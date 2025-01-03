@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 """ Common Max Utils needed by multiple modules"""
+import shutil
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -202,6 +203,12 @@ def parse_gcs_bucket_and_prefix(destination_gcs_name):
   return bucket, key
 
 
+def add_trailing_slash(path):
+  if not path.endswith("/"):
+    return path + "/"
+  return path
+
+
 def upload_blob(destination_gcs_name, source_file_name):
   """Uploads a file to a GCS location"""
   bucket_name, prefix_name = parse_gcs_bucket_and_prefix(destination_gcs_name)
@@ -209,6 +216,34 @@ def upload_blob(destination_gcs_name, source_file_name):
   bucket = storage_client.get_bucket(bucket_name)
   blob = bucket.blob(prefix_name)
   blob.upload_from_filename(source_file_name)
+
+
+def upload_dump(local_dir, target_dir, module_name=None, delete_local_after=True, all_host_upload=False):
+  """Uploads a directory to a GCS location, with an optional filter"""
+  if not all_host_upload and jax.process_index() != 0:
+    return
+  storage_client = storage.Client()
+  bucket_name, prefix_name = parse_gcs_bucket_and_prefix(target_dir)
+  bucket = storage_client.get_bucket(bucket_name)
+  if all_host_upload:
+    hostname = socket.gethostname()  # Alternatively can use jax.process_id()
+    prefix_name = os.path.join(prefix_name, hostname)
+    target_dir = os.path.join(target_dir, hostname)
+  max_logging.log(f"Uploading HLO Dump to {target_dir}...")
+  for root, _, files in os.walk(local_dir):
+    for file in files:
+      if module_name and module_name not in file:
+        continue
+      else:
+        max_logging.log(f"Uploading {file}")
+      local_path = os.path.join(root, file)
+      relative_path = os.path.relpath(local_path, local_dir)
+      blob_name = os.path.join(prefix_name, relative_path)
+      blob = bucket.blob(blob_name)
+      blob.upload_from_filename(local_path)
+  max_logging.log(f"HLO Dump Uploaded to {target_dir}!")
+  if delete_local_after:
+    shutil.rmtree(local_dir)
 
 
 def maybe_initialize_jax_distributed_system(raw_keys):
