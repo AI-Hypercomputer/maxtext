@@ -34,6 +34,7 @@ from layers import embeddings
 from layers import initializers
 from layers import linears
 from layers import quantizations
+import max_logging
 
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
@@ -64,6 +65,7 @@ BATCH = common_types.BATCH
 PREFILL_KV_BATCH = common_types.PREFILL_KV_BATCH
 KV_BATCH = common_types.KV_BATCH
 LENGTH = common_types.LENGTH
+KV_LENGTH = common_types.KV_LENGTH
 HEAD = common_types.HEAD
 KV_HEAD = common_types.KV_HEAD
 D_KV = common_types.D_KV
@@ -140,7 +142,8 @@ class AttentionOp(nn.Module):
   float32_qk_product: bool = False
   max_prefill_predict_length: int = -1
   float32_logits: bool = False
-  flash_axis_names: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
+  flash_axis_names_kv: AxisNames = (BATCH, HEAD, KV_LENGTH, D_KV)
+  flash_axis_names_q: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
   prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
   cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
   cache_scale_logical_axis_names: AxisNames = (CACHE_SCALE_BATCH, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV)
@@ -301,12 +304,16 @@ class AttentionOp(nn.Module):
     query = jnp.transpose(query, axes=(0, 2, 1, 3))
     key = jnp.transpose(key, axes=(0, 2, 1, 3))
     value = jnp.transpose(value, axes=(0, 2, 1, 3))
-
+    segment_axis_names_q = None
+    segment_axis_names_kv = None
     if decoder_segment_ids is not None:
-      decoder_segment_ids = splash_attention_kernel.SegmentIds(decoder_segment_ids, decoder_segment_ids)
-    axis_names = nn.logical_to_mesh_axes(self.flash_axis_names)
-    segment_axis_names = nn.logical_to_mesh_axes((BATCH, "activation_length_no_heads"))
-
+      segment_axis_names_q = nn.logical_to_mesh_axes((BATCH, "activation_length_q"))
+      segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH, "activation_length_kv"))
+    axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
+    axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
+    max_logging.log(f'axis_names_q: {axis_names_q}')
+    max_logging.log(f'axis_names_kv: {axis_names_kv}')
+    
     global_block_q = self.config.sa_block_q
     global_block_kv = self.config.sa_block_kv
     global_block_kv_compute = self.config.sa_block_kv_compute
@@ -324,19 +331,16 @@ class AttentionOp(nn.Module):
         shard_map,
         mesh=self.mesh,
         in_specs=(
-            axis_names,
-            axis_names,
-            axis_names,
-            segment_axis_names,
+            axis_names_q,
+            axis_names_kv,
+            axis_names_kv,
+            segment_axis_names_q,
+            segment_axis_names_kv,
         ),
-        out_specs=axis_names,
+        out_specs=axis_names_q,
         check_rep=False,
     )
-    def wrap_flash_attention(query, key, value, decoder_segment_ids):
-      if decoder_segment_ids is not None:
-        assert (
-            query.shape[2] == decoder_segment_ids.q.shape[1]
-        ), "Sharding along sequence dimension not allowed in tpu kernel attention"
+    def wrap_flash_attention(query, key, value, decoder_segment_ids_q, decoder_segment_ids_kv):
       block_sizes = splash_attention_kernel.BlockSizes(
           block_q=min(global_block_q, query.shape[2]),
           block_kv=min(global_block_kv, key.shape[2]),
@@ -352,14 +356,14 @@ class AttentionOp(nn.Module):
           v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
       )
 
-      mask = splash_attention_mask.CausalMask(shape=(query.shape[2], query.shape[2]))
+      mask = splash_attention_mask.CausalMask(shape=(query.shape[2], key.shape[2]))
 
       # Apply local masking if local sliding attention is enabled.
       if self.attention_type == AttentionType.LOCAL_SLIDING:
         if self.sliding_window_size is None:
           raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
         mask &= splash_attention_mask.LocalMask(
-            shape=(query.shape[2], query.shape[2]),
+            shape=(query.shape[2], key.shape[2]),
             window_size=(self.sliding_window_size, self.sliding_window_size),
             offset=0,
         )
@@ -374,13 +378,17 @@ class AttentionOp(nn.Module):
           attn_logits_soft_cap=attn_logits_soft_cap,
       )
 
-      return jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids)
+      if decoder_segment_ids_q is not None:
+        decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(decoder_segment_ids_q, decoder_segment_ids_kv)
+      else:
+        decoder_segment_ids_tuple = None
+      return jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids_tuple)
 
     devices_in_data_fsdp = self.mesh.shape["data"] * self.mesh.shape["fsdp"]
     assert (query.shape[0] / devices_in_data_fsdp).is_integer(), (
         "Batch dimension should be shardable among the devices in data and fsdp" " axis"
     )
-    x = wrap_flash_attention(query, key, value, decoder_segment_ids)
+    x = wrap_flash_attention(query, key, value, decoder_segment_ids, decoder_segment_ids)
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
     return x
 
