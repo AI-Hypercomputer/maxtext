@@ -558,7 +558,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   if config.use_dpo:
     new_state = _merge_dpo_state(new_state, reference_params)
 
-  return new_state, metrics
+  return new_state, metrics, raw_grads
 
 
 def eval_step(model, config, state, data, dropout_rng):
@@ -751,7 +751,7 @@ def setup_train_loop(config):
   )
 
 
-def train_loop(config, state=None):
+def train_loop(config, config2, state=None):
   """Main Training loop.
   Args:
     config:
@@ -775,6 +775,18 @@ def train_loop(config, state=None):
       eval_data_iterator,
       state,
   ) = setup_train_loop(config)
+  (
+      init_rng2,
+      writer2,
+      checkpoint_manager2,
+      state_mesh_shardings2,
+      model2,
+      mesh2,
+      learning_rate_schedule2,
+      data_iterator2,
+      eval_data_iterator2,
+      state2,
+  ) = setup_train_loop(config2)
 
   if config.use_dpo:
     if "reference_params" not in state.params:
@@ -790,6 +802,13 @@ def train_loop(config, state=None):
       static_argnums_train,
       donate_argnums_train,
   ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config)
+  (
+      functional_train2,
+      in_shard_train2,
+      out_shard_train2,
+      static_argnums_train,
+      donate_argnums_train,
+  ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh2, state_mesh_shardings2, model2, config2)
 
   if eval_data_iterator:
     # pylint: disable=line-too-long
@@ -822,6 +841,13 @@ def train_loop(config, state=None):
   else:
     p_train_step = jax.jit(
         functional_train,
+        in_shardings=in_shard_train,
+        out_shardings=out_shard_train,
+        static_argnums=static_argnums_train,
+        donate_argnums=donate_argnums_train,
+    )
+    p_train_step2 = jax.jit(
+        functional_train2,
         in_shardings=in_shard_train,
         out_shardings=out_shard_train,
         static_argnums=static_argnums_train,
@@ -866,7 +892,41 @@ def train_loop(config, state=None):
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        state, metrics = p_train_step(state, example_batch, nextrng)
+        
+        _, metrics, raw_grads = p_train_step(state, example_batch, nextrng)
+        state, metrics2, raw_grads_2 = p_train_step2(state, example_batch, nextrng)
+        
+
+        jitted_diff_grads = jax.jit(maxtext_utils.diff_grads, in_shardings=(out_shard_train[2], out_shard_train[2]))
+        diff_norm, wi_norm, query_norm, out_norm, key_norm, value_norm = jitted_diff_grads(raw_grads, raw_grads_2)
+
+        print(f"{diff_norm=}", flush=True)
+        print(f"{wi_norm=}", flush=True)
+        print(f"{query_norm=}", flush=True)
+        print(f"{out_norm=}", flush=True)
+        print(f"{key_norm=}", flush=True)
+        print(f"{value_norm=}", flush=True)
+
+        metrics['scalar']['grad_diff/total_diff']=diff_norm
+        metrics['scalar']['grad_diff/wi_norm']=wi_norm
+        metrics['scalar']['grad_diff/query_norm']=query_norm
+        metrics['scalar']['grad_diff/out_norm']=out_norm
+        metrics['scalar']['grad_diff/key_norm']=key_norm
+        metrics['scalar']['grad_diff/value_norm']=value_norm
+      
+      
+      def merge_metrics(metrics_1, metrics_2, metrics_2_suffix='_2'):
+        sd = metrics_2['scalar']
+        new_sd = {}
+        for key,value in sd.items():
+          metrics_1['scalar'][f"{key}_2"]=value
+        return metrics_1
+      metrics= merge_metrics(metrics, metrics2)
+        
+
+
+
+
 
     new_time = datetime.datetime.now()
     record_scalar_metrics(
@@ -958,6 +1018,17 @@ def main(argv: Sequence[str]) -> None:
   pyconfig.initialize(argv)
   max_utils.print_system_information()
   config = pyconfig.config
+  #argv2 = argv + ['remat_policy=qkv_proj_offloaded']
+  argv2 = argv + ['remat_policy=custom', 'query_proj=offload']
+  #argv2 = argv + ['remat_policy=custom', 'mlpwi_0=offload']
+  #argv2 = argv + ['remat_policy=custom', 'key_proj=device', 'value_proj=device', 'query_proj=device' ]
+  #argv2 = argv + ['remat_policy=custom', 'key_proj=offload']
+  #argv2 = argv + ['remat_policy=custom', 'mlpwi_0=offload']
+  #argv2 = argv + ['remat_policy=custom', 'key_proj=device', 'value_proj=device', 'query_proj=device' ]
+  #argv2 = argv + ['remat_policy=custom', 'key_proj=offload']
+  import pyconfig2
+  pyconfig2.initialize(argv2)
+  config2=pyconfig2.config
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   vertex_tensorboard_manager = VertexTensorboardManager()
@@ -986,7 +1057,7 @@ def main(argv: Sequence[str]) -> None:
   )
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
   with diagnostic.diagnose(diagnostic_config):
-    train_loop(config)
+    train_loop(config, config2)
 
 
 if __name__ == "__main__":
