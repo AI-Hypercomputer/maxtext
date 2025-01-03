@@ -859,7 +859,6 @@ def train_loop(config, state=None):
   last_step_completion = datetime.datetime.now()
   prof = profiler.Profiler(config)
   for step in np.arange(start_step, config.steps):
-    max_utils.print_mem_stats(f"step {step}")
     if step == first_profiling_step:
       if config.profile_cleanly:
         jax.block_until_ready(state)  # Block until previous state finishes to start profile cleanly
