@@ -323,7 +323,7 @@ class Gpt3DecoderLayer(nn.Module):
     )
 
     attention_lnx = nn.with_logical_constraint(
-      attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
+        attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
     )
     attention_lnx += inputs
 
