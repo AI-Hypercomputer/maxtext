@@ -124,7 +124,9 @@ class LlamaDecoderLayer(nn.Module):
         model_mode=model_mode,
     )
 
-    attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+    attention_lnx = nn.with_logical_constraint(
+        attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
+    )
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
@@ -135,7 +137,9 @@ class LlamaDecoderLayer(nn.Module):
         kernel_axes=("norm",),
         epsilon=cfg.normalization_layer_epsilon,
     )(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(hidden_states, ("activation_batch", "activation_norm_length", "activation_embed"))
+    hidden_states = nn.with_logical_constraint(
+        hidden_states, ("activation_batch", "activation_norm_length", "activation_embed")
+    )
 
     # MLP block.
     mlp_lnx = linears.MlpBlock(

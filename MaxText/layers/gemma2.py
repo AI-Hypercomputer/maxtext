@@ -113,7 +113,9 @@ class Gemma2DecoderLayer(nn.Module):
           dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="post_self_attention_norm_local", kernel_axes=("norm",)
       )(attention_lnx)
 
-    attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+    attention_lnx = nn.with_logical_constraint(
+        attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
+    )
     attention_lnx += inputs
     residual = attention_lnx
 
@@ -195,7 +197,9 @@ class Gemma2DecoderLayer(nn.Module):
           dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="post_self_attention_norm_global", kernel_axes=("norm",)
       )(attention_lnx)
 
-    attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+    attention_lnx = nn.with_logical_constraint(
+        attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
+    )
     attention_lnx += inputs
     residual = attention_lnx
 
