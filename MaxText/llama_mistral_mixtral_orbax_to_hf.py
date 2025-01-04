@@ -45,16 +45,15 @@ import max_logging
 import checkpointing
 from generate_param_only_checkpoint import _read_train_checkpoint
 import llama_or_mistral_ckpt
-from transformers import LlamaForCausalLM, MistralForCausalLM, AutoModelForCausalLM
+from transformers import LlamaForCausalLM, MistralForCausalLM, AutoModelForCausalLM, AutoConfig
 
 
 def unpermute_from_match_maxtext_rope(arr):
   """
   Function to get the RoPE values in correct ordering
   """
-  split_size = arr.shape[-1] // 2  # Assuming half for evens, half for odds
-  evens = arr[..., :split_size]
-  odds = arr[..., split_size:]
+  evens = arr[..., ::2]
+  odds = arr[..., 1::2]
   return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
 
 
@@ -77,6 +76,9 @@ def load_hf_model(model_size):
     model = MistralForCausalLM.from_pretrained("mistralai/Mistral-7B-v0.1")
   elif model_size == "mixtral-8x7b":
     model = AutoModelForCausalLM.from_pretrained("mistralai/Mixtral-8x7B-v0.1", device_map="auto")
+  elif model_size == "llama3.1-8b":
+    config = AutoConfig.from_pretrained("meta-llama/Llama-3.1-8B")
+    model = AutoModelForCausalLM.from_config(config)
   else:
     raise NotImplementedError
   return model
