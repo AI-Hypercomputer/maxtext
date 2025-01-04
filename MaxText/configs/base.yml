@@ -239,7 +239,7 @@ logical_axis_rules: [
                       ['activation_length', ['sequence', 'context']],
                       ['activation_length', ['context']],
                       ['activation_length_q', ['context']],
-                      ['activation_kv_length', []],
+                      ['activation_length_kv', []],
                       ['activation_embed', 'tensor'],
                       ['activation_mlp', ['tensor', 'tensor_sequence']],
                       ['activation_kv', ['tensor', 'tensor_sequence']],

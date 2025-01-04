@@ -35,6 +35,7 @@ from layers import initializers
 from layers import linears
 from layers import quantizations
 import max_logging
+import pdb
 
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
@@ -145,6 +146,7 @@ class AttentionOp(nn.Module):
   float32_logits: bool = False
   flash_axis_names_kv: AxisNames = (BATCH, HEAD, KV_LENGTH, D_KV)
   flash_axis_names_q: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
+  flash_axis_names_splash_kernel: AxisNames = (HEAD, LENGTH)
   prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
   cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
   cache_scale_logical_axis_names: AxisNames = (CACHE_SCALE_BATCH, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV)
@@ -310,10 +312,14 @@ class AttentionOp(nn.Module):
     if decoder_segment_ids is not None:
       segment_axis_names_q = nn.logical_to_mesh_axes((BATCH, "activation_length_q"))
       segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH, "activation_length_kv"))
+    #Anisha
+    # does segment_axis_names_splash_kernel also need to be inside `if decoder_segment_ids is not None:`?
+    axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
     axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
     axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
     max_logging.log(f'axis_names_q: {axis_names_q}')
     max_logging.log(f'axis_names_kv: {axis_names_kv}')
+    max_logging.log(f'axis_names_splash_kernel: {axis_names_splash_kernel}')
     
     global_block_q = self.config.sa_block_q
     global_block_kv = self.config.sa_block_kv
@@ -328,6 +334,56 @@ class AttentionOp(nn.Module):
     global_k_layout = self.config.sa_k_layout
     global_v_layout = self.config.sa_v_layout
 
+
+    devices_in_data_fsdp = self.mesh.shape["data"] * self.mesh.shape["fsdp"]
+    assert (query.shape[0] / devices_in_data_fsdp).is_integer(), (
+        "Batch dimension should be shardable among the devices in data and fsdp" " axis"
+    )
+
+    #Anisha
+    #create_splash_attention kernel
+
+    block_sizes = splash_attention_kernel.BlockSizes(
+        block_q=min(global_block_q, query.shape[2]),
+        block_kv=min(global_block_kv, key.shape[2]),
+        block_kv_compute=min(global_block_kv_compute, key.shape[2]),
+        block_q_dkv=min(global_block_q_dkv, query.shape[2]),
+        block_kv_dkv=min(global_block_kv_dkv, key.shape[2]),
+        block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
+        block_q_dq=None if global_use_fused_bwd_kernel else min(global_block_q_dq, query.shape[2]),
+        block_kv_dq=None if global_use_fused_bwd_kernel else min(global_block_kv_dq, query.shape[2]),
+        use_fused_bwd_kernel=global_use_fused_bwd_kernel,
+        q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
+        k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
+        v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
+    )
+    # jax.debug.print("query.shape = {qs}, key.shape = {ks}", qs = query.shape, ks = key.shape)
+    mask = splash_attention_mask.CausalMask(shape=(query.shape[2], key.shape[2]))
+
+    # Apply local masking if local sliding attention is enabled.
+    if self.attention_type == AttentionType.LOCAL_SLIDING:
+      if self.sliding_window_size is None:
+        raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
+      mask &= splash_attention_mask.LocalMask(
+          shape=(query.shape[2], key.shape[2]),
+          window_size=(self.sliding_window_size, self.sliding_window_size),
+          offset=0,
+      )
+
+    # Create multi-head mask
+    multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
+    splash_kernel = splash_attention_kernel.make_splash_mha(
+        mask=multi_head_mask,
+        head_shards=1,
+        q_seq_shards=1, #seq shard
+        block_sizes=block_sizes,
+        attn_logits_soft_cap=attn_logits_soft_cap,
+    )
+
+    named_sharding = jax.sharding.NamedSharding(self.mesh, axis_names_splash_kernel)
+    segment_axis_names_splash_kernel = splash_kernel.manual_sharding_spec(named_sharding)
+
+
     @functools.partial(
         shard_map,
         mesh=self.mesh,
@@ -337,59 +393,31 @@ class AttentionOp(nn.Module):
             axis_names_kv,
             segment_axis_names_q,
             segment_axis_names_kv,
+            segment_axis_names_splash_kernel, #TODO: add the manual sharding,
         ),
         out_specs=axis_names_q,
         check_rep=False,
     )
-    def wrap_flash_attention(query, key, value, decoder_segment_ids_q, decoder_segment_ids_kv):
-      block_sizes = splash_attention_kernel.BlockSizes(
-          block_q=min(global_block_q, query.shape[2]),
-          block_kv=min(global_block_kv, key.shape[2]),
-          block_kv_compute=min(global_block_kv_compute, key.shape[2]),
-          block_q_dkv=min(global_block_q_dkv, query.shape[2]),
-          block_kv_dkv=min(global_block_kv_dkv, key.shape[2]),
-          block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
-          block_q_dq=None if global_use_fused_bwd_kernel else min(global_block_q_dq, query.shape[2]),
-          block_kv_dq=None if global_use_fused_bwd_kernel else min(global_block_kv_dq, query.shape[2]),
-          use_fused_bwd_kernel=global_use_fused_bwd_kernel,
-          q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
-          k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
-          v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
-      )
-
-      mask = splash_attention_mask.CausalMask(shape=(query.shape[2], key.shape[2]))
-
-      # Apply local masking if local sliding attention is enabled.
-      if self.attention_type == AttentionType.LOCAL_SLIDING:
-        if self.sliding_window_size is None:
-          raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
-        mask &= splash_attention_mask.LocalMask(
-            shape=(query.shape[2], key.shape[2]),
-            window_size=(self.sliding_window_size, self.sliding_window_size),
-            offset=0,
-        )
-
-      # Create multi-head mask
-      multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
-      splash_kernel = splash_attention_kernel.make_splash_mha(
-          mask=multi_head_mask,
-          head_shards=1,
-          q_seq_shards=1,
-          block_sizes=block_sizes,
-          attn_logits_soft_cap=attn_logits_soft_cap,
-      )
+    def wrap_flash_attention(query, key, value, decoder_segment_ids_q, decoder_segment_ids_kv, splash_kernel):
 
       if decoder_segment_ids_q is not None:
         decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(decoder_segment_ids_q, decoder_segment_ids_kv)
       else:
         decoder_segment_ids_tuple = None
-      return jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids_tuple)
+      attention_output = jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids_tuple)
+      # pdb.set_trace()
+      # jax.debug.print("attention_output.shape = {ash}", ash = attention_output.shape)
+      # full_mask = [per_head_mask for per_head_mask in multi_head_mask.masks]
+      # valid_tokens = multi_head_mask.masks.any(dim=-1) # [q_sl] -> [q_sl, 1] -> [q_sl, head_dim] 
+      # valid_tokens = decoder_segment_ids_q & multi_head_mask.masks.any(dim=-1)
+      # attention_output = attention_output * valid_tokens # broadcasting along head_dim
 
-    devices_in_data_fsdp = self.mesh.shape["data"] * self.mesh.shape["fsdp"]
-    assert (query.shape[0] / devices_in_data_fsdp).is_integer(), (
-        "Batch dimension should be shardable among the devices in data and fsdp" " axis"
-    )
-    x = wrap_flash_attention(query, key, value, decoder_segment_ids, decoder_segment_ids)
+      return attention_output
+
+    x = wrap_flash_attention(query, key, value, decoder_segment_ids, decoder_segment_ids, splash_kernel)
+    # pdb.set_trace()
+    # jax.debug.print("{x}", x=x)
+    
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
     return x
 
