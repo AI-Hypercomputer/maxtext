@@ -84,8 +84,8 @@ def prefill_insert_benchmark_loop(
     config, engine, decode_state, params, total_slots, tokens, true_length, iters, profile_name
 ):
   """Inner loop for benchmarking prefill and insert step."""
-  prof = profiler.Profiler(config, profile_name)
-  prof.activate()
+  prof = profiler.Profiler(config)
+  prof.activate(optional_postfix=profile_name)
   start = datetime.datetime.now()
   rng = jax.random.PRNGKey(1234)
   for i in range(iters):
@@ -121,8 +121,8 @@ def prefill_insert_benchmark(config, engine, decode_state, params, total_slots, 
 
 def ar_benchmark_loop(config, engine, params, decode_state, iters, profile_name):
   """Inner loop for benchmarking ar step."""
-  prof = profiler.Profiler(config, profile_name)
-  prof.activate()
+  prof = profiler.Profiler(config)
+  prof.activate(optional_postfix=profile_name)
   start = datetime.datetime.now()
   rng = jax.random.PRNGKey(1234)
   for _ in range(iters):

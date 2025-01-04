@@ -843,19 +843,19 @@ def train_loop(config, state=None):
   running_gcs_metrics = [] if config.gcs_metrics else None
 
   start_step = get_first_step(state)  # this is the start_step for training
-  first_profiling_step = start_step + config.skip_first_n_steps_for_profiler
+  prof = profiler.Profiler(config, offset_step=start_step)
+  first_profiling_step = prof.start_initial_profile_step
   if config.profiler != "" and first_profiling_step >= config.steps:
     raise ValueError("Profiling requested but initial profiling step set past training final step")
-  last_profiling_step = np.clip(first_profiling_step + config.profiler_steps - 1, first_profiling_step, config.steps - 1)
+  last_profiling_step = prof.finished_initial_profile_step
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
-  prof = profiler.Profiler(config)
+
   for step in np.arange(start_step, config.steps):
-    if step == first_profiling_step:
-      if config.profile_cleanly:
-        jax.block_until_ready(state)  # Block until previous state finishes to start profile cleanly
-      prof.activate()
+    if step == first_profiling_step or prof.should_activate_periodic_profile(step):
+      optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
+      prof.activate(blocking_object=state, optional_postfix=optional_postfix)
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
@@ -940,10 +940,8 @@ def train_loop(config, state=None):
         prof.deactivate()
         break
 
-    if step == last_profiling_step:
-      if config.profile_cleanly:
-        jax.block_until_ready(state)  # Block until current state finishes to end profile cleanly
-      prof.deactivate()
+    if step == last_profiling_step or prof.should_deactivate_periodic_profile(step):
+      prof.deactivate(blocking_object=state)
 
     if step == start_step:
       max_utils.print_mem_stats("After params initialized")
