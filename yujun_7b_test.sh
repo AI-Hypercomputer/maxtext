@@ -1,5 +1,5 @@
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1223-baseline
-export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/us-west1-docker.pkg.dev/supercomputer-testing/yujunzou/llama2-7b
+export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/yujunzou/llama2-7b
 
 export MODEL_NAME=llama2-7b
 # export MODEL_NAME=llama3.1-405b
