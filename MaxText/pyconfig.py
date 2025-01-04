@@ -499,6 +499,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["ici_fsdp_transpose_parallelism"],
       raw_keys["ici_sequence_parallelism"],
       raw_keys["ici_tensor_parallelism"],
+      raw_keys["ici_tensor_sequence_parallelism"],
       raw_keys["ici_expert_parallelism"],
       raw_keys["ici_autoregressive_parallelism"],
   ]
@@ -509,6 +510,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["dcn_fsdp_transpose_parallelism"],
       raw_keys["dcn_sequence_parallelism"],
       raw_keys["dcn_tensor_parallelism"],
+      raw_keys["dcn_tensor_sequence_parallelism"],
       raw_keys["dcn_expert_parallelism"],
       raw_keys["dcn_autoregressive_parallelism"],
   ]
@@ -548,6 +550,7 @@ def validate_multiple_slices(raw_keys):
                   raw_keys["dcn_fsdp_transpose_parallelism"],
                   raw_keys["dcn_sequence_parallelism"],
                   raw_keys["dcn_tensor_parallelism"],
+                  raw_keys["dcn_tensor_sequence_parallelism"],
                   raw_keys["dcn_expert_parallelism"],
                   raw_keys["dcn_autoregressive_parallelism"],
               ]
@@ -583,6 +586,7 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["ici_fsdp_transpose_parallelism"],
           raw_keys["ici_sequence_parallelism"],
           raw_keys["ici_tensor_parallelism"],
+          raw_keys["ici_tensor_sequence_parallelism"],
           raw_keys["ici_expert_parallelism"],
           raw_keys["ici_autoregressive_parallelism"],
       ]
@@ -593,11 +597,24 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["dcn_fsdp_transpose_parallelism"],
           raw_keys["dcn_sequence_parallelism"],
           raw_keys["dcn_tensor_parallelism"],
+          raw_keys["dcn_tensor_sequence_parallelism"],
           raw_keys["dcn_expert_parallelism"],
           raw_keys["dcn_autoregressive_parallelism"],
       ]
-      mesh_axes = ["stage", "data", "fsdp", "fsdp_transpose", "sequence", "tensor", "expert", "autoregressive"]
-      data_sharding = [["stage", "data", "fsdp", "fsdp_transpose", "sequence", "tensor", "expert", "autoregressive"]]
+      mesh_axes = [
+          "stage",
+          "data",
+          "fsdp",
+          "fsdp_transpose",
+          "sequence",
+          "tensor",
+          "tensor_sequence",
+          "expert",
+          "autoregressive",
+      ]
+      data_sharding = [
+          ["stage", "data", "fsdp", "fsdp_transpose", "sequence", "tensor", "tensor_sequence", "expert", "autoregressive"]
+      ]
 
       raw_keys["ici_parallelism"] = ici_parallelism
       raw_keys["dcn_parallelism"] = dcn_parallelism
@@ -646,7 +663,12 @@ def validate_megablox_parallelism(raw_keys):
       using_sequence_parallelism(raw_keys) or using_pipeline_parallelism(raw_keys) or using_expert_parallelism(raw_keys)
   ):
     raise ValueError("Currently we only support Megablox with data and tensor parallelism.")
-  tensor_parallelism = raw_keys["ici_tensor_parallelism"] * raw_keys["dcn_tensor_parallelism"]
+  tensor_parallelism = (
+      raw_keys["ici_tensor_parallelism"]
+      * raw_keys["dcn_tensor_parallelism"]
+      * raw_keys["ici_tensor_sequence_parallelism"]
+      * raw_keys["dcn_tensor_sequence_parallelism"]
+  )
   if raw_keys["megablox"] and using_tensor_parallelism(raw_keys) and (raw_keys["emb_dim"] % tensor_parallelism):
     raise ValueError(
         f"The embedding dimension {raw_keys['emb_dim']} is not divisible by tensor parallelism setting {tensor_parallelism}."
@@ -764,7 +786,12 @@ def using_pipeline_parallelism(raw_keys) -> bool:
 
 
 def using_tensor_parallelism(raw_keys) -> bool:
-  return int(raw_keys["ici_tensor_parallelism"]) > 1 or int(raw_keys["dcn_tensor_parallelism"]) > 1
+  return (
+      int(raw_keys["ici_tensor_parallelism"]) > 1
+      or int(raw_keys["dcn_tensor_parallelism"]) > 1
+      or int(raw_keys["ici_tensor_sequence_parallelism"]) > 1
+      or int(raw_keys["dcn_tensor_sequence_parallelism"]) > 1
+  )
 
 
 def using_sequence_parallelism(raw_keys) -> bool:
