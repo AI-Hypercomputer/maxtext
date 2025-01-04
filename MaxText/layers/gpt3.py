@@ -68,7 +68,7 @@ class Gpt3LayerNorm(nn.Module):
   epsilon: float = 1e-6
   dtype: Any = jnp.float32
   weight_dtype: Any = jnp.float32
-  kernel_axes: Tuple[str, ...] = ()
+  kernel_axes: Tuple[Optional[str], ...] = ()
   scale_init: Initializer = nn.initializers.zeros
   use_bias: bool = True
   reductions_in_fp32: bool = False

@@ -135,7 +135,7 @@ class MistralDecoderLayer(nn.Module):
           num_experts_per_tok=cfg.num_experts_per_tok,
           mesh=mesh,
           kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-          kernel_axes=("embed", "mlp"),
+          kernel_axes=("embed", None),
           dtype=cfg.dtype,
           weight_dtype=cfg.weight_dtype,
           quant=self.quant,

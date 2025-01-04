@@ -55,13 +55,6 @@ DISPATCH = "dispatch"
 COMBINE = "combine"
 
 
-def _get_model_call_mode(config):
-  if config.model_cal_mode == "inference":
-    return "inference"
-  else:
-    return None
-
-
 def _convert_to_activation_function(fn_or_string: Union[str, Callable[..., Any]]) -> Callable[..., Any]:
   """Convert a string to an activation function."""
   if fn_or_string == "linear":
@@ -107,7 +100,7 @@ class DenseGeneral(nn.Module):
   weight_dtype: DType = jnp.float32
   dtype: DType = jnp.float32
   kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal")
-  kernel_axes: Tuple[str, ...] = ()
+  kernel_axes: Tuple[Optional[str], ...] = ()
   quant: Optional[Quant] = None
   use_bias: bool = False
   matmul_precision: str = "default"
@@ -309,7 +302,7 @@ class MoeBlock(nn.Module):
   num_experts_per_tok: int
   mesh: Mesh
   kernel_init: NdInitializer
-  kernel_axes: Tuple[str, ...]
+  kernel_axes: Tuple[Optional[str], ...]
   weight_dtype: DType = jnp.float32
   dtype: DType = jnp.float32
   quant: Optional[Quant] = None
@@ -597,7 +590,8 @@ class MoeBlock(nn.Module):
     return kernel
 
   def dense_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
-    gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", "activation_embed"))
+    # gate_logits: batch, length, expert
+    gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", None))
     softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
     # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
     top_k_weights, top_k_indices = jax.lax.top_k(softmax_probs, self.num_experts_per_tok)
@@ -609,7 +603,10 @@ class MoeBlock(nn.Module):
       mask_axes = ("activation_batch", "activation_length", None, None)
       dispatch_mask = nn.with_logical_constraint(dispatch_mask, mask_axes)
       combine_mask = nn.with_logical_constraint(combine_mask, mask_axes)
-      loss = self.load_balance_loss(top_k_indices, softmax_probs)
+      if self.config.model_call_mode != "inference":
+        loss = self.load_balance_loss(top_k_indices, softmax_probs)
+      else:
+        loss = None
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
       with jax.named_scope("dispatch"):
         dispatch = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=DISPATCH)(
