@@ -344,6 +344,9 @@ class _HyperParameters:
     max_logging.log(f"Updating keys from model: {keys_from_model}")
     validate_no_keys_overwritten_twice(keys_from_env_and_command_line, keys_from_model)
 
+    # This must be invoked before initializing the backend
+    raw_keys = validate_and_set_hlo_dump_defaults(raw_keys)
+
     # We initialize the jax distributed system here because it must be done before device backend is initialized.
     if raw_keys["jax_debug_log_modules"]:
       jax.config.update("jax_debug_log_modules", raw_keys["jax_debug_log_modules"])
@@ -403,6 +406,8 @@ class _HyperParameters:
     raw_keys["mlp_dim"] = 2**mlp_dim_scale * raw_keys["base_mlp_dim"]
     raw_keys["num_decoder_layers"] = 2**layer_scale * raw_keys["base_num_decoder_layers"]
 
+    # This is the first command that initializes the backend - it calls
+    # jax.devices()
     (
         raw_keys["global_batch_size_to_load"],
         raw_keys["global_batch_size_to_train_on"],
@@ -494,6 +499,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["ici_fsdp_transpose_parallelism"],
       raw_keys["ici_sequence_parallelism"],
       raw_keys["ici_tensor_parallelism"],
+      raw_keys["ici_tensor_sequence_parallelism"],
       raw_keys["ici_expert_parallelism"],
       raw_keys["ici_autoregressive_parallelism"],
   ]
@@ -504,11 +510,32 @@ def create_parallelisms_list(raw_keys):
       raw_keys["dcn_fsdp_transpose_parallelism"],
       raw_keys["dcn_sequence_parallelism"],
       raw_keys["dcn_tensor_parallelism"],
+      raw_keys["dcn_tensor_sequence_parallelism"],
       raw_keys["dcn_expert_parallelism"],
       raw_keys["dcn_autoregressive_parallelism"],
   ]
   raw_keys["ici_parallelism"] = ici_parallelism
   raw_keys["dcn_parallelism"] = dcn_parallelism
+  return raw_keys
+
+
+def validate_and_set_hlo_dump_defaults(raw_keys):
+  if not raw_keys["dump_hlo"]:
+    return raw_keys
+  if os.environ.get("XLA_FLAGS") and raw_keys["dump_hlo_xla_flags"]:
+    raise ValueError("You must set either XLA_FLAGS or dump_hlo_xla_flags to dump HLO, but not both.")
+  if not os.environ.get("XLA_FLAGS") and not raw_keys["dump_hlo_xla_flags"]:
+    raw_keys["dump_hlo_xla_flags"] = f"--xla_dump_to={raw_keys['dump_hlo_local_dir']} --xla_dump_large_constants"
+    if raw_keys["dump_hlo_module_name"]:
+      raw_keys["dump_hlo_xla_flags"] = (
+          f"{raw_keys['dump_hlo_xla_flags']} --xla_dump_hlo_module_re={raw_keys['dump_hlo_module_name']}"
+      )
+  if not raw_keys["dump_hlo_gcs_dir"]:
+    raw_keys["dump_hlo_gcs_dir"] = os.path.join(raw_keys["base_output_directory"], raw_keys["run_name"], "xla_dump")
+  else:
+    raw_keys["dump_hlo_gcs_dir"] = max_utils.add_trailing_slash(raw_keys["dump_hlo_gcs_dir"])
+  if not os.environ.get("XLA_FLAGS"):
+    os.environ["XLA_FLAGS"] = raw_keys["dump_hlo_xla_flags"]
   return raw_keys
 
 
@@ -523,6 +550,7 @@ def validate_multiple_slices(raw_keys):
                   raw_keys["dcn_fsdp_transpose_parallelism"],
                   raw_keys["dcn_sequence_parallelism"],
                   raw_keys["dcn_tensor_parallelism"],
+                  raw_keys["dcn_tensor_sequence_parallelism"],
                   raw_keys["dcn_expert_parallelism"],
                   raw_keys["dcn_autoregressive_parallelism"],
               ]
@@ -558,6 +586,7 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["ici_fsdp_transpose_parallelism"],
           raw_keys["ici_sequence_parallelism"],
           raw_keys["ici_tensor_parallelism"],
+          raw_keys["ici_tensor_sequence_parallelism"],
           raw_keys["ici_expert_parallelism"],
           raw_keys["ici_autoregressive_parallelism"],
       ]
@@ -568,11 +597,24 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["dcn_fsdp_transpose_parallelism"],
           raw_keys["dcn_sequence_parallelism"],
           raw_keys["dcn_tensor_parallelism"],
+          raw_keys["dcn_tensor_sequence_parallelism"],
           raw_keys["dcn_expert_parallelism"],
           raw_keys["dcn_autoregressive_parallelism"],
       ]
-      mesh_axes = ["stage", "data", "fsdp", "fsdp_transpose", "sequence", "tensor", "expert", "autoregressive"]
-      data_sharding = [["stage", "data", "fsdp", "fsdp_transpose", "sequence", "tensor", "expert", "autoregressive"]]
+      mesh_axes = [
+          "stage",
+          "data",
+          "fsdp",
+          "fsdp_transpose",
+          "sequence",
+          "tensor",
+          "tensor_sequence",
+          "expert",
+          "autoregressive",
+      ]
+      data_sharding = [
+          ["stage", "data", "fsdp", "fsdp_transpose", "sequence", "tensor", "tensor_sequence", "expert", "autoregressive"]
+      ]
 
       raw_keys["ici_parallelism"] = ici_parallelism
       raw_keys["dcn_parallelism"] = dcn_parallelism
@@ -621,7 +663,12 @@ def validate_megablox_parallelism(raw_keys):
       using_sequence_parallelism(raw_keys) or using_pipeline_parallelism(raw_keys) or using_expert_parallelism(raw_keys)
   ):
     raise ValueError("Currently we only support Megablox with data and tensor parallelism.")
-  tensor_parallelism = raw_keys["ici_tensor_parallelism"] * raw_keys["dcn_tensor_parallelism"]
+  tensor_parallelism = (
+      raw_keys["ici_tensor_parallelism"]
+      * raw_keys["dcn_tensor_parallelism"]
+      * raw_keys["ici_tensor_sequence_parallelism"]
+      * raw_keys["dcn_tensor_sequence_parallelism"]
+  )
   if raw_keys["megablox"] and using_tensor_parallelism(raw_keys) and (raw_keys["emb_dim"] % tensor_parallelism):
     raise ValueError(
         f"The embedding dimension {raw_keys['emb_dim']} is not divisible by tensor parallelism setting {tensor_parallelism}."
@@ -717,8 +764,10 @@ def calculate_global_batch_sizes(
 
 
 def get_num_target_devices(raw_keys):
-  compile_topology = accelerator_to_spec_map.get_system_characteristics(raw_keys.get("compile_topology", ""))
-  if compile_topology is not None:
+  # In AOT case compile_topology is set (e.g. is not the empty string), and we determine the
+  # number of devices from the compile_topology. In non-AOT settings we simply can use jax.devices().
+  if raw_keys.get("compile_topology"):
+    compile_topology = accelerator_to_spec_map.get_system_characteristics(raw_keys["compile_topology"])
     devices_per_slice = compile_topology.devices_per_slice
     return int(devices_per_slice * raw_keys["compile_topology_num_slices"])
   else:
@@ -737,7 +786,12 @@ def using_pipeline_parallelism(raw_keys) -> bool:
 
 
 def using_tensor_parallelism(raw_keys) -> bool:
-  return int(raw_keys["ici_tensor_parallelism"]) > 1 or int(raw_keys["dcn_tensor_parallelism"]) > 1
+  return (
+      int(raw_keys["ici_tensor_parallelism"]) > 1
+      or int(raw_keys["dcn_tensor_parallelism"]) > 1
+      or int(raw_keys["ici_tensor_sequence_parallelism"]) > 1
+      or int(raw_keys["dcn_tensor_sequence_parallelism"]) > 1
+  )
 
 
 def using_sequence_parallelism(raw_keys) -> bool:

@@ -62,7 +62,7 @@ class MultihostDataloadingTest(unittest.TestCase):
     dataset = dataset.batch(batch_size)
     self.multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataset, self.mesh)
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_batch_sharded_data_pipeline(self):
     first_batch = next(self.multihost_gen)
     sec_batch = next(self.multihost_gen)
