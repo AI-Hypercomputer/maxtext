@@ -1,4 +1,4 @@
-# Llama2-70b model.
+# Llama2-7b model.
 # This config will work out of the box for any number of trillium-256 slices.
 #
 # Command Flags:
@@ -7,7 +7,7 @@
 # RUN_NAME (Required, unless run_name is already set in base.yml or running with XPK/GKE)
 #
 # Example to invoke this script:
-# bash MaxText/configs/trillium/llama2_70b_4096.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>"
+# bash MaxText/configs/trillium/llama2_7b_4096.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>"
 #
 
 
