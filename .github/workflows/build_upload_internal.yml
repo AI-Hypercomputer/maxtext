@@ -28,6 +28,9 @@ on:
       build_mode:
         required: true
         type: string
+      base_image:
+        required: false
+        type: string
 
 jobs:
   build_and_upload:
@@ -37,7 +40,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build an image
         run: |
-          bash docker_build_dependency_image.sh MODE=${{ inputs.build_mode }} DEVICE=${{ inputs.device_type }}
+          bash docker_build_dependency_image.sh MODE=${{ inputs.build_mode }} DEVICE=${{ inputs.device_type }} BASEIMAGE=${{ inputs.base_image }}
       - name: Tag the image
         run: |
           docker tag maxtext_base_image gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:${{ inputs.device_type }}
