@@ -227,15 +227,15 @@ def convert_to_jax_weights(base_model_path, model_size, lora_path=None):
 
   max_logging.log(f"Loading the base model from {base_model_path}")
   # Skip any hidden files for checkpoints
-  # ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.bin"))
-  ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.pth"))
+  ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.bin"))
+  # ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.pth"))
   chkpt_vars = {}
   for i, ckpt_path in enumerate(ckpt_paths):
     max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
     max_logging.log(f"Loading checkpoint from {ckpt_path} ...")
     checkpoint = torch.load(ckpt_path, map_location="cpu")
-    chkpt_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = checkpoint
-    #chkpt_vars[int(ckpt_path.name.split("-", maxsplit=2)[1])] = checkpoint
+    #chkpt_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = checkpoint
+    chkpt_vars[int(ckpt_path.name.split("-", maxsplit=2)[1])] = checkpoint
   chkpt_vars = [chkpt_vars[i] for i in sorted(list(chkpt_vars.keys()))]
 
   chkpt_vars_combined_dict = {}

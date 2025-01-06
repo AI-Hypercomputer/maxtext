@@ -156,6 +156,8 @@ class MaxEngine(engine_api.Engine):
     else:
       params = state.params
     max_utils.print_mem_stats("After load_params")
+    # print("AMANGU (maxengine.py): Type of params: ")
+    # print(params)
     return params
 
   def quantize_params(self, state, rng: Optional[jax.random.PRNGKey] = None):

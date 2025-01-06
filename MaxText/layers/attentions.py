@@ -1293,9 +1293,9 @@ class Attention(nn.Module):
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
 
-    logging.info(f"AMANGU: ATTENTION __CALL__:\nQuery_shape: {query.shape},\nKey_shape: {key.shape},\nValue_shape: {value.shape}")
+    # logging.info(f"AMANGU: ATTENTION __CALL__:\nQuery_shape: {query.shape},\nKey_shape: {key.shape},\nValue_shape: {value.shape}")
 
-    logging.info(f"AMANGU: ATTENTION __call__: \nQuery: {query},\nKey: {key},\nValue: {value}")
+    # logging.info(f"AMANGU: ATTENTION __call__: \nQuery: {query},\nKey: {key},\nValue: {value}")
 
     if self.lora_config is not None:
         # lora_A_q_reshaped = self.lora_A_q.reshape(self.lora_A_q.shape[0], 1, self.num_query_heads, self.head_dim)

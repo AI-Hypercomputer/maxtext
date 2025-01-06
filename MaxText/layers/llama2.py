@@ -174,7 +174,6 @@ class LlamaDecoderLayer(nn.Module):
           "activation_fraction_zero",
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
-      logging.info("AMANGU: In LlamaDecoderLayer::__call__")
 
     if cfg.scan_layers:
       return layer_output, None

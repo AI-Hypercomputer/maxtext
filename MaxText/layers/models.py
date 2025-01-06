@@ -65,7 +65,7 @@ class DecoderLayer(nn.Module):
       deterministic,
       model_mode,
   ):
-    logging.info("AMANGU: In DecoderLayer::__call__()  Start")
+    # logging.info("AMANGU: In DecoderLayer::__call__()  Start")
     cfg = self.config
     mesh = self.mesh
 
@@ -146,7 +146,7 @@ class DecoderLayer(nn.Module):
           "activation_fraction_zero",
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
-    logging.info("AMANGU: In DecoderLayer::__call__() End")
+    #logging.info("AMANGU: In DecoderLayer::__call__() End")
 
     return layer_output, None if cfg.scan_layers else layer_output
 
@@ -162,7 +162,6 @@ class SequentialBlockDecoderLayers(nn.Module):
 
   @nn.compact
   def __call__(self, inputs: jnp.ndarray, decoder_segment_ids, decoder_positions, deterministic, model_mode) -> jnp.ndarray:
-    logging.info("AMANGU: In SequentialBlockDecoderLayer::__call__()  Start")
     for lyr in range(self.num_decoder_layers):
       inputs = self.decoder_layer(config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant)(
           inputs,
@@ -171,7 +170,6 @@ class SequentialBlockDecoderLayers(nn.Module):
           deterministic,
           model_mode,
       )
-    logging.info("AMANGU: In SequentialBlockDecoderLayer::__call__() End")
     return inputs
 
 
@@ -229,7 +227,6 @@ class Decoder(nn.Module):
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
   def scan_decoder_layers(self, cfg, decoder_layer, length, metdata_axis_name, mesh):
-    logging.info("AMANGU: In Decoder::scan_decoder_layer()  Start")
     initializing = self.is_mutable_collection("params")
     params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
     cache_spec = 0
@@ -255,11 +252,9 @@ class Decoder(nn.Module):
         length=length,
         metadata_params={nn.PARTITION_NAME: metdata_axis_name},
     )
-    logging.info("AMANGU: In Decoder::scan_decoder_layer() End")
     return scan_fn(config=cfg, mesh=mesh, name="layers", quant=self.quant)
 
   def get_pipeline_stage_module(self, base_stage, cfg, mesh):
-    logging.info("AMANGU: In Decoder::get_pipeline_stage_module()  Start")
     if cfg.num_layers_per_pipeline_stage == 1:
       stage_module = base_stage(config=cfg, mesh=mesh, quant=self.quant)
     elif cfg.scan_layers:
@@ -272,7 +267,6 @@ class Decoder(nn.Module):
           mesh=mesh,
           quant=self.quant,
       )
-    logging.info("AMANGU: In Decoder::get_pipeline_stage_module() End")
     return stage_module
 
   @nn.compact
@@ -284,7 +278,6 @@ class Decoder(nn.Module):
       deterministic=False,
       model_mode=common_types.MODEL_MODE_TRAIN,
   ):
-    logging.info("AMANGU: In Decoder::__call__()  Start")
     cfg = self.config
     mesh = self.mesh
     assert decoder_input_tokens.ndim == 2  # [batch, len]
@@ -308,10 +301,9 @@ class Decoder(nn.Module):
       )(decoder_positions)
 
     BlockLayer = self.get_decoder_layer()
-    logging.info("AMANGU: In Decoder::__call__()  1")
+    # logging.info("AMANGU: In Decoder::__call__()  1")
 
     if cfg.remat_policy != "none":
-      logging.info("AMANGU: In Decoder::__call__()  2 : remat_policy == %s", cfg.remat_policy)
       if cfg.remat_policy == "minimal":
         policy = jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
       elif cfg.remat_policy == "save_dot_with_context_except_mlp":
@@ -378,7 +370,6 @@ class Decoder(nn.Module):
         assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
         policy = None
 
-    logging.info("AMANGU: In Decoder::__call__() 3")
     RemattedBlockLayer = nn.remat(  # pylint: disable=invalid-name
         BlockLayer,
         prevent_cse=not cfg.scan_layers,
@@ -386,7 +377,6 @@ class Decoder(nn.Module):
         static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
     )
     if cfg.using_pipeline_parallelism:
-      logging.info("AMANGU: In Decoder::__call__()  4")
       base_stage = RemattedBlockLayer if cfg.set_remat_policy_on_layers_per_stage else BlockLayer
       stage_module = self.get_pipeline_stage_module(base_stage, cfg, mesh)
       y = pipeline.Pipeline(config=cfg, mesh=mesh, layers=stage_module, remat_policy=policy)(
@@ -397,9 +387,7 @@ class Decoder(nn.Module):
           model_mode,
       )
     else:
-      logging.info("AMANGU: In Decoder::__call__()  5")
       if cfg.scan_layers:
-        logging.info("AMANGU: In Decoder::__call__()  6")
         y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
             y,
             decoder_segment_ids,
@@ -408,7 +396,6 @@ class Decoder(nn.Module):
             model_mode,
         )
       else:
-        logging.info("AMANGU: In Decoder::__call__()  7")
         for lyr in range(cfg.num_decoder_layers):
           y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
               y,
@@ -418,7 +405,6 @@ class Decoder(nn.Module):
               model_mode,
           )
 
-    logging.info("AMANGU: In Decoder::__call__()  8")
     y = self.get_norm_layer()(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -426,9 +412,7 @@ class Decoder(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
         kernel_axes=("norm",),
     )(y)
-    logging.info("AMANGU: In Decoder::__call__()  9")
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
-    logging.info("AMANGU: In Decoder::__call__()  10")
 
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
@@ -440,7 +424,6 @@ class Decoder(nn.Module):
       if cfg.final_logits_soft_cap:
         logits = logits / cfg.final_logits_soft_cap
         logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
-      logging.info("AMANGU: In Decoder::__call__()  11")
     else:
       logits = linears.DenseGeneral(
           cfg.vocab_size,
@@ -452,11 +435,9 @@ class Decoder(nn.Module):
       )(
           y
       )  # We do not quantize the logits matmul.
-      logging.info("AMANGU: In Decoder::__call__()  12")
     logits = nn.with_logical_constraint(
         logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
     )
-    logging.info("AMANGU: In Decoder::__call__()  13")
     if self.config.cast_logits_to_fp32:
       logits = logits.astype(jnp.float32)
     return logits
@@ -485,7 +466,6 @@ class Transformer(nn.Module):
         name="token_embedder",
         config=cfg,
     )
-    logging.info("AMANGU: In Transformer::SetUp()")
 
     self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant)
 
@@ -512,5 +492,4 @@ class Transformer(nn.Module):
         deterministic=not enable_dropout,
         model_mode=model_mode,
     )
-    logging.info("AMANGU: In Transformer::__call__()")
     return logits
