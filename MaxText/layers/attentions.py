@@ -369,13 +369,13 @@ class AttentionOp(nn.Module):
           window_size=(self.sliding_window_size, self.sliding_window_size),
           offset=0,
       )
-
+    # pdb.set_trace()
     # Create multi-head mask
     multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
     splash_kernel = splash_attention_kernel.make_splash_mha(
         mask=multi_head_mask,
         head_shards=1,
-        q_seq_shards=1, #seq shard
+        q_seq_shards=int(query.shape[2]/global_block_q), #seq shard
         block_sizes=block_sizes,
         attn_logits_soft_cap=attn_logits_soft_cap,
     )
