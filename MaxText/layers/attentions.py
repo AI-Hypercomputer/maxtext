@@ -340,9 +340,7 @@ class AttentionOp(nn.Module):
         "Batch dimension should be shardable among the devices in data and fsdp" " axis"
     )
 
-    #Anisha
     #create_splash_attention kernel
-
     block_sizes = splash_attention_kernel.BlockSizes(
         block_q=min(global_block_q, query.shape[2]),
         block_kv=min(global_block_kv, key.shape[2]),
@@ -369,13 +367,13 @@ class AttentionOp(nn.Module):
           window_size=(self.sliding_window_size, self.sliding_window_size),
           offset=0,
       )
-    # pdb.set_trace()
+
     # Create multi-head mask
     multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
     splash_kernel = splash_attention_kernel.make_splash_mha(
         mask=multi_head_mask,
         head_shards=1, # we would need to change this to the size of the axis if sharding over heads
-        q_seq_shards=int(query.shape[2]/global_block_q), #seq shard
+        q_seq_shards=self.mesh.shape["context"], #axis for sequence sharding
         block_sizes=block_sizes,
         attn_logits_soft_cap=attn_logits_soft_cap,
     )
