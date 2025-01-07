@@ -237,6 +237,10 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
   Returns:
     bool: True if the majority of parameters are sufficiently sharded
   """
+  print("log model params sharding")
+  print("Number of shards: %s", jax.tree_util.tree_map(lambda x: len(x.addressable_shards), params))
+  print("Sharded shapes: %s", jax.tree_util.tree_map(lambda x: x.addressable_shards[0].data.shape, params))
+  print("Total shapes: %s", jax.tree_util.tree_map(lambda x: x.shape, params))
   total_num_params = max_utils.calculate_num_params_from_pytree(params)
   product_num_devices_for_weight_sharding = 1
   for axis in ["fsdp", "fsdp_transpose", "sequence", "tensor", "stage", "expert"]:
