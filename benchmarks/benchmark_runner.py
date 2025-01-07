@@ -85,6 +85,7 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
           'gpt_3_175b',
           'llama2_7b_4096',
           'llama2_70b_4096',
+          'llama2_70b_4096_sc',
           'llama2_70b_4096_real_data',
           'llama3_70b_8192',
           'llama3_1_405b_8192_fsdp_dcn',
@@ -102,6 +103,7 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
           'model to be benchmarked, supported models are gpt_3_175b '
           'llama2_7b_4096 '
           'llama2_70b_4096 '
+          'llama2_70b_4096_sc ',
           'llama2_70b_4096_real_data '
           'llama3_1_405b_8192_fsdp_dcn '
           'mixtral_8x7b_dropped '

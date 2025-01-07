@@ -15,6 +15,16 @@
  """
 """This file contains commonly-used XLA Flags."""
 
+### Disclaimer that this is a list of commonly used XLA flags that have been shown to be benifitical in certain cases.
+
+### Acronyms
+# CF = Continuation Fusion
+# CM = Collective Matmul
+# SC = SparseCore
+# AG = All Gather
+# AR = All Reduce
+# RS = Reduce Scatter
+
 _DENSE_VMEM_LIMIT = 98304
 _MOE_VMEM_LIMIT = 81920
 DENSE_VMEM_LIMIT_FLAG = f" --xla_tpu_scoped_vmem_limit_kib={_DENSE_VMEM_LIMIT}"
@@ -49,8 +59,9 @@ CF_FOR_ALL_REDUCE_AND_ALL_GATHER = (
     " --xla_tpu_enable_async_collective_fusion_multiple_steps=true"
 )
 
-#Only ready for 1D All-Gather but should support 2D soon, and
-# hopefully All-Reduce soon.
+
+# Only ready for 1D All-Gather but should support 2D soon.
+# Do note that this disables CF for AG.
 ENABLE_SPARSECORE_OFFLOADING_FOR_1D_ALL_GATHER = (
     " --xla_sc_disable_megacore_partitioning=true"
     " --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false"
@@ -60,10 +71,31 @@ ENABLE_SPARSECORE_OFFLOADING_FOR_1D_ALL_GATHER = (
     " --xla_sc_enable_instruction_fusion=false"
     " --xla_sc_disjoint_spmem=false"
     " --2a886c8_chip_config_name=megachip_tccontrol"
-    # Interesting flags to try:
-    # " --xla_tpu_enable_offloading_gather_to_sparsecore=true"
-    # " --xla_tpu_enable_offloading_reduce_to_sparsecore=true"
-    # " --xla_tpu_enable_offloading_scatter_to_sparsecore=true"
+    " --xla_tpu_enable_sparse_core_collective_offload_all_reduce=false"
+)
+
+# Enable SC Collectives for both AR and AG. Do note that this disables CF for AG.
+ENABLE_SPARECORE_OFFLOADING_FOR_ALL_REDUCE_AND_ALL_GATHER = (
+    " --xla_sc_disable_megacore_partitioning=true"
+    " --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false"
+    " --xla_tpu_enable_all_gather_offload_tracing=true"
+    " --xla_tpu_enable_all_reduce_offload_tracing=true"
+    " --xla_tpu_use_tc_device_shape_on_sc=true"
+    " --xla_tpu_enable_sparse_core_collective_offload_all_gather=true"
+    " --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true"
+    " --xla_sc_enable_instruction_fusion=false"
+    " --xla_sc_disjoint_spmem=false"
+    " --2a886c8_chip_config_name=megachip_tccontrol"
+)
+
+ENABLE_SPARECORE_OFFLOADING_FOR_ALL_REDUCE = (
+    " --xla_sc_disable_megacore_partitioning=true"
+    " --xla_tpu_enable_all_reduce_offload_tracing=true"
+    " --xla_tpu_use_tc_device_shape_on_sc=true"
+    " --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true"
+    " --xla_sc_enable_instruction_fusion=false"
+    " --xla_sc_disjoint_spmem=false"
+    " --2a886c8_chip_config_name=megachip_tccontrol"
 )
 
 ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE = (
