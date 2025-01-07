@@ -374,7 +374,7 @@ class AttentionOp(nn.Module):
     multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
     splash_kernel = splash_attention_kernel.make_splash_mha(
         mask=multi_head_mask,
-        head_shards=1,
+        head_shards=1, # we would need to change this to the size of the axis if sharding over heads
         q_seq_shards=int(query.shape[2]/global_block_q), #seq shard
         block_sizes=block_sizes,
         attn_logits_soft_cap=attn_logits_soft_cap,
