@@ -23,13 +23,17 @@ pip3 install torch
 MODEL_NAME="mixtral-8x22B-Instruct-v0.3"
 
 PARAM_DIR="$HOME/tempdisk"
+OUTPUT_PARAM_DIR="$HOME/tempoutput"
 mkdir -p "$PARAM_DIR"
+mkdir -p "$OUTPUT_PARAM_DIR"
 [[ ! -z $(ls "$PARAM_DIR") ]] && fusermount -u "$PARAM_DIR"
+[[ ! -z $(ls "$OUTPUT_PARAM_DIR") ]] && fusermount -u "$OUTPUT_PARAM_DIR"
 gcsfuse --implicit-dirs maxtext-external "$PARAM_DIR"
+gcsfuse --implicit-dirs runner-maxtext-logs/ranran "$OUTPUT_PARAM_DIR"
 # alternatively: $ gcloud storage cp -r "gs://maxtext-external/$MODEL_NAME" $PARAM_DIR
 
 # Convert it to MaxText(orbax) format - scanned ckpt
-JAX_PLATFORMS=cpu python3 MaxText/llama_or_mistral_ckpt.py --base-model-path="$PARAM_DIR/$MODEL_NAME" --model-size=mixtral-8x22b --maxtext-model-path=${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_ckpt/ --checkpoint-type=safetensors
+JAX_PLATFORMS=cpu python3 MaxText/llama_or_mistral_ckpt.py --base-model-path="$PARAM_DIR/$MODEL_NAME" --model-size=mixtral-8x22b --maxtext-model-path=${OUTPUT_PARAM_DIR}/${MODEL_NAME}/scanned_ckpt/ --checkpoint-type=safetensors
 echo "Wrote MaxText compatible scanned checkpoint to ${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_ckpt"
 
 # unmount the gcsfuse directory
@@ -41,8 +45,10 @@ fusermount -u "$PARAM_DIR"
 # removal should not impact overall testing.
 
 # Generate unscanned ckpt for efficient decoding test
-export SCANNED_CHECKPOINT=${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_ckpt/0/items
+# export SCANNED_CHECKPOINT=${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_ckpt/0/items
+export SCANNED_CHECKPOINT=${OUTPUT_PARAM_DIR}/${MODEL_NAME}/scanned_ckpt/0/items
 export RUN_NAME=unscanned_ckpt
-JAX_PLATFORMS=cpu python MaxText/generate_param_only_checkpoint.py MaxText/configs/base.yml async_checkpointing=false base_output_directory=${BASE_OUTPUT_PATH} load_parameters_path=${SCANNED_CHECKPOINT} run_name=${RUN_NAME} model_name='mixtral-8x22b' force_unroll=true
-echo "Wrote MaxText compatible unscanned checkpoint to ${BASE_OUTPUT_PATH}/${RUN_NAME}/checkpoints"
+JAX_PLATFORMS=cpu python MaxText/generate_param_only_checkpoint.py MaxText/configs/base.yml async_checkpointing=false base_output_directory=${OUTPUT_PARAM_DIR} load_parameters_path=${SCANNED_CHECKPOINT} run_name=${RUN_NAME} model_name='mixtral-8x22b' force_unroll=true
+echo "Wrote MaxText compatible unscanned checkpoint to ${OUTPUT_PARAM_DIR}/${RUN_NAME}/checkpoints"
 
+fusermount -u "$OUTPUT_PARAM_DIR"
