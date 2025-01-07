@@ -315,6 +315,7 @@ def build_user_command(
       f' base_output_directory={base_output_directory}'
       f' use_vertex_tensorboard=false'
       ' vertex_tensorboard_project="" vertex_tensorboard_region=""'
+      # Adjust this "run_name" to identify the name of the run in the experiment
       f' run_name="{model.model_name}-{num_slices}-{libtpu_date}"'
   )
 
@@ -376,6 +377,9 @@ def generate_xpk_workload_cmd(
           ' --enable-debug-logs'
           f' --workload={name}'
           ' --priority=medium'
+          # Below two flags "enable vertex tensorboard and then the experiment name
+          # experiment name has to be lower case and uses "-", no underscores. Don't make it too long
+          # experiment emcompasses multiple "runs"
           # ' --use-vertex-tensorboard'
           # f' --experiment-name={test_purpose_name}'
           f' {additional_flags}'
