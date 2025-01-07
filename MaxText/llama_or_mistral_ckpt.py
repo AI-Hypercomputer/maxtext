@@ -144,7 +144,7 @@ MODEL_PARAMS_DICT = {
 }
 
 # We get errors with > 1 that we don't as yet understand
-SIMULATED_CPU_DEVICES_COUNT = 1
+SIMULATED_CPU_DEVICES_COUNT = 16
 
 
 def _hf_mapping(layer_idx: int = -1, expert_idx: int = -1) -> dict:
