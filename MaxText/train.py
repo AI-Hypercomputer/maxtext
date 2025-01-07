@@ -25,6 +25,7 @@ import os
 import sys
 import functools
 import time
+import queue
 import threading
 
 from typing import Sequence, Optional
@@ -53,7 +54,7 @@ from vertex_tensorboard import VertexTensorboardManager
 from input_pipeline.input_pipeline_interface import create_data_iterator
 from layers import models
 
-from monitoring.gcp_workload_monitor import report_heartbeat_thread
+from monitoring.gcp_workload_monitor import GCPWorkloadMonitor
 
 import jax.numpy as jnp
 from jax import random
@@ -761,13 +762,12 @@ def setup_train_loop(config):
   )
 
 
-def train_loop(config, state=None, heartbeat_reporting_stop_event=None):
+def train_loop(config, state=None):
   """Main Training loop.
   Args:
     config:
     state:
-    heartbeat_reporting_stop_event: threading event indicating when heartbeat reporting should stop. If None, 
-                                    program is not reporting heartbeat to GCP for monitoring.
+    ckpt_path:
   Returns:
   """
   # Create a GoodputRecorder to log information
@@ -863,12 +863,15 @@ def train_loop(config, state=None, heartbeat_reporting_stop_event=None):
   example_batch = None
   last_step_completion = datetime.datetime.now()
 
-  prof = profiler.Profiler(config)
-  if heartbeat_reporting_stop_event:
-    max_logging.log("Starting background thread for reporting heartbeat")
-    t = threading.Thread(target=report_heartbeat_thread, args=(heartbeat_reporting_stop_event,))
-    t.daemon = True
-    t.start()
+  performance_metric_queue = None
+  if config.report_heartbeat_metric_for_gcp_monitoring or config.report_performance_metric_for_gcp_monitoring:
+    gcp_workload_monitor = GCPWorkloadMonitor(config.run_name)
+    if config.report_heartbeat_metric_for_gcp_monitoring:
+      gcp_workload_monitor.start_heartbeat_reporting_thread(config.heartbeat_reporting_interval_in_seconds)
+    if config.report_performance_metric_for_gcp_monitoring:
+      performance_metric_queue = queue.Queue()
+      gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
+
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step or prof.should_activate_periodic_profile(step):
       optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
@@ -885,11 +888,11 @@ def train_loop(config, state=None, heartbeat_reporting_stop_event=None):
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, nextrng)
 
-    new_time = datetime.datetime.now()
-    record_scalar_metrics(
-        metrics, new_time - last_step_completion, per_device_tflops, learning_rate_schedule(step), per_device_tokens
-    )
-    last_step_completion = new_time
+    step_time_delta = datetime.datetime.now() - last_step_completion
+    record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
+    if performance_metric_queue:
+      performance_metric_queue.put(step_time_delta.total_seconds())
+    last_step_completion = datetime.datetime.now()
 
     if checkpoint_manager is not None:
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
@@ -1021,11 +1024,8 @@ def main(argv: Sequence[str]) -> None:
       )
   )
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
-  heartbeat_reporting_stop_event = threading.Event() if config.report_heartbeat_metric_for_gcp_monitoring else None
   with diagnostic.diagnose(diagnostic_config):
-    train_loop(config, state=None, heartbeat_reporting_stop_event=heartbeat_reporting_stop_event)
-  if heartbeat_reporting_stop_event:
-    heartbeat_reporting_stop_event.set()
+    train_loop(config)
 
 
 if __name__ == "__main__":
