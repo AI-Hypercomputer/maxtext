@@ -952,6 +952,16 @@ def train_loop(config, state=None):
   max_utils.close_summary_writer(writer)
   record_goodput(recorder, config, recorder.record_job_end_time if recorder else None)
   clear_buffered_metrics()
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    # pytype: disable=attribute-error
+    compiled = p_train_step.lower(state, example_batch, nextrng).compile()
+    compiled_stats = compiled.memory_analysis()
+    max_logging.log(
+        f"Output size: {compiled_stats.output_size_in_bytes}, "
+        f"temp size: {compiled_stats.temp_size_in_bytes}, "
+        f"argument size: {compiled_stats.argument_size_in_bytes}, "
+        f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
+    )
   return state
 
 
