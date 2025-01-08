@@ -959,8 +959,6 @@ def train_loop(config, state=None):
   max_utils.close_summary_writer(writer)
   record_goodput(recorder, config, recorder.record_job_end_time if recorder else None)
   clear_buffered_metrics()
-  memory_stats = jax.local_devices()[0].memory_stats()
-  max_logging.log(f"Jax memory stats: {memory_stats}")
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     compiled = p_train_step.lower(state, example_batch, nextrng).compile()
     compiled_stats = compiled.memory_analysis()
