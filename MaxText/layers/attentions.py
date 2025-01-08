@@ -301,8 +301,21 @@ class AttentionOp(nn.Module):
       value: Array,
       decoder_segment_ids: Array | None,
       attn_logits_soft_cap: float | None = None,
+      load_balanced_context_parallel: bool = True
   ) -> Array:
     """TPU Flash Attention."""
+
+
+    #Anisha: reorder tensors which is currently [B,S,H,KV]
+    cp_size = self.mesh.shape["context"]
+    if cp_size>1 and load_balanced_context_parallel:
+      query = self.reorder_causal_load_balancing(tensor = query, cp_size= cp_size, seq_dim= 1, to_contiguous=False) 
+      decoder_segment_ids = self.reorder_causal_load_balancing(tensor = decoder_segment_ids, cp_size= cp_size, seq_dim= 1, to_contiguous=False)
+    
+
+
+
+
     # Transpose to ('batch', 'heads', 'length', 'kv')
     query = jnp.transpose(query, axes=(0, 2, 1, 3))
     key = jnp.transpose(key, axes=(0, 2, 1, 3))
@@ -340,6 +353,8 @@ class AttentionOp(nn.Module):
         "Batch dimension should be shardable among the devices in data and fsdp" " axis"
     )
 
+
+
     #create_splash_attention kernel
     block_sizes = splash_attention_kernel.BlockSizes(
         block_q=min(global_block_q, query.shape[2]),
@@ -358,6 +373,11 @@ class AttentionOp(nn.Module):
     # jax.debug.print("query.shape = {qs}, key.shape = {ks}", qs = query.shape, ks = key.shape)
     mask = splash_attention_mask.CausalMask(shape=(query.shape[2], key.shape[2]))
 
+    # Anisha: permute the mask
+    if cp_size>1 and load_balanced_context_parallel:
+      mask = self.reorder_causal_load_balancing(mask, cp_size, 1, to_contiguous=False) 
+
+    #Anisha: figure out local_sliding attention + load_balancing, default is global
     # Apply local masking if local sliding attention is enabled.
     if self.attention_type == AttentionType.LOCAL_SLIDING:
       if self.sliding_window_size is None:
@@ -373,7 +393,7 @@ class AttentionOp(nn.Module):
     splash_kernel = splash_attention_kernel.make_splash_mha(
         mask=multi_head_mask,
         head_shards=1, # we would need to change this to the size of the axis if sharding over heads
-        q_seq_shards=self.mesh.shape["context"], #axis for sequence sharding
+        q_seq_shards=cp_size, #axis for sequence sharding
         block_sizes=block_sizes,
         attn_logits_soft_cap=attn_logits_soft_cap,
     )
@@ -417,7 +437,75 @@ class AttentionOp(nn.Module):
     # jax.debug.print("{x}", x=x)
     
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
+
+    if cp_size>1 and load_balanced_context_parallel:
+    #Anisha: inverse reorder for load_balancing
+      x = self.reorder_causal_load_balancing(tensor = x, cp_size= cp_size, seq_dim= 1, to_contiguous=True)
+
+    
     return x
+
+
+  def reorder_causal_load_balancing(self, tensor, cp_size: int, seq_dim: int, to_contiguous: bool):
+    """Reorders a tensor for load balancing the compute of causal attention."""
+
+    if tensor is None:
+      return tensor
+    
+    if cp_size == 1:
+        return tensor
+
+    if cp_size % 2 != 0:
+        raise ValueError(f"{cp_size=} must be a multiple of 2.")
+
+    # Need to ensure we have 2 pairs to swap for balancing between cp ranks
+    if tensor.shape[seq_dim] % (cp_size * 2) != 0:
+        raise ValueError(f"{tensor.shape=} is not a multiple of {cp_size*2=}")
+
+    # [B, S, H, D] -> [B, 2*cp_size, S/2*cp_size, D] #Anisha: this is ours
+    # [S, B, H, D] -> [2*cp_size, S/2*cp_size, B, H, D]
+    
+    ori_tensor_shape = tensor.shape
+    tensor = jnp.reshape(
+              tensor,
+              (
+                  *ori_tensor_shape[:seq_dim],
+                  2 * cp_size,
+                  ori_tensor_shape[seq_dim] // (2 * cp_size),
+                  *ori_tensor_shape[seq_dim + 1 :],
+              )
+          )
+
+    parts = []
+    if not to_contiguous:
+        for cp_rank in range(cp_size):
+            # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
+            # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
+            index = jnp.array([cp_rank, (2 * cp_size - cp_rank - 1)])
+            parts.append(jnp.take(tensor, index, axis=seq_dim))
+    else:
+        for cp_rank in range(cp_size // 2):
+            # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
+            # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
+            base = 4 * cp_rank
+            index = jnp.array([base, base + 2])
+            parts.append(jnp.take(tensor, index, axis=seq_dim))
+        for cp_rank in range(cp_size // 2):
+            # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
+            # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
+            base = 2 * cp_size - 1 - 4 * cp_rank
+            index = jnp.array([base, base - 2])
+            parts.append(jnp.take(tensor, index, axis=seq_dim))
+
+    # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D]
+    # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D]
+    combined = jnp.stack(parts, axis=seq_dim)
+
+    return jnp.reshape(combined,ori_tensor_shape)
+
+
+
+
 
   def cudnn_flash_attention(
       self,
