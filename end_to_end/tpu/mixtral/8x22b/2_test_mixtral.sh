@@ -32,10 +32,13 @@ export TOKENIZER_PATH=assets/tokenizer.mistral-v3
 python3 MaxText/train.py MaxText/configs/base.yml \
   base_output_directory=${BASE_OUTPUT_PATH} dataset_path=${DATASET_PATH} \
   run_name=pre_training per_device_batch_size=1 enable_checkpointing=True \
-  model_name=mixtral-8x22b ici_tensor_parallelism=1 ici_fsdp_parallelism=-1 \
+  model_name=mixtral-8x22b ici_tensor_parallelism=4 ici_fsdp_parallelism=16 \
   steps=5 max_target_length=1024 async_checkpointing=True \
   tokenizer_path=${TOKENIZER_PATH} attention=flash dtype=bfloat16 \
-  weight_dtype=bfloat16 megablox=True load_parameters_path=${SCANNED_CHECKPOINT}
+  weight_dtype=bfloat16 megablox=False
+
+
+python MaxText/decode.py MaxText/configs/base.yml tokenizer_path=assets/tokenizer_llama3.tiktoken load_parameters_path=${CONVERTED_CHECKPOINT} per_device_batch_size=1 run_name=runner_$(date +%Y-%m-%d-%H-%M) max_prefill_predict_length=4 max_target_length=16 dataset_type=synthetic async_checkpointing=True model_name=${MODEL_VARIATION} attention=dot_product prompt="I love to"
 
 
 # TODO(ranran): add decoding test for megablox implementation
