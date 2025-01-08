@@ -22,7 +22,7 @@ fi
 export DATASET_PATH=gs://maxtext-dataset
 
 # `SCANNED_CHECKPOINT` refers to the checkpoint that used for both `train.py` and `decode.py` 
-export SCANNED_CHECKPOINT=${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_ckpt/0/items
+export SCANNED_CHECKPOINT=gs://ranran-multipod-dev/xlml/8x22b/origin/8x22b/scanned_ckpt/0/items
 
 export TOKENIZER_PATH=assets/tokenizer.mistral-v3
 
@@ -31,8 +31,16 @@ export TOKENIZER_PATH=assets/tokenizer.mistral-v3
 # Run pre-training without load_parameters_path - megablox implementation
 python3 MaxText/train.py MaxText/configs/base.yml \
   base_output_directory=${BASE_OUTPUT_PATH} dataset_path=${DATASET_PATH} \
-  run_name=pre_training per_device_batch_size=1 enable_checkpointing=false \
+  run_name=pre_training per_device_batch_size=1 enable_checkpointing=True \
   model_name=mixtral-8x22b ici_tensor_parallelism=1 ici_fsdp_parallelism=-1 \
-  steps=5 max_target_length=1024 async_checkpointing=false \
+  steps=5 max_target_length=1024 async_checkpointing=True \
   tokenizer_path=${TOKENIZER_PATH} attention=flash dtype=bfloat16 \
-  weight_dtype=bfloat16 megablox=True
+  weight_dtype=bfloat16 megablox=True load_parameters_path=${SCANNED_CHECKPOINT}
+
+
+# TODO(ranran): add decoding test for megablox implementation
+python3 MaxText/decode.py MaxText/configs/base.yml load_parameters_path=${SCANNED_CHECKPOINT} run_name=unscanned_decoding_1 per_device_batch_size=1 model_name=mixtral-8x22b async_checkpointing=false tokenizer_path=assets/tokenizer.mistral-v3 ici_tensor_parallelism=4 ici_fsdp_parallelism=16 max_prefill_predict_length=11 max_target_length=24 prompt="[INST] I love to [/INST]" megablox=False
+
+# Run decoding with converted ckpt - dropping implementation
+python3 MaxText/decode.py MaxText/configs/base.yml load_parameters_path=${SCANNED_CHECKPOINT} run_name=unscanned_decoding_2 per_device_batch_size=1 model_name=mixtral-8x22b async_checkpointing=false tokenizer_path=assets/tokenizer.mistral-v3 ici_tensor_parallelism=4 ici_fsdp_parallelism=16 max_prefill_predict_length=11 max_target_length=24 prompt="[INST] I love to [/INST]" megablox=False capacity_factor=1.25
+
