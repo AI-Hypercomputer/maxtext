@@ -316,6 +316,8 @@ def initialize_jax_for_cpu(raw_keys):
       num_processes=int(os.environ.get("JAX_PROCESS_COUNT")),
       initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
   )
+  ocp.multihost.initialize_runtime_to_distributed_ids()
+  ocp.multihost.initialize_distributed_to_device_ids()
 
 
 def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
@@ -399,9 +401,9 @@ def _retrieve_jax_init_info(raw_keys):
 
 def get_num_slices(raw_keys):
   """Calculate num_slices based on number of devices."""
-  if raw_keys["hardware"] == "cpu":
-    max_logging.log(" Setting num_slices=1 for CPU hardware type")
-    return 1
+  # if raw_keys["hardware"] == "cpu":
+  #   max_logging.log(" Setting num_slices=1 for CPU hardware type")
+  #   return 1
   if int(raw_keys["compile_topology_num_slices"]) > 0:
     return raw_keys["compile_topology_num_slices"]
   else:
@@ -592,6 +594,7 @@ def create_device_mesh(config, devices=None):
           dcn_parallelism,
           devices,
           allow_split_physical_axes=allow_split_physical_axes,
+          process_is_granule=True,
       )
   else:
     if allow_split_physical_axes:
