@@ -372,15 +372,24 @@ class AttentionOp(nn.Module):
         v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
     )
       
-      
-    mask = splash_attention_mask.CausalMask(shape=(query.shape[2], key.shape[2]))
+    mask_shape = (query.shape[2], key.shape[2])
+    mask = splash_attention_mask.CausalMask(shape=mask_shape)
 
     # jax.debug.print("original: mask items = {items}", items = mask.__getitem__((slice(mask.shape[0]),slice(mask.shape[1]))))
     
     # Anisha: permute the mask if cp and load_balancing
     if cp_size>1 and load_balanced_context_parallel:
-      original_mask_ndarray = mask.__getitem__((slice(mask.shape[0]),slice(mask.shape[1])))
+      idx = (slice(mask_shape[0]),slice(mask_shape[1]))
+      q_slice, kv_slice = idx
+      q_slice = splash_attention_mask._fill_slice(q_slice, mask_shape[0])
+      kv_slice = splash_attention_mask._fill_slice(kv_slice, mask_shape[1])
+      q_ids = mask.q_sequence[q_slice]
+      kv_ids = np.arange(kv_slice.start, kv_slice.stop)
+      #assuming offset == 0:
+      original_mask_ndarray = q_ids >= kv_ids
+
       permuted_mask_ndarray = self.reorder_causal_load_balancing(tensor = original_mask_ndarray, cp_size= cp_size, seq_dim= 0, to_contiguous=False) 
+      pdb.set_trace()
       mask = LoadBalancedCausalMask(shape=(query.shape[2], key.shape[2]),mask_ndarray=permuted_mask_ndarray) 
     
     # pdb.set_trace()
@@ -1462,6 +1471,7 @@ class Attention(nn.Module):
     out = checkpoint_name(out, "out_proj")
     return out
 
+partial = functools.partial
 class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
   """Lazy causal mask, prevents the model from attending to future tokens.
 
@@ -1474,7 +1484,12 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
 
   offset: int
   mask_ndarray: np.ndarray
-
+  @partial(
+    jax.jit,
+    static_argnames=[
+        "mask_ndarray",
+    ],
+)
   def __init__(
       self,
       shape: tuple[int, int],
