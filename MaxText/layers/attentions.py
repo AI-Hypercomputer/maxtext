@@ -36,6 +36,7 @@ from layers import linears
 from layers import quantizations
 import max_logging
 import pdb
+import numpy as np
 
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
@@ -370,12 +371,22 @@ class AttentionOp(nn.Module):
         k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
         v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
     )
-    # jax.debug.print("query.shape = {qs}, key.shape = {ks}", qs = query.shape, ks = key.shape)
+      
+      
     mask = splash_attention_mask.CausalMask(shape=(query.shape[2], key.shape[2]))
 
-    # Anisha: permute the mask
+    # jax.debug.print("original: mask items = {items}", items = mask.__getitem__((slice(mask.shape[0]),slice(mask.shape[1]))))
+    
+    # Anisha: permute the mask if cp and load_balancing
     if cp_size>1 and load_balanced_context_parallel:
-      mask = self.reorder_causal_load_balancing(mask, cp_size, 1, to_contiguous=False) 
+      original_mask_ndarray = mask.__getitem__((slice(mask.shape[0]),slice(mask.shape[1])))
+      permuted_mask_ndarray = self.reorder_causal_load_balancing(tensor = original_mask_ndarray, cp_size= cp_size, seq_dim= 0, to_contiguous=False) 
+      mask = LoadBalancedCausalMask(shape=(query.shape[2], key.shape[2]),mask_ndarray=permuted_mask_ndarray) 
+    
+    # pdb.set_trace()
+    # jax.debug.print("permuted: mask items = {items}", items = new_mask.__getitem__((slice(mask.shape[0]),slice(mask.shape[1]))))
+    
+    # jax.debug.print("new_mask == old_mask = {equal}", equal = new_mask.__getitem__((slice(mask.shape[0]),slice(mask.shape[1])))==mask.__getitem__((slice(mask.shape[0]),slice(mask.shape[1]))))
 
     #Anisha: figure out local_sliding attention + load_balancing, default is global
     # Apply local masking if local sliding attention is enabled.
@@ -1450,3 +1461,62 @@ class Attention(nn.Module):
     out = self.out_projection(inputs_q.shape[-1], out)
     out = checkpoint_name(out, "out_proj")
     return out
+
+class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
+  """Lazy causal mask, prevents the model from attending to future tokens.
+
+  Attributes:
+    offset: Offset of q start wrt kv. A positive offset shifts the bottom
+      triangle upward, a negative one shifts it downward. A negative offset
+      makes the first 'offset' rows of the attention matrix all 0s which leads
+      to undefined softmax.
+  """
+
+  offset: int
+  mask_ndarray: np.ndarray
+
+  def __init__(
+      self,
+      shape: tuple[int, int],
+      offset: int = 0,
+      mask_ndarray: np.ndarray = None,
+      shard_count: int = 1,
+  ):
+    self.offset = offset
+    self.mask_ndarray = mask_ndarray
+
+    def causal_mask_function_load_balanced(q_ids, kv_ids):
+      return self.mask_ndarray[q_ids, kv_ids]
+      # # When evaluating the mask in _process_mask we typically work with numpy
+      # # array views.
+      # # Avoid the addition when possible to avoid instantiating an actual array.
+      # if self.offset == 0:
+      #   return q_ids >= kv_ids
+      # else:
+      #   return q_ids + self.offset >= kv_ids
+
+    mask_function = causal_mask_function_load_balanced
+
+    super().__init__(
+        shape=shape,
+        mask_function=mask_function,
+        shard_count=shard_count,
+    )
+  
+  def __eq__(self, other: object):
+    if not isinstance(other, type(self)):
+      return NotImplemented
+
+    return (
+        self.shape == other.shape
+        and self.offset == other.offset
+        and np.array_equal(self.q_sequence, other.q_sequence)
+    )
+
+  def __hash__(self):
+    return hash((
+        type(self),
+        self.shape,
+        self.offset,
+        self.q_sequence.tobytes() if self.q_sequence is not None else None,
+    ))
