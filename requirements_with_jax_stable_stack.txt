@@ -3,6 +3,8 @@
 absl-py
 aqtp==0.8.2
 datasets
+grain-nightly>=0.0.10
+orbax-checkpoint>=0.10.3
 pylint
 pytest
 pyink
