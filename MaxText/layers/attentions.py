@@ -372,7 +372,8 @@ class AttentionOp(nn.Module):
         v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
     )
       
-    mask_shape = (query.shape[2], key.shape[2])
+    # mask_shape = (query.shape[2], key.shape[2])
+    mask_shape = (self.config.max_target_length, self.config.max_target_length)
     mask = splash_attention_mask.CausalMask(shape=mask_shape)
 
     # jax.debug.print("original: mask items = {items}", items = mask.__getitem__((slice(mask.shape[0]),slice(mask.shape[1]))))
@@ -383,14 +384,15 @@ class AttentionOp(nn.Module):
       q_slice, kv_slice = idx
       q_slice = splash_attention_mask._fill_slice(q_slice, mask_shape[0])
       kv_slice = splash_attention_mask._fill_slice(kv_slice, mask_shape[1])
-      q_ids = mask.q_sequence[q_slice]
-      kv_ids = np.arange(kv_slice.start, kv_slice.stop)
+      q_sequence = jnp.arange(mask_shape[0], dtype=jnp.int32)
+      q_ids = q_sequence[q_slice]
+      kv_ids = jnp.arange(kv_slice.start, kv_slice.stop)
       #assuming offset == 0:
       original_mask_ndarray = q_ids >= kv_ids
 
-      permuted_mask_ndarray = self.reorder_causal_load_balancing(tensor = original_mask_ndarray, cp_size= cp_size, seq_dim= 0, to_contiguous=False) 
-      pdb.set_trace()
-      mask = LoadBalancedCausalMask(shape=(query.shape[2], key.shape[2]),mask_ndarray=permuted_mask_ndarray) 
+      permuted_mask_ndarray = self.reorder_mask_load_balancing(tensor = original_mask_ndarray, cp_size= cp_size, seq_dim= 0) 
+      # pdb.set_trace()
+      mask = LoadBalancedCausalMask(shape=mask_shape,mask_ndarray=permuted_mask_ndarray) 
     
     # pdb.set_trace()
     # jax.debug.print("permuted: mask items = {items}", items = new_mask.__getitem__((slice(mask.shape[0]),slice(mask.shape[1]))))
@@ -465,6 +467,56 @@ class AttentionOp(nn.Module):
     
     return x
 
+  @functools.partial(
+      jax.jit,
+      static_argnames=[
+          "tensor",
+          "cp_size",
+          "seq_dim",
+      ],
+  )
+  def reorder_mask_load_balancing(self, tensor, cp_size: int, seq_dim: int):
+    """Reorders a tensor for load balancing the compute of causal attention."""
+
+    if tensor is None:
+      return tensor
+    
+    if cp_size == 1:
+        return tensor
+
+    if cp_size % 2 != 0:
+        raise ValueError(f"{cp_size=} must be a multiple of 2.")
+
+    # Need to ensure we have 2 pairs to swap for balancing between cp ranks
+    if tensor.shape[seq_dim] % (cp_size * 2) != 0:
+        raise ValueError(f"{tensor.shape=} is not a multiple of {cp_size*2=}")
+
+    # [B, S, H, D] -> [B, 2*cp_size, S/2*cp_size, D] #Anisha: this is ours
+    # [S, B, H, D] -> [2*cp_size, S/2*cp_size, B, H, D]
+    
+    ori_tensor_shape = tensor.shape
+    tensor = jnp.reshape(
+              tensor,
+              (
+                  *ori_tensor_shape[:seq_dim],
+                  2 * cp_size,
+                  ori_tensor_shape[seq_dim] // (2 * cp_size),
+                  *ori_tensor_shape[seq_dim + 1 :],
+              )
+          )
+
+    parts = []
+    for cp_rank in range(cp_size):
+        # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
+        # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
+        index = jnp.array([cp_rank, (2 * cp_size - cp_rank - 1)])
+        parts.append(jnp.take(tensor, index, axis=seq_dim))
+
+    # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D]
+    # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D]
+    combined = jnp.stack(parts, axis=seq_dim)
+
+    return jnp.reshape(combined,ori_tensor_shape)
 
   def reorder_causal_load_balancing(self, tensor, cp_size: int, seq_dim: int, to_contiguous: bool):
     """Reorders a tensor for load balancing the compute of causal attention."""
