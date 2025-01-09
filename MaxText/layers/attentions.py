@@ -380,19 +380,19 @@ class AttentionOp(nn.Module):
     
     # Anisha: permute the mask if cp and load_balancing
     if cp_size>1 and load_balanced_context_parallel:
-      idx = (slice(mask_shape[0]),slice(mask_shape[1]))
-      q_slice, kv_slice = idx
-      q_slice = splash_attention_mask._fill_slice(q_slice, mask_shape[0])
-      kv_slice = splash_attention_mask._fill_slice(kv_slice, mask_shape[1])
-      q_sequence = jnp.arange(mask_shape[0], dtype=jnp.int32)
-      q_ids = q_sequence[q_slice]
-      kv_ids = jnp.arange(kv_slice.start, kv_slice.stop)
-      #assuming offset == 0:
-      original_mask_ndarray = q_ids >= kv_ids
+      # idx = (slice(mask_shape[0]),slice(mask_shape[1]))
+      # q_slice, kv_slice = idx
+      # q_slice = splash_attention_mask._fill_slice(q_slice, mask_shape[0])
+      # kv_slice = splash_attention_mask._fill_slice(kv_slice, mask_shape[1])
+      # q_sequence = jnp.arange(mask_shape[0], dtype=jnp.int32)
+      # q_ids = q_sequence[q_slice]
+      # kv_ids = jnp.arange(kv_slice.start, kv_slice.stop)
+      # #assuming offset == 0:
+      # original_mask_ndarray = q_ids >= kv_ids
 
-      permuted_mask_ndarray = self.reorder_mask_load_balancing(tensor = original_mask_ndarray, cp_size= cp_size, seq_dim= 0) 
-      # pdb.set_trace()
-      mask = LoadBalancedCausalMask(shape=mask_shape,mask_ndarray=permuted_mask_ndarray) 
+      # permuted_mask_ndarray = reorder_mask_load_balancing(tensor = original_mask_ndarray, cp_size= cp_size, seq_dim= 0) 
+      
+      mask = LoadBalancedCausalMask(shape=mask_shape,cp_size=cp_size) 
     
     # pdb.set_trace()
     # jax.debug.print("permuted: mask items = {items}", items = new_mask.__getitem__((slice(mask.shape[0]),slice(mask.shape[1]))))
@@ -412,13 +412,24 @@ class AttentionOp(nn.Module):
 
     # Create multi-head mask
     multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
-    splash_kernel = splash_attention_kernel.make_splash_mha(
-        mask=multi_head_mask,
-        head_shards=1, # we would need to change this to the size of the axis if sharding over heads
-        q_seq_shards=cp_size, #axis for sequence sharding
-        block_sizes=block_sizes,
-        attn_logits_soft_cap=attn_logits_soft_cap,
+
+    @partial(
+        jax.jit,
+        static_argnames=[
+            "multi_head_mask",
+        ],
     )
+    def wrap_splash_kernel(multi_head_mask):
+      splash_kernel = splash_attention_kernel.make_splash_mha(
+          mask=multi_head_mask,
+          head_shards=1, # we would need to change this to the size of the axis if sharding over heads
+          q_seq_shards=cp_size, #axis for sequence sharding
+          block_sizes=block_sizes,
+          attn_logits_soft_cap=attn_logits_soft_cap,
+      )
+      return splash_kernel
+    
+    splash_kernel = wrap_splash_kernel(multi_head_mask)
 
     named_sharding = jax.sharding.NamedSharding(self.mesh, axis_names_splash_kernel)
     segment_axis_names_splash_kernel = splash_kernel.manual_sharding_spec(named_sharding)
@@ -467,15 +478,15 @@ class AttentionOp(nn.Module):
     
     return x
 
-  @functools.partial(
-      jax.jit,
-      static_argnames=[
-          "tensor",
-          "cp_size",
-          "seq_dim",
-      ],
-  )
-  def reorder_mask_load_balancing(self, tensor, cp_size: int, seq_dim: int):
+  # @functools.partial(
+  #     jax.jit,
+  #     static_argnames=[
+  #         "tensor",
+  #         "cp_size",
+  #         "seq_dim",
+  #     ],
+  # )
+  def reorder_mask_load_balancing(tensor, cp_size: int, seq_dim: int):
     """Reorders a tensor for load balancing the compute of causal attention."""
 
     if tensor is None:
@@ -1536,21 +1547,35 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
 
   offset: int
   mask_ndarray: np.ndarray
-  @partial(
-    jax.jit,
-    static_argnames=[
-        "mask_ndarray",
-    ],
-)
+#   @partial(
+#     jax.jit,
+#     static_argnames=[
+#         "mask_ndarray",
+#     ],
+# )
   def __init__(
       self,
       shape: tuple[int, int],
       offset: int = 0,
-      mask_ndarray: np.ndarray = None,
+      # mask_ndarray: jnp.ndarray = None,
+      cp_size: int = 1,
       shard_count: int = 1,
   ):
     self.offset = offset
-    self.mask_ndarray = mask_ndarray
+    idx = (slice(shape[0]),slice(shape[1]))
+    q_slice, kv_slice = idx
+    q_slice = splash_attention_mask._fill_slice(q_slice, shape[0])
+    kv_slice = splash_attention_mask._fill_slice(kv_slice, shape[1])
+    q_sequence = np.arange(shape[0], dtype=np.int32)
+    rows = q_sequence[q_slice]
+    cols = np.arange(kv_slice.start, kv_slice.stop)
+    q_ids = rows[:, None]
+    kv_ids = cols[None, :]
+    #assuming offset == 0:
+    original_mask_ndarray = q_ids >= kv_ids
+    permuted_mask_ndarray = AttentionOp.reorder_mask_load_balancing(tensor = original_mask_ndarray, cp_size= cp_size, seq_dim= 0) 
+    self.mask_ndarray = permuted_mask_ndarray
+    # pdb.set_trace()
 
     def causal_mask_function_load_balanced(q_ids, kv_ids):
       return self.mask_ndarray[q_ids, kv_ids]
