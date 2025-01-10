@@ -72,6 +72,7 @@ class Profiler:
       else:
         max_logging.log("WARNING: library for nsys was not loaded \n" "profiler has no effect")
         return
+      # Check if the output_path is a GCS path or a local path
       if self.output_path.startswith("gs://"):
         # Popen() instead of run() for non-blocking behavior
         if shutil.which("gsutil") is not None:
