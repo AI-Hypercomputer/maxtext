@@ -1,14 +1,14 @@
-# export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1223-baseline
-export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/yujunzou/llama2-7b-log
+export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1223-baseline
+# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/yujunzou/llama2-7b-log
 
-export MODEL_NAME=llama2-7b
-# export MODEL_NAME=llama3.1-405b
+# export MODEL_NAME=llama2-7b
+export MODEL_NAME=llama3.1-405b
 # export MODEL_NAME=llama2-70b
 
 export CONFIG_NAME=$(echo $MODEL_NAME | sed 's/-/_/g')
 export MODEL_SIZE=$(echo $MODEL_NAME | grep -o '[0-9]\+b')
-# export NUM_NODES=64
-export NUM_NODES=2
+export NUM_NODES=64
+# export NUM_NODES=2
 
 export WORKLOAD_NAME=zz-$USER-${MODEL_SIZE}-${NUM_NODES}n-stable-stack-${RANDOM:0:3}
 # export ATTENTION=dot_product
@@ -22,7 +22,7 @@ python ../xpk/xpk.py  workload delete --cluster a3plus-benchmark --workload $WOR
 
 python ../xpk/xpk.py  workload create --device-type h100-mega-80gb-8 --project supercomputer-testing --zone australia-southeast1 --cluster a3plus-benchmark \
   --docker-image $LOCAL_IMAGE_NAME \
-  --command 'export LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:$LD_LIBRARY_PATH;'"python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml run_name=maxtext-$MODEL_NAME model_name=$MODEL_NAME attention=$ATTENTION use_iota_embed=true per_device_batch_size=$PER_DEVICE_BATCH_SIZE skip_first_n_steps_for_profiler=5 profiler=xplane steps=10 hardware=gpu enable_checkpointing=false base_output_directory=gs://yujunzou-dev-supercomputer-testing/maxtext_gpu dataset_type=synthetic remat_policy=minimal_flash logits_dot_in_fp32=false dcn_fsdp_parallelism=$NUM_NODES ici_fsdp_parallelism=8 max_target_length=1024" \
+  --command 'export LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:$LD_LIBRARY_PATH;'"python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml run_name=maxtext-$MODEL_NAME model_name=$MODEL_NAME attention=$ATTENTION use_iota_embed=true per_device_batch_size=$PER_DEVICE_BATCH_SIZE skip_first_n_steps_for_profiler=5 profiler=xplane steps=10 hardware=gpu enable_checkpointing=false base_output_directory=gs://yujunzou-dev-supercomputer-testing/maxtext_gpu dataset_type=synthetic remat_policy=minimal_flash logits_dot_in_fp32=false dcn_fsdp_parallelism=$NUM_NODES ici_fsdp_parallelism=8 max_target_length=1024 dtype=float8_e5m2" \
   --num-nodes $NUM_NODES \
   --workload $WORKLOAD_NAME \
   --scheduler=gke.io/topology-aware-auto \
