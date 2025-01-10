@@ -377,33 +377,15 @@ class AttentionOp(nn.Module):
     mask_shape = (self.config.max_target_length, self.config.max_target_length)
     mask = splash_attention_mask.CausalMask(shape=mask_shape)
 
-    # jax.debug.print("original: mask items = {items}", items = mask.__getitem__((slice(mask.shape[0]),slice(mask.shape[1]))))
-    
-    # Anisha: permute the mask if cp and load_balancing
+    # permute the mask if cp and load_balancing
     if cp_size>1 and load_balanced_context_parallel:
-      # idx = (slice(mask_shape[0]),slice(mask_shape[1]))
-      # q_slice, kv_slice = idx
-      # q_slice = splash_attention_mask._fill_slice(q_slice, mask_shape[0])
-      # kv_slice = splash_attention_mask._fill_slice(kv_slice, mask_shape[1])
-      # q_sequence = jnp.arange(mask_shape[0], dtype=jnp.int32)
-      # q_ids = q_sequence[q_slice]
-      # kv_ids = jnp.arange(kv_slice.start, kv_slice.stop)
-      # #assuming offset == 0:
-      # original_mask_ndarray = q_ids >= kv_ids
-
-      # permuted_mask_ndarray = reorder_mask_load_balancing(tensor = original_mask_ndarray, cp_size= cp_size, seq_dim= 0) 
-      
-      # permuted_mask_ndarray = LoadBalancedCausalMask.create_mask(shape=mask_shape,cp_size=cp_size) 
-      # pdb.set_trace()
-
       mask = create_load_balance_causal_mask(shape=mask_shape,cp_size=cp_size)
-      breakpoint()
     
     # jax.debug.print("permuted: mask items = {items}", items = new_mask.__getitem__((slice(mask.shape[0]),slice(mask.shape[1]))))
     
     # jax.debug.print("new_mask == old_mask = {equal}", equal = new_mask.__getitem__((slice(mask.shape[0]),slice(mask.shape[1])))==mask.__getitem__((slice(mask.shape[0]),slice(mask.shape[1]))))
 
-    #Anisha: figure out local_sliding attention + load_balancing, default is global
+    #TODO: figure out local_sliding attention + load_balancing, default is global
     # Apply local masking if local sliding attention is enabled.
     if self.attention_type == AttentionType.LOCAL_SLIDING:
       if self.sliding_window_size is None:
@@ -448,7 +430,7 @@ class AttentionOp(nn.Module):
             axis_names_kv,
             segment_axis_names_q,
             segment_axis_names_kv,
-            segment_axis_names_splash_kernel, #TODO: add the manual sharding,
+            segment_axis_names_splash_kernel,
         ),
         out_specs=axis_names_q,
         check_rep=False,
@@ -1556,9 +1538,7 @@ class WrapperNpNDArray():
 def create_load_balance_causal_mask(
   shape: tuple[int, int],
   # offset: int = 0, #Anisha: do we need offset?
-  # mask_ndarray: jnp.ndarray = None,
   cp_size: int = 1,
-  # shard_count: int = 1,
   ):
   # self.offset = offset
   idx = (slice(shape[0]),slice(shape[1]))
@@ -1575,66 +1555,3 @@ def create_load_balance_causal_mask(
   mask_ndarray = AttentionOp.reorder_mask_load_balancing(tensor = original_mask_ndarray, cp_size= cp_size, seq_dim= 0) 
   return splash_attention_mask.NumpyMask(mask_ndarray)
 
-
-class LoadBalancedCausalMask(splash_attention_mask.NumpyMask):
-  """Lazy causal mask, prevents the model from attending to future tokens.
-
-  Attributes:
-    offset: Offset of q start wrt kv. A positive offset shifts the bottom
-      triangle upward, a negative one shifts it downward. A negative offset
-      makes the first 'offset' rows of the attention matrix all 0s which leads
-      to undefined softmax.
-  """
-
-  offset: int
-  # mask_ndarray: WrapperNpNDArray
-
-  
-  def __init__(
-      self,
-      shape: tuple[int, int],
-      offset: int = 0,
-      # mask_ndarray: WrapperNpNDArray = None,
-      # cp_size: int = 1,
-      shard_count: int = 1,
-  ):
-    # self.mask_ndarray = mask_ndarray
-    self.offset = offset
-
-    def causal_mask_function_load_balanced(q_ids, kv_ids):
-
-      
-        return self.array[q_ids, kv_ids]
-        # # When evaluating the mask in _process_mask we typically work with numpy
-        # # array views.
-        # # Avoid the addition when possible to avoid instantiating an actual array.
-        # if self.offset == 0:
-        #   return q_ids >= kv_ids
-        # else:
-        #   return q_ids + self.offset >= kv_ids
-
-    mask_function = causal_mask_function_load_balanced
-
-    super().__init__(
-        shape=shape,
-        mask_function=mask_function,
-        shard_count=shard_count,
-    )
-  
-  def __eq__(self, other: object):
-    if not isinstance(other, type(self)):
-      return NotImplemented
-
-    return (
-        self.shape == other.shape
-        and self.offset == other.offset
-        and np.array_equal(self.q_sequence, other.q_sequence)
-    )
-
-  def __hash__(self):
-    return hash((
-        type(self),
-        self.shape,
-        self.offset,
-        self.q_sequence.tobytes() if self.q_sequence is not None else None,
-    ))
