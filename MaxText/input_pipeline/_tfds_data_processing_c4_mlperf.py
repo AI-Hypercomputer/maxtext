@@ -269,11 +269,23 @@ def preprocess_train_dataset(
 
 def preprocess_eval_dataset(
     eval_ds: tf.data.Dataset,
+    sp_tokenizer,
     eval_global_batch_size_to_load: int,
     max_target_length: int,
     num_examples: Optional[int] = None,
+    is_tokenized_dataset: bool = True,
 ) -> tf.data.Dataset:
   """Preprocess the evaluation dataset."""
+  # group text up to max_target_length if the dataset is not pre-tokenized/pre-processed
+  if not is_tokenized_dataset:
+    eval_ds = eval_ds.map(
+        lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)), num_parallel_calls=AUTOTUNE
+    )
+    # hardcode batch_sizes 24567 i.e. the exp size in split validation_24567exp
+    #   to avoid padding tokens inserted in group text
+    eval_ds = reduce_concat_tokens(eval_ds, feature_key="targets", batch_size=24567)
+    eval_ds = split_tokens_to_targets_length(eval_ds, max_target_length)
+
   eval_ds = sequence_packing.pack_dataset(eval_ds, max_target_length)
 
   eval_ds = eval_ds.map(format_fn, num_parallel_calls=AUTOTUNE)
@@ -327,21 +339,43 @@ def make_c4_mlperf_eval_iterator(
     process_indices,
 ):
   """Make eval iterator of customized C4 dataset for mlperf gpt3 training."""
-  eval_ds = get_dataset(
-      dataset_name=config.eval_dataset_name,
-      split="validation_tokenized_5662seqs",
-      dataloading_host_index=process_indices.index(jax.process_index()),
-      dataloading_host_count=len(process_indices),
-      enable_data_shuffling=False,
-  )
-  # note validation_tokenized_5662seqs split is pre tokenized, reduce_concated and split to target_length
-  #   mainly to avoid eval sequences change depending on the number of hosts
-  eval_ds = rekey(eval_ds, {"inputs": None, "targets": "ids"})
+  if config.eval_dataset_name == "c4/en:3.0.5":
+    is_tokenized_dataset = True
+  elif config.eval_dataset_name == "c4/en:3.0.4":
+    is_tokenized_dataset = False
+  else:
+    raise ValueError(f"{config.eval_dataset_name=} should be one of ('c4/en:3.0.4', 'c4/en:3.0.5')")
+  if is_tokenized_dataset:
+    eval_ds = get_dataset(
+        dataset_name=config.eval_dataset_name,
+        split="validation_tokenized_5662seqs",
+        dataloading_host_index=process_indices.index(jax.process_index()),
+        dataloading_host_count=len(process_indices),
+        enable_data_shuffling=False,
+    )
+    # note validation_tokenized_5662seqs split is pre tokenized, reduce_concated and split to target_length
+    #   mainly to avoid eval sequences change depending on the number of hosts
+    eval_ds = rekey(eval_ds, {"inputs": None, "targets": "ids"})
+  else:
+    eval_ds = get_dataset(
+        dataset_name=config.eval_dataset_name,
+        split="validation_24567exp",
+        dataloading_host_index=process_indices.index(jax.process_index()),
+        dataloading_host_count=len(process_indices),
+        enable_data_shuffling=False,
+    )
+
+    eval_ds = rekey(eval_ds, {"inputs": None, "targets": "text"})
+
+  sp_tokenizer = get_tokenizer(config.tokenizer_path, config.add_bos, config.add_eos)
+
 
   eval_ds = preprocess_eval_dataset(
       eval_ds,
+      sp_tokenizer,
       eval_global_batch_size_to_load=config.global_batch_size_to_load_eval,
       max_target_length=config.max_target_length,
+      is_tokenized_dataset=is_tokenized_dataset,
   )
 
   eval_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(eval_ds, global_mesh)
