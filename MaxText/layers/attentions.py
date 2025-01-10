@@ -392,10 +392,11 @@ class AttentionOp(nn.Module):
 
       # permuted_mask_ndarray = reorder_mask_load_balancing(tensor = original_mask_ndarray, cp_size= cp_size, seq_dim= 0) 
       
-      permuted_mask_ndarray = LoadBalancedCausalMask.create_mask(shape=mask_shape,cp_size=cp_size) 
-      pdb.set_trace()
+      # permuted_mask_ndarray = LoadBalancedCausalMask.create_mask(shape=mask_shape,cp_size=cp_size) 
+      # pdb.set_trace()
 
-      mask = LoadBalancedCausalMask(mask_ndarray=permuted_mask_ndarray,shape=mask_shape,cp_size=cp_size)
+      mask = create_load_balance_causal_mask(shape=mask_shape,cp_size=cp_size)
+      breakpoint()
     
     # jax.debug.print("permuted: mask items = {items}", items = new_mask.__getitem__((slice(mask.shape[0]),slice(mask.shape[1]))))
     
@@ -1550,8 +1551,31 @@ class WrapperNpNDArray():
         type(self),
         self.np_ndarray.tobytes() if self.np_ndarray is not None else None,
     ))
-  
-class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
+
+def create_load_balance_causal_mask(
+  shape: tuple[int, int],
+  # offset: int = 0, #Anisha: do we need offset?
+  # mask_ndarray: jnp.ndarray = None,
+  cp_size: int = 1,
+  # shard_count: int = 1,
+  ):
+  # self.offset = offset
+  idx = (slice(shape[0]),slice(shape[1]))
+  q_slice, kv_slice = idx
+  q_slice = splash_attention_mask._fill_slice(q_slice, shape[0])
+  kv_slice = splash_attention_mask._fill_slice(kv_slice, shape[1])
+  q_sequence = np.arange(shape[0], dtype=np.int32)
+  rows = q_sequence[q_slice]
+  cols = np.arange(kv_slice.start, kv_slice.stop)
+  q_ids = rows[:, None]
+  kv_ids = cols[None, :]
+  #assuming offset == 0:
+  original_mask_ndarray = q_ids >= kv_ids
+  mask_ndarray = AttentionOp.reorder_mask_load_balancing(tensor = original_mask_ndarray, cp_size= cp_size, seq_dim= 0) 
+  return splash_attention_mask.NumpyMask(mask_ndarray)
+
+
+class LoadBalancedCausalMask(splash_attention_mask.NumpyMask):
   """Lazy causal mask, prevents the model from attending to future tokens.
 
   Attributes:
@@ -1562,59 +1586,31 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
   """
 
   offset: int
-  mask_ndarray: WrapperNpNDArray
+  # mask_ndarray: WrapperNpNDArray
 
-  @staticmethod
-  def create_mask(
-      shape: tuple[int, int],
-      # offset: int = 0, #Anisha: do we need offset?
-      # mask_ndarray: jnp.ndarray = None,
-      cp_size: int = 1,
-      shard_count: int = 1,
-  ):
-    # self.offset = offset
-    idx = (slice(shape[0]),slice(shape[1]))
-    q_slice, kv_slice = idx
-    q_slice = splash_attention_mask._fill_slice(q_slice, shape[0])
-    kv_slice = splash_attention_mask._fill_slice(kv_slice, shape[1])
-    q_sequence = np.arange(shape[0], dtype=np.int32)
-    rows = q_sequence[q_slice]
-    cols = np.arange(kv_slice.start, kv_slice.stop)
-    q_ids = rows[:, None]
-    kv_ids = cols[None, :]
-    #assuming offset == 0:
-    original_mask_ndarray = q_ids >= kv_ids
-    mask_ndarray = AttentionOp.reorder_mask_load_balancing(tensor = original_mask_ndarray, cp_size= cp_size, seq_dim= 0) 
-    return WrapperNpNDArray(mask_ndarray)
-    # self.mask_ndarray = permuted_mask_ndarray
-    # pdb.set_trace()
-
-  @partial(
-    jax.jit,
-    static_argnames=[
-        "mask_ndarray",
-    ],
-  )
+  
   def __init__(
       self,
       shape: tuple[int, int],
       offset: int = 0,
-      mask_ndarray: WrapperNpNDArray = None,
+      # mask_ndarray: WrapperNpNDArray = None,
       # cp_size: int = 1,
       shard_count: int = 1,
   ):
-    self.mask_ndarray = mask_ndarray
+    # self.mask_ndarray = mask_ndarray
     self.offset = offset
 
     def causal_mask_function_load_balanced(q_ids, kv_ids):
-      return self.mask_ndarray.np_ndarray[q_ids, kv_ids]
-      # # When evaluating the mask in _process_mask we typically work with numpy
-      # # array views.
-      # # Avoid the addition when possible to avoid instantiating an actual array.
-      # if self.offset == 0:
-      #   return q_ids >= kv_ids
-      # else:
-      #   return q_ids + self.offset >= kv_ids
+
+      
+        return self.array[q_ids, kv_ids]
+        # # When evaluating the mask in _process_mask we typically work with numpy
+        # # array views.
+        # # Avoid the addition when possible to avoid instantiating an actual array.
+        # if self.offset == 0:
+        #   return q_ids >= kv_ids
+        # else:
+        #   return q_ids + self.offset >= kv_ids
 
     mask_function = causal_mask_function_load_balanced
 
