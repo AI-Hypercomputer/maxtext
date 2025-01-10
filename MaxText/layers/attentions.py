@@ -306,12 +306,13 @@ class AttentionOp(nn.Module):
   ) -> Array:
     """TPU Flash Attention."""
 
+    decoder_segment_ids_permuted = None
 
     #Anisha: reorder tensors which is currently [B,S,H,KV]
     cp_size = self.mesh.shape["context"]
     if cp_size>1 and load_balanced_context_parallel:
       query = self.reorder_causal_load_balancing(tensor = query, cp_size= cp_size, seq_dim= 1, to_contiguous=False) 
-      decoder_segment_ids = self.reorder_causal_load_balancing(tensor = decoder_segment_ids, cp_size= cp_size, seq_dim= 1, to_contiguous=False)
+      decoder_segment_ids_permuted = self.reorder_causal_load_balancing(tensor = decoder_segment_ids, cp_size= cp_size, seq_dim= 1, to_contiguous=False)
     
 
 
@@ -468,7 +469,7 @@ class AttentionOp(nn.Module):
 
       return attention_output
 
-    x = wrap_flash_attention(query, key, value, decoder_segment_ids, decoder_segment_ids, splash_kernel)
+    x = wrap_flash_attention(query, key, value, decoder_segment_ids_permuted, decoder_segment_ids, splash_kernel)
     # pdb.set_trace()
     # jax.debug.print("{x}", x=x)
     
