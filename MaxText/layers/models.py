@@ -251,6 +251,21 @@ class Decoder(nn.Module):
     )
     return scan_fn(config=cfg, mesh=mesh, name="layers", quant=self.quant)
 
+  def get_pipeline_stage_module(self, base_stage, cfg, mesh):
+    if cfg.num_layers_per_pipeline_stage == 1:
+      stage_module = base_stage(config=cfg, mesh=mesh, quant=self.quant)
+    elif cfg.scan_layers:
+      stage_module = self.scan_decoder_layers(cfg, base_stage, cfg.num_layers_per_pipeline_stage, "layers_per_stage", mesh)
+    else:
+      stage_module = SequentialBlockDecoderLayers(
+          decoder_layer=base_stage,
+          num_decoder_layers=cfg.num_layers_per_pipeline_stage,
+          config=cfg,
+          mesh=mesh,
+          quant=self.quant,
+      )
+    return stage_module
+
   @nn.compact
   def __call__(
       self,
@@ -287,6 +302,15 @@ class Decoder(nn.Module):
     if cfg.remat_policy != "none":
       if cfg.remat_policy == "minimal":
         policy = jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
+      elif cfg.remat_policy == "save_dot_with_context_except_mlp":
+        policy = jax.checkpoint_policies.save_only_these_names(
+            "query_proj",
+            "value_proj",
+            "key_proj",
+            "qkv_proj",
+            "context",
+            "out_proj",
+        )
       elif cfg.remat_policy == "save_dot_except_mlpwi":
         policy = jax.checkpoint_policies.save_only_these_names(
             "query_proj",
@@ -349,21 +373,8 @@ class Decoder(nn.Module):
         static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
     )
     if cfg.using_pipeline_parallelism:
-      if cfg.num_layers_per_pipeline_stage == 1:
-        stage_module = BlockLayer(config=cfg, mesh=mesh, quant=self.quant)
-      elif cfg.scan_layers:
-        stage_module = self.scan_decoder_layers(
-            cfg, RemattedBlockLayer, cfg.num_layers_per_pipeline_stage, "layers_per_stage", mesh
-        )
-      elif not cfg.scan_layers:
-        stage_module = SequentialBlockDecoderLayers(
-            decoder_layer=RemattedBlockLayer,
-            num_decoder_layers=cfg.num_layers_per_pipeline_stage,
-            config=cfg,
-            mesh=mesh,
-            quant=self.quant,
-        )
-
+      base_stage = RemattedBlockLayer if cfg.set_remat_policy_on_layers_per_stage else BlockLayer
+      stage_module = self.get_pipeline_stage_module(base_stage, cfg, mesh)
       y = pipeline.Pipeline(config=cfg, mesh=mesh, layers=stage_module, remat_policy=policy)(
           y,
           decoder_segment_ids,

@@ -31,12 +31,11 @@ from input_pipeline import input_pipeline_interface
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
 
-def get_functional_train_with_signature(train_step, mesh, state_mesh_annotations, model, config):
+def get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config):
   """Get the shardings (both state and data) for train_step"""
-  functional_train = get_functional_train_step(train_step, model, config)
+  functional_train = get_functional_train_step(train_step, model, config, state_mesh_shardings)
   functional_train.__name__ = "train_step"
   data_pspec = P(*config.data_sharding)
-  state_mesh_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
   data_sharding = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = (state_mesh_shardings, None)  # State, metrics
@@ -45,16 +44,15 @@ def get_functional_train_with_signature(train_step, mesh, state_mesh_annotations
   return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums
 
 
-def get_functional_train_step(train_step, model, config):
-  return functools.partial(train_step, model, config)
+def get_functional_train_step(train_step, model, config, state_mesh_shardings):
+  return functools.partial(train_step, model, config, state_mesh_shardings)
 
 
-def get_functional_eval_with_signature(eval_step, mesh, state_mesh_annotations, model, config):
+def get_functional_eval_with_signature(eval_step, mesh, state_mesh_shardings, model, config):
   """Get the shardings (both state and data) for eval_step"""
   functional_eval = get_functional_eval_step(eval_step, model, config)
   functional_eval.__name__ = "eval_step"
   data_pspec = P(*config.data_sharding)
-  state_mesh_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), state_mesh_annotations)
   data_sharding = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = None  # metrics
@@ -158,10 +156,11 @@ def calculate_tflops_training_per_device(config, log=True):
   )
   embedding_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.vocab_size
 
-  # multiply by 3 for both feed forward and back proporgation flops
+  # multiply by 3 for both feed forward and back propagation flops
   learnable_weight_tflops = (
       ((total_ffn_flops + qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
   )
+
   # megatron tflops calculation does not account for causality in attention
   attention_tflops = attention_flops * config.num_decoder_layers * 3 / 10**12
 
@@ -173,7 +172,16 @@ def calculate_tflops_training_per_device(config, log=True):
 
   learnable_weight_tflops = learnable_weight_tflops * config.gradient_accumulation_steps
   attention_tflops = attention_tflops * config.gradient_accumulation_steps
-  total_tflops = learnable_weight_tflops + attention_tflops
+
+  # DPO includes one additional forward pass per gradient accumulation step
+  if config.use_dpo:
+    reference_model_tflops = learnable_weight_tflops / 3  # additional forward pass
+    reference_model_attention_tflops = attention_tflops / 3
+    attention_tflops = attention_tflops + reference_model_attention_tflops
+  else:
+    reference_model_tflops = 0
+
+  total_tflops = learnable_weight_tflops + attention_tflops + reference_model_tflops
 
   if log:
     print(
@@ -213,7 +221,7 @@ def calculate_prefill_tflops_per_device(num_model_parameters, prefill_length, co
   return total_tflops, learnable_weight_tflops, causal_attention_tflops
 
 
-def assert_params_sufficiently_sharded(params, mesh, tolerance=0.02):
+def assert_params_sufficiently_sharded(params, mesh, tolerance):
   """Checks whether most params are sharded across sharding axis.
 
   This function determines whether the majority of parameters  are distributed
@@ -231,13 +239,13 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance=0.02):
   """
   total_num_params = max_utils.calculate_num_params_from_pytree(params)
   product_num_devices_for_weight_sharding = 1
-  for axis in ["fsdp", "fsdp_transpose", "sequence", "tensor", "stage", "expert"]:
+  for axis in ["fsdp", "fsdp_transpose", "sequence", "tensor", "tensor_sequence", "stage", "expert"]:
     product_num_devices_for_weight_sharding *= mesh.shape[axis]
   total_num_params_per_chip = max_utils.calculate_total_params_per_chip(params)
   perfectly_sharded_params_per_chip = total_num_params / product_num_devices_for_weight_sharding
   assert total_num_params_per_chip >= perfectly_sharded_params_per_chip, (
       "Number of parameters per chip must not be less than in the ideal sharded "
-      "scenario across `fsdp`, `fsdp_transpose`,`sequence`, `tensor`, `expert` axes."
+      "scenario across `fsdp`, `fsdp_transpose`,`sequence`, `tensor`, `tensor_sequence`, `expert` axes."
   )
   unsharded_param_perc = total_num_params_per_chip / perfectly_sharded_params_per_chip - 1
   assert unsharded_param_perc < tolerance, (

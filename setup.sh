@@ -22,6 +22,7 @@
 # You have the option to provide a LIBTPU_GCS_PATH that points to a libtpu.so provided to you by Google.
 # In libtpu-only MODE, the LIBTPU_GCS_PATH is mandatory.
 # For MODE=stable you may additionally specify JAX_VERSION, e.g. JAX_VERSION=0.4.13
+# For DEVICE=gpu, you may also specify JAX_VERSION when MODE=nightly, e.g. JAX_VERSION=0.4.36.dev20241109
 
 
 # Enable "exit immediately if any command fails" option
@@ -30,7 +31,7 @@ export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_SUSPEND=1
 export NEEDRESTART_MODE=l
 
-
+apt-get update && apt-get install -y sudo
 (sudo bash || bash) <<'EOF'
 apt update && \
 apt install -y numactl lsb-release gnupg curl net-tools iproute2 procps lsof git ethtool && \
@@ -59,8 +60,8 @@ if [[ $LIBTPU_GCS_PATH == NONE ]]; then
   unset LIBTPU_GCS_PATH
 fi
 
-if [[ -n $JAX_VERSION && ! ($MODE == "stable" || -z $MODE) ]]; then
-     echo -e "\n\nError: You can only specify a JAX_VERSION with stable mode.\n\n"
+if [[ -n $JAX_VERSION && ! ($MODE == "stable" || -z $MODE || ($MODE == "nightly" && $DEVICE == "gpu")) ]]; then
+     echo -e "\n\nError: You can only specify a JAX_VERSION with stable mode (plus nightly mode on GPU).\n\n"
      exit 1
 fi
 
@@ -89,9 +90,9 @@ run_name_folder_path=$(pwd)
 # Install dependencies from requirements.txt
 cd $run_name_folder_path && pip install --upgrade pip
 if [[ "$MODE" == "pinned" ]]; then
-    pip3 install -U -r requirements.txt -c constraints_gpu.txt
+    pip3 install --no-cache-dir -U -r requirements.txt -c constraints_gpu.txt
 else
-    pip3 install -U -r requirements.txt
+    pip3 install --no-cache-dir -U -r requirements.txt
 fi
 
 # Uninstall existing jax, jaxlib and  libtpu-nightly
@@ -109,11 +110,10 @@ if [[ "$MODE" == "pinned" ]]; then
     echo "pinned mode is supported for GPU builds only."
     exit 1
   fi
-  echo "Installing pinned jax, jaxlib for NVIDIA gpu."
+  echo "Installing Jax and Transformer Engine."
   pip3 install "jax[cuda12]" -c constraints_gpu.txt
-  pip3 install "transformer-engine==1.5.0+297459b" \
-    --extra-index-url https://us-python.pkg.dev/gce-ai-infra/maxtext-build-support-packages/simple/ \
-    -c constraints_gpu.txt
+  pip install transformer-engine[jax]==1.13.0
+
 elif [[ "$MODE" == "stable" || ! -v MODE ]]; then
 # Stable mode
     if [[ $DEVICE == "tpu" ]]; then
@@ -157,9 +157,14 @@ elif [[ "$MODE" == "stable" || ! -v MODE ]]; then
 elif [[ $MODE == "nightly" ]]; then
 # Nightly mode
     if [[ $DEVICE == "gpu" ]]; then
-        echo "Installing jax-nightly, jaxlib-nightly"
         # Install jax-nightly
-        pip install -U --pre jax jaxlib jax-cuda12-plugin[with_cuda] jax-cuda12-pjrt -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+        if [[ -n "$JAX_VERSION" ]]; then
+            echo "Installing jax-nightly, jaxlib-nightly ${JAX_VERSION}"
+            pip install -U --pre jax==${JAX_VERSION} jaxlib==${JAX_VERSION} jax-cuda12-plugin[with_cuda] jax-cuda12-pjrt -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+        else
+            echo "Installing latest jax-nightly, jaxlib-nightly"
+            pip install -U --pre jax jaxlib jax-cuda12-plugin[with_cuda] jax-cuda12-pjrt -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+        fi
         # Install Transformer Engine
         export NVTE_FRAMEWORK=jax
         pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@stable

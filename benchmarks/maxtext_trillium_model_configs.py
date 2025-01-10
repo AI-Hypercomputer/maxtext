@@ -353,6 +353,8 @@ llama3_70b_8192 = MaxTextModel(
         "per_device_batch_size": 2,
         "ici_fsdp_parallelism": -1,
         "remat_policy": "full",
+        "optimizer_memory_host_offload": True,
+        "gradient_clipping_threshold": 0,
         "max_target_length": 8192,
         "attention": "flash",
         "gcs_metrics": True,
@@ -369,6 +371,8 @@ llama3_70b_8192 = MaxTextModel(
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
         + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+        + " --xla_tpu_scheduler_percent_shared_memory_limit=90"
     ),
 )
 
@@ -404,6 +408,129 @@ llama3_1_405b_8192_fsdp_dcn = MaxTextModel(
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
         + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+)
+
+llama3_1_8b_8192 = MaxTextModel(
+    model_name="llama3_1-8b-8192",
+    model_type="llama3.1-8b",
+    tuning_params={
+        "per_device_batch_size": 4,
+        "ici_fsdp_parallelism": -1,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "out_proj": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "enable_checkpointing": False,
+        "sa_block_q": 2048,
+        "sa_block_kv": 2048,
+        "sa_block_kv_compute": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_kv_dkv": 2048,
+        "sa_block_kv_dkv_compute": 2048,
+        "sa_block_q_dq": 2048,
+        "sa_block_kv_dq": 2048,
+        "sa_use_fused_bwd_kernel": True,
+        "profiler": "xplane",
+        "skip_first_n_steps_for_profiler": 10,
+        "profiler_steps": 5,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+)
+
+llama3_1_70b_8192 = MaxTextModel(
+    model_name="llama3_1-70b-8192",
+    model_type="llama3.1-70b",
+    tuning_params={
+        "per_device_batch_size": 4,
+        "ici_fsdp_parallelism": -1,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "enable_checkpointing": False,
+        "sa_block_q": 2048,
+        "sa_block_kv": 2048,
+        "sa_block_kv_compute": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_kv_dkv": 2048,
+        "sa_block_kv_dkv_compute": 2048,
+        "sa_block_q_dq": 2048,
+        "sa_block_kv_dq": 2048,
+        "sa_use_fused_bwd_kernel": True,
+        "profiler": "xplane",
+        "skip_first_n_steps_for_profiler": 10,
+        "profiler_steps": 5,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+)
+
+llama3_1_70b_129024 = MaxTextModel(
+    model_name="llama3_1-70b-129024",
+    model_type="llama3.1-70b",
+    tuning_params={
+        "per_device_batch_size": 0.125,
+        "ici_fsdp_parallelism": -1,
+        "ici_sequence_parallelism": 8,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "out_proj": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "max_target_length": 129024,
+        "attention": "flash",
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "enable_checkpointing": False,
+        "sa_block_q": 2048,
+        "sa_block_kv": 2048,
+        "sa_block_kv_compute": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_kv_dkv": 2048,
+        "sa_block_kv_dkv_compute": 2048,
+        "sa_block_q_dq": 2048,
+        "sa_block_kv_dq": 2048,
+        "sa_use_fused_bwd_kernel": True,
+        "profiler": "xplane",
+        "skip_first_n_steps_for_profiler": 10,
+        "profiler_steps": 5,
+        "allow_split_physical_axes": True,
+        "custom_mesh": "hybrid_ring_32x8",
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_1D_ALL_GATHER
         + xla_flags_library.HOST_OFFLOAD_FLAGS
     ),
 )
@@ -572,6 +699,9 @@ maxstar_models = [
     llama3_8b_8192,  # Not Optimizied yet
     llama3_70b_8192,  # Not Optimizied yet
     llama3_1_405b_8192_fsdp_dcn,
+    llama3_1_8b_8192,
+    llama3_1_70b_8192,
+    llama3_1_70b_129024,
     mixtral_8x7b_dropped,
     mixtral_8x7b_dropped_int8,
     mixtral_8x7b_dropless,

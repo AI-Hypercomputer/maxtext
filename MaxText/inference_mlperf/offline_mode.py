@@ -16,6 +16,7 @@ import argparse
 import contextlib
 import copy
 import gc
+import json
 import time
 import math
 import logging
@@ -46,11 +47,10 @@ from maxengine import create_engine_from_config_flags
 import offline_inference
 
 _MLPERF_ID = "llama2-70b"
-
-logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
+log.setLevel(os.getenv("LOGLEVEL", "INFO"))
 
 sys.path.insert(0, os.getcwd())
-log = logging.getLogger("main2.py")
 
 
 from absl import app, flags
@@ -164,6 +164,15 @@ flags.DEFINE_bool(
     "allow_skipping_queries",
     False,
     "Allow skipping queries which have target len greater than 2x configured max prefill len",
+    required=False,
+)
+
+flags.DEFINE_string(
+    "rename_dataset_cols",
+    "",
+    "Rename some of the dataset columns to whats expected by code. For example, "
+    "mixtral dataset uses ref_token_length instead of ref_token_len. Format is a string dict "
+    'eg. {"tok_input_len": "tok_input_length"}',
     required=False,
 )
 
@@ -333,6 +342,9 @@ class SUT:
       self.offline_inf_instances[group_idx].decode_state = None
       gc.collect()
       for key, val in result.items():
+        if not val:
+          log.info(f"Value empty for key {key}")
+          continue
         key = int(key)
         lg.FirstTokenComplete([make_response(key, [val[0]])])
         resp = make_response(key, val)
@@ -419,6 +431,11 @@ def main(argv):
 
   log.info("dataset path: %s", FLAGS.dataset_path)
   dataset = pd.read_pickle(FLAGS.dataset_path)
+  if FLAGS.rename_dataset_cols:
+    rename_dict = json.loads(FLAGS.rename_dataset_cols)
+    dataset.rename(columns=rename_dict, inplace=True)
+    log.info(f"Renaming columns of dataset with mapping: {rename_dict}")
+
   if FLAGS.total_sample_count < len(dataset):
     dataset = dataset.sample(n=FLAGS.total_sample_count)
   estimated_counts_by_bucket = _estimated_counts_by_bucket(dataset)
@@ -477,6 +494,7 @@ def main(argv):
   settings.use_token_latencies = True
 
   os.makedirs(FLAGS.output_log_dir, exist_ok=True)
+  log.info(f"Logging to {FLAGS.output_log_dir}")
   log_output_settings = lg.LogOutputSettings()
   log_output_settings.outdir = FLAGS.output_log_dir
   log_output_settings.copy_summary_to_stdout = True
