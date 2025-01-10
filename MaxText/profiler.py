@@ -80,7 +80,7 @@ class Profiler:
         else:
           max_logging.log("WARNING: gsutil is not installed or not found in the system's PATH. Skipping upload...")
       else:
-        subprocess.Popen(["cp", "*nsys-rep", self.output_path])
+        subprocess.Popen(["cp", "*nsys-rep", self.output_path])  # pylint: disable=consider-using-with
     elif self.mode == "xplane":
       jax.profiler.stop_trace()
 
