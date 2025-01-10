@@ -308,7 +308,7 @@ class AttentionOp(nn.Module):
 
     decoder_segment_ids_permuted = None
 
-    #Anisha: reorder tensors which is currently [B,S,H,KV]
+    #Reorder tensors which is currently [B,S,H,KV]
     cp_size = self.mesh.shape["context"]
     if cp_size>1 and load_balanced_context_parallel:
       query = self.reorder_causal_load_balancing(tensor = query, cp_size= cp_size, seq_dim= 1, to_contiguous=False) 
@@ -327,8 +327,6 @@ class AttentionOp(nn.Module):
     if decoder_segment_ids is not None:
       segment_axis_names_q = nn.logical_to_mesh_axes((BATCH, "activation_length_q"))
       segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH, "activation_length_kv"))
-    #Anisha
-    # does segment_axis_names_splash_kernel also need to be inside `if decoder_segment_ids is not None:`?
     axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
     axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
     axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
