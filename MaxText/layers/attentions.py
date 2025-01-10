@@ -152,26 +152,37 @@ class PagedAttentionOp(nn.Module):
 
   def init_or_get_kv_pages(self, model_mode: str):
     """Get paged attention op."""
+    # Get existing variables if they exist
+    if self.has_variable("cache", "key_pages"):
+        key_pages_var = self.variable("cache", "key_pages")
+        value_pages_var = self.variable("cache", "value_pages")
+        
+        # For AR mode, if shape doesn't match, reinitialize values but not variables
+        if model_mode != common_types.MODEL_MODE_PREFILL and key_pages_var.value.shape[1] != self.num_pages:
+            kv_pages_shape = (self.num_kv_heads, self.num_pages, self.page_size, self.kv_head_dim_size)
+            key_pages_var.value = jnp.zeros(kv_pages_shape, dtype=self.dtype)
+            value_pages_var.value = jnp.zeros(kv_pages_shape, dtype=self.dtype)
+    else:
+        # Initial creation - choose size based on mode
+        num_pages = self.max_pages_per_prefill if model_mode == common_types.MODEL_MODE_PREFILL else self.num_pages
+        kv_pages_shape = (self.num_kv_heads, num_pages, self.page_size, self.kv_head_dim_size)
+        
+        key_pages_var = self.variable(
+            "cache",
+            "key_pages",
+            nn.with_logical_partitioning(jnp.zeros, self.kv_pages_axis_names),
+            kv_pages_shape,
+            self.dtype,
+        )
+        value_pages_var = self.variable(
+            "cache",
+            "value_pages",
+            nn.with_logical_partitioning(jnp.zeros, self.kv_pages_axis_names),
+            kv_pages_shape,
+            self.dtype,
+        )
 
-    num_pages = self.num_pages
-    if model_mode == common_types.MODEL_MODE_PREFILL:
-      num_pages = self.max_pages_per_prefill
-
-    kv_pages_shape = (self.num_kv_heads, num_pages, self.page_size, self.kv_head_dim_size)
-    key_pages_var = self.variable(
-        "cache",
-        "key_pages",
-        nn.with_logical_partitioning(jnp.zeros, self.kv_pages_axis_names),
-        kv_pages_shape,
-        self.dtype,
-    )
-    value_pages_var = self.variable(
-        "cache",
-        "value_pages",
-        nn.with_logical_partitioning(jnp.zeros, self.kv_pages_axis_names),
-        kv_pages_shape,
-        self.dtype,
-    )
+    # Apply logical constraints
     key_pages_var.value = nn.with_logical_constraint(key_pages_var.value, self.kv_pages_axis_names)
     value_pages_var.value = nn.with_logical_constraint(value_pages_var.value, self.kv_pages_axis_names)
     return key_pages_var, value_pages_var
@@ -221,7 +232,7 @@ class PagedAttentionOp(nn.Module):
 
     return attn#, local_max, local_sum 
 
-  
+
   def paged_attention(
       self,
       query: Array,
@@ -232,16 +243,24 @@ class PagedAttentionOp(nn.Module):
     """Apply Paged Attention.
 
     Annotations:
-      b: batch_size
-      s: sequence length
-      n: query heads
+    b: batch_size
+    s: sequence length
+    n: query heads
 
-      k: kv_heads
-      x: num_pages
-      p: page_size
+    k: kv_heads
+    x: num_pages
+    p: page_size
 
-      d: kv_head_dim_size
+    d: kv_head_dim_size
     """
+    # jax.debug.print("\nAR mode - query.shape actual: {}", tuple(query.shape))
+    # jax.debug.print("AR mode - key_pages_var actual: {}", tuple(key_pages_var.value.shape))
+    # jax.debug.print("AR mode - value_pages_var actual: {}", tuple(value_pages_var.value.shape))
+    # jax.debug.print("AR mode - query shape: {}", query.shape)
+    # jax.debug.print("AR mode - key_pages shape: {}", key_pages_var.value.shape)
+    # jax.debug.print("AR mode - value_pages shape: {}", value_pages_var.value.shape)
+    # jax.debug.print("AR mode - sequence_lengths: {}", page_state.sequence_lengths)
+    # jax.debug.print("AR mode - page_map: {}", page_state.page_map)
     bsnd = nn.logical_to_mesh_axes(self.query_axis_names)
     kxpd = nn.logical_to_mesh_axes(self.kv_pages_axis_names)
     batch_q, seqlen_q, num_heads_q, head_dim = query.shape
@@ -372,18 +391,16 @@ class PagedAttentionOp(nn.Module):
       page_state: page_managers.PageState,
   ) -> None:
     """Update pages for decode step."""
-
-    # print(f"\nupdate_decode_step_pages - {key.shape=}")
     assert key.shape == value.shape, f"decode_step key/value should have the same shape, but getting {key.shape=} and {value.shape=} instead"
     b, t, n_kv, d = key.shape
     assert t == 1, f"decode_step key/value length should be 1, but getting {t} instead"
     assert key_pages_var.value.shape == value_pages_var.value.shape, f"decode_step key/value_pages_var should have the same shape, but getting {key_pages_var.shape=} and {value_pages_var.shape=} instead"
 
-    # print(f"update_decode_step_pages - {key_pages_var.value.shape=}")
     v_n_kv, v_n_p, v_p, v_d = key_pages_var.value.shape
     assert v_n_kv == n_kv, f"{v_n_kv=} {n_kv=}"
     assert v_p == self.page_size, f"{v_p=} {self.page_size=}"
     assert v_d == d, f"{v_d=} {d=}"
+    # Modified assertion to handle both modes
     assert v_n_p == self.num_pages, f"{v_n_p=} {self.num_pages=}"
 
     current_page = page_state.current_page  # (8)
@@ -396,17 +413,22 @@ class PagedAttentionOp(nn.Module):
 
     keys = jax.vmap(_update_page_slice)(zeros, current_page_position, key)       # (32, 16, 32, 128)
     values = jax.vmap(_update_page_slice)(zeros, current_page_position, value)   # (32, 16, 32, 128)
+    # jax.debug.print("update_decode_step_pages - Before transpose - keys shape: {}", keys.shape)
+    # jax.debug.print("update_decode_step_pages - Before transpose - current_page_position: {}", current_page_position)
 
     keys = jnp.transpose(keys, axes=(2, 0, 1, 3))       # (32, 32, 16, 128)
     values = jnp.transpose(values, axes=(2, 0, 1, 3))   # (32, 32, 16, 128)
 
     def _update_pages(slot, state):
       update_target, update_pages, page_indices = state
+      # jax.debug.print("_update_pages - page_indices[slot]: {}", page_indices[slot])
       update_page = jax.lax.dynamic_index_in_dim(update_pages, slot, axis=1)
       updated_target = jax.lax.dynamic_update_slice_in_dim(update_target, update_page, page_indices[slot], axis=1)
       updated_state = updated_target, update_pages, page_indices
       return updated_state
-
+    
+    # jax.debug.print("Before update loop - current_page: {}", current_page)
+    # jax.debug.print("keys shape: {}", keys.shape)
     key_pages_var.value, _, _ = jax.lax.fori_loop(0, b, _update_pages, (key_pages_var.value, keys, current_page))
     value_pages_var.value, _, _ = jax.lax.fori_loop(0, b, _update_pages, (value_pages_var.value, values, current_page))
     key_pages_var.value = nn.with_logical_constraint(key_pages_var.value, self.kv_pages_axis_names)
