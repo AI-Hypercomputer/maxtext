@@ -451,14 +451,15 @@ class AttentionOp(nn.Module):
 
       return attention_output
 
-    x = wrap_flash_attention(query, key, value, decoder_segment_ids_permuted, decoder_segment_ids, splash_kernel)
-    # pdb.set_trace()
-    # jax.debug.print("{x}", x=x)
+    if cp_size>1 and load_balanced_context_parallel:
+      x = wrap_flash_attention(query, key, value, decoder_segment_ids_permuted, decoder_segment_ids, splash_kernel)
+    else:
+      x = wrap_flash_attention(query, key, value, decoder_segment_ids, decoder_segment_ids, splash_kernel)
     
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
 
     if cp_size>1 and load_balanced_context_parallel:
-    #Anisha: inverse reorder for load_balancing
+    #inverse reorder for load_balancing
       x = self.reorder_causal_load_balancing(tensor = x, cp_size= cp_size, seq_dim= 1, to_contiguous=True)
 
     
