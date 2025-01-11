@@ -27,7 +27,6 @@ from multihost_dataloading import MultiHostDataLoadIterator
 import numpy as np
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
-import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
 # pylint: disable=too-many-positional-arguments
 
@@ -118,6 +117,7 @@ def create_orbax_emergency_replicator_checkpoint_manager(
     save_interval_steps: int,
     global_mesh: jax.sharding.Mesh,
 ):
+  import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
   """Returns an emergency replicator checkpoint manager."""
   flags.FLAGS.experimental_orbax_use_distributed_process_id = True
   max_logging.log("Creating emergency replicator checkpoint manager...")
