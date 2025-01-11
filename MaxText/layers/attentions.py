@@ -508,8 +508,11 @@ class AttentionOp(nn.Module):
         # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
         # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
         index = np.array([cp_rank, (2 * cp_size - cp_rank - 1)])
-        parts.append(np.take(tensor, index, axis=seq_dim))
-    # breakpoint()
+        try:
+          parts.append(np.take(tensor, index, axis=seq_dim))
+        except Exception as e:
+          print(f"Got exception={e}")
+          # breakpoint()
 
 
     # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D]
@@ -1588,7 +1591,7 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
           return q_ids + offset >= kv_ids
         
       original_mask_ndarray = create_load_balance_causal_mask(self.shape, q_ids, kv_ids, self.offset)
-      mask_ndarray = AttentionOp.reorder_mask_load_balancing(tensor = original_mask_ndarray, cp_size= cp_size, seq_dim= 0) 
+      mask_ndarray = AttentionOp.reorder_mask_load_balancing(tensor = original_mask_ndarray, cp_size= self.cp_size, seq_dim= 0) 
       return mask_ndarray
       # return splash_attention_mask.NumpyMask(mask_ndarray)
 
