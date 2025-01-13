@@ -475,7 +475,9 @@ class AttentionOp(nn.Module):
   @staticmethod
   def reorder_mask_load_balancing(tensor, cp_size: int, seq_dim: int):
     """Reorders a tensor for load balancing the compute of causal attention."""
-
+    if type(tensor) is not np.ndarray:
+      breakpoint()
+    
     if tensor is None:
       return tensor
     
@@ -512,12 +514,16 @@ class AttentionOp(nn.Module):
           parts.append(np.take(tensor, index, axis=seq_dim))
         except Exception as e:
           print(f"Got exception={e}")
-          # breakpoint()
+          breakpoint()
 
 
     # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D]
     # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D]
-    combined = np.stack(parts, axis=seq_dim)
+    try:
+      combined = np.stack(parts, axis=seq_dim)
+    except Exception as e:
+          print(f"Got exception={e}")
+          breakpoint()
 
     return np.reshape(combined,ori_tensor_shape)
 
@@ -1569,12 +1575,28 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
       # array views.
       # Avoid the addition when possible to avoid instantiating an actual array.
 
+      def create_causal_mask_for_index(
+          shape: tuple[int, int],
+          idx: int,
+          cp: int, #context parallelism val
+        ):
+        
+        q_slice, kv_slice = idx, slice(shape[1])
+        
+
+
       def create_load_balance_causal_mask(
       shape: tuple[int, int],
       q_ids: int,
       kv_ids: int,
-      offset: int = 0, #Anisha: do we need offset?
+      offset: int = 0, #This is important for auto regressive decoding, 
+      #we are not supporting flash/splash attention for auto regressive decoding
       ):
+        (slice * i + jnp.arange(slice))[:, None] <= jnp.arange(seq_len)[None, :] - something like this
+        for each index, for i = i and i = n - i -1 (perhaps 2 * n - i - 1 here maybe?)
+
+        #then concatenate
+
         # self.offset = offset
         # idx = (slice(shape[0]),slice(shape[1]))
         # q_slice, kv_slice = idx
@@ -1591,6 +1613,10 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
           return q_ids + offset >= kv_ids
         
       original_mask_ndarray = create_load_balance_causal_mask(self.shape, q_ids, kv_ids, self.offset)
+      if type(original_mask_ndarray) is not np.ndarray:
+        raise ValueError("Something went wrong in function_create_load_balance_causal_mask")
+      else:
+        print("np ndarray found!!")
       mask_ndarray = AttentionOp.reorder_mask_load_balancing(tensor = original_mask_ndarray, cp_size= self.cp_size, seq_dim= 0) 
       return mask_ndarray
       # return splash_attention_mask.NumpyMask(mask_ndarray)
