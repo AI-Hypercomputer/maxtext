@@ -7,6 +7,7 @@
 run_name="trillium_llama2-70b"
 dry_run=false
 enable_profiler=false
+enable_batch_prefill=false
 enable_xla_flags=false
 single_bucket=false
 token_multiplier=3.0
@@ -36,6 +37,7 @@ for arg in "$@"; do
         -t) test_mode=true ;;
         -s) single_bucket=true ;;
         -x) enable_xla_flags=true ;;
+        -c) enable_batch_prefill=true ;;
         -r=*|--run=*) run_name="${arg#*=}" ;;
         -r|--run) shift; run_name="$1" ;;
         -m=*|--multiplier=*) token_multiplier="${arg#*=}" ;;
@@ -66,6 +68,10 @@ fi
 
 if "$test_mode"; then
     RUN_OPTIONS="${RUN_OPTIONS} -t "
+fi
+
+if "$enable_batch_prefill"; then
+    RUN_OPTIONS="${RUN_OPTIONS} -c "
 fi
 
 if "$single_bucket"; then
@@ -104,7 +110,7 @@ run_benchmark() {
     local type=$1
     case "$type" in
         "performance")
-            $cmd bash llama_offline_run.sh -r benchmarks_performance_${RUN_DESC} ${RUN_OPTIONS}
+            $cmd bash llama_offline_run.sh ${RUN_OPTIONS} -r benchmarks_performance_${RUN_DESC}
             ;;
         "audit")
             $cmd bash llama_offline_run.sh -r benchmarks_audit_${RUN_DESC} -d
