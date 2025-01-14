@@ -9,6 +9,10 @@
 # Example Usage: export BASE_OUTPUT_PATH=/path/to/GCS/bucket; bash end_to_end/tpu/mistral/7b/test_mistral-7b.sh
 
 set -ex
+
+# Installing torch for deps in forward_pass_logit_chekcker.py
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+
 MODEL_VARIATION='7b'
 
 if [ -z "${BASE_OUTPUT_PATH}" ]; then
