@@ -10,6 +10,9 @@ datasets
 gcsfs
 google-cloud-aiplatform==1.61.0
 google-cloud-storage
+google-cloud-monitoring
+google-api-core
+google-api-python-client
 grain-nightly
 flax>=0.8.0
 ml-collections
