@@ -103,31 +103,42 @@ class OfflineInference:
           .lower(self.params, tokens=input_data, slot=0, true_length=length - 1, decode_state=self.decode_state)
           .compile()
       )
-    #   input_data_batch = jax.ShapeDtypeStruct((max_length,), jnp.dtype("int32"))
-    #   example_seq_len=16
-    #   num_prompts = max_length//length
-    #   self._cached_pref_batch[length] = (
-    #     jax.jit(self._prefill_insert_batch, donate_argnums=(4,))
-    #     .lower(
-    #       self.params,
-    #       tokens=input_data_batch,
-    #       slots=jnp.arange(0, example_seq_len),
-    #       num_prompts = 16,
-    #       decoder_positions = jnp.arange(0, max_length),
-    #       decoder_segment_ids = jnp.ones(max_length),
-    #       start_pos=jnp.arange(0, max_length, max_length//example_seq_len),
-    #       padded_lengths=jnp.arange(0, max_length, max_length//example_seq_len),
-    #       true_lengths=jnp.arange(0, max_length, max_length//example_seq_len),
-    #       decode_state=self.decode_state)
-    #     .compile()
-    #   )
-    self.batch_inference(warmup_samples, desc="warmup")
+      if length == 64 or length == 1024:
+        continue
+      log.info(f"Compiling batched prefill: {length}")
+      input_data_batch = jax.ShapeDtypeStruct((max_length,), jnp.dtype("int32"))
+      num_prompts = max_length // length
+      self._cached_pref_batch[length] = (
+          jax.jit(
+              self._prefill_insert_batch,
+              static_argnames=(
+                  "num_prompts",
+                  "padded_length",
+              ),
+              donate_argnames=("decode_state",),
+          )
+          .lower(
+              self.params,
+              tokens=input_data_batch,
+              slots=jnp.arange(0, 8, dtype=int),
+              num_prompts=num_prompts,
+              decoder_positions=jnp.arange(0, max_length, dtype=int),
+              decoder_segment_ids=jnp.ones(max_length, dtype=int),
+              start_pos=jnp.arange(0, max_length, 128, dtype=int),
+              padded_length=length,
+              true_lengths=jnp.full(8, length, dtype=int),
+              decode_state=self.decode_state,
+          )
+          .compile()
+      )
     self._cached_generate = (
         jax.jit(self.engine.generate, donate_argnums=(1,)).lower(self.params, self.decode_state).compile()
     )
+    self.batch_inference(warmup_samples, desc="warmup")
 
   def _prefill_insert(self, params, tokens, slot, true_length, decode_state):
     """return decodestate."""
+    padded_len = tokens.shape[0]
     prefill_result, first_token = self.engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
     decode_state = self.engine.insert(prefill_result, decode_state, slot)
     return first_token, decode_state
@@ -141,12 +152,12 @@ class OfflineInference:
       decoder_positions,
       decoder_segment_ids,
       start_pos,
-      padded_lengths,
+      padded_length,
       true_lengths,
       decode_state,
   ):
     """return decodestate."""
-    prefill_results, first_tokens = self.engine.prefill_concat(
+    cache, prefill_results, first_tokens = self.engine.prefill_concat(
         params=params,
         padded_tokens=tokens,
         decoder_positions=decoder_positions,
@@ -155,20 +166,15 @@ class OfflineInference:
         true_lengths=true_lengths,
         num_prompts=num_prompts,
     )
-    # decode_state = jax.lax.fori_loop(
-    #   0, num_prompts,
-    #   lambda i, state: self.engine.insert(
-    #     prefill_results[i],
-    #     state,
-    #     slot=slots[i],
-    #     start_idx = start_pos[i],
-    #     seq_len = padded_lengths[i]),
-    #   decode_state
-    # )
-    for i in range(num_prompts):
-      decode_state = self.engine.insert_partial(
-          prefill_results[i], decode_state, slots[i], start_idx=start_pos[i].item(), seq_len=padded_lengths[i].item()
-      )
+    decode_state = self.engine.insert_partial(
+        prefill_results,
+        decode_state,
+        cache,
+        slots,
+        num_prompts=num_prompts,
+        start_indices=start_pos,
+        seq_len=padded_length,
+    )
     return first_tokens, decode_state
 
   def batch_inference_with_callback(
@@ -188,7 +194,7 @@ class OfflineInference:
       if self.dummy:
         log.info("dummy prefill")
         return 123
-      if not self.enable_batch_prefill or prefill_len * len(prefill_bucket) != 1024:
+      if not self.enable_batch_prefill or prefill_len in (64, 1024) or prefill_len * len(prefill_bucket) != 1024:
         prefill_result = []
         prefill_fn = self._prefill_insert
         if (cached := self._cached_pref.get(prefill_len)) is not None:
@@ -219,7 +225,6 @@ class OfflineInference:
         tokens = jnp.concat([row.tokens for (slot, row) in prefill_bucket])
 
         slots = [slot for (slot, row) in prefill_bucket]
-        padded_lengths = [row.tokens.shape[0] for (slot, row) in prefill_bucket]
         true_lengths = [row.true_length for (slot, row) in prefill_bucket]
         start_pos = np.cumsum([0] + [row.tokens.shape[0] for (slot, row) in prefill_bucket])[:-1]
         start_pos = start_pos.tolist()
@@ -230,23 +235,20 @@ class OfflineInference:
             array_to_pad.extend([0] * (pad_len - len(array_to_pad)))
           return jnp.array(array_to_pad)
 
-        slots = pad_num_prompts_len_array(slots, 16)
-        padded_lengths = pad_num_prompts_len_array(padded_lengths, 16)
-        true_lengths = pad_num_prompts_len_array(true_lengths, 16)
-        start_pos = pad_num_prompts_len_array(start_pos, 16)
-
+        slots = pad_num_prompts_len_array(slots, 8)
+        true_lengths = pad_num_prompts_len_array(true_lengths, 8)
+        start_pos = pad_num_prompts_len_array(start_pos, 8)
+        # this lowered function has static input for num_prompts and padded_length
         first_tokens, self.decode_state = prefill_fn(
             self.params,
             tokens=tokens,
             slots=slots,
-            num_prompts=len(prefill_bucket),
             decoder_positions=positions,
             decoder_segment_ids=sequence_indicator,
             start_pos=start_pos,
-            padded_lengths=padded_lengths,
             true_lengths=true_lengths,
             decode_state=self.decode_state,
-        )
+        )  # pytype: disable=missing-parameter
         prefill_result = [(first_tokens[idx], slot, row) for (idx, (slot, row)) in enumerate(prefill_bucket)]
 
         return prefill_result
@@ -345,9 +347,9 @@ class OfflineInference:
       total_num_prefills += 1
       log.info(f"Total num prefill: {total_num_prefills}")
       slot = empty_slots.pop()
-      # directly prefill prompts with 64 or less tokens
-      if num_tokens == 64:
-        first_token, slot, row = prefill([(slot, row)], 64)[0]
+      # directly prefill prompts with 64 or less tokens, and with 1024 tokens
+      if num_tokens in (64, 1024) or not self.enable_batch_prefill:
+        first_token, slot, row = prefill([(slot, row)], num_tokens)[0]
         self.detokenize_backlog.put((first_token, True, row.id, slot), block=True)
         continue
       self.prefill_buckets[num_tokens].append((slot, row))
