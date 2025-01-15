@@ -11,6 +11,10 @@
 # Use the same BASE_OUTPUT_PATH for both 1_test_mixtral.sh & 2_test_mixtral.sh.
 
 set -ex
+
+# Installing torch for deps in forward_pass_logit_chekcker.py
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+
 MODEL_VARIATION='8x7b'
 
 if [ -z "${BASE_OUTPUT_PATH}" ]; then

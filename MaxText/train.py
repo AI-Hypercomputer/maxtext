@@ -648,16 +648,23 @@ def setup_mesh_and_model(config):
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
   logger = checkpointing.setup_checkpoint_logger(config)
   if config.enable_emergency_checkpoint:
-    abstract_state, _, _ = max_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
-    checkpoint_manager = checkpointing.create_orbax_emergency_checkpoint_manager(
-        config.local_checkpoint_directory,
-        config.checkpoint_dir,
-        mesh,
-        abstract_state,
-        config.local_checkpoint_period,
-        config.checkpoint_period,
-        logger,
-    )
+    if config.use_replicator_service:
+      checkpoint_manager = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
+          config.local_checkpoint_directory,
+          config.local_checkpoint_period,
+          mesh,
+      )
+    else:
+      abstract_state, _, _ = max_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
+      checkpoint_manager = checkpointing.create_orbax_emergency_checkpoint_manager(
+          config.local_checkpoint_directory,
+          config.checkpoint_dir,
+          mesh,
+          abstract_state,
+          config.local_checkpoint_period,
+          config.checkpoint_period,
+          logger,
+      )
   else:
     # TODO(b/368121306): Remove this once zarr3 support is plumbed on the backend
     use_ocdbt = config.checkpoint_storage_use_ocdbt
@@ -957,12 +964,13 @@ def train_loop(config, state=None):
     # pytype: disable=attribute-error
     compiled = p_train_step.lower(state, example_batch, nextrng).compile()
     compiled_stats = compiled.memory_analysis()
-    max_logging.log(
-        f"Output size: {compiled_stats.output_size_in_bytes}, "
-        f"temp size: {compiled_stats.temp_size_in_bytes}, "
-        f"argument size: {compiled_stats.argument_size_in_bytes}, "
-        f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
-    )
+    if compiled_stats is not None:
+      max_logging.log(
+          f"Output size: {compiled_stats.output_size_in_bytes}, "
+          f"temp size: {compiled_stats.temp_size_in_bytes}, "
+          f"argument size: {compiled_stats.argument_size_in_bytes}, "
+          f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
+      )
   return state
 
 
