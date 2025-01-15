@@ -69,6 +69,23 @@ def get_server_config(config_str: str, config: Any) -> Type[config_lib.ServerCon
           generate_engine_create_fns=(functools.partial(create_exp_maxengine, config=config),),
           interleaved_engine_create_fns=(),
       )
+    case "ExperimentalMaxtextDisaggServer_8_16":
+      # ExperimentalMaxtextDisaggregatedServer is still under development.
+      # Its dependencies IFRT Proxy and other components are not publicly available
+      # either.
+      server_config = config_lib.ServerConfig(
+          prefill_slices=("v6e-8",),
+          generate_slices=("v6e-8","v6e-8"),
+          interleaved_slices=(),
+          prefill_engine_create_fns=(
+            functools.partial(create_exp_maxengine, config=config),
+          ),
+          generate_engine_create_fns=(
+            functools.partial(create_exp_maxengine, config=config),
+            functools.partial(create_exp_maxengine, config=config),
+          ),
+          interleaved_engine_create_fns=(),
+      )
     case _:
       raise NotImplementedError
   return server_config
