@@ -319,6 +319,7 @@ def build_user_command(
       f'echo {buffer_size} &&',
       'export ENABLE_PJRT_COMPATIBILITY=true &&',
       'python3 MaxText/train.py MaxText/configs/base.yml',
+      f'steps={num_steps}',
       f'{config_tuning_params}',
       f'model_name={model.model_type}',
       f'base_output_directory={base_output_directory}',
@@ -455,7 +456,7 @@ def xpk_benchmark_runner(
         model=benchmark.model_name,
         cluster_config=cluster_config,
         num_slices=benchmark.hardware_config.num_slices,
-        libtpu_type=LibTpuType.NIGHTLY,
+        libtpu_type=LibTpuType.MAXTEXT,
         libtpu_version=benchmark.software_config.libtpu_version,
         base_output_directory=cluster_config.base_output_directory,
         buffer_size=4294967296,
@@ -477,3 +478,86 @@ def xpk_benchmark_runner(
       dry_run=False,
   )
   print(f'Returncodes: {returncodes}')
+
+def on_device_benchmark_runner(
+    base_output_directory: str,
+    benchmarks: list[BenchmarkRunner],
+):
+  for benchmark in benchmarks:
+    user_command = build_on_device_user_command(
+        model=benchmark.model_name,
+        num_steps=20,
+        libtpu_type=LibTpuType.MAXTEXT,
+        # libtpu_version=benchmark.software_config.libtpu_version,
+        base_output_directory=base_output_directory,
+        buffer_size=4294967296,
+    )
+    print(f'User command: {user_command}')
+    subprocess.run(user_command, shell=True, text=True)
+
+
+def build_on_device_user_command(
+    model: model_configs.MaxTextModel,
+    num_steps: int,
+    libtpu_type: LibTpuType,
+    base_output_directory: str,
+    buffer_size: int,
+    libtpu_date: str = None,
+):
+  config_tuning_params = ''
+  for key, value in model.tuning_params.items():
+    config_tuning_params += f'{key}={value} '
+
+  install_libtpu_cmd = ''
+  if libtpu_type == LibTpuType.NIGHTLY:
+    install_libtpu_cmd += (
+        f' pip install libtpu-nightly==0.1.dev{libtpu_date} -f'
+        ' https://storage.googleapis.com/libtpu-releases/index.html &&'
+    )
+  elif libtpu_type == LibTpuType.CUSTOM:
+    install_libtpu_cmd += f' mv libtpu.so /lib/ &&'
+  elif libtpu_type == LibTpuType.MAXTEXT:
+    install_libtpu_cmd += ''
+  # model.xla_flags += ' --megascale_verify_checksums=true'
+  # Enable chaotic good.
+  # model.xla_flags += ' --megascale_grpc_use_chaotic_good=true'
+  # model.xla_flags += ' --megascale_grpc_use_event_engine_allocator=true'
+  # model.xla_flags += ' --grpc_enable_tcp_recv_zerocopy=false'
+  # model.xla_flags += ' --grpc_enable_rpc_receive_coalescing=true'
+  # model.xla_flags += ' --grpc_experiments=tcp_rcv_lowat'
+
+  # Use single quotes for LIBTPU_INIT_ARGS and escape inner single quotes
+  libtpu_flags = f"LIBTPU_INIT_ARGS='{model.xla_flags}'"
+
+  return (
+      # f'python3 -m pip install google-cloud-aiplatform==v1.61.0 &&'
+      # f'pip install -U "jax[tpu]==0.4.30" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html &&'
+      # f' pip install https://storage.googleapis.com/jax-releases/nightly/nocuda/jaxlib-0.4.27.dev20240501-cp310-cp310-manylinux2014_x86_64.whl &&'
+      # f' pip install git+https://github.com/jax-ml/jax.git@57bfe81260545556ec22509347f7ced112496200 &&'
+      f' {install_libtpu_cmd}'
+      # f' mv libtpu.so /lib/ &&'
+      # f' export TPU_LIBRARY_PATH=$PWD/libtpu.so &&'
+      f' echo {libtpu_flags} &&'
+      # f' echo {model.tuning_params["sa_block_q"]}-q-dq-{model.tuning_params["sa_block_q_dq"]}-q-dkv-{model.tuning_params["sa_block_q_dkv"]} &&'
+      # f' echo {model.tuning_params["ici_fsdp_parallelism"]} {model.tuning_params["ici_tensor_parallelism"]} &&'
+      f' export JAX_PLATFORMS=tpu,cpu &&'
+      # f' export JAX_DEBUG_NANS=True &&'
+      # f' export TPU_MEGACORE=megachip_tccontrol &&'
+      # f' echo TPU MEGACORE: $TPU_MEGACORE &&'
+      f' export TPU_PREMAPPED_BUFFER_SIZE={buffer_size} &&'
+      f' echo {buffer_size} &&'
+      f' export ENABLE_PJRT_COMPATIBILITY=true &&'
+      f' export {libtpu_flags} && '
+      f' bash preflight.sh && '
+      # f' echo "4096 41943040 314572800" > /proc/sys/net/ipv4/tcp_rmem && '
+      ' python3 MaxText/train.py MaxText/configs/base.yml'
+      f' {config_tuning_params} steps={num_steps} enable_checkpointing=false'
+      f' model_name={model.model_type}'
+      f' base_output_directory={base_output_directory}'
+      f' use_vertex_tensorboard=false'
+      ' vertex_tensorboard_project="" vertex_tensorboard_region=""'
+      # f' run_name="raymond-llama-test"'
+      # f' run_name="{model.model_name}-{libtpu_date}"'
+  )
+
+# 

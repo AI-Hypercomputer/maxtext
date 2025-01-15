@@ -23,6 +23,7 @@ Example usages:
 """
 import argparse
 import importlib
+import subprocess
 
 import maxtext_trillium_model_configs
 from maxtext_xpk_runner import BenchmarkRunner
@@ -30,7 +31,38 @@ from maxtext_xpk_runner import HWConfig
 from maxtext_xpk_runner import SWconfig
 from maxtext_xpk_runner import PathwaysConfig
 from maxtext_xpk_runner import xpk_benchmark_runner
+from maxtext_xpk_runner import on_device_benchmark_runner
 from maxtext_xpk_runner import XpkConfig
+
+
+MODELS_LIST = [
+	'gpt_3_175b',
+	'llama2_7b_4096',
+	'llama2_70b_4096',
+	'llama2_70b_4096_real_data',
+	'llama2_70b_4096_pw_long_run',
+	'llama2_70b_4096_real_data_pw_long_run',
+	'llama2_70b_4096_pw_rd_tfds',
+	'llama2_70b_4096_synthetic_pw_lr',
+	'llama2_70b_4096_synthetic',
+	'llama3_70b_8192',
+	'llama3_1_405b_8192_fsdp_dcn',
+	'mixtral_8x7b_dropped',
+	'mixtral_8x7b_dropped_int8',
+	'mixtral_8x7b_dropless',
+	'gemma2_9b_8192',
+	'gemma2_27b_8192',
+	'llama3_1_70b_129024',
+	'llama3_1_8b_8192',
+	'llama3_1_70b_8192',
+    'default_16b_v5e_256',
+    'default_32b_v5e_256',
+    'default_64b_v5e_256',
+    'default_128b_v5e_256',
+    'llama2_7b_v5e_256',
+    'llama2_13b_v5e_256',
+    'llama2_70b_v5e_256',
+]
 
 
 def add_shared_arguments(custom_parser: argparse.ArgumentParser):
@@ -42,13 +74,13 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
   custom_parser.add_argument(
       '--project',
       type=str,
-      default=None, required=True,
+      default=None, required=False,
       help='GCE project name, defaults to "gcloud config project."',
   )
   custom_parser.add_argument(
       '--zone',
       type=str,
-      default=None, required=True,
+      default=None, required=False,
       help=(
           'GCE zone, e.g. us-central2-b, defaults to "gcloud config '
           'compute/zone." Only one of --zone or --region is allowed in a '
@@ -58,19 +90,19 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
   custom_parser.add_argument(
       '--cluster_name',
       type=str,
-      default=None, required=True,
+      default=None, required=False,
       help='cluster name The name of the cluster to run the job on. command.',
   )
   custom_parser.add_argument(
       '--base_output_directory',
       type=str,
-      default=None, required=True,
+      default=None, required=False,
       help='gcloud bucket to store arfifacts.',
   )
   custom_parser.add_argument(
       '--device_type',
       type=str,
-      default=None, required=True,
+      default=None, required=False,
       help='tpu device type command.',
   )
   custom_parser.add_argument(
@@ -79,47 +111,15 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
       default='1',
       help='Number of slices for tpu devices command.',
   )
+  model_list_str = ' '.join(MODELS_LIST)
   custom_parser.add_argument(
       '--model_name',
       type=str,
-      choices=[
-          'gpt_3_175b',
-          'llama2_7b_4096',
-          'llama2_70b_4096',
-          'llama2_70b_4096_real_data',
-          'llama2_70b_4096_pw_long_run',
-          'llama2_70b_4096_real_data_pw_long_run',
-          'llama2_70b_4096_pw_rd_tfds',
-          'llama2_70b_4096_synthetic_pw_lr',
-          'llama2_70b_4096_synthetic',
-          'llama3_70b_8192',
-          'llama3_1_405b_8192_fsdp_dcn',
-          'mixtral_8x7b_dropped',
-          'mixtral_8x7b_dropped_int8',
-          'mixtral_8x7b_dropless',
-          'gemma2_9b_8192',
-          'gemma2_27b_8192',
-          'llama3_1_70b_129024',
-          'llama3_1_8b_8192',
-          'llama3_1_70b_8192',
-      ],
+      choices=MODELS_LIST,
       default='llama2_70b_4096',
       help=(
-          'model to be benchmarked, supported models are gpt_3_175b '
-          'llama2_7b_4096 '
-          'llama2_70b_4096 '
-          'llama2_70b_4096_real_data '
-          'llama2_70b_4096_pw_long_run '
-          'llama2_70b_4096_real_data_pw_long_run '
-          'llama2_70b_4096_pw_rd_tfds '
-          'llama2_70b_4096_synthetic_pw_lr '
-          'llama2_70b_4096_synthetic '
-          'llama3_1_405b_8192_fsdp_dcn '
-          'mixtral_8x7b_dropped '
-          'mixtral_8x7b_dropped_int8 '
-          'mixtral_8x7b_dropless '
-          'gemma2_9b_8192 '
-          'gemma2_27b_8192 '
+          'model to be benchmarked, supported models are '
+          f'{model_list_str}'
           'command.'
       ),
   )
@@ -179,6 +179,12 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
       default=0,
       help='Number of restarts to attempt.',
   )
+  custom_parser.add_argument(
+      '--run-on-device',
+      type=bool,
+      default=False,
+      help='Run model on current device.',
+  )
 
 
 def main() -> None:
@@ -214,8 +220,18 @@ def main() -> None:
       num_slices=options.num_slices, device_type=options.device_type
   )
 
-  model_sets = importlib.import_module('maxtext_trillium_model_configs')
-  benchmark_model = getattr(model_sets, options.model_name)
+  model_sets = [
+  	importlib.import_module('maxtext_trillium_model_configs'),
+  	importlib.import_module('maxtext_v5e_model_configs'),
+  ]
+  
+
+  for ms in model_sets:
+    try:
+        benchmark_model = getattr(ms, options.model_name)
+        break
+    except AttributeError:
+        continue
 
   model_runner = BenchmarkRunner(
       model_name=benchmark_model,
@@ -223,7 +239,12 @@ def main() -> None:
       hardware_config=v6e_256_configs,
   )
 
-  xpk_benchmark_runner(cluster_config, [model_runner], options.xpk_path)
+  print("I am here!")
+  print(benchmark_model.model_name)
+  if options.run_on_device:
+    on_device_benchmark_runner(options.base_output_directory, [model_runner])
+  else:
+    xpk_benchmark_runner(cluster_config, [model_runner], options.xpk_path)
 
 
 if __name__ == '__main__':
