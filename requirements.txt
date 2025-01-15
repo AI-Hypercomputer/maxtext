@@ -1,6 +1,6 @@
 jax>=0.4.30
 jaxlib>=0.4.30
-orbax-checkpoint>=0.5.12
+orbax-checkpoint>=0.11.0
 absl-py
 array-record
 aqtp
@@ -14,7 +14,7 @@ google-cloud-monitoring
 google-api-core
 google-api-python-client
 grain-nightly
-flax>=0.8.0
+flax>=0.10.2
 ml-collections
 ml-goodput-measurement==0.0.4
 numpy
