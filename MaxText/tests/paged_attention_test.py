@@ -644,6 +644,321 @@ class PagedAttentionTest(unittest.TestCase):
                     atol=1e-5,
                     err_msg=f"Mismatch in value cache at position {i}, head {head}"
                 )
+    
+    def test_page_boundary_conditions(self):
+        """Test attention computation across page boundaries."""
+        batch_size = 1
+        seq_len = self.cfg['page_size'] * 2  # Two pages exactly
+        num_heads = 8
+        head_dim = 128
+        
+        # Create attention op with exactly 2 pages for prefill
+        attention_op = PagedAttentionOp(
+            mesh=self.mesh,
+            num_pages=self.cfg['num_pages'],
+            page_size=self.cfg['page_size'],
+            max_pages_per_slot=self.cfg['max_target_length'] // self.cfg['page_size'],
+            max_pages_per_prefill=2,  # Override to exactly what we need
+            block_size=self.cfg['block_size'],
+            pages_per_compute_block=self.cfg['block_size'] // self.cfg['page_size'],
+            num_kv_heads=self.cfg['num_kv_heads'],
+            kv_head_dim_size=self.cfg['head_dim'],
+            dtype=self.cfg['dtype'],
+        )
+        
+        # Create distinct patterns for each page
+        rng1, rng2 = jax.random.split(self.rng)
+        query_page1 = jax.random.normal(rng1, (batch_size, self.cfg['page_size'], num_heads, head_dim))
+        query_page2 = jax.random.normal(rng2, (batch_size, self.cfg['page_size'], num_heads, head_dim))
+        query = jnp.concatenate([query_page1, query_page2], axis=1)
+        
+        key = query  # Use same patterns for key and value for simplicity
+        value = query
+        
+        page_state = PageState(
+            page_status=jnp.zeros(self.cfg['num_pages'], dtype=jnp.int32),
+            page_map=jnp.zeros((batch_size, self.cfg['num_pages']), dtype=jnp.int32),
+            sequence_lengths=jnp.array([seq_len], dtype=jnp.int32),
+            num_pages_used=jnp.zeros(batch_size, dtype=jnp.int32),
+            current_page=jnp.zeros(batch_size, dtype=jnp.int32),
+            current_page_position=jnp.zeros(batch_size, dtype=jnp.int32)
+        )
+        
+        variables = attention_op.init(
+            self.rng,
+            query,
+            key, 
+            value,
+            None,
+            common_types.MODEL_MODE_PREFILL,
+            page_state
+        )
+        
+        output_tuple, _ = attention_op.apply(
+            variables,
+            query,
+            key,
+            value,
+            None,
+            common_types.MODEL_MODE_PREFILL,
+            page_state,
+            mutable=["cache"]
+        )
+        
+        output, max_vals, sum_vals = output_tuple
+        output = output / (sum_vals + 1e-9)
+        reference_output = reference_attention(query, key, value)
+        
+        # Test boundary attention patterns
+        
+        # 1. Check last token of first page
+        boundary_idx = self.cfg['page_size']
+        np.testing.assert_allclose(
+            output[:, boundary_idx-1:boundary_idx],
+            reference_output[:, boundary_idx-1:boundary_idx],
+            rtol=1e-5, atol=1e-5,
+            err_msg="Last token of first page doesn't match reference"
+        )
+        
+        # 2. Check first token of second page
+        np.testing.assert_allclose(
+            output[:, boundary_idx:boundary_idx+1],
+            reference_output[:, boundary_idx:boundary_idx+1],
+            rtol=1e-5, atol=1e-5,
+            err_msg="First token of second page doesn't match reference"
+        )
+        
+        # 3. Check boundary transition
+        window_size = 4  # Check 2 tokens on each side of boundary
+        boundary_window = slice(boundary_idx - window_size//2, boundary_idx + window_size//2)
+        np.testing.assert_allclose(
+            output[:, boundary_window],
+            reference_output[:, boundary_window],
+            rtol=1e-5, atol=1e-5,
+            err_msg="Attention pattern at page boundary doesn't match reference"
+        )
+        
+        # 4. Verify no discontinuities at boundary
+        attention_diff = jnp.abs(output[:, boundary_idx] - output[:, boundary_idx-1])
+        self.assertTrue(
+            jnp.all(attention_diff < 1e3),
+            "Detected unexpected discontinuity at page boundary"
+        )
+        
+        # 5. Verify overall output
+        np.testing.assert_allclose(
+            output,
+            reference_output,
+            rtol=1e-5, atol=1e-5,
+            err_msg="Complete attention output doesn't match reference"
+        )
+
+    def test_page_reuse(self):
+        """Test page reuse after releasing pages."""
+        batch_size = 1
+        seq_len = 1
+        num_heads = 8
+        head_dim = 128
+        
+        # Initialize with one sequence
+        key1 = jax.random.normal(self.rng, (batch_size, seq_len, num_heads, head_dim))
+        value1 = jax.random.normal(self.rng, (batch_size, seq_len, num_heads, head_dim))
+        
+        # Initialize page state for first sequence
+        page_state = PageState(
+            page_status=jnp.zeros(self.cfg['num_pages'], dtype=jnp.int32),
+            page_map=jnp.zeros((batch_size, self.cfg['num_pages']), dtype=jnp.int32),
+            sequence_lengths=jnp.ones(batch_size, dtype=jnp.int32),
+            num_pages_used=jnp.zeros(batch_size, dtype=jnp.int32),
+            current_page=jnp.zeros(batch_size, dtype=jnp.int32),
+            current_page_position=jnp.zeros(batch_size, dtype=jnp.int32)
+        )
+        
+        variables = self.attention_op.init(
+            self.rng,
+            key1,
+            key1,
+            value1,
+            None,
+            common_types.MODEL_MODE_AUTOREGRESSIVE,
+            page_state
+        )
+        
+        # Store first sequence
+        _, mutated_vars = self.attention_op.apply(
+            variables,
+            key1,
+            key1,
+            value1,
+            None,
+            common_types.MODEL_MODE_AUTOREGRESSIVE,
+            page_state,
+            mutable=["cache"]
+        )
+        
+        # Create new sequence with different values
+        key2 = jax.random.normal(self.rng, (batch_size, seq_len, num_heads, head_dim))
+        value2 = jax.random.normal(self.rng, (batch_size, seq_len, num_heads, head_dim))
+        
+        # Reset page state (simulating page release)
+        page_state = PageState(
+            page_status=jnp.zeros(self.cfg['num_pages'], dtype=jnp.int32),
+            page_map=jnp.zeros((batch_size, self.cfg['num_pages']), dtype=jnp.int32),
+            sequence_lengths=jnp.ones(batch_size, dtype=jnp.int32),
+            num_pages_used=jnp.zeros(batch_size, dtype=jnp.int32),
+            current_page=jnp.zeros(batch_size, dtype=jnp.int32),
+            current_page_position=jnp.zeros(batch_size, dtype=jnp.int32)
+        )
+        
+        # Store second sequence in same location
+        output_tuple, final_vars = self.attention_op.apply(
+            mutated_vars,
+            key2,
+            key2,
+            value2,
+            None,
+            common_types.MODEL_MODE_AUTOREGRESSIVE,
+            page_state,
+            mutable=["cache"]
+        )
+        
+        output, _, _ = output_tuple
+        reference_output = reference_attention(key2, key2, value2)
+        
+        # Verify second sequence is stored correctly
+        np.testing.assert_allclose(
+            output,
+            reference_output,
+            rtol=1e-2,
+            atol=1e-2,
+            err_msg="Page reuse produced incorrect attention output"
+        )
+
+    def test_multi_head_consistency(self):
+        """Test consistency across different attention heads."""
+        batch_size = 1
+        seq_len = self.cfg['max_prefill_predict_length']
+        num_heads = self.cfg['num_query_heads']
+        head_dim = self.cfg['head_dim']
+        
+        # Create input where each head gets different patterns
+        query = jnp.stack([
+            jax.random.normal(self.rng, (batch_size, seq_len, head_dim)) * (i + 1)
+            for i in range(num_heads)
+        ], axis=2)
+        
+        key = jnp.stack([
+            jax.random.normal(self.rng, (batch_size, seq_len, head_dim)) * (i + 1)
+            for i in range(self.cfg['num_kv_heads'])
+        ], axis=2)
+        
+        value = jnp.stack([
+            jax.random.normal(self.rng, (batch_size, seq_len, head_dim)) * (i + 1)
+            for i in range(self.cfg['num_kv_heads'])
+        ], axis=2)
+        
+        page_state = PageState(
+            page_status=jnp.zeros(self.cfg['num_pages'], dtype=jnp.int32),
+            page_map=jnp.zeros((batch_size, self.cfg['num_pages']), dtype=jnp.int32),
+            sequence_lengths=jnp.array([seq_len], dtype=jnp.int32),
+            num_pages_used=jnp.zeros(batch_size, dtype=jnp.int32),
+            current_page=jnp.zeros(batch_size, dtype=jnp.int32),
+            current_page_position=jnp.zeros(batch_size, dtype=jnp.int32)
+        )
+        
+        variables = self.attention_op.init(
+            self.rng,
+            query,
+            key,
+            value,
+            None,
+            common_types.MODEL_MODE_PREFILL,
+            page_state
+        )
+        
+        output_tuple, _ = self.attention_op.apply(
+            variables,
+            query,
+            key,
+            value,
+            None,
+            common_types.MODEL_MODE_PREFILL,
+            page_state,
+            mutable=["cache"]
+        )
+        
+        output, max_vals, sum_vals = output_tuple
+        output = output / (sum_vals + 1e-9)
+        reference_output = reference_attention(query, key, value)
+        
+        # Check each head separately
+        for head in range(num_heads):
+            np.testing.assert_allclose(
+                output[:,:,head,:],
+                reference_output[:,:,head,:],
+                rtol=1e-5, atol=1e-5,
+                err_msg=f"Head {head} attention output doesn't match reference"
+            )
+
+    def test_long_sequence_stability(self):
+        """Test numerical stability with long sequences."""
+        batch_size = 1
+        seq_len = self.cfg['max_prefill_predict_length']
+        num_heads = 8
+        head_dim = 128
+        
+        # Create sequence with large magnitude differences
+        query = jax.random.normal(self.rng, (batch_size, seq_len, num_heads, head_dim)) * 10
+        key = jax.random.normal(self.rng, (batch_size, seq_len, num_heads, head_dim)) * 10
+        value = jax.random.normal(self.rng, (batch_size, seq_len, num_heads, head_dim))
+        
+        page_state = PageState(
+            page_status=jnp.zeros(self.cfg['num_pages'], dtype=jnp.int32),
+            page_map=jnp.zeros((batch_size, self.cfg['num_pages']), dtype=jnp.int32),
+            sequence_lengths=jnp.array([seq_len], dtype=jnp.int32),
+            num_pages_used=jnp.zeros(batch_size, dtype=jnp.int32),
+            current_page=jnp.zeros(batch_size, dtype=jnp.int32),
+            current_page_position=jnp.zeros(batch_size, dtype=jnp.int32)
+        )
+        
+        variables = self.attention_op.init(
+            self.rng,
+            query,
+            key,
+            value,
+            None,
+            common_types.MODEL_MODE_PREFILL,
+            page_state
+        )
+        
+        output_tuple, _ = self.attention_op.apply(
+            variables,
+            query,
+            key,
+            value,
+            None,
+            common_types.MODEL_MODE_PREFILL,
+            page_state,
+            mutable=["cache"]
+        )
+        
+        output, max_vals, sum_vals = output_tuple
+        output = output / (sum_vals + 1e-9)
+        reference_output = reference_attention(query, key, value)
+        
+        # Check numerical stability
+        np.testing.assert_allclose(
+            output,
+            reference_output,
+            rtol=1e-5, atol=1e-5,
+            err_msg="Long sequence attention is numerically unstable"
+        )
+        
+        # Verify that max values aren't too large (check for overflow)
+        self.assertTrue(
+            jnp.all(jnp.abs(max_vals) < 1e5),
+            "Attention weights may be experiencing numerical overflow"
+        )
 
 if __name__ == "__main__":
     unittest.main()
