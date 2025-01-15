@@ -740,6 +740,7 @@ mixtral_8x7b_dropless = MaxTextModel(
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
         "megablox": True,
+        "sparse_matmul": True,
     },
     xla_flags=(
         xla_flags_library.MOE_VMEM_LIMIT_FLAG
@@ -768,6 +769,7 @@ mixtral_8x7b_dropped = MaxTextModel(
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
         "megablox": False,
+        "sparse_matmul": False,
         "capacity_factor": 1.25,
         "tokenizer_path": "assets/tokenizer.mistral-v1",
     },
@@ -797,6 +799,7 @@ mixtral_8x7b_dropped_int8 = MaxTextModel(
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
         "megablox": False,
+        "sparse_matmul": False,
         "capacity_factor": 1.25,
         "quantization": "int8",
         "tokenizer_path": "assets/tokenizer.mistral-v1",

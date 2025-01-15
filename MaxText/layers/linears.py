@@ -399,8 +399,8 @@ class MoeBlock(nn.Module):
       )
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
 
-  def megablox(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
-    tile_size = (512, 1024, 1024)
+  def sparse_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
+    tile_size = (512, 1024, 1024)  # (m, k, n)
 
     def gmm(inputs, kernel, group_sizes):
       hs_shape = inputs.shape
@@ -419,15 +419,29 @@ class MoeBlock(nn.Module):
         lhs_quantize_dtype = quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype()
         rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
 
-      output = mblx.gmm(
-          lhs=inputs,
-          rhs=kernel,
-          group_sizes=group_sizes,
-          preferred_element_type=jnp.bfloat16,
-          tiling=tile_size,
-          lhs_quantize_dtype=lhs_quantize_dtype,
-          rhs_quantize_dtype=rhs_quantize_dtype,
-      )
+      if self.config.megablox:
+        m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
+        output = mblx.gmm(
+            lhs=inputs,
+            rhs=kernel,
+            group_sizes=group_sizes,
+            preferred_element_type=jnp.bfloat16,
+            tiling=(min(tile_size[0], m), min(tile_size[1], k), min(tile_size[2], n)),
+            lhs_quantize_dtype=lhs_quantize_dtype,
+            rhs_quantize_dtype=rhs_quantize_dtype,
+        )
+      else:
+        if self.quant is not None:
+          raise NotImplementedError(
+              "Quantization is not yet supported with ragged_dot, please set"
+              " megablox=True"
+          )
+        output = jax.lax.ragged_dot(
+            lhs=inputs,
+            rhs=kernel,
+            group_sizes=group_sizes,
+            preferred_element_type=jnp.bfloat16,
+        )
       if hs_shape[0] % pad_length:
         output = output[: hs_shape[0]]
       return output
@@ -732,13 +746,13 @@ class MoeBlock(nn.Module):
         matmul_precision=self.config.matmul_precision,
     )(inputs)
     w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts, cfg.emb_dim, cfg.mlp_dim)
-    if cfg.megablox:
-      max_logging.log("Running MoE megablox implementation.")
+    if cfg.sparse_matmul:
+      max_logging.log("Running MoE sparse matmul implementation.")
       if quantizations.in_serve_mode(self.quant):
         w0_kernel, w1_kernel, wo_kernel = self.retrieve_quantized_weight(
             inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel
         )
-      return self.megablox(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+      return self.sparse_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
     else:
-      max_logging.log("Running MoE matmul implementation.")
+      max_logging.log("Running MoE dense matmul implementation.")
       return self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
