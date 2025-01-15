@@ -19,14 +19,7 @@ import dataclasses
 import typing
 import xla_flags_library
 
-
-@dataclasses.dataclass
-class MaxTextModel:
-  model_name: str
-  model_type: str
-  tuning_params: dict[str, typing.Any]
-  xla_flags: str
-
+from model_configs import MaxTextModel
 
 default_basic = MaxTextModel(
     model_name="default-basic",
