@@ -432,10 +432,7 @@ class MoeBlock(nn.Module):
         )
       else:
         if self.quant is not None:
-          raise NotImplementedError(
-              "Quantization is not yet supported with ragged_dot, please set"
-              " megablox=True"
-          )
+          raise NotImplementedError("Quantization is not yet supported with ragged_dot, please set" " megablox=True")
         output = jax.lax.ragged_dot(
             lhs=inputs,
             rhs=kernel,
