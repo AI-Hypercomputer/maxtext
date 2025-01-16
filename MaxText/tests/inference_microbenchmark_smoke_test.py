@@ -23,7 +23,7 @@ from MaxText.inference_microbenchmark import main as inference_microbenchmark_ma
 
 class Inference_Microbenchmark(unittest.TestCase):
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test(self):
     pyconfig.initialize(
         [

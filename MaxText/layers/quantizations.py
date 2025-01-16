@@ -153,6 +153,8 @@ class AqtQuantization:
     rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(
         mesh_axes, is_tiled, replicate_scale=self.replicate_scale
     )
+    # module_path = "/".join(nn.module._context.module_stack[-1].path)
+    # print(f"quant_dg: {quant_dg}, is_tiled: {is_tiled}, module_path: {module_path}")
     aqt_dg_cls = functools.partial(
         aqt_flax.AqtDotGeneral,
         quant_dg,
@@ -247,7 +249,9 @@ def _get_mixed_precision_quant_config(mixed_precision_config):
   ret_config = {}
   default_mp_config = _get_default_mp_config(default=mixed_precision_config.get(DEFAULT, None))
   for layer_name_re, layer_quantization_config in mixed_precision_config.items():
-    quant_config = default_mp_config
+    # Make a copy of default_mp_config to avoid updaing original dict
+    quant_config = default_mp_config.copy()
+    # print(f"Mixed precision config: processing {layer_name_re} - {layer_quantization_config}, default config - {quant_config}")
     if layer_name_re != DEFAULT:
       for k in quant_config.keys():
         quant_config[k] = layer_quantization_config.get(k, default_mp_config[k])

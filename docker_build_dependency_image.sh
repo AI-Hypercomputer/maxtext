@@ -31,6 +31,7 @@
 set -e
 
 export LOCAL_IMAGE_NAME=maxtext_base_image
+echo "Building to $LOCAL_IMAGE_NAME"
 
 # Use Docker BuildKit so we can cache pip packages.
 export DOCKER_BUILDKIT=1
@@ -90,7 +91,7 @@ if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
       build_stable_stack
     else
       if [[ ${MODE} == "pinned" ]]; then
-        export BASEIMAGE=ghcr.io/nvidia/jax:base-2024-05-07
+        export BASEIMAGE=ghcr.io/nvidia/jax:base-2024-12-04
       else
         export BASEIMAGE=ghcr.io/nvidia/jax:base
       fi

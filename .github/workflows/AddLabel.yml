@@ -16,7 +16,7 @@ name: Add Label
 
 on:
   workflow_run:
-    workflows: [Unit Test, CodeQL]
+    workflows: [Tests, CodeQL]
     types:
       - completed
   pull_request_review:
@@ -57,6 +57,7 @@ jobs:
               khatwanimohit: "",
               bvandermoon: "",
               vipannalla: "",
+              RissyRan: "",
             }
             const reviews = await github.rest.pulls.listReviews({
               owner,

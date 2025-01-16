@@ -28,18 +28,27 @@ import jax
 class Profiler:
   """Activate/deactivate a profiler based on the 'profiler' config"""
 
-  def __init__(self, config, optional_postfix=""):
+  def __init__(self, config, offset_step=0):
     self.libcudart = None
     self.mode = config.profiler
-    self.upload_all_profiler_results = config.upload_all_profiler_results
     if self.mode != "":
-      self.output_path = os.path.join(config.tensorboard_dir, optional_postfix)
+      self.base_output_dir = config.tensorboard_dir
+    self.output_path = ""
+    self.upload_all_profiler_results = config.upload_all_profiler_results
+    self.profile_cleanly = config.profile_cleanly
+    self.profile_period = config.profile_periodically_period
+    self.start_initial_profile_step = self._set_first_profiler_step(config.skip_first_n_steps_for_profiler, offset_step)
+    self.finished_initial_profile_step = self._set_last_profiler_step(config.profiler_steps, config.steps)
 
-  def activate(self):
+  def activate(self, blocking_object=None, optional_postfix=""):
     """Start the profiler.
     nsys profiler becomes no-op when libcudart.so is not available on the system"""
+    if self.profile_cleanly and blocking_object is not None:
+      jax.block_until_ready(blocking_object)
     if not (self.upload_all_profiler_results or jax.process_index() == 0):
       return
+    if self.mode != "":
+      self.output_path = os.path.join(self.base_output_dir, optional_postfix)
     if self.mode == "nsys":
       try:
         self.libcudart = cdll.LoadLibrary("libcudart.so")
@@ -50,9 +59,11 @@ class Profiler:
     elif self.mode == "xplane":
       jax.profiler.start_trace(self.output_path)
 
-  def deactivate(self):
+  def deactivate(self, blocking_object=None):
     """End the profiler.
     The result is uploaded to the output bucket"""
+    if self.profile_cleanly and blocking_object is not None:
+      jax.block_until_ready(blocking_object)
     if not (self.upload_all_profiler_results or jax.process_index() == 0):
       return
     if self.mode == "nsys":
@@ -68,3 +79,15 @@ class Profiler:
         max_logging.log("WARNING: gsutil is not installed or not found in the system's PATH. Skipping upload...")
     elif self.mode == "xplane":
       jax.profiler.stop_trace()
+
+  def _set_first_profiler_step(self, skip_steps, start_step):
+    return start_step + skip_steps
+
+  def _set_last_profiler_step(self, profiler_steps, last_job_step):
+    return min(self.start_initial_profile_step + profiler_steps - 1, last_job_step - 1)
+
+  def should_activate_periodic_profile(self, step):
+    return self.profile_period > 0 and (step - self.start_initial_profile_step) % self.profile_period == 0
+
+  def should_deactivate_periodic_profile(self, step):
+    return self.profile_period > 0 and (step - self.finished_initial_profile_step) % self.profile_period == 0

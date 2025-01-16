@@ -28,7 +28,7 @@ def generate_random_string(length=10):
 
 class GradientAccumulationTest(unittest.TestCase):
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_grad_accumulate_same_loss(self):
     random_suffix = generate_random_string()
     run_accumulate_metrics_file = f"/tmp/runner_grad_accumulate_{random_suffix}.txt"

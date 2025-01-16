@@ -291,6 +291,46 @@ llama2_70b_4096_real_data = MaxTextModel(
     ),
 )
 
+
+llama2_70b_4096_real_data_pw_long_run = MaxTextModel(
+    model_name="llama2-70b-4096-rd-pw-lr",
+    model_type="llama2-70b",
+    tuning_params={
+        "per_device_batch_size": 4,
+        "ici_fsdp_parallelism": -1,
+        "remat_policy": "full",
+        "max_target_length": 4096,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "reuse_example_batch": 0,
+        "profiler": "xplane",
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "tfds",
+        "tokenizer_path": "assets/tokenizer.llama2",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+        "steps": 1000000,
+
+        # Additional tuning params for pathways long running test.
+        "enable_checkpointing": True,
+        "async_checkpointing": True,
+        "checkpoint_period": 100,
+        "checkpoint_storage_use_ocdbt": False,
+        "checkpoint_storage_use_zarr3": False,
+        "metrics_file": "metrics.txt",
+        "goodput_upload_interval_seconds": 30,
+        "enable_pathways_goodput": True,
+        "enable_checkpoint_cloud_logger": True,
+        "enable_single_controller": True,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+    ),
+)
+
 # ici_fsdp_transpose_parallelism gives one TFLOP better performance.
 llama2_70b_4096 = MaxTextModel(
     model_name="llama2-70b-4096",
@@ -319,6 +359,151 @@ llama2_70b_4096 = MaxTextModel(
         + xla_flags_library.CF_FOR_ALL_GATHER
     ),
 )
+llama2_70b_4096_synthetic = MaxTextModel(
+    model_name="llama2_70b_4096_synthetic",
+    model_type="llama2-70b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": 1,
+        "ici_fsdp_transpose_parallelism": -1,
+        "ici_tensor_parallelism": 1,
+        "remat_policy": "qkv_proj_offloaded",
+        "max_target_length": 4096,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+    ),
+)
+
+llama2_70b_4096_synthetic_pw_lr = MaxTextModel(
+    model_name="llama2_70b_4096_synthetic_pw_lr",
+    model_type="llama2-70b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": 1,
+        "ici_fsdp_transpose_parallelism": -1,
+        "ici_tensor_parallelism": 1,
+        "remat_policy": "qkv_proj_offloaded",
+        "max_target_length": 4096,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        # "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+        "steps": 1000000,
+
+        # Additional tuning params for pathways long running test.
+        "enable_checkpointing": True,
+        "async_checkpointing": True,
+        "checkpoint_period": 100,
+        "checkpoint_storage_use_ocdbt": False,
+        "checkpoint_storage_use_zarr3": False,
+        "metrics_file": "metrics.txt",
+        "goodput_upload_interval_seconds": 30,
+        "enable_pathways_goodput": True,
+        "enable_checkpoint_cloud_logger": True,
+        "enable_single_controller": True,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+    ),
+)
+
+llama2_70b_4096_pw_long_run = MaxTextModel(
+    model_name="llama2-70b-4096-pw-lr",
+    model_type="llama2-70b",
+    tuning_params={
+        "per_device_batch_size": 4,
+        "ici_fsdp_parallelism": 1,
+        "ici_fsdp_transpose_parallelism": -1,
+        "ici_tensor_parallelism": 1,
+        "remat_policy": "full",
+        "max_target_length": 4096,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+        "steps": 1000000,
+
+        # Additional tuning params for pathways long running test.
+        "enable_checkpointing": True,
+        "async_checkpointing": True,
+        "checkpoint_period": 100,
+        "checkpoint_storage_use_ocdbt": False,
+        "checkpoint_storage_use_zarr3": False,
+        "metrics_file": "metrics.txt",
+        "goodput_upload_interval_seconds": 30,
+        "enable_pathways_goodput": True,
+        "enable_checkpoint_cloud_logger": True,
+        "enable_single_controller": True,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+    ),
+)
+
+llama2_70b_4096_pw_rd_tfds = MaxTextModel(
+    model_name="llama2_70b_4096_pw_rd_tfds",
+    model_type="llama2-70b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": 1,
+        "ici_fsdp_transpose_parallelism": -1,
+        "ici_tensor_parallelism": 1,
+        "remat_policy": "qkv_proj_offloaded",
+        "max_target_length": 4096,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://trillium-storage-datasets-sr",
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+
+        # Additional tuning params for pathways long running test.
+        "enable_checkpointing": True,
+        "async_checkpointing": True,
+        "checkpoint_period": 100,
+        "checkpoint_storage_use_ocdbt": False,
+        "checkpoint_storage_use_zarr3": False,
+        "metrics_file": "metrics.txt",
+        "goodput_upload_interval_seconds": 30,
+        "enable_pathways_goodput": True,
+        "enable_checkpoint_cloud_logger": True,
+        "enable_single_controller": True,
+    },
+    xla_flags=(
+    xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+    + xla_flags_library.CF_FOR_ALL_GATHER
+    ),
+)
+
 
 llama3_8b_8192 = MaxTextModel(
     model_name="llama3-8b-8192",
@@ -412,6 +597,86 @@ llama3_1_405b_8192_fsdp_dcn = MaxTextModel(
     ),
 )
 
+llama3_1_8b_8192 = MaxTextModel(
+    model_name="llama3_1-8b-8192",
+    model_type="llama3.1-8b",
+    tuning_params={
+        "per_device_batch_size": 4,
+        "ici_fsdp_parallelism": -1,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "out_proj": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "enable_checkpointing": False,
+        "sa_block_q": 2048,
+        "sa_block_kv": 2048,
+        "sa_block_kv_compute": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_kv_dkv": 2048,
+        "sa_block_kv_dkv_compute": 2048,
+        "sa_block_q_dq": 2048,
+        "sa_block_kv_dq": 2048,
+        "sa_use_fused_bwd_kernel": True,
+        "profiler": "xplane",
+        "skip_first_n_steps_for_profiler": 10,
+        "profiler_steps": 5,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+)
+
+llama3_1_70b_8192 = MaxTextModel(
+    model_name="llama3_1-70b-8192",
+    model_type="llama3.1-70b",
+    tuning_params={
+        "per_device_batch_size": 4,
+        "ici_fsdp_parallelism": -1,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "enable_checkpointing": False,
+        "sa_block_q": 2048,
+        "sa_block_kv": 2048,
+        "sa_block_kv_compute": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_kv_dkv": 2048,
+        "sa_block_kv_dkv_compute": 2048,
+        "sa_block_q_dq": 2048,
+        "sa_block_kv_dq": 2048,
+        "sa_use_fused_bwd_kernel": True,
+        "profiler": "xplane",
+        "skip_first_n_steps_for_profiler": 10,
+        "profiler_steps": 5,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+)
+
 llama3_1_70b_129024 = MaxTextModel(
     model_name="llama3_1-70b-129024",
     model_type="llama3.1-70b",
@@ -475,6 +740,7 @@ mixtral_8x7b_dropless = MaxTextModel(
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
         "megablox": True,
+        "sparse_matmul": True,
     },
     xla_flags=(
         xla_flags_library.MOE_VMEM_LIMIT_FLAG
@@ -503,6 +769,7 @@ mixtral_8x7b_dropped = MaxTextModel(
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
         "megablox": False,
+        "sparse_matmul": False,
         "capacity_factor": 1.25,
         "tokenizer_path": "assets/tokenizer.mistral-v1",
     },
@@ -532,6 +799,7 @@ mixtral_8x7b_dropped_int8 = MaxTextModel(
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
         "megablox": False,
+        "sparse_matmul": False,
         "capacity_factor": 1.25,
         "quantization": "int8",
         "tokenizer_path": "assets/tokenizer.mistral-v1",
@@ -615,10 +883,17 @@ maxstar_models = [
     gpt_3_175b,
     llama2_7b_4096,
     llama2_70b_4096,
+    llama2_70b_4096_pw_long_run,
     llama2_70b_4096_real_data,
+    llama2_70b_4096_real_data_pw_long_run,
+    llama2_70b_4096_pw_rd_tfds,
     llama3_8b_8192,  # Not Optimizied yet
     llama3_70b_8192,  # Not Optimizied yet
+    llama2_70b_4096_synthetic_pw_lr,
+    llama2_70b_4096_synthetic,
     llama3_1_405b_8192_fsdp_dcn,
+    llama3_1_8b_8192,
+    llama3_1_70b_8192,
     llama3_1_70b_129024,
     mixtral_8x7b_dropped,
     mixtral_8x7b_dropped_int8,

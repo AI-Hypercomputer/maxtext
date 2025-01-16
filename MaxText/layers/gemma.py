@@ -69,14 +69,14 @@ class GemmaDecoderLayer(nn.Module):
   ):
     cfg = self.config
     mesh = self.mesh
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
+    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
     lnx = RMSNorm(dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_self_attention_norm", kernel_axes=("norm",))(
         inputs
     )
 
-    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
+    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     attention_layer = Attention(
         config=cfg,
@@ -108,7 +108,9 @@ class GemmaDecoderLayer(nn.Module):
         model_mode=model_mode,
     )
 
-    attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    attention_lnx = nn.with_logical_constraint(
+        attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
+    )
     attention_lnx += inputs
     residual = attention_lnx
     attn_output = RMSNorm(dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_ffw_norm", kernel_axes=("norm",))(
@@ -126,7 +128,7 @@ class GemmaDecoderLayer(nn.Module):
         config=cfg,
         quant=self.quant,
     )(attn_output, deterministic=deterministic)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     next_layer_addition = mlp_lnx + residual
 
@@ -137,7 +139,7 @@ class GemmaDecoderLayer(nn.Module):
     layer_output = next_layer_addition_dropped_out
     layer_output = nn.with_logical_constraint(
         layer_output,
-        ("activation_batch", "activation_length", "activation_embed"),
+        ("activation_batch", "activation_norm_length", "activation_embed"),
     )
 
     if cfg.record_internal_nn_metrics:
