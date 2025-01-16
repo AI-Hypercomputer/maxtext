@@ -19,6 +19,8 @@ Convert orbax Gemma checkpoint to MaxText compatible checkpoint.
 import jax
 import jax.numpy as jnp
 import numpy as np
+import psutil
+import gc
 
 jax.config.update("jax_platform_name", "cpu")
 import argparse
@@ -26,7 +28,7 @@ import copy
 from flax.training import train_state
 
 from typing import Any
-import sys
+import logging
 import max_logging
 
 
@@ -36,6 +38,8 @@ import checkpointing
 from train import save_checkpoint
 
 Params = dict[str, Any]
+
+SIMULATED_CPU_DEVICES_COUNT = 16
 
 
 def nest_params(params: Params) -> Params:
@@ -50,18 +54,11 @@ def nest_params(params: Params) -> Params:
   return nested_params
 
 
-def main(raw_args=None) -> None:
-  parser = argparse.ArgumentParser()
-  parser.add_argument("--base_model_path", type=str, required=True)
-  parser.add_argument("--maxtext_model_path", type=str, required=True)
-  parser.add_argument("--model_size", type=str, required=True)
-  args = parser.parse_args(raw_args)
-  if args.model_size not in ("2b", "7b", "9b"):
-    raise NotImplementedError
-
+def convert_to_jax_weights(base_model_path, model_size):
+  """Convert to MaxText compatible orbax weights."""
   print("Loading checkpoint")
   checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-  params = checkpointer.restore(args.base_model_path)
+  params = checkpointer.restore(base_model_path)
   params = nest_params(params)
   num_layers = max((int(k.split("_")[1]) for k in params["transformer"].keys() if "layer_" in k)) + 1
   hidden_dim, embed_dim = params["transformer"]["layer_0"]["mlp"]["linear"]["w"].shape
@@ -103,7 +100,7 @@ def main(raw_args=None) -> None:
   for layer_idx in range(num_layers):
     in_layer_name = "layer_" + str(layer_idx)
     # attention block
-    if args.model_size in ("2b", "9b"):  # MQA
+    if model_size in ("2b", "9b"):  # MQA
       self_attention["query"]["kernel"].append(
           params["transformer"][in_layer_name]["attn"]["q_einsum"]["w"].transpose((1, 0, 2)) * head_dim**-0.5
       )
@@ -148,35 +145,77 @@ def main(raw_args=None) -> None:
 
   layer_weight["self_attention"] = copy.deepcopy(self_attention)
   jax_weights["decoder"]["layers"] = copy.deepcopy(layer_weight)
-  jax_weights = jax.tree_util.tree_map(jnp.array, jax_weights)
 
-  def astype_fn(x):
-    if isinstance(x, jnp.ndarray):
-      return x.astype(jnp.bfloat16)
+  return jax_weights
+
+
+def save_jax_weights_to_checkpoint(maxtext_model_path, jax_weights):
+  """
+  Function to save jax_weights ready for MaxText to a parameters checkpoint
+  """
+  mem_info = psutil.Process()
+  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+  gc.collect()
+  mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
+  s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))  # shards first axis
+  s2 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "checkpoint_sharding_axis"))  # shards second axis
+  s3 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None))  # no sharding
+
+  def checkpoint_device_put(arr):
+    if arr.shape[0] % SIMULATED_CPU_DEVICES_COUNT == 0:
+      max_logging.log("sharding first axis")
+      return jax.device_put(arr, device=s1)
+    elif len(arr.shape) > 1 and arr.shape[1] % SIMULATED_CPU_DEVICES_COUNT == 0:
+      max_logging.log("sharding second axis")
+      return jax.device_put(arr, device=s2)
     else:
-      return x
+      max_logging.log("no sharding was possible, replicating")
+      return jax.device_put(arr, device=s3)
 
-  jax_weights = jax.tree_util.tree_map(astype_fn, jax_weights)
+  # convert all weights to jax.numpy with sharding if applicable
+  jax_weights_flat, jax_weights_struct = jax.tree.flatten(jax_weights)
+  jax_weights_new = []
+  while len(jax_weights_flat) > 0:
+    jax_weight = jax_weights_flat.pop(0)
+    jax_weights_new.append(checkpoint_device_put(jax_weight))
+    del jax_weight
+    gc.collect()
+    logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
+  jax_weights = jax.tree.unflatten(jax_weights_struct, jax_weights_new)
+
+  # dummy configs for the checkpoint_manager
+  step_number_to_save_new_ckpt = 0
   enable_checkpointing = True
   async_checkpointing = False
   save_interval_steps = 1
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      args.maxtext_model_path, enable_checkpointing, async_checkpointing, save_interval_steps
+      maxtext_model_path, enable_checkpointing, async_checkpointing, save_interval_steps
   )
 
   state_new = train_state.TrainState(
       step=0, apply_fn=None, params={"params": jax_weights}, tx=None, opt_state={}  # type: ignore
   )
 
+  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
   if checkpoint_manager is not None:
-    if save_checkpoint(checkpoint_manager, 0, state_new):
-      max_logging.log("saved a checkpoint at step 0")
+    if save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new):
+      max_logging.log(f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
     # Upon preemption, exit when and only when all ongoing saves are complete.
-    if checkpoint_manager.reached_preemption(0):
-      checkpoint_manager.wait_until_finished()
-      sys.exit()
+    checkpoint_manager.wait_until_finished()
+
+
+def main(raw_args=None) -> None:
+  parser = argparse.ArgumentParser()
+  parser.add_argument("--base_model_path", type=str, required=True)
+  parser.add_argument("--maxtext_model_path", type=str, required=True)
+  parser.add_argument("--model_size", type=str, required=True)
+  args = parser.parse_args(raw_args)
+  if args.model_size not in ("2b", "7b", "9b"):
+    raise NotImplementedError
+
+  save_jax_weights_to_checkpoint(args.maxtext_model_path, convert_to_jax_weights(args.base_model_path, args.model_size))
 
 
 if __name__ == "__main__":
