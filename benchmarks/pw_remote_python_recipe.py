@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import argparse
 import os
 import sys
 
@@ -22,6 +23,18 @@ import maxtext_xpk_runner as mxr
 
 
 def main() -> int:
+  # Parse command line arguments
+  parser = argparse.ArgumentParser()
+  parser.add_argument(
+      "--delete",
+      action="store_true",
+      help=(
+          "Only delete workloads starting with the user's first five"
+          " characters."
+      ),
+  )
+  args = parser.parse_args()
+
   # Variables to configure.
   user = os.environ["USER"]
   user_bucket = user
@@ -29,6 +42,28 @@ def main() -> int:
   region = "us-east5"
   project = "tpu-prod-env-one-vm"
 
+  v6e_cluster_config_yucmhab = mxr.XpkClusterConfig(
+      cluster_name="bodaborg-v6e-256-dnd-yucmhab",
+      project="tpu-prod-env-one-vm",
+      zone="us-east5-b",
+      device_type="v6e-256",
+  )
+
+  if args.delete:
+    # Delete workloads starting with the first 5 characters of the user's name.
+    first_five_chars = user[:5]
+    delete_command = (
+        f"python3 xpk/xpk.py workload delete $(python3 xpk/xpk.py workload list"
+        f" --project={project} --cluster={v6e_cluster_config_yucmhab.cluster_name}"
+        f" --filter-by-job={first_five_chars} | grep '^{first_five_chars}' | awk '{{print $1}}') --async"
+    )
+
+    print(f"Deleting workloads starting with: {first_five_chars}")
+    os.system(delete_command)
+    print("Deletion initiated. Exiting.")
+    return 0
+
+  # If --delete is not passed, proceed with creating and running workloads:
   proxy_image = (
       f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/{user}/"
       "proxy_server:latest"
@@ -51,29 +86,10 @@ def main() -> int:
 
   base_output_directory = f"gs://{user_bucket}-{region}/{user_run}"
 
-  v6e_cluster_config_yucmhab = mxr.XpkClusterConfig(
-      cluster_name="bodaborg-v6e-256-dnd-yucmhab",
-      project="tpu-prod-env-one-vm",
-      zone="us-east5-b",
-      device_type="v6e-256",
-  )
-
   list_of_models = [model_configs.llama2_70b_4096_pw_long_run]
 
   xpk_workload_cmds = []
   xpk_workload_names = []
-
-  # Delete workloads starting with the first 5 characters of the user's name.
-  # This is added before creating new workloads
-  first_five_chars = user[:5]
-  delete_command = (
-      f"python3 xpk/xpk.py workload delete $(python3 xpk/xpk.py workload list"
-      f" --project={project} --cluster={v6e_cluster_config_yucmhab.cluster_name}"
-      f" --filter-by-job={first_five_chars} | grep '^{first_five_chars}' | awk '{{print $1}}') --async"
-  )
-
-  print(f"Deleting workloads starting with: {first_five_chars}")
-  os.system(delete_command)
 
   for model in list_of_models:
     # Run workloads on the below clusters
