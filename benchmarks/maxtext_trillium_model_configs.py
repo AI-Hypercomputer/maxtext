@@ -893,7 +893,7 @@ llama3_1_70b_129024 = _add_to_model_dictionary(
 mixtral_8x7b_dropless = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
-    model_name="mixtral-8x7b",
+    model_name="mixtral_8x7b_dropless",
     model_type="mixtral-8x7b",
     tuning_params={
         "per_device_batch_size": 12,
@@ -926,13 +926,18 @@ mixtral_8x7b_dropless = _add_to_model_dictionary(
 mixtral_8x7b_dropped = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
-    model_name="mixtral-8x7b",
+    model_name="mixtral_8x7b_dropped",
     model_type="mixtral-8x7b",
     tuning_params={
-        "per_device_batch_size": 8,
+        "per_device_batch_size": 12,
         "ici_fsdp_parallelism": -1,
         "max_target_length": 4096,
-        "remat_policy": "full",
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "out_proj": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
         "attention": "flash",
         "gcs_metrics": True,
         "use_iota_embed": True,
@@ -961,7 +966,7 @@ mixtral_8x7b_dropped = _add_to_model_dictionary(
 mixtral_8x7b_dropped_int8 = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
-    model_name="mixtral-8x7b",
+    model_name="mixtral_8x7b_dropped_int8",
     model_type="mixtral-8x7b",
     tuning_params={
         "per_device_batch_size": 8,
