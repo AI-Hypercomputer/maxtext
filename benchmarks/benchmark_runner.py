@@ -127,6 +127,11 @@ def add_xpk_runner_arguments(custom_parser: argparse.ArgumentParser):
       help='version of pathways runner image to be benchmarked command.',
   )
   custom_parser.add_argument(
+      '--remote_python_sidecar_image',
+      type=str,
+      help='version of remote python sidecar image to be benchmarked command.',
+  )
+  custom_parser.add_argument(
       '--use_pathways',
       type=bool,
       default=False,
@@ -246,6 +251,7 @@ def main() -> None:
         server_image=options.pathways_server_image,
         proxy_image=options.pathways_proxy_image,
         runner_image=options.pathways_runner_image,
+        remote_python_sidecar_image=options.remote_python_sidecar_image,
       )
 
     workload_config = WorkloadConfig(
