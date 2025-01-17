@@ -175,6 +175,7 @@ def main() -> None:
       server_image=options.pathways_server_image,
       proxy_image=options.pathways_proxy_image,
       runner_image=options.pathways_runner_image,
+      remote_python_sidecar_image=options.remote_python_sidecar_image,
     )
 
   assert trillium_model_dict.get(options.model_name) is not None, f'Invalid model name: {options.model_name}'
