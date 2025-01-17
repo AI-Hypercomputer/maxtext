@@ -131,6 +131,11 @@ HOST_OFFLOAD_FLAGS = (
     " --xla_latency_hiding_scheduler_rerun=2"
 )
 
+# Flags to optimize pipeline parallelism over DCN with large host offloading.
+PIPELINING_FLAGS = (
+    " --xla_tpu_iova_dma_chunk_size_bytes=16777216" # breaks DMA to/from host into 16M chunks
+)
+
 # Disable bundle-aware CostModel which was causing worse perf b/357103386.
 # Some fusions in the backward pass of the model were 3x slower without this.
 DISABLE_BUNDLE_AWARE_COST_MODEL = (
