@@ -283,6 +283,8 @@ class _HyperParameters:
     raw_data_from_cmd_line = self._load_kwargs(argv, **kwargs)
     updated_keys = []
 
+    print(f"****** raw_data_from_cmd_line: {raw_data_from_cmd_line}")
+
     for k in raw_data_from_cmd_line:
       if k not in raw_data_from_yaml:
         raise ValueError(f"Key {k} was passed at the command line but isn't in config.")

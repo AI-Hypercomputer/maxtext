@@ -118,6 +118,12 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
       help='version of pathways runner image to be benchmarked command.',
   )
   custom_parser.add_argument(
+      '--remote_python_sidecar_image',
+      type=str,
+      default='us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/remote_python_sidecar:latest',
+      help='version of remote python sidecar image to be benchmarked command.',
+  )
+  custom_parser.add_argument(
       '--use_pathways',
       type=bool,
       default=False,
