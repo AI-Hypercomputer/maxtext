@@ -17,13 +17,6 @@ limitations under the License.
 import os
 import sys
 
-# Get the absolute path of the current file's directory
-current_dir = os.path.dirname(os.path.abspath(__file__))
-# Get the parent directory
-parent_dir = os.path.dirname(current_dir)
-# Add the parent directory to sys.path
-sys.path.append(parent_dir)
-
 import maxtext_trillium_model_configs as model_configs
 import maxtext_xpk_runner as mxr
 
