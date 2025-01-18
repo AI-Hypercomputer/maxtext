@@ -34,28 +34,33 @@ def main() -> int:
       ),
   )
   args = parser.parse_args()
-
-  # Variables to configure.
   user = os.environ["USER"]
-  user_bucket = user
-  user_run = user
-  region = "us-east5"
-  project = "tpu-prod-env-one-vm"
 
-  v6e_cluster_config_yucmhab = mxr.XpkClusterConfig(
-      cluster_name="bodaborg-v6e-256-dnd-yucmhab",
-      project="tpu-prod-env-one-vm",
-      zone="us-east5-b",
-      device_type="v6e-256",
+  # V6e cluster config
+  # cluster_config = mxr.XpkClusterConfig(
+  #     cluster_name="bodaborg-v6e-256-dnd-yucmhab",
+  #     project="tpu-prod-env-one-vm",
+  #     zone="us-east5-b",
+  #     device_type="v6e-256",
+  # )
+
+  # V5e cluster config
+  cluster_config = mxr.XpkClusterConfig(
+      cluster_name="sujinesh-in-memory-test-cluster",
+      project="cloud-tpu-multipod-dev",
+      zone="us-west1-c",
+      device_type="v5litepod-16",
   )
+
+  region = "-".join(cluster_config.zone.split("-")[:-1])
 
   if args.delete:
     # Delete workloads starting with the first 5 characters of the user's name.
     first_five_chars = user[:5]
     delete_command = (
-        f"python3 xpk/xpk.py workload delete $(python3 xpk/xpk.py workload list"
-        f" --project={project} --cluster={v6e_cluster_config_yucmhab.cluster_name}"
-        f" --filter-by-job={first_five_chars} | grep '^{first_five_chars}' | awk '{{print $1}}') --async"
+        f"python3 xpk/xpk.py workload delete "
+        f" --project={cluster_config.project} --cluster={cluster_config.cluster_name}"
+        f" --filter-by-job={first_five_chars}"
     )
 
     print(f"Deleting workloads starting with: {first_five_chars}")
@@ -72,9 +77,9 @@ def main() -> int:
       f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/{user}/"
       "server:latest"
   )
-  runner = f"gcr.io/{project}/{user}_latest:latest"
+  runner = f"gcr.io/{cluster_config.project}/{user}_latest:latest"
   remote_python_image = (
-      f"gcr.io/{project}/{user}/remote_python_sidecar_latest:latest"
+      f"gcr.io/{cluster_config.project}/{user}/remote_python_sidecar_latest:latest"
   )
 
   pathways_config = mxr.PathwaysConfig(
@@ -84,7 +89,7 @@ def main() -> int:
       remote_python_sidecar_image=remote_python_image,
   )
 
-  base_output_directory = f"gs://{user_bucket}-{region}/{user_run}"
+  base_output_directory = f"gs://{user}-{region}/{user}"
 
   list_of_models = [model_configs.llama2_70b_4096_pw_long_run]
 
@@ -94,7 +99,7 @@ def main() -> int:
   for model in list_of_models:
     # Run workloads on the below clusters
     for cluster_config in [
-        v6e_cluster_config_yucmhab,
+        cluster_config,
     ]:
       # Run workloads in the following slice configurations
       for num_slices in [
