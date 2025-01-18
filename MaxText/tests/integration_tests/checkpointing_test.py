@@ -34,6 +34,7 @@ def run_checkpointing(attention_type):
       "False",  # collect_stack_trace
       "grain",  # dataset_type
       attention_type,
+      "False",  # async_checkpointing"
   ]
 
   subprocess.run(command, check=True, cwd="..")
