@@ -928,16 +928,16 @@ def train_loop(config, state=None):
       eval_loss = (
           cumulative_eval_metrics["scalar"]["eval/total_loss"]
           / (cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS)
-          + cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
       )
       cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
+      cumulative_eval_metrics["scalar"]["eval/avg_moe_lb_loss"] = cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
       if config.use_dpo:
         cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = eval_dpo_reward_accuracy / eval_step_count
       write_metrics(
           writer, local_metrics_file, running_gcs_metrics, cumulative_eval_metrics, step, config, is_training=False
       )
       max_logging.log(
-          f"average loss after {step=}: {eval_step_count=}, {eval_loss=},"
+          f"average loss after {step=}: {eval_step_count=}, {eval_loss=}"
           f" total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}"
       )
       if eval_loss <= config.target_eval_loss:
