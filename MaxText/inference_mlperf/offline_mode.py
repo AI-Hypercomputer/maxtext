@@ -191,7 +191,7 @@ scenario_map = {
 
 def pad_tokens(tokens):
   true_length = len(tokens)
-  target_length = max(int(2 ** math.ceil(math.log2(true_length))), 32)
+  target_length = max(int(2 ** math.ceil(math.log2(true_length))), 128)
   padded = tokens + [0] * (target_length - true_length)
   return padded, true_length
 
@@ -347,7 +347,6 @@ class SUT:
       self.offline_inf_instances[group_idx].init_decode_state()
       result = self.offline_inf_instances[group_idx].batch_inference(group, desc=f"batch-{group_idx}")
       self.offline_inf_instances[group_idx].decode_state = None
-      gc.collect()
       for key, val in result.items():
         if not val:
           log.info(f"Value empty for key {key}")
@@ -359,6 +358,7 @@ class SUT:
 
     log.info("Flush queries end")
     end = time.perf_counter()
+    gc.collect()
 
   def LoadSamplesToRam(self, sample_list):
     """Pads the data, move them to jax array on device"""
