@@ -384,10 +384,11 @@ def generate_xpk_workload_cmd(
     docker_image_flag = (
         f'--docker-image={pw_config.runner_image}'
     )
+    print(f'***** docker image flag is : {pw_config.runner_image}')
   else:
     docker_image_flag = f'--base-docker-image="{wl_config.base_docker_image}"'
 
-
+  print(f'***** docker image flag is : {docker_image_flag}')
   print(f'User command: {user_command}')
   return (
       (

@@ -280,6 +280,12 @@ class _HyperParameters:
 
   def _update_from_env_and_command_line(self, raw_keys, raw_data_from_yaml, argv, **kwargs) -> list[str]:
     """Update model config from environment and command line"""
+    max_logging.log(f"******** raw_data_from_yaml: {raw_data_from_yaml}")
+    max_logging.log(f"******** argv: {argv}")
+
+    # temp strip out anything without "="
+    argv = [a for a in argv if "=" in a]
+
     raw_data_from_cmd_line = self._load_kwargs(argv, **kwargs)
     updated_keys = []
 

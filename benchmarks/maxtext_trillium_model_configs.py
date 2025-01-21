@@ -609,6 +609,48 @@ llama2_70b_4096_pw_long_run = _add_to_model_dictionary(
   )
 )
 
+llama2_70b_4096_pw_long_run_v5e = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama2-70b-4096-pw-lr",
+    model_type="llama2-70b",
+    tuning_params={
+        "per_device_batch_size": 4,
+        "ici_fsdp_parallelism": 1,
+        "ici_fsdp_transpose_parallelism": 16,
+        "ici_tensor_parallelism": 1,
+        "remat_policy": "full",
+        "max_target_length": 4096,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+        "steps": 1000000,
+
+        # Additional tuning params for pathways long running test.
+        "enable_checkpointing": True,
+        "async_checkpointing": True,
+        "checkpoint_period": 100,
+        "checkpoint_storage_use_ocdbt": False,
+        "checkpoint_storage_use_zarr3": False,
+        "metrics_file": "metrics.txt",
+        "goodput_upload_interval_seconds": 30,
+        # "enable_pathways_goodput": True,
+        "enable_checkpoint_cloud_logger": True,
+        "enable_single_controller": True,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+    ),
+  )
+)
 
 llama2_70b_4096_pw_rd_tfds = _add_to_model_dictionary(
   trillium_model_dict,
@@ -883,7 +925,7 @@ llama3_1_70b_129024 = _add_to_model_dictionary(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
         + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
         + xla_flags_library.DATA_PARALLEL_OVERLAP
-        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_GATHER
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_1D_ALL_GATHER
         + xla_flags_library.HOST_OFFLOAD_FLAGS
     ),
   )

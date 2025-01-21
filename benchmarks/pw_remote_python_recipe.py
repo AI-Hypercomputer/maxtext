@@ -16,7 +16,6 @@ limitations under the License.
 
 import argparse
 import os
-import sys
 
 import maxtext_trillium_model_configs as model_configs
 import maxtext_xpk_runner as mxr
@@ -91,7 +90,7 @@ def main() -> int:
 
   base_output_directory = f"gs://{user}-{region}/{user}"
 
-  list_of_models = [model_configs.llama2_70b_4096_pw_long_run]
+  list_of_models = [model_configs.llama2_70b_4096_pw_long_run_v5e]
 
   xpk_workload_cmds = []
   xpk_workload_names = []
@@ -111,9 +110,9 @@ def main() -> int:
             device_type=cluster_config.device_type,
             base_output_directory=base_output_directory,
             max_restarts=0,
-            libtpu_type=None,  # Pathways doesn't use libtpu.
+            libtpu_type=None,
             libtpu_nightly_version="",
-            base_docker_image="",  # Pathways doesn't use base docker image
+            base_docker_image="",
             pathways_config=pathways_config,
             xpk_path="xpk",
         )

@@ -447,6 +447,7 @@ def get_coordinator_ip_address():
 
 def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):
   """Evaluates unspecified DCN/ICI parallelism values"""
+  max_logging.log(f"********* fill_unspecified_mesh_axes: parallelism_vals: {parallelism_vals}, target_product: {target_product}, parallelism_type: {parallelism_type}")
   if -1 in parallelism_vals:
     assert (
         parallelism_vals.count(-1) == 1
