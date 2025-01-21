@@ -403,7 +403,7 @@ class KVQuant:
     return self.einsum_fn_with_rhs_qtensor(
       value,
       lhs_dequant_mode=aqt_config.DequantMode.THIS_INPUT,
-      lhs_calirbation_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
+      lhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
       rhs_dequant_mode=aqt_config.DequantMode.OTHER_INPUT,
       rhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS
       )
