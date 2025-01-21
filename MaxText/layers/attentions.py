@@ -1562,65 +1562,21 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
   def __init__(
       self,
       shape: tuple[int, int],
-      cp_size: int,
       offset: int = 0,
       shard_count: int = 1,
+      cp_size: int = 4
   ):
     self.offset = offset
-    self.cp_size = cp_size
-  
 
     def causal_mask_function(q_ids, kv_ids):
-      # When evaluating the mask in _process_mask we typically work with numpy
-      # array views.
-      # Avoid the addition when possible to avoid instantiating an actual array.
-
-      def create_causal_mask_for_index(
-          shape: tuple[int, int],
-          idx: int,
-          cp: int, #context parallelism val
-        ):
-        
-        q_slice, kv_slice = idx, slice(shape[1])
-        
-
-
-      def create_load_balance_causal_mask(
-      shape: tuple[int, int],
-      q_ids: int,
-      kv_ids: int,
-      offset: int = 0, #This is important for auto regressive decoding, 
-      #we are not supporting flash/splash attention for auto regressive decoding
-      ):
-        (slice * i + jnp.arange(slice))[:, None] <= jnp.arange(seq_len)[None, :] - something like this
-        for each index, for i = i and i = n - i -1 (perhaps 2 * n - i - 1 here maybe?)
-
-        #then concatenate
-
-        # self.offset = offset
-        # idx = (slice(shape[0]),slice(shape[1]))
-        # q_slice, kv_slice = idx
-        # q_slice = splash_attention_mask._fill_slice(q_slice, shape[0])
-        # kv_slice = splash_attention_mask._fill_slice(kv_slice, shape[1])
-        # q_sequence = np.arange(shape[0], dtype=np.int32)
-        # rows = q_sequence[q_slice]
-        # cols = np.arange(kv_slice.start, kv_slice.stop)
-        # q_ids = rows[:, None]
-        # kv_ids = cols[None, :]
-        if offset == 0:
-          return q_ids >= kv_ids
-        else:
-          return q_ids + offset >= kv_ids
-        
-      original_mask_ndarray = create_load_balance_causal_mask(self.shape, q_ids, kv_ids, self.offset)
-      if type(original_mask_ndarray) is not np.ndarray:
-        raise ValueError("Something went wrong in function_create_load_balance_causal_mask")
+      if self.offset == 0:
+        return q_ids >= kv_ids
       else:
-        print("np ndarray found!!")
-      mask_ndarray = AttentionOp.reorder_mask_load_balancing(tensor = original_mask_ndarray, cp_size= self.cp_size, seq_dim= 0) 
-      return mask_ndarray
-      # return splash_attention_mask.NumpyMask(mask_ndarray)
+        return q_ids + self.offset >= kv_ids
 
+    arr = np.arange(shape[0])
+    out = AttentionOp.reorder_mask_load_balancing(arr[None, :, None, None], cp_size, seq_dim=1)
+    q_sequence = out[0, :, 0, 0]
 
     mask_function = causal_mask_function
 
@@ -1629,6 +1585,82 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
         mask_function=mask_function,
         shard_count=shard_count,
     )
+    self.q_sequence = q_sequence
+
+  # def __init__(
+  #     self,
+  #     shape: tuple[int, int],
+  #     cp_size: int,
+  #     offset: int = 0,
+  #     shard_count: int = 1,
+  # ):
+  #   self.offset = offset
+  #   self.cp_size = cp_size
+  
+
+  #   def causal_mask_function(q_ids, kv_ids):
+  #     # When evaluating the mask in _process_mask we typically work with numpy
+  #     # array views.
+  #     # Avoid the addition when possible to avoid instantiating an actual array.
+
+  #     def create_causal_mask_for_index(
+  #         shape: tuple[int, int],
+  #         idx: int,
+  #         cp: int, #context parallelism val
+  #       ):
+        
+  #       q_slice, kv_slice = idx, slice(shape[1])
+
+
+
+  #     def create_load_balance_causal_mask(
+  #     shape: tuple[int, int],
+  #     q_ids: int,
+  #     kv_ids: int,
+  #     offset: int = 0, #This is important for auto regressive decoding, 
+  #     #we are not supporting flash/splash attention for auto regressive decoding
+  #     ):
+  #       (slice * i + jnp.arange(slice))[:, None] <= jnp.arange(seq_len)[None, :] - something like this
+  #       for each index, for i = i and i = n - i -1 (perhaps 2 * n - i - 1 here maybe?)
+
+  #       #then concatenate
+
+  #       """
+  #         1. create all 
+  #       """
+
+  #       # self.offset = offset
+  #       # idx = (slice(shape[0]),slice(shape[1]))
+  #       # q_slice, kv_slice = idx
+  #       # q_slice = splash_attention_mask._fill_slice(q_slice, shape[0])
+  #       # kv_slice = splash_attention_mask._fill_slice(kv_slice, shape[1])
+  #       # q_sequence = np.arange(shape[0], dtype=np.int32)
+  #       # rows = q_sequence[q_slice]
+  #       # cols = np.arange(kv_slice.start, kv_slice.stop)
+  #       # q_ids = rows[:, None]
+  #       # kv_ids = cols[None, :]
+  #       if offset == 0:
+  #         return q_ids >= kv_ids
+  #       else:
+  #         return q_ids + offset >= kv_ids
+        
+  #     original_mask_ndarray = create_load_balance_causal_mask(self.shape, q_ids, kv_ids, self.offset)
+  #     if type(original_mask_ndarray) is not np.ndarray:
+  #       raise ValueError("Something went wrong in function_create_load_balance_causal_mask")
+  #     else:
+  #       print("np ndarray found!!")
+  #     mask_ndarray = AttentionOp.reorder_mask_load_balancing(tensor = original_mask_ndarray, cp_size= self.cp_size, seq_dim= 0) 
+  #     return mask_ndarray
+  #     # return splash_attention_mask.NumpyMask(mask_ndarray)
+
+
+  #   mask_function = causal_mask_function
+
+  #   super().__init__(
+  #       shape=shape,
+  #       mask_function=mask_function,
+  #       shard_count=shard_count,
+  #   )
 
   def __eq__(self, other: object):
     if not isinstance(other, type(self)):
