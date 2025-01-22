@@ -215,6 +215,37 @@ class MaxEngine(engine_api.Engine):
       res_cache["decoder"][f"layers_{i}"] = layer_cache[i]
 
     return res_cache
+  
+  def prefill_chunked(self,
+      *,
+      params: Params,
+      existing_prefix: Optional[jax.Array] = None,
+      padded_tokens: jax.Array,
+      true_length: int,
+      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
+      rng: Optional[jax.random.PRNGKey] = None,
+      chunk_length=12
+  ) -> Tuple[Prefix, engine_api.ResultTokens]:
+    if existing_prefix:
+      raise ValueError("We don't know what to do with existing_prefix")
+    if rng is None:
+      rng = jax.random.PRNGKey(0)
+
+    num_padded_tokens_chunks = len(padded_tokens)/chunk_length
+    for i in range(num_padded_tokens_chunks):
+      # each chunk should be of fixed size, pad if necessary. 
+      chunked_padded_tokens = padded_tokens[:(i+1)*chunk_length]
+      # chunked_prefill_segment_ids will resemble 1s for current sequence which is to be processed
+      # no need of prefill result to be stored for intermediate chunks
+      # chunked_prefill_segment_ids - Array representing lower diag triangle of current sequence
+      chunked_prefill_segment_ids = None
+      if i < num_padded_tokens_chunks - 1 :
+        _, _ = self.prefill(params=params, padded_tokens=chunked_padded_tokens, true_length=chunk_length, rng=rng, chunked_prefill_segment_ids=chunked_prefill_segment_ids)
+      # prefill for ith chunk is done
+      else:
+        # prefill for all chunks is done, 
+        # full cache will be constructed and returned
+        return self.prefill(params=params, padded_tokens=chunked_padded_tokens, true_length=chunk_length, rng=rng, chunked_prefill_segment_ids=chunked_prefill_segment_ids)
 
   @functools.partial(jax.jit, static_argnums=(0,))
   def prefill(
@@ -298,7 +329,6 @@ class MaxEngine(engine_api.Engine):
         length_idx=(2, 3),
         samples_per_slot=1,
     )
-
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
 
@@ -382,7 +412,7 @@ class MaxEngine(engine_api.Engine):
   )
   def insert(
       self,
-      prefix: Prefix,
+      prefix: Prefix, #[BSN(KV Heads)D]
       decode_state: DecodeState,
       slot: int,
   ) -> DecodeState:
@@ -394,7 +424,7 @@ class MaxEngine(engine_api.Engine):
     def copy(path, partial_cache, full_cache, annotations):
       path_key = path[-1].key
       if path_key in [
-          "cache_ar_index",
+          "cache_ar_index", #index of sequence, prompt size = 1024, o/p len = 1024 ---> depicts what next one is generated
           "cached_ar_key",
           "cached_ar_value",
           "cached_ar_key_scale",
@@ -403,15 +433,15 @@ class MaxEngine(engine_api.Engine):
         return full_cache  # we don't even zero these out because we can mask them out.
 
       batch_idx = -1
-      if "cache_batch" in annotations:
-        batch_idx = annotations.index("cache_batch")
+      if "cache_batch" in annotations: 
+        batch_idx = annotations.index("cache_batch") 
       elif "cache_scale_batch" in annotations:
         batch_idx = annotations.index("cache_scale_batch")
 
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
 
-      if path_key == "cache_ar_segment_id":
+      if path_key == "cache_ar_segment_id": # segment_id = 
         ### goal: zero this out in case there is existing data
         s = list(full_cache.shape)
         s[batch_idx] = 1

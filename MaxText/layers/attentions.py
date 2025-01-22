@@ -160,6 +160,8 @@ class AttentionOp(nn.Module):
   sliding_window_size: int | None = None
   use_ragged_attention: bool = False
   ragged_block_size: int = 256
+  use_chunked_prefill: bool = False
+  prefill_cache_constructed: bool = False
 
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
     """Check attention inputs."""
@@ -180,7 +182,6 @@ class AttentionOp(nn.Module):
     elif decoder_segment_ids is not None:
       mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
       mask = mask[:, None, None, :, :]
-
     causal_mask = None
     # We enforce causality except for AUTOREGRESSION
     if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE:
@@ -199,7 +200,11 @@ class AttentionOp(nn.Module):
       output_mask = mask
     elif causal_mask is not None:
       output_mask = causal_mask
-
+     # construct an attention mask based on decoder_segment_ids/chunk segment ids
+    if self.use_chunked_prefill:
+      output_mask = None
+      # mask looks like - https://medium.com/byte-sized-ai/llm-inference-optimizations-2-chunked-prefill-764407b3a67a
+    
     if self.attention_type == AttentionType.LOCAL_SLIDING and output_mask is not None:
       if self.sliding_window_size is None:
         raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
@@ -762,6 +767,7 @@ class AttentionOp(nn.Module):
       key, value, decoder_segment_id.
 
     """
+    # Nothing chnages if prefill cache has not been initialized
     batch, _, heads, kv_head_size = key.shape
     assert key.dtype == value.dtype, "Key and Value Dtypes should match."
 
@@ -788,8 +794,16 @@ class AttentionOp(nn.Module):
 
     if decoder_segment_ids is not None:
       cached_prefill_segment_id_var.value = decoder_segment_ids
-
+    
+    if self.prefill_cache_constructed:
+      # update key_value_prefill based on decoder_segment_ids/chunked_prefill_segment_ids
+      # return full prefill cache. 
+      pass
+    
     return key, value, decoder_segment_ids
+
+  def update_prefill_key_value(self, chunk_size_key, chunk_size_value, cached_key_vars, one_hot_current_chunk_indices):
+    pass
 
   def update_ar_key_value(
       self,
@@ -1277,10 +1291,16 @@ class Attention(nn.Module):
       query = self.query_projection(inputs_q)
       key = self.kv_projection(inputs_kv, proj_name="key")
       value = self.kv_projection(inputs_kv, proj_name="value")
-
+    jax.debug.print("🤯 query {query} 🤯", query=query)
+    jax.debug.print("🤯 key {key} 🤯", key=key)
+    jax.debug.print("🤯 value {value} 🤯", value=value)
     # apply ROPE
     query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
     key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
+
+    jax.debug.print("🤯 query_rotary {query} 🤯", query=query)
+    jax.debug.print("🤯 key_rotary {key} 🤯", key=key)
+    jax.debug.print("🤯 decoder_segment_ids inside {decoder_segment_ids} 🤯", decoder_segment_ids=decoder_segment_ids)
 
     if model_mode == common_types.MODEL_MODE_PREFILL:
       query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
