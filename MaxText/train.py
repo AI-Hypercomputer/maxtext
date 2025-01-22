@@ -870,9 +870,9 @@ def train_loop(config, state=None):
       eval_loss = (
           cumulative_eval_metrics["scalar"]["eval/total_loss"]
           / (cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS)
-          + cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
       )
       cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
+      cumulative_eval_metrics["scalar"]["eval/avg_moe_lb_loss"] = cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
       if config.use_dpo:
         cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = eval_dpo_reward_accuracy / eval_step_count
       max_logging.log(
