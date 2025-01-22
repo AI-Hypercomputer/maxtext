@@ -1062,3 +1062,76 @@ gemma2_27b_8192 = _add_to_model_dictionary(
     ),
   )
 )
+<<<<<<< HEAD
+=======
+
+llama3_1_70b_131072 = MaxTextModel(
+    model_name="llama3_1_70b_131072",
+    model_type="llama3.1-70b",
+    tuning_params={
+        "per_device_batch_size": 0.125,
+        "ici_fsdp_parallelism": -1,
+        "ici_context_parallelism": 16,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "out_proj": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "max_target_length": 131072,
+        "attention": "flash",
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "enable_checkpointing": False,
+        "sa_block_q": 2048,
+        "sa_block_kv": 2048,
+        "sa_block_kv_compute": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_kv_dkv": 2048,
+        "sa_block_kv_dkv_compute": 2048,
+        "sa_block_q_dq": 2048,
+        "sa_block_kv_dq": 2048,
+        "sa_use_fused_bwd_kernel": True,
+        "profiler": "xplane",
+        "skip_first_n_steps_for_profiler": 10,
+        "profiler_steps": 5,
+        "allow_split_physical_axes": True,
+        # "custom_mesh": "hybrid_ring_32x8",
+        "tokenizer_path": "assets/tokenizer_llama3.tiktoken", 
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_1D_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+)
+
+# TODO(b/368441022) LLAMA3.1 8B, 70B, 405B
+# TODO(b/368441022) MaxDiffusion BEST
+# TODO(b/368441022) Determine largest batch per slice for non-optimized models
+# List of all models
+maxstar_models = [
+    default_basic,
+    default_32,
+    default_64,  # Not Optimizied yet
+    default_128,  # Not Optimizied yet
+    # default_256,  # OOM, Not Optimizied yet
+    # default_512,  # OOM, Not Optimizied yet
+    gpt_3_175b,
+    llama2_7b_4096,
+    llama2_70b_4096,
+    llama2_70b_4096_real_data,
+    llama3_8b_8192,  # Not Optimizied yet
+    llama3_70b_8192,  # Not Optimizied yet
+    llama3_1_405b_8192_fsdp_dcn,
+    llama3_1_70b_129024,
+    mixtral_8x7b_dropped,
+    mixtral_8x7b_dropped_int8,
+    mixtral_8x7b_dropless,
+    gemma2_9b_8192,
+    gemma2_27b_8192,
+]
+>>>>>>> 5efc11e1 (try running v6e-256 experiment)
