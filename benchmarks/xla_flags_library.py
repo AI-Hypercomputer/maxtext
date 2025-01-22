@@ -65,7 +65,7 @@ CF_FOR_ALL_REDUCE_AND_ALL_GATHER = (
 )
 
 # Enable SparseCore All Gather (SC AG).
-# Either one of CF AG or SC AR can be enabled at a time.
+# Either one of CF AG or SC AG can be enabled at a time.
 ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_GATHER = (
     " --xla_sc_disable_megacore_partitioning=true"
     " --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false"
