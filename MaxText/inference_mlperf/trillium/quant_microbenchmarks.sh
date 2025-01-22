@@ -1,3 +1,7 @@
+#!/bin/bash
+
+set -x
+
 # int8 baseline
 python MaxText/inference_microbenchmark.py \
 MaxText/configs/base.yml \
@@ -18,8 +22,8 @@ checkpoint_is_quantized=True \
 compute_axis_order=0,2,1,3 \
 ar_cache_axis_order=0,2,1,3 \
 profiler=xplane \
-base_output_directory=/mnt/disks/persist/quant_microbenchmark_results \
-tensorboard_dir=/mnt/disks/persist/quant_microbenchmark_results \
+base_output_directory=/mnt/disks/persist/quant_microbenchmark_results_redo/int8 \
+tensorboard_dir=/mnt/disks/persist/quant_microbenchmark_results_redo/int8 \
 quantize_kvcache=True \
 kv_quant_dtype=int8 \
 quantization=int8 \
@@ -44,12 +48,12 @@ checkpoint_is_quantized=True \
 compute_axis_order=0,2,1,3 \
 ar_cache_axis_order=0,2,1,3 \
 profiler=xplane \
-base_output_directory=/mnt/disks/persist/quant_microbenchmark_results \
-tensorboard_dir=/mnt/disks/persist/quant_microbenchmark_results \
+base_output_directory=/mnt/disks/persist/quant_microbenchmark_results_redo/a16w4 \
+tensorboard_dir=/mnt/disks/persist/quant_microbenchmark_results_redo/a16w4 \
 quantize_kvcache=True \
 kv_quant_dtype=int8 \
 quantization=intmp \
-quant_cfg_path=/mnt/disks/persist/maxtext/MaxText/configs/quantization/int4_weight_only.json
+quant_cfg_path=/mnt/disks/persist/maxtext_quant_testing/MaxText/configs/quantization/int4_weight_only.json
 
 # # a16w8
 python MaxText/inference_microbenchmark.py \
@@ -70,12 +74,12 @@ checkpoint_is_quantized=True \
 compute_axis_order=0,2,1,3 \
 ar_cache_axis_order=0,2,1,3 \
 profiler=xplane \
-base_output_directory=/mnt/disks/persist/quant_microbenchmark_results \
-tensorboard_dir=/mnt/disks/persist/quant_microbenchmark_results \
+base_output_directory=/mnt/disks/persist/quant_microbenchmark_results_redo/a16w8 \
+tensorboard_dir=/mnt/disks/persist/quant_microbenchmark_results_redo/a16w8 \
 quantize_kvcache=True \
 kv_quant_dtype=int8 \
 quantization=intmp \
-quant_cfg_path=/mnt/disks/persist/maxtext/MaxText/configs/quantization/int8_weight_only.json
+quant_cfg_path=/mnt/disks/persist/maxtext_quant_testing/MaxText/configs/quantization/int8_weight_only.json
 
 # # a8w4
 python MaxText/inference_microbenchmark.py \
@@ -96,12 +100,12 @@ checkpoint_is_quantized=True \
 compute_axis_order=0,2,1,3 \
 ar_cache_axis_order=0,2,1,3 \
 profiler=xplane \
-base_output_directory=/mnt/disks/persist/quant_microbenchmark_results \
-tensorboard_dir=/mnt/disks/persist/quant_microbenchmark_results \
+base_output_directory=/mnt/disks/persist/quant_microbenchmark_results_redo/a8w4 \
+tensorboard_dir=/mnt/disks/persist/quant_microbenchmark_results_redo/a8w4 \
 quantize_kvcache=True \
 kv_quant_dtype=int8 \
 quantization=intmp \
-quant_cfg_path=/mnt/disks/persist/maxtext/MaxText/configs/quantization/a8w4.json 
+quant_cfg_path=/mnt/disks/persist/maxtext_quant_testing/MaxText/configs/quantization/a8w4.json 
 
 # # a4w4
 python MaxText/inference_microbenchmark.py \
@@ -122,12 +126,12 @@ checkpoint_is_quantized=True \
 compute_axis_order=0,2,1,3 \
 ar_cache_axis_order=0,2,1,3 \
 profiler=xplane \
-base_output_directory=/mnt/disks/persist/quant_microbenchmark_results \
-tensorboard_dir=/mnt/disks/persist/quant_microbenchmark_results \
+base_output_directory=/mnt/disks/persist/quant_microbenchmark_results_redo/a4w4 \
+tensorboard_dir=/mnt/disks/persist/quant_microbenchmark_results_redo/a4w4 \
 quantize_kvcache=True \
 kv_quant_dtype=int8 \
 quantization=intmp \
-quant_cfg_path=/mnt/disks/persist/maxtext/MaxText/configs/quantization/a4w4.json 
+quant_cfg_path=/mnt/disks/persist/maxtext_quant_testing/MaxText/configs/quantization/a4w4.json 
 
 ####################################################################################################
 
@@ -153,8 +157,8 @@ checkpoint_is_quantized=True \
 compute_axis_order=0,2,1,3 \
 ar_cache_axis_order=0,2,1,3 \
 profiler=xplane \
-base_output_directory=/mnt/disks/persist/quant_microbenchmark_results \
-tensorboard_dir=/mnt/disks/persist/quant_microbenchmark_results \
+base_output_directory=/mnt/disks/persist/quant_microbenchmark_results_redo/int8_int4kv \
+tensorboard_dir=/mnt/disks/persist/quant_microbenchmark_results_redo/int8_int4kv \
 quantize_kvcache=True \
 kv_quant_dtype=int4 \
 quantization=int8 \
@@ -179,12 +183,12 @@ checkpoint_is_quantized=True \
 compute_axis_order=0,2,1,3 \
 ar_cache_axis_order=0,2,1,3 \
 profiler=xplane \
-base_output_directory=/mnt/disks/persist/quant_microbenchmark_results \
-tensorboard_dir=/mnt/disks/persist/quant_microbenchmark_results \
+base_output_directory=/mnt/disks/persist/quant_microbenchmark_results_redo/a16w4_int4kv \
+tensorboard_dir=/mnt/disks/persist/quant_microbenchmark_results_redo/a16w4_int4kv \
 quantize_kvcache=True \
 kv_quant_dtype=int4 \
 quantization=intmp \
-quant_cfg_path=/mnt/disks/persist/maxtext/MaxText/configs/quantization/int4_weight_only.json
+quant_cfg_path=/mnt/disks/persist/maxtext_quant_testing/MaxText/configs/quantization/int4_weight_only.json
 
 # # a16w8
 python MaxText/inference_microbenchmark.py \
@@ -205,12 +209,12 @@ checkpoint_is_quantized=True \
 compute_axis_order=0,2,1,3 \
 ar_cache_axis_order=0,2,1,3 \
 profiler=xplane \
-base_output_directory=/mnt/disks/persist/quant_microbenchmark_results \
-tensorboard_dir=/mnt/disks/persist/quant_microbenchmark_results \
+base_output_directory=/mnt/disks/persist/quant_microbenchmark_results_redo/a16w8_int4kv \
+tensorboard_dir=/mnt/disks/persist/quant_microbenchmark_results_redo/a16w8_int4kv \
 quantize_kvcache=True \
 kv_quant_dtype=int4 \
 quantization=intmp \
-quant_cfg_path=/mnt/disks/persist/maxtext/MaxText/configs/quantization/int8_weight_only.json
+quant_cfg_path=/mnt/disks/persist/maxtext_quant_testing/MaxText/configs/quantization/int8_weight_only.json
 
 # # a8w4
 python MaxText/inference_microbenchmark.py \
@@ -231,12 +235,12 @@ checkpoint_is_quantized=True \
 compute_axis_order=0,2,1,3 \
 ar_cache_axis_order=0,2,1,3 \
 profiler=xplane \
-base_output_directory=/mnt/disks/persist/quant_microbenchmark_results \
-tensorboard_dir=/mnt/disks/persist/quant_microbenchmark_results \
+base_output_directory=/mnt/disks/persist/quant_microbenchmark_results_redo/a8w4_int4kv \
+tensorboard_dir=/mnt/disks/persist/quant_microbenchmark_results_redo/a8w4_int4kv \
 quantize_kvcache=True \
 kv_quant_dtype=int4 \
 quantization=intmp \
-quant_cfg_path=/mnt/disks/persist/maxtext/MaxText/configs/quantization/a8w4.json 
+quant_cfg_path=/mnt/disks/persist/maxtext_quant_testing/MaxText/configs/quantization/a8w4.json 
 
 # # a4w4
 python MaxText/inference_microbenchmark.py \
@@ -257,9 +261,9 @@ checkpoint_is_quantized=True \
 compute_axis_order=0,2,1,3 \
 ar_cache_axis_order=0,2,1,3 \
 profiler=xplane \
-base_output_directory=/mnt/disks/persist/quant_microbenchmark_results \
-tensorboard_dir=/mnt/disks/persist/quant_microbenchmark_results \
+base_output_directory=/mnt/disks/persist/quant_microbenchmark_results_redo/a4w4_int4kv \
+tensorboard_dir=/mnt/disks/persist/quant_microbenchmark_results_redo/a4w4_int4kv \
 quantize_kvcache=True \
 kv_quant_dtype=int4 \
 quantization=intmp \
-quant_cfg_path=/mnt/disks/persist/maxtext/MaxText/configs/quantization/a4w4.json 
+quant_cfg_path=/mnt/disks/persist/maxtext_quant_testing/MaxText/configs/quantization/a4w4.json 
