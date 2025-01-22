@@ -16,6 +16,7 @@
 import copy as cp
 import functools
 from typing import Any, Optional, Tuple, Callable
+from collections import defaultdict
 
 import flax
 from flax import linen as nn
@@ -45,6 +46,7 @@ import warnings
 warnings.simplefilter("ignore", category=FutureWarning)
 
 Prefix = Any
+PackedPrefix = Any
 Params = Any
 
 
@@ -310,6 +312,112 @@ class MaxEngine(engine_api.Engine):
         "tokens": first_generated_token,
     }, result
 
+  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_prompts",))
+  def prefill_concat(
+      self,
+      *,
+      params: Params,
+      existing_prefix: Optional[jax.Array] = None,
+      padded_tokens: jax.Array,
+      decoder_positions: jax.Array,
+      decoder_segment_ids: jax.Array,
+      start_pos: jax.Array,
+      true_lengths: jax.Array,
+      num_prompts: int,
+      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
+      rng: Optional[jax.random.PRNGKey] = None,
+  ) -> Tuple[Any, PackedPrefix, engine_api.ResultTokens]:
+    """Computes a kv-cache for a new packed generate request, which is a
+    concatenation of several shorter prompts. Experimentation shows that
+    longer prefill sequences gives approximately 15% boost in time per prefilled
+    token.
+
+    Args:
+      params: Scalar multiplier.
+      existing_prefix: If provided, represents a prefix that has already been
+        processed by the underlying model.
+      padded_tokens: Logically appended tokens to any existing prefix, this is
+        what we compute prefill on.
+      decoder_positions: int values indicating the position of token in its
+        original sequence.
+      decoder_segment_ids: int values indicating which sequence the the token
+        originally belong to.
+      start_pos: Padded array indicating the start position of each of the prompts.
+      true_length: Padded array indicating the true lengths of each of the prompts.
+      num_prompts: the number of prompts packed in the entire sequence.
+    Returns:
+      kv_cache: For the resulting text.
+    """
+    if existing_prefix:
+      raise ValueError("We don't know what to do with existing_prefix")
+
+    if rng is None:
+      rng = jax.random.PRNGKey(0)
+    input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
+    decoder_positions = jnp.expand_dims(decoder_positions, 0)
+    decoder_segment_ids = jnp.expand_dims(decoder_segment_ids, 0)
+    rng, new_rng = jax.random.split(rng)
+    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      flat_logits, new_vars = self.model.apply(
+          params,
+          input_tokens,
+          decoder_positions,
+          decoder_segment_ids=decoder_segment_ids,
+          enable_dropout=False,
+          model_mode=common_types.MODEL_MODE_PREFILL,
+          rngs={"params": new_rng},
+          mutable=["cache"],
+      )
+    cache = new_vars["cache"]
+    cache = self._maybe_stack_prefill_result_cache(cache)
+
+    def process_packed_logits_and_caches(packed_flat_logits, idx):
+      next_pos = jnp.full((1, 1), true_lengths[idx], dtype=jnp.int32)
+      generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
+      selected_logits = jax.lax.dynamic_slice(
+          packed_flat_logits,
+          (0, start_pos[idx] + true_lengths[idx] - 1, 0),
+          (packed_flat_logits.shape[0], 1, packed_flat_logits.shape[2]),
+      )
+      selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
+      first_generated_token = inference_utils.sampling(
+          selected_logits,
+          rng,
+          self.config.decode_sampling_strategy,
+          topk=self.config.decode_sampling_top_k,
+          nucleus_topp=self.config.decode_sampling_nucleus_p,
+          temperature=self.config.decode_sampling_temperature,
+      )
+      all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
+      result = engine_api.ResultTokens(
+          data=jnp.concatenate((first_generated_token, all_valid, generated_tokens), axis=1),
+          # Tokens are shape [batch, speculations], so when we concatenate
+          # tokens, validity and length along their index 1 dimension then they
+          # occupy 0:speculations.
+          tokens_idx=(0, 1),
+          # Validity occupies the same amount of space, but next in line.
+          valid_idx=(1, 2),
+          # And lengths is rank 1.
+          length_idx=(2, 3),
+          samples_per_slot=1,
+      )
+      return {
+          "logits": selected_logits,
+          "next_pos": next_pos,
+          "generated_tokens": generated_tokens,
+          "tokens": first_generated_token,
+      }, result
+
+    prefill_results = defaultdict(list)
+    first_tokens = []
+    for idx in range(num_prompts):
+      prefill_result, first_token = process_packed_logits_and_caches(flat_logits, idx)
+      for k, v in prefill_result.items():
+        prefill_results[k].append(v)
+      first_tokens.append(first_token)
+    prefill_results = {k: jnp.stack(v) for k, v in prefill_results.items()}
+    return cache, prefill_results, first_tokens
+
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
   def generate(
       self,
@@ -386,7 +494,7 @@ class MaxEngine(engine_api.Engine):
       decode_state: DecodeState,
       slot: int,
   ) -> DecodeState:
-    """Insert into KV cache"""
+    """Insert a single computed prefill cache into KV cache."""
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
 
     unboxed_prefix["cache"] = self._maybe_unstack_prefill_result_cache(unboxed_prefix["cache"])
@@ -453,6 +561,125 @@ class MaxEngine(engine_api.Engine):
         0,
     )
     inserted_tokens = jax.lax.dynamic_update_index_in_dim(decode_state["tokens"], unboxed_prefix["tokens"], slot, 0)
+
+    inserted_logits = jax.lax.with_sharding_constraint(inserted_logits, self.replicated_sharding)
+    inserted_generated_tokens = jax.lax.with_sharding_constraint(inserted_generated_tokens, self.replicated_sharding)
+    inserted_next_pos = jax.lax.with_sharding_constraint(inserted_next_pos, self.replicated_sharding)
+    inserted_tokens = jax.lax.with_sharding_constraint(inserted_tokens, self.replicated_sharding)
+    inserted_cache = jax.lax.with_sharding_constraint(inserted_cache, self.kv_cache_shardings)
+
+    return {
+        "logits": inserted_logits,
+        "cache": inserted_cache,
+        "next_pos": inserted_next_pos,
+        "generated_tokens": inserted_generated_tokens,
+        "tokens": inserted_tokens,
+    }
+
+  @functools.partial(
+      jax.jit,
+      static_argnums=(0,),
+      static_argnames=(
+          "num_prompts",
+          "seq_len",
+      ),
+      donate_argnums=(
+          1,
+          2,
+      ),
+  )
+  def insert_partial(
+      self,
+      prefix: PackedPrefix,
+      decode_state: DecodeState,
+      cache: Any,
+      slots: jax.Array,
+      *,
+      start_indices: jax.Array,
+      num_prompts: int,
+      seq_len: int,
+  ) -> DecodeState:
+    """Insert into KV cache"""
+    unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
+    cache_unboxed = max_utils.unbox_logicallypartioned(cache)
+    cache_unboxed = self._maybe_unstack_prefill_result_cache(cache_unboxed)
+    start_idx = 0
+    slot = slots[0]
+
+    def copy(path, partial_cache, full_cache, annotations):
+      path_key = path[-1].key
+      if path_key in [
+          "cache_ar_index",
+          "cached_ar_key",
+          "cached_ar_value",
+          "cached_ar_key_scale",
+          "cached_ar_value_scale",
+      ]:
+        return full_cache  # we don't even zero these out because we can mask them out.
+
+      batch_idx = -1
+      if "cache_batch" in annotations:
+        batch_idx = annotations.index("cache_batch")
+      elif "cache_scale_batch" in annotations:
+        batch_idx = annotations.index("cache_scale_batch")
+
+      if batch_idx < 0:
+        raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
+
+      if path_key == "cache_ar_segment_id":
+        ### goal: zero this out in case there is existing data
+        zeros = jnp.zeros((1, self.config.max_target_length - self.config.max_prefill_predict_length), dtype=jnp.int32)
+        return jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
+      elif path_key == "cache_prefill_segment_id":
+        zeros = jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32)
+        ## zero out in case prefill cache is too small to cover
+        full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
+        ## copy prefill cache
+        partial_cache = jax.lax.dynamic_slice(partial_cache, (0, start_idx), (1, seq_len))
+        partial_cache = jnp.mod(partial_cache, 2)
+        full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+        return full_cache
+      elif path_key == "cached_ar_lengths":
+        return full_cache.at[slot].set(0)
+      elif path_key in [
+          "cached_prefill_key",
+          "cached_prefill_value",
+          "cached_prefill_key_scale",
+          "cached_prefill_value_scale",
+      ]:
+        seqlen_index = self.config.prefill_cache_axis_order.split(",").index("1")
+        start_indices = [0, 0, 0, 0]
+        start_indices[seqlen_index] = start_idx
+        slice_size = list(partial_cache.shape)
+        slice_size[seqlen_index] = seq_len
+
+        slice_size = tuple(slice_size)
+        partial_cache = jax.lax.dynamic_slice(partial_cache, start_indices, slice_size)
+        # jax.debug.print("start_indices: {}, slice_size: {}", start_indices, slice_size)
+
+        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+      else:
+        raise ValueError(f"We don't have a strategy for inserting {path_key}")
+
+    inserted_cache = decode_state["cache"]
+    inserted_logits = decode_state["logits"]
+    inserted_next_pos = decode_state["next_pos"]
+    inserted_generated_tokens = decode_state["generated_tokens"]
+    inserted_tokens = decode_state["tokens"]
+
+    for i in range(num_prompts):
+      start_idx = start_indices[i]
+      slot = slots[i]
+      inserted_cache = jax.tree_util.tree_map_with_path(copy, cache_unboxed, inserted_cache, self.kv_cache_annotations_named)
+      inserted_logits = jax.lax.dynamic_update_index_in_dim(inserted_logits, unboxed_prefix["logits"][i, ...], slot, 0)
+      inserted_next_pos = jax.lax.dynamic_update_index_in_dim(inserted_next_pos, unboxed_prefix["next_pos"][i, ...], slot, 0)
+      inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(
+          inserted_generated_tokens,
+          unboxed_prefix["generated_tokens"][i, ...],
+          slot,
+          0,
+      )
+      inserted_tokens = jax.lax.dynamic_update_index_in_dim(inserted_tokens, unboxed_prefix["tokens"][i, ...], slot, 0)
 
     inserted_logits = jax.lax.with_sharding_constraint(inserted_logits, self.replicated_sharding)
     inserted_generated_tokens = jax.lax.with_sharding_constraint(inserted_generated_tokens, self.replicated_sharding)

@@ -147,6 +147,13 @@ flags.DEFINE_bool(
 )
 
 flags.DEFINE_bool(
+    "enable_batch_prefill",
+    False,
+    "If set, enable batch prefilling.",
+    required=False,
+)
+
+flags.DEFINE_bool(
     "skip_warmup",
     False,
     "Skip warmup",
@@ -463,7 +470,7 @@ def main(argv):
         max_target_length=target_length,
         args_str=FLAGS.maxengine_args,
     )
-    offline_inf = offline_inference.OfflineInference(engine, params, base_engine)
+    offline_inf = offline_inference.OfflineInference(engine, params, base_engine, FLAGS.enable_batch_prefill)
     if params is None and offline_inf.params is not None:
       base_engine = engine
     params = offline_inf.params

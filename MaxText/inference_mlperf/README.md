@@ -46,7 +46,7 @@ wget https://inference.mlcommons-storage.org/mixtral_8x7b/09292024_mixtral_15k_m
 mv 09292024_mixtral_15k_mintoken2_v1.pkl mixtral-processed-data.pkl
 ```
 
-### Install Maxtext 
+### Install Maxtext
 ```
 cd ~
 git clone git@github.com:google/maxtext.git
@@ -84,7 +84,7 @@ export SAVE_QUANT_PARAMS_PATH=gs://${USER}-bkt/quantized/llama2-70b-chat
 2. Run the following maxtext script to generate and save an int8 quantized checkpoint
 
 ```
-# Set appropriate tokenizer path. For example, LLama2 models tokenizer.llama2. You can find 
+# Set appropriate tokenizer path. For example, LLama2 models tokenizer.llama2. You can find
 # other tokenizers under maxtext/assets/ directory.
 export TOKENIZER_PATH=maxtext/assets/tokenizer.llama2
 cd maxtext && \
@@ -94,7 +94,7 @@ python MaxText/decode.py MaxText/configs/base.yml tokenizer_path=${TOKENIZER_PAT
 
 
 
-Your checkpoint is generated at `$SAVE_QUANT_PARAMS_PATH`. This is used to set `load_parameters_path` param below in `MAXENGINE_ARGS` env variable. 
+Your checkpoint is generated at `$SAVE_QUANT_PARAMS_PATH`. This is used to set `load_parameters_path` param below in `MAXENGINE_ARGS` env variable.
 
 ### HuggingFace login
 ```
@@ -117,7 +117,7 @@ bash ./llama_offline_run.sh -p -t
 cd ~/maxtext/MaxText/inference_mlperf
 export TOKENIZER_PATH="/home/${USER}/maxtext/assets/tokenizer.mistral-v1
 export BATCH_AND_PREFILL_LEN="2048,18"
-export MAXENGINE_ARGS="model_name=mixtral-8x7b tokenizer_path=${TOKENIZER_PATH}  quantization=int8 quantize_kvcache=True load_parameters_path=${SAVE_QUANT_PARAMS_PATH} checkpoint_is_quantized=True megablox=False capacity_factor=1 model_call_mode=inference"
+export MAXENGINE_ARGS="model_name=mixtral-8x7b tokenizer_path=${TOKENIZER_PATH}  quantization=int8 quantize_kvcache=True load_parameters_path=${SAVE_QUANT_PARAMS_PATH} checkpoint_is_quantized=True megablox=False sparse_matmul=False capacity_factor=1 model_call_mode=inference"
 
 bash ./mixtral_offline_run.sh -p -t
 ```
@@ -138,7 +138,7 @@ export MAXENGINE_ARGS="model_name=llama2-70b tokenizer_path=${TOKENIZER_PATH}  q
 ```
 #### Mixtral-8x7b:
 export BATCH_AND_PREFILL_LEN="256,144|512,72|2048,18"
-export MAXENGINE_ARGS="model_name=mixtral-8x7b tokenizer_path=${TOKENIZER_PATH}  quantization=int8 quantize_kvcache=True load_parameters_path=${SAVE_QUANT_PARAMS_PATH} checkpoint_is_quantized=True megablox=False capacity_factor=1 model_call_mode=inference compute_axis_order=0,2,1,3 ar_cache_axis_order=0,2,1,3"
+export MAXENGINE_ARGS="model_name=mixtral-8x7b tokenizer_path=${TOKENIZER_PATH}  quantization=int8 quantize_kvcache=True load_parameters_path=${SAVE_QUANT_PARAMS_PATH} checkpoint_is_quantized=True megablox=False sparse_matmul=False capacity_factor=1 model_call_mode=inference compute_axis_order=0,2,1,3 ar_cache_axis_order=0,2,1,3"
 
 #### Run offline performance benchmark
 #### LLama2-70b:

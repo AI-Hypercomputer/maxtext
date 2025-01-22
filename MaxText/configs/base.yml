@@ -49,8 +49,8 @@ force_unroll: False # during generate_param_only_checkpoint should we unroll the
 
 # checkpointing using orbax has two important parameters: array driver
 # and its underlying storage - the kvstore (preferably ocdbt)
-# orbax supports setting a target file size, chunking a single 
-# large arrays into small physical files (<2GB) can speed up distributed and over 
+# orbax supports setting a target file size, chunking a single
+# large arrays into small physical files (<2GB) can speed up distributed and over
 # the network loading enormously
 checkpoint_storage_target_data_file_size_bytes: 2147483648
 checkpoint_storage_use_ocdbt: True
@@ -97,7 +97,7 @@ checkpoint_is_quantized: False # Set to True if reading from a saved aqt quantiz
 save_quantized_params_path: ""
 #Used to configure the mode in which model is called
 # when left as is, corresponds to training
-# accepted values are "inference" 
+# accepted values are "inference"
 model_call_mode: ""
 
 # Shard the range finding operation for quantization. By default this is set to number of slices.
@@ -126,6 +126,7 @@ cast_logits_to_fp32: True # whether to cast the logits to fp32. The higher preci
 num_experts: 1
 num_experts_per_tok: 1
 megablox: True
+sparse_matmul: True
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
 load_balance_loss_weight: 0.01 # weight for the load balance loss
 
@@ -147,7 +148,7 @@ pipeline_delay_activation_forwarding: False # This delays the activation forward
 # the communication and compute in each iteration are now independent. However this comes at the cost of doubling the pipeline bubble,
 # and you must set the number of microbatches to at least 2 * num_stages (the minimum 2 * num_stages is set by default with this delay).
 
-# There are two loops for PP: 
+# There are two loops for PP:
 #  1)  Outer loop over microbatches (pipeline iterations)
 #  2)  Inner loop over layers (layers per stage)
 # We have observed extra remat when a remat policy and scanning is performed on both, and recommend the default
@@ -319,7 +320,7 @@ train_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected
 eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 
 # direct preference optimization (DPO)
-use_dpo: False 
+use_dpo: False
 dpo_label_smoothing: 0.0
 dpo_beta: 0.1
 
@@ -350,7 +351,7 @@ log_period: 100 # Flushes Tensorboard
 jax_distributed_initialization_timeout: 300 # This is the default timeout in https://github.com/jax-ml/jax/blob/main/jax/_src/distributed.py
 # Note there are two separate initializations - the jax coordination service (aka jax.distributed.initialize) and the backend (e.g. PjRT), the timeout above refers
 # only to the jax coordination service.
-jax_debug_log_modules: "" # Set this to "jax" to enable jax verbose logging such as for the jax coordination service initialization. 
+jax_debug_log_modules: "" # Set this to "jax" to enable jax verbose logging such as for the jax coordination service initialization.
 skip_jax_distributed_system: False # If True we will not initialize the jax distributed system.
 # Currently the jax distributed is needed on cloud TPUs for async checkpointing.
 # However when run on google internal TPUs the coordination service is started automatically

@@ -13,6 +13,7 @@
 #  limitations under the License.
 
 import jax
+import sre_parse
 import unittest
 from layers import linears
 from layers import initializers
@@ -44,6 +45,7 @@ class TokenDroppingTest(unittest.TestCase):
         model_name="mixtral-8x7b",
         dtype="bfloat16",
         megablox=False,
+        sparse_matmul=False,
         max_target_length=80,
         per_device_batch_size=1,
         capacity_factor=2,
@@ -267,6 +269,7 @@ class MoeBlockTest(unittest.TestCase):
         model_name="mixtral-8x7b",
         dtype="bfloat16",
         megablox=True,
+        sparse_matmul=True,
     )
 
     cfg = pyconfig.config
@@ -291,6 +294,7 @@ class MoeBlockTest(unittest.TestCase):
         model_name="mixtral-8x7b",
         dtype="bfloat16",
         megablox=False,
+        sparse_matmul=False,
     )
 
     cfg = pyconfig.config
