@@ -925,12 +925,13 @@ def train_loop(config, state=None):
         eval_dpo_reward_accuracy += float(eval_metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0))  # for dpo only
         max_logging.log(f"Completed eval step {eval_step_count}")
         eval_step_count += 1
-      eval_loss = (
-          cumulative_eval_metrics["scalar"]["eval/total_loss"]
-          / (cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS)
-          + cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
+      eval_loss = cumulative_eval_metrics["scalar"]["eval/total_loss"] / (
+          cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS
       )
       cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
+      cumulative_eval_metrics["scalar"]["eval/avg_moe_lb_loss"] = (
+          cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
+      )
       if config.use_dpo:
         cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = eval_dpo_reward_accuracy / eval_step_count
       write_metrics(
