@@ -198,9 +198,9 @@ def save_checkpoint(
 ) -> bool:
   """Wrapper for saving checkpoint."""
   if config and config.enable_checkpointing:
-    if (step % config.checkpoint_period == 0) or (
+    if step != 0 and ((step % config.checkpoint_period == 0) or (
         config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0
-    ):
+    )):
       blocking_until_ready_start = time.time()
       max_logging.log(f"Waiting for step {step} to finish before checkpoint...")
       # We block here on the step finishing so that our checkpointing metrics
