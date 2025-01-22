@@ -14,7 +14,7 @@
 
 """Normalization Layers."""
 
-from typing import Any, Tuple
+from typing import Any, Tuple, Optional
 
 from flax import linen as nn
 from jax import lax
@@ -30,7 +30,7 @@ class RMSNorm(nn.Module):
   epsilon: float = 1e-6
   dtype: Any = jnp.float32
   weight_dtype: Any = jnp.float32
-  kernel_axes: Tuple[str, ...] = ()
+  kernel_axes: Tuple[Optional[str], ...] = ()
   scale_init: Initializer = nn.initializers.ones
 
   @nn.compact

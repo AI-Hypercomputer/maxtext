@@ -273,6 +273,7 @@ class TrainCompile(unittest.TestCase):
             "ici_expert_parallelism=8",
             "model_name=mixtral-8x7b",
             "megablox=False",
+            "sparse_matmul=False",
             "capacity_factor=1",
             "per_device_batch_size=4",
             "max_target_length=1024",

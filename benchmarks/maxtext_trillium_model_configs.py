@@ -19,6 +19,11 @@ import dataclasses
 import typing
 import xla_flags_library
 
+# TODO(vbarr@) Abstract software features like checkpointing,
+# real data / synthetic data out of this config
+# TODO(vbarr@) Make slice dependent configurations to allow for a model's tuning
+# to adjust at scales.
+
 
 @dataclasses.dataclass
 class MaxTextModel:
@@ -27,9 +32,17 @@ class MaxTextModel:
   tuning_params: dict[str, typing.Any]
   xla_flags: str
 
+trillium_model_dict = {}
 
-default_basic = MaxTextModel(
-    model_name="default-basic",
+# Run this for new definitions that should be part of the library.
+def _add_to_model_dictionary(model_dictionary: dict[str, MaxTextModel], maxtext_model: MaxTextModel)-> MaxTextModel:
+  model_dictionary[maxtext_model.model_name.replace('-', '_')] = maxtext_model
+  return maxtext_model
+
+default_basic_1 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="default-basic-1",
     model_type="default",
     tuning_params={
         "per_device_batch_size": 1,
@@ -43,37 +56,13 @@ default_basic = MaxTextModel(
         "profiler": "xplane",
     },
     xla_flags="",
-)
-
-# Test model for FSDP + TP.
-default_1 = MaxTextModel(
-    model_name="default-1",
-    model_type="default",
-    tuning_params={
-        "per_device_batch_size": 1,
-        "ici_fsdp_parallelism": 16,
-        "ici_tensor_parallelism": 16,
-        "dcn_pipeline_parallelism": 2,
-        "dcn_fsdp_parallelism": 1,
-        "remat_policy": "full",
-        "global_parameter_scale": 1,
-        "attention": "flash",
-        "gcs_metrics": True,
-        "use_iota_embed": True,
-        "dataset_path": "gs://max-datasets-rogue",
-        "dataset_type": "synthetic",
-        "reuse_example_batch": 1,
-        "enable_checkpointing": False,
-        "profiler": "xplane",
-    },
-    xla_flags=(
-        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.CF_FOR_ALL_GATHER
-    ),
+  )
 )
 
 
-default_32 = MaxTextModel(
+default_32 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
     model_name="default-32",
     model_type="default",
     tuning_params={
@@ -97,9 +86,13 @@ default_32 = MaxTextModel(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
         + xla_flags_library.CF_FOR_ALL_GATHER
     ),
+  )
 )
 
-default_64 = MaxTextModel(
+
+default_64 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
     model_name="default-64",
     model_type="default",
     tuning_params={
@@ -123,9 +116,13 @@ default_64 = MaxTextModel(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
         + xla_flags_library.CF_FOR_ALL_GATHER
     ),
+  )
 )
 
-default_128 = MaxTextModel(
+
+default_128 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
     model_name="default-128",
     model_type="default",
     tuning_params={
@@ -149,15 +146,19 @@ default_128 = MaxTextModel(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
         + xla_flags_library.CF_FOR_ALL_GATHER
     ),
+  )
 )
 
-default_256 = MaxTextModel(
+
+# OOM, Not Optimized yet
+default_256 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
     model_name="default-256",
     model_type="default",
     tuning_params={
         "per_device_batch_size": 1,
         "ici_fsdp_parallelism": -1,
-        # "dcn_fsdp_parallelism": 2,
         "dcn_fsdp_transpose_parallelism": -1,
         "remat_policy": "full",
         "global_parameter_scale": 256,
@@ -177,12 +178,14 @@ default_256 = MaxTextModel(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
         + xla_flags_library.CF_FOR_ALL_GATHER
     ),
+  )
 )
 
-# TODO(b/368441022) DEFAULT_512 which requires host offloading for optimizer
-# state.
-# Currently OOM
-default_512 = MaxTextModel(
+
+# OOM, Not Optimized yet
+default_512 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
     model_name="default-512",
     model_type="default",
     tuning_params={
@@ -208,10 +211,13 @@ default_512 = MaxTextModel(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
         + xla_flags_library.CF_FOR_ALL_GATHER
     ),
+  )
 )
 
 
-gpt_3_175b = MaxTextModel(
+gpt_3_175b = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
     model_name="gpt-3-175b",
     model_type="gpt3-175b",
     tuning_params={
@@ -235,9 +241,13 @@ gpt_3_175b = MaxTextModel(
         + xla_flags_library.DATA_PARALLEL_OVERLAP
         + xla_flags_library.DISABLE_BUNDLE_AWARE_COST_MODEL
     ),
+  )
 )
 
-llama2_7b_4096 = MaxTextModel(
+
+llama2_7b_4096 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
     model_name="llama2-7b-4096",
     model_type="llama2-7b",
     tuning_params={
@@ -261,38 +271,13 @@ llama2_7b_4096 = MaxTextModel(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
         + xla_flags_library.CF_FOR_ALL_GATHER
     ),
+  )
 )
 
 
-llama2_70b_4096_real_data = MaxTextModel(
-    model_name="llama2-70b-4096-rd",
-    model_type="llama2-70b",
-    tuning_params={
-        "per_device_batch_size": 7,
-        "ici_fsdp_parallelism": -1,
-        "remat_policy": "full",
-        "max_target_length": 4096,
-        "attention": "flash",
-        "gcs_metrics": True,
-        "use_iota_embed": True,
-        "reuse_example_batch": 1,
-        "enable_checkpointing": False,
-        "profiler": "xplane",
-        "dataset_path": "gs://max-datasets-rogue",
-        "dataset_type": "tfds",
-        "tokenizer_path": "assets/tokenizer.llama2",
-        "sa_block_q": 1024,
-        "sa_block_q_dkv": 2048,
-        "sa_block_q_dq": 2048,
-    },
-    xla_flags=(
-        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.CF_FOR_ALL_GATHER
-    ),
-)
-
-# ici_fsdp_transpose_parallelism gives one TFLOP better performance.
-llama2_70b_4096 = MaxTextModel(
+llama2_70b_4096 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
     model_name="llama2-70b-4096",
     model_type="llama2-70b",
     tuning_params={
@@ -318,9 +303,357 @@ llama2_70b_4096 = MaxTextModel(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
         + xla_flags_library.CF_FOR_ALL_GATHER
     ),
+  )
 )
 
-llama3_8b_8192 = MaxTextModel(
+
+llama2_70b_4096_optimized = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama2_70b_4096_synthetic",
+    model_type="llama2-70b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": 1,
+        "ici_fsdp_transpose_parallelism": -1,
+        "ici_tensor_parallelism": 1,
+        "remat_policy": "qkv_proj_offloaded",
+        "max_target_length": 4096,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+    ),
+  )
+)
+
+
+# Enable SparseCore Offloading of AR in an optimized model.
+llama2_70b_4096_sc = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama2-70b-4096-sc",
+    model_type="llama2-70b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": 1,
+        "ici_fsdp_transpose_parallelism": -1,
+        "ici_tensor_parallelism": 1,
+        "remat_policy": "qkv_proj_offloaded",
+        "max_target_length": 4096,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+    ),
+  )
+)
+
+
+llama2_70b_4096_sc_real_data_tfds = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama2-70b-4096-sc",
+    model_type="llama2-70b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": 1,
+        "ici_fsdp_transpose_parallelism": -1,
+        "ici_tensor_parallelism": 1,
+        "remat_policy": "qkv_proj_offloaded",
+        "max_target_length": 4096,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://trillium-storage-datasets-sr",
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+    ),
+  )
+)
+
+
+llama2_70b_4096_sc_real_data_grain = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama2-70b-4096",
+    model_type="llama2-70b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": 1,
+        "ici_fsdp_transpose_parallelism": -1,
+        "ici_tensor_parallelism": 1,
+        "remat_policy": "qkv_proj_offloaded",
+        "max_target_length": 4096,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://trillium-storage-datasets-sr",
+        "base_output_directory": (
+            "gs://trillium-storage-tests-nov24-sr/long-run-dec11"
+        ),
+        "enable_checkpointing": False,
+        "dataset_type": "grain",
+        "grain_train_files": "/tmp/dataset/array-record/c4/en/3.0.1/c4-train.array_record*",
+        "grain_worker_count": 24,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+        "profile_cleanly": False,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+    ),
+  )
+)
+
+
+llama2_70b_4096_sc_real_data_grain_checkpoint = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama2-70b-4096",
+    model_type="llama2-70b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": 1,
+        "ici_fsdp_transpose_parallelism": -1,
+        "ici_tensor_parallelism": 1,
+        "remat_policy": "qkv_proj_offloaded",
+        "max_target_length": 4096,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://trillium-storage-datasets-sr",
+        "base_output_directory": (
+            "gs://trillium-storage-tests-nov24-sr/long-run-dec11"
+        ),
+        "checkpoint_period": 100,
+        "enable_checkpointing": True,
+        "async_checkpointing": True,
+        "dataset_type": "grain",
+        "grain_train_files": "/tmp/dataset/array-record/c4/en/3.0.1/c4-train.array_record*",
+        "grain_worker_count": 24,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+    ),
+  )
+)
+
+
+llama2_70b_4096_real_data_pw_long_run = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama2-70b-4096-rd-pw-lr",
+    model_type="llama2-70b",
+    tuning_params={
+        "per_device_batch_size": 4,
+        "ici_fsdp_parallelism": -1,
+        "remat_policy": "full",
+        "max_target_length": 4096,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "reuse_example_batch": 0,
+        "profiler": "xplane",
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "tfds",
+        "tokenizer_path": "assets/tokenizer.llama2",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+        "steps": 1000000,
+
+        # Additional tuning params for pathways long running test.
+        "enable_checkpointing": True,
+        "async_checkpointing": True,
+        "checkpoint_period": 100,
+        "checkpoint_storage_use_ocdbt": False,
+        "checkpoint_storage_use_zarr3": False,
+        "metrics_file": "metrics.txt",
+        "goodput_upload_interval_seconds": 30,
+        "enable_pathways_goodput": True,
+        "enable_checkpoint_cloud_logger": True,
+        "enable_single_controller": True,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+    ),
+  )
+)
+
+
+llama2_70b_4096_synthetic_pw_lr = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama2_70b_4096_synthetic_pw_lr",
+    model_type="llama2-70b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": 1,
+        "ici_fsdp_transpose_parallelism": -1,
+        "ici_tensor_parallelism": 1,
+        "remat_policy": "qkv_proj_offloaded",
+        "max_target_length": 4096,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        # "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+        "steps": 1000000,
+
+        # Additional tuning params for pathways long running test.
+        "enable_checkpointing": True,
+        "async_checkpointing": True,
+        "checkpoint_period": 100,
+        "checkpoint_storage_use_ocdbt": False,
+        "checkpoint_storage_use_zarr3": False,
+        "metrics_file": "metrics.txt",
+        "goodput_upload_interval_seconds": 30,
+        "enable_pathways_goodput": True,
+        "enable_checkpoint_cloud_logger": True,
+        "enable_single_controller": True,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+    ),
+  )
+)
+
+
+llama2_70b_4096_pw_long_run = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama2-70b-4096-pw-lr",
+    model_type="llama2-70b",
+    tuning_params={
+        "per_device_batch_size": 4,
+        "ici_fsdp_parallelism": 1,
+        "ici_fsdp_transpose_parallelism": -1,
+        "ici_tensor_parallelism": 1,
+        "remat_policy": "full",
+        "max_target_length": 4096,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+        "steps": 1000000,
+
+        # Additional tuning params for pathways long running test.
+        "enable_checkpointing": True,
+        "async_checkpointing": True,
+        "checkpoint_period": 100,
+        "checkpoint_storage_use_ocdbt": False,
+        "checkpoint_storage_use_zarr3": False,
+        "metrics_file": "metrics.txt",
+        "goodput_upload_interval_seconds": 30,
+        "enable_pathways_goodput": True,
+        "enable_checkpoint_cloud_logger": True,
+        "enable_single_controller": True,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+    ),
+  )
+)
+
+
+llama2_70b_4096_pw_rd_tfds = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama2_70b_4096_pw_rd_tfds",
+    model_type="llama2-70b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": 1,
+        "ici_fsdp_transpose_parallelism": -1,
+        "ici_tensor_parallelism": 1,
+        "remat_policy": "qkv_proj_offloaded",
+        "max_target_length": 4096,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://trillium-storage-datasets-sr",
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+
+        # Additional tuning params for pathways long running test.
+        "enable_checkpointing": True,
+        "async_checkpointing": True,
+        "checkpoint_period": 100,
+        "checkpoint_storage_use_ocdbt": False,
+        "checkpoint_storage_use_zarr3": False,
+        "metrics_file": "metrics.txt",
+        "goodput_upload_interval_seconds": 30,
+        "enable_pathways_goodput": True,
+        "enable_checkpoint_cloud_logger": True,
+        "enable_single_controller": True,
+    },
+    xla_flags=(
+    xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+    + xla_flags_library.CF_FOR_ALL_GATHER
+    ),
+  )
+)
+
+
+llama3_8b_8192 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
     model_name="llama3-8b-8192",
     model_type="llama3-8b",
     tuning_params={
@@ -344,9 +677,13 @@ llama3_8b_8192 = MaxTextModel(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
         + xla_flags_library.CF_FOR_ALL_GATHER
     ),
+  )
 )
 
-llama3_70b_8192 = MaxTextModel(
+
+llama3_70b_8192 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
     model_name="llama3-70b-8192",
     model_type="llama3-70b",
     tuning_params={
@@ -374,9 +711,13 @@ llama3_70b_8192 = MaxTextModel(
         + xla_flags_library.HOST_OFFLOAD_FLAGS
         + " --xla_tpu_scheduler_percent_shared_memory_limit=90"
     ),
+  )
 )
 
-llama3_1_405b_8192_fsdp_dcn = MaxTextModel(
+
+llama3_1_405b_8192_fsdp_dcn = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
     model_name="llama3-1-405b-8192-fsdp-dcn",
     model_type="llama3.1-405b",
     tuning_params={
@@ -410,9 +751,13 @@ llama3_1_405b_8192_fsdp_dcn = MaxTextModel(
         + xla_flags_library.CF_FOR_ALL_GATHER
         + xla_flags_library.HOST_OFFLOAD_FLAGS
     ),
+  )
 )
 
-llama3_1_8b_8192 = MaxTextModel(
+
+llama3_1_8b_8192 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
     model_name="llama3_1-8b-8192",
     model_type="llama3.1-8b",
     tuning_params={
@@ -451,9 +796,13 @@ llama3_1_8b_8192 = MaxTextModel(
         + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
         + xla_flags_library.HOST_OFFLOAD_FLAGS
     ),
+  )
 )
 
-llama3_1_70b_8192 = MaxTextModel(
+
+llama3_1_70b_8192 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
     model_name="llama3_1-70b-8192",
     model_type="llama3.1-70b",
     tuning_params={
@@ -490,9 +839,13 @@ llama3_1_70b_8192 = MaxTextModel(
         + xla_flags_library.CF_FOR_ALL_GATHER
         + xla_flags_library.HOST_OFFLOAD_FLAGS
     ),
+  )
 )
 
-llama3_1_70b_129024 = MaxTextModel(
+
+llama3_1_70b_129024 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
     model_name="llama3_1-70b-129024",
     model_type="llama3.1-70b",
     tuning_params={
@@ -530,13 +883,17 @@ llama3_1_70b_129024 = MaxTextModel(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
         + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
         + xla_flags_library.DATA_PARALLEL_OVERLAP
-        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_1D_ALL_GATHER
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_GATHER
         + xla_flags_library.HOST_OFFLOAD_FLAGS
     ),
+  )
 )
 
-mixtral_8x7b_dropless = MaxTextModel(
-    model_name="mixtral-8x7b",
+
+mixtral_8x7b_dropless = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="mixtral_8x7b_dropless",
     model_type="mixtral-8x7b",
     tuning_params={
         "per_device_batch_size": 12,
@@ -555,22 +912,32 @@ mixtral_8x7b_dropless = MaxTextModel(
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
         "megablox": True,
+        "sparse_matmul": True,
     },
     xla_flags=(
         xla_flags_library.MOE_VMEM_LIMIT_FLAG
         + xla_flags_library.CF_FOR_ALL_GATHER
         + xla_flags_library.DATA_PARALLEL_OVERLAP
     ),
+  )
 )
 
-mixtral_8x7b_dropped = MaxTextModel(
-    model_name="mixtral-8x7b",
+
+mixtral_8x7b_dropped = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="mixtral_8x7b_dropped",
     model_type="mixtral-8x7b",
     tuning_params={
-        "per_device_batch_size": 8,
+        "per_device_batch_size": 12,
         "ici_fsdp_parallelism": -1,
         "max_target_length": 4096,
-        "remat_policy": "full",
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "out_proj": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
         "attention": "flash",
         "gcs_metrics": True,
         "use_iota_embed": True,
@@ -583,6 +950,7 @@ mixtral_8x7b_dropped = MaxTextModel(
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
         "megablox": False,
+        "sparse_matmul": False,
         "capacity_factor": 1.25,
         "tokenizer_path": "assets/tokenizer.mistral-v1",
     },
@@ -591,10 +959,14 @@ mixtral_8x7b_dropped = MaxTextModel(
         + xla_flags_library.CF_FOR_ALL_GATHER
         + xla_flags_library.DATA_PARALLEL_OVERLAP
     ),
+  )
 )
 
-mixtral_8x7b_dropped_int8 = MaxTextModel(
-    model_name="mixtral-8x7b",
+
+mixtral_8x7b_dropped_int8 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="mixtral_8x7b_dropped_int8",
     model_type="mixtral-8x7b",
     tuning_params={
         "per_device_batch_size": 8,
@@ -612,6 +984,7 @@ mixtral_8x7b_dropped_int8 = MaxTextModel(
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
         "megablox": False,
+        "sparse_matmul": False,
         "capacity_factor": 1.25,
         "quantization": "int8",
         "tokenizer_path": "assets/tokenizer.mistral-v1",
@@ -621,9 +994,13 @@ mixtral_8x7b_dropped_int8 = MaxTextModel(
         + xla_flags_library.CF_FOR_ALL_GATHER
         + xla_flags_library.DATA_PARALLEL_OVERLAP
     ),
+  )
 )
 
-gemma2_9b_8192 = MaxTextModel(
+
+gemma2_9b_8192 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
     model_name="gemma2-9b-8192",
     model_type="gemma2-9b",
     tuning_params={
@@ -650,9 +1027,13 @@ gemma2_9b_8192 = MaxTextModel(
         + xla_flags_library.CF_FOR_ALL_GATHER
         + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
     ),
+  )
 )
 
-gemma2_27b_8192 = MaxTextModel(
+
+gemma2_27b_8192 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
     model_name="gemma2-27b-8192",
     model_type="gemma2-27b",
     tuning_params={
@@ -679,32 +1060,5 @@ gemma2_27b_8192 = MaxTextModel(
         + xla_flags_library.CF_FOR_ALL_GATHER
         + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
     ),
+  )
 )
-
-# TODO(b/368441022) LLAMA3.1 8B, 70B, 405B
-# TODO(b/368441022) MaxDiffusion BEST
-# TODO(b/368441022) Determine largest batch per slice for non-optimized models
-# List of all models
-maxstar_models = [
-    default_basic,
-    default_32,
-    default_64,  # Not Optimizied yet
-    default_128,  # Not Optimizied yet
-    # default_256,  # OOM, Not Optimizied yet
-    # default_512,  # OOM, Not Optimizied yet
-    gpt_3_175b,
-    llama2_7b_4096,
-    llama2_70b_4096,
-    llama2_70b_4096_real_data,
-    llama3_8b_8192,  # Not Optimizied yet
-    llama3_70b_8192,  # Not Optimizied yet
-    llama3_1_405b_8192_fsdp_dcn,
-    llama3_1_8b_8192,
-    llama3_1_70b_8192,
-    llama3_1_70b_129024,
-    mixtral_8x7b_dropped,
-    mixtral_8x7b_dropped_int8,
-    mixtral_8x7b_dropless,
-    gemma2_9b_8192,
-    gemma2_27b_8192,
-]

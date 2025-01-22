@@ -1,7 +1,10 @@
 # Requirements for Building the MaxText Docker Image
 # These requirements are additional to the dependencies present in the JAX SS base image.
 absl-py
+aqtp==0.8.2
 datasets
+grain-nightly>=0.0.10
+orbax-checkpoint>=0.10.3
 pylint
 pytest
 pyink

@@ -41,7 +41,8 @@ jobs:
     with:
       device_type: tpu
       device_name: v4-8
-      build_mode: stable
+      build_mode: stable_stack
+      base_image: us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:latest
 
   gpu_image:
     needs: prelim

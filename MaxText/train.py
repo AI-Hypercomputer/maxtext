@@ -511,11 +511,9 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   else:
     if config.optimizer_memory_host_offload:
       cast_params = jax.device_put(state.params, max_utils.with_memory_kind(state_mesh_shardings.params, "device"))
-      cast_params = max_utils.cast_to_bf16(cast_params)
       state = state.replace(params=cast_params)
       if config.use_dpo:
         reference_params = jax.device_put(reference_params, max_utils.with_memory_kind(reference_params_sharding, "device"))
-        reference_params = max_utils.cast_to_bf16(reference_params)
         extra_dpo_args = [reference_params]
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
@@ -648,16 +646,23 @@ def setup_mesh_and_model(config):
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
   logger = checkpointing.setup_checkpoint_logger(config)
   if config.enable_emergency_checkpoint:
-    abstract_state, _, _ = max_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
-    checkpoint_manager = checkpointing.create_orbax_emergency_checkpoint_manager(
-        config.local_checkpoint_directory,
-        config.checkpoint_dir,
-        mesh,
-        abstract_state,
-        config.local_checkpoint_period,
-        config.checkpoint_period,
-        logger,
-    )
+    if config.use_replicator_service:
+      checkpoint_manager = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
+          config.local_checkpoint_directory,
+          config.local_checkpoint_period,
+          mesh,
+      )
+    else:
+      abstract_state, _, _ = max_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
+      checkpoint_manager = checkpointing.create_orbax_emergency_checkpoint_manager(
+          config.local_checkpoint_directory,
+          config.checkpoint_dir,
+          mesh,
+          abstract_state,
+          config.local_checkpoint_period,
+          config.checkpoint_period,
+          logger,
+      )
   else:
     # TODO(b/368121306): Remove this once zarr3 support is plumbed on the backend
     use_ocdbt = config.checkpoint_storage_use_ocdbt
@@ -843,19 +848,19 @@ def train_loop(config, state=None):
   running_gcs_metrics = [] if config.gcs_metrics else None
 
   start_step = get_first_step(state)  # this is the start_step for training
-  first_profiling_step = start_step + config.skip_first_n_steps_for_profiler
+  prof = profiler.Profiler(config, offset_step=start_step)
+  first_profiling_step = prof.start_initial_profile_step
   if config.profiler != "" and first_profiling_step >= config.steps:
     raise ValueError("Profiling requested but initial profiling step set past training final step")
-  last_profiling_step = np.clip(first_profiling_step + config.profiler_steps - 1, first_profiling_step, config.steps - 1)
+  last_profiling_step = prof.finished_initial_profile_step
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
-  prof = profiler.Profiler(config)
+
   for step in np.arange(start_step, config.steps):
-    if step == first_profiling_step:
-      if config.profile_cleanly:
-        jax.block_until_ready(state)  # Block until previous state finishes to start profile cleanly
-      prof.activate()
+    if step == first_profiling_step or prof.should_activate_periodic_profile(step):
+      optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
+      prof.activate(blocking_object=state, optional_postfix=optional_postfix)
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
@@ -940,10 +945,8 @@ def train_loop(config, state=None):
         prof.deactivate()
         break
 
-    if step == last_profiling_step:
-      if config.profile_cleanly:
-        jax.block_until_ready(state)  # Block until current state finishes to end profile cleanly
-      prof.deactivate()
+    if step == last_profiling_step or prof.should_deactivate_periodic_profile(step):
+      prof.deactivate(blocking_object=state)
 
     if step == start_step:
       max_utils.print_mem_stats("After params initialized")
@@ -954,6 +957,17 @@ def train_loop(config, state=None):
   max_utils.close_summary_writer(writer)
   record_goodput(recorder, config, recorder.record_job_end_time if recorder else None)
   clear_buffered_metrics()
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    # pytype: disable=attribute-error
+    compiled = p_train_step.lower(state, example_batch, nextrng).compile()
+    compiled_stats = compiled.memory_analysis()
+    if compiled_stats is not None:
+      max_logging.log(
+          f"Output size: {compiled_stats.output_size_in_bytes}, "
+          f"temp size: {compiled_stats.temp_size_in_bytes}, "
+          f"argument size: {compiled_stats.argument_size_in_bytes}, "
+          f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
+      )
   return state
 
 

@@ -19,7 +19,7 @@ limitations under the License.
 from typing import Any, Optional, Union
 from absl import flags
 from etils import epath
-from flax.training import orbax_utils, train_state
+from flax.training import train_state
 import grain.python as grain
 import jax
 import max_logging
@@ -27,6 +27,7 @@ from multihost_dataloading import MultiHostDataLoadIterator
 import numpy as np
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
+import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
 # pylint: disable=too-many-positional-arguments
 
@@ -91,7 +92,7 @@ def create_orbax_emergency_checkpoint_manager(
     persistent_save_interval_steps: int,
     orbax_logger: Optional[abstract_logger.AbstractLogger] = None,
 ):
-  """Returns an emergency checkpoint."""
+  """Returns an emergency checkpoint manager."""
   flags.FLAGS.experimental_orbax_use_distributed_process_id = True
   max_logging.log("Creating emergency checkpoint manager...")
 
@@ -99,7 +100,7 @@ def create_orbax_emergency_checkpoint_manager(
       local=LocalCheckpointOptions(save_interval_steps=local_save_interval_steps),
       persistent=PersistentCheckpointOptions(save_interval_steps=persistent_save_interval_steps),
   )
-  emergency_mngr = emergency_checkpoint_manager.CheckpointManager(
+  manager = emergency_checkpoint_manager.CheckpointManager(
       local_checkpoint_dir,
       epath.Path(persistent_checkpoint_dir),
       global_mesh=global_mesh,
@@ -109,7 +110,29 @@ def create_orbax_emergency_checkpoint_manager(
   )
 
   max_logging.log("Emergency checkpoint manager created!")
-  return emergency_mngr
+  return manager
+
+
+def create_orbax_emergency_replicator_checkpoint_manager(
+    local_checkpoint_dir: str,
+    save_interval_steps: int,
+    global_mesh: jax.sharding.Mesh,
+):
+  """Returns an emergency replicator checkpoint manager."""
+  flags.FLAGS.experimental_orbax_use_distributed_process_id = True
+  max_logging.log("Creating emergency replicator checkpoint manager...")
+
+  options = emergency_replicator_checkpoint_manager.ReplicatorCheckpointManagerOptions(
+      save_interval_steps=save_interval_steps,
+  )
+  manager = emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager(
+      epath.Path(local_checkpoint_dir),
+      options,
+      global_mesh=global_mesh,
+  )
+
+  max_logging.log("Emergency replicator checkpoint manager created!")
+  return manager
 
 
 def print_save_message(step, async_checkpointing):
@@ -307,6 +330,5 @@ def save_params_to_path(checkpoint_dir, params):
   """Save decode params in checkpoint at specified path."""
   assert checkpoint_dir, "checkpoint_dir is not defined."
   orbax_checkpointer = ocp.PyTreeCheckpointer()
-  save_args = orbax_utils.save_args_from_target({"params": params})
-  orbax_checkpointer.save(checkpoint_dir, {"params": params}, save_args=save_args, force=True)
+  orbax_checkpointer.save(checkpoint_dir, {"params": params}, force=True)
   print(f"Quantized params checkpoint saved at: {checkpoint_dir}")

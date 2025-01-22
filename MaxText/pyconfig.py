@@ -85,6 +85,17 @@ def validate_profiler_type(s: str) -> None:
     raise ValueError("Invalid profiler type was passed. Valid options ", valid_profiler_types)
 
 
+def validate_periodic_profiler(profiler, profile_periodically_period, profiler_steps):
+  if profile_periodically_period <= 0:
+    return
+  if not profiler:
+    raise ValueError("Periodic profiler requested but no profiler was set, set it via profiler=xplane or profiler=nsys")
+  if profile_periodically_period < profiler_steps:
+    raise ValueError(
+        f"You must set the profile_periodically_period {profile_periodically_period} at least as long profiler_steps {profiler_steps}."
+    )
+
+
 def validate_model_call_mode(s: str) -> None:
   valid_model_call_modes = ("", "inference")
   if s not in valid_model_call_modes:  # currently supported attention
@@ -94,7 +105,8 @@ def validate_model_call_mode(s: str) -> None:
 def validate_prefill_and_target_lengths(max_prefill_length: int, max_target_length: int) -> None:
   if max_prefill_length <= 0:
     raise ValueError(f"Invalid max_prefill_predict_length {max_prefill_length}, it should be a positive number")
-  if max_target_length <= max_prefill_length:
+  if max_target_length < max_prefill_length:
+    # valid max_target_length = max_prefill_length for existing logit checks
     raise ValueError(
         f"Invalid max_target_length {max_target_length}, this should be sum of "
         f"max_prefill_predict_length ({max_prefill_length}) and max output length expected."
@@ -105,6 +117,7 @@ def validate_keys(keys):
   validate_attention_kernel(keys["attention"])
   validate_attention_type(keys["attention_type"])
   validate_profiler_type(keys["profiler"])
+  validate_periodic_profiler(keys["profiler"], keys["profile_periodically_period"], keys["profiler_steps"])
   validate_compute_axis_order(keys["compute_axis_order"])
   validate_kv_quant_axis(keys["kv_quant_axis"], keys["quantize_kvcache"])
   validate_model_call_mode(keys["model_call_mode"])

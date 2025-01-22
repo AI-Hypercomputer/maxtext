@@ -15,6 +15,10 @@
 # the subfolders names aka RUN_NAMEs are static. Please remember to change BASE_OUTPUT_PATH across different runs.
 
 set -ex
+
+# Installing torch for deps in forward_pass_logit_chekcker.py
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+
 export MODEL_VARIATION='llama3-8b'
 
 if [ -z "${BASE_OUTPUT_PATH}" ]; then

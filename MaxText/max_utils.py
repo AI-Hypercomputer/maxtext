@@ -65,10 +65,6 @@ def cast_dtype_from_to(nest, src, dst):
   return jax.tree_util.tree_map(lambda t: t.astype(dst) if t.dtype == src else t, nest)
 
 
-def cast_to_bf16(params):
-  return cast_dtype_from_to(params, np.float32, jnp.bfloat16)
-
-
 def find_nans_and_infs(pytree):
   def finder(x):
     return jnp.any(jnp.isinf(x) | jnp.isnan(x))
@@ -463,10 +459,10 @@ def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_typ
     parallelism_vals[parallelism_vals.index(-1)] = int(determined_val)
 
   target_type = "slices" if parallelism_type == "DCN" else "devices per slice"
-  assert (
-      np.prod(parallelism_vals) == target_product
-  ), f"Number of {target_type} {target_product} does not match\
-    the product of the {parallelism_type} parallelism {np.prod(parallelism_vals)}"
+  assert np.prod(parallelism_vals) == target_product, (
+      f"Number of {target_type} {target_product} does not match"
+      f" the product of the {parallelism_type} parallelism {np.prod(parallelism_vals)}"
+  )
 
   return parallelism_vals
 
@@ -578,12 +574,12 @@ def create_device_mesh(config, devices=None):
   multi_slice_env = num_slices > 1
 
   # Find possible unspecified parallelisms
-  ici_parallelism = fill_unspecified_mesh_axes(config.ici_parallelism, num_devices_per_slice, "ICI")
+  ici_parallelism = fill_unspecified_mesh_axes(config.ici_parallelism.copy(), num_devices_per_slice, "ICI")
 
   allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
 
   if multi_slice_env:
-    dcn_parallelism = fill_unspecified_mesh_axes(config.dcn_parallelism, num_slices, "DCN")
+    dcn_parallelism = fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN")
     if is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
       mesh = create_custom_device_mesh(ici_parallelism, dcn_parallelism, devices, config.custom_mesh)
     else:
