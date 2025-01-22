@@ -59,7 +59,7 @@ def main() -> int:
     delete_command = (
         f"python3 xpk/xpk.py workload delete "
         f" --project={cluster_config.project} --cluster={cluster_config.cluster_name}"
-        f" --filter-by-job={first_five_chars}"
+        f" --filter-by-job={first_five_chars} --zone={cluster_config.zone}"
     )
 
     print(f"Deleting workloads starting with: {first_five_chars}")
@@ -90,7 +90,11 @@ def main() -> int:
 
   base_output_directory = f"gs://{user}-{region}/{user}"
 
-  list_of_models = [model_configs.llama2_70b_4096_pw_long_run_v5e]
+  list_of_models = [
+    # model_configs.llama2_70b_4096_pw_long_run_v5e,
+    # model_configs.llama2_7b_4096_pw,
+    model_configs.default_basic_1_pw_v5e,
+  ]
 
   xpk_workload_cmds = []
   xpk_workload_names = []
