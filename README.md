@@ -59,7 +59,7 @@ More details on reproducing these results can be found in [MaxText/configs/READM
 
 | No. of params | Accelerator Type | TFLOP/chip/sec | Model flops utilization (MFU) |
 |---|---|---|---|
-| 32B | v5p-128 | 3.28e+02 | 71.47% |
+| 32B | v5p-128 | 3.28e+02 | 67.76% |
 | 64B | v5p-128 | 3.23e+02 | 70.31% |
 | 128B | v5p-256 | 3.15e+02 | 68.68% |
 | 128B | v5p-512 | 3.15e+02 | 68.53% |
