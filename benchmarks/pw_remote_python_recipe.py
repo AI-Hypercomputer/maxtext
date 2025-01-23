@@ -1,5 +1,4 @@
-"""
-Copyright 2025 Google LLC
+"""Copyright 2025 Google LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -57,7 +56,7 @@ def main() -> int:
     # Delete workloads starting with the first 5 characters of the user's name.
     first_five_chars = user[:5]
     delete_command = (
-        f"python3 xpk/xpk.py workload delete "
+        "python3 xpk/xpk.py workload delete "
         f" --project={cluster_config.project} --cluster={cluster_config.cluster_name}"
         f" --filter-by-job={first_five_chars} --zone={cluster_config.zone}"
     )
@@ -77,9 +76,7 @@ def main() -> int:
       "server:latest"
   )
   runner = f"gcr.io/{cluster_config.project}/{user}_latest:latest"
-  remote_python_image = (
-      f"gcr.io/{cluster_config.project}/{user}/remote_python_sidecar_latest:latest"
-  )
+  remote_python_image = f"gcr.io/{cluster_config.project}/{user}/remote_python_sidecar_latest:latest"
 
   pathways_config = mxr.PathwaysConfig(
       server_image=server_image,
@@ -91,9 +88,9 @@ def main() -> int:
   base_output_directory = f"gs://{user}-{region}/{user}"
 
   list_of_models = [
-    # model_configs.llama2_70b_4096_pw_long_run_v5e,
-    # model_configs.llama2_7b_4096_pw,
-    model_configs.default_basic_1_pw_v5e,
+      # model_configs.llama2_70b_4096_pw_long_run_v5e,
+      # model_configs.llama2_7b_4096_pw,
+      model_configs.default_basic_1_pw_v5e,
   ]
 
   xpk_workload_cmds = []
@@ -119,6 +116,7 @@ def main() -> int:
             base_docker_image="",
             pathways_config=pathways_config,
             xpk_path="xpk",
+            num_steps=1000000,
         )
         command, name = mxr.generate_xpk_workload_cmd(
             cluster_config=cluster_config, wl_config=wl_config

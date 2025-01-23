@@ -74,7 +74,7 @@ default_basic_1_pw_v5e = _add_to_model_dictionary(
         "dataset_type": "synthetic",
         "reuse_example_batch": 1,
         "enable_checkpointing": False,
-        "profiler": "xplane",
+        # "profiler": "xplane",
 
         # Additional tuning params for pathways long running test.
         "enable_checkpointing": True,
