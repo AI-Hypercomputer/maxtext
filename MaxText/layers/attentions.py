@@ -224,6 +224,8 @@ class AttentionOp(nn.Module):
       lengths: Array | None,
       model_mode: str,
       use_ragged_attention: bool = False,
+      chunk_id=None,
+      chunk_length=None,
   ):
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
@@ -237,7 +239,7 @@ class AttentionOp(nn.Module):
         or (self.attention_kernel == "autoselected" and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE)
         or (self.attention_kernel == "autoselected" and length < 128)
     ):
-      return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
+      return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode, chunk_id=chunk_id, chunk_length=chunk_length)
     elif self.attention_kernel == "flash" or self.attention_kernel == "autoselected":
       if isinstance(key, KVTensor):
         key = key.dequant()
@@ -478,6 +480,8 @@ class AttentionOp(nn.Module):
       value: Array | KVTensor,
       decoder_segment_ids: Array | None,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
+      chunk_id=None,
+      chunk_length=None,
   ):
     """Apply Attention."""
     validate_compute_axis_order(self.compute_axis_order)
@@ -1087,7 +1091,7 @@ class AttentionOp(nn.Module):
     return cached_prefill, cached_ar
 
   def kv_cache(
-      self, key: Array, value: Array, decoder_segment_ids: Array, model_mode: str, use_ragged_attention: bool = False
+      self, key: Array, value: Array, decoder_segment_ids: Array, model_mode: str, use_ragged_attention: bool = False, chunk_id=None,
   ) -> tuple:
     """KV cache takes the current state and updates the state accordingly.
 
@@ -1112,7 +1116,10 @@ class AttentionOp(nn.Module):
     if model_mode == common_types.MODEL_MODE_TRAIN:
       return (key, value, decoder_segment_ids), None
     elif model_mode == common_types.MODEL_MODE_PREFILL:
-      return self.kv_cache_prefill(key, value, decoder_segment_ids), None
+      if self.use_chunked_prefill and chunk_id == 0:
+        return self.kv_cache_prefill(key, value, decoder_segment_ids), None
+      else:
+        return self.kv_cache_prefill_chunked(key, value, decoder_segment_ids)
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       return self.kv_cache_autoregressive(key, value, use_ragged_attention)
     else:
@@ -1142,7 +1149,7 @@ class AttentionOp(nn.Module):
     return attn_out
 
   @nn.compact
-  def __call__(self, query, key, value, decoder_segment_ids, model_mode):
+  def __call__(self, query, key, value, decoder_segment_ids, model_mode, chunk_id, chunk_length):
     prefill_kv_cache, ar_kv_cache = self.kv_cache(
         key, value, decoder_segment_ids, model_mode, use_ragged_attention=self.use_ragged_attention
     )
@@ -1155,6 +1162,8 @@ class AttentionOp(nn.Module):
         lengths=None,
         model_mode=model_mode,
         use_ragged_attention=self.use_ragged_attention,
+        chunk_id=chunk_id,
+        chunk_length=chunk_length,
     )
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
@@ -1365,6 +1374,8 @@ class Attention(nn.Module):
       *,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
       deterministic: bool = False,
+      chunk_id=None,
+      chunk_length=None 
   ):
     """Applies Attention on the input data.
 
@@ -1447,7 +1458,7 @@ class Attention(nn.Module):
         ragged_block_size=self.ragged_block_size,
     )
 
-    out = attention_op(query, key, value, decoder_segment_ids, model_mode)
+    out = attention_op(query, key, value, decoder_segment_ids, model_mode, chunk_id=chunk_id, chunk_length=chunk_length)
 
     out = nn.with_logical_constraint(out, self.out_axis_names)
 
