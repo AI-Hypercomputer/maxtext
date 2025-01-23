@@ -426,6 +426,7 @@ class AttentionOp(nn.Module):
         scale_factor=1.0 / math.sqrt(head_dim),
         transpose_batch_sequence=False,
         window_size=sliding_window_size,
+        context_parallel_axis="sequence"
     )
     return dpa_layer(query, key, value, mask=attn_mask)
 

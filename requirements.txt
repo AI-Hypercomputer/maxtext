@@ -1,7 +1,7 @@
 jax>=0.4.30
 jaxlib>=0.4.30
 orbax-checkpoint>=0.5.12,<0.10.3
-absl-py
+absl-py>=2.1.0
 array-record
 aqtp
 cloud-accelerator-diagnostics
@@ -16,7 +16,7 @@ ml-collections
 ml-goodput-measurement
 numpy
 optax
-protobuf==3.20.3
+protobuf>=3.19.0
 pylint
 pytest
 pyink
@@ -25,7 +25,7 @@ pytype
 sentencepiece==0.1.97
 tensorflow-text>=2.13.0
 tensorflow>=2.13.0
-tensorflow-datasets
+tensorflow-datasets>=1.15.0
 tensorboardx
 tensorboard-plugin-profile
 tiktoken

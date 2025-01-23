@@ -213,17 +213,15 @@ def upload_blob(destination_gcs_name, source_file_name):
 def maybe_initialize_transformer_engine_comm_gemm_overlap(config, mesh):
   from transformer_engine.jax.gemm import initialize_comm_gemm_overlaps
   from mpi4py import MPI
-  # Only for MLP-in GeMM, right now.
-  # May need a way to express sharded dimensions?
+  # Only for MLP-in GeMMs, right now.
   # AG to generalize this later.
-
   initialize_comm_gemm_overlaps(
-      [config.micro_batch_size_to_train_on, config.max_target_length, config.base_mlp_dim],
-      mesh,
-      MPI.COMM_WORLD.Get_rank(),
-      MPI.COMM_WORLD.Get_size(),
-      tp_resource="tensor_sequence",
-      overlap_configs={"ag_gemm": dict()},
+        [config.micro_batch_size_to_train_on, config.max_target_length, config.base_mlp_dim],
+        mesh,
+        MPI.COMM_WORLD.Get_rank(),
+        MPI.COMM_WORLD.Get_size(),
+        tp_resource="tensor_sequence",
+        overlap_configs=config.overlap_config,
   )
 
 def maybe_destroy_transformer_engine_comm_gemm_overlap(config, mesh):

@@ -872,7 +872,7 @@ def train_loop(config, state=None):
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         if config.comm_gemm_overlap:
           import transformer_engine.jax as te
-          with te.sharding.global_shard_guard(te.MeshResource(tp_resource='tensor_sequence', cp_resource='tensor_sequence', dp_resource="data", fsdp_resource="fsdp")):
+          with te.sharding.global_shard_guard(te.MeshResource(tp_resource='tensor_sequence', cp_resource='sequence', dp_resource="data", fsdp_resource="fsdp")):
             state, metrics = p_train_step(state, example_batch, nextrng)
         else:
           state, metrics = p_train_step(state, example_batch, nextrng)

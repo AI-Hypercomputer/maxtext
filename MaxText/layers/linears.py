@@ -146,7 +146,7 @@ class DenseGeneral(nn.Module):
       def te_gemm_with_overlap(A, B):
           return te_gemm_impl(
               x=A,
-              kernel=jax.lax.with_sharding_constraint(B, NamedSharding(self.mesh, P(None, "tensor_sequence"))),
+              kernel=jax.lax.with_sharding_constraint(B, NamedSharding(self.mesh, P(None, "tensor_sequence"))) if self.comm_gemm_overlap_type=="fc1_fprop" else jax.lax.with_sharding_constraint(B, NamedSharding(self.mesh, P("tensor_sequence", None))),
               comm_overlap_name=self.comm_gemm_overlap_type
           )
 
@@ -276,8 +276,6 @@ class MlpBlock(nn.Module):
           quant=self.quant,
           use_bias=self.use_bias,
           matmul_precision=self.config.matmul_precision,
-          comm_gemm_overlap=self.config.comm_gemm_overlap,
-          comm_gemm_overlap_type="ag_gemm",
           mesh=self.mesh
       )(inputs)
       x = checkpoint_name(x, "mlpwi")
@@ -285,6 +283,7 @@ class MlpBlock(nn.Module):
         y = _convert_to_activation_function(act_fn)(x[:, :, idx, ...])
         activations.append(y)
     else:
+      comm_gemm_overlap = True
       for idx, act_fn in enumerate(self.activations):
         dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
         x = DenseGeneral(
@@ -297,10 +296,11 @@ class MlpBlock(nn.Module):
             quant=self.quant,
             use_bias=self.use_bias,
             matmul_precision=self.config.matmul_precision,
-            comm_gemm_overlap=self.config.comm_gemm_overlap,
-            comm_gemm_overlap_type="ag_gemm",
+            comm_gemm_overlap=comm_gemm_overlap,
+            comm_gemm_overlap_type="fc1_fprop",
             mesh=self.mesh
         )(inputs)
+        comm_gemm_overlap=False
         x = checkpoint_name(x, "mlp" + dense_name)
         if cfg.activations_in_float32:
           x = x.astype(jnp.float32)
@@ -324,8 +324,8 @@ class MlpBlock(nn.Module):
         quant=self.quant,
         use_bias=self.use_bias,
         matmul_precision=self.config.matmul_precision,
-        comm_gemm_overlap=False, #self.config.comm_gemm_overlap #hard-coded to False now for debugging
-        comm_gemm_overlap_type="gemm_rs",
+        comm_gemm_overlap=self.config.comm_gemm_overlap,
+        comm_gemm_overlap_type="fc2_fprop",
         mesh=self.mesh
     )(x)
 
