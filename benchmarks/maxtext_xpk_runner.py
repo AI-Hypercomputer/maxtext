@@ -387,6 +387,7 @@ def generate_xpk_workload_cmd(
   else:
     docker_image_flag = f'--base-docker-image="{wl_config.base_docker_image}"'
 
+
   print(f'User command: {user_command}')
   return (
       (

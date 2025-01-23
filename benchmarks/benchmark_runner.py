@@ -117,6 +117,7 @@ def add_shared_arguments(custom_parser: argparse.ArgumentParser):
       default='us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest',
       help='version of pathways runner image to be benchmarked command.',
   )
+  # TODO(sujinesh): Update the default image to the official one.
   custom_parser.add_argument(
       '--remote_python_sidecar_image',
       type=str,
