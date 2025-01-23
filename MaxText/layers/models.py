@@ -121,6 +121,7 @@ class DecoderLayer(nn.Module):
         name="mlp",
         config=cfg,
         quant=self.quant,
+        mesh=mesh,
     )(lnx, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
 

@@ -298,6 +298,28 @@ ici_autoregressive_parallelism: 1
 ici_pipeline_parallelism: 1
 ici_expert_parallelism: 1
 
+# Configs for TransformerEngine Communication-GeMM overlap
+comm_gemm_overlap: False
+overlap_config: {
+  "fc1_fprop": {
+      "method": "ring_exchange",  # "pipeline" for collective kernels instead of send/recv
+      "cga_size": 1,  # default is 2 for "pipeline"
+      "num_sm": 1,  # ignored for "ring_exchange", must be tuned for "pipeline"
+      "set_sm_margin": False,  # set to True for "pipeline"
+      "atomic_gemm": False,  # more performant when not using CUDA Graphs
+      "use_ce": True,  # ignored (always False) for "pipeline" method
+  },
+  "fc2_fprop": {
+      "method": "pipeline", #for collective kernels instead of send/recv
+      "num_splits": 4,  # independent of TP size for "pipeline"
+      "cga_size": 2,  # default is 2 for "pipeline"
+      "num_sm": 8,  # ignored for "ring_exchange", must be tuned for "pipeline"
+      "set_sm_margin": True,  # set to True for "pipeline"
+      "atomic_gemm": False,  # more performant when not using CUDA Graphs
+      "use_ce": False,  # ignored (always False) for "pipeline" method
+  },
+}
+
 # The number of TPU slices is automatically determined, you should not set this explicitly. For ahead of time compilation,
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
 num_slices: -1

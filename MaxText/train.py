@@ -644,6 +644,9 @@ def setup_mesh_and_model(config):
   devices_array = max_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
 
+  if config.comm_gemm_overlap:
+    max_utils.maybe_initialize_transformer_engine_comm_gemm_overlap(config, mesh)
+
   # Model and Optimizer definition
   quant = quantizations.configure_quantization(config)
   model = Transformer(config, mesh, quant=quant)
@@ -885,7 +888,12 @@ def train_loop(config, state=None):
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        state, metrics = p_train_step(state, example_batch, nextrng)
+        if config.comm_gemm_overlap:
+          import transformer_engine.jax as te
+          with te.sharding.global_shard_guard(te.MeshResource(tp_resource='tensor_sequence', cp_resource='sequence', dp_resource="data", fsdp_resource="fsdp")):
+            state, metrics = p_train_step(state, example_batch, nextrng)
+        else:
+          state, metrics = p_train_step(state, example_batch, nextrng)
 
     step_time_delta = datetime.datetime.now() - last_step_completion
     record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
@@ -970,6 +978,8 @@ def train_loop(config, state=None):
     checkpoint_manager.wait_until_finished()
   write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config)  # final step metrics
   max_utils.close_summary_writer(writer)
+  if config.comm_gemm_overlap:
+      max_utils.maybe_destroy_transformer_engine_comm_gemm_overlap(config, mesh)
   record_goodput(recorder, config, recorder.record_job_end_time if recorder else None)
   clear_buffered_metrics()
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):

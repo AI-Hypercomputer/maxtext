@@ -217,6 +217,23 @@ def upload_blob(destination_gcs_name, source_file_name):
   blob = bucket.blob(prefix_name)
   blob.upload_from_filename(source_file_name)
 
+def maybe_initialize_transformer_engine_comm_gemm_overlap(config, mesh):
+  from transformer_engine.jax.gemm import initialize_comm_gemm_overlaps
+  from mpi4py import MPI
+  # Only for MLP-in GeMMs, right now.
+  # AG to generalize this later.
+  initialize_comm_gemm_overlaps(
+        [config.micro_batch_size_to_train_on, config.max_target_length, config.base_mlp_dim],
+        mesh,
+        MPI.COMM_WORLD.Get_rank(),
+        MPI.COMM_WORLD.Get_size(),
+        tp_resource="tensor_sequence",
+        overlap_configs=config.overlap_config,
+  )
+
+def maybe_destroy_transformer_engine_comm_gemm_overlap(config, mesh):
+  from transformer_engine.jax.gemm import destroy_comm_gemm_overlaps
+  destroy_comm_gemm_overlaps()
 
 def upload_dump(local_dir, target_dir, module_name=None, delete_local_after=True, all_host_upload=False):
   """Uploads a directory to a GCS location, with an optional filter"""
@@ -283,7 +300,11 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     else:
       initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
     max_logging.log("Jax distributed system initialized!")
-
+  elif raw_keys["hardware"] == "gpu_mpi":
+    max_logging.log("Attempting to initialize the jax distributed system with MPI...")
+    from mpi4py import MPI
+    jax.distributed.initialize(cluster_detection_method="mpi4py", initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
+    max_logging.log("Jax distributed system initialized!")
 
 def initialize_jax_for_gpu(raw_keys):
   """Jax distributed initialize for GPUs."""

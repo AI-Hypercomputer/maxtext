@@ -104,6 +104,9 @@ class DenseGeneral(nn.Module):
   quant: Optional[Quant] = None
   use_bias: bool = False
   matmul_precision: str = "default"
+  comm_gemm_overlap: Optional[bool] = False
+  comm_gemm_overlap_type: Optional[str] = ""
+  mesh: Optional[Quant] = None
 
   @nn.compact
   def __call__(self, inputs: Array) -> Array:
@@ -125,6 +128,23 @@ class DenseGeneral(nn.Module):
         dot_general = dot_general_cls()
         return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
       return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision)
+
+    def transformer_engine_comm_gemm_overlap(inputs, kernel, axis, contract_ind):
+      from transformer_engine.jax.gemm import gemm as te_gemm_impl
+      from functools import partial
+      from jax.sharding import NamedSharding
+      from jax.sharding import PartitionSpec as P
+
+      def te_gemm_with_overlap(A, B):
+          return te_gemm_impl(
+              x=A,
+              kernel=jax.lax.with_sharding_constraint(B, NamedSharding(self.mesh, P(None, "tensor_sequence"))) if self.comm_gemm_overlap_type=="fc1_fprop" else jax.lax.with_sharding_constraint(B, NamedSharding(self.mesh, P("tensor_sequence", None))),
+              comm_overlap_name=self.comm_gemm_overlap_type
+          )
+
+      collective_gemm = jax.jit(partial(te_gemm_with_overlap))
+      out = collective_gemm(inputs, kernel)
+      return out
 
     features = _canonicalize_tuple(self.features)
     axis = _canonicalize_tuple(self.axis)
@@ -151,6 +171,8 @@ class DenseGeneral(nn.Module):
     kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(axis)))
+    if self.comm_gemm_overlap:
+      compute_dot_general = transformer_engine_comm_gemm_overlap
     output = compute_dot_general(inputs, kernel, axis, contract_ind)
 
     if self.use_bias:
@@ -196,6 +218,7 @@ class MlpBlock(nn.Module):
   use_bias: bool = False
   use_pre_norm: bool = False
   quant: Optional[Quant] = None
+  mesh: Optional = None
 
   def get_norm_layer(self):
     if self.config.decoder_block in ("default", "llama2", "mistral", "gemma"):
@@ -241,6 +264,7 @@ class MlpBlock(nn.Module):
         y = _convert_to_activation_function(act_fn)(x[:, :, idx, ...])
         activations.append(y)
     else:
+      comm_gemm_overlap = True
       for idx, act_fn in enumerate(self.activations):
         dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
         x = DenseGeneral(
@@ -253,7 +277,11 @@ class MlpBlock(nn.Module):
             quant=self.quant,
             use_bias=self.use_bias,
             matmul_precision=self.config.matmul_precision,
+            comm_gemm_overlap=self.config.comm_gemm_overlap,
+            comm_gemm_overlap_type="fc1_fprop",
+            mesh=self.mesh,
         )(inputs)
+        comm_gemm_overlap=False
         x = checkpoint_name(x, "mlp" + dense_name)
         if cfg.activations_in_float32:
           x = x.astype(jnp.float32)
@@ -277,6 +305,9 @@ class MlpBlock(nn.Module):
         quant=self.quant,
         use_bias=self.use_bias,
         matmul_precision=self.config.matmul_precision,
+        comm_gemm_overlap=self.config.comm_gemm_overlap,
+        comm_gemm_overlap_type="fc2_fprop",
+        mesh=self.mesh,
     )(x)
 
     output = checkpoint_name(output, "mlpwo")
