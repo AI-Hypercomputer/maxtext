@@ -21,6 +21,7 @@ limitations under the License.
 from flax import linen as nn
 from jax.sharding import Mesh
 import jax.numpy as jnp
+from jax.ad_checkpoint import checkpoint_name
 # from jax.experimental.pallas.ops.tpu import flash_attention
 from layers import attentions
 from layers import embeddings
@@ -77,8 +78,8 @@ class LlamaDecoderLayer(nn.Module):
     cfg = self.config
     mesh = self.mesh
 
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
-
+    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    inputs = checkpoint_name(inputs, "decoder_layer_input")
     lnx_rms = models.RMSNorm(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -88,7 +89,7 @@ class LlamaDecoderLayer(nn.Module):
     )
     lnx = lnx_rms(inputs)
 
-    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
+    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     # Self-attention block
     attention_layer = Attention(
@@ -110,6 +111,8 @@ class LlamaDecoderLayer(nn.Module):
         ar_cache_axis_order=tuple([int(i) for i in cfg.ar_cache_axis_order.split(",")]),
         compute_axis_order=tuple([int(i) for i in cfg.compute_axis_order.split(",")]),
         reshape_q=cfg.reshape_q,
+        use_ragged_attention=cfg.use_ragged_attention,
+        ragged_block_size=cfg.ragged_block_size,
     )
 
     attention_lnx = attention_layer(
@@ -121,7 +124,9 @@ class LlamaDecoderLayer(nn.Module):
         model_mode=model_mode,
     )
 
-    attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    attention_lnx = nn.with_logical_constraint(
+        attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
+    )
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
@@ -132,7 +137,9 @@ class LlamaDecoderLayer(nn.Module):
         kernel_axes=("norm",),
         epsilon=cfg.normalization_layer_epsilon,
     )(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(hidden_states, ("activation_batch", "activation_length", "activation_embed"))
+    hidden_states = nn.with_logical_constraint(
+        hidden_states, ("activation_batch", "activation_norm_length", "activation_embed")
+    )
 
     # MLP block.
     mlp_lnx = linears.MlpBlock(
@@ -145,7 +152,7 @@ class LlamaDecoderLayer(nn.Module):
         config=cfg,
         quant=self.quant,
     )(hidden_states, deterministic=deterministic)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     layer_output = mlp_lnx + intermediate_inputs
 
@@ -153,7 +160,7 @@ class LlamaDecoderLayer(nn.Module):
 
     layer_output = nn.with_logical_constraint(
         layer_output,
-        ("activation_batch", "activation_length", "activation_embed"),
+        ("activation_batch", "activation_norm_length", "activation_embed"),
     )
 
     if cfg.record_internal_nn_metrics:

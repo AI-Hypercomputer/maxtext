@@ -11,7 +11,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-""" A simple decoder layer consisting of a single [embed, embed] weight matrix for testing and debugging purposes."""
+""" Simple decoder layers for testing and debugging purposes."""
 
 from jax import numpy as jnp
 from flax import linen as nn
@@ -22,16 +22,19 @@ import common_types
 
 # pytype: disable=attribute-error
 
+
 class SimpleDecoderLayer(nn.Module):
+  """Decoder layer consisting of a single [embed, embed] weight matrix."""
+
   config: common_types.Config
   mesh: Mesh
   quant: Optional[quantizations.AqtQuantization] = None
 
   def setup(self):
     self.weight_mat = self.param(
-      'weights',
-      nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "mlp")),
-      (self.config.emb_dim, self.config.emb_dim)
+        "weights",
+        nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "mlp")),
+        (self.config.emb_dim, self.config.emb_dim),
     )
 
   def __call__(self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode):
@@ -39,3 +42,31 @@ class SimpleDecoderLayer(nn.Module):
       return inputs @ self.weight_mat.astype(inputs.dtype), None
     else:
       return inputs @ self.weight_mat.astype(inputs.dtype)
+
+
+class SimpleMlpDecoderLayer(nn.Module):
+  """Decoder layer consisting of [embed,mlp] followed by an [mlp,embed] matmul."""
+
+  config: common_types.Config
+  mesh: Mesh
+  quant: Optional[quantizations.AqtQuantization] = None
+
+  def setup(self):
+    self.ff_1 = self.param(
+        "ff_1",
+        nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("embed", "mlp")),
+        (self.config.emb_dim, self.config.mlp_dim),
+    )
+    self.ff_2 = self.param(
+        "ff_2",
+        nn.with_logical_partitioning(nn.initializers.lecun_normal(), ("mlp", "embed")),
+        (self.config.mlp_dim, self.config.emb_dim),
+    )
+
+  def __call__(self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode):
+    intermediate = inputs @ self.ff_1.astype(inputs.dtype)
+    output = intermediate @ self.ff_2.astype(inputs.dtype)
+    if self.config.scan_layers:
+      return output, None
+    else:
+      return output

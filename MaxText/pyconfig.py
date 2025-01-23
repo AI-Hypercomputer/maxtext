@@ -24,6 +24,7 @@ from typing import Any, Union
 
 import jax
 from jax.experimental.compilation_cache import compilation_cache
+from layers.attentions import AttentionType
 import accelerator_to_spec_map
 import max_logging
 import max_utils
@@ -57,6 +58,7 @@ def validate_compute_axis_order(s: str) -> None:
   if s not in valid_compute_axis_order:  # currently supported compute_axis_order
     raise ValueError("Invalid compute_axis_order was passed. Valid options ", valid_compute_axis_order)
 
+
 def validate_kv_quant_axis(s: str, quantize_kvcache: bool) -> None:
   valid_kv_quant_axis = ("", "dkv", "heads_and_dkv")
   if s not in valid_kv_quant_axis:  # currently supported kv_quant_axis
@@ -64,10 +66,18 @@ def validate_kv_quant_axis(s: str, quantize_kvcache: bool) -> None:
   if quantize_kvcache and s == "":
     raise ValueError("kv_quant_axis can not be '' when quantize_kvcache is True")
 
+
+def validate_attention_kernel(s: str) -> None:
+  valid_attention_kernels = ("autoselected", "dot_product", "flash", "cudnn_flash_te")
+  if s not in valid_attention_kernels:  # currently supported attention
+    raise ValueError("Invalid attention kernel was passed. Valid options ", valid_attention_kernels)
+
+
 def validate_attention_type(s: str) -> None:
-  valid_attention_types = ("autoselected", "dot_product", "flash", "cudnn_flash_te")
+  valid_attention_types = (attention_type.value for attention_type in AttentionType)
   if s not in valid_attention_types:  # currently supported attention
     raise ValueError("Invalid attention type was passed. Valid options ", valid_attention_types)
+
 
 def validate_profiler_type(s: str) -> None:
   valid_profiler_types = ("", "nsys", "xplane")
@@ -75,11 +85,43 @@ def validate_profiler_type(s: str) -> None:
     raise ValueError("Invalid profiler type was passed. Valid options ", valid_profiler_types)
 
 
+def validate_periodic_profiler(profiler, profile_periodically_period, profiler_steps):
+  if profile_periodically_period <= 0:
+    return
+  if not profiler:
+    raise ValueError("Periodic profiler requested but no profiler was set, set it via profiler=xplane or profiler=nsys")
+  if profile_periodically_period < profiler_steps:
+    raise ValueError(
+        f"You must set the profile_periodically_period {profile_periodically_period} at least as long profiler_steps {profiler_steps}."
+    )
+
+
+def validate_model_call_mode(s: str) -> None:
+  valid_model_call_modes = ("", "inference")
+  if s not in valid_model_call_modes:  # currently supported attention
+    raise ValueError(f"Invalid model call mode {s}. Valid options are {valid_model_call_modes}")
+
+
+def validate_prefill_and_target_lengths(max_prefill_length: int, max_target_length: int) -> None:
+  if max_prefill_length <= 0:
+    raise ValueError(f"Invalid max_prefill_predict_length {max_prefill_length}, it should be a positive number")
+  if max_target_length < max_prefill_length:
+    # valid max_target_length = max_prefill_length for existing logit checks
+    raise ValueError(
+        f"Invalid max_target_length {max_target_length}, this should be sum of "
+        f"max_prefill_predict_length ({max_prefill_length}) and max output length expected."
+    )
+
+
 def validate_keys(keys):
-  validate_attention_type(keys["attention"])
+  validate_attention_kernel(keys["attention"])
+  validate_attention_type(keys["attention_type"])
   validate_profiler_type(keys["profiler"])
+  validate_periodic_profiler(keys["profiler"], keys["profile_periodically_period"], keys["profiler_steps"])
   validate_compute_axis_order(keys["compute_axis_order"])
   validate_kv_quant_axis(keys["kv_quant_axis"], keys["quantize_kvcache"])
+  validate_model_call_mode(keys["model_call_mode"])
+  validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
 
   assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys[
       "enable_checkpointing"
@@ -88,10 +130,23 @@ def validate_keys(keys):
       keys["load_parameters_path"] == "" or keys["load_full_state_path"] == ""
   ), "At most one of `load_parameters_path` or `load_full_state_path` should be set"
   if keys["enable_emergency_checkpoint"]:
-    assert keys["local_checkpoint_directory"] != "", "A local checkpoint directory must be specified when using emergency checkpoint"
-    assert keys["local_checkpoint_period"] > 0, "A positive local checkpoint period must be specified when using emergency checkpoint"
+    assert (
+        keys["local_checkpoint_directory"] != ""
+    ), "A local checkpoint directory must be specified when using emergency checkpoint"
+    assert (
+        keys["local_checkpoint_period"] > 0
+    ), "A positive local checkpoint period must be specified when using emergency checkpoint"
+    if keys["use_replicator_service"]:
+      assert (
+          keys["replicator_backup_interval_minutes"] > 0
+      ), "Replicator service is enabled, the backup interval minutes must be positive"
   else:
-    max_logging.log("Not using emergency checkpoint, ignoring local_checkpoint_directory and local_checkpoint_period")
+    max_logging.log(
+        "Not using emergency checkpoint, ignoring local_checkpoint_directory, local_checkpoint_period,"
+        " use_replicator_service and replicator_backup_interval_minutes"
+    )
+
+  validate_multiple_slices(keys)
   if keys["num_experts"] > 1:
     validate_megablox_parallelism(keys)
 
@@ -103,29 +158,33 @@ def validate_data_input(keys):
         f"dataset_type set to hf, will use {keys['hf_path']=}, {keys['hf_data_dir']=} and {keys['hf_train_files']=} to read data"
     )
     assert keys["hf_path"] != "", "hf_path can't be empty when dataset_type=hf"
-    if not keys['hf_train_files']:
-      keys['hf_train_files'] = None
-    if not keys['hf_eval_files']:
-      keys['hf_eval_files'] = None
-    if keys['hf_eval_files']:
-      keys['hf_eval_split'] = 'train'
-    if keys['eval_interval'] > 0:
-      assert keys['hf_eval_split'], "Please specify hf_eval_split or set eval_interval to <=0."
+    if not keys["hf_train_files"]:
+      keys["hf_train_files"] = None
+    if not keys["hf_eval_files"]:
+      keys["hf_eval_files"] = None
+    if keys["hf_eval_files"]:
+      keys["hf_eval_split"] = "train"
+    if keys["eval_interval"] > 0:
+      assert keys["hf_eval_split"], "Please specify hf_eval_split or set eval_interval to <=0."
 
   elif keys["dataset_type"] == "grain":
     max_logging.log(
         f"dataset_type set to grain, will use {keys['grain_train_files']=} as data files, and {keys['grain_worker_count']} workers"
     )
-    assert keys['grain_train_files'] != "", "grain_train_files can't be empty when dataset_type=grain"
-    if keys['eval_interval'] > 0:
-      assert keys['grain_eval_files'], "Please specify grain_eval_files or set eval_interval to <=0."
+    assert keys["grain_train_files"] != "", "grain_train_files can't be empty when dataset_type=grain"
+    if keys["eval_interval"] > 0:
+      assert keys["grain_eval_files"], "Please specify grain_eval_files or set eval_interval to <=0."
   elif keys["dataset_type"] == "tfds":
-    max_logging.log(
-        f"dataset_type set to tfds, will use {keys['dataset_path']=} and {keys['dataset_name']=}"
-    )
-    assert keys['dataset_name'] != "", "dataset_name can't be empty when dataset_type=tfds"
-    if keys['eval_interval'] > 0:
+    max_logging.log(f"dataset_type set to tfds, will use {keys['dataset_path']=} and {keys['dataset_name']=}")
+    assert keys["dataset_name"] != "", "dataset_name can't be empty when dataset_type=tfds"
+    if keys["eval_interval"] > 0:
       assert keys["eval_split"], "Please specify eval_split or set eval_interval to <=0."
+
+  if keys["sharding_tolerance"] > 1.0 or keys["sharding_tolerance"] < 0.0:
+    max_logging.log(
+        "WARNING: 'sharding_tolerance: allowed percentage of non-sharded parameters' should be between 0.0 and 1.0"
+    )
+
 
 def validate_model_name(s: str) -> bool:
   """Validate provided model name."""
@@ -137,17 +196,24 @@ def validate_model_name(s: str) -> bool:
       "llama2-70b",
       "llama3-8b",
       "llama3-70b",
+      "llama3.1-8b",
+      "llama3.1-70b",
+      "llama3.1-405b",
       "mistral-7b",
       "mixtral-8x7b",
+      "mixtral-8x22b",
       "gemma-7b",
       "gemma-2b",
+      "gemma2-2b",
+      "gemma2-9b",
+      "gemma2-27b",
       "gpt3-175b",
       "gpt3-22b",
       "gpt3-6b",
       "gpt3-52k",
   )
   if s not in valid_model_names:
-    raise ValueError("Invalid model name was passed. Valid options ", valid_model_names)
+    raise ValueError(f"Invalid model name was passed. Got {s}, Valid options {valid_model_names}")
 
 
 def validate_no_keys_overwritten_twice(keys1: list[str], keys2: list[str]):
@@ -159,14 +225,37 @@ def validate_no_keys_overwritten_twice(keys1: list[str], keys2: list[str]):
     )
 
 
+def validate_and_assign_remat_tensors(keys):
+  # list of allowed tensors for custom remat policy
+  tensors = [
+      "decoder_layer_input",
+      "context",
+      "mlpwi",
+      "mlpwi_0",
+      "mlpwi_1",
+      "mlpwo",
+      "query_proj",
+      "key_proj",
+      "value_proj",
+      "out_proj",
+  ]
+  assert keys["decoder_layer_input"] != "remat", "Cannot remeterialize this tensor with scan_layers=True"
+  tensors_on_device = []
+  tensors_to_offload = []
+  for t in tensors:
+    if keys[t] == "device":
+      tensors_on_device.append(t)
+    elif keys[t] == "offload":
+      tensors_to_offload.append(t)
+    elif keys[t] != "remat":
+      raise ValueError(f"Invalid value chosen for tensor {t}")
+  keys["tensors_on_device"] = tensors_on_device
+  keys["tensors_to_offload"] = tensors_to_offload
+  return keys
+
+
 _config = None
 config = None
-
-
-def print_system_information():
-  max_logging.log(f"System Information: Jax Version: {jax.__version__}")
-  max_logging.log(f"System Information: Jaxlib Version: {jax.lib.__version__}")
-  max_logging.log(f"System Information: Jax Backend: {jax.lib.xla_bridge.get_backend().platform_version}")
 
 
 def _lists_to_tuples(l: list[Any]) -> Union[tuple[Any], list[Any]]:
@@ -268,15 +357,20 @@ class _HyperParameters:
     max_logging.log(f"Updating keys from model: {keys_from_model}")
     validate_no_keys_overwritten_twice(keys_from_env_and_command_line, keys_from_model)
 
+    # This must be invoked before initializing the backend
+    raw_keys = validate_and_set_hlo_dump_defaults(raw_keys)
+
     # We initialize the jax distributed system here because it must be done before device backend is initialized.
+    if raw_keys["jax_debug_log_modules"]:
+      jax.config.update("jax_debug_log_modules", raw_keys["jax_debug_log_modules"])
     max_utils.maybe_initialize_jax_distributed_system(raw_keys)
 
     if raw_keys["jax_cache_dir"]:
       compilation_cache.set_cache_dir(os.path.expanduser(raw_keys["jax_cache_dir"]))
 
-    if raw_keys["model_name"] == "gpt3-175b":
-      _HyperParameters.configure_gpt3_task(raw_keys)
     _HyperParameters.user_init(raw_keys)
+    if raw_keys["dataset_type"] == "c4_mlperf" and raw_keys["model_name"] == "gpt3-175b":
+      _HyperParameters.configure_gpt3_task(raw_keys)
 
     if not os.path.isfile(raw_keys["tokenizer_path"]):
       # Try and find the tokenizer path relative to the config file.
@@ -291,8 +385,10 @@ class _HyperParameters:
     self.keys = raw_keys
     keys = [k for k in raw_keys]  # pylint: disable=unnecessary-comprehension
     keys.sort()
-    for k in keys:
-      max_logging.log(f"Config param {k}: {raw_keys[k]}")
+
+    if raw_keys["log_config"]:
+      for k in keys:
+        max_logging.log(f"Config param {k}: {raw_keys[k]}")
 
   @staticmethod
   def user_init(raw_keys):
@@ -311,6 +407,11 @@ class _HyperParameters:
     if raw_keys["steps"] == -1:
       raw_keys["steps"] = raw_keys["learning_rate_schedule_steps"]
 
+    if raw_keys["attn_logits_soft_cap"] == 0.0:
+      raw_keys["attn_logits_soft_cap"] = None
+    if raw_keys["final_logits_soft_cap"] == 0.0:
+      raw_keys["final_logits_soft_cap"] = None
+
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(raw_keys["global_parameter_scale"])
     raw_keys["emb_dim"] = 2**emb_scale * raw_keys["base_emb_dim"]
     raw_keys["num_query_heads"] = 2**num_head_scale * raw_keys["base_num_query_heads"]
@@ -318,27 +419,39 @@ class _HyperParameters:
     raw_keys["mlp_dim"] = 2**mlp_dim_scale * raw_keys["base_mlp_dim"]
     raw_keys["num_decoder_layers"] = 2**layer_scale * raw_keys["base_num_decoder_layers"]
 
-    raw_keys["global_batch_size_to_load"], raw_keys["global_batch_size_to_train_on"] = calculate_global_batch_sizes(raw_keys)
-    raw_keys["num_slices"] = get_num_slices(raw_keys)
+    # This is the first command that initializes the backend - it calls
+    # jax.devices()
+    (
+        raw_keys["global_batch_size_to_load"],
+        raw_keys["global_batch_size_to_train_on"],
+        raw_keys["micro_batch_size_to_train_on"],
+    ) = calculate_global_batch_sizes(
+        raw_keys["per_device_batch_size"],
+        raw_keys["expansion_factor_real_data"],
+        get_num_target_devices(raw_keys),
+        raw_keys["gradient_accumulation_steps"],
+    )
+
+    if raw_keys["eval_per_device_batch_size"] <= 0:
+      raw_keys["eval_per_device_batch_size"] = raw_keys["per_device_batch_size"]
+
+    (
+        raw_keys["global_batch_size_to_load_eval"],
+        raw_keys["global_batch_size_to_eval_on"],
+        raw_keys["micro_batch_size_to_eval_on"],
+    ) = calculate_global_batch_sizes(
+        raw_keys["eval_per_device_batch_size"], raw_keys["expansion_factor_real_data"], get_num_target_devices(raw_keys), 1
+    )
+
+    raw_keys["num_slices"] = max_utils.get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)
+    raw_keys = create_parallelisms_list(raw_keys)
+    raw_keys = set_and_validate_pipeline_config(raw_keys)
 
-    if using_pipeline_parallelism(raw_keys):
-      raw_keys["using_pipeline_parallelism"] = True
-      num_stages = int(raw_keys['ici_pipeline_parallelism'] * raw_keys['dcn_pipeline_parallelism'])
-      if raw_keys['num_pipeline_repeats'] == -1:
-        num_pipeline_repeats, remainder = divmod(raw_keys['num_decoder_layers'], num_stages * raw_keys['num_layers_per_pipeline_stage'])
-        assert not remainder, f"The number of layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) times the number of stages ({num_stages}) must divide the number of decoder layers ({raw_keys['num_decoder_layers']}) "
-        raw_keys['num_pipeline_repeats'] = num_pipeline_repeats
-      assert num_stages * raw_keys['num_pipeline_repeats'] * raw_keys['num_layers_per_pipeline_stage'] == raw_keys['num_decoder_layers'], f"The product of pipeline stages ({num_stages}), repeats ({raw_keys['num_pipeline_repeats']}), and layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) must be equal to the number of layers ({raw_keys['num_decoder_layers']})"
-      if raw_keys['num_pipeline_microbatches'] == -1:
-        raw_keys['num_pipeline_microbatches'] = num_stages
-      assert raw_keys['num_pipeline_microbatches'] % num_stages == 0, f"The number of microbatches ({raw_keys['num_pipeline_microbatches']}) must be divisible by the number of stages ({num_stages})"
-      assert raw_keys['global_batch_size_to_train_on'] % raw_keys['num_pipeline_microbatches'] == 0, f"The global batch size ({raw_keys['global_batch_size_to_train_on']}) must be divisible by the number of microbatches ({raw_keys['num_pipeline_microbatches']})"
-    else:
-      raw_keys["using_pipeline_parallelism"] = False
-
-
-    print_system_information()
+    if raw_keys["dataset_type"] == "c4_mlperf":
+      raw_keys["add_bos"] = False
+      raw_keys["add_eos"] = False
+      max_logging.log("Override add_bos and add_eos to False when dataset_type=c4_mlperf")
 
     # Write raw_keys to GCS before type conversions
     max_utils.write_config_raw_keys_for_gcs(raw_keys)
@@ -348,6 +461,8 @@ class _HyperParameters:
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
 
+    if raw_keys["remat_policy"] == "custom":
+      raw_keys = validate_and_assign_remat_tensors(raw_keys)
     validate_keys(raw_keys)
     validate_data_input(raw_keys)
 
@@ -356,16 +471,15 @@ class _HyperParameters:
     """dynamically configure gpt3 task based on training rules"""
     # follow https://github.com/google/paxml/blob/19db52eed85ae0d2365339b83a97cd0b873bbf73/paxml/tasks/lm/params/c4.py#L280
     #   according to training_rules of mlperf gpt3 training
-    global_batch_size = calculate_global_batch_sizes(raw_keys)[1]
-    if global_batch_size <= 3584:
+    global_batch_size_to_train_on = raw_keys["global_batch_size_to_train_on"]
+    if global_batch_size_to_train_on <= 3584:
       raw_keys["learning_rate"] = 2e-5
     else:
       raw_keys["learning_rate"] = 3e-5
-    warmup_steps = math.ceil(265.0 * 1536 / global_batch_size - 1e-6)
-    decay_end_step = math.ceil(108600.0 * 1536 / global_batch_size - 1e-6)
+    warmup_steps = math.ceil(265.0 * 1536 / global_batch_size_to_train_on - 1e-6)
+    decay_end_step = math.ceil(108600.0 * 1536 / global_batch_size_to_train_on - 1e-6)
     raw_keys["learning_rate_schedule_steps"] = decay_end_step
     raw_keys["warmup_steps_fraction"] = warmup_steps / decay_end_step
-    global_batch_size_to_train_on = calculate_global_batch_sizes(raw_keys)[1]
     raw_keys["eval_interval"] = math.ceil(24567 / global_batch_size_to_train_on)
 
   @staticmethod
@@ -389,13 +503,189 @@ class _HyperParameters:
       raw_keys = validate_and_update_keys(raw_keys, model_vars, config_name)
     return updated_keys
 
+
+def create_parallelisms_list(raw_keys):
+  ici_parallelism = [
+      raw_keys["ici_data_parallelism"],
+      raw_keys["ici_pipeline_parallelism"],
+      raw_keys["ici_fsdp_parallelism"],
+      raw_keys["ici_fsdp_transpose_parallelism"],
+      raw_keys["ici_sequence_parallelism"],
+      raw_keys["ici_tensor_parallelism"],
+      raw_keys["ici_tensor_sequence_parallelism"],
+      raw_keys["ici_expert_parallelism"],
+      raw_keys["ici_autoregressive_parallelism"],
+  ]
+  dcn_parallelism = [
+      raw_keys["dcn_data_parallelism"],
+      raw_keys["dcn_pipeline_parallelism"],
+      raw_keys["dcn_fsdp_parallelism"],
+      raw_keys["dcn_fsdp_transpose_parallelism"],
+      raw_keys["dcn_sequence_parallelism"],
+      raw_keys["dcn_tensor_parallelism"],
+      raw_keys["dcn_tensor_sequence_parallelism"],
+      raw_keys["dcn_expert_parallelism"],
+      raw_keys["dcn_autoregressive_parallelism"],
+  ]
+  raw_keys["ici_parallelism"] = ici_parallelism
+  raw_keys["dcn_parallelism"] = dcn_parallelism
+  return raw_keys
+
+
+def validate_and_set_hlo_dump_defaults(raw_keys):
+  if not raw_keys["dump_hlo"]:
+    return raw_keys
+  if os.environ.get("XLA_FLAGS") and raw_keys["dump_hlo_xla_flags"]:
+    raise ValueError("You must set either XLA_FLAGS or dump_hlo_xla_flags to dump HLO, but not both.")
+  if not os.environ.get("XLA_FLAGS") and not raw_keys["dump_hlo_xla_flags"]:
+    raw_keys["dump_hlo_xla_flags"] = f"--xla_dump_to={raw_keys['dump_hlo_local_dir']} --xla_dump_large_constants"
+    if raw_keys["dump_hlo_module_name"]:
+      raw_keys["dump_hlo_xla_flags"] = (
+          f"{raw_keys['dump_hlo_xla_flags']} --xla_dump_hlo_module_re={raw_keys['dump_hlo_module_name']}"
+      )
+  if not raw_keys["dump_hlo_gcs_dir"]:
+    raw_keys["dump_hlo_gcs_dir"] = os.path.join(raw_keys["base_output_directory"], raw_keys["run_name"], "xla_dump")
+  else:
+    raw_keys["dump_hlo_gcs_dir"] = max_utils.add_trailing_slash(raw_keys["dump_hlo_gcs_dir"])
+  if not os.environ.get("XLA_FLAGS"):
+    os.environ["XLA_FLAGS"] = raw_keys["dump_hlo_xla_flags"]
+  return raw_keys
+
+
+def validate_multiple_slices(raw_keys):
+  if (
+      math.fabs(
+          math.prod(
+              [
+                  raw_keys["dcn_data_parallelism"],
+                  raw_keys["dcn_pipeline_parallelism"],
+                  raw_keys["dcn_fsdp_parallelism"],
+                  raw_keys["dcn_fsdp_transpose_parallelism"],
+                  raw_keys["dcn_sequence_parallelism"],
+                  raw_keys["dcn_tensor_parallelism"],
+                  raw_keys["dcn_tensor_sequence_parallelism"],
+                  raw_keys["dcn_expert_parallelism"],
+                  raw_keys["dcn_autoregressive_parallelism"],
+              ]
+          )
+      )
+      > 1
+  ):
+    assert raw_keys["num_slices"] > 1, "DCN parallelism requested but only one slice available."
+
+
+def set_and_validate_pipeline_config(raw_keys):
+  if using_pipeline_parallelism(raw_keys):
+
+    def modify_activation_embed_and_logits_batch(logical_axis_rules):
+      for idx, logical_rule in enumerate(logical_axis_rules):
+        if logical_rule[0] == "activation_embed_and_logits_batch":
+          # For pipeline parallelism the pre and post decoder layer tensors' batch dimension is sharded by stages.
+          # Microbatches are sharded by stage, so moving out of and into this sharding should be a local reshape.
+          # The "stage" needs to be listed first since the microbatch dimension is first before the reshape.
+          logical_axis_rules[idx] = [
+              "activation_embed_and_logits_batch",
+              ["stage", "data", "fsdp", "fsdp_transpose", "expert"],
+          ]
+          break  # Exit the loop after modifying the list
+      return logical_axis_rules
+
+    def pipeline_first_axis(raw_keys):
+      # We have seen better performance when axes used for DCN are earlier in this list than ICI, see (b/339009148) for details
+      ici_parallelism = [
+          raw_keys["ici_pipeline_parallelism"],
+          raw_keys["ici_data_parallelism"],
+          raw_keys["ici_fsdp_parallelism"],
+          raw_keys["ici_fsdp_transpose_parallelism"],
+          raw_keys["ici_sequence_parallelism"],
+          raw_keys["ici_tensor_parallelism"],
+          raw_keys["ici_tensor_sequence_parallelism"],
+          raw_keys["ici_expert_parallelism"],
+          raw_keys["ici_autoregressive_parallelism"],
+      ]
+      dcn_parallelism = [
+          raw_keys["dcn_pipeline_parallelism"],
+          raw_keys["dcn_data_parallelism"],
+          raw_keys["dcn_fsdp_parallelism"],
+          raw_keys["dcn_fsdp_transpose_parallelism"],
+          raw_keys["dcn_sequence_parallelism"],
+          raw_keys["dcn_tensor_parallelism"],
+          raw_keys["dcn_tensor_sequence_parallelism"],
+          raw_keys["dcn_expert_parallelism"],
+          raw_keys["dcn_autoregressive_parallelism"],
+      ]
+      mesh_axes = [
+          "stage",
+          "data",
+          "fsdp",
+          "fsdp_transpose",
+          "sequence",
+          "tensor",
+          "tensor_sequence",
+          "expert",
+          "autoregressive",
+      ]
+      data_sharding = [
+          ["stage", "data", "fsdp", "fsdp_transpose", "sequence", "tensor", "tensor_sequence", "expert", "autoregressive"]
+      ]
+
+      raw_keys["ici_parallelism"] = ici_parallelism
+      raw_keys["dcn_parallelism"] = dcn_parallelism
+      raw_keys["mesh_axes"] = mesh_axes
+      raw_keys["data_sharding"] = data_sharding
+      return raw_keys
+
+    raw_keys["using_pipeline_parallelism"] = True
+    raw_keys["logical_axis_rules"] = modify_activation_embed_and_logits_batch(raw_keys["logical_axis_rules"])
+    raw_keys = pipeline_first_axis(raw_keys)
+    num_stages = int(raw_keys["ici_pipeline_parallelism"] * raw_keys["dcn_pipeline_parallelism"])
+    if raw_keys["num_pipeline_repeats"] == -1:
+      num_pipeline_repeats, remainder = divmod(
+          raw_keys["num_decoder_layers"], num_stages * raw_keys["num_layers_per_pipeline_stage"]
+      )
+      assert (
+          not remainder
+      ), f"The number of layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) times the number of stages ({num_stages}) must divide the number of decoder layers ({raw_keys['num_decoder_layers']}) "
+      raw_keys["num_pipeline_repeats"] = num_pipeline_repeats
+    assert (
+        num_stages * raw_keys["num_pipeline_repeats"] * raw_keys["num_layers_per_pipeline_stage"]
+        == raw_keys["num_decoder_layers"]
+    ), f"The product of pipeline stages ({num_stages}), repeats ({raw_keys['num_pipeline_repeats']}), and layers per stage ({raw_keys['num_layers_per_pipeline_stage']}) must be equal to the number of layers ({raw_keys['num_decoder_layers']})"
+    if raw_keys["num_pipeline_microbatches"] == -1:
+      if raw_keys["pipeline_delay_activation_forwarding"]:
+        raw_keys["num_pipeline_microbatches"] = 2 * num_stages
+      else:
+        raw_keys["num_pipeline_microbatches"] = num_stages
+    assert (
+        raw_keys["num_pipeline_microbatches"] % num_stages == 0
+    ), f"The number of microbatches ({raw_keys['num_pipeline_microbatches']}) must be divisible by the number of stages ({num_stages})"
+    assert (
+        raw_keys["micro_batch_size_to_train_on"] % raw_keys["num_pipeline_microbatches"] == 0
+    ), f"The batch size ({raw_keys['micro_batch_size_to_train_on']}) must be divisible by the number of microbatches ({raw_keys['num_pipeline_microbatches']})"
+    if raw_keys["pipeline_delay_activation_forwarding"]:
+      assert (
+          raw_keys["num_pipeline_microbatches"] >= 2 * num_stages
+      ), f"Delayed activation forwarding requires at least 2 * num_stages microbatches, but {num_stages} stages are used with {raw_keys['num_pipeline_microbatches']} microbatches"
+  else:
+    raw_keys["using_pipeline_parallelism"] = False
+  return raw_keys
+
+
 def validate_megablox_parallelism(raw_keys):
-  if raw_keys["megablox"] and (using_sequence_parallelism(raw_keys) or
-                               using_pipeline_parallelism(raw_keys)):
+  if raw_keys["megablox"] and (
+      using_sequence_parallelism(raw_keys) or using_pipeline_parallelism(raw_keys) or using_expert_parallelism(raw_keys)
+  ):
     raise ValueError("Currently we only support Megablox with data and tensor parallelism.")
-  tensor_parallelism = raw_keys["ici_tensor_parallelism"] * raw_keys["dcn_tensor_parallelism"]
+  tensor_parallelism = (
+      raw_keys["ici_tensor_parallelism"]
+      * raw_keys["dcn_tensor_parallelism"]
+      * raw_keys["ici_tensor_sequence_parallelism"]
+      * raw_keys["dcn_tensor_sequence_parallelism"]
+  )
   if raw_keys["megablox"] and using_tensor_parallelism(raw_keys) and (raw_keys["emb_dim"] % tensor_parallelism):
-    raise ValueError(f"The embedding dimension {raw_keys['emb_dim']} is not divisible by tensor parallelism setting {tensor_parallelism}.")
+    raise ValueError(
+        f"The embedding dimension {raw_keys['emb_dim']} is not divisible by tensor parallelism setting {tensor_parallelism}."
+    )
 
 
 def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules):
@@ -407,25 +697,28 @@ def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules
       continue
     replacements.append((logical_axis, mesh_axes))
     new_logical_axis.add(logical_axis)
-  old_logical_rules_filtered = [(old_logical_axis, _lists_to_tuples(old_mesh_axes)) for old_logical_axis, old_mesh_axes
-                                  in old_logical_axis_rules if old_logical_axis not in new_logical_axis]
+  old_logical_rules_filtered = [
+      (old_logical_axis, _lists_to_tuples(old_mesh_axes))
+      for old_logical_axis, old_mesh_axes in old_logical_axis_rules
+      if old_logical_axis not in new_logical_axis
+  ]
   return old_logical_rules_filtered + replacements
 
 
 def update_model_keys(raw_keys, model_keys, key):
-  """Update `key` value in `raw_keys` from the value in `model_keys`. """
+  """Update `key` value in `raw_keys` from the value in `model_keys`."""
   assert key in model_keys and key in raw_keys
-  if key == 'logical_axis_rules':
+  if key == "logical_axis_rules":
     raw_keys[key] = create_new_logical_axis_rules(
-      old_logical_axis_rules=raw_keys[key],
-      new_logical_axis_rules=model_keys[key])
+        old_logical_axis_rules=raw_keys[key], new_logical_axis_rules=model_keys[key]
+    )
     return
   raw_keys[key] = model_keys[key]
+
 
 def validate_and_update_keys(raw_keys, model_keys, config_name: str):
   """Validate and update model specific config keys"""
   max_logging.log("Updating following parameters in config\n")
-
 
   for k in model_keys:
     max_logging.log(f"{k}: {model_keys[k]}")
@@ -461,49 +754,37 @@ def get_individual_scales(scale):
   return emb_scale, num_head_scale, mlp_dim_scale, layer_scale
 
 
-def calculate_global_batch_sizes(raw_keys):
+def calculate_global_batch_sizes(
+    per_device_batch_size, expansion_factor_real_data, num_devices, gradient_accumulation_steps
+):
   """Calculates target global batch size from target devices and per_device_batch"""
-  per_device_batch_size = raw_keys["per_device_batch_size"]
-  expansion_factor_real_data = raw_keys["expansion_factor_real_data"]
-  num_devices = get_num_target_devices(raw_keys)
   if per_device_batch_size < 1.0:
     # For per_device_batch_size<1, we load the data as if per_device_batch_size=1
     if expansion_factor_real_data != -1:
-      global_batch_size_to_load = num_devices * expansion_factor_real_data
+      micro_batch_size_to_load = num_devices * expansion_factor_real_data
     else:
-      global_batch_size_to_load = num_devices
+      micro_batch_size_to_load = num_devices
   else:
     if expansion_factor_real_data != -1:
-      global_batch_size_to_load = int(num_devices * per_device_batch_size * expansion_factor_real_data)
+      micro_batch_size_to_load = int(num_devices * per_device_batch_size * expansion_factor_real_data)
     else:
-      global_batch_size_to_load = int(num_devices * per_device_batch_size)
+      micro_batch_size_to_load = int(num_devices * per_device_batch_size)
 
-  global_batch_size_to_train_on = int(num_devices * per_device_batch_size)
-  return global_batch_size_to_load, global_batch_size_to_train_on
+  micro_batch_size_to_train_on = int(num_devices * per_device_batch_size)
+  global_batch_size_to_load = int(micro_batch_size_to_load * gradient_accumulation_steps)
+  global_batch_size_to_train_on = int(micro_batch_size_to_train_on * gradient_accumulation_steps)
+  return global_batch_size_to_load, global_batch_size_to_train_on, micro_batch_size_to_train_on
 
 
 def get_num_target_devices(raw_keys):
-  compile_topology = accelerator_to_spec_map.get_system_characteristics(raw_keys.get("compile_topology", ""))
-  if compile_topology is not None:
+  # In AOT case compile_topology is set (e.g. is not the empty string), and we determine the
+  # number of devices from the compile_topology. In non-AOT settings we simply can use jax.devices().
+  if raw_keys.get("compile_topology"):
+    compile_topology = accelerator_to_spec_map.get_system_characteristics(raw_keys["compile_topology"])
     devices_per_slice = compile_topology.devices_per_slice
     return int(devices_per_slice * raw_keys["compile_topology_num_slices"])
   else:
     return len(jax.devices())
-
-
-def get_num_slices(raw_keys):
-  """ Calculate num_slices based on number of devices. """
-  if raw_keys['hardware'] == 'cpu':
-    max_logging.log(" Setting num_slices=1 for CPU hardware type")
-    return 1
-  if int(raw_keys["compile_topology_num_slices"]) > 0:
-    return raw_keys["compile_topology_num_slices"]
-  else:
-    devices = jax.devices()
-    try:
-      return 1 + max([d.slice_index for d in devices])
-    except:
-      return 1
 
 
 def get_quantization_local_shard_count(raw_keys):
@@ -512,14 +793,27 @@ def get_quantization_local_shard_count(raw_keys):
   else:
     return raw_keys["quantization_local_shard_count"]
 
+
 def using_pipeline_parallelism(raw_keys) -> bool:
-  return int(raw_keys['ici_pipeline_parallelism']) > 1 or int(raw_keys['dcn_pipeline_parallelism']) > 1
+  return int(raw_keys["ici_pipeline_parallelism"]) > 1 or int(raw_keys["dcn_pipeline_parallelism"]) > 1
+
 
 def using_tensor_parallelism(raw_keys) -> bool:
-  return int(raw_keys['ici_tensor_parallelism']) > 1 or int(raw_keys['dcn_tensor_parallelism']) > 1
+  return (
+      int(raw_keys["ici_tensor_parallelism"]) > 1
+      or int(raw_keys["dcn_tensor_parallelism"]) > 1
+      or int(raw_keys["ici_tensor_sequence_parallelism"]) > 1
+      or int(raw_keys["dcn_tensor_sequence_parallelism"]) > 1
+  )
+
 
 def using_sequence_parallelism(raw_keys) -> bool:
-  return int(raw_keys['ici_sequence_parallelism']) > 1 or int(raw_keys['dcn_sequence_parallelism']) > 1
+  return int(raw_keys["ici_sequence_parallelism"]) > 1 or int(raw_keys["dcn_sequence_parallelism"]) > 1
+
+
+def using_expert_parallelism(raw_keys) -> bool:
+  return int(raw_keys["ici_expert_parallelism"]) > 1 or int(raw_keys["dcn_expert_parallelism"]) > 1
+
 
 class HyperParameters:  # pylint: disable=missing-class-docstring
 

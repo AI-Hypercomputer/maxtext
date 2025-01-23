@@ -19,6 +19,7 @@ from typing import Any, Sequence
 from flax.linen import partitioning
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 Config = Any
 
@@ -37,10 +38,12 @@ BATCH = "activation_batch"
 LENGTH = "activation_length"
 EMBED = "activation_embed"
 HEAD = "activation_heads"
+PREFILL_KV_BATCH = "activation_prefill_kv_batch"
 KV_BATCH = "activation_kv_batch"
 KV_HEAD = "activation_kv_heads"
 KV_HEAD_DIM = "activation_kv_head_dim"
 D_KV = "activation_kv"
+CACHE_BATCH_PREFILL = "cache_batch_prefill"
 CACHE_BATCH = "cache_batch"
 CACHE_SEQUENCE = "cache_sequence"
 CACHE_HEADS = "cache_heads"
@@ -55,3 +58,7 @@ MODEL_MODE_PREFILL = "prefill"
 MODEL_MODE_TRAIN = "train"
 
 DECODING_ACTIVE_SEQUENCE_INDICATOR = 1
+
+# A large negative mask value is used for masking to ensure that the
+# softmax function assigns an extremely low probability to the masked positions.
+DEFAULT_MASK_VALUE = -0.7 * float(np.finfo(np.dtype("float32")).max)

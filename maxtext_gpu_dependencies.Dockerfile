@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y google-cloud-sdk
 ENV PATH="/usr/local/google-cloud-sdk/bin:${PATH}"
 
 # Upgrade libcusprase to work with Jax
-RUN apt-get update && apt-get install -y libcusparse-12-3
+RUN apt-get update && apt-get install -y libcusparse-12-6
 
 ARG MODE
 ENV ENV_MODE=$MODE
@@ -38,12 +38,13 @@ RUN mkdir -p /deps
 # Set the working directory in the container
 WORKDIR /deps
 
-# Copy all files from local workspace into docker container
-COPY . .
-RUN ls .
+# Copy setup files and dependency files separately for better caching
+COPY setup.sh ./
+COPY constraints_gpu.txt requirements.txt requirements_with_jax_stable_stack.txt ./
 
+# Install dependencies - these steps are cached unless the copied files change
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE}"
 RUN --mount=type=cache,target=/root/.cache/pip bash setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} DEVICE=${ENV_DEVICE}
 
-
-WORKDIR /deps
+# Now copy the remaining code (source files that may change frequently)
+COPY . .

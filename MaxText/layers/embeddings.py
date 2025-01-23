@@ -82,7 +82,9 @@ class Embed(nn.Module):
       output = jnp.dot(one_hot, jnp.asarray(self.embedding, self.dtype))
     else:
       output = jnp.asarray(self.embedding, self.dtype)[inputs]
-    output = nn.with_logical_constraint(output, ("activation_embed_and_logits_batch", "activation_length", "activation_embed"))
+    output = nn.with_logical_constraint(
+        output, ("activation_embed_and_logits_batch", "activation_length", "activation_embed")
+    )
     return output
 
   def attend(self, query: Array) -> Array:
@@ -103,7 +105,7 @@ class Embed(nn.Module):
 
 
 class RotaryEmbedding(nn.Module):
-  """RoPE
+  """Rotary Position Embedding.
 
   Attributes:
     min_timescale: Start of the geometric index. Determines the periodicity of
@@ -123,10 +125,18 @@ class RotaryEmbedding(nn.Module):
     if self.embedding_dims % 2:
       raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
 
+    half_embedding_dim = self.embedding_dims // 2
+    fraction = 2 * jnp.arange(0, half_embedding_dim) / self.embedding_dims
+    self.timescale = self.min_timescale * (self.max_timescale / self.min_timescale) ** fraction
+
+    half_embedding_dim = self.embedding_dims // 2
+    fraction = 2 * jnp.arange(0, half_embedding_dim) / self.embedding_dims
+    self.timescale = self.min_timescale * (self.max_timescale / self.min_timescale) ** fraction
+
   def __call__(
       self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
       inputs: jax.Array,
-      position: jax.Array,
+      position: Optional[jax.Array] = None,
   ) -> jax.Array:
     """Generates a jax.Array of sinusoids with different frequencies.
 
@@ -149,11 +159,9 @@ class RotaryEmbedding(nn.Module):
       raise ValueError(
           "The embedding dims of the rotary position embedding" "must match the hidden dimension of the inputs."
       )
-    half_embedding_dim = self.embedding_dims // 2
-    fraction = 2 * jnp.arange(0, half_embedding_dim) / self.embedding_dims
-    timescale = self.min_timescale * (self.max_timescale / self.min_timescale) ** fraction
+
     position = position[:, :, jnp.newaxis, jnp.newaxis]
-    sinusoid_inp = position / timescale
+    sinusoid_inp = position / self.timescale
     sin = jnp.sin(sinusoid_inp).astype(inputs.dtype)
     cos = jnp.cos(sinusoid_inp).astype(inputs.dtype)
     first_half, second_half = jnp.split(inputs, 2, axis=-1)
@@ -164,6 +172,110 @@ class RotaryEmbedding(nn.Module):
       second_part = second_part.astype(self.fprop_dtype)
     x_out = jnp.concatenate((first_part, second_part), axis=-1)
     return x_out
+
+
+class LLaMARotaryEmbedding(RotaryEmbedding):
+  """LLaMA variant of ROPE."""
+
+  # # LLaMA3.1 ROPE scaling, see the original pytorch implementation
+  # https://github.com/meta-llama/llama-models/blob/301ca3a2b3b10e94ddcd1fdd2c57e52f812e1cac/models/llama3/reference_impl/model.py#L45C5-L45C18
+  use_scale: bool = True
+
+  def _apply_scaling_factor(self, freq):
+    scale_factor = 8
+    low_freq_factor = 1
+    high_freq_factor = 4
+    old_context_len = 8192  # original llama3 length
+
+    low_freq_wavelen = old_context_len / low_freq_factor
+    high_freq_wavelen = old_context_len / high_freq_factor
+    wavelen = 2 * jnp.pi / freq
+
+    def lower_wavelen(freq):
+      return freq
+
+    def bigger_or_equal_wavelen(freq):
+      def bigger_wavelen(freq):
+        return freq / scale_factor
+
+      def equal_wavelen(freq):
+        smooth = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
+        return (1 - smooth) * freq / scale_factor + smooth * freq
+
+      bigger_wavelen_cond = wavelen > low_freq_wavelen
+      return jax.lax.cond(bigger_wavelen_cond, bigger_wavelen, equal_wavelen, freq)
+
+    lower_wavelen_cond = wavelen < high_freq_wavelen
+    return jax.lax.cond(lower_wavelen_cond, lower_wavelen, bigger_or_equal_wavelen, freq)
+
+  def setup(self) -> None:
+    if self.embedding_dims % 2:
+      raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
+
+    half_embedding_dim = self.embedding_dims // 2
+    fraction = 2 * jnp.arange(0, half_embedding_dim) / self.embedding_dims
+    fraction = jnp.repeat(fraction, 2)
+    timescale = self.min_timescale * (self.max_timescale / self.min_timescale) ** fraction
+
+    # Apply scaling factor if enabled
+    if self.use_scale:
+      timescale = 1.0 / jax.vmap(self._apply_scaling_factor)(1.0 / timescale)
+
+    # Expand timescale dimensions for broadcasting
+    self.timescale = timescale[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
+
+  def __call__(self, inputs: jax.Array, position: Optional[jax.Array] = None) -> jax.Array:
+    """Applies LLaMA variant of rotary position embedding.
+
+    Args:
+      inputs: The input sequence on which to apply the Rotary position
+        embedding. It is assumed of shape [B, S, N, H].
+      position: Optional position array [B, S]. Only needed when the sequence
+        is packed.
+
+    Returns:
+      A jax.Array of shape [B, S, N, H] with rotary position embeddings applied.
+    """
+    # Ensure input is 4D
+    if len(inputs.shape) != 4:
+      raise ValueError("Input is assumed to be a rank 4 tensor of shape [B, S, N, H].")
+    if self.embedding_dims != inputs.shape[3]:
+      raise ValueError("The embedding dims of the rotary position embedding must match the hidden dimension of the inputs.")
+
+    # Shift the inputs left and right as per LLaMA's specific behavior
+    inputs_shifted_left = jnp.concatenate([inputs[..., 1:], inputs[..., :1]], axis=-1)
+    inputs_shifted_right = jnp.concatenate([inputs[..., -1:], inputs[..., :-1]], axis=-1)
+    inputs_shifted = jax.lax.select(
+        jnp.tile(
+            jnp.mod(jnp.arange(self.embedding_dims, dtype=jnp.int32), 2),
+            inputs.shape[:-1] + (1,),
+        ),
+        inputs_shifted_right,
+        inputs_shifted_left,
+    )
+
+    # Determine positions if not provided
+    if position is None:
+      seq_length = inputs.shape[1]
+      position = jnp.arange(seq_length, dtype=jnp.float32)[jnp.newaxis, :]
+
+    # Calculate sinusoidal input
+    position = position[:, :, jnp.newaxis, jnp.newaxis]
+    sinusoid_inp = position / self.timescale
+
+    sin = jnp.sin(sinusoid_inp)
+    cos = jnp.cos(sinusoid_inp)
+
+    # Apply alternating sign
+    sign = jnp.tile(jnp.array([-1, 1]), self.embedding_dims // 2)
+
+    # Combine original inputs with sinusoidal information
+    outputs = inputs * cos + inputs_shifted * sin * sign
+
+    if self.cast_as_fprop_dtype:
+      outputs = outputs.astype(self.fprop_dtype)
+
+    return outputs
 
 
 class PositionalEmbedding(nn.Module):

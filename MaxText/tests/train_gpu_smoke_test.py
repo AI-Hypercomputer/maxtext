@@ -25,15 +25,20 @@ class Train(unittest.TestCase):
 
   def test_tiny_config(self):
     test_tmpdir = os.environ.get("TEST_TMPDIR")
-    train_main([
-        None,
-        "third_party/py/maxtext/configs/gpu_smoke_test.yml",
-        f"base_output_directory=gs://runner-maxtext-logs",
-        "run_name=runner_test",
-        r"dataset_path=gs://maxtext-dataset",
-        "enable_checkpointing=False",
-        "tokenizer_path=../assets/tokenizer.llama2",
-    ])
+    train_main(
+        [
+            None,
+            "third_party/py/maxtext/configs/gpu_smoke_test.yml",
+            f"base_output_directory=gs://runner-maxtext-logs",
+            "run_name=runner_test",
+            r"dataset_path=gs://maxtext-dataset",
+            "enable_checkpointing=False",
+            "tokenizer_path=../assets/tokenizer.llama2",
+            "enable_goodput_recording=False",
+            "enable_checkpoint_cloud_logger=False",
+            "monitor_goodput=False",
+        ]
+    )
 
 
 if __name__ == "__main__":

@@ -42,6 +42,8 @@ import accelerator_to_spec_map
 import train
 from input_pipeline import input_pipeline_interface
 
+# pylint: disable=too-many-positional-arguments
+
 Transformer = models.Transformer
 
 
@@ -56,13 +58,21 @@ def validate_config(config):
 def get_topology_mesh(config):
   """Get the target hardware devices, and create configured mesh with them"""
   target_hardware = accelerator_to_spec_map.get_system_characteristics(config.compile_topology)
-  topology_devices = get_topology_desc(
-      platform=target_hardware.platform,
-      topology_name=target_hardware.topology_name,
-      chip_config_name=target_hardware.chip_config_name,
-      chips_per_host_bounds=target_hardware.chips_per_host_bounds,
-      num_slices=config.compile_topology_num_slices,
-  ).devices
+  if target_hardware.platform == "gpu":
+    # Disable sharded autotuning. This is an optimization to distribute
+    # autotuning across the fleet, but can cause hangs with AoT compilation.
+    os.environ["XLA_FLAGS"] = os.environ.get("XLA_FLAGS", "") + " --xla_gpu_shard_autotuning=false"
+    jax.config.update("mock_num_gpu_processes", config.compile_topology_num_slices)
+    topology_devices = jax.devices()
+  else:
+    topology_devices = get_topology_desc(
+        platform=target_hardware.platform,
+        topology_name=target_hardware.topology_name,
+        chip_config_name=target_hardware.chip_config_name,
+        chips_per_host_bounds=target_hardware.chips_per_host_bounds,
+        num_slices=config.compile_topology_num_slices,
+        wrap=target_hardware.wrap,
+    ).devices
   topology_device_mesh = max_utils.create_device_mesh(config, topology_devices)
   topology_mesh = Mesh(topology_device_mesh, config.mesh_axes)
   return topology_mesh
@@ -82,14 +92,14 @@ def get_shaped_inputs(topology_mesh, config):
   shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
 
   # Shaped state
-  abstract_state, state_mesh_annotations, _ = max_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
+  abstract_state, _, state_mesh_shardings = max_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
 
   # Shaped batch
   shaped_batch = input_pipeline_interface.get_shaped_batch(config)
 
   shaped_train_args = (abstract_state, shaped_batch, shaped_rng)
   shaped_train_kwargs = {}
-  return shaped_train_args, shaped_train_kwargs, state_mesh_annotations, model
+  return shaped_train_args, shaped_train_kwargs, state_mesh_shardings, model
 
 
 def jit_and_compile(
@@ -137,12 +147,16 @@ def main(argv: Sequence[str]) -> None:
   # Create target mesh
   topology_mesh = get_topology_mesh(config)
 
+  # Print system information after building the compile topology to avoid
+  # prematurely initializing the backend.
+  max_utils.print_system_information()
+
   # Get shaped inputs
-  shaped_train_args, shaped_train_kwargs, state_mesh_annotations, model = get_shaped_inputs(topology_mesh, config)
+  shaped_train_args, shaped_train_kwargs, state_mesh_shardings, model = get_shaped_inputs(topology_mesh, config)
 
   # Get function to compile and shardings
   func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
-      train.train_step, topology_mesh, state_mesh_annotations, model, config
+      train.train_step, topology_mesh, state_mesh_shardings, model, config
   )
 
   # Compile
@@ -168,6 +182,16 @@ def main(argv: Sequence[str]) -> None:
   print("Finished train_compile.py successfully!", flush=True)
   print(f"Cost analysis: {compiled.cost_analysis()}")
   print(f"Memory analysis: {compiled.memory_analysis()}")
+
+  # Dump HLO if requested
+  if config.dump_hlo:
+    max_utils.upload_dump(
+        config.dump_hlo_local_dir,
+        config.dump_hlo_gcs_dir,
+        module_name=config.dump_hlo_module_name,
+        delete_local_after=config.dump_hlo_delete_local_after,
+        all_host_upload=config.dump_hlo_upload_all,
+    )
 
 
 if __name__ == "__main__":

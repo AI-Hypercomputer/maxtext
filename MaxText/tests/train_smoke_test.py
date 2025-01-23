@@ -26,25 +26,30 @@ class Train(unittest.TestCase):
 
   def test_tiny_config(self):
     test_tmpdir = os.environ.get("TEST_TMPDIR")
-    train_main([
-        None,
-        "third_party/py/maxtext/configs/base.yml",
-        f"base_output_directory=gs://runner-maxtext-logs",
-        "run_name=runner_test",
-        r"dataset_path=gs://maxtext-dataset",
-        "base_emb_dim=8",
-        "base_num_query_heads=4",
-        "base_num_kv_heads=4",
-        "base_mlp_dim=32",
-        "base_num_decoder_layers=8",
-        "head_dim=128",
-        "per_device_batch_size=2",
-        "max_target_length=1024",
-        "dataset_type=synthetic",
-        "steps=10",
-        "enable_checkpointing=False",
-        "tokenizer_path=../assets/tokenizer.llama2",
-    ])
+    train_main(
+        [
+            None,
+            "third_party/py/maxtext/configs/base.yml",
+            f"base_output_directory=gs://runner-maxtext-logs",
+            "run_name=runner_test",
+            r"dataset_path=gs://maxtext-dataset",
+            "base_emb_dim=8",
+            "base_num_query_heads=4",
+            "base_num_kv_heads=4",
+            "base_mlp_dim=32",
+            "base_num_decoder_layers=8",
+            "head_dim=128",
+            "per_device_batch_size=2",
+            "max_target_length=1024",
+            "dataset_type=synthetic",
+            "steps=10",
+            "enable_checkpointing=False",
+            "tokenizer_path=../assets/tokenizer.llama2",
+            "enable_goodput_recording=False",
+            "enable_checkpoint_cloud_logger=False",
+            "monitor_goodput=False",
+        ]
+    )
 
 
 if __name__ == "__main__":

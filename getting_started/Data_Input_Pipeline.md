@@ -23,7 +23,20 @@ Currently MaxText has three data input pipelines:
 | Grain | ArrayRecord, available through Tensorflow Datasets | fully deterministic, regardless of preemption | only supports random access datasets |
 | TFDS | TFRecord, available through Tensorflow Datasets |  | only supports TFRecords<br>non-deterministic with preemption<br>(deterministic without preemption) |
 
-Performance data for input pipeline: https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Perf.md
+### Performance
+* Perf data for all 3 input pipeline: https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Perf.md
+
+### Multihost dataloading best practice
+In multihost environment, if use an input pipeline that reads data sequentially (HuggingFace or TFDS), the most performant way is to have each data file only accessed by one host, and each host access a subset of data files (shuffle is within the subset of files). This requires (# of data files) to be multiples of (# of hosts loading data). We recommand users to reshard the dataset or use a subset of hosts to load data by setting expansion_factor_real_data (only available for some topologies, will error out otherwise). In MaxText, since the goal is to demonstrate the most performant experience, the behaviors for different data pipelines are:
+#### HuggingFace pipeline in multihost
+* When (# of data files) >= (# of hosts loading data), assign files to each host as evenly as possible, some host may ended up with 1 file more than the others. When some hosts run out of data, they will produce empty padding batches, so that you are able to utilize the data from the hosts that still have data. But in this stage, training/eval will be less effective, and you will see a decrease in total_weights and slower change in loss. If all hosts run out of data before the step number you set, you will see 0 total_weights and 0 loss. The training/eval will run until the steps/eval_steps set in the config. Note that even each host are assigned the same number of data files, due to the different example count in each data file, and example packing, you will still have different number of batches on each host near the end of the epoch.
+* When (# of data files) < (# of hosts loading data), files are read sequentially with multiple hosts accessing each file, perf can degrade quickly as # of host increases.
+#### TFDS pipeline in multihost
+* When (# of data files) >= (# of hosts loading data), assign equal number of files to each host. The remainning files are skipped. Train/eval will hang if steps/eval_steps are not met but some hosts run out of data. Please set steps/eval_steps accordingly.
+* When (# of data files) < (# of hosts loading data), files are read sequentially with multiple hosts accessing each file, perf can degrade quickly as # of host increases.
+#### Grain pipeline in multihost
+* Perf not affected by (# of data files) vs (# of hosts loading data). [Data are shuffled globally](https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#global-shuffle-in-grain). Because grain uses a data format (ArrayRecord) that supports random access by index. Even with multiple hosts accessing the same file, they are accessing different indices and and won't have the issue seen with sequential reading.
+* At the end of the dataset, you may still have some hosts runing out of indices and hang, Please set steps/eval_steps accordingly.
 
 ### HuggingFace pipeline
 The HuggingFace pipeline supports streaming directly from HuggingFace Hub, or from GCS bucket in HuggingFace supported formats (parquet, json, etc.). This is through the HuggingFace [`datasets.load_dataset` API](https://huggingface.co/docs/datasets/en/loading) with `streaming=True`, which take in `hf_*` parameters.
@@ -60,7 +73,7 @@ tokenizer_path: 'google-t5/t5-large'  # for using https://huggingface.co/google-
 #### Limitations & Recommendations
 1. Streaming data directly from HuggingFace Hub may be impacted by the traffic of the server. During peak hours you may encounter "504 Server Error: Gateway Time-out". It's recommended to download the HuggingFace dataset to a GCS bucket or disk for the most stable experience.
 2. Streaming data directly from HuggingFace Hub works in multihost settings with a small number of hosts. We have encountered "read time out" error with host number > 16.
-3. Multihost data input is achieved through HuggingFace's `datasets.distributed.split_dataset_by_node` API, which is more performant when (data shards/files) % (number of host reading data) == 0. To give MaxText users a performant experience, we follow this rule and will use data shards up to the number that's divisible by number of host reading data. For instance if your dataset has 100 shards, and you use 8 hosts, at most 96/100 shards of data will be used since 96%8==0. You can reshard or combine shards if you want to utilize the whole dataset.
+3. Only supports epoch=1 at this moment.
 
 ### Grain pipeline - for determinism
 
@@ -76,11 +89,16 @@ Grain ensures determinism in data input pipelines by saving the pipeline's state
 * **Convergence comparison.** In sensitive convergence experiments like testing quantization techniques, maintaining identical data batches between runs (e.g., quantized vs. unquantized) is essential for comparison. Determinism ensures consistency even when the runs are long and undergo saving/resuming at different steps.
 * **Debug training anomalies.** When troubleshooting training spikes or anomalies, the ability to replay the exact data sequence helps distinguish between bad data batches and underlying hardware or software issues.
 
+#### Global shuffle in Grain
+In HF or TFDS data pipeline, global shuffle is performed by a shuffle buffer with limited size. Grain performs global shuffle of the indices in the beginning of each epoch and then reads the elements according to the random order. We have found this to be generally fast enough, even when using hard drives and distributed file systems.
+
 #### Using Grain
 1. Dataset needs to be in a format that supports random access. The default format is [ArrayRecord](https://github.com/google/array_record). For converting a dataset into ArrayRecord, see [instructions](https://github.com/google/array_record/tree/main/beam). Additionally, other random accessible data sources can be supported via a custom data source class ([docs](https://github.com/google/grain/blob/main/docs/data_sources.md)).
 2. ArrayRecord dataset, when hosted on GCS bucket, can only be read through [Cloud Storage FUSE](https://cloud.google.com/storage/docs/gcs-fuse). The installation of Cloud Storage FUSE is included in [setup.sh](https://github.com/google/maxtext/blob/main/setup.sh). User then needs to mount the GCS bucket to a local path for each worker, using the script [setup_gcsfuse.sh](https://github.com/google/maxtext/blob/main/setup_gcsfuse.sh). The script configs some parameters for the mount.
 ```
-bash setup_gcsfuse.sh DATASET_GCS_BUCKET=$BUCKET_NAME MOUNT_PATH=$MOUNT_PATH
+bash setup_gcsfuse.sh DATASET_GCS_BUCKET=$BUCKET_NAME MOUNT_PATH=$MOUNT_PATH [FILE_PATH=$MOUNT_PATH/my_dataset]
+# FILE_PATH is optional, when provided, the script runs "ls -R" for pre-filling the metadata cache
+# https://cloud.google.com/storage/docs/cloud-storage-fuse/performance#improve-first-time-reads
 ```
 3. Set `dataset_type=grain` and set `grain_train_files` to match the ArrayRecord files via a local path since the bucket has been mounted.
 4. Tune `grain_worker_count` for performance. This parameter controls the number of child process used by Grain (more details in [behind_the_scene](https://github.com/google/grain/blob/main/docs/behind_the_scenes.md), [code](https://github.com/google/grain/blob/main/grain/_src/python/grain_pool.py)). If you use a large number of workers, please check your config for gcsfuse in [setup_gcsfuse.sh](https://github.com/google/maxtext/blob/main/setup_gcsfuse.sh) to avoid gcsfuse throttling.

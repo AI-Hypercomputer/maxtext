@@ -12,40 +12,56 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CLI Utility for Running Inference on a Single Stream"""
+"""CLI utility for running inference on a single stream"""
 
 import jax
 
+import max_utils
 import maxengine
 
 import os
 import pyconfig
-import sys
+
+from typing import Sequence
+from absl import app
 
 
-def main(config):
+def main(argv: Sequence[str]) -> None:
+  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+
+  pyconfig.initialize(argv)
+  config = pyconfig.config
+  validate_config(config)
+  max_utils.print_system_information()
+
   engine = maxengine.MaxEngine(config)
-  params = engine.load_params()
+  rng = jax.random.PRNGKey(1234)
+  rng, rng_load_params = jax.random.split(rng)
+  params = engine.load_params(rng_load_params)
 
   text = config.prompt
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
-  tokens, true_length = tokenizer_model.encode(
-      text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length]
-  )
+  tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
   assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
   assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
-  prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
+
+  # Split RNG before calling prefill
+  rng, rng_prefill = jax.random.split(rng)
+  prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
   slot = 0
 
-  decode_state = engine.init_decode_state()
+  rng, rng_init_decode = jax.random.split(rng)
+  decode_state = engine.init_decode_state(rng_init_decode)
   decode_state = engine.insert(prefill_result, decode_state, slot=slot)
 
   steps = range(config.max_prefill_predict_length, config.max_target_length)
   sampled_tokens_list = []
   sampled_tokens_list.append(first_token)
   for _ in steps:
-    decode_state, sampled_tokens = engine.generate(params, decode_state)
+    rng, rng_generate = jax.random.split(rng)
+    decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
     sampled_tokens_list.append(sampled_tokens)
 
   results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
@@ -65,9 +81,4 @@ def validate_config(config):
 
 
 if __name__ == "__main__":
-  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-  pyconfig.initialize(sys.argv)
-  cfg = pyconfig.config
-  validate_config(cfg)
-  main(cfg)
+  app.run(main)

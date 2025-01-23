@@ -1,0 +1,24 @@
+# Requirements for Building the MaxText Docker Image
+# These requirements are additional to the dependencies present in the JAX SS base image.
+absl-py
+aqtp==0.8.2
+datasets
+grain-nightly>=0.0.10
+orbax-checkpoint>=0.10.3
+pylint
+pytest
+pyink
+pre-commit
+pytype
+sentencepiece==0.1.97
+tensorflow-text>=2.13.0
+tensorflow-datasets
+tiktoken
+transformers
+mlperf-logging@git+https://github.com/mlperf/logging.git
+google-jetstream
+jsonlines
+pathwaysutils@git+https://github.com/google/pathways-utils.git
+google-cloud-monitoring
+google-api-core
+google-api-python-client

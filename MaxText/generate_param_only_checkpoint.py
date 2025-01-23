@@ -56,13 +56,15 @@ def _possibly_unroll_params(config, training_state, training_state_annotations, 
 
   new_per_layer_state_annotation = jax.tree_util.tree_map(new_pspec, training_state_annotations_layers)
   new_per_layer_state_sharding = jax.tree_util.tree_map(
-    lambda x: jax.sharding.NamedSharding(mesh, x), new_per_layer_state_annotation)
+      lambda x: jax.sharding.NamedSharding(mesh, x), new_per_layer_state_annotation
+  )
 
   for i in range(config.num_decoder_layers):
 
     def slice_ith(input_layers):
       return jax.tree_util.tree_map(lambda x: jax.numpy.take(x, i, axis=config.param_scan_axis), input_layers)
 
+    # pylint: disable=not-callable
     new_layer = jax.jit(slice_ith, out_shardings=new_per_layer_state_sharding)(training_state_layers)
 
     training_state.params["params"]["decoder"][f"layers_{i}"] = new_layer
@@ -82,7 +84,7 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
   rng = random.PRNGKey(0)
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
-  state, state_mesh_notations, _ = max_utils.setup_training_state(model, None, tx, config, rng, mesh, checkpoint_manager)
+  state, state_mesh_notations, _, _ = max_utils.setup_training_state(model, None, tx, config, rng, mesh, checkpoint_manager)
   num_params = max_utils.calculate_num_params_from_pytree(state.params)
   max_logging.log(f"In input checkpoint Number of model params={num_params/1e9:.3f} billion")
   return state, state_mesh_notations
@@ -92,7 +94,8 @@ def _save_decode_checkpoint(config, state, checkpoint_manager):
   """Generate checkpoint for decode from the training_state."""
   with jax.spmd_mode("allow_all"):
     decode_state = max_utils.init_decode_state(
-      None, jax.tree_util.tree_map(lambda x: x.astype(jax.numpy.bfloat16), state.params))
+        None, jax.tree_util.tree_map(lambda x: x.astype(jax.numpy.bfloat16), state.params)
+    )
   if checkpoint_manager is not None:
     if save_checkpoint(checkpoint_manager, 0, decode_state):
       max_logging.log(f"saved an decode checkpoint at {config.checkpoint_dir}")
