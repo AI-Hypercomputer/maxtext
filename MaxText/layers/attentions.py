@@ -749,6 +749,71 @@ class AttentionOp(nn.Module):
     value_vars = (cached_value_var, cached_value_scale_var)
     return key_vars, value_vars, cached_segment_id_var, cache_index_var, cached_lengths_var
 
+  def kv_cache_prefill_chunked(
+      self,
+      key: Array,
+      value: Array,
+      decoder_segment_ids: Array,
+  ):
+    """In prefill mode, we zero out the existing cache, run the computation and
+    prepare the cache as necessary.
+
+    Args:
+      key: in shape [b, s, n, d].
+      value: in shape [b, s, n, d].
+      decoder_segment_ids: [b, s] -- marking segment ids for tokens
+
+    Returns:
+      key, value, decoder_segment_id.
+
+    """
+    # Nothing chnages if prefill cache has not been initialized
+    batch, _, heads, kv_head_size = key.shape
+    assert key.dtype == value.dtype, "Key and Value Dtypes should match."
+
+    cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
+        batch, heads, kv_head_size, common_types.MODEL_MODE_PREFILL
+    )
+
+    self.update_prefill_key_value(
+        key,
+        value,
+        cached_prefill_key_vars,
+        cached_prefill_value_vars,
+        cached_prefill_segment_id_var,
+    )
+
+    cached_prefill = (
+        self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order),
+        self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order),
+        cached_prefill_segment_id_var.value,
+    )
+
+    # TODO: Find a way to not enable the ar cache for prefill mode.
+    _ = self._get_ar_cache_vars(batch, heads, kv_head_size, common_types.MODEL_MODE_PREFILL)  # initialize it now
+
+    key_shaped_for_cache = jnp.transpose(key, self.prefill_cache_axis_order)
+    value_shaped_for_cache = jnp.transpose(value, self.prefill_cache_axis_order)
+
+    if self.kv_quant:
+      prefill_key_axis_names = self.transpose_tuple(self.cache_logical_axis_names, self.prefill_cache_axis_order)
+      key_shaped_for_cache, key_scale_shaped_for_cache = self.kv_quant.quantize(key_shaped_for_cache, prefill_key_axis_names)
+      value_shaped_for_cache, value_scale_shaped_for_cache = self.kv_quant.quantize(
+          value_shaped_for_cache, prefill_key_axis_names
+      )
+      cached_prefill_key_vars[1].value = key_scale_shaped_for_cache
+      cached_prefill_value_vars[1].value = value_scale_shaped_for_cache
+
+    cached_prefill_key_vars[0].value = key_shaped_for_cache
+    cached_prefill_value_vars[0].value = value_shaped_for_cache
+
+    if decoder_segment_ids is not None:
+      cached_prefill_segment_id_var.value = decoder_segment_ids
+    
+    return key, value, decoder_segment_ids
+
+
+
   def kv_cache_prefill(
       self,
       key: Array,
@@ -795,15 +860,57 @@ class AttentionOp(nn.Module):
     if decoder_segment_ids is not None:
       cached_prefill_segment_id_var.value = decoder_segment_ids
     
-    if self.prefill_cache_constructed:
-      # update key_value_prefill based on decoder_segment_ids/chunked_prefill_segment_ids
-      # return full prefill cache. 
-      pass
-    
     return key, value, decoder_segment_ids
 
-  def update_prefill_key_value(self, chunk_size_key, chunk_size_value, cached_key_vars, one_hot_current_chunk_indices):
-    pass
+  def update_prefill_key_value(self, 
+                               chunk_size_key, 
+                               chunk_size_value, 
+                               cached_key_vars, 
+                               cached_value_vars, 
+                               one_hot_current_chunk_indices):
+    cached_key_var, cached_key_scale_var = cached_key_vars
+    cached_value_var, cached_value_scale_var = cached_value_vars
+
+    chunk_size_key_shaped_for_cache = jnp.transpose(chunk_size_key, self.ar_cache_axis_order)
+    chunk_size_value_shaped_for_cache = jnp.transpose(chunk_size_value, self.ar_cache_axis_order)
+
+    if self.kv_quant:
+      chunk_size_key_shaped_for_ccahe, chunk_size_key_scale_shaped_for_cache = self.kv_quant.quantize(
+          chunk_size_key_shaped_for_cache, prefill_cache_axis_names
+      )
+      chunk_size_value_shaped_for_cache, chunk_size_value_scale_shaped_for_cache = self.kv_quant.quantize(
+          chunk_size_value_shaped_for_cache, prefill_cache_axis_names
+      )
+
+    one_hot_current_chunk_indices = one_hot_current_chunk_indices.astype(int)
+    prefill_cache_update_idx = None
+    prefill_cache_update_axis = prefill_cache_axis_names.index(CACHE_SEQUENCE)
+
+    prefill_cache_axis_names = self.transpose_tuple(self.cache_logical_axis_names, self.prefill_cache_axis_order)
+    cached_key_var.value = jax.lax.dynamic_update_index_in_dim(
+          cached_key_var.value, chunk_size_key_shaped_for_ccahe, prefill_cache_update_idx, prefill_cache_update_axis
+      )
+    
+    cached_value_var.value = jax.lax.dynamic_update_index_in_dim(
+        cached_value_var.value, chunk_size_value_shaped_for_cache, prefill_cache_update_idx, prefill_cache_update_axis
+    )
+
+    cached_key_var.value = nn.with_logical_constraint(cached_key_var.value, prefill_cache_axis_names)
+    cached_value_var.value = nn.with_logical_constraint(cached_value_var.value, prefill_cache_axis_names)
+
+    if self.kv_quant:
+      prefill_cache_scale_axis_names = self.transpose_tuple(self.cache_scale_logical_axis_names, self.ar_cache_axis_order)
+      ar_cache_scale_update_axis = prefill_cache_scale_axis_names.index(CACHE_SCALE_SEQUENCE)
+      cached_key_scale_var.value = jax.lax.dynamic_update_index_in_dim(
+          cached_key_scale_var.value, chunk_size_key_scale_shaped_for_cache, prefill_cache_update_idx, ar_cache_scale_update_axis
+      )
+      cached_value_scale_var.value = jax.lax.dynamic_update_index_in_dim(
+          cached_value_scale_var.value,
+          chunk_size_value_scale_shaped_for_cache,
+          prefill_cache_update_idx,
+          ar_cache_scale_update_axis,
+      )
+    return
 
   def update_ar_key_value(
       self,

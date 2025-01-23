@@ -66,6 +66,8 @@ class MistralDecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      chunk_id=None,
+      chunk_length=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -108,6 +110,8 @@ class MistralDecoderLayer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        chunk_id=chunk_id,
+        chunk_length=chunk_length,
     )
 
     attention_lnx = nn.with_logical_constraint(

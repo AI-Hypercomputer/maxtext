@@ -224,8 +224,11 @@ class MaxEngine(engine_api.Engine):
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[jax.random.PRNGKey] = None,
-      chunk_length=12
+      chunk_length
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
+    """
+    Add link to paper etc
+    """
     if existing_prefix:
       raise ValueError("We don't know what to do with existing_prefix")
     if rng is None:
@@ -238,14 +241,26 @@ class MaxEngine(engine_api.Engine):
       # chunked_prefill_segment_ids will resemble 1s for current sequence which is to be processed
       # no need of prefill result to be stored for intermediate chunks
       # chunked_prefill_segment_ids - Array representing lower diag triangle of current sequence
+      
       chunked_prefill_segment_ids = None
       if i < num_padded_tokens_chunks - 1 :
-        _, _ = self.prefill(params=params, padded_tokens=chunked_padded_tokens, true_length=chunk_length, rng=rng, chunked_prefill_segment_ids=chunked_prefill_segment_ids)
-      # prefill for ith chunk is done
+        decode_state, _ = self.prefill(params=params, 
+                            padded_tokens=chunked_padded_tokens, 
+                            true_length=chunk_length, rng=rng, 
+                            chunked_prefill_segment_ids=chunk_length, 
+                            chunk_num=i,
+                            existing_prefix= decode_state
+                            )
+        # because this is done sequentially, cache is updated in place.
+        # one way can be to return KV for each iteration and pass it in previous tokens, like generate
       else:
-        # prefill for all chunks is done, 
-        # full cache will be constructed and returned
-        return self.prefill(params=params, padded_tokens=chunked_padded_tokens, true_length=chunk_length, rng=rng, chunked_prefill_segment_ids=chunked_prefill_segment_ids)
+        return self.prefill(params=params, 
+                            padded_tokens=chunked_padded_tokens, 
+                            true_length=true_length, 
+                            rng=rng, 
+                            chunk_id=i, 
+                            chunk_length=chunk_length,
+                            existing_prefix=existing_prefix)
 
   @functools.partial(jax.jit, static_argnums=(0,))
   def prefill(
@@ -257,6 +272,8 @@ class MaxEngine(engine_api.Engine):
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[jax.random.PRNGKey] = None,
+      chunk_length=None,
+      chunk_id=None,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -295,6 +312,8 @@ class MaxEngine(engine_api.Engine):
           model_mode=common_types.MODEL_MODE_PREFILL,
           rngs={"params": new_rng},
           mutable=["cache"],
+          chunk_length=chunk_length,
+          chunk_id=chunk_id,
       )
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
@@ -329,6 +348,7 @@ class MaxEngine(engine_api.Engine):
         length_idx=(2, 3),
         samples_per_slot=1,
     )
+
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
 

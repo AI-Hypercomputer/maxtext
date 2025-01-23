@@ -274,6 +274,8 @@ class Decoder(nn.Module):
       decoder_segment_ids=None,
       deterministic=False,
       model_mode=common_types.MODEL_MODE_TRAIN,
+      chunk_id=None,
+      chunk_length=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -472,6 +474,8 @@ class Transformer(nn.Module):
       decoder_segment_ids=None,
       enable_dropout=True,
       model_mode=common_types.MODEL_MODE_TRAIN,
+      chunk_id=None,
+      chunk_length=None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target."""
 
@@ -487,5 +491,7 @@ class Transformer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=not enable_dropout,
         model_mode=model_mode,
+        chunk_length=chunk_length,
+        chunk_id=chunk_id,
     )
     return logits
