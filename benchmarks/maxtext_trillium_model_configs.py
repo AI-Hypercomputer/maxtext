@@ -60,10 +60,10 @@ default_basic_1 = _add_to_model_dictionary(
 )
 
 
-default_basic_1_pw_v5e = _add_to_model_dictionary(
+default_basic_1_pw = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
-    model_name="default-basic-1-pw-v5e",
+    model_name="default-basic-1-pw",
     model_type="default",
     tuning_params={
         "per_device_batch_size": 1,
