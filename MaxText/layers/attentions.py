@@ -192,8 +192,13 @@ class PagedAttentionOp(nn.Module):
   def paged_dot_product_attention_with_max_and_sum(self, query, key, value):
     b, t, n, d = query.shape
     _, s, n_kv, _ = key.shape
+    print(f"Attention input shapes - Query: {query.shape}, Key: {key.shape}")
+    
     query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
+    print(f"Reshaped query shape: {query.shape}")
+    
     attn_weights = jnp.einsum("btkgd,bskd->bkgts", query, key)
+    print(f"Attention weights shape: {attn_weights.shape}")
     
     causal_mask = jnp.triu(jnp.ones((t, s)), k=1)
     causal_mask = jnp.reshape(causal_mask, (1, 1, 1, t, s))

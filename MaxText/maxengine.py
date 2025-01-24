@@ -260,6 +260,10 @@ class MaxEngine(engine_api.Engine):
     print(f"MaxEngine.prefill: slot={slot}, true_length={true_length}")  # Add this line
 
     rng, new_rng = jax.random.split(rng)
+    input_tokens = jnp.expand_dims(padded_tokens, 0)
+    positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
+    rng, new_rng = jax.random.split(rng) if rng is not None else (None, None)
+    
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       flat_logits, new_vars = self.model.apply(
           params,

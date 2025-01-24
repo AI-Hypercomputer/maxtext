@@ -955,11 +955,9 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh):
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_kv_cache(model, config):
-    input_shape = (
-        config.global_batch_size_to_load,
-        config.max_prefill_predict_length,
-    )
-
+    # Force batch size of 1 for initialization
+    input_shape = (1, config.max_prefill_predict_length)
+    
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
         jnp.ones(input_shape),

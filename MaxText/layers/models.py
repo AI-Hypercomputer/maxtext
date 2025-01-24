@@ -470,14 +470,15 @@ class Transformer(nn.Module):
 
     assert self.config.max_target_length % self.config.page_size == 0
     assert self.config.max_prefill_predict_length % self.config.page_size == 0
-    self.page_manager = page_managers.PageManager(
-      num_pages=self.config.num_pages,
-      page_size=self.config.page_size,
-      slots=int(self.config.per_device_batch_size * jax.device_count()),
-      max_target_length=self.config.max_target_length,
-      max_prefill_predict_length=self.config.max_prefill_predict_length,
-      max_pages_per_slot=self.config.max_target_length // self.config.page_size,
-    )
+    if self.config.attention == "paged":
+      self.page_manager = page_managers.PageManager(
+        num_pages=self.config.num_pages,
+        page_size=self.config.page_size,
+        slots=int(self.config.per_device_batch_size * jax.device_count()),
+        max_target_length=self.config.max_target_length,
+        max_prefill_predict_length=self.config.max_prefill_predict_length,
+        max_pages_per_slot=self.config.max_target_length // self.config.page_size,
+      )
 
   def __call__(
       self,
