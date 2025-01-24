@@ -72,6 +72,7 @@ class WorkloadConfig:
   priority: str = "medium"
   xpk_path: str = '~/xpk'
   pathways_config: PathwaysConfig = None
+  run_name: str = None
 
 
 @dataclasses.dataclass
@@ -454,6 +455,16 @@ def xpk_benchmark_runner(
     if return_code != 0:
       print('Unable to run xpk workload: {xpk_workload_name}')
 
+def on_device_benchmark_runner(
+    workload_configs: list[WorkloadConfig],
+):
+  for wl_config in workload_configs:
+    user_command = build_user_command(
+      name=wl_config.run_name,
+      wl_config=wl_config
+    )
+    print(f'User command: {user_command}')
+    subprocess.run(user_command, shell=True, text=True)
 
 # Run maxtext_xpk_runner.py as a script for executing multiple workloads pythonically!
 def main() -> int:
