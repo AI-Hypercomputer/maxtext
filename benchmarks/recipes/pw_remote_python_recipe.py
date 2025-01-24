@@ -44,10 +44,9 @@ def main() -> int:
   # Handle command line arguments using args_helper
   helper.handle_cmd_args(cluster_config, helper.DELETE)
 
+  # Configure test images
   user = os.environ["USER"]
   region = "-".join(cluster_config.zone.split("-")[:-1])
-
-  # Configure test images
   proxy_image = (
       f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/{user}/"
       "proxy_server:latest"
@@ -56,22 +55,23 @@ def main() -> int:
       f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/{user}/"
       "server:latest"
   )
-  runner = f"gcr.io/{cluster_config.project}/{user}_latest:latest"
   remote_python_image = (
       f"gcr.io/{cluster_config.project}/{user}/remote_python_sidecar_latest:latest"
   )
+  runner = f"gcr.io/{cluster_config.project}/{user}_latest:latest"
+  base_output_directory = f"gs://{user}-{region}/{user}"
 
+  list_of_models = [
+      model_configs.default_basic_1_pw,
+  ]
   pathways_config = mxr.PathwaysConfig(
       server_image=server_image,
       proxy_image=proxy_image,
       runner_image=runner,
       remote_python_sidecar_image=remote_python_image,
   )
-
-  base_output_directory = f"gs://{user}-{region}/{user}"
-
-  list_of_models = [
-      model_configs.default_basic_1_pw,
+  num_slices_list = [
+      1
   ]
 
   xpk_workload_cmds = []
@@ -83,9 +83,7 @@ def main() -> int:
         cluster_config,
     ]:
       # Run workloads in the following slice configurations
-      for num_slices in [
-          1,
-      ]:
+      for num_slices in num_slices_list:
         wl_config = mxr.WorkloadConfig(
             model=model,
             num_slices=num_slices,
