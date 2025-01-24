@@ -67,7 +67,7 @@ class TrainState(train_state.TrainState):
         stacked_opt_state,
     )
     if self.optimizer_memory_host_offload:
-      params = jax.device_put(params, TransferToMemoryKind('device'))
+      # params = jax.device_put(params, TransferToMemoryKind('device'))
       slice_opt_state = jax.device_put(slice_opt_state, TransferToMemoryKind('device'))
     updates, new_opt_state = self.tx.update(
       _add_dummy_stacking(grads),
@@ -84,7 +84,7 @@ class TrainState(train_state.TrainState):
   def apply_complete(self, unstacked_grads, unstacked_params, new_stacked_params, new_stacked_opt_state):
     unstacked_opt_state = self.opt_state.unstacked_opt_state
     if self.optimizer_memory_host_offload:
-      unstacked_params = jax.device_put(unstacked_params, TransferToMemoryKind('device'))
+      # unstacked_params = jax.device_put(unstacked_params, TransferToMemoryKind('device'))
       unstacked_opt_state = jax.device_put(unstacked_opt_state, TransferToMemoryKind('device'))
     updates, new_unstacked_opt_state = self.tx.update(
       unstacked_grads, unstacked_opt_state, unstacked_params
