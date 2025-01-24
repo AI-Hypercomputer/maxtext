@@ -376,6 +376,7 @@ def generate_xpk_workload_cmd(
         f' --server-image={pw_config.server_image}'
         f' --proxy-server-image={pw_config.proxy_image}'
         f' --remote-python-sidecar-image={pw_config.remote_python_sidecar_image}'
+        if pw_config.remote_python_sidecar_image is not None else ''
         ' --termination-grace-period-seconds=300'
         f' --pathways-gcs-location={wl_config.base_output_directory}'
         f' --restart-on-user-code-failure'

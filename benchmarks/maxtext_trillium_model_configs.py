@@ -584,7 +584,7 @@ llama2_70b_4096_real_data_pw_long_run = _add_to_model_dictionary(
         "checkpoint_storage_use_zarr3": False,
         "metrics_file": "metrics.txt",
         "goodput_upload_interval_seconds": 30,
-        # "enable_pathways_goodput": True,
+        "enable_pathways_goodput": True,
         "enable_checkpoint_cloud_logger": True,
         "enable_single_controller": True,
     },
@@ -628,7 +628,7 @@ llama2_70b_4096_synthetic_pw_lr = _add_to_model_dictionary(
         "checkpoint_storage_use_zarr3": False,
         "metrics_file": "metrics.txt",
         "goodput_upload_interval_seconds": 30,
-        # "enable_pathways_goodput": True,
+        "enable_pathways_goodput": True,
         "enable_checkpoint_cloud_logger": True,
         "enable_single_controller": True,
     },
@@ -672,7 +672,7 @@ llama2_70b_4096_pw_long_run = _add_to_model_dictionary(
         "checkpoint_storage_use_zarr3": False,
         "metrics_file": "metrics.txt",
         "goodput_upload_interval_seconds": 30,
-        # "enable_pathways_goodput": True,
+        "enable_pathways_goodput": True,
         "enable_checkpoint_cloud_logger": True,
         "enable_single_controller": True,
     },
@@ -712,7 +712,7 @@ llama2_70b_4096_pw_rd_tfds = _add_to_model_dictionary(
         "checkpoint_storage_use_zarr3": False,
         "metrics_file": "metrics.txt",
         "goodput_upload_interval_seconds": 30,
-        # "enable_pathways_goodput": True,
+        "enable_pathways_goodput": True,
         "enable_checkpoint_cloud_logger": True,
         "enable_single_controller": True,
     },
@@ -956,7 +956,7 @@ llama3_1_70b_129024 = _add_to_model_dictionary(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
         + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
         + xla_flags_library.DATA_PARALLEL_OVERLAP
-        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_1D_ALL_GATHER
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_GATHER
         + xla_flags_library.HOST_OFFLOAD_FLAGS
     ),
   )
