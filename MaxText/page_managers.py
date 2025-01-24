@@ -304,6 +304,15 @@ class PageManager(nn.Module):
       current_page_position_var
     ) = self.init_or_get_vars()
 
+    if model_mode == common_types.MODEL_MODE_PREFILL and self.is_mutable_collection('params'):
+        return PageState(
+          page_status_var.value,
+          page_map_var.value,
+          sequence_lengths_var.value,
+          num_pages_used_var.value,
+          current_page_var.value,
+          current_page_position_var.value
+        )
     if model_mode == common_types.MODEL_MODE_PREFILL:
       assert slot is not None and true_length is not None, f"but get {slot=} and {true_length=} instead"
       self.reserve_prefix_slot_pages(

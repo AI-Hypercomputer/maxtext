@@ -25,7 +25,6 @@ import pyconfig
 from typing import Sequence
 from absl import app
 
-
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
@@ -49,8 +48,8 @@ def main(argv: Sequence[str]) -> None:
 
   # Split RNG before calling prefill
   rng, rng_prefill = jax.random.split(rng)
-  prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
   slot = 0
+  prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill, slot=slot)
 
   rng, rng_init_decode = jax.random.split(rng)
   decode_state = engine.init_decode_state(rng_init_decode)
@@ -73,12 +72,10 @@ def main(argv: Sequence[str]) -> None:
         output == config.autoregressive_decode_assert
     ), f"generated text mismatch {output=} {config.autoregressive_decode_assert=}"
 
-
 def validate_config(config):
   assert config.load_full_state_path == "", (
       "Decode doesn't operate on full states! Convert to parameter checkpoint first." "Using generate_param_only_checkpoint."
   )
-
 
 if __name__ == "__main__":
   app.run(main)
