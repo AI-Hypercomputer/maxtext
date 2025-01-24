@@ -13,27 +13,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-import argparse
 import os
 
+import args_helper as helper
 import maxtext_trillium_model_configs as model_configs
 import maxtext_xpk_runner as mxr
 
 
 def main() -> int:
-  # Parse command line arguments
-  parser = argparse.ArgumentParser()
-  parser.add_argument(
-      "--delete",
-      action="store_true",
-      help=(
-          "Only delete workloads starting with the user's first five"
-          " characters."
-      ),
-  )
-  args = parser.parse_args()
-  user = os.environ["USER"]
-
   # V6e cluster config
   # cluster_config = mxr.XpkClusterConfig(
   #     cluster_name="bodaborg-v6e-256-dnd-yucmhab",
@@ -50,23 +37,13 @@ def main() -> int:
       device_type="v5litepod-16",
   )
 
+  # Handle command line arguments using args_helper
+  helper.handle_cmd_args(cluster_config, helper.DELETE)
+
+  user = os.environ["USER"]
   region = "-".join(cluster_config.zone.split("-")[:-1])
 
-  if args.delete:
-    # Delete workloads starting with the first 5 characters of the user's name.
-    first_five_chars = user[:5]
-    delete_command = (
-        "python3 xpk/xpk.py workload delete "
-        f" --project={cluster_config.project} --cluster={cluster_config.cluster_name}"
-        f" --filter-by-job={first_five_chars} --zone={cluster_config.zone}"
-    )
-
-    print(f"Deleting workloads starting with: {first_five_chars}")
-    os.system(delete_command)
-    print("Deletion initiated. Exiting.")
-    return 0
-
-  # If --delete is not passed, proceed with creating and running workloads:
+  # Configure test images
   proxy_image = (
       f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/{user}/"
       "proxy_server:latest"
@@ -76,7 +53,9 @@ def main() -> int:
       "server:latest"
   )
   runner = f"gcr.io/{cluster_config.project}/{user}_latest:latest"
-  remote_python_image = f"gcr.io/{cluster_config.project}/{user}/remote_python_sidecar_latest:latest"
+  remote_python_image = (
+      f"gcr.io/{cluster_config.project}/{user}/remote_python_sidecar_latest:latest"
+  )
 
   pathways_config = mxr.PathwaysConfig(
       server_image=server_image,
@@ -88,9 +67,7 @@ def main() -> int:
   base_output_directory = f"gs://{user}-{region}/{user}"
 
   list_of_models = [
-      # model_configs.llama2_70b_4096_pw_long_run_v5e,
-      # model_configs.llama2_7b_4096_pw,
-      model_configs.default_basic_1_pw_v5e,
+      model_configs.default_basic_1_pw,
   ]
 
   xpk_workload_cmds = []
