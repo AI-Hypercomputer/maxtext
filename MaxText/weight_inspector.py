@@ -27,7 +27,7 @@ import torch
 import max_logging
 
 
-def inspect_weights(left_path, right_path):
+def inspect_weights(left_path, right_path, layer):
   """Load the pickle files and compare contents."""
   with open(left_path, "rb") as file:
     left_weights = pickle.load(file)
@@ -41,10 +41,10 @@ def inspect_weights(left_path, right_path):
   mismatched_keys = []
   # Iterate through keys common to both dictionaries
   for key in left_weights.keys() & right_weights.keys():  # Intersection of keys
-    if ".0." in key:  # check only layer 0 of the model
+    if f".{layer}." in key:  # check only layer 0 of the model
       assert (
           left_weights[key].shape == right_weights[key].shape
-      ), f"Mismatched shapes left {left_weights[key].shape}, right right_weights[key].shape"
+      ), f"Mismatched shapes left {key}:{left_weights[key].shape}, right {key}:{right_weights[key].shape}"
       if not np.allclose(
           left_weights[key].type(torch.float16).numpy(), right_weights[key].type(torch.float16).numpy(), atol=1e-8
       ):
@@ -62,9 +62,9 @@ if __name__ == "__main__":
   parser = argparse.ArgumentParser()
   parser.add_argument("--lhs", type=str, required=True)
   parser.add_argument("--rhs", type=str, required=True)
-
+  parser.add_argument("--layer", type=int, required=False, default=0)
   args = parser.parse_args()
 
-  inspect_weights(args.lhs, args.rhs)
+  inspect_weights(args.lhs, args.rhs, args.layer)
 
   args = parser.parse_args()
