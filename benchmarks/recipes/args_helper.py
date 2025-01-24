@@ -14,8 +14,8 @@ limitations under the License.
 """
 
 import argparse
-import sys
 import os
+import sys
 
 # Needed to import files from the parent directory
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -23,17 +23,24 @@ sys.path.append(parent_dir)
 
 import maxtext_xpk_runner as mxr
 
-
 # Constants for defining supported actions
-# Add more actions here as needed, e.g.,
 DELETE = "delete"
 
 
-def _handle_delete(cluster_config: mxr.XpkClusterConfig, user: str) -> None:
-  """Handles the deletion of workloads."""
+def _handle_delete(
+    cluster_config: mxr.XpkClusterConfig, user: str, **kwargs
+) -> None:
+  """Handles the deletion of workloads.
+
+  Args:
+      cluster_config: mxr.XpkClusterConfig object
+      user: User string
+      **kwargs: Optional keyword arguments, such as xpk_path
+  """
+  xpk_path = kwargs.get("xpk_path", "xpk")  # Default to "xpk" if not provided
   first_five_chars = user[:5]
   delete_command = (
-      "python3 xpk/xpk.py workload delete "
+      f"python3 {xpk_path}/xpk.py workload delete "
       f"--project={cluster_config.project} --cluster={cluster_config.cluster_name}"
       f" --filter-by-job={first_five_chars} --zone={cluster_config.zone}"
   )
@@ -45,7 +52,7 @@ def _handle_delete(cluster_config: mxr.XpkClusterConfig, user: str) -> None:
 
 
 def handle_cmd_args(
-    cluster_config: mxr.XpkClusterConfig, *actions: str
+    cluster_config: mxr.XpkClusterConfig, *actions: str, **kwargs
 ) -> None:
   """Parses command-line arguments and executes the specified actions.
 
@@ -54,6 +61,7 @@ def handle_cmd_args(
         for running the actions.
       *actions: Variable number of string arguments representing the actions to
         be performed.
+      **kwargs: Optional keyword arguments to be passed to action handlers.
 
   Raises:
     ValueError: If an unsupported action is provided or if unknown arguments are
@@ -79,4 +87,4 @@ def handle_cmd_args(
 
   # Handle actions
   if DELETE in actions and known_args.delete:
-    _handle_delete(cluster_config, user)
+    _handle_delete(cluster_config, user, **kwargs)

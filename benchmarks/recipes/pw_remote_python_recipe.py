@@ -40,9 +40,10 @@ def main() -> int:
       zone="us-west1-c",
       device_type="v5litepod-16",
   )
+  xpk_path = "xpk"
 
   # Handle command line arguments using args_helper
-  helper.handle_cmd_args(cluster_config, helper.DELETE)
+  helper.handle_cmd_args(cluster_config, helper.DELETE, xpk_path=xpk_path)
 
   # Configure test images
   user = os.environ["USER"]
@@ -94,7 +95,7 @@ def main() -> int:
             libtpu_nightly_version="",
             base_docker_image="",
             pathways_config=pathways_config,
-            xpk_path="xpk",
+            xpk_path=xpk_path,
             num_steps=1000000,
         )
         command, name = mxr.generate_xpk_workload_cmd(
