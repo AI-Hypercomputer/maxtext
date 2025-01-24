@@ -26,20 +26,20 @@ import maxtext_xpk_runner as mxr
 
 def main() -> int:
   # V6e cluster config
-  # cluster_config = mxr.XpkClusterConfig(
-  #     cluster_name="bodaborg-v6e-256-dnd-yucmhab",
-  #     project="tpu-prod-env-one-vm",
-  #     zone="us-east5-b",
-  #     device_type="v6e-256",
-  # )
+  cluster_config = mxr.XpkClusterConfig(
+      cluster_name="bodaborg-v6e-256-dnd-yucmhab",
+      project="tpu-prod-env-one-vm",
+      zone="us-east5-b",
+      device_type="v6e-256",
+  )
 
   # V5e cluster config
-  cluster_config = mxr.XpkClusterConfig(
-      cluster_name="sujinesh-in-memory-test-cluster",
-      project="cloud-tpu-multipod-dev",
-      zone="us-west1-c",
-      device_type="v5litepod-16",
-  )
+  # cluster_config = mxr.XpkClusterConfig(
+  #     cluster_name="sujinesh-in-memory-test-cluster",
+  #     project="cloud-tpu-multipod-dev",
+  #     zone="us-west1-c",
+  #     device_type="v5litepod-16",
+  # )
   xpk_path = "xpk"
 
   # Handle command line arguments using args_helper
