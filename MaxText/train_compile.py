@@ -92,14 +92,14 @@ def get_shaped_inputs(topology_mesh, config):
   shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
 
   # Shaped state
-  abstract_state, state_mesh_annotations, _ = max_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
+  abstract_state, _, state_mesh_shardings = max_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
 
   # Shaped batch
   shaped_batch = input_pipeline_interface.get_shaped_batch(config)
 
   shaped_train_args = (abstract_state, shaped_batch, shaped_rng)
   shaped_train_kwargs = {}
-  return shaped_train_args, shaped_train_kwargs, state_mesh_annotations, model
+  return shaped_train_args, shaped_train_kwargs, state_mesh_shardings, model
 
 
 def jit_and_compile(
@@ -152,11 +152,11 @@ def main(argv: Sequence[str]) -> None:
   max_utils.print_system_information()
 
   # Get shaped inputs
-  shaped_train_args, shaped_train_kwargs, state_mesh_annotations, model = get_shaped_inputs(topology_mesh, config)
+  shaped_train_args, shaped_train_kwargs, state_mesh_shardings, model = get_shaped_inputs(topology_mesh, config)
 
   # Get function to compile and shardings
   func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
-      train.train_step, topology_mesh, state_mesh_annotations, model, config
+      train.train_step, topology_mesh, state_mesh_shardings, model, config
   )
 
   # Compile
@@ -182,6 +182,16 @@ def main(argv: Sequence[str]) -> None:
   print("Finished train_compile.py successfully!", flush=True)
   print(f"Cost analysis: {compiled.cost_analysis()}")
   print(f"Memory analysis: {compiled.memory_analysis()}")
+
+  # Dump HLO if requested
+  if config.dump_hlo:
+    max_utils.upload_dump(
+        config.dump_hlo_local_dir,
+        config.dump_hlo_gcs_dir,
+        module_name=config.dump_hlo_module_name,
+        delete_local_after=config.dump_hlo_delete_local_after,
+        all_host_upload=config.dump_hlo_upload_all,
+    )
 
 
 if __name__ == "__main__":

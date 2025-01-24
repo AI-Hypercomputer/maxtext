@@ -15,7 +15,7 @@
  -->
 
 
-[![Unit Tests](https://github.com/google/maxtext/actions/workflows/UnitTests.yml/badge.svg)](https://github.com/google/maxtext/actions/workflows/UnitTests.yml)
+[![Unit Tests](https://github.com/google/maxtext/actions/workflows/RunTests.yml/badge.svg)](https://github.com/google/maxtext/actions/workflows/RunTests.yml)
 
 # Overview
 
@@ -49,7 +49,7 @@ Some extra helpful guides:
 * [Llama2](https://llama.meta.com/llama2/): a family of open-weights Large Language Model (LLM) by Meta. You can run decode and finetuning using [these instructions](getting_started/Run_Llama2.md).
 * [Mixtral](https://mistral.ai/news/mixtral-of-experts/): a family of open-weights sparse mixture-of-experts (MoE) model by Mistral AI. You can run decode and finetuning using [these instructions](end_to_end/tpu/mixtral/Run_Mixtral.md)
 
-In addition to the getting started guides, there are always other MaxText capabilities that are being constantly being added! The full suite of end-to-end tests is in [end_to_end](end_to_end). We run them with a nightly cadence. They can be a good source for understanding MaxText Alternatively you can see the continuous [unit tests](.github/workflows/UnitTests.yml) which are run almost continuously.
+In addition to the getting started guides, there are always other MaxText capabilities that are being constantly being added! The full suite of end-to-end tests is in [end_to_end](end_to_end). We run them with a nightly cadence. They can be a good source for understanding MaxText Alternatively you can see the continuous [unit tests](.github/workflows/RunTests.yml) which are run almost continuously.
 
 # Runtime Performance Results
 
@@ -59,7 +59,7 @@ More details on reproducing these results can be found in [MaxText/configs/READM
 
 | No. of params | Accelerator Type | TFLOP/chip/sec | Model flops utilization (MFU) |
 |---|---|---|---|
-| 32B | v5p-128 | 3.28e+02 | 71.47% |
+| 32B | v5p-128 | 3.28e+02 | 67.76% |
 | 64B | v5p-128 | 3.23e+02 | 70.31% |
 | 128B | v5p-256 | 3.15e+02 | 68.68% |
 | 128B | v5p-512 | 3.15e+02 | 68.53% |

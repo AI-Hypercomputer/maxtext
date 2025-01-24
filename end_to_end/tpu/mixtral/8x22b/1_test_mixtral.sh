@@ -17,7 +17,6 @@ if [ -z "${BASE_OUTPUT_PATH}" ]; then
     export BASE_OUTPUT_PATH=gs://runner-maxtext-logs/$(date +%Y-%m-%d)/
     echo "BASE_OUTPUT_PATH is not set, using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}"
 fi
-BASE_OUTPUT_PATH=gs://rdyro-mixtral-storage/logs/megamem-logs
 
 # Download checkpoint
 pip3 install torch
@@ -36,8 +35,8 @@ echo "Wrote MaxText compatible scanned checkpoint to ${BASE_OUTPUT_PATH}/${MODEL
 # unmount the gcsfuse directory
 fusermount -u "$PARAM_DIR"
 
-# Generate unscanned ckpt for efficient decoding test
-export SCANNED_CHECKPOINT=${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/scanned_ckpt/0/items
-export RUN_NAME=unscanned_ckpt
-JAX_PLATFORMS=cpu python MaxText/generate_param_only_checkpoint.py MaxText/configs/base.yml async_checkpointing=false base_output_directory=${BASE_OUTPUT_PATH} load_parameters_path=${SCANNED_CHECKPOINT} run_name=${RUN_NAME} model_name='mixtral-8x22b' force_unroll=true dtype=bfloat16 weight_dtype=bfloat16
-echo "Wrote MaxText compatible unscanned checkpoint to ${BASE_OUTPUT_PATH}/${RUN_NAME}/checkpoints"
+# rdyro(TODO): Temporarily disable the generation of unscanned checkpoints to
+# save time, as this process takes a couple of hours and is not utilized in
+# subsequent tests. The unscanned test is already running for 8x7b, so this
+# removal should not impact overall testing.
+

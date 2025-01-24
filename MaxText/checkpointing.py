@@ -19,7 +19,7 @@ limitations under the License.
 from typing import Any, Optional, Union
 from absl import flags
 from etils import epath
-from flax.training import orbax_utils, train_state
+from flax.training import train_state
 import grain.python as grain
 import jax
 import max_logging
@@ -27,6 +27,7 @@ from multihost_dataloading import MultiHostDataLoadIterator
 import numpy as np
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
+import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
 # pylint: disable=too-many-positional-arguments
 
@@ -38,8 +39,6 @@ PersistentCheckpointOptions = emergency_checkpoint_manager.PersistentCheckpointO
 
 abstract_logger = ocp.logging.abstract_logger
 cloud_logger = ocp.logging.cloud_logger
-composite_logger = ocp.logging.composite_logger
-standard_logger = ocp.logging.standard_logger
 
 
 def create_orbax_checkpoint_manager(
@@ -99,7 +98,7 @@ def create_orbax_emergency_checkpoint_manager(
     persistent_save_interval_steps: int,
     orbax_logger: Optional[abstract_logger.AbstractLogger] = None,
 ):
-  """Returns an emergency checkpoint."""
+  """Returns an emergency checkpoint manager."""
   flags.FLAGS.experimental_orbax_use_distributed_process_id = True
   max_logging.log("Creating emergency checkpoint manager...")
 
@@ -107,18 +106,46 @@ def create_orbax_emergency_checkpoint_manager(
       local=LocalCheckpointOptions(save_interval_steps=local_save_interval_steps),
       persistent=PersistentCheckpointOptions(save_interval_steps=persistent_save_interval_steps),
   )
-  emergency_mngr = emergency_checkpoint_manager.CheckpointManager(
+  manager = emergency_checkpoint_manager.CheckpointManager(
       local_checkpoint_dir,
       epath.Path(persistent_checkpoint_dir),
       global_mesh=global_mesh,
       abstract_state=abstract_state,
       options=options,
-      local_state_handler=emergency_checkpoint_manager.local_checkpoint_handler(),
       logger=orbax_logger,
   )
 
   max_logging.log("Emergency checkpoint manager created!")
-  return emergency_mngr
+  return manager
+
+
+def create_orbax_emergency_replicator_checkpoint_manager(
+    local_checkpoint_dir: str,
+    save_interval_steps: int,
+    global_mesh: jax.sharding.Mesh,
+):
+  """Returns an emergency replicator checkpoint manager."""
+  flags.FLAGS.experimental_orbax_use_distributed_process_id = True
+  max_logging.log("Creating emergency replicator checkpoint manager...")
+
+  options = emergency_replicator_checkpoint_manager.ReplicatorCheckpointManagerOptions(
+      save_interval_steps=save_interval_steps,
+  )
+  manager = emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager(
+      epath.Path(local_checkpoint_dir),
+      options,
+      global_mesh=global_mesh,
+  )
+
+  max_logging.log("Emergency replicator checkpoint manager created!")
+  return manager
+
+
+def print_save_message(step, async_checkpointing):
+  if async_checkpointing:
+    max_logging.log(f"Started an asynchronous checkpoint save for step {step}")
+  else:
+    max_logging.log(f"Saved a checkpoint at step {step}.")
 
 
 def _find_idx(array: np.ndarray, replica_axis_idx: int):
@@ -155,6 +182,7 @@ def load_state_if_possible(
     abstract_unboxed_pre_state: train_state.TrainState,
     enable_single_replica_ckpt_restoring: Optional[bool] = False,
     dataset_type: Optional[str] = "tfds",
+    step: int = -1,  # -1 means latest
 ):
   """Loads TrainState as possible from the inputs.
 
@@ -180,12 +208,9 @@ def load_state_if_possible(
   if checkpoint_manager is not None:
     max_logging.log("checkpoint manager exists so trying to load this run's existing checkpoint")
 
-    latest_step = checkpoint_manager.latest_step()
-    if latest_step is not None:
-      max_logging.log(
-          f"restoring from this run's directory latest step \
-          {latest_step}"
-      )
+    step = checkpoint_manager.latest_step() if step < 0 else step
+    if step is not None:
+      max_logging.log(f"restoring from this run's directory step {step}")
 
       def map_to_pspec(data):
         pspec = data.sharding.spec
@@ -219,16 +244,19 @@ def load_state_if_possible(
       if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
         return (
             checkpoint_manager.restore(
-                latest_step,
+                step,
                 args=ocp.args.PyTreeRestore(item=abstract_unboxed_pre_state, restore_args=restore_args),
             ),
             None,
         )
-
-      if dataset_type == "grain" and data_iterator is not None:
+      if (
+          dataset_type == "grain"
+          and data_iterator is not None
+          and (checkpoint_manager.directory / str(step) / "iter").exists()
+      ):
         return (
             checkpoint_manager.restore(
-                latest_step,
+                step,
                 args=ocp.args.Composite(
                     items=ocp.args.PyTreeRestore(
                         item=abstract_unboxed_pre_state,
@@ -242,7 +270,7 @@ def load_state_if_possible(
       else:
         return (
             checkpoint_manager.restore(
-                latest_step,
+                step,
                 args=ocp.args.Composite(
                     items=ocp.args.PyTreeRestore(
                         item=abstract_unboxed_pre_state,
@@ -268,32 +296,23 @@ def load_state_if_possible(
     return None, None
 
 
-def setup_checkpoint_logger(config) -> composite_logger.CompositeLogger | None:
+def setup_checkpoint_logger(config) -> cloud_logger.CloudLogger | None:
   """Setup checkpoint logger.
   Args:
     config
   Returns:
-    CompositeLogger
+    CloudLogger
   """
   orbax_cloud_logger = None
-  orbax_standard_logger = None
   max_logging.log("Setting up checkpoint logger...")
   if config.enable_checkpoint_cloud_logger:
-    logger_name = f"checkpoint_{config.run_name}"
+    logger_name = f"goodput_{config.run_name}"
     options = cloud_logger.CloudLoggerOptions(job_name=config.run_name, logger_name=logger_name)
     orbax_cloud_logger = cloud_logger.CloudLogger(options=options)
     max_logging.log("Successfully set up checkpoint cloud logger.")
+    return orbax_cloud_logger
 
-  if config.enable_checkpoint_standard_logger:
-    orbax_standard_logger = standard_logger.StandardLogger()
-    max_logging.log("Successfully set up checkpoint standard logger.")
-
-  orbax_logger = None
-  if orbax_cloud_logger is not None and orbax_standard_logger is not None:
-    orbax_logger = composite_logger.CompositeLogger(orbax_cloud_logger, orbax_standard_logger)
-    max_logging.log("Successfully set up checkpoint composite logger.")
-
-  return orbax_logger
+  return orbax_cloud_logger
 
 
 def load_params_from_path(load_parameters_from_path, abstract_unboxed_params):
@@ -317,6 +336,5 @@ def save_params_to_path(checkpoint_dir, params):
   """Save decode params in checkpoint at specified path."""
   assert checkpoint_dir, "checkpoint_dir is not defined."
   orbax_checkpointer = ocp.PyTreeCheckpointer()
-  save_args = orbax_utils.save_args_from_target({"params": params})
-  orbax_checkpointer.save(checkpoint_dir, {"params": params}, save_args=save_args, force=True)
+  orbax_checkpointer.save(checkpoint_dir, {"params": params}, force=True)
   print(f"Quantized params checkpoint saved at: {checkpoint_dir}")

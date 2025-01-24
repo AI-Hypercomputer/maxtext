@@ -77,11 +77,7 @@ class AttentionTest(unittest.TestCase):
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
         name="self_attention",
-<<<<<<< HEAD
-        attention_type=self.attention_type
-=======
         attention_type=self.attention_type,
->>>>>>> main
     )
 
     self._attention_as_mha_generic_variable = self._attention_as_mha_generic.init(
@@ -122,7 +118,7 @@ class AttentionTest(unittest.TestCase):
 
     return lnx, decoder_segment_ids, decoder_positions
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_autoregression(self):
     prefill_length = self.cfg.max_prefill_predict_length
     decode_total_length = self.cfg.max_target_length
@@ -178,11 +174,11 @@ class AttentionTest(unittest.TestCase):
       self.assertTrue(mha_full_this_idx.shape == mha_idx.shape)
       self.assertTrue(jax.numpy.allclose(mha_full_this_idx, mha_idx, rtol=1e-02, atol=1e-02, equal_nan=False))
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_model_mode_prefill_dtype_float32(self):
     self._test_model_mode_prefill_dtype(jnp.float32)
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_model_mode_prefill_dtype_bfloat16(self):
     self._test_model_mode_prefill_dtype(jnp.bfloat16)
 
@@ -228,15 +224,15 @@ class AttentionTest(unittest.TestCase):
 
     self.assertEqual(dtype, mha_prefill.dtype)
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_tpu_kernel_attention_mha(self):
     self.tpu_kernel_attention_helper(self.num_kv_heads)
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_tpu_kernel_attention_gqa(self):
     self.tpu_kernel_attention_helper(self.num_kv_heads // 2)
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_tpu_kernel_attention_mqa(self):
     self.tpu_kernel_attention_helper(1)
 
@@ -313,7 +309,7 @@ class AttentionTest(unittest.TestCase):
         jax.numpy.allclose(mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False)
     )
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_dot_product_cache_axis_order(self):
     all_axis_orders = [axis_order for axis_order in itertools.permutations(range(4))]
     for axis_order in random.choices(all_axis_orders, k=4):
@@ -427,7 +423,7 @@ class AttentionTest(unittest.TestCase):
           jax.numpy.allclose(attention_w_layout_full_this_idx, attention_w_layout_idx, rtol=rtol, atol=atol, equal_nan=False)
       )
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_dot_product_reshape_q(self):
     for compute_axis_order in [(0, 1, 2, 3), (0, 2, 1, 3)]:
       self._dot_product_attention_reshape_q(
@@ -722,113 +718,6 @@ class AttentionTest(unittest.TestCase):
         jax.numpy.allclose(
             sliding_window_output.astype(jnp.bfloat16), global_attn_output.astype(jnp.bfloat16), rtol=1e-04, atol=1e-04
         )
-    )
-
-  def test_sliding_window_attention(self):
-    """Test sliding window attention"""
-
-    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(self.dtype)
-
-    # Global Attention
-    global_attn = Attention(
-        config=self.cfg,
-        num_query_heads=self.num_query_heads,
-        num_kv_heads=self.num_kv_heads,
-        head_dim=self.head_dim,
-        max_target_length=self.max_target_length,
-        max_prefill_predict_length=self.max_prefill_predict_length,
-        mesh=self.mesh,
-        attention_kernel="dot_product",
-        dtype=self.dtype,
-        dropout_rate=self.cfg.dropout_rate,
-        name="global_attention",
-        attention_type=attentions.AttentionType.GLOBAL,
-    )
-
-    # Attention with sliding window of size 8
-    sliding_attn = Attention(
-        config=self.cfg,
-        num_query_heads=self.num_query_heads,
-        num_kv_heads=self.num_kv_heads,
-        head_dim=self.head_dim,
-        max_target_length=self.max_target_length,
-        max_prefill_predict_length=self.max_prefill_predict_length,
-        mesh=self.mesh,
-        attention_kernel="dot_product",
-        dtype=self.dtype,
-        dropout_rate=self.cfg.dropout_rate,
-        name="sliding_window_attention",
-        attention_type=attentions.AttentionType.LOCAL_SLIDING,
-        sliding_window_size=8,
-    )
-    
-    # Use freeze to fix the parameters to facilitate the comparison of sliding and global attention.
-    attn_variable = freeze(sliding_attn.init(
-        {"params": self.rng, "aqt": self.rng},
-        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones((self.global_batch_size, self.max_target_length)),
-    ))
-
-    global_attn_output = global_attn.apply(
-        attn_variable,
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
-        rngs={"aqt": self.rng},
-    )
-
-    sliding_window_output = sliding_attn.apply(
-        attn_variable,
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
-        rngs={"aqt": self.rng},
-    )
-
-    # Test if sliding window attention is different from global attention
-    self.assertFalse(
-        jax.numpy.allclose(sliding_window_output.astype(jnp.bfloat16), global_attn_output.astype(jnp.bfloat16), rtol=1e-04, atol=1e-04)
-    )
-
-    # Attention with sliding window of size max_target_length
-    # This should be equivalent to global attension.
-    sliding_attn = Attention(
-        config=self.cfg,
-        num_query_heads=self.num_query_heads,
-        num_kv_heads=self.num_kv_heads,
-        head_dim=self.head_dim,
-        max_target_length=self.max_target_length,
-        max_prefill_predict_length=self.max_prefill_predict_length,
-        mesh=self.mesh,
-        attention_kernel="dot_product",
-        dtype=self.dtype,
-        dropout_rate=self.cfg.dropout_rate,
-        name="sliding_window_attention",
-        attention_type=attentions.AttentionType.LOCAL_SLIDING,
-        sliding_window_size=self.max_target_length,
-    )
-
-    sliding_window_output = sliding_attn.apply(
-        attn_variable,
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
-        rngs={"aqt": self.rng},
-    )
-
-    # Test if sliding window attention with max_target_length size is the same as global attention
-    self.assertTrue(
-        jax.numpy.allclose(sliding_window_output.astype(jnp.bfloat16), global_attn_output.astype(jnp.bfloat16), rtol=1e-04, atol=1e-04)
     )
 
 

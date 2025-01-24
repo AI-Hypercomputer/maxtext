@@ -101,7 +101,7 @@ def checkpoint_loop(config, state=None):
     if jax.process_index() == 0:
       max_logging.log(f"STANDALONE CHECKPOINTER : Initial checkpoint restored in : {checkpoint_load_end - checkpoint_load_start}")
   else:  # Checkpoint was unavailable, state needs to be initialized
-    state, _, _ = max_utils.setup_training_state(model, None, tx, config, init_rng, mesh, checkpoint_manager)
+    state, _, _, _ = max_utils.setup_training_state(model, None, tx, config, init_rng, mesh, checkpoint_manager)
   state = add_entropy_to_checkpoint(state)
 
   ckpt_read_idx = 0
@@ -113,7 +113,7 @@ def checkpoint_loop(config, state=None):
       # A barrier to sync all hosts before starting to save checkpoint
       jax.experimental.multihost_utils.sync_global_devices("Barrier before save")
       start_time = datetime.datetime.now()
-      if save_checkpoint(checkpoint_manager=checkpoint_manager, step=step, state=state, config=config):
+      if save_checkpoint(checkpoint_manager=checkpoint_manager, step=int(step), state=state, config=config):
         checkpoint_manager.wait_until_finished()
         end_time = datetime.datetime.now()
         checkpoint_write_time = (end_time - start_time).total_seconds()

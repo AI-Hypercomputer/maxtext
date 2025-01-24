@@ -45,16 +45,17 @@ import max_logging
 import checkpointing
 from generate_param_only_checkpoint import _read_train_checkpoint
 import llama_or_mistral_ckpt
-from transformers import LlamaForCausalLM, MistralForCausalLM, AutoModelForCausalLM
+from transformers import LlamaForCausalLM, MistralForCausalLM, AutoModelForCausalLM, AutoConfig
 
 
-def unpermute_from_match_maxtext_rope(arr):
+def unpermute_from_match_maxtext_rope(arr, model_size):
   """
   Function to get the RoPE values in correct ordering
   """
-  split_size = arr.shape[-1] // 2  # Assuming half for evens, half for odds
-  evens = arr[..., :split_size]
-  odds = arr[..., split_size:]
+  if model_size[:8] != "llama3.1":
+    return arr
+  evens = arr[..., ::2]
+  odds = arr[..., 1::2]
   return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
 
 
@@ -77,6 +78,9 @@ def load_hf_model(model_size):
     model = MistralForCausalLM.from_pretrained("mistralai/Mistral-7B-v0.1")
   elif model_size == "mixtral-8x7b":
     model = AutoModelForCausalLM.from_pretrained("mistralai/Mixtral-8x7B-v0.1", device_map="auto")
+  elif model_size == "llama3.1-8b":
+    config = AutoConfig.from_pretrained("meta-llama/Llama-3.1-8B")
+    model = AutoModelForCausalLM.from_config(config)
   else:
     raise NotImplementedError
   return model
@@ -138,7 +142,8 @@ def convert_state_to_hf(training_state, model_size):
                         :, layer_int, :, :
                     ],
                     head_dim,
-                )
+                ),
+                model_size,
             )
             .reshape(base_num_query_heads * head_dim, base_num_query_heads * head_dim)
             .T
@@ -149,7 +154,8 @@ def convert_state_to_hf(training_state, model_size):
     hf_model_params[f"model.layers.{layer_int}.self_attn.k_proj.weight"] = torch.tensor(
         np.asarray(
             unpermute_from_match_maxtext_rope(
-                training_state.params["params"]["decoder"]["layers"]["self_attention"]["key"]["kernel"][:, layer_int, :, :]
+                training_state.params["params"]["decoder"]["layers"]["self_attention"]["key"]["kernel"][:, layer_int, :, :],
+                model_size,
             )
             .reshape(base_num_query_heads * head_dim, base_num_kv_heads * head_dim)
             .T

@@ -58,12 +58,12 @@ class TokenizerTest(unittest.TestCase):
     os.remove(cls.tokenizer_path)
 
   @pytest.mark.skip(reason="mohitkhatwani@ will fix this")
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_tokenize(self):
     text = "This is a test"
     self.assertTrue(np.array_equal(self.source_tokenizer.encode(text).numpy(), self.test_tokenizer.encode(text).numpy()))
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_detokenize(self):
     tokens = [66, 12, 10, 698]
     self.assertEqual(np.asarray(self.source_tokenizer.decode(tokens)), np.asarray(self.test_tokenizer.decode(tokens)))
@@ -76,13 +76,9 @@ class TikTokenTest(unittest.TestCase):
   def setUpClass(cls):
     dataset_name = "c4/en:3.0.1"
     dataset_path = "gs://maxtext-dataset"
-<<<<<<< HEAD
-    cls.source_tokenizer = _input_pipeline_utils.get_tokenizer("../assets/tokenizer_llama3.tiktoken", add_bos=False, add_eos=False)
-=======
     cls.source_tokenizer = _input_pipeline_utils.get_tokenizer(
         "../assets/tokenizer_llama3.tiktoken", add_bos=False, add_eos=False
     )
->>>>>>> main
     os.environ["TFDS_DATA_DIR"] = dataset_path
     read_config = tfds.ReadConfig(
         shuffle_seed=0,
@@ -90,13 +86,13 @@ class TikTokenTest(unittest.TestCase):
     train_ds_builder = tfds.builder(dataset_name)
     cls.dataset = train_ds_builder.as_dataset(split="train", read_config=read_config, shuffle_files=True)
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_tokenize(self):
     text = "This is a test"
     tokens = [2028, 374, 264, 1296]
     self.assertTrue(np.array_equal(self.source_tokenizer.encode(text), tokens))
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_detokenize(self):
     tokens = [2028, 374, 264, 1296]
     text = "This is a test"

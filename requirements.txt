@@ -1,6 +1,6 @@
 jax>=0.4.30
 jaxlib>=0.4.30
-orbax-checkpoint>=0.5.12,<=0.6.4
+orbax-checkpoint>=0.5.12
 absl-py
 array-record
 aqtp==0.7.5
@@ -10,6 +10,9 @@ datasets
 gcsfs
 google-cloud-aiplatform==1.61.0
 google-cloud-storage
+google-cloud-monitoring
+google-api-core
+google-api-python-client
 grain-nightly
 flax>=0.8.0
 ml-collections

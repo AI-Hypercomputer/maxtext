@@ -105,31 +105,9 @@ def main(config, test_args):
     max_logging.log(f"{golden_logits[0]=}")
     max_logging.log(f"{full_train_logits[0, 0, :]=}")
     token_size = int(test_args.token_size) if test_args.token_size else golden_logits.shape[0]
-<<<<<<< HEAD
-    max_logging.log(f"Max Numerical Difference {np.max(np.subtract(full_train_logits[0, :token_size, :], golden_logits[:token_size, :]))}")
-
-    model_probabilities = jax.nn.softmax(full_train_logits[0, :token_size, :], axis=-1)
-    golden_probabilities = jax.nn.softmax(golden_logits[:token_size, :], axis=-1)
-
-    max_logging.log(f"{golden_probabilities[0]=}")
-    max_logging.log(f"{model_probabilities[0]=}")
-
-    kl_div = jax.numpy.sum(jax.scipy.special.kl_div(golden_probabilities, model_probabilities), axis=-1)
-    max_logging.log(f"KL divergence = {kl_div}, max KL divergence = {jax.numpy.max(kl_div)}")
-
-    if test_args.max_kl_div is not None:
-      max_logging.log("Checking KL Divergence between train distribution and golden distribution")
-      assert jax.numpy.all(kl_div < test_args.max_kl_div), f"KL divergence values exceed the specified threshold of {test_args.max_kl_div}. Max divergence: {jax.numpy.max(kl_div)}"
-    else:
-      max_logging.log("Checking Numerical Differences between train logits and golden logits")
-      assert jax.numpy.allclose(
-            full_train_logits[0, :token_size, :], golden_logits[:token_size, :], rtol=float(test_args.rtol), atol=float(test_args.atol), equal_nan=False
-      ), f"Logits do not match closely enough. Required rtol={test_args.rtol}, atol={test_args.atol}."
-=======
     max_logging.log(
         f"Max Numerical Difference {np.max(np.subtract(full_train_logits[0, :token_size, :], golden_logits[:token_size, :]))}"
     )
->>>>>>> main
 
     model_probabilities = jax.nn.softmax(full_train_logits[0, :token_size, :], axis=-1)
     golden_probabilities = jax.nn.softmax(golden_logits[:token_size, :], axis=-1)

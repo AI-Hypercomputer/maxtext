@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Example:
-# bash offline_run_llama.sh -r test_int8_kv_216-108-54  -n
+# bash llama_offline_run.sh -r test_int8_kv_216-108-54  -n
 
 # enable profiling using -p option and capture using
 # tensorboard --logdir /tmp/tensorboard/
@@ -11,24 +11,29 @@ dry_run=false
 skip_warmup=false
 test_run=false
 enable_profiler=false
-performance=false
+enable_batch_prefill=false
+performance=true
 audit=false
 accuracy=false
+fast_eval=false
 
-
-while getopts "ntsepdar:" opt
-do
-  case "$opt" in
-      n ) dry_run=true ;;
-      t ) test_run=true ;; 
-      s ) skip_warmup=true ;;
-      e ) enable_profiler=true ;;
-      p ) performance=true ;;
-      d ) audit=true ;;
-      a ) accuracy=true ;;
-      r ) run_name="$OPTARG" ;;
-      ? ) helpFunction ;; # Print helpFunction in case parameter is non-existent
+for arg in "$@"; do
+  case $arg in
+    -n) dry_run=true ;;
+    -t) test_run=true ;;
+    -s) skip_warmup=true ;;
+    -p) enable_profiler=true ;;
+    -c) enable_batch_prefill=true ;;
+    -d) audit=true ;;
+    -a) accuracy=true ;;
+    -f) fast_eval=true ;;
+    -r=*|--run=*) run_name="${arg#*=}" ;;
+    -r|--run)
+      shift
+      run_name="$1"
+      ;;
   esac
+  shift
 done
 
 
@@ -46,6 +51,11 @@ fi
 PROFILER_OPTION=""
 if "$enable_profiler"; then
     PROFILER_OPTION="--enable_profile"
+fi
+
+BATCH_PREFILL_OPTION=""
+if "$enable_batch_prefill"; then
+    BATCH_PREFILL_OPTION="--enable_batch_prefill"
 fi
 
 if [ -z "$TOKENIZER_PATH" ]; then
@@ -71,14 +81,23 @@ then
   LAYOUT_CFG="compute_axis_order=0,1,2,3 ar_cache_axis_order=0,1,2,3"
   MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${LAYOUT_CFG}"
 fi
+
+if [ -z "$BASEDIR" ];
+then
+  BASEDIR=/home/${USER}/inference
+fi
+
+if [ -z "$DATA_DISK_DIR" ];
+then
+  DATA_DISK_DIR=/home/${USER}/loadgen_run_data
+fi
+
 export LOADGEN_RUN_TIMESTAMP=$(TZ=America/Los_Angeles date +%Y%m%d%H%M%S%Z)
-export BASEDIR=/home/${USER}/inference
-export DATA_DISK_DIR=/home/${USER}/loadgen_run_data
 export API_URL=0.0.0.0:9000
 if "$test_run"; then
   export DATASET_TYPE=test
   export DATASET_PATH=${DATA_DISK_DIR}/processed-data.pkl
-  export TOTAL_SAMPLE_COUNT=100
+  export TOTAL_SAMPLE_COUNT=1000
   export USER_CONFIG=user${TOTAL_SAMPLE_COUNT}.conf
 else
   export DATASET_TYPE=full
@@ -93,12 +112,10 @@ export JAX_COMPILATION_CACHE_DIR="/tmp/jax_cache2"
 export LIBTPU_INIT_ARGS
 
 run_loadgen() {
-
   OUTPUT_LOG_ID=llama70b-${run_name}-${DATASET_TYPE}-${LOADGEN_RUN_TYPE}-${LOADGEN_RUN_TYPE}_${LOADGEN_RUN_TIMESTAMP}
   OUTPUT_LOG_DIR=${DATA_DISK_DIR}/logs/${OUTPUT_LOG_ID}
   mkdir -p ${OUTPUT_LOG_DIR} && cp ${USER_CONFIG} ${OUTPUT_LOG_DIR}
   OUTPUT_ACCURACY_JSON_PATH=${OUTPUT_LOG_DIR}/mlperf_log_accuracy.json
-
 
   echo "LOADGEN_RUN_TIMESTAMP: ${LOADGEN_RUN_TIMESTAMP}"
   echo "DATASET_PATH: ${DATASET_PATH}"
@@ -110,19 +127,18 @@ run_loadgen() {
 
   ${cmd} python -m offline_mode \
     --mlperf_test_mode=${TEST_MODE} \
-	  --input_mode tokenized \
+    --input_mode tokenized \
     --output_mode tokenized \
-	  --mlperf_conf $BASEDIR/mlperf.conf \
-	  --user_conf ${USER_CONFIG} \
-	  --audit_conf ${AUDIT_CONF}  \
-	  --total_sample_count ${TOTAL_SAMPLE_COUNT} \
-	  --dataset_path ${DATASET_PATH} \
+    --mlperf_conf $BASEDIR/mlperf.conf \
+    --user_conf ${USER_CONFIG} \
+    --audit_conf ${AUDIT_CONF}  \
+    --total_sample_count ${TOTAL_SAMPLE_COUNT} \
+    --dataset_path ${DATASET_PATH} \
     --prefill_lengths_and_batch_sizes ${BATCH_AND_PREFILL_LEN} \
     --maxengine_args "${MAXENGINE_ARGS}" \
-	  --output_log_dir ${OUTPUT_LOG_DIR} \
+    --output_log_dir ${OUTPUT_LOG_DIR} \
     --tok_outlen_multiplier ${TOK_OUTLEN_MULTIPLIER} \
-    ${SKIP_WARMUP_OPTION} ${PROFILER_OPTION} 2>&1 | tee ${OUTPUT_LOG_DIR}/${LOADGEN_RUN_TYPE}_log.log
-
+    ${SKIP_WARMUP_OPTION} ${PROFILER_OPTION} ${BATCH_PREFILL_OPTION} 2>&1 | tee ${OUTPUT_LOG_DIR}/${LOADGEN_RUN_TYPE}_log.log
 }
 
 run_loadgen_performance () {
@@ -147,27 +163,36 @@ run_loadgen_accuracy () {
 
   # Eval Run
   if [ -e ${OUTPUT_ACCURACY_JSON_PATH} ]; then
-    ${CMD} python3 evaluate-accuracy.py \
-      --checkpoint-path meta-llama/Llama-2-70b-chat-hf \
+    if [ "${FAST_EVAL:-false}" = "true" ] || "$fast_eval"; then
+      EVAL_SCRIPT="evaluate-accuracy-fast.py"
+    else
+      EVAL_SCRIPT="evaluate-accuracy.py"
+    fi
+    
+    ${CMD} python3 ${EVAL_SCRIPT} \
+      --tokenizer-path ${TOKENIZER_PATH} \
       --mlperf-accuracy-file ${OUTPUT_ACCURACY_JSON_PATH} \
       --dataset-file ${DATASET_PATH} 2>&1 | tee ${OUTPUT_LOG_DIR}/evaluate_offline_accuracy_log.log
   fi
 }
 
-if "$performance"; then
-  echo
-  echo "Starting loadgen performance run"
-  run_loadgen_performance
-fi
-
+performance=true
 if "$audit"; then
+  performance=false
   echo
   echo "Starting loadgen audit"
   run_loadgen_audit
 fi
 
 if "$accuracy"; then
+  performance=false
   echo
   echo "Starting loadgen accuracy"
   run_loadgen_accuracy
+fi
+
+if "$performance"; then
+  echo
+  echo "Starting loadgen performance run"
+  run_loadgen_performance
 fi
