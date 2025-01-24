@@ -425,7 +425,7 @@ class OfflineInference:
     data_dict[128] += data_dict[64]
     data_dict[64] = []
     data = []
-    for padded_len in np.power([7, 8, 9, 10], 2):
+    for padded_len in [128, 256, 512, 1024]:
       log.info(f"padded len: {padded_len}, num: {len(data_dict[padded_len])}")
       random.shuffle(data_dict[padded_len])
       data += data_dict[padded_len]
