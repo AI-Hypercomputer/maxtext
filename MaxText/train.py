@@ -59,6 +59,8 @@ import jax.numpy as jnp
 from jax import random
 from jax.sharding import Mesh
 from jax.experimental import checkify
+from jax._src.api import TransferToMemoryKind
+from jax.experimental.compute_on import compute_on
 
 from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
@@ -531,13 +533,15 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   else:
     grads = raw_grads
   if config.optimizer_memory_host_offload:
+    grads = jax.device_put(grads, max_utils.with_memory_kind(state_mesh_shardings.params, "pinned_host"))
     state = state.replace(
         opt_state=jax.device_put(
             state.opt_state,
             jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="device"), state_mesh_shardings.opt_state),
         )
     )
-  new_state = state.apply_gradients(grads=grads)
+
+    new_state = compute_on('device_host')(state.apply_gradients)(grads=grads)
 
   scalar_metrics = {
       "learning/loss": loss,
