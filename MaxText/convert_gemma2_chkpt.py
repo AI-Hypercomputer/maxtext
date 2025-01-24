@@ -25,44 +25,114 @@ import argparse
 import copy
 from flax.training import train_state
 
+from transformers import AutoModelForCausalLM
 from typing import Any
 import sys
+import re
+import psutil
 import max_logging
-
+from collections import defaultdict
 
 import orbax
-
+from dataclasses import dataclass
 import checkpointing
 from train import save_checkpoint
 
 Params = dict[str, Any]
 
 
-def nest_params(params: Params) -> Params:
+def nest_params(params: Params, split_char = "/") -> Params:
   """Nests params as a dict of dicts rather than a flat dict."""
   nested_params = {}
   for path, param in params.items():
-    *path, leaf = path.split("/")
+    *path, leaf = path.split(split_char)
     subdict = nested_params
     for key in path:
       subdict = subdict.setdefault(key, {})
     subdict[leaf] = param
   return nested_params
 
+def _hf_mapping(layer_idx: int = -1) -> dict:
+  # pylint: disable=line-too-long
+  return {
+    "model.embed_tokens.weight": "transformer/embedder",
+    "model.norm.weight": "transformer/final_norm",
+    "lm_head.weight": "transformer/lm_head",
+    f"model.layers.{layer_idx}.self_attn.q_proj.weight": f"transformer/layers_{layer_idx}/attention/q_einsum/w",
+    f"model.layers.{layer_idx}.self_attn.k_proj.weight": f"transformer/layers_{layer_idx}/attention/kv_einsum/w",
+    f"model.layers.{layer_idx}.self_attn.v_proj.weight": f"transformer/layers_{layer_idx}/attention/kv_einsum.w",
+    f"model.layers.{layer_idx}.self_attn.o_proj.weight": f"transformer/layers_{layer_idx}/attention/attn_vec_einsum/w",
+    f"model.layers.{layer_idx}.mlp.gate_proj.weight": f"transformer/layers_{layer_idx}/mlp/gating_einsum",
+    f"model.layers.{layer_idx}.mlp.up_proj.weight": f"transformer/layers_{layer_idx}/mlp/gating_einsum",
+    f"model.layers.{layer_idx}.mlp.down_proj.weight": f"transformer/layer_{layer_idx}/mlp/linear",
+    f"model.layers.{layer_idx}.input_layernorm.weight": f"transformer/layers_{layer_idx}/pre_attention_norm",
+    f"model.layers.{layer_idx}.post_attention_layernorm.weight": f"transformer/layers_{layer_idx}/post_attention_norm",
+    f"model.layers.{layer_idx}.pre_feedforward_layernorm.weight": f"transformer/layer_{layer_idx}/pre_ffw_norm",
+    f"model.layers.{layer_idx}.post_feedforward_layernorm.weight": f"transformer/layer_{layer_idx}/post_ffw_norm",
+  }
+
+
+def map_from_hf(params):
+  new_params = defaultdict(list)
+  for key in params:
+
+  return params
+
+@dataclass
+class _HFNamespaceMapper:
+  """A class to dynamically map Gemma weight names from Huggingface weights
+  if the checkpoint is from HF.
+  """
+
+  collection: dict
+  delimiter: str = "."
+
+  def __getitem__(self, key):
+    if key in self.collection:
+      return self.collection[key]  # original key takes precedence
+    fields = key.split(self.delimiter)
+    num_fields = [int(field) for field in fields if re.match(r"[0-9]+", field) is not None]
+    mapping = _hf_mapping(*num_fields)
+    print(num_fields)
+    print(mapping)
+    if key not in mapping:
+      raise ValueError(f"Key `{key}` is missing from the original collection and from the mapping.")
+    new_key = mapping[key]
+    if new_key not in self.collection:
+      raise ValueError(f"New key `{new_key}` mapped from `{key}` is missing from the collection.")
+    return self.collection[new_key]
 
 def main(raw_args=None) -> None:
   parser = argparse.ArgumentParser()
   parser.add_argument("--base_model_path", type=str, required=True)
+  parser.add_argument("--base_model_source", type=str, required=False, default='kaggle')
   parser.add_argument("--maxtext_model_path", type=str, required=True)
   parser.add_argument("--model_size", type=str, required=True)
   args = parser.parse_args(raw_args)
   if args.model_size not in ("2b", "9b", "27b"):
     raise NotImplementedError("only implemented for gemma 2 classes")
+  mem_info = psutil.Process()
+  max_logging.log(f"Memory usage: {mem_info.memory_info().rss / (1024**3)} GB")
+  print(f"Loading checkpoint from {args.base_model_source}")
+  if args.base_model_source == "kaggle":
+    checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+    params = checkpointer.restore(args.base_model_path)
+    breakpoint()
+    params = nest_params(params)
+    
+  elif args.base_model_source == "huggingface":
+    model = AutoModelForCausalLM.from_pretrained(args.base_model_path)
+    params = model.state_dict()
+    params = map_from_hf(params)
+    max_logging.log(f"Memory usage: {mem_info.memory_info().rss / (1024**3)} GB")
+    breakpoint()
+    params = nest_params(params, split_char = ".")
+    
+  else:
+    raise ValueError(f"{args.base_model_source=} not supported")
 
-  print("Loading checkpoint")
-  checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-  params = checkpointer.restore(args.base_model_path)
-  params = nest_params(params)
+  max_logging.log(f"Memory usage: {mem_info.memory_info().rss / (1024**3)} GB")
+
   num_layers = max((int(k.split("_")[1]) for k in params["transformer"].keys() if "layer_" in k)) + 1
   hidden_dim, embed_dim = params["transformer"]["layer_0"]["mlp"]["linear"]["w"].shape
   num_heads, head_dim, _ = params["transformer"]["layer_0"]["attn"]["attn_vec_einsum"]["w"].shape
