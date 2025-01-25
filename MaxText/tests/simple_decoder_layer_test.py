@@ -13,7 +13,7 @@ limitations under the License.
 
 import unittest
 import pytest
-from train import main as train_main
+from MaxText.train import main as train_main
 
 
 class SimpleDecoderLayerTest(unittest.TestCase):
