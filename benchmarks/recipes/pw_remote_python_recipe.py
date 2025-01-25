@@ -43,7 +43,12 @@ def main() -> int:
   xpk_path = "xpk"
 
   # Handle command line arguments using args_helper
-  helper.handle_cmd_args(cluster_config, helper.DELETE, xpk_path=xpk_path)
+  should_continue = helper.handle_cmd_args(
+      cluster_config, helper.DELETE, xpk_path=xpk_path
+  )
+
+  if not should_continue:
+    return 0
 
   # Configure test images
   user = os.environ["USER"]

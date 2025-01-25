@@ -29,7 +29,7 @@ DELETE = "delete"
 
 def _handle_delete(
     cluster_config: mxr.XpkClusterConfig, user: str, **kwargs
-) -> None:
+) -> int:
   """Handles the deletion of workloads.
 
   Args:
@@ -53,7 +53,7 @@ def _handle_delete(
 
 def handle_cmd_args(
     cluster_config: mxr.XpkClusterConfig, *actions: str, **kwargs
-) -> None:
+) -> bool:
   """Parses command-line arguments and executes the specified actions.
 
   Args:
@@ -86,5 +86,9 @@ def handle_cmd_args(
   user = os.environ["USER"]
 
   # Handle actions
+  should_continue = True
   if DELETE in actions and known_args.delete:
     _handle_delete(cluster_config, user, **kwargs)
+    should_continue = False
+
+  return should_continue
