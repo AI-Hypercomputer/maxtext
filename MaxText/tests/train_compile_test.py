@@ -282,3 +282,155 @@ class TrainCompile(unittest.TestCase):
             "attention=flash",
         )
     )
+
+  @pytest.mark.tpu_only
+  def test_moe_dropping_bf16(self):
+    compiled_trainstep_file = "/tmp/test_moe_dropping_bf16.pickle"
+    train_compile_main(
+        (
+            None,
+            "configs/base.yml",
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v6e-256",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=mixtral-8x7b",
+            "sparse_matmul=False",
+            "capacity_factor=1",
+            "per_device_batch_size=4",
+            "max_target_length=1024",
+            "attention=flash",
+            "dtype=bfloat16",
+        )
+    )
+
+  @pytest.mark.tpu_only
+  def test_moe_dropping_int8(self):
+    compiled_trainstep_file = "/tmp/test_moe_dropping_int8.pickle"
+    train_compile_main(
+        (
+            None,
+            "configs/base.yml",
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-128",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=mixtral-8x7b",
+            "sparse_matmul=False",
+            "capacity_factor=1",
+            "per_device_batch_size=4",
+            "max_target_length=128",
+            "attention=flash",
+            "dtype=bfloat16",
+            "quantization=int8",
+        )
+    )
+
+  # TODO(b/388572320): Add int8 quantization test once this bug is fixed.
+  @pytest.mark.tpu_only
+  def test_moe_megablox_bf16(self):
+    compiled_trainstep_file = "/tmp/test_moe_megablox_bf16.pickle"
+    train_compile_main(
+        (
+            None,
+            "configs/base.yml",
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v6e-256",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=mixtral-8x7b",
+            "sparse_matmul=True",
+            "megablox=True",
+            "per_device_batch_size=4",
+            "max_target_length=1024",
+            "attention=flash",
+            "dtype=bfloat16",
+        )
+    )
+
+  @pytest.mark.tpu_only
+  def test_moe_ragged_dot_bf16(self):
+    compiled_trainstep_file = "/tmp/test_moe_ragged_dot_bf16.pickle"
+    train_compile_main(
+        (
+            None,
+            "configs/base.yml",
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v6e-256",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=mixtral-8x7b",
+            "sparse_matmul=True",
+            "megablox=False",
+            "per_device_batch_size=4",
+            "max_target_length=1024",
+            "attention=flash",
+            "dtype=bfloat16",
+        )
+    )
+
+  @pytest.mark.tpu_only
+  def test_moe_dense_bf16(self):
+    compiled_trainstep_file = "/tmp/test_moe_dense_bf16.pickle"
+    train_compile_main(
+        (
+            None,
+            "configs/base.yml",
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v6e-256",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=mixtral-8x7b",
+            "sparse_matmul=False",
+            "capacity_factor=-1",
+            "per_device_batch_size=4",
+            "max_target_length=1024",
+            "attention=flash",
+            "dtype=bfloat16",
+        )
+    )
+
+  @pytest.mark.tpu_only
+  def test_moe_dense_int8(self):
+    compiled_trainstep_file = "/tmp/test_moe_dense_int8.pickle"
+    train_compile_main(
+        (
+            None,
+            "configs/base.yml",
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-128",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=mixtral-8x7b",
+            "sparse_matmul=False",
+            "capacity_factor=-1",
+            "per_device_batch_size=4",
+            "max_target_length=128",
+            "attention=flash",
+            "dtype=bfloat16",
+            "quantization=int8",
+        )
+    )
+
+  @pytest.mark.tpu_only
+  def test_moe_pp_bf16(self):
+    compiled_trainstep_file = "/tmp/test_moe_pp_bf16.pickle"
+    train_compile_main(
+        (
+            None,
+            "configs/base.yml",
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v6e-256",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=2",
+            "model_name=mixtral-8x7b",
+            "sparse_matmul=False",
+            "capacity_factor=1",
+            "per_device_batch_size=4",
+            "max_target_length=1024",
+            "attention=flash",
+            "dtype=bfloat16",
+            "dcn_pipeline_parallelism=2",
+            "num_layers_per_pipeline_stage=1",
+        )
+    )
