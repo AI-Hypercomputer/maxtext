@@ -263,7 +263,6 @@ class PageManager(nn.Module):
       current_page = current_page.at[slot].set(page_idx)
       return page_map, page_status, current_page, updating_slots
 
-    print(f"{page_status.shape=}")
     page_map, page_status, current_page, _ = jax.lax.fori_loop(
       0,
       jnp.count_nonzero(seq_new_page),

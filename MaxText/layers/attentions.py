@@ -192,13 +192,10 @@ class PagedAttentionOp(nn.Module):
   def paged_dot_product_attention_with_max_and_sum(self, query, key, value):
     b, t, n, d = query.shape
     _, s, n_kv, _ = key.shape
-    print(f"Attention input shapes - Query: {query.shape}, Key: {key.shape}")
     
     query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
-    print(f"Reshaped query shape: {query.shape}")
     
     attn_weights = jnp.einsum("btkgd,bskd->bkgts", query, key)
-    print(f"Attention weights shape: {attn_weights.shape}")
     
     causal_mask = jnp.triu(jnp.ones((t, s)), k=1)
     causal_mask = jnp.reshape(causal_mask, (1, 1, 1, t, s))
@@ -366,34 +363,32 @@ class PagedAttentionOp(nn.Module):
   
 
   def update_decode_step_pages(self, key_pages_var, value_pages_var, key, value, page_state):
-    """Update KV cache pages for autoregressive generation."""
-    b, t, n_kv, d = key.shape
-    
-    # Get current state
-    current_page = page_state.current_page[0]          
-    current_position = page_state.current_page_position[0]
-    
-    # Update cache for each head
-    for head_idx in range(n_kv):
-        # Get new values for this head
-        new_key = jnp.squeeze(key[0, 0, head_idx])
-        new_value = jnp.squeeze(value[0, 0, head_idx])
-        
-        # Update key pages
-        key_pages_var.value = key_pages_var.value.at[
-            head_idx, current_page, current_position].set(new_key)
-            
-        # Update value pages
-        value_pages_var.value = value_pages_var.value.at[
-            head_idx, current_page, current_position].set(new_value)
-    
-    # Apply logical constraints to maintain sharding
-    key_pages_var.value = nn.with_logical_constraint(
-        key_pages_var.value, self.kv_pages_axis_names)
-    value_pages_var.value = nn.with_logical_constraint(
-        value_pages_var.value, self.kv_pages_axis_names)
+    key_pages = key_pages_var.value
+    value_pages = value_pages_var.value
 
-    return
+    batch_size, seq_len, kv_heads, head_dim = key.shape
+    kv_heads, num_pages, page_size, head_dim = key_pages.shape
+
+    new_key = key.reshape(batch_size, kv_heads, head_dim)[:, :, :] 
+    new_key = jnp.transpose(new_key, (1, 0, 2))  # [n_kv, b, d]
+    new_value = value.reshape(batch_size, kv_heads, head_dim)[:, :, :]
+    new_value = jnp.transpose(new_value, (1, 0, 2))  # n_kv, b, d
+
+    broadcast_pages = jnp.tile(page_state.current_page, (kv_heads, 1))  # [n_kv, b]
+    broadcast_pos = jnp.tile(page_state.current_page_position, (kv_heads, 1))  # [n_kv, b]
+    kv_indices = jnp.arange(kv_heads)[:, None]  # [n_kv, 1]
+    kv_indices = jnp.tile(kv_indices, (1, batch_size))  # [n_kv, b]
+
+    # pages (self.num_kv_heads, self.num_pages, self.page_size, self.kv_head_dim_size)
+    key_pages_updated = key_pages.at[kv_indices, broadcast_pages, broadcast_pos].set(new_key)
+    value_pages_updated = value_pages.at[kv_indices, broadcast_pages, broadcast_pos].set(new_value)
+
+    key_pages_updated = nn.with_logical_constraint(key_pages_updated, self.kv_pages_axis_names)
+    value_pages_updated = nn.with_logical_constraint(value_pages_updated, self.kv_pages_axis_names)
+
+    key_pages_var.value = key_pages_updated
+    value_pages_var.value = value_pages_updated
+    return key_pages_var, value_pages_var
 
 
 class AttentionOp(nn.Module):

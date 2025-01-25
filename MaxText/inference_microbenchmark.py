@@ -261,11 +261,11 @@ def debug_cache(cache, cache_type, attention_kernel):
   if attention_kernel == "paged":
     page_manager_keys = [
       "page_status",
-      "seq_lengths",
-      "seq_num_pages",
-      "seq_page_idx_mappings",
-      "seq_page_indices",
-      "seq_page_slice_indices",
+      "current_page",
+      "current_page_position",
+      "num_pages_used",
+      "page_map",
+      "sequence_lengths",
     ]
     for page_manager_key in page_manager_keys:
       max_utils.debug_array(cache['page_manager'][page_manager_key], page_manager_key)

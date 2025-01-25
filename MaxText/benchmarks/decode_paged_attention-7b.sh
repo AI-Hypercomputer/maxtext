@@ -3,7 +3,7 @@ python MaxText/decode.py \
     MaxText/configs/base.yml \
     model_name=llama2-7b \
     tokenizer_path=assets/tokenizer.llama2 \
-    per_device_batch_size=1 \
+    per_device_batch_size=8 \
     max_prefill_predict_length=1024 \
     max_target_length=2048 \
     weight_dtype=bfloat16 \
