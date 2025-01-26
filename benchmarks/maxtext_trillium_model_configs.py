@@ -437,7 +437,7 @@ llama2_70b_4096_optimized_pw = _add_to_model_dictionary(
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
 
-        # Additional tuning params for pathways long running test.
+        # Additional tuning params for pathways benchmarking
         "checkpoint_storage_use_ocdbt": False,
         "checkpoint_storage_use_zarr3": False,
         "goodput_upload_interval_seconds": 30,
