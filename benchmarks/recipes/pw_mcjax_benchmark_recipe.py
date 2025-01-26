@@ -31,7 +31,7 @@ CLUSTER = "v6e-256-cluster"
 PROJECT = "tpu-prod-env-cluster"
 ZONE = "us-east5-b"
 DEVICE_TYPE = "v6e-256"
-BENCHMARK_STEPS = 100000
+BENCHMARK_STEPS = 20
 
 
 def main() -> int:
@@ -58,6 +58,7 @@ def main() -> int:
 
   list_of_models = [
       model_configs.llama2_70b_4096_real_data_pw_long_run,
+      model_configs.llama2_70b_4096_real_data_pw_long_run,
   ]
   pathways_config = mxr.PathwaysConfig(
       server_image=HEAD_SERVER_IMAGE,
@@ -65,7 +66,7 @@ def main() -> int:
       runner_image=HEAD_RUNNER,
   )
   num_slices_list = [
-      6
+      1, 2, 4, 6
   ]
 
   xpk_workload_cmds = []
