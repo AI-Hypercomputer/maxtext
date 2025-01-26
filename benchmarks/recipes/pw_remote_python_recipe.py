@@ -27,16 +27,16 @@ import maxtext_xpk_runner as mxr
 def main() -> int:
   # V6e cluster config
   cluster_config = mxr.XpkClusterConfig(
-      cluster_name="bodaborg-v6e-256-dnd-yucmhab",
-      project="tpu-prod-env-one-vm",
+      cluster_name="v6e-256-cluster",
+      project="tpu-prod-env-cluster",
       zone="us-east5-b",
       device_type="v6e-256",
   )
 
   # V5e cluster config
   # cluster_config = mxr.XpkClusterConfig(
-  #     cluster_name="sujinesh-in-memory-test-cluster",
-  #     project="cloud-tpu-multipod-dev",
+  #     cluster_name="v5e-cluster",
+  #     project="cloud-tpu-cluster",
   #     zone="us-west1-c",
   #     device_type="v5litepod-16",
   # )
