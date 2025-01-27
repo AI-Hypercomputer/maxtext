@@ -17,7 +17,7 @@
 import jax
 
 import max_utils
-from maxtext import maxengine
+import maxengine
 
 import os
 import pyconfig
