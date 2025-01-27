@@ -30,13 +30,14 @@ mkdir -p "$PARAM_DIR"
 [[ ! -z $(ls "$PARAM_DIR") ]] && fusermount -u "$PARAM_DIR"
 # [[ ! -z $(ls "$OUTPUT_PARAM_DIR") ]] && fusermount -u "$OUTPUT_PARAM_DIR"
 # gcsfuse --implicit-dirs maxtext-external "$PARAM_DIR"
-gcsfuse -o ro --implicit-dirs --type-cache-max-size-mb=-1 --stat-cache-max-size-mb=-1 --kernel-list-cache-ttl-secs=-1 --metadata-cache-ttl-secs=-1 maxtext-external "$PARAM_DIR"
+# gcsfuse -o ro --implicit-dirs --type-cache-max-size-mb=-1 --stat-cache-max-size-mb=-1 --kernel-list-cache-ttl-secs=-1 --metadata-cache-ttl-secs=-1 maxtext-external "$PARAM_DIR"
 
 # gcsfuse -o ro --implicit-dirs --log-severity=debug \
 #         --type-cache-max-size-mb=-1 --stat-cache-max-size-mb=-1 --kernel-list-cache-ttl-secs=-1 --metadata-cache-ttl-secs=-1 \
 #         --log-file=$HOME/gcsfuse_$TIMESTAMP.json "$DATASET_GCS_BUCKET" "$MOUNT_PATH"
 # gcsfuse --implicit-dirs runner-maxtext-logs "$OUTPUT_PARAM_DIR"
 # alternatively: $ gcloud storage cp -r "gs://maxtext-external/$MODEL_NAME" $PARAM_DIR
+gcloud storage cp -r "gs://maxtext-external/$MODEL_NAME" $PARAM_DIR
 
 # Convert it to MaxText(orbax) format - scanned ckpt
 JAX_PLATFORMS=cpu python3 MaxText/llama_or_mistral_ckpt.py --base-model-path="$PARAM_DIR/$MODEL_NAME" --model-size=mixtral-8x22b --maxtext-model-path=${OUTPUT_PARAM_DIR}/ranran/${MODEL_NAME}/scanned_ckpt/ --checkpoint-type=safetensors
