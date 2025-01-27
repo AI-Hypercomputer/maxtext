@@ -39,7 +39,7 @@ from jetstream.engine import token_utils
 import max_utils
 import inference_utils
 import pyconfig
-import jaxlib
+
 
 import warnings
 
@@ -126,7 +126,7 @@ class MaxEngine(engine_api.Engine):
     # pylint: disable=isinstance-second-argument-not-valid-type
     self.abstract_params = jax.tree_util.tree_map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
-        if isinstance(x, jaxlib.xla_extension.ArrayImpl)
+        if isinstance(x, jax.Array)
         else None,
         state.params,
     )
