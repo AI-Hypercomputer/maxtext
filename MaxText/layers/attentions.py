@@ -160,7 +160,7 @@ class AttentionOp(nn.Module):
   sliding_window_size: int | None = None
   use_ragged_attention: bool = False
   ragged_block_size: int = 256
-  use_chunked_prefill: bool = False
+  use_chunked_prefill: bool = True
   prefill_cache_constructed: bool = False
 
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
@@ -224,8 +224,9 @@ class AttentionOp(nn.Module):
       lengths: Array | None,
       model_mode: str,
       use_ragged_attention: bool = False,
-      chunk_id=None,
-      chunk_length=None,
+      chunk_id=0,
+      chunk_length=20,
+      prefix_id=None,
   ):
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
@@ -239,7 +240,7 @@ class AttentionOp(nn.Module):
         or (self.attention_kernel == "autoselected" and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE)
         or (self.attention_kernel == "autoselected" and length < 128)
     ):
-      return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode, chunk_id=chunk_id, chunk_length=chunk_length)
+      return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode, chunk_id=chunk_id, chunk_length=chunk_length, prefix_id=prefix_id)
     elif self.attention_kernel == "flash" or self.attention_kernel == "autoselected":
       if isinstance(key, KVTensor):
         key = key.dequant()
@@ -480,8 +481,9 @@ class AttentionOp(nn.Module):
       value: Array | KVTensor,
       decoder_segment_ids: Array | None,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
-      chunk_id=None,
-      chunk_length=None,
+      chunk_id=0,
+      chunk_length=20,
+      prefix_id=None,
   ):
     """Apply Attention."""
     validate_compute_axis_order(self.compute_axis_order)
@@ -503,6 +505,10 @@ class AttentionOp(nn.Module):
     if model_mode == common_types.MODEL_MODE_TRAIN and self.float32_logits:
       attn_weights = attn_weights.astype(jnp.float32)
     attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
+    chunked_prefill_mask = None
+    if self.use_chunked_prefill:
+      if prefix_id == chunk_id:
+        pass
     if attn_mask is not None:
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
     return self.compute_local_attention(attn_weights, value, q_seq_len, model_mode)
@@ -1091,7 +1097,7 @@ class AttentionOp(nn.Module):
     return cached_prefill, cached_ar
 
   def kv_cache(
-      self, key: Array, value: Array, decoder_segment_ids: Array, model_mode: str, use_ragged_attention: bool = False, chunk_id=None,
+      self, key: Array, value: Array, decoder_segment_ids: Array, model_mode: str, use_ragged_attention: bool = False, chunk_id=0,
   ) -> tuple:
     """KV cache takes the current state and updates the state accordingly.
 
@@ -1125,6 +1131,15 @@ class AttentionOp(nn.Module):
     else:
       raise ValueError(f"Model Mode isn't supported! {model_mode=}")
 
+  def fetch_kv_cache_for_ith_chunk(chunk_id, chunk_length):
+
+
+    
+    pass
+  
+  def create_attention_mask_for_ith(chunk_id, chunk_length):
+    pass
+  
   def normalize_attention(self, local_outs, local_maxes, local_sums):
     """Normalize across multiple localized attentions
 
@@ -1150,45 +1165,103 @@ class AttentionOp(nn.Module):
 
   @nn.compact
   def __call__(self, query, key, value, decoder_segment_ids, model_mode, chunk_id, chunk_length):
-    prefill_kv_cache, ar_kv_cache = self.kv_cache(
-        key, value, decoder_segment_ids, model_mode, use_ragged_attention=self.use_ragged_attention
-    )
+    if not self.use_chunked_prefill:
+      prefill_kv_cache, ar_kv_cache = self.kv_cache(
+          key, value, decoder_segment_ids, model_mode, use_ragged_attention=self.use_ragged_attention
+      )
 
-    prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
-        query=query,
-        key=prefill_kv_cache[0],
-        value=prefill_kv_cache[1],
-        decoder_segment_ids=prefill_kv_cache[2],
-        lengths=None,
-        model_mode=model_mode,
-        use_ragged_attention=self.use_ragged_attention,
-        chunk_id=chunk_id,
-        chunk_length=chunk_length,
-    )
+      prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
+          query=query,
+          key=prefill_kv_cache[0],
+          value=prefill_kv_cache[1],
+          decoder_segment_ids=prefill_kv_cache[2],
+          lengths=None,
+          model_mode=model_mode,
+          use_ragged_attention=self.use_ragged_attention,
+          chunk_id=chunk_id,
+          chunk_length=chunk_length,
+      )
 
-    # Return the "prefill" cache if it actually the combined prefill+ar kv cache
-    if ar_kv_cache is None:
-      if prefill_exponentials_sum is not None:
+      # Return the "prefill" cache if it actually the combined prefill+ar kv cache
+      if ar_kv_cache is None:
+        if prefill_exponentials_sum is not None:
+          return prefill_unnormalized_output / prefill_exponentials_sum
+        return prefill_unnormalized_output
+
+      ar_unnormalized_output, ar_exponentials_max, ar_exponentials_sum = self.apply_attention(
+          query=query,
+          key=ar_kv_cache[0],
+          value=ar_kv_cache[1],
+          decoder_segment_ids=ar_kv_cache[2],
+          lengths=ar_kv_cache[3],
+          model_mode=model_mode,
+          use_ragged_attention=self.use_ragged_attention,
+      )
+
+      if ar_unnormalized_output is not None:
+        unnormalized_outputs = [prefill_unnormalized_output, ar_unnormalized_output]
+        exponentials_maxes = [prefill_exponentials_max, ar_exponentials_max]
+        exponentials_sums = [prefill_exponentials_sum, ar_exponentials_sum]
+        return self.normalize_attention(unnormalized_outputs, exponentials_maxes, exponentials_sums)
+      else:
         return prefill_unnormalized_output / prefill_exponentials_sum
-      return prefill_unnormalized_output
-
-    ar_unnormalized_output, ar_exponentials_max, ar_exponentials_sum = self.apply_attention(
-        query=query,
-        key=ar_kv_cache[0],
-        value=ar_kv_cache[1],
-        decoder_segment_ids=ar_kv_cache[2],
-        lengths=ar_kv_cache[3],
-        model_mode=model_mode,
-        use_ragged_attention=self.use_ragged_attention,
-    )
-
-    if ar_unnormalized_output is not None:
-      unnormalized_outputs = [prefill_unnormalized_output, ar_unnormalized_output]
-      exponentials_maxes = [prefill_exponentials_max, ar_exponentials_max]
-      exponentials_sums = [prefill_exponentials_sum, ar_exponentials_sum]
-      return self.normalize_attention(unnormalized_outputs, exponentials_maxes, exponentials_sums)
     else:
-      return prefill_unnormalized_output / prefill_exponentials_sum
+      for i in range(chunk_id + 1):
+        """
+        i) Get cached prefill cache
+        ii) Apply attention
+        """
+        # get cache for ith sequence
+        prefill_kv_cache, ar_kv_cache = self.kv_cache(
+        
+        key, value, decoder_segment_ids, model_mode, use_ragged_attention=self.use_ragged_attention)
+
+        # unstack kv_cache 
+        # get_ith_sequence_cache or get_partial_kv_cache
+
+        
+        prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
+          query=query,
+          key=prefill_kv_cache[0],
+          value=prefill_kv_cache[1],
+          decoder_segment_ids=prefill_kv_cache[2],
+          lengths=None,
+          model_mode=model_mode,
+          use_ragged_attention=self.use_ragged_attention,
+          chunk_id=chunk_id,
+          chunk_length=chunk_length,
+          prefix_id = i,
+        )
+
+      # Return the "prefill" cache if it actually the combined prefill+ar kv cache
+      if ar_kv_cache is None:
+        if prefill_exponentials_sum is not None:
+          return prefill_unnormalized_output / prefill_exponentials_sum
+        return prefill_unnormalized_output
+
+      ar_unnormalized_output, ar_exponentials_max, ar_exponentials_sum = self.apply_attention(
+          query=query,
+          key=ar_kv_cache[0],
+          value=ar_kv_cache[1],
+          decoder_segment_ids=ar_kv_cache[2],
+          lengths=ar_kv_cache[3],
+          model_mode=model_mode,
+          use_ragged_attention=self.use_ragged_attention,
+          chunk_id=chunk_id,
+          chunk_length=chunk_length,
+          prefix_id = i,
+      )
+
+      if ar_unnormalized_output is not None:
+        unnormalized_outputs = [prefill_unnormalized_output, ar_unnormalized_output]
+        exponentials_maxes = [prefill_exponentials_max, ar_exponentials_max]
+        exponentials_sums = [prefill_exponentials_sum, ar_exponentials_sum]
+        return self.normalize_attention(unnormalized_outputs, exponentials_maxes, exponentials_sums)
+      else:
+        return prefill_unnormalized_output / prefill_exponentials_sum
+
+
+      
 
 
 class Attention(nn.Module):
@@ -1237,6 +1310,7 @@ class Attention(nn.Module):
   sliding_window_size: int | None = None
   use_ragged_attention: bool = False
   ragged_block_size: int = 256
+  use_chunked_prefill: bool = True
 
   # Shard the query activation as the same as the key and value.
   # TODO: Find a better sharding axis name.
@@ -1374,8 +1448,8 @@ class Attention(nn.Module):
       *,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
       deterministic: bool = False,
-      chunk_id=None,
-      chunk_length=None 
+      chunk_id=0,
+      chunk_length=20 
   ):
     """Applies Attention on the input data.
 
@@ -1409,9 +1483,9 @@ class Attention(nn.Module):
       query = self.query_projection(inputs_q)
       key = self.kv_projection(inputs_kv, proj_name="key")
       value = self.kv_projection(inputs_kv, proj_name="value")
-    jax.debug.print("🤯 query {query} 🤯", query=query)
-    jax.debug.print("🤯 key {key} 🤯", key=key)
-    jax.debug.print("🤯 value {value} 🤯", value=value)
+    # jax.debug.print("🤯 query {query} 🤯", query=query)
+    # jax.debug.print("🤯 key {key} 🤯", key=key)
+    # jax.debug.print("🤯 value {value} 🤯", value=value)
     # apply ROPE
     query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
     key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
@@ -1456,6 +1530,7 @@ class Attention(nn.Module):
         sliding_window_size=self.sliding_window_size,
         use_ragged_attention=self.use_ragged_attention,
         ragged_block_size=self.ragged_block_size,
+        use_chunked_prefill=True,
     )
 
     out = attention_op(query, key, value, decoder_segment_ids, model_mode, chunk_id=chunk_id, chunk_length=chunk_length)

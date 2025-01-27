@@ -216,7 +216,7 @@ class MaxEngine(engine_api.Engine):
 
     return res_cache
   
-  def prefill_chunked(self,
+  def prefill(self,
       *,
       params: Params,
       existing_prefix: Optional[jax.Array] = None,
@@ -224,7 +224,7 @@ class MaxEngine(engine_api.Engine):
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[jax.random.PRNGKey] = None,
-      chunk_length
+      chunk_length=20
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """
     Add link to paper etc
@@ -235,35 +235,41 @@ class MaxEngine(engine_api.Engine):
       rng = jax.random.PRNGKey(0)
 
     num_padded_tokens_chunks = len(padded_tokens)/chunk_length
-    for i in range(num_padded_tokens_chunks):
+    print("num_padded_tokens_chunks ", num_padded_tokens_chunks)
+
+    _, _ = self.prefill_iter(params=params, 
+                            padded_tokens=padded_tokens[:20], 
+                            true_length=chunk_length, rng=rng, 
+                            chunk_length=20, 
+                            chunk_id=0,
+                            )
+    for i in range(int(num_padded_tokens_chunks)):
       # each chunk should be of fixed size, pad if necessary. 
       chunked_padded_tokens = padded_tokens[:(i+1)*chunk_length]
+      print("chunked_padded_tokens ", chunked_padded_tokens)
       # chunked_prefill_segment_ids will resemble 1s for current sequence which is to be processed
       # no need of prefill result to be stored for intermediate chunks
       # chunked_prefill_segment_ids - Array representing lower diag triangle of current sequence
-      
-      chunked_prefill_segment_ids = None
       if i < num_padded_tokens_chunks - 1 :
-        decode_state, _ = self.prefill(params=params, 
+        _, _ = self.prefill_iter(params=params, 
                             padded_tokens=chunked_padded_tokens, 
                             true_length=chunk_length, rng=rng, 
-                            chunked_prefill_segment_ids=chunk_length, 
-                            chunk_num=i,
-                            existing_prefix= decode_state
+                            chunk_length=chunk_length, 
+                            chunk_id=i,
                             )
         # because this is done sequentially, cache is updated in place.
         # one way can be to return KV for each iteration and pass it in previous tokens, like generate
       else:
-        return self.prefill(params=params, 
+        return self.prefill_iter(params=params, 
                             padded_tokens=chunked_padded_tokens, 
                             true_length=true_length, 
                             rng=rng, 
                             chunk_id=i, 
                             chunk_length=chunk_length,
-                            existing_prefix=existing_prefix)
+                            )
 
   @functools.partial(jax.jit, static_argnums=(0,))
-  def prefill(
+  def prefill_iter(
       self,
       *,
       params: Params,
