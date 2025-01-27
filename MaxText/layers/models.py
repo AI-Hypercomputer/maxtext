@@ -25,6 +25,7 @@ import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 import common_types
+import page_managers
 from layers import attentions
 from layers import embeddings
 from layers import linears
@@ -274,6 +275,7 @@ class Decoder(nn.Module):
       decoder_segment_ids=None,
       deterministic=False,
       model_mode=common_types.MODEL_MODE_TRAIN,
+      page_state: Optional[page_managers.PageState] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -399,6 +401,7 @@ class Decoder(nn.Module):
               decoder_positions,
               deterministic,
               model_mode,
+              page_state=page_state,
           )
 
     y = self.get_norm_layer()(
@@ -465,6 +468,18 @@ class Transformer(nn.Module):
 
     self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant)
 
+    assert self.config.max_target_length % self.config.page_size == 0
+    assert self.config.max_prefill_predict_length % self.config.page_size == 0
+    if self.config.attention == "paged":
+      self.page_manager = page_managers.PageManager(
+          num_pages=self.config.num_pages,
+          page_size=self.config.page_size,
+          slots=int(self.config.per_device_batch_size * jax.device_count()),
+          max_target_length=self.config.max_target_length,
+          max_prefill_predict_length=self.config.max_prefill_predict_length,
+          max_pages_per_slot=self.config.max_target_length // self.config.page_size,
+      )
+
   def __call__(
       self,
       decoder_input_tokens,
@@ -472,6 +487,8 @@ class Transformer(nn.Module):
       decoder_segment_ids=None,
       enable_dropout=True,
       model_mode=common_types.MODEL_MODE_TRAIN,
+      slot: Optional[int] = None,
+      true_length: Optional[int] = None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target."""
 
@@ -481,11 +498,23 @@ class Transformer(nn.Module):
           f" which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}."
       )
 
+    page_state = None
+    if self.config.attention == "paged":
+      if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+        page_state = self.page_manager(model_mode)
+      elif model_mode == common_types.MODEL_MODE_PREFILL:
+        page_state = self.page_manager(
+            model_mode=model_mode,
+            slot=slot,
+            true_length=true_length,
+        )
+
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=not enable_dropout,
         model_mode=model_mode,
+        page_state=page_state,
     )
     return logits

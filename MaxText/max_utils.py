@@ -954,11 +954,9 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
 def get_prefill_kv_cache_annotations(model, config, rng, mesh):
   """Get a shaped abstraction of the state (including optimizer)"""
 
-  def init_kv_cache(model, config):
-    input_shape = (
-        config.global_batch_size_to_load,
-        config.max_prefill_predict_length,
-    )
+  def init_prefill_kv_cache(model, config):
+    # Force batch size of 1 for initialization
+    input_shape = (config.global_batch_size_to_load, config.max_prefill_predict_length)
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
@@ -969,8 +967,8 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh):
     return model_vars["cache"]
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
-    abstract_state = jax.eval_shape(init_kv_cache_partial)
+    init_prefill_kv_cache_partial = functools.partial(init_prefill_kv_cache, model, config)
+    abstract_state = jax.eval_shape(init_prefill_kv_cache_partial)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
@@ -980,7 +978,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh):
 def get_kv_cache_annotations(model, config, rng, mesh):
   """Get a shaped abstraction of the state (including optimizer)"""
 
-  def init_kv_cache(model, config):
+  def init_ar_kv_cache(model, config):
     input_shape = (
         config.global_batch_size_to_load,
         1,
@@ -995,8 +993,8 @@ def get_kv_cache_annotations(model, config, rng, mesh):
     return model_vars["cache"]
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
-    abstract_state = jax.eval_shape(init_kv_cache_partial)
+    init_ar_kv_cache_partial = functools.partial(init_ar_kv_cache, model, config)
+    abstract_state = jax.eval_shape(init_ar_kv_cache_partial)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
@@ -1082,3 +1080,26 @@ def print_system_information():
   max_logging.log(f"System Information: Jax Version: {jax.__version__}")
   max_logging.log(f"System Information: Jaxlib Version: {jax.lib.__version__}")
   max_logging.log(f"System Information: Jax Backend: {jax.lib.xla_bridge.get_backend().platform_version}")
+
+
+def debug_array(array, array_name):
+  """Debug array sizing and sharding across chips."""
+  print(f"\t{array_name}:")
+  if isinstance(array, flax.linen.spmd.LogicallyPartitioned):
+    array = array.value
+  single_shard = array.addressable_shards[0]
+  n_shards = len(array.addressable_shards)
+  total_size_across_n_shards = single_shard.data.size * n_shards
+  total_nbytes_across_n_shards = single_shard.data.nbytes * n_shards
+  print(f"\t\tdtype: {array.dtype}")
+  print(f"\t\tshape: {array.shape}")
+  print(f"\t\tsharding spec: {array.sharding.spec}")
+  print(f"\t\tdevice local layouer: {array.layout.device_local_layout}")
+  print(f"\t\tsize (across n shards): {array.size} ({total_size_across_n_shards})")
+  print(f"\t\tbytes (across n shards): {array.nbytes} ({total_nbytes_across_n_shards})")
+
+
+def debug_qtensor(qtensor, qtensor_name):
+  """Debug qtensor sizing and sharding across chips."""
+  debug_array(qtensor.qvalue, f"{qtensor_name} qvalue")
+  debug_array(qtensor.scale[0], f"{qtensor_name} scale")
