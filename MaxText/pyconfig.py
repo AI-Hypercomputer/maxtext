@@ -507,7 +507,6 @@ class _HyperParameters:
 def create_parallelisms_list(raw_keys):
   ici_parallelism = [
       raw_keys["ici_data_parallelism"],
-      raw_keys["ici_pipeline_parallelism"],
       raw_keys["ici_fsdp_parallelism"],
       raw_keys["ici_fsdp_transpose_parallelism"],
       raw_keys["ici_sequence_parallelism"],
@@ -518,7 +517,6 @@ def create_parallelisms_list(raw_keys):
   ]
   dcn_parallelism = [
       raw_keys["dcn_data_parallelism"],
-      raw_keys["dcn_pipeline_parallelism"],
       raw_keys["dcn_fsdp_parallelism"],
       raw_keys["dcn_fsdp_transpose_parallelism"],
       raw_keys["dcn_sequence_parallelism"],
@@ -585,7 +583,8 @@ def set_and_validate_pipeline_config(raw_keys):
           # The "stage" needs to be listed first since the microbatch dimension is first before the reshape.
           logical_axis_rules[idx] = [
               "activation_embed_and_logits_batch",
-              ["stage", "data", "fsdp", "fsdp_transpose", "expert"],
+              [ "data", "fsdp", "fsdp_transpose", "expert"],
+              # ["stage", "data", "fsdp", "fsdp_transpose", "expert"],
           ]
           break  # Exit the loop after modifying the list
       return logical_axis_rules
@@ -593,7 +592,7 @@ def set_and_validate_pipeline_config(raw_keys):
     def pipeline_first_axis(raw_keys):
       # We have seen better performance when axes used for DCN are earlier in this list than ICI, see (b/339009148) for details
       ici_parallelism = [
-          raw_keys["ici_pipeline_parallelism"],
+          # raw_keys["ici_pipeline_parallelism"],
           raw_keys["ici_data_parallelism"],
           raw_keys["ici_fsdp_parallelism"],
           raw_keys["ici_fsdp_transpose_parallelism"],
@@ -604,7 +603,7 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["ici_autoregressive_parallelism"],
       ]
       dcn_parallelism = [
-          raw_keys["dcn_pipeline_parallelism"],
+          # raw_keys["dcn_pipeline_parallelism"],
           raw_keys["dcn_data_parallelism"],
           raw_keys["dcn_fsdp_parallelism"],
           raw_keys["dcn_fsdp_transpose_parallelism"],
@@ -615,7 +614,7 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["dcn_autoregressive_parallelism"],
       ]
       mesh_axes = [
-          "stage",
+          # "stage",
           "data",
           "fsdp",
           "fsdp_transpose",
@@ -626,7 +625,8 @@ def set_and_validate_pipeline_config(raw_keys):
           "autoregressive",
       ]
       data_sharding = [
-          ["stage", "data", "fsdp", "fsdp_transpose", "sequence", "tensor", "tensor_sequence", "expert", "autoregressive"]
+        # ["stage",
+          ["data", "fsdp", "fsdp_transpose", "sequence", "tensor", "tensor_sequence", "expert", "autoregressive"]
       ]
 
       raw_keys["ici_parallelism"] = ici_parallelism

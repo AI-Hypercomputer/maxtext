@@ -228,11 +228,12 @@ jax_cache_dir: "~/jax_cache"
 hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
 
 # Parallelism
-mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'tensor_sequence', 'expert', 'autoregressive']
+mesh_axes: ['data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'expert', 'autoregressive']
+
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
-                      ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_embed_and_logits_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_heads', ['tensor','sequence','tensor_sequence']],
                       ['activation_kv_heads', ['tensor','sequence','tensor_sequence']],
                       ['activation_length', ['sequence']],
@@ -247,7 +248,7 @@ logical_axis_rules: [
                       ['activation_vocab', 'tensor'],
                       ['activation_vocab', 'tensor_sequence'],
                       ['activation_vocab', 'sequence'],
-                      ['activation_stage', 'stage'],
+                      ['activation_stage', []],
                       ['activation_exp', 'expert'],
                       ['mlp', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
                       ['vocab', ['tensor', 'tensor_sequence', 'autoregressive']],
@@ -258,7 +259,7 @@ logical_axis_rules: [
                       ['norm', ['tensor', 'tensor_sequence']],
                       ['q_heads', ['tensor', 'tensor_sequence', 'autoregressive']],
                       ['heads', ['tensor', 'tensor_sequence', 'autoregressive']],
-                      ['layers', 'stage'],
+                      ['layers', []],
                       ['kv', []],
                       ['kv_heads', ['tensor', 'tensor_sequence', 'autoregressive']],
                       ['kv_head_dim', []],
@@ -270,7 +271,7 @@ logical_axis_rules: [
                       ['exp', 'expert'],
                     ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
-data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'tensor_sequence', 'expert', 'autoregressive']]
+data_sharding: [['data', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'tensor_sequence', 'expert', 'autoregressive']]
 
 # sharding tolerance: float between 0.0 and 1.0 representing the allowed percentage of non-sharded parameters.
 sharding_tolerance: 0.02

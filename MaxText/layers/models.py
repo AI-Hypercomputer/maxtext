@@ -177,6 +177,8 @@ class Decoder(nn.Module):
   shared_embedding: nn.Module
   mesh: Mesh
   quant: Optional[Quant] = None
+  stage_index: Optional[int] = None
+  num_stages: Optional[int] = None
 
   def get_decoder_layer(self):
     if self.config.decoder_block == "default":
@@ -277,25 +279,35 @@ class Decoder(nn.Module):
   ):
     cfg = self.config
     mesh = self.mesh
-    assert decoder_input_tokens.ndim == 2  # [batch, len]
+    stage_index = self.stage_index
+    num_stages = self.num_stages
 
-    # [batch, length] -> [batch, length, emb_dim]
-    y = self.shared_embedding(decoder_input_tokens.astype("int32"))
-    y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
-    y = y.astype(cfg.dtype)
+    y = None
+    # In the mpmd_pp prototype, only stage 0 and last stage execute the Decoder.__call__.
+    # Stage 0 executes the embedding lookup while stage 1 executes the logits.
+    if stage_index is None or stage_index == 0:
+      assert decoder_input_tokens.ndim == 2  # [batch, len]
 
-    if cfg.use_untrainable_positional_embedding:
-      y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
+      # [batch, length] -> [batch, length, emb_dim]
+      y = self.shared_embedding(decoder_input_tokens.astype("int32"))
+      y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
+      y = y.astype(cfg.dtype)
 
-    if cfg.trainable_position_size > 0:
-      y += Embed(
-          num_embeddings=cfg.trainable_position_size,
-          features=cfg.emb_dim,
-          dtype=cfg.dtype,
-          embedding_init=nn.initializers.normal(stddev=1.0),
-          name="position_embedder",
-          config=cfg,
-      )(decoder_positions)
+      if cfg.use_untrainable_positional_embedding:
+        y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
+
+      if cfg.trainable_position_size > 0:
+        y += Embed(
+            num_embeddings=cfg.trainable_position_size,
+            features=cfg.emb_dim,
+            dtype=cfg.dtype,
+            embedding_init=nn.initializers.normal(stddev=1.0),
+            name="position_embedder",
+            config=cfg,
+        )(decoder_positions)
+
+    if y is None:
+      y = decoder_input_tokens
 
     BlockLayer = self.get_decoder_layer()
 
@@ -372,34 +384,21 @@ class Decoder(nn.Module):
         policy=policy,
         static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
     )
-    if cfg.using_pipeline_parallelism:
-      base_stage = RemattedBlockLayer if cfg.set_remat_policy_on_layers_per_stage else BlockLayer
-      stage_module = self.get_pipeline_stage_module(base_stage, cfg, mesh)
-      y = pipeline.Pipeline(config=cfg, mesh=mesh, layers=stage_module, remat_policy=policy)(
-          y,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-      )
-    else:
-      if cfg.scan_layers:
-        y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
-            y,
-            decoder_segment_ids,
-            decoder_positions,
-            deterministic,
-            model_mode,
-        )
-      else:
-        for lyr in range(cfg.num_decoder_layers):
-          y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
-              y,
-              decoder_segment_ids,
-              decoder_positions,
-              deterministic,
-              model_mode,
-          )
+
+    assert cfg.using_pipeline_parallelism, "the prototype only supports pipeline parallelism"
+    assert stage_index is not None
+
+    base_stage = RemattedBlockLayer
+
+    y = base_stage(
+        config=cfg, mesh=mesh, name=f"layers_{stage_index}", quant=self.quant
+    )(
+        y,
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+    )
 
     y = self.get_norm_layer()(
         dtype=cfg.dtype,
@@ -410,6 +409,10 @@ class Decoder(nn.Module):
     )(y)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
 
+    if stage_index is not None and stage_index == 0:
+      return y
+
+    assert stage_index is None or stage_index == num_stages - 1
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
       # Use the transpose of embedding matrix for logit transform.
@@ -447,6 +450,8 @@ class Transformer(nn.Module):
   config: Config
   mesh: Mesh
   quant: Quant
+  stage_index: Optional[int] = None
+  num_stages: Optional[int] = None
 
   def setup(self):
     """Initialize shared_embedding & decoder layers."""
@@ -463,7 +468,7 @@ class Transformer(nn.Module):
         config=cfg,
     )
 
-    self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant)
+    self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant,stage_index=self.stage_index,num_stages=self.num_stages)
 
   def __call__(
       self,

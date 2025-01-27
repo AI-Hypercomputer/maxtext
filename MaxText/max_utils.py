@@ -569,7 +569,11 @@ def create_device_mesh(config, devices=None):
     devices = jax.devices()
   num_devices = len(devices)
   num_slices = 1 if config.inference_benchmark_test else config.num_slices
-  num_devices_per_slice = num_devices // num_slices
+  # num_devices_per_slice = num_devices // num_slices
+
+  # TODO(lc5211): hack here for two stages (emulating two slices,
+  # each slice has 4 devices for the prototype on H100X8)
+  num_devices_per_slice = 4
 
   multi_slice_env = num_slices > 1
 
@@ -646,7 +650,7 @@ def init_training_state(apply_fn, params, tx):
   return state
 
 
-def init_initial_state(model, tx, config, is_training, key):
+def init_initial_state(model, tx, config, is_training, stage_index, key):
   """
   We pass in "static" objects like model, tx, config as JAX compares them by
   object hash, and instantiating them inside causes pjit top-level annotations
@@ -654,11 +658,24 @@ def init_initial_state(model, tx, config, is_training, key):
 
   Args: model, tx, config, is_training, key
   """
-  input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+   # stage 0 has follow input shape:
+  # TODO(linchai): hard coded micro_batch size to 4 for now.
+  if stage_index == 0:
+    input_shape = (4, config.max_target_length)  # 4 = micro_batch_size
+  else:
+    input_shape = (
+        4,  # micro_batch_size
+        config.max_target_length,
+        config.emb_dim,
+    )
+  decoder_pos_shape = (
+      4,  # micro_batch_size
+      config.max_target_length,
+  )
   model_vars = model.init(
       {"params": key, "dropout": key, "aqt": key},
       np.ones(input_shape, dtype=jnp.int32),
-      np.ones(input_shape, dtype=jnp.int32),
+      np.ones(decoder_pos_shape, dtype=jnp.int32),
   )
   if is_training:
     return init_training_state(model.apply, model_vars, tx)
@@ -696,29 +713,26 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   return state, state_mesh_annotations
 
 
-def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager):
-  is_training = True
+def setup_training_state(model, tx, config, stage_index, rng, mesh):
   return setup_initial_state(
       model,
-      data_iterator,
       tx,
       config,
+      True,
+      stage_index,
       rng,
       mesh,
-      checkpoint_manager,
-      is_training,
   )
 
 
 def setup_initial_state(
     model,
-    data_iterator,
     tx,
     config,
+    is_training,
+    stage_index,
     rng,
     mesh,
-    checkpoint_manager,
-    is_training=True,
 ):
   """We initialize the model and optimizer state, and optionally load from a
   checkpoint as necessary.
@@ -737,44 +751,25 @@ def setup_initial_state(
     state_mesh_annotations: the mesh annotations for the train state
   """
 
-  unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
-      model, tx, config, rng, mesh, is_training
+  _, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
+      model, tx, config, stage_index, rng, mesh
   )
 
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    restored, raw_params = checkpointing.load_state_if_possible(
-        checkpoint_manager,
-        data_iterator,
-        config.load_parameters_path,
-        config.load_full_state_path,
-        unboxed_abstract_state,
-        config.enable_single_replica_ckpt_restoring,
-        config.dataset_type,
-    )
+    init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, stage_index)
+    init_state_partial.__name__ = "initialize_state"
+    # pylint: disable=not-callable
+    state = jax.jit(
+        init_state_partial,
+        in_shardings=None,
+        out_shardings=state_mesh_shardings,
+    )(rng)
 
-    if restored:
-      if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
-        state = restored
-      else:
-        if "iter" in restored and restored["iter"] is not None:
-          data_iterator.local_iterator = restored["iter"]
-        state = restored["items"]
-    else:
-      init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
-      init_state_partial.__name__ = "initialize_state"
-      # pylint: disable=not-callable
-      state = jax.jit(
-          init_state_partial,
-          in_shardings=None,
-          out_shardings=state_mesh_shardings,
-      )(rng)
-      if raw_params:  # If we loaded a partial state, we need to merge it.
-        state = state.replace(params=raw_params)
 
   state = unbox_logicallypartioned(state)
 
-  return state, state_mesh_annotations, state_mesh_shardings, data_iterator
+  return state, state_mesh_annotations, state_mesh_shardings
 
 
 # Learning Rate Schedule
@@ -919,9 +914,9 @@ def _cross_entropy_with_logits_bwd(
 cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd, _cross_entropy_with_logits_bwd)
 
 
-def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
+def get_abstract_state(model, tx, config, stage_index, rng, mesh):
   """Get a shaped abstraction of the state (including optimizer)"""
-  init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
+  init_state_partial = functools.partial(init_initial_state, model, tx, config, True, stage_index, rng)
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     abstract_state = jax.eval_shape(init_state_partial)
@@ -1060,6 +1055,18 @@ def save_quantized_checkpoint_if_configured(config, params):
     "Skipping saving quantized checkpoint as save_quantized_params_path is null."
 
 
+def get_functional_train_signature(mesh, state_mesh_shardings, config):
+  data_pspec = P(*config.data_sharding)
+  data_sharding = jax.tree_util.tree_map(
+      lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec
+  )
+  in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
+  out_shardings = (state_mesh_shardings, None)  # State, metrics
+  static_argnums= ()  # We partial out the static argnums of model and config
+  donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
+  return in_shardings, out_shardings, static_argnums, donate_argnums
+
+
 def print_mem_stats(label: str):
   max_logging.log(f"\nMemstats: {label}:")
   try:
@@ -1078,3 +1085,12 @@ def print_system_information():
   max_logging.log(f"System Information: Jax Version: {jax.__version__}")
   max_logging.log(f"System Information: Jaxlib Version: {jax.lib.__version__}")
   max_logging.log(f"System Information: Jax Backend: {jax.lib.xla_bridge.get_backend().platform_version}")
+
+
+def load_next_batch(train_iter, example_batch, config):
+  """Loads the next batch. Can keep reusing the same batch for performance reasons"""
+
+  if config.reuse_example_batch and example_batch is not None:
+    return example_batch
+  else:
+    return next(train_iter)
