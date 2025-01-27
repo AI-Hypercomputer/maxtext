@@ -479,9 +479,9 @@ goodput_upload_interval_seconds: 60
 enable_pathways_goodput: False
 
 # GCP workload monitoring
-report_heartbeat_metric_for_gcp_monitoring: False
+report_heartbeat_metric_for_gcp_monitoring: True
 heartbeat_reporting_interval_in_seconds: 5
-report_performance_metric_for_gcp_monitoring: False
+report_performance_metric_for_gcp_monitoring: True
 
 enable_tensorboard: True
 
