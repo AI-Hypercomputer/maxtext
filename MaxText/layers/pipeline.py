@@ -72,7 +72,7 @@ class Pipeline(nn.Module):
         + self.iterations_to_complete_first_microbatch_one_repeat()
     )
 
-  def init_states(self, inputs):
+  def init_states(self, inputs, sharding_info):
     """Initialize components of state: state_io, shift, circular_storage and circular_storage_mover
     Assumes input has already been reshaped into microbatches: [num_micro_batches, micro_batch_size, sequence, embed]
 
@@ -83,6 +83,7 @@ class Pipeline(nn.Module):
       circ_storage: zeros [num_stages, microbatches, micro_size, sequence, embed] when needed, else None
       circ_storage_mover: zeros[num_stages, micro_size, sequence, embed] when needed, else None
       loop_iteration: scalar set initially to 0.
+      bsw: weights with num_repeats replaced by 2, e.g. [2, num_stages, mlp, embed]
     """
 
     # Shift is used to rotate the output of each pipeline into the input of the next
@@ -571,7 +572,7 @@ class Pipeline(nn.Module):
     def run_iteration_scannable(model, loop_state, xs):
       # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we explicitly wrap
       # the run_one_iteration in this method - the first argument model (i.e. self) is a nn.module instance.
-      return model.run_one_iteration(all_pipeline_weights, loop_state, positions, segment_ids, deterministic, model_mode, model.layers), None
+      return model.run_one_iteration(self.layers.variables, loop_state, positions, segment_ids, deterministic, model_mode, model.layers), None
 
     if self.config.set_remat_policy_on_pipeline_iterations:
       run_iteration_scannable = nn.remat(
