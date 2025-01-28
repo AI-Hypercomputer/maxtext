@@ -1,0 +1,50 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This file runs unit tests with Pathways backend.
+
+name: Run Pathways Tests
+
+on:
+  workflow_call:
+    inputs:
+      device_type:
+        required: true
+        type: string
+      device_name:
+        required: true
+        type: string
+      pytest_marker:
+        required: true
+        type: string
+      test_directory:
+        required: true
+        type: string
+
+jobs:
+  start_pathways:
+    name: Start Pathways tests on (${{ inputs.device_name }})
+    runs-on: ["self-hosted", "${{ inputs.device_type }}", "${{ inputs.device_name }}"]
+    steps:
+      - name: Install prerequisites on the self-hosted runner for Pathways
+        run: |
+          echo "Setting up the prerequisites"
+          apt-get install -y docker --quiet
+          apt-get install -y docker-compose-plugin --quiet
+          docker compose version # To ensure docker compose is installed
+          gcloud auth configure-docker us-docker.pkg.dev --quiet
+      - uses: actions/checkout@v4
+      - name: Start Pathways and Maxtext containers using script
+        run: |
+          bash docker_run_pathways_containers.sh maxtext_image=gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu command="cd MaxText ; python3 -m pytest ${{ inputs.test_directory }} -m '${{ inputs.pytest_marker }}' -s"
