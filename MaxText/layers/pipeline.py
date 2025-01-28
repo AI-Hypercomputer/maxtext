@@ -156,6 +156,7 @@ class Pipeline(nn.Module):
         "circ_storage_mover": circ_storage_mover,
         "loop_iteration": 0,
         "prev_outputs": prev_outputs,
+        "bsw": bsw
     }
     return init_loop_state
 
@@ -266,7 +267,7 @@ class Pipeline(nn.Module):
     outs = jax.vmap(_gather_one, in_axes=(None, 0), out_axes=ids_dim)(xs, ids)
     return self.shard_dim_by_stages(outs, 0)
 
-  def get_new_loop_state(self, output, loop_state):
+  def get_new_loop_state(self, output, loop_state, sharding_info):
     """
     Update the various buffers given the output of the most recent iteration
     * state_io: rotates left/up by 1 (the whole created in the last slot is filled with the most recent pipeline output)
@@ -283,6 +284,7 @@ class Pipeline(nn.Module):
     old_circ_storage_mover = loop_state["circ_storage_mover"]
     loop_iteration = loop_state["loop_iteration"]
     old_prev_outputs = loop_state["prev_outputs"]
+    old_bsw = loop_state["bsw"]
 
     def _rotate_right(arr):
       # Use lax.slice to avoid generating a gather.
@@ -345,6 +347,7 @@ class Pipeline(nn.Module):
       return jax.lax.dynamic_update_slice_in_dim(state_in, stream_slice, stream_buf_idx, axis=1)
 
     new_state = _update_state_io(old_state_io, stream_slice, output)
+    new_bsw = self.maybe_ag_new_bsw(old_bsw, sharding_info, loop_iteration)
 
     new_loop_state = {
         "state_io": new_state,
@@ -353,6 +356,7 @@ class Pipeline(nn.Module):
         "circ_storage_mover": new_circ_storage_mover,
         "loop_iteration": loop_iteration + 1,
         "prev_outputs": new_prev_outputs,
+        "bsw": new_bsw
     }
     return new_loop_state
 
@@ -474,7 +478,7 @@ class Pipeline(nn.Module):
     )
     return vmap_func
 
-  def run_one_iteration(self, all_pipeline_weights, loop_state, positions, segment_ids, deterministic, model_mode, decoder_layer_instance):
+  def run_one_iteration(self, all_pipeline_weights, loop_state, positions, segment_ids, deterministic, model_mode, decoder_layer_instance, sharding_info=None):
     """Run one loop iteration - gets weights and inputs for each stage, run the stages in parallel, and update the loop state."""
     state_io = loop_state["state_io"]
     shift = loop_state["shift"]
@@ -498,7 +502,7 @@ class Pipeline(nn.Module):
     if self.config.scan_layers:
       stages_output = stages_output[0]
 
-    new_state = self.get_new_loop_state(stages_output, loop_state)
+    new_state = self.get_new_loop_state(stages_output, loop_state, sharding_info)
     return new_state
 
   def get_pipeline_remat_policy(self):
@@ -654,7 +658,7 @@ class Pipeline(nn.Module):
     def run_iteration_scannable(model, loop_state, xs):
       # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we explicitly wrap
       # the run_one_iteration in this method - the first argument model (i.e. self) is a nn.module instance.
-      return model.run_one_iteration(self.layers.variables, loop_state, positions, segment_ids, deterministic, model_mode, model.layers), None
+      return model.run_one_iteration(self.layers.variables, loop_state, positions, segment_ids, deterministic, model_mode, model.layers, sharding_info=sharding_info), None
 
     if self.config.set_remat_policy_on_pipeline_iterations:
       run_iteration_scannable = nn.remat(
