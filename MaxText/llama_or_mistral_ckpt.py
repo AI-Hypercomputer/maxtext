@@ -136,7 +136,7 @@ MODEL_PARAMS_DICT = {
         "num_heads": 48,
         "num_kv_heads": 8,
         "dims_per_head": 128,
-        "vocab": 32768,
+        "vocab": 32000,
         "base_emb_dim": 6144,
         "base_mlp_dim": 16384,
         "num_experts": 8,
@@ -550,6 +550,20 @@ def save_jax_weights_to_checkpoint(maxtext_model_path, jax_weights):
     checkpoint_manager.wait_until_finished()
 
 
+def print_nested_dict(nested_dict, level=0):  # level for indentation
+    for key, value in nested_dict.items():
+        print("  " * level + f"{key}: ", end="")  # Indentation
+
+        if isinstance(value, dict):  # Check if it's another dictionary
+            print()  # Newline for nested dicts
+            print_nested_dict(value, level + 1)  # Recursive call
+        else:
+            print(f"value.shape: {value.shape}")
+            print(f"value.mean: {np.mean(value)}")
+            print(f"value.min: {np.min(value)}")
+            print(f"value.max: {np.max(value)}")
+            print(f"value.std: {np.std(value)}")
+
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
   parser.add_argument("--base-model-path", type=str, required=True)
@@ -566,7 +580,11 @@ if __name__ == "__main__":
     raise NotImplementedError
 
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={SIMULATED_CPU_DEVICES_COUNT}"
+  
+  maxtext_jax_weights = convert_to_jax_weights(args.base_model_path, args.model_size, args.checkpoint_type)
+  print_nested_dict(maxtext_jax_weights)
+  print("done with script")
 
-  save_jax_weights_to_checkpoint(
-      args.maxtext_model_path, convert_to_jax_weights(args.base_model_path, args.model_size, args.checkpoint_type)
-  )
+  # save_jax_weights_to_checkpoint(
+  #     args.maxtext_model_path, convert_to_jax_weights(args.base_model_path, args.model_size, args.checkpoint_type)
+  # )
