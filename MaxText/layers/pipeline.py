@@ -413,12 +413,38 @@ class Pipeline(nn.Module):
     return output
 
 
-  def get_current_stage_weights(self, weights, loop_iteration):
+  def get_current_stage_weights(self, weights, bsw, loop_iteration):
     if self.config.num_pipeline_repeats > 1:
-      return self.get_current_repeat_from_stages(weights, loop_iteration)
+      return self.get_current_weights_from_bsw(bsw, loop_iteration)
     else:
       return weights
   
+  def get_current_weights_from_bsw(self, bsw, loop_iteration):
+    def get_bsw_idx(loop_iteration):
+      _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
+      bsw_ids = repeat_ids==repeat_ids[0] # For early repeats this might return true when it should be false( e.g. 0==0 instead of 0!=-1)
+
+      bsw_ids = bsw_ids.astype(jnp.int32)
+      #jax.debug.print("hello {loop_iteration} {bsw_ids}", loop_iteration=loop_iteration, bsw_ids=bsw_ids)
+      return bsw_ids
+    bsw_ids = get_bsw_idx(loop_iteration)
+    def gather_weights_for_stages_in(weights):
+      return jax.tree.map(
+          functools.partial(
+              self.vmap_parallel_gather, repeat_ids=bsw_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1),
+          weights)
+    circular_metadata_params={
+      nn.PARTITION_NAME: "circular_repeats",
+      'sub_weight_split_dims_mapping': (None,),
+      "is_initializing": self.is_initializing(),
+      "x_times": self.config.num_pipeline_repeats,
+      'optimizer_dims_mapping': None,
+    }
+    #breakpoint()
+    weights = meta.remove_axis(bsw, 0, circular_metadata_params) # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
+    weights = gather_weights_for_stages_in(weights)
+    return weights
+
   def get_current_repeat_from_stages(self, weights, loop_iteration):
     _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
     def gather_weights_for_stages_in(weights):
@@ -495,7 +521,8 @@ class Pipeline(nn.Module):
 
     #vmap_func = self.get_main_vmap_func()
     vmap_func = self.get_main_vmap_func_apply()
-    stage_weights = self.get_current_stage_weights(all_pipeline_weights, loop_iteration)
+    stage_weights = self.get_current_stage_weights(all_pipeline_weights, loop_state['bsw'], loop_iteration)
+    breakpoint()
     stages_output = vmap_func(
         decoder_layer_instance, stage_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode
     )
