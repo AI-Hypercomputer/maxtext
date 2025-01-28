@@ -468,6 +468,7 @@ class Pipeline(nn.Module):
       positions: jnp.ndarray,
       deterministic: bool,
       model_mode=common_types.MODEL_MODE_TRAIN,
+      sharding_info=None
   ) -> jnp.ndarray:
     """The main method that maps the series of decoder layer inputs to final layer outputs.
     Has the same signature of a single decoder layer, and expects the same shapes, e.g. the inputs should have shape [global_batch], and internally
@@ -502,7 +503,7 @@ class Pipeline(nn.Module):
       example_segmentation = None
       segment_idx = None
 
-    loop_state = self.init_states(inputs)
+    loop_state = self.init_states(inputs, sharding_info)
 
     # Each microbatch should go through each stage (with repeats) - so there is num_micro * (num_stages * repeats) compute to perform
     # Each iteration is vmapped by num_stages, so the number of iterations should be num_micro * num_stages * repeats / num_stages = num_micro * repeats
