@@ -141,7 +141,7 @@ class Pipeline(nn.Module):
     def grab_two_rows_of_pytree(pytree):
       def _grab_two_rows_of_array(leaf):
         all_repeats = jnp.zeros_like(leaf)
-        #all_repeats = all_repeats.astype(jnp.bfloat16) # This line makes a huge difference surprisingly
+        all_repeats = all_repeats.astype(jnp.bfloat16) # This line makes a huge difference surprisingly, for both correctness and ideal comm pattern
         return all_repeats[0:2] # Buffer is of length 2
       return jax.tree.map(_grab_two_rows_of_array, pytree)
     bsw = grab_two_rows_of_pytree(self.layers.variables)
