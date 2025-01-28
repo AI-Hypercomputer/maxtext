@@ -138,6 +138,17 @@ class Pipeline(nn.Module):
     else:
       circ_storage_mover = None
 
+    def grab_two_rows_of_pytree(pytree):
+      def _grab_two_rows_of_array(leaf):
+        all_repeats = jnp.zeros_like(leaf)
+        #all_repeats = all_repeats.astype(jnp.bfloat16) # This line makes a huge difference surprisingly
+        return all_repeats[0:2] # Buffer is of length 2
+      return jax.tree.map(_grab_two_rows_of_array, pytree)
+    bsw = grab_two_rows_of_pytree(self.layers.variables)
+    physical_constraint_no_fsdp = self.get_physical_spec_no_fsdp(sharding_info)
+    bsw = jax.lax.with_sharding_constraint(bsw, physical_constraint_no_fsdp)
+    bsw = self.ag_new_bsw(bsw, sharding_info, 0)
+
     init_loop_state = {
         "state_io": state_io,
         "shift": shift,
@@ -345,6 +356,49 @@ class Pipeline(nn.Module):
     }
     return new_loop_state
 
+  def maybe_ag_new_bsw(self, bsw, sharding_info, loop_iter):
+    # Update at end of iteration before new repeat
+    bsw = jax.lax.cond( (loop_iter + 1) % self.config.num_pipeline_microbatches == 0, lambda: self.ag_new_bsw(bsw, sharding_info, loop_iter), lambda: bsw)
+    return bsw
+
+  def ag_new_bsw(self, bsw, sharding_info, loop_iter):
+    physical_spec = self.get_physical_spec_no_fsdp(sharding_info)
+    _, repeat_idx = self.get_microbatch_and_repeat_ids(loop_iter + 1)
+    #jax.debug.print("loop_iter {loop_iter} repeat_idx {repeat_idx}", loop_iter=loop_iter, repeat_idx=repeat_idx)
+    #jax.debug.print("Loop iter {loop_iter} Old bsw {bsw}", loop_iter=loop_iter, bsw=bsw['params']['mlp']['wi_0']['kernel'][:,:,0,0])
+    new_bw_insert = self.grab_bsw(self.layers.variables,repeat_idx[0])
+    new_bw_insert = jax.lax.with_sharding_constraint(new_bw_insert, physical_spec)
+    #jax.debug.print("Loop iter {loop_iter} bsw to insert {new_bw_insert}", loop_iter=loop_iter, new_bw_insert=new_bw_insert['params']['mlp']['wi_0']['kernel'][:,:,0,0])
+    new_bw_ag = self.force_ag(new_bw_insert, sharding_info)
+    new_bw_ag = jax.lax.with_sharding_constraint(new_bw_ag, physical_spec)
+    grab_idx_1 = self.grab_bsw(bsw, 1)
+    grab_idx_1 = jax.lax.with_sharding_constraint(grab_idx_1, physical_spec)
+    new_full_bsw = self.insert_pytree(bsw, grab_idx_1, 0) # bsw[0] = bsw[1]
+    new_full_bsw = jax.lax.with_sharding_constraint(new_full_bsw, physical_spec)
+    new_full_bsw = self.insert_pytree(new_full_bsw, new_bw_ag, 1) # bsw[1] = new_bw_ag
+    new_full_bsw = jax.lax.with_sharding_constraint(new_full_bsw, physical_spec)
+    #jax.debug.print("Loop iter {loop_iter} new bsw {new_full_bsw}", loop_iter=loop_iter, new_full_bsw=new_full_bsw['params']['mlp']['wi_0']['kernel'][:,:,0,0])
+    return new_full_bsw
+  
+  def grab_bsw(self, vars, idx):
+    def grab_bsw_leaf(leaf):
+      arr = jax.lax.dynamic_slice_in_dim(leaf, idx, 1)
+      #arr = nn.with_logical_constraint(arr, (None, "stage"), rules=self.config.logical_axis_rules, mesh=self.mesh)
+      #return arr.astype(jnp.bfloat16) # TODO, should we modify where we change dtype? Unsure where
+      return arr
+    return jax.tree.map(grab_bsw_leaf, vars)
+  
+  def force_ag(self, vars, sharding_info):
+    physical_constraint_no_fsdp = self.get_physical_spec_no_fsdp(sharding_info)
+    vars = jax.lax.with_sharding_constraint(vars, physical_constraint_no_fsdp)
+    return vars
+
+  def insert_pytree(self, x, y, start_index):
+    def _insert_into_leaf(x_leaf, y_leaf):
+      updated_leaf = x_leaf.at[start_index:start_index+1].set(y_leaf)
+      return updated_leaf
+    return jax.tree.map(_insert_into_leaf, x, y)
+
   def permute_output_micro_per_stage_dim(self, output):
     # The first real output (microbatch 0) takes a certain amount of loop iterations to finish and be pushed to state_io - it will land on a different index of state_io depending on the number of iterations.
     microbatch_0_idx = self.iterations_to_complete_first_microbatch() % self.microbatches_per_stage
@@ -459,6 +513,33 @@ class Pipeline(nn.Module):
     else:
       remat_policy = save_input_policy
     return remat_policy
+
+  def get_physical_spec_no_fsdp(self, full_logical):
+    def remove_fsdp_sharding(sharding_tree):
+      def _remove_fsdp_from_partition_spec(named_sharding):
+        if isinstance(named_sharding, jax.sharding.NamedSharding):
+          new_spec = []
+          for axis in named_sharding.spec:
+            if axis is None:
+              new_spec.append(None)
+            elif isinstance(axis, str):
+              if axis != 'fsdp':
+                new_spec.append(axis)
+              else:
+                new_spec.append(None)
+            elif isinstance(axis, (list, tuple)):  # Handle list/tuple of axes
+              new_axis = [a for a in axis if a != 'fsdp']
+              new_spec.append(tuple(new_axis))
+              #new_spec.append(tuple(new_axis) if new_axis else None) 
+            else:
+              raise ValueError(f"Unsupported axis type: {type(axis)}")
+          return jax.sharding.NamedSharding(named_sharding.mesh, jax.sharding.PartitionSpec(*new_spec))
+        return named_sharding
+      return jax.tree.map(_remove_fsdp_from_partition_spec, sharding_tree)
+
+    physical = nn.logical_to_mesh_sharding(full_logical, mesh=self.mesh, rules=self.config.logical_axis_rules)
+    physical_no_fsdp = remove_fsdp_sharding(physical)
+    return physical_no_fsdp
 
   @nn.compact
   def __call__(
