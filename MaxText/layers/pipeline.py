@@ -568,11 +568,6 @@ class Pipeline(nn.Module):
           [self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim],
       )
 
-    def all_gather_over_fsdp(self):
-      return self.layers.variables
-    
-    all_pipeline_weights = all_gather_over_fsdp(self)
-
     def run_iteration_scannable(model, loop_state, xs):
       # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we explicitly wrap
       # the run_one_iteration in this method - the first argument model (i.e. self) is a nn.module instance.
