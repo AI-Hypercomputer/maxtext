@@ -51,6 +51,8 @@ jobs:
       env:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
+        JAX_PLATFORMS: proxy
+        JAX_BACKEND_TARGET: grpc://localhost:29000
       options: ${{ inputs.container_resource_option }}
     steps:
       - uses: actions/checkout@v4

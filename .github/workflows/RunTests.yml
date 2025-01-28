@@ -35,6 +35,16 @@ jobs:
     - name: Cleanup old docker images
       run: docker system prune --all --force
 
+  prelim_pathways:
+    runs-on: ["self-hosted", "tpu"]
+    steps:
+    - name: Test gsutil installation
+      run: which gsutil >/dev/null 2>&1 || { echo >&2 "gsutil is required but not installed. Aborting"; exit 24;}
+    - name: Cleanup old docker images
+      run: docker system prune --all --force
+    - name: Start Pathways containers.
+      run: cd utils; docker compose up
+
   tpu_image:
     needs: prelim
     uses: ./.github/workflows/build_upload_internal.yml
@@ -43,6 +53,15 @@ jobs:
       device_name: v4-8
       build_mode: stable_stack
       base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
+
+  tpu_pathways_image:
+    needs: prelim_pathways
+    uses: ./.github/workflows/build_upload_internal.yml
+    with:
+      device_type: tpu
+      device_name: v4-8
+      build_mode: stable_stack
+      base_image: us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:latest
 
   gpu_image:
     needs: prelim
@@ -53,11 +72,23 @@ jobs:
       build_mode: pinned
       base_image: gcr.io/tpu-prod-env-multipod/maxtext_gpu_jax_pinned:latest
 
-  tpu_unit_tests:
-    needs: tpu_image
+  # tpu_unit_tests:
+  #   needs: tpu_image
+  #   uses: ./.github/workflows/run_tests_internal.yml
+  #   with:
+  #     device_type: tpu
+  #     device_name: v4-8
+  #     pytest_marker: 'not gpu_only and not integration_test'
+  #     test_directory: 'tests'
+  #     xla_python_client_mem_fraction: 0.75
+  #     tf_force_gpu_allow_growth: false
+  #     container_resource_option: "--privileged"
+  
+  tpu_pathways_unit_tests:
+    needs: [tpu_pathways_image]
     uses: ./.github/workflows/run_tests_internal.yml
     with:
-      device_type: tpu
+      device_type: tpu #pathways
       device_name: v4-8
       pytest_marker: 'not gpu_only and not integration_test'
       test_directory: 'tests'
@@ -103,7 +134,8 @@ jobs:
 
   clean_up:
     if: ${{ always() }}  # always execute, regardless of previous jobs or steps.
-    needs: [gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
+    # needs: [gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
+    needs: [gpu_unit_tests, gpu_integration_tests, tpu_pathways_unit_tests, tpu_integration_tests]
     name: "Clean up"
     runs-on: ["self-hosted"]
     permissions:
