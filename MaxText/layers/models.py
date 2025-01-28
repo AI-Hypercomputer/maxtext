@@ -251,54 +251,27 @@ class Decoder(nn.Module):
     )
     return scan_fn(config=cfg, mesh=mesh, name="layers", quant=self.quant)
 
-  def get_pipeline_stage_module(self, base_stage, cfg, mesh):
+  def get_pipeline_stage_module(self, base_stage):
+    cfg=self.config
+    if cfg.set_remat_policy_on_layers_per_stage:
+      policy=self.get_remat_policy()
+      base_stage = self.set_remat_policy(base_stage, policy)
     if cfg.num_layers_per_pipeline_stage == 1:
-      stage_module = base_stage(config=cfg, mesh=mesh, quant=self.quant)
+      stage_module = base_stage(config=cfg, mesh=self.mesh, quant=self.quant)
     elif cfg.scan_layers:
-      stage_module = self.scan_decoder_layers(cfg, base_stage, cfg.num_layers_per_pipeline_stage, "layers_per_stage", mesh)
+      stage_module = self.scan_decoder_layers(cfg, base_stage, cfg.num_layers_per_pipeline_stage, "layers_per_stage", self.mesh)
     else:
       stage_module = SequentialBlockDecoderLayers(
           decoder_layer=base_stage,
           num_decoder_layers=cfg.num_layers_per_pipeline_stage,
           config=cfg,
-          mesh=mesh,
+          mesh=self.mesh,
           quant=self.quant,
       )
     return stage_module
 
-  @nn.compact
-  def __call__(
-      self,
-      decoder_input_tokens,
-      decoder_positions,
-      decoder_segment_ids=None,
-      deterministic=False,
-      model_mode=common_types.MODEL_MODE_TRAIN,
-  ):
+  def get_remat_policy(self):
     cfg = self.config
-    mesh = self.mesh
-    assert decoder_input_tokens.ndim == 2  # [batch, len]
-
-    # [batch, length] -> [batch, length, emb_dim]
-    y = self.shared_embedding(decoder_input_tokens.astype("int32"))
-    y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
-    y = y.astype(cfg.dtype)
-
-    if cfg.use_untrainable_positional_embedding:
-      y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
-
-    if cfg.trainable_position_size > 0:
-      y += Embed(
-          num_embeddings=cfg.trainable_position_size,
-          features=cfg.emb_dim,
-          dtype=cfg.dtype,
-          embedding_init=nn.initializers.normal(stddev=1.0),
-          name="position_embedder",
-          config=cfg,
-      )(decoder_positions)
-
-    BlockLayer = self.get_decoder_layer()
-
     if cfg.remat_policy != "none":
       if cfg.remat_policy == "minimal":
         policy = jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
@@ -365,23 +338,65 @@ class Decoder(nn.Module):
       else:
         assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
         policy = None
+      return policy
 
-    RemattedBlockLayer = nn.remat(  # pylint: disable=invalid-name
-        BlockLayer,
-        prevent_cse=not cfg.scan_layers,
+  def set_remat_policy(self, block_layer, policy):
+    return nn.remat(  # pylint: disable=invalid-name
+        block_layer,
+        prevent_cse=not self.config.scan_layers,
         policy=policy,
         static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
     )
+  
+  def setup(self):
+    """Initialize decoder layer."""
+    self.decoder_layer = self.get_decoder_layer()
+    self.norm_layer = self.get_norm_layer()
+    if self.config.using_pipeline_parallelism:
+      pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
+      remat_policy = self.get_remat_policy()
+      self.pipeline_module = pipeline.Pipeline(config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy)
+
+  @nn.compact
+  def __call__(
+      self,
+      decoder_input_tokens,
+      decoder_positions,
+      decoder_segment_ids=None,
+      deterministic=False,
+      model_mode=common_types.MODEL_MODE_TRAIN,
+  ):
+    cfg = self.config
+    mesh = self.mesh
+    assert decoder_input_tokens.ndim == 2  # [batch, len]
+
+    # [batch, length] -> [batch, length, emb_dim]
+    y = self.shared_embedding(decoder_input_tokens.astype("int32"))
+    y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
+    y = y.astype(cfg.dtype)
+
+    if cfg.use_untrainable_positional_embedding:
+      y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
+
+    if cfg.trainable_position_size > 0:
+      y += Embed(
+          num_embeddings=cfg.trainable_position_size,
+          features=cfg.emb_dim,
+          dtype=cfg.dtype,
+          embedding_init=nn.initializers.normal(stddev=1.0),
+          name="position_embedder",
+          config=cfg,
+      )(decoder_positions)
+
+    BlockLayer = self.decoder_layer
+    policy = self.get_remat_policy()
+    RemattedBlockLayer = self.set_remat_policy(self.decoder_layer, policy)
     if cfg.using_pipeline_parallelism:
-      base_stage = RemattedBlockLayer if cfg.set_remat_policy_on_layers_per_stage else BlockLayer
-      stage_module = self.get_pipeline_stage_module(base_stage, cfg, mesh)
-      y = pipeline.Pipeline(config=cfg, mesh=mesh, layers=stage_module, remat_policy=policy)(
-          y,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-      )
+      y = self.pipeline_module(y,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode)
     else:
       if cfg.scan_layers:
         y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
