@@ -67,6 +67,15 @@ jobs:
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
 
+  tpu_pathways_unit_tests:
+    needs: [tpu_image]
+    uses: ./.github/workflows/run_pathways_tests_internal.yml
+    with:
+      device_type: tpu
+      device_name: v4-8
+      pytest_marker: 'not gpu_only and not integration_test'
+      test_directory: 'tests'
+
   tpu_integration_tests:
     needs: tpu_image
     uses: ./.github/workflows/run_tests_internal.yml
@@ -105,7 +114,7 @@ jobs:
 
   clean_up:
     if: ${{ always() }}  # always execute, regardless of previous jobs or steps.
-    needs: [gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
+    needs: [gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_pathways_unit_tests, tpu_integration_tests]
     name: "Clean up"
     runs-on: ["self-hosted"]
     permissions:
@@ -119,7 +128,7 @@ jobs:
 
   notify:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
+    needs: [gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_pathways_unit_tests, tpu_integration_tests]
     runs-on: ["self-hosted"]
     steps:
     - name: Check whether one of the jobs failed
