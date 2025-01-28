@@ -278,8 +278,8 @@ class Decoder(nn.Module):
       decoder_segment_ids=None,
       deterministic=False,
       model_mode=common_types.MODEL_MODE_TRAIN,
-      chunk_id=None,
-      chunk_length=None,
+      chunk_id=0,
+      chunk_length=20,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -480,7 +480,7 @@ class Transformer(nn.Module):
       decoder_segment_ids=None,
       enable_dropout=True,
       model_mode=common_types.MODEL_MODE_TRAIN,
-      chunk_id=None,
+      chunk_id=0,
       chunk_length=None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target."""

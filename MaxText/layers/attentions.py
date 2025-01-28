@@ -1166,7 +1166,7 @@ class AttentionOp(nn.Module):
   @nn.compact
   def __call__(self, query, key, value, decoder_segment_ids, model_mode, chunk_id, chunk_length):
     jax.debug.print("chunk_id inside call attention op call: {chunk_id}", chunk_id=chunk_id)
-    if not self.use_chunked_prefill:
+    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       prefill_kv_cache, ar_kv_cache = self.kv_cache(
           key, value, decoder_segment_ids, model_mode, use_ragged_attention=self.use_ragged_attention
       )
