@@ -393,11 +393,27 @@ class Decoder(nn.Module):
     RemattedBlockLayer = self.set_remat_policy(self.decoder_layer, policy)
 
     if cfg.using_pipeline_parallelism:
+      key = jax.random.PRNGKey(0)
+      keys={"params": key, "dropout": key, "aqt": key}
+      weights=self.pipeline_module.init(keys,y,decoder_segment_ids, decoder_positions, deterministic, model_mode)
+
+      def get_partition_spec(pytree):
+        def _is_leaf(x):
+          return isinstance(x, nn.spmd.LogicallyPartitioned)
+
+        def get_partition_spec_leaf(leaf):
+          return leaf.get_partition_spec()
+        partition_spec_tree = jax.tree.map(get_partition_spec_leaf, pytree, is_leaf=_is_leaf)
+        return partition_spec_tree
+      weights_partition_spec = get_partition_spec(weights)
+      weights_partition_spec['params'] = weights_partition_spec['params']['layers']
+
       y = self.pipeline_module(y,
             decoder_segment_ids,
             decoder_positions,
             deterministic,
-            model_mode)
+            model_mode,
+            weights_partition_spec)
     else:
       if cfg.scan_layers:
         y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
@@ -488,6 +504,7 @@ class Transformer(nn.Module):
       decoder_segment_ids=None,
       enable_dropout=True,
       model_mode=common_types.MODEL_MODE_TRAIN,
+      sharding_info=None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target."""
 

@@ -571,7 +571,7 @@ class Pipeline(nn.Module):
     def run_iteration_scannable(model, loop_state, xs):
       # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we explicitly wrap
       # the run_one_iteration in this method - the first argument model (i.e. self) is a nn.module instance.
-      return model.run_one_iteration(all_pipeline_weights, loop_state, positions, segment_ids, deterministic, model_mode, model.layers), None
+      return model.run_one_iteration(self.layers.variables, loop_state, positions, segment_ids, deterministic, model_mode, model.layers), None
 
     if self.config.set_remat_policy_on_pipeline_iterations:
       run_iteration_scannable = nn.remat(
