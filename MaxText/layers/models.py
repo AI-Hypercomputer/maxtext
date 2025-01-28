@@ -310,6 +310,7 @@ class Decoder(nn.Module):
       else:
         assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
         policy = None
+      return policy
 
   def set_remat_policy(self, block_layer, policy):
     return nn.remat(  # pylint: disable=invalid-name
@@ -392,9 +393,6 @@ class Decoder(nn.Module):
     RemattedBlockLayer = self.set_remat_policy(self.decoder_layer, policy)
 
     if cfg.using_pipeline_parallelism:
-      # base_stage = RemattedBlockLayer if cfg.set_remat_policy_on_layers_per_stage else BlockLayer
-      # stage_module = self.get_pipeline_stage_module(base_stage, cfg, mesh)
-      # TODO: Need to plumb in remat policy?
       y = self.pipeline_module(y,
             decoder_segment_ids,
             decoder_positions,
@@ -419,7 +417,7 @@ class Decoder(nn.Module):
               model_mode,
           )
 
-    y = self.norm_layer(
+    y = self.get_norm_layer()(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="decoder_norm",
@@ -481,11 +479,6 @@ class Transformer(nn.Module):
         config=cfg,
     )
 
-    # from layers import simple_layer
-    # sdl = simple_layer.SimpleMlpDecoderLayer
-    # stage_module = sdl(config=self.config, mesh=self.mesh, quant=self.quant) # missing remat!
-    # pipeline_module = pipeline.Pipeline(config=self.config, mesh=self.mesh, layers=stage_module)
-    # self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant, pipeline_module=pipeline_module)
     self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant)
 
   def __call__(

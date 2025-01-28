@@ -456,12 +456,12 @@ class Pipeline(nn.Module):
         weights = gather_weights_for_stages_in(weights)
         return weights
 
-      vmap_func = nn.map_variables(
-          vmap_func,
-          mapped_collections=["params", "non_trainable", "summaries", "intermediates"],
-          mutable=True,
-          trans_in_fn=prepare_vars_for_main_vmap,
-      )
+      # vmap_func = nn.map_variables(
+      #     vmap_func,
+      #     mapped_collections=["params", "non_trainable", "summaries", "intermediates"],
+      #     mutable=True,
+      #     trans_in_fn=prepare_vars_for_main_vmap,
+      # )
 
     repeat_weights = self.prepare_vars_for_main_vmap_2(all_pipeline_weights, loop_iteration)
     stages_output = vmap_func(
