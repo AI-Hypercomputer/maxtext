@@ -18,10 +18,9 @@ limitations under the License.
 import datetime
 import jax
 import json
-import sys
 
+from absl import app
 from collections.abc import MutableMapping
-from typing import Any, Dict, Optional
 
 from jetstream.engine import token_utils
 
@@ -36,7 +35,7 @@ import warnings
 warnings.simplefilter("ignore", category=FutureWarning)
 
 _WARMUP_ITERS = 2
-
+_FLATTEN_MICROBENCHMARK_RESULTS = False
 # pylint: disable=too-many-positional-arguments
 
 
@@ -44,6 +43,7 @@ def prefill_benchmark_loop(engine, params, tokens, true_length, iters):
   """Inner loop for benchmarking prefill step."""
   start = datetime.datetime.now()
   rng = jax.random.PRNGKey(1234)
+  prefill_result = None
   for _ in range(iters):
     rng, rng_prefill = jax.random.split(rng)
     prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
@@ -56,6 +56,7 @@ def prefill_benchmark_loop(engine, params, tokens, true_length, iters):
 def prefill_benchmark(config, engine, params, tokens, true_length, num_model_params, iters):
   """Handles warmup, running prefill benchmark, and printing results."""
   rng = jax.random.PRNGKey(1234)
+  prefill_result = None
   for _ in range(_WARMUP_ITERS):
     rng, rng_prefill = jax.random.split(rng)
     prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
@@ -163,7 +164,7 @@ def ar_benchmark(config, engine, params, decode_state, global_batch_size, cache_
       "step_in_ms_per_seq": ar_average_ms / global_batch_size,
       "global_batch_size": global_batch_size,
       "total_throughput_tokens_per_second": total_throughput,
-      "device_bandwidth_GB_per_second": bw_per_device,
+      "bw_per_device_GB_per_second": bw_per_device,
   }
   return result_dict, decode_state
 
@@ -197,7 +198,7 @@ def write_results(results, filename, flatten_microbenchmark_results):
   """Write the results microbenchmark results to a json file."""
   if flatten_microbenchmark_results:
     results["flattened_results"] = flatten_dict(results)
-  if filename != "":
+  if filename:
     with open(filename, "w", encoding="utf-8") as f:
       json.dump(results, f, indent=2)
   return results
@@ -246,7 +247,8 @@ def summarize_prefill_result(engine, params, tokens, true_length):
   }
 
 
-def main(config, inference_metadata: Optional[Dict[str, Any]] = None):
+def run_benchmarks(config):
+  """Run microbenchmarks."""
   engine = maxengine.MaxEngine(config)
   rng = jax.random.PRNGKey(1234)
   rng, rng_load_params = jax.random.split(rng)
@@ -313,21 +315,20 @@ def main(config, inference_metadata: Optional[Dict[str, Any]] = None):
 
   results = collate_results(config, benchmark_results, model_size, cache_size, num_model_params)
   print_results_for_analyze(results)
-  if inference_metadata:
-    flatten_microbenchmark_results = pyconfig.string_to_bool(
-        inference_metadata.get("flatten_microbenchmark_results", "false")
+  if config.inference_microbenchmark_log_file_path:
+    write_results(
+        results,
+        filename=config.inference_microbenchmark_log_file_path,
+        flatten_microbenchmark_results=_FLATTEN_MICROBENCHMARK_RESULTS,
     )
-  else:
-    flatten_microbenchmark_results = "false"
-  results = write_results(
-      results,
-      filename=config.inference_microbenchmark_log_file_path,
-      flatten_microbenchmark_results=flatten_microbenchmark_results,
-  )
   return results
 
 
-if __name__ == "__main__":
+def main(argv):
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  pyconfig.initialize(sys.argv)
-  main(pyconfig.config)
+  pyconfig.initialize(argv)
+  run_benchmarks(pyconfig.config)
+
+
+if __name__ == "__main__":
+  app.run(main)
