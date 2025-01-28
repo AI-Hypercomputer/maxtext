@@ -372,7 +372,7 @@ max_target_length: 2048 # Maximum sequence length
 max_prefill_predict_length: 64 # Maximum length for the prefill when doing autoregression
 use_chunked_prefill: False
 
-prompt: "I love to" # Prompt for language model sampling.
+prompt: "I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to I love to" # Prompt for language model sampling.
 load_from_prefill_dir: False # If true, decode.py doesn't "prefill" but just reads from directory
 prefill_cache_dir: "" # If set and load_from_prefill_dir, decode.py reads from directory. If set, decode.py writes to directory
 autoregressive_decode_assert: ""
@@ -474,7 +474,7 @@ max_checkify: False
 # Inference
 inference_microbenchmark_prefill_lengths: "64,128,256,512,1024"
 inference_microbenchmark_stages: "prefill"
-inference_microbenchmark_loop_iters: 10
+inference_microbenchmark_loop_iters: 1
 inference_microbenchmark_log_file_path: ""
 inference_metadata_file: "" # path to a json file
 inference_server: "MaxtextInterleavedServer"  # inference server to start

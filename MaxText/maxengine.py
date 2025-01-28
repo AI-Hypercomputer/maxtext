@@ -237,29 +237,34 @@ class MaxEngine(engine_api.Engine):
     num_padded_tokens_chunks = len(padded_tokens)/chunk_length
     print("num_padded_tokens_chunks ", num_padded_tokens_chunks)
 
-    _, _ = self.prefill_iter(params=params, 
+    result, _ = self.prefill_iter(params=params, 
                             padded_tokens=padded_tokens[:20], 
                             true_length=chunk_length, rng=rng, 
                             chunk_length=20, 
                             chunk_id=0,
                             )
+    jax.block_until_ready(result)
+    print("first dummy call done")
     for i in range(int(num_padded_tokens_chunks)):
       # each chunk should be of fixed size, pad if necessary. 
-      chunked_padded_tokens = padded_tokens[:(i+1)*chunk_length]
+      chunked_padded_tokens = padded_tokens[i*chunk_length:(i+1)*chunk_length]
       print("chunked_padded_tokens ", chunked_padded_tokens)
       # chunked_prefill_segment_ids will resemble 1s for current sequence which is to be processed
       # no need of prefill result to be stored for intermediate chunks
       # chunked_prefill_segment_ids - Array representing lower diag triangle of current sequence
       if i < num_padded_tokens_chunks - 1 :
-        _, _ = self.prefill_iter(params=params, 
+        print("inside if ", i)
+        result,_  = self.prefill_iter(params=params, 
                             padded_tokens=chunked_padded_tokens, 
                             true_length=chunk_length, rng=rng, 
                             chunk_length=chunk_length, 
                             chunk_id=i,
                             )
+        jax.block_until_ready(result)
         # because this is done sequentially, cache is updated in place.
         # one way can be to return KV for each iteration and pass it in previous tokens, like generate
       else:
+        print("inside else ", i)
         return self.prefill_iter(params=params, 
                             padded_tokens=chunked_padded_tokens, 
                             true_length=true_length, 
@@ -308,6 +313,7 @@ class MaxEngine(engine_api.Engine):
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
     rng, new_rng = jax.random.split(rng)
+    jax.debug.print("calling with chunk_id {i} ", i=chunk_id)
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       flat_logits, new_vars = self.model.apply(
           params,

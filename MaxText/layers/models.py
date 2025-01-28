@@ -63,6 +63,8 @@ class DecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      chunk_id=0,
+      chunk_length=20,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -107,6 +109,8 @@ class DecoderLayer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        chunk_id=chunk_id,
+        chunk_length=chunk_length,
     )
 
     attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
@@ -401,6 +405,8 @@ class Decoder(nn.Module):
               decoder_positions,
               deterministic,
               model_mode,
+              chunk_id=chunk_id,
+              chunk_length=chunk_length,
           )
 
     y = self.get_norm_layer()(
@@ -484,7 +490,7 @@ class Transformer(nn.Module):
           f"During autoregressive decoding we assume the tokens are in the active sequence"
           f" which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}."
       )
-
+    jax.debug.print("calling decoder outside {chunk_id} ", chunk_id=chunk_id)
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,

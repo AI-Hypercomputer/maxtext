@@ -1165,6 +1165,7 @@ class AttentionOp(nn.Module):
 
   @nn.compact
   def __call__(self, query, key, value, decoder_segment_ids, model_mode, chunk_id, chunk_length):
+    jax.debug.print("chunk_id inside call attention op call: {chunk_id}", chunk_id=chunk_id)
     if not self.use_chunked_prefill:
       prefill_kv_cache, ar_kv_cache = self.kv_cache(
           key, value, decoder_segment_ids, model_mode, use_ragged_attention=self.use_ragged_attention
@@ -1207,6 +1208,7 @@ class AttentionOp(nn.Module):
         return prefill_unnormalized_output / prefill_exponentials_sum
     else:
       for i in range(chunk_id + 1):
+        jax.debug.print("chunk_id inside call attention op: {chunk_id}", chunk_id=chunk_id)
         """
         i) Get cached prefill cache
         ii) Apply attention
@@ -1449,7 +1451,7 @@ class Attention(nn.Module):
       model_mode: str = common_types.MODEL_MODE_TRAIN,
       deterministic: bool = False,
       chunk_id=0,
-      chunk_length=20 
+      chunk_length=20,
   ):
     """Applies Attention on the input data.
 
@@ -1475,6 +1477,7 @@ class Attention(nn.Module):
     """
     inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
     inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+    jax.debug.print("chunk_id inside call attention outer call: {chunk_id}", chunk_id=chunk_id)
 
     # apply projection.
     if self.config.fused_qkv:
@@ -1490,9 +1493,9 @@ class Attention(nn.Module):
     query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
     key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
 
-    jax.debug.print("🤯 query_rotary {query} 🤯", query=query)
-    jax.debug.print("🤯 key_rotary {key} 🤯", key=key)
-    jax.debug.print("🤯 decoder_segment_ids inside {decoder_segment_ids} 🤯", decoder_segment_ids=decoder_segment_ids)
+    # jax.debug.print("🤯 query_rotary {query} 🤯", query=query)
+    # jax.debug.print("🤯 key_rotary {key} 🤯", key=key)
+    # jax.debug.print("🤯 decoder_segment_ids inside {decoder_segment_ids} 🤯", decoder_segment_ids=decoder_segment_ids)
 
     if model_mode == common_types.MODEL_MODE_PREFILL:
       query = nn.with_logical_constraint(query, self.prefill_query_axis_names)

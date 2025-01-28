@@ -71,6 +71,7 @@ class MistralDecoderLayer(nn.Module):
   ):
     cfg = self.config
     mesh = self.mesh
+    jax.debug.print("inside call Mixtral Decoder Layer {chunk_id} ", chunk_id=chunk_id)
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
@@ -102,7 +103,7 @@ class MistralDecoderLayer(nn.Module):
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
     )
-
+    jax.debug.print("chunk_id before fetching attention_lnx {chunk_id} ", chunk_id=chunk_id)
     attention_lnx = attention_layer(
         lnx,
         lnx,
