@@ -15,13 +15,12 @@
 """Implementation of Engine API for MaxText"""
 import copy as cp
 import functools
-from typing import Any, Optional, Tuple, Callable
+from typing import Any, List, Optional, Tuple, Callable
 from collections import defaultdict
 
 import flax
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
-from flax import struct
 
 from layers import models, quantizations
 
@@ -39,26 +38,15 @@ from jetstream.engine import token_utils
 import max_utils
 import inference_utils
 import pyconfig
-import jaxlib
 
 import warnings
 
 warnings.simplefilter("ignore", category=FutureWarning)
-
+DecodeState = Any
 Prefix = Any
 PackedPrefix = Any
 Params = Any
-
-
-@struct.dataclass
-class DecodeState:
-  """The inputs into a generation step."""
-
-  prefill_cache: jax.Array
-  generate_cache: jax.Array
-  generate_cache_index: int
-  generate_lengths: jax.Array
-  generated_token: jax.Array
+PRNGKeyType = Any
 
 
 class MaxEngineConfig:
@@ -110,7 +98,7 @@ class MaxEngine(engine_api.Engine):
     self.kv_cache_shardings = None
     self.state_mesh_annotations = None
 
-  def load_params(self, *args, rng: Optional[jax.random.PRNGKey] = None, **kwargs) -> Params:
+  def load_params(self, *args, rng: Optional[PRNGKeyType] = None, **kwargs) -> Params:
     """Load Parameters, typically from GCS"""
     # pylint: disable=unused-argument
 
@@ -126,7 +114,7 @@ class MaxEngine(engine_api.Engine):
     # pylint: disable=isinstance-second-argument-not-valid-type
     self.abstract_params = jax.tree_util.tree_map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
-        if isinstance(x, jaxlib.xla_extension.ArrayImpl)
+        if isinstance(x, jax.Array)
         else None,
         state.params,
     )
@@ -158,7 +146,7 @@ class MaxEngine(engine_api.Engine):
     max_utils.print_mem_stats("After load_params")
     return params
 
-  def quantize_params(self, state, rng: Optional[jax.random.PRNGKey] = None):
+  def quantize_params(self, state, rng: Optional[PRNGKeyType] = None):
     """Forward pass to quantize decode params."""
     if rng is None:
       rng = jax.random.PRNGKey(0)
@@ -227,7 +215,7 @@ class MaxEngine(engine_api.Engine):
       padded_tokens: jax.Array,
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
-      rng: Optional[jax.random.PRNGKey] = None,
+      rng: Optional[PRNGKeyType] = None,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -325,8 +313,8 @@ class MaxEngine(engine_api.Engine):
       true_lengths: jax.Array,
       num_prompts: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
-      rng: Optional[jax.random.PRNGKey] = None,
-  ) -> Tuple[Any, PackedPrefix, engine_api.ResultTokens]:
+      rng: Optional[PRNGKeyType] = None,
+  ) -> Tuple[Any, PackedPrefix, List[engine_api.ResultTokens]]:
     """Computes a kv-cache for a new packed generate request, which is a
     concatenation of several shorter prompts. Experimentation shows that
     longer prefill sequences gives approximately 15% boost in time per prefilled
@@ -424,7 +412,7 @@ class MaxEngine(engine_api.Engine):
       params: Params,
       decode_state: DecodeState,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
-      rng: Optional[jax.random.PRNGKey] = None,
+      rng: Optional[PRNGKeyType] = None,
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
     """Run one generate step"""
     if rng is None:
@@ -718,7 +706,7 @@ class MaxEngine(engine_api.Engine):
   def init_decode_state(
       self,
       *args,  # pylint: disable=unused-argument
-      rng: Optional[jax.random.PRNGKey] = None,
+      rng: Optional[PRNGKeyType] = None,
       **kwargs,  # pylint: disable=unused-argument
   ) -> DecodeState:
     """Initialises any state which a generation step transforms."""
@@ -820,9 +808,9 @@ class MaxEngine(engine_api.Engine):
 
 
 def set_engine_vars_from_base_engine(
-    engine: engine_api.Engine,
-    base_engine: engine_api.Engine,
-    rng: jax.random.PRNGKey,
+    engine: MaxEngine,
+    base_engine: MaxEngine,
+    rng: PRNGKeyType,
 ):
   """Set internal vars from base_engine, which has already loaded the checkpoint and has sharding,
   mesh, and kv cache related vars set.
