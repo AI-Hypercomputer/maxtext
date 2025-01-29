@@ -436,6 +436,37 @@ class Pipeline(nn.Module):
 
     #vmap_func = self.get_main_vmap_func()
     vmap_func = self.get_main_vmap_func_apply()
+    if self.config.num_pipeline_repeats > 1:
+      _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
+      def prepare_vars_for_main_vmap(weights):
+          def gather_weights_for_stages_in(weights):
+            return jax.tree.map(
+                functools.partial(
+                    self.vmap_parallel_gather, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1
+                ),
+                weights,
+            )
+
+          circular_metadata_params = {
+              nn.PARTITION_NAME: "circular_repeats",
+              "sub_weight_split_dims_mapping": (None,),
+              "is_initializing": self.is_initializing(),
+              "x_times": self.config.num_pipeline_repeats,
+              "optimizer_dims_mapping": None,
+          }
+          weights = meta.remove_axis(
+              weights, 0, circular_metadata_params
+          )  # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
+          weights = gather_weights_for_stages_in(weights)
+          return weights
+
+    vmap_func = nn.map_variables(
+        vmap_func,
+        mapped_collections=["params", "non_trainable", "summaries", "intermediates"],
+        mutable=True,
+        trans_in_fn=prepare_vars_for_main_vmap,
+    )
+
     stage_weights = self.get_current_stage_weights(all_pipeline_weights, loop_iteration)
     stages_output = vmap_func(
         decoder_layer_instance, stage_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode
