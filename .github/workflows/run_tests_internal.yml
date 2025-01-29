@@ -45,18 +45,22 @@ jobs:
   run:
     runs-on: ["self-hosted", "${{ inputs.device_type }}", "${{ inputs.device_name }}"]
     container:
-      image: gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:${{ inputs.device_type }}
+      image: gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu
       volumes:
         - /home/runner/actions-runner/_work/maxtext/maxtext:/deps
       env:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
-        JAX_PLATFORMS: proxy
-        JAX_BACKEND_TARGET: grpc://localhost:29000
+        # JAX_PLATFORMS: "proxy"
+        # JAX_BACKEND_TARGET: "grpc://localhost:29000"
       options: ${{ inputs.container_resource_option }}
     steps:
       - uses: actions/checkout@v4
+      - name: Set variables for Pathways tests
+        if: "${{ inputs.device_type }} == 'tpu_pathways'"
+        run: |
+          export JAX_PLATFORMS="proxy" ; export JAX_BACKEND_TARGET="grpc://localhost:29000" ; echo "Set Pathways env variables"
       - name: Run Tests
         run: |
           cd MaxText
-          python3 -m pytest ${{ inputs.test_directory }} -m "${{ inputs.pytest_marker }}"
+          python3 -m pytest -s ${{ inputs.test_directory }} -m "${{ inputs.pytest_marker }}"
