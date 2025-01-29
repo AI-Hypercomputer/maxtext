@@ -18,10 +18,12 @@
                           ***** IMPORTANT *****
 This script will run specific tuned workload on specified hardware and software environments
 Example usages:
-  python3 benchmark_runner.py  --project=<my-project> --zone=<zone> \
+  python3 benchmark_runner.py xpk --project=<my-project> --zone=<zone> \
     --cluster_name=<xpk_cluster_name> --base_output_directory=<output_gcloud_bucket> --device_type=v6e-256 --num_slices=1 --model_name="llama2_70b_4096" --libtpu_version=20241009 --base_docker_image=maxtext_base_image
 """
 import argparse
+import os
+import time
 
 from maxtext_trillium_model_configs import trillium_model_dict
 from maxtext_v5e_model_configs import v5e_model_dict
@@ -172,7 +174,7 @@ def add_on_device_runner_arguments(custom_parser: argparse.ArgumentParser):
   custom_parser.add_argument(
       '--run_name',
       type=str,
-      default=None, required=True,
+      default=None,
       help='run_name for model run',
   )
   custom_parser.add_argument(
@@ -265,6 +267,15 @@ def main() -> None:
 
     xpk_benchmark_runner(cluster_config, [workload_config])
   elif options.runner == "on-device":
+    # Generate a run_name if it is not passed from CLI or M_RUN_NAME env variable is empty
+    curr_date = time.strftime('%Y%m%d')
+    if options.run_name is None:
+      try:
+        run_name = os.environ['M_RUN_NAME']
+        if run_name == "":
+          options.run_name = f'{options.model_name}-{curr_date}'
+      except KeyError:
+        options.run_name = f'{options.model_name}-{curr_date}'
     workload_config = WorkloadConfig(
       model=model,
       num_slices=None,
