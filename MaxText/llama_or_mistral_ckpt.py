@@ -275,6 +275,7 @@ def convert_to_jax_weights(base_model_path, model_size, checkpoint_type):
   max_logging.log("Processing decoder norm scale")
   decoder_norm_scale = chkpt_vars[0]["norm.weight"].type(torch.float16).numpy()
   jax_weights["decoder"]["decoder_norm"]["scale"] = decoder_norm_scale
+  print_helper('jax_weights["decoder"]["decoder_norm"]["scale"]', jax_weights["decoder"]["decoder_norm"]["scale"])
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
@@ -283,6 +284,7 @@ def convert_to_jax_weights(base_model_path, model_size, checkpoint_type):
   logits_dense = np.concatenate([var["output.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0).transpose()
   assert logits_dense.shape[1] == vocab_size
   jax_weights["decoder"]["logits_dense"]["kernel"] = logits_dense
+  print_helper('jax_weights["decoder"]["logits_dense"]["kernel"]', jax_weights["decoder"]["logits_dense"]["kernel"])
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
@@ -294,6 +296,7 @@ def convert_to_jax_weights(base_model_path, model_size, checkpoint_type):
     token_embedder = np.concatenate([var["tok_embeddings.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=1)
   assert token_embedder.shape[0] == vocab_size
   jax_weights["token_embedder"]["embedding"] = token_embedder
+  print_helper('jax_weights["token_embedder"]["embedding"]', jax_weights["token_embedder"]["embedding"])
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
@@ -353,6 +356,7 @@ def convert_to_jax_weights(base_model_path, model_size, checkpoint_type):
   self_attention["query"]["kernel"] = self_attention["query"]["kernel"] / np.sqrt(head_dim)
 
   jax_weights["decoder"]["layers"]["self_attention"] = self_attention
+  print_helper('jax_weights["decoder"]["layers"]["self_attention"]', jax_weights["decoder"]["layers"]["self_attention"])
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   # layer weight pre and post self attention norm ################
@@ -369,7 +373,7 @@ def convert_to_jax_weights(base_model_path, model_size, checkpoint_type):
           stack_shape + pre_self_attention_layernorm.shape, dtype=np.float16
       )
       layer_weight["post_self_attention_layer_norm"]["scale"] = np.zeros(
-          stack_shape + post_self_attention_layernorm.shape, dtype=np.float16
+          stack_shape + post_self_attentfion_layernorm.shape, dtype=np.float16
       )
     layer_weight["pre_self_attention_layer_norm"]["scale"][layer_idx, ...] = pre_self_attention_layernorm  # pylint: disable=E1137
     layer_weight["post_self_attention_layer_norm"]["scale"][layer_idx, ...] = post_self_attention_layernorm  # pylint: disable=E1137
@@ -383,6 +387,8 @@ def convert_to_jax_weights(base_model_path, model_size, checkpoint_type):
 
   jax_weights["decoder"]["layers"]["pre_self_attention_layer_norm"] = layer_weight["pre_self_attention_layer_norm"]
   jax_weights["decoder"]["layers"]["post_self_attention_layer_norm"] = layer_weight["post_self_attention_layer_norm"]
+  print_helper('pre_self_attention_layer_norm', jax_weights["decoder"]["layers"]["pre_self_attention_layer_norm"]["scale"])
+  print_helper('post_self_attention_layer_norm', jax_weights["decoder"]["layers"]["post_self_attention_layer_norm"]["scale"])
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   # layer weights ################################################
@@ -405,6 +411,7 @@ def convert_to_jax_weights(base_model_path, model_size, checkpoint_type):
     }
 
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
+    print(f'decoder_layer_idx: {layer_idx}')
     if num_experts is None:
       wi_0 = np.concatenate(
           [var[f"layers.{layer_idx}.feed_forward.w1.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0
@@ -432,6 +439,7 @@ def convert_to_jax_weights(base_model_path, model_size, checkpoint_type):
         layer_weight["gate"]["kernel"] = np.zeros(stack_shape + gate.shape, dtype=np.float16)
       layer_weight["gate"]["kernel"][layer_idx, ...] = gate
       for k in tqdm(range(num_experts), desc="experts", leave=False):
+        print(f"expert_id: {k}")
         wi_0 = np.concatenate(
             [
                 var[f"layers.{layer_idx}.feed_forward.experts.{k}.w1.weight"].type(torch.float16).numpy()
@@ -475,10 +483,13 @@ def convert_to_jax_weights(base_model_path, model_size, checkpoint_type):
   else:
     layer_weight["gate"]["kernel"] = np.transpose(layer_weight["gate"]["kernel"], axes=(1, 0, 2))
     jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["kernel"] = layer_weight["gate"]["kernel"]
-
     jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_0"] = layer_weight["mlp"]["wi_0"]["kernel"]
     jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_1"] = layer_weight["mlp"]["wi_1"]["kernel"]
     jax_weights["decoder"]["layers"]["MoeBlock_0"]["wo"] = layer_weight["mlp"]["wo"]["kernel"]
+    print_helper('jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["kernel"]', jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["kernel"])
+    print_helper('jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_0"]', jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_0"])
+    print_helper('jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_1"]', jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_1"])
+    print_helper('jax_weights["decoder"]["layers"]["MoeBlock_0"]["wo"]', jax_weights["decoder"]["layers"]["MoeBlock_0"]["wo"])
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   del chkpt_vars
@@ -549,6 +560,17 @@ def save_jax_weights_to_checkpoint(maxtext_model_path, jax_weights):
     # Upon preemption, exit when and only when all ongoing saves are complete.
     checkpoint_manager.wait_until_finished()
 
+def print_helper(key, value):
+  if isinstance(value, dict):
+    print_nested_dict(value)
+  else:
+    print()
+    print(f"key: {key}")
+    print(f"value.shape: {value.shape}")
+    print(f"value.mean: {np.mean(value)}")
+    print(f"value.min: {np.min(value)}")
+    print(f"value.max: {np.max(value)}")
+    print(f"value.std: {np.std(value)}")
 
 def print_nested_dict(nested_dict, level=0):  # level for indentation
     for key, value in nested_dict.items():
@@ -582,7 +604,7 @@ if __name__ == "__main__":
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={SIMULATED_CPU_DEVICES_COUNT}"
   
   maxtext_jax_weights = convert_to_jax_weights(args.base_model_path, args.model_size, args.checkpoint_type)
-  print_nested_dict(maxtext_jax_weights)
+  # print_nested_dict(maxtext_jax_weights)
   print("done with script")
 
   # save_jax_weights_to_checkpoint(
