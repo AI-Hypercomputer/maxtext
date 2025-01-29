@@ -888,10 +888,10 @@ def train_loop(config, state=None):
         state, metrics = p_train_step(state, example_batch, nextrng)
 
     step_time_delta = datetime.datetime.now() - last_step_completion
+    last_step_completion = datetime.datetime.now()
     record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
     if performance_metric_queue:
       performance_metric_queue.put(step_time_delta.total_seconds())
-    last_step_completion = datetime.datetime.now()
 
     if checkpoint_manager is not None:
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
