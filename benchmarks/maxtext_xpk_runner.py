@@ -309,6 +309,11 @@ def build_user_command(
 
   libtpu_flags = f'LIBTPU_INIT_ARGS=\'{wl_config.model.xla_flags}\''
 
+  if name is None:
+    run_name_command=""
+  else:
+    run_name_command=f'run_name={name}'
+
   # Construct the command string with proper formatting and line continuations
   command = ' '.join([
       f'{install_libtpu_cmd}',
@@ -323,7 +328,7 @@ def build_user_command(
       f'model_name={wl_config.model.model_type}',
       f'base_output_directory={wl_config.base_output_directory}',
       f'{vertex_tensorboard}',
-      f'run_name={name}'
+      f'{run_name_command}'
   ])
   return command
 
