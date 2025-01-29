@@ -34,6 +34,7 @@ from layers import normalizations
 from layers import models
 import common_types
 import max_logging
+import page_managers
 
 Array = common_types.Array
 Config = common_types.Config
@@ -66,6 +67,7 @@ class MistralDecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      page_state: Optional[page_managers.PageState] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -108,6 +110,7 @@ class MistralDecoderLayer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        page_state=page_state,
     )
 
     attention_lnx = nn.with_logical_constraint(
