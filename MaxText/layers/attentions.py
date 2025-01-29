@@ -312,9 +312,40 @@ class PagedAttentionOp(nn.Module):
   ) -> None:
     """Update KV Pages."""
     if model_mode == common_types.MODEL_MODE_PREFILL:
-      self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value)
+      if self.use_chunked_prefill:
+        self.update_chunked_prefill_step_pages(key_pages_var, value_pages_var, key, value)
+      else:
+        self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value)
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       self.update_decode_step_pages(key_pages_var, value_pages_var, key, value, page_state)
+
+  def update_chunked_prefill_step_pages(self, key_pages_var, value_pages_var, key, value, page_state):
+    key_pages = key_pages_var.value
+    value_pages = value_pages_var.value
+
+    batch_size, seq_len, kv_heads, head_dim = key.shape
+    kv_heads, num_pages, page_size, head_dim = key_pages.shape
+
+    new_key = key.reshape(batch_size, kv_heads, head_dim)[:, :, :]
+    new_key = jnp.transpose(new_key, (1, 0, 2))  # [n_kv, b, d]
+    new_value = value.reshape(batch_size, kv_heads, head_dim)[:, :, :]
+    new_value = jnp.transpose(new_value, (1, 0, 2))  # n_kv, b, d
+
+    broadcast_pages = jnp.tile(page_state.current_page, (kv_heads, 1))  # [n_kv, b]
+    broadcast_pos = jnp.tile(page_state.current_page_position, (kv_heads, 1))  # [n_kv, b]
+    kv_indices = jnp.arange(kv_heads)[:, None]  # [n_kv, 1]
+    kv_indices = jnp.tile(kv_indices, (1, batch_size))  # [n_kv, b]
+
+    key_pages_updated = key_pages.at[kv_indices, broadcast_pages, broadcast_pos].set(new_key)
+    value_pages_updated = value_pages.at[kv_indices, broadcast_pages, broadcast_pos].set(new_value)
+
+    key_pages_updated = nn.with_logical_constraint(key_pages_updated, self.kv_pages_axis_names)
+    value_pages_updated = nn.with_logical_constraint(value_pages_updated, self.kv_pages_axis_names)
+
+    key_pages_var.value = key_pages_updated
+    value_pages_var.value = value_pages_updated
+    return key_pages_var, value_pages_var
+
 
   def update_prefill_step_pages(
       self,
