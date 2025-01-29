@@ -51,6 +51,7 @@ jobs:
       device_type: gpu
       device_name: a100-40gb-4
       build_mode: pinned
+      base_image: gcr.io/tpu-prod-env-multipod/maxtext_gpu_jax_pinned:latest
 
   tpu_unit_tests:
     needs: tpu_image
