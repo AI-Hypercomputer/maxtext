@@ -1561,7 +1561,7 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
       else:
         return q_ids + self.offset >= kv_ids
 
-    arr = jnp.arange(shape[0])
+    arr = np.arange(shape[0])
     out = AttentionOp.reorder_mask_load_balancing(arr[None, :, None, None], cp_size, seq_dim=1)
     q_sequence = out[0, :, 0, 0]
 
@@ -1649,7 +1649,7 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
     if not isinstance(other, type(self)):
       return NotImplemented
 
-    return self.shape == other.shape and self.offset == other.offset and jnp.array_equal(self.q_sequence, other.q_sequence)
+    return self.shape == other.shape and self.offset == other.offset and np.array_equal(self.q_sequence, other.q_sequence)
 
   def __hash__(self):
     return hash(
@@ -1657,6 +1657,6 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
             type(self),
             self.shape,
             self.offset,
-            # self.q_sequence.tobytes() if self.q_sequence is not None else None,
+            self.q_sequence.tobytes() if self.q_sequence is not None else None,
         )
     )
