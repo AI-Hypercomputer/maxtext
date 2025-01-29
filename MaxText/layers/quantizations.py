@@ -101,6 +101,8 @@ def _rhs_axis_metadata_wrapper(
     for orig_rank, new_rank in tile_map.items():
       assert new_rank
       assert len(new_rank) <= 2
+       # Check if index below should be zero (num_channels and channel_size) - we want to pick channel size.
+      # b/353722489
       new_mesh_axes[new_rank[-1]] = mesh_axes[orig_rank]
     mesh_axes = new_mesh_axes
 
