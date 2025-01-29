@@ -610,7 +610,10 @@ class MoeBlock(nn.Module):
 
     if self.config.capacity_factor > 0:
       # token dropping if needed
-      dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs)
+      # dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs)
+      top_k_weights /= top_k_weights.sum(-1, keepdims=True)
+      weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
+      dispatch_mask, combine_mask = self.generate_masks(top_k_indices, weights)
       mask_axes = ("activation_batch", "activation_length", None, None)
       dispatch_mask = nn.with_logical_constraint(dispatch_mask, mask_axes)
       combine_mask = nn.with_logical_constraint(combine_mask, mask_axes)
