@@ -315,12 +315,10 @@ class PagedAttentionOp(nn.Module):
     """Update KV Pages."""
     if model_mode == common_types.MODEL_MODE_PREFILL:
       if self.use_chunked_prefill:
-        if is_first_prefill:
-          import pdb
-          pdb.set_trace()
-          self.update_chunked_prefill_step_pages(key_pages_var, value_pages_var, key, value)
-        else:
-          self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value)
+        # if is_first_prefill:
+        #   self.update_chunked_prefill_step_pages(key_pages_var, value_pages_var, key, value)
+        # else:
+        self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value)
       else:
         self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value)
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
@@ -1632,7 +1630,7 @@ class Attention(nn.Module):
           ragged_block_size=self.ragged_block_size,
       )
 
-    out = attention_op(query, key, value, decoder_segment_ids, model_mode, page_state=page_state)
+    out = attention_op(query, key, value, decoder_segment_ids, model_mode, page_state=page_state, is_first_prefill=is_first_prefill)
 
     out = nn.with_logical_constraint(out, self.out_axis_names)
     out = self.out_projection(inputs_q.shape[-1], out)

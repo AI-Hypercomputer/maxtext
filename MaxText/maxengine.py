@@ -220,7 +220,7 @@ class MaxEngine(engine_api.Engine):
     return res_cache
   
   @functools.partial(jax.jit, static_argnums=(0,))
-  def prefill(
+  def prefill_first(
       self,
       *,
       params: Params,
@@ -266,7 +266,8 @@ class MaxEngine(engine_api.Engine):
     input_tokens = jnp.expand_dims(padded_tokens, 0)
     positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
     rng, new_rng = jax.random.split(rng) if rng is not None else (None, None)
-
+    import pdb
+    pdb.set_trace()
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       flat_logits, new_vars = self.model.apply(
           params,
@@ -279,7 +280,7 @@ class MaxEngine(engine_api.Engine):
           mutable=["cache"],
           slot=slot,
           true_length=true_length,
-          is_first_prefill=False,
+          is_first_prefill=True,
       )
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
@@ -430,7 +431,7 @@ class MaxEngine(engine_api.Engine):
     }, result
   
   @functools.partial(jax.jit, static_argnums=(0,))
-  def prefill_first(
+  def prefill(
       self,
       *,
       params: Params,
@@ -491,7 +492,7 @@ class MaxEngine(engine_api.Engine):
           mutable=["cache"],
           slot=slot,
           true_length=true_length,
-          is_first_prefill=True,
+          is_first_prefill=False,
       )
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)

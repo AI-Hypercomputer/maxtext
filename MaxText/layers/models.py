@@ -511,8 +511,6 @@ class Transformer(nn.Module):
             slot=slot,
             true_length=true_length,
         )
-    import pdb
-    pdb.set_trace()
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
