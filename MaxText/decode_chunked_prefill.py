@@ -97,8 +97,9 @@ def main(argv: Sequence[str]) -> None:
       decode_state = engine.insert(prefill_result, decode_state, slot=slot)
     else:
       for j in range(i+1):
+        print("running for ", j, i)
         prefill_result, first_token = engine.prefill(
-        params=params, padded_tokens=chunk_metadata.chunk_padded, true_length=true_length, rng=rng_prefill, slot=slot, existing_prefix=None)
+        params=params, padded_tokens=chunk_metadata.chunk_padded, true_length=true_length, rng=rng_prefill, slot=slot)#, existing_prefix=None)
         decode_state = engine.insert(prefill_result, decode_state, slot=slot)
       
   

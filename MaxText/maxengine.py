@@ -279,6 +279,7 @@ class MaxEngine(engine_api.Engine):
           mutable=["cache"],
           slot=slot,
           true_length=true_length,
+          is_first_prefill=False,
       )
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
@@ -427,7 +428,7 @@ class MaxEngine(engine_api.Engine):
         "generated_tokens": generated_tokens,
         "tokens": first_generated_token,
     }, result
-
+  
   @functools.partial(jax.jit, static_argnums=(0,))
   def prefill_first(
       self,
@@ -439,6 +440,9 @@ class MaxEngine(engine_api.Engine):
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[jax.random.PRNGKey] = None,
       slot: int = 0,
+      chunk_metadata=None, 
+      prefix_id=None,
+      decode_state=None, # existing prefix
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -480,7 +484,7 @@ class MaxEngine(engine_api.Engine):
           positions,
           decoder_segment_ids=sequence_indicator,
           enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_PREFILL_FIRST,
+          model_mode=common_types.MODEL_MODE_PREFILL,
           rngs={"params": new_rng},
           mutable=["cache"],
           slot=slot,
@@ -531,7 +535,6 @@ class MaxEngine(engine_api.Engine):
         "generated_tokens": generated_tokens,
         "tokens": first_generated_token,
     }, result
-
 
 
 
