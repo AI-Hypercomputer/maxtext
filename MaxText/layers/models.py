@@ -393,11 +393,28 @@ class Decoder(nn.Module):
     RemattedBlockLayer = self.set_remat_policy(self.decoder_layer, policy)
 
     if cfg.using_pipeline_parallelism:
+      z = self.pipeline_module
+      key = jax.random.PRNGKey(0)
+      keys={"params": key, "dropout": key, "aqt": key}
+      rawr=z.init(keys,y,decoder_segment_ids, decoder_positions, deterministic, model_mode)
+
+      def get_partition_spec(pytree):
+        def _is_leaf(x):
+          return isinstance(x, nn.spmd.LogicallyPartitioned)
+
+        def get_partition_spec_leaf(leaf):
+          return leaf.get_partition_spec()
+        partition_spec_tree = jax.tree.map(get_partition_spec_leaf, pytree, is_leaf=_is_leaf)
+        return partition_spec_tree
+      rawr_spec = get_partition_spec(rawr)
+      rawr_no_layers = dict()
+      rawr_no_layers['params'] = rawr_spec['params']['layers']
       y = self.pipeline_module(y,
             decoder_segment_ids,
             decoder_positions,
             deterministic,
-            model_mode)
+            model_mode,
+            sharding_info=rawr_no_layers)
     else:
       if cfg.scan_layers:
         y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(

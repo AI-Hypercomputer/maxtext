@@ -23,6 +23,7 @@ from flax import linen as nn
 import common_types
 import functools
 from typing import Any
+from jax.experimental import shard_map
 
 
 class Pipeline(nn.Module):
@@ -144,10 +145,14 @@ class Pipeline(nn.Module):
         all_repeats = all_repeats.astype(jnp.bfloat16) # This line makes a huge difference surprisingly, for both correctness and ideal comm pattern
         return all_repeats[0:2] # Buffer is of length 2
       return jax.tree.map(_grab_two_rows_of_array, pytree)
-    bsw = grab_two_rows_of_pytree(self.layers.variables)
-    physical_constraint_no_fsdp = self.get_physical_spec_no_fsdp(sharding_info)
-    bsw = jax.lax.with_sharding_constraint(bsw, physical_constraint_no_fsdp)
-    bsw = self.ag_new_bsw(bsw, sharding_info, 0)
+    
+    if self.is_initializing():
+      bsw = None
+    else:
+      bsw = grab_two_rows_of_pytree(self.layers.variables)
+      physical_constraint_no_fsdp = self.get_physical_spec_no_fsdp(sharding_info)
+      bsw = jax.lax.with_sharding_constraint(bsw, physical_constraint_no_fsdp)
+      bsw = self.ag_new_bsw(bsw, sharding_info, 0)
 
     init_loop_state = {
         "state_io": state_io,
@@ -365,6 +370,27 @@ class Pipeline(nn.Module):
     bsw = jax.lax.cond( (loop_iter + 1) % self.config.num_pipeline_microbatches == 0, lambda: self.ag_new_bsw(bsw, sharding_info, loop_iter), lambda: bsw)
     return bsw
 
+  def full_shmap_ag_new_bsw(self, bsw, loop_iter):
+      _, repeat_idx = self.get_microbatch_and_repeat_ids(loop_iter + 1)
+      @functools.partial(
+        shard_map,
+        mesh=self.mesh,
+        in_specs=(
+            bsnd,
+            bsnd,
+            bsnd,
+            b,
+            None,
+        ),
+        out_specs=bsnd,
+        check_rep=False,
+    )
+      def _full_shmap_ag_new_bsw(bsw, vars):
+        new_bw_insert = self.grab_bsw(vars, repeat_idx[0])
+
+  
+
+
   def ag_new_bsw(self, bsw, sharding_info, loop_iter):
     physical_spec = self.get_physical_spec_no_fsdp(sharding_info)
     _, repeat_idx = self.get_microbatch_and_repeat_ids(loop_iter + 1)
@@ -572,6 +598,8 @@ class Pipeline(nn.Module):
     return remat_policy
 
   def get_physical_spec_no_fsdp(self, full_logical):
+    if full_logical is not None:
+      print('oopsie')
     def remove_fsdp_sharding(sharding_tree):
       def _remove_fsdp_from_partition_spec(named_sharding):
         if isinstance(named_sharding, jax.sharding.NamedSharding):
