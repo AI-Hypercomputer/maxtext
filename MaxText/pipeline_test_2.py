@@ -208,6 +208,6 @@ class PipelineParallelismTest():
 
 
 if __name__ == "__main__":
-  print("what")
   P = PipelineParallelismTest()
-  P.test_circular_extra_microbatches_same_output_and_grad()
+  #P.test_circular_extra_microbatches_same_output_and_grad()
+  P.test_circular_minimum_microbatches_same_output_and_grad()
