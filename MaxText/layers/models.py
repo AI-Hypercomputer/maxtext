@@ -276,6 +276,7 @@ class Decoder(nn.Module):
       deterministic=False,
       model_mode=common_types.MODEL_MODE_TRAIN,
       page_state: Optional[page_managers.PageState] = None,
+      is_first_prefill=False,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -402,6 +403,7 @@ class Decoder(nn.Module):
               deterministic,
               model_mode,
               page_state=page_state,
+              is_first_prefill=is_first_prefill,
           )
 
     y = self.get_norm_layer()(
@@ -489,6 +491,7 @@ class Transformer(nn.Module):
       model_mode=common_types.MODEL_MODE_TRAIN,
       slot: Optional[int] = None,
       true_length: Optional[int] = None,
+      is_first_prefill = False,
   ):
     """Applies Transformer decoder-branch on encoded-input and target."""
 
@@ -516,5 +519,6 @@ class Transformer(nn.Module):
         deterministic=not enable_dropout,
         model_mode=model_mode,
         page_state=page_state,
+        is_first_prefill=is_first_prefill,
     )
     return logits

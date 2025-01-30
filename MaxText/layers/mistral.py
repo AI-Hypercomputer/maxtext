@@ -68,6 +68,7 @@ class MistralDecoderLayer(nn.Module):
       deterministic,
       model_mode,
       page_state: Optional[page_managers.PageState] = None,
+      is_first_prefill = False,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -111,6 +112,7 @@ class MistralDecoderLayer(nn.Module):
         deterministic=deterministic,
         model_mode=model_mode,
         page_state=page_state,
+        is_first_prefill=is_first_prefill,
     )
 
     attention_lnx = nn.with_logical_constraint(

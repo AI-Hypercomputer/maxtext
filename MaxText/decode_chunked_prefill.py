@@ -92,22 +92,22 @@ def main(argv: Sequence[str]) -> None:
   for i,chunk_metadata in enumerate(chunked_metadata_list):
     if i == 0:
       decode_state = engine.init_decode_state(rng_init_decode)
-      prefill_result, first_token = engine.prefill(
-      params=params, padded_tokens=chunk_metadata.chunk_padded, true_length=true_length, rng=rng_prefill, slot=slot) #decode_state=decode_state)
+      prefill_result, first_token = engine.prefill_first(
+      params=params, padded_tokens=chunk_metadata.chunk_padded, true_length=true_length, rng=rng_prefill, slot=slot)#decode_state=decode_state)
       decode_state = engine.insert(prefill_result, decode_state, slot=slot)
     else:
       for j in range(i+1):
         prefill_result, first_token = engine.prefill(
-        params=params, padded_tokens=chunk_metadata.chunk_padded, true_length=true_length, rng=rng_prefill, slot=slot) #existing_prefix=prefill_result)
+        params=params, padded_tokens=chunk_metadata.chunk_padded, true_length=true_length, rng=rng_prefill, slot=slot, existing_prefix=None)
         decode_state = engine.insert(prefill_result, decode_state, slot=slot)
       
-    
+  
     
     
 
-  prefill_result, first_token = engine.prefill(
-      params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill, slot=slot
-  )
+  # prefill_result, first_token = engine.prefill(
+  #     params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill, slot=slot
+  # )
 
   steps = range(config.max_prefill_predict_length, config.max_target_length)
   sampled_tokens_list = []
@@ -119,7 +119,7 @@ def main(argv: Sequence[str]) -> None:
 
   results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
   output = tokenizer_model.decode(results)
-  print(f"Input `{text}` -> `{output}`")
+  # print(f"Input `{text}` -> `{output}`")
 
   if config.autoregressive_decode_assert != "":
     assert (

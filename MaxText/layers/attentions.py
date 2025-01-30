@@ -286,6 +286,7 @@ class PagedAttentionOp(nn.Module):
       decoder_segment_ids: Array,
       model_mode: str,
       page_state: page_managers.PageState,
+      is_first_prefill=False,
   ) -> Array:
     """Apply paged attention mechanism.
 
@@ -294,7 +295,7 @@ class PagedAttentionOp(nn.Module):
               are None for autoregressive mode (handled by paged_attention kernel)
     """
     key_pages_var, value_pages_var = self.init_or_get_kv_pages(model_mode)
-    self.update(key_pages_var, value_pages_var, key, value, model_mode, page_state)
+    self.update(key_pages_var, value_pages_var, key, value, model_mode, page_state, is_first_prefill=is_first_prefill)
 
     if model_mode == common_types.MODEL_MODE_PREFILL:
       return self.paged_dot_product_attention_with_max_and_sum(query, key, value)
@@ -309,11 +310,15 @@ class PagedAttentionOp(nn.Module):
       value: Array,
       model_mode: str,
       page_state: Optional[page_managers.PageState] = None,
+      is_first_prefill = False,
   ) -> None:
     """Update KV Pages."""
     if model_mode == common_types.MODEL_MODE_PREFILL:
       if self.use_chunked_prefill:
-        self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value)
+        if is_first_prefill:
+          self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value)
+        else:
+          self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value)
       else:
         self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value)
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
@@ -1308,7 +1313,7 @@ class AttentionOp(nn.Module):
     return attn_out
 
   @nn.compact
-  def __call__(self, query, key, value, decoder_segment_ids, model_mode, page_state=None):
+  def __call__(self, query, key, value, decoder_segment_ids, model_mode, page_state=None, is_first_prefill=False):
     prefill_kv_cache, ar_kv_cache = self.kv_cache(
         key, value, decoder_segment_ids, model_mode, use_ragged_attention=self.use_ragged_attention
     )
@@ -1532,6 +1537,7 @@ class Attention(nn.Module):
       model_mode: str = common_types.MODEL_MODE_TRAIN,
       deterministic: bool = False,
       page_state: Optional[page_managers.PageState] = None,
+      is_first_prefill=False,
   ):
     """Applies Attention on the input data.
 
