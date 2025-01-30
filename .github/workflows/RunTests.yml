@@ -44,21 +44,21 @@ jobs:
       build_mode: stable_stack
       base_image: us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:latest
 
-  # tpu_pathways_image:
-  #   needs: prelim
-  #   uses: ./.github/workflows/build_upload_internal.yml
-  #   with:
-  #     device_type: tpu_pathways
-  #     device_name: v4-8
-  #     build_mode: stable_stack
-  #     base_image: us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:latest
+  tpu_pathways_image:
+    needs: prelim
+    uses: ./.github/workflows/build_upload_internal.yml
+    with:
+      device_type: tpu_pathways
+      device_name: v4-8
+      build_mode: stable_stack
+      base_image: us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:latest
 
-  # tpu_pathways_setup:
-  #   needs: tpu_pathways_image
-  #   uses: ./.github/workflows/start_pathways_containers.yml
-  #   with:
-  #     device_type: tpu_pathways
-  #     device_name: v4-8
+  tpu_pathways_setup:
+    needs: tpu_pathways_image
+    uses: ./.github/workflows/start_pathways_containers.yml
+    with:
+      device_type: tpu_pathways
+      device_name: v4-8
 
   # gpu_image:
   #   needs: prelim
@@ -68,8 +68,20 @@ jobs:
   #     device_name: a100-40gb-4
   #     build_mode: pinned
 
-  tpu_unit_tests:
-    needs: tpu_image
+  # tpu_unit_tests:
+  #   needs: tpu_image
+  #   uses: ./.github/workflows/run_tests_internal.yml
+  #   with:
+  #     device_type: tpu
+  #     device_name: v4-8
+  #     pytest_marker: 'not gpu_only and not integration_test'
+  #     test_directory: 'tests'
+  #     xla_python_client_mem_fraction: 0.75
+  #     tf_force_gpu_allow_growth: false
+  #     container_resource_option: "--privileged"
+  
+  tpu_pathways_unit_tests:
+    needs: [tpu_pathways_setup]
     uses: ./.github/workflows/run_tests_internal.yml
     with:
       device_type: tpu_pathways
@@ -79,18 +91,6 @@ jobs:
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
-  
-  # tpu_pathways_unit_tests:
-  #   needs: [tpu_pathways_setup]
-  #   uses: ./.github/workflows/run_tests_internal.yml
-  #   with:
-  #     device_type: tpu_pathways
-  #     device_name: v4-8
-  #     pytest_marker: 'not gpu_only and not integration_test'
-  #     test_directory: 'tests'
-  #     xla_python_client_mem_fraction: 0.75
-  #     tf_force_gpu_allow_growth: false
-  #     container_resource_option: "--privileged"
 
   # tpu_integration_tests:
   #   needs: tpu_image
@@ -132,8 +132,8 @@ jobs:
   clean_up:
     if: ${{ always() }}  # always execute, regardless of previous jobs or steps.
     # needs: [gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_pathways_unit_tests, tpu_integration_tests]
-    # needs: [tpu_pathways_unit_tests]
-    needs: [tpu_unit_tests]
+    needs: [tpu_pathways_unit_tests]
+    # needs: [tpu_unit_tests]
     name: "Clean up"
     runs-on: ["self-hosted"]
     steps:
