@@ -53,12 +53,12 @@ jobs:
   #     build_mode: stable_stack
   #     base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
 
-  # tpu_pathways_setup:
-  #   needs: tpu_pathways_image
-  #   uses: ./.github/workflows/start_pathways_containers.yml
-  #   with:
-  #     device_type: tpu_pathways
-  #     device_name: v4-8
+  tpu_pathways_setup:
+    needs: tpu_pathways_image
+    uses: ./.github/workflows/start_pathways_containers.yml
+    with:
+      device_type: tpu_pathways
+      device_name: v4-8
 
 
   gpu_image:
