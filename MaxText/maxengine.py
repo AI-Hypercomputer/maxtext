@@ -219,7 +219,7 @@ class MaxEngine(engine_api.Engine):
 
     return res_cache
   
-  def prefill(
+  def prefill_new(
       self,
       *,
       params: Params,
@@ -230,7 +230,8 @@ class MaxEngine(engine_api.Engine):
       rng: Optional[jax.random.PRNGKey] = None,
       slot: int = 0,
       chunk_metadata=None, 
-      prefix_id=None  
+      prefix_id=None,
+      decode_state=None, # existing prefix
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -267,7 +268,7 @@ class MaxEngine(engine_api.Engine):
 
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       flat_logits, new_vars = self.model.apply(
-          params,
+          params | {"cache": decode_state["cache"]},
           input_tokens,
           positions,
           decoder_segment_ids=sequence_indicator,
@@ -324,7 +325,7 @@ class MaxEngine(engine_api.Engine):
     }, result
 
   @functools.partial(jax.jit, static_argnums=(0,))
-  def prefill_old(
+  def prefill(
       self,
       *,
       params: Params,

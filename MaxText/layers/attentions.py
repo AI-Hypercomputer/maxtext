@@ -150,7 +150,7 @@ class PagedAttentionOp(nn.Module):
 
   query_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
   kv_pages_axis_names: AxisNames = ("paged_kv_heads", "num_pages", "page_size", "paged_kv_head_dim_size")
-
+  use_chunked_prefill = True
   def init_or_get_kv_pages(self, model_mode: str):
     """Get paged attention op."""
     # Get existing variables if they exist
@@ -313,7 +313,7 @@ class PagedAttentionOp(nn.Module):
     """Update KV Pages."""
     if model_mode == common_types.MODEL_MODE_PREFILL:
       if self.use_chunked_prefill:
-        self.update_chunked_prefill_step_pages(key_pages_var, value_pages_var, key, value)
+        self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value)
       else:
         self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value)
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
@@ -325,7 +325,8 @@ class PagedAttentionOp(nn.Module):
 
     batch_size, seq_len, kv_heads, head_dim = key.shape
     kv_heads, num_pages, page_size, head_dim = key_pages.shape
-
+    import pdb
+    pdb.set_trace()
     new_key = key.reshape(batch_size, kv_heads, head_dim)[:, :, :]
     new_key = jnp.transpose(new_key, (1, 0, 2))  # [n_kv, b, d]
     new_value = value.reshape(batch_size, kv_heads, head_dim)[:, :, :]

@@ -46,7 +46,7 @@ def create_chunked_metadata(tokens, true_length, chunk_size):
   
   while start < len(tokens):
     end = min(start + chunk_size, true_length)
-    cur_chunk_tokens = tokens[:, start:end]
+    cur_chunk_tokens = tokens[start:end]
 
     chunk_metadata_list.append(ChunkMetadata(tokens_entire_sequence=tokens, 
                                              true_length=true_length, 
@@ -78,8 +78,9 @@ def main(argv: Sequence[str]) -> None:
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
   tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
+  tokens = tokens[:config.max_prefill_predict_length]
+  true_length = config.max_prefill_predict_length
   chunked_metadata_list = create_chunked_metadata(tokens, true_length, chunk_size)
-  
   assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
   assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
 
@@ -92,14 +93,12 @@ def main(argv: Sequence[str]) -> None:
     if i == 0:
       decode_state = engine.init_decode_state(rng_init_decode)
       prefill_result, first_token = engine.prefill(
-      params=params, padded_tokens=chunk_metadata[0].chunk_tokens, true_length=true_length, rng=rng_prefill, slot=slot)
-      rng, rng_init_decode = jax.random.split(rng)
-      decode_state = engine.init_decode_state(rng_init_decode)
+      params=params, padded_tokens=chunk_metadata.chunk_padded, true_length=true_length, rng=rng_prefill, slot=slot) #decode_state=decode_state)
       decode_state = engine.insert(prefill_result, decode_state, slot=slot)
     else:
       for j in range(i+1):
         prefill_result, first_token = engine.prefill(
-        params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill, slot=slot, existing_prefix=prefill_result)
+        params=params, padded_tokens=chunk_metadata.chunk_padded, true_length=true_length, rng=rng_prefill, slot=slot) #existing_prefix=prefill_result)
         decode_state = engine.insert(prefill_result, decode_state, slot=slot)
       
     
