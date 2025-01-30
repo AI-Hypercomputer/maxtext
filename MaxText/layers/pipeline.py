@@ -403,7 +403,6 @@ class Pipeline(nn.Module):
               if inner_list and target_string in inner_list:  # Efficiently checks if string is in list/tuple
                   return i
           return -1  # Return -1 if not found
-        print(physical_sharded)
         new_bw_insert = self.grab_bsw(vars, repeat_idx[0])
         #new_bw_ag = self.force_ag(new_bw_insert, sharding_info) # TODO: SHMAP THAT AG
         
@@ -418,7 +417,6 @@ class Pipeline(nn.Module):
             return jax.lax.all_gather(leaf, axis_name='fsdp', axis=fsdp_index, tiled=True)
           else:
             return leaf
-        breakpoint()
         new_bw_ag = jax.tree_map(ag_leaf, new_bw_insert, physical_sharded, is_leaf=is_leaf)
 
         grab_idx_1 = self.grab_bsw(bsw, 1)
@@ -434,11 +432,8 @@ class Pipeline(nn.Module):
   def ag_new_bsw(self, bsw, sharding_info, loop_iter):
     physical_spec = self.get_physical_spec_no_fsdp(sharding_info)
     _, repeat_idx = self.get_microbatch_and_repeat_ids(loop_iter + 1)
-    #jax.debug.print("loop_iter {loop_iter} repeat_idx {repeat_idx}", loop_iter=loop_iter, repeat_idx=repeat_idx)
-    #jax.debug.print("Loop iter {loop_iter} Old bsw {bsw}", loop_iter=loop_iter, bsw=bsw['params']['mlp']['wi_0']['kernel'][:,:,0,0])
     new_bw_insert = self.grab_bsw(self.layers.variables,repeat_idx[0])
     new_bw_insert = jax.lax.with_sharding_constraint(new_bw_insert, physical_spec)
-    #jax.debug.print("Loop iter {loop_iter} bsw to insert {new_bw_insert}", loop_iter=loop_iter, new_bw_insert=new_bw_insert['params']['mlp']['wi_0']['kernel'][:,:,0,0])
     new_bw_ag = self.force_ag(new_bw_insert, sharding_info)
     new_bw_ag = jax.lax.with_sharding_constraint(new_bw_ag, physical_spec)
     grab_idx_1 = self.grab_bsw(bsw, 1)
@@ -447,7 +442,6 @@ class Pipeline(nn.Module):
     new_full_bsw = jax.lax.with_sharding_constraint(new_full_bsw, physical_spec)
     new_full_bsw = self.insert_pytree(new_full_bsw, new_bw_ag, 1) # bsw[1] = new_bw_ag
     new_full_bsw = jax.lax.with_sharding_constraint(new_full_bsw, physical_spec)
-    #jax.debug.print("Loop iter {loop_iter} new bsw {new_full_bsw}", loop_iter=loop_iter, new_full_bsw=new_full_bsw['params']['mlp']['wi_0']['kernel'][:,:,0,0])
     return new_full_bsw
   
   def grab_bsw(self, vars, idx):
@@ -614,8 +608,7 @@ class Pipeline(nn.Module):
         mutable=True,
         trans_in_fn=prepare_vars_for_main_vmap,
     )
-    #stage_weights = self.get_current_stage_weights(all_pipeline_weights, loop_state['bsw'], loop_iteration)
-    stage_weights= prepare_vars_for_main_vmap(self.layers.variables)
+    stage_weights = self.get_current_stage_weights(all_pipeline_weights, loop_state['bsw'], loop_iteration)
     stages_output = vmap_func(
         decoder_layer_instance, stage_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode
     )
