@@ -25,6 +25,7 @@ import functools
 from typing import Any
 from jax.experimental import shard_map
 
+shard_map = shard_map.shard_map
 
 class Pipeline(nn.Module):
   """Module that implements pipelining across stages.
@@ -367,26 +368,65 @@ class Pipeline(nn.Module):
 
   def maybe_ag_new_bsw(self, bsw, sharding_info, loop_iter):
     # Update at end of iteration before new repeat
-    bsw = jax.lax.cond( (loop_iter + 1) % self.config.num_pipeline_microbatches == 0, lambda: self.ag_new_bsw(bsw, sharding_info, loop_iter), lambda: bsw)
+    #bsw = jax.lax.cond( (loop_iter + 1) % self.config.num_pipeline_microbatches == 0, lambda: self.ag_new_bsw(bsw, sharding_info, loop_iter), lambda: bsw)
+    bsw = jax.lax.cond( (loop_iter + 1) % self.config.num_pipeline_microbatches == 0, lambda: self.full_shmap_ag_new_bsw(bsw, sharding_info, loop_iter), lambda: bsw)
     return bsw
 
-  def full_shmap_ag_new_bsw(self, bsw, loop_iter):
+  def full_shmap_ag_new_bsw(self, bsw, sharding_info, loop_iter):
+      physical_sharded = nn.logical_to_mesh_sharding(sharding_info, mesh=self.mesh, rules=self.config.logical_axis_rules)
+      physical_spec_ag = self.get_physical_spec_no_fsdp(sharding_info)
+
+      def convert_leaf(leaf):
+        return leaf.spec
+      physical_sharded = jax.tree_map(convert_leaf, physical_sharded)
+      physical_spec_ag = jax.tree_map(convert_leaf, physical_spec_ag)
+
+
       _, repeat_idx = self.get_microbatch_and_repeat_ids(loop_iter + 1)
+
       @functools.partial(
-        shard_map,
-        mesh=self.mesh,
-        in_specs=(
-            bsnd,
-            bsnd,
-            bsnd,
-            b,
-            None,
-        ),
-        out_specs=bsnd,
-        check_rep=False,
-    )
-      def _full_shmap_ag_new_bsw(bsw, vars):
+          shard_map,
+          mesh=self.mesh,
+          in_specs=(
+              physical_sharded,
+              physical_spec_ag,
+          ),
+          out_specs=physical_spec_ag,
+          check_rep=False,
+      )
+      def _full_shmap_ag_new_bsw(vars, bsw):
+
+        def find_string_in_list_of_lists(list_of_lists, target_string):
+          if list_of_lists is None:
+            return -1
+          for i, inner_list in enumerate(list_of_lists):
+              if inner_list and target_string in inner_list:  # Efficiently checks if string is in list/tuple
+                  return i
+          return -1  # Return -1 if not found
+        print(physical_sharded)
         new_bw_insert = self.grab_bsw(vars, repeat_idx[0])
+        #new_bw_ag = self.force_ag(new_bw_insert, sharding_info) # TODO: SHMAP THAT AG
+        
+        #new_bw_ag = jax.lax.all_gather(new_bw_insert, axis_name='fsdp', tiled=True)
+
+        from jax.sharding import PartitionSpec
+        def is_leaf(node):
+          return isinstance(node, (PartitionSpec, jnp.ndarray))
+        def ag_leaf(leaf, sharding_info):
+          fsdp_index = find_string_in_list_of_lists(sharding_info, 'fsdp')
+          if fsdp_index > 0:
+            return jax.lax.all_gather(leaf, axis_name='fsdp', axis=fsdp_index, tiled=True)
+          else:
+            return leaf
+        breakpoint()
+        new_bw_ag = jax.tree_map(ag_leaf, new_bw_insert, physical_sharded, is_leaf=is_leaf)
+
+        grab_idx_1 = self.grab_bsw(bsw, 1)
+        new_full_bsw = self.insert_pytree(bsw, grab_idx_1, 0) # bsw[0] = bsw[1]
+        new_full_bsw = self.insert_pytree(bsw, new_bw_ag, 1) # bsw[1] = new_bw_ag
+        return new_full_bsw
+      return _full_shmap_ag_new_bsw(self.layers.variables, bsw)
+
 
   
 
@@ -574,7 +614,8 @@ class Pipeline(nn.Module):
         mutable=True,
         trans_in_fn=prepare_vars_for_main_vmap,
     )
-    stage_weights = self.get_current_stage_weights(all_pipeline_weights, loop_state['bsw'], loop_iteration)
+    #stage_weights = self.get_current_stage_weights(all_pipeline_weights, loop_state['bsw'], loop_iteration)
+    stage_weights= prepare_vars_for_main_vmap(self.layers.variables)
     stages_output = vmap_func(
         decoder_layer_instance, stage_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode
     )
@@ -598,8 +639,6 @@ class Pipeline(nn.Module):
     return remat_policy
 
   def get_physical_spec_no_fsdp(self, full_logical):
-    if full_logical is not None:
-      print('oopsie')
     def remove_fsdp_sharding(sharding_tree):
       def _remove_fsdp_from_partition_spec(named_sharding):
         if isinstance(named_sharding, jax.sharding.NamedSharding):
