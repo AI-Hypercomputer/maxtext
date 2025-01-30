@@ -107,6 +107,9 @@ jobs:
     needs: [gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
     name: "Clean up"
     runs-on: ["self-hosted"]
+    permissions:
+      contents: read
+      issues: write  # for failed-build-issue
     steps:
     - name: Delete GPU image
       run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:gpu --force-delete-tags --quiet
