@@ -143,7 +143,7 @@ class Pipeline(nn.Module):
     def grab_two_rows_of_pytree(pytree):
       def _grab_two_rows_of_array(leaf):
         all_repeats = jnp.zeros_like(leaf)
-        all_repeats = all_repeats.astype(jnp.bfloat16) # This line makes a huge difference surprisingly, for both correctness and ideal comm pattern
+        #all_repeats = all_repeats.astype(jnp.bfloat16) # This line makes a huge difference surprisingly, for both correctness and ideal comm pattern
         return all_repeats[0:2] # Buffer is of length 2
       return jax.tree.map(_grab_two_rows_of_array, pytree)
     
@@ -410,7 +410,7 @@ class Pipeline(nn.Module):
 
         from jax.sharding import PartitionSpec
         def is_leaf(node):
-          return isinstance(node, (PartitionSpec, jnp.ndarray))
+          return isinstance(node, (PartitionSpec, jnp.ndarray, nn.spmd.LogicallyPartitioned))
         def ag_leaf(leaf, sharding_info):
           fsdp_index = find_string_in_list_of_lists(sharding_info, 'fsdp')
           if fsdp_index > 0:
