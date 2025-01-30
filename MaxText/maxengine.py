@@ -478,6 +478,8 @@ class MaxEngine(engine_api.Engine):
     rng, new_rng = jax.random.split(rng) if rng is not None else (None, None)
 
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      import pdb
+      pdb.set_trace()
       flat_logits, new_vars = self.model.apply(
           params,
           input_tokens,
@@ -489,7 +491,7 @@ class MaxEngine(engine_api.Engine):
           mutable=["cache"],
           slot=slot,
           true_length=true_length,
-          is_first_prefill=False,
+          is_first_prefill=True,
       )
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)

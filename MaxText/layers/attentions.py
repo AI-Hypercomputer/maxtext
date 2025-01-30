@@ -316,7 +316,9 @@ class PagedAttentionOp(nn.Module):
     if model_mode == common_types.MODEL_MODE_PREFILL:
       if self.use_chunked_prefill:
         if is_first_prefill:
-          self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value)
+          import pdb
+          pdb.set_trace()
+          self.update_chunked_prefill_step_pages(key_pages_var, value_pages_var, key, value)
         else:
           self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value)
       else:
