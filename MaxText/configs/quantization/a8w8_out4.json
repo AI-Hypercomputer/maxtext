@@ -1,0 +1,4 @@
+{
+  "__default__": {"w_bits": 8, "a_bits": 8, "w_scale": 1.0, "a_scale": 1.0, "tile_size": -1},
+  ".*/out": {"w_bits": 4, "a_bits": 4}
+}

@@ -3,8 +3,9 @@
 # Example run: bash end_to_end/tpu/test_decode_save_quantized_ckpt.sh -m llama2-70b -r 070924 -n
 
 dry_run=false
-model='llama2-7b'
-run_name="test_quant_ckpt"
+model='llama2-70b'
+run_name="mlperf_01302025"
+export QUANT_CFG="a4w4"
 
 while getopts "nm:r:" opt
 do
@@ -33,17 +34,18 @@ fi
 export MODEL_NAME=${model}
 export TOKENIZER_PATH=assets/tokenizer.llama2
 export LOAD_PARAMETERS_PATH=gs://inference-benchmarks/models/${MODEL_NAME}-chat/${checkpoint_ts}/param-only-decode-ckpt-maxtext/checkpoints/0/items
-export MAX_PREFILL_PREDICT_LENGTH=128
-export MAX_TARGET_LENGTH=256
+export MAX_PREFILL_PREDICT_LENGTH=16
+export MAX_TARGET_LENGTH=32
 export ICI_FSDP_PARALLELISM=1
 export ICI_AUTOREGRESSIVE_PARALLELISM=1
 export ICI_TENSOR_PARALLELISM=-1
 export SCAN_LAYERS=false
 export WEIGHT_DTYPE=bfloat16
-export PER_DEVICE_BATCH_SIZE=10
-export QUANTIZATION="int8"
+export PER_DEVICE_BATCH_SIZE=1
+export QUANTIZATION="intmp"
+export QUANT_CFG_PATH="MaxText/configs/quantization/${QUANT_CFG}.json"
 export QUANTIZE_KVCACHE=True
-export CHKPT_SUBDIR="${run_name}/${QUANTIZATION}_"
+export CHKPT_SUBDIR="${run_name}/${QUANTIZATION}_${QUANT_CFG}"
 export SAVE_QUANTIZED_CHECKPOINT_PATH=gs://${USER}-bkt/checkpoints/quant_${MODEL_NAME}-chat/${CHKPT_SUBDIR}
 export OUTDIR="/tmp/${cmd}_res_save_chkpt/${CHKPT_SUBDIR}"
 export OUTFILE="${OUTDIR}/decode.txt"
@@ -64,6 +66,7 @@ ${cmd} python MaxText/decode.py \
   weight_dtype=${WEIGHT_DTYPE} \
   per_device_batch_size=${PER_DEVICE_BATCH_SIZE} \
   quantization=${QUANTIZATION} \
+  quant_cfg_path=${QUANT_CFG_PATH}\
   quantize_kvcache=${QUANTIZE_KVCACHE} \
   save_quantized_params_path=${SAVE_QUANTIZED_CHECKPOINT_PATH} \
   | tee -a $OUTFILE
