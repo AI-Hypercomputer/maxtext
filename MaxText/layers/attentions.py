@@ -791,6 +791,21 @@ class AttentionOp(nn.Module):
 
     return key, value, decoder_segment_ids
 
+  def update_prefill_key_value(self, 
+                               one_token_keys, 
+                               one_token_values, 
+                               cached_key_vars, 
+                               cached_value_vars, 
+                               one_hot_indices, 
+                               lengths):
+    cached_key_var, cached_key_scale_var = cached_key_vars
+    cached_value_var, cached_value_scale_var = cached_value_vars
+
+
+    
+    pass
+  
+  
   def update_ar_key_value(
       self,
       one_token_key: Array,
@@ -819,10 +834,16 @@ class AttentionOp(nn.Module):
 
     # In order to update the key, value caches with the current key and
     # value, we reshape the one_token_key and one_token_value
+    # import pdb
+    # pdb.set_trace()
+    # one_token_key >> (4, 1, 8, 128)
     one_token_key_shaped_for_cache = jnp.transpose(one_token_key, self.ar_cache_axis_order)
+   # (1, 8, 4, 128)
+    
     one_token_value_shaped_for_cache = jnp.transpose(one_token_value, self.ar_cache_axis_order)
 
     ar_cache_axis_names = self.transpose_tuple(self.cache_logical_axis_names, self.ar_cache_axis_order)
+    
     if self.kv_quant:
       one_token_key_shaped_for_cache, one_token_key_scale_shaped_for_cache = self.kv_quant.quantize(
           one_token_key_shaped_for_cache, ar_cache_axis_names
@@ -956,6 +977,9 @@ class AttentionOp(nn.Module):
         self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order),
         cached_prefill_segment_id_var.value,
     )
+    
+    import pdb
+    pdb.set_trace()
 
     cached_ar = (
         self.get_cached_values(cached_ar_key_vars, key.dtype, self.ar_cache_axis_order),

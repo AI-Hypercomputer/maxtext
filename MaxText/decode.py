@@ -24,6 +24,38 @@ import pyconfig
 
 from typing import Sequence
 from absl import app
+from flax import struct
+import common_types
+Array = common_types.Array
+import jax.numpy as jnp
+
+@struct.dataclass
+class ChunkMetadata:
+  tokens_entire_sequence: Array
+  true_length: int
+  true_length_chunk: int
+  chunk_padded: Array
+  processed: bool
+  chunk_seq_start_index: int
+
+
+def create_chunked_metadata(tokens, true_length, chunk_size):
+  start = 0
+  chunk_metadata_list = []
+  
+  while start < len(tokens):
+    end = min(start + chunk_size, true_length)
+    cur_chunk_tokens = tokens[start:end]
+
+    chunk_metadata_list.append(ChunkMetadata(tokens_entire_sequence=tokens, 
+                                             true_length=true_length, 
+                                             true_length_chunk=chunk_size, 
+                                             chunk_padded=cur_chunk_tokens, 
+                                             processed=False, 
+                                             chunk_seq_start_index=start))
+    
+    start = start + chunk_size
+  return chunk_metadata_list
 
 
 def main(argv: Sequence[str]) -> None:
@@ -44,17 +76,54 @@ def main(argv: Sequence[str]) -> None:
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
   tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
+  chunk_size = config.chunk_size
+  tokens = tokens[:config.max_prefill_predict_length]
+  true_length = config.max_prefill_predict_length
+  chunked_metadata_list = create_chunked_metadata(tokens, true_length, chunk_size)
   assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
   assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
 
   # Split RNG before calling prefill
   rng, rng_prefill = jax.random.split(rng)
-  prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
   slot = 0
+  rng, rng_init_decode = jax.random.split(rng)
+
+  
+  for i,chunk_metadata in enumerate(chunked_metadata_list):
+      position_og = jnp.arange(config.max_prefill_predict_length)
+      decode_state = engine.init_decode_state(rng_init_decode)
+      postion_mask_1 = jnp.where(position_og >= i*chunk_size, position_og, 0)
+      postion_mask = jnp.where(position_og < (i+1)*chunk_size, position_og, 0)
+      print(postion_mask)
+      prefill_result, first_token = engine.prefill(
+      params=params, padded_tokens=chunk_metadata.chunk_padded, true_length=true_length, rng=rng_prefill, position_mask_cur=postion_mask)#decode_state=decode_state)
+      decode_state = engine.insert(prefill_result, decode_state, slot=slot)
+  
+  # for i,chunk_metadata in enumerate(chunked_metadata_list):
+  #   if i == 0:
+  #     decode_state = engine.init_decode_state(rng_init_decode)
+  #     prefill_result, first_token = engine.prefill(
+  #     params=params, padded_tokens=chunk_metadata.chunk_padded, true_length=true_length, rng=rng_prefill)#decode_state=decode_state)
+  #     decode_state = engine.insert(prefill_result, decode_state, slot=slot)
+  #   else:
+  #     for j in range(i+1):
+  #       print("running for ", j, i)
+  #       prefill_result, first_token = engine.prefill(
+  #       params=params, padded_tokens=chunk_metadata.chunk_padded, true_length=true_length, rng=rng_prefill)#, existing_prefix=None)
+  #       decode_state = engine.insert(prefill_result, decode_state, slot=slot)
+  
+  
+  # assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
+  # assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
+
+  # # Split RNG before calling prefill
+  # rng, rng_prefill = jax.random.split(rng)
+  # prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
+  # slot = 0
 
   rng, rng_init_decode = jax.random.split(rng)
-  decode_state = engine.init_decode_state(rng_init_decode)
-  decode_state = engine.insert(prefill_result, decode_state, slot=slot)
+  # decode_state = engine.init_decode_state(rng_init_decode)
+  # decode_state = engine.insert(prefill_result, decode_state, slot=slot)
 
   steps = range(config.max_prefill_predict_length, config.max_target_length)
   sampled_tokens_list = []

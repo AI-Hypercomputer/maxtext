@@ -100,6 +100,8 @@ class MistralDecoderLayer(nn.Module):
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
     )
+    # import pdb
+    # pdb.set_trace()
 
     attention_lnx = attention_layer(
         lnx,
