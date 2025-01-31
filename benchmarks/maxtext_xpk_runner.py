@@ -73,6 +73,7 @@ class WorkloadConfig:
   xpk_path: str = '~/xpk'
   pathways_config: PathwaysConfig = None
   run_name: str = None
+  grain_dataset_path: str = None
 
 
 @dataclasses.dataclass
@@ -276,7 +277,6 @@ def build_user_command(
     wl_config: WorkloadConfig,
 ):
   is_pw_enabled = wl_config.pathways_config is not None
-
   config_tuning_params = ''
   for key, value in wl_config.model.tuning_params.items():
     config_tuning_params += f'{key}={value} '
@@ -324,6 +324,10 @@ def build_user_command(
       f'{vertex_tensorboard}',
       f'run_name={name}'
   ])
+
+  if wl_config.grain_dataset_path is not None:
+    command = f"bash setup_gcsfuse.sh DATASET_GCS_BUCKET={wl_config.grain_dataset_path} MOUNT_PATH={wl_config.model.tuning_params['dataset_path']} && " + command 
+
   return command
 
 
@@ -469,8 +473,8 @@ def on_device_benchmark_runner(
 # Run maxtext_xpk_runner.py as a script for executing multiple workloads pythonically!
 def main() -> int:
   # Variables to configure:
-  output_bucket = 'gs://DIR'
-  base_docker_image = _DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME
+  output_bucket = 'gs://trillium-storage-tests-nov24-sr/next25'
+  base_docker_image = "gcr.io/tpu-prod-env-multipod/maxtext_jax_nightly:2025-01-29"
 
   # Set up the clusters to run workloads on!
   v5e_cluster_config = XpkClusterConfig(
@@ -481,9 +485,9 @@ def main() -> int:
   )
 
   v6e_cluster_config = XpkClusterConfig(
-      cluster_name='v6e-256',
-      project='my-cool-project',
-      zone='us-central2-b',
+      cluster_name='bodaborg-v6e-256-dnd-yucmhab',
+      project='tpu-prod-env-one-vm',
+      zone='us-east5-c',
       device_type='v6e-256',
   )
 
@@ -491,7 +495,7 @@ def main() -> int:
   xpk_workload_names = []
 
   list_of_models = [
-    model_configs.llama2_70b_4096_sc,
+    model_configs.llama3_1_70b_8192,
     # model_configs.default_128
   ]
 
@@ -517,7 +521,7 @@ def main() -> int:
     for cluster_config in [
       # v5e_cluster_config,
       # v6e_cluster_config,
-      v6e_cluster_config_yucmhab,
+      v6e_cluster_config,
       # another_config,
     ]:
       # Run workloads in the following slice configurations
@@ -538,7 +542,8 @@ def main() -> int:
             libtpu_type=libtpu_type,
             libtpu_nightly_version="",
             base_docker_image=base_docker_image,
-            pathways_config=None
+            pathways_config=None, 
+            grain_dataset_path="trillium-storage-datasets-sr"
           )
           command, name = generate_xpk_workload_cmd(
             cluster_config=cluster_config,
