@@ -542,7 +542,8 @@ def main() -> int:
             libtpu_type=libtpu_type,
             libtpu_nightly_version="",
             base_docker_image=base_docker_image,
-            pathways_config=None, 
+            pathways_config=None,
+            num_steps=100, 
             grain_dataset_path="trillium-storage-datasets-sr"
           )
           command, name = generate_xpk_workload_cmd(

@@ -699,7 +699,7 @@ llama3_70b_8192 = _add_to_model_dictionary(
         "dataset_path": "gs://max-datasets-rogue",
         "dataset_type": "synthetic",
         "reuse_example_batch": 1,
-        "enable_checkpointing": True,
+        "enable_checkpointing": False,
         "profiler": "xplane",
         "sa_block_q": 1024,
         "sa_block_q_dkv": 2048,
@@ -709,7 +709,6 @@ llama3_70b_8192 = _add_to_model_dictionary(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
         + xla_flags_library.CF_FOR_ALL_GATHER
         + xla_flags_library.HOST_OFFLOAD_FLAGS
-        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR
         + " --xla_tpu_scheduler_percent_shared_memory_limit=90"
     ),
   )
@@ -843,6 +842,7 @@ llama3_1_70b_8192 = _add_to_model_dictionary(
         + xla_flags_library.DATA_PARALLEL_OVERLAP
         + xla_flags_library.CF_FOR_ALL_GATHER
         + xla_flags_library.HOST_OFFLOAD_FLAGS
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR
     ),
   )
 )
