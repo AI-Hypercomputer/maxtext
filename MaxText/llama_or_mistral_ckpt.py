@@ -220,7 +220,8 @@ def load_safetensors_checkpoint(ckpt_paths):
       for k in f.keys():
         assert k not in chkpt_vars_raw
         chkpt_vars_raw[k] = f.get_tensor(k)
-  chkpt_vars = [_HFNamespaceMapper(chkpt_vars_raw)]
+  # chkpt_vars = [_HFNamespaceMapper(chkpt_vars_raw)]
+  chkpt_vars = [_HFNamespaceMapper(var) for var in chkpt_vars_raw]
   return chkpt_vars
 
 
