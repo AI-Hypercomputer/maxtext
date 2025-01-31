@@ -35,14 +35,14 @@ jobs:
     - name: Cleanup old docker images
       run: docker system prune --all --force
 
-  tpu_image:
-    needs: prelim
-    uses: ./.github/workflows/build_upload_internal.yml
-    with:
-      device_type: tpu_pathways
-      device_name: v4-8
-      build_mode: stable_stack
-      base_image: us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:latest
+  # tpu_image:
+  #   needs: prelim
+  #   uses: ./.github/workflows/build_upload_internal.yml
+  #   with:
+  #     device_type: tpu_pathways
+  #     device_name: v4-8
+  #     build_mode: stable_stack
+  #     base_image: us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:latest
 
   tpu_pathways_image:
     needs: prelim

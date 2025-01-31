@@ -62,5 +62,6 @@ jobs:
           export JAX_PLATFORMS="proxy" ; export JAX_BACKEND_TARGET="grpc://localhost:29000" ; echo "Set Pathways env variables"
       - name: Run Tests
         run: |
+          export JAX_PLATFORMS="proxy" ; export JAX_BACKEND_TARGET="grpc://localhost:29000" ; echo "Set Pathways env variables" ;
           cd MaxText
           python3 -m pytest -s ${{ inputs.test_directory }} -m "${{ inputs.pytest_marker }}"
