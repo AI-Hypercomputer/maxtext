@@ -65,10 +65,6 @@ def cast_dtype_from_to(nest, src, dst):
   return jax.tree_util.tree_map(lambda t: t.astype(dst) if t.dtype == src else t, nest)
 
 
-def cast_to_bf16(params):
-  return cast_dtype_from_to(params, np.float32, jnp.bfloat16)
-
-
 def find_nans_and_infs(pytree):
   def finder(x):
     return jnp.any(jnp.isinf(x) | jnp.isnan(x))
