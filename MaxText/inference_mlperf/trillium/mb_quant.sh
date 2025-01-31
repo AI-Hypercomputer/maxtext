@@ -4,14 +4,14 @@
 # tensorboard --logdir /tmp/mb/profiles/trillium_llama2_70b/tensorboard/prefill_insert_1024 
 
 
-run_name="trillium_llama2-70b-int8-kv-int8-bs54"
+run_name="trillium_llama2-70b-quant"
 dry_run=false
 enable_profiler=true
 enable_xla_flags=true
 dump_hlo=false
 prefill_lens="1024"
 stages="prefill,generate"
-
+QUANT_CFG="a4w4"
 while getopts "npxdr:s:l:" opt
 do
   case "$opt" in
@@ -57,11 +57,13 @@ echo
 echo "LIBTPU_INIT_ARGS:${LIBTPU_INIT_ARGS}"
 echo "XLA_FLAGS:${XLA_FLAGS}"
 echo
+export MODEL_NAME="llama2-70b"
 export TOKENIZER_PATH=/home/${USER}/maxtext/assets/tokenizer.llama2
-export LOAD_PARAMETERS_PATH=gs://${USER}-bkt/checkpoints/quant_llama2-70b-chat/prod/int8_
+export QUANTIZATION="intmp"
+export CHKPT_SUBDIR="mlperf_01302025/${QUANTIZATION}_${QUANT_CFG}"
+export LOAD_PARAMETERS_PATH=gs://${USER}-bkt/checkpoints/quant_${MODEL_NAME}-chat/${CHKPT_SUBDIR}
 export MAX_PREFILL_PREDICT_LENGTH=1024
 export MAX_TARGET_LENGTH=2048
-export MODEL_NAME=llama2-70b
 export ICI_FSDP_PARALLELISM=1
 export ICI_AUTOREGRESSIVE_PARALLELISM=1
 export ICI_TENSOR_PARALLELISM=-1
@@ -70,6 +72,7 @@ export WEIGHT_DTYPE=bfloat16
 export PER_DEVICE_BATCH_SIZE=54
 export RUN_DESC="${run_name}_xla_flags_${enable_xla_flags}"
 
+export QUANT_CFG_PATH="../../configs/quantization/${QUANT_CFG}.json"
 $cmd python3 ../../inference_microbenchmark.py   \
 ../../configs/base.yml   tokenizer_path=${TOKENIZER_PATH}   \
 load_parameters_path=${LOAD_PARAMETERS_PATH}   \
@@ -79,7 +82,8 @@ ici_fsdp_parallelism=${ICI_FSDP_PARALLELISM}   \
 ici_autoregressive_parallelism=${ICI_AUTOREGRESSIVE_PARALLELISM}   \
 ici_tensor_parallelism=${ICI_TENSOR_PARALLELISM}   scan_layers=${SCAN_LAYERS} \
 weight_dtype=${WEIGHT_DTYPE}   per_device_batch_size=${PER_DEVICE_BATCH_SIZE} \
-quantization=int8 quantize_kvcache=True kv_quant_dtype=int4 inference_microbenchmark_stages=${stages} \
+quantization=${QUANTIZATION} quant_cfg_path=${QUANT_CFG_PATH} \
+quantize_kvcache=True inference_microbenchmark_stages=${stages} \
 inference_microbenchmark_prefill_lengths="${prefill_lens}" checkpoint_is_quantized=True \
 compute_axis_order=0,2,1,3 ar_cache_axis_order=0,2,1,3 \
 attention=dot_product base_output_directory="/tmp/mb/profiles" run_name=${RUN_DESC} \
