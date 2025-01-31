@@ -25,3 +25,5 @@ vocab_size: 256128
 decoder_block: "gemma"
 normalization_layer_epsilon: 1.e-06
 logits_via_embedding: True
+float32_qk_product: True
+float32_qk_logits: True

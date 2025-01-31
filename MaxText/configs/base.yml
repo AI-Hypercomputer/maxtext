@@ -200,6 +200,10 @@ final_logits_soft_cap: 0.0
 use_post_attn_norm: False
 use_post_ffw_norm: False
 
+# In dot_product attention, whether to upcast the qk product and attention logits to fp32
+float32_qk_product: False
+float32_logits: False
+
 
 # Combine matmuls for QKV and MLP
 fused_qkv: False
