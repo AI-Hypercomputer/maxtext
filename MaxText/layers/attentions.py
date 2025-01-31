@@ -477,7 +477,7 @@ class AttentionOp(nn.Module):
     """Apply Attention."""
     validate_compute_axis_order(self.compute_axis_order)
     # Casting qk_product and softmaxt computation for float32 for model stability.
-    if model_mode == common_types.MODEL_MODE_TRAIN and self.float32_qk_product:
+    if self.float32_qk_product:
       if isinstance(key, KVTensor):
         key = key.dequant()
       query = query.astype(jnp.float32)
@@ -491,7 +491,7 @@ class AttentionOp(nn.Module):
       attn_weights = attn_weights * self.attn_logits_soft_cap
 
     # Casting softmaxt computation for float32 for model stability.
-    if model_mode == common_types.MODEL_MODE_TRAIN and self.float32_logits:
+    if self.float32_logits:
       attn_weights = attn_weights.astype(jnp.float32)
     attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
     if attn_mask is not None:
