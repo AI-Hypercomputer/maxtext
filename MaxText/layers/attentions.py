@@ -520,6 +520,8 @@ class AttentionOp(nn.Module):
     einsum = jnp.einsum
     if self.kv_quant:
       einsum = self.kv_quant.einsum_fn_with_rhs_qtensor(key)
+      # if isinstance(key, KVTensor):
+      #   key = self.kv_quant.dequant(key)
     b, t, n, d = query.shape
     n_kv = key.shape[-2]
     assert n_kv == self.num_kv_heads
@@ -896,6 +898,8 @@ class AttentionOp(nn.Module):
         scale_value /= quantizations.MAX_INT8
       elif dtype == jnp.int4:
         scale_value /= quantizations.MAX_INT4
+      elif dtype == jnp.float8_e4m3fn:
+        scale_value /= quantizations.E4M3_MAX
 
       cache_value = KVTensor(qvalue=cache_value, scale=[scale_value], scale_t=None, dequant_dtype=target_dtype, bias=[])
     cache_value_in_logical_shape = jax.tree.map(lambda x: self.reverse_transepose(x, cache_axis_order), cache_value)

@@ -42,6 +42,7 @@ _TILE_SIZE = "tile_size"  # Tile size for subchannel
 
 MAX_INT8 = 127.5
 MAX_INT4 = 7.5
+E4M3_MAX = jnp.finfo(jnp.float8_e4m3fn).max.astype(jnp.float32)
 
 Array = common_types.Array
 Config = common_types.Config
@@ -222,6 +223,8 @@ def _get_int8_quant_config(config):
       drhs_accumulator_dtype=drhs_accumulator_dtype,
   )
 
+def _get_aqt_fp8_quant_config(config):
+  return aqt_config.config_fwd_fp8()
 
 def _dot_general_make(quant_cfg):
   lhs_bits = quant_cfg[_A_BITS]
@@ -265,6 +268,12 @@ def _get_quant_config(config):
     return None
   if config.quantization == "int8":
     return _get_int8_quant_config(config)
+  if config.quantization == "aqt_fp8":
+    return _get_aqt_fp8_quant_config(config)
+  if config.quantization == "int8w":
+    return _get_weight_only_quant_config(lhs_bits=None, rhs_bits=8)
+  if config.quantization == "int4w":
+    return _get_weight_only_quant_config(lhs_bits=None, rhs_bits=4)
   if config.quantization == "intmp":
     assert config.quant_cfg_path, "Must specify quant_cfg for mixed precision quantization"
     with open(config.quant_cfg_path, "r") as config_file:
@@ -368,6 +377,8 @@ class KVQuant:
       return jnp.int4
     if dtype_cfg == "int8":
       return jnp.int8
+    if dtype_cfg == "fp8":
+      return jnp.float8_e4m3fn
     raise ValueError(f"Invalid kv_quant_dtype: {dtype_cfg}")
 
   def _get_max_axis(self, axis_names: AxisNames):
@@ -388,42 +399,71 @@ class KVQuant:
     if self.dtype == jnp.int4:
       value = jnp.int4(jnp.rint(kv * (MAX_INT4 / scale)))
       return value, scale
+    if self.dtype == jnp.float8_e4m3fn:
+      value = jnp.float8_e4m3fn(kv * (E4M3_MAX / scale))
+      return value, scale
     raise ValueError(f"Invalid KV quant dtype:{self.dtype}.")
 
+  def dequant(self, kv: KVTensor):
+    assert isinstance(kv, KVTensor)
+    qvalue = kv.qvalue 
+    scale = kv.scale[0]
+    dequant_kv = jnp.bfloat16(qvalue) * jnp.bfloat16(scale)
+    return dequant_kv
+    
   def einsum_fn_with_rhs_qtensor(
-      self,
-      kv: Array | aqt_tensor.QTensor,
-      rhs_dequant_mode=None,
-      rhs_calibration_mode=None,
-  ):
+    self,
+    kv: Array| aqt_tensor.QTensor,
+    rhs_dequant_mode=None,
+    rhs_calibration_mode=None,
+    lhs_dequant_mode=None,
+    lhs_calibration_mode=None,
+    ):
     # Assumes kv is already quantized.
     einsum = jnp.einsum
     if isinstance(kv, aqt_tensor.QTensor):
-      num_bits = 4 if kv.qvalue.dtype == jnp.int4 else 8
-      kv_cfg = aqt_config.dot_general_make(
-          lhs_bits=None,
-          rhs_bits=num_bits,
+      if kv.qvalue.dtype != jnp.float8_e4m3fn:
+        lhs_bits = None
+        rhs_bits = 4 if kv.qvalue.dtype == jnp.int4 else 8
+        kv_cfg = aqt_config.dot_general_make(
+          lhs_bits=lhs_bits,
+          rhs_bits=rhs_bits,
           bwd_bits=None,
           use_fwd_quant=False,
-      )
+          )
+      else:
+        kv_cfg = aqt_config.config_fwd_fp8()
+      
       if rhs_dequant_mode:
         aqt_config.set_fwd_dequant_mode(kv_cfg, rhs_dequant_mode=rhs_dequant_mode)
       if rhs_calibration_mode:
         aqt_config.set_fwd_calibration_mode(
-            kv_cfg,
-            rhs_calibration_mode=rhs_calibration_mode,
+          kv_cfg,
+          rhs_calibration_mode=rhs_calibration_mode,
+          )
+      if lhs_dequant_mode:
+        aqt_config.set_fwd_dequant_mode(
+          kv_cfg, lhs_dequant_mode=lhs_dequant_mode
         )
+      if lhs_calibration_mode:
+        aqt_config.set_fwd_calibration_mode(
+          kv_cfg,
+          lhs_calibration_mode=lhs_calibration_mode,
+          )
       einsum = aqt_flax.AqtEinsum(
-          rhs_quant_mode=aqt_flax.QuantMode.TRAIN,
-          lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
-          rhs_freeze_mode=aqt_flax.FreezerMode.NONE,
-          cfg=kv_cfg,
-      )
+        rhs_quant_mode=aqt_flax.QuantMode.TRAIN,
+        lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
+        rhs_freeze_mode=aqt_flax.FreezerMode.NONE,
+        cfg=kv_cfg
+        )
+
     return einsum
 
   def einsum_fn_with_rhs_qtensor_and_dequant(self, value):
     return self.einsum_fn_with_rhs_qtensor(
-        value,
-        rhs_dequant_mode=aqt_config.DequantMode.OTHER_INPUT,
-        rhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
-    )
+      value,
+      lhs_dequant_mode=aqt_config.DequantMode.THIS_INPUT,
+      lhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
+      rhs_dequant_mode=aqt_config.DequantMode.OTHER_INPUT,
+      rhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS
+      )
