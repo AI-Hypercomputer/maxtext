@@ -1,0 +1,8 @@
+{
+    "__default__": {"w_bits": 8, "a_bits": 8},
+    ".*/query": {"w_bits": 4, "tile_size": 128},
+    ".*/key": {"w_bits": 4, "tile_size": 256},
+    ".*/value": {"w_bits": 4}
+}
+
+
