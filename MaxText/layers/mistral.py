@@ -97,6 +97,8 @@ class MistralDecoderLayer(nn.Module):
         weight_dtype=cfg.weight_dtype,
         dropout_rate=cfg.dropout_rate,
         name="self_attention",
+        float32_qk_product=cfg.float32_qk_product,
+        float32_logits=cfg.float32_logits,
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
     )
