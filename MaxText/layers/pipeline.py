@@ -368,8 +368,8 @@ class Pipeline(nn.Module):
 
   def maybe_ag_new_bsw(self, bsw, sharding_info, loop_iter):
     # Update at end of iteration before new repeat
-    bsw = jax.lax.cond( (loop_iter + 1) % self.config.num_pipeline_microbatches == 0, lambda: self.ag_new_bsw(bsw, sharding_info, loop_iter), lambda: bsw)
-    #bsw = jax.lax.cond( (loop_iter + 1) % self.config.num_pipeline_microbatches == 0, lambda: self.full_shmap_ag_new_bsw(bsw, sharding_info, loop_iter), lambda: bsw)
+    #bsw = jax.lax.cond( (loop_iter + 1) % self.config.num_pipeline_microbatches == 0, lambda: self.ag_new_bsw(bsw, sharding_info, loop_iter), lambda: bsw)
+    bsw = jax.lax.cond( (loop_iter + 1) % self.config.num_pipeline_microbatches == 0, lambda: self.full_shmap_ag_new_bsw(bsw, sharding_info, loop_iter), lambda: bsw)
     return bsw
 
   def full_shmap_ag_new_bsw(self, bsw, sharding_info, loop_iter):
@@ -421,7 +421,7 @@ class Pipeline(nn.Module):
 
         grab_idx_1 = self.grab_bsw(bsw, 1)
         new_full_bsw = self.insert_pytree(bsw, grab_idx_1, 0) # bsw[0] = bsw[1]
-        new_full_bsw = self.insert_pytree(bsw, new_bw_ag, 1) # bsw[1] = new_bw_ag
+        new_full_bsw = self.insert_pytree(new_full_bsw, new_bw_ag, 1) # bsw[1] = new_bw_ag
         return new_full_bsw
       return _full_shmap_ag_new_bsw(self.layers.variables, bsw)
 

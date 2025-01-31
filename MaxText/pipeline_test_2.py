@@ -55,7 +55,6 @@ def assert_same_output_and_grad(f1, f2, *inputs):
   print(f"{f1_value=}")
   print(f"{f2_value=}")
   assert jax.numpy.allclose(f1_value, f2_value, rtol=1e-2, equal_nan=False)
-  breakpoint()
   assert jax.numpy.allclose(f1_grad, f2_grad, rtol=1, equal_nan=False)
 
 
