@@ -23,6 +23,9 @@ from flax import linen as nn
 import common_types
 import functools
 from typing import Any
+from jax.experimental import shard_map
+
+shard_map = shard_map.shard_map
 
 
 class Pipeline(nn.Module):
@@ -143,6 +146,7 @@ class Pipeline(nn.Module):
     def grab_two_rows_of_pytree(pytree):
       def _grab_two_rows_of_array(leaf):
         all_repeats = jnp.zeros_like(leaf, dtype=inputs.dtype) # TODO: Should set to activation_dtype probably
+        #all_repeats = jnp.zeros_like(leaf) # TODO: Should set to activation_dtype probably
         return all_repeats[0:2] # Buffer is of length 2 since at most 2 repeats are active across stages on most iterations on each iteration
       return jax.tree.map(_grab_two_rows_of_array, pytree)
 
@@ -413,6 +417,59 @@ class Pipeline(nn.Module):
     weights = gather_weights_for_stages_in(weights)
     return weights
 
+  def full_shmap_ag_new_bsw(self, bsw, sharding_info, loop_iter):
+      physical_sharded = nn.logical_to_mesh_sharding(sharding_info, mesh=self.mesh, rules=self.config.logical_axis_rules)
+      physical_spec_ag = self.get_physical_spec_no_fsdp(sharding_info)
+
+      def convert_leaf(leaf):
+        return leaf.spec
+      physical_sharded = jax.tree_map(convert_leaf, physical_sharded)
+      physical_spec_ag = jax.tree_map(convert_leaf, physical_spec_ag)
+
+
+      _, repeat_idx = self.get_microbatch_and_repeat_ids(loop_iter + 1)
+
+      @functools.partial(
+          shard_map,
+          mesh=self.mesh,
+          in_specs=(
+              physical_sharded,
+              physical_spec_ag,
+          ),
+          out_specs=physical_spec_ag,
+          check_rep=False,
+      )
+      def _full_shmap_ag_new_bsw(vars, bsw):
+
+        def find_string_in_list_of_lists(list_of_lists, target_string):
+          if list_of_lists is None:
+            return -1
+          for i, inner_list in enumerate(list_of_lists):
+              if inner_list and target_string in inner_list:  # Efficiently checks if string is in list/tuple
+                  return i
+          return -1  # Return -1 if not found
+        new_bw_insert = self.grab_bsw(vars, repeat_idx[0])
+        #new_bw_ag = self.force_ag(new_bw_insert, sharding_info) # TODO: SHMAP THAT AG
+
+        #new_bw_ag = jax.lax.all_gather(new_bw_insert, axis_name='fsdp', tiled=True)
+
+        from jax.sharding import PartitionSpec
+        def is_leaf(node):
+          return isinstance(node, (PartitionSpec, jnp.ndarray, nn.spmd.LogicallyPartitioned))
+        def ag_leaf(leaf, sharding_info):
+          fsdp_index = find_string_in_list_of_lists(sharding_info, 'fsdp')
+          if fsdp_index > 0:
+            return jax.lax.all_gather(leaf, axis_name='fsdp', axis=fsdp_index, tiled=True)
+          else:
+            return leaf
+        new_bw_ag = jax.tree_map(ag_leaf, new_bw_insert, physical_sharded, is_leaf=is_leaf)
+
+        grab_idx_1 = self.grab_bsw(bsw, 1)
+        new_full_bsw = self.insert_pytree(bsw, grab_idx_1, 0) # bsw[0] = bsw[1]
+        new_full_bsw = self.insert_pytree(new_full_bsw, new_bw_ag, 1) # bsw[1] = new_bw_ag
+        return new_full_bsw
+      return _full_shmap_ag_new_bsw(self.layers.variables, bsw)
+
   def ag_new_bsw(self, bsw, sharding_info, loop_iter):
     physical_spec = self.get_physical_spec_no_fsdp(sharding_info)
     _, repeat_idx = self.get_microbatch_and_repeat_ids(loop_iter + 1)
@@ -436,8 +493,8 @@ class Pipeline(nn.Module):
     def grab_bsw_leaf(leaf):
       arr = jax.lax.dynamic_slice_in_dim(leaf, idx, 1)
       #arr = nn.with_logical_constraint(arr, (None, "stage"), rules=self.config.logical_axis_rules, mesh=self.mesh)
-      #return arr.astype(jnp.bfloat16) # TODO, should we modify where we change dtype? Unsure where
-      return arr
+      return arr.astype(jnp.bfloat16) # TODO, should we modify where we change dtype? Unsure where
+      #return arr
     return jax.tree.map(grab_bsw_leaf, vars)
   
   def force_ag(self, vars, sharding_info):
@@ -757,11 +814,13 @@ class Pipeline(nn.Module):
       # TODO(Consider wrapping this double loop in its own method - loop_over_repeats_gather_fsdp_first), since
       # it probably won't be called all the time - only with FSDP and feature turned on
       for repeat_index in range(self.config.num_pipeline_repeats):
-        loop_state['bsw'] = self.ag_new_bsw(loop_state['bsw'], sharding_info, loop_state['loop_iteration'])
+        #loop_state['bsw'] = self.ag_new_bsw(loop_state['bsw'], sharding_info, loop_state['loop_iteration'])
+        loop_state['bsw'] = self.full_shmap_ag_new_bsw(loop_state['bsw'], sharding_info, loop_state['loop_iteration'])
         loop_state, _ = run_one_repeat(self, loop_state, None)
       # TODO: For final flushing, we need to move bsw[0] - bsw[1]. However wedon't need to AG anything new,
       # so we don't need to call ag_new_bsw, we can get away with a subset of it
-      loop_state['bsw'] = self.ag_new_bsw(loop_state['bsw'], sharding_info, loop_state['loop_iteration'])
+      #loop_state['bsw'] = self.ag_new_bsw(loop_state['bsw'], sharding_info, loop_state['loop_iteration'])
+      loop_state['bsw'] = self.full_shmap_ag_new_bsw(loop_state['bsw'], sharding_info, loop_state['loop_iteration'])
       # TODO: Identical scan is used for repeat and flushing - should refactor to shared, only length differs
       flush_pipeline = nn.scan(
           run_iteration_scannable,
