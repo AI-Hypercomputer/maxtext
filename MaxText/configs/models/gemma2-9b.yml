@@ -30,5 +30,3 @@ attn_logits_soft_cap: 50.0
 sliding_window_size: 4096
 use_post_attn_norm: True
 use_post_ffw_norm: True
-float32_qk_product: True
-float32_qk_logits: True

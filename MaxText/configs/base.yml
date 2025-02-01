@@ -120,6 +120,8 @@ logits_via_embedding: False
 normalize_embedding_logits: True  # whether to normlize pre-softmax logits if logits_via_embedding is true
 logits_dot_in_fp32: False  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
 cast_logits_to_fp32: True # whether to cast the logits to fp32. The higher precision is generally beneficial, but it can vary slightly.
+float32_qk_product: False # in dot_product attention, whether to cast to fp32 the inputs to qk product
+float32_logits: False # in dot_product attention, whether to cast to fp32 the inputs to softmax
 
 # mixture of experts (moe)
 num_experts: 1
@@ -191,10 +193,6 @@ attn_logits_soft_cap: 0.0
 final_logits_soft_cap: 0.0
 use_post_attn_norm: False
 use_post_ffw_norm: False
-
-# In dot_product attention, whether to upcast the qk product and attention logits to fp32
-float32_qk_product: False
-float32_logits: False
 
 
 # Combine matmuls for QKV and MLP
