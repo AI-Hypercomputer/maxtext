@@ -756,9 +756,12 @@ class Pipeline(nn.Module):
       # AG weights
       # TODO(Consider wrapping this double loop in its own method - loop_over_repeats_gather_fsdp_first), since
       # it probably won't be called all the time - only with FSDP and feature turned on
-      loop_state['bsw'] = self.ag_new_bsw(loop_state['bsw'], sharding_info, loop_state['loop_iteration'])
       for repeat_index in range(self.config.num_pipeline_repeats):
+        loop_state['bsw'] = self.ag_new_bsw(loop_state['bsw'], sharding_info, loop_state['loop_iteration'])
         loop_state, _ = run_one_repeat(self, loop_state, None)
+      # TODO: For final flushing, we need to move bsw[0] - bsw[1]. However wedon't need to AG anything new,
+      # so we don't need to call ag_new_bsw, we can get away with a subset of it
+      loop_state['bsw'] = self.ag_new_bsw(loop_state['bsw'], sharding_info, loop_state['loop_iteration'])
       # TODO: Identical scan is used for repeat and flushing - should refactor to shared, only length differs
       flush_pipeline = nn.scan(
           run_iteration_scannable,
