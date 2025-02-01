@@ -393,21 +393,27 @@ class Decoder(nn.Module):
     RemattedBlockLayer = self.set_remat_policy(self.decoder_layer, policy)
 
     if cfg.using_pipeline_parallelism:
-      key = jax.random.PRNGKey(0)
-      keys={"params": key, "dropout": key, "aqt": key}
-      weights=self.pipeline_module.init(keys,y,decoder_segment_ids, decoder_positions, deterministic, model_mode)
 
-      def get_partition_spec(pytree):
-        def _is_leaf(x):
-          return isinstance(x, nn.spmd.LogicallyPartitioned)
+      # Generate sharding spec of the weights used by the pipeline module (e.g. weights of the decoder layers)
+      # TODO(nit): Can this be plumbed into pipeline.py instead?
+      def generate_pp_weights_sharding_spec():
+        key = jax.random.PRNGKey(0)
+        keys={"params": key, "dropout": key, "aqt": key}
+        weights=self.pipeline_module.init(keys,y,decoder_segment_ids, decoder_positions, deterministic, model_mode)
 
-        def get_partition_spec_leaf(leaf):
-          return leaf.get_partition_spec()
-        partition_spec_tree = jax.tree.map(get_partition_spec_leaf, pytree, is_leaf=_is_leaf)
-        return partition_spec_tree
-      weights_partition_spec = get_partition_spec(weights)
-      weights_partition_spec['params'] = weights_partition_spec['params']['layers']
+        def get_partition_spec(pytree):
+          def _is_leaf(x):
+            return isinstance(x, nn.spmd.LogicallyPartitioned)
 
+          def get_partition_spec_leaf(leaf):
+            return leaf.get_partition_spec()
+          partition_spec_tree = jax.tree.map(get_partition_spec_leaf, pytree, is_leaf=_is_leaf)
+          return partition_spec_tree
+        weights_partition_spec = get_partition_spec(weights)
+        weights_partition_spec['params'] = weights_partition_spec['params']['layers']
+        return weights_partition_spec
+
+      weights_partition_spec = generate_pp_weights_sharding_spec()
       y = self.pipeline_module(y,
             decoder_segment_ids,
             decoder_positions,

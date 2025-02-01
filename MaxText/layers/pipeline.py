@@ -72,7 +72,7 @@ class Pipeline(nn.Module):
         + self.iterations_to_complete_first_microbatch_one_repeat()
     )
 
-  def init_states(self, inputs, sharding_info):
+  def init_states(self, inputs, sharding_info=None):
     """Initialize components of state: state_io, shift, circular_storage and circular_storage_mover
     Assumes input has already been reshaped into microbatches: [num_micro_batches, micro_batch_size, sequence, embed]
 
@@ -139,23 +139,29 @@ class Pipeline(nn.Module):
     else:
       circ_storage_mover = None
 
-    # bsw holds to repeats worth of weights for every stage. It us used to implement ideal behavior with FSDP:
-    # which is that we can all-gather the weights only once per repeat (as opposed to every microbatch), since the same weights apply to all microbatches.
-    # Additionally we can reduce the gradients across the data and fsdp axis only once per repeat using this buffer. This allows us to avoid
-    # additional fsdp/data parallelism comms, without having to incur a huge memory cost of storing all of the weights and gradients.
-    # If the weights and gradients fit into memory we can instead replace any FSDP with DP - probably some combination of TP and EP as well
-    # If there is no FSDP this feature is not needed. If there is DP the XLA compiler will automatically reduce the gradients only after all microbatches.
-    # This synergy with FSDP is only available to circular pipelines - otherwise we generally have to store the FSDP-gathered weights and gradients
-    # to avoid extra comms associated with FSDP (e.g. FSDP is only sharding the optimizer state, not the live weights and grads)
+
     def grab_two_rows_of_pytree(pytree):
       def _grab_two_rows_of_array(leaf):
         all_repeats = jnp.zeros_like(leaf, dtype=inputs.dtype) # TODO: Should set to activation_dtype probably
         return all_repeats[0:2] # Buffer is of length 2 since at most 2 repeats are active across stages on most iterations on each iteration
       return jax.tree.map(_grab_two_rows_of_array, pytree)
-    bsw = grab_two_rows_of_pytree(self.layers.variables)
-    physical_constraint_no_fsdp = self.get_physical_spec_no_fsdp(sharding_info)
-    bsw = jax.lax.with_sharding_constraint(bsw, physical_constraint_no_fsdp)
-    bsw = self.ag_new_bsw(bsw, sharding_info, 0)
+
+    # bsw holds two repeats worth of weights for every stage. It us used to implement ideal behavior with FSDP.
+    # Ideal behavior is to all-gather the weights only once per repeat (as opposed to every microbatch), since the same weights apply to all microbatches.
+    # Additionally we can reduce the gradients across the data and fsdp axis only once per repeat by making use of this buffer. This allows us to avoid
+    # additional fsdp/data parallelism comms, without having to incur a huge memory cost of storing all of the weights and gradients.
+    # If the weights and gradients fit into memory we can instead replace any FSDP with DP - probably some combination of TP and EP as well.
+    # If there is no FSDP this feature is not needed. If there is DP the XLA compiler will automatically reduce the gradients only after all microbatches.
+    # This synergy with FSDP is only available to circular pipelines - otherwise we generally have to store the FSDP-gathered weights and gradients
+    # to avoid extra comms associated with FSDP (e.g. except for ciruclar pipelines, FSDP is only sharding the optimizer state, not the live weights and grads,
+    # without paying for extra communication costs)
+    if self.is_initializing():
+      bsw = None
+    else:
+      bsw = grab_two_rows_of_pytree(self.layers.variables)
+      bsw = jax.lax.with_sharding_constraint(bsw, self.get_physical_spec_no_fsdp(sharding_info))
+      # bsw = self.ag_new_bsw(bsw, sharding_info, 0) TODO(This was needed in the old implementation since we all gather for first time on later stages), this has to be initialized
+      # to real weights. I think for this double loop implementation it will be initialized right before the first microbatch of the first repeat.
 
     init_loop_state = {
         "state_io": state_io,
@@ -362,6 +368,7 @@ class Pipeline(nn.Module):
         "circ_storage_mover": new_circ_storage_mover,
         "loop_iteration": loop_iteration + 1,
         "prev_outputs": new_prev_outputs,
+        'bsw': loop_state['bsw'], #bsw is updated outside of this inner loop, only once per outer loop iteration.
     }
     return new_loop_state
 
@@ -381,10 +388,11 @@ class Pipeline(nn.Module):
     else:
       return weights
   
-    def get_current_weights_from_bsw(self, bsw, loop_iteration):
+  def get_current_weights_from_bsw(self, bsw, loop_iteration):
     def get_bsw_idx(loop_iteration):
       _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
       bsw_ids = repeat_ids==repeat_ids[0] # For early repeats this might return true when it should be false( e.g. 0==0 instead of 0!=-1)
+      # TODO(confirm/clarify it doesn't matter because dummy bubble for this iterations anyway) 
 
       bsw_ids = bsw_ids.astype(jnp.int32)
       return bsw_ids
@@ -573,6 +581,32 @@ class Pipeline(nn.Module):
       remat_policy = save_input_policy
     return remat_policy
 
+  def get_physical_spec_no_fsdp(self, full_logical):
+    def remove_fsdp_sharding(sharding_tree):
+      def _remove_fsdp_from_partition_spec(named_sharding):
+        if isinstance(named_sharding, jax.sharding.NamedSharding):
+          new_spec = []
+          for axis in named_sharding.spec:
+            if axis is None:
+              new_spec.append(None)
+            elif isinstance(axis, str):
+              if axis != 'fsdp':
+                new_spec.append(axis)
+              else:
+                new_spec.append(None)
+            elif isinstance(axis, (list, tuple)):  # Handle list/tuple of axes
+              new_axis = [a for a in axis if a != 'fsdp']
+              new_spec.append(tuple(new_axis))
+              #new_spec.append(tuple(new_axis) if new_axis else None) 
+            else:
+              raise ValueError(f"Unsupported axis type: {type(axis)}")
+          return jax.sharding.NamedSharding(named_sharding.mesh, jax.sharding.PartitionSpec(*new_spec))
+        return named_sharding
+      return jax.tree.map(_remove_fsdp_from_partition_spec, sharding_tree)
+    physical = nn.logical_to_mesh_sharding(full_logical, mesh=self.mesh, rules=self.config.logical_axis_rules)
+    physical_no_fsdp = remove_fsdp_sharding(physical)
+    return physical_no_fsdp
+
   @nn.compact
   def __call__(
       self,
@@ -581,6 +615,7 @@ class Pipeline(nn.Module):
       positions: jnp.ndarray,
       deterministic: bool,
       model_mode=common_types.MODEL_MODE_TRAIN,
+      sharding_info=None # Pytree of sharding specifications of the weights (aka self.layers.variables)
   ) -> jnp.ndarray:
     """The main method that maps the series of decoder layer inputs to final layer outputs.
     Has the same signature of a single decoder layer, and expects the same shapes, e.g. the inputs should have shape [global_batch], and internally
@@ -615,7 +650,7 @@ class Pipeline(nn.Module):
       example_segmentation = None
       segment_idx = None
 
-    loop_state = self.init_states(inputs)
+    loop_state = self.init_states(inputs, sharding_info=sharding_info)
 
     # Each microbatch should go through each stage (with repeats) - so there is num_micro * (num_stages * repeats) compute to perform
     # Each iteration is vmapped by num_stages, so the number of iterations should be num_micro * num_stages * repeats / num_stages = num_micro * repeats
@@ -693,7 +728,7 @@ class Pipeline(nn.Module):
           prevent_cse=not self.config.scan_pipeline_iterations,  # prevent_cse not used with scan
           policy=self.get_pipeline_remat_policy(),
       )
-
+      
     # The scan cannot be used on init since it broadcasts the weights, which aren't yet initialized.
     if self.config.scan_pipeline_iterations:
       variable_carry = []
@@ -719,9 +754,12 @@ class Pipeline(nn.Module):
           length=self.config.num_pipeline_microbatches
       )
       # AG weights
-      cur_repeat_weights_buffer = self.ag_new_bsw(bsw, sharding_info, loop_iter)
-      for repeat in range(self.config.num_pipeline_repeats):
+      # TODO(Consider wrapping this double loop in its own method - loop_over_repeats_gather_fsdp_first), since
+      # it probably won't be called all the time - only with FSDP and feature turned on
+      loop_state['bsw'] = self.ag_new_bsw(loop_state['bsw'], sharding_info, loop_state['loop_iteration'])
+      for repeat_index in range(self.config.num_pipeline_repeats):
         loop_state, _ = run_one_repeat(self, loop_state, None)
+      # TODO: Identical scan is used for repeat and flushing - should refactor to shared, only length differs
       flush_pipeline = nn.scan(
           run_iteration_scannable,
           variable_axes={
