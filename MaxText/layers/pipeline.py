@@ -72,7 +72,7 @@ class Pipeline(nn.Module):
         + self.iterations_to_complete_first_microbatch_one_repeat()
     )
 
-  def init_states(self, inputs):
+  def init_states(self, inputs, sharding_info):
     """Initialize components of state: state_io, shift, circular_storage and circular_storage_mover
     Assumes input has already been reshaped into microbatches: [num_micro_batches, micro_batch_size, sequence, embed]
 
@@ -83,6 +83,8 @@ class Pipeline(nn.Module):
       circ_storage: zeros [num_stages, microbatches, micro_size, sequence, embed] when needed, else None
       circ_storage_mover: zeros[num_stages, micro_size, sequence, embed] when needed, else None
       loop_iteration: scalar set initially to 0.
+      bsw: pytree of identical structure as weights with leaf arryas leading dimension of num_repeats replaced by 2, e.g.
+        a leaf of shape [num_repeats, stages, mlp,embed] is mapped to [2, num_stages, mlp, embed]
     """
 
     # Shift is used to rotate the output of each pipeline into the input of the next
@@ -137,6 +139,24 @@ class Pipeline(nn.Module):
     else:
       circ_storage_mover = None
 
+    # bsw holds to repeats worth of weights for every stage. It us used to implement ideal behavior with FSDP:
+    # which is that we can all-gather the weights only once per repeat (as opposed to every microbatch), since the same weights apply to all microbatches.
+    # Additionally we can reduce the gradients across the data and fsdp axis only once per repeat using this buffer. This allows us to avoid
+    # additional fsdp/data parallelism comms, without having to incur a huge memory cost of storing all of the weights and gradients.
+    # If the weights and gradients fit into memory we can instead replace any FSDP with DP - probably some combination of TP and EP as well
+    # If there is no FSDP this feature is not needed. If there is DP the XLA compiler will automatically reduce the gradients only after all microbatches.
+    # This synergy with FSDP is only available to circular pipelines - otherwise we generally have to store the FSDP-gathered weights and gradients
+    # to avoid extra comms associated with FSDP (e.g. FSDP is only sharding the optimizer state, not the live weights and grads)
+    def grab_two_rows_of_pytree(pytree):
+      def _grab_two_rows_of_array(leaf):
+        all_repeats = jnp.zeros_like(leaf, dtype=inputs.dtype) # TODO: Should set to activation_dtype probably
+        return all_repeats[0:2] # Buffer is of length 2 since at most 2 repeats are active across stages on most iterations on each iteration
+      return jax.tree.map(_grab_two_rows_of_array, pytree)
+    bsw = grab_two_rows_of_pytree(self.layers.variables)
+    physical_constraint_no_fsdp = self.get_physical_spec_no_fsdp(sharding_info)
+    bsw = jax.lax.with_sharding_constraint(bsw, physical_constraint_no_fsdp)
+    bsw = self.ag_new_bsw(bsw, sharding_info, 0)
+
     init_loop_state = {
         "state_io": state_io,
         "shift": shift,
@@ -144,6 +164,7 @@ class Pipeline(nn.Module):
         "circ_storage_mover": circ_storage_mover,
         "loop_iteration": 0,
         "prev_outputs": prev_outputs,
+        "bsw": bsw
     }
     return init_loop_state
 
@@ -360,6 +381,43 @@ class Pipeline(nn.Module):
     else:
       return weights
   
+  def ag_new_bsw(self, bsw, sharding_info, loop_iter):
+    physical_spec = self.get_physical_spec_no_fsdp(sharding_info)
+    _, repeat_idx = self.get_microbatch_and_repeat_ids(loop_iter + 1)
+    #jax.debug.print("loop_iter {loop_iter} repeat_idx {repeat_idx}", loop_iter=loop_iter, repeat_idx=repeat_idx)
+    #jax.debug.print("Loop iter {loop_iter} Old bsw {bsw}", loop_iter=loop_iter, bsw=bsw['params']['mlp']['wi_0']['kernel'][:,:,0,0])
+    new_bw_insert = self.grab_bsw(self.layers.variables,repeat_idx[0])
+    new_bw_insert = jax.lax.with_sharding_constraint(new_bw_insert, physical_spec)
+    #jax.debug.print("Loop iter {loop_iter} bsw to insert {new_bw_insert}", loop_iter=loop_iter, new_bw_insert=new_bw_insert['params']['mlp']['wi_0']['kernel'][:,:,0,0])
+    new_bw_ag = self.force_ag(new_bw_insert, sharding_info)
+    new_bw_ag = jax.lax.with_sharding_constraint(new_bw_ag, physical_spec)
+    grab_idx_1 = self.grab_bsw(bsw, 1)
+    grab_idx_1 = jax.lax.with_sharding_constraint(grab_idx_1, physical_spec)
+    new_full_bsw = self.insert_pytree(bsw, grab_idx_1, 0) # bsw[0] = bsw[1]
+    new_full_bsw = jax.lax.with_sharding_constraint(new_full_bsw, physical_spec)
+    new_full_bsw = self.insert_pytree(new_full_bsw, new_bw_ag, 1) # bsw[1] = new_bw_ag
+    new_full_bsw = jax.lax.with_sharding_constraint(new_full_bsw, physical_spec)
+    #jax.debug.print("Loop iter {loop_iter} new bsw {new_full_bsw}", loop_iter=loop_iter, new_full_bsw=new_full_bsw['params']['mlp']['wi_0']['kernel'][:,:,0,0])
+    return new_full_bsw
+  
+  def grab_bsw(self, vars, idx):
+    def grab_bsw_leaf(leaf):
+      arr = jax.lax.dynamic_slice_in_dim(leaf, idx, 1)
+      #arr = nn.with_logical_constraint(arr, (None, "stage"), rules=self.config.logical_axis_rules, mesh=self.mesh)
+      #return arr.astype(jnp.bfloat16) # TODO, should we modify where we change dtype? Unsure where
+      return arr
+    return jax.tree.map(grab_bsw_leaf, vars)
+  
+  def force_ag(self, vars, sharding_info):
+    physical_constraint_no_fsdp = self.get_physical_spec_no_fsdp(sharding_info)
+    vars = jax.lax.with_sharding_constraint(vars, physical_constraint_no_fsdp)
+    return vars
+
+  def insert_pytree(self, x, y, start_index):
+    def _insert_into_leaf(x_leaf, y_leaf):
+      updated_leaf = x_leaf.at[start_index:start_index+1].set(y_leaf)
+      return updated_leaf
+    return jax.tree.map(_insert_into_leaf, x, y)
   def get_current_repeat_from_stages(self, weights, loop_iteration):
     _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
     def gather_weights_for_stages_in(weights):
@@ -619,7 +677,8 @@ class Pipeline(nn.Module):
         variable_carry.append("non_trainable")
       else:
         variable_broadcast.append("non_trainable")
-      run_all_iterations_scanned = nn.scan(
+      
+      run_one_repeat = nn.scan(
           run_iteration_scannable,
           variable_axes={
               "summaries": 0,
@@ -631,9 +690,29 @@ class Pipeline(nn.Module):
           variable_carry=variable_carry,
           # Dropout/aqt keys will be split for each iteration.
           split_rngs={"random": True},
-          length=total_iterations,
+          #length=total_iterations,
+          length=self.config.num_pipeline_microbatches
       )
-      loop_state, _ = run_all_iterations_scanned(self, loop_state, None)
+      # AG weights
+      cur_repeat_weights_buffer = self.ag_new_bsw(bsw, sharding_info, loop_iter)
+      for repeat in range(self.config.num_pipeline_repeats):
+        loop_state, _ = run_one_repeat(self, loop_state, None)
+      flush_pipeline = nn.scan(
+          run_iteration_scannable,
+          variable_axes={
+              "summaries": 0,
+              "aux_loss": 0,
+              "intermediates": 0,
+              "hyper_params": 0,
+          },
+          variable_broadcast=variable_broadcast,
+          variable_carry=variable_carry,
+          # Dropout/aqt keys will be split for each iteration.
+          split_rngs={"random": True},
+          #length=total_iterations,
+          length=self.forwarding_delay * (self.num_stages - 1) 
+      )
+      loop_state, _ = flush_pipeline(self, loop_state, None)
     else:
       for loop_iteration in range(total_iterations):
         loop_state, _ = run_iteration_scannable(self, loop_state, None)
