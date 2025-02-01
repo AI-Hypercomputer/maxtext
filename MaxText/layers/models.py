@@ -412,7 +412,8 @@ class Decoder(nn.Module):
             decoder_segment_ids,
             decoder_positions,
             deterministic,
-            model_mode)
+            model_mode,
+            sharding_info=weights_partition_spec)
     else:
       if cfg.scan_layers:
         y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
