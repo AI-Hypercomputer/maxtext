@@ -43,18 +43,18 @@ class MaxEngineTest(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     pyconfig.initialize(
-      [sys.argv[0], "configs/base.yml"],
-      per_device_batch_size=1.0,
-      run_name="test",
-      enable_checkpointing=False,
-      base_num_decoder_layers=2,
-      attention="dot_product",
-      max_target_length=16,
-      base_emb_dim=256,
-      base_num_query_heads=2,
-      base_num_kv_heads=2,
-      max_prefill_predict_length=4,
-      **kwargs,
+        [sys.argv[0], "configs/base.yml"],
+        per_device_batch_size=1.0,
+        run_name="test",
+        enable_checkpointing=False,
+        base_num_decoder_layers=2,
+        attention="dot_product",
+        max_target_length=16,
+        base_emb_dim=256,
+        base_num_query_heads=2,
+        base_num_kv_heads=2,
+        max_prefill_predict_length=4,
+        **kwargs,
     )
     return pyconfig.config
 
@@ -111,15 +111,14 @@ class MaxEngineTest(unittest.TestCase):
     true_length = 4
     engine = MaxEngine(self.cfg, jax.devices())
     prefill_result, first_token = engine.prefill(
-      params=transformer_vars,
-      padded_tokens=input_tokens,
-      true_length=true_length
+        params=transformer_vars,
+        padded_tokens=input_tokens,
+        true_length=true_length
     )
+
     self.assertEqual(prefill_result["generated_tokens"], jnp.array([0]))
     self.assertEqual(prefill_result["tokens"], jnp.array([31398]))
-    data=jax.block_until_ready(first_token.data)
-    data_np=jnp.array(data)
-    self.assertTrue(jnp.array_equal(data_np, jnp.array([[31398, 1, 0]])))
+    self.assertTrue(jnp.array_equal(first_token.data, jnp.array([[31398, 1, 0]])))
 
 if __name__ == "__main__":
   unittest.main()
