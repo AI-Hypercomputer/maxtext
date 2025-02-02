@@ -111,14 +111,13 @@ class MaxEngineTest(unittest.TestCase):
     true_length = 4
     engine = MaxEngine(self.cfg, jax.devices())
     prefill_result, first_token = engine.prefill(
-        params=transformer_vars,
-        padded_tokens=input_tokens,
-        true_length=true_length
+        params=transformer_vars, padded_tokens=input_tokens, true_length=true_length
     )
 
     self.assertEqual(prefill_result["generated_tokens"], jnp.array([0]))
     self.assertEqual(prefill_result["tokens"], jnp.array([31398]))
     self.assertTrue(jnp.array_equal(first_token.data, jnp.array([[31398, 1, 0]])))
+
 
 if __name__ == "__main__":
   unittest.main()
