@@ -66,6 +66,7 @@ class MistralDecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      existing_prefix=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -102,6 +103,8 @@ class MistralDecoderLayer(nn.Module):
     )
     # import pdb
     # pdb.set_trace()
+    # jax.debug.print("lnx shape {lnx_shape}", lnx_shape=lnx.shape)
+    # jax.debug.print("existing_prefix inside mistral {existing_prefix}", existing_prefix=existing_prefix)
 
     attention_lnx = attention_layer(
         lnx,
@@ -110,6 +113,7 @@ class MistralDecoderLayer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        existing_prefix = existing_prefix,
     )
 
     attention_lnx = nn.with_logical_constraint(

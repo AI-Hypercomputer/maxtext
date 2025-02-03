@@ -240,8 +240,8 @@ class MaxEngine(engine_api.Engine):
     Returns:
       kv_cache: For the resulting text.
     """
-    if existing_prefix:
-      raise ValueError("We don't know what to do with existing_prefix")
+    # if existing_prefix:
+    #   raise ValueError("We don't know what to do with existing_prefix")
 
     if rng is None:
       rng = jax.random.PRNGKey(0)
@@ -265,6 +265,7 @@ class MaxEngine(engine_api.Engine):
           model_mode=common_types.MODEL_MODE_PREFILL,
           rngs={"params": new_rng},
           mutable=["cache"],
+          existing_prefix=existing_prefix,
       )
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)

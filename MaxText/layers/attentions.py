@@ -219,6 +219,7 @@ class AttentionOp(nn.Module):
       lengths: Array | None,
       model_mode: str,
       use_ragged_attention: bool = False,
+      existing_prefix=None,
   ):
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
@@ -232,7 +233,8 @@ class AttentionOp(nn.Module):
         or (self.attention_kernel == "autoselected" and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE)
         or (self.attention_kernel == "autoselected" and length < 128)
     ):
-      return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
+      jax.debug.print("existing_prefix just before apply_attention_dot  {existing_prefix}", existing_prefix=existing_prefix)
+      return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode, existing_prefix)
     elif self.attention_kernel == "flash" or self.attention_kernel == "autoselected":
       if isinstance(key, KVTensor):
         key = key.dequant()
@@ -473,6 +475,7 @@ class AttentionOp(nn.Module):
       value: Array | KVTensor,
       decoder_segment_ids: Array | None,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
+      existing_prefix=None,
   ):
     """Apply Attention."""
     validate_compute_axis_order(self.compute_axis_order)
@@ -768,6 +771,8 @@ class AttentionOp(nn.Module):
     cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
         batch, heads, kv_head_size, common_types.MODEL_MODE_PREFILL
     )
+    # import pdb
+    # pdb.set_trace()
     # TODO: Find a way to not enable the ar cache for prefill mode.
     _ = self._get_ar_cache_vars(batch, heads, kv_head_size, common_types.MODEL_MODE_PREFILL)  # initialize it now
 
@@ -783,6 +788,10 @@ class AttentionOp(nn.Module):
       cached_prefill_key_vars[1].value = key_scale_shaped_for_cache
       cached_prefill_value_vars[1].value = value_scale_shaped_for_cache
 
+    # import pdb
+    # pdb.set_trace()
+    # cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice(cached_prefill_key_vars[0].value, key_shaped_for_cache, (512, 8, 128))
+    # cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(cached_prefill_key_vars[0].value, key_shaped_for_cache, (512, 8, 128))
     cached_prefill_key_vars[0].value = key_shaped_for_cache
     cached_prefill_value_vars[0].value = value_shaped_for_cache
 
@@ -978,8 +987,8 @@ class AttentionOp(nn.Module):
         cached_prefill_segment_id_var.value,
     )
     
-    import pdb
-    pdb.set_trace()
+    # import pdb
+    # pdb.set_trace()
 
     cached_ar = (
         self.get_cached_values(cached_ar_key_vars, key.dtype, self.ar_cache_axis_order),
@@ -1045,7 +1054,7 @@ class AttentionOp(nn.Module):
     return attn_out
 
   @nn.compact
-  def __call__(self, query, key, value, decoder_segment_ids, model_mode):
+  def __call__(self, query, key, value, decoder_segment_ids, model_mode, existing_prefix=None):
     prefill_kv_cache, ar_kv_cache = self.kv_cache(
         key, value, decoder_segment_ids, model_mode, use_ragged_attention=self.use_ragged_attention
     )
@@ -1058,6 +1067,7 @@ class AttentionOp(nn.Module):
         lengths=None,
         model_mode=model_mode,
         use_ragged_attention=self.use_ragged_attention,
+        existing_prefix=existing_prefix,
     )
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
@@ -1074,6 +1084,7 @@ class AttentionOp(nn.Module):
         lengths=ar_kv_cache[3],
         model_mode=model_mode,
         use_ragged_attention=self.use_ragged_attention,
+        existing_prefix=existing_prefix,
     )
 
     if ar_unnormalized_output is not None:
@@ -1268,6 +1279,7 @@ class Attention(nn.Module):
       *,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
       deterministic: bool = False,
+      existing_prefix=None,
   ):
     """Applies Attention on the input data.
 
@@ -1344,7 +1356,7 @@ class Attention(nn.Module):
         ragged_block_size=self.ragged_block_size,
     )
 
-    out = attention_op(query, key, value, decoder_segment_ids, model_mode)
+    out = attention_op(query, key, value, decoder_segment_ids, model_mode, existing_prefix=existing_prefix)
 
     out = nn.with_logical_constraint(out, self.out_axis_names)
 

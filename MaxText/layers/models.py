@@ -274,10 +274,13 @@ class Decoder(nn.Module):
       decoder_segment_ids=None,
       deterministic=False,
       model_mode=common_types.MODEL_MODE_TRAIN,
+      existing_prefix=None,
   ):
     cfg = self.config
     mesh = self.mesh
     assert decoder_input_tokens.ndim == 2  # [batch, len]
+
+    jax.debug.print("inside decoder call {existing_prefix} ", existing_prefix=existing_prefix)
 
     # [batch, length] -> [batch, length, emb_dim]
     y = self.shared_embedding(decoder_input_tokens.astype("int32"))
@@ -399,6 +402,7 @@ class Decoder(nn.Module):
               decoder_positions,
               deterministic,
               model_mode,
+              existing_prefix=existing_prefix,
           )
 
     y = self.get_norm_layer()(
@@ -472,6 +476,7 @@ class Transformer(nn.Module):
       decoder_segment_ids=None,
       enable_dropout=True,
       model_mode=common_types.MODEL_MODE_TRAIN,
+      existing_prefix=None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target."""
 
@@ -487,5 +492,6 @@ class Transformer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=not enable_dropout,
         model_mode=model_mode,
+        existing_prefix=existing_prefix,
     )
     return logits

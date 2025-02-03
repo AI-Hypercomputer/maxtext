@@ -14,6 +14,7 @@
 
 """CLI utility for running inference on a single stream"""
 
+from collections import defaultdict
 import jax
 
 import max_utils
@@ -88,59 +89,46 @@ def main(argv: Sequence[str]) -> None:
   slot = 0
   rng, rng_init_decode = jax.random.split(rng)
 
-  
+  prefill_result = None
+  prefill_results_dict = defaultdict(list)
   for i,chunk_metadata in enumerate(chunked_metadata_list):
       position_og = jnp.arange(config.max_prefill_predict_length)
       decode_state = engine.init_decode_state(rng_init_decode)
       postion_mask_1 = jnp.where(position_og >= i*chunk_size, position_og, 0)
       postion_mask = jnp.where(position_og < (i+1)*chunk_size, position_og, 0)
       print(postion_mask)
-      prefill_result, first_token = engine.prefill(
-      params=params, padded_tokens=chunk_metadata.chunk_padded, true_length=true_length, rng=rng_prefill, position_mask_cur=postion_mask)#decode_state=decode_state)
-      decode_state = engine.insert(prefill_result, decode_state, slot=slot)
-  
-  # for i,chunk_metadata in enumerate(chunked_metadata_list):
-  #   if i == 0:
-  #     decode_state = engine.init_decode_state(rng_init_decode)
-  #     prefill_result, first_token = engine.prefill(
-  #     params=params, padded_tokens=chunk_metadata.chunk_padded, true_length=true_length, rng=rng_prefill)#decode_state=decode_state)
-  #     decode_state = engine.insert(prefill_result, decode_state, slot=slot)
-  #   else:
-  #     for j in range(i+1):
-  #       print("running for ", j, i)
-  #       prefill_result, first_token = engine.prefill(
-  #       params=params, padded_tokens=chunk_metadata.chunk_padded, true_length=true_length, rng=rng_prefill)#, existing_prefix=None)
-  #       decode_state = engine.insert(prefill_result, decode_state, slot=slot)
-  
-  
-  # assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
-  # assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
+      prefill_result, first_token = engine.prefill(existing_prefix=prefill_result, 
+                                                   params=params, 
+                                                   padded_tokens=chunk_metadata.chunk_padded, 
+                                                   true_length=true_length, 
+                                                   rng=rng_prefill, 
+                                                   position_mask_cur=postion_mask)
+      # for k, v in prefill_result.items():
+      #   prefill_results_dict[k].append(v)
+      
+      # import pdb
+      # pdb.set_trace()
 
-  # # Split RNG before calling prefill
-  # rng, rng_prefill = jax.random.split(rng)
-  # prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
-  # slot = 0
-
-  rng, rng_init_decode = jax.random.split(rng)
+  # rng, rng_init_decode = jax.random.split(rng)
   # decode_state = engine.init_decode_state(rng_init_decode)
   # decode_state = engine.insert(prefill_result, decode_state, slot=slot)
 
-  steps = range(config.max_prefill_predict_length, config.max_target_length)
-  sampled_tokens_list = []
-  sampled_tokens_list.append(first_token)
-  for _ in steps:
-    rng, rng_generate = jax.random.split(rng)
-    decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
-    sampled_tokens_list.append(sampled_tokens)
+  # steps = range(config.max_prefill_predict_length, config.max_target_length)
+  # sampled_tokens_list = []
+  # sampled_tokens_list.append(first_token)
+  # for _ in steps:
+  #   rng, rng_generate = jax.random.split(rng)
+  #   decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
+  #   sampled_tokens_list.append(sampled_tokens)
 
-  results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
-  output = tokenizer_model.decode(results)
-  print(f"Input `{text}` -> `{output}`")
+  # results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
+  # output = tokenizer_model.decode(results)
+  # print(f"Input `{text}` -> `{output}`")
 
-  if config.autoregressive_decode_assert != "":
-    assert (
-        output == config.autoregressive_decode_assert
-    ), f"generated text mismatch {output=} {config.autoregressive_decode_assert=}"
+  # if config.autoregressive_decode_assert != "":
+  #   assert (
+  #       output == config.autoregressive_decode_assert
+  #   ), f"generated text mismatch {output=} {config.autoregressive_decode_assert=}"
 
 
 def validate_config(config):
