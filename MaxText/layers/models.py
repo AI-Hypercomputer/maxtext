@@ -178,43 +178,47 @@ class Decoder(nn.Module):
   mesh: Mesh
   quant: Optional[Quant] = None
 
-  def get_decoder_layer(self):
+  def get_decoder_layers(self):
     if self.config.decoder_block == "default":
-      return DecoderLayer
+      return [DecoderLayer]
     elif self.config.decoder_block == "llama2":
       from layers import llama2
 
-      return llama2.LlamaDecoderLayer
+      return [llama2.LlamaDecoderLayer]
     elif self.config.decoder_block == "mistral":
       # TODO(ranran): update to Mistral with sliding window attention
       from layers import mistral
 
-      return mistral.MistralDecoderLayer
+      return [mistral.MistralDecoderLayer]
+    elif self.config.decoder_block == "deepseek":
+      from layers import deepseek
+
+      return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
     elif self.config.decoder_block == "gemma":
       from layers import gemma
 
-      return gemma.GemmaDecoderLayer
+      return [gemma.GemmaDecoderLayer]
     elif self.config.decoder_block == "gemma2":
       from layers import gemma2
 
-      return gemma2.Gemma2DecoderLayer
+      return [gemma2.Gemma2DecoderLayer]
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
 
-      return gpt3.Gpt3DecoderLayer
+      return [gpt3.Gpt3DecoderLayer]
     elif self.config.decoder_block == "simple":
       from layers import simple_layer
 
-      return simple_layer.SimpleDecoderLayer
+      return [simple_layer.SimpleDecoderLayer]
     elif self.config.decoder_block == "simple_mlp":
       from layers import simple_layer
 
-      return simple_layer.SimpleMlpDecoderLayer
+      return [simple_layer.SimpleMlpDecoderLayer]
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
   def get_norm_layer(self):
-    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma", "gemma2", "simple", "simple_mlp"):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "deepseek", "gemma", "gemma2", "simple", "simple_mlp"):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
@@ -249,7 +253,7 @@ class Decoder(nn.Module):
         length=length,
         metadata_params={nn.PARTITION_NAME: metdata_axis_name},
     )
-    return scan_fn(config=cfg, mesh=mesh, name="layers", quant=self.quant)
+    return scan_fn(config=cfg, mesh=mesh, name=metdata_axis_name, quant=self.quant)
 
   def get_pipeline_stage_module(self, base_stage, cfg, mesh):
     if cfg.num_layers_per_pipeline_stage == 1:
@@ -297,7 +301,7 @@ class Decoder(nn.Module):
           config=cfg,
       )(decoder_positions)
 
-    BlockLayer = self.get_decoder_layer()
+    BlockLayers = self.get_decoder_layers()
 
     if cfg.remat_policy != "none":
       if cfg.remat_policy == "minimal":
@@ -366,13 +370,18 @@ class Decoder(nn.Module):
         assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
         policy = None
 
-    RemattedBlockLayer = nn.remat(  # pylint: disable=invalid-name
-        BlockLayer,
-        prevent_cse=not cfg.scan_layers,
-        policy=policy,
-        static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
-    )
+    RemattedBlockLayers = []
+    for BlockLayer in BlockLayers:
+      RemattedBlockLayer = nn.remat(  # pylint: disable=invalid-name
+          BlockLayer,
+          prevent_cse=not cfg.scan_layers,
+          policy=policy,
+          static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
+      )
+      RemattedBlockLayers.append(RemattedBlockLayer)
+
     if cfg.using_pipeline_parallelism:
+      RemattedBlockLayer = RemattedBlockLayers[0]
       base_stage = RemattedBlockLayer if cfg.set_remat_policy_on_layers_per_stage else BlockLayer
       stage_module = self.get_pipeline_stage_module(base_stage, cfg, mesh)
       y = pipeline.Pipeline(config=cfg, mesh=mesh, layers=stage_module, remat_policy=policy)(
@@ -384,22 +393,65 @@ class Decoder(nn.Module):
       )
     else:
       if cfg.scan_layers:
-        y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
-            y,
-            decoder_segment_ids,
-            decoder_positions,
-            deterministic,
-            model_mode,
-        )
-      else:
-        for lyr in range(cfg.num_decoder_layers):
-          y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
+        if cfg.decoder_block == "deepseek":
+          assert len(RemattedBlockLayers) == 2, f"Scanned layers must have a length of 2 using deepseek."
+          dense_layer = RemattedBlockLayers[0]
+          moe_layer = RemattedBlockLayers[1]
+          y, _ = self.scan_decoder_layers(cfg, dense_layer, cfg.first_num_dense_layers, "dense_layers", mesh)(
               y,
               decoder_segment_ids,
               decoder_positions,
               deterministic,
               model_mode,
           )
+          num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
+          y, _ = self.scan_decoder_layers(cfg, moe_layer, num_moe_layers, "moe_layers", mesh)(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+          )
+        else:
+          RemattedBlockLayer = RemattedBlockLayers[0]
+          y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+          )
+      else:
+        if cfg.decoder_block == "deepseek":
+          assert len(RemattedBlockLayers) == 2, f"Unscanned layers must have a length of 2 using deepseek."
+          dense_layer = RemattedBlockLayers[0]
+          moe_layer = RemattedBlockLayers[1]
+          for lyr in range(cfg.first_num_dense_layers):
+            y = dense_layer(config=cfg, mesh=mesh, name=f"dense_layers_{lyr}", quant=self.quant)(
+                y,
+                decoder_segment_ids,
+                decoder_positions,
+                deterministic,
+                model_mode,
+            )
+          num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
+          for lyr in range(num_moe_layers):
+            y = moe_layer(config=cfg, mesh=mesh, name=f"moe_layers_{lyr}", quant=self.quant)(
+                y,
+                decoder_segment_ids,
+                decoder_positions,
+                deterministic,
+                model_mode,
+            )            
+        else:          
+          for lyr in range(cfg.num_decoder_layers):
+            y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
+                y,
+                decoder_segment_ids,
+                decoder_positions,
+                deterministic,
+                model_mode,
+            )
 
     y = self.get_norm_layer()(
         dtype=cfg.dtype,

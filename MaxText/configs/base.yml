@@ -129,6 +129,14 @@ sparse_matmul: True
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
 load_balance_loss_weight: 0.01 # weight for the load balance loss
 
+# deepseek moe
+base_moe_dim: 7168 # intermediate dimension at MoE layer (use base_mlp_dim if not DeepSeek style)
+first_num_dense_layers: 0 # number of initial dense layers in the model
+shared_experts: 1
+routed_scaling_factor: 1.0 # scaling factor for routing scores
+routed_score_func: "" # scoring function for routing
+routed_bias: False # a flag if a bias term is added for routing
+
 # pipeline parallelism
 # The number of decoder layers is equal to the product of num_stages, num_layers_per_pipeline_stage and num_pipeline_repeats.
 # There is a tradeoff between the num_layers_per_pipeline_stage and num_pipeline_repeats: The more layers per stage the easier

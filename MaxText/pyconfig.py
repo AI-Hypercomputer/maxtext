@@ -149,6 +149,7 @@ def validate_keys(keys):
   validate_multiple_slices(keys)
   if keys["num_experts"] > 1:
     validate_megablox_parallelism(keys)
+    validate_deepseek_moe(keys)
 
 
 def validate_data_input(keys):
@@ -202,6 +203,7 @@ def validate_model_name(s: str) -> bool:
       "mistral-7b",
       "mixtral-8x7b",
       "mixtral-8x22b",
+      "deepseek3-671b",
       "gemma-7b",
       "gemma-2b",
       "gemma2-2b",
@@ -417,6 +419,7 @@ class _HyperParameters:
     raw_keys["num_query_heads"] = 2**num_head_scale * raw_keys["base_num_query_heads"]
     raw_keys["num_kv_heads"] = 2**num_head_scale * raw_keys["base_num_kv_heads"]
     raw_keys["mlp_dim"] = 2**mlp_dim_scale * raw_keys["base_mlp_dim"]
+    raw_keys["moe_dim"] = 2**mlp_dim_scale * raw_keys["base_moe_dim"]
     raw_keys["num_decoder_layers"] = 2**layer_scale * raw_keys["base_num_decoder_layers"]
 
     # This is the first command that initializes the backend - it calls
@@ -669,6 +672,11 @@ def set_and_validate_pipeline_config(raw_keys):
   else:
     raw_keys["using_pipeline_parallelism"] = False
   return raw_keys
+
+
+def validate_deepseek_moe(raw_keys):
+  if raw_keys["decoder_block"] == "deepseek" and using_pipeline_parallelism(raw_keys):
+    raise ValueError("Currently we do not support DeepSeek MoE with pipeline parallelism.")
 
 
 def validate_megablox_parallelism(raw_keys):
