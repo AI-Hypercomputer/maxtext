@@ -91,14 +91,21 @@ class PipelineParallelismTest(unittest.TestCase):
     init_pipeline_params = my_pipeline.init(
         jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode
     )
+    partition_spec = my_pipeline.get_weight_sharding(inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
 
     # Create a dummy scalar loss function so we may take the gradient wrt weights
-    def pipeline_parallelism_dummy_loss(
-        params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode, dummy_targets
+    def pipeline_parallelism_dummy_loss_extra(
+        params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode, dummy_targets, partition_spec=None
     ):
-      outputs = my_pipeline.apply(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
+      outputs = my_pipeline.apply(
+          params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode, partition_spec=partition_spec
+      )
       loss = jnp.linalg.norm(outputs - dummy_targets)
       return loss
+
+    import functools
+
+    pipeline_parallelism_dummy_loss = functools.partial(pipeline_parallelism_dummy_loss_extra, partition_spec=partition_spec)
 
     def regular_sequential_layers(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):
       def get_cur_layer_params(params, layer_idx):
@@ -180,6 +187,24 @@ class PipelineParallelismTest(unittest.TestCase):
         base_num_decoder_layers=8,
         num_pipeline_microbatches=8,
         per_device_batch_size=4,
+    )
+    config = pyconfig.config
+    self.assert_pipeline_same_output_and_grad(config)
+
+  @pytest.mark.tpu_only
+  def test_circular_ag_once(self):
+    # 2 stages, 8 microbatches, all gather once
+    pyconfig.initialize(
+        [sys.argv[0], "configs/base.yml"],
+        enable_checkpointing=False,
+        run_name="circular_ag_once",
+        max_target_length=128,
+        base_emb_dim=28,
+        ici_pipeline_parallelism=2,
+        base_num_decoder_layers=8,
+        num_pipeline_microbatches=8,
+        per_device_batch_size=4,
+        pipeline_fsdp_ag_once=True,
     )
     config = pyconfig.config
     self.assert_pipeline_same_output_and_grad(config)
