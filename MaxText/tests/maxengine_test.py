@@ -116,7 +116,7 @@ class MaxEngineTest(unittest.TestCase):
     )
 
     self.assertEqual(prefill_result["generated_tokens"], jnp.array([0]))
-    # test default strategy is gready
+    # test default strategy is gready which choose only one next token
     self.assertEqual(prefill_result["tokens"].size, 1)
     self.assertNotEqual(prefill_result["tokens"], jnp.array([0]))
     self.assertTrue(jnp.array_equal(first_token.data.size, 3))
