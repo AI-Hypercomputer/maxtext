@@ -144,7 +144,8 @@ def write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step
     steps_to_write = step
 
   if metrics_to_write:
-    write_metrics_to_tensorboard(writer, metrics_to_write, steps_to_write, config, is_training)
+    if config.enable_tensorboard:
+      write_metrics_to_tensorboard(writer, metrics_to_write, steps_to_write, config, is_training)
 
     if config.metrics_file:
       max_utils.write_metrics_locally(metrics_to_write, steps_to_write, config, local_metrics_file, is_training)
