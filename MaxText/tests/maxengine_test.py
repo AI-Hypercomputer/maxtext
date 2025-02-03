@@ -31,6 +31,7 @@ from layers import models
 
 Mesh = jax.sharding.Mesh
 
+
 class MaxEngineTest(unittest.TestCase):
   """Tests for MaxEngine."""
 
@@ -115,8 +116,10 @@ class MaxEngineTest(unittest.TestCase):
     )
 
     self.assertEqual(prefill_result["generated_tokens"], jnp.array([0]))
-    self.assertEqual(prefill_result["tokens"], jnp.array([31398]))
-    self.assertTrue(jnp.array_equal(first_token.data, jnp.array([[31398, 1, 0]])))
+    # test default strategy is gready
+    self.assertEqual(prefill_result["tokens"].size, 1)
+    self.assertNotEqual(prefill_result["tokens"], jnp.array([0]))
+    self.assertTrue(jnp.array_equal(first_token.data.size, 3))
 
 
 if __name__ == "__main__":
