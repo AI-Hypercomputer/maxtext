@@ -228,6 +228,7 @@ class MoeBlockTest(unittest.TestCase):
         mesh=mesh,
         kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
         kernel_axes=("embed", "mlp"),
+        intermediate_dim=cfg.mlp_dim,
         dtype=cfg.dtype,
     )
 
@@ -270,6 +271,7 @@ class MoeBlockTest(unittest.TestCase):
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
+        per_device_batch_size=4,
     )
 
     cfg = pyconfig.config
@@ -295,6 +297,7 @@ class MoeBlockTest(unittest.TestCase):
         dtype="bfloat16",
         megablox=False,
         sparse_matmul=False,
+        per_device_batch_size=4,
     )
 
     cfg = pyconfig.config
