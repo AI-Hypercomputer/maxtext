@@ -383,6 +383,45 @@ class PagedAttentionOp(nn.Module):
     key_pages_var.value = key_pages_updated
     value_pages_var.value = value_pages_updated
     return key_pages_var, value_pages_var
+  
+  def release_slot(
+      self,
+      slot: int,
+      page_state: page_managers.PageState,
+  ) -> page_managers.PageState:
+    """Releases all pages assigned to a slot and updates page state.
+    
+    Args:
+      slot: The slot number to release
+      page_state: Current page state
+      
+    Returns:
+      Updated page state with released pages
+    """
+    # Reset page map entries for this slot
+    slot_pages = page_state.page_map[slot]
+    used_pages = slot_pages[slot_pages > 0]
+    
+    # Update page status to mark pages as free
+    new_page_status = page_state.page_status.at[used_pages].set(0)
+    
+    # Reset page map
+    new_page_map = page_state.page_map.at[slot].set(0)
+    
+    # Reset other state
+    new_sequence_lengths = page_state.sequence_lengths.at[slot].set(0)
+    new_num_pages_used = page_state.num_pages_used.at[slot].set(0) 
+    new_current_page = page_state.current_page.at[slot].set(0)
+    new_current_page_position = page_state.current_page_position.at[slot].set(0)
+
+    return page_managers.PageState(
+        page_status=new_page_status,
+        page_map=new_page_map, 
+        sequence_lengths=new_sequence_lengths,
+        num_pages_used=new_num_pages_used,
+        current_page=new_current_page,
+        current_page_position=new_current_page_position
+    )
 
 
 class AttentionOp(nn.Module):

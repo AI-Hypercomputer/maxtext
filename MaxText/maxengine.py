@@ -26,6 +26,7 @@ from layers import models, quantizations
 
 import jax
 import jax.numpy as jnp
+from jax.experimental import host_callback
 from jax.sharding import PartitionSpec as P
 
 import common_types
@@ -38,6 +39,13 @@ from jetstream.engine import token_utils
 import max_utils
 import inference_utils
 import pyconfig
+
+
+import logging
+
+# Configure logging at the beginning of your main script or globally
+logging.basicConfig(filename='maxengine_debug.log', level=logging.INFO, 
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 
 import warnings
 
@@ -817,6 +825,78 @@ class MaxEngine(engine_api.Engine):
     self.kv_cache_annotations_named = jax.tree_util.tree_map(lambda x: tuple(x.names), cache, is_leaf=is_lp)
     zeroed = max_utils.unbox_logicallypartioned(init_state)
     return zeroed
+  
+  def free_slot(self, decode_state: dict, slot: int) -> None:
+    """Release all pages and cached KV data for the given slot with enhanced safety checks.
+    
+    Args:
+        decode_state: Current decode state containing cache information
+        slot: Slot number to free
+    """
+    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+        cache = decode_state["cache"]
+        
+        if all(k in cache for k in ["page_status", "page_map"]):
+            # Get current page state
+            page_map = cache["page_map"].value
+            page_status = cache["page_status"].value
+            
+            # Identify pages that need clearing
+            slot_pages = page_map[slot]
+            
+            # Track both owned and potentially influenced pages
+            pages_owned = slot_pages == 1
+            
+            # Clear all pages this slot had any interaction with
+            cache["page_status"].value = jnp.where(pages_owned, 0, page_status)
+            cache["page_map"].value = page_map.at[slot].set(0)
+            
+            # Force clear position and length tracking
+            cache["sequence_lengths"].value = cache["sequence_lengths"].value.at[slot].set(0)
+            cache["num_pages_used"].value = cache["num_pages_used"].value.at[slot].set(0)
+            cache["current_page"].value = cache["current_page"].value.at[slot].set(0)
+            cache["current_page_position"].value = cache["current_page_position"].value.at[slot].set(0)
+            
+            # Ensure KV caches are fully cleared for this slot's pages
+            if "key_pages" in cache:
+                owned_pages_mask = pages_owned[None, :, None, None]
+                cache["key_pages"].value = jnp.where(
+                    owned_pages_mask,
+                    jnp.zeros_like(cache["key_pages"].value),
+                    cache["key_pages"].value
+                )
+            
+            if "value_pages" in cache:
+                cache["value_pages"].value = jnp.where(
+                    owned_pages_mask,
+                    jnp.zeros_like(cache["value_pages"].value),
+                    cache["value_pages"].value
+                )
+            
+            # Explicitly clear all KV cache entries
+            prefill_axes = [int(i) for i in self.config.prefill_cache_axis_order.split(",")]
+            ar_axes = [int(i) for i in self.config.ar_cache_axis_order.split(",")]
+            prefill_batch_idx = prefill_axes.index(0)
+            ar_batch_idx = ar_axes.index(0)
+            
+            # Handle both prefill and AR caches
+            for key in ["cached_prefill_key", "cached_prefill_value",
+                       "cached_ar_key", "cached_ar_value"]:
+                if key not in cache:
+                    continue
+                    
+                batch_idx = prefill_batch_idx if "prefill" in key else ar_batch_idx
+                cur_cache = cache[key].value
+                
+                # Create zero slice with exact shape
+                zero_slice = jnp.zeros_like(
+                    jax.lax.dynamic_slice_in_dim(cur_cache, slot, 1, batch_idx)
+                )
+                
+                # Force clear the entire slot section
+                cache[key].value = jax.lax.dynamic_update_slice_in_dim(
+                    cur_cache, zero_slice, slot, batch_idx
+                )
 
   @property
   def max_concurrent_decodes(self) -> int:
@@ -884,7 +964,7 @@ def create_engine_from_config_flags(batch_size, max_prefill_predict_length, max_
     k, v = cmd_arg.split("=")
     args[k.strip()] = v.strip()
   assert "load_parameters_path" in args, "load_parameters_path must be defined"
-  updated_args = ["MaxText/maxengine_server.py", "../configs/base.yml"]
+  updated_args = ["MaxText/maxengine_server.py", "/mnt/disks/persist/maxtext/MaxText/configs/base.yml"]
   for k, v in args.items():
     option = f"{k}={v}"
     updated_args.append(option)

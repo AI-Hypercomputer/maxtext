@@ -822,5 +822,247 @@ class PagedAttentionTest(unittest.TestCase):
     self.assertTrue(jnp.all(jnp.abs(max_vals) < 1e5), "Attention weights may be experiencing numerical overflow")
 
 
+  def test_multi_slot_cache_isolation(self):
+    """Test that cache entries remain isolated between slots."""
+    num_slots = 4
+    seq_len = self.cfg['max_prefill_predict_length']
+    num_heads = self.cfg['num_query_heads']
+    head_dim = self.cfg['head_dim']
+    
+    # Track outputs for comparison
+    slot_outputs = []
+    
+    # Initialize single page state to handle all slots
+    page_state = PageState(
+        page_status=jnp.zeros(self.cfg['num_pages'], dtype=jnp.int32),
+        page_map=jnp.zeros((num_slots, self.cfg['num_pages']), dtype=jnp.int32),
+        sequence_lengths=jnp.ones(num_slots, dtype=jnp.int32) * seq_len,
+        num_pages_used=jnp.zeros(num_slots, dtype=jnp.int32),
+        current_page=jnp.arange(num_slots, dtype=jnp.int32),  # Each slot gets its own initial page
+        current_page_position=jnp.zeros(num_slots, dtype=jnp.int32)
+    )
+    
+    # Create queries with distinct patterns for each slot
+    queries = []
+    for slot in range(num_slots):
+        rng_slot = jax.random.fold_in(self.rng, slot)
+        queries.append(jax.random.normal(rng_slot, (1, seq_len, num_heads, head_dim)) * (slot + 1))
+    queries = jnp.concatenate(queries, axis=0)  # Combine into batch
+    
+    # Initialize and run attention
+    variables = self.attention_op.init(
+        self.rng, queries, queries, queries, None,
+        common_types.MODEL_MODE_PREFILL, page_state
+    )
+    
+    output_tuple, _ = self.attention_op.apply(
+        variables, queries, queries, queries, None,
+        common_types.MODEL_MODE_PREFILL, page_state,
+        mutable=["cache"]
+    )
+    
+    # Verify outputs are different for each slot
+    output = output_tuple[0]
+    for i in range(num_slots - 1):
+        for j in range(i + 1, num_slots):
+            self.assertFalse(
+                jnp.allclose(output[i], output[j], rtol=1e-5, atol=1e-5),
+                f"Slots {i} and {j} produced identical outputs"
+            )
+
+  def test_prefill_to_ar_transition_multi_slot(self):
+    """Test transition from prefill to autoregressive generation across multiple slots."""
+    num_slots = 4
+    seq_len = self.cfg['max_prefill_predict_length']
+    num_heads = self.cfg['num_query_heads']
+    head_dim = self.cfg['head_dim']
+    
+    # Initialize single page state for all slots
+    page_state = PageState(
+        page_status=jnp.zeros(self.cfg['num_pages'], dtype=jnp.int32),
+        page_map=jnp.zeros((num_slots, self.cfg['num_pages']), dtype=jnp.int32),
+        sequence_lengths=jnp.ones(num_slots, dtype=jnp.int32) * seq_len,
+        num_pages_used=jnp.zeros(num_slots, dtype=jnp.int32),
+        current_page=jnp.arange(num_slots, dtype=jnp.int32),
+        current_page_position=jnp.zeros(num_slots, dtype=jnp.int32)
+    )
+    
+    # Create prefill inputs for all slots
+    prefill_inputs = []
+    for slot in range(num_slots):
+        rng_slot = jax.random.fold_in(self.rng, slot)
+        prefill_inputs.append(
+            jax.random.normal(rng_slot, (1, seq_len, num_heads, head_dim)) * (slot + 1)
+        )
+    prefill_inputs = jnp.concatenate(prefill_inputs, axis=0)
+    
+    # Do prefill for all slots
+    variables = self.attention_op.init(
+        self.rng, prefill_inputs, prefill_inputs, prefill_inputs, None,
+        common_types.MODEL_MODE_PREFILL, page_state
+    )
+    
+    _, mutated_vars = self.attention_op.apply(
+        variables, prefill_inputs, prefill_inputs, prefill_inputs, None,
+        common_types.MODEL_MODE_PREFILL, page_state,
+        mutable=["cache"]
+    )
+    
+    # Create AR inputs for all slots
+    ar_inputs = []
+    for slot in range(num_slots):
+        rng_slot = jax.random.fold_in(self.rng, slot + num_slots)
+        ar_inputs.append(
+            jax.random.normal(rng_slot, (1, 1, num_heads, head_dim)) * (slot + 1)
+        )
+    ar_inputs = jnp.concatenate(ar_inputs, axis=0)
+    
+    # Update page state for AR step
+    ar_page_state = PageState(
+        page_status=page_state.page_status,
+        page_map=page_state.page_map,
+        sequence_lengths=page_state.sequence_lengths + 1,  # Increment all lengths
+        num_pages_used=page_state.num_pages_used,
+        current_page=page_state.current_page,
+        current_page_position=page_state.current_page_position + 1  # Increment all positions
+    )
+    
+    ar_output_tuple, _ = self.attention_op.apply(
+        mutated_vars, ar_inputs, ar_inputs, ar_inputs, None,
+        common_types.MODEL_MODE_AUTOREGRESSIVE, ar_page_state,
+        mutable=["cache"]
+    )
+    
+    ar_outputs = ar_output_tuple[0]
+    
+    # Verify AR outputs differ between slots
+    for i in range(num_slots - 1):
+        for j in range(i + 1, num_slots):
+            self.assertFalse(
+                jnp.allclose(ar_outputs[i], ar_outputs[j], rtol=1e-5, atol=1e-5),
+                f"AR outputs for slots {i} and {j} are identical"
+            )
+  
+  def test_cache_state_preservation(self):
+    """Test cache state preservation across multiple AR steps."""
+    num_slots = 4
+    seq_len = self.cfg['max_prefill_predict_length']
+    num_heads = self.cfg['num_query_heads']
+    head_dim = self.cfg['head_dim']
+    num_ar_steps = 3
+    tokens_per_page = self.cfg['tokens_per_page']
+    
+    # Initialize single page state for all slots
+    page_state = PageState(
+        page_status=jnp.zeros(self.cfg['num_pages'], dtype=jnp.int32),
+        page_map=jnp.zeros((num_slots, self.cfg['num_pages']), dtype=jnp.int32),
+        sequence_lengths=jnp.ones(num_slots, dtype=jnp.int32) * seq_len,
+        num_pages_used=jnp.zeros(num_slots, dtype=jnp.int32),
+        current_page=jnp.arange(num_slots, dtype=jnp.int32),  # Each slot starts on a different page
+        current_page_position=jnp.zeros(num_slots, dtype=jnp.int32)
+    )
+    
+    # Create prefill inputs for all slots
+    prefill_inputs = []
+    for slot in range(num_slots):
+        rng_slot = jax.random.fold_in(self.rng, slot)
+        prefill_inputs.append(
+            jax.random.normal(rng_slot, (1, seq_len, num_heads, head_dim)) * (slot + 1)
+        )
+    prefill_inputs = jnp.concatenate(prefill_inputs, axis=0)
+    
+    # Do prefill
+    variables = self.attention_op.init(
+        self.rng, prefill_inputs, prefill_inputs, prefill_inputs, None,
+        common_types.MODEL_MODE_PREFILL, page_state
+    )
+    
+    _, current_vars = self.attention_op.apply(
+        variables, prefill_inputs, prefill_inputs, prefill_inputs, None,
+        common_types.MODEL_MODE_PREFILL, page_state,
+        mutable=["cache"]
+    )
+    
+    # Track AR outputs per slot
+    ar_outputs = [[] for _ in range(num_slots)]
+    current_page_state = page_state
+    
+    # Track per-slot sequence lengths
+    sequence_lengths = jnp.ones(num_slots, dtype=jnp.int32) * seq_len
+    
+    # Do AR steps
+    for step in range(num_ar_steps):
+        # Create AR inputs for all slots
+        ar_inputs = []
+        for slot in range(num_slots):
+            rng_slot = jax.random.fold_in(self.rng, step * num_slots + slot)
+            ar_inputs.append(
+                jax.random.normal(rng_slot, (1, 1, num_heads, head_dim)) * 
+                (slot + 1) * ((step + 1) * 100)  # Make patterns very distinct
+            )
+        ar_inputs = jnp.concatenate(ar_inputs, axis=0)
+        
+        # Calculate indices for each slot
+        sequence_lengths = sequence_lengths + 1
+        token_indices = sequence_lengths - 1
+        page_indices = token_indices // tokens_per_page
+        page_positions = token_indices % tokens_per_page
+        
+        # Update page mapping for new positions
+        new_page_map = current_page_state.page_map
+        for slot in range(num_slots):
+            new_page_map = new_page_map.at[slot, page_indices[slot]].set(page_indices[slot]) 
+        
+        # Update pages used count
+        new_pages_used = current_page_state.num_pages_used.at[:].set(
+            jnp.maximum(current_page_state.num_pages_used, page_indices + 1)
+        )
+        
+        # Create updated page state
+        current_page_state = PageState(
+            page_status=current_page_state.page_status,
+            page_map=new_page_map,
+            sequence_lengths=sequence_lengths,
+            num_pages_used=new_pages_used,
+            current_page=page_indices,
+            current_page_position=page_positions
+        )
+        
+        # Verify page state is updating correctly
+        for slot in range(num_slots):
+            self.assertEqual(
+                current_page_state.sequence_lengths[slot],
+                seq_len + step + 1,
+                f"Incorrect sequence length for slot {slot} at step {step}"
+            )
+            self.assertEqual(
+                current_page_state.current_page_position[slot],
+                page_positions[slot],
+                f"Incorrect page position for slot {slot} at step {step}"
+            )
+        
+        ar_output_tuple, current_vars = self.attention_op.apply(
+            current_vars, ar_inputs, ar_inputs, ar_inputs, None,
+            common_types.MODEL_MODE_AUTOREGRESSIVE, current_page_state,
+            mutable=["cache"]
+        )
+        
+        # Store outputs per slot
+        ar_output = ar_output_tuple[0]
+        for slot in range(num_slots):
+            ar_outputs[slot].append(ar_output[slot])
+    
+    # Verify outputs differ across steps for each slot
+    for slot in range(num_slots):
+        for step1 in range(num_ar_steps - 1):
+            for step2 in range(step1 + 1, num_ar_steps):
+                logits1 = ar_outputs[slot][step1]
+                logits2 = ar_outputs[slot][step2]
+                self.assertFalse(
+                    jnp.allclose(logits1, logits2, rtol=1e-5, atol=1e-5),
+                    f"AR outputs identical for slot {slot} at steps {step1} and {step2}"
+                )
+
+
 if __name__ == "__main__":
   unittest.main()

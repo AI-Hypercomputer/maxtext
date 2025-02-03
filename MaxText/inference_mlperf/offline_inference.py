@@ -20,6 +20,7 @@ from jax import numpy as jnp
 import numpy as np
 import queue
 import os
+import sys
 import functools
 import threading
 import traceback
@@ -29,7 +30,6 @@ import random
 from jetstream.engine import engine_api
 
 import logging
-# pylint: disable=no-name-in-module
 from maxengine import set_engine_vars_from_base_engine
 
 log = logging.getLogger(__name__)
@@ -144,7 +144,7 @@ class OfflineInference:
   def _prefill_insert(self, params, tokens, slot, true_length, decode_state):
     """return decodestate."""
     padded_len = tokens.shape[0]
-    prefill_result, first_token = self.engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
+    prefill_result, first_token = self.engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, slot=slot)
     decode_state = self.engine.insert(prefill_result, decode_state, slot)
     return first_token, decode_state
 
@@ -171,6 +171,7 @@ class OfflineInference:
         true_lengths=true_lengths,
         num_prompts=num_prompts,
     )
+    print(f"\n_prefill_insert_batch: {num_prompts=}, {start_pos=}, {true_lengths=}, {decoder_positions=}, {decoder_segment_ids=}, {slots=}")
     decode_state = self.engine.insert_partial(
         prefill_results,
         decode_state,
@@ -311,17 +312,22 @@ class OfflineInference:
       nonlocal self
       nonlocal slot_to_id
       nonlocal empty_slots
+      query_responses = {}  # Dictionary to store responses for each query
+
       while self.live:
-        # log.info("Detokenize start")
         newly_empty = []
         result_tokens, is_first_token, row_id, _slot = self.detokenize_backlog.get(block=True)
-        # result_tokens = result_tokens.convert_to_numpy()
-        # log.info("Detokenize get from queue")
         if is_first_token:
           first_token = result_tokens.data[0][0].item()
           should_terminate = emit_first_token(row_id, first_token)
+          # Print the first token immediately:
+          decoded_first_token = self.tokenizer.decode([first_token])
+          # print(f"First token for query {row_id}: {decoded_first_token}", flush=True)
+          sys.stdout.flush()  # Ensure immediate output
+
           if not should_terminate:
             slot_to_id[_slot] = row_id
+            query_responses[row_id] = decoded_first_token # Initialize response with first token
           else:
             empty_slots.append(_slot)
           continue
@@ -330,12 +336,31 @@ class OfflineInference:
           log.debug(f"slot is {slot}, length is {length}")
           should_finish = False
           if is_valid:
+            # Print each generated token immediately:
+            decoded_token = self.tokenizer.decode([token.item()])
+            # print(f"Token for query {id_}: {decoded_token}", flush=True)
+            sys.stdout.flush()  # Ensure immediate output
+
+            # Append token to the corresponding response, adding a space if necessary:
+            if id_ in query_responses:
+                if query_responses[id_] and not query_responses[id_].endswith(" "):
+                  query_responses[id_] += " " + decoded_token
+                else:
+                  query_responses[id_] += decoded_token
+
             should_finish = emit_token(id_, token.item())
           if should_finish or length >= self.max_decode_length:
             newly_empty.append(slot)
+            # Print the complete response for the finished query:
+            if id_ in query_responses:
+              print(f"Complete response for query {id_} @ slot {slot}: {query_responses[id_]}", flush=True)
+              sys.stdout.flush()
+              del query_responses[id_]  # Remove to avoid reprinting
             log.debug(f"Detokenize free up {slot}, length {length}")
         # Add slots of those that are empty to empty
         for slot in newly_empty:
+          log.info(f"Deleting {slot=}")
+          self.engine.free_slot(self.decode_state, slot)
           del slot_to_id[slot]
           empty_slots.append(slot)
         if newly_empty and self.detokenize_backlog.qsize() == 0 and len(slot_to_id.items()) == 0:
@@ -355,7 +380,7 @@ class OfflineInference:
         # If slots are all full, decode until there are free slots
         # to insert
         num_decodes += 1
-        log.info(f"decode-{desc}-{num_decodes}")
+        # log.info(f"decode-{desc}-{num_decodes}")
         decode()
       # do one insert
       padded_len = len(row.tokens)
