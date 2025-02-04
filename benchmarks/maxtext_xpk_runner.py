@@ -392,7 +392,8 @@ def generate_xpk_workload_cmd(
         f'--docker-image={pw_config.runner_image}'
     )
   else:
-    docker_image_flag = f'--base-docker-image="{wl_config.base_docker_image}"'
+    docker_image_flag = f'--docker-image="{wl_config.base_docker_image}"'
+
 
 
   print(f'User command: {user_command}')
@@ -477,8 +478,8 @@ def on_device_benchmark_runner(
 # Run maxtext_xpk_runner.py as a script for executing multiple workloads pythonically!
 def main() -> int:
   # Variables to configure:
-  output_bucket = 'gs://DIR'
-  base_docker_image = _DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME
+  output_bucket = 'gs://maxtext-experiments-multipod'
+  base_docker_image = "gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2025-02-04"
 
   # Set up the clusters to run workloads on!
   v5e_cluster_config = XpkClusterConfig(
@@ -489,17 +490,18 @@ def main() -> int:
   )
 
   v6e_cluster_config = XpkClusterConfig(
-      cluster_name='v6e-256',
-      project='my-cool-project',
-      zone='us-central2-b',
+      cluster_name='bodaborg-v6e-256-rxc',
+      project='tpu-prod-env-one-vm',
+      zone='asia-northeast1-b',
       device_type='v6e-256',
   )
+
 
   xpk_workload_cmds = []
   xpk_workload_names = []
 
   list_of_models = [
-    model_configs.llama2_70b_4096_sc,
+    model_configs.deepseek_a1,
     # model_configs.default_128
   ]
 
@@ -524,8 +526,8 @@ def main() -> int:
     # Run workloads on the below clusters
     for cluster_config in [
       # v5e_cluster_config,
-      # v6e_cluster_config,
-      v6e_cluster_config_yucmhab,
+      v6e_cluster_config,
+      #v6e_cluster_config_yucmhab,
       # another_config,
     ]:
       # Run workloads in the following slice configurations

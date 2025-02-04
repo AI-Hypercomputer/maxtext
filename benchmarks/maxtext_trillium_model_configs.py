@@ -1136,3 +1136,41 @@ gemma2_27b_8192 = _add_to_model_dictionary(
     ),
   )
 )
+
+deepseek_a1 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="deepseek_a1",
+    model_type="default",
+    tuning_params={
+        "steps": 10,
+        "per_device_batch_size": 6,
+        "max_target_length": 8192,
+        "enable_checkpointing": False,
+        "dataset_type": "synthetic",
+        "base_output_directory": "gs://maxtext-experiments-multipod",
+        "decoder_block": "mistral",
+        "num_experts": 256, # 256
+        "num_experts_per_tok": 8,
+        "base_emb_dim": 7168, #7168
+        "base_mlp_dim": 2048,
+        "sparse_matmul": True, # False
+        "megablox": True, # True
+        "capacity_factor": 1,
+        "profiler": "xplane",
+        "base_num_decoder_layers": 60,
+        "ici_expert_parallelism": 4,
+        "opt_type": "sgd",
+        "allow_split_physical_axes": True,
+        "custom_mesh": "hybrid_ring_64x4",
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+    },
+    xla_flags=(
+        xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(81920)
+        + xla_flags_library.REDUCE_SCATTER_FUSION
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+    ),
+  )
+)
