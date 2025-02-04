@@ -194,6 +194,9 @@ As in the TPU case, note that the compilation environment must match the executi
 ## Automatically Upload Logs to Vertex Tensorboard
 MaxText supports automatic upload of logs collected in a directory to a Tensorboard instance in Vertex AI. Follow [user guide](getting_started/Use_Vertex_AI_Tensorboard.md) to know more.
 
+## Monitor Goodput of Your Workload
+If you are interested in monitoring Goodput metrics of your workload, follow this [user guide](getting_started/Monitor_Goodput.md).
+
 ## Announcement
 
 ### February 2025

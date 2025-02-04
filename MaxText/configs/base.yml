@@ -475,8 +475,10 @@ target_eval_loss: 0.  # early stop once reaching target eval_loss
 # Goodput parameters
 enable_goodput_recording: True
 monitor_goodput: True
-goodput_upload_interval_seconds: 60
+goodput_upload_interval_seconds: 30
 enable_pathways_goodput: False
+monitor_step_time_deviation: True
+step_deviation_interval_seconds: 30
 
 # GCP workload monitoring
 report_heartbeat_metric_for_gcp_monitoring: False
