@@ -323,6 +323,11 @@ use_dpo: False
 dpo_label_smoothing: 0.0
 dpo_beta: 0.1
 
+# Group Relative Policy Optimization (GRPO)
+num_generations: 16
+temperature: 0.9
+
+
 # dataset_type must be synthetic, hf, grain, tfds
 # details in: https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md
 dataset_type: tfds
@@ -445,7 +450,7 @@ compiled_trainstep_file: "" # Name of saved serialized compiled train_step, e.g.
 compile_topology: '' # Target hardware version, e.g. 'v5e-256'
 compile_topology_num_slices: -1 # Number of target slices, set to a positive integer.
 
-decode_sampling_strategy: "greedy" # decode_sampling_strategy should be one of greedy, weighted, nucleus, or topk
+decode_sampling_strategy: "weighted" # decode_sampling_strategy should be one of greedy, weighted, nucleus, or topk
 decode_sampling_nucleus_p: -1 # set if you're doing nucleus / top-p
 decode_sampling_top_k: 0 # set if you're doing top-k
 decode_sampling_temperature: 1.

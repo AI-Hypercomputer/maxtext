@@ -70,6 +70,9 @@ from layers import quantizations
 from ml_goodput_measurement import goodput
 from ml_goodput_measurement import monitoring
 
+import maxengine
+import tokenizer
+
 # pylint: disable=too-many-positional-arguments
 
 Transformer = models.Transformer
@@ -271,6 +274,10 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
       output_metrics["scalar"][f"activ_mean/layer_{layer_num:03d}"] = layer["activation_mean"][0]
       output_metrics["scalar"][f"activ_stdev/layer_{layer_num:03d}"] = layer["activation_stdev"][0]
 
+# -----------------------------------------------------------------------------
+# DPO
+# -----------------------------------------------------------------------------
+
 
 def _split_dpo_state(state):
   reference_params = state.params["reference_params"]
@@ -453,6 +460,327 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       "moe_lb_loss": moe_lb_loss,
   }
   return loss, aux
+
+# -----------------------------------------------------------------------------
+# GRPO
+# -----------------------------------------------------------------------------
+
+EPS = 1e-8
+
+def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_train=True):
+  """
+  GRPO loss function for training.
+ 
+  This function performs the following steps:
+ 
+    1. From the batch (data["prompt"]) extract B prompts.
+    2. For each prompt, generate `config.num_generations` completions using autoregressive sampling.
+    3. Compute the per-token log-probabilities for the full sequence (prompt + completion) both with the
+       current model (policy) and the reference model.
+    4. Restrict the log-probabilities to the generated completion tokens.
+    5. Compute a per-token KL divergence:
+         kl = exp(ref_logp - policy_logp) - (ref_logp - policy_logp) - 1.
+    6. Decode the (repeated) prompts and generated completions back to text (using tokenizer.batch_decode)
+       and compute a scalar reward for each generated completion via reward_fn.
+    7. Group the rewards (each prompt yields “G = num_generations” completions), compute the mean and std,
+       and then compute a normalized advantage.
+    8. Compute a per-token loss that is given by
+         - [exp(policy_logp - stop_gradient(policy_logp)) * advantage - beta * kl]
+       (the jax.lax.stop_gradient ensures that only the advantage contributes to gradients).
+    9. Finally the loss is the average (over examples) of the mean per-token loss - where only tokens before the
+       first eos (according to tokenizer.eos_id) are taken into account.
+ 
+  Args:
+    model: A nn.Module.
+    config: The training configuration (contains hyper-parameters and reward and tokenizer objects).
+    data: A batch dict with key "prompt" containing prompts as token-ids of shape [B, L_prompt].
+    dropout_rng: a PRNGKey.
+    params: The current model parameters.
+    reference_params: The reference model parameters.
+    is_train: Boolean indicating training mode.
+
+  Returns:
+    loss: A scalar loss.
+    aux: A dictionary with auxiliary metrics.
+  """
+
+  # Split the dropout key.
+  rng1, rng_gen = random.split(dropout_rng)
+  
+  # --- (1) Prepare prompts and tokenizer
+  prompts = data["prompt"]
+  if is_train:
+    # restrict batch size when per_device_batch_size<1
+    prompts = prompts[: config.micro_batch_size_to_train_on, :]
+  B, L_prompt = prompts.shape
+  # calculate the L_prompt which is the lenght of the prompt, we assume that the prompts are left padded to have same length, 
+  # then there is padding on the right to pad till max_target_length
+  def get_valid_length(tokens, pad_token_id):
+    """
+    Finds the index of the first padding token from the right in a 1D JAX array tokens.
+
+    Args:
+      tokens: A 1D JAX array of tokens (integers).
+      pad_id: The ID of the padding token.
+
+    Returns:
+      The index of the first padding token from the right, 
+      or len(tokens) if no padding token is found.
+    """
+
+    is_padding = (tokens == pad_token_id)
+    padding_indices = jnp.where(is_padding, size=tokens.shape[0], fill_value=tokens.shape[0])[0]
+    result = jnp.where(padding_indices.shape[0] == 0, tokens.shape[0], padding_indices[0])
+
+    # Convert the result to a Python int
+    return int(result)
+
+  tokenizer_model = tokenizer.build_tokenizer(config.tokenizer_path, config.add_bos, config.add_eos)
+
+  L_prompt = get_valid_length(prompts[0, 0], tokenizer_model.pad_id)
+  # TODO: do we need to truncate prompts in case for some dataset prompts are too long?
+
+  # --- (2) Generate completions.
+  # For each prompt generate config.num_generations completions.
+  # This helper returns a tensor of shape [B x G, L_total] where L_total = L_prompt + max_completion_length 
+  # TODO: make L_total <= max_target_length
+  completions = generate_completions( 
+                                     prompts, 
+                                     config,
+                                     rngs=rng_gen,
+                                     )
+  # completions shape: [B x G, L_total]
+  L_total = completions.shape[1]
+  L_completion = L_total - L_prompt
+
+  # --- (3) Compute per-token log probabilities.
+  #TODO: need to create the inputs_position and inputs_segmentation since the autoregressive decoding has added legit tokens now
+  
+  def extend_substring(tensor: jnp.ndarray, pad_token_id: int) -> jnp.ndarray:
+    """
+    Extends a substring of consecutive integers (starting from 0) along the 
+    last dimension of a tensor up to the first padding index from the right.
+
+    Args:
+        tensor: The input JAX array.
+        pad_token_id: The ID of the padding token.
+
+    Returns:
+        A new JAX array with the substring extended.
+    """
+
+    def find_start_index(row):
+      """Finds the start index of the substring (first occurrence of 0)."""
+      return jnp.where(row == 0, size=1, fill_value=row.shape[0])[0][0]
+
+    def extend_row(row):
+      """Extends the substring for a single row."""
+      i = get_valid_length(row, pad_token_id) - 1 
+      start_index = find_start_index(row)
+      
+      extended_substring = jnp.arange(0, jnp.maximum(0, i - start_index + 1))
+
+      mask = jnp.arange(row.shape[0]) >= start_index
+      mask = mask & (jnp.arange(row.shape[0]) <= i)
+
+      padded_extended_substring = jnp.pad(
+            extended_substring,
+            (0, jnp.maximum(0, jnp.sum(mask) - extended_substring.shape[0])),
+            mode='constant'
+      )
+      
+      return jnp.where(mask, padded_extended_substring, row)
+
+    # Apply extend_row to each row of the tensor using jax.vmap
+    extended_tensor = jax.vmap(extend_row)(tensor)
+
+    return extended_tensor
+
+  inputs_position = extend_substring(data["inputs_position"], tokenizer_model.pad_id)
+  inputs_segmentation = extend_substring(data["inputs_segmentation"], tokenizer_model.pad_id)
+
+  # compute_log_probs returns logits.
+  # We compute the log-probabilities for the entire generated sequence, then shift as usual.
+  rng1, rng_fwd = random.split(rng1)
+  token_logps_policy = compute_log_probs(model, params, completions, inputs_position, inputs_segmentation, config, is_train=is_train, rngs={"dropout": rng1, "params": rng_fwd})
+  token_logps_ref = compute_log_probs(model, {"params": reference_params}, completions, inputs_position, inputs_segmentation, config, is_train=False, rngs={"dropout": rng1, "params": rng_fwd})
+ 
+  # Because of the shifting, token_logps have shape [B*G, L_total - 1]. The completion log-probs
+  # correspond to indices starting from (L_prompt - 1)
+  comp_logps_policy = token_logps_policy[:, (L_prompt - 1):]  # shape [B*G, L_completion]
+  comp_logps_ref = token_logps_ref[:, (L_prompt - 1):]
+
+  # --- (4) Compute per-token KL divergence for each token in the generated completion.
+  per_token_kl = jnp.exp(comp_logps_ref - comp_logps_policy) - (comp_logps_ref - comp_logps_policy) - 1
+
+  # --- (5) Create a mask over the completion tokens.
+  # For each generated completion (of length L_completion) we mask all tokens that come after the first eos.
+  eos_id = tokenizer_model.eos_id
+  def get_completion_mask(seq):
+    # seq: [L_completion]
+    L = seq.shape[0]
+    # Create an index array [0,1,...,L-1]
+    idx = jnp.arange(L)
+    # If any token equals eos, take its index; if none, set to L.
+    # Use jnp.where to replace non-eos with L.
+    eos_positions = jnp.where(seq == eos_id, idx, L)
+    first_eos = jnp.min(eos_positions)
+    return (idx <= first_eos).astype(jnp.float32)
+  completion_mask = jax.vmap(get_completion_mask)(completions[:, L_prompt:])
+  # completion_mask shape: [BxG, L_completion]
+
+  # --- (6) Decode prompts and completions (as text) to compute rewards.
+  # Repeat prompts for each generation.
+  repeated_prompts = jnp.repeat(prompts, config.num_generations, axis=0)  # shape: [B*G, L_prompt]
+  # TODO: Does our tokenizer have batch_decode? Assuming that tokenizer_model.batch_decode accepts numpy arrays.)
+  prompts_text = tokenizer_model.batch_decode(jax.device_get(repeated_prompts), skip_special_tokens=True)
+  completions_text = tokenizer_model.batch_decode(jax.device_get(completions[:, L_prompt:]), skip_special_tokens=True)
+  # Compute rewards (a scalar per generated completion); assume reward_fn is pure python.
+  rewards = jaccard_reward_fn(prompts_text, completions_text)
+  rewards = jnp.array(rewards)  # shape [B*G]
+
+  # --- (7) Group rewards and compute normalized advantage.
+  G = config.num_generations
+  rewards_grouped = rewards.reshape(-1, G)  # shape [B, G]
+  group_mean = jnp.mean(rewards_grouped, axis=1)  # shape [B]
+  group_std = jnp.std(rewards_grouped, axis=1)    # shape [B]
+  repeated_group_mean = jnp.repeat(group_mean, G)   # shape [B*G]
+  repeated_group_std = jnp.repeat(group_std, G)     # shape [B*G]
+  advantages = (rewards - repeated_group_mean) / (repeated_group_std + 1e-4)  # shape [B*G]
+ 
+  # --- (8) Compute per-token loss.
+  # We follow the TRL GRPO loss:
+  #   loss_token = - [ exp(policy_logp - stop_gradient(policy_logp)) * advantage - beta * kl ]
+  # Make sure to expand advantage along the token dimension.
+  advantages_exp = advantages[:, None]  # shape [B*G, 1]
+  loss_tokens = -( jnp.exp(comp_logps_policy - jax.lax.stop_gradient(comp_logps_policy)) * advantages_exp - config.beta * per_token_kl )
+  # Apply the completion mask.
+  loss_tokens_masked = loss_tokens * completion_mask
+  # Average over tokens per generated completion.
+  loss_per_example = jnp.sum(loss_tokens_masked, axis=1) / (jnp.sum(completion_mask, axis=1) + EPS)
+  loss = jnp.mean(loss_per_example)
+
+  # --- (9) Compute auxiliary metrics.
+  avg_kl = jnp.mean((per_token_kl * completion_mask) / (jnp.sum(completion_mask, axis=1, keepdims=True) + EPS))
+  avg_reward = jnp.mean(rewards)
+  avg_advantage = jnp.mean(advantages)
+  avg_completion_length = jnp.mean(jnp.sum(completion_mask, axis=1))
+ 
+  aux = {
+      "total_loss": loss,
+      "avg_reward": avg_reward,
+      "avg_reward_std": jnp.mean(repeated_group_std),
+      "avg_advantage": avg_advantage,
+      "avg_kl": avg_kl,
+      "completion_length": avg_completion_length,
+  }
+
+  return loss, aux
+
+
+# --- GRPO Helpers ---
+def jaccard_reward_fn(str1, str2):
+  """
+    A simple Jaccard similarity for now
+    #TODO: Include more reward functions
+  """
+
+  return len(set(str1) & set(str2)) / len(set(str1) | set(str2)) if (str1 or str2) else 1.0
+
+def compute_log_probs(model, params, inputs, inputs_position, inputs_segmentation, config, is_train=False, rngs=None):
+  """
+  Given a sequence of tokens (shape [B, L]), this helper calls model.apply (with dropout enabled
+  if is_train) to obtain logits and then computes per-token log-probabilities.
+ 
+  Note: We assume that tokens have been already appropriately padded.
+  """
+  logits = model.apply(
+      params,
+      inputs,
+      inputs_position,
+      decoder_segment_ids = inputs_segmentation,
+      enable_dropout=(config.enable_dropout if is_train else False),
+      rngs=rngs,
+  )
+  if not is_train:
+    logits = jax.lax.stop_gradient(logits)
+  # Remove last time step since there is no target for the final position.
+  logits = logits[:, :-1, :]
+  targets = inputs[:, 1:]
+  log_probs = jax.nn.log_softmax(logits, axis=-1)
+  # Gather the log probabilities corresponding to each target token.
+  token_log_probs = jnp.take_along_axis(log_probs, targets[..., None], axis=-1)[..., 0]
+  return token_log_probs
+
+
+def generate_completions(prompts, config, rng):
+  """
+  Autoregressively generates completions for a batch of prompts.
+
+  Args:
+    prompts: Array of shape [B, S] containing token ids.
+    config: Configuration containing:
+         - num_generations: number of completions to generate per prompt.
+         - max_completion_length: maximum number of tokens to generate.
+         - temperature: sampling temperature.
+    rng: JAX PRNGKeys.
+ 
+  Returns:
+    A jnp.array of shape [B x num_generations, S] where S = length_of_prompt + max_completion_length.
+  """
+
+  engine = maxengine.MaxEngine(config)
+  rng, rng_load_params = jax.random.split(rng)
+  params = engine.load_params(rng_load_params)
+  
+  outputs = []
+  metadata = engine.get_tokenizer()
+  tokenizer_model = engine.build_tokenizer(metadata)
+
+  G = config.num_generations
+  # Repeat each prompt G times.
+  prompts = jnp.repeat(prompts, repeats=G, axis=0)  # shape [BxG, L_prompt]
+
+  #TODO: Improve the token generation by using batch inference
+
+  for i in range(prompts.shape[0]):
+    tokens = prompts[i]
+    #TODO: Need to find a better way to get true_length
+    true_length = tokenizer_model.encode(tokenizer_model.decode(tokens.tolist()),is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
+
+    # Split RNG before calling prefill
+    rng, rng_prefill = jax.random.split(rng)
+    prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
+    slot = 0
+
+    rng, rng_init_decode = jax.random.split(rng)
+    decode_state = engine.init_decode_state(rng_init_decode)
+    decode_state = engine.insert(prefill_result, decode_state, slot=slot)
+    
+    # Autoregressively generate tokens for max_target_length steps.
+    steps = range(config.max_prefill_predict_length, config.max_target_length)
+    sampled_tokens_list = []
+    sampled_tokens_list.append(first_token)
+    for _ in steps:
+      rng, rng_generate = jax.random.split(rng)
+      # Temperature scaling done by using `weighted` as sampling method
+      decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
+      sampled_tokens_list.append(sampled_tokens)
+
+    results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
+
+
+    output = tokenizer_model.decode(results)
+    # print(f"Input `{tokenizer_model.decode(tokens.tolist())}` -> `{output}`")
+    outputs.append(output)
+
+  #TODO: is the sharding correctly copied?
+  return jnp.array(outputs, device=prompts.sharding)
+
+
+# -----------------------------------------------------------------------------
+# Trainer and top level training functions
+# -----------------------------------------------------------------------------
 
 
 def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
