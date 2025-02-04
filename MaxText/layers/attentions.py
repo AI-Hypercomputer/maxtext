@@ -213,12 +213,13 @@ class AttentionOp(nn.Module):
       next_pos = 0
       if existing_prefix != None:
         next_pos = existing_prefix['next_pos'][0][0]
-
-      output_mask = jnp.ones((q_seq_len, kv_seq_len), jnp.int32)
-      # import pdb
-      # pdb.set_trace()
-      output_mask = jax.lax.dynamic_update_slice(output_mask, causal_mask, (0,next_pos))
-      jax.debug.print("output_mask_shape  in  generate mask before {output_mask_shape} ", output_mask_shape = output_mask.shape)
+        output_mask = jnp.ones((q_seq_len, kv_seq_len), jnp.int32)
+        output_mask = jax.lax.dynamic_update_slice(output_mask, causal_mask, (0,next_pos))
+      else:
+        output_mask = jnp.zeros((q_seq_len, kv_seq_len), jnp.int32)
+        output_mask = jax.lax.dynamic_update_slice(output_mask, causal_mask, (0,next_pos))
+      
+      jax.debug.print("output_mask_shape  in  generate mask before {output_mask_shape} {output_mask} ", output_mask_shape = output_mask.shape, output_mask=output_mask)
       output_mask = output_mask[None, None, None, :, :]
       jax.debug.print("output_mask_shape  in  generate mask after {output_mask_shape} ", output_mask_shape = output_mask.shape)
       return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
@@ -863,21 +864,7 @@ class AttentionOp(nn.Module):
 
     return jnp.transpose(cached_prefill_key_vars[0].value, (2,0,1,3)), jnp.transpose(cached_prefill_value_vars[0].value, (2,0,1,3)), decoder_segment_ids
 
-    return key, value, decoder_segment_ids
-
-  def update_prefill_key_value(self, 
-                               one_token_keys, 
-                               one_token_values, 
-                               cached_key_vars, 
-                               cached_value_vars, 
-                               one_hot_indices, 
-                               lengths):
-    cached_key_var, cached_key_scale_var = cached_key_vars
-    cached_value_var, cached_value_scale_var = cached_value_vars
-
-
-    
-    pass
+    # return key, value, decoder_segment_ids
   
   
   def update_ar_key_value(

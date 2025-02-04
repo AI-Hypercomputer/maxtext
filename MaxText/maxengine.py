@@ -245,9 +245,13 @@ class MaxEngine(engine_api.Engine):
 
     if rng is None:
       rng = jax.random.PRNGKey(0)
+    mul = 0
+    if existing_prefix is not None:
+      mul = 0
+    
 
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
-    positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
+    positions = jnp.expand_dims(jnp.arange(mul, mul+input_tokens.shape[1]), 0)
 
     zero_to_n = jnp.arange(0, padded_tokens.shape[0])
     ones_to_keep = zero_to_n < true_length

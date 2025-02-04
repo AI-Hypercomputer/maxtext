@@ -98,9 +98,11 @@ def main(argv: Sequence[str]) -> None:
       prefill_result, first_token = engine.prefill(existing_prefix=prefill_result, 
                                                    params=params, 
                                                    padded_tokens=chunk_metadata.chunk_padded, 
-                                                   true_length=true_length, 
+                                                   true_length=chunk_size, 
                                                    rng=rng_prefill, 
                                                    position_mask_cur=postion_mask)
+      # import pdb
+      # pdb.set_trace()
       if i == 0:
         prefill_result['next_pos'] = [[512]]
       jax.debug.print("{next_pos} after {i} ", next_pos=prefill_result['next_pos'], i=i)
