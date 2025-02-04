@@ -49,6 +49,7 @@ def preprocessing_pipeline(
     drop_remainder=False,
     generate_padding_example=False,
     use_dpo=None,
+    use_grpo=False,
 ):
   """pipeline for preprocessing HF dataset"""
 
@@ -84,7 +85,7 @@ def preprocessing_pipeline(
       data_column_names,
   )
   operations = []
-  if not use_dpo:
+  if not use_dpo and not use_grpo:
     assert len(data_column_names) == 1
     operations.append(_input_pipeline_utils.HFNormalizeFeatures(data_column_names[0]))
     data_column_names = ("inputs", "targets")
@@ -92,7 +93,7 @@ def preprocessing_pipeline(
     lists2array = lambda x: jax.tree.map(np.asarray, x, is_leaf=lambda x: isinstance(x, (list, tuple)))
     operations.append(grain.MapOperation(lists2array))
 
-  if packing and not use_dpo:
+  if packing and not use_dpo and not use_grpo:
     length_struct = {col: max_target_length for col in data_column_names}
     operations.append(
         grain.experimental.PackAndBatchOperation(
@@ -105,7 +106,7 @@ def preprocessing_pipeline(
     operations.append(_input_pipeline_utils.PadToMaxLength(max_target_length))
     operations.append(grain.Batch(batch_size=global_batch_size // jax.process_count(), drop_remainder=drop_remainder))
 
-  if shift and not use_dpo:
+  if shift and not use_dpo and not use_grpo:
     operations.append(_input_pipeline_utils.ShiftData(axis=1))
 
   # Since HuggingFace IterableDataset does not support access through index
@@ -167,6 +168,7 @@ def make_hf_train_iterator(
       add_eos=config.add_eos,
       generate_padding_example=True,
       use_dpo=config.use_dpo,
+      use_grpo=config.use_grpo,
   )
   return train_iter
 

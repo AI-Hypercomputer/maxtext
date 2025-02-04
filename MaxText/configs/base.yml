@@ -324,6 +324,7 @@ dpo_label_smoothing: 0.0
 dpo_beta: 0.1
 
 # Group Relative Policy Optimization (GRPO)
+use_grpo: False
 num_generations: 16
 temperature: 0.9 #from TRL
 grpo_beta: 0.04 #from TRL

@@ -799,11 +799,14 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
 
   """
   reference_params, reference_params_sharding, extra_dpo_args, _loss_fn = [], [], [], loss_fn
-  if config.use_dpo:
+  if config.use_dpo or config.use_grpo:
     state, reference_params = _split_dpo_state(state)
     state_mesh_shardings, reference_params_sharding = _split_dpo_state(state_mesh_shardings)
     extra_dpo_args = [reference_params]
-    _loss_fn = dpo_loss_fn
+    if config.use_dpo:
+      _loss_fn = dpo_loss_fn
+    elif config.use_grpo:
+      _loss_fn = grpo_loss_fn
 
   if config.gradient_accumulation_steps > 1:
 
@@ -886,7 +889,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
 
-  if config.use_dpo:
+  if config.use_dpo or config.use_grpo:
     new_state = _merge_dpo_state(new_state, reference_params)
 
   return new_state, metrics
@@ -1050,7 +1053,7 @@ def setup_train_loop(config):
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
     maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
 
-  if config.use_dpo:
+  if config.use_dpo or config.use_grpo:
     abstract_state, _, _ = max_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
     max_logging.log(f"Restoring reference parameters for DPO from '{os.path.join(str(config.checkpoint_dir), str(0))}'")
     try:
@@ -1114,7 +1117,7 @@ def train_loop(config, state=None):
       state,
   ) = setup_train_loop(config)
 
-  if config.use_dpo:
+  if config.use_dpo or config.use_grpo:
     if "reference_params" not in state.params:
       reference_params = jax.tree.map(jnp.copy, state.params["params"])
       state = _merge_dpo_state(state, reference_params)
