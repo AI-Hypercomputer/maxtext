@@ -123,7 +123,7 @@ class MaxEngineTest(unittest.TestCase):
     self.assertTrue(jnp.array_equal(first_token.data.size, 3))
 
   def test_sampling(self):
-    selected_logits = jnp.array([[[-3.46875, -4.90625, 4.125, 4.0625, -2.6875, 1.1953125, 8.2, 0.345]]])
+    selected_logits = jnp.array([[[-3.46875, -4.90625, 4.125, 4.0625, -2.6875, 1.1953125, 8.2, 0.345, 0.0]]])
     rng = jax.random.PRNGKey(0)
     # all results should be the same in this configuration, this is only for functionality test
     greedy_logit = inference_utils.sampling(selected_logits, rng, "greedy")
