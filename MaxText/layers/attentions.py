@@ -205,7 +205,7 @@ class AttentionOp(nn.Module):
       mask_shape = (q_seq_len, q_seq_len)
       row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
       col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
-      causal_mask = (col_ids <= row_ids)[None, None, None, :, :]
+      causal_mask = (col_ids <= row_ids).astype(jnp.int32)
 
       jax.debug.print("causal_mask shape {causal_mask_shape} ", causal_mask_shape = causal_mask.shape)
 
@@ -217,9 +217,10 @@ class AttentionOp(nn.Module):
       output_mask = jnp.ones((q_seq_len, kv_seq_len), jnp.int32)
       # import pdb
       # pdb.set_trace()
-      # output_mask = jax.lax.dynamic_update_slice(output_mask, causal_mask, (1,1,1,0,next_pos))
+      output_mask = jax.lax.dynamic_update_slice(output_mask, causal_mask, (0,next_pos))
+      jax.debug.print("output_mask_shape  in  generate mask before {output_mask_shape} ", output_mask_shape = output_mask.shape)
       output_mask = output_mask[None, None, None, :, :]
-      jax.debug.print("output_mask_shape  in  generate mask {output_mask_shape} ", output_mask_shape = output_mask.shape)
+      jax.debug.print("output_mask_shape  in  generate mask after {output_mask_shape} ", output_mask_shape = output_mask.shape)
       return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
 
     
