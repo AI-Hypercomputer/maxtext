@@ -178,7 +178,7 @@ class AttentionOp(nn.Module):
     if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       mask = decoder_segment_ids[:, None, None, None, :] == common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     elif decoder_segment_ids is not None:
-      jax.debug.print("decoder_segment_ids not none  and {model_mode} {decoder_segment_ids}", decoder_segment_ids=decoder_segment_ids, model_mode = model_mode)
+      # jax.debug.print("decoder_segment_ids not none  and {model_mode} {decoder_segment_ids}", decoder_segment_ids=decoder_segment_ids, model_mode = model_mode)
       mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
       mask = mask[:, None, None, :, :]
 
@@ -835,6 +835,33 @@ class AttentionOp(nn.Module):
     next_pos = 0
     if existing_prefix != None:
       next_pos = existing_prefix['next_pos'][0][0]
+      # cached_prefill = (
+        # self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order),
+        # self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order),
+      cached_key = self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order)
+      cached_value = self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order)
+      # import pdb
+      # pdb.set_trace()
+      # jax.debug.print("cached_prefill_key_vars before {cached_prefill_key_vars_value}", cached_prefill_key_vars_value=cached_prefill_key_vars[0].value)
+      cached_key_value = jnp.transpose(cached_key, (1,2,0,3))
+      cached_value_value = jnp.transpose(cached_value, (1,2,0,3))
+      
+      jax.debug.print("cached_prefill_key_vars before {cached_prefill_key_vars_value}", cached_prefill_key_vars_value=cached_prefill_key_vars[0].value)
+      cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice(cached_key_value, key_shaped_for_cache, (next_pos, 0, 0, 0))
+      jax.debug.print("cached_prefill_key_vars after {cached_prefill_key_vars_value}", cached_prefill_key_vars_value=cached_prefill_key_vars[0].value)
+
+      cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(cached_value_value, key_shaped_for_cache, (next_pos, 0, 0, 0))
+
+    else:
+      cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice(cached_prefill_key_vars[0].value, key_shaped_for_cache, (next_pos, 0, 0, 0))
+      cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(cached_prefill_value_vars[0].value, value_shaped_for_cache, (next_pos, 0, 0, 0))
+
+      
+      
+      
+      # import pdb
+      # pdb.set_trace()
+      # cached_prefill_key_vars[0].value = existing_prefix['cache'][]
 
     # cached_prefill_key_vars[0].value = jax.lax.select(existing_prefix, 
     #                                                   jax.lax.dynamic_update_slice(cached_prefill_key_vars[0].value, 
@@ -847,9 +874,12 @@ class AttentionOp(nn.Module):
     #                                                                                                  cached_prefill_value_vars[0].value)
     
     # s,n,b,d
-    cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice(cached_prefill_key_vars[0].value, key_shaped_for_cache, (next_pos, heads, 1, kv_head_size))
-    cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(cached_prefill_value_vars[0].value, value_shaped_for_cache, (next_pos, heads, 1, kv_head_size))
+    # jax.debug.print("cached_prefill_key_vars before {cached_prefill_key_vars_value}", cached_prefill_key_vars_value=cached_prefill_key_vars[0].value)
+    # jax.debug.print("key shaped for cache {key_shaped_for_cache_value}", key_shaped_for_cache_value=key_shaped_for_cache)
+    # cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice(cached_prefill_key_vars[0].value, key_shaped_for_cache, (next_pos, 0, 0, 0))
     
+    # cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(cached_prefill_value_vars[0].value, value_shaped_for_cache, (next_pos, 0, 0, 0))
+    # jax.debug.print("cached_prefill_key_vars after {cached_prefill_key_vars_value}", cached_prefill_key_vars_value=cached_prefill_key_vars[0].value)
     # # cached_prefill_key_vars[0].value = key_shaped_for_cache
     # # cached_prefill_value_vars[0].value = value_shaped_for_cache
 

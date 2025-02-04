@@ -95,12 +95,20 @@ def main(argv: Sequence[str]) -> None:
       position_og = jnp.arange(config.max_prefill_predict_length)
       postion_mask = jnp.where(position_og < (i+1)*chunk_size, position_og, 0)
       print(postion_mask)
-      prefill_result, first_token = engine.prefill(existing_prefix=prefill_result, 
-                                                   params=params, 
-                                                   padded_tokens=chunk_metadata.chunk_padded, 
-                                                   true_length=chunk_size, 
-                                                   rng=rng_prefill, 
-                                                   position_mask_cur=postion_mask)
+      if i == 0:
+        prefill_result, first_token = engine.prefill(existing_prefix=prefill_result, 
+                                                    params=params, 
+                                                    padded_tokens=chunk_metadata.chunk_padded, 
+                                                    true_length=chunk_size, 
+                                                    rng=rng_prefill, 
+                                                    position_mask_cur=postion_mask)
+      else:
+        prefill_result, first_token = engine.prefill(existing_prefix=prefill_result, 
+                                                    params=params | {"cache": prefill_result["cache"]}, 
+                                                    padded_tokens=chunk_metadata.chunk_padded, 
+                                                    true_length=chunk_size, 
+                                                    rng=rng_prefill, 
+                                                    position_mask_cur=postion_mask)
       # import pdb
       # pdb.set_trace()
       if i == 0:
