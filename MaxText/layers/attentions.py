@@ -173,28 +173,62 @@ class AttentionOp(nn.Module):
   # Following Pallas MHA Flash Attention Reference.
   # https://github.com/jax-ml/jax/blob/main/jax/experimental/pallas/ops/tpu/flash_attention.py
   # This mask models (1) separate sequences (decoder_segment_ids) and (2) causality
-  def generate_attention_mask(self, query, key, decoder_segment_ids: Array | None, model_mode: str) -> Array | None:
+  def generate_attention_mask(self, query, key, decoder_segment_ids: Array | None, model_mode: str, existing_prefix=None) -> Array | None:
     mask = None
     if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       mask = decoder_segment_ids[:, None, None, None, :] == common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     elif decoder_segment_ids is not None:
+      jax.debug.print("decoder_segment_ids not none  and {model_mode} {decoder_segment_ids}", decoder_segment_ids=decoder_segment_ids, model_mode = model_mode)
       mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
       mask = mask[:, None, None, :, :]
 
     causal_mask = None
     # We enforce causality except for AUTOREGRESSION
     if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE:
+      jax.debug.print("model_mode  {model_mode}", model_mode=model_mode)
       _, q_seq_len, _, _ = query.shape
       _, kv_seq_len, _, _ = key.shape
       mask_shape = (q_seq_len, kv_seq_len)
       row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
       col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
       causal_mask = (col_ids <= row_ids)[None, None, None, :, :]
+      # import pdb
+      # pdb.set_trace()
 
     output_mask = None
 
-    if (mask is not None) and (causal_mask is not None):
+    if self.config.use_chunked_prefill and model_mode == common_types.MODEL_MODE_PREFILL:
+      jax.debug.print("query shape {query_shape} ", query_shape = query.shape)
+      jax.debug.print("key shape {key_shape} ", key_shape = key.shape)
+      _, q_seq_len, _, _ = query.shape
+      _, kv_seq_len, _, _ = key.shape
+      mask_shape = (q_seq_len, q_seq_len)
+      row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
+      col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
+      causal_mask = (col_ids <= row_ids)[None, None, None, :, :]
+
+      jax.debug.print("causal_mask shape {causal_mask_shape} ", causal_mask_shape = causal_mask.shape)
+
+      
+      next_pos = 0
+      if existing_prefix != None:
+        next_pos = existing_prefix['next_pos'][0][0]
+
+      output_mask = jnp.ones((q_seq_len, kv_seq_len), jnp.int32)
+      # import pdb
+      # pdb.set_trace()
+      # output_mask = jax.lax.dynamic_update_slice(output_mask, causal_mask, (1,1,1,0,next_pos))
+      output_mask = output_mask[None, None, None, :, :]
+      jax.debug.print("output_mask_shape  in  generate mask {output_mask_shape} ", output_mask_shape = output_mask.shape)
+      return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
+
+    
+
+    elif (mask is not None) and (causal_mask is not None):
+      # import pdb
+      # pdb.set_trace()
       output_mask = jnp.logical_and(mask, causal_mask)
+      
     elif mask is not None:
       output_mask = mask
     elif causal_mask is not None:
@@ -233,7 +267,7 @@ class AttentionOp(nn.Module):
         or (self.attention_kernel == "autoselected" and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE)
         or (self.attention_kernel == "autoselected" and length < 128)
     ):
-      jax.debug.print("existing_prefix just before apply_attention_dot  {existing_prefix}", existing_prefix=existing_prefix)
+      # jax.debug.print("existing_prefix just before apply_attention_dot  {existing_prefix}", existing_prefix=existing_prefix)
       return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode, existing_prefix)
     elif self.attention_kernel == "flash" or self.attention_kernel == "autoselected":
       if isinstance(key, KVTensor):
@@ -496,7 +530,11 @@ class AttentionOp(nn.Module):
     # Casting softmaxt computation for float32 for model stability.
     if model_mode == common_types.MODEL_MODE_TRAIN and self.float32_logits:
       attn_weights = attn_weights.astype(jnp.float32)
-    attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
+    
+    # import pdb
+    # pdb.set_trace()
+    
+    attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode,existing_prefix=existing_prefix)
     if attn_mask is not None:
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
     return self.compute_local_attention(attn_weights, value, q_seq_len, model_mode)
@@ -752,6 +790,7 @@ class AttentionOp(nn.Module):
       key: Array,
       value: Array,
       decoder_segment_ids: Array,
+      existing_prefix=None,
   ):
     """In prefill mode, we zero out the existing cache, run the computation and
     prepare the cache as necessary.
@@ -790,13 +829,38 @@ class AttentionOp(nn.Module):
 
     # import pdb
     # pdb.set_trace()
-    # cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice(cached_prefill_key_vars[0].value, key_shaped_for_cache, (512, 8, 128))
-    # cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(cached_prefill_key_vars[0].value, key_shaped_for_cache, (512, 8, 128))
-    cached_prefill_key_vars[0].value = key_shaped_for_cache
-    cached_prefill_value_vars[0].value = value_shaped_for_cache
+    # s, n, b, d
+    next_pos = 0
+    if existing_prefix != None:
+      next_pos = existing_prefix['next_pos'][0][0]
+
+    # cached_prefill_key_vars[0].value = jax.lax.select(existing_prefix, 
+    #                                                   jax.lax.dynamic_update_slice(cached_prefill_key_vars[0].value, 
+    #                                                                                key_shaped_for_cache, 
+    #                                                                                (int(existing_prefix['next_pos']*self.config.chunk_size), 8, 1, 128)), 
+    #                                                   cached_prefill_key_vars[0].value)
+    # cached_prefill_value_vars[0].value = jax.lax.select(existing_prefix,jax.lax.dynamic_update_slice(cached_prefill_value_vars[0].value, 
+    #                                                                                                  value_shaped_for_cache, 
+    #                                                                                                  (int(existing_prefix['next_pos']*self.config.chunk_size), 8, 1, 128)), 
+    #                                                                                                  cached_prefill_value_vars[0].value)
+    
+    # s,n,b,d
+    cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice(cached_prefill_key_vars[0].value, key_shaped_for_cache, (next_pos, heads, 1, kv_head_size))
+    cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(cached_prefill_value_vars[0].value, value_shaped_for_cache, (next_pos, heads, 1, kv_head_size))
+    
+    # # cached_prefill_key_vars[0].value = key_shaped_for_cache
+    # # cached_prefill_value_vars[0].value = value_shaped_for_cache
 
     if decoder_segment_ids is not None:
       cached_prefill_segment_id_var.value = decoder_segment_ids
+
+    # import pdb
+    # pdb.set_trace()
+    # b, s, n, d
+
+    # key_to_return = cached_prefill_key_vars[0].value
+
+    return jnp.transpose(cached_prefill_key_vars[0].value, (2,0,1,3)), jnp.transpose(cached_prefill_value_vars[0].value, (2,0,1,3)), decoder_segment_ids
 
     return key, value, decoder_segment_ids
 
@@ -999,7 +1063,7 @@ class AttentionOp(nn.Module):
     return cached_prefill, cached_ar
 
   def kv_cache(
-      self, key: Array, value: Array, decoder_segment_ids: Array, model_mode: str, use_ragged_attention: bool = False
+      self, key: Array, value: Array, decoder_segment_ids: Array, model_mode: str, use_ragged_attention: bool = False, existing_prefix=None,
   ) -> tuple:
     """KV cache takes the current state and updates the state accordingly.
 
@@ -1024,7 +1088,7 @@ class AttentionOp(nn.Module):
     if model_mode == common_types.MODEL_MODE_TRAIN:
       return (key, value, decoder_segment_ids), None
     elif model_mode == common_types.MODEL_MODE_PREFILL:
-      return self.kv_cache_prefill(key, value, decoder_segment_ids), None
+      return self.kv_cache_prefill(key, value, decoder_segment_ids, existing_prefix), None
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       return self.kv_cache_autoregressive(key, value, use_ragged_attention)
     else:
@@ -1055,9 +1119,7 @@ class AttentionOp(nn.Module):
 
   @nn.compact
   def __call__(self, query, key, value, decoder_segment_ids, model_mode, existing_prefix=None):
-    prefill_kv_cache, ar_kv_cache = self.kv_cache(
-        key, value, decoder_segment_ids, model_mode, use_ragged_attention=self.use_ragged_attention
-    )
+    prefill_kv_cache, ar_kv_cache = self.kv_cache(key, value, decoder_segment_ids, model_mode, use_ragged_attention=self.use_ragged_attention, existing_prefix=existing_prefix)
 
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
         query=query,

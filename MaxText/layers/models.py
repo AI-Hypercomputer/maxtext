@@ -280,7 +280,7 @@ class Decoder(nn.Module):
     mesh = self.mesh
     assert decoder_input_tokens.ndim == 2  # [batch, len]
 
-    jax.debug.print("inside decoder call {existing_prefix} ", existing_prefix=existing_prefix)
+    # jax.debug.print("inside decoder call {existing_prefix} ", existing_prefix=existing_prefix)
 
     # [batch, length] -> [batch, length, emb_dim]
     y = self.shared_embedding(decoder_input_tokens.astype("int32"))

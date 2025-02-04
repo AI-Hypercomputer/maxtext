@@ -103,6 +103,8 @@ def main(argv: Sequence[str]) -> None:
                                                    true_length=true_length, 
                                                    rng=rng_prefill, 
                                                    position_mask_cur=postion_mask)
+      prefill_result['next_pos'] = [[512]]
+      jax.debug.print("{next_pos} after {i} ", next_pos=prefill_result['next_pos'], i=i)
       # for k, v in prefill_result.items():
       #   prefill_results_dict[k].append(v)
       
