@@ -23,6 +23,7 @@ from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2.flax import aqt_flax
 from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
+from aqt.jax.v2.flax import delayed_scaling_calibration
 import common_types
 from dataclasses import dataclass
 import flax.linen as nn
@@ -222,6 +223,26 @@ def _get_int8_quant_config(config):
       drhs_accumulator_dtype=drhs_accumulator_dtype,
   )
 
+def _get_fp8_quant_config(config):
+  # AQT Config
+  aqt_cfg = aqt_config.config_v4()
+  bits = ["e4m3"] * 2 + ["e5m2"] * 4
+  aqt_cfg = aqt_config.set_bits(aqt_cfg, *bits)
+  # Update cfg with DelayedScalingCalibration.
+  # Setting history length to be greater than the number of training steps
+  # so we can verify history is being updated correctly on each step below.
+  calibration_cls = functools.partial(
+      delayed_scaling_calibration.DelayedScalingCalibration,
+  )
+  aqt_cfg.fwd.dg_quantizer.lhs.calibration = calibration_cls
+  aqt_cfg.fwd.dg_quantizer.rhs.calibration = calibration_cls
+  aqt_cfg.dlhs.dg_quantizer.lhs.calibration = calibration_cls
+  aqt_cfg.dlhs.dg_quantizer.rhs.calibration = calibration_cls
+  aqt_cfg.drhs.dg_quantizer.lhs.calibration = calibration_cls
+  aqt_cfg.drhs.dg_quantizer.rhs.calibration = calibration_cls
+
+  return aqt_cfg
+
 
 def _dot_general_make(quant_cfg):
   lhs_bits = quant_cfg[_A_BITS]
@@ -272,6 +293,8 @@ def _get_quant_config(config):
     return _get_mixed_precision_quant_config(mixed_precision_config)
   if config.quantization == "fp8":
     return "fp8"
+  if config.quantization == "fp8_aqt":
+    return _get_fp8_quant_config(config)
   raise ValueError(f"Invalid value configured for quantization {config.quantization}.")
 
 

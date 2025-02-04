@@ -463,8 +463,8 @@ eval_steps: -1  # only run this number of batches for eval, for debugging use
 target_eval_loss: 0.  # early stop once reaching target eval_loss
 
 # Goodput parameters
-enable_goodput_recording: True
-monitor_goodput: True
+enable_goodput_recording: False
+monitor_goodput: False
 goodput_upload_interval_seconds: 60
 enable_pathways_goodput: False
 

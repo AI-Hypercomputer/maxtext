@@ -324,6 +324,7 @@ class Decoder(nn.Module):
             "intermediates": 0,
             "aqt": 0,
             "_overwrite_with_gradient": 0,
+            "calibration_stats": 0
         },
         split_rngs={
             "params": True,
