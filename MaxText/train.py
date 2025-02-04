@@ -541,8 +541,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 
   # --- (2) Generate completions.
   # For each prompt generate config.num_generations completions.
-  # This helper returns a tensor of shape [B x G, L_total] where L_total = L_prompt + max_completion_length 
-  # TODO: make L_total <= max_target_length
+  # This helper returns a tensor of shape [B x G, max_target_length]
   completions = generate_completions( 
                                      prompts, 
                                      config,
@@ -637,7 +636,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   completions_text = tokenizer_model.batch_decode(jax.device_get(completions[:, L_prompt:]), skip_special_tokens=True)
   # Compute rewards (a scalar per generated completion); assume reward_fn is pure python.
   rewards = jaccard_reward_fn(prompts_text, completions_text)
-  rewards = jnp.array(rewards)  # shape [B*G]
+  rewards = jnp.array(rewards)  # shape [BxG]
 
   # --- (7) Group rewards and compute normalized advantage.
   G = config.num_generations
@@ -653,7 +652,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   #   loss_token = - [ exp(policy_logp - stop_gradient(policy_logp)) * advantage - beta * kl ]
   # Make sure to expand advantage along the token dimension.
   advantages_exp = advantages[:, None]  # shape [B*G, 1]
-  loss_tokens = -( jnp.exp(comp_logps_policy - jax.lax.stop_gradient(comp_logps_policy)) * advantages_exp - config.beta * per_token_kl )
+  loss_tokens = -( jnp.exp(comp_logps_policy - jax.lax.stop_gradient(comp_logps_policy)) * advantages_exp - config.grpo_beta * per_token_kl )
   # Apply the completion mask.
   loss_tokens_masked = loss_tokens * completion_mask
   # Average over tokens per generated completion.

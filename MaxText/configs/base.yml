@@ -325,8 +325,8 @@ dpo_beta: 0.1
 
 # Group Relative Policy Optimization (GRPO)
 num_generations: 16
-temperature: 0.9
-
+temperature: 0.9 #from TRL
+grpo_beta: 0.04 #from TRL
 
 # dataset_type must be synthetic, hf, grain, tfds
 # details in: https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md
