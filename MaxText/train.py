@@ -512,7 +512,6 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   if is_train:
     # restrict batch size when per_device_batch_size<1
     prompts = prompts[: config.micro_batch_size_to_train_on, :]
-  B, L_prompt = prompts.shape
   # calculate the L_prompt which is the lenght of the prompt, we assume that the prompts are left padded to have same length, 
   # then there is padding on the right to pad till max_target_length
   def get_valid_length(tokens, pad_token_id):
@@ -548,6 +547,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
                                      prompts, 
                                      config,
                                      rngs=rng_gen,
+                                     true_length=L_prompt,
                                      )
   # completions shape: [B x G, L_total]
   L_total = completions.shape[1]
@@ -605,9 +605,9 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   token_logps_policy = compute_log_probs(model, params, completions, inputs_position, inputs_segmentation, config, is_train=is_train, rngs={"dropout": rng1, "params": rng_fwd})
   token_logps_ref = compute_log_probs(model, {"params": reference_params}, completions, inputs_position, inputs_segmentation, config, is_train=False, rngs={"dropout": rng1, "params": rng_fwd})
  
-  # Because of the shifting, token_logps have shape [B*G, L_total - 1]. The completion log-probs
+  # Because of the shifting, token_logps have shape [BxG, L_total - 1]. The completion log-probs
   # correspond to indices starting from (L_prompt - 1)
-  comp_logps_policy = token_logps_policy[:, (L_prompt - 1):]  # shape [B*G, L_completion]
+  comp_logps_policy = token_logps_policy[:, (L_prompt - 1):]  # shape [BxG, L_completion]
   comp_logps_ref = token_logps_ref[:, (L_prompt - 1):]
 
   # --- (4) Compute per-token KL divergence for each token in the generated completion.
@@ -713,9 +713,10 @@ def compute_log_probs(model, params, inputs, inputs_position, inputs_segmentatio
   return token_log_probs
 
 
-def generate_completions(prompts, config, rng):
+def generate_completions(prompts, config, rng, true_length):
   """
   Autoregressively generates completions for a batch of prompts.
+  We assume the prompts are all left padded, so all of them have the same length=true_length
 
   Args:
     prompts: Array of shape [B, S] containing token ids.
@@ -746,7 +747,7 @@ def generate_completions(prompts, config, rng):
   for i in range(prompts.shape[0]):
     tokens = prompts[i]
     #TODO: Need to find a better way to get true_length
-    true_length = tokenizer_model.encode(tokenizer_model.decode(tokens.tolist()),is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
+    # true_length = tokenizer_model.encode(tokenizer_model.decode(tokens.tolist()),is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
 
     # Split RNG before calling prefill
     rng, rng_prefill = jax.random.split(rng)
