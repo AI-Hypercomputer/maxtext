@@ -26,13 +26,13 @@ class Train(unittest.TestCase):
 
   def test_tiny_config(self):
     test_tmpdir = os.environ.get("TEST_TMPDIR")
+    outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
     train_main(
         [
             None,
             "third_party/py/maxtext/configs/base.yml",
             f"base_output_directory={test_tmpdir}",
-            "run_name=runner_test",
-            r"dataset_path=gs://maxtext-dataset",
+            "run_name=ragged_dot_smoke_test",
             "base_emb_dim=8",
             "base_num_query_heads=4",
             "base_num_kv_heads=4",
@@ -54,6 +54,7 @@ class Train(unittest.TestCase):
             "enable_goodput_recording=False",
             "enable_checkpoint_cloud_logger=False",
             "monitor_goodput=False",
+            f"metrics_file={outputs_dir}/metrics.json",
         ]
     )
 
