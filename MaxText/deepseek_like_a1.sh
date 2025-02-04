@@ -8,7 +8,7 @@ ZONE=asia-northeast1-b
 PROJECT=tpu-prod-env-one-vm
 
 
-WORKLOAD_NAME=mattdavidow-ds-a7
+WORKLOAD_NAME=mattdavidow-ds-a8
 
 python3 ../xpk/xpk.py workload create --workload $WORKLOAD_NAME \
 --cluster $CLUSTER_NAME \
@@ -17,6 +17,7 @@ python3 ../xpk/xpk.py workload create --workload $WORKLOAD_NAME \
 --command="python3 MaxText/train.py MaxText/configs/base.yml \
 run_name=$WORKLOAD_NAME \
 steps=10 \
+enable_checkpointing=False \
 dataset_type=synthetic \
 base_output_directory=$bd \
 decoder_block=mistral \
