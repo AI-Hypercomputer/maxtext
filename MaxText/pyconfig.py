@@ -449,10 +449,10 @@ class _HyperParameters:
     raw_keys = create_parallelisms_list(raw_keys)
     raw_keys = set_and_validate_pipeline_config(raw_keys)
 
-    if raw_keys["dataset_type"] == "c4_mlperf":
-      raw_keys["add_bos"] = False
-      raw_keys["add_eos"] = False
-      max_logging.log("Override add_bos and add_eos to False when dataset_type=c4_mlperf")
+    # if raw_keys["dataset_type"] == "c4_mlperf":
+    #   raw_keys["add_bos"] = False
+    #   raw_keys["add_eos"] = False
+    #   max_logging.log("Override add_bos and add_eos to False when dataset_type=c4_mlperf")
 
     # Write raw_keys to GCS before type conversions
     max_utils.write_config_raw_keys_for_gcs(raw_keys)
