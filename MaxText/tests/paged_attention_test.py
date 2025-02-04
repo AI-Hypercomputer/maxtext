@@ -2,6 +2,7 @@ import unittest
 import pytest
 import jax
 import numpy as np
+import math
 import jax.numpy as jnp
 from flax.core import freeze
 from flax import linen as nn
@@ -21,6 +22,7 @@ class PagedAttentionTest(unittest.TestCase):
 
   def setUp(self):
     self.cfg = {
+        "per_device_batch_size": 1,
         "num_query_heads": 8,
         "num_kv_heads": 8,
         "head_dim": 128,
@@ -1063,6 +1065,389 @@ class PagedAttentionTest(unittest.TestCase):
                     f"AR outputs identical for slot {slot} at steps {step1} and {step2}"
                 )
 
+  @pytest.mark.tpu_only
+  def test_multi_slot_token_generation(self):
+    """Test token generation with proper sharding to verify cache consistency."""
+    num_slots = self.cfg["per_device_batch_size"] * jax.device_count()
+    seq_len = self.cfg["max_prefill_predict_length"]
+    num_heads = self.cfg["num_query_heads"] 
+    head_dim = self.cfg["head_dim"]
+    
+    # Create page state matching expected dimensions
+    page_state = PageState(
+        page_status=jnp.zeros(self.cfg["num_pages"], dtype=jnp.int32),
+        page_map=jnp.zeros((num_slots, self.cfg["num_pages"]), dtype=jnp.int32),
+        sequence_lengths=jnp.ones(num_slots, dtype=jnp.int32) * seq_len,
+        num_pages_used=jnp.zeros(num_slots, dtype=jnp.int32),
+        current_page=jnp.arange(num_slots, dtype=jnp.int32),
+        current_page_position=jnp.zeros(num_slots, dtype=jnp.int32)
+    )
+
+    # Create distinct prefill inputs per slot
+    prefill_inputs = []
+    for slot in range(num_slots):
+        rng_slot = jax.random.fold_in(self.rng, slot)
+        prefill_inputs.append(
+            jax.random.normal(rng_slot, (1, seq_len, num_heads, head_dim)) * (slot + 1)
+        )
+    prefill_input = jnp.concatenate(prefill_inputs, axis=0)
+
+    # Initialize attention op
+    variables = self.attention_op.init(
+        self.rng,
+        prefill_input, prefill_input, prefill_input,
+        None,
+        common_types.MODEL_MODE_PREFILL,
+        page_state
+    )
+
+    output_tuple, variables = self.attention_op.apply(
+        variables,
+        prefill_input, prefill_input, prefill_input,
+        None,
+        common_types.MODEL_MODE_PREFILL,
+        page_state,
+        mutable=["cache"]
+    )
+
+    prefill_output = output_tuple[0]
+    
+    # Verify distinct outputs per slot after prefill
+    for slot in range(num_slots - 1):
+        self.assertFalse(
+            jnp.allclose(prefill_output[slot], prefill_output[slot + 1], rtol=1e-5, atol=1e-5),
+            f"Prefill outputs identical for slots {slot} and {slot + 1}"
+        )
+
+    # Test autoregressive generation
+    num_generations = 3
+    for i in range(num_generations):
+        ar_input = jax.random.normal(
+            jax.random.fold_in(self.rng, i),
+            (num_slots, 1, num_heads, head_dim)
+        )
+        
+        ar_output_tuple, variables = self.attention_op.apply(
+            variables,
+            ar_input, ar_input, ar_input,
+            None,
+            common_types.MODEL_MODE_AUTOREGRESSIVE,
+            page_state,
+            mutable=["cache"]
+        )
+        
+        ar_output = ar_output_tuple[0]
+        
+        # Verify outputs remain distinct between slots
+        for slot in range(num_slots - 1):
+            self.assertFalse(
+                jnp.allclose(ar_output[slot], ar_output[slot + 1], rtol=1e-5, atol=1e-5),
+                f"Generation {i} produced identical outputs for slots {slot} and {slot + 1}"
+            )
+
+  @pytest.mark.tpu_only
+  def test_slot_reuse_after_free(self):
+    """Test that a freed slot can be reused without contamination from previous contents."""
+    batch_size, seq_len = 1, self.cfg["max_prefill_predict_length"]
+    num_heads = self.cfg["num_query_heads"]
+    head_dim = self.cfg["head_dim"]
+
+    # Initialize with one sequence 
+    key1 = jax.random.normal(self.rng, (batch_size, seq_len, num_heads, head_dim))
+    value1 = jax.random.normal(self.rng, (batch_size, seq_len, num_heads, head_dim))
+
+    # Initialize page state
+    page_state = PageState(
+        page_status=jnp.zeros(self.cfg["num_pages"], dtype=jnp.int32),
+        page_map=jnp.zeros((batch_size, self.cfg["num_pages"]), dtype=jnp.int32),
+        sequence_lengths=jnp.array([seq_len], dtype=jnp.int32),
+        num_pages_used=jnp.zeros(batch_size, dtype=jnp.int32),
+        current_page=jnp.zeros(batch_size, dtype=jnp.int32),
+        current_page_position=jnp.zeros(batch_size, dtype=jnp.int32)
+    )
+
+    # Store first sequence
+    variables = self.attention_op.init(self.rng, key1, key1, value1, None, common_types.MODEL_MODE_PREFILL, page_state)
+    output_tuple1, vars1 = self.attention_op.apply(
+        variables, key1, key1, value1, None, common_types.MODEL_MODE_PREFILL, page_state, mutable=["cache"]
+    )
+    first_output = output_tuple1[0]
+
+    # Capture cache state before release
+    pre_release_cache = vars1["cache"]
+    print("Pre-release cache keys:", pre_release_cache.keys())
+    print("Key pages shape:", pre_release_cache["key_pages"].value.shape)
+    
+    # Release slot
+    page_state = self.attention_op.release_slot(0, page_state)
+    
+    # Verify page state is cleaned
+    print("\nPage state after release:")
+    print("sequence_lengths:", page_state.sequence_lengths)
+    print("num_pages_used:", page_state.num_pages_used)
+    print("page_map:", page_state.page_map)
+    
+    # Create new sequence with very different values
+    key2 = jax.random.normal(self.rng, (batch_size, seq_len, num_heads, head_dim)) * 100.0  # Scale up significantly
+    value2 = jax.random.normal(self.rng, (batch_size, seq_len, num_heads, head_dim)) * 100.0
+
+    # Store second sequence in same slot
+    output_tuple2, vars2 = self.attention_op.apply(
+        vars1, key2, key2, value2, None, common_types.MODEL_MODE_PREFILL, page_state, mutable=["cache"]
+    )
+    second_output = output_tuple2[0]
+
+    # Print cache states
+    print("\nPost-second sequence cache keys:", vars2["cache"].keys())
+    print("Input scale difference:", jnp.mean(jnp.abs(key2 - key1)))
+    print("Output scale difference:", jnp.mean(jnp.abs(second_output - first_output)))
+
+    # Compare outputs element-wise
+    output_diff = second_output - first_output
+    print("\nOutput statistics:")
+    print("Min diff:", jnp.min(output_diff))
+    print("Max diff:", jnp.max(output_diff))
+    print("Mean diff:", jnp.mean(output_diff))
+
+    # Verify outputs are different
+    self.assertFalse(
+        jnp.allclose(first_output, second_output, rtol=1e-5, atol=1e-5),
+        "Second sequence output shows contamination from first sequence"
+    )
+ 
+  @pytest.mark.tpu_only
+  def test_basic_slot_cleanup(self):
+    """Test that releasing a slot properly cleans up its pages in KV cache."""
+    batch_size = 1
+    seq_len = self.cfg["max_prefill_predict_length"]
+    num_heads = self.cfg["num_query_heads"]
+    head_dim = self.cfg["head_dim"]
+
+    # Initialize page state
+    page_state = PageState(
+        page_status=jnp.zeros(self.cfg["num_pages"], dtype=jnp.int32),
+        page_map=jnp.zeros((batch_size, self.cfg["num_pages"]), dtype=jnp.int32),
+        sequence_lengths=jnp.array([seq_len], dtype=jnp.int32),
+        num_pages_used=jnp.zeros(batch_size, dtype=jnp.int32),
+        current_page=jnp.zeros(batch_size, dtype=jnp.int32),
+        current_page_position=jnp.zeros(batch_size, dtype=jnp.int32)
+    )
+
+    # Initial sequence
+    x1 = jax.random.normal(self.rng, (batch_size, seq_len, num_heads, head_dim))
+    
+    # Initialize and store first sequence
+    variables = self.attention_op.init(
+        self.rng, x1, x1, x1, None, 
+        common_types.MODEL_MODE_PREFILL, page_state
+    )
+    
+    # Get initial KV cache state
+    initial_cache = variables["cache"]
+    initial_k_pages = initial_cache["key_pages"].value.copy()
+    initial_v_pages = initial_cache["value_pages"].value.copy()
+    
+    # Store initial page map state
+    initial_page_map = page_state.page_map.copy()
+
+    # Release the slot
+    page_state = self.attention_op.release_slot(0, page_state)
+
+    # Check page state was reset
+    self.assertEqual(page_state.sequence_lengths[0], 0)
+    self.assertEqual(page_state.num_pages_used[0], 0)
+    used_pages = page_state.page_map[0][page_state.page_map[0] > 0]
+    self.assertEqual(len(used_pages), 0)
+
+    # Check KV cache pages marked as free are actually zeroed/cleaned
+    current_k_pages = variables["cache"]["key_pages"].value
+    current_v_pages = variables["cache"]["value_pages"].value
+
+    # For pages that were in use and then freed
+    prev_used_pages = jnp.where(initial_page_map[0] > 0)[0]
+    for page in prev_used_pages:
+        zeros = jnp.zeros_like(current_k_pages[:, page])
+        np.testing.assert_array_equal(
+            current_k_pages[:, page], zeros,
+            "Key cache not cleaned for freed page"
+        )
+        np.testing.assert_array_equal(
+            current_v_pages[:, page], zeros,
+            "Value cache not cleaned for freed page"
+        ) 
+  
+  @pytest.mark.tpu_only
+  def test_single_slot_content_preservation(self):
+    """Test that content generated in a slot remains consistent and unique."""
+    batch_size = 1
+    seq_len = self.cfg["max_prefill_predict_length"]
+    num_heads = self.cfg["num_query_heads"]
+    head_dim = self.cfg["head_dim"]
+
+    # Initialize page state
+    page_state = PageState(
+        page_status=jnp.zeros(self.cfg["num_pages"], dtype=jnp.int32),
+        page_map=jnp.zeros((batch_size, self.cfg["num_pages"]), dtype=jnp.int32),
+        sequence_lengths=jnp.array([seq_len], dtype=jnp.int32),
+        num_pages_used=jnp.zeros(batch_size, dtype=jnp.int32),
+        current_page=jnp.zeros(batch_size, dtype=jnp.int32),
+        current_page_position=jnp.zeros(batch_size, dtype=jnp.int32)
+    )
+
+    # Create initial input
+    x1 = jax.random.normal(self.rng, (batch_size, seq_len, num_heads, head_dim))
+    
+    # Initialize 
+    variables = self.attention_op.init(
+        self.rng, x1, x1, x1, None, 
+        common_types.MODEL_MODE_PREFILL, page_state
+    )
+
+    # Store sequence of outputs for examination
+    outputs = []
+
+    # Do prefill
+    output_tuple, vars = self.attention_op.apply(
+        variables, x1, x1, x1, None,
+        common_types.MODEL_MODE_PREFILL, page_state, mutable=["cache"]
+    )
+    outputs.append(output_tuple[0])
+    variables = vars
+
+    # Generate sequence of 16 tokens
+    # In real runs we see 16-token sequences repeating
+    num_generations = 16
+    for i in range(num_generations):
+        # Generate with slightly different input each time
+        gen_input = jax.random.normal(
+            jax.random.fold_in(self.rng, i),
+            (batch_size, 1, num_heads, head_dim)
+        ) * (i + 1)  # Scale to make patterns distinct
+
+        output_tuple, vars = self.attention_op.apply(
+            variables, gen_input, gen_input, gen_input, None,
+            common_types.MODEL_MODE_AUTOREGRESSIVE, page_state, mutable=["cache"]
+        )
+        outputs.append(output_tuple[0])
+        variables = vars
+
+        # Verify the new output is different from all previous outputs
+        for j in range(len(outputs)-1):
+            self.assertFalse(
+                jnp.allclose(outputs[-1], outputs[j], rtol=1e-5, atol=1e-5),
+                f"Generation {i} produced output identical to generation {j}"
+            )
+
+        # Also verify attention pattern is using full context
+        # Get logits portion of output and verify non-zero attention weights 
+        # across multiple positions
+        logits = output_tuple[0]
+        attention_weights = jnp.sum(jnp.abs(logits), axis=-1)
+        num_attended = jnp.sum(attention_weights > 1e-6)
+        self.assertGreater(
+            num_attended, 1,
+            f"Generation {i} only attending to single position"
+        )
+  
+  @pytest.mark.tpu_only
+  def test_kv_cache_persistence(self):
+    """Test that KV cache contents persist correctly between generations."""
+    batch_size = 1
+    num_heads = self.cfg["num_query_heads"]
+    head_dim = self.cfg["head_dim"]
+    
+    # Start with single token
+    x = jax.random.normal(self.rng, (batch_size, 1, num_heads, head_dim))
+    
+    page_state = PageState(
+        page_status=jnp.zeros(self.cfg["num_pages"], dtype=jnp.int32),
+        page_map=jnp.zeros((batch_size, self.cfg["num_pages"]), dtype=jnp.int32),
+        sequence_lengths=jnp.ones(batch_size, dtype=jnp.int32),
+        num_pages_used=jnp.zeros(batch_size, dtype=jnp.int32),
+        current_page=jnp.zeros(batch_size, dtype=jnp.int32),
+        current_page_position=jnp.zeros(batch_size, dtype=jnp.int32)
+    )
+
+    variables = self.attention_op.init(
+        self.rng, x, x, x, None, common_types.MODEL_MODE_AUTOREGRESSIVE, page_state
+    )
+
+    # Store initial KV cache state
+    initial_k_pages = variables["cache"]["key_pages"].value.copy()
+    
+    # Do generation
+    output_tuple, variables = self.attention_op.apply(
+        variables, x, x, x, None,
+        common_types.MODEL_MODE_AUTOREGRESSIVE, page_state, mutable=["cache"]
+    )
+
+    # Verify initial content preserved in unused pages
+    current_k_pages = variables["cache"]["key_pages"].value
+    # Check that pages not in page_map are unchanged
+    unused_pages = jnp.where(page_state.page_map[0] == 0)[0]
+    for page in unused_pages:
+        np.testing.assert_array_equal(
+            initial_k_pages[:, page],
+            current_k_pages[:, page],
+            "KV cache modified in unused pages"
+        )
+  
+  @pytest.mark.tpu_only
+  def test_slot_reuse_attention_computation(self):
+    """Test that reused slot properly computes attention with new content."""
+    batch_size, seq_len = 1, self.cfg["max_prefill_predict_length"]
+    num_heads = self.cfg["num_query_heads"]
+    head_dim = self.cfg["head_dim"]
+
+    # Create structured input where we can verify attention is working
+    key1 = jnp.ones((batch_size, seq_len, num_heads, head_dim))  # All ones
+    value1 = jnp.ones((batch_size, seq_len, num_heads, head_dim)) 
+
+    # Initialize page state
+    page_state = PageState(
+        page_status=jnp.zeros(self.cfg["num_pages"], dtype=jnp.int32),
+        page_map=jnp.zeros((batch_size, self.cfg["num_pages"]), dtype=jnp.int32),
+        sequence_lengths=jnp.array([seq_len], dtype=jnp.int32),
+        num_pages_used=jnp.zeros(batch_size, dtype=jnp.int32),
+        current_page=jnp.zeros(batch_size, dtype=jnp.int32),
+        current_page_position=jnp.zeros(batch_size, dtype=jnp.int32)
+    )
+
+    # Store first sequence
+    variables = self.attention_op.init(self.rng, key1, key1, value1, None, common_types.MODEL_MODE_PREFILL, page_state)
+    output_tuple1, vars1 = self.attention_op.apply(
+        variables, key1, key1, value1, None, common_types.MODEL_MODE_PREFILL, page_state, mutable=["cache"]
+    )
+    first_output = output_tuple1[0]
+    
+    # Release slot
+    page_state = self.attention_op.release_slot(0, page_state)
+
+    # Create new sequence with specific pattern to detect attention
+    key2 = jnp.zeros((batch_size, seq_len, num_heads, head_dim))  # All zeros except...
+    key2 = key2.at[:, 0, :, :].set(1.0)  # First position is ones
+    value2 = jnp.ones((batch_size, seq_len, num_heads, head_dim)) * 2.0  # All twos
+
+    # Store second sequence in same slot
+    output_tuple2, vars2 = self.attention_op.apply(
+        vars1, key2, key2, value2, None, common_types.MODEL_MODE_PREFILL, page_state, mutable=["cache"]
+    )
+    second_output = output_tuple2[0]
+
+    # If attention is working:
+    # - First sequence should attend equally to all positions (all ones) 
+    # - Second sequence should attend mainly to first position (only non-zero)
+    
+    print("First output mean per position:", jnp.mean(first_output, axis=(0,2,3)))
+    print("Second output mean per position:", jnp.mean(second_output, axis=(0,2,3)))
+    
+    # We expect second output to have larger values at early positions
+    # if attention is working properly
+    second_means = jnp.mean(second_output, axis=(0,2,3))
+    self.assertGreater(
+        second_means[0], second_means[-1],
+        "Second sequence not showing position-dependent attention"
+    )
 
 if __name__ == "__main__":
   unittest.main()

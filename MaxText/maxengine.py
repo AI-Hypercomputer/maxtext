@@ -827,76 +827,42 @@ class MaxEngine(engine_api.Engine):
     return zeroed
   
   def free_slot(self, decode_state: dict, slot: int) -> None:
-    """Release all pages and cached KV data for the given slot with enhanced safety checks.
-    
-    Args:
-        decode_state: Current decode state containing cache information
-        slot: Slot number to free
-    """
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+    """Release all pages and cached KV data for the given slot."""
+    with self._mesh:
         cache = decode_state["cache"]
-        
         if all(k in cache for k in ["page_status", "page_map"]):
-            # Get current page state
-            page_map = cache["page_map"].value
-            page_status = cache["page_status"].value
-            
-            # Identify pages that need clearing
-            slot_pages = page_map[slot]
-            
-            # Track both owned and potentially influenced pages
-            pages_owned = slot_pages == 1
-            
-            # Clear all pages this slot had any interaction with
-            cache["page_status"].value = jnp.where(pages_owned, 0, page_status)
-            cache["page_map"].value = page_map.at[slot].set(0)
-            
-            # Force clear position and length tracking
-            cache["sequence_lengths"].value = cache["sequence_lengths"].value.at[slot].set(0)
-            cache["num_pages_used"].value = cache["num_pages_used"].value.at[slot].set(0)
-            cache["current_page"].value = cache["current_page"].value.at[slot].set(0)
-            cache["current_page_position"].value = cache["current_page_position"].value.at[slot].set(0)
-            
-            # Ensure KV caches are fully cleared for this slot's pages
-            if "key_pages" in cache:
-                owned_pages_mask = pages_owned[None, :, None, None]
-                cache["key_pages"].value = jnp.where(
-                    owned_pages_mask,
-                    jnp.zeros_like(cache["key_pages"].value),
-                    cache["key_pages"].value
-                )
-            
-            if "value_pages" in cache:
-                cache["value_pages"].value = jnp.where(
-                    owned_pages_mask,
-                    jnp.zeros_like(cache["value_pages"].value),
-                    cache["value_pages"].value
-                )
-            
-            # Explicitly clear all KV cache entries
-            prefill_axes = [int(i) for i in self.config.prefill_cache_axis_order.split(",")]
-            ar_axes = [int(i) for i in self.config.ar_cache_axis_order.split(",")]
-            prefill_batch_idx = prefill_axes.index(0)
-            ar_batch_idx = ar_axes.index(0)
-            
-            # Handle both prefill and AR caches
-            for key in ["cached_prefill_key", "cached_prefill_value",
-                       "cached_ar_key", "cached_ar_value"]:
-                if key not in cache:
-                    continue
-                    
-                batch_idx = prefill_batch_idx if "prefill" in key else ar_batch_idx
-                cur_cache = cache[key].value
-                
-                # Create zero slice with exact shape
-                zero_slice = jnp.zeros_like(
-                    jax.lax.dynamic_slice_in_dim(cur_cache, slot, 1, batch_idx)
-                )
-                
-                # Force clear the entire slot section
-                cache[key].value = jax.lax.dynamic_update_slice_in_dim(
-                    cur_cache, zero_slice, slot, batch_idx
-                )
+            # Create temporary vars to match PageManager's expected interface
+            page_status_var = nn.Variable({}, "page_status", 
+                                        lambda: cache["page_status"].value)
+            page_map_var = nn.Variable({}, "page_map", 
+                                     lambda: cache["page_map"].value)
+            sequence_lengths_var = nn.Variable({}, "sequence_lengths",
+                                             lambda: cache["sequence_lengths"].value)
+            num_pages_used_var = nn.Variable({}, "num_pages_used",
+                                           lambda: cache["num_pages_used"].value)
+            current_page_var = nn.Variable({}, "current_page",
+                                         lambda: cache["current_page"].value)
+            current_page_position_var = nn.Variable({}, "current_page_position",
+                                                  lambda: cache["current_page_position"].value)
+
+            # Use PageManager's release logic to ensure consistent cleanup
+            self.page_manager.release_slot_pages(
+                slot,
+                page_status_var,
+                page_map_var, 
+                sequence_lengths_var,
+                num_pages_used_var,
+                current_page_var,
+                current_page_position_var
+            )
+
+            # Update cache with cleaned state
+            cache["page_status"].value = page_status_var.value
+            cache["page_map"].value = page_map_var.value
+            cache["sequence_lengths"].value = sequence_lengths_var.value
+            cache["num_pages_used"].value = num_pages_used_var.value
+            cache["current_page"].value = current_page_var.value
+            cache["current_page_position"].value = current_page_position_var.value
 
   @property
   def max_concurrent_decodes(self) -> int:
