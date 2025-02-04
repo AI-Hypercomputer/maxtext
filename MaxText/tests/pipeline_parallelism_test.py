@@ -279,6 +279,36 @@ class PipelineParallelismTest(unittest.TestCase):
         ]
     )
 
+  def test_full_train_fp8(self):
+    # Run a full train.py call with fp8 quantization, which adds extra
+    # variable collections that need to be handled
+    train_main(
+        [
+            None,
+            "configs/base.yml",
+            r"base_output_directory=gs://runner-maxtext-logs",
+            "run_name=runner_pipeline_parallelism_fp8_test",
+            r"dataset_path=gs://maxtext-dataset",
+            "base_emb_dim=28",
+            "base_num_query_heads=4",
+            "base_num_kv_heads=4",
+            "base_mlp_dim=32",
+            "base_num_decoder_layers=4",
+            "head_dim=128",
+            "per_device_batch_size=2",
+            "max_target_length=1024",
+            "vocab_size=32",
+            "dataset_type=synthetic",
+            "steps=3",
+            "enable_checkpointing=False",
+            "ici_pipeline_parallelism=4",
+            "tokenizer_path=../assets/tokenizer.llama2",
+            "quantization=fp8",
+            "scan_layers=False",
+            "attention=dot_product",
+        ]
+    )
+
 
 if __name__ == "__main__":
   unittest.main()
