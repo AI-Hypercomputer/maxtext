@@ -1135,7 +1135,7 @@ class Attention(nn.Module):
 
     def query_init(*args):
       # pylint: disable=no-value-for-parameter
-      return self.kernel_init(*args) / depth_scaling
+      return self.kernel_init(*args)
 
     query_proj = DenseGeneral(
         features=(self.num_query_heads, self.head_dim),
@@ -1147,7 +1147,7 @@ class Attention(nn.Module):
         name="query",
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
-    )(inputs_q)
+    )(inputs_q) / depth_scaling
     return query_proj
 
   def kv_projection(self, inputs_kv: Array, proj_name: str) -> Array:
