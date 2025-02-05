@@ -57,6 +57,7 @@ if cached_prefix is None or matched_len != orig_key_len:
 """
 
 from typing import Tuple, Any, Optional
+import dataclasses
 import jax
 
 import max_logging
@@ -130,25 +131,85 @@ class Value:
 
 
 class PrefixCacheTrie:
-  """Stores prefix tokens as a trie for fast lookup index."""
+  """Stores prefix tokens as a trie for fast lookup index of PrefixCache store in cache.
+
+  Insert longer Key replace shorter key to be the longest common prefix key.
+  The shorter key will never be returned even if longer key is erased, and should got evicted in the future.
+
+  Assume Key is equal length to tokens, which can be used to slice prompt and cache Value.
+  Should check the return key common prefix length by the caller.
+
+  If erase the Key not the leaf, nothing will happen.
+  If erased key match at a leaf, delete the node and ancestors would be the leaf after deleted.
+  """
+
+  @dataclasses.dataclass
+  class Node:
+    children: dict[Token, "PrefixCacheTrie.Node"] = dataclasses.field(default_factory=dict)
+
+    def is_leaf(self):
+      return len(self.children) == 0
+
+    def get_one_child_token(self) -> Optional[Token]:
+      if len(self.children) == 0:
+        return None
+      return next(iter(self.children.keys()))
+
+  def __init__(self):
+    self._saved_keys: list[Key] = []
+    self._root = PrefixCacheTrie.Node()
 
   def insert(self, key: Key):
     """Insert key into the trie."""
-    raise NotImplementedError
+    node = self._root
+    for token in key:
+      if token not in node.children:
+        node.children[token] = PrefixCacheTrie.Node()
+      node = node.children[token]
 
   def get_longest_common_prefix_key(self, key: Key) -> Optional[Key]:
     """Get the key with longest common prefix.
+    If not found at least one token match, return None."""
+    result_tokens: list[Token] = []
 
-    If not found at least one token match, return None.
-    """
-    raise NotImplementedError
+    node = self._root
+    for token in key:
+      if token not in node.children:
+        break
+      node = node.children[token]
+      result_tokens.append(token)
 
-  def erase(self, key: Key) -> bool:
-    """Erase key in trie.
+    if len(result_tokens) == 0:
+      return None
 
-    Return False if key is not found.
-    """
-    raise NotImplementedError
+    while not node.is_leaf():
+      token = node.get_one_child_token()
+      if token is None:
+        break
+      result_tokens.append(token)
+      node = node.children[token]
+
+    return tuple(result_tokens)
+
+  def erase(self, key: Key) -> None:
+    """Erase key in trie if it is leaf."""
+
+    def erase_from(node: PrefixCacheTrie.Node, idx: int) -> bool:
+      """
+      Erase node traverse from `node` and start from key index `idx`. Return true if the `node` is leaf needed deleted.
+      """
+      if idx >= len(key):
+        return node.is_leaf()
+
+      if key[idx] not in node.children:
+        return False
+
+      if erase_from(node.children[key[idx]], idx + 1):
+        del node.children[key[idx]]
+
+      return node.is_leaf()
+
+    erase_from(self._root, 0)
 
 
 class HBMCache:
