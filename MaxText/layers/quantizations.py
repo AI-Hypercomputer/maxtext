@@ -270,10 +270,6 @@ def _get_quant_config(config):
     return _get_int8_quant_config(config)
   if config.quantization == "aqt_fp8":
     return _get_aqt_fp8_quant_config(config)
-  if config.quantization == "int8w":
-    return _get_weight_only_quant_config(lhs_bits=None, rhs_bits=8)
-  if config.quantization == "int4w":
-    return _get_weight_only_quant_config(lhs_bits=None, rhs_bits=4)
   if config.quantization == "intmp":
     assert config.quant_cfg_path, "Must specify quant_cfg for mixed precision quantization"
     with open(config.quant_cfg_path, "r") as config_file:
