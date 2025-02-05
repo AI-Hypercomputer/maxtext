@@ -794,6 +794,10 @@ def reshard_fn(config: pyconfig.HyperParameters):
       )
 
       restore_step = config.eu.data["save_step"]
+      sharding = jax.sharding.NamedSharding(
+          mesh,
+          config.eu.data["state"].sharding.spec,
+      )
       restore_state = config.eu.reshard(config.eu.data["state"], mesh, donate=False)
 
       config.eu.save(restore_step, state=restore_state)

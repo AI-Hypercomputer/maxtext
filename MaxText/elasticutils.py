@@ -2,39 +2,72 @@
 
 import collections
 import contextlib
-import itertools
 import functools
+import itertools
 import logging
-import os
 import sys
-import time
 import threading
+import time
 import traceback
-from typing import Sequence, Any, Optional, Callable
+from typing import Any, Callable, Optional, Sequence
+
 import jax
 import numpy as np
+
+jax._src.array.ArrayImpl._check_if_deleted = lambda _: False  # pylint: disable=protected-access
 
 PyTree = Any
 
 logger = logging.getLogger(__name__)
 
-logging.basicConfig(level=logging.INFO)
 logger.setLevel(logging.INFO)
 
+#  pylint: disable=logging-fstring-interpolation
 
-@contextlib.contextmanager
-def timer(name: str):
-  start = time.time()
-  try:
-    yield
-  finally:
-    end = time.time()
-    logger.info("%s elaspsed %.2fs.", name, end - start)
 
-def timeit(func: Callable):
+class Profile:
+  """Profile context manager."""
+
+  def __init__(self, gcs_path: Optional[str] = None):
+    self.gcs_path = gcs_path
+
+  def __enter__(self):
+    if self.gcs_path:
+      jax.profiler.start_trace(self.gcs_path)
+
+  def __exit__(self, exc_type, exc_value, tb):
+    if self.gcs_path:
+      jax.profiler.stop_trace()
+
+
+class Timer:
+  """Timer context manager."""
+
+  def __init__(self, name):
+    self.name = name
+
+  def __enter__(self):
+    self.start = time.time()
+    return self
+
+  def __exit__(self, exc_type, exc_value, tb):
+    self.stop = time.time()
+    self.time = self.stop - self.start
+    logger.info(str(self))
+
+  def __str__(self):
+    return f"{self.name} elaspsed {self.time}." 
+
+
+def timeit(
+    func: Callable[..., Any], name: Optional[str] = None
+) -> Callable[..., Any]:
+  if name is None:
+    name = getattr(func, "__name__", "Unknown")
+
   @functools.wraps(func)
   def wrapper(*args, **kwargs):
-    with timer(func.__name__):
+    with Timer(name):
       return func(*args, **kwargs)
   return wrapper
 
@@ -77,7 +110,9 @@ class ElasticUtils:
     self.good_slice_indices = self.get_slice_availability()
     self.failure_count += 1
 
-    logger.info(f"Failure count: {self.failure_count} with max {self.max_failures}")
+    logger.info(
+        f"Failure count: {self.failure_count} with max {self.max_failures}"
+    )
     if self.failure_count >= self.max_failures:
       logger.fatal(f"Max failures reached {self.max_failures}")
 
@@ -94,10 +129,15 @@ class ElasticUtils:
     self.data = data
 
   def is_ready_to_reshard(self, step: int):
-    """
-    Indicates if it is time to reshard.
+    """Indicates if it is time to reshard.
 
     May update `good_slice_indices`.
+
+    Args:
+      step: The current step.
+
+    Returns:
+      True if it is time to reshard, False otherwise.
     """
     if step % self.reshard_check_period:
       return False
@@ -191,7 +231,7 @@ class ElasticUtils:
           + self.TEST_VALUE
       )
       try:
-        with timer(f"checking {slice_index=}"):
+        with Timer(f"checking {slice_index=}"):
           if np.allclose(x, expected):
             good_slice_indices.add(slice_index)
             logger.info(f"{slice_index=} good")
@@ -214,23 +254,170 @@ class ElasticUtils:
 
     return good_slice_indices
 
-  @staticmethod
+  @classmethod
   @timeit
   def reshard(
-      tree: PyTree,
-      mesh: jax.sharding.Mesh,
+      cls,
+      x: Any,
+      sharding: jax.sharding.Sharding | Any,
       *,
-      donate: bool = True,
-  ) -> PyTree:
-    """Reshard a PyTree."""
-    def func(leaf):
-        return jax.device_put(
-            leaf,
-            jax.sharding.NamedSharding(mesh, leaf.sharding.spec),
-            donate=donate,
-        )
+      donate_input: bool = True,
+      put_array: Optional[
+          Callable[
+              [jax.Array, Sequence[jax.sharding.Sharding], bool], jax.Array
+          ]
+      ] = None,
+  ) -> Any:
+    """Reshards `x` to the specified `sharding`.
 
-    return jax.tree.map(func, tree)
+    Args:
+        x: An array, scalar, or a nested Python container thereof.
+        sharding: A `Sharding` or a nested `Sharding` in a Python container
+          (must match the structure of `x`), specifying the target sharding.
+        donate_input: If `True`, donates the input arrays to reduce memory
+          needed for resharding. Donated buffers should not be reused.
+        put_array: A function that takes an array, a sharding, and a boolean
+          indicating whether to donate the input, and returns a copy of the
+          array with the specified sharding.
+
+    Returns:
+        A copy of `x` with the specified `sharding`.
+    """
+    if put_array is None:
+      put_array = cls.default_put_array
+
+    flat_x, tree_def = jax.tree_util.tree_flatten(x)
+    flat_sharding = jax.api_util.flatten_axes(
+        "reshard sharding", tree_def, sharding
+    )
+
+    if len(flat_x) != len(flat_sharding):
+      raise ValueError("Mismatched length between `x` and `sharding`.")
+
+    arrays = [
+        put_array(arr, dst_sharding, donate_input)
+        for arr, dst_sharding in zip(flat_x, flat_sharding)
+    ]
+    return jax.tree_util.tree_unflatten(tree_def, arrays)
+
+  @staticmethod
+  def put_array_device_put0(
+      arr: jax.Array,
+      dst_sharding: jax.sharding.Sharding,
+      donate_input: bool,
+  ):
+    if not isinstance(dst_sharding, jax.sharding.Sharding):
+      raise ValueError("`sharding` must contain only `Sharding` instances.")
+    return jax.device_put(arr, dst_sharding, donate=donate_input)
+
+  default_put_array = put_array_device_put0
+
+  def put_array_device_put1(
+      self,
+      arr: jax.Array,
+      dst_sharding: jax.sharding.Sharding,
+      donate_input: bool,  # pylint: disable=unused-argument
+  ):
+    """Reshards `arr` to the specified `dst_sharding`.
+
+    Args:
+        arr: An array, scalar, or a nested Python container thereof.
+        dst_sharding: A `Sharding` or a nested `Sharding` in a Python container
+          (must match the structure of `x`), specifying the target sharding.
+        donate_input: If `True`, donates the input arrays to reduce memory
+          needed for resharding. Donated buffers should not be reused.
+
+    Returns:
+        A copy of `x` with the specified `sharding`.
+    """
+    if not isinstance(dst_sharding, jax.sharding.Sharding):
+      raise ValueError("`sharding` must contain only `Sharding` instances.")
+
+    if dst_sharding.num_devices <= arr.sharding.num_devices:
+      # Reshard down
+      arrays = [
+          x.data
+          for x in arr.addressable_shards
+          if x.device.slice_index in self.good_slice_indices
+      ]
+    else:
+      # Reshard up
+      arrays = [x.data for x in arr.addressable_shards]
+
+      good_reference_slice = arr.addressable_shards[0].device.slice_index
+      good_reference_arrays = [
+          array
+          for array in arrays
+          if array.device.slice_index == good_reference_slice
+      ]
+
+      new_slice_index = (
+          self.good_slice_indices
+          - {d.slice_index for d in arr.sharding.device_set}
+      ).pop()
+
+      for device, array in zip(
+          self.slice_to_devices[new_slice_index], good_reference_arrays
+      ):
+        arrays.append(jax.device_put(array, device))
+
+    return jax.make_array_from_single_device_arrays(
+        arr.shape, dst_sharding, arrays
+    )
+
+  def put_array_device_put2(
+      self,
+      arr: jax.Array,
+      dst_sharding: jax.sharding.Sharding,
+      donate_input: bool,  # pylint: disable=unused-argument
+  ):
+    """Reshards `arr` to the specified `dst_sharding`.
+
+    Args:
+        arr: An array, scalar, or a nested Python container thereof.
+        dst_sharding: A `Sharding` or a nested `Sharding` in a Python container
+          (must match the structure of `x`), specifying the target sharding.
+        donate_input: If `True`, donates the input arrays to reduce memory
+          needed for resharding. Donated buffers should not be reused.
+
+    Returns:
+        A copy of `x` with the specified `sharding`.
+    """
+    if not isinstance(dst_sharding, jax.sharding.Sharding):
+      raise ValueError("`sharding` must contain only `Sharding` instances.")
+
+    if dst_sharding.num_devices <= arr.sharding.num_devices:
+      # Reshard down
+      arrays = [
+          x.data
+          for x in arr.addressable_shards
+          if x.device.slice_index in self.good_slice_indices
+      ]
+    else:
+      # Reshard up
+      arrays = [x.data for x in arr.addressable_shards]
+
+      good_reference_slice = arr.addressable_shards[0].device.slice_index
+      good_reference_arrays = [
+          array
+          for array in arrays
+          if array.device.slice_index == good_reference_slice
+      ]
+
+      new_slice_index = (
+          self.good_slice_indices
+          - {d.slice_index for d in arr.sharding.device_set}
+      ).pop()
+
+      new_arrays = jax.device_put(
+          good_reference_arrays, self.slice_to_devices[new_slice_index]
+      )
+
+      arrays += new_arrays
+
+    return jax.make_array_from_single_device_arrays(
+        arr.shape, dst_sharding, arrays
+    )
 
   def scale_by_good_slices(self, x: int | float) -> int | float:
     """Scale x by the number of good slices."""
@@ -249,7 +436,17 @@ class ElasticUtils:
 
 
 @contextlib.contextmanager
-def watchdog(timeout):
+def watchdog(timeout: float):
+  """Watchdog context manager.
+
+  Prints the stack trace of all threads every `timeout` seconds.
+
+  Args:
+    timeout: The timeout in seconds.
+
+  Yields:
+    None
+  """
   event = threading.Event()
 
   def handler():
@@ -260,8 +457,15 @@ def watchdog(timeout):
         for thread in threading.enumerate():
           try:
             logger.info(f"Thread: {thread.ident}")
-            logger.info("".join(traceback.format_stack(sys._current_frames().get(thread.ident, []))))
-          except:
+            logger.info(
+                "".join(
+                    traceback.format_stack(
+                        sys._current_frames()  # pylint: disable=protected-access
+                        .get(thread.ident, [])
+                    )
+                )
+            )
+          except Exception:  # pylint: disable=broad-exception-caught
             logger.info(f"Error print traceback for {thread.ident=}")
             pass
       finally:
@@ -272,11 +476,12 @@ def watchdog(timeout):
       count += 1
 
   logger.debug("Registering watchdog")
-  watchdog = threading.Thread(target=handler, name="watchdog")
-  watchdog.start()
+  watchdog_thread = threading.Thread(target=handler, name="watchdog")
+  watchdog_thread.start()
   try:
     yield
   finally:
     event.set()
-    watchdog.join()
-    logger.debug("Degistering watchdog")
+    watchdog_thread.join()
+    logger.debug("Deregistering watchdog")
+
