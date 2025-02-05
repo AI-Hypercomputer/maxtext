@@ -399,7 +399,7 @@ class Pipeline(nn.Module):
         func_to_vmap,
         in_axes=(0, 0, 0, None, None),
         spmd_axis_name="stage",
-        variable_axes={"params": 0},
+        variable_axes={"params": 0, "_overwrite_with_gradient": 0},
         split_rngs={"params": self.is_initializing()},
         metadata_params={
             nn.PARTITION_NAME: "layers",
@@ -478,7 +478,7 @@ class Pipeline(nn.Module):
 
       vmap_func = nn.map_variables(
           vmap_func,
-          mapped_collections=["params", "non_trainable", "summaries", "intermediates"],
+          mapped_collections=["params", "_overwrite_with_gradient", "non_trainable", "summaries", "intermediates"],
           mutable=True,
           trans_in_fn=prepare_vars_for_main_vmap,
       )
@@ -629,6 +629,7 @@ class Pipeline(nn.Module):
             in_axes=(0, segment_idx, position_idx, None, None),
             variable_axes={
                 "params": 0,
+                "_overwrite_with_gradient": 0,
                 "non_trainable": 0,
                 "hyper_params": 0,
             },
@@ -695,7 +696,10 @@ class Pipeline(nn.Module):
     # The scan cannot be used on init since it broadcasts the weights, which aren't yet initialized.
     if self.config.scan_pipeline_iterations:
       variable_carry = []
-      variable_broadcast = ["params"]  # All loop iterations need the weights for the full pipeline.
+      variable_broadcast = [
+          "params",
+          "_overwrite_with_gradient",
+      ]  # All loop iterations need the weights for the full pipeline.
       if self.is_mutable_collection("non_trainable"):
         variable_carry.append("non_trainable")
       else:
