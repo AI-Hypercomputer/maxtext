@@ -72,6 +72,7 @@ from ml_goodput_measurement import monitoring
 
 import maxengine
 import tokenizer
+import transformers
 
 # pylint: disable=too-many-positional-arguments
 
@@ -508,95 +509,49 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   rng1, rng_gen = random.split(dropout_rng)
   
   # --- (1) Prepare prompts and tokenizer
+  # Calling it prompts, because currently it only has left padded prompts such that all the prompts are aligned
+  # at the right index, and then there is padding to the right till max_target_length
   prompts = data["prompt"]
   if is_train:
     # restrict batch size when per_device_batch_size<1
     prompts = prompts[: config.micro_batch_size_to_train_on, :]
-  # calculate the L_prompt which is the lenght of the prompt, we assume that the prompts are left padded to have same length, 
+
+  # tokenizer_model = tokenizer.build_tokenizer(config.tokenizer_path, config.add_bos, config.add_eos)
+  tokenizer_model = transformers.AutoTokenizer.from_pretrained(
+        config.tokenizer_path,
+        add_bos_token=config.add_bos,
+        add_eos_token=config.add_eos,
+        model_max_length=config.max_target_length,
+        legacy=False,
+        token=config.hf_access_token,
+    )
+  
+  # TODO: calculate the L_prompt which is the lenght of the prompt, we assume that the prompts are left padded to have same length, 
   # then there is padding on the right to pad till max_target_length
-  def get_valid_length(tokens, pad_token_id):
-    """
-    Finds the index of the first padding token from the right in a 1D JAX array tokens.
-
-    Args:
-      tokens: A 1D JAX array of tokens (integers).
-      pad_id: The ID of the padding token.
-
-    Returns:
-      The index of the first padding token from the right, 
-      or len(tokens) if no padding token is found.
-    """
-
-    is_padding = (tokens == pad_token_id)
-    padding_indices = jnp.where(is_padding, size=tokens.shape[0], fill_value=tokens.shape[0])[0]
-    result = jnp.where(padding_indices.shape[0] == 0, tokens.shape[0], padding_indices[0])
-
-    # Convert the result to a Python int
-    return int(result)
-
-  tokenizer_model = tokenizer.build_tokenizer(config.tokenizer_path, config.add_bos, config.add_eos)
-
-  L_prompt = get_valid_length(prompts[0, 0], tokenizer_model.pad_id)
+  # L_prompt = get_valid_length(prompts[0, 0], tokenizer_model.pad_token)
   # TODO: do we need to truncate prompts in case for some dataset prompts are too long?
 
   # --- (2) Generate completions.
-  # For each prompt generate config.num_generations completions.
+  # find the length of the prompt out of the max_target_length
+  L_prompt = get_valid_length(prompts, tokenizer_model.pad_token)
+  # For each prompt generate config.num_generations completions. This repeatation happens inside the helper.
   # This helper returns a tensor of shape [B x G, max_target_length]
   completions = generate_completions( 
-                                     prompts, 
-                                     config,
+                                     params=params, #TODO: this needs to be \theta_old, but for now we are using \theta_old = \theta
+                                     prompts=prompts, 
+                                     config=config,
                                      rngs=rng_gen,
+                                     tokenizer_model=tokenizer_model,
                                      true_length=L_prompt,
                                      )
   # completions shape: [B x G, L_total]
-  L_total = completions.shape[1]
+  L_total = completions.shape[1] #max_target_length
   L_completion = L_total - L_prompt
 
   # --- (3) Compute per-token log probabilities.
-  #TODO: need to create the inputs_position and inputs_segmentation since the autoregressive decoding has added legit tokens now
-  
-  def extend_substring(tensor: jnp.ndarray, pad_token_id: int) -> jnp.ndarray:
-    """
-    Extends a substring of consecutive integers (starting from 0) along the 
-    last dimension of a tensor up to the first padding index from the right.
-
-    Args:
-        tensor: The input JAX array.
-        pad_token_id: The ID of the padding token.
-
-    Returns:
-        A new JAX array with the substring extended.
-    """
-
-    def find_start_index(row):
-      """Finds the start index of the substring (first occurrence of 0)."""
-      return jnp.where(row == 0, size=1, fill_value=row.shape[0])[0][0]
-
-    def extend_row(row):
-      """Extends the substring for a single row."""
-      i = get_valid_length(row, pad_token_id) - 1 
-      start_index = find_start_index(row)
-      
-      extended_substring = jnp.arange(0, jnp.maximum(0, i - start_index + 1))
-
-      mask = jnp.arange(row.shape[0]) >= start_index
-      mask = mask & (jnp.arange(row.shape[0]) <= i)
-
-      padded_extended_substring = jnp.pad(
-            extended_substring,
-            (0, jnp.maximum(0, jnp.sum(mask) - extended_substring.shape[0])),
-            mode='constant'
-      )
-      
-      return jnp.where(mask, padded_extended_substring, row)
-
-    # Apply extend_row to each row of the tensor using jax.vmap
-    extended_tensor = jax.vmap(extend_row)(tensor)
-
-    return extended_tensor
-
-  inputs_position = extend_substring(data["inputs_position"], tokenizer_model.pad_id)
-  inputs_segmentation = extend_substring(data["inputs_segmentation"], tokenizer_model.pad_id)
+  # Need to create the inputs_position and inputs_segmentation since the autoregressive decoding has added legit tokens now
+  inputs_position = extend_substring(data["inputs_position"], tokenizer_model.pad_token)
+  inputs_segmentation = extend_substring(data["inputs_segmentation"], tokenizer_model.pad_token)
 
   # compute_log_probs returns logits.
   # We compute the log-probabilities for the entire generated sequence, then shift as usual.
@@ -678,6 +633,68 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 
 
 # --- GRPO Helpers ---
+
+def extend_substring(tensor: jnp.ndarray, pad_token_id: int) -> jnp.ndarray:
+  """
+  Extends a substring of consecutive integers (starting from 0) along the 
+  last dimension of a tensor up to the first padding index from the right.
+
+  Args:
+      tensor: The input JAX array.
+      pad_token_id: The ID of the padding token.
+
+  Returns:
+      A new JAX array with the substring extended.
+  """
+
+  def find_start_index(row):
+    """Finds the start index of the substring (first occurrence of 0)."""
+    return jnp.where(row == 0, size=1, fill_value=row.shape[0])[0][0]
+
+  def extend_row(row):
+    """Extends the substring for a single row."""
+    i = get_valid_length(row, pad_token_id) - 1 
+    start_index = find_start_index(row)
+    
+    extended_substring = jnp.arange(0, jnp.maximum(0, i - start_index + 1))
+
+    mask = jnp.arange(row.shape[0]) >= start_index
+    mask = mask & (jnp.arange(row.shape[0]) <= i)
+
+    padded_extended_substring = jnp.pad(
+          extended_substring,
+          (0, jnp.maximum(0, jnp.sum(mask) - extended_substring.shape[0])),
+          mode='constant'
+    )
+    
+    return jnp.where(mask, padded_extended_substring, row)
+
+  # Apply extend_row to each row of the tensor using jax.vmap
+  extended_tensor = jax.vmap(extend_row)(tensor)
+
+  return extended_tensor
+  
+def get_valid_length(tokens, pad_token_id):
+    """
+    Finds the index of the first padding token from the right in a 1D JAX array tokens.
+
+    Args:
+      tokens: A 1D JAX array of tokens (integers).
+      pad_id: The ID of the padding token.
+
+    Returns:
+      The index of the first padding token from the right, 
+      or len(tokens) if no padding token is found.
+    """
+
+    is_padding = (tokens == pad_token_id)
+    breakpoint()
+    padding_indices = jnp.where(is_padding, size=tokens.shape[0], fill_value=tokens.shape[0])[0]
+    result = jnp.where(padding_indices.shape[0] == 0, tokens.shape[0], padding_indices[0])
+
+    # Convert the result to a Python int
+    return int(result)
+
 def jaccard_reward_fn(str1, str2):
   """
     A simple Jaccard similarity for now
@@ -712,7 +729,7 @@ def compute_log_probs(model, params, inputs, inputs_position, inputs_segmentatio
   return token_log_probs
 
 
-def generate_completions(prompts, config, rng, true_length):
+def generate_completions(params, prompts, config, rng, tokenizer_model, true_length):
   """
   Autoregressively generates completions for a batch of prompts.
   We assume the prompts are all left padded, so all of them have the same length=true_length
@@ -724,6 +741,8 @@ def generate_completions(prompts, config, rng, true_length):
          - max_completion_length: maximum number of tokens to generate.
          - temperature: sampling temperature.
     rng: JAX PRNGKeys.
+    tokenizer_model: Tokenizer for generate
+    true_length: Length of the prompt out of the max_target_length
  
   Returns:
     A jnp.array of shape [B x num_generations, S] where S = length_of_prompt + max_completion_length.
@@ -731,11 +750,9 @@ def generate_completions(prompts, config, rng, true_length):
 
   engine = maxengine.MaxEngine(config)
   rng, rng_load_params = jax.random.split(rng)
-  params = engine.load_params(rng_load_params)
   
   outputs = []
-  metadata = engine.get_tokenizer()
-  tokenizer_model = engine.build_tokenizer(metadata)
+  
 
   G = config.num_generations
   # Repeat each prompt G times.
@@ -750,6 +767,7 @@ def generate_completions(prompts, config, rng, true_length):
 
     # Split RNG before calling prefill
     rng, rng_prefill = jax.random.split(rng)
+    # generate the KV cache by prefilling the prompt tokens
     prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
     slot = 0
 
