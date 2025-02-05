@@ -91,7 +91,7 @@ def main(argv: Sequence[str]) -> None:
 
   prefill_result = None
   for i,chunk_metadata in enumerate(chunked_metadata_list):
-      rng, rng_prefill = jax.random.split(rng)
+      # rng, rng_prefill = jax.random.split(rng)
       position_og = jnp.arange(config.max_prefill_predict_length)
       postion_mask = jnp.where(position_og < (i+1)*chunk_size, position_og, 0)
       print(postion_mask)
@@ -102,6 +102,8 @@ def main(argv: Sequence[str]) -> None:
                                                     true_length=chunk_size, 
                                                     rng=rng_prefill, 
                                                     position_mask_cur=postion_mask)
+        # import pdb
+        # pdb.set_trace()
       else:
         prefill_result, first_token = engine.prefill(existing_prefix=prefill_result, 
                                                     params=params | {"cache": prefill_result["cache"]}, 
@@ -109,10 +111,10 @@ def main(argv: Sequence[str]) -> None:
                                                     true_length=chunk_size, 
                                                     rng=rng_prefill, 
                                                     position_mask_cur=postion_mask)
-      # import pdb
-      # pdb.set_trace()
-      if i == 0:
-        prefill_result['next_pos'] = [[512]]
+        # import pdb
+        # pdb.set_trace()
+      # if i == 0:
+      #   prefill_result['next_pos'] = [[512]]
       jax.debug.print("{next_pos} after {i} ", next_pos=prefill_result['next_pos'], i=i)
 
   rng, rng_init_decode = jax.random.split(rng)

@@ -206,6 +206,10 @@ class AttentionOp(nn.Module):
       row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
       col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
       causal_mask = (col_ids <= row_ids).astype(jnp.int32)
+      # import pdb
+      # pdb.set_trace()
+      # diag_mask = (col_ids == row_ids).astype(jnp.int32)
+      # causal_mask = jnp.logical_and(causal_mask_prev,diag_mask)
 
       jax.debug.print("causal_mask shape {causal_mask_shape} ", causal_mask_shape = causal_mask.shape)
 
@@ -850,7 +854,7 @@ class AttentionOp(nn.Module):
       cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice(cached_key_value, key_shaped_for_cache, (next_pos, 0, 0, 0))
       jax.debug.print("cached_prefill_key_vars after {cached_prefill_key_vars_value}", cached_prefill_key_vars_value=cached_prefill_key_vars[0].value)
 
-      cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(cached_value_value, key_shaped_for_cache, (next_pos, 0, 0, 0))
+      cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(cached_value_value, value_shaped_for_cache, (next_pos, 0, 0, 0))
 
     else:
       cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice(cached_prefill_key_vars[0].value, key_shaped_for_cache, (next_pos, 0, 0, 0))
@@ -892,6 +896,10 @@ class AttentionOp(nn.Module):
 
     # key_to_return = cached_prefill_key_vars[0].value
 
+    jax.debug.print("decoder_segment_ids just before return {decoder_segment_ids}", decoder_segment_ids=decoder_segment_ids)
+    # import pdb
+    # pdb.set_trace()
+    # decoder_segment_ids = jnp.zeros((1,1024), jnp.int32)
     return jnp.transpose(cached_prefill_key_vars[0].value, (2,0,1,3)), jnp.transpose(cached_prefill_value_vars[0].value, (2,0,1,3)), decoder_segment_ids
 
     # return key, value, decoder_segment_ids
@@ -1396,6 +1404,12 @@ class Attention(nn.Module):
 
     # apply ROPE
     query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
+    if existing_prefix != None:
+      # [512, ...1024]
+      # import pdb
+      # pdb.set_trace()
+      # inputs_positions=jnp.expand_dims(jnp.arange(0, 1024,  dtype=jnp.int32), 0)
+      jax.debug.print("inputs_positions {inputs_positions}", inputs_positions=inputs_positions)
     key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
 
     if model_mode == common_types.MODEL_MODE_PREFILL:

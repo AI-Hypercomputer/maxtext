@@ -246,11 +246,16 @@ class MaxEngine(engine_api.Engine):
     if rng is None:
       rng = jax.random.PRNGKey(0)
     mul = 0
+    to_add = jnp.zeros((1,512,32000))
+    to_add_pos = 0
     if existing_prefix is not None:
-      mul = 0
+      mul = 512
+      to_add = existing_prefix['flat_logits']
+      to_add_pos = 512
     
 
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
+    # positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
     positions = jnp.expand_dims(jnp.arange(mul, mul+input_tokens.shape[1]), 0)
 
     zero_to_n = jnp.arange(0, padded_tokens.shape[0])
@@ -271,9 +276,13 @@ class MaxEngine(engine_api.Engine):
           mutable=["cache"],
           existing_prefix=existing_prefix,
       )
+    jax.debug.print("flat_logits {flat_logits} {shape} ", flat_logits=flat_logits, shape=flat_logits.shape)
 
-    next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
+    # if existing_prefix is None:
+    next_pos = jnp.full((1, 1), true_length + mul, dtype=jnp.int32)
     generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
+    
+    # jax.debug.print("added_logits {added_logits} {shape} ", added_logits=added_logits, shape=added_logits.shape)
     selected_logits = jax.lax.dynamic_slice(
         flat_logits,
         (0, true_length - 1, 0),
@@ -308,12 +317,15 @@ class MaxEngine(engine_api.Engine):
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
 
+    jax.debug.print("next_pos {next_pos}", next_pos=next_pos)
+
     return {
         "logits": selected_logits,
         "cache": cache,
         "next_pos": next_pos,
         "generated_tokens": generated_tokens,
         "tokens": first_generated_token,
+        "flat_logits": flat_logits,
     }, result
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
