@@ -1466,5 +1466,110 @@ class PagedAttentionTest(unittest.TestCase):
         "Second sequence not showing position-dependent attention"
     )
 
+  def test_update_prefill_step_pages_state_management(self):
+    """Test page state updates during prefill with state tracking."""
+    batch_size = 4
+    seq_len = 64  # Must be divisible by tokens_per_page
+    num_heads = 8
+    head_dim = 128
+
+    # Create test input
+    key = jnp.ones((batch_size, seq_len, num_heads, head_dim))
+    value = jnp.ones((batch_size, seq_len, num_heads, head_dim))
+    
+    # Create initial page state
+    page_state = PageState(
+        page_status=jnp.zeros(self.cfg["num_pages"], dtype=jnp.int32),
+        page_map=jnp.zeros((batch_size, self.cfg["num_pages"]), dtype=jnp.int32),
+        sequence_lengths=jnp.zeros(batch_size, dtype=jnp.int32),
+        num_pages_used=jnp.zeros(batch_size, dtype=jnp.int32),
+        current_page=jnp.zeros(batch_size, dtype=jnp.int32),
+        current_page_position=jnp.zeros(batch_size, dtype=jnp.int32)
+    )
+
+    # Initialize
+    variables = self.attention_op.init(
+        self.rng, key, key, value, None,
+        common_types.MODEL_MODE_PREFILL, page_state
+    )
+
+    # First apply - should initialize state
+    output_tuple, vars = self.attention_op.apply(
+        variables, key, key, value, None,
+        common_types.MODEL_MODE_PREFILL, page_state,
+        mutable=["cache"]
+    )
+
+    # Verify state was stored and updated
+    self.assertIn("page_state", vars["cache"], "page_state not stored in cache")
+    new_page_state = vars["cache"]["page_state"]  # Remove .value access
+    self.assertIsNotNone(new_page_state, "page_state is None after update")
+
+    # Add type verification
+    self.assertIsInstance(new_page_state, PageState, 
+                         f"Expected PageState, got {type(new_page_state)}")
+
+    # Print debug info
+    print(f"\nPage State after update:")
+    print(f"  sequence_lengths: {new_page_state.sequence_lengths}")
+    print(f"  num_pages_used: {new_page_state.num_pages_used}")
+    print(f"  page_map shape: {new_page_state.page_map.shape}")
+
+    # Verify page assignments
+    expected_pages_per_seq = seq_len // self.cfg["tokens_per_page"]
+    for b in range(batch_size):
+        # Check sequence tracking
+        print(f"{new_page_state.sequence_lengths[b]=}") # [64]
+        print(f"{seq_len=}")                            # 64
+        print(f"{new_page_state.num_pages_used[b]=}")   # [2]
+        print(f"{expected_pages_per_seq=}")             # 2
+
+        self.assertEqual(
+            new_page_state.sequence_lengths[b], seq_len,
+            f"Wrong sequence length for batch {b}"
+        )
+        self.assertEqual(
+            new_page_state.num_pages_used[b], expected_pages_per_seq,
+            f"Wrong number of pages used for batch {b}"
+        )
+
+        # Verify used pages are marked
+        used_pages = new_page_state.page_map[b][new_page_state.page_map[b] > 0]
+        print(f"{new_page_state.page_map[b]=}")         # [0, 1, 0, ..., 0]
+        print(f"{used_pages=}")                         # [1]
+        self.assertEqual(
+            len(used_pages), expected_pages_per_seq,
+            f"Wrong number of pages mapped for batch {b}"
+        )
+        for page in used_pages:
+            self.assertEqual(
+                new_page_state.page_status[page], 1,
+                f"Page {page} not marked as used"
+            )
+
+    # Verify page contents
+    key_pages = vars["cache"]["key_pages"].value
+    value_pages = vars["cache"]["value_pages"].value
+
+    for b in range(batch_size):
+        for p in range(expected_pages_per_seq):
+            page_idx = new_page_state.page_map[b][p]
+            start_pos = p * self.cfg["tokens_per_page"]
+            end_pos = start_pos + self.cfg["tokens_per_page"]
+
+            # Check key storage
+            np.testing.assert_array_equal(
+                key_pages[:, page_idx],
+                key[b, start_pos:end_pos].transpose(1, 0, 2),
+                f"Key mismatch batch {b} page {p}"
+            )
+
+            # Check value storage 
+            np.testing.assert_array_equal(
+                value_pages[:, page_idx],
+                value[b, start_pos:end_pos].transpose(1, 0, 2),
+                f"Value mismatch batch {b} page {p}"
+            )
+
 if __name__ == "__main__":
   unittest.main()
