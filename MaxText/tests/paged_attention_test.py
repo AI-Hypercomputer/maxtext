@@ -1175,18 +1175,20 @@ class PagedAttentionTest(unittest.TestCase):
 
     # Capture cache state before release
     pre_release_cache = vars1["cache"]
+    key_pages_var = vars1["cache"]["key_pages"] # Get key_pages_var
+    value_pages_var = vars1["cache"]["value_pages"] # Get value_pages_var
     print("Pre-release cache keys:", pre_release_cache.keys())
     print("Key pages shape:", pre_release_cache["key_pages"].value.shape)
-    
+
     # Release slot
-    page_state = self.attention_op.release_slot(0, page_state)
-    
+    page_state = self.attention_op.release_slot(0, page_state, key_pages_var, value_pages_var) # Pass vars
+
     # Verify page state is cleaned
     print("\nPage state after release:")
     print("sequence_lengths:", page_state.sequence_lengths)
     print("num_pages_used:", page_state.num_pages_used)
     print("page_map:", page_state.page_map)
-    
+
     # Create new sequence with very different values
     key2 = jax.random.normal(self.rng, (batch_size, seq_len, num_heads, head_dim)) * 100.0  # Scale up significantly
     value2 = jax.random.normal(self.rng, (batch_size, seq_len, num_heads, head_dim)) * 100.0
@@ -1236,22 +1238,25 @@ class PagedAttentionTest(unittest.TestCase):
     # Initial sequence
     x1 = jax.random.normal(self.rng, (batch_size, seq_len, num_heads, head_dim))
     
-    # Initialize and store first sequence
     variables = self.attention_op.init(
-        self.rng, x1, x1, x1, None, 
+        self.rng, x1, x1, x1, None,
         common_types.MODEL_MODE_PREFILL, page_state
     )
-    
+
     # Get initial KV cache state
     initial_cache = variables["cache"]
     initial_k_pages = initial_cache["key_pages"].value.copy()
     initial_v_pages = initial_cache["value_pages"].value.copy()
-    
+
     # Store initial page map state
     initial_page_map = page_state.page_map.copy()
 
-    # Release the slot
-    page_state = self.attention_op.release_slot(0, page_state)
+    key_pages_var = variables["cache"]["key_pages"] # Get key_pages_var
+    value_pages_var = variables["cache"]["value_pages"] # Get value_pages_var
+
+
+    # Release the slot, now passing key_pages_var and value_pages_var
+    page_state = self.attention_op.release_slot(0, page_state, key_pages_var, value_pages_var)
 
     # Check page state was reset
     self.assertEqual(page_state.sequence_lengths[0], 0)
@@ -1395,19 +1400,20 @@ class PagedAttentionTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_slot_reuse_attention_computation(self):
     """Test that reused slot properly computes attention with new content."""
-    batch_size, seq_len = 1, self.cfg["max_prefill_predict_length"]
+    batch_size = 4
+    seq_len = self.cfg["max_prefill_predict_length"]
     num_heads = self.cfg["num_query_heads"]
     head_dim = self.cfg["head_dim"]
 
     # Create structured input where we can verify attention is working
     key1 = jnp.ones((batch_size, seq_len, num_heads, head_dim))  # All ones
-    value1 = jnp.ones((batch_size, seq_len, num_heads, head_dim)) 
+    value1 = jnp.ones((batch_size, seq_len, num_heads, head_dim))
 
     # Initialize page state
     page_state = PageState(
         page_status=jnp.zeros(self.cfg["num_pages"], dtype=jnp.int32),
         page_map=jnp.zeros((batch_size, self.cfg["num_pages"]), dtype=jnp.int32),
-        sequence_lengths=jnp.array([seq_len], dtype=jnp.int32),
+        sequence_lengths=jnp.ones(batch_size, dtype=jnp.int32),
         num_pages_used=jnp.zeros(batch_size, dtype=jnp.int32),
         current_page=jnp.zeros(batch_size, dtype=jnp.int32),
         current_page_position=jnp.zeros(batch_size, dtype=jnp.int32)
@@ -1419,28 +1425,39 @@ class PagedAttentionTest(unittest.TestCase):
         variables, key1, key1, value1, None, common_types.MODEL_MODE_PREFILL, page_state, mutable=["cache"]
     )
     first_output = output_tuple1[0]
-    
+
+    key_pages_var = vars1["cache"]["key_pages"] # Get key_pages_var
+    value_pages_var = vars1["cache"]["value_pages"] # Get value_pages_var
+
     # Release slot
-    page_state = self.attention_op.release_slot(0, page_state)
+    page_state = self.attention_op.release_slot(0, page_state, key_pages_var, value_pages_var) # Pass vars
 
     # Create new sequence with specific pattern to detect attention
     key2 = jnp.zeros((batch_size, seq_len, num_heads, head_dim))  # All zeros except...
     key2 = key2.at[:, 0, :, :].set(1.0)  # First position is ones
     value2 = jnp.ones((batch_size, seq_len, num_heads, head_dim)) * 2.0  # All twos
+    ar_key2 = key2[:, 0:1, :, :]
+    ar_value2 = value2[:, 0:1, :, :]
 
     # Store second sequence in same slot
+    print(f"\ntest_slot_reuse_attention_computation: Before second apply call (AUTOREGRESSIVE mode):")
+    print(f"test_slot_reuse_attention_computation: ar_key2.shape = {ar_key2.shape}")
+    print(f"test_slot_reuse_attention_computation: ar_value2.shape = {ar_value2.shape}")
     output_tuple2, vars2 = self.attention_op.apply(
-        vars1, key2, key2, value2, None, common_types.MODEL_MODE_PREFILL, page_state, mutable=["cache"]
+        vars1, ar_key2, ar_key2, ar_value2, None, common_types.MODEL_MODE_AUTOREGRESSIVE, page_state, mutable=["cache"]
     )
+    print(f"test_slot_reuse_attention_computation: {len(output_tuple2)=}")
     second_output = output_tuple2[0]
+    print(f"test_slot_reuse_attention_computation: {first_output.shape=}")
+    print(f"test_slot_reuse_attention_computation: {second_output.shape=}")
 
     # If attention is working:
-    # - First sequence should attend equally to all positions (all ones) 
+    # - First sequence should attend equally to all positions (all ones)
     # - Second sequence should attend mainly to first position (only non-zero)
-    
+
     print("First output mean per position:", jnp.mean(first_output, axis=(0,2,3)))
     print("Second output mean per position:", jnp.mean(second_output, axis=(0,2,3)))
-    
+
     # We expect second output to have larger values at early positions
     # if attention is working properly
     second_means = jnp.mean(second_output, axis=(0,2,3))

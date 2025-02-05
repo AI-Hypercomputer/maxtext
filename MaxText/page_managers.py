@@ -133,6 +133,8 @@ class PageManager(nn.Module):
       num_pages_used_var: nn.Variable,
       current_page_var: nn.Variable,
       current_page_position_var: nn.Variable,
+      key_pages_var: nn.Variable,  # Added key_pages_var argument
+      value_pages_var: nn.Variable,  # Added value_pages_var argument
   ) -> Tuple:
     """Releases all pages assigned to a specific slot.
 
@@ -147,6 +149,9 @@ class PageManager(nn.Module):
       num_pages_used_var: Variable tracking page usage counts
       current_page_var: Variable tracking current active pages
       current_page_position_var: Variable tracking positions in current pages
+      key_pages_var: Variable for key pages cache
+      value_pages_var: Variable for value pages cache
+
 
     Returns:
       Tuple of updated variables after releasing the slot's pages
@@ -178,6 +183,13 @@ class PageManager(nn.Module):
     num_pages_used_var.value = num_pages_used
     current_page_var.value = current_page
     current_page_position_var.value = current_page_position
+
+    # Zero out KV cache pages for the released slot
+    used_pages_local = page_map[slot][page_map[slot] > 0] # need to read value again to get updated page_map
+    for page_idx in used_pages_local:
+        key_pages_var.value = key_pages_var.value.at[:, page_idx, :, :].set(jnp.zeros_like(key_pages_var.value[:, page_idx, :, :]))
+        value_pages_var.value = value_pages_var.value.at[:, page_idx, :, :].set(jnp.zeros_like(value_pages_var.value[:, page_idx, :, :]))
+
 
     return (
         page_status_var,

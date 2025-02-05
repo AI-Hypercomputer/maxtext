@@ -220,6 +220,7 @@ class PagedAttentionOp(nn.Module):
       key_pages_var: nn.Variable,
       value_pages_var: nn.Variable,
       page_state: page_managers.PageState,
+      model_mode: str,
   ) -> Array:
     """Apply Paged Attention.
 
@@ -241,6 +242,11 @@ class PagedAttentionOp(nn.Module):
 
     no_shard = P(None, None, None, None)
 
+    print(f"\npaged_attention - before wrap call: {query.shape=}")
+    print(f"paged_attention - before wrap call: {key_pages_var.value.shape=}")
+    print(f"paged_attention - before wrap call: {page_state.sequence_lengths=}")
+    print(f"paged_attention - before wrap call: {page_state.page_map=}")
+
     @functools.partial(
         shard_map,
         mesh=self.mesh,
@@ -256,7 +262,9 @@ class PagedAttentionOp(nn.Module):
         check_rep=False,
     )
     def wrap_paged_attention(q, k_pages, v_pages, lengths, page_indices, pages_per_compute_block):
-      q = jnp.squeeze(q, axis=1)
+      if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+        q = jnp.squeeze(q, axis=1)
+
       result = paged_attention(
           q=q,
           k_pages=k_pages,
@@ -292,14 +300,22 @@ class PagedAttentionOp(nn.Module):
         tuple: (output, exponentials_max, exponentials_sum) where the latter two
               are None for autoregressive mode (handled by paged_attention kernel)
     """
+    print(f"PagedAttentionOp.__call__: model_mode = {model_mode}") 
     key_pages_var, value_pages_var = self.init_or_get_kv_pages(model_mode)
+    
+    print(f"\nPagedAttentionOp.paged_attention: model_mode = {model_mode}")
+    print(f"PagedAttentionOp.paged_attention: page_state.sequence_lengths = {page_state.sequence_lengths}")
+    print(f"PagedAttentionOp.paged_attention: page_state.page_map = \n{page_state.page_map}")
+    print(f"PagedAttentionOp.paged_attention: page_state.current_page = {page_state.current_page}")
+    print(f"PagedAttentionOp.paged_attention: page_state.current_page_position = {page_state.current_page_position}")
+
     self.update(key_pages_var, value_pages_var, key, value, model_mode, page_state)
 
     if model_mode == common_types.MODEL_MODE_PREFILL:
       return self.paged_dot_product_attention_with_max_and_sum(query, key, value)
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-      ar_output = self.paged_attention(query, key_pages_var, value_pages_var, page_state)
-      return ar_output, None, None
+      ar_output = self.paged_attention(query, key_pages_var, value_pages_var, page_state, model_mode) 
+      return ar_output
 
   def update(
       self,
@@ -311,6 +327,7 @@ class PagedAttentionOp(nn.Module):
       page_state: Optional[page_managers.PageState] = None,
   ) -> None:
     """Update KV Pages."""
+    print(f"\nupdate: Entered - {model_mode=}")
     if model_mode == common_types.MODEL_MODE_PREFILL:
       self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value)
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
@@ -325,10 +342,16 @@ class PagedAttentionOp(nn.Module):
   ) -> None:
     """Update pages for prefill step."""
 
+    print(f"\nupdate_prefill_step_pages: Entered") # Entry point print
+
     assert (
         key.shape == value.shape
     ), f"prefill_step key/value should have the same shape, but getting {key.shape=} and {value.shape=} instead"
     b, t, n_kv, d = key.shape
+    print(f"update_prefill_step_pages: Input key.shape={key.shape}, value.shape={value.shape}") # Input shapes
+    print(f"update_prefill_step_pages: key_pages_var.value.shape={key_pages_var.value.shape}, value_pages_var.value.shape={value_pages_var.value.shape}") # KV cache var shapes
+
+
     assert t % self.tokens_per_page == 0
     assert (
         key_pages_var.value.shape == value_pages_var.value.shape
@@ -342,20 +365,29 @@ class PagedAttentionOp(nn.Module):
 
     # Handle both init (b>1) and runtime (b=1) cases
     if b == 1:
-      key = jnp.squeeze(key)
-      value = jnp.squeeze(value)
+      key_squeezed = jnp.squeeze(key)
+      value_squeezed = jnp.squeeze(value)
     else:
-      key = key[0]
-      value = value[0]
+      key_squeezed = key[0]
+      value_squeezed = value[0]
 
-    key = jnp.transpose(key, axes=(1, 0, 2))
-    value = jnp.transpose(value, axes=(1, 0, 2))
+    print(f"update_prefill_step_pages: key_squeezed.shape={key_squeezed.shape}, value_squeezed.shape={value_squeezed.shape}") # Squeezed shapes
 
-    key = jnp.reshape(key, shape=(n_kv, t // self.tokens_per_page, self.tokens_per_page, d))
-    value = jnp.reshape(value, shape=(n_kv, t // self.tokens_per_page, self.tokens_per_page, d))
+    key_transposed = jnp.transpose(key_squeezed, axes=(1, 0, 2))
+    value_transposed = jnp.transpose(value_squeezed, axes=(1, 0, 2))
 
-    key_pages_var.value = nn.with_logical_constraint(key, self.kv_pages_axis_names)
-    value_pages_var.value = nn.with_logical_constraint(value, self.kv_pages_axis_names)
+    print(f"update_prefill_step_pages: key_transposed.shape={key_transposed.shape}, value_transposed.shape={value_transposed.shape}") # Transposed shapes
+
+    key_reshaped = jnp.reshape(key_transposed, shape=(n_kv, t // self.tokens_per_page, self.tokens_per_page, d))
+    value_reshaped = jnp.reshape(value_transposed, shape=(n_kv, t // self.tokens_per_page, self.tokens_per_page, d))
+
+    print(f"update_prefill_step_pages: key_reshaped.shape={key_reshaped.shape}, value_reshaped.shape={value_reshaped.shape}") # Reshaped shapes
+
+    key_pages_var.value = nn.with_logical_constraint(key_reshaped, self.kv_pages_axis_names)
+    value_pages_var.value = nn.with_logical_constraint(value_reshaped, self.kv_pages_axis_names)
+
+    print(f"update_prefill_step_pages: Updated key_pages_var.value[0, 0, :2, :2]:\n{key_pages_var.value[0, 0, :2, :2]}") # Sample of updated KV cache
+    print(f"update_prefill_step_pages: Exit\n") # Exit point print
 
   def update_decode_step_pages(self, key_pages_var, value_pages_var, key, value, page_state):
     key_pages = key_pages_var.value
@@ -374,6 +406,10 @@ class PagedAttentionOp(nn.Module):
     kv_indices = jnp.arange(kv_heads)[:, None]  # [n_kv, 1]
     kv_indices = jnp.tile(kv_indices, (1, batch_size))  # [n_kv, b]
 
+    print(f"update_decode_step_pages: Shapes - key.shape={key.shape}, value.shape={value.shape}, key_pages.shape={key_pages.shape}, value_pages.shape={value_pages.shape}")
+    print(f"update_decode_step_pages: page_state.current_page={page_state.current_page}, page_state.current_page_position={page_state.current_page_position}")
+    print(f"update_decode_step_pages: new_key[0, 0, :2]=\n{new_key[0, 0, :2]}, new_value[0, 0, :2]=\n{new_value[0, 0, :2]}") # Print sample values
+
     key_pages_updated = key_pages.at[kv_indices, broadcast_pages, broadcast_pos].set(new_key)
     value_pages_updated = value_pages.at[kv_indices, broadcast_pages, broadcast_pos].set(new_value)
 
@@ -388,41 +424,57 @@ class PagedAttentionOp(nn.Module):
       self,
       slot: int,
       page_state: page_managers.PageState,
+      key_pages_var: nn.Variable,
+      value_pages_var: nn.Variable,
   ) -> page_managers.PageState:
     """Releases all pages assigned to a slot and updates page state.
-    
+
     Args:
       slot: The slot number to release
       page_state: Current page state
-      
+
     Returns:
       Updated page state with released pages
     """
+
     # Reset page map entries for this slot
     slot_pages = page_state.page_map[slot]
     used_pages = slot_pages[slot_pages > 0]
-    
+
+    # Print KV cache pages before zeroing
+    print(f"release_slot: Before zeroing - slot: {slot}, used_pages: {used_pages}")
+    print(f"release_slot: key_pages_var.value before zeroing (sample page 0):\n{key_pages_var.value[:, 0, :2, :2]}")
+
     # Update page status to mark pages as free
     new_page_status = page_state.page_status.at[used_pages].set(0)
-    
+
     # Reset page map
     new_page_map = page_state.page_map.at[slot].set(0)
-    
+
     # Reset other state
     new_sequence_lengths = page_state.sequence_lengths.at[slot].set(0)
-    new_num_pages_used = page_state.num_pages_used.at[slot].set(0) 
+    new_num_pages_used = page_state.num_pages_used.at[slot].set(0)
     new_current_page = page_state.current_page.at[slot].set(0)
     new_current_page_position = page_state.current_page_position.at[slot].set(0)
 
+    # Zero out KV cache pages for the released slot
+    for page_idx in used_pages:
+        key_pages_var.value = key_pages_var.value.at[:, int(page_idx), :, :].set(jnp.zeros_like(key_pages_var.value[:, int(page_idx), :, :]))
+        value_pages_var.value = value_pages_var.value.at[:, page_idx, :, :].set(jnp.zeros_like(value_pages_var.value[:, page_idx, :, :]))
+
+    # Print KV cache pages after zeroing
+    print(f"release_slot: After zeroing - slot: {slot}, used_pages: {used_pages}")
+    print(f"release_slot: key_pages_var.value after zeroing (sample page 0):\n{key_pages_var.value[:, 0, :2, :2]}")
+
+
     return page_managers.PageState(
         page_status=new_page_status,
-        page_map=new_page_map, 
+        page_map=new_page_map,
         sequence_lengths=new_sequence_lengths,
         num_pages_used=new_num_pages_used,
         current_page=new_current_page,
         current_page_position=new_current_page_position
     )
-
 
 class AttentionOp(nn.Module):
   config: Config
@@ -1352,7 +1404,7 @@ class AttentionOp(nn.Module):
       exponentials_sums = [prefill_exponentials_sum, ar_exponentials_sum]
       return self.normalize_attention(unnormalized_outputs, exponentials_maxes, exponentials_sums)
     else:
-      return prefill_unnormalized_output / prefill_exponentials_sum
+      return ar_unnormalized_output / ar_exponentials_sum if ar_exponentials_sum is not None else ar_unnormalized_output
 
 
 class Attention(nn.Module):
@@ -1562,6 +1614,14 @@ class Attention(nn.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
+    print(f"\nAttentionOp.__call__: Entered - model_mode = {model_mode}")
+    print(f"AttentionOp.__call__: q.shape = {inputs_q.shape}")
+    print(f"AttentionOp.__call__: kv.shape = {inputs_kv.shape}")
+    if decoder_segment_ids is not None:
+        print(f"AttentionOp.__call__: decoder_segment_ids.shape = {decoder_segment_ids.shape}")
+    else:
+        print(f"AttentionOp.__call__: decoder_segment_ids = None")
+
     inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
     inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
 

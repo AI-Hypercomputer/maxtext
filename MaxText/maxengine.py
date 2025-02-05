@@ -845,6 +845,9 @@ class MaxEngine(engine_api.Engine):
             current_page_position_var = nn.Variable({}, "current_page_position",
                                                   lambda: cache["current_page_position"].value)
 
+            key_pages_var = nn.Variable({}, "key_pages", lambda: cache["key_pages"].value)
+            value_pages_var = nn.Variable({}, "value_pages", lambda: cache["value_pages"].value)
+
             # Use PageManager's release logic to ensure consistent cleanup
             self.page_manager.release_slot_pages(
                 slot,
@@ -853,7 +856,9 @@ class MaxEngine(engine_api.Engine):
                 sequence_lengths_var,
                 num_pages_used_var,
                 current_page_var,
-                current_page_position_var
+                current_page_position_var,
+                key_pages_var,
+                value_pages_var,
             )
 
             # Update cache with cleaned state
