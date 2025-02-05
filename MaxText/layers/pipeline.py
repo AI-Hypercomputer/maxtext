@@ -787,7 +787,7 @@ class Pipeline(nn.Module):
       )
       
     # The scan cannot be used on init since it broadcasts the weights, which aren't yet initialized.
-    if self.config.scan_pipeline_iterations:
+    if self.config.scan_pipeline_iterations or True:
       variable_carry = []
       variable_broadcast = ["params"]  # All loop iterations need the weights for the full pipeline.
       if self.is_mutable_collection("non_trainable"):
@@ -795,52 +795,44 @@ class Pipeline(nn.Module):
       else:
         variable_broadcast.append("non_trainable")
       
-      run_one_repeat = nn.scan(
-          run_iteration_scannable,
-          variable_axes={
-              "summaries": 0,
-              "aux_loss": 0,
-              "intermediates": 0,
-              "hyper_params": 0,
-          },
-          variable_broadcast=variable_broadcast,
-          variable_carry=variable_carry,
-          # Dropout/aqt keys will be split for each iteration.
-          split_rngs={"random": True},
-          #length=total_iterations,
-          length=self.config.num_pipeline_microbatches
-      )
+      def run_one_repeat(self, loop_state, n_iters):
+        if self.config.scan_pipeline_iterations:
+          run_one_repeat_scanned = nn.scan(
+              run_iteration_scannable,
+              variable_axes={
+                  "summaries": 0,
+                  "aux_loss": 0,
+                  "intermediates": 0,
+                  "hyper_params": 0,
+              },
+              variable_broadcast=variable_broadcast,
+              variable_carry=variable_carry,
+              # Dropout/aqt keys will be split for each iteration.
+              split_rngs={"random": True},
+              #length=total_iterations,
+              length=n_iters
+          )
+          loop_state, _ = run_one_repeat_scanned(self, loop_state, None)
+          return loop_state
+        else:
+          for _ in range(n_iters):
+            loop_state, _ = run_iteration_scannable(self, loop_state, None)
+          return loop_state
+
       # AG weights
       # TODO(Consider wrapping this double loop in its own method - loop_over_repeats_gather_fsdp_first), since
       # it probably won't be called all the time - only with FSDP and feature turned on
       for repeat_index in range(self.config.num_pipeline_repeats):
         #loop_state['bsw'] = self.ag_new_bsw(loop_state['bsw'], sharding_info, loop_state['loop_iteration'])
         loop_state['bsw'] = self.full_shmap_ag_new_bsw(loop_state['bsw'], sharding_info, loop_state['loop_iteration'])
-        loop_state, _ = run_one_repeat(self, loop_state, None)
+        loop_state = run_one_repeat(self, loop_state, self.config.num_pipeline_microbatches)
       # TODO: For final flushing, we need to move bsw[0] - bsw[1]. However wedon't need to AG anything new,
       # so we don't need to call ag_new_bsw, we can get away with a subset of it
       #loop_state['bsw'] = self.ag_new_bsw(loop_state['bsw'], sharding_info, loop_state['loop_iteration'])
       loop_state['bsw'] = self.full_shmap_ag_new_bsw(loop_state['bsw'], sharding_info, loop_state['loop_iteration'])
-      # TODO: Identical scan is used for repeat and flushing - should refactor to shared, only length differs
-      flush_pipeline = nn.scan(
-          run_iteration_scannable,
-          variable_axes={
-              "summaries": 0,
-              "aux_loss": 0,
-              "intermediates": 0,
-              "hyper_params": 0,
-          },
-          variable_broadcast=variable_broadcast,
-          variable_carry=variable_carry,
-          # Dropout/aqt keys will be split for each iteration.
-          split_rngs={"random": True},
-          #length=total_iterations,
-          length=self.forwarding_delay * (self.num_stages - 1) 
-      )
-      loop_state, _ = flush_pipeline(self, loop_state, None)
-    else:
-      for loop_iteration in range(total_iterations):
-        loop_state, _ = run_iteration_scannable(self, loop_state, None)
+      loop_state = run_one_repeat(self, loop_state, self.forwarding_delay * (self.num_stages - 1) )
+
+
 
     # The final output is located in the input/output array, however the output microbatches may be permuted relative to the input
     final_output = self.permute_output_micro_per_stage_dim(loop_state["state_io"])
