@@ -1145,7 +1145,7 @@ deepseek_a1 = _add_to_model_dictionary(
     tuning_params={
         "steps": 10,
         "per_device_batch_size": 6,
-        "max_target_length": 8192,
+        "max_target_length": 4096,
         "enable_checkpointing": False,
         "dataset_type": "synthetic",
         "base_output_directory": "gs://maxtext-experiments-multipod",
@@ -1154,13 +1154,14 @@ deepseek_a1 = _add_to_model_dictionary(
         "num_experts_per_tok": 8,
         "base_emb_dim": 7168, #7168
         "base_mlp_dim": 2048,
-        "sparse_matmul": True, # False
-        "megablox": True, # True
+        "sparse_matmul": False, # False
+        "megablox": False, # True
         "capacity_factor": 1,
         "profiler": "xplane",
-        "base_num_decoder_layers": 60,
+        "base_num_decoder_layers": 50,
         "ici_expert_parallelism": 4,
         "opt_type": "sgd",
+        "weight_dtype": "bfloat16",
         "allow_split_physical_axes": True,
         "custom_mesh": "hybrid_ring_64x4",
         "remat_policy": "custom",
