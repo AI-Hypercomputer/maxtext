@@ -366,7 +366,11 @@ class _HyperParameters:
     max_utils.maybe_initialize_jax_distributed_system(raw_keys)
 
     if raw_keys["jax_cache_dir"]:
+      max_logging.log(f"Setting jax cache to {raw_keys['jax_cache_dir']}")
       compilation_cache.set_cache_dir(os.path.expanduser(raw_keys["jax_cache_dir"]))
+      jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+      jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
+      jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
 
     _HyperParameters.user_init(raw_keys)
     if raw_keys["dataset_type"] == "c4_mlperf" and raw_keys["model_name"] == "gpt3-175b":

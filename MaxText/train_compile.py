@@ -123,7 +123,7 @@ def jit_and_compile(
         donate_argnums=donate_argnums,
     )
     lowered = jitted.lower(*func_input_args, **func_input_kwargs)
-  compiled = lowered.compile()
+    compiled = lowered.compile()
   return compiled
 
 
@@ -158,7 +158,8 @@ def main(argv: Sequence[str]) -> None:
   func_to_compile, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
       train.train_step, topology_mesh, state_mesh_shardings, model, config
   )
-
+  # import pdb
+  # pdb.set_trace()
   # Compile
   print("Jitting and compiling train step...", flush=True)
   compiled = jit_and_compile(
