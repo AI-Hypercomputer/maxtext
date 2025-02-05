@@ -307,8 +307,8 @@ vocab_size: 32_000 # powers of 2 for sharding
 tokenizer_path: "assets/tokenizer.llama2"
 tokenize_train_data: True  # False if the dataset is pre-tokenized
 tokenize_eval_data: True  # False if the dataset is pre-tokenized
-add_bos: 1
-add_eos: 2
+add_bos: True
+add_eos: True
 
 # Dataset
 per_device_batch_size: 12.0
