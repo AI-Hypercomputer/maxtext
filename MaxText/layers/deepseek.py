@@ -210,4 +210,4 @@ class DeepSeekMoELayer(nn.Module):
         layer_output,
         ("activation_batch", "activation_norm_length", "activation_embed"),
     )
-    return post_process(self.config, layer_output)
+    return post_process(cfg, layer_output)
