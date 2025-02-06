@@ -376,15 +376,16 @@ class PagedAttentionOp(nn.Module):
     key: Array,
     value: Array,
     page_state: page_managers.PageState
-) -> page_managers.PageState:
+  ) -> page_managers.PageState:
     b, t, n_kv, d = key.shape
     pages_needed = t // self.tokens_per_page
 
     print(f"\nUpdate prefill analysis:")
     print(f"  Input shape: {key.shape}")
     print(f"  Pages needed per sequence: {pages_needed}")
+    print(f"  Total pages: {self.num_pages}")
 
-    # Take copies for modification
+    # Take copies for modification and keep track of status
     new_page_map = page_state.page_map
     new_page_status = page_state.page_status
     new_sequence_lengths = page_state.sequence_lengths
@@ -392,56 +393,49 @@ class PagedAttentionOp(nn.Module):
     new_current_page = page_state.current_page
     new_current_page_position = page_state.current_page_position
 
-    # Track next available page, starting at 1 to avoid using 0
     next_free_page = 1
 
     for batch_idx in range(b):
         pages_for_sequence = []
-        
+
         # Allocate pages for this sequence
         for i in range(pages_needed):
-            # Find next truly free page, skipping 0
+            # Find the next truly free page, skipping 0
             while next_free_page < self.num_pages and new_page_status[next_free_page] == 1:
                 next_free_page += 1
-            
-            if next_free_page >= self.num_pages:
-                raise ValueError(f"No more free pages available at batch {batch_idx}, page {i}")
-            
+
+            if next_free_page > self.num_pages:
+                raise ValueError(f"No more pages available for batch {batch_idx}, requested page {i}. next_free_page: {next_free_page}, num_pages: {self.num_pages}")
+
             # Assign this page
             page_idx = next_free_page
             pages_for_sequence.append(page_idx)
-            
-            # Mark page as used and map it
-            new_page_status = new_page_status.at[page_idx].set(1)
+
+            # Mark page as used and update the page map
+            new_page_status = new_page_status.at[page_idx].set(1) # Update Page Status
             new_page_map = new_page_map.at[batch_idx, i].set(page_idx)
-            
-            # Copy data
+
+            # Copy data to the allocated page
             start_token = i * self.tokens_per_page
             end_token = start_token + self.tokens_per_page
-            
-            # Prepare and store page data
+
             page_key_data = jnp.transpose(key[batch_idx, start_token:end_token], (1, 0, 2))
             page_value_data = jnp.transpose(value[batch_idx, start_token:end_token], (1, 0, 2))
-            
+
             key_pages_var.value = key_pages_var.value.at[:, page_idx].set(page_key_data)
             value_pages_var.value = value_pages_var.value.at[:, page_idx].set(page_value_data)
-            
-            next_free_page += 1
+
+            # next_free_page += 1  # REMOVED
 
         print(f"  Batch {batch_idx} assigned pages: {pages_for_sequence}")
-        
-        # Update sequence tracking
+
+        # Update sequence tracking information
         new_sequence_lengths = new_sequence_lengths.at[batch_idx].set(t)
         new_num_pages_used = new_num_pages_used.at[batch_idx].set(pages_needed)
         new_current_page = new_current_page.at[batch_idx].set(pages_for_sequence[-1])
         new_current_page_position = new_current_page_position.at[batch_idx].set(t % self.tokens_per_page)
 
-    # Add debug verification
-    for b_idx in range(b):
-        mapped_pages = new_page_map[b_idx][new_page_map[b_idx] > 0]
-        print(f"  Verification - Batch {b_idx}:")
-        print(f"    Mapped pages: {mapped_pages}")
-        print(f"    Num pages: {len(mapped_pages)}")
+    # Removed the additional check here
 
     return page_managers.PageState(
         page_status=new_page_status,
@@ -452,6 +446,7 @@ class PagedAttentionOp(nn.Module):
         current_page_position=new_current_page_position
     )
 
+
   def update_decode_step_pages(
     self,
     key_pages_var: nn.Variable,
@@ -459,8 +454,8 @@ class PagedAttentionOp(nn.Module):
     key: Array,
     value: Array,
     page_state: page_managers.PageState
-  ) -> page_managers.PageState:
-    """Updates pages for decode step with correct position tracking and page allocation."""
+) -> page_managers.PageState:
+    """Updates pages for decode step with improved page allocation strategy."""
     print(f"\nupdate_decode_step_pages:")
     print(f"  Input shapes - key: {key.shape}, value: {value.shape}")
     print(f"  Initial state:")
@@ -478,14 +473,46 @@ class PagedAttentionOp(nn.Module):
     new_current_page = page_state.current_page
     new_current_page_position = page_state.current_page_position
 
-    def find_next_free_page(start_from: int) -> int:
-        """Find next available page starting from given index."""
-        next_page = start_from
-        while next_page < self.num_pages and new_page_status[next_page] == 1:
-            next_page += 1
-        if next_page >= self.num_pages:
-            raise ValueError(f"No free pages available starting from {start_from}")
-        return next_page
+    def find_next_free_page(preferred_start: int, batch_idx: int) -> int:
+        """Find next available page with improved allocation strategy.
+        
+        Args:
+            preferred_start: Preferred starting page number
+            batch_idx: Current batch being processed
+            
+        Returns:
+            Next available page number
+        
+        Strategy:
+        1. Try preferred_start first (continuity)
+        2. Try batch-aligned section (locality)
+        3. Fall back to full search if needed
+        """
+        # First try the preferred next page
+        if preferred_start < self.num_pages and new_page_status[preferred_start] == 0:
+            return preferred_start
+            
+        # Try batch-aligned section first
+        # Each batch gets num_pages/batch_size consecutive pages
+        pages_per_batch = self.num_pages // batch_size
+        batch_start = batch_idx * pages_per_batch
+        batch_end = batch_start + pages_per_batch
+        
+        # Search batch's section first
+        for page in range(batch_start, batch_end):
+            if new_page_status[page] == 0:
+                return page
+                
+        # Fall back to searching all remaining pages
+        # But skip page 0 which is reserved
+        for page in range(1, self.num_pages):
+            if new_page_status[page] == 0:
+                return page
+                
+        raise ValueError(
+            f"No free pages available for batch {batch_idx}. "
+            f"Used pages: {new_page_map[batch_idx][new_page_map[batch_idx] > 0]}"
+        )
 
     # Process each batch
     for b in range(batch_size):
@@ -498,8 +525,8 @@ class PagedAttentionOp(nn.Module):
         # If this is the first token (curr_page == 0), we need to allocate first page
         if curr_page == 0:
             print(f"  Batch {b} - First token logic entered (curr_page == 0)")
-            # For first token, always start allocation from page 1
-            curr_page = find_next_free_page(1)
+            # For first token, allocate from batch's section
+            curr_page = find_next_free_page(1, b)
 
             print(f"  Batch {b} - Allocated first page: {curr_page}")
 
@@ -521,10 +548,10 @@ class PagedAttentionOp(nn.Module):
 
         # Check if we need new page for next token
         if curr_pos >= self.tokens_per_page:
-            # Find next free page starting after current page
+            # Try to get next consecutive page first
             try:
-                next_page = find_next_free_page(curr_page + 1)
-                print(f"  Batch {b} - Allocating new page {next_page} after page boundary")
+                next_page = find_next_free_page(curr_page + 1, b)
+                print(f"  Batch {b} - Allocated new page {next_page} after page boundary")
             except ValueError as e:
                 raise ValueError(f"Failed to allocate new page for batch {b}: {str(e)}")
 
@@ -545,7 +572,8 @@ class PagedAttentionOp(nn.Module):
         print(f"    page: {curr_page}, position: {curr_pos}")
         print(f"    sequence_length: {new_sequence_lengths[b]}")
         print(f"    num pages used: {new_num_pages_used[b]}")
-        print(f"    page map: {new_page_map[b][new_page_map[b] > 0]}")
+        used_pages = new_page_map[b][new_page_map[b] > 0]
+        print(f"    page map: {used_pages}")
 
     new_state = page_managers.PageState(
         page_status=new_page_status,

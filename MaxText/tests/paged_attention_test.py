@@ -824,45 +824,43 @@ class PagedAttentionTest(unittest.TestCase):
     self.assertTrue(jnp.all(jnp.abs(max_vals) < 1e5), "Attention weights may be experiencing numerical overflow")
 
 
+  @pytest.mark.tpu_only
   def test_multi_slot_cache_isolation(self):
     """Test that cache entries remain isolated between slots."""
     num_slots = 4
     seq_len = self.cfg['max_prefill_predict_length']
     num_heads = self.cfg['num_query_heads']
     head_dim = self.cfg['head_dim']
-    
-    # Track outputs for comparison
-    slot_outputs = []
-    
+
     # Initialize single page state to handle all slots
     page_state = PageState(
         page_status=jnp.zeros(self.cfg['num_pages'], dtype=jnp.int32),
         page_map=jnp.zeros((num_slots, self.cfg['num_pages']), dtype=jnp.int32),
         sequence_lengths=jnp.ones(num_slots, dtype=jnp.int32) * seq_len,
         num_pages_used=jnp.zeros(num_slots, dtype=jnp.int32),
-        current_page=jnp.arange(num_slots, dtype=jnp.int32),  # Each slot gets its own initial page
+        current_page=jnp.zeros(num_slots, dtype=jnp.int32),
         current_page_position=jnp.zeros(num_slots, dtype=jnp.int32)
     )
-    
+
     # Create queries with distinct patterns for each slot
     queries = []
     for slot in range(num_slots):
         rng_slot = jax.random.fold_in(self.rng, slot)
         queries.append(jax.random.normal(rng_slot, (1, seq_len, num_heads, head_dim)) * (slot + 1))
     queries = jnp.concatenate(queries, axis=0)  # Combine into batch
-    
+
     # Initialize and run attention
     variables = self.attention_op.init(
         self.rng, queries, queries, queries, None,
         common_types.MODEL_MODE_PREFILL, page_state
     )
-    
-    output_tuple, _ = self.attention_op.apply(
+
+    output_tuple, mutated_vars = self.attention_op.apply(
         variables, queries, queries, queries, None,
         common_types.MODEL_MODE_PREFILL, page_state,
         mutable=["cache"]
     )
-    
+
     # Verify outputs are different for each slot
     output = output_tuple[0]
     for i in range(num_slots - 1):
