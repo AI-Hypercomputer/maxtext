@@ -56,12 +56,13 @@ jobs:
       options: ${{ inputs.container_resource_option }}
     steps:
       - uses: actions/checkout@v4
-      - name: Set variables for Pathways tests
-        if: "${{ inputs.device_type }} == 'tpu_pathways'"
-        run: |
-          export JAX_PLATFORMS="proxy" ; export JAX_BACKEND_TARGET="grpc://localhost:29000" ; echo "Set Pathways env variables"
       - name: Run Tests
         run: |
-          export JAX_PLATFORMS="proxy" ; export JAX_BACKEND_TARGET="grpc://localhost:29000" ; echo "Set Pathways env variables" ;
+          export JAX_PLATFORMS="proxy" 
+          export JAX_BACKEND_TARGET="grpc://localhost:29000" 
+          echo $JAX_BACKEND_TARGET 
+          echo "Set Pathways env variables"
           cd MaxText
           python3 -m pytest -s ${{ inputs.test_directory }} -m "${{ inputs.pytest_marker }}"
+          cd utils_pathways
+          docker compose down
