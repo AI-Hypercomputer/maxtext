@@ -133,7 +133,7 @@ jobs:
     # needs: [gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_pathways_unit_tests, tpu_integration_tests]
     needs: [tpu_pathways_unit_tests]
     name: "Clean up"
-    runs-on: ["self-hosted"]
+    runs-on: ["self-hosted", "tpu_pathways" ]
     permissions:
       contents: read
       issues: write  # for failed-build-issue
@@ -142,6 +142,7 @@ jobs:
     #   run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:gpu --force-delete-tags --quiet
     - name: Delete TPU image
       run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu --force-delete-tags --quiet
+
 
   notify:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
