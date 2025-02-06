@@ -54,11 +54,14 @@ jobs:
       base_image: us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:latest
 
   # tpu_pathways_setup:
-  #   needs: tpu_pathways_image
-  #   uses: ./.github/workflows/start_pathways_containers.yml
-  #   with:
-  #     device_type: tpu_pathways
-  #     device_name: v4-8
+  #   runs-on: ["self-hosted", "tpu_pathways", "v4-8"]
+  #   steps:
+  #   - name: Install Docker Compose and configure docker
+  #     run: |
+  #       sudo apt-get install docker-compose-plugin
+  #       docker compose version
+  #       gcloud auth configure-docker us-docker.pkg.dev --quiet
+        
 
   # gpu_image:
   #   needs: prelim
