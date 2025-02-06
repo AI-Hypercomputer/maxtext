@@ -1570,6 +1570,190 @@ class PagedAttentionTest(unittest.TestCase):
                 value[b, start_pos:end_pos].transpose(1, 0, 2),
                 f"Value mismatch batch {b} page {p}"
             )
+  
+  @pytest.mark.tpu_only
+  def test_decode_step_pages_state_management(self):
+    """Test page state management during decode steps with proper boundary handling.
+    
+    Critical test case: Step 31 (page boundary)
+    - Data is written to position 31 of old pages [1,2,3,4]
+    - State advances to position 0 of new pages [5,6,7,8]
+    - Must verify data in position 31 of old pages [1,2,3,4]
+    """
+    batch_size = 4
+    num_heads = 8
+    head_dim = 128
+    tokens_per_page = self.cfg["tokens_per_page"]
+    
+    def determine_read_location(step: int, state: PageState) -> tuple[jnp.ndarray, int]:
+        """Calculate correct page and position for reading stored data.
+        
+        Args:
+            step: Current generation step
+            state: Current page state with updated page map
+            
+        Returns:
+            Tuple of (page_numbers, position) where page_numbers is array of
+            pages to read from and position is where in page to read.
+        """
+        if step == 0:
+            return jnp.ones(batch_size, dtype=jnp.int32), 0
+            
+        # At page boundary (e.g. step 31), data is in old pages at last position
+        if step % tokens_per_page == tokens_per_page - 1:
+            # Get first (original) page from each batch's page map
+            read_pages = state.page_map[:, 0]
+            return read_pages, tokens_per_page - 1
+        
+        # Normal case - read from current page at current position
+        return state.current_page, step % tokens_per_page
+
+    def get_stored_key(
+        vars: dict, 
+        read_page: jnp.ndarray, 
+        read_pos: int, 
+        batch_idx: int
+    ) -> jnp.ndarray:
+        """Retrieve stored key data for verification."""
+        return vars["cache"]["key_pages"].value[
+            :,  # heads
+            read_page[batch_idx],  # Page for this batch
+            read_pos,  # Position in page
+            :   # dims
+        ]
+
+    # Initialize empty page state
+    page_state = PageState(
+        page_status=jnp.zeros(self.cfg["num_pages"], dtype=jnp.int32),
+        page_map=jnp.zeros((batch_size, self.cfg["num_pages"]), dtype=jnp.int32),
+        sequence_lengths=jnp.zeros(batch_size, dtype=jnp.int32),
+        num_pages_used=jnp.zeros(batch_size, dtype=jnp.int32),
+        current_page=jnp.zeros(batch_size, dtype=jnp.int32),
+        current_page_position=jnp.zeros(batch_size, dtype=jnp.int32)
+    )
+    
+    # Initialize attention op
+    variables = self.attention_op.init(
+        self.rng,
+        jnp.ones((batch_size, 1, num_heads, head_dim)),
+        jnp.ones((batch_size, 1, num_heads, head_dim)),
+        jnp.ones((batch_size, 1, num_heads, head_dim)),
+        None,
+        common_types.MODEL_MODE_AUTOREGRESSIVE,
+        page_state
+    )
+
+    # Test through one page boundary
+    num_steps = tokens_per_page + 2
+
+    print(f"\nTesting {num_steps} decode steps:")
+    print(f"  tokens_per_page: {tokens_per_page}")
+    print(f"  num_pages: {self.cfg['num_pages']}")
+    
+    for step in range(num_steps):
+        # Create distinct input for this step
+        step_value = float(step + 1)
+        step_key = jnp.ones((batch_size, 1, num_heads, head_dim)) * step_value
+        step_value = jnp.ones((batch_size, 1, num_heads, head_dim)) * step_value * 2
+
+        print(f"\nStep {step}:")
+        print(f"  Pre-step sequence lengths: {page_state.sequence_lengths}")
+        print(f"  Pre-step current pages: {page_state.current_page}")
+        print(f"  Pre-step page positions: {page_state.current_page_position}")
+        print(f"  Pre-step page map:")
+        for b in range(batch_size):
+            used_pages = page_state.page_map[b][page_state.page_map[b] > 0]
+            print(f"    Batch {b}: {used_pages}")
+        
+        # Process step
+        output_tuple, vars = self.attention_op.apply(
+            variables,
+            step_key, step_key, step_value,
+            None,
+            common_types.MODEL_MODE_AUTOREGRESSIVE,
+            page_state,
+            mutable=["cache"]
+        )
+        
+        # Get updated state
+        new_page_state = vars["cache"]["page_state"]
+        
+        # Determine correct read location
+        read_pages, read_pos = determine_read_location(step, new_page_state)
+        
+        print(f"  Post-process state:")
+        print(f"    sequence_lengths: {new_page_state.sequence_lengths}")
+        print(f"    current_pages: {new_page_state.current_page}")
+        print(f"    current_positions: {new_page_state.current_page_position}")
+        print(f"  Verification:")
+        print(f"    reading from pages: {read_pages}")
+        print(f"    reading at position: {read_pos}")
+        print(f"    updated page map:")
+        for b in range(batch_size):
+            used_pages = new_page_state.page_map[b][new_page_state.page_map[b] > 0]
+            print(f"      Batch {b}: {used_pages}")
+        
+        # Verify state and data for each batch
+        for b in range(batch_size):
+            # Verify sequence length increased
+            self.assertEqual(
+                new_page_state.sequence_lengths[b],
+                step + 1,
+                f"Wrong sequence length batch {b} step {step}"
+            )
+            
+            # Get stored data
+            stored_key = get_stored_key(vars, read_pages, read_pos, b)
+            
+            # Print first few values for debugging
+            if b == 0:
+                print(f"    batch 0 stored key values: {stored_key[0, 0:5]}")
+                print(f"    batch 0 expected values: {step_key[0, 0, 0, 0:5]}")
+            
+            # Verify stored key matches input
+            np.testing.assert_array_almost_equal(
+                stored_key,
+                step_key[b, 0],
+                decimal=5,
+                err_msg=f"Key mismatch batch {b} step {step}"
+            )
+            
+            # After page boundary, verify both old and new pages tracked
+            if step >= tokens_per_page:
+                used_pages = new_page_state.page_map[b][new_page_state.page_map[b] > 0]
+                self.assertEqual(
+                    len(used_pages),
+                    2,  # Should have both old and new page
+                    f"Should have 2 pages tracked for batch {b} step {step}"
+                )
+        
+        # Update state for next iteration
+        page_state = new_page_state
+        variables = vars
+    
+    # Final state verification
+    print("\nFinal state verification:")
+    for b in range(batch_size):
+        used_pages = page_state.page_map[b][page_state.page_map[b] > 0]
+        print(f"  Batch {b}:")
+        print(f"    Used pages: {used_pages}")
+        print(f"    Sequence length: {page_state.sequence_lengths[b]}")
+        
+        # Verify both pages still tracked
+        self.assertEqual(
+            len(used_pages),
+            2,
+            f"Wrong number of pages tracked for batch {b}"
+        )
+        self.assertEqual(
+            used_pages[0],
+            b + 1,  # First page should be batch_index + 1
+            f"Wrong first page for batch {b}"
+        )
+        self.assertTrue(
+            used_pages[1] > used_pages[0],  # Second page should be higher numbered
+            f"Second page {used_pages[1]} not higher than first {used_pages[0]}"
+        )
 
 if __name__ == "__main__":
   unittest.main()

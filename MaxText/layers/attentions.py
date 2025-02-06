@@ -434,9 +434,7 @@ class PagedAttentionOp(nn.Module):
         new_sequence_lengths = new_sequence_lengths.at[batch_idx].set(t)
         new_num_pages_used = new_num_pages_used.at[batch_idx].set(pages_needed)
         new_current_page = new_current_page.at[batch_idx].set(pages_for_sequence[-1])
-        new_current_page_position = new_current_page_position.at[batch_idx].set(
-            (t - 1) % self.tokens_per_page
-        )
+        new_current_page_position = new_current_page_position.at[batch_idx].set(t % self.tokens_per_page)
 
     # Add debug verification
     for b_idx in range(b):
@@ -461,82 +459,109 @@ class PagedAttentionOp(nn.Module):
     key: Array,
     value: Array,
     page_state: page_managers.PageState
-) -> page_managers.PageState:
-    """Updates decode steps with new data.
-
-    Args:
-        key_pages_var: Variable holding key pages
-        value_pages_var: Variable holding value pages
-        key: New key data for current step
-        value: New value data for current step  
-        page_state: Current page state
-    
-    Returns:
-        Updated PageState
-    """
-    print(f"\nupdate_decode_step_pages: Shapes - key.shape={key.shape}, value.shape={value.shape}, "
-          f"key_pages.shape={key_pages_var.value.shape}, value_pages.shape={value_pages_var.value.shape}")
+  ) -> page_managers.PageState:
+    """Updates pages for decode step with correct position tracking and page allocation."""
+    print(f"\nupdate_decode_step_pages:")
+    print(f"  Input shapes - key: {key.shape}, value: {value.shape}")
+    print(f"  Initial state:")
+    print(f"    current_positions: {page_state.current_page_position}")
+    print(f"    current_pages: {page_state.current_page}")
 
     batch_size, seq_len, kv_heads, head_dim = key.shape
     assert seq_len == 1, "Decode step must have sequence length 1"
 
-    # Get current state values
-    current_pages = page_state.current_page
-    current_positions = page_state.current_page_position
+    # Take copies for modification
+    new_page_map = page_state.page_map
+    new_page_status = page_state.page_status
+    new_sequence_lengths = page_state.sequence_lengths
+    new_num_pages_used = page_state.num_pages_used
+    new_current_page = page_state.current_page
+    new_current_page_position = page_state.current_page_position
 
-    print(f"page_state.current_page={current_pages}, page_state.current_page_position={current_positions}")
+    def find_next_free_page(start_from: int) -> int:
+        """Find next available page starting from given index."""
+        next_page = start_from
+        while next_page < self.num_pages and new_page_status[next_page] == 1:
+            next_page += 1
+        if next_page >= self.num_pages:
+            raise ValueError(f"No free pages available starting from {start_from}")
+        return next_page
 
-    # Reshape inputs
-    new_key = jnp.reshape(key, (batch_size, kv_heads, head_dim))
-    new_value = jnp.reshape(value, (batch_size, kv_heads, head_dim))
-    new_key = jnp.transpose(new_key, (1, 0, 2))  # [kv_heads, batch, head_dim]
-    new_value = jnp.transpose(new_value, (1, 0, 2))
-
-    print(f"new_key[0, 0, :2]=\n{new_key[0, 0, :2]}, new_value[0, 0, :2]=\n{new_value[0, 0, :2]}")
-
-    # Make copies for modification
-    sequence_lengths = page_state.sequence_lengths
-    num_pages_used = page_state.num_pages_used
-    page_map = page_state.page_map
-    page_status = page_state.page_status
-
-    # Update each batch item
+    # Process each batch
     for b in range(batch_size):
-        curr_page = current_pages[b]
-        curr_pos = current_positions[b]
+        curr_page = new_current_page[b]
+        curr_pos = new_current_page_position[b]
 
-        # Store the new key/value data
-        key_pages_var.value = key_pages_var.value.at[:, curr_page, curr_pos, :].set(
-            new_key[:, b, :]
-        )
-        value_pages_var.value = value_pages_var.value.at[:, curr_page, curr_pos, :].set(
-            new_value[:, b, :]
-        )
+        print(f"  Batch {b} before update:")
+        print(f"    page: {curr_page}, position: {curr_pos}")
 
-        # Update position tracking
+        # If this is the first token (curr_page == 0), we need to allocate first page
+        if curr_page == 0:
+            print(f"  Batch {b} - First token logic entered (curr_page == 0)")
+            # For first token, always start allocation from page 1
+            curr_page = find_next_free_page(1)
+
+            print(f"  Batch {b} - Allocated first page: {curr_page}")
+
+            new_page_status = new_page_status.at[curr_page].set(1)
+            new_page_map = new_page_map.at[b, 0].set(curr_page)
+            new_num_pages_used = new_num_pages_used.at[b].set(1)
+            new_current_page = new_current_page.at[b].set(curr_page)
+
+        # Store key/value data
+        print(f"  Batch {b} - Storing at page {curr_page}, position {curr_pos}")
+        key_data = key[b, 0]
+        value_data = value[b, 0]
+
+        key_pages_var.value = key_pages_var.value.at[:, curr_page, curr_pos, :].set(key_data)
+        value_pages_var.value = value_pages_var.value.at[:, curr_page, curr_pos, :].set(value_data)
+
+        # Increment position
         curr_pos += 1
+
+        # Check if we need new page for next token
         if curr_pos >= self.tokens_per_page:
-            # Need new page
-            new_page = jnp.where(page_status == 0)[0][0]
-            page_status = page_status.at[new_page].set(1)
-            page_map = page_map.at[b, num_pages_used[b]].set(new_page)
-            num_pages_used = num_pages_used.at[b].add(1)
-            curr_page = new_page
+            # Find next free page starting after current page
+            try:
+                next_page = find_next_free_page(curr_page + 1)
+                print(f"  Batch {b} - Allocating new page {next_page} after page boundary")
+            except ValueError as e:
+                raise ValueError(f"Failed to allocate new page for batch {b}: {str(e)}")
+
+            # Set up new page
+            curr_page = next_page
             curr_pos = 0
 
-        # Update tracking for this batch item
-        current_pages = current_pages.at[b].set(curr_page)
-        current_positions = current_positions.at[b].set(curr_pos)
-        sequence_lengths = sequence_lengths.at[b].add(1)
+            new_page_status = new_page_status.at[next_page].set(1)
+            new_page_map = new_page_map.at[b, new_num_pages_used[b]].set(next_page)
+            new_num_pages_used = new_num_pages_used.at[b].add(1)
 
-    return page_managers.PageState(
-        page_status=page_status,
-        page_map=page_map, 
-        sequence_lengths=sequence_lengths,
-        num_pages_used=num_pages_used,
-        current_page=current_pages,
-        current_page_position=current_positions
+        # Update tracking
+        new_current_page_position = new_current_page_position.at[b].set(curr_pos)
+        new_current_page = new_current_page.at[b].set(curr_page)
+        new_sequence_lengths = new_sequence_lengths.at[b].add(1)
+
+        print(f"  Batch {b} after update:")
+        print(f"    page: {curr_page}, position: {curr_pos}")
+        print(f"    sequence_length: {new_sequence_lengths[b]}")
+        print(f"    num pages used: {new_num_pages_used[b]}")
+        print(f"    page map: {new_page_map[b][new_page_map[b] > 0]}")
+
+    new_state = page_managers.PageState(
+        page_status=new_page_status,
+        page_map=new_page_map,
+        sequence_lengths=new_sequence_lengths,
+        num_pages_used=new_num_pages_used,
+        current_page=new_current_page,
+        current_page_position=new_current_page_position
     )
+
+    print(f"\nFinal state:")
+    print(f"  current_positions: {new_state.current_page_position}")
+    print(f"  current_pages: {new_state.current_page}")
+    print(f"  sequence_lengths: {new_state.sequence_lengths}")
+
+    return new_state
   
   def release_slot(
     self,
@@ -545,52 +570,49 @@ class PagedAttentionOp(nn.Module):
     key_pages_var: nn.Variable,
     value_pages_var: nn.Variable,
   ) -> page_managers.PageState:
-    """Releases all pages assigned to a slot.
-
+    """Releases all pages assigned to a slot with proper page indexing.
+    
     Args:
         slot: Slot to release
         page_state: Current page state
-        key_pages_var: Key pages variable 
+        key_pages_var: Key pages variable
         value_pages_var: Value pages variable
-
+        
     Returns:
-        Updated PageState with released pages
+        Updated page state with released pages
     """
     print(f"\nrelease_slot: Releasing slot {slot}")
+    print(f"  Initial state:")
+    print(f"    sequence_length: {page_state.sequence_lengths[slot]}")
+    print(f"    num_pages_used: {page_state.num_pages_used[slot]}")
     
     # Get current state
-    page_map = page_state.page_map
-    page_status = page_state.page_status
+    new_page_map = page_state.page_map
+    new_page_status = page_state.page_status
     
     # Find pages to release
-    slot_pages = page_map[slot]
-    used_pages = slot_pages[slot_pages > 0]
-    print(f"Found {len(used_pages)} pages to release: {used_pages}")
+    mapped_pages = new_page_map[slot]
+    used_pages = mapped_pages[mapped_pages > 0]  # Only consider valid page indices (>0)
+    print(f"  Found {len(used_pages)} pages to release: {used_pages}")
 
-    # Create copies for modification
-    new_page_status = page_status
-    new_page_map = page_map
-
-    # Zero out pages
+    # Zero out pages and mark as free
     for page_idx in used_pages:
-        # Clear page tracking
+        # Clear page status
         new_page_status = new_page_status.at[page_idx].set(0)
         
-        # Zero the actual page data
+        # Zero the page data
         key_pages_var.value = key_pages_var.value.at[:, page_idx, :, :].set(
             jnp.zeros_like(key_pages_var.value[:, page_idx, :, :])
         )
         value_pages_var.value = value_pages_var.value.at[:, page_idx, :, :].set(
             jnp.zeros_like(value_pages_var.value[:, page_idx, :, :])
         )
-    
+
     # Clear slot's page map
     new_page_map = new_page_map.at[slot].set(0)
 
-    print(f"After zeroing pages")
-
-    # Create new page state with released pages
-    return page_managers.PageState(
+    # Create new state
+    new_state = page_managers.PageState(
         page_status=new_page_status,
         page_map=new_page_map,
         sequence_lengths=page_state.sequence_lengths.at[slot].set(0),
@@ -598,6 +620,13 @@ class PagedAttentionOp(nn.Module):
         current_page=page_state.current_page.at[slot].set(0),
         current_page_position=page_state.current_page_position.at[slot].set(0)
     )
+
+    print(f"  Final state:")
+    print(f"    sequence_length: {new_state.sequence_lengths[slot]}")
+    print(f"    num_pages_used: {new_state.num_pages_used[slot]}")
+    print(f"    used_pages: {new_state.page_map[slot][new_state.page_map[slot] > 0]}")
+    
+    return new_state
 
   def validate_page_state(self, page_state: page_managers.PageState, prefix: str = "") -> None:
     """Validates consistency of page state.
