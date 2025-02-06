@@ -318,6 +318,36 @@ def initialize_jax_for_cpu(raw_keys):
   )
 
 
+def _wait_for_file_to_disappear(f, timeout=300):
+  for i in range(timeout):
+    if not f.exists():
+      return True
+    time.sleep(1)
+  return False
+
+
+def _extract_step(f):
+  for i in range(len(f) - 1, -1, -1):
+    if f[i:i+2] == "-n":
+      end = i
+    if f[i:i+2] == "-s":
+      return f[i+2:end]
+
+
+def _block_and_proces_restore_dir(dir, timeout=300):
+  WORD = '.restore'
+  for i in range(timeout):
+    files = os.listdir(dir)
+    for f in files:
+      if f[-len(WORD):] == WORD:
+        step = extract_step(f)
+        if step != "0":
+          os.rename(epath.Path(dir) / f, epath.Path(dir) / step)
+        return
+    time.sleep(1)
+  max_logging.log(f"{timeout} seconds have passed but no .restore file was found.")
+
+
 def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
   """Initialize JAX distributed runtime for TPUs when emergency checkpointing is used.
   The information required to initialize JAX distributed runtime will be written by GKE to
@@ -338,8 +368,12 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
     )
     if raw_keys["use_replicator_service"]:
       REPLICATOR_FILE = "replicator.yaml"
-      TEMP_FILE = REPLICATOR_FILE + ".tmp"
       replicator_file = epath.Path(raw_keys["local_checkpoint_directory"]) / REPLICATOR_FILE
+      if not _wait_for_file_to_disappear(replicator_file):
+        max_logging.log("There is existing replicator.yaml which did not disappear in time.")
+      else:
+        max_logging.log("replicator.yaml no longer exists, creating new replicator.yaml.")
+      TEMP_FILE = REPLICATOR_FILE + ".tmp"
       temp_file = epath.Path(raw_keys["local_checkpoint_directory"]) / TEMP_FILE
       num_slices = get_num_slices(raw_keys)
       num_nodes = jax.process_count()
@@ -366,6 +400,12 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
 
       temp_file.write_text("\n".join([l.strip() for l in replicator_yaml.split("\n")]))
       os.rename(temp_file, replicator_file)
+      if not _wait_for_file_to_disappear(replicator_file):
+        max_logging.log("The newly created replicator.yaml was not deleted in time.")
+      else:
+        max_logging.log("The newly created replicator.yaml was deleted, moving forward...")
+
+      _block_and_proces_restore_dir(raw_keys["local_checkpoint_directory"])
   else:
     max_logging.log(
         "Initializing JAX distributed runtime without args when emergency checkpointing is"
