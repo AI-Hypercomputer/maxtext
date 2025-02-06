@@ -14,9 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-apt-get install docker-compose-plugin
-docker compose version
-gcloud auth configure-docker us-docker.pkg.dev --quiet
+# apt-get install docker
+# apt-get install docker-compose-plugin
+# docker compose version
+# gcloud auth configure-docker us-docker.pkg.dev --quiet
 
 cd utils_pathways
 docker compose down
@@ -24,5 +25,5 @@ sleep 10
 docker compose up &
 sleep 20
 docker compose ps
-
+cd ..
 echo "Docker compose installation complete!"
