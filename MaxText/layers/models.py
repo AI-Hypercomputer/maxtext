@@ -178,7 +178,100 @@ class Decoder(nn.Module):
   mesh: Mesh
   quant: Optional[Quant] = None
 
-  def get_decoder_layers(self):
+  def setup(self):
+    """Initialize decoder layer."""
+    self.decoder_layer = self.get_decoder_layer()
+    self.norm_layer = self.get_norm_layer()
+    if self.config.using_pipeline_parallelism:
+      pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
+      remat_policy = self.get_remat_policy()
+      self.pipeline_module = pipeline.Pipeline(
+          config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
+      )
+
+  def get_remat_policy(self):
+    cfg = self.config
+    if cfg.remat_policy != "none":
+      if cfg.remat_policy == "minimal":
+        policy = jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
+      elif cfg.remat_policy == "save_dot_with_context_except_mlp":
+        policy = jax.checkpoint_policies.save_only_these_names(
+            "query_proj",
+            "value_proj",
+            "key_proj",
+            "qkv_proj",
+            "context",
+            "out_proj",
+        )
+      elif cfg.remat_policy == "save_dot_except_mlpwi":
+        policy = jax.checkpoint_policies.save_only_these_names(
+            "query_proj",
+            "value_proj",
+            "key_proj",
+            "qkv_proj",
+            "out_proj",
+            "mlpwo",
+        )
+      elif cfg.remat_policy == "save_dot_except_mlp":
+        policy = jax.checkpoint_policies.save_only_these_names(
+            "query_proj",
+            "value_proj",
+            "key_proj",
+            "qkv_proj",
+            "out_proj",
+        )
+      elif cfg.remat_policy == "save_qkv_proj":
+        policy = jax.checkpoint_policies.save_only_these_names(
+            "query_proj",
+            "value_proj",
+            "key_proj",
+            "qkv_proj",
+        )
+      elif cfg.remat_policy == "qkv_proj_offloaded":
+        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
+            names_which_can_be_saved=[],
+            names_which_can_be_offloaded=["query_proj", "value_proj", "key_proj"],
+            offload_src="device",
+            offload_dst="pinned_host",
+        )
+      elif cfg.remat_policy == "minimal_offloaded":
+        policy = jax.checkpoint_policies.offload_dot_with_no_batch_dims(offload_src="device", offload_dst="pinned_host")
+      elif cfg.remat_policy == "custom":
+        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
+            names_which_can_be_saved=cfg.tensors_on_device,
+            names_which_can_be_offloaded=cfg.tensors_to_offload,
+            offload_src="device",
+            offload_dst="pinned_host",
+        )
+      elif cfg.remat_policy == "minimal_flash":
+        policy = jax.checkpoint_policies.save_from_both_policies(
+            jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
+            jax.checkpoint_policies.save_only_these_names(
+                "context",
+            ),
+        )
+      elif cfg.remat_policy == "save_out_proj":
+        policy = jax.checkpoint_policies.save_only_these_names(
+            "out_proj",
+        )
+      else:
+        assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
+        policy = None
+      return policy
+
+  def set_remat_policy(self, block_layers, policy):
+    RemattedBlockLayers = []
+    for block_layer in block_layers:
+      layer = nn.remat(  # pylint: disable=invalid-name
+          block_layer,
+          prevent_cse=not self.config.scan_layers,
+          policy=policy,
+          static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
+      )
+      RemattedBlockLayers.append(layer)
+    return RemattedBlockLayers
+
+  def get_decoder_layer(self):
     if self.config.decoder_block == "default":
       return [DecoderLayer]
     elif self.config.decoder_block == "llama2":
@@ -255,17 +348,23 @@ class Decoder(nn.Module):
     )
     return scan_fn(config=cfg, mesh=mesh, name=metdata_axis_name, quant=self.quant)
 
-  def get_pipeline_stage_module(self, base_stage, cfg, mesh):
+  def get_pipeline_stage_module(self, base_stage):
+    cfg = self.config
+    if cfg.set_remat_policy_on_layers_per_stage:
+      policy = self.get_remat_policy()
+      base_stage = self.set_remat_policy([base_stage], policy)[0]
     if cfg.num_layers_per_pipeline_stage == 1:
-      stage_module = base_stage(config=cfg, mesh=mesh, quant=self.quant)
+      stage_module = base_stage(config=cfg, mesh=self.mesh, quant=self.quant)
     elif cfg.scan_layers:
-      stage_module = self.scan_decoder_layers(cfg, base_stage, cfg.num_layers_per_pipeline_stage, "layers_per_stage", mesh)
+      stage_module = self.scan_decoder_layers(
+          cfg, base_stage, cfg.num_layers_per_pipeline_stage, "layers_per_stage", self.mesh
+      )
     else:
       stage_module = SequentialBlockDecoderLayers(
           decoder_layer=base_stage,
           num_decoder_layers=cfg.num_layers_per_pipeline_stage,
           config=cfg,
-          mesh=mesh,
+          mesh=self.mesh,
           quant=self.quant,
       )
     return stage_module
@@ -301,84 +400,8 @@ class Decoder(nn.Module):
           config=cfg,
       )(decoder_positions)
 
-    BlockLayers = self.get_decoder_layers()
-
-    if cfg.remat_policy != "none":
-      if cfg.remat_policy == "minimal":
-        policy = jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
-      elif cfg.remat_policy == "save_dot_with_context_except_mlp":
-        policy = jax.checkpoint_policies.save_only_these_names(
-            "query_proj",
-            "value_proj",
-            "key_proj",
-            "qkv_proj",
-            "context",
-            "out_proj",
-        )
-      elif cfg.remat_policy == "save_dot_except_mlpwi":
-        policy = jax.checkpoint_policies.save_only_these_names(
-            "query_proj",
-            "value_proj",
-            "key_proj",
-            "qkv_proj",
-            "out_proj",
-            "mlpwo",
-        )
-      elif cfg.remat_policy == "save_dot_except_mlp":
-        policy = jax.checkpoint_policies.save_only_these_names(
-            "query_proj",
-            "value_proj",
-            "key_proj",
-            "qkv_proj",
-            "out_proj",
-        )
-      elif cfg.remat_policy == "save_qkv_proj":
-        policy = jax.checkpoint_policies.save_only_these_names(
-            "query_proj",
-            "value_proj",
-            "key_proj",
-            "qkv_proj",
-        )
-      elif cfg.remat_policy == "qkv_proj_offloaded":
-        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=[],
-            names_which_can_be_offloaded=["query_proj", "value_proj", "key_proj"],
-            offload_src="device",
-            offload_dst="pinned_host",
-        )
-      elif cfg.remat_policy == "minimal_offloaded":
-        policy = jax.checkpoint_policies.offload_dot_with_no_batch_dims(offload_src="device", offload_dst="pinned_host")
-      elif cfg.remat_policy == "custom":
-        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=cfg.tensors_on_device,
-            names_which_can_be_offloaded=cfg.tensors_to_offload,
-            offload_src="device",
-            offload_dst="pinned_host",
-        )
-      elif cfg.remat_policy == "minimal_flash":
-        policy = jax.checkpoint_policies.save_from_both_policies(
-            jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,
-            jax.checkpoint_policies.save_only_these_names(
-                "context",
-            ),
-        )
-      elif cfg.remat_policy == "save_out_proj":
-        policy = jax.checkpoint_policies.save_only_these_names(
-            "out_proj",
-        )
-      else:
-        assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
-        policy = None
-
-    RemattedBlockLayers = []
-    for BlockLayer in BlockLayers:
-      RemattedBlockLayer = nn.remat(  # pylint: disable=invalid-name
-          BlockLayer,
-          prevent_cse=not cfg.scan_layers,
-          policy=policy,
-          static_argnums=(4, 5),  # Deterministic and model mode are static arguments.
-      )
-      RemattedBlockLayers.append(RemattedBlockLayer)
+    policy = self.get_remat_policy()
+    RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, policy)
 
     if cfg.using_pipeline_parallelism:
       RemattedBlockLayer = RemattedBlockLayers[0]
@@ -442,8 +465,8 @@ class Decoder(nn.Module):
                 decoder_positions,
                 deterministic,
                 model_mode,
-            )            
-        else:          
+            )
+        else:
           for lyr in range(cfg.num_decoder_layers):
             y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
                 y,
