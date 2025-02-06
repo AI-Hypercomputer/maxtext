@@ -43,7 +43,7 @@ class FakeElasticUtils(ElasticUtils):
   def update_good_slice_indices(self, good_slice_indices: set[int]):
     """Start step handler."""
     self.fake_good_slice_indices = good_slice_indices
-    self.good_slice_indices = self.get_slice_availability()
+    logger.info(f"Updated: {self.fake_good_slice_indices=}")
 
   @timeit
   def get_slice_availability(self) -> set[int]:
