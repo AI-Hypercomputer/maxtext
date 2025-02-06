@@ -1131,7 +1131,7 @@ class Attention(nn.Module):
     # NOTE: T5 does not explicitly rescale the attention logits by
     #       1/sqrt(depth_kq)!  This is folded into the initializers of the
     #       linear transformations, which is equivalent under Adafactor.
-    depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
+    depth_scaling = 1.0 / jnp.sqrt(self.head_dim)
 
     def query_init(*args):
       # pylint: disable=no-value-for-parameter
@@ -1147,7 +1147,7 @@ class Attention(nn.Module):
         name="query",
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
-    )(inputs_q) / depth_scaling
+    )(inputs_q) * depth_scaling
     return query_proj
 
   def kv_projection(self, inputs_kv: Array, proj_name: str) -> Array:
