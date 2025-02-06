@@ -474,8 +474,8 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
  
   This function performs the following steps:
  
-    1. From the batch (data["prompt"]) extract B prompts.
-    2. For each prompt, generate `config.num_generations` completions using autoregressive sampling.
+    1. From the batch (data["prompt+completion"]) extract BxG prompts.
+    -----2. For each prompt, generate `config.num_generations` completions using autoregressive sampling.
     3. Compute the per-token log-probabilities for the full sequence (prompt + completion) both with the
        current model (policy) and the reference model.
     4. Restrict the log-probabilities to the generated completion tokens.
@@ -505,6 +505,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
     aux: A dictionary with auxiliary metrics.
   """
 
+  """
   # Split the dropout key.
   rng1, rng_gen = random.split(dropout_rng)
   
@@ -515,7 +516,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   if is_train:
     # restrict batch size when per_device_batch_size<1
     prompts = prompts[: config.micro_batch_size_to_train_on, :]
-
+  """
   # tokenizer_model = tokenizer.build_tokenizer(config.tokenizer_path, config.add_bos, config.add_eos)
   tokenizer_model = transformers.AutoTokenizer.from_pretrained(
         config.tokenizer_path,
@@ -526,14 +527,22 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
         token=config.hf_access_token,
     )
   
-  # TODO: calculate the L_prompt which is the lenght of the prompt, we assume that the prompts are left padded to have same length, 
+  """# TODO: calculate the L_prompt which is the lenght of the prompt, we assume that the prompts are left padded to have same length, 
   # then there is padding on the right to pad till max_target_length
   # L_prompt = get_valid_length(prompts[0, 0], tokenizer_model.pad_token)
   # TODO: do we need to truncate prompts in case for some dataset prompts are too long?
+  """
+
+  """
+  We assume
+  data["]
+  
+  """
 
   # --- (2) Generate completions.
   # find the length of the prompt out of the max_target_length
   L_prompt = data["prompt_true_length"]
+  """
   # For each prompt generate config.num_generations completions. This repeatation happens inside the helper.
   # This helper returns a tensor of shape [B x G, max_target_length]
   completions = generate_completions( 
@@ -544,18 +553,23 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
                                      tokenizer_model=tokenizer_model,
                                      true_length=L_prompt,
                                      )
+  """
   # completions shape: [B x G, L_total]
-  L_total = completions.shape[1] #max_target_length
+  completions = data["input_ids"] # this includes the prompts (upto data["prompt_true_length"]) +completion tokens (upto data["completion length"] + padding (upto max_target_length))
+  L_total = completions.shape[1] # max_target_length
   L_completion = L_total - L_prompt
 
   # --- (3) Compute per-token log probabilities.
-  # Need to create the inputs_position and inputs_segmentation since the autoregressive decoding has added legit tokens now
-  inputs_position = extend_substring(data["inputs_position"], tokenizer_model.pad_token)
-  inputs_segmentation = extend_substring(data["inputs_segmentation"], tokenizer_model.pad_token)
-
+  """# Need to create the inputs_position and inputs_segmentation since the autoregressive decoding has added legit tokens now
+  inputs_position = # extend_substring(data["inputs_position"], tokenizer_model.pad_token)
+  inputs_segmentation = # extend_substring(data["inputs_segmentation"], tokenizer_model.pad_token)"""
+  
+  inputs_position = data["inputs_position"] 
+  inputs_segmentation = data["inputs_segmentation"] 
+  
   # compute_log_probs returns logits.
   # We compute the log-probabilities for the entire generated sequence, then shift as usual.
-  rng1, rng_fwd = random.split(rng1)
+  rng1, rng_fwd = random.split(dropout_rng)
   token_logps_policy = compute_log_probs(model, params, completions, inputs_position, inputs_segmentation, config, is_train=is_train, rngs={"dropout": rng1, "params": rng_fwd})
   token_logps_ref = compute_log_probs(model, {"params": reference_params}, completions, inputs_position, inputs_segmentation, config, is_train=False, rngs={"dropout": rng1, "params": rng_fwd})
  
@@ -569,7 +583,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 
   # --- (5) Create a mask over the completion tokens.
   # For each generated completion (of length L_completion) we mask all tokens that come after the first eos.
-  eos_id = tokenizer_model.eos_id
+  """eos_id = tokenizer_model.eos_id
   def get_completion_mask(seq):
     # seq: [L_completion]
     L = seq.shape[0]
@@ -580,7 +594,8 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
     eos_positions = jnp.where(seq == eos_id, idx, L)
     first_eos = jnp.min(eos_positions)
     return (idx <= first_eos).astype(jnp.float32)
-  completion_mask = jax.vmap(get_completion_mask)(completions[:, L_prompt:])
+  completion_mask = jax.vmap(get_completion_mask)(completions[:, L_prompt:])"""
+  completion_mask = data ["completion_mask"]
   # completion_mask shape: [BxG, L_completion]
 
   # --- (6) Decode prompts and completions (as text) to compute rewards.
@@ -690,6 +705,8 @@ def compute_log_probs(model, params, inputs, inputs_position, inputs_segmentatio
  
   Note: We assume that tokens have been already appropriately padded.
   """
+  #TODO: Ensure attention mask takes into account the left paading
+  
   logits = model.apply(
       params,
       inputs,
@@ -727,7 +744,6 @@ def generate_completions(params, prompts, config, rng, tokenizer_model, true_len
   Returns:
     A jnp.array of shape [B x num_generations, S] where S = length_of_prompt + max_completion_length.
   """
-
   engine = maxengine.MaxEngine(config)
   rng, rng_load_params = jax.random.split(rng)
   
