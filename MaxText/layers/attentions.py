@@ -170,10 +170,34 @@ class AttentionOp(nn.Module):
     assert key.shape[-3] == value.shape[-3], "k, v lengths must match."
     assert query.shape[-1] == key.shape[-1], "q, k depths must match."
 
+
+  def generate_chunk_attention_mask(self, query, key, decoder_segment_ids: Array | None, processed_chunks):
+      """
+      generates mask for current chunk given processed_chunk information.
+      The mask will look like attention masks mentioned in https://medium.com/byte-sized-ai/llm-inference-optimizations-2-chunked-prefill-764407b3a67a
+      # TODO: encorporate decoder_segment_ids for true length, currently the assumption is that true length of chunk = chunk size
+      """
+      _, q_seq_len, _, _ = query.shape
+      _, kv_seq_len, _, _ = key.shape
+      mask_shape = (q_seq_len, q_seq_len)
+      row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
+      col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
+      causal_mask = (col_ids <= row_ids).astype(jnp.int32)
+      next_pos = 0
+      if processed_chunks != None:
+        next_pos = processed_chunks['next_pos'][0][0]
+        output_mask = jnp.ones((q_seq_len, kv_seq_len), jnp.int32)
+        output_mask = jax.lax.dynamic_update_slice(output_mask, causal_mask, (0,next_pos))
+      else:
+        output_mask = jnp.zeros((q_seq_len, kv_seq_len), jnp.int32)
+        output_mask = jax.lax.dynamic_update_slice(output_mask, causal_mask, (0,next_pos))
+      output_mask = output_mask[None, None, None, :, :]
+      return output_mask
+
   # Following Pallas MHA Flash Attention Reference.
   # https://github.com/jax-ml/jax/blob/main/jax/experimental/pallas/ops/tpu/flash_attention.py
   # This mask models (1) separate sequences (decoder_segment_ids) and (2) causality
-  def generate_attention_mask(self, query, key, decoder_segment_ids: Array | None, model_mode: str) -> Array | None:
+  def generate_attention_mask(self, query, key, decoder_segment_ids: Array | None, model_mode: str, processed_chunks=None) -> Array | None:
     mask = None
     if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       mask = decoder_segment_ids[:, None, None, None, :] == common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
@@ -193,7 +217,9 @@ class AttentionOp(nn.Module):
 
     output_mask = None
 
-    if (mask is not None) and (causal_mask is not None):
+    if model_mode == common_types.MODEL_MODE_PREFILL and self.config.use_chunked_prefill:
+      output_mask = self.generate_chunk_attention_mask(query, key, decoder_segment_ids, processed_chunks)
+    elif (mask is not None) and (causal_mask is not None):
       output_mask = jnp.logical_and(mask, causal_mask)
     elif mask is not None:
       output_mask = mask
@@ -749,6 +775,7 @@ class AttentionOp(nn.Module):
       key: Array,
       value: Array,
       decoder_segment_ids: Array,
+      processed_chunks = None,
   ):
     """In prefill mode, we zero out the existing cache, run the computation and
     prepare the cache as necessary.
@@ -782,9 +809,28 @@ class AttentionOp(nn.Module):
       )
       cached_prefill_key_vars[1].value = key_scale_shaped_for_cache
       cached_prefill_value_vars[1].value = value_scale_shaped_for_cache
+    
+    if not self.config.use_chunked_prefill:
+      # reinitialize the cache to current key value and prepare cache
+      cached_prefill_key_vars[0].value = key_shaped_for_cache
+      cached_prefill_value_vars[0].value = value_shaped_for_cache
+    else:
+      next_pos = 0
+      if processed_chunks != None:
+        # if there is a part of prompt that is processed already, don't reinitialize the cache, use previous cache
+        next_pos = processed_chunks['next_pos'][0][0]
+        cached_key = self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order)
+        cached_value = self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order)
+        cached_key_value = jnp.transpose(cached_key, (1,2,0,3))
+        cached_value_value = jnp.transpose(cached_value, (1,2,0,3))
+        cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice(cached_key_value, key_shaped_for_cache, (next_pos, 0, 0, 0))
+        cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(cached_value_value, value_shaped_for_cache, (next_pos, 0, 0, 0))
 
-    cached_prefill_key_vars[0].value = key_shaped_for_cache
-    cached_prefill_value_vars[0].value = value_shaped_for_cache
+      else:
+        # if none of the chunks are processed, in case of first chunk, reinitize the cache
+        cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice(cached_prefill_key_vars[0].value, key_shaped_for_cache, (next_pos, 0, 0, 0))
+        cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(cached_prefill_value_vars[0].value, value_shaped_for_cache, (next_pos, 0, 0, 0))
+
 
     if decoder_segment_ids is not None:
       cached_prefill_segment_id_var.value = decoder_segment_ids
