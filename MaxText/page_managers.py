@@ -98,7 +98,7 @@ class PageManager(nn.Module):
     page_map_var = self.variable(
         "cache",
         "page_map",
-        nn.with_logical_partitioning(jnp.zeros, ("slots", "max_pages_per_slot")),
+        nn.with_logical_partitioning(lambda: jnp.full((self.slots, self.max_pages_per_slot), -1, dtype=jnp.int32), ("slots", "max_pages_per_slot")),
         (self.slots, self.max_pages_per_slot),
         jnp.int32,
     )

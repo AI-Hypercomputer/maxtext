@@ -572,7 +572,7 @@ class PagedAttentionOp(nn.Module):
         print(f"    page: {curr_page}, position: {curr_pos}")
         print(f"    sequence_length: {new_sequence_lengths[b]}")
         print(f"    num pages used: {new_num_pages_used[b]}")
-        used_pages = new_page_map[b][new_page_map[b] > 0]
+        used_pages = new_page_map[b][new_page_map[b] >= 0]
         print(f"    page map: {used_pages}")
 
     new_state = page_managers.PageState(
@@ -652,7 +652,7 @@ class PagedAttentionOp(nn.Module):
     print(f"  Final state:")
     print(f"    sequence_length: {new_state.sequence_lengths[slot]}")
     print(f"    num_pages_used: {new_state.num_pages_used[slot]}")
-    print(f"    used_pages: {new_state.page_map[slot][new_state.page_map[slot] > 0]}")
+    print(f"    used_pages: {new_state.page_map[slot][new_state.page_map[slot] >= 0]}")
     
     return new_state
 
@@ -685,7 +685,7 @@ class PagedAttentionOp(nn.Module):
         
     # Validate page counts
     for slot in range(batch_size):
-        used_pages = page_state.page_map[slot][page_state.page_map[slot] > 0]
+        used_pages = page_state.page_map[slot][page_state.page_map[slot] >= 0]
         if len(used_pages) != page_state.num_pages_used[slot]:
             raise ValueError(
                 f"{prefix} Slot {slot} shows {len(used_pages)} used pages but "
