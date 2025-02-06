@@ -742,13 +742,16 @@ def generate_completions(params, prompts, config, rng, tokenizer_model, true_len
 
   for i in range(prompts.shape[0]):
     tokens = prompts[i]
+    current_token_true_length = true_length[i]
+    jax.debug.print("current_token_true_length = {current_token_true_length}", current_token_true_length=current_token_true_length)
     #TODO: Need to find a better way to get true_length
     # true_length = tokenizer_model.encode(tokenizer_model.decode(tokens.tolist()),is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
 
     # Split RNG before calling prefill
     rng, rng_prefill = jax.random.split(rng)
     # generate the KV cache by prefilling the prompt tokens
-    prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
+    jax.debug.print("true_length={current_token_true_length}", current_token_true_length=current_token_true_length)
+    prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=current_token_true_length, rng=rng_prefill)
     slot = 0
 
     rng, rng_init_decode = jax.random.split(rng)

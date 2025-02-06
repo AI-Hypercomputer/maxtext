@@ -121,6 +121,8 @@ class LeftPad(grain.MapTransform):
         data[key] = _left_pad_right_align(data[key], true_lengths)
 
     data["prompt_true_length"] = np.full((data["prompt"].shape[0],), max(true_lengths), dtype=np.int64)
+    prompt_true_length = data["prompt_true_length"]
+    print(f"prompt_true_length={prompt_true_length}")
     return data
 
 
