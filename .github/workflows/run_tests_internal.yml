@@ -55,6 +55,17 @@ jobs:
         # JAX_BACKEND_TARGET: "grpc://localhost:29000"
       options: ${{ inputs.container_resource_option }}
     steps:
+      - name: Install Docker Compose and configure docker
+        run: |
+          apt-get install docker-compose-plugin
+          docker compose version
+          gcloud auth configure-docker us-docker.pkg.dev --quiet
+        continue-on-error: false
+      - name: Start Pathways docker containers
+        run: |
+          cd MaxText/utils_pathways 
+          docker compose up -d
+          sleep 10
       - uses: actions/checkout@v4
       - name: Run Tests
         run: |
@@ -64,5 +75,7 @@ jobs:
           echo "Set Pathways env variables"
           cd MaxText
           python3 -m pytest -s ${{ inputs.test_directory }} -m "${{ inputs.pytest_marker }}"
-          cd utils_pathways
+      - name: Clean up 
+        run: |
+          cd MaxText/utils_pathways
           docker compose down
