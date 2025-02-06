@@ -794,11 +794,14 @@ def reshard_fn(config: pyconfig.HyperParameters):
       )
 
       restore_step = config.eu.data["save_step"]
-      sharding = jax.sharding.NamedSharding(
-          mesh,
-          config.eu.data["state"].sharding.spec,
+      sharding = jax.tree.map(
+          lambda x: jax.sharding.NamedSharding(mesh, x.sharding.spec),
+          config.eu.data["state"],
       )
-      restore_state = config.eu.reshard(config.eu.data["state"], mesh, donate=False)
+      restore_state = config.eu.reshard(
+          config.eu.data["state"],
+          sharding,
+      )
 
       config.eu.save(restore_step, state=restore_state)
 
@@ -978,16 +981,30 @@ def train_loop(config, state=None):
 
   step = start_step
 
+  step_down = {10, 30, 44}
+  step_up = {14, 16, 40, 45}
   while True:
     with elasticutils.watchdog(120):
-      if step == first_profiling_step or prof.should_activate_periodic_profile(step):
-        optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
-        prof.activate(blocking_object=state, optional_postfix=optional_postfix)
-
-      if step >= config.steps:
-        break
-      max_logging.log(f"{step=} {config.eu.failure_count=} {config.eu.good_slice_count=}")
       try:
+        if step in step_down:
+          step_down.remove(step)
+          # Remove a slice
+          config.eu.update_good_slice_indices(set(range(config.eu.total_slice_count)) - {step % config.eu.total_slice_count})
+          raise jax.errors.JaxRuntimeError("DATA_LOSS: Fake")
+        elif step in step_up:
+          step_up.remove(step)
+
+          config.eu.update_good_slice_indices(set(range(config.eu.total_slice_count)))
+
+
+        if step == first_profiling_step or prof.should_activate_periodic_profile(step):
+          optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
+          prof.activate(blocking_object=state, optional_postfix=optional_postfix)
+
+        if step >= config.steps:
+          break
+
+        max_logging.log(f"{step=} {config.eu.failure_count=} {config.eu.good_slice_count=}")
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules), jax.default_device(config.eu.default_device):
           with jax.profiler.StepTraceAnnotation("train", step_num=step):
             record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
