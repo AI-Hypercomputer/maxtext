@@ -87,6 +87,42 @@ class HFNormalizeFeatures(grain.MapTransform):
         "targets": np.asarray(features[self.column_name], dtype=np.int32),
     }
 
+@dataclasses.dataclass
+class LeftPad(grain.MapTransform):
+  """Pads each input to the specified length"""
+
+  def __init__(self, pad_token_id):
+    self.pad_token_id = pad_token_id
+
+  def map(self, data: dict[str, np.ndarray]):
+    """map to each element"""
+    def _max_true_length(prompts, pad_token_id):
+      true_lengths = []
+      for prompt in prompts:
+        matches = np.where(prompt == pad_token_id)[0]
+        if matches.size != 0:
+          true_lengths.append(matches[0])
+        else:
+          true_lengths.append(prompt.shape[1])
+      return true_lengths
+
+    def _left_pad_right_align(prompts, true_lengths):
+      new_prompts = []
+      max_true_length = max(true_lengths)
+      for i, prompt in enumerate(prompts):
+        new_prompts.append(np.concatenate([prompt[true_lengths[i]:max_true_length], prompt[:true_lengths[i]], prompt[max_true_length:]], axis = 0))
+      return np.array(new_prompts)
+
+    true_lengths = _max_true_length(data["prompt"], self.pad_token_id)  
+
+    # only left align prompt tokens, segmentation and positions
+    for key, _ in data.items():
+      if key.startswith("prompt"):
+        data[key] = _left_pad_right_align(data[key], true_lengths)
+
+    data["prompt_true_length"] = np.full((data["prompt"].shape[0],), max(true_lengths), dtype=np.int64)
+    return data
+
 
 class HFDataSource(grain.RandomAccessDataSource):
   """A class that makes HuggingFace IterableDataset a grain datasource without random access support"""

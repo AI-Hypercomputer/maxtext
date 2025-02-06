@@ -533,14 +533,14 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 
   # --- (2) Generate completions.
   # find the length of the prompt out of the max_target_length
-  L_prompt = get_valid_length(prompts, tokenizer_model.pad_token)
+  L_prompt = data["prompt_true_length"]
   # For each prompt generate config.num_generations completions. This repeatation happens inside the helper.
   # This helper returns a tensor of shape [B x G, max_target_length]
   completions = generate_completions( 
                                      params=params, #TODO: this needs to be \theta_old, but for now we are using \theta_old = \theta
                                      prompts=prompts, 
                                      config=config,
-                                     rngs=rng_gen,
+                                     rng=rng_gen,
                                      tokenizer_model=tokenizer_model,
                                      true_length=L_prompt,
                                      )
@@ -673,27 +673,7 @@ def extend_substring(tensor: jnp.ndarray, pad_token_id: int) -> jnp.ndarray:
   extended_tensor = jax.vmap(extend_row)(tensor)
 
   return extended_tensor
-  
-def get_valid_length(tokens, pad_token_id):
-    """
-    Finds the index of the first padding token from the right in a 1D JAX array tokens.
 
-    Args:
-      tokens: A 1D JAX array of tokens (integers).
-      pad_id: The ID of the padding token.
-
-    Returns:
-      The index of the first padding token from the right, 
-      or len(tokens) if no padding token is found.
-    """
-
-    is_padding = (tokens == pad_token_id)
-    breakpoint()
-    padding_indices = jnp.where(is_padding, size=tokens.shape[0], fill_value=tokens.shape[0])[0]
-    result = jnp.where(padding_indices.shape[0] == 0, tokens.shape[0], padding_indices[0])
-
-    # Convert the result to a Python int
-    return int(result)
 
 def jaccard_reward_fn(str1, str2):
   """

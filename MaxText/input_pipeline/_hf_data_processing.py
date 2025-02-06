@@ -105,6 +105,9 @@ def preprocessing_pipeline(
   else:
     operations.append(_input_pipeline_utils.PadToMaxLength(max_target_length))
     operations.append(grain.Batch(batch_size=global_batch_size // jax.process_count(), drop_remainder=drop_remainder))
+    if use_grpo: # Left pad prompt tokens and add per batch max true length
+      operations.append(_input_pipeline_utils.LeftPad(tokenizer.pad_token_id))
+
 
   if shift and not use_dpo and not use_grpo:
     operations.append(_input_pipeline_utils.ShiftData(axis=1))

@@ -5,7 +5,7 @@ train_data_columns: ['prompt', 'completion']
 
 per_device_batch_size: 2.0
 steps: 10
-max_target_length: 512
+max_target_length: 1024
 
 enable_goodput_recording: False
 monitor_goodput: False
