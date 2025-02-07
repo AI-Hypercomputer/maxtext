@@ -68,7 +68,7 @@ services:
       - JAX_PLATFORMS="proxy"
       - JAX_BACKEND_TARGET="grpc://localhost:29000"
     command:
-      - python3 -m pytest -s tests -m tpu_only
+      - cd Maxtext ; python3 -m pytest -s tests -m tpu_only
 
 #### LOCAL NETWORK
 
