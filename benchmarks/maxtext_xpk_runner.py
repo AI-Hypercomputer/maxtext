@@ -24,7 +24,6 @@
 # Enable hlo dumps.
 
 import dataclasses
-import datetime
 import enum
 import os
 import queue
@@ -37,6 +36,8 @@ import threading
 import time
 
 import maxtext_trillium_model_configs as model_configs
+from command_utils import run_command_with_updates
+
 import xla_flags_library as xla_flags
 
 # Assumes you built maxtext dep image.
@@ -83,6 +84,7 @@ class WorkloadConfig:
   xpk_path: str = '~/xpk'
   pathways_config: PathwaysConfig = None
   run_name: str = None
+  generate_metrics_and_upload_to_big_query: bool = True
 
 
 @dataclasses.dataclass
@@ -459,6 +461,12 @@ def build_user_command(
   else:
     run_name_command=f'run_name={name}'
 
+  enable_metrics_cmd=""
+  if wl_config.generate_metrics_and_upload_to_big_query:
+    # 'metrics_file=metrics.txt
+    # Save metrics to gcs bucket so that we can upload them to bq in post processing.
+    enable_metrics_cmd = 'gcs_metrics=true'
+
   # Construct the command string with proper formatting and line continuations
   command = ' '.join([
       f'{install_libtpu_cmd}',
@@ -473,7 +481,8 @@ def build_user_command(
       f'model_name={wl_config.model.model_type}',
       f'base_output_directory={wl_config.base_output_directory}',
       f'{vertex_tensorboard}',
-      f'{run_name_command}'
+      f'{run_name_command}',
+      f'{enable_metrics_cmd}'
   ])
   return command
 
@@ -664,6 +673,15 @@ def generate_xpk_workload_cmd(
   else:
     docker_image_flag = f'--base-docker-image="{wl_config.base_docker_image}"'
 
+  upload_metrics_to_bq_cmd = ""
+  if wl_config.generate_metrics_and_upload_to_big_query:
+    # TODO pass arguments to bq from the maxtext runner.
+    # TODO only run this command if the previous succeeds using &&
+    # TODO enable generate_metrics_and_upload_to_big_query by default in main of this file
+    # TODO (optionally) make it so that this upload step is done on local device instead of within the workload.
+    upload_metrics_to_bq_cmd = " && python3 benchmarks/upload_metrics_to_bq.py ARGS"
+
+
   print(f'User command: {user_command}')
   return (
       (
@@ -683,6 +701,7 @@ def generate_xpk_workload_cmd(
           # ' --use-vertex-tensorboard'
           # f' --experiment-name={test_purpose_name}'
           f' {additional_flags}'
+          f' {upload_metrics_to_bq_cmd}'
       ),
       name,
   )
@@ -754,7 +773,7 @@ def on_device_benchmark_runner(
 # Run maxtext_xpk_runner.py as a script for executing multiple workloads pythonically!
 def main() -> int:
   # Variables to configure:
-  output_bucket = 'gs://DIR'
+  output_bucket = 'gs://maxtext-experiments-tpem/'
   base_docker_image = _DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME
 
   # Set up the clusters to run workloads on!
