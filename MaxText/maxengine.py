@@ -244,7 +244,6 @@ class MaxEngine(engine_api.Engine):
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
     rng, new_rng = jax.random.split(rng)
-    jax.debug.print("input_tokens={input_tokens}, ones_to_keep={ones_to_keep}",input_tokens=input_tokens,ones_to_keep=ones_to_keep)
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       flat_logits, new_vars = self.model.apply(
           params,

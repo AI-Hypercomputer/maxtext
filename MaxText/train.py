@@ -512,20 +512,20 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   # --- (1) Prepare prompts and tokenizer
   # Calling it prompts, because currently it only has left padded prompts such that all the prompts are aligned
   # at the right index, and then there is padding to the right till max_target_length
-  prompts = data["prompt"]
+  # prompts = data["prompt"]
   if is_train:
     # restrict batch size when per_device_batch_size<1
     prompts = prompts[: config.micro_batch_size_to_train_on, :]
-  """
-  # tokenizer_model = tokenizer.build_tokenizer(config.tokenizer_path, config.add_bos, config.add_eos)
-  tokenizer_model = transformers.AutoTokenizer.from_pretrained(
-        config.tokenizer_path,
-        add_bos_token=config.add_bos,
-        add_eos_token=config.add_eos,
-        model_max_length=config.max_target_length,
-        legacy=False,
-        token=config.hf_access_token,
-    )
+
+  # # tokenizer_model = tokenizer.build_tokenizer(config.tokenizer_path, config.add_bos, config.add_eos)
+  # tokenizer_model = transformers.AutoTokenizer.from_pretrained(
+  #       config.tokenizer_path,
+  #       add_bos_token=config.add_bos,
+  #       add_eos_token=config.add_eos,
+  #       model_max_length=config.max_target_length,
+  #       legacy=False,
+  #       token=config.hf_access_token,
+  #   )
   
   """# TODO: calculate the L_prompt which is the lenght of the prompt, we assume that the prompts are left padded to have same length, 
   # then there is padding on the right to pad till max_target_length
@@ -545,15 +545,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   """
   # For each prompt generate config.num_generations completions. This repeatation happens inside the helper.
   # This helper returns a tensor of shape [B x G, max_target_length]
-  completions = generate_completions( 
-                                     params=params, #TODO: this needs to be \theta_old, but for now we are using \theta_old = \theta
-                                     prompts=prompts, 
-                                     config=config,
-                                     rng=rng_gen,
-                                     tokenizer_model=tokenizer_model,
-                                     true_length=L_prompt,
-                                     )
-  """
+  
   # completions shape: [B x G, L_total]
   completions = data["input_ids"] # this includes the prompts (upto data["prompt_true_length"]) +completion tokens (upto data["completion length"] + padding (upto max_target_length))
   L_total = completions.shape[1] # max_target_length
@@ -649,6 +641,89 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 
 # --- GRPO Helpers ---
 
+def generate_completions(params, prompts, config, rng, tokenizer_model, engine, true_length):
+  """
+  Autoregressively generates completions for a batch of prompts.
+  We assume the prompts are all left padded, so all of them have the same length=true_length
+
+  Args:
+    prompts: Array of shape [B, S] containing token ids.
+    config: Configuration containing:
+         - num_generations: number of completions to generate per prompt.
+         - max_completion_length: maximum number of tokens to generate.
+         - temperature: sampling temperature.
+    rng: JAX PRNGKeys.
+    tokenizer_model: Tokenizer for generate
+    true_length: Length of the prompt out of the max_target_length
+ 
+  Returns:
+    A jnp.array of shape [B x num_generations, S] where S = length_of_prompt + max_completion_length.
+  """
+  rng, rng_load_params = jax.random.split(rng)
+  outputs = []
+  G = config.num_generations
+  # Repeat each prompt G times.
+  prompts = jnp.repeat(prompts, repeats=G, axis=0)  # shape [BxG, L_prompt]
+
+  #TODO: Improve the token generation by using batch inference
+
+  for i in range(prompts.shape[0]):
+    tokens = prompts[i]
+    current_token_true_length = true_length[i]
+
+    # Split RNG before calling prefill
+    rng, rng_prefill = jax.random.split(rng)
+    # generate the KV cache by prefilling the prompt tokens
+    prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=current_token_true_length, rng=rng_prefill)
+    slot = 0
+
+    rng, rng_init_decode = jax.random.split(rng)
+    decode_state = engine.init_decode_state(rng_init_decode)
+    breakpoint()
+    decode_state = engine.insert(prefill_result, decode_state, slot=slot)
+    
+    # Autoregressively generate tokens for max_target_length steps.
+    steps = range(config.max_prefill_predict_length, config.max_target_length)
+    sampled_tokens_list = []
+    sampled_tokens_list.append(first_token)
+    for _ in steps:
+      rng, rng_generate = jax.random.split(rng)
+      # Temperature scaling done by using `weighted` as sampling method
+      decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
+      sampled_tokens_list.append(sampled_tokens)
+
+    results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
+
+    breakpoint()
+    output = tokenizer_model.decode(results)
+    # print(f"Input `{tokenizer_model.decode(tokens.tolist())}` -> `{output}`")
+    outputs.append(output)
+
+  #TODO: is the sharding correctly copied?
+  return jnp.array(outputs, device=prompts.sharding)
+
+def prompt_completions(config, engine, tokenizer_model, data, params, rng):
+  for k, v in data.items():
+    if v.ndim == 2:
+      data[k] = v[: config.micro_batch_size_to_train_on, :]
+    else:
+      data[k] = v[:config.micro_batch_size_to_train_on]
+
+  rng1, rng_gen = random.split(rng)
+  engine.load_params(params)
+  L_prompt = data['prompt_true_length']
+  completions = generate_completions(
+                                     params=params, #TODO: this needs to be \theta_old, but for now we are using \theta_old = \theta
+                                     prompts=data['prompt'],
+                                     config=config,
+                                     rng=rng_gen,
+                                     tokenizer_model=tokenizer_model,
+                                     engine=engine,
+                                     true_length=L_prompt,
+                                     )
+  return data
+  
+
 def extend_substring(tensor: jnp.ndarray, pad_token_id: int) -> jnp.ndarray:
   """
   Extends a substring of consecutive integers (starting from 0) along the 
@@ -726,73 +801,7 @@ def compute_log_probs(model, params, inputs, inputs_position, inputs_segmentatio
   return token_log_probs
 
 
-def generate_completions(params, prompts, config, rng, tokenizer_model, true_length):
-  """
-  Autoregressively generates completions for a batch of prompts.
-  We assume the prompts are all left padded, so all of them have the same length=true_length
 
-  Args:
-    prompts: Array of shape [B, S] containing token ids.
-    config: Configuration containing:
-         - num_generations: number of completions to generate per prompt.
-         - max_completion_length: maximum number of tokens to generate.
-         - temperature: sampling temperature.
-    rng: JAX PRNGKeys.
-    tokenizer_model: Tokenizer for generate
-    true_length: Length of the prompt out of the max_target_length
- 
-  Returns:
-    A jnp.array of shape [B x num_generations, S] where S = length_of_prompt + max_completion_length.
-  """
-  engine = maxengine.MaxEngine(config)
-  rng, rng_load_params = jax.random.split(rng)
-  
-  outputs = []
-  
-
-  G = config.num_generations
-  # Repeat each prompt G times.
-  prompts = jnp.repeat(prompts, repeats=G, axis=0)  # shape [BxG, L_prompt]
-
-  #TODO: Improve the token generation by using batch inference
-
-  for i in range(prompts.shape[0]):
-    tokens = prompts[i]
-    current_token_true_length = true_length[i]
-    jax.debug.print("current_token_true_length = {current_token_true_length}", current_token_true_length=current_token_true_length)
-    #TODO: Need to find a better way to get true_length
-    # true_length = tokenizer_model.encode(tokenizer_model.decode(tokens.tolist()),is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
-
-    # Split RNG before calling prefill
-    rng, rng_prefill = jax.random.split(rng)
-    # generate the KV cache by prefilling the prompt tokens
-    jax.debug.print("true_length={current_token_true_length}", current_token_true_length=current_token_true_length)
-    prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=current_token_true_length, rng=rng_prefill)
-    slot = 0
-
-    rng, rng_init_decode = jax.random.split(rng)
-    decode_state = engine.init_decode_state(rng_init_decode)
-    decode_state = engine.insert(prefill_result, decode_state, slot=slot)
-    
-    # Autoregressively generate tokens for max_target_length steps.
-    steps = range(config.max_prefill_predict_length, config.max_target_length)
-    sampled_tokens_list = []
-    sampled_tokens_list.append(first_token)
-    for _ in steps:
-      rng, rng_generate = jax.random.split(rng)
-      # Temperature scaling done by using `weighted` as sampling method
-      decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
-      sampled_tokens_list.append(sampled_tokens)
-
-    results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
-
-
-    output = tokenizer_model.decode(results)
-    # print(f"Input `{tokenizer_model.decode(tokens.tolist())}` -> `{output}`")
-    outputs.append(output)
-
-  #TODO: is the sharding correctly copied?
-  return jnp.array(outputs, device=prompts.sharding)
 
 
 # -----------------------------------------------------------------------------
@@ -1058,6 +1067,9 @@ def setup_train_loop(config):
   recorder = create_goodput_recorder(config)
   record_goodput(recorder, config, recorder.record_tpu_init_start_time if recorder else None)
   init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
+
+  # Creating an engine here but might have two model compilation, need to initialize engine while passing model object
+  engine = maxengine.MaxEngine(config)
   record_goodput(recorder, config, recorder.record_tpu_init_end_time if recorder else None)
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
@@ -1101,6 +1113,7 @@ def setup_train_loop(config):
       checkpoint_manager,
       state_mesh_shardings,
       model,
+      engine,
       mesh,
       learning_rate_schedule,
       data_iterator,
@@ -1127,12 +1140,21 @@ def train_loop(config, state=None):
       checkpoint_manager,
       state_mesh_shardings,
       model,
+      engine,
       mesh,
       learning_rate_schedule,
       data_iterator,
       eval_data_iterator,
       state,
   ) = setup_train_loop(config)
+  tokenizer_model = transformers.AutoTokenizer.from_pretrained(
+        config.tokenizer_path,
+        add_bos_token=config.add_bos,
+        add_eos_token=config.add_eos,
+        model_max_length=config.max_target_length,
+        legacy=False,
+        token=config.hf_access_token,
+    )
 
   if config.use_dpo or config.use_grpo:
     if "reference_params" not in state.params:
@@ -1232,6 +1254,9 @@ def train_loop(config, state=None):
       # pylint: disable=not-callable
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
+      # do AR decoding here
+      if config.use_grpo:
+        example_batch = prompt_completions(config, engine, tokenizer_model, example_batch, state.params, nextrng)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, nextrng)
 
