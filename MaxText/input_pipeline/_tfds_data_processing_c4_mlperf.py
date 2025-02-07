@@ -285,10 +285,8 @@ def preprocess_eval_dataset(
     #   to avoid padding tokens inserted in group text
     eval_ds = reduce_concat_tokens(eval_ds, feature_key="targets", batch_size=24567)
     eval_ds = split_tokens_to_targets_length(eval_ds, max_target_length)
-
-  eval_ds = sequence_packing.pack_dataset(eval_ds, max_target_length)
-
-  eval_ds = eval_ds.map(format_fn, num_parallel_calls=AUTOTUNE)
+    eval_ds = sequence_packing.pack_dataset(eval_ds, max_target_length)
+    eval_ds = eval_ds.map(format_fn, num_parallel_calls=AUTOTUNE)
 
   # ensure array split in an equal division for each device
   # pad zeros up to the same batch_size among all processes
@@ -339,23 +337,23 @@ def make_c4_mlperf_eval_iterator(
     process_indices,
 ):
   """Make eval iterator of customized C4 dataset for mlperf gpt3 training."""
-  if config.eval_dataset_name == "c4/en:3.0.5":
+  if config.eval_dataset_name == "c4/en:3.0.6":
     is_tokenized_dataset = True
   elif config.eval_dataset_name == "c4/en:3.0.4":
     is_tokenized_dataset = False
   else:
-    raise ValueError(f"{config.eval_dataset_name=} should be one of ('c4/en:3.0.4', 'c4/en:3.0.5')")
+    raise ValueError(f"{config.eval_dataset_name=} should be one of ('c4/en:3.0.4', 'c4/en:3.0.6')")
   if is_tokenized_dataset:
     eval_ds = get_dataset(
         dataset_name=config.eval_dataset_name,
-        split="validation_tokenized_5662seqs",
+        split="validation_tokenized_388seq",
         dataloading_host_index=process_indices.index(jax.process_index()),
         dataloading_host_count=len(process_indices),
         enable_data_shuffling=False,
     )
-    # note validation_tokenized_5662seqs split is pre tokenized, reduce_concated and split to target_length
-    #   mainly to avoid eval sequences change depending on the number of hosts
-    eval_ds = rekey(eval_ds, {"inputs": None, "targets": "ids"})
+    sp_tokenizer = None
+    # note validation_tokenized_388seq split is pre tokenized, reduce_concated and split to length of 32768
+    # mainly to avoid eval sequences change depending on the number of hosts
   else:
     eval_ds = get_dataset(
         dataset_name=config.eval_dataset_name,
@@ -367,7 +365,7 @@ def make_c4_mlperf_eval_iterator(
 
     eval_ds = rekey(eval_ds, {"inputs": None, "targets": "text"})
 
-  sp_tokenizer = get_tokenizer(config.tokenizer_path, config.add_bos, config.add_eos)
+    sp_tokenizer = get_tokenizer(config.tokenizer_path, config.add_bos, config.add_eos)
 
 
   eval_ds = preprocess_eval_dataset(
