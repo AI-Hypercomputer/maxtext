@@ -46,10 +46,9 @@ jobs:
     runs-on: ["self-hosted", "${{ inputs.device_type }}", "${{ inputs.device_name }}"]
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/workflows/start_pathways_containers.yml
-        with:
-          device_type: tpu_pathways
-          device_name: v4-8
+      - name: Start containers using script
+        run: |
+          bash docker_build_pathways_containers.sh
   # run:
   #   runs-on: ["self-hosted", "${{ inputs.device_type }}", "${{ inputs.device_name }}"]
   #   container:
