@@ -786,9 +786,10 @@ def reshard_fn(config: pyconfig.HyperParameters):
           setup_mesh_and_model(config)
       )
 
+      data_iterator, _ = create_data_iterator(config, mesh)
+
       restore_step = config.eu.data["save_step"]
 
-      data_iterator, _ = create_data_iterator(config, mesh)
       state, _, state_mesh_shardings, data_iterator = max_utils.setup_training_state(
           model,
           data_iterator,
@@ -799,17 +800,21 @@ def reshard_fn(config: pyconfig.HyperParameters):
           checkpoint_manager,
       )
 
-      state = state.replace(step=restore_step)
-      params_sharding = jax.tree.map(
-          lambda x: jax.sharding.NamedSharding(mesh, x.sharding.spec),
-          config.eu.data["params"],
+      def reshard(arr):
+        return config.eu.reshard(
+            arr,
+            jax.tree.map(
+                lambda x: jax.sharding.NamedSharding(mesh, x.sharding.spec),
+                arr,
+            ),
+        )
+
+      state = state.replace(step=0, params=None, opt_state=None)
+      state = state.replace(
+          step=restore_step,
+          params=reshard(config.eu.data["params"]),
+          opt_state=reshard(config.eu.data["opt_state"]),
       )
-      state = state.replace(params=config.eu.reshard(config.eu.data["params"], params_sharding))
-      opt_state_sharding = jax.tree.map(
-          lambda x: jax.sharding.NamedSharding(mesh, x.sharding.spec),
-          config.eu.data["opt_state"],
-      )
-      state = state.replace(opt_state=config.eu.reshard(config.eu.data["opt_state"], opt_state_sharding))
 
       config.eu.save(
           restore_step,
