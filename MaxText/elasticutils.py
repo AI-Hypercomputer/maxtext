@@ -121,7 +121,13 @@ class ElasticUtils:
     """Save step and state."""
     # In case DATA_LOSS occurs during jax.block_until_ready, overwrite self.data
     # at the end
-    data = {k: jax.tree.map(lambda x: x.copy(), v) for k, v in kwargs.items()}
+    data = {
+        k: jax.device_put(
+            v,
+            jax.tree.map(lambda x: x.sharding.with_memory_kind(kind="pinned_host"), v),
+        )
+        for k, v in kwargs.items()
+    }
     for v in data.values():
       jax.block_until_ready(v)
     data["save_step"] = save_step

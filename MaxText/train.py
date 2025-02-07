@@ -787,16 +787,6 @@ def reshard_fn(config: pyconfig.HyperParameters):
       )
 
       restore_step = config.eu.data["save_step"]
-      sharding = jax.tree.map(
-          lambda x: jax.sharding.NamedSharding(mesh, x.sharding.spec),
-          config.eu.data["state"],
-      )
-      restore_state = config.eu.reshard(
-          config.eu.data["state"],
-          sharding,
-      )
-
-      config.eu.save(restore_step, state=restore_state)
 
       data_iterator, _ = create_data_iterator(config, mesh)
       state, _, state_mesh_shardings, data_iterator = max_utils.setup_training_state(
@@ -809,10 +799,22 @@ def reshard_fn(config: pyconfig.HyperParameters):
           checkpoint_manager,
       )
 
-      state = state.replace(
-          step=restore_state.step,
-          params=restore_state.params,
-          opt_state=restore_state.opt_state,
+      state = state.replace(step=restore_step)
+      params_sharding = jax.tree.map(
+          lambda x: jax.sharding.NamedSharding(mesh, x.sharding.spec),
+          config.eu.data["params"],
+      )
+      state = state.replace(params=config.eu.reshard(config.eu.data["params"], params_sharding))
+      opt_state_sharding = jax.tree.map(
+          lambda x: jax.sharding.NamedSharding(mesh, x.sharding.spec),
+          config.eu.data["opt_state"],
+      )
+      state = state.replace(opt_state=config.eu.reshard(config.eu.data["opt_state"], opt_state_sharding))
+
+      config.eu.save(
+          restore_step,
+          params=state.params,
+          opt_state=state.opt_state,
       )
 
       (
@@ -1087,7 +1089,11 @@ def train_loop(config, state=None):
 
           reshard_flag = config.eu.is_ready_to_reshard(step)
           if reshard_flag or step % config.eu.save_period == 0:
-            config.eu.save(step, state=state)
+            config.eu.save(
+                step,
+                params=state.params,
+                opt_state=state.opt_state,
+            )
 
           if step == start_step:
             max_utils.print_mem_stats("After params initialized")
