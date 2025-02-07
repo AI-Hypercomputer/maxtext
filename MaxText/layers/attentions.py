@@ -407,6 +407,13 @@ class AttentionOp(nn.Module):
       sliding_window_size = [self.sliding_window_size, 0]
       mask_type = "causal"  # SWA only works with causal masking
       attn_mask = None
+    elif model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE and decoder_segment_ids is None:
+      # For training or prefill cases where the sequence lengths are fixed, it is more efficient to take the
+      # shortcut of using causal mask type without passing an attention mask. This reduces the overhead of
+      # generating the attention mask in Maxtext and extracting the accumulative seqlen from the attention mask
+      # in Transformer Engine.
+      mask_type = "causal"
+      attn_mask = None
     else:
       # generate attn_mask
       mask_type = "padding_causal"  # only padding_causal mask type can take a created mask
