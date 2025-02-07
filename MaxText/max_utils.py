@@ -807,7 +807,7 @@ def create_learning_rate_schedule(config):
   cos_steps = config.learning_rate_schedule_steps - warmup_steps
   constant_zero_steps = config.steps - config.learning_rate_schedule_steps
   if config.match_nemo_linear_schedule:
-    warmup_schedule = optax.linear_schedule(init_value=0.0, end_value=lr, transition_steps=warmup_steps + 1, transition_begin=-1)
+    warmup_schedule = optax.linear_schedule(init_value=lr/(warmup_steps+1), end_value=lr, transition_steps=warmup_steps)
   else:
     warmup_schedule = optax.linear_schedule(init_value=0.0, end_value=lr, transition_steps=warmup_steps)
   cos_schedule = make_cos_schedule(lr, cos_final_lr, cos_steps)
