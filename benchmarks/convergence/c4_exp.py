@@ -38,6 +38,42 @@ c4_mutil_hp = DatasetHParams(
         add_eos=False,
         tokenizer_path="gs://mlperf-llm-public2/vocab/c4_en_301_5Mexp2_spm.model")
 
+c4_mutil_v1_hp = DatasetHParams(
+        name="c4multi",
+        dataset_path="gs://mlperf-llm-public2",
+        dataset_name="c4/multilingual:3.1.0",
+        dataset_type="tfds",
+        train_split="en",
+        eval_split="en-validation",
+        eval_steps= 206 * 512, #152 * 512 #for llama2 token, #824 * 512 #206 * 2048, # 852 * 512
+        add_bos=False,
+        add_eos=False,
+        tokenizer_path="gs://mlperf-llm-public2/vocab/c4_en_301_5Mexp2_spm.model")
+
+c4_mutil_v2_hp = DatasetHParams(
+        name="c4multi",
+        dataset_path="gs://mlperf-llm-public2",
+        dataset_name="c4/multilingual:3.1.1",
+        dataset_type="tfds",
+        train_split="en-train0",
+        eval_split="en-validation",
+        eval_steps= 206 * 512, #152 * 512 #for llama2 token, #824 * 512 #206 * 2048, # 852 * 512
+        add_bos=False,
+        add_eos=False,
+        tokenizer_path="gs://mlperf-llm-public2/vocab/c4_en_301_5Mexp2_spm.model")
+
+c4_mutil_v3_hp = DatasetHParams(
+        name="c4multi",
+        dataset_path="gs://mlperf-llm-public2",
+        dataset_name="c4/multilingual:3.1.1",
+        dataset_type="tfds",
+        train_split="en-train1",
+        eval_split="en-validation",
+        eval_steps= 206 * 512, #152 * 512 #for llama2 token, #824 * 512 #206 * 2048, # 852 * 512
+        add_bos=False,
+        add_eos=False,
+        tokenizer_path="gs://mlperf-llm-public2/vocab/c4_en_301_5Mexp2_spm.model")
+
 llama3_1_8b_8192_c4en = MaxTextModel(
     model_name="llama3_1_8b_8192_c4en",
     model_type="llama3.1-8b",
@@ -254,6 +290,15 @@ def setupC4En(model: MaxTextModel):
 
 def setupC4Mlperf(model: MaxTextModel):
     setupDataset(model, c4_mlperf_hp)   
+
+def setupC4Multilingualen_withPartialEval(model: MaxTextModel):
+    setupDataset(model, c4_mutil_v1_hp)
+
+def setupC4Multilingualen_set1(model: MaxTextModel):
+    setupDataset(model, c4_mutil_v2_hp)
+
+def setupC4Multilingualen_set2(model: MaxTextModel):
+    setupDataset(model, c4_mutil_v3_hp)
 
 def setupConvHParams(model: MaxTextModel, params: ConvHParams, num_devices: int):
     gbs = params.global_batch_size

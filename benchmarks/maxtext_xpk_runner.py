@@ -320,6 +320,8 @@ def build_user_command(
       f' use_vertex_tensorboard=false'
       ' vertex_tensorboard_project="" vertex_tensorboard_region=""'
       f' run_name="{run_name}"'
+      f' 2>&1 | tee /tmp/maxtext_log'
+      f' && gsutil cp /tmp/maxtext_log {base_output_directory}/result_log'
       #f' gsutil -m cp -r /tmp/xla_dump/ {base_output_directory}/xla'
   )
 
@@ -437,7 +439,7 @@ def xpk_benchmark_runner(cluster_config: XpkConfig, benchmarks: list[BenchmarkRu
         model=benchmark.model_name,
         cluster_config=cluster_config,
         num_slices=benchmark.hardware_config.num_slices,
-        libtpu_type=LibTpuType.NIGHTLY,
+        libtpu_type=LibTpuType.MAXTEXT,
         libtpu_version=benchmark.software_config.libtpu_version,
         base_output_directory=cluster_config.base_output_directory,
         buffer_size=4294967296,
