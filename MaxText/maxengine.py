@@ -556,15 +556,29 @@ class MaxEngine(engine_api.Engine):
 
           def _update_pages(prefix_page_idx, state):
             decode_state_pages, prefix_pages, page_map = state
-            prefix_page = jax.lax.dynamic_index_in_dim(prefix_pages, prefix_page_idx, axis=1)
+            # Use dynamic_index_in_dim to get prefix_page
+            prefix_page = jax.lax.dynamic_index_in_dim(prefix_pages, prefix_page_idx, axis=1, keepdims=False)
+            # Get the page index using dynamic_index_in_dim and keep it as a 1-element array
+            page_index = jax.lax.dynamic_index_in_dim(page_map, prefix_page_idx, axis=0, keepdims=True)
+
+            jax.debug.print("insert: prefix_page_idx shape={}, dtype={}", prefix_page_idx.shape, prefix_page_idx.dtype)
+            jax.debug.print("insert: page_index shape={}, dtype={}", page_index.shape, page_index.dtype)
+            jax.debug.print("insert: prefix_page shape={}, dtype={}", prefix_page.shape, prefix_page.dtype)
+            jax.debug.print("insert: decode_state_pages before update shape={}, dtype={}", decode_state_pages.shape, decode_state_pages.dtype)
+
             decode_state_pages = jax.lax.dynamic_update_slice_in_dim(
-                decode_state_pages, prefix_page, page_map[prefix_page_idx], axis=1
+                decode_state_pages, prefix_page, page_index[0], axis=1  # Use the scalar index
             )
+            jax.debug.print("insert: decode_state_pages after update shape={}, dtype={}", decode_state_pages.shape, decode_state_pages.dtype)
+
             return decode_state_pages, prefix_pages, page_map
+
+          # Use dynamic_index_in_dim also to get num_pages_used.
+          num_pages = jax.lax.dynamic_index_in_dim(prefix["cache"]["page_manager"]["num_pages_used"].value, slot, axis=0, keepdims=False)
 
           decode_state_cache, _, _ = jax.lax.fori_loop(
               0,
-              prefix["cache"]["page_manager"]["num_pages_used"].value[slot],
+              num_pages,  # Use the extracted scalar value
               _update_pages,
               (decode_state_cache, prefix_cache, prefix["cache"]["page_manager"]["page_map"].value[slot]),
           )
@@ -584,6 +598,8 @@ class MaxEngine(engine_api.Engine):
           decode_state["cache"],
           self.kv_cache_annotations_named,
       )
+
+    # Use dynamic_update_index_in_dim for all updates.
     inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state["logits"], unboxed_prefix["logits"], slot, 0)
     inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state["next_pos"], unboxed_prefix["next_pos"], slot, 0)
     inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(
@@ -831,43 +847,39 @@ class MaxEngine(engine_api.Engine):
     with self._mesh:
         cache = decode_state["cache"]
         if all(k in cache for k in ["page_status", "page_map"]):
-            # Create temporary vars to match PageManager's expected interface
-            page_status_var = nn.Variable({}, "page_status", 
-                                        lambda: cache["page_status"].value)
-            page_map_var = nn.Variable({}, "page_map", 
-                                     lambda: cache["page_map"].value)
-            sequence_lengths_var = nn.Variable({}, "sequence_lengths",
-                                             lambda: cache["sequence_lengths"].value)
-            num_pages_used_var = nn.Variable({}, "num_pages_used",
-                                           lambda: cache["num_pages_used"].value)
-            current_page_var = nn.Variable({}, "current_page",
-                                         lambda: cache["current_page"].value)
-            current_page_position_var = nn.Variable({}, "current_page_position",
-                                                  lambda: cache["current_page_position"].value)
+            # Use dynamic_update_index_in_dim to set values
+            num_pages = cache["num_pages_used"].value.shape[0]
 
-            key_pages_var = nn.Variable({}, "key_pages", lambda: cache["key_pages"].value)
-            value_pages_var = nn.Variable({}, "value_pages", lambda: cache["value_pages"].value)
+            # Create temporary 2D arrays and update specific rows using dynamic_update_index_in_dim
+            page_status_2d = jnp.zeros((num_pages, cache["page_status"].value.shape[0]), dtype=cache["page_status"].value.dtype)
+            page_status_2d = jax.lax.dynamic_update_index_in_dim(page_status_2d, cache["page_status"].value, 0, axis=0)  
+            page_status_2d = jax.lax.dynamic_update_index_in_dim(page_status_2d, jnp.zeros_like(cache["page_status"].value), slot, axis=0)
+            cache["page_status"].value = page_status_2d[slot]  # Extract back to original shape
 
-            # Use PageManager's release logic to ensure consistent cleanup
-            self.page_manager.release_slot_pages(
-                slot,
-                page_status_var,
-                page_map_var, 
-                sequence_lengths_var,
-                num_pages_used_var,
-                current_page_var,
-                current_page_position_var,
-                key_pages_var,
-                value_pages_var,
-            )
+            page_map_2d = jnp.full((num_pages, *cache["page_map"].value.shape), -1, dtype=cache["page_map"].value.dtype)
+            page_map_2d = jax.lax.dynamic_update_index_in_dim(page_map_2d, cache["page_map"].value, 0, axis=0)
+            page_map_2d = jax.lax.dynamic_update_index_in_dim(page_map_2d, jnp.full_like(cache["page_map"].value, -1), slot, axis=0)
+            cache["page_map"].value = page_map_2d[slot]
 
-            # Update cache with cleaned state
-            cache["page_status"].value = page_status_var.value
-            cache["page_map"].value = page_map_var.value
-            cache["sequence_lengths"].value = sequence_lengths_var.value
-            cache["num_pages_used"].value = num_pages_used_var.value
-            cache["current_page"].value = current_page_var.value
-            cache["current_page_position"].value = current_page_position_var.value
+            sequence_lengths_2d = jnp.zeros((num_pages, cache["sequence_lengths"].value.shape[0]), dtype=cache["sequence_lengths"].value.dtype)
+            sequence_lengths_2d = jax.lax.dynamic_update_index_in_dim(sequence_lengths_2d, cache["sequence_lengths"].value, 0, axis=0)
+            sequence_lengths_2d = jax.lax.dynamic_update_index_in_dim(sequence_lengths_2d, jnp.zeros_like(cache["sequence_lengths"].value), slot, axis=0)
+            cache["sequence_lengths"].value = sequence_lengths_2d[slot]
+
+            num_pages_used_2d = jnp.zeros((num_pages, cache["num_pages_used"].value.shape[0]), dtype=cache["num_pages_used"].value.dtype)
+            num_pages_used_2d = jax.lax.dynamic_update_index_in_dim(num_pages_used_2d, cache["num_pages_used"].value, 0, axis=0)
+            num_pages_used_2d = jax.lax.dynamic_update_index_in_dim(num_pages_used_2d, jnp.zeros_like(cache["num_pages_used"].value), slot, axis=0)
+            cache["num_pages_used"].value = num_pages_used_2d[slot]
+
+            current_page_2d = jnp.full((num_pages, cache["current_page"].value.shape[0]), -1, dtype=cache["current_page"].value.dtype)
+            current_page_2d = jax.lax.dynamic_update_index_in_dim(current_page_2d, cache["current_page"].value, 0, axis=0)
+            current_page_2d = jax.lax.dynamic_update_index_in_dim(current_page_2d, jnp.full_like(cache["current_page"].value, -1), slot, axis=0)
+            cache["current_page"].value = current_page_2d[slot]
+
+            current_page_position_2d = jnp.zeros((num_pages, cache["current_page_position"].value.shape[0]), dtype=cache["current_page_position"].value.dtype)
+            current_page_position_2d = jax.lax.dynamic_update_index_in_dim(current_page_position_2d, cache["current_page_position"].value, 0, axis=0)
+            current_page_position_2d = jax.lax.dynamic_update_index_in_dim(current_page_position_2d, jnp.zeros_like(cache["current_page_position"].value), slot, axis=0)
+            cache["current_page_position"].value = current_page_position_2d[slot]
 
   @property
   def max_concurrent_decodes(self) -> int:

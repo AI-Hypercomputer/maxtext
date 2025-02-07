@@ -78,6 +78,7 @@ class DecoderLayer(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
         kernel_axes=("norm",),
     )(inputs)
+    # lnx = lnx_rms(inputs)
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
 
     attention_layer = Attention(
@@ -246,6 +247,7 @@ class Decoder(nn.Module):
             nn.broadcast,
             nn.broadcast,
             nn.broadcast,
+            nn.broadcast, # Added model_mode
         ),
         length=length,
         metadata_params={nn.PARTITION_NAME: metdata_axis_name},
@@ -275,7 +277,6 @@ class Decoder(nn.Module):
       decoder_segment_ids=None,
       deterministic=False,
       model_mode=common_types.MODEL_MODE_TRAIN,
-      page_state: Optional[page_managers.PageState] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -401,7 +402,6 @@ class Decoder(nn.Module):
               decoder_positions,
               deterministic,
               model_mode,
-              page_state=page_state,
           )
 
     y = self.get_norm_layer()(
@@ -517,6 +517,5 @@ class Transformer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=not enable_dropout,
         model_mode=model_mode,
-        page_state=page_state,
     )
     return logits

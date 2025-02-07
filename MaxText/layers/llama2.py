@@ -75,26 +75,24 @@ class LlamaDecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
-      page_state: Optional[page_managers.PageState] = None,
   ):
     cfg = self.config
     mesh = self.mesh
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
-    lnx_rms = models.RMSNorm(
+    lnx = models.RMSNorm(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="pre_self_attention_layer_norm",
         kernel_axes=("norm",),
         epsilon=cfg.normalization_layer_epsilon,
-    )
-    lnx = lnx_rms(inputs)
+    )(inputs) # call and assign in one go.
 
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     # Self-attention block
-    attention_layer = Attention(
+    attention_layer = attentions.Attention(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
         num_kv_heads=cfg.num_kv_heads,
@@ -124,7 +122,6 @@ class LlamaDecoderLayer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
-        page_state=page_state,
     )
 
     attention_lnx = nn.with_logical_constraint(
