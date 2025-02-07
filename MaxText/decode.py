@@ -79,6 +79,7 @@ def main(argv: Sequence[str]) -> None:
   tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
   chunk_size = config.chunk_size
   tokens = tokens[:config.max_prefill_predict_length]
+  print("tokens are ", tokens, len(tokens))
   true_length = config.max_prefill_predict_length
   chunked_metadata_list = create_chunked_metadata(tokens, true_length, chunk_size)
   assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
@@ -91,47 +92,42 @@ def main(argv: Sequence[str]) -> None:
 
   prefill_result = None
   for i,chunk_metadata in enumerate(chunked_metadata_list):
-      # rng, rng_prefill = jax.random.split(rng)
-      position_og = jnp.arange(config.max_prefill_predict_length)
-      postion_mask = jnp.where(position_og < (i+1)*chunk_size, position_og, 0)
-      print(postion_mask)
       if i == 0:
         prefill_result, first_token = engine.prefill(existing_prefix=prefill_result, 
                                                     params=params, 
                                                     padded_tokens=chunk_metadata.chunk_padded, 
                                                     true_length=chunk_size, 
-                                                    rng=rng_prefill, 
-                                                    position_mask_cur=postion_mask)
-        # import pdb
-        # pdb.set_trace()
+                                                    rng=rng, 
+                                                    position_mask_cur=None)
       else:
         prefill_result, first_token = engine.prefill(existing_prefix=prefill_result, 
                                                     params=params | {"cache": prefill_result["cache"]}, 
                                                     padded_tokens=chunk_metadata.chunk_padded, 
                                                     true_length=chunk_size, 
-                                                    rng=rng_prefill, 
-                                                    position_mask_cur=postion_mask)
-        # import pdb
-        # pdb.set_trace()
-      # if i == 0:
-      #   prefill_result['next_pos'] = [[512]]
-      jax.debug.print("{next_pos} after {i} ", next_pos=prefill_result['next_pos'], i=i)
+                                                    rng=rng,
+                                                    position_mask_cur=None)
 
+  import pdb
+  pdb.set_trace()
+  
   rng, rng_init_decode = jax.random.split(rng)
   decode_state = engine.init_decode_state(rng_init_decode)
   decode_state = engine.insert(prefill_result, decode_state, slot=slot)
-
+  
   steps = range(config.max_prefill_predict_length, config.max_target_length)
+  print("total steps ", steps)
   sampled_tokens_list = []
   sampled_tokens_list.append(first_token)
-  for _ in steps:
+  for s in steps:
     rng, rng_generate = jax.random.split(rng)
+    
     decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
     sampled_tokens_list.append(sampled_tokens)
 
   results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
+  print("len results ", len(results))
   output = tokenizer_model.decode(results)
-  print(f"Input `{text}` -> `{output}`")
+  print(f"Output ************************** -> `{output}`")
 
   if config.autoregressive_decode_assert != "":
     assert (

@@ -255,15 +255,14 @@ class MaxEngine(engine_api.Engine):
     
 
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
-    # positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
     positions = jnp.expand_dims(jnp.arange(mul, mul+input_tokens.shape[1]), 0)
 
-    zero_to_n = jnp.arange(0, padded_tokens.shape[0])
-    ones_to_keep = zero_to_n < true_length
+    zero_to_n = jnp.arange(0, 1024)
+    ones_to_keep = zero_to_n < 1024
     one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
-    rng, new_rng = jax.random.split(rng)
+    # rng, new_rng = jax.random.split(rng)
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       flat_logits, new_vars = self.model.apply(
           params,
@@ -272,7 +271,7 @@ class MaxEngine(engine_api.Engine):
           decoder_segment_ids=sequence_indicator,
           enable_dropout=False,
           model_mode=common_types.MODEL_MODE_PREFILL,
-          rngs={"params": new_rng},
+          rngs={"params": rng},
           mutable=["cache"],
           existing_prefix=existing_prefix,
       )
@@ -282,7 +281,6 @@ class MaxEngine(engine_api.Engine):
     next_pos = jnp.full((1, 1), true_length + mul, dtype=jnp.int32)
     generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
     
-    # jax.debug.print("added_logits {added_logits} {shape} ", added_logits=added_logits, shape=added_logits.shape)
     selected_logits = jax.lax.dynamic_slice(
         flat_logits,
         (0, true_length - 1, 0),
@@ -316,8 +314,6 @@ class MaxEngine(engine_api.Engine):
 
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
-
-    jax.debug.print("next_pos {next_pos}", next_pos=next_pos)
 
     return {
         "logits": selected_logits,

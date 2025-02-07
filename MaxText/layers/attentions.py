@@ -178,14 +178,12 @@ class AttentionOp(nn.Module):
     if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       mask = decoder_segment_ids[:, None, None, None, :] == common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     elif decoder_segment_ids is not None:
-      # jax.debug.print("decoder_segment_ids not none  and {model_mode} {decoder_segment_ids}", decoder_segment_ids=decoder_segment_ids, model_mode = model_mode)
       mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
       mask = mask[:, None, None, :, :]
 
     causal_mask = None
     # We enforce causality except for AUTOREGRESSION
     if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE:
-      jax.debug.print("model_mode  {model_mode}", model_mode=model_mode)
       _, q_seq_len, _, _ = query.shape
       _, kv_seq_len, _, _ = key.shape
       mask_shape = (q_seq_len, kv_seq_len)
@@ -198,21 +196,12 @@ class AttentionOp(nn.Module):
     output_mask = None
 
     if self.config.use_chunked_prefill and model_mode == common_types.MODEL_MODE_PREFILL:
-      jax.debug.print("query shape {query_shape} ", query_shape = query.shape)
-      jax.debug.print("key shape {key_shape} ", key_shape = key.shape)
       _, q_seq_len, _, _ = query.shape
       _, kv_seq_len, _, _ = key.shape
       mask_shape = (q_seq_len, q_seq_len)
       row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
       col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
       causal_mask = (col_ids <= row_ids).astype(jnp.int32)
-      # import pdb
-      # pdb.set_trace()
-      # diag_mask = (col_ids == row_ids).astype(jnp.int32)
-      # causal_mask = jnp.logical_and(causal_mask_prev,diag_mask)
-
-      jax.debug.print("causal_mask shape {causal_mask_shape} ", causal_mask_shape = causal_mask.shape)
-
       
       next_pos = 0
       if existing_prefix != None:
@@ -223,9 +212,7 @@ class AttentionOp(nn.Module):
         output_mask = jnp.zeros((q_seq_len, kv_seq_len), jnp.int32)
         output_mask = jax.lax.dynamic_update_slice(output_mask, causal_mask, (0,next_pos))
       
-      jax.debug.print("output_mask_shape  in  generate mask before {output_mask_shape} {output_mask} ", output_mask_shape = output_mask.shape, output_mask=output_mask)
       output_mask = output_mask[None, None, None, :, :]
-      jax.debug.print("output_mask_shape  in  generate mask after {output_mask_shape} ", output_mask_shape = output_mask.shape)
       return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
 
     
@@ -273,7 +260,6 @@ class AttentionOp(nn.Module):
         or (self.attention_kernel == "autoselected" and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE)
         or (self.attention_kernel == "autoselected" and length < 128)
     ):
-      # jax.debug.print("existing_prefix just before apply_attention_dot  {existing_prefix}", existing_prefix=existing_prefix)
       return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode, existing_prefix)
     elif self.attention_kernel == "flash" or self.attention_kernel == "autoselected":
       if isinstance(key, KVTensor):
@@ -528,6 +514,7 @@ class AttentionOp(nn.Module):
 
     q_seq_len = query.shape[1]
     attn_weights = self.qk_product(query, key, q_seq_len, model_mode)
+    # 1,8,4,512,1024
 
     if self.attn_logits_soft_cap:
       attn_weights = jnp.tanh(attn_weights / self.attn_logits_soft_cap)
@@ -844,66 +831,19 @@ class AttentionOp(nn.Module):
         # self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order),
       cached_key = self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order)
       cached_value = self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order)
-      # import pdb
-      # pdb.set_trace()
-      # jax.debug.print("cached_prefill_key_vars before {cached_prefill_key_vars_value}", cached_prefill_key_vars_value=cached_prefill_key_vars[0].value)
       cached_key_value = jnp.transpose(cached_key, (1,2,0,3))
       cached_value_value = jnp.transpose(cached_value, (1,2,0,3))
       
-      jax.debug.print("cached_prefill_key_vars before {cached_prefill_key_vars_value}", cached_prefill_key_vars_value=cached_prefill_key_vars[0].value)
       cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice(cached_key_value, key_shaped_for_cache, (next_pos, 0, 0, 0))
-      jax.debug.print("cached_prefill_key_vars after {cached_prefill_key_vars_value}", cached_prefill_key_vars_value=cached_prefill_key_vars[0].value)
 
       cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(cached_value_value, value_shaped_for_cache, (next_pos, 0, 0, 0))
-
+      cached_prefill_segment_id_var.value = decoder_segment_ids
+      return jnp.transpose(cached_prefill_key_vars[0].value, (2,0,1,3)), jnp.transpose(cached_prefill_value_vars[0].value, (2,0,1,3)), cached_prefill_segment_id_var.value
     else:
       cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice(cached_prefill_key_vars[0].value, key_shaped_for_cache, (next_pos, 0, 0, 0))
       cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(cached_prefill_value_vars[0].value, value_shaped_for_cache, (next_pos, 0, 0, 0))
-
-      
-      
-      
-      # import pdb
-      # pdb.set_trace()
-      # cached_prefill_key_vars[0].value = existing_prefix['cache'][]
-
-    # cached_prefill_key_vars[0].value = jax.lax.select(existing_prefix, 
-    #                                                   jax.lax.dynamic_update_slice(cached_prefill_key_vars[0].value, 
-    #                                                                                key_shaped_for_cache, 
-    #                                                                                (int(existing_prefix['next_pos']*self.config.chunk_size), 8, 1, 128)), 
-    #                                                   cached_prefill_key_vars[0].value)
-    # cached_prefill_value_vars[0].value = jax.lax.select(existing_prefix,jax.lax.dynamic_update_slice(cached_prefill_value_vars[0].value, 
-    #                                                                                                  value_shaped_for_cache, 
-    #                                                                                                  (int(existing_prefix['next_pos']*self.config.chunk_size), 8, 1, 128)), 
-    #                                                                                                  cached_prefill_value_vars[0].value)
-    
-    # s,n,b,d
-    # jax.debug.print("cached_prefill_key_vars before {cached_prefill_key_vars_value}", cached_prefill_key_vars_value=cached_prefill_key_vars[0].value)
-    # jax.debug.print("key shaped for cache {key_shaped_for_cache_value}", key_shaped_for_cache_value=key_shaped_for_cache)
-    # cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice(cached_prefill_key_vars[0].value, key_shaped_for_cache, (next_pos, 0, 0, 0))
-    
-    # cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(cached_prefill_value_vars[0].value, value_shaped_for_cache, (next_pos, 0, 0, 0))
-    # jax.debug.print("cached_prefill_key_vars after {cached_prefill_key_vars_value}", cached_prefill_key_vars_value=cached_prefill_key_vars[0].value)
-    # # cached_prefill_key_vars[0].value = key_shaped_for_cache
-    # # cached_prefill_value_vars[0].value = value_shaped_for_cache
-
-    if decoder_segment_ids is not None:
       cached_prefill_segment_id_var.value = decoder_segment_ids
-
-    # import pdb
-    # pdb.set_trace()
-    # b, s, n, d
-
-    # key_to_return = cached_prefill_key_vars[0].value
-
-    jax.debug.print("decoder_segment_ids just before return {decoder_segment_ids}", decoder_segment_ids=decoder_segment_ids)
-    # import pdb
-    # pdb.set_trace()
-    # decoder_segment_ids = jnp.zeros((1,1024), jnp.int32)
-    return jnp.transpose(cached_prefill_key_vars[0].value, (2,0,1,3)), jnp.transpose(cached_prefill_value_vars[0].value, (2,0,1,3)), decoder_segment_ids
-
-    # return key, value, decoder_segment_ids
-  
+      return jnp.transpose(cached_prefill_key_vars[0].value, (2,0,1,3)), jnp.transpose(cached_prefill_value_vars[0].value, (2,0,1,3)), cached_prefill_segment_id_var.value
   
   def update_ar_key_value(
       self,
@@ -1147,6 +1087,7 @@ class AttentionOp(nn.Module):
   def __call__(self, query, key, value, decoder_segment_ids, model_mode, existing_prefix=None):
     prefill_kv_cache, ar_kv_cache = self.kv_cache(key, value, decoder_segment_ids, model_mode, use_ragged_attention=self.use_ragged_attention, existing_prefix=existing_prefix)
 
+    # jax.debug.print("infos******** {model_mode} {key_shape} {existing_prefix_none}", model_mode=model_mode, key_shape=prefill_kv_cache[0].shape, existing_prefix_none=existing_prefix==None)
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
         query=query,
         key=prefill_kv_cache[0],
@@ -1159,9 +1100,13 @@ class AttentionOp(nn.Module):
     )
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
+    # jax.debug.print("ar_kv_cache  is {ar_kv_cache}", ar_kv_cache=ar_kv_cache)
     if ar_kv_cache is None:
       if prefill_exponentials_sum is not None:
-        return prefill_unnormalized_output / prefill_exponentials_sum
+        o = prefill_unnormalized_output / prefill_exponentials_sum
+        # jax.debug.print("output in prefill shape {o_shape}", o_shape=o.shape)
+        # jax.debug.print("output in prefill values: {o_shape}", o_shape=o[:,:,:,-1])
+        return o
       return prefill_unnormalized_output
 
     ar_unnormalized_output, ar_exponentials_max, ar_exponentials_sum = self.apply_attention(
@@ -1391,10 +1336,13 @@ class Attention(nn.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
+    # jax.debug.print("query in attention call {inputs_q}", inputs_q=inputs_q)
+    # jax.debug.print("key in attention call {inputs_kv}", inputs_kv=inputs_kv)
+    
     inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
     inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
 
-    # apply projection.
+  # apply projection.
     if self.config.fused_qkv:
       query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
     else:
@@ -1404,12 +1352,6 @@ class Attention(nn.Module):
 
     # apply ROPE
     query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
-    if existing_prefix != None:
-      # [512, ...1024]
-      # import pdb
-      # pdb.set_trace()
-      # inputs_positions=jnp.expand_dims(jnp.arange(0, 1024,  dtype=jnp.int32), 0)
-      jax.debug.print("inputs_positions {inputs_positions}", inputs_positions=inputs_positions)
     key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
 
     if model_mode == common_types.MODEL_MODE_PREFILL:

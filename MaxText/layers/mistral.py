@@ -101,11 +101,6 @@ class MistralDecoderLayer(nn.Module):
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
     )
-    # import pdb
-    # pdb.set_trace()
-    # jax.debug.print("lnx shape {lnx_shape}", lnx_shape=lnx.shape)
-    # jax.debug.print("existing_prefix inside mistral {existing_prefix}", existing_prefix=existing_prefix)
-
     attention_lnx = attention_layer(
         lnx,
         lnx,
