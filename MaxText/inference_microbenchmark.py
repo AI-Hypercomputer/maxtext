@@ -293,6 +293,7 @@ def compile_generate_and_get_layouts(
   ).lower(params, decode_state).compile()
   arg_layouts, _ = compiled_generate.input_layouts
   generated_out_layouts, _ = compiled_generate.output_layouts
+  print(f'wyzhangd: generatd_out_layouts = {generated_out_layouts}')
   return (
   compiled_generate, arg_layouts[0], arg_layouts[1], generated_out_layouts)
 
