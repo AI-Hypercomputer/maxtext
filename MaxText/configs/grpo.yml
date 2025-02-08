@@ -10,4 +10,5 @@ max_target_length: 1024
 enable_goodput_recording: False
 monitor_goodput: False
 
-init_engine_seed: 0
+# TODO: we update max_prefill_predict_length for grpo setting
+#max_prefill_predict_length

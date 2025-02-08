@@ -1176,10 +1176,8 @@ def train_loop(config, config_inference, state=None):
   # Initializing maxengine and everything related from decode.py
   # Creating an engine here but might have two model compilation, need to initialize engine while passing model object
   engine = maxengine.MaxEngine(config_inference)
-  engine_rng = random.PRNGKey(config.init_engine_seed)
-  engine_rng, engine_rng_load_params = jax.random.split(engine_rng)
-  params = engine.load_params(engine_rng_load_params)
-  ar_outputs = []
+  
+  
 
   if eval_data_iterator:
     # pylint: disable=line-too-long
@@ -1267,7 +1265,9 @@ def train_loop(config, config_inference, state=None):
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       # do AR decoding here
       assert config.use_grpo, "Non grpo setting calling grpo_trainer"
-      example_batch = prompt_completions(config_inference, engine, tokenizer_model, example_batch, state.params, engine_rng)
+      init_rng, engine_rng = jax.random.split(init_rng)
+      engine_params = engine.load_params(engine_rng)
+      example_batch = prompt_completions(config_inference, engine, tokenizer_model, example_batch, engine_params, init_rng)
       # TODO: ensure this partitioning is correct
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, nextrng)
@@ -1411,6 +1411,7 @@ def main(argv: Sequence[str]) -> None:
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
   # TODO: ensure that we have same configs as decode.py
   # TODO: we probably don't need everything in pyconfig.py to be present in pyconfig_inference.py
+  # TODO: modify argv with sharding (e.g.,no fsdp) and attention_type (ideally prefill flash attention and AR with dot_product)
   pyconfig_inference.initialize(argv)
   config_inference = pyconfig_inference.config
   # TODO: ensure we can run decode with full_state_path 
