@@ -288,6 +288,7 @@ def compile_generate_and_get_layouts(
     engine.generate,
     in_shardings=(param_layout, decode_state_layout),
     out_shardings=(Layout(DLL.AUTO), Layout(DLL.AUTO)),
+    donate_argnums=(1,),
   ).lower(params, decode_state).compile()
   arg_layouts, _ = compiled_generate.input_layouts
   generated_out_layouts, _ = compiled_generate.output_layouts
