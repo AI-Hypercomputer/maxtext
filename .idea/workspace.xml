@@ -5,7 +5,6 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="22b5c112-1f85-45a0-a878-8f4dec58ec1c" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/MaxText/inference_microbenchmark.py" beforeDir="false" afterPath="$PROJECT_DIR$/MaxText/inference_microbenchmark.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -115,7 +114,7 @@
       <workItem from="1738172392786" duration="1204000" />
       <workItem from="1738643555426" duration="3593000" />
       <workItem from="1738694113496" duration="6198000" />
-      <workItem from="1738892766103" duration="47064000" />
+      <workItem from="1738892766103" duration="47085000" />
     </task>
     <servers />
   </component>
