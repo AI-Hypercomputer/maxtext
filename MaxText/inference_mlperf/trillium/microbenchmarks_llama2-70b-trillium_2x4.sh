@@ -10,7 +10,7 @@ enable_profiler=false
 enable_xla_flags=false
 dump_hlo=false
 prefill_lens="128,256,512,1024"
-stages="prefill,generate"
+stages="generate"
 
 while getopts "npxdr:s:l:" opt
 do
