@@ -23,6 +23,7 @@ from absl import app
 from collections.abc import MutableMapping
 
 from jetstream.engine import token_utils
+from typing import Any
 
 import max_utils
 import maxengine
@@ -32,6 +33,9 @@ import pyconfig
 
 import warnings
 
+from jax.experimental import layout as jax_layout
+DLL = jax_layout.DeviceLocalLayout
+Layout = jax_layout.Layout
 warnings.simplefilter("ignore", category=FutureWarning)
 
 _WARMUP_ITERS = 2
@@ -247,6 +251,52 @@ def summarize_prefill_result(engine, params, tokens, true_length):
   }
 
 
+def _identity(x: Any) -> Any:
+  """Avoids lambda that breaks JAX caching."""
+  return x
+
+
+def _iterated_layout(arrays: Any, layouts: Any,
+                     xla_flags: dict[str, Any] | None = None) -> Any:
+  """Lays out an array tensor by tensor to prevent OOMs."""
+
+  def _layout(x, s, l):
+    if x.layout == l:
+      return x
+    # Somehow this can be None sometimes.
+    dll = l.device_local_layout if isinstance(l, Layout) else l
+    f = jax.jit(_identity, out_shardings=Layout(dll, s)).lower(x).compile(
+      compiler_options=xla_flags)
+    y = f(x)
+    # Achieves donation of the input argument, but allows for different memory
+    # layouts and shapes.
+    jax.tree.map(lambda z: z.delete(), x)
+    jax.block_until_ready(y)
+    return y
+
+  shardings = jax.tree.map(lambda x: x.sharding, arrays)
+  arrays = jax.tree.map(_layout, arrays, shardings, layouts)
+  return arrays
+
+
+def compile_generate_and_get_layouts(
+    engine: Any,
+    params: Any,
+    decode_state: Any,
+) -> tuple[Any, Any, Any, Any]:
+  param_layout = Layout(DLL.AUTO)
+  decode_state_layout = Layout(DLL.AUTO)
+  compiled_generate = jax.jit(
+    engine.generate,
+    in_shardings=(param_layout, decode_state_layout),
+    out_shardings=(Layout(DLL.AUTO), Layout(DLL.AUTO)),
+  ).lower(params, decode_state).compile()
+  arg_layouts, _ = compiled_generate.input_layouts
+  generated_out_layouts, _ = compiled_generate.output_layouts
+  return (
+  compiled_generate, arg_layouts[0], arg_layouts[1], generated_out_layouts)
+
+
 def run_benchmarks(config):
   """Run microbenchmarks."""
   engine = maxengine.MaxEngine(config)
@@ -262,6 +312,12 @@ def run_benchmarks(config):
   vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
   rng, rng_init_decode = jax.random.split(rng)
   decode_state = engine.init_decode_state(rng_init_decode)
+
+  abstract_decode_state = jax.eval_shape(decode_state)
+  compiled_generate, param_layout, decode_state_layout = compile_generate_and_get_layouts(
+    engine, engine.abstract_params, abstract_decode_state)
+  params = _iterated_layout(params, param_layout)
+
   _, cache_size, _ = max_utils.summarize_pytree_data(decode_state["cache"], name="Cache")
   num_model_params, model_size, _ = max_utils.summarize_pytree_data(params, name="Model")
 
@@ -324,7 +380,7 @@ def run_benchmarks(config):
   return results
 
 
-def main(argv):
+ndef main(argv):
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   pyconfig.initialize(argv)
   run_benchmarks(pyconfig.config)
