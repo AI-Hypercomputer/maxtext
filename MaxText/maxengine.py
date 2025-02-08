@@ -238,6 +238,7 @@ class MaxEngine(engine_api.Engine):
     Returns:
       kv_cache: For the resulting text.
     """
+    # jax.debug.print("maxengine.prefill - START")
     if existing_prefix:
       raise ValueError("We don't know what to do with existing_prefix")
 
@@ -254,6 +255,7 @@ class MaxEngine(engine_api.Engine):
 
     rng, new_rng = jax.random.split(rng)
 
+    # jax.debug.print("maxengine.prefill - before apply")
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       flat_logits, new_vars = self.model.apply(
           params,
@@ -303,7 +305,7 @@ class MaxEngine(engine_api.Engine):
 
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
-
+    # jax.debug.print("maxengine.prefill - EXIT")
     return {
         "logits": selected_logits,
         "cache": cache,
@@ -425,25 +427,34 @@ class MaxEngine(engine_api.Engine):
       decode_state: DecodeState,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
+      slot: int = -1,
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
     """Run one generate step"""
     if rng is None:
-      rng = jax.random.PRNGKey(0)
+        rng = jax.random.PRNGKey(0)
 
     previous_token = decode_state["tokens"]
+    
+    # Get sequence length for this slot
+    sequence_length = decode_state["cache"]["sequence_lengths"][slot] if slot >= 0 else None
 
+    jax.debug.print("engine.generate - START - slot: {}, sequence_length: {}", 
+                   slot, sequence_length)
+    
     rng, new_rng = jax.random.split(rng)
-    # run one step generation
+    
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      out_logits, new_vars = self.model.apply(
-          params | {"cache": decode_state["cache"]},
-          previous_token,
-          decode_state["next_pos"],
-          enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-          rngs={"params": new_rng},
-          mutable=["cache"],
-      )
+        out_logits, new_vars = self.model.apply(
+            params | {"cache": decode_state["cache"]},
+            previous_token,
+            decode_state["next_pos"],
+            enable_dropout=False,
+            model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+            rngs={"params": new_rng},
+            mutable=["cache"],
+            slot=slot,
+            true_length=sequence_length,  # Pass through the sequence length
+        )
 
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
@@ -549,42 +560,141 @@ class MaxEngine(engine_api.Engine):
     if self.config.attention == "paged":
 
       def copy_paged(path, prefix_cache, decode_state_cache):
-        if path[-2].key == "page_manager":
-          return prefix_cache
-        path_key = path[-1].key
-        if path_key in ["key_pages", "value_pages"]:
-
-          def _update_pages(prefix_page_idx, state):
-            decode_state_pages, prefix_pages, page_map = state
-            # Use dynamic_index_in_dim to get prefix_page
-            prefix_page = jax.lax.dynamic_index_in_dim(prefix_pages, prefix_page_idx, axis=1, keepdims=False)
-            # Get the page index using dynamic_index_in_dim and keep it as a 1-element array
-            page_index = jax.lax.dynamic_index_in_dim(page_map, prefix_page_idx, axis=0, keepdims=True)
-
-            jax.debug.print("insert: prefix_page_idx shape={}, dtype={}", prefix_page_idx.shape, prefix_page_idx.dtype)
-            jax.debug.print("insert: page_index shape={}, dtype={}", page_index.shape, page_index.dtype)
-            jax.debug.print("insert: prefix_page shape={}, dtype={}", prefix_page.shape, prefix_page.dtype)
-            jax.debug.print("insert: decode_state_pages before update shape={}, dtype={}", decode_state_pages.shape, decode_state_pages.dtype)
-
-            decode_state_pages = jax.lax.dynamic_update_slice_in_dim(
-                decode_state_pages, prefix_page, page_index[0], axis=1  # Use the scalar index
-            )
-            jax.debug.print("insert: decode_state_pages after update shape={}, dtype={}", decode_state_pages.shape, decode_state_pages.dtype)
-
-            return decode_state_pages, prefix_pages, page_map
-
-          # Use dynamic_index_in_dim also to get num_pages_used.
-          num_pages = jax.lax.dynamic_index_in_dim(prefix["cache"]["page_manager"]["num_pages_used"].value, slot, axis=0, keepdims=False)
-
-          decode_state_cache, _, _ = jax.lax.fori_loop(
-              0,
-              num_pages,  # Use the extracted scalar value
-              _update_pages,
-              (decode_state_cache, prefix_cache, prefix["cache"]["page_manager"]["page_map"].value[slot]),
-          )
-          return decode_state_cache
+        """Handle paged cache copying with comprehensive component support.
+        
+        Args:
+            path: A tuple representing the path in the tree
+            prefix_cache: Source cache data
+            decode_state_cache: Destination cache data
+            
+        Returns:
+            Updated cache data based on component type
+        """
+        # Safe path key extraction
+        if isinstance(path, tuple) and path:
+            last_component = path[-1]
+            path_key = getattr(last_component, 'key', str(last_component))
         else:
-          raise ValueError(f"We don't have a strategy for inserting {path_key} for paged attention.")
+            path_key = str(path)
+
+        # Page manager special case
+        if path_key == "page_manager":
+            return prefix_cache
+
+        # Complete component categorization
+        ar_components = {
+            # Core AR cache components
+            "cache_ar_index",
+            "cache_ar_segment_id",
+            "cached_ar_key",
+            "cached_ar_value",
+            # AR scaling components
+            "cached_ar_key_scale",
+            "cached_ar_value_scale",
+            # AR metadata
+            "cached_ar_lengths"
+        }
+
+        prefill_components = {
+            # Core prefill cache components
+            "cache_prefill_segment_id",  # Added missing component
+            "cached_prefill_key",
+            "cached_prefill_value",
+            # Prefill scaling components
+            "cached_prefill_key_scale",
+            "cached_prefill_value_scale"
+        }
+
+        page_components = {
+            # Core page storage
+            "key_pages",
+            "value_pages",
+            # Page management
+            "page_status",
+            "page_map",
+            # Sequence tracking
+            "sequence_lengths",
+            "num_pages_used",
+            # Position tracking
+            "current_page",
+            "current_page_position"
+        }
+
+        # Component handling logic
+        if path_key in ar_components:
+            # AR components maintain their state
+            return decode_state_cache
+        
+        if path_key in prefill_components:
+            # Prefill components get updated
+            # Special handling for segment_id to maintain proper boundaries
+            if path_key == "cache_prefill_segment_id":
+                # Copy segment ID while preserving structure
+                return jax.lax.dynamic_update_slice_in_dim(
+                    decode_state_cache,
+                    prefix_cache,
+                    0,  # Start index
+                    axis=0  # Assuming batch dimension
+                )
+            return prefix_cache
+
+        if path_key in ["key_pages", "value_pages"]:
+            def _update_pages(prefix_page_idx, state):
+                """Update page content while maintaining cache coherency."""
+                decode_state_pages, prefix_pages, page_map = state
+
+                # Extract source page
+                prefix_page = jax.lax.dynamic_index_in_dim(
+                    prefix_pages, prefix_page_idx, axis=1, keepdims=False
+                )
+                # Get target location
+                page_index = jax.lax.dynamic_index_in_dim(
+                    page_map, prefix_page_idx, axis=0, keepdims=True
+                )
+
+                # Update state pages
+                decode_state_pages = jax.lax.dynamic_update_slice_in_dim(
+                    decode_state_pages, prefix_page, page_index[0], axis=1
+                )
+                return decode_state_pages, prefix_pages, page_map
+
+            # Get page count for processing
+            num_pages = jax.lax.dynamic_index_in_dim(
+                prefix["cache"]["page_manager"]["num_pages_used"].value,
+                slot,
+                axis=0,
+                keepdims=False
+            )
+
+            # Process all pages
+            decode_state_cache, _, _ = jax.lax.fori_loop(
+                0,
+                num_pages,
+                _update_pages,
+                (
+                    decode_state_cache,
+                    prefix_cache,
+                    prefix["cache"]["page_manager"]["page_map"].value[slot]
+                )
+            )
+            return decode_state_cache
+
+        if path_key in page_components:
+            # Maintain page management state
+            return decode_state_cache
+
+        # Comprehensive error for unknown components
+        raise ValueError(
+            f"Unhandled cache component: {path_key}\n"
+            f"AR components: {sorted(ar_components)}\n"
+            f"Prefill components: {sorted(prefill_components)}\n"
+            f"Page components: {sorted(page_components)}\n"
+            "Please update component handling for this cache element.\n"
+            f"Component categories:\n"
+            f"- AR: Autoregressive cache state\n"
+            f"- Prefill: Prefill cache state\n"
+            f"- Page: Page management state"
+        )
 
       inserted_cache = jax.tree_util.tree_map_with_path(
           copy_paged,
@@ -763,82 +873,178 @@ class MaxEngine(engine_api.Engine):
     else:
       return token_utils.SentencePieceTokenizer(metadata)
 
-  def init_decode_state(
-      self,
-      *args,  # pylint: disable=unused-argument
-      rng: Optional[PRNGKeyType] = None,
-      **kwargs,  # pylint: disable=unused-argument
-  ) -> DecodeState:
-    """Initialises any state which a generation step transforms."""
-
+  def init_decode_state(self, rng: Optional[PRNGKeyType] = None) -> DecodeState:
+    """Initialize decode state with proper sharding support for paged attention.
+    
+    Args:
+        rng: Optional PRNG key for initialization. If None, a default key is created.
+        
+    Returns:
+        DecodeState: Initialized state for decoding with proper sharding and cache setup.
+    """
     if rng is None:
-      rng = jax.random.PRNGKey(0)
+        rng = jax.random.PRNGKey(0)
 
-    # pylint: disable=unused-argument
     def init(abstract_params):
-      x = jnp.ones(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
-          dtype=jnp.int32,
-      )
-      _, cache = self.model.apply(
-          abstract_params,
-          x,
-          x,
-          enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-          rngs={"params": rng},
-          mutable=["cache"],
-      )
+        """Initialize the basic structure with placeholder values.
+        
+        This creates the initial arrays needed for decode state, including cache.
+        """
+        # Calculate batch size accounting for all devices
+        batch_size = int(self.config.per_device_batch_size * jax.device_count())
+        
+        # Create dummy inputs for model.apply
+        x = jnp.ones((batch_size, 1), dtype=jnp.int32)
+        
+        # Get initial cache structure through model application
+        _, cache = self.model.apply(
+            abstract_params,
+            x,
+            x,
+            enable_dropout=False,
+            model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+            rngs={"params": rng},
+            mutable=["cache"],
+        )
 
-      next_pos = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
-          dtype=jnp.int32,
-      )
-      generated_tokens = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
-          dtype=jnp.int32,
-      )
-      tokens = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
-          dtype=jnp.int32,
-      )
-      return {
-          "logits": jnp.zeros(
-              (
-                  int(self.config.per_device_batch_size * jax.device_count()),
-                  1,
-                  self.config.vocab_size,
-              )
-          ),
-          "cache": cache["cache"],
-          "next_pos": next_pos,
-          "generated_tokens": generated_tokens,
-          "tokens": tokens,
-      }
+        # Initialize position tracking arrays
+        next_pos = jnp.zeros((batch_size, 1), dtype=jnp.int32)
+        generated_tokens = jnp.zeros((batch_size, 1), dtype=jnp.int32)
+        tokens = jnp.zeros((batch_size, 1), dtype=jnp.int32)
 
+        # Return complete state dictionary
+        return {
+            "logits": jnp.zeros((batch_size, 1, self.config.vocab_size)),
+            "cache": cache["cache"],
+            "next_pos": next_pos,
+            "generated_tokens": generated_tokens,
+            "tokens": tokens,
+        }
+
+    # Get abstract shapes and partitioning specs
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      abstract_outputs = jax.eval_shape(init, self.abstract_params)
+        abstract_outputs = jax.eval_shape(init, self.abstract_params)
     logical_annotations = nn.get_partition_spec(abstract_outputs)
 
+    # Convert logical annotations to mesh annotations
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      mesh_annotations = nn.logical_to_mesh(logical_annotations)
+        mesh_annotations = nn.logical_to_mesh(logical_annotations)
 
+    # Create shardings from mesh annotations
     shardings = jax.tree_util.tree_map(
         lambda mesh_annotation: jax.sharding.NamedSharding(self._mesh, mesh_annotation),
         mesh_annotations,
     )
 
+    # Initialize with proper sharding
     @functools.partial(jax.jit, out_shardings=shardings)
     def initialize():
-      return jax.tree_util.tree_map(lambda x: jnp.zeros(x.shape, x.dtype), abstract_outputs)
+        return jax.tree_util.tree_map(
+            lambda x: jnp.zeros(x.shape, x.dtype), 
+            abstract_outputs
+        )
 
+    # Get initial state and extract cache
     init_state = initialize()
     cache = init_state["cache"]
 
     def is_lp(k):
-      return isinstance(k, flax.linen.spmd.LogicallyPartitioned)
+        """Check if a value is LogicallyPartitioned."""
+        return isinstance(k, flax.linen.spmd.LogicallyPartitioned)
 
-    self.kv_cache_annotations_named = jax.tree_util.tree_map(lambda x: tuple(x.names), cache, is_leaf=is_lp)
+    def get_paged_attention_names(path_or_value, value):
+        """Get sharding names for paged attention arrays.
+        
+        Args:
+            path_or_value: Tuple representing path in the tree
+            value: The actual value at this position
+            
+        Returns:
+            tuple: Sharding names for this component
+        """
+        # Handle LogicallyPartitioned values
+        if isinstance(value, flax.linen.spmd.LogicallyPartitioned):
+            return tuple(value.names)
+        
+        # Handle path components
+        if isinstance(path_or_value, tuple):
+            if path_or_value:
+                last_component = path_or_value[-1]
+                component = getattr(last_component, 'key', str(last_component))
+            else:
+                return ()
+        else:
+            return ()
+
+        # Define sharding rules for different components
+        paged_attention_rules = {
+            "key_pages": ("paged_kv_heads", "num_pages", "tokens_per_page", "paged_kv_head_dim_size"),
+            "value_pages": ("paged_kv_heads", "num_pages", "tokens_per_page", "paged_kv_head_dim_size"),
+            "page_status": ("num_pages",),
+            "page_map": ("cache_batch", "num_pages"),
+            "sequence_lengths": ("cache_batch",),
+            "num_pages_used": ("cache_batch",),
+            "current_page": ("cache_batch",),
+            "current_page_position": ("cache_batch",)
+        }
+        
+        return paged_attention_rules.get(str(component), ())
+
+    def print_tree_structure(tree, prefix=""):
+        """Print detailed information about a tree's structure.
+        
+        Args:
+            tree: The tree to examine
+            prefix: String prefix for output formatting
+        """
+        try:
+            leaves = jax.tree_util.tree_leaves(tree)
+            print(f"{prefix}Number of leaves: {len(leaves)}")
+            print(f"{prefix}Leaf types: {[type(leaf) for leaf in leaves]}")
+            print(f"{prefix}Tree structure: {jax.tree_util.tree_structure(tree)}")
+        except Exception as e:
+            print(f"{prefix}Error examining tree: {e}")
+
+    def debug_path(path_or_value, value, depth=0):
+        """Debug helper that prints path and value information before processing.
+        
+        Args:
+            path_or_value: The path through the tree
+            value: The value at this location
+            depth: Current depth in the tree for indentation
+        """
+        indent = "  " * depth
+        print(f"{indent}Path type: {type(path_or_value)}")
+        print(f"{indent}Path value: {path_or_value}")
+        print(f"{indent}Value type: {type(value)}")
+        result = get_paged_attention_names(path_or_value, value)
+        print(f"{indent}Returning sharding: {result}")
+        return result
+
+    # try:
+    #     print("\nStarting cache tree analysis:")
+    #     print_tree_structure(cache, "Cache tree: ")
+        
+    #     print("\nMapping tree with debug information:")
+    #     self.kv_cache_annotations_named = jax.tree_util.tree_map_with_path(
+    #         debug_path,
+    #         cache,
+    #         is_leaf=is_lp
+    #     )
+        
+    #     print("\nFinal annotations structure:")
+    #     print_tree_structure(
+    #         self.kv_cache_annotations_named, 
+    #         "Annotations tree: "
+    #     )
+            
+    # except Exception as e:
+    #     print(f"\nError during tree mapping: {e}")
+    #     print(f"Cache type: {type(cache)}")
+    #     print(f"Cache structure: {jax.tree_util.tree_structure(cache)}")
+    #     raise
+
+    # Return unboxed state
     zeroed = max_utils.unbox_logicallypartioned(init_state)
     return zeroed
   

@@ -19,6 +19,7 @@ limitations under the License.
 # pylint: disable=no-name-in-module
 
 from flax import linen as nn
+import jax
 from jax.sharding import Mesh
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
@@ -75,24 +76,30 @@ class LlamaDecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      page_state: Optional[page_managers.PageState] = None,
+      slot: Optional[int] = None,
+      true_length: Optional[int] = None,
   ):
     cfg = self.config
     mesh = self.mesh
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
-    lnx = models.RMSNorm(
+    lnx_rms = models.RMSNorm(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="pre_self_attention_layer_norm",
         kernel_axes=("norm",),
         epsilon=cfg.normalization_layer_epsilon,
-    )(inputs) # call and assign in one go.
+    )
+    lnx = lnx_rms(inputs)
 
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+    jax.debug.print("LlamaDecoderLayer - lnx shape: {}", lnx.shape)
+    jax.debug.print("LlamaDecoderLayer - decoder_positions shape: {}", decoder_positions.shape)
 
     # Self-attention block
-    attention_layer = attentions.Attention(
+    attention_layer = Attention(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
         num_kv_heads=cfg.num_kv_heads,
@@ -122,6 +129,9 @@ class LlamaDecoderLayer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        page_state=page_state,
+        slot=slot,
+        true_length=true_length,
     )
 
     attention_lnx = nn.with_logical_constraint(

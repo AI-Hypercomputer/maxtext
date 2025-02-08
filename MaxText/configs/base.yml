@@ -268,7 +268,7 @@ logical_axis_rules: [
                       ['cache_kv', []],
                       ['cache_sequence', []],
                       ['exp', 'expert'],
-                      ['paged_kv_heads', []],
+                      ['paged_kv_heads', ['tensor']],
                       ['num_pages', ['tensor']],
                       ['tokens_per_page', []],
                       ['paged_kv_head_dim_size', []],

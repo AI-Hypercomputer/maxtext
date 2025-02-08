@@ -40,6 +40,8 @@ def main(argv: Sequence[str]) -> None:
   rng, rng_load_params = jax.random.split(rng)
   params = engine.load_params(rng_load_params)
 
+  # jax.debug.print("Main - it's all downhill from here.")
+
   text = config.prompt
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
@@ -50,9 +52,12 @@ def main(argv: Sequence[str]) -> None:
   # Split RNG before calling prefill
   rng, rng_prefill = jax.random.split(rng)
   slot = 0
+  # jax.debug.print("decode.py::main - before engine.prefill")
+  # print(f"decode.py::main - before engine.prefill - {true_length=}, {slot=}")
   prefill_result, first_token = engine.prefill(
       params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill, slot=slot
   )
+  # jax.debug.print("decode.py::main - after engine.prefill")
 
   rng, rng_init_decode = jax.random.split(rng)
   decode_state = engine.init_decode_state(rng_init_decode)
@@ -63,7 +68,7 @@ def main(argv: Sequence[str]) -> None:
   sampled_tokens_list.append(first_token)
   for _ in steps:
     rng, rng_generate = jax.random.split(rng)
-    decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
+    decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate, slot=slot)
     sampled_tokens_list.append(sampled_tokens)
 
   results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
