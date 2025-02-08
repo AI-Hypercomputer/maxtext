@@ -124,30 +124,28 @@ def prefill_insert_benchmark(config, engine, decode_state, params, total_slots, 
   return result_dict, decode_state
 
 
-def ar_benchmark_loop(config, engine, params, decode_state, iters, profile_name):
+def ar_benchmark_loop(config, generate_executable, params, decode_state, iters, profile_name):
   """Inner loop for benchmarking ar step."""
   prof = profiler.Profiler(config)
   prof.activate(optional_postfix=profile_name)
   start = datetime.datetime.now()
   rng = jax.random.PRNGKey(1234)
   for _ in range(iters):
-    rng, rng_generate = jax.random.split(rng)
-    decode_state, _ = engine.generate(params, decode_state, rng=rng_generate)
+    decode_state, _ = generate_executable(params, decode_state)
   jax.block_until_ready(decode_state)
   end = datetime.datetime.now()
   prof.deactivate()
   return (end - start).total_seconds(), decode_state
 
 
-def ar_benchmark(config, engine, params, decode_state, global_batch_size, cache_size, model_size, iters):
+def ar_benchmark(config, generate_executable, params, decode_state, global_batch_size, cache_size, model_size, iters):
   """Handles warmup, running ar benchmark, and printing results."""
   rng = jax.random.PRNGKey(1234)
   for _ in range(_WARMUP_ITERS):
-    rng, rng_generate = jax.random.split(rng)
-    decode_state, _ = engine.generate(params, decode_state, rng=rng_generate)
+    decode_state, _ = generate_executable(params, decode_state)
   jax.block_until_ready(decode_state)
 
-  time_in_s, decode_state = ar_benchmark_loop(config, engine, params, decode_state, iters, profile_name="autoregress")
+  time_in_s, decode_state = ar_benchmark_loop(config, generate_executable, params, decode_state, iters, profile_name="autoregress")
   seconds_per_step = time_in_s / iters
   ar_average_ms = seconds_per_step * 1000
   total_throughput = global_batch_size / seconds_per_step
@@ -293,7 +291,6 @@ def compile_generate_and_get_layouts(
   ).lower(params, decode_state).compile()
   arg_layouts, _ = compiled_generate.input_layouts
   generated_out_layouts, _ = compiled_generate.output_layouts
-  print(f'wyzhangd: generatd_out_layouts = {generated_out_layouts}')
   return (
   compiled_generate, arg_layouts[0], arg_layouts[1], generated_out_layouts)
 
@@ -314,11 +311,15 @@ def run_benchmarks(config):
   rng, rng_init_decode = jax.random.split(rng)
 
   abstract_decode_state = jax.eval_shape(engine.init_decode_state)
-  compiled_generate, param_layout, decode_state_layout = compile_generate_and_get_layouts(
+  generate_executable, param_layout, _, decode_state_layout = compile_generate_and_get_layouts(
     engine, engine.abstract_params, abstract_decode_state)
   params = _iterated_layout(params, param_layout)
 
-  decode_state = engine.init_decode_state(rng_init_decode)
+  decode_state_executable = jax.jit(
+    engine.init_decode_state, in_shardings=(None), out_shardings=(decode_state_layout)
+  ).lower().compile()
+  decode_state = decode_state_executable()
+
   _, cache_size, _ = max_utils.summarize_pytree_data(decode_state["cache"], name="Cache")
   num_model_params, model_size, _ = max_utils.summarize_pytree_data(params, name="Model")
 
@@ -367,7 +368,7 @@ def run_benchmarks(config):
 
   if "generate" in stages_to_benchmark:
     benchmark_results["autoregressive"], decode_state = ar_benchmark(
-        config, engine, params, decode_state, engine.max_concurrent_decodes, cache_size, model_size, benchmark_loop_iters
+        config, generate_executable, params, decode_state, engine.max_concurrent_decodes, cache_size, model_size, benchmark_loop_iters
     )
 
   results = collate_results(config, benchmark_results, model_size, cache_size, num_model_params)
