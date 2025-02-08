@@ -1,9 +1,5 @@
 
 #### HOST NETWORK
-
-# networks:
-#   local: {}
-
 services:
 
   resource_manager:
@@ -61,14 +57,17 @@ services:
       - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
 
 
-  maxtext:
-    image: us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:latest
-    network_mode: host
-    environment:
-      - JAX_PLATFORMS="proxy"
-      - JAX_BACKEND_TARGET="grpc://localhost:29000"
-    command:
-      - cd Maxtext ; python3 -m pytest -s tests -m tpu_only
+  # maxtext:
+  #   image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest
+  #   # us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest
+  #   # gcr.io/tpu-prod-env-multipod/maxtext_jax_stable_stack:latest
+  #   network_mode: host
+  #   environment:
+  #     - JAX_PLATFORMS="proxy"
+  #     - JAX_BACKEND_TARGET="grpc://localhost:29000"
+  #   entrypoint: "/bin/bash"
+  #   command:
+  #     - "ls "
 
 #### LOCAL NETWORK
 

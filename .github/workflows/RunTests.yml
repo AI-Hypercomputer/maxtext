@@ -53,18 +53,6 @@ jobs:
   #     build_mode: stable_stack
   #     base_image: us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:latest
 
-  tpu_pathways_installs:
-    runs-on: ["self-hosted", "tpu_pathways", "v4-8"]
-    needs: prelim
-    steps:
-    - name: Install Docker Compose and configure docker
-      run: |
-        sudo apt-get -y install docker
-        sudo apt-get -y install docker-compose-plugin
-        docker compose version
-        gcloud auth configure-docker us-docker.pkg.dev --quiet
-        
-
   # gpu_image:
   #   needs: prelim
   #   uses: ./.github/workflows/build_upload_internal.yml
@@ -86,7 +74,7 @@ jobs:
   #     container_resource_option: "--privileged"
   
   tpu_pathways_unit_tests:
-    needs: [tpu_pathways_installs]
+    needs: [prelim]
     uses: ./.github/workflows/run_tests_internal.yml
     with:
       device_type: tpu_pathways
