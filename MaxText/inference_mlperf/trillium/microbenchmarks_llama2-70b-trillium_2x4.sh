@@ -67,7 +67,7 @@ export ICI_AUTOREGRESSIVE_PARALLELISM=1
 export ICI_TENSOR_PARALLELISM=-1
 export SCAN_LAYERS=false
 export WEIGHT_DTYPE=bfloat16
-export PER_DEVICE_BATCH_SIZE=54
+export PER_DEVICE_BATCH_SIZE=64
 export RUN_DESC="${run_name}_xla_flags_${enable_xla_flags}"
 
 $cmd python3 ../../inference_microbenchmark.py   \
@@ -81,6 +81,5 @@ ici_tensor_parallelism=${ICI_TENSOR_PARALLELISM}   scan_layers=${SCAN_LAYERS} \
 weight_dtype=${WEIGHT_DTYPE}   per_device_batch_size=${PER_DEVICE_BATCH_SIZE} \
 quantization=int8 quantize_kvcache=True inference_microbenchmark_stages=${stages} \
 inference_microbenchmark_prefill_lengths="${prefill_lens}" checkpoint_is_quantized=True \
-compute_axis_order=0,2,1,3 ar_cache_axis_order=0,2,1,3 \
 attention=dot_product base_output_directory="/tmp/mb/profiles" run_name=${RUN_DESC} \
 ${PROFILER_OPTION} 2>&1 | tee /tmp/mb/logs/${cmd}_${RUN_DESC}
