@@ -312,13 +312,13 @@ def run_benchmarks(config):
   metadata = engine.get_tokenizer()
   vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
   rng, rng_init_decode = jax.random.split(rng)
-  decode_state = engine.init_decode_state(rng_init_decode)
 
-  abstract_decode_state = jax.eval_shape(decode_state)
+  abstract_decode_state = jax.eval_shape(engine.init_decode_state)
   compiled_generate, param_layout, decode_state_layout = compile_generate_and_get_layouts(
     engine, engine.abstract_params, abstract_decode_state)
   params = _iterated_layout(params, param_layout)
 
+  decode_state = engine.init_decode_state(rng_init_decode)
   _, cache_size, _ = max_utils.summarize_pytree_data(decode_state["cache"], name="Cache")
   num_model_params, model_size, _ = max_utils.summarize_pytree_data(params, name="Model")
 
