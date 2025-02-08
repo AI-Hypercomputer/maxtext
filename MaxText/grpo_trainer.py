@@ -682,9 +682,8 @@ def generate_completions(params, prompts, config, rng, tokenizer_model, engine, 
 
     rng, rng_init_decode = jax.random.split(rng)
     decode_state = engine.init_decode_state(rng_init_decode)
-    breakpoint()
     decode_state = engine.insert(prefill_result, decode_state, slot=slot)
-    
+    breakpoint()
     # Autoregressively generate tokens for max_target_length steps.
     steps = range(config.max_prefill_predict_length, config.max_target_length)
     sampled_tokens_list = []
@@ -1140,7 +1139,6 @@ def train_loop(config, config_inference, state=None):
       checkpoint_manager,
       state_mesh_shardings,
       model,
-      engine,
       mesh,
       learning_rate_schedule,
       data_iterator,

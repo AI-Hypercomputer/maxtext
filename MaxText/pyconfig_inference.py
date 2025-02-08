@@ -262,7 +262,7 @@ def _lists_to_tuples(l: list[Any]) -> Union[tuple[Any], list[Any]]:
   return tuple(_lists_to_tuples(x) for x in l) if isinstance(l, list) else l
 
 
-class __HyperParameters:
+class _HyperParameters:
   # pylint: disable=missing-class-docstring
   def _validate_env_variables(self, raw_data_from_yaml: dict[str, Any]):
     for environment_var in os.environ:
