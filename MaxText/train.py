@@ -859,7 +859,7 @@ def train_loop(config, state=None):
           break
         first_batch = eval_batch["inputs"]
         #np.save("/tmp/dump/firstbatch", first_batch)
-        max_logging.log(first_batch)
+        # max_logging.log(first_batch)
         #max_logging.log(first_batch.shape)
         max_logging.log(jnp.mean(first_batch))
         max_logging.log(jnp.min(first_batch))
