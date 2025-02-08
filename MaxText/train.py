@@ -857,6 +857,15 @@ def train_loop(config, state=None):
       for eval_batch in eval_data_iterator:
         if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
           break
+        first_batch = eval_batch["inputs"]
+        #np.save("/tmp/dump/firstbatch", first_batch)
+        max_logging.log(first_batch)
+        #max_logging.log(first_batch.shape)
+        max_logging.log(jnp.mean(first_batch))
+        max_logging.log(jnp.min(first_batch))
+        max_logging.log(jnp.max(first_batch))
+        max_logging.log(jnp.std(first_batch))
+        
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
           eval_metrics = p_eval_step(state, eval_batch, init_rng)
         cumulative_eval_metrics["scalar"]["eval/total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
@@ -865,6 +874,7 @@ def train_loop(config, state=None):
         eval_dpo_reward_accuracy += float(eval_metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0))  # for dpo only
         max_logging.log(f"Completed eval step {eval_step_count}")
         eval_step_count += 1
+        break
       eval_loss = (
           cumulative_eval_metrics["scalar"]["eval/total_loss"]
           / (cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS)
@@ -954,12 +964,16 @@ def train_loop(config, state=None):
       for eval_batch in eval_data_iterator:
         if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
           break
-        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-          eval_metrics = p_eval_step(state, eval_batch, nextrng)
-        cumulative_eval_metrics["scalar"]["eval/total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
-        cumulative_eval_metrics["scalar"]["eval/total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
-        cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] += float(eval_metrics["scalar"]["evaluation/moe_lb_loss"])
-        eval_dpo_reward_accuracy += float(eval_metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0))  # for dpo only
+
+        max_logging.log(eval_batch)
+        max_logging.log(sum(eval_batch["inputs"]))
+        # with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        #   eval_metrics = p_eval_step(state, eval_batch, nextrng)
+        # cumulative_eval_metrics["scalar"]["eval/total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
+        # cumulative_eval_metrics["scalar"]["eval/total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
+        # cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] += float(eval_metrics["scalar"]["evaluation/moe_lb_loss"])
+        # eval_dpo_reward_accuracy += float(eval_metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0))  # for dpo only
+        
         max_logging.log(f"Completed eval step {eval_step_count}")
         eval_step_count += 1
       eval_loss = (
