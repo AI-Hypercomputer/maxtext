@@ -57,8 +57,8 @@ echo
 echo "LIBTPU_INIT_ARGS:${LIBTPU_INIT_ARGS}"
 echo "XLA_FLAGS:${XLA_FLAGS}"
 echo
-export TOKENIZER_PATH=/home/${USER}/maxtext/assets/tokenizer.llama2
-export LOAD_PARAMETERS_PATH=gs://${USER}-bkt/checkpoints/quant_llama2-70b-chat/prod/int8_
+export TOKENIZER_PATH=/mnt/github/maxtext/assets/tokenizer.llama2
+export LOAD_PARAMETERS_PATH=gs://wyzhang-dev/maxtext/llama2-70b-chat/ckpt-int8w/
 export MAX_PREFILL_PREDICT_LENGTH=1024
 export MAX_TARGET_LENGTH=2048
 export MODEL_NAME=llama2-70b
