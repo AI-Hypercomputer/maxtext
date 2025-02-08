@@ -370,8 +370,11 @@ class MoeBlock(nn.Module):
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
     inputs_shape = inputs.shape
     inputs_2d = jnp.reshape(inputs, (inputs_shape[0] * inputs_shape[1], inputs_shape[2]))
+
+    gate_logits = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=1).astype(self.dtype)
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
-    weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+    weights /= jnp.sum(weights, axes=-1, keepdims=True)
+    #weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.dtype)
     flatten_selected_experts = jnp.ravel(selected_experts)
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
     sorted_indices = sorted_selected_experts // self.num_experts_per_tok
