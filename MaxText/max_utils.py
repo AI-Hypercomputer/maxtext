@@ -952,27 +952,34 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
 
 
 def get_prefill_kv_cache_annotations(model, config, rng, mesh):
-  """Get a shaped abstraction of the state (including optimizer)"""
+  """Get the linen variables representing the prefill kv-cache."""
+  if config.attention == "paged":
+      model_mode = common_types.MODEL_MODE_PREFILL
+      slot = 0
+      true_length = 0
+  else:
+      model_mode = common_types.MODEL_MODE_AUTOREGRESSIVE
+      slot = None
+      true_length = None
 
-  def init_prefill_kv_cache(model, config):
-    input_shape = (config.global_batch_size_to_load, config.max_prefill_predict_length)
-
+  def init_prefill_kv_cache_partial(rng):
+    batch = int(config.per_device_batch_size * jax.device_count())
+    input_shape = (batch, config.max_prefill_predict_length)
     model_vars = model.init(
-        {"params": rng, "dropout": rng, "aqt": rng},
-        jnp.ones(input_shape),
-        jnp.ones(input_shape),
-        model_mode=common_types.MODEL_MODE_PREFILL,
+        rng,
+        jnp.ones(input_shape, jnp.float32),
+        jnp.ones(input_shape, jnp.float32),
+        enable_dropout=False,
+        model_mode=model_mode,
+        slot=slot,
+        true_length=true_length
     )
     return model_vars["cache"]
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    init_prefill_kv_cache_partial = functools.partial(init_prefill_kv_cache, model, config)
-    abstract_state = jax.eval_shape(init_prefill_kv_cache_partial)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  return state_mesh_annotations
-
+        abstract_state = jax.eval_shape(init_prefill_kv_cache_partial, rng)
+        # Return names directly, not PartitionSpec
+        return jax.tree_util.tree_map(lambda x: tuple(x.names) if hasattr(x, 'names') else (), abstract_state, is_leaf=lambda x: hasattr(x, 'names'))
 
 def get_kv_cache_annotations(model, config, rng, mesh):
   """Get a shaped abstraction of the state (including optimizer)"""

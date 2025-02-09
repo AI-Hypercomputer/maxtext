@@ -507,13 +507,10 @@ class Transformer(nn.Module):
 
     page_state = None
     if self.config.attention == "paged":
-      if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-        page_state = self.page_manager(model_mode)
-      elif model_mode == common_types.MODEL_MODE_PREFILL:
         page_state = self.page_manager(
             model_mode=model_mode,
             slot=slot,
-            true_length=true_length,
+            true_length=true_length if true_length is not None else 0, # Always provide true_length
         )
 
     logits = self.decoder(

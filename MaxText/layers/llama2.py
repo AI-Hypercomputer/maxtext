@@ -93,10 +93,15 @@ class LlamaDecoderLayer(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
     )
     lnx = lnx_rms(inputs)
-
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
-    jax.debug.print("LlamaDecoderLayer - lnx shape: {}", lnx.shape)
-    jax.debug.print("LlamaDecoderLayer - decoder_positions shape: {}", decoder_positions.shape)
+
+    print(f"LlamaDecoderLayer - {model_mode=}")
+    print(f"LlamaDecoderLayer - {lnx.shape=}")
+    print(f"LlamaDecoderLayer - {decoder_positions.shape=}")
+    try:
+        print(f"LlamaDecoderLayer - {page_state.shape=}")
+    except:
+        pass
 
     # Self-attention block
     attention_layer = Attention(
@@ -137,7 +142,22 @@ class LlamaDecoderLayer(nn.Module):
     attention_lnx = nn.with_logical_constraint(
         attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
     )
-    intermediate_inputs = inputs + attention_lnx
+    if isinstance(attention_lnx, tuple):
+        print(f"LlamaDecoderLayer - tuple {len(attention_lnx)=}")
+        print(f"LlamaDecoderLayer - tuple {len(attention_lnx[0])=}")
+        print(f"LlamaDecoderLayer - tuple {len(attention_lnx[1])=}")
+        print(f"LlamaDecoderLayer - tuple {len(attention_lnx[2])=}")
+        attention_output = attention_lnx[0]
+        # Reshape from (batch, seq_len, num_heads, head_dim) to (batch, seq_len, hidden_dim)
+        if len(attention_output.shape) == 4:  # Check if we have the 4D shape from paged attention
+            attention_output = jnp.reshape(
+                attention_output, 
+                attention_output.shape[:-2] + (attention_output.shape[-2] * attention_output.shape[-1],)
+            )
+        intermediate_inputs = inputs + attention_output
+    else:
+        print(f"LlamaDecoderLayer - tensor {attention_lnx.shape=}")
+        intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
     hidden_states = models.RMSNorm(
