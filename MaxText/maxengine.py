@@ -27,6 +27,7 @@ from layers import models, quantizations
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
+from jax.experimental import layout as jax_layout
 
 import common_types
 from jetstream.core import config_lib
@@ -47,6 +48,8 @@ Prefix = Any
 PackedPrefix = Any
 Params = Any
 PRNGKeyType = Any
+DLL = jax_layout.DeviceLocalLayout
+Layout = jax_layout.Layout
 
 
 class MaxEngineConfig:
@@ -97,6 +100,85 @@ class MaxEngine(engine_api.Engine):
     self.prefill_kv_cache_shardings = None
     self.kv_cache_shardings = None
     self.state_mesh_annotations = None
+    self.decode_state_shapes = None
+    self.decode_state_layouts = None
+    self.param_layouts = None
+
+  def generate_aot(
+      self, params: Params, decode_state: DecodeState, rng: Optional[PRNGKeyType] = None
+  ) -> Tuple[DecodeState, engine_api.ResultTokens]:
+    """Wrapper to generate for ahead of time compilation."""
+
+    return self.generate(params=params, decode_state=decode_state, rng=rng)
+
+  def _compile_generate_and_get_layouts(
+      self, params: Any, decode_state: Any, rng_shape: Any, xla_flags: dict[str, Any] | None = None
+  ) -> tuple[Any, Any, Any, Any]:
+    """Optimal memory layout for params and decode_state."""
+
+    param_layout = Layout(DLL.AUTO)
+    decode_state_layout = Layout(DLL.AUTO)
+    # Keyword arguments are not yet supported in JAX for specifying shardings. Therefore, all AOT
+    # compiled functions use arguments instead.
+    compiled_generate = (
+        jax.jit(
+            self.generate_aot,
+            in_shardings=(param_layout, decode_state_layout, None),
+            out_shardings=(Layout(DLL.AUTO), Layout(DLL.AUTO)),
+            donate_argnames=("decode_state",),
+        ).lower(params, decode_state, rng_shape)
+    ).compile(compiler_options=xla_flags)
+
+    arg_layouts, _ = compiled_generate.input_layouts
+    generate_out_layouts, _ = compiled_generate.output_layouts
+
+    return compiled_generate, arg_layouts[0], arg_layouts[1], generate_out_layouts
+
+  def _identity(self, x: Any) -> Any:
+    """Avoids lambda that breaks JAX caching."""
+
+    return x
+
+  def _iterated_layout(self, arrays: Any, layouts: Any, xla_flags: dict[str, Any] | None = None) -> Any:
+    """Lays out an array tensor by tensor to prevent OOMs."""
+
+    def _layout(x, s, l):
+      if x.layout == l:
+        return x
+      # Somehow this can be None sometimes.
+      dll = l.device_local_layout if isinstance(l, Layout) else l
+      f = jax.jit(self._identity, out_shardings=Layout(dll, s)).lower(x).compile(compiler_options=xla_flags)
+      y = f(x)
+      # Achieves donation of the input argument, but allows for different memory
+      # layouts and shapes.
+      jax.tree.map(lambda z: z.delete(), x)
+      jax.block_until_ready(y)
+      return y
+
+    shardings = jax.tree.map(lambda x: x.sharding, arrays)
+    arrays = jax.tree.map(_layout, arrays, shardings, layouts)
+    return arrays
+
+  def aot_compile(
+      self, params: Params, pass_rng_shape: bool, xla_flags: dict[str, Any] | None = None
+  ) -> Tuple[Any, Params, Any]:
+    """Ahead of time compilation of generate with auto layout, relayout parameters."""
+    if pass_rng_shape:
+      rng_shape = jax.ShapeDtypeStruct([4], jax.numpy.dtype("uint32"))
+    else:
+      rng_shape = None
+    self.decode_state_shapes = jax.eval_shape(self.init_decode_state, rng_shape)
+
+    generate_executable, self.param_layouts, _, self.decode_state_layouts = self._compile_generate_and_get_layouts(
+        self.abstract_params, self.decode_state_shapes, rng_shape, xla_flags
+    )
+    return (
+        generate_executable,
+        self._iterated_layout(params, self.param_layouts),
+        jax.jit(self.init_decode_state, in_shardings=(None), out_shardings=self.decode_state_layouts)
+        .lower(rng_shape)
+        .compile(),
+    )
 
   def load_params(self, *args, rng: Optional[PRNGKeyType] = None, **kwargs) -> Params:
     """Load Parameters, typically from GCS"""
@@ -205,6 +287,17 @@ class MaxEngine(engine_api.Engine):
       res_cache["decoder"][f"layers_{i}"] = layer_cache[i]
 
     return res_cache
+
+  def prefill_aot(
+      self,
+      params: Params,
+      padded_tokens: jax.Array,
+      true_length: int,
+      rng: Optional[PRNGKeyType] = None,
+  ) -> Tuple[Prefix, engine_api.ResultTokens]:
+    """Wrapper for prefill for ahead-of-time compilation."""
+
+    return self.prefill(params=params, padded_tokens=padded_tokens, true_length=true_length, rng=rng)
 
   @functools.partial(jax.jit, static_argnums=(0,))
   def prefill(
@@ -405,6 +498,20 @@ class MaxEngine(engine_api.Engine):
       first_tokens.append(first_token)
     prefill_results = {k: jnp.stack(v) for k, v in prefill_results.items()}
     return cache, prefill_results, first_tokens
+
+  def prefill_insert(  # pylint: disable=too-many-positional-arguments
+      self,
+      padded_tokens: jax.Array,
+      true_length: int,
+      rng: Any,
+      decode_state: DecodeState,
+      slot: int,
+      params: Params,
+  ) -> DecodeState:
+    """Prefill and insert a single computed prefill cache into KV cache."""
+
+    prefix, _ = self.prefill(params=params, padded_tokens=padded_tokens, true_length=true_length, rng=rng)
+    return self.insert(prefix, decode_state, slot)
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
   def generate(

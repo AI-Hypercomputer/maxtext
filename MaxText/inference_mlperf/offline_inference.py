@@ -59,9 +59,12 @@ class OfflineInference:
     self.live = False
     self.engine = engine
     self.decode_state = None
+    self.decode_state_executable = None
     if params is None:
+      self.relayout_params = True
       params = engine.load_params()
     else:
+      self.relayout_params = False
       rng = jax.random.PRNGKey(0)
       set_engine_vars_from_base_engine(engine, base_engine, rng)
     self.params = params
@@ -80,12 +83,21 @@ class OfflineInference:
     self.detokenize_backlog = queue.Queue(10)
     self.prefill_buckets = defaultdict(list)
 
+    self._decode_state_executable = None
+
   def init_decode_state(self):
     if self.decode_state is None:
-      self.decode_state = self.engine.init_decode_state()
+      assert self._decode_state_executable != None, "Decode state executable is none"
+      self.decode_state = self._decode_state_executable(None)
 
   def warmup(self, max_length, warmup_samples):
+
+    self._cached_generate, self.params, self._decode_state_executable = self.engine.aot_compile(
+        self.params, pass_rng_shape=False
+    )
+
     self.init_decode_state()
+
     interesting_buckets = [
         64,
         128,
@@ -95,18 +107,31 @@ class OfflineInference:
         2048,
         4096,
     ]
+    i32_scalar = jax.ShapeDtypeStruct((), int)
+
     for length in interesting_buckets:
       if length > max_length:
         break
       log.info(f"Compiling prefill: {length}")
       input_data = jax.ShapeDtypeStruct((length,), jnp.dtype("int32"))
-      self._cached_pref[length] = (
-          jax.jit(self._prefill_insert, donate_argnums=(4,))
-          .lower(self.params, tokens=input_data, slot=0, true_length=length - 1, decode_state=self.decode_state)
-          .compile()
+
+      insert_with_layout = jax.jit(
+          self._prefill_insert,
+          in_shardings=(self.engine.param_layouts, None, None, None, self.engine.decode_state_layouts),
+          out_shardings=(
+              None,
+              self.engine.decode_state_layouts,
+          ),
+          donate_argnames=("decode_state"),
       )
+      lowered_insert = insert_with_layout.lower(
+          self.params, input_data, i32_scalar, i32_scalar, self.engine.decode_state_shapes
+      )
+      self._cached_pref[length] = lowered_insert.compile(compiler_options=None)
+
       if length == 64 or length == 1024:
         continue
+
       input_data_batch = jax.ShapeDtypeStruct((max_length,), jnp.dtype("int32"))
       min_num_prompts = max_length // length
       max_num_prompts = max_length // (length // 2)
@@ -116,6 +141,20 @@ class OfflineInference:
         self._cached_pref_batch[(length, num_prompts)] = (
             jax.jit(
                 self._prefill_insert_batch,
+                in_shardings=(
+                    self.engine.param_layouts,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    self.engine.decode_state_layouts,
+                ),
+                out_shardings=(
+                    None,
+                    self.engine.decode_state_layouts,
+                ),
                 static_argnames=(
                     "num_prompts",
                     "padded_length",
@@ -124,21 +163,19 @@ class OfflineInference:
             )
             .lower(
                 self.params,
-                tokens=input_data_batch,
-                slots=jnp.arange(0, 16, dtype=int),
-                num_prompts=num_prompts,
-                decoder_positions=jnp.arange(0, max_length, dtype=int),
-                decoder_segment_ids=jnp.ones(max_length, dtype=int),
-                start_pos=jnp.arange(0, max_length, 64, dtype=int),
-                padded_length=length,
-                true_lengths=jnp.full(16, length, dtype=int),
-                decode_state=self.decode_state,
+                input_data_batch,
+                jnp.arange(0, 16, dtype=int),
+                num_prompts,
+                jnp.arange(0, max_length, dtype=int),
+                jnp.ones(max_length, dtype=int),
+                jnp.arange(0, max_length, 64, dtype=int),
+                length,
+                jnp.full(16, length, dtype=int),
+                self.engine.decode_state_shapes,
             )
-            .compile()
+            .compile(compiler_options=None)
         )
-    self._cached_generate = (
-        jax.jit(self.engine.generate, donate_argnums=(1,)).lower(self.params, self.decode_state).compile()
-    )
+
     self.batch_inference(warmup_samples, desc="warmup")
 
   def _prefill_insert(self, params, tokens, slot, true_length, decode_state):
@@ -208,10 +245,11 @@ class OfflineInference:
         prefill_fn = self._prefill_insert
         if (cached := self._cached_pref.get(prefill_len)) is not None:
           prefill_fn = cached
+        else:
+          assert False, "prefill fn not found"
+
         for slot, row in prefill_bucket:
-          first_token, self.decode_state = prefill_fn(
-              self.params, tokens=row.tokens, slot=slot, true_length=row.true_length, decode_state=self.decode_state
-          )
+          first_token, self.decode_state = prefill_fn(self.params, row.tokens, slot, row.true_length, self.decode_state)
           prefill_result.append((first_token, slot, row))
         return prefill_result
       else:
@@ -250,16 +288,18 @@ class OfflineInference:
         log.info(f"invoking compiled function with length {prefill_len} num_prompts {num_prompts}")
         if (cached := self._cached_pref_batch.get((prefill_len, num_prompts))) is not None:
           prefill_fn = cached
+        else:
+          assert False, "prefill batch not found"
 
         first_tokens, self.decode_state = prefill_fn(
             self.params,
-            tokens=tokens,
-            slots=slots,
-            decoder_positions=positions,
-            decoder_segment_ids=sequence_indicator,
-            start_pos=start_pos,
-            true_lengths=true_lengths,
-            decode_state=self.decode_state,
+            tokens,
+            slots,
+            positions,
+            sequence_indicator,
+            start_pos,
+            true_lengths,
+            self.decode_state,
         )  # pytype: disable=missing-parameter
         prefill_result = [(first_tokens[idx], slot, row) for (idx, (slot, row)) in enumerate(prefill_bucket)]
 
@@ -297,9 +337,11 @@ class OfflineInference:
         gen_fn = self.engine.generate
         if self._cached_generate is not None:
           gen_fn = self._cached_generate
+        else:
+          assert False, "no generate fn"
         result_tokens_l = []
         for i in range(5):
-          self.decode_state, result_tokens = gen_fn(self.params, self.decode_state)
+          self.decode_state, result_tokens = gen_fn(self.params, self.decode_state, None)
           result_tokens_l.append(result_tokens)
       for i in range(5):
         # result_tokens.copy_to_host_async()
