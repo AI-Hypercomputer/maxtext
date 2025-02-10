@@ -299,12 +299,13 @@ class MaxEngine(engine_api.Engine):
 
     return self.prefill(params=params, padded_tokens=padded_tokens, true_length=true_length, rng=rng)
 
-  @functools.partial(jax.jit, static_argnums=(0,))
+  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("existing_prefix_matched_length",))
   def prefill(
       self,
       *,
       params: Params,
-      existing_prefix: Optional[jax.Array] = None,
+      existing_prefix: Optional[Any] = None, # Prefix['cache']
+      existing_prefix_matched_length: int = 0,
       padded_tokens: jax.Array,
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
@@ -322,14 +323,23 @@ class MaxEngine(engine_api.Engine):
     Returns:
       kv_cache: For the resulting text.
     """
-    if existing_prefix:
-      raise ValueError("We don't know what to do with existing_prefix")
-
+# yyy: need handle existing_prefix_matched_length >= true_length
     if rng is None:
       rng = jax.random.PRNGKey(0)
 
-    input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
-    positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
+
+    if existing_prefix is None:
+      input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
+      positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
+    else:
+# yyy: Do we need padding to zero out the kv cache suffix?
+      input_tokens = jax.lax.dynamic_slice(
+          padded_tokens,
+          (existing_prefix_matched_length,),
+          (padded_tokens.shape[0] - existing_prefix_matched_length,),
+      )
+      input_tokens = jnp.expand_dims(input_tokens, 0)  # [BATCH, SEQUENCE]
+      positions = jnp.expand_dims(jnp.arange(existing_prefix_matched_length, padded_tokens.shape[0]), 0)
 
     zero_to_n = jnp.arange(0, padded_tokens.shape[0])
     ones_to_keep = zero_to_n < true_length
@@ -338,24 +348,43 @@ class MaxEngine(engine_api.Engine):
 
     rng, new_rng = jax.random.split(rng)
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      flat_logits, new_vars = self.model.apply(
-          params,
-          input_tokens,
-          positions,
-          decoder_segment_ids=sequence_indicator,
-          enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_PREFILL,
-          rngs={"params": new_rng},
-          mutable=["cache"],
-      )
+      if existing_prefix is None:
+        flat_logits, new_vars = self.model.apply(
+            params,
+            input_tokens,
+            positions,
+            decoder_segment_ids=sequence_indicator,
+            enable_dropout=False,
+            model_mode=common_types.MODEL_MODE_PREFILL,
+            rngs={"params": new_rng},
+            mutable=["cache"],
+        )
+      else:
+        flat_logits, new_vars = self.model.apply(
+            params | {"cache": existing_prefix} if existing_prefix is not None else params,
+            input_tokens,
+            positions,
+            decoder_segment_ids=sequence_indicator, # full max prefill length
+            enable_dropout=False,
+            model_mode=common_types.MODEL_MODE_PREFILL,
+            rngs={"params": new_rng},
+            mutable=["cache"],
+        )
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
     generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
-    selected_logits = jax.lax.dynamic_slice(
-        flat_logits,
-        (0, true_length - 1, 0),
-        (flat_logits.shape[0], 1, flat_logits.shape[2]),
-    )
+    if existing_prefix is None:
+      selected_logits = jax.lax.dynamic_slice(
+          flat_logits,
+          (0, true_length - 1, 0),
+          (flat_logits.shape[0], 1, flat_logits.shape[2]),
+      )
+    else:
+      selected_logits = jax.lax.dynamic_slice(
+          flat_logits,
+          (0, true_length - existing_prefix_matched_length - 1, 0),
+          (flat_logits.shape[0], 1, flat_logits.shape[2]),
+      )
     selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
 
     # sampling first token
@@ -386,11 +415,11 @@ class MaxEngine(engine_api.Engine):
     cache = self._maybe_stack_prefill_result_cache(cache)
 
     return {
-        "logits": selected_logits,
-        "cache": cache,
-        "next_pos": next_pos,
-        "generated_tokens": generated_tokens,
-        "tokens": first_generated_token,
+        "logits": selected_logits, # 1
+        "cache": cache, # padding_length
+        "next_pos": next_pos, # 1
+        "generated_tokens": generated_tokens, # 1
+        "tokens": first_generated_token, # 1
     }, result
 
   @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_prompts",))

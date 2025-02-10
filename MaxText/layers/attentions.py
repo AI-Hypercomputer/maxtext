@@ -39,6 +39,7 @@ from layers import quantizations
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
 
+import os; YYYDEV = os.environ.get("YYYDEV"); print(f"{YYYDEV=}");
 
 class AttentionType(enum.Enum):
   GLOBAL = "global"
@@ -178,18 +179,34 @@ class AttentionOp(nn.Module):
     if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       mask = decoder_segment_ids[:, None, None, None, :] == common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     elif decoder_segment_ids is not None:
-      mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
-      mask = mask[:, None, None, :, :]
+# yyy: error -> ignore other case just for test
+      if YYYDEV and False:
+        pass
+      else:
+        mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
+        mask = mask[:, None, None, :, :]
 
     causal_mask = None
     # We enforce causality except for AUTOREGRESSION
-    if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE:
-      _, q_seq_len, _, _ = query.shape
-      _, kv_seq_len, _, _ = key.shape
-      mask_shape = (q_seq_len, kv_seq_len)
-      row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
-      col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
-      causal_mask = (col_ids <= row_ids)[None, None, None, :, :]
+# yyy: mask mismatch if qv not the max length
+    if YYYDEV:
+      if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE:
+        _, q_seq_len, _, _ = query.shape
+        _, kv_seq_len, _, _ = key.shape
+        if decoder_segment_ids is not None:
+          kv_seq_len = decoder_segment_ids.shape[1]
+        mask_shape = (q_seq_len, kv_seq_len)
+        row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
+        col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
+        causal_mask = (col_ids + q_seq_len - kv_seq_len <= row_ids)[None, None, None, :, :]
+    else:
+      if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE:
+        _, q_seq_len, _, _ = query.shape
+        _, kv_seq_len, _, _ = key.shape
+        mask_shape = (q_seq_len, kv_seq_len)
+        row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
+        col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
+        causal_mask = (col_ids <= row_ids)[None, None, None, :, :]
 
     output_mask = None
 
@@ -754,8 +771,8 @@ class AttentionOp(nn.Module):
     prepare the cache as necessary.
 
     Args:
-      key: in shape [b, s, n, d].
-      value: in shape [b, s, n, d].
+      key: in shape [b, s - common_prefix_length, n, d].
+      value: in shape [b, s - common_prefix_length, n, d].
       decoder_segment_ids: [b, s] -- marking segment ids for tokens
 
     Returns:
@@ -774,22 +791,71 @@ class AttentionOp(nn.Module):
     key_shaped_for_cache = jnp.transpose(key, self.prefill_cache_axis_order)
     value_shaped_for_cache = jnp.transpose(value, self.prefill_cache_axis_order)
 
-    if self.kv_quant:
+# yyy: BUG here if loading params
+    if YYYDEV:
       prefill_key_axis_names = self.transpose_tuple(self.cache_logical_axis_names, self.prefill_cache_axis_order)
-      key_shaped_for_cache, key_scale_shaped_for_cache = self.kv_quant.quantize(key_shaped_for_cache, prefill_key_axis_names)
-      value_shaped_for_cache, value_scale_shaped_for_cache = self.kv_quant.quantize(
-          value_shaped_for_cache, prefill_key_axis_names
+      prefill_cache_update_axis = prefill_key_axis_names.index(CACHE_SEQUENCE)
+      if self.kv_quant:
+        key_shaped_for_cache, key_scale_shaped_for_cache = self.kv_quant.quantize(key_shaped_for_cache, prefill_key_axis_names)
+        value_shaped_for_cache, value_scale_shaped_for_cache = self.kv_quant.quantize(
+            value_shaped_for_cache, prefill_key_axis_names
+        )
+        cached_prefill_key_vars[1].value = jax.lax.dynamic_update_index_in_dim(
+            cached_prefill_key_vars[1].value,
+            key_scale_shaped_for_cache,
+            cached_prefill_key_vars[1].value.shape[prefill_cache_update_axis] - key_scale_shaped_for_cache.shape[prefill_cache_update_axis],
+            prefill_cache_update_axis,
+        )
+        
+        cached_prefill_value_vars[1].value = jax.lax.dynamic_update_index_in_dim(
+            cached_prefill_value_vars[1].value,
+            value_scale_shaped_for_cache,
+            cached_prefill_value_vars[1].value.shape[prefill_cache_update_axis] - value_scale_shaped_for_cache.shape[prefill_cache_update_axis],
+            prefill_cache_update_axis,
+        )
+
+      cached_prefill_key_vars[0].value = jax.lax.dynamic_update_index_in_dim(
+          cached_prefill_key_vars[0].value,
+          key_shaped_for_cache,
+          cached_prefill_key_vars[0].value.shape[prefill_cache_update_axis] - key_shaped_for_cache.shape[prefill_cache_update_axis],
+          prefill_cache_update_axis,
       )
-      cached_prefill_key_vars[1].value = key_scale_shaped_for_cache
-      cached_prefill_value_vars[1].value = value_scale_shaped_for_cache
+      cached_prefill_value_vars[0].value = jax.lax.dynamic_update_index_in_dim(
+          cached_prefill_value_vars[0].value,
+          value_shaped_for_cache,
+          cached_prefill_value_vars[0].value.shape[prefill_cache_update_axis] - value_shaped_for_cache.shape[prefill_cache_update_axis],
+          prefill_cache_update_axis,
+      )
 
-    cached_prefill_key_vars[0].value = key_shaped_for_cache
-    cached_prefill_value_vars[0].value = value_shaped_for_cache
+      if decoder_segment_ids is not None:
+        cached_prefill_segment_id_var.value = decoder_segment_ids
 
-    if decoder_segment_ids is not None:
-      cached_prefill_segment_id_var.value = decoder_segment_ids
+# yyy: kv_quant will cause return value different from the origin implement
+# which is origin key and value.
+      cached_prefill = (
+          self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order),
+          self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order),
+          cached_prefill_segment_id_var.value,
+      )
 
-    return key, value, decoder_segment_ids
+      return cached_prefill
+    else:
+      if self.kv_quant:
+        prefill_key_axis_names = self.transpose_tuple(self.cache_logical_axis_names, self.prefill_cache_axis_order)
+        key_shaped_for_cache, key_scale_shaped_for_cache = self.kv_quant.quantize(key_shaped_for_cache, prefill_key_axis_names)
+        value_shaped_for_cache, value_scale_shaped_for_cache = self.kv_quant.quantize(
+            value_shaped_for_cache, prefill_key_axis_names
+        )
+        cached_prefill_key_vars[1].value = key_scale_shaped_for_cache
+        cached_prefill_value_vars[1].value = value_scale_shaped_for_cache
+
+      cached_prefill_key_vars[0].value = key_shaped_for_cache
+      cached_prefill_value_vars[0].value = value_shaped_for_cache
+
+      if decoder_segment_ids is not None:
+        cached_prefill_segment_id_var.value = decoder_segment_ids
+
+      return key, value, decoder_segment_ids
 
   def update_ar_key_value(
       self,
@@ -1025,7 +1091,7 @@ class AttentionOp(nn.Module):
     prefill_kv_cache, ar_kv_cache = self.kv_cache(
         key, value, decoder_segment_ids, model_mode, use_ragged_attention=self.use_ragged_attention
     )
-
+#yyy: return [b,seq,head,dim], [b,seq,head,1], [b,seq,head,1]
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
         query=query,
         key=prefill_kv_cache[0],
@@ -1037,6 +1103,7 @@ class AttentionOp(nn.Module):
     )
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
+#yyy: None if prefill
     if ar_kv_cache is None:
       if prefill_exponentials_sum is not None:
         return prefill_unnormalized_output / prefill_exponentials_sum
