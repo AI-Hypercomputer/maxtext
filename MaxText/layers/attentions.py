@@ -397,7 +397,6 @@ class PagedAttentionOp(nn.Module):
         self.current_page.value = self.current_page.value.at[slot].set(next_page)
         new_pos = jnp.where(need_new_page, 0, curr_pos)
 
-        # CRITICAL FIX: Proper reshaping of key/value data
         # Extract single item for slot
         key_data = key[slot]  # Shape: [1, num_kv_heads, head_dim]
         value_data = value[slot]  # Shape: [1, num_kv_heads, head_dim]

@@ -443,7 +443,6 @@ class MaxEngine(engine_api.Engine):
 
     def copy_paged(path, prefix_cache, decode_state_cache):
       """Handle paged cache copying."""
-      # ... (rest of copy_paged, UNCHANGED)
       if isinstance(path, tuple) and path:
           last_component = path[-1]
           path_key = getattr(last_component, 'key', str(last_component))
@@ -496,14 +495,14 @@ class MaxEngine(engine_api.Engine):
       if path_key in ["key_pages", "value_pages"]:
         def _update_pages(prefix_page_idx, state):
             decode_state_pages, prefix_pages, page_map = state
-            prefix_page = jax.lax.dynamic_index_in_dim(prefix_pages, prefix_page_idx, axis=1, keepdims=False)
+            prefix_page = jax.lax.dynamic_index_in_dim(prefix_pages, prefix_page_idx, axis=1, keepdims=True)
             page_index = jax.lax.dynamic_index_in_dim(page_map, prefix_page_idx, axis=0, keepdims=True)
             decode_state_pages = jax.lax.dynamic_update_slice_in_dim(decode_state_pages, prefix_page, page_index[0], axis=1)
             return decode_state_pages, prefix_pages, page_map
         num_pages = jax.lax.dynamic_index_in_dim(
-          prefix["cache"]["page_manager"]["num_pages_used"].value, slot, axis=0, keepdims=False
+          prefix["cache"]["page_manager"]["num_pages_used"], slot, axis=0, keepdims=False
         )
-        decode_state_cache, _, _ = jax.lax.fori_loop(0, num_pages, _update_pages, (decode_state_cache,prefix_cache,prefix["cache"]["page_manager"]["page_map"].value[slot]))
+        decode_state_cache, _, _ = jax.lax.fori_loop(0, num_pages, _update_pages, (decode_state_cache,prefix_cache,prefix["cache"]["page_manager"]["page_map"][slot]))
         return decode_state_cache
 
       if path_key in page_components:
@@ -560,11 +559,9 @@ class MaxEngine(engine_api.Engine):
 
 
     if self.config.attention == "paged":
-      # Use nn.get_partition_spec to get the *logical* annotations.
       if self.kv_cache_annotations_named is None:
         logical_annotations = nn.get_partition_spec(decode_state["cache"])
         def get_names(x):
-          # CRUCIAL FIX: Use jax.sharding.PartitionSpec
           if isinstance(x, jax.sharding.PartitionSpec):
             return tuple(x)
           return ()
