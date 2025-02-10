@@ -112,6 +112,7 @@ def write_run(
   from typing import Type
 
   from benchmark_db_writer import bq_writer_utils
+  from benchmark_db_writer.run_summary_writer import sample_run_summary_writer
   from benchmark_db_writer.schema.workload_benchmark_v2 import workload_benchmark_v2_schema
   from benchmark_db_writer.schema.workload_benchmark_v2 import model_info_schema
   from benchmark_db_writer.schema.workload_benchmark_v2 import software_info_schema
@@ -147,90 +148,12 @@ def write_run(
         dataclass_type=dataclass_type,
     )
 
-  def _validate_id(
-      id_value: str,
-      table_name: str,
-      id_field: str,
-      dataclass_type: Type,
-      is_test: bool = False,
-  ) -> bool:
-    """Generic function to validate an ID against a BigQuery table.
-
-    Args:
-      id_value: The ID value to validate.
-      table_name: The name of the BigQuery table.
-      id_field: The name of the ID field in the table.
-      is_test: Whether to use the testing project or the production project.
-
-    Returns:
-      True if the ID is valid, False otherwise.
-    """
-
-    client = get_db_client(table_name, dataclass_type, is_test)
-    result = client.query(where={id_field: id_value})
-
-    if not result:
-      logger.info(
-          "%s: %s is not present in the %s table ",
-          id_field.capitalize(),
-          id_value,
-          table_name,
-      )
-      logger.info(
-          "Please add %s specific row in %s table before adding to run summary table",
-          id_value,
-          table_name,
-      )
-      return False
-    return True
-
-  def validate_model_id(model_id: str, is_test: bool = False) -> bool:
-    """Validates a model ID against the model_info table."""
-
-    print("model id: " + model_id)
-    id_val = _validate_id(
-        model_id, "model_info", "model_id", model_info_schema.ModelInfo, is_test
-    )
-    if not id_val:
-      print("model id validation failed")
-      return False
-    return True
-
-  def validate_hardware_id(hardware_id: str, is_test: bool = False) -> bool:
-    """Validates a hardware ID against the hardware_info table."""
-    id_val = _validate_id(
-        hardware_id,
-        "hardware_info",
-        "hardware_id",
-        hardware_info_schema.HardwareInfo,
-        is_test,
-    )
-    if not id_val:
-      print("hardware id validation failed")
-      return False
-    return True
-
-  def validate_software_id(software_id: str, is_test: bool = False) -> bool:
-    """Validates a software ID against the software_info table."""
-    id_val = _validate_id(
-        software_id,
-        "software_info",
-        "software_id",
-        software_info_schema.SoftwareInfo,
-        is_test,
-    )
-
-    if not id_val:
-      print("software id validation failed")
-      return False
-    return True
-
   print(model_id)
 
   if (
-      validate_model_id(model_id, is_test)
-      and validate_hardware_id(hardware_id, is_test)
-      and validate_software_id(software_id, is_test)
+      sample_run_summary_writer.validate_model_id(model_id, is_test)
+      and sample_run_summary_writer.validate_hardware_id(hardware_id, is_test)
+      and sample_run_summary_writer.validate_software_id(software_id, is_test)
   ):
     summary = workload_benchmark_v2_schema.WorkloadBenchmarkV2Schema(
         run_id=f"run-{uuid.uuid4()}",
