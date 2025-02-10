@@ -115,12 +115,12 @@ jobs:
     - name: Delete TPU image
       run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu --force-delete-tags --quiet
 
-   notify:
-     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-     needs: [gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests, clean_up]
-     if: failure() && github.event.pull_request == null
-     runs-on: ["self-hosted"]
-     steps:
-       - uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
-         with:
-           github-token: ${{ secrets.GITHUB_TOKEN }}
+  notify:
+    name: Notify failed build # creates an issue or modifies last open existing issue for failed build
+    needs: [gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
+    if: failure() && github.event.pull_request == null
+    runs-on: ["self-hosted"]
+    steps:
+    - uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
