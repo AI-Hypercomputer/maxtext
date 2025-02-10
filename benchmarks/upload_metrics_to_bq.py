@@ -138,9 +138,6 @@ def main(argv: Sequence[str]) -> None:
 
   metrics_from_file = parse_metrics(local_metrics_file, number_of_steps, compute_metrics_of_n_steps)
 
-  # TODO() convert hardware_id to bq acceptable term
-  hardware_id = hardware_id
-
   # Convert number of chips to number of nodes (number of vms)
   # Trillium 4 chips per vm
   number_of_chips = int(number_of_chips)
@@ -161,11 +158,8 @@ def main(argv: Sequence[str]) -> None:
   env_dict = {"env_vars": dict(os.environ)}
   env_vars = json.dumps(env_dict)
 
-  # TODO() support framework config in json
+  # Framework config in json
   framework_config = json.dumps({"config": config_file})
-
-  # TODO() convert hardware_id to topology
-  # topology = "16x16"
 
   # Load metrics to bq
   write_run(
@@ -175,10 +169,10 @@ def main(argv: Sequence[str]) -> None:
     number_of_nodes=number_of_nodes,
     number_of_chips=number_of_chips,
     container_image_name=container_image_name,
-    global_batch_size=global_batch_size,
+    global_batch_size=int(global_batch_size),
     precision=precision,
     optimizer=optimizer,
-    seq_length=seq_length,
+    seq_length=int(seq_length),
     median_step_time=metrics_from_file.median_step_time,
     e2e_time=metrics_from_file.e2e_step_time,
     number_of_steps=number_of_steps,
@@ -195,7 +189,7 @@ def main(argv: Sequence[str]) -> None:
     xla_flags=xla_flags,
     topology=topology,
     dataset=dataset,
-    num_of_superblock=None,
+    num_of_superblock=0,
     update_person_ldap=getpass.getuser(),
     comment="",
     is_test=False,
