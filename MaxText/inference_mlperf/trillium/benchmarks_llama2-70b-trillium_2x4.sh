@@ -75,7 +75,7 @@ if "$enable_batch_prefill"; then
 fi
 
 if "$single_bucket"; then
-    export BATCH_AND_PREFILL_LEN="1024,54"
+    export BATCH_AND_PREFILL_LEN="1024,60"
 else
     export BATCH_AND_PREFILL_LEN="256,216|512,108|1024,54"
 fi
@@ -99,8 +99,7 @@ fi
 
 BASE_CFG="model_name=llama2-70b tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT}"
 QUANT_CFG="quantization=int8 quantize_kvcache=True checkpoint_is_quantized=True"
-LAYOUT_CFG="compute_axis_order=0,2,1,3 ar_cache_axis_order=0,2,1,3"
-export MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${LAYOUT_CFG}"
+export MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG}"
 
 RUN_DESC=int8_kv_${batch_and_prefill_str}_${token_multiplier}_flags_${enable_xla_flags}
 
@@ -128,3 +127,4 @@ if [ "$benchmark_type" = "all" ]; then
 else
     run_benchmark "$benchmark_type"
 fi
+

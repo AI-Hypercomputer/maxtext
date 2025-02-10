@@ -481,7 +481,6 @@ def main(argv):
       for group_idx in offline_inf_instances:
         (length, batch) = group_idx
         log.info(f"warm up for {length}")
-        offline_inf_instances[group_idx].init_decode_state()
         offline_inf_instances[group_idx].warmup(length, warmup_samples[group_idx])
         offline_inf_instances[group_idx].decode_state = None  # drop state
         gc.collect()
