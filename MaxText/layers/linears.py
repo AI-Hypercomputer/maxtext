@@ -606,7 +606,7 @@ class MoeBlock(nn.Module):
   def dense_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
     # gate_logits: batch, length, expert
     gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", None))
-    softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
+    softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
     # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
     top_k_weights, top_k_indices = jax.lax.top_k(softmax_probs, self.num_experts_per_tok)
     matmul_precision = lax.Precision(self.config.matmul_precision)
@@ -614,14 +614,14 @@ class MoeBlock(nn.Module):
     if self.config.capacity_factor > 0:
       # token dropping if needed
       # dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs)
-      top_k_weights /= top_k_weights.sum(-1, keepdims=True)
+      top_k_weights /= top_k_weights.sum(-1, keepdims=True).astype(self.dtype)
       weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
       dispatch_mask, combine_mask = self.generate_masks(top_k_indices, weights)
       mask_axes = ("activation_batch", "activation_length", None, None)
       dispatch_mask = nn.with_logical_constraint(dispatch_mask, mask_axes)
       combine_mask = nn.with_logical_constraint(combine_mask, mask_axes)
       if self.config.model_call_mode != "inference":
-        loss = self.load_balance_loss(top_k_indices, softmax_probs)
+        loss = self.load_balance_loss(top_k_indices, top_k_weights)
       else:
         loss = None
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
