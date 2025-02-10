@@ -807,6 +807,13 @@ def main() -> int:
       device_type='v6e-256',
   )
 
+  v6e_cluster_config_yucmhab = XpkClusterConfig(
+      cluster_name='v6e-256',
+      project='my-cool-project',
+      zone='us-central2-b',
+      device_type='v6e-256',
+  )
+
   xpk_workload_cmds = []
   xpk_workload_names = []
 
@@ -830,7 +837,7 @@ def main() -> int:
   # 3. See other examples below
 
   user = os.environ['USER']
-  base_output_dir = os.path.join(output_bucket,user)
+  base_output_dir = os.path.join(output_bucket, user)
 
   for model in list_of_models:
     # Run workloads on the below clusters
@@ -850,7 +857,7 @@ def main() -> int:
         ]:
           wl_config = WorkloadConfig(
             model=model,
-            num_slices=num_slices,
+            num_slices=str(num_slices),
             device_type=cluster_config.device_type,
             base_output_directory=base_output_dir,
             priority="medium",
