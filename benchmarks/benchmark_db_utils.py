@@ -23,13 +23,13 @@ DEFAULT_LOCAL_DIR="/tmp/"
 # bq_writer_repo_root = get_bq_writer_path(DEFAULT_LOCAL_DIR)
 
 
-def get_bq_writer_path(local_dir) -> str:
-  return os.path.join(local_dir, "benchmark-automation/benchmark_db_writer/src")
+def get_bq_writer_path() -> str:
+  return "/benchmark-automation/benchmark_db_writer/src"
 
 
-def install_mantaray_locally(local_dir) -> int:
-  command = f"git -C {local_dir} pull || git clone sso://cmcs-perf-tooling-internal/benchmark-automation {local_dir}"
-  return run_command_with_updates(command, f"Install or update mantaray locally in {local_dir}")
+# def install_mantaray_locally(local_dir) -> int:
+#   command = f"git -C {local_dir} pull || git clone sso://cmcs-perf-tooling-internal/benchmark-automation {local_dir}"
+#   return run_command_with_updates(command, f"Install or update mantaray locally in {local_dir}")
 
 
 def write_run(
@@ -103,7 +103,7 @@ def write_run(
   Raises:
     ValueError: If any of the IDs are invalid.
   """
-  bq_writer_repo_root = get_bq_writer_path(writer_path)
+  bq_writer_repo_root = get_bq_writer_path()
   sys.path.append(bq_writer_repo_root)
 
   # pylint: disable=import-outside-toplevel
@@ -114,9 +114,7 @@ def write_run(
   from benchmark_db_writer import bq_writer_utils
   from benchmark_db_writer.run_summary_writer import sample_run_summary_writer
   from benchmark_db_writer.schema.workload_benchmark_v2 import workload_benchmark_v2_schema
-  from benchmark_db_writer.schema.workload_benchmark_v2 import model_info_schema
-  from benchmark_db_writer.schema.workload_benchmark_v2 import software_info_schema
-  from benchmark_db_writer.schema.workload_benchmark_v2 import hardware_info_schema
+ 
   # pylint: enable=import-outside-toplevel
   logging.basicConfig(
       format="%(asctime)s %(levelname)-8s %(message)s",
