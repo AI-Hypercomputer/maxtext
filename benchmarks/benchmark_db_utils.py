@@ -16,23 +16,45 @@
 import sys
 import os
 import getpass
+from typing import Dict, Any
 
 from command_utils import run_command_with_updates
 
-DEFAULT_LOCAL_DIR="/tmp/"
+DEFAULT_LOCAL_DIR = "/tmp/"
 # bq_writer_repo_root = get_bq_writer_path(DEFAULT_LOCAL_DIR)
 
-
-def get_bq_writer_path(local_dir) -> str:
-  return os.path.join(local_dir, "benchmark-automation/benchmark_db_writer/src")
+DEFAULT_TUNING_PARAMS_FILE = "/tmp/tuning_params.json"
 
 
-def install_mantaray_locally(local_dir) -> int:
-  command = f"git -C {local_dir} pull || git clone sso://cmcs-perf-tooling-internal/benchmark-automation {local_dir}"
-  return run_command_with_updates(command, f"Install or update mantaray locally in {local_dir}")
+def get_bq_writer_path() -> str:
+  return "/benchmark-automation/benchmark_db_writer/src"
+
+
+def recover_tuning_params(tuning_params: str) -> Dict[str, Any]:
+  items = tuning_params[1:-1].split(",")
+  tuning_params_dict = {}
+  for item in items:
+    key, value = item.split(":", 1)
+    key = key.strip()
+    # Convert values to appropriate types
+    try:
+      value = int(value.strip()) 
+    except ValueError:
+      try:
+        value = float(value.strip())
+      except ValueError:
+        value = value.strip()
+        if value.lower() == "true":
+          value = True
+        elif value.lower() == "false":
+          value = False
+    tuning_params_dict[key] = value
+  return tuning_params_dict
 
 
 def write_run(
+    db_project: str,
+    db_dataset: str,
     model_id: str,
     hardware_id: str,
     software_id: str,
@@ -103,7 +125,7 @@ def write_run(
   Raises:
     ValueError: If any of the IDs are invalid.
   """
-  bq_writer_repo_root = get_bq_writer_path(writer_path)
+  bq_writer_repo_root = get_bq_writer_path()
   sys.path.append(bq_writer_repo_root)
 
   # pylint: disable=import-outside-toplevel
@@ -112,11 +134,10 @@ def write_run(
   from typing import Type
 
   from benchmark_db_writer import bq_writer_utils
+  from benchmark_db_writer import dataclass_bigquery_writer
   from benchmark_db_writer.run_summary_writer import sample_run_summary_writer
   from benchmark_db_writer.schema.workload_benchmark_v2 import workload_benchmark_v2_schema
-  from benchmark_db_writer.schema.workload_benchmark_v2 import model_info_schema
-  from benchmark_db_writer.schema.workload_benchmark_v2 import software_info_schema
-  from benchmark_db_writer.schema.workload_benchmark_v2 import hardware_info_schema
+ 
   # pylint: enable=import-outside-toplevel
   logging.basicConfig(
       format="%(asctime)s %(levelname)-8s %(message)s",
@@ -126,8 +147,9 @@ def write_run(
   logger = logging.getLogger(__name__)
 
   def get_db_client(
+      project: str, dataset: str,
       table: str, dataclass_type: Type, is_test: bool = False
-  ) -> bq_writer_utils.create_bq_writer_object:
+  ) -> dataclass_bigquery_writer.DataclassBigQueryWriter:
     """Creates a BigQuery client object.
 
     Args:
@@ -139,8 +161,6 @@ def write_run(
       A BigQuery client object.
     """
 
-    project = "ml-workload-benchmarks"
-    dataset = "benchmark_dataset_v2"
     return bq_writer_utils.create_bq_writer_object(
         project=project,
         dataset=dataset,
@@ -190,6 +210,8 @@ def write_run(
     )
 
     client = get_db_client(
+        db_project,
+        db_dataset,
         "run_summary",
         workload_benchmark_v2_schema.WorkloadBenchmarkV2Schema,
         is_test,
