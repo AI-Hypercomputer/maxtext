@@ -367,25 +367,56 @@ class MaxEngine(engine_api.Engine):
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
   def generate(
-      self,
-      params: Params,
-      decode_state: DecodeState,
-      sampler: Optional[Callable[[Any], Any]] = None,
-      rng: Optional[PRNGKeyType] = None,
-      slot: int = -1,
+    self,
+    params: Params,
+    decode_state: DecodeState,
+    sampler: Optional[Callable[[Any], Any]] = None,
+    rng: Optional[PRNGKeyType] = None,
+    slot: int = -1,
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
-    """Run one generate step"""
+    """Run one generate step with shape verification"""
     if rng is None:
         rng = jax.random.PRNGKey(0)
 
+    # Shape verification
+    batch_size = int(self.config.per_device_batch_size * jax.device_count())
+    
+    # Verify decode state shapes
     previous_token = decode_state["tokens"]
-    sequence_length = decode_state["cache"]["sequence_lengths"][slot] if slot >= 0 else None
-    rng, new_rng = jax.random.split(rng)
+    expected_token_shape = (batch_size, 1)  # Base shape without embedding dim
+    assert previous_token.shape[:2] == expected_token_shape, (
+        f"Previous token shape mismatch. Expected {expected_token_shape}, "
+        f"got {previous_token.shape[:2]}"
+    )
 
+    # Verify next_pos shape
+    next_pos = decode_state["next_pos"]
+    assert next_pos.shape[:2] == expected_token_shape, (
+        f"Next position shape mismatch. Expected {expected_token_shape}, "
+        f"got {next_pos.shape[:2]}"
+    )
+
+    # Verify cache shape consistency
+    if "page_manager" in decode_state["cache"]:
+        sequence_lengths = decode_state["cache"]["page_manager"]["sequence_lengths"]
+        assert sequence_lengths.shape[0] == batch_size, (
+            f"Sequence lengths shape mismatch. Expected first dim {batch_size}, "
+            f"got {sequence_lengths.shape[0]}"
+        )
+
+    sequence_length = jax.lax.cond(
+        slot >= 0,
+        lambda _: decode_state["cache"]["page_manager"]["sequence_lengths"][slot],
+        lambda _: jnp.zeros((), dtype=jnp.int32),
+        operand=None
+    )
+
+    rng, new_rng = jax.random.split(rng)
+    
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
         out_logits, new_vars = self.model.apply(
             params | {"cache": decode_state["cache"]},
-            previous_token,
+            previous_token,  # Now verified to have correct batch size
             decode_state["next_pos"],
             enable_dropout=False,
             model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
@@ -395,33 +426,14 @@ class MaxEngine(engine_api.Engine):
             true_length=sequence_length,
         )
 
+    # Verify output shapes
+    assert out_logits.shape[0] == batch_size, (
+        f"Output logits shape mismatch. Expected first dim {batch_size}, "
+        f"got {out_logits.shape[0]}"
+    )
+
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
-    new_token = inference_utils.sampling(
-        out_logits,
-        rng,
-        self.config.decode_sampling_strategy,
-        topk=self.config.decode_sampling_top_k,
-        nucleus_topp=self.config.decode_sampling_nucleus_p,
-        temperature=self.config.decode_sampling_temperature,
-    )
-
-    all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
-    result = engine_api.ResultTokens(
-        data=jnp.concatenate((new_token, all_valid, decode_state["generated_tokens"]), axis=1),
-        tokens_idx=(0, 1),
-        valid_idx=(1, 2),
-        length_idx=(2, 3),
-        samples_per_slot=1,
-    )
-
-    return {
-        "logits": out_logits,
-        "cache": new_cache,
-        "next_pos": decode_state["next_pos"] + 1,
-        "generated_tokens": decode_state["generated_tokens"] + 1,
-        "tokens": new_token,
-    }, result
 
   @functools.partial(
       jax.jit,
@@ -743,17 +755,18 @@ class MaxEngine(engine_api.Engine):
       return token_utils.SentencePieceTokenizer(metadata)
 
   def init_decode_state(self, rng: Optional[PRNGKeyType] = None) -> DecodeState:
-    """Initialize decode state with support for both paged and standard attention."""
+    """Initialize decode state with batch size verification."""
     if rng is None:
         rng = jax.random.PRNGKey(0)
 
+    batch_size = int(self.config.per_device_batch_size * jax.device_count())
+    
     def init(abstract_params):
         x = jnp.ones(
-            (int(self.config.per_device_batch_size * jax.device_count()), 1),
+            (batch_size, 1),  # Explicit about expected shape
             dtype=jnp.int32,
         )
 
-        # Initialize with autoregressive mode for both cases, but we need a dummy logits output too
         initial_logits, initial_vars = self.model.apply(
             abstract_params,
             x,
@@ -765,14 +778,19 @@ class MaxEngine(engine_api.Engine):
             slot=0,
             true_length=0,
         )
-        initial_cache = initial_vars["cache"]
+
+        # Verify initial state shapes
+        assert initial_logits.shape[0] == batch_size, (
+            f"Initial logits batch dimension {initial_logits.shape[0]} "
+            f"does not match expected batch size {batch_size}"
+        )
 
         initial_decode_state = {
             "logits": initial_logits,
-            "cache": initial_cache,
-            "next_pos": jnp.array([[0]], dtype=jnp.int32),
-            "generated_tokens": jnp.array([[0]], dtype=jnp.int32),
-            "tokens": jnp.array([[0]], dtype=jnp.int32),
+            "cache": initial_vars["cache"],
+            "next_pos": jnp.broadcast_to(jnp.array([[0]], dtype=jnp.int32), (batch_size, 1)),
+            "generated_tokens": jnp.zeros((batch_size, 1), dtype=jnp.int32),
+            "tokens": jnp.zeros((batch_size, 1), dtype=jnp.int32),
         }
         return initial_decode_state
 

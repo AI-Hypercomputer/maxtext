@@ -24,6 +24,7 @@ import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
+from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention as paged_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 from jax.sharding import PartitionSpec as P
@@ -425,24 +426,20 @@ class PagedAttentionOp(nn.Module):
         model_mode: str,
         pages_per_compute_block: int,
     ) -> Array:
-        """Core paged attention computation.
+        """Core paged attention computation with shape verification."""
         
-        Args:
-            query: [batch, len, num_heads, head_dim]
-            key_pages: [num_kv_heads, num_pages, tokens_per_page, head_dim]
-            value_pages: [num_kv_heads, num_pages, tokens_per_page, head_dim]
-            sequence_lengths: [batch]
-            page_map: [batch, max_pages_per_slot]
-            model_mode: Current model mode
-            pages_per_compute_block: Number of pages per attention block
-        """
-        from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention_kernel
+        # Shape validation
+        batch_size = query.shape[0]
+        assert sequence_lengths.shape[0] == batch_size, (
+            f"Sequence lengths batch dimension {sequence_lengths.shape[0]} "
+            f"does not match query batch dimension {batch_size}"
+        )
+        assert page_map.shape[0] == batch_size, (
+            f"Page map batch dimension {page_map.shape[0]} "
+            f"does not match query batch dimension {batch_size}"
+        )
 
-        if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-          # Reshape to the correct shape.  (b, 1, n, d) -> (b, n, d)
-          query = jnp.squeeze(query, axis=1)
-        
-        return paged_attention_kernel.paged_attention(
+        return paged_attention_kernel(
             q=query,
             k_pages=key_pages,
             v_pages=value_pages,
