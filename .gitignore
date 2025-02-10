@@ -137,3 +137,5 @@ dmypy.json
 
 # Wheel build
 *.whl
+
+.idea/
