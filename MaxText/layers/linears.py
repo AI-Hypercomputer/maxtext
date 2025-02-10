@@ -564,6 +564,7 @@ class MoeBlock(nn.Module):
 
   # See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details.
   def load_balance_loss(self, top_k_indices, logits):
+    logits = jax.nn.softmax(logits.astype(jnp.float32), axis=-1)
     expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
     summed_expert_mask = jnp.sum(expert_mask, axis=2)
     # Get fraction of tokens dispatched to each expert
@@ -621,7 +622,7 @@ class MoeBlock(nn.Module):
       dispatch_mask = nn.with_logical_constraint(dispatch_mask, mask_axes)
       combine_mask = nn.with_logical_constraint(combine_mask, mask_axes)
       if self.config.model_call_mode != "inference":
-        loss = self.load_balance_loss(top_k_indices, top_k_weights)
+        loss = self.load_balance_loss(top_k_indices, weights)
       else:
         loss = None
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
