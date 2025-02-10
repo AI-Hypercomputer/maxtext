@@ -22,7 +22,7 @@ import flax
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
-from layers import models, quantizations
+from layers import models, quantizations, attentions
 
 import jax
 import jax.numpy as jnp
@@ -743,14 +743,7 @@ class MaxEngine(engine_api.Engine):
       return token_utils.SentencePieceTokenizer(metadata)
 
   def init_decode_state(self, rng: Optional[PRNGKeyType] = None) -> DecodeState:
-    """Initialize decode state with support for both paged and standard attention.
-    
-    Args:
-        rng: Optional PRNG key for initialization
-        
-    Returns:
-        Initialized decode state with appropriate sharding for the active attention mode
-    """
+    """Initialize decode state with support for both paged and standard attention."""
     if rng is None:
         rng = jax.random.PRNGKey(0)
 
@@ -759,9 +752,9 @@ class MaxEngine(engine_api.Engine):
             (int(self.config.per_device_batch_size * jax.device_count()), 1),
             dtype=jnp.int32,
         )
-        
-        # Initialize with autoregressive mode for both cases
-        _, cache = self.model.apply(
+
+        # Initialize with autoregressive mode for both cases, but we need a dummy logits output too
+        initial_logits, initial_vars = self.model.apply(
             abstract_params,
             x,
             x,
@@ -772,27 +765,41 @@ class MaxEngine(engine_api.Engine):
             slot=0,
             true_length=0,
         )
-        return cache
+        initial_cache = initial_vars["cache"]
+
+        initial_decode_state = {
+            "logits": initial_logits,
+            "cache": initial_cache,
+            "next_pos": jnp.array([[0]], dtype=jnp.int32),
+            "generated_tokens": jnp.array([[0]], dtype=jnp.int32),
+            "tokens": jnp.array([[0]], dtype=jnp.int32),
+        }
+        return initial_decode_state
 
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        abstract_outputs = jax.eval_shape(init, self.abstract_params)
-
-    # Get logical annotations - needed for both modes
-    logical_annotations = nn.get_partition_spec(abstract_outputs)
+        abstract_state = jax.eval_shape(init, self.abstract_params)
 
     if self.config.attention == "paged":
-        # Paged attention needs minimal sharding setup
-        @functools.partial(jax.jit)
-        def initialize():
-            return jax.tree_util.tree_map(
-                lambda x: jnp.zeros(x.shape, x.dtype), 
-                abstract_outputs
-            )
-        
-        init_state = initialize()
-        
-    else:
-        # Standard attention needs full sharding specifications
+        # Get axis names from PagedAttentionOp
+        cache_axis_names = {
+            "decoder": {
+                f"layers_{i}": {
+                    "self_attention": {
+                        "PagedAttentionOp_0": attentions.PagedAttentionOp.get_cache_axis_names()
+                    }
+                } for i in range(self.config.num_decoder_layers)
+            },
+            "page_manager": {k: v for k, v in attentions.PagedAttentionOp.get_cache_axis_names().items() 
+                    if k not in ('key_pages', 'value_pages')
+            }
+        }
+
+        # Convert axis names to PartitionSpecs
+        logical_annotations = jax.tree_util.tree_map(
+            lambda names: P(*names) if names else None,
+            cache_axis_names
+        )
+
         with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
             mesh_annotations = nn.logical_to_mesh(logical_annotations)
 
@@ -800,12 +807,31 @@ class MaxEngine(engine_api.Engine):
             lambda mesh_annotation: jax.sharding.NamedSharding(self._mesh, mesh_annotation),
             mesh_annotations,
         )
+        self.kv_cache_shardings = shardings
+
+        @functools.partial(jax.jit)
+        def initialize():
+            return jax.tree_util.tree_map(
+                lambda x: jnp.zeros(x.shape, x.dtype),
+                abstract_state
+            )
+
+        init_state = initialize()
+
+    else:
+        with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+            state_mesh_annotations = nn.logical_to_mesh(nn.get_partition_spec(abstract_state))
+
+        shardings = jax.tree_util.tree_map(
+            lambda mesh_annotation: jax.sharding.NamedSharding(self._mesh, mesh_annotation),
+            state_mesh_annotations,
+        )
 
         @functools.partial(jax.jit, out_shardings=shardings)
         def initialize():
             return jax.tree_util.tree_map(
-                lambda x: jnp.zeros(x.shape, x.dtype), 
-                abstract_outputs
+                lambda x: jnp.zeros(x.shape, x.dtype),
+                abstract_state
             )
 
         init_state = initialize()
@@ -814,14 +840,12 @@ class MaxEngine(engine_api.Engine):
         def is_lp(k):
             return isinstance(k, flax.linen.spmd.LogicallyPartitioned)
 
-        # Store KV cache annotations for standard attention
         self.kv_cache_annotations_named = jax.tree_util.tree_map(
-            lambda x: tuple(x.names), 
-            cache, 
+            lambda x: tuple(x.names),
+            cache,
             is_leaf=is_lp
         )
 
-    # Return unboxed state for both cases
     return max_utils.unbox_logicallypartioned(init_state)
 
 

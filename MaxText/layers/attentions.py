@@ -149,20 +149,16 @@ class PagedAttentionOp(nn.Module):
 
     @staticmethod
     def get_cache_axis_names():
-        """Return sharding specifications for different cache components.
-        
-        Returns:
-            Dict mapping cache component names to their sharding axis names.
-        """
         return {
-            "key_pages": ("paged_kv_heads", "num_pages", "tokens_per_page", "paged_kv_head_dim_size"),
-            "value_pages": ("paged_kv_heads", "num_pages", "tokens_per_page", "paged_kv_head_dim_size"),
-            "page_status": ("num_pages",),
-            "page_map": ("cache_batch", "max_pages_per_slot"),
-            "sequence_lengths": ("cache_batch",),
-            "num_pages_used": ("cache_batch",),
-            "current_page": ("cache_batch",),
-            "current_page_position": ("cache_batch",)
+            # Keep as flat structure for direct access in setup()
+            "key_pages": P("paged_kv_heads", "num_pages", "tokens_per_page", "paged_kv_head_dim_size"),
+            "value_pages": P("paged_kv_heads", "num_pages", "tokens_per_page", "paged_kv_head_dim_size"),
+            "page_status": P("num_pages"),
+            "page_map": P("cache_batch", "max_pages_per_slot"),
+            "sequence_lengths": P("cache_batch"),
+            "num_pages_used": P("cache_batch"),
+            "current_page": P("cache_batch"),
+            "current_page_position": P("cache_batch")
         }
 
     def setup(self):
