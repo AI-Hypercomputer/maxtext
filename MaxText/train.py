@@ -438,7 +438,8 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   loss = total_loss / (total_weights + EPS)
   # get moe load balance loss
   moe_lb_loss = 0.0
-  if config.num_experts > 1:
+  # don't add moe_loss during eval
+  if config.num_experts > 1 and is_train == True:
     nested_key = ("intermediates", "decoder", "layers", "moe_lb_loss")
     total_moe_lb_loss = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, 0.0)
     moe_lb_loss = jnp.mean(jnp.array(total_moe_lb_loss))
