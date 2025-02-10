@@ -14,16 +14,21 @@
  limitations under the License.
  """
 
-from typing import Sequence
+from typing import Any, Dict, Sequence
 from statistics import median
+
+import omegaconf
 from command_utils import run_command_with_updates
-from benchmark_db_utils import install_mantaray_locally
+# from benchmark_db_utils import install_mantaray_locally
 from benchmark_db_utils import write_run
 from benchmark_db_utils import DEFAULT_LOCAL_DIR
+from benchmark_db_utils import recover_tuning_params
 import dataclasses
+import fnmatch
 import getpass
 import json
 import os
+import sys
 
 
 @dataclasses.dataclass
@@ -45,7 +50,7 @@ hardware_id_to_bf16_tflops = {"v4": 275,
                               }
 
 def download_metrics_file_locally(metrics_gcs_file: str, local_file: str) -> int:
-  command = f"gsutil cp {metrics_gcs_file} {local_file}"
+  command = f"gsutil cp -r {metrics_gcs_file} {local_file}"
   return run_command_with_updates(command, f"Download {metrics_gcs_file} in {local_file}")
 
 # Get the last n datapoints for a target metric
@@ -94,10 +99,24 @@ def parse_metrics(local_metrics_file, total_steps, last_n_steps=10) -> Metrics:
 
   return metrics
 
-# Args
-# metric gcs file location
-#
+
+def update_config_with_tuning_params(base_config: omegaconf.DictConfig,
+                                     tuning_params: Dict[str, Any]):
+  """Updates base_config with key-value pairs from tuning_params."""
+  if tuning_params:
+    for key, value in tuning_params.items():
+      omegaconf.OmegaConf.update(base_config, key, value, merge=True)
+  return base_config
+
+
 def main(argv: Sequence[str]) -> None:
+  # only write once
+  if int(os.environ["TPU_WORKER_ID"]) != 0:
+    return
+
+  for arg in argv:
+    print(f"got arg: {arg}")
+
   metrics_gcs_file = argv[0]
   model_id = argv[1]
   hardware_id = argv[2]
@@ -114,19 +133,26 @@ def main(argv: Sequence[str]) -> None:
   run_type = argv[13]
   config_file = argv[14]
   topology = argv[15]
+  tuning_params = argv[16]
 
   local_dir = DEFAULT_LOCAL_DIR
 
   # 1.Download metrics from the GCS Bucket
   local_metrics_file = local_dir
+  print(f"Attempting metrics download from {metrics_gcs_file} to {local_metrics_file}.",flush=True)
   rc = download_metrics_file_locally(metrics_gcs_file=metrics_gcs_file, local_file=local_metrics_file)
   if rc != 0:
+    print("metrics download FAIL")
     exit(rc)
+  print("metrics download SUCCESS")
 
   # 2.Install MantaRay locally
-  rc = install_mantaray_locally(local_dir)
-  if rc != 0:
-    exit(rc)
+  # print("Attempting mantaray install...")
+  # rc = install_mantaray_locally(local_dir)
+  # if rc != 0:
+  #   print("mantaray install FAIL")
+  #   exit(rc)
+  # print("mantaray install SUCCESS")
 
   # 3.Parse Metrics
   # If there are more than 10 steps, have a buffer to avoid profiling bad perf:
@@ -135,11 +161,15 @@ def main(argv: Sequence[str]) -> None:
     compute_metrics_of_n_steps = number_of_steps - 10
   else:
     compute_metrics_of_n_steps = number_of_steps
-
-  metrics_from_file = parse_metrics(local_metrics_file, number_of_steps, compute_metrics_of_n_steps)
+  for file in os.listdir(os.path.join(local_metrics_file,'metrics')):
+    if fnmatch.fnmatch(file, 'metrics_step*.txt'):
+      file_to_parse = os.path.join(local_metrics_file,'metrics',file)
+      print(f"Found metrics file to parse: {file_to_parse}")
+      break
+  metrics_from_file = parse_metrics(file_to_parse, number_of_steps, compute_metrics_of_n_steps)
+  print(f'Metrics: {metrics_from_file}')
 
   # Convert number of chips to number of nodes (number of vms)
-  # Trillium 4 chips per vm
   number_of_chips = int(number_of_chips)
   if hardware_id.startswith("v"):
     number_of_nodes = number_of_chips // 4
@@ -159,7 +189,12 @@ def main(argv: Sequence[str]) -> None:
   env_vars = json.dumps(env_dict)
 
   # Framework config in json
-  framework_config = json.dumps({"config": config_file})
+  base_config = omegaconf.OmegaConf.load(config_file)
+  print(f"tuning_params: {tuning_params}")
+  tuning_params_dict = recover_tuning_params(tuning_params)
+  config = update_config_with_tuning_params(base_config, tuning_params_dict)
+  config_dict = omegaconf.OmegaConf.to_container(config, resolve=True)
+  framework_config = json.dumps({"config": config_dict})
 
   # Load metrics to bq
   write_run(
@@ -186,7 +221,7 @@ def main(argv: Sequence[str]) -> None:
     nccl_driver_nickname=None,
     env_variables=env_vars,
     framework_config_in_json=framework_config,
-    xla_flags=xla_flags,
+    xla_flags=xla_flags.replace(',', ' '),
     topology=topology,
     dataset=dataset,
     num_of_superblock=0,
@@ -194,5 +229,8 @@ def main(argv: Sequence[str]) -> None:
     comment="",
     is_test=False,
   )
+  print(f"DB write complete")
 
 
+if __name__ == "__main__":
+  main(sys.argv[1:])
