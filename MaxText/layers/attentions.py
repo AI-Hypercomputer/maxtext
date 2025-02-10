@@ -439,6 +439,9 @@ class PagedAttentionOp(nn.Module):
             f"does not match query batch dimension {batch_size}"
         )
 
+        print(f"Calling paged_attention_kernel with {model_mode=}, {query.shape=}, {key_pages.shape=}, {value_pages.shape=}, {sequence_lengths.shape=}, {page_map.shape=}")
+        if query.ndim == 4 and query.shape[1] == 1:
+            query = jnp.squeeze(query, axis=1)
         return paged_attention_kernel(
             q=query,
             k_pages=key_pages,
