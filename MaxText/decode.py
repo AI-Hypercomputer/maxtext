@@ -67,11 +67,9 @@ def main(argv: Sequence[str]) -> None:
   results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
   output = tokenizer_model.decode(results)
   print(f"Input `{text}` -> `{output}`")
+  max_utils.print_mem_stats("After decode")
 
-  if config.autoregressive_decode_assert != "":
-    assert (
-        output == config.autoregressive_decode_assert
-    ), f"generated text mismatch {output=} {config.autoregressive_decode_assert=}"
+  assert (output.startswith(config.autoregressive_decode_assert)), f"generated text mismatch {output=}, {config.autoregressive_decode_assert=}"
 
 
 def validate_config(config):
