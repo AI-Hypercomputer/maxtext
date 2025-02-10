@@ -23,6 +23,7 @@ from benchmark_db_utils import DEFAULT_LOCAL_DIR
 import dataclasses
 import getpass
 import json
+import os
 
 
 @dataclasses.dataclass
@@ -32,7 +33,16 @@ class Metrics:
   median_step_time: float
   e2e_step_time: float
 
-
+hardware_id_to_bf16_tflops = {"v4": 275,
+                              "v5e": 197,
+                              "v5p": 459,
+                              "v6e": 918,
+                              "v6e-8": 918,
+                              "v6e-1": 918,
+                              "v6p": 1992,
+                              "a3mega": 989,
+                              "a3ultra": 989,
+                              }
 
 def download_metrics_file_locally(metrics_gcs_file: str, local_file: str) -> int:
   command = f"gsutil cp {metrics_gcs_file} {local_file}"
@@ -101,6 +111,9 @@ def main(argv: Sequence[str]) -> None:
   number_of_steps = argv[10]
   xla_flags = argv[11]
   dataset = argv[12]
+  run_type = argv[13]
+  config_file = argv[14]
+  topology = argv[15]
 
   local_dir = DEFAULT_LOCAL_DIR
 
@@ -117,6 +130,7 @@ def main(argv: Sequence[str]) -> None:
 
   # 3.Parse Metrics
   # If there are more than 10 steps, have a buffer to avoid profiling bad perf:
+  number_of_steps = int(number_of_steps)
   if number_of_steps - 10 > 0:
     compute_metrics_of_n_steps = number_of_steps - 10
   else:
@@ -126,28 +140,32 @@ def main(argv: Sequence[str]) -> None:
 
   # TODO() convert hardware_id to bq acceptable term
   hardware_id = hardware_id
-  # TODO() convert number of chips to number of nodes (number of vms)
+
+  # Convert number of chips to number of nodes (number of vms)
   # Trillium 4 chips per vm
-  number_of_nodes = number_of_chips / 4
+  number_of_chips = int(number_of_chips)
+  if hardware_id.startswith("v"):
+    number_of_nodes = number_of_chips // 4
+  elif hardware_id == "a3mega" or hardware_id == "'a3ultra":
+    number_of_nodes = number_of_chips // 8
+  else:
+    number_of_nodes = number_of_chips
 
-  # TODO() convert tflops to MFU based on hardware_id
+  # Convert tflops to MFU based on hardware_id
   # Trillium 918
-  avg_mfu = metrics_from_file.avg_tflops_per_sec / 918
-
-  # TODO() determine runtype
-  run_type = "MaxText"
+  avg_mfu = metrics_from_file.avg_tflops_per_sec / hardware_id_to_bf16_tflops[hardware_id]
 
   run_release_status = "local"
 
-  # TODO() support env variables
-  env_vars = ""
+  # Write env variables
+  env_dict = {"env_vars": dict(os.environ)}
+  env_vars = json.dumps(env_dict)
 
   # TODO() support framework config in json
-  framework_config = ""
+  framework_config = json.dumps({"config": config_file})
 
   # TODO() convert hardware_id to topology
-  topology = "16x16"
-
+  # topology = "16x16"
 
   # Load metrics to bq
   write_run(
