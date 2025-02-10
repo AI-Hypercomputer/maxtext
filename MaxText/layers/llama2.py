@@ -142,22 +142,24 @@ class LlamaDecoderLayer(nn.Module):
     attention_lnx = nn.with_logical_constraint(
         attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
     )
+
+
+    # during prefill: LlamaDecoderLayer - tensor attention_lnx.shape=(1, 1024, 32, 128)
+    # during AR: LlamaDecoderLayer - tensor attention_lnx.shape=(8, 32, 128)
+
+    # TODO: this is less than ideal, needs to be better
     if isinstance(attention_lnx, tuple):
-        print(f"LlamaDecoderLayer - tuple {len(attention_lnx)=}")
-        print(f"LlamaDecoderLayer - tuple {len(attention_lnx[0])=}")
-        print(f"LlamaDecoderLayer - tuple {len(attention_lnx[1])=}")
-        print(f"LlamaDecoderLayer - tuple {len(attention_lnx[2])=}")
-        attention_output = attention_lnx[0]
-        # Reshape from (batch, seq_len, num_heads, head_dim) to (batch, seq_len, hidden_dim)
-        if len(attention_output.shape) == 4:  # Check if we have the 4D shape from paged attention
-            attention_output = jnp.reshape(
-                attention_output, 
-                attention_output.shape[:-2] + (attention_output.shape[-2] * attention_output.shape[-1],)
-            )
-        intermediate_inputs = inputs + attention_output
-    else:
-        print(f"LlamaDecoderLayer - tensor {attention_lnx.shape=}")
-        intermediate_inputs = inputs + attention_lnx
+        attention_lnx = attention_lnx[0]
+    print(f"LlamaDecoderLayer - {model_mode} tensor {attention_lnx.shape=}")
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+        b, t, n, d = attention_lnx.shape
+        attention_lnx = jnp.reshape(attention_lnx, (b, t, n*d))
+    elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+        b, n, d = attention_lnx.shape
+        attention_lnx = jnp.reshape(attention_lnx, (b, 1, n*d))
+    print(f"LlamaDecoderLayer - {model_mode} tensor reshaped to {attention_lnx.shape=}")
+
+    intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
     hidden_states = models.RMSNorm(

@@ -26,7 +26,6 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
-from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention as paged_attention_kernel
 from jax.sharding import PartitionSpec as P
 import jax.numpy as jnp
 import common_types
@@ -443,8 +442,12 @@ class PagedAttentionOp(nn.Module):
             pages_per_compute_block: Number of pages per attention block
         """
         from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention_kernel
+
+        if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+          # Reshape to the correct shape.  (b, 1, n, d) -> (b, n, d)
+          query = jnp.squeeze(query, axis=1)
         
-        return paged_attention_kernel(
+        return paged_attention_kernel.paged_attention(
             q=query,
             k_pages=key_pages,
             v_pages=value_pages,
