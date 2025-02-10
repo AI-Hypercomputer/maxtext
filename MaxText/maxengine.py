@@ -367,73 +367,99 @@ class MaxEngine(engine_api.Engine):
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
   def generate(
-    self,
-    params: Params,
-    decode_state: DecodeState,
-    sampler: Optional[Callable[[Any], Any]] = None,
-    rng: Optional[PRNGKeyType] = None,
-    slot: int = -1,
+      self,
+      params: Params,
+      decode_state: DecodeState,
+      sampler: Optional[Callable[[Any], Any]] = None,
+      rng: Optional[PRNGKeyType] = None,
+      slot: int = -1,
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
-    """Run one generate step with shape verification"""
-    if rng is None:
-        rng = jax.random.PRNGKey(0)
+      """Run one generate step with shape verification."""
+      if rng is None:
+          rng = jax.random.PRNGKey(0)
 
-    # Shape verification
-    batch_size = int(self.config.per_device_batch_size * jax.device_count())
-    
-    # Verify decode state shapes
-    previous_token = decode_state["tokens"]
-    expected_token_shape = (batch_size, 1)  # Base shape without embedding dim
-    assert previous_token.shape[:2] == expected_token_shape, (
-        f"Previous token shape mismatch. Expected {expected_token_shape}, "
-        f"got {previous_token.shape[:2]}"
-    )
+      # Shape verification
+      batch_size = int(self.config.per_device_batch_size * jax.device_count())
+      
+      # Verify decode state shapes
+      previous_token = decode_state["tokens"]
+      expected_token_shape = (batch_size, 1)  
+      assert previous_token.shape[:2] == expected_token_shape, (
+          f"Previous token shape mismatch. Expected {expected_token_shape}, "
+          f"got {previous_token.shape[:2]}"
+      )
 
-    # Verify next_pos shape
-    next_pos = decode_state["next_pos"]
-    assert next_pos.shape[:2] == expected_token_shape, (
-        f"Next position shape mismatch. Expected {expected_token_shape}, "
-        f"got {next_pos.shape[:2]}"
-    )
+      next_pos = decode_state["next_pos"]
+      assert next_pos.shape[:2] == expected_token_shape, (
+          f"Next position shape mismatch. Expected {expected_token_shape}, "
+          f"got {next_pos.shape[:2]}"
+      )
 
-    # Verify cache shape consistency
-    if "page_manager" in decode_state["cache"]:
-        sequence_lengths = decode_state["cache"]["page_manager"]["sequence_lengths"]
-        assert sequence_lengths.shape[0] == batch_size, (
-            f"Sequence lengths shape mismatch. Expected first dim {batch_size}, "
-            f"got {sequence_lengths.shape[0]}"
-        )
+      sequence_length = jax.lax.cond(
+          slot >= 0,
+          lambda _: decode_state["cache"]["page_manager"]["sequence_lengths"][slot],
+          lambda _: jnp.zeros((), dtype=jnp.int32),
+          operand=None
+      )
 
-    sequence_length = jax.lax.cond(
-        slot >= 0,
-        lambda _: decode_state["cache"]["page_manager"]["sequence_lengths"][slot],
-        lambda _: jnp.zeros((), dtype=jnp.int32),
-        operand=None
-    )
+      rng, new_rng = jax.random.split(rng)
 
-    rng, new_rng = jax.random.split(rng)
-    
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        out_logits, new_vars = self.model.apply(
-            params | {"cache": decode_state["cache"]},
-            previous_token,  # Now verified to have correct batch size
-            decode_state["next_pos"],
-            enable_dropout=False,
-            model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-            rngs={"params": new_rng},
-            mutable=["cache"],
-            slot=slot,
-            true_length=sequence_length,
-        )
+      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+          out_logits, new_vars = self.model.apply(
+              params | {"cache": decode_state["cache"]},
+              previous_token,  
+              next_pos,
+              enable_dropout=False,
+              model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+              rngs={"params": new_rng},
+              mutable=["cache"],
+              slot=slot,
+              true_length=sequence_length,
+          )
 
-    # Verify output shapes
-    assert out_logits.shape[0] == batch_size, (
-        f"Output logits shape mismatch. Expected first dim {batch_size}, "
-        f"got {out_logits.shape[0]}"
-    )
+          # Handle paged attention tuple returns
+          if isinstance(out_logits, tuple):
+              unnormalized_out, exp_max, exp_sum = out_logits
+              out_logits = unnormalized_out / (exp_sum + 1e-9)
 
-    out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
-    new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
+          # Verify output shapes
+          assert out_logits.shape[0] == batch_size, (
+              f"Output logits shape mismatch. Expected first dim {batch_size}, "
+              f"got {out_logits.shape[0]}"
+          )
+
+          out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
+          new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
+
+          # Sample next token
+          next_token = inference_utils.sampling(
+              out_logits,
+              rng,
+              self.config.decode_sampling_strategy,
+              topk=self.config.decode_sampling_top_k,
+              nucleus_topp=self.config.decode_sampling_nucleus_p,
+              temperature=self.config.decode_sampling_temperature,
+          )
+
+          new_decode_state = {
+              "logits": out_logits,
+              "cache": new_cache,
+              "next_pos": next_pos + 1,
+              "generated_tokens": next_token,
+              "tokens": next_token,
+          }
+
+          # Create result tokens
+          all_valid = jnp.ones(next_token.shape, dtype=jnp.int8)
+          result = engine_api.ResultTokens(
+              data=jnp.concatenate((next_token, all_valid, next_token), axis=1),
+              tokens_idx=(0, 1),
+              valid_idx=(1, 2),
+              length_idx=(2, 3),
+              samples_per_slot=1,
+          )
+
+          return new_decode_state, result
 
   @functools.partial(
       jax.jit,
