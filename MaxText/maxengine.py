@@ -745,81 +745,59 @@ class MaxEngine(engine_api.Engine):
     else:
       return token_utils.SentencePieceTokenizer(metadata)
 
-  def init_decode_state(
-      self,
-      *args,  # pylint: disable=unused-argument
-      rng: Optional[PRNGKeyType] = None,
-      **kwargs,  # pylint: disable=unused-argument
-  ) -> DecodeState:
-    """Initialises any state which a generation step transforms."""
-
+  def init_decode_state(self, rng: Optional[PRNGKeyType] = None) -> DecodeState:
+    """Initialize decode state with support for both paged and standard attention.
+    
+    Args:
+        rng: Optional PRNG key for initialization
+        
+    Returns:
+        Initialized decode state with appropriate sharding for the active attention mode
+    """
     if rng is None:
-      rng = jax.random.PRNGKey(0)
+        rng = jax.random.PRNGKey(0)
 
-    # pylint: disable=unused-argument
     def init(abstract_params):
-      x = jnp.ones(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
-          dtype=jnp.int32,
-      )
-      # KEY CHANGE: Use PREFILL mode with slot=0 and true_length=0 for paged attention initialization
-      if self.config.attention == "paged":
-          _, cache = self.model.apply(
-              abstract_params,
-              x,
-              x,
-              enable_dropout=False,
-              model_mode=common_types.MODEL_MODE_PREFILL, # Use PREFILL mode
-              rngs={"params": rng},
-              mutable=["cache"],
-              slot=0,           # Provide slot=0
-              true_length=0,    # Provide true_length=0  <---  THIS LINE
-          )
-      else:
-          _, cache = self.model.apply(
-              abstract_params,
-              x,
-              x,
-              enable_dropout=False,
-              model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-              rngs={"params": rng},
-              mutable=["cache"],
-          )
-
-      next_pos = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
-          dtype=jnp.int32,
-      )
-      generated_tokens = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
-          dtype=jnp.int32,
-      )
-      tokens = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
-          dtype=jnp.int32,
-      )
-      return {
-          "logits": jnp.zeros(
-              (
-                  int(self.config.per_device_batch_size * jax.device_count()),
-                  1,
-                  self.config.vocab_size,
-              )
-          ),
-          "cache": cache["cache"],
-          "next_pos": next_pos,
-          "generated_tokens": generated_tokens,
-          "tokens": tokens,
-      }
+        x = jnp.ones(
+            (int(self.config.per_device_batch_size * jax.device_count()), 1),
+            dtype=jnp.int32,
+        )
+        
+        # Initialize with autoregressive mode for both cases
+        _, cache = self.model.apply(
+            abstract_params,
+            x,
+            x,
+            enable_dropout=False,
+            model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+            rngs={"params": rng, "cache": rng},
+            mutable=["cache"],
+            slot=0,
+            true_length=0,
+        )
+        return cache
 
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      abstract_outputs = jax.eval_shape(init, self.abstract_params)
+        abstract_outputs = jax.eval_shape(init, self.abstract_params)
 
-    if self.config.attention != "paged":
-        logical_annotations = nn.get_partition_spec(abstract_outputs)
+    # Get logical annotations - needed for both modes
+    logical_annotations = nn.get_partition_spec(abstract_outputs)
 
+    if self.config.attention == "paged":
+        # Paged attention needs minimal sharding setup
+        @functools.partial(jax.jit)
+        def initialize():
+            return jax.tree_util.tree_map(
+                lambda x: jnp.zeros(x.shape, x.dtype), 
+                abstract_outputs
+            )
+        
+        init_state = initialize()
+        
+    else:
+        # Standard attention needs full sharding specifications
         with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-          mesh_annotations = nn.logical_to_mesh(logical_annotations)
+            mesh_annotations = nn.logical_to_mesh(logical_annotations)
 
         shardings = jax.tree_util.tree_map(
             lambda mesh_annotation: jax.sharding.NamedSharding(self._mesh, mesh_annotation),
@@ -828,24 +806,26 @@ class MaxEngine(engine_api.Engine):
 
         @functools.partial(jax.jit, out_shardings=shardings)
         def initialize():
-          return jax.tree_util.tree_map(lambda x: jnp.zeros(x.shape, x.dtype), abstract_outputs)
+            return jax.tree_util.tree_map(
+                lambda x: jnp.zeros(x.shape, x.dtype), 
+                abstract_outputs
+            )
 
         init_state = initialize()
         cache = init_state["cache"]
 
         def is_lp(k):
-          return isinstance(k, flax.linen.spmd.LogicallyPartitioned)
+            return isinstance(k, flax.linen.spmd.LogicallyPartitioned)
 
-        self.kv_cache_annotations_named = jax.tree_util.tree_map(lambda x: tuple(x.names), cache, is_leaf=is_lp)
-        zeroed = max_utils.unbox_logicallypartioned(init_state)
-        return zeroed
-    else:
-      # Don't extract sharding for paged attention here - defer to insert()
-      @functools.partial(jax.jit)
-      def initialize():
-          return jax.tree_util.tree_map(lambda x: jnp.zeros(x.shape, x.dtype), abstract_outputs)
-      init_state = initialize()
-      return init_state # Return unboxed state directly
+        # Store KV cache annotations for standard attention
+        self.kv_cache_annotations_named = jax.tree_util.tree_map(
+            lambda x: tuple(x.names), 
+            cache, 
+            is_leaf=is_lp
+        )
+
+    # Return unboxed state for both cases
+    return max_utils.unbox_logicallypartioned(init_state)
 
 
   def free_slot(self, decode_state: dict, slot: int) -> None:

@@ -34,6 +34,7 @@ import collections
 from typing import Any, Tuple
 
 import max_logging
+from layers import attentions
 
 
 import orbax.checkpoint as ocp
@@ -980,27 +981,66 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh):
         abstract_state = jax.eval_shape(init_prefill_kv_cache_partial, rng)
         # Return names directly, not PartitionSpec
         return jax.tree_util.tree_map(lambda x: tuple(x.names) if hasattr(x, 'names') else (), abstract_state, is_leaf=lambda x: hasattr(x, 'names'))
-
 def get_kv_cache_annotations(model, config, rng, mesh):
   """Get a shaped abstraction of the state (including optimizer)"""
+  if config.attention == "paged":
+    return attentions.PagedAttentionOp.get_cache_axis_names()
 
-  def init_ar_kv_cache(model, config):
-    input_shape = (
-        config.global_batch_size_to_load,
-        1,
-    )
+  def init_ar_kv_cache(config, mesh): # Modified: Pass config and mesh
+    # Directly define the abstract shapes of the KV cache variables
+    num_slots = int(config.per_device_batch_size * jax.device_count())
+    num_kv_heads = config.num_kv_heads
+    num_pages = config.num_pages
+    tokens_per_page = config.tokens_per_page
+    kv_head_dim_size = config.head_dim
+    dtype = jnp.bfloat16 # Or config.dtype if you need dtype from config
 
-    model_vars = model.init(
-        {"params": rng, "dropout": rng, "aqt": rng},
-        jnp.ones(input_shape),
-        jnp.ones(input_shape),
-        model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-    )
-    return model_vars["cache"]
+    cache_axis_names = attentions.PagedAttentionOp( # Use PagedAttentionOp to get axis names
+        mesh=mesh, # Mesh needed, but not for computation
+        num_pages=num_pages,
+        tokens_per_page=tokens_per_page,
+        max_pages_per_slot=config.max_target_length // tokens_per_page,
+        max_pages_per_prefill=config.max_prefill_predict_length // tokens_per_page,
+        pages_per_compute_block=config.pages_per_compute_block,
+        num_kv_heads=num_kv_heads,
+        kv_head_dim_size=kv_head_dim_size,
+        config=config, # Config needed, but not for computation
+        dtype=dtype,
+    ).get_cache_axis_names()
+
+
+    abstract_cache = { # Define abstract state directly
+        "key_pages": jax.ShapeDtypeStruct(
+            shape=(num_kv_heads, num_pages, tokens_per_page, kv_head_dim_size), 
+            dtype=dtype),
+        "value_pages": jax.ShapeDtypeStruct(
+            shape=(num_kv_heads, num_pages, tokens_per_page, kv_head_dim_size), 
+            dtype=dtype),
+        "page_status": jax.ShapeDtypeStruct(
+            shape=(num_pages,), 
+            dtype=jnp.int32),
+        "page_map": jax.ShapeDtypeStruct(
+            shape=(num_slots, config.max_target_length // tokens_per_page), # max_pages_per_slot
+            dtype=jnp.int32),
+        "sequence_lengths": jax.ShapeDtypeStruct(
+            shape=(num_slots,), 
+            dtype=jnp.int32),
+        "num_pages_used": jax.ShapeDtypeStruct(
+            shape=(num_slots,), 
+            dtype=jnp.int32),
+        "current_page": jax.ShapeDtypeStruct(
+            shape=(num_slots,), 
+            dtype=jnp.int32),
+        "current_page_position": jax.ShapeDtypeStruct(
+            shape=(num_slots,), 
+            dtype=jnp.int32)
+    }
+    return abstract_cache # Return abstract cache dict directly
+
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    init_ar_kv_cache_partial = functools.partial(init_ar_kv_cache, model, config)
-    abstract_state = jax.eval_shape(init_ar_kv_cache_partial)
+    init_ar_kv_cache_partial = functools.partial(init_ar_kv_cache, config, mesh) # Modified partial
+    abstract_state = jax.eval_shape(init_ar_kv_cache_partial) # eval_shape on partial
   state_logical_annotations = nn.get_partition_spec(abstract_state)
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)

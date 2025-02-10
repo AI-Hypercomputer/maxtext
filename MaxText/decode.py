@@ -53,11 +53,15 @@ def main(argv: Sequence[str]) -> None:
   rng, rng_prefill = jax.random.split(rng)
   slot = 0
   # jax.debug.print("decode.py::main - before engine.prefill")
-  # print(f"decode.py::main - before engine.prefill - {true_length=}, {slot=}")
+  print(f"decode.py::main - before engine.prefill - {true_length=}, {slot=}")
   prefill_result, first_token = engine.prefill(
-      params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill, slot=slot
+      params=params, 
+      padded_tokens=tokens, 
+      true_length=true_length, 
+      rng=rng_prefill, 
+      slot=slot,
   )
-  # jax.debug.print("decode.py::main - after engine.prefill")
+  print("decode.py::main - after engine.prefill")
 
   rng, rng_init_decode = jax.random.split(rng)
   decode_state = engine.init_decode_state(rng_init_decode)

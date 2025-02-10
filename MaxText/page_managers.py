@@ -79,6 +79,8 @@ class PageManager(nn.Module):
           "cache", "current_page_position",
           lambda: jnp.zeros((self.slots,), dtype=jnp.int32)
       )
+
+
   def find_next_free_page(self, page_status: Array) -> Array:
     """Finds the index of the next free page.
 
