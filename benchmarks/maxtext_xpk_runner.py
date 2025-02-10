@@ -408,8 +408,24 @@ def generate_xpk_workload_cmd(
     # TODO only run this command if the previous succeeds using &&
     # TODO enable generate_metrics_and_upload_to_big_query by default in main of this file
     # TODO (optionally) make it so that this upload step is done on local device instead of within the workload.
-    upload_metrics_to_bq_cmd = " && python3 benchmarks/upload_metrics_to_bq.py ARGS"
+    ARGS = f"{metrics_gcs_file} "
+    ARGS += f"{model_id} "
+    ARGS += f"{hardware_id} "
+    ARGS += f"{software_id} "
+    ARGS += f"{number_of_chips} "
+    ARGS += f"{container_image_name} "
+    ARGS += f"{global_batch_size} "
+    ARGS += f"{precision} "
+    ARGS += f"{optimizer} "
+    ARGS += f"{seq_length} "
+    ARGS += f"{number_of_steps} "
+    ARGS += f"{xla_flags} "
+    ARGS += f"{dataset} "
+    ARGS += f"{run_type} "
+    ARGS += f"{config_file} "
+    ARGS += f"{topology} "
 
+    upload_metrics_to_bq_cmd = f" && python3 benchmarks/upload_metrics_to_bq.py {ARGS}"
 
   print(f'User command: {user_command}')
   return (
