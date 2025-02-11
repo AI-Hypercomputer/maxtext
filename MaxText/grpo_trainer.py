@@ -182,7 +182,11 @@ def write_metrics_to_tensorboard(writer, metrics, step, config, is_training=True
           f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
           #TODO: Do we need this?
           # f"total_weights: {metrics['scalar']['learning/total_weights']}, "
-          f"loss: {metrics['scalar']['learning/loss']:.3f}"
+          f"loss: {metrics['scalar']['learning/loss']:.3f}, "
+          f"learning/avg_reward: {metrics['scalar']['learning/avg_reward']:.3f}, "
+          f"learning/avg_reward_std: {metrics['scalar']['learning/avg_reward_std']:.3f}, "
+          f"learning/avg_advantage: {metrics['scalar']['learning/avg_advantage']:.3f}, "
+          f"learning/avg_kl: {metrics['scalar']['learning/avg_kl']:.3f}, "
       )
 
       if full_log and jax.process_index() == 0:
@@ -912,6 +916,10 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
 
   scalar_metrics = {
       "learning/loss": loss,
+      "learning/avg_reward": aux['avg_reward'],
+      "learning/avg_reward_std": aux['avg_reward_std'],
+      "learning/avg_advantage": aux['avg_advantage'],
+      "learning/avg_kl": aux['avg_kl'],
       # TODO: Do we need these?
       # "learning/moe_lb_loss": moe_lb_loss,
       # "learning/total_weights": total_weights,
