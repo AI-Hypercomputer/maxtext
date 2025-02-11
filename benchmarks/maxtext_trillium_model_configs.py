@@ -1071,6 +1071,49 @@ mixtral_8x7b_dropped_int8 = _add_to_model_dictionary(
   )
 )
 
+mixtral_8x22b_dropped = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="mixtral_8x22b_dropped",
+    model_type="mixtral-8x22b",
+    tuning_params={
+        "per_device_batch_size": 8,
+        "max_target_length": 4096,
+        "ici_fsdp_parallelism": 64,
+        "ici_expert_parallelism": 4,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "out_proj": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+        "megablox": False,
+        "sparse_matmul": False,
+        "capacity_factor": 1.25,
+        "tokenizer_path": "assets/tokenizer.mistral-v3",
+        "dtype": "bfloat16",
+        "weight_dtype": "bfloat16",
+        "allow_split_physical_axes": True,
+        "custom_mesh": "hybrid_ring_64x4",
+    },
+    xla_flags=(
+        xla_flags_library.MOE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+    ),
+  )
+)
 
 gemma2_9b_8192 = _add_to_model_dictionary(
   trillium_model_dict,
