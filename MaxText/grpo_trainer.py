@@ -569,13 +569,13 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 
   # # tokenizer_model = tokenizer.build_tokenizer(config.tokenizer_path, config.add_bos, config.add_eos)
   tokenizer_model = transformers.AutoTokenizer.from_pretrained(
-        config.tokenizer_path,
-        add_bos_token=config.add_bos,
-        add_eos_token=config.add_eos,
-        model_max_length=config.max_target_length,
-        legacy=False,
-        token=config.hf_access_token,
-    )
+    config.tokenizer_path,
+    add_bos_token=config.add_bos,
+    add_eos_token=config.add_eos,
+    model_max_length=config.max_target_length,
+    legacy=False,
+    token=config.hf_access_token,
+  )
   
   # completions shape: [B x G, max_target_length - max_prefill_length]
   # this includes the completion tokens + padding (upto max_target_length - max_prefill_length))
@@ -744,7 +744,7 @@ def prompt_completions(config, engine, tokenizer_model, data, params, rng):
       data[k] = v[:config.micro_batch_size_to_train_on]
 
   rng, rng_gen = random.split(rng)
-  engine.load_params(params)
+  # engine.load_params(params)
   L_prompt = data['prompt_true_length']
   data = generate_completions(
                                      params=params, #TODO: this needs to be \theta_old, but for now we are using \theta_old = \theta
@@ -1188,8 +1188,8 @@ def train_loop(config, config_inference, state=None):
   # Initializing maxengine and everything related from decode.py
   # Creating an engine here but might have two model compilation, need to initialize engine while passing model object
   engine = maxengine.MaxEngine(config_inference)
-  
-  
+  init_rng, rng_load_params = jax.random.split(init_rng)
+  _ = engine.load_params(rng_load_params)
 
   if eval_data_iterator:
     # pylint: disable=line-too-long
@@ -1278,9 +1278,8 @@ def train_loop(config, config_inference, state=None):
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       # do AR decoding here
       assert config.use_grpo, "Non grpo setting calling grpo_trainer"
-      init_rng, engine_rng = jax.random.split(init_rng)
-      engine_params = engine.load_params(engine_rng)
-      example_batch = prompt_completions(config_inference, engine, tokenizer_model, example_batch, engine_params, init_rng)
+      # engine_params = engine.load_params(engine_rng)
+      example_batch = prompt_completions(config_inference, engine, tokenizer_model, example_batch, state.params, init_rng)
       # TODO: ensure this partitioning is correct
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, nextrng)
@@ -1394,6 +1393,8 @@ def main(argv: Sequence[str]) -> None:
     os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   pyconfig.initialize(argv)
   config = pyconfig.config
+  pyconfig_inference.initialize(argv + ['ici_tensor_parallelism=4'])
+  config_inference = pyconfig_inference.config
   max_utils.print_system_information()
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
@@ -1425,8 +1426,7 @@ def main(argv: Sequence[str]) -> None:
   # TODO: ensure that we have same configs as decode.py
   # TODO: we probably don't need everything in pyconfig.py to be present in pyconfig_inference.py
   # TODO: modify argv with sharding (e.g.,no fsdp) and attention_type (ideally prefill flash attention and AR with dot_product)
-  pyconfig_inference.initialize(argv + ['ici_tensor_parallelism=4'])
-  config_inference = pyconfig_inference.config
+  
   # TODO: ensure we can run decode with full_state_path 
   with diagnostic.diagnose(diagnostic_config):
     train_loop(config,config_inference)
