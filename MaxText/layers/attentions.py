@@ -799,7 +799,6 @@ class AttentionOp(nn.Module):
     """
     batch, _, heads, kv_head_size = key.shape
     assert key.dtype == value.dtype, "Key and Value Dtypes should match."
-
     cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
         batch, heads, kv_head_size, common_types.MODEL_MODE_PREFILL
     )
