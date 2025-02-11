@@ -73,6 +73,8 @@ class OfflineInference:
     self.batch_size = engine.max_concurrent_decodes
     self.max_prefill_length = engine.config.max_prefill_predict_length
     self.max_decode_length = engine.config.max_target_length - engine.config.max_prefill_predict_length
+    self.min_prefill_length = 64
+    self.max_prompts_per_prefill = self.max_prefill_length // self.min_prefill_length
     metadata = engine.get_tokenizer()
     self.tokenizer = engine.build_tokenizer(metadata)
     self.dummy = False
@@ -129,7 +131,7 @@ class OfflineInference:
       )
       self._cached_pref[length] = lowered_insert.compile(compiler_options=None)
 
-      if length == 64 or length == 1024:
+      if length == 64 or length == self.max_prefill_length:
         continue
 
       input_data_batch = jax.ShapeDtypeStruct((max_length,), jnp.dtype("int32"))
@@ -164,13 +166,13 @@ class OfflineInference:
             .lower(
                 self.params,
                 input_data_batch,
-                jnp.arange(0, 16, dtype=int),
+                jnp.arange(0, self.max_prompts_per_prefill, dtype=int),
                 num_prompts,
                 jnp.arange(0, max_length, dtype=int),
                 jnp.ones(max_length, dtype=int),
-                jnp.arange(0, max_length, 64, dtype=int),
+                jnp.arange(0, max_length, self.min_prefill_length, dtype=int),
                 length,
-                jnp.full(16, length, dtype=int),
+                jnp.full(self.max_prompts_per_prefill, length, dtype=int),
                 self.engine.decode_state_shapes,
             )
             .compile(compiler_options=None)
@@ -280,9 +282,9 @@ class OfflineInference:
             array_to_pad.extend([0] * (pad_len - len(array_to_pad)))
           return jnp.array(array_to_pad)
 
-        slots = pad_num_prompts_len_array(slots, 16)
-        true_lengths = pad_num_prompts_len_array(true_lengths, 16)
-        start_pos = pad_num_prompts_len_array(start_pos, 16)
+        slots = pad_num_prompts_len_array(slots, self.max_prompts_per_prefill)
+        true_lengths = pad_num_prompts_len_array(true_lengths, self.max_prompts_per_prefill)
+        start_pos = pad_num_prompts_len_array(start_pos, self.max_prompts_per_prefill)
 
         prefill_fn = self._prefill_insert_batch
         log.info(f"invoking compiled function with length {prefill_len} num_prompts {num_prompts}")
@@ -467,11 +469,12 @@ class OfflineInference:
     data_dict[128] += data_dict[64]
     data_dict[64] = []
     data = []
-    for padded_len in [128, 256, 512, 1024]:
+    log.info(f"padded len: 128, num: {len(data_dict[128])}")
+    for padded_len in np.power(2, [7, 8, 9, 10, 11]):
       log.info(f"padded len: {padded_len}, num: {len(data_dict[padded_len])}")
       random.shuffle(data_dict[padded_len])
       data += data_dict[padded_len]
-    log.info("finished sorting data")
+    log.info(f"finished sorting data, total rows: {len(data)}")
     res = defaultdict(list)
 
     def callback(id_, token):

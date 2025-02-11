@@ -15,6 +15,7 @@ performance=true
 audit=false
 accuracy=false
 fast_eval=false
+enable_batch_prefill=false
 
 for arg in "$@"; do
   case $arg in
@@ -22,6 +23,7 @@ for arg in "$@"; do
     -t) test_run=true ;;
     -s) skip_warmup=true ;;
     -p) enable_profiler=true ;;
+    -c) enable_batch_prefill=true ;;
     -d) audit=true ;;
     -a) accuracy=true ;;
     -f) fast_eval=true ;;
@@ -51,6 +53,11 @@ if "$enable_profiler"; then
     PROFILER_OPTION="--enable_profile"
 fi
 
+BATCH_PREFILL_OPTION=""
+if "$enable_batch_prefill"; then
+    BATCH_PREFILL_OPTION="--enable_batch_prefill"
+fi
+
 if [ -z "$TOKENIZER_PATH" ]; then
   TOKENIZER_PATH=/home/${USER}/maxtext/assets/tokenizer.mistral-v1
 fi
@@ -68,9 +75,9 @@ fi
 
 if [ -z "$MAXENGINE_ARGS" ];
 then
-  CHECKPOINT="gs://vipannalla-bkt/checkpoints/quantized/mixtral-8x7b-instruct/11-06-24"
+  CHECKPOINT="gs://vipannalla-bkt/checkpoints/quantized/mixtral-8x7b-instruct/int4_qkv_ts_512/12-28-2024"
   BASE_CFG="model_name=mixtral-8x7b tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT}"
-  QUANT_CFG="quantization=int8 quantize_kvcache=True checkpoint_is_quantized=True"
+  QUANT_CFG="quantization=intmp quantize_kvcache=True checkpoint_is_quantized=True quant_cfg_path=/home/vipannalla_google_com/configs/int4_mp.json"
   LAYOUT_CFG="compute_axis_order=0,2,1,3 ar_cache_axis_order=0,2,1,3"
   MOE_CFG="megablox=False sparse_matmul=False capacity_factor=1.5 model_call_mode=inference"
   MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${LAYOUT_CFG} ${MOE_CFG}"
@@ -134,7 +141,7 @@ run_loadgen() {
     --output_log_dir ${OUTPUT_LOG_DIR} \
     --tok_outlen_multiplier ${TOK_OUTLEN_MULTIPLIER} \
     --rename_dataset_cols "${MIXTRAL_COLS_RENAME}" \
-    ${SKIP_WARMUP_OPTION} ${PROFILER_OPTION} 2>&1 | tee ${OUTPUT_LOG_DIR}/${LOADGEN_RUN_TYPE}_log.log
+    ${SKIP_WARMUP_OPTION} ${PROFILER_OPTION} ${BATCH_PREFILL_OPTION} 2>&1 | tee ${OUTPUT_LOG_DIR}/${LOADGEN_RUN_TYPE}_log.log
 }
 
 run_loadgen_performance () {

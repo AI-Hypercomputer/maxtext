@@ -434,3 +434,49 @@ class TrainCompile(unittest.TestCase):
             "num_layers_per_pipeline_stage=1",
         )
     )
+
+  @pytest.mark.tpu_only
+  def test_moe_deepseek_scanned_bf16(self):
+    compiled_trainstep_file = "/tmp/test_moe_deepseek_scanned_bf16.pickle"
+    train_compile_main(
+        (
+            None,
+            "configs/base.yml",
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek3-671b",
+            "sparse_matmul=True",
+            "megablox=False",
+            "per_device_batch_size=4",
+            "max_target_length=1024",
+            "attention=flash",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "scan_layers=True",
+        )
+    )
+
+  @pytest.mark.tpu_only
+  def test_moe_deepseek_unscanned_bf16(self):
+    compiled_trainstep_file = "/tmp/test_moe_deepseek_unscanned_bf16.pickle"
+    train_compile_main(
+        (
+            None,
+            "configs/base.yml",
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek3-671b",
+            "sparse_matmul=True",
+            "megablox=False",
+            "per_device_batch_size=4",
+            "max_target_length=1024",
+            "attention=flash",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "scan_layers=False",
+        )
+    )

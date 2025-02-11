@@ -280,6 +280,7 @@ def get_warmup_samples(dataset):
       256,
       512,
       1024,
+      2048,
   ]
   warmup_samples = _init_query_batches()
 
