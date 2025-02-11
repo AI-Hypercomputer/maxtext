@@ -38,6 +38,7 @@ def preprocessing_pipeline(
     tokenizer_path,
     hf_access_token,
     global_batch_size,
+    max_prefill_predict_length,
     max_target_length,
     shuffle,
     data_shuffle_seed,
@@ -102,11 +103,13 @@ def preprocessing_pipeline(
         )
     )
     operations.append(_input_pipeline_utils.ReformatPacking(data_column_names))
-  else:
+  elif use_dpo:
     operations.append(_input_pipeline_utils.PadToMaxLength(max_target_length))
     operations.append(grain.Batch(batch_size=global_batch_size // jax.process_count(), drop_remainder=drop_remainder))
-    if use_grpo: # Left pad prompt tokens and add per batch max true length
-      operations.append(_input_pipeline_utils.LeftPad(tokenizer.pad_token_id))
+  elif use_grpo:
+    operations.append(_input_pipeline_utils.PadToMaxLength(max_prefill_predict_length))
+    operations.append(grain.Batch(batch_size=global_batch_size // jax.process_count(), drop_remainder=drop_remainder))
+    operations.append(_input_pipeline_utils.LeftPad(tokenizer.pad_token_id))
 
 
   if shift and not use_dpo and not use_grpo:
@@ -164,6 +167,7 @@ def make_hf_train_iterator(
       tokenizer_path=config.tokenizer_path,
       hf_access_token=config.hf_access_token,
       global_batch_size=config.global_batch_size_to_load,
+      max_prefill_predict_length=config.max_prefill_predict_length,
       max_target_length=config.max_target_length,
       shuffle=config.enable_data_shuffling,
       data_shuffle_seed=config.data_shuffle_seed,
@@ -204,6 +208,7 @@ def make_hf_eval_iterator(
       tokenizer_path=config.tokenizer_path,
       hf_access_token=config.hf_access_token,
       global_batch_size=config.global_batch_size_to_load_eval,
+      max_prefill_predict_length=config.max_prefill_predict_length,
       max_target_length=config.max_target_length,
       shuffle=False,
       data_shuffle_seed=config.data_shuffle_seed,

@@ -644,7 +644,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 
 # --- GRPO Helpers ---
 
-def generate_completions(params, prompts, config, rng, tokenizer_model, engine, true_length):
+def generate_completions(params, data, config, rng, tokenizer_model, engine, true_length):
   """
   Autoregressively generates completions for a batch of prompts.
   We assume the prompts are all left padded, so all of them have the same length=true_length
@@ -662,14 +662,18 @@ def generate_completions(params, prompts, config, rng, tokenizer_model, engine, 
   Returns:
     A jnp.array of shape [B x num_generations, S] where S = length_of_prompt + max_completion_length.
   """
+  prompts = data['prompt']
   rng, rng_load_params = jax.random.split(rng)
-  outputs = []
   G = config.num_generations
   # Repeat each prompt G times.
-  prompts = jnp.repeat(prompts, repeats=G, axis=0)  # shape [BxG, L_prompt]
+  # prompts = jnp.repeat(prompts, repeats=G, axis=0)  # shape [BxG, L_prompt]
 
   #TODO: Improve the token generation by using batch inference
-
+  rng, rng_init_decode = jax.random.split(rng_load_params)
+  decode_state = engine.init_decode_state(rng_init_decode)
+  ar_completions = []
+  ar_completions_segmentation = []
+  ar_completions_position = []
   for i in range(prompts.shape[0]):
     tokens = prompts[i]
     current_token_true_length = true_length[i]
@@ -677,46 +681,46 @@ def generate_completions(params, prompts, config, rng, tokenizer_model, engine, 
     # Split RNG before calling prefill
     rng, rng_prefill = jax.random.split(rng)
     # generate the KV cache by prefilling the prompt tokens
-    prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=current_token_true_length, rng=rng_prefill)
     slot = 0
-
-    rng, rng_init_decode = jax.random.split(rng)
-    decode_state = engine.init_decode_state(rng_init_decode)
-    decode_state = engine.insert(prefill_result, decode_state, slot=slot)
-    breakpoint()
-    # Autoregressively generate tokens for max_target_length steps.
-    steps = range(config.max_prefill_predict_length, config.max_target_length)
-    sampled_tokens_list = []
-    sampled_tokens_list.append(first_token)
-    for _ in steps:
-      rng, rng_generate = jax.random.split(rng)
-      # Temperature scaling done by using `weighted` as sampling method
-      decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
-      sampled_tokens_list.append(sampled_tokens)
-
-    results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
-
-    breakpoint()
-    output = tokenizer_model.decode(results)
-    # print(f"Input `{tokenizer_model.decode(tokens.tolist())}` -> `{output}`")
-    outputs.append(output)
-
-  #TODO: is the sharding correctly copied?
-  return jnp.array(outputs, device=prompts.sharding)
+    # Generate G completions for a prompt with different rng
+    for _ in range(G):
+      prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=current_token_true_length, rng=rng_prefill)
+      decode_state = engine.insert(prefill_result, decode_state, slot=slot)
+      # Autoregressively generate tokens for max_target_length steps.
+      steps = config.max_target_length - config.max_prefill_predict_length
+      completions = []
+      for _ in range(steps):
+        rng, rng_generate = jax.random.split(rng)
+        # Temperature scaling done by using `weighted` as sampling method
+        decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
+        if sampled_tokens.get_result_at_slot(slot).tokens.item() == tokenizer_model.eos_token_id: # got EOS token
+          completions.append(sampled_tokens.get_result_at_slot(slot).tokens.item())
+          break
+        completions.append(sampled_tokens.get_result_at_slot(slot).tokens.item())
+      ar_completions.append(completions + [tokenizer_model.pad_token_id] * (steps - len(completions)))
+      ar_completions_segmentation.append([1] * len(completions) + [0] * (steps - len(completions)))
+      ar_completions_position.append(list(range(len(completions))) + [0] * (steps - len(completions)))
+  data['ar_completions'] = jnp.array(ar_completions)
+  data['ar_completions_segmentation'] = jnp.array(ar_completions_segmentation)
+  data['ar_completions_position'] = jnp.array(ar_completions_position)
+  # TODO:Since ar_completions are generated through inference. These arrays and NOT sharded. 
+  return data
 
 def prompt_completions(config, engine, tokenizer_model, data, params, rng):
+  """ Complete input prompts
+  """
   for k, v in data.items():
     if v.ndim == 2:
       data[k] = v[: config.micro_batch_size_to_train_on, :]
     else:
       data[k] = v[:config.micro_batch_size_to_train_on]
 
-  rng1, rng_gen = random.split(rng)
+  rng, rng_gen = random.split(rng)
   engine.load_params(params)
   L_prompt = data['prompt_true_length']
-  completions = generate_completions(
+  data = generate_completions(
                                      params=params, #TODO: this needs to be \theta_old, but for now we are using \theta_old = \theta
-                                     prompts=data['prompt'],
+                                     data=data,
                                      config=config,
                                      rng=rng_gen,
                                      tokenizer_model=tokenizer_model,
@@ -724,47 +728,7 @@ def prompt_completions(config, engine, tokenizer_model, data, params, rng):
                                      true_length=L_prompt,
                                      )
   return data
-  
 
-def extend_substring(tensor: jnp.ndarray, pad_token_id: int) -> jnp.ndarray:
-  """
-  Extends a substring of consecutive integers (starting from 0) along the 
-  last dimension of a tensor up to the first padding index from the right.
-
-  Args:
-      tensor: The input JAX array.
-      pad_token_id: The ID of the padding token.
-
-  Returns:
-      A new JAX array with the substring extended.
-  """
-
-  def find_start_index(row):
-    """Finds the start index of the substring (first occurrence of 0)."""
-    return jnp.where(row == 0, size=1, fill_value=row.shape[0])[0][0]
-
-  def extend_row(row):
-    """Extends the substring for a single row."""
-    i = get_valid_length(row, pad_token_id) - 1 
-    start_index = find_start_index(row)
-    
-    extended_substring = jnp.arange(0, jnp.maximum(0, i - start_index + 1))
-
-    mask = jnp.arange(row.shape[0]) >= start_index
-    mask = mask & (jnp.arange(row.shape[0]) <= i)
-
-    padded_extended_substring = jnp.pad(
-          extended_substring,
-          (0, jnp.maximum(0, jnp.sum(mask) - extended_substring.shape[0])),
-          mode='constant'
-    )
-    
-    return jnp.where(mask, padded_extended_substring, row)
-
-  # Apply extend_row to each row of the tensor using jax.vmap
-  extended_tensor = jax.vmap(extend_row)(tensor)
-
-  return extended_tensor
 
 
 def jaccard_reward_fn(str1, str2):
@@ -1410,7 +1374,7 @@ def main(argv: Sequence[str]) -> None:
   # TODO: ensure that we have same configs as decode.py
   # TODO: we probably don't need everything in pyconfig.py to be present in pyconfig_inference.py
   # TODO: modify argv with sharding (e.g.,no fsdp) and attention_type (ideally prefill flash attention and AR with dot_product)
-  pyconfig_inference.initialize(argv)
+  pyconfig_inference.initialize(argv + ['ici_tensor_parallelism=4'])
   config_inference = pyconfig_inference.config
   # TODO: ensure we can run decode with full_state_path 
   with diagnostic.diagnose(diagnostic_config):
