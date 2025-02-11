@@ -14,6 +14,7 @@
 
 """Embedding Layers."""
 
+import math
 from typing import Any, Optional
 
 from flax import linen as nn
@@ -276,6 +277,139 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
       outputs = outputs.astype(self.fprop_dtype)
 
     return outputs
+
+
+class YarnRotaryEmbedding(nn.Module):
+  """Yarn rotary embedding.
+
+  Based on https://arxiv.org/abs/2309.00071
+  This implementation uses DeepSeek-v3 PyTorch as reference
+  https://github.com/deepseek-ai/DeepSeek-V3/blob/2f7b80eecebf3d1c84da5a0d465f6639ea175012/inference/model.py#L294
+
+  Attributes:
+    embedding_dims: Dimension of the embedding to be generated.
+    max_seq_len: The maximum sequence length that will be encountered.
+    original_seq_len: The sequence length for which the base frequencies were defined.
+    beta_fast: Lower bound parameter for correction.
+    beta_slow: Upper bound parameter for correction.
+    rope_theta: The base theta value for the frequency computation.
+    rope_factor: Factor applied to adjust the frequencies.
+  """
+
+  embedding_dims: int
+  max_seq_len: int = 4096 * 4
+  original_seq_len: int = 4096
+  beta_fast: float = 32
+  beta_slow: float = 1
+  rope_theta: float = 10000.0
+  rope_factor: float = 40
+  cast_as_fprop_dtype: bool = True
+  fprop_dtype: DType = jnp.bfloat16
+
+  def setup(self) -> None:
+    if self.embedding_dims % 2:
+      raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
+
+    half_dim = self.embedding_dims // 2
+    # Compute base frequencies for each (even-indexed) dimension.
+    # (Note: We use jnp.arange with float32 for precision.)
+    freqs = 1.0 / (self.rope_theta ** (2.0 * jnp.arange(0, half_dim, dtype=jnp.float32) / self.embedding_dims))
+
+    # Adjust frequencies if using a longer sequence than originally trained.
+    if self.max_seq_len > self.original_seq_len:
+      low, high = self._find_correction_range(
+          self.beta_fast, self.beta_slow, self.embedding_dims, self.rope_theta, self.original_seq_len
+      )
+      smooth = 1 - self._linear_ramp_factor(low, high, half_dim)
+      # The corrected frequency is a weighted mix of the scaled and base values.
+      freqs = freqs / self.rope_factor * (1 - smooth) + freqs * smooth
+
+    # Precompute frequencies for all positions by taking the outer product.
+    t = jnp.arange(self.max_seq_len, dtype=jnp.float32)  # shape [max_seq_len]
+    # This gives a [max_seq_len, half_dim] tensor with rows as time steps.
+    freqs = jnp.outer(t, freqs)
+    # Compute the complex “cis” values: exp(i * theta).
+    self.freqs_cis = jnp.exp(1j * freqs)  # shape [max_seq_len, half_dim]
+
+  def _find_correction_dim(self, num_rotations: float, dim: int, base: float, max_seq_len: int) -> float:
+    """Compute the correction dimension for a given number of rotations."""
+    return dim * math.log(max_seq_len / (num_rotations * 2 * math.pi)) / (2 * math.log(base))
+
+  def _find_correction_range(self, low_rot: float, high_rot: float, dim: int, base: float, max_seq_len: int):
+    """Computes the range of correction dimensions for rotary positional embeddings.
+
+    Args:
+        low_rot (float): Lower bound for the number of rotations.
+        high_rot (float): Upper bound for the number of rotations.
+        dim (int): Dimensionality of the embedding space.
+        base (float): Base value for the exponential computation.
+        max_seq_len (int): Maximum sequence length.
+
+    Returns:
+        Tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
+    """
+    low = math.floor(self._find_correction_dim(low_rot, dim, base, max_seq_len))
+    high = math.ceil(self._find_correction_dim(high_rot, dim, base, max_seq_len))
+    low = max(low, 0)
+    high = min(high, dim - 1)
+    return low, high
+
+  def _linear_ramp_factor(self, min_val: float, max_val: float, dim: int) -> Array:
+    """Computes a linear ramp over the dimension.
+
+    Returns a jax.Array of shape (dim,) with values between 0 and 1.
+    """
+    if min_val == max_val:
+      max_val += 0.001  # Avoid division by zero.
+    linear_func = (jnp.arange(dim, dtype=jnp.float32) - min_val) / (max_val - min_val)
+    return jnp.clip(linear_func, 0, 1)
+
+  def __call__(self, inputs: Array, position: Optional[Array] = None) -> Array:
+    """Applies the rotary positional embedding using the precomputed complex frequencies.
+
+    Args:
+      inputs: jax.Array of shape [B, S, N, H]. (H must equal self.embedding_dims.)
+      position: jax.Array of shape [B, S] with integer positions (indexes into precomputed freqs).
+
+    Returns:
+      jax.Array of shape [B, S, N, H] with the rotary embedding applied.
+    """
+    if len(inputs.shape) != 4:
+      raise ValueError("Input is assumed to be a rank 4 tensor of shape [batch, sequence, heads, dims].")
+    if self.embedding_dims != inputs.shape[3]:
+      raise ValueError("The embedding dims of the rotary position embedding must match the hidden dimension of the inputs.")
+
+    # Determine positions if not provided
+    if position is None:
+      seq_length = inputs.shape[1]
+      position = jnp.arange(seq_length, dtype=jnp.int32)[jnp.newaxis, :]
+    else:
+      position = position.astype(jnp.int32)
+
+    B, S, N, H = inputs.shape
+    half_dim = H // 2
+
+    # Convert the last dimension into a complex representation.
+    # First reshape so that each pair of numbers represents the real and imaginary parts.
+    inputs_reshaped = inputs.reshape(B, S, N, half_dim, 2)
+    inputs_complex = inputs_reshaped[..., 0] + 1j * inputs_reshaped[..., 1]  # shape: [B, S, N, half_dim]
+
+    # Lookup the precomputed frequencies using the position indices.
+    # self.freqs_cis has shape [max_seq_len, half_dim] so we use jnp.take along axis 0.
+    # After indexing, shape becomes [B, S, half_dim]; we then add an axis for the heads.
+    freqs = jnp.take(self.freqs_cis, position, axis=0)  # shape: [B, S, half_dim]
+    freqs = freqs[:, :, jnp.newaxis, :]  # shape: [B, S, 1, half_dim]
+
+    # Apply the rotary transformation via complex multiplication.
+    rotated = inputs_complex * freqs  # shape: [B, S, N, half_dim]
+
+    # Convert the complex result back to a real tensor.
+    # Split the complex number into its real and imaginary parts.
+    rotated_real = jnp.stack([jnp.real(rotated), jnp.imag(rotated)], axis=-1)  # shape: [B, S, N, half_dim, 2]
+    output = rotated_real.reshape(B, S, N, H)
+    if self.cast_as_fprop_dtype:
+      output = output.astype(self.fprop_dtype)
+    return output
 
 
 class PositionalEmbedding(nn.Module):
