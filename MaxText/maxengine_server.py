@@ -41,7 +41,7 @@ def main(config):
 
   metrics_server_config: config_lib.MetricsServerConfig | None = None
   if config.prometheus_port != 0:
-    metrics_server_config = config_lib.MetricsServerConfig(port=config.prometheus_port, model_name=config.model_name)
+    metrics_server_config = config_lib.MetricsServerConfig(port=config.prometheus_port)
 
   # We separate credential from run so that we can unit test it with
   # local credentials.
