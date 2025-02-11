@@ -26,8 +26,8 @@ MaxText aims to be a launching off point for ambitious LLM projects both in rese
 We have used MaxText to [demonstrate high-performance, well-converging training in int8](https://cloud.google.com/blog/products/compute/accurate-quantized-training-aqt-for-tpu-v5e) and [scale training to ~51K chips](https://cloud.google.com/blog/products/compute/the-worlds-largest-distributed-llm-training-job-on-tpu-v5e).
 
 Key supported features:
-* TPUs and GPUs (in preview)
-* Training and Inference (in preview)
+* TPUs and GPUs
+* Training and Inference
 * Models: Llama2, Mistral and Gemma
 
 # Table of Contents
