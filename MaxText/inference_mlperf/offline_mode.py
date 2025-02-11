@@ -190,6 +190,13 @@ flags.DEFINE_integer(
     required=False,
 )
 
+flags.DEFINE_string(
+    "mlperf_model_id",
+    _MLPERF_ID,
+    "Model id prefix used by mlperf conf, used to find model specific overrides.",
+    required=False,
+)
+
 scenario_map = {
     "offline": lg.TestScenario.Offline,
     "server": lg.TestScenario.Server,
@@ -280,6 +287,7 @@ def get_warmup_samples(dataset):
       256,
       512,
       1024,
+      2048,
   ]
   warmup_samples = _init_query_batches()
 
@@ -438,9 +446,9 @@ def main(argv):
   settings.scenario = lg.TestScenario.Offline
   user_conf = FLAGS.user_conf
 
-  settings.FromConfig(FLAGS.mlperf_conf, _MLPERF_ID, "Offline")
-  settings.FromConfig(user_conf, _MLPERF_ID, "Offline")
-  log.info("Mlperf config: %s", FLAGS.mlperf_conf)
+  # settings.FromConfig(FLAGS.mlperf_conf, FLAGS.mlperf_model_id, "Offline")
+  settings.FromConfig(user_conf, FLAGS.mlperf_model_id, "Offline")
+  #log.info("Mlperf config: %s", FLAGS.mlperf_conf)
   log.info("User config: %s", user_conf)
 
   log.info("dataset path: %s", FLAGS.dataset_path)

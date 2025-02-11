@@ -91,7 +91,8 @@ class DenseGeneral(nn.Module):
     weight_dtype: the dtype of the weights (default: float32).
     dtype: the dtype of the computation (default: float32).
     kernel_init: initializer function for the weight matrix.
-    use_bias: whether to add bias in linear transformation
+    use_bias: whether to add bias in linear transformation.
+    bias_norm: whether to add normalization before adding bias.
     quant: quantization config, defaults to None implying no quantization.
   """
 
@@ -103,6 +104,7 @@ class DenseGeneral(nn.Module):
   kernel_axes: Tuple[Optional[str], ...] = ()
   quant: Optional[Quant] = None
   use_bias: bool = False
+  bias_norm: str = ""
   matmul_precision: str = "default"
 
   @nn.compact
@@ -165,6 +167,9 @@ class DenseGeneral(nn.Module):
           self.weight_dtype,
       )
       bias = jnp.asarray(bias, self.dtype)
+
+      if self.bias_norm:
+        output = _convert_to_activation_function(self.bias_norm)(output)
       output += bias
     return output
 
@@ -198,7 +203,7 @@ class MlpBlock(nn.Module):
   quant: Optional[Quant] = None
 
   def get_norm_layer(self):
-    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma"):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma", "deepseek"):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
@@ -292,6 +297,7 @@ class MoeBlock(nn.Module):
     mesh: Mesh, device mesh.
     kernel_init: Kernel function, passed to the dense layers.
     kernel_axes: Tuple with axes to apply kernel function.
+    intermediate_dim: Intermediate dimension of MoE.
     weight_dtype: Type for the weights.
     dtype: Type for the dense layer.
     quant: Optional quantization config, no quantization if None.
@@ -303,6 +309,7 @@ class MoeBlock(nn.Module):
   mesh: Mesh
   kernel_init: NdInitializer
   kernel_axes: Tuple[Optional[str], ...]
+  intermediate_dim: int = 2048
   weight_dtype: DType = jnp.float32
   dtype: DType = jnp.float32
   quant: Optional[Quant] = None
@@ -364,6 +371,14 @@ class MoeBlock(nn.Module):
     wo_kernel = jnp.asarray(wo_kernel, self.dtype)
     return w0_kernel, w1_kernel, wo_kernel
 
+  def deepseek_scale_weights(self, weights):
+    """Scales weights according to DeepSeek's v3 reference implementation.
+    https://github.com/deepseek-ai/DeepSeek-V3/blob/2f7b80eecebf3d1c84da5a0d465f6639ea175012/inference/model.py#L592-L594
+    """
+    weights /= weights.sum(-1, keepdims=True)
+    weights *= self.config.routed_scaling_factor
+    return weights
+
   def permute(self, inputs, gate_logits):
     """Permute tokens to group by expert to fit gmm call."""
 
@@ -371,7 +386,10 @@ class MoeBlock(nn.Module):
     inputs_shape = inputs.shape
     inputs_2d = jnp.reshape(inputs, (inputs_shape[0] * inputs_shape[1], inputs_shape[2]))
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
-    weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+    if self.config.decoder_block == "deepseek":
+      wegihts = self.deepseek_scale_weights(weights)
+    else:
+      weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.dtype)
     flatten_selected_experts = jnp.ravel(selected_experts)
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
     sorted_indices = sorted_selected_experts // self.num_experts_per_tok
@@ -603,19 +621,25 @@ class MoeBlock(nn.Module):
   def dense_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
     # gate_logits: batch, length, expert
     gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", None))
-    softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
     # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
-    top_k_weights, top_k_indices = jax.lax.top_k(softmax_probs, self.num_experts_per_tok)
+    top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+
+    if self.config.decoder_block == "deepseek":
+      top_k_weights = self.deepseek_scale_weights(top_k_weights)
+    else:
+      top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+
+    weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
     matmul_precision = lax.Precision(self.config.matmul_precision)
 
     if self.config.capacity_factor > 0:
       # token dropping if needed
-      dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs)
+      dispatch_mask, combine_mask = self.generate_masks(top_k_indices, weights)
       mask_axes = ("activation_batch", "activation_length", None, None)
       dispatch_mask = nn.with_logical_constraint(dispatch_mask, mask_axes)
       combine_mask = nn.with_logical_constraint(combine_mask, mask_axes)
       if self.config.model_call_mode != "inference":
-        loss = self.load_balance_loss(top_k_indices, softmax_probs)
+        loss = self.load_balance_loss(top_k_indices, weights)
       else:
         loss = None
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
@@ -678,8 +702,6 @@ class MoeBlock(nn.Module):
         ).astype(self.dtype)
       return output, loss
     else:
-      top_k_weights /= top_k_weights.sum(-1, keepdims=True)
-      weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
       with jax.named_scope("wi_0"):
         layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
@@ -740,9 +762,12 @@ class MoeBlock(nn.Module):
         kernel_init=self.kernel_init,
         kernel_axes=self.kernel_axes,
         name="gate",
+        use_bias=self.config.routed_bias,
+        bias_norm=self.config.routed_score_func,
         matmul_precision=self.config.matmul_precision,
     )(inputs)
-    w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts, cfg.emb_dim, cfg.mlp_dim)
+
+    w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts, cfg.emb_dim, self.intermediate_dim)
     if cfg.sparse_matmul:
       max_logging.log("Running MoE sparse matmul implementation.")
       if quantizations.in_serve_mode(self.quant):
@@ -753,3 +778,54 @@ class MoeBlock(nn.Module):
     else:
       max_logging.log("Running MoE dense matmul implementation.")
       return self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+
+
+class DeepSeekMoeBlock(nn.Module):
+  """DeepSeek MoE block, combining shared and routed experts.
+
+  Attributes:
+    config: Model configs.
+    mesh: Mesh, device mesh.
+    kernel_init: Kernel function, passed to the dense layers.
+    kernel_axes: Tuple with axes to apply kernel function.
+    weight_dtype: Type for the weights.
+    dtype: Type for the dense layer.
+    quant: Optional quantization config, no quantization if None.
+  """
+
+  config: Config
+  mesh: Mesh
+  kernel_init: NdInitializer
+  kernel_axes: Tuple[Optional[str], ...]
+  weight_dtype: DType = jnp.float32
+  dtype: DType = jnp.float32
+  quant: Optional[Quant] = None
+
+  @nn.compact
+  def __call__(self, inputs):
+    cfg = self.config
+    routed_experts, _ = MoeBlock(
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=self.mesh,
+        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", None),
+        intermediate_dim=cfg.moe_mlp_dim,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        quant=self.quant,
+    )(inputs)
+
+    shared_experts = MlpBlock(
+        intermediate_dim=cfg.shared_experts * cfg.moe_mlp_dim,
+        activations=cfg.mlp_activations,
+        intermediate_dropout_rate=cfg.dropout_rate,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        name=f"shared_experts",
+        config=cfg,
+        quant=self.quant,
+    )(inputs)
+
+    return routed_experts + shared_experts
