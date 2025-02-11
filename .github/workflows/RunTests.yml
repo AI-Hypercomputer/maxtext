@@ -118,9 +118,13 @@ jobs:
   notify:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
     needs: [gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
-    if: failure() && github.event.pull_request == null
     runs-on: ["self-hosted"]
     steps:
-    - uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
+    - name: Check whether one of the jobs failed
+      if: ${{ failure() && github.event.pull_request == null }}
+      uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
       with:
         github-token: ${{ secrets.GITHUB_TOKEN }}
+    - name: Log message if dependent job succeeded
+      if: ${{ ! (failure() && github.event.pull_request == null) }}
+      run: echo "Conditions for creating/updating issue not met. Skipping."
