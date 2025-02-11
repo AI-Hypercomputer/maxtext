@@ -587,7 +587,11 @@ class MoeBlock(nn.Module):
       if isinstance(self.quant, quantizations.Fp8Quantization):
         einsum_op = quantizations.Fp8Einsum(dtype=self.dtype)
       else:
-        einsum_op = aqt_einsum
+        # We need a separate way to retrieve the quantized einsum for fp8 config.
+        if isinstance(self.quant, quantizations.Fp8Quantization):
+          einsum_op = quantizations.Fp8Einsum(dtype=self.dtype)
+        else:
+          einsum_op = aqt_einsum
     else:
       einsum_op = jnp.einsum
     return einsum_op
