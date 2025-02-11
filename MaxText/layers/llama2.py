@@ -144,21 +144,6 @@ class LlamaDecoderLayer(nn.Module):
     )
 
 
-    # during prefill: LlamaDecoderLayer - tensor attention_lnx.shape=(1, 1024, 32, 128)
-    # during AR: LlamaDecoderLayer - tensor attention_lnx.shape=(8, 32, 128)
-
-    # TODO: this is less than ideal, needs to be better
-    if isinstance(attention_lnx, tuple):
-        attention_lnx = attention_lnx[0]
-    print(f"LlamaDecoderLayer - {model_mode} tensor {attention_lnx.shape=}")
-    if model_mode == common_types.MODEL_MODE_PREFILL:
-        b, t, n, d = attention_lnx.shape
-        attention_lnx = jnp.reshape(attention_lnx, (b, t, n*d))
-    elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-        b, n, d = attention_lnx.shape
-        attention_lnx = jnp.reshape(attention_lnx, (b, 1, n*d))
-    print(f"LlamaDecoderLayer - {model_mode} tensor reshaped to {attention_lnx.shape=}")
-
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected

@@ -24,10 +24,11 @@ import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
-from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention as paged_attention_kernel
+from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention 
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 from jax.sharding import PartitionSpec as P
+from jax.sharding import NamedSharding
 import jax.numpy as jnp
 import common_types
 from kernels.ragged_attention import ragged_gqa
@@ -147,6 +148,7 @@ class PagedAttentionOp(nn.Module):
     kv_head_dim_size: int
     config: Config
     dtype: DType = jnp.bfloat16
+    paged_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
 
     @staticmethod
     def get_cache_axis_names():
@@ -415,40 +417,41 @@ class PagedAttentionOp(nn.Module):
         self.sequence_lengths.value = self.sequence_lengths.value.at[slot].add(1)
 
 
-    @staticmethod
-    @functools.partial(jax.jit, static_argnames=("model_mode", "pages_per_compute_block"))
     def paged_attention_impl(
-        query: Array,
-        key_pages: Array,
-        value_pages: Array,
-        sequence_lengths: Array,
-        page_map: Array,
-        model_mode: str,
-        pages_per_compute_block: int,
+        self,
+        query: Array,  # (batch_size, num_heads, head_dim)
+        key_pages: Array,  # (num_kv_heads, total_num_pages, page_size, head_dim)
+        value_pages: Array,  # (num_kv_heads, total_num_pages, page_size, head_dim)
+        sequence_lengths: Array,  # (batch_size)
+        page_map: Array,  # (batch_size, pages_per_seq)
     ) -> Array:
-        """Core paged attention computation with shape verification."""
+        """Simplified paged attention without complex sharding."""
+        print(f"calling paged_attention_impl with: {query.shape=}, {key_pages.shape=}, "
+              f"{value_pages.shape=}, {sequence_lengths.shape=}, {page_map.shape=}")
         
-        # Shape validation
-        batch_size = query.shape[0]
-        assert sequence_lengths.shape[0] == batch_size, (
-            f"Sequence lengths batch dimension {sequence_lengths.shape[0]} "
-            f"does not match query batch dimension {batch_size}"
+        @functools.partial(
+            shard_map,
+            mesh=self.mesh,
+            in_specs=(None,) * 5,
+            out_specs=P(None),
+            check_rep=False,
         )
-        assert page_map.shape[0] == batch_size, (
-            f"Page map batch dimension {page_map.shape[0]} "
-            f"does not match query batch dimension {batch_size}"
-        )
+        def _paged_attention_wrapper(query, key_pages, value_pages, sequence_lengths, page_map):
+            return paged_attention(
+                query,
+                key_pages,
+                value_pages,
+                sequence_lengths,
+                page_map,
+                pages_per_compute_block=self.pages_per_compute_block,
+            )
 
-        print(f"Calling paged_attention_kernel with {model_mode=}, {query.shape=}, {key_pages.shape=}, {value_pages.shape=}, {sequence_lengths.shape=}, {page_map.shape=}")
-        if query.ndim == 4 and query.shape[1] == 1:
-            query = jnp.squeeze(query, axis=1)
-        return paged_attention_kernel(
-            q=query,
-            k_pages=key_pages,
-            v_pages=value_pages,
-            lengths=sequence_lengths,
-            page_indices=page_map,
-            pages_per_compute_block=pages_per_compute_block,
+        return _paged_attention_wrapper(
+            query,
+            key_pages,
+            value_pages,
+            sequence_lengths,
+            page_map,
         )
 
     def paged_dot_product_attention(
@@ -518,10 +521,19 @@ class PagedAttentionOp(nn.Module):
         true_length: int,
     ) -> Union[Array, Tuple[Array, Array, Array]]:
         """Main entry point with proper shape handling."""
-        
+        print(f"PagedAttentionOp.__call__ - {model_mode=}")
+        print(f"PagedAttentionOp.__call__ - is_mutable_collection: {self.is_mutable_collection('params')}")
+
         if model_mode == common_types.MODEL_MODE_PREFILL:
-            self.release_slot_pages(slot)
-            
+            if self.is_mutable_collection("params"):  # Initialization phase
+                print("PagedAttentionOp.__call__ - Returning prefill init zeros")
+                b, t, n, d = query.shape
+                # During *initialization*, return (b, t, n * d)
+                return jnp.zeros((b, t, n * d), dtype=query.dtype)
+
+            # --- Non-initialization PREFILL ---
+            self.release_slot_pages(slot)  # Correct: Release pages.
+
             num_pages_needed = (true_length + self.tokens_per_page - 1) // self.tokens_per_page
             self.sequence_lengths.value = self.sequence_lengths.value.at[slot].set(true_length)
             self.num_pages_used.value = self.num_pages_used.value.at[slot].set(num_pages_needed)
@@ -535,9 +547,17 @@ class PagedAttentionOp(nn.Module):
                 true_length=true_length
             )
 
-            return self.paged_dot_product_attention(query, key, value)
+            attn, _, _ = self.paged_dot_product_attention(query, key, value)
+            b, t, n, d = attn.shape
+            return jnp.reshape(attn, (b, t, n * d)) # Correct Prefill Shape
 
         elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+            if self.is_mutable_collection("params"):  # Initialization phase
+                print("PagedAttentionOp.__call__ - Returning AR init zeros")
+                b, n, d = query.shape
+                # During *initialization*, return (b, 1, n * d)
+                return jnp.zeros((b, 1, n * d), dtype=query.dtype) # Corrected init shape.
+
             if key.shape[1] != 1:
                 raise ValueError(f"Autoregressive mode expects sequence length 1, got {key.shape[1]}")
 
@@ -549,15 +569,21 @@ class PagedAttentionOp(nn.Module):
                 slot=slot
             )
 
-            return self.paged_attention_impl(
+            if query.ndim == 4 and query.shape[1] == 1:
+                query = jnp.squeeze(query, axis=1)
+
+            print(f"calling paged_attention_impl with: {model_mode=}, {query.shape=}, {self.key_pages.value.shape=}, {self.value_pages.value.shape=}, {self.sequence_lengths.value.shape=}, {self.page_map.value.shape=}")
+
+            attn = self.paged_attention_impl(
                 query,
                 self.key_pages.value,
                 self.value_pages.value,
                 self.sequence_lengths.value,
                 self.page_map.value,
-                model_mode,
-                self.pages_per_compute_block
             )
+            # Return (b, n, d) reshaped to (b, 1, n*d)
+            b, n, d = attn.shape
+            return jnp.reshape(attn, (b, 1, n * d))
 
         else:
             raise ValueError(f"Invalid model_mode: {model_mode}")
@@ -1815,15 +1841,7 @@ class Attention(nn.Module):
         )
         attention_output = attention_op(query, key, value, decoder_segment_ids, model_mode)
 
-    # 8. Process attention output based on mode
-    if self.attention_kernel == "paged" and model_mode != common_types.MODEL_MODE_TRAIN and true_length is not None and slot is not None:
-        unnormalized_out, _, exp_sum = attention_output
-        out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
-    else:
-        out = attention_output
-
-    # 9. Apply output constraints and projection
-    out = nn.with_logical_constraint(out, self.out_axis_names)
+    out = nn.with_logical_constraint(attention_output, self.out_axis_names)
     out = self.out_projection(inputs_q.shape[-1], out)
     out = checkpoint_name(out, "out_proj")
 
