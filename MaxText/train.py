@@ -36,6 +36,7 @@ import jax
 import numpy as np
 import orbax.checkpoint
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
+import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
 import checkpointing
 import max_utils
@@ -221,7 +222,13 @@ def save_checkpoint(
     chunk_byte_size = config.checkpoint_storage_target_data_file_size_bytes
   save_args = jax.tree.map(lambda _: orbax.checkpoint.SaveArgs(chunk_byte_size=chunk_byte_size), state)
 
-  if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
+  if isinstance(
+      checkpoint_manager,
+      (
+          emergency_checkpoint_manager.CheckpointManager,
+          emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
+      ),
+  ):
     return checkpoint_manager.save(
         step,
         args=orbax.checkpoint.args.PyTreeSave(item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size),
