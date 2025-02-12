@@ -218,11 +218,119 @@ class MaxEngine(engine_api.Engine):
     return res_cache
 
   @functools.partial(jax.jit, static_argnums=(0,))
-  def prefill(
+  def prefill_single_chunk(
       self,
       *,
       params: Params,
       existing_prefix: Optional[jax.Array] = None,
+      padded_tokens: jax.Array,
+      true_length: int,
+      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
+      rng: Optional[jax.random.PRNGKey] = None,
+      all_true_length=None,
+      chunk_length_till_chunk=None,
+  ) -> Tuple[Prefix, engine_api.ResultTokens]:
+    """Computes a kv-cache for a new generate request.
+
+    Args:
+      params: Scalar multiplier.
+      existing_prefix: If provided, represents a prefix that has already been
+        processed by the underlying model.
+      padded_tokens: Logically appended tokens to any existing prefix, this is
+        what we compute prefill on.
+      true_length: The real length of the tokens, pre-pad.
+    Returns:
+      kv_cache: For the resulting text.
+    """
+    # if existing_prefix:
+    #   raise ValueError("We don't know what to do with existing_prefix")
+    if rng is None:
+      rng = jax.random.PRNGKey(0)
+    mul = 0
+    # multiplier = 0
+    full_chunk = self.config.chunk_size
+    if existing_prefix is not None:
+      # mul = 64
+      mul = existing_prefix['next_pos']
+      full_chunk = existing_prefix['next_pos_full_chunk']
+
+    
+
+    input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
+    positions = jnp.expand_dims(jnp.arange(mul, mul+input_tokens.shape[1]), 0)
+    
+    zero_to_n = jnp.arange(0, full_chunk)
+    ones_to_keep = zero_to_n < (true_length + mul)
+    one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+    sequence_indicator = jnp.expand_dims(one_d_output, 0)
+
+    # rng, new_rng = jax.random.split(rng)
+    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      flat_logits, new_vars = self.model.apply(
+          params,
+          input_tokens,
+          positions,
+          decoder_segment_ids=sequence_indicator,
+          enable_dropout=False,
+          model_mode=common_types.MODEL_MODE_PREFILL,
+          rngs={"params": rng},
+          mutable=["cache"],
+          existing_prefix=existing_prefix,
+      )
+    
+    # jax.debug.print("flat_logits {flat_logits} {shape} ", flat_logits=flat_logits, shape=flat_logits.shape)
+
+    # if existing_prefix is None:
+    next_pos = jnp.full((1, 1), true_length + mul, dtype=jnp.int32)
+    generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
+    
+    selected_logits = jax.lax.dynamic_slice(
+        flat_logits,
+        (0, true_length - 1, 0),
+        (flat_logits.shape[0], 1, flat_logits.shape[2]),
+    )
+    selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
+
+      # sampling first token
+    first_generated_token = inference_utils.sampling(
+        selected_logits,
+        rng,
+        self.config.decode_sampling_strategy,
+        topk=self.config.decode_sampling_top_k,
+        nucleus_topp=self.config.decode_sampling_nucleus_p,
+        temperature=self.config.decode_sampling_temperature,
+    )
+
+    all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
+    result = engine_api.ResultTokens(
+        data=jnp.concatenate((first_generated_token, all_valid, generated_tokens), axis=1),
+        # Tokens are shape [batch, speculations], so when we concatenate
+        # tokens, validity and length along their index 1 dimension then they
+        # occupy 0:speculations.
+        tokens_idx=(0, 1),
+        # Validity occupies the same amount of space, but next in line.
+        valid_idx=(1, 2),
+        # And lengths is rank 1.
+        length_idx=(2, 3),
+        samples_per_slot=1,
+    )
+
+    cache = new_vars["cache"]
+    cache = self._maybe_stack_prefill_result_cache(cache)
+
+    return {
+        "logits": selected_logits,
+        "cache": cache,
+        "next_pos": next_pos,
+        "generated_tokens": generated_tokens,
+        "tokens": first_generated_token,
+        "flat_logits": flat_logits,
+    }, result
+
+  def prefill(
+      self,
+      *,
+      params: Params,
       padded_tokens: jax.Array,
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
@@ -243,100 +351,32 @@ class MaxEngine(engine_api.Engine):
     # if existing_prefix:
     #   raise ValueError("We don't know what to do with existing_prefix")
     chunk_size = self.config.chunk_size
-    import pdb
-    pdb.set_trace()
+    # import pdb
+    # pdb.set_trace()
     chunked_metadata_list = create_chunked_metadata(padded_tokens, true_length, chunk_size)
-
-    def prefill_single(chunk_num, model, params, existing_prefix, padded_tokens, true_length, sampler, rng):
-      padded_tokens = chunked_metadata_list[chunk_num]
-      if rng is None:
-        rng = jax.random.PRNGKey(0)
-      mul = 0
-      to_add = jnp.zeros((1,512,32000))
-      to_add_pos = 0
-      if existing_prefix is not None:
-        mul = 512
-        to_add = existing_prefix['flat_logits']
-        to_add_pos = 512
-      
-
-      input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
-      positions = jnp.expand_dims(jnp.arange(mul, mul+input_tokens.shape[1]), 0)
-
-      zero_to_n = jnp.arange(0, 1024)
-      ones_to_keep = zero_to_n < 1024
-      one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
-      sequence_indicator = jnp.expand_dims(one_d_output, 0)
-
-      # rng, new_rng = jax.random.split(rng)
-      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        flat_logits, new_vars = model.apply(
-            params,
-            input_tokens,
-            positions,
-            decoder_segment_ids=sequence_indicator,
-            enable_dropout=False,
-            model_mode=common_types.MODEL_MODE_PREFILL,
-            rngs={"params": rng},
-            mutable=["cache"],
-            existing_prefix=existing_prefix,
-        )
-      jax.debug.print("flat_logits {flat_logits} {shape} ", flat_logits=flat_logits, shape=flat_logits.shape)
-
-      # if existing_prefix is None:
-      next_pos = jnp.full((1, 1), true_length + mul, dtype=jnp.int32)
-      generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
-      
-      selected_logits = jax.lax.dynamic_slice(
-          flat_logits,
-          (0, true_length - 1, 0),
-          (flat_logits.shape[0], 1, flat_logits.shape[2]),
-      )
-      selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
-
-      # sampling first token
-      first_generated_token = inference_utils.sampling(
-          selected_logits,
-          rng,
-          self.config.decode_sampling_strategy,
-          topk=self.config.decode_sampling_top_k,
-          nucleus_topp=self.config.decode_sampling_nucleus_p,
-          temperature=self.config.decode_sampling_temperature,
-      )
-
-      all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
-      result = engine_api.ResultTokens(
-          data=jnp.concatenate((first_generated_token, all_valid, generated_tokens), axis=1),
-          # Tokens are shape [batch, speculations], so when we concatenate
-          # tokens, validity and length along their index 1 dimension then they
-          # occupy 0:speculations.
-          tokens_idx=(0, 1),
-          # Validity occupies the same amount of space, but next in line.
-          valid_idx=(1, 2),
-          # And lengths is rank 1.
-          length_idx=(2, 3),
-          samples_per_slot=1,
-      )
-
-      cache = new_vars["cache"]
-      cache = self._maybe_stack_prefill_result_cache(cache)
-
-      return {
-          "logits": selected_logits,
-          "cache": cache,
-          "next_pos": next_pos,
-          "generated_tokens": generated_tokens,
-          "tokens": first_generated_token,
-          "flat_logits": flat_logits,
-      }, result
+    prefill_result = None
+    next_pos = 0
+    for chunk_metadata in chunked_metadata_list:
+      if prefill_result is None:
+        prefill_result, first_token = self.prefill_single_chunk(existing_prefix=prefill_result, 
+                                                    params=params, 
+                                                    padded_tokens=chunk_metadata.chunk_padded_tokens, 
+                                                    true_length=chunk_metadata.true_length, 
+                                                    rng=rng, all_true_length=true_length,
+                                                    chunk_length_till_chunk=chunk_metadata.chunk_length_till_chunk,
+                                                    )
+        prefill_result['next_pos_full_chunk'] = jnp.full((1,1), 0 + self.config.chunk_size, dtype=jnp.int32)
+      else:
+        prefill_result, first_token = self.prefill_single_chunk(existing_prefix=prefill_result, 
+                                                    params=params | {"cache": prefill_result["cache"]}, 
+                                                    padded_tokens=chunk_metadata.chunk_padded_tokens, 
+                                                    true_length=chunk_metadata.true_length, 
+                                                    rng=rng, all_true_length=true_length,chunk_length_till_chunk=chunk_metadata.chunk_length_till_chunk,)
+        prefill_result['next_pos_full_chunk'] = jnp.full((1,1), prefill_result['next_pos_full_chunk'][0][0] + self.config.chunk_size, dtype=jnp.int32)
+      prefill_result['next_pos'] = jnp.full((1,1), next_pos + chunk_metadata.true_length, dtype=jnp.int32)
+      next_pos = next_pos + chunk_metadata.true_length
     
-    import pdb
-    pdb.set_trace()
-    
-    prefill_p = functools.partial(prefill_single,
-                                  )
-    prefill_result, result = jax.lax.fori_loop(0, len(chunked_metadata_list), prefill_p, (chunked_metadata_list, self.model, params, existing_prefix, padded_tokens, true_length, sampler, rng))
-    return prefill_result, result
+    return prefill_result, first_token
 
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))

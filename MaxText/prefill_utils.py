@@ -22,6 +22,7 @@ class ChunkMetadata:
   processed: bool
   is_first_chunk: bool
   is_last_chunk:bool
+  chunk_length_till_chunk: int
 
 def create_chunked_metadata(tokens, true_length, chunk_size):
   start = 0
@@ -46,6 +47,8 @@ def create_chunked_metadata(tokens, true_length, chunk_size):
                                               chunk_padded_tokens=chunk_padded_tokens,
                                               processed=False,
                                               is_first_chunk=is_first_chunk,
-                                              is_last_chunk=is_last_chunk, ))
+                                              is_last_chunk=is_last_chunk, 
+                                              chunk_length_till_chunk=int(chunk_size*(chunk_num+1))
+                                              ))
     return chunk_metadata_list
 
