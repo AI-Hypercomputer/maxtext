@@ -205,9 +205,9 @@ class AttentionOp(nn.Module):
       
       next_pos = 0
       if existing_prefix != None:
-        next_pos = existing_prefix['next_pos'][0][0]
+        next_pos = existing_prefix['t_l_array'].shape[1]
         overall_mask = jnp.zeros((q_seq_len, kv_seq_len), jnp.int32)
-        output_mask = jnp.ones((q_seq_len, kv_seq_len-next_pos), jnp.int32)
+        output_mask = jnp.ones((q_seq_len, kv_seq_len-q_seq_len), jnp.int32)
         output_mask = jax.lax.dynamic_update_slice(output_mask, causal_mask, (0,next_pos))
         output_mask = jax.lax.dynamic_update_slice(overall_mask, output_mask, (0,0))
       else:
@@ -826,7 +826,8 @@ class AttentionOp(nn.Module):
     # s, n, b, d
     next_pos = 0
     if existing_prefix != None:
-      next_pos = existing_prefix['next_pos'][0][0]
+      # next_pos = existing_prefix['next_pos'][0][0]
+      next_pos = existing_prefix['t_l_array'].shape[1]
       # cached_prefill = (
         # self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order),
         # self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order),

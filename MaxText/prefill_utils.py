@@ -41,7 +41,9 @@ def create_chunked_metadata(tokens, true_length, chunk_size):
     is_first_chunk = chunk_num == 0
     is_last_chunk = chunk_num == num_chunks - 1
 
-    chunk_padded_tokens=jax.lax.slice(tokens, (start,), (start+chunk_size,))
+    chunk_padded_tokens_end = min(start+chunk_size, len(tokens))
+
+    chunk_padded_tokens=jax.lax.slice(tokens, (start,), (chunk_padded_tokens_end,))
     
     chunk_metadata_list.append(ChunkMetadata(processed_chunks=None, 
                                              next_pos=next_pos, true_length=true_length_of_chunk,

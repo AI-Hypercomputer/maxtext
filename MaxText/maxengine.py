@@ -229,6 +229,7 @@ class MaxEngine(engine_api.Engine):
       rng: Optional[jax.random.PRNGKey] = None,
       all_true_length=None,
       chunk_length_till_chunk=None,
+      positions = None
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -246,20 +247,17 @@ class MaxEngine(engine_api.Engine):
     #   raise ValueError("We don't know what to do with existing_prefix")
     if rng is None:
       rng = jax.random.PRNGKey(0)
-    mul = 0
+    # mul = 0
     # multiplier = 0
-    full_chunk = self.config.chunk_size
-    if existing_prefix is not None:
-      # mul = 64
-      mul = existing_prefix['next_pos'][0][0]
-      full_chunk = existing_prefix['next_pos_full_chunk'][0][0]
+    # if existing_prefix is not None:
+      # mul = existing_prefix['next_pos'][0][0]
 
     
 
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
-    import pdb
-    pdb.set_trace()
-    positions = jnp.expand_dims(jnp.arange(0,input_tokens.shape[1]), 0) + mul
+    # import pdb
+    # pdb.set_trace()
+    # positions =
     # positions = jnp.expand_dims(jnp.arange(mul, mul+input_tokens.shape[1]), 0)
     jax.debug.print("positions {positions}", positions=positions)
     zero_to_n = jnp.arange(0, self.config.max_prefill_predict_length)
@@ -285,7 +283,8 @@ class MaxEngine(engine_api.Engine):
     # jax.debug.print("flat_logits {flat_logits} {shape} ", flat_logits=flat_logits, shape=flat_logits.shape)
 
     # if existing_prefix is None:
-    next_pos = jnp.full((1, 1), true_length + mul, dtype=jnp.int32)
+    # next_pos = jnp.full((1, 1), true_length + mul, dtype=jnp.int32)
+    next_pos = 0
     generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
     
     selected_logits = jax.lax.dynamic_slice(
@@ -361,8 +360,11 @@ class MaxEngine(engine_api.Engine):
     prefill_result = None
     next_pos = 0
     print("len chunked_metadata_list", len(chunked_metadata_list))
-    for chunk_metadata in chunked_metadata_list:
+    for i, chunk_metadata in enumerate(chunked_metadata_list):
       print("running for chunk metadata", len(chunked_metadata_list))
+      t_l_array = jnp.expand_dims(jnp.arange(0, i*self.config.chunk_size + chunk_metadata.true_length), 0)
+      end = min(len(padded_tokens), (i+1)* self.config.chunk_size)
+      positions = jnp.expand_dims(jnp.arange(i*self.config.chunk_size, end, dtype=jnp.int32), 0)
       if prefill_result is None:
         prefill_result, first_token = self.prefill_single_chunk(existing_prefix=prefill_result, 
                                                     params=params, 
@@ -370,16 +372,22 @@ class MaxEngine(engine_api.Engine):
                                                     true_length=chunk_metadata.true_length, 
                                                     rng=rng, all_true_length=true_length,
                                                     chunk_length_till_chunk=chunk_metadata.chunk_length_till_chunk,
+                                                    positions=positions,
                                                     )
-        prefill_result['next_pos_full_chunk'] = jnp.full((1,1), 0 + self.config.chunk_size, dtype=jnp.int32)
+        prefill_result['next_pos'] = jnp.full((1,1), next_pos + chunk_metadata.true_length, dtype=jnp.int32)
+        # prefill_result['next_pos_full_chunk'] = jnp.full((1,1), 0 + self.config.chunk_size, dtype=jnp.int32)
       else:
+        prefill_result['t_l_array'] =  t_l_array
         prefill_result, first_token = self.prefill_single_chunk(existing_prefix=prefill_result, 
                                                     params=params | {"cache": prefill_result["cache"]}, 
                                                     padded_tokens=chunk_metadata.chunk_padded_tokens, 
                                                     true_length=chunk_metadata.true_length, 
-                                                    rng=rng, all_true_length=true_length,chunk_length_till_chunk=chunk_metadata.chunk_length_till_chunk,)
-        prefill_result['next_pos_full_chunk'] = jnp.full((1,1), prefill_result['next_pos_full_chunk'][0][0] + self.config.chunk_size, dtype=jnp.int32)
-      prefill_result['next_pos'] = jnp.full((1,1), next_pos + chunk_metadata.true_length, dtype=jnp.int32)
+                                                    rng=rng, all_true_length=true_length,
+                                                    chunk_length_till_chunk=chunk_metadata.chunk_length_till_chunk,
+                                                    positions=positions,
+                                                    )
+        # prefill_result['next_pos_full_chunk'] = jnp.full((1,1), prefill_result['next_pos_full_chunk'][0][0] + self.config.chunk_size, dtype=jnp.int32)
+        prefill_result['next_pos'] = jnp.full((1,1), next_pos + chunk_metadata.true_length, dtype=jnp.int32)
       next_pos = next_pos + chunk_metadata.true_length
     
     return prefill_result, first_token
