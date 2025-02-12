@@ -251,18 +251,22 @@ class MaxEngine(engine_api.Engine):
     full_chunk = self.config.chunk_size
     if existing_prefix is not None:
       # mul = 64
-      mul = existing_prefix['next_pos']
-      full_chunk = existing_prefix['next_pos_full_chunk']
+      mul = existing_prefix['next_pos'][0][0]
+      full_chunk = existing_prefix['next_pos_full_chunk'][0][0]
 
     
 
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
-    positions = jnp.expand_dims(jnp.arange(mul, mul+input_tokens.shape[1]), 0)
-    
-    zero_to_n = jnp.arange(0, full_chunk)
-    ones_to_keep = zero_to_n < (true_length + mul)
+    import pdb
+    pdb.set_trace()
+    positions = jnp.expand_dims(jnp.arange(0,input_tokens.shape[1]), 0) + mul
+    # positions = jnp.expand_dims(jnp.arange(mul, mul+input_tokens.shape[1]), 0)
+    jax.debug.print("positions {positions}", positions=positions)
+    zero_to_n = jnp.arange(0, self.config.max_prefill_predict_length)
+    ones_to_keep = zero_to_n < all_true_length
     one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
+    jax.debug.print("sequence_indicator {sequence_indicator} ", sequence_indicator=sequence_indicator)
 
     # rng, new_rng = jax.random.split(rng)
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -356,7 +360,9 @@ class MaxEngine(engine_api.Engine):
     chunked_metadata_list = create_chunked_metadata(padded_tokens, true_length, chunk_size)
     prefill_result = None
     next_pos = 0
+    print("len chunked_metadata_list", len(chunked_metadata_list))
     for chunk_metadata in chunked_metadata_list:
+      print("running for chunk metadata", len(chunked_metadata_list))
       if prefill_result is None:
         prefill_result, first_token = self.prefill_single_chunk(existing_prefix=prefill_result, 
                                                     params=params, 

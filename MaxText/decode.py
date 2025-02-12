@@ -77,9 +77,9 @@ def main(argv: Sequence[str]) -> None:
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
   tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
-  chunk_size = config.chunk_size
+  # chunk_size = config.chunk_size
   # tokens = tokens[:config.max_prefill_predict_length]
-  print("tokens are ", tokens, len(tokens))
+  # print("tokens are ", tokens, len(tokens))
   # true_length = config.max_prefill_predict_length
   # chunked_metadata_list = create_chunked_metadata(tokens, true_length, chunk_size)
   # assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
@@ -89,32 +89,11 @@ def main(argv: Sequence[str]) -> None:
   rng, rng_prefill = jax.random.split(rng)
   slot = 0
   rng, rng_init_decode = jax.random.split(rng)
-  prefill_result, first_token = engine.prefill(existing_prefix=None, 
-                                                    params=params, 
+  prefill_result, first_token = engine.prefill(params=params, 
                                                     padded_tokens=tokens,
                                                     true_length=true_length, 
                                                     rng=rng, 
                                                     )
-
-  # prefill_result = None
-  # for i,chunk_metadata in enumerate(chunked_metadata_list):
-  #     if i == 0:
-  #       prefill_result, first_token = engine.prefill(existing_prefix=prefill_result, 
-  #                                                   params=params, 
-  #                                                   padded_tokens=chunk_metadata.chunk_padded, 
-  #                                                   true_length=chunk_size, 
-  #                                                   rng=rng, 
-  #                                                   position_mask_cur=None)
-  #     else:
-  #       prefill_result, first_token = engine.prefill(existing_prefix=prefill_result, 
-  #                                                   params=params | {"cache": prefill_result["cache"]}, 
-  #                                                   padded_tokens=chunk_metadata.chunk_padded, 
-  #                                                   true_length=chunk_size, 
-  #                                                   rng=rng,
-  #                                                   position_mask_cur=None)
-
-  # import pdb
-  # pdb.set_trace()
   
   rng, rng_init_decode = jax.random.split(rng)
   decode_state = engine.init_decode_state(rng_init_decode)
