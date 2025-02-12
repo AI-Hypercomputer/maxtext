@@ -106,22 +106,23 @@ class LeftPad(grain.MapTransform):
           true_lengths.append(prompt.shape[1])
       return true_lengths
 
-    def _left_pad_right_align(prompts, true_lengths):
-      new_prompts = []
-      max_true_length = max(true_lengths)
-      for i, prompt in enumerate(prompts):
-        new_prompts.append(np.concatenate([prompt[true_lengths[i]:max_true_length], prompt[:true_lengths[i]], prompt[max_true_length:]], axis = 0))
-      return np.array(new_prompts)
+    # def _left_pad_right_align(prompts, true_lengths):
+    #   new_prompts = []
+    #   max_true_length = max(true_lengths)
+    #   for i, prompt in enumerate(prompts):
+    #     new_prompts.append(np.concatenate([prompt[true_lengths[i]:max_true_length], prompt[:true_lengths[i]], prompt[max_true_length:]], axis = 0))
+    #   return np.array(new_prompts)
 
-    true_lengths = _max_true_length(data["prompt"], self.pad_token_id)  
+    true_lengths = _max_true_length(data["prompt"], self.pad_token_id)
 
-    # only left align prompt tokens, segmentation and positions
-    for key, _ in data.items():
-      if key.startswith("prompt"):
-        data[key] = _left_pad_right_align(data[key], true_lengths)
+    # # only left align prompt tokens, segmentation and positions
+    # for key, _ in data.items():
+    #   if key.startswith("prompt"):
+    #     data[key] = _left_pad_right_align(data[key], true_lengths)
 
-    data["prompt_true_length"] = np.full((data["prompt"].shape[0],), max(true_lengths), dtype=np.int64)
-    prompt_true_length = data["prompt_true_length"]
+    # data["prompt_true_length"] = np.full((data["prompt"].shape[0],), max(true_lengths), dtype=np.int64)
+    data["prompt_true_length"] = np.array(true_lengths, dtype=np.int32)
+    # prompt_true_length = data["prompt_true_length"]
     return data
 
 

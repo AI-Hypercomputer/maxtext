@@ -751,14 +751,14 @@ def prompt_completions(config, engine, tokenizer_model, data, params, rng):
   # engine.load_params(params)
   L_prompt = data['prompt_true_length']
   data = generate_completions(
-                                     params=params, #TODO: this needs to be \theta_old, but for now we are using \theta_old = \theta
-                                     data=data,
-                                     config=config,
-                                     rng=rng_gen,
-                                     tokenizer_model=tokenizer_model,
-                                     engine=engine,
-                                     true_length=L_prompt,
-                                     )
+                              params=params, #TODO: this needs to be \theta_old, but for now we are using \theta_old = \theta
+                              data=data,
+                              config=config,
+                              rng=rng_gen,
+                              tokenizer_model=tokenizer_model,
+                              engine=engine,
+                              true_length=L_prompt,
+                              )
   return data
 
 
@@ -1288,6 +1288,10 @@ def train_loop(config, config_inference, state=None):
       assert config.use_grpo, "Non grpo setting calling grpo_trainer"
       # engine_params = engine.load_params(engine_rng)
       example_batch = prompt_completions(config_inference, engine, tokenizer_model, example_batch, state.params, init_rng)
+      jax.debug.print("golden completion {x}",x=example_batch['completion'][0])
+      jax.debug.print("ar_completion[0] {x}",x=tokenizer_model.decode(example_batch['ar_completions'][0]))
+      jax.debug.print("ar_completion_segmentation {x}",x=example_batch['ar_completions_segmentation'][0])
+      jax.debug.print("ar_completion_position {x}",x=example_batch['ar_completions_position'][0])
       # TODO: ensure this partitioning is correct
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, nextrng)
