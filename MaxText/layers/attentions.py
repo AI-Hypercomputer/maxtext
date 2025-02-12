@@ -207,9 +207,9 @@ class AttentionOp(nn.Module):
       if existing_prefix != None:
         next_pos = existing_prefix['t_l_array'].shape[1]
         overall_mask = jnp.zeros((q_seq_len, kv_seq_len), jnp.int32)
-        output_mask = jnp.ones((q_seq_len, kv_seq_len-q_seq_len), jnp.int32)
-        output_mask = jax.lax.dynamic_update_slice(output_mask, causal_mask, (0,next_pos))
-        output_mask = jax.lax.dynamic_update_slice(overall_mask, output_mask, (0,0))
+        previous_mask = jnp.ones((q_seq_len, next_pos), jnp.int32)
+        output_mask = jax.lax.dynamic_update_slice(overall_mask, causal_mask, (0,next_pos))
+        output_mask = jax.lax.dynamic_update_slice(output_mask, previous_mask, (0,0))
       else:
         output_mask = jnp.zeros((q_seq_len, kv_seq_len), jnp.int32)
         output_mask = jax.lax.dynamic_update_slice(output_mask, causal_mask, (0,next_pos))

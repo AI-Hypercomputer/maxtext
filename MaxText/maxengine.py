@@ -362,7 +362,7 @@ class MaxEngine(engine_api.Engine):
     print("len chunked_metadata_list", len(chunked_metadata_list))
     for i, chunk_metadata in enumerate(chunked_metadata_list):
       print("running for chunk metadata", len(chunked_metadata_list))
-      t_l_array = jnp.expand_dims(jnp.arange(0, i*self.config.chunk_size + chunk_metadata.true_length), 0)
+      # t_l_array = jnp.expand_dims(jnp.arange(0, i*self.config.chunk_size + chunk_metadata.true_length), 0)
       end = min(len(padded_tokens), (i+1)* self.config.chunk_size)
       positions = jnp.expand_dims(jnp.arange(i*self.config.chunk_size, end, dtype=jnp.int32), 0)
       if prefill_result is None:
@@ -377,7 +377,7 @@ class MaxEngine(engine_api.Engine):
         prefill_result['next_pos'] = jnp.full((1,1), next_pos + chunk_metadata.true_length, dtype=jnp.int32)
         # prefill_result['next_pos_full_chunk'] = jnp.full((1,1), 0 + self.config.chunk_size, dtype=jnp.int32)
       else:
-        prefill_result['t_l_array'] =  t_l_array
+        # prefill_result['t_l_array'] =  t_l_array
         prefill_result, first_token = self.prefill_single_chunk(existing_prefix=prefill_result, 
                                                     params=params | {"cache": prefill_result["cache"]}, 
                                                     padded_tokens=chunk_metadata.chunk_padded_tokens, 
@@ -387,7 +387,9 @@ class MaxEngine(engine_api.Engine):
                                                     positions=positions,
                                                     )
         # prefill_result['next_pos_full_chunk'] = jnp.full((1,1), prefill_result['next_pos_full_chunk'][0][0] + self.config.chunk_size, dtype=jnp.int32)
-        prefill_result['next_pos'] = jnp.full((1,1), next_pos + chunk_metadata.true_length, dtype=jnp.int32)
+      t_l_array = jnp.expand_dims(jnp.arange(0, i*self.config.chunk_size + chunk_metadata.true_length), 0)
+      prefill_result['t_l_array'] =  t_l_array
+      prefill_result['next_pos'] = jnp.full((1,1), next_pos + chunk_metadata.true_length, dtype=jnp.int32)
       next_pos = next_pos + chunk_metadata.true_length
     
     return prefill_result, first_token
