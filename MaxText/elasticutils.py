@@ -117,19 +117,22 @@ class ElasticUtils:
       logger.fatal(f"Max failures reached {self.max_failures}")
 
   @timeit
-  def save(self, save_step: int, **kwargs):
+  def save(self, save_step: int, blocking: bool = True, **kwargs):
     """Save step and state."""
     # In case DATA_LOSS occurs during jax.block_until_ready, overwrite self.data
     # at the end
     data = {
         k: jax.device_put(
             v,
-            jax.tree.map(lambda x: x.sharding.with_memory_kind(kind="pinned_host"), v),
+            jax.tree.map(
+                lambda x: x.sharding.with_memory_kind(kind="pinned_host"), v
+            ),
         )
         for k, v in kwargs.items()
     }
-    for v in data.values():
-      jax.block_until_ready(v)
+    if blocking:
+      for v in data.values():
+        jax.block_until_ready(v)
     data["save_step"] = save_step
 
     self.data = data
@@ -424,6 +427,65 @@ class ElasticUtils:
     return jax.make_array_from_single_device_arrays(
         arr.shape, dst_sharding, arrays
     )
+
+  def put_array_device_put3(
+      self,
+      arr: jax.Array,
+      dst_sharding: jax.sharding.Sharding,
+      donate_input: bool,  # pylint: disable=unused-argument
+  ):
+    """Reshards `arr` to the specified `dst_sharding`.
+
+    Args:
+        arr: An array, scalar, or a nested Python container thereof.
+        dst_sharding: A `Sharding` or a nested `Sharding` in a Python container
+          (must match the structure of `x`), specifying the target sharding.
+        donate_input: If `True`, donates the input arrays to reduce memory
+          needed for resharding. Donated buffers should not be reused.
+
+    Returns:
+        A copy of `x` with the specified `sharding`.
+    """
+    if not isinstance(dst_sharding, jax.sharding.Sharding):
+      raise ValueError("`sharding` must contain only `Sharding` instances.")
+
+    if dst_sharding.num_devices <= arr.sharding.num_devices:
+      # Reshard down
+      arrays = [
+          x.data
+          for x in arr.addressable_shards
+          if x.device.slice_index in self.good_slice_indices
+      ]
+    else:
+      # Reshard up
+      slice_to_arrays = collections.defaultdict(list)
+      for x in arr.addressable_shards:
+        slice_to_arrays[x.data.device.slice_index].append(x.data)
+      slice_to_arrays = dict(slice_to_arrays)
+
+      good_data_slice_indices = {d.slice_index for d in arr.sharding.device_set}
+      new_slice_indices = self.good_slice_indices - good_data_slice_indices
+
+      new_arrays = []
+      for i, slice_index in enumerate(good_data_slice_indices):
+        arrays = slice_to_arrays[slice_index]
+        start_index = len(arrays) * i // len(self.good_slice_indices)
+        end_index = len(arrays) * (i + 1) // len(self.good_slice_indices)
+
+        arrays_to_put = arrays[start_index:end_index]
+
+        for new_slice_index in new_slice_indices:
+          new_arrays += jax.device_put(
+              arrays_to_put,
+              self.slice_to_devices[new_slice_index][start_index:end_index],
+          )
+
+      arrays = sum(slice_to_arrays.values(), []) + new_arrays
+
+    return jax.make_array_from_single_device_arrays(
+        arr.shape, dst_sharding, arrays
+    )
+
 
   def scale_by_good_slices(self, x: int | float) -> int | float:
     """Scale x by the number of good slices."""
