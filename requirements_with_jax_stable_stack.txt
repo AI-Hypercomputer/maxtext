@@ -19,3 +19,6 @@ mlperf-logging@git+https://github.com/mlperf/logging.git
 google-jetstream
 jsonlines
 pathwaysutils@git+https://github.com/google/pathways-utils.git
+google-cloud-monitoring
+google-api-core
+google-api-python-client

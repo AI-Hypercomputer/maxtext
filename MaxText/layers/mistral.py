@@ -97,6 +97,8 @@ class MistralDecoderLayer(nn.Module):
         weight_dtype=cfg.weight_dtype,
         dropout_rate=cfg.dropout_rate,
         name="self_attention",
+        float32_qk_product=cfg.float32_qk_product,
+        float32_logits=cfg.float32_logits,
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
     )
@@ -136,6 +138,7 @@ class MistralDecoderLayer(nn.Module):
           mesh=mesh,
           kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
           kernel_axes=("embed", None),
+          intermediate_dim=cfg.mlp_dim,
           dtype=cfg.dtype,
           weight_dtype=cfg.weight_dtype,
           quant=self.quant,

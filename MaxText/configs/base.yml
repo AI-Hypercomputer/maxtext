@@ -121,6 +121,8 @@ logits_via_embedding: False
 normalize_embedding_logits: True  # whether to normlize pre-softmax logits if logits_via_embedding is true
 logits_dot_in_fp32: False  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
 cast_logits_to_fp32: True # whether to cast the logits to fp32. The higher precision is generally beneficial, but it can vary slightly.
+float32_qk_product: False # in dot_product attention, whether to cast to fp32 the inputs to qk product
+float32_logits: False # in dot_product attention, whether to cast to fp32 the inputs to softmax
 
 # mixture of experts (moe)
 num_experts: 1
@@ -129,6 +131,14 @@ megablox: True
 sparse_matmul: True
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
 load_balance_loss_weight: 0.01 # weight for the load balance loss
+
+# deepseek moe
+base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer (use base_mlp_dim if not DeepSeek style)
+first_num_dense_layers: 0 # number of initial dense layers in the model
+shared_experts: 1
+routed_scaling_factor: 1.0 # scaling factor for routing scores
+routed_score_func: "" # scoring function for routing
+routed_bias: False # a flag if a bias term is added for routing
 
 # pipeline parallelism
 # The number of decoder layers is equal to the product of num_stages, num_layers_per_pipeline_stage and num_pipeline_repeats.
@@ -147,6 +157,14 @@ num_pipeline_microbatches: -1
 pipeline_delay_activation_forwarding: False # This delays the activation forwarding one loop iteration simplifying XLA's task of overlapping since
 # the communication and compute in each iteration are now independent. However this comes at the cost of doubling the pipeline bubble,
 # and you must set the number of microbatches to at least 2 * num_stages (the minimum 2 * num_stages is set by default with this delay).
+
+pipeline_fsdp_ag_once: False # If set to true then all gather all of the weights over FSDP before the first pipeline iteration.
+# This is a memory/time tradeoff - we now have to store the FSDP gathered weights and gradients (typically in bf16), as opposed
+# to only one stage's worth, however we only execute one all-gather and reduce across per repeat, as opposed
+# to every microbatch. This is similar to zero-1 sharding, since we also don't need to all gather the FSDP weights in the backward pass.
+# An alternative to setting this to true may be to replace any FSDP with DP and use optimizer offloading if necessary.
+# A more optimal behavior is to all-gather at the start of each repeat, which would ideally get the best of both worlds -
+# a small amount of memory and time, however this has proven hard to implement in SPMD, see b/364386697 for more.
 
 # There are two loops for PP:
 #  1)  Outer loop over microbatches (pipeline iterations)
@@ -461,6 +479,13 @@ monitor_goodput: True
 goodput_upload_interval_seconds: 60
 enable_pathways_goodput: False
 
+# GCP workload monitoring
+report_heartbeat_metric_for_gcp_monitoring: False
+heartbeat_reporting_interval_in_seconds: 5
+report_performance_metric_for_gcp_monitoring: False
+
+enable_tensorboard: True
+
 # Vertex AI Tensorboard Configurations - https://github.com/google/maxtext/tree/main/getting_started/Use_Vertex_AI_Tensorboard.md
 # Set to True for GCE, False if running via XPK
 use_vertex_tensorboard: False
@@ -519,6 +544,8 @@ enable_single_controller: False
 custom_mesh: "" # Available options: ['hybrid_ring_64x4', 'hybrid_ring_32x8']
 # Split physical axes for https://jax.readthedocs.io/en/latest/_autosummary/jax.experimental.mesh_utils.create_device_mesh.html
 allow_split_physical_axes: False
+# Apply transformations to the mesh to optimize for TPU v6e
+optimize_mesh_for_tpu_v6e: False
 
 use_ragged_attention: False
 ragged_block_size: 256
