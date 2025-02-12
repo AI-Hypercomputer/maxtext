@@ -330,6 +330,7 @@ class PageManager(nn.Module):
       page_status = page_status.at[page_idx].set(1)
       page_map = page_map.at[slot, num_pages_used[slot] - 1].set(page_idx)
       current_page = current_page.at[slot].set(page_idx)
+      jax.debug.print("slot_id: {}, page_idx: {}, num_pages_used: {}, current_page: {}", slot, page_idx, num_pages_used[slot], current_page.at[slot])
       return page_map, page_status, current_page, updating_slots
 
     page_map, page_status, current_page, _ = jax.lax.fori_loop(

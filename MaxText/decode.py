@@ -57,6 +57,7 @@ def main(argv: Sequence[str]) -> None:
   rng, rng_init_decode = jax.random.split(rng)
   decode_state = engine.init_decode_state(rng_init_decode)
   decode_state = engine.insert(prefill_result, decode_state, slot=slot)
+  jax.debug.print("logits: {}, next_pos: {}, generated_tokens: {}, tokens: {}", decode_state["logits"][0][0], decode_state["next_pos"][0], decode_state["generated_tokens"][0], decode_state["tokens"][0])
 
   steps = range(config.max_prefill_predict_length, config.max_target_length)
   sampled_tokens_list = []
@@ -65,6 +66,7 @@ def main(argv: Sequence[str]) -> None:
     rng, rng_generate = jax.random.split(rng)
     decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
     sampled_tokens_list.append(sampled_tokens)
+    print(f"generated token `{sampled_tokens.get_result_at_slot(slot).tokens.item()}`")
 
   results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
   output = tokenizer_model.decode(results)

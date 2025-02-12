@@ -286,6 +286,7 @@ class MaxEngine(engine_api.Engine):
         nucleus_topp=self.config.decode_sampling_nucleus_p,
         temperature=self.config.decode_sampling_temperature,
     )
+    jax.debug.print("first_generated_token: {}", first_generated_token[0])
 
     all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
     result = engine_api.ResultTokens(
@@ -431,7 +432,7 @@ class MaxEngine(engine_api.Engine):
       rng = jax.random.PRNGKey(0)
 
     previous_token = decode_state["tokens"]
-
+    #jax.debug.print("generate call next_pos: {}, tokens: {}", decode_state["next_pos"], decode_state["tokens"])
     rng, new_rng = jax.random.split(rng)
     # run one step generation
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -444,10 +445,9 @@ class MaxEngine(engine_api.Engine):
           rngs={"params": new_rng},
           mutable=["cache"],
       )
-
+    #jax.debug.print("out logits: {}", out_logits)
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
-
     # sampling tokens
     new_token = inference_utils.sampling(
         out_logits,
@@ -457,7 +457,7 @@ class MaxEngine(engine_api.Engine):
         nucleus_topp=self.config.decode_sampling_nucleus_p,
         temperature=self.config.decode_sampling_temperature,
     )
-
+    #jax.debug.print("new_token: {}", new_token)
     all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
     result = engine_api.ResultTokens(
         data=jnp.concatenate((new_token, all_valid, decode_state["generated_tokens"]), axis=1),
@@ -498,9 +498,12 @@ class MaxEngine(engine_api.Engine):
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
 
     unboxed_prefix["cache"] = self._maybe_unstack_prefill_result_cache(unboxed_prefix["cache"])
+    #jax.debug.print("prefix_logits: {}", unboxed_prefix["logits"][0][0])
+    #jax.debug.print("logits: {}, next_pos: {}, generated_tokens: {}, tokens: {}", decode_state["logits"][0][0], decode_state["next_pos"][0], decode_state["generated_tokens"][0], decode_state["tokens"][0])
 
     def copy(path, partial_cache, full_cache, annotations):
       path_key = path[-1].key
+      #print(f"Path key: {path_key}")
       if path_key in [
           "cache_ar_index",
           "cached_ar_key",
@@ -585,6 +588,7 @@ class MaxEngine(engine_api.Engine):
           self.kv_cache_annotations_named,
       )
     inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state["logits"], unboxed_prefix["logits"], slot, 0)
+    #jax.debug.print("logit1: {}, logit2: {}, slot: {}, dim: {}", decode_state["logits"][slot][0], unboxed_prefix["logits"][0][0], slot, decode_state["logits"].shape)
     inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state["next_pos"], unboxed_prefix["next_pos"], slot, 0)
     inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(
         decode_state["generated_tokens"],
@@ -600,13 +604,17 @@ class MaxEngine(engine_api.Engine):
     inserted_tokens = jax.lax.with_sharding_constraint(inserted_tokens, self.replicated_sharding)
     inserted_cache = jax.lax.with_sharding_constraint(inserted_cache, self.kv_cache_shardings)
 
-    return {
+    decode_s = {
         "logits": inserted_logits,
         "cache": inserted_cache,
         "next_pos": inserted_next_pos,
         "generated_tokens": inserted_generated_tokens,
         "tokens": inserted_tokens,
     }
+
+    #jax.debug.print("decode_state")
+    #jax.debug.print("logits: {}, next_pos: {}, generated_tokens: {}, tokens: {}", decode_s["logits"][slot][0], decode_s["next_pos"][slot], decode_s["generated_tokens"][slot], decode_s["tokens"][slot])
+    return decode_s
 
   @functools.partial(
       jax.jit,

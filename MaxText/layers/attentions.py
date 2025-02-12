@@ -151,6 +151,7 @@ class PagedAttentionOp(nn.Module):
   kv_pages_axis_names: AxisNames = ("paged_kv_heads", "num_pages", "tokens_per_page", "paged_kv_head_dim_size")
 
   def init_or_get_kv_pages(self, model_mode: str):
+    #jax.debug.print("init_or_get_kv_pages")
     """Get paged attention op."""
     # Get existing variables if they exist
     if self.has_variable("cache", "key_pages"):
@@ -162,11 +163,12 @@ class PagedAttentionOp(nn.Module):
         kv_pages_shape = (self.num_kv_heads, self.num_pages, self.tokens_per_page, self.kv_head_dim_size)
         key_pages_var.value = jnp.zeros(kv_pages_shape, dtype=self.dtype)
         value_pages_var.value = jnp.zeros(kv_pages_shape, dtype=self.dtype)
+        #jax.debug.print("AR mode kv_pages_shape: {}", kv_pages_shape)
     else:
       # Initial creation - choose size based on mode
       num_pages = self.max_pages_per_prefill if model_mode == common_types.MODEL_MODE_PREFILL else self.num_pages
       kv_pages_shape = (self.num_kv_heads, num_pages, self.tokens_per_page, self.kv_head_dim_size)
-
+      #jax.debug.print("num_pages: {}, kv_pages_shape: {}", num_pages, kv_pages_shape)
       key_pages_var = self.variable(
           "cache",
           "key_pages",
@@ -181,16 +183,17 @@ class PagedAttentionOp(nn.Module):
           kv_pages_shape,
           self.dtype,
       )
-
+      #jax.debug.print("key_pages_var: {}, value_pages_var: {}", key_pages_var, value_pages_var)
     # Apply logical constraints
     key_pages_var.value = nn.with_logical_constraint(key_pages_var.value, self.kv_pages_axis_names)
     value_pages_var.value = nn.with_logical_constraint(value_pages_var.value, self.kv_pages_axis_names)
     return key_pages_var, value_pages_var
 
+#whats the difference with the dot product
   def paged_dot_product_attention_with_max_and_sum(self, query, key, value):
     b, t, n, d = query.shape
     _, s, n_kv, _ = key.shape
-
+    #jax.debug.print("paged_dot_product_attention_with_max_and_sum")
     query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
 
     attn_weights = jnp.einsum("btkgd,bskd->bkgts", query, key)
@@ -296,8 +299,10 @@ class PagedAttentionOp(nn.Module):
     self.update(key_pages_var, value_pages_var, key, value, model_mode, page_state)
 
     if model_mode == common_types.MODEL_MODE_PREFILL:
+      # why use this
       return self.paged_dot_product_attention_with_max_and_sum(query, key, value)
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+      #jax.debug.print("call: page status: {}, page map: {}, sequence length: {}, num pages: {}, current_page: {}, current_page_position: {}", page_state.page_status, page_state.page_map, page_state.sequence_lengths, page_state.num_pages_used, page_state.current_page, page_state.current_page_position)
       ar_output = self.paged_attention(query, key_pages_var, value_pages_var, page_state)
       return ar_output, None, None
 
@@ -314,6 +319,8 @@ class PagedAttentionOp(nn.Module):
     if model_mode == common_types.MODEL_MODE_PREFILL:
       self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value)
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+      #jax.debug.print("update: page status: {}, page map: {}, sequence length: {}, num pages: {}, current_page: {}, current_page_position: {}", page_state.page_status, page_state.page_map, page_state.sequence_lengths, page_state.num_pages_used, page_state.current_page, page_state.current_page_position)
+      #jax.debug.print("update, page_state.page_map: {}", page_state.num_pages_used)
       self.update_decode_step_pages(key_pages_var, value_pages_var, key, value, page_state)
 
   def update_prefill_step_pages(
@@ -329,7 +336,8 @@ class PagedAttentionOp(nn.Module):
         key.shape == value.shape
     ), f"prefill_step key/value should have the same shape, but getting {key.shape=} and {value.shape=} instead"
     b, t, n_kv, d = key.shape
-    assert t % self.tokens_per_page == 0
+    #jax.debug.print("seq_length: {}, tokens_per_page: {}", t, self.tokens_per_page)
+    assert (t % self.tokens_per_page == 0), f"seq_length {t} and  tokens_per_page {self.tokens_per_page}"
     assert (
         key_pages_var.value.shape == value_pages_var.value.shape
     ), f"prefill_step key/value_pages_var should have the same shape, but getting {key_pages_var.shape=} and {value_pages_var.shape=} instead"
@@ -356,6 +364,8 @@ class PagedAttentionOp(nn.Module):
 
     key_pages_var.value = nn.with_logical_constraint(key, self.kv_pages_axis_names)
     value_pages_var.value = nn.with_logical_constraint(value, self.kv_pages_axis_names)
+
+    #jax.debug.print("update_prefill_step_pages, key_pages_var: {}, value_pages_var: {}", key_pages_var, value_pages_var)
 
   def update_decode_step_pages(self, key_pages_var, value_pages_var, key, value, page_state):
     key_pages = key_pages_var.value
