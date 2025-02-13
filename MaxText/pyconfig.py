@@ -397,7 +397,8 @@ class _HyperParameters:
 
     if raw_keys["log_config"]:
       for k in keys:
-        max_logging.log(f"Config param {k}: {raw_keys[k]}")
+        if k != "hf_access_token":
+          max_logging.log(f"Config param {k}: {raw_keys[k]}")
 
   @staticmethod
   def user_init(raw_keys):
