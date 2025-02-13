@@ -75,6 +75,46 @@ class SyntheticDataIterator:
     output["targets_segmentation"] = segmentation
     return output
 
+class SyntheticDataZerosIterator:
+  """Creates a synthetic data iterator that returns zeros for performance testing work"""
+
+  def __init__(self, config, mesh):
+    self.mesh = mesh
+    self.config = config
+    data_pspec = P(*config.data_sharding)
+    data_pspec_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
+    self.data_generator = jax.jit(
+        SyntheticDataZerosIterator.raw_generate_synthetic_data, out_shardings=data_pspec_shardings, static_argnums=0
+    )
+
+  def __iter__(self):
+    return self
+
+  def __next__(self):
+    with self.mesh:
+      return self.data_generator(self.config)
+
+  @staticmethod
+  def raw_generate_synthetic_data(config):
+    """Generates a single batch of synthetic data"""
+    output = {}
+    output["inputs"] = jax.numpy.zeros((config.global_batch_size_to_load, config.max_target_length), dtype=jax.numpy.int32)
+
+    sequence_positions = jnp.arange(0, config.max_target_length, dtype=jnp.int32).reshape(1, -1)
+    output["inputs_position"] = jnp.broadcast_to(sequence_positions, (config.global_batch_size_to_load, config.max_target_length))
+
+    output["inputs_segmentation"] = jax.numpy.ones(
+        (config.global_batch_size_to_load, config.max_target_length), dtype=jax.numpy.int32
+    )
+    output["targets"] = jax.numpy.zeros((config.global_batch_size_to_load, config.max_target_length), dtype=jax.numpy.int32)
+    output["targets_position"] = jax.numpy.zeros(
+        (config.global_batch_size_to_load, config.max_target_length), dtype=jax.numpy.int32
+    )
+    output["targets_segmentation"] = jax.numpy.ones(
+        (config.global_batch_size_to_load, config.max_target_length), dtype=jax.numpy.int32
+    )
+    return output
+
 
 class BadSyntheticDataIterator:
   """Creates a Bad synthetic data iterator for loading on subset of hosts"""
@@ -149,6 +189,8 @@ def make_mixed_iterator(config, mesh, process_indices_train, process_indices_eva
 def create_data_iterator(config, mesh):
   if config.dataset_type == "synthetic":
     return SyntheticDataIterator(config, mesh), None
+  if config.dataset_type == "synthetic_zeros":
+    return SyntheticDataZerosIterator(config, mesh), None
 
   process_indices_train = get_process_loading_real_data(
       config.data_sharding,
