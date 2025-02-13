@@ -392,7 +392,8 @@ def generate_xpk_workload_cmd(
         f'--docker-image={pw_config.runner_image}'
     )
   else:
-    docker_image_flag = f'--docker-image="{wl_config.base_docker_image}"'
+    #docker_image_flag = f'--docker-image="{wl_config.base_docker_image}"'
+    docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2025-02-12"'
 
 
 
@@ -489,12 +490,21 @@ def main() -> int:
       device_type='v5litepod-256',
   )
 
-  v6e_cluster_config = XpkClusterConfig(
-      cluster_name='bodaborg-v6e-256-rxc',
-      project='tpu-prod-env-one-vm',
-      zone='asia-northeast1-b',
+  v6e_cluster_config_big = XpkClusterConfig(
+      cluster_name='bodaborg-v6e-256-donotdelete-wv-c',
+      project='tpu-prod-env-multipod',
+      zone='us-east4-a',
       device_type='v6e-256',
   )
+
+  v6e_cluster_config = XpkClusterConfig(
+      cluster_name='bodaborg-v6e-256-dnd-yucmhab',
+      project='tpu-prod-env-one-vm',
+      zone='us-east5-b',
+      device_type='v6e-256',
+  )
+
+
 
 
   xpk_workload_cmds = []
