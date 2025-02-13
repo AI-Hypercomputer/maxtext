@@ -32,7 +32,7 @@ from layers import models
 from layers import quantizations
 
 import common_types
-import page_managers
+from page_manager import PageState
 from typing import Optional
 
 Array = common_types.Array
@@ -63,7 +63,6 @@ Quant = quantizations.AqtQuantization
 
 class LlamaDecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
-
   config: models.Config
   mesh: Mesh
   quant: Optional[Quant] = None
@@ -76,7 +75,7 @@ class LlamaDecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
-      page_state: Optional[page_managers.PageState] = None,
+      page_state: Optional[PageState] = None,
       slot: Optional[int] = None,
       true_length: Optional[int] = None,
   ):
@@ -93,15 +92,8 @@ class LlamaDecoderLayer(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
     )
     lnx = lnx_rms(inputs)
-    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
-    print(f"LlamaDecoderLayer - {model_mode=}")
-    print(f"LlamaDecoderLayer - {lnx.shape=}")
-    print(f"LlamaDecoderLayer - {decoder_positions.shape=}")
-    try:
-        print(f"LlamaDecoderLayer - {page_state.shape=}")
-    except:
-        pass
+    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     # Self-attention block
     attention_layer = Attention(
@@ -117,6 +109,8 @@ class LlamaDecoderLayer(nn.Module):
         weight_dtype=cfg.weight_dtype,
         dropout_rate=cfg.dropout_rate,
         name="self_attention",
+        float32_qk_product=cfg.float32_qk_product,
+        float32_logits=cfg.float32_logits,
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
         prefill_cache_axis_order=tuple([int(i) for i in cfg.prefill_cache_axis_order.split(",")]),
@@ -142,8 +136,6 @@ class LlamaDecoderLayer(nn.Module):
     attention_lnx = nn.with_logical_constraint(
         attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
     )
-
-
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected

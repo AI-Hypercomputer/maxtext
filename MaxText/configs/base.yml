@@ -120,6 +120,8 @@ logits_via_embedding: False
 normalize_embedding_logits: True  # whether to normlize pre-softmax logits if logits_via_embedding is true
 logits_dot_in_fp32: False  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
 cast_logits_to_fp32: True # whether to cast the logits to fp32. The higher precision is generally beneficial, but it can vary slightly.
+float32_qk_product: False # in dot_product attention, whether to cast to fp32 the inputs to qk product
+float32_logits: False # in dot_product attention, whether to cast to fp32 the inputs to softmax
 
 # mixture of experts (moe)
 num_experts: 1
@@ -530,6 +532,7 @@ enable_single_controller: False
 custom_mesh: "" # Available options: ['hybrid_ring_64x4', 'hybrid_ring_32x8']
 # Split physical axes for https://jax.readthedocs.io/en/latest/_autosummary/jax.experimental.mesh_utils.create_device_mesh.html
 allow_split_physical_axes: False
+optimize_mesh_for_tpu_v6e: False
 
 use_ragged_attention: False
 ragged_block_size: 256

@@ -34,7 +34,7 @@ import collections
 from typing import Any, Tuple
 
 import max_logging
-from layers import attentions
+import max_utils
 
 
 import orbax.checkpoint as ocp
@@ -64,10 +64,6 @@ def with_memory_kind(t, memory_kind):
 def cast_dtype_from_to(nest, src, dst):
   """All items in nest with dtype src are casted to dtype dst."""
   return jax.tree_util.tree_map(lambda t: t.astype(dst) if t.dtype == src else t, nest)
-
-
-def cast_to_bf16(params):
-  return cast_dtype_from_to(params, np.float32, jnp.bfloat16)
 
 
 def find_nans_and_infs(pytree):
@@ -568,6 +564,30 @@ def is_valid_custom_mesh(ici_parallelism, strategy):
     raise ValueError(f"The strategy {strategy} to reshape the mesh is invalid.")
 
 
+def optimize_mesh_for_tpu_v6e(mesh, devices):
+  """Apply transformations to the mesh to optimize for TPU v6e"""
+  if devices[0].device_kind != "TPU v6 lite":
+    return mesh
+  num_devices = len(devices)
+  mesh_is_1d_ring = num_devices in mesh.shape
+  if not mesh_is_1d_ring:
+    return mesh
+  # check that the physical topology is 2x4
+  device_coords = [d.coords for d in devices]
+  coord_size = len(device_coords[0])
+  max_coords = tuple(max(dc[i] for dc in device_coords) for i in range(coord_size))
+  min_coords = tuple(min(dc[i] for dc in device_coords) for i in range(coord_size))
+  dims = tuple(h - l + 1 for (h, l) in zip(max_coords, min_coords))
+  if dims != (2, 4, 1):
+    return mesh
+  axis_idx = mesh.shape.index(num_devices)
+  new_mesh = np.moveaxis(mesh, axis_idx, 0)
+  new_mesh[4:] = new_mesh[-1:3:-1]
+  new_mesh = np.moveaxis(new_mesh, 0, axis_idx)
+  max_logging.log("Optimized the mesh for TPU v6e")
+  return new_mesh
+
+
 def create_device_mesh(config, devices=None):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
   if devices is None:
@@ -617,6 +637,8 @@ def create_device_mesh(config, devices=None):
           ici_parallelism,
           devices,
       )
+      if config.optimize_mesh_for_tpu_v6e:
+        mesh = optimize_mesh_for_tpu_v6e(mesh, devices)
 
   max_logging.log(f"Num_devices: {num_devices}, shape {mesh.shape}")
 
@@ -683,6 +705,10 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
     state: state with decode params loaded from the checkpoint
     state_mesh_annotations: the mesh annotations for the state
   """
+  print("\nEntering setup_decode_state:")
+  print(f"  model: {type(model).__name__}")
+  print(f"  mesh.shape: {mesh.shape}")
+  max_utils.print_mem_stats("Start of setup_decode_state")
   if not config.load_parameters_path:
     # generate random params
     max_logging.log("No decode checkpoint specified - generating random weights.")
@@ -698,6 +724,7 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
     state = init_decode_state(None, params)
 
   state = unbox_logicallypartioned(state)
+  max_utils.print_mem_stats("After setup_decode_state")
   return state, state_mesh_annotations
 
 
@@ -953,94 +980,51 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
 
 
 def get_prefill_kv_cache_annotations(model, config, rng, mesh):
-  """Get the linen variables representing the prefill kv-cache."""
-  if config.attention == "paged":
-      model_mode = common_types.MODEL_MODE_PREFILL
-      slot = 0
-      true_length = 0
-  else:
-      model_mode = common_types.MODEL_MODE_AUTOREGRESSIVE
-      slot = None
-      true_length = None
+  """Get a shaped abstraction of the state (including optimizer)"""
 
-  def init_prefill_kv_cache_partial(rng):
-    batch = int(config.per_device_batch_size * jax.device_count())
-    input_shape = (batch, config.max_prefill_predict_length)
+  def init_kv_cache(model, config):
+    input_shape = (
+        config.global_batch_size_to_load,
+        config.max_prefill_predict_length,
+    )
+
     model_vars = model.init(
-        rng,
-        jnp.ones(input_shape, jnp.float32),
-        jnp.ones(input_shape, jnp.float32),
-        enable_dropout=False,
-        model_mode=model_mode,
-        slot=slot,
-        true_length=true_length
+        {"params": rng, "dropout": rng, "aqt": rng},
+        jnp.ones(input_shape),
+        jnp.ones(input_shape),
+        model_mode=common_types.MODEL_MODE_PREFILL,
     )
     return model_vars["cache"]
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-        abstract_state = jax.eval_shape(init_prefill_kv_cache_partial, rng)
-        # Return names directly, not PartitionSpec
-        return jax.tree_util.tree_map(lambda x: tuple(x.names) if hasattr(x, 'names') else (), abstract_state, is_leaf=lambda x: hasattr(x, 'names'))
+    init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
+    abstract_state = jax.eval_shape(init_kv_cache_partial)
+  state_logical_annotations = nn.get_partition_spec(abstract_state)
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+  return state_mesh_annotations
+
+
 def get_kv_cache_annotations(model, config, rng, mesh):
   """Get a shaped abstraction of the state (including optimizer)"""
-  if config.attention == "paged":
-    return attentions.PagedAttentionOp.get_cache_axis_names()
 
-  def init_ar_kv_cache(config, mesh): # Modified: Pass config and mesh
-    # Directly define the abstract shapes of the KV cache variables
-    num_slots = int(config.per_device_batch_size * jax.device_count())
-    num_kv_heads = config.num_kv_heads
-    num_pages = config.num_pages
-    tokens_per_page = config.tokens_per_page
-    kv_head_dim_size = config.head_dim
-    dtype = jnp.bfloat16 # Or config.dtype if you need dtype from config
+  def init_kv_cache(model, config):
+    input_shape = (
+        config.global_batch_size_to_load,
+        1,
+    )
 
-    cache_axis_names = attentions.PagedAttentionOp( # Use PagedAttentionOp to get axis names
-        mesh=mesh, # Mesh needed, but not for computation
-        num_pages=num_pages,
-        tokens_per_page=tokens_per_page,
-        max_pages_per_slot=config.max_target_length // tokens_per_page,
-        max_pages_per_prefill=config.max_prefill_predict_length // tokens_per_page,
-        pages_per_compute_block=config.pages_per_compute_block,
-        num_kv_heads=num_kv_heads,
-        kv_head_dim_size=kv_head_dim_size,
-        config=config, # Config needed, but not for computation
-        dtype=dtype,
-    ).get_cache_axis_names()
-
-
-    abstract_cache = { # Define abstract state directly
-        "key_pages": jax.ShapeDtypeStruct(
-            shape=(num_kv_heads, num_pages, tokens_per_page, kv_head_dim_size), 
-            dtype=dtype),
-        "value_pages": jax.ShapeDtypeStruct(
-            shape=(num_kv_heads, num_pages, tokens_per_page, kv_head_dim_size), 
-            dtype=dtype),
-        "page_status": jax.ShapeDtypeStruct(
-            shape=(num_pages,), 
-            dtype=jnp.int32),
-        "page_map": jax.ShapeDtypeStruct(
-            shape=(num_slots, config.max_target_length // tokens_per_page), # max_pages_per_slot
-            dtype=jnp.int32),
-        "sequence_lengths": jax.ShapeDtypeStruct(
-            shape=(num_slots,), 
-            dtype=jnp.int32),
-        "num_pages_used": jax.ShapeDtypeStruct(
-            shape=(num_slots,), 
-            dtype=jnp.int32),
-        "current_page": jax.ShapeDtypeStruct(
-            shape=(num_slots,), 
-            dtype=jnp.int32),
-        "current_page_position": jax.ShapeDtypeStruct(
-            shape=(num_slots,), 
-            dtype=jnp.int32)
-    }
-    return abstract_cache # Return abstract cache dict directly
-
+    model_vars = model.init(
+        {"params": rng, "dropout": rng, "aqt": rng},
+        jnp.ones(input_shape),
+        jnp.ones(input_shape),
+        model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+    )
+    return model_vars["cache"]
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    init_ar_kv_cache_partial = functools.partial(init_ar_kv_cache, config, mesh) # Modified partial
-    abstract_state = jax.eval_shape(init_ar_kv_cache_partial) # eval_shape on partial
+    init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
+    abstract_state = jax.eval_shape(init_kv_cache_partial)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
@@ -1126,26 +1110,3 @@ def print_system_information():
   max_logging.log(f"System Information: Jax Version: {jax.__version__}")
   max_logging.log(f"System Information: Jaxlib Version: {jax.lib.__version__}")
   max_logging.log(f"System Information: Jax Backend: {jax.lib.xla_bridge.get_backend().platform_version}")
-
-
-def debug_array(array, array_name):
-  """Debug array sizing and sharding across chips."""
-  print(f"\t{array_name}:")
-  if isinstance(array, flax.linen.spmd.LogicallyPartitioned):
-    array = array.value
-  single_shard = array.addressable_shards[0]
-  n_shards = len(array.addressable_shards)
-  total_size_across_n_shards = single_shard.data.size * n_shards
-  total_nbytes_across_n_shards = single_shard.data.nbytes * n_shards
-  print(f"\t\tdtype: {array.dtype}")
-  print(f"\t\tshape: {array.shape}")
-  print(f"\t\tsharding spec: {array.sharding.spec}")
-  print(f"\t\tdevice local layouer: {array.layout.device_local_layout}")
-  print(f"\t\tsize (across n shards): {array.size} ({total_size_across_n_shards})")
-  print(f"\t\tbytes (across n shards): {array.nbytes} ({total_nbytes_across_n_shards})")
-
-
-def debug_qtensor(qtensor, qtensor_name):
-  """Debug qtensor sizing and sharding across chips."""
-  debug_array(qtensor.qvalue, f"{qtensor_name} qvalue")
-  debug_array(qtensor.scale[0], f"{qtensor_name} scale")
