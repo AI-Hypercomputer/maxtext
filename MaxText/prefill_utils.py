@@ -29,7 +29,7 @@ def create_chunked_metadata(tokens, true_length, chunk_size):
   chunk_metadata_list = []
   num_chunks =int(math.ceil(true_length/chunk_size))
 
-  print("len tokens full and num chunks ", len(tokens), num_chunks, true_length)
+  print("len tokens full and num chunks ", tokens.shape, num_chunks, true_length)
 
   for chunk_num in range(num_chunks):
     true_length_of_chunk = chunk_size

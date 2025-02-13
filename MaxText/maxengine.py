@@ -218,18 +218,17 @@ class MaxEngine(engine_api.Engine):
     return res_cache
 
   @functools.partial(jax.jit, static_argnums=(0,))
-  def prefill_single_chunk(
+  def prefill(
       self,
       *,
       params: Params,
-      existing_prefix: Optional[jax.Array] = None,
       padded_tokens: jax.Array,
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[jax.random.PRNGKey] = None,
       all_true_length=None,
-      chunk_length_till_chunk=None,
-      positions = None
+      positions = None,
+      existing_prefix: Optional[jax.Array] = None,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -259,12 +258,12 @@ class MaxEngine(engine_api.Engine):
     # pdb.set_trace()
     # positions =
     # positions = jnp.expand_dims(jnp.arange(mul, mul+input_tokens.shape[1]), 0)
-    jax.debug.print("positions {positions}", positions=positions)
+    # jax.debug.print("positions {positions}", positions=positions)
     zero_to_n = jnp.arange(0, self.config.max_prefill_predict_length)
     ones_to_keep = zero_to_n < all_true_length
     one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
-    jax.debug.print("sequence_indicator {sequence_indicator} ", sequence_indicator=sequence_indicator)
+    # jax.debug.print("sequence_indicator {sequence_indicator} ", sequence_indicator=sequence_indicator)
 
     # rng, new_rng = jax.random.split(rng)
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -330,7 +329,7 @@ class MaxEngine(engine_api.Engine):
         "flat_logits": flat_logits,
     }, result
 
-  def prefill(
+  def prefill_old(
       self,
       *,
       params: Params,
@@ -661,6 +660,16 @@ class MaxEngine(engine_api.Engine):
   def max_prefill_length(self) -> int:
     """Maximum prefill length."""
     return int(self.config.max_prefill_predict_length)
+  
+  @property
+  def use_chunked_prefill(self) -> bool:
+    """Maximum prefill length."""
+    return int(self.config.use_chunked_prefill)
+  
+  @property
+  def chunk_size(self) -> int:
+    """Maximum prefill length."""
+    return int(self.config.chunk_size)
 
   @property
   def samples_per_slot(self) -> int:
