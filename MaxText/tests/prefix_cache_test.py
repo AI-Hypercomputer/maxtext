@@ -14,7 +14,7 @@
 
 """Prefix Cache Test"""
 
-from prefix_cache import PrefixCacheTrie, Value
+from prefix_cache import HBMCache, PrefixCacheTrie, Value
 
 import unittest
 import jax
@@ -22,6 +22,8 @@ import jax.numpy as jnp
 
 
 def create_default_value(prefix=None, true_length=1, padded_length=1, tokens=None) -> Value:
+  if prefix is None:
+    prefix = {"decoder": jnp.array([1, 2, 3, 4, 5, 0, 0, 0, 0, 0])}
   if tokens is None:
     tokens = [1, 2, 3, 4, 5, 0, 0, 0, 0, 0]
   return Value(
@@ -69,10 +71,13 @@ class ValueTest(unittest.TestCase):
     assert value.prefix_size_bytes == prefix_size_byte
 
   def test_set_none_prefix_without_error(self):
-    value = create_default_value(
+    value = Value(
         prefix=None,
+        true_length=1,
+        padded_length=2,
+        tokens=[1],
     )
-    assert value.prefix == None
+    assert value.prefix is None
     assert value.prefix_size_bytes == 0
 
   def test_set_prefix_tree_with_non_jax_array_member_ignore_the_bytes(self):
@@ -190,6 +195,48 @@ class PrefixCacheTrieTest(unittest.TestCase):
     assert second_matched_key[:2] == (1, 2)
     trie.erase(second_matched_key)
     assert trie.get_longest_common_prefix_key((1, 2)) is None
+
+
+class HBMCacheTest(unittest.TestCase):
+
+  def test_is_enough_space_remain(self):
+    value = create_default_value()
+    hbm_cache = HBMCache(max_size_bytes=value.prefix_size_bytes)
+    assert hbm_cache.is_enough_space_remain(value) is True
+    hbm_cache = HBMCache(max_size_bytes=value.prefix_size_bytes - 1)
+    assert hbm_cache.is_enough_space_remain(value) is False
+
+  def test_add_to_cache_and_fetch_with_key_exactly_matched(self):
+    key = (1, 2, 3)
+    value = create_default_value()
+    hbm_cache = HBMCache(max_size_bytes=value.prefix_size_bytes)
+    assert hbm_cache.add_to_cache(key, value) is True
+    assert hbm_cache.retrieve_from_cache(key) == value
+
+  def test_add_to_cache_fail_if_not_enough_space(self):
+    value = create_default_value()
+    hbm_cache = HBMCache(max_size_bytes=value.prefix_size_bytes * 2 - 1)
+    assert hbm_cache.add_to_cache((1), value) is True
+    # The second one will exceed 1 bytes
+    assert hbm_cache.add_to_cache((2), value) is False
+    assert hbm_cache.retrieve_from_cache((2)) is None
+
+  def test_cannot_retrieve_not_exactly_matched_key(self):
+    key = (1, 2, 3)
+    value = create_default_value()
+    hbm_cache = HBMCache(max_size_bytes=value.prefix_size_bytes)
+    assert hbm_cache.add_to_cache(key, value) is True
+    assert hbm_cache.retrieve_from_cache((1, 2, 4)) is None
+    assert hbm_cache.retrieve_from_cache((1, 2)) is None
+
+  def test_add_and_retrieve_multiple_keys(self):
+    hbm_cache = HBMCache(max_size_bytes=1_000_000)
+    value1 = create_default_value(tokens=[1])
+    hbm_cache.add_to_cache((1), value1)
+    value2 = create_default_value(tokens=[2])
+    hbm_cache.add_to_cache((2), value2)
+    assert hbm_cache.retrieve_from_cache((1)) == value1
+    assert hbm_cache.retrieve_from_cache((2)) == value2
 
 
 if __name__ == "__main__":

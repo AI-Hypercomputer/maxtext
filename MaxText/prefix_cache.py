@@ -239,23 +239,35 @@ class HBMCache:
     Args:
       max_size_bytes: Maximum bytes of HBM to use for cache
     """
-    raise NotImplementedError
+    self._remain_size_bytes = max_size_bytes
+    self._saved_values: dict[Key, Value] = {}
 
   def is_enough_space_remain(self, value: Value) -> bool:
     """Calculate if value size can add to cache."""
-    raise NotImplementedError
+    return self._remain_size_bytes >= value.prefix_size_bytes
 
   def add_to_cache(self, key: Key, value: Value) -> bool:
     """
+    Value will be moved to the cache, which means cannot used the same value reference after add_to_cache.
+
+    The jax may modified the value even stored in another python reference.
+    If the value need to be used after add_to_cache, make sure copy them before add_to_cache.
     Return False if cache is full.
     """
-    raise NotImplementedError
+    if not self.is_enough_space_remain(value):
+      return False
+
+    self._saved_values[key] = value
+    self._remain_size_bytes -= value.prefix_size_bytes
+    return True
 
   def retrieve_from_cache(self, key: Key) -> Optional[Value]:
+    """Return value copied from cache or None if not found.
+    To avoid modified value in the cache, always copied the value before return.
     """
-    Return None if key is not found.
-    """
-    raise NotImplementedError
+    if key in self._saved_values:
+      return self._saved_values[key].clone()
+    return None
 
 
 class PrefixCache:
