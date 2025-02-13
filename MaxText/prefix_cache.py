@@ -59,6 +59,7 @@ if cached_prefix is None or matched_len != orig_key_len:
 from typing import Tuple, Any, Optional
 import dataclasses
 import jax
+import jax.numpy as jnp
 
 import max_logging
 
@@ -111,6 +112,21 @@ class Value:
   @property
   def prefix_size_bytes(self) -> int:
     return self._prefix_size_bytes
+
+  def clone(self) -> "Value":
+    """Clone to prevent use the same jax array."""
+    copied_prefix = jax.tree.map(lambda x: x.copy() if isinstance(x, jax.Array) else x, self._prefix)
+    return Value(prefix=copied_prefix, true_length=self._true_length, padded_length=self._padded_length, tokens=self._tokens)
+
+  def __eq__(self, other: Any) -> bool:
+    if not isinstance(other, Value):
+      return False
+    return (
+        other.padded_length == self.padded_length
+        and other.tokens == self.tokens
+        and jax.tree.all(jax.tree.map(jnp.array_equal, other.prefix, self.prefix))
+        and other.prefix_size_bytes == self.prefix_size_bytes
+    )
 
   def _calculate_prefix_bytes(self, prefix: Prefix) -> int:
     def has_nbytes_int(obj) -> bool:

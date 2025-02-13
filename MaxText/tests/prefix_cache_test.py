@@ -21,18 +21,19 @@ import jax
 import jax.numpy as jnp
 
 
+def create_default_value(prefix=None, true_length=1, padded_length=1, tokens=None) -> Value:
+  if tokens is None:
+    tokens = [1, 2, 3, 4, 5, 0, 0, 0, 0, 0]
+  return Value(
+      prefix=prefix,
+      true_length=true_length,
+      padded_length=padded_length,
+      tokens=tokens,
+  )
+
+
 class ValueTest(unittest.TestCase):
   """Test for Value."""
-
-  def _create_default_value(self, prefix=None, true_length=1, padded_length=1, tokens=None) -> Value:
-    if tokens is None:
-      tokens = [1, 2, 3, 4, 5, 0, 0, 0, 0, 0]
-    return Value(
-        prefix=prefix,
-        true_length=true_length,
-        padded_length=padded_length,
-        tokens=tokens,
-    )
 
   def test_get_the_set_value(self):
     true_length = 5
@@ -54,22 +55,21 @@ class ValueTest(unittest.TestCase):
         }
     }
     # array len * byte size(int8, + float32 + float16 + int32) in the prefix
-    prefix_byte_size = 10 * (1 + 4 + 2 + 4)
+    prefix_size_byte = 10 * (1 + 4 + 2 + 4)
     value = Value(
         prefix=prefix,
         true_length=true_length,
         padded_length=padded_length,
         tokens=tokens,
     )
-    assert value.prefix == prefix
     assert value.true_length == true_length
     assert value.padded_length == padded_length
-    assert jnp.array_equal(value.tokens, tokens)
+    assert value.tokens == tokens
     assert jax.tree_util.tree_all(jax.tree.map(jnp.array_equal, value.prefix, prefix))
-    assert value.prefix_size_bytes == prefix_byte_size
+    assert value.prefix_size_bytes == prefix_size_byte
 
   def test_set_none_prefix_without_error(self):
-    value = self._create_default_value(
+    value = create_default_value(
         prefix=None,
     )
     assert value.prefix == None
@@ -81,13 +81,46 @@ class ValueTest(unittest.TestCase):
         "jax_array": jnp.array([1, 2, 3], dtype=jnp.int8),
     }
     prefix_size_bytes = 3
-    value = self._create_default_value(prefix=prefix)
+    value = create_default_value(prefix=prefix)
     assert value.prefix == prefix
     assert value.prefix_size_bytes == prefix_size_bytes
 
   def test_adjust_true_length_shorter_equal_than_tokens(self):
-    value = self._create_default_value(true_length=100, tokens=jnp.array([1, 2, 3]))
+    value = create_default_value(true_length=100, tokens=jnp.array([1, 2, 3]))
     assert value.true_length == 3
+
+  def test_equal(self):
+    prefix1 = {
+        "decoder": jnp.array([1, 2, 3], dtype=jnp.int8),
+    }
+    prefix2 = {
+        "decoder": jnp.array([1, 2, 3, 4, 5], dtype=jnp.int8),
+    }
+    value1_1 = create_default_value(prefix=prefix1)
+    value1_2 = create_default_value(prefix=prefix1)
+    assert value1_1 != 42
+    assert value1_1 == value1_2
+    assert value1_1.true_length == value1_2.true_length
+    assert value1_1.padded_length == value1_2.padded_length
+    assert jnp.array_equal(value1_1.tokens, value1_2.tokens)
+    assert jax.tree_util.tree_all(jax.tree.map(jnp.array_equal, value1_1.prefix, value1_2.prefix))
+    assert value1_1.prefix_size_bytes == value1_2.prefix_size_bytes
+    value1_2 = create_default_value(prefix=prefix2)
+    assert value1_1 != value1_2
+
+  def test_clone_for_copy_jax_array(self):
+    """jax array in value prefix should be different or may destroy the array in cache."""
+    prefix = {
+        "decoder": jnp.array([1, 2, 3], dtype=jnp.int8),
+    }
+    value1_1 = create_default_value(prefix=prefix)
+    value1_2 = value1_1
+    assert value1_1.prefix is value1_2.prefix
+    assert value1_1.prefix["decoder"] is value1_2.prefix["decoder"]
+    value2 = value1_1.clone()
+    assert value2.prefix is not value1_1.prefix
+    assert value2.prefix["decoder"] is not value1_1.prefix["decoder"]
+    assert value2 == value1_1
 
 
 class PrefixCacheTrieTest(unittest.TestCase):
