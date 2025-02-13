@@ -33,12 +33,15 @@ import subprocess
 import sys
 import tempfile
 import time
+from google.cloud import storage
 
 import maxtext_trillium_model_configs as model_configs
 
 # Assumes you built maxtext dep image.
 # Assumes you have xpk installed in a git clone repo of ~/{wl_config.xpk_path}/xpk.py
-_DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME = 'maxtext_base_image'
+_DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME = 'gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:latest'
+
+STORAGE_SYSTEM = "ps" # "ps" or "gcsfuse"
 
 class LibTpuType(enum.Enum):
   NIGHTLY = 'nightly-libtpu'
@@ -70,7 +73,7 @@ class WorkloadConfig:
   libtpu_nightly_version: str = None # A date in %Y%M%D format, 20241201
   num_steps: int = 20
   max_restarts: int = 0
-  priority: str = "medium"
+  priority: str = "high"
   xpk_path: str = '~/xpk'
   pathways_config: PathwaysConfig = None
   run_name: str = None
@@ -326,7 +329,7 @@ def build_user_command(
       f'{config_tuning_params}',
       f'steps={wl_config.num_steps}',
       f'model_name={wl_config.model.model_type}',
-      f'base_output_directory={wl_config.base_output_directory}',
+      f'base_output_directory={wl_config.base_output_directory}/{name}',
       f'{vertex_tensorboard}',
       f'{run_name_command}'
   ])
@@ -340,6 +343,9 @@ def generate_xpk_workload_cmd(
   """Generates a command to run a maxtext model on XPK."""
 
   is_pathways_enabled = wl_config.pathways_config is not None
+
+  is_checkpointing = wl_config.model.tuning_params["enable_checkpointing"]
+  is_dataloading = wl_config.model.tuning_params["dataset_type"] != "synthetic"
 
   time.localtime()
   length_of_random_str = 3
@@ -367,6 +373,16 @@ def generate_xpk_workload_cmd(
       name=name,
       wl_config=wl_config
   )
+
+  storage_flags = ''
+  if is_checkpointing or is_dataloading:
+    storage_flags += '--storage='
+    if is_checkpointing:
+      storage_flags += f'"{STORAGE_SYSTEM}-ckpt"'
+    if is_dataloading:
+      if is_checkpointing:
+        storage_flags += ","
+      storage_flags += f'"{STORAGE_SYSTEM}-dl"'
 
   additional_flags = ''
   if not is_pathways_enabled and wl_config.libtpu_type == LibTpuType.CUSTOM:
@@ -405,6 +421,7 @@ def generate_xpk_workload_cmd(
           f' --zone={cluster_config.zone}'
           f' --device-type={cluster_config.device_type}'
           f' --num-slices={wl_config.num_slices}'
+          f' {storage_flags}'
           f' --command="{user_command}"'
           f' {docker_image_flag}'
           ' --enable-debug-logs'
@@ -438,6 +455,33 @@ def run_xpk_workload(
   )
   return run_command_with_updates(command, 'Run XPK workload')
 
+def upload_string_to_gcs(object_name, content):
+    """Uploads a string to a GCS bucket.
+
+    Args:
+        bucket_name: The name of the GCS bucket.
+        object_name: The name of the GCS object (file).
+        content: The string content to upload.
+    """
+
+    try:
+        # Initialize the GCS client
+        storage_client = storage.Client()
+
+        bucket_name = "BUCKET NAME HERE!"
+        # Get the bucket
+        bucket = storage_client.bucket(bucket_name)
+
+        # Create a new blob (object) in the bucket
+        blob = bucket.blob(object_name)
+
+        # Upload the string content to the blob
+        blob.upload_from_string(content)  # Use upload_from_string for strings
+
+        print(f"String uploaded to gs://{bucket_name}/{object_name}")
+
+    except Exception as e:
+        print(f"Error uploading string to GCS: {e}")
 
 def xpk_benchmark_runner(
     cluster_config: XpkClusterConfig,
@@ -477,7 +521,7 @@ def on_device_benchmark_runner(
 # Run maxtext_xpk_runner.py as a script for executing multiple workloads pythonically!
 def main() -> int:
   # Variables to configure:
-  output_bucket = 'gs://DIR'
+  output_bucket = '/tmp/gcsfuse'
   base_docker_image = _DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME
 
   # Set up the clusters to run workloads on!
@@ -488,18 +532,20 @@ def main() -> int:
       device_type='v5litepod-256',
   )
 
-  v6e_cluster_config = XpkClusterConfig(
-      cluster_name='v6e-256',
-      project='my-cool-project',
-      zone='us-central2-b',
-      device_type='v6e-256',
-  )
-
   xpk_workload_cmds = []
   xpk_workload_names = []
 
   list_of_models = [
-    model_configs.llama2_70b_4096_sc,
+    #model_configs.llama2_70b_4096_sc,
+    #model_configs.llama3_1_70b_8192,
+    #model_configs.llama3_1_70b_8192_synthetic
+    #model_configs.llama2_70b_4096_sc
+    #model_configs.llama2_70b_4096_sc_ckpt
+    model_configs.llama2_70b_4096_sc_real_data_grain_checkpoint
+    #model_configs.llama3_1_405b_8192_fsdp_dcn
+    #model_configs.llama3_1_405b_8192_fsdp_dcn_ckpt
+    #model_configs.llama2_70b_4096_sc_real_data_grain
+    #model_configs.llama2_70b_4096_sc
     # model_configs.default_128
   ]
 
@@ -524,12 +570,12 @@ def main() -> int:
     # Run workloads on the below clusters
     for cluster_config in [
       # v5e_cluster_config,
-      # v6e_cluster_config,
-      v6e_cluster_config_yucmhab,
+      v6e_cluster_config,
+      # v6e_cluster_config_yucmhab,
       # another_config,
     ]:
       # Run workloads in the following slice configurations
-      for num_slices in [1,]:
+      for num_slices in [1]:
         # Use the libtpu dependencies from:
         for libtpu_type in [
             # LibTpuType.CUSTOM
@@ -539,9 +585,10 @@ def main() -> int:
           wl_config = WorkloadConfig(
             model=model,
             num_slices=num_slices,
+            num_steps=105,
             device_type=cluster_config.device_type,
             base_output_directory=base_output_dir,
-            priority="medium",
+            priority="high",
             max_restarts=0,
             libtpu_type=libtpu_type,
             libtpu_nightly_version="",
@@ -563,6 +610,9 @@ def main() -> int:
     return_code = run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
     if return_code != 0:
       print('Unable to run xpk workload: {xpk_workload_name}')
+    else:
+      upload_string_to_gcs(f'{xpk_workload_name}/xpk_command.txt', xpk_workload_cmd)
+
 
   # Support Batch workloads one day. Note that this doesn't show the xpk logs per workload.
   # They are saved to file instead.

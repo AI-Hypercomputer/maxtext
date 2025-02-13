@@ -431,7 +431,6 @@ llama2_70b_4096_sc = _add_to_model_dictionary(
         "dataset_path": "gs://max-datasets-rogue",
         "dataset_type": "synthetic",
         "enable_checkpointing": False,
-        "profiler": "xplane",
         "sa_block_q": 1024,
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
@@ -491,19 +490,14 @@ llama2_70b_4096_sc_real_data_grain = _add_to_model_dictionary(
         "attention": "flash",
         "gcs_metrics": True,
         "use_iota_embed": True,
-        "dataset_path": "gs://trillium-storage-datasets-sr",
-        "base_output_directory": (
-            "gs://trillium-storage-tests-nov24-sr/long-run-dec11"
-        ),
+        "dataset_path": "/tmp/dataset",
         "enable_checkpointing": False,
         "dataset_type": "grain",
         "grain_train_files": "/tmp/dataset/array-record/c4/en/3.0.1/c4-train.array_record*",
         "grain_worker_count": 24,
-        "profiler": "xplane",
         "sa_block_q": 1024,
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
-        "profile_cleanly": False,
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -529,17 +523,16 @@ llama2_70b_4096_sc_real_data_grain_checkpoint = _add_to_model_dictionary(
         "attention": "flash",
         "gcs_metrics": True,
         "use_iota_embed": True,
-        "dataset_path": "gs://trillium-storage-datasets-sr",
+        "dataset_path": "/tmp/dataset",
         "base_output_directory": (
-            "gs://trillium-storage-tests-nov24-sr/long-run-dec11"
+            "/tmp/gcsfuse"
         ),
-        "checkpoint_period": 100,
+        "checkpoint_period": 20,
         "enable_checkpointing": True,
         "async_checkpointing": True,
         "dataset_type": "grain",
         "grain_train_files": "/tmp/dataset/array-record/c4/en/3.0.1/c4-train.array_record*",
         "grain_worker_count": 24,
-        "profiler": "xplane",
         "sa_block_q": 1024,
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
@@ -874,7 +867,7 @@ llama3_1_8b_8192 = _add_to_model_dictionary(
 )
 
 
-llama3_1_70b_8192 = _add_to_model_dictionary(
+llama3_1_70b_8192_synthetic = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
     model_name="llama3_1-70b-8192",
@@ -890,7 +883,6 @@ llama3_1_70b_8192 = _add_to_model_dictionary(
         "max_target_length": 8192,
         "attention": "flash",
         "use_iota_embed": True,
-        "dataset_path": "gs://max-datasets-rogue",
         "dataset_type": "synthetic",
         "enable_checkpointing": False,
         "sa_block_q": 2048,
@@ -902,9 +894,6 @@ llama3_1_70b_8192 = _add_to_model_dictionary(
         "sa_block_q_dq": 2048,
         "sa_block_kv_dq": 2048,
         "sa_use_fused_bwd_kernel": True,
-        "profiler": "xplane",
-        "skip_first_n_steps_for_profiler": 10,
-        "profiler_steps": 5,
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -915,7 +904,6 @@ llama3_1_70b_8192 = _add_to_model_dictionary(
     ),
   )
 )
-
 
 llama3_1_70b_129024 = _add_to_model_dictionary(
   trillium_model_dict,
