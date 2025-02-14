@@ -606,6 +606,8 @@ class MaxEngine(engine_api.Engine):
 
     def copy(path, partial_cache, full_cache, annotations):
       path_key = path[-1].key
+      if path_key in ['key_pages', 'value_pages']:
+        return full_cache
       if path_key in [
           "cache_ar_index",
           "cached_ar_key",
@@ -895,7 +897,14 @@ class MaxEngine(engine_api.Engine):
     def is_lp(k):
       return isinstance(k, flax.linen.spmd.LogicallyPartitioned)
 
-    self.kv_cache_annotations_named = jax.tree_util.tree_map(lambda x: tuple(x.names), cache, is_leaf=is_lp)
+    def get_axis_names(x):
+        if isinstance(x, flax.linen.spmd.LogicallyPartitioned):
+            return tuple(x.names)
+    self.kv_cache_annotations_named = jax.tree_util.tree_map(
+        get_axis_names,
+        cache,
+        is_leaf=lambda k: isinstance(k, (flax.linen.spmd.LogicallyPartitioned, jax.Array))
+    )
     zeroed = max_utils.unbox_logicallypartioned(init_state)
     return zeroed
 
