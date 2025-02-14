@@ -139,7 +139,7 @@ class PagedAttentionOp(nn.Module):
     mesh: any
     num_pages: int
     tokens_per_page: int
-    max_pages_per_slot: int
+    max_pages_per_group: int
     max_pages_per_prefill: int
     pages_per_compute_block: int
     num_kv_heads: int
@@ -150,9 +150,10 @@ class PagedAttentionOp(nn.Module):
     quant: Optional[Quant] = None
 
     def setup(self):
+        max_page_groups = int(self.config.per_device_batch_size * jax.device_count())
+
         print("\nPagedAttentionOp.setup() called")
-        num_slots = int(self.config.per_device_batch_size * jax.device_count())
-        print(f"  num_slots: {num_slots}")
+        print(f"  max_page_groups: {max_page_groups}")
         print(f"  num_pages: {self.num_pages}")
         print(f"  tokens_per_page: {self.tokens_per_page}")
         print(f"  num_kv_heads: {self.num_kv_heads}")
@@ -161,10 +162,10 @@ class PagedAttentionOp(nn.Module):
         self.page_manager = PageManager(
             num_pages=self.num_pages,
             tokens_per_page=self.tokens_per_page,
-            slots=num_slots,
+            max_page_groups=max_page_groups,
             max_target_length=self.config.max_target_length,
             max_prefill_predict_length=self.config.max_prefill_predict_length,
-            max_pages_per_slot=self.max_pages_per_slot,
+            max_pages_per_group=self.max_pages_per_group,
         )
 
         key_pages_init = jnp.zeros(
@@ -271,19 +272,19 @@ class PagedAttentionOp(nn.Module):
       
       # return attn_out
 
-    def get_slot_pages(self, page_map: Array, slot: int) -> Array:
-        """Get pages for a single slot."""
+    def get_page_group_pages(self, page_map: Array, page_group_id: int) -> Array:
+        """Get pages for a single page group."""
         assert len(page_map.shape) == 2
-        assert page_map.shape[1] == self.max_pages_per_slot
-        slot_pages = jax.lax.dynamic_slice(page_map, (slot, 0), (1, self.max_pages_per_slot))
-        return jnp.squeeze(slot_pages, axis=0)
+        assert page_map.shape[1] == self.max_pages_per_group
+        page_group_pages = jax.lax.dynamic_slice(page_map, (page_group_id, 0), (1, self.max_pages_per_group))
+        return jnp.squeeze(page_group_pages, axis=0)
 
-    def _paged_prefill_impl(self, key, value, start_index, true_length, slot_pages, num_full_pages):
+    def _paged_prefill_impl(self, key, value, start_index, true_length, page_group_pages, num_full_pages):
         """JIT-compatible implementation of paged prefill."""
         
         def update_full_page(i, carry):
             key_pages, value_pages = carry
-            page_idx = slot_pages[i]
+            page_idx = page_group_pages[i]
             start_idx = i * self.tokens_per_page
             
             update_idx = (0, page_idx, 0, 0)
@@ -324,7 +325,7 @@ class PagedAttentionOp(nn.Module):
         
         # Handle partial page using static shapes and masking
         def update_partial():
-            last_page_idx = slot_pages[num_full_pages]
+            last_page_idx = page_group_pages[num_full_pages]
             update_idx = (0, last_page_idx, 0, 0)
             start_pos = start_index + (num_full_pages * self.tokens_per_page)
             
@@ -385,7 +386,7 @@ class PagedAttentionOp(nn.Module):
         decoder_segment_ids: Array,
         model_mode: str,
         *,
-        slot: int,
+        page_group_id: int,
         true_length: int,
     ) -> Union[Array, Tuple[Array, Array, Array]]:
         # Initialization (return zeros of correct shape)
@@ -399,17 +400,17 @@ class PagedAttentionOp(nn.Module):
             raise NotImplementedError(
                 "Paged attention is not yet supported for training."
             )
-        if slot is not None:
+        if page_group_id is not None:
             if model_mode == common_types.MODEL_MODE_PREFILL:
-                page_state = self.page_manager(model_mode="prefill", slot=slot, true_length=true_length)
-                slot_pages = self.get_slot_pages(page_state.page_map, slot)
+                page_state = self.page_manager(model_mode="prefill", page_group_id=page_group_id, true_length=true_length)
+                page_group_pages = self.get_page_group_pages(page_state.page_map, page_group_id)
                 last_page_length = jnp.where(true_length % self.tokens_per_page == 0,
                                             self.tokens_per_page,
                                             true_length % self.tokens_per_page)
                 num_full_pages = (true_length - last_page_length) // self.tokens_per_page
                 start_index = true_length - last_page_length
                 key_pages, value_pages = self._paged_prefill_impl(
-                    key, value, start_index, true_length, slot_pages, num_full_pages
+                    key, value, start_index, true_length, page_group_pages, num_full_pages
                 )
                 self.key_pages.value = key_pages
                 self.value_pages.value = value_pages
@@ -424,9 +425,9 @@ class PagedAttentionOp(nn.Module):
                         f"Autoregressive mode expects sequence length 1, got "
                         f"key shape {key.shape}, value shape {value.shape}"
                     )
-                page_state = self.page_manager(model_mode="autoregressive", slot=slot)
-                current_page = page_state.current_page[slot]
-                current_page_position = page_state.current_page_position[slot]
+                page_state = self.page_manager(model_mode="autoregressive", page_group_id=page_group_id)
+                current_page = page_state.current_page[page_group_id]
+                current_page_position = page_state.current_page_position[page_group_id]
                 if current_page == -1:
                     raise ValueError("Invalid page allocation in autoregressive mode")
 
@@ -1471,7 +1472,7 @@ class Attention(nn.Module):
               mesh=self.mesh,
               num_pages=self.config.num_pages,
               tokens_per_page=self.config.tokens_per_page,
-              max_pages_per_slot=self.config.max_pages_per_slot,
+              max_pages_per_group=self.config.max_pages_per_group,
               max_pages_per_prefill=self.config.max_prefill_predict_length,
               pages_per_compute_block=self.config.pages_per_compute_block,
               num_kv_heads=self.num_kv_heads,
@@ -1627,7 +1628,7 @@ class Attention(nn.Module):
       model_mode: str = common_types.MODEL_MODE_TRAIN,
       deterministic: bool = False,
       page_state: Optional[PageState] = None,
-      slot: Optional[int] = None,
+      page_group_id: Optional[int] = None,
       true_length: Optional[int] = None,
   ):
       print(f"\nAttention.__call__() called")
@@ -1636,7 +1637,7 @@ class Attention(nn.Module):
       print(f"  input shapes:")
       print(f"    inputs_q: {inputs_q.shape}")
       print(f"    inputs_kv: {inputs_kv.shape}")
-      print(f"    slot: {slot}")
+      print(f"    page_group_id: {page_group_id}")
 
       inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
@@ -1644,14 +1645,13 @@ class Attention(nn.Module):
       if self.config.attention == "paged":
         # If using paged attention, perform ONLY the projections and RoPE,
         # then call PagedAttentionOp directly and bypass all AttentionOp logic.
-
         if self.config.fused_qkv:
             query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
         else:
             query = self.query_projection(inputs_q)
             key = self.kv_projection(inputs_kv, proj_name="key")
             value = self.kv_projection(inputs_kv, proj_name="value")
-        query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")  # Keep RoPE
+        query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
         key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
 
         if model_mode == common_types.MODEL_MODE_PREFILL:
@@ -1663,23 +1663,22 @@ class Attention(nn.Module):
             key = nn.with_logical_constraint(key, self.key_axis_names)
             value = nn.with_logical_constraint(value, self.value_axis_names)
 
-        query = checkpoint_name(query, "query_proj")  # Keep checkpoint names
+        query = checkpoint_name(query, "query_proj")
         key = checkpoint_name(key, "key_proj")
         value = checkpoint_name(value, "value_proj")
-        # Call PagedAttentionOp and apply *its* out_projection.
+        # Call PagedAttentionOp and apply its out_projection.
         out = self.attention_op(
             query=query,
             key=key,
             value=value,
             decoder_segment_ids=decoder_segment_ids,
             model_mode=model_mode,
-            slot=slot,
+            page_group_id=page_group_id,
             true_length=true_length,
         )
-        return out  # Return directly from PagedAttentionOp
+        return out
 
-      else:  # config.attention != "paged" (Use AttentionOp)
-        # Original AttentionOp logic.
+      else:
         if self.config.fused_qkv:
             query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
         else:

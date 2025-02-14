@@ -129,7 +129,7 @@ class LlamaDecoderLayer(nn.Module):
         deterministic=deterministic,
         model_mode=model_mode,
         page_state=page_state,
-        slot=slot,
+        page_group_id=slot,
         true_length=true_length,
     )
 
