@@ -102,75 +102,64 @@ export HUGGING_FACE_TOKEN=<your_hugging_face_token>
 huggingface-cli login --token $HUGGING_FACE_TOKEN
 ```
 
-### Offline Server - Test Run
+### Run Offline Benchmarks
+
+#### For trillium
 #### LLama2-70b:
 ```
-cd ~/maxtext/MaxText/inference_mlperf
-export TOKENIZER_PATH="/home/${USER}/maxtext/assets/tokenizer.llama2
-export BATCH_AND_PREFILL_LEN="1024,20"
-export MAXENGINE_ARGS="model_name=llama2-70b tokenizer_path=${TOKENIZER_PATH}  quantization=int8 quantize_kvcache=True load_parameters_path=${SAVE_QUANT_PARAMS_PATH} checkpoint_is_quantized=True"
-
-bash ./llama_offline_run.sh -p -t
+cd ~/maxtext/MaxText/inference_mlperf/trillium
 ```
+
+##### Test Run
+```
+bash benchmarks_llama2-70b-trillium_2x4.sh -b=performance -t
+```
+
+##### Performance Only:
+```
+bash benchmarks_llama2-70b-trillium_2x4.sh -b=performance
+```
+
+##### Accuracy Only:
+```
+bash benchmarks_llama2-70b-trillium_2x4.sh -b=accuracy
+```
+
+##### Audit Only:
+```
+bash benchmarks_llama2-70b-trillium_2x4.sh -b=audit
+```
+
+##### Run all benchmarks:
+```
+bash benchmarks_llama2-70b-trillium_2x4.sh -b=all
+```
+
 #### Mixtral-8x7b:
 ```
-cd ~/maxtext/MaxText/inference_mlperf
-export TOKENIZER_PATH="/home/${USER}/maxtext/assets/tokenizer.mistral-v1
-export BATCH_AND_PREFILL_LEN="2048,18"
-export MAXENGINE_ARGS="model_name=mixtral-8x7b tokenizer_path=${TOKENIZER_PATH}  quantization=int8 quantize_kvcache=True load_parameters_path=${SAVE_QUANT_PARAMS_PATH} checkpoint_is_quantized=True megablox=False sparse_matmul=False capacity_factor=1 model_call_mode=inference"
-
-bash ./mixtral_offline_run.sh -p -t
-```
-
-### Offline Benchmarks
-
-#### For v5e
-```
-export BATCH_AND_PREFILL_LEN="256,80|512,40|1024,20"
-export MAXENGINE_ARGS="model_name=llama2-70b tokenizer_path=${TOKENIZER_PATH}  quantization=int8 quantize_kvcache=True load_parameters_path=${SAVE_QUANT_PARAMS_PATH} checkpoint_is_quantized=True compute_axis_order=0,1,2,3 ar_cache_axis_order=0,1,2,3"
-```
-
-#### For v6
-#### LLama2-70b:
-```
-export BATCH_AND_PREFILL_LEN=“256,216|512,108|1024,54”
-export MAXENGINE_ARGS="model_name=llama2-70b tokenizer_path=${TOKENIZER_PATH}  quantization=int8 quantize_kvcache=True load_parameters_path=${SAVE_QUANT_PARAMS_PATH} checkpoint_is_quantized=True compute_axis_order=0,2,1,3 ar_cache_axis_order=0,2,1,3"
-```
-#### Mixtral-8x7b:
-export BATCH_AND_PREFILL_LEN="256,144|512,72|2048,18"
+export PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES="256,144|512,72|2048,18"
 export MAXENGINE_ARGS="model_name=mixtral-8x7b tokenizer_path=${TOKENIZER_PATH}  quantization=int8 quantize_kvcache=True load_parameters_path=${SAVE_QUANT_PARAMS_PATH} checkpoint_is_quantized=True megablox=False sparse_matmul=False capacity_factor=1 model_call_mode=inference compute_axis_order=0,2,1,3 ar_cache_axis_order=0,2,1,3"
-
-#### Run offline performance benchmark
-#### LLama2-70b:
-```
-bash ./llama_offline_run.sh -p
-```
-#### Mixtral-8x7b:
-```
-bash ./mixtral_offline_run.sh -p
 ```
 
-#### Run offline accuracy benchmark
-#### LLama2-70b:
+##### Test Run
 ```
-bash ./llama_offline_run.sh -a
+bash ./mixtral_offline_run.sh -t
 ```
-#### Mixtral-8x7b:
+
+##### Performance Only:
+```
+bash ./mixtral_offline_run.sh
+```
+
+##### Accuracy Only:
 ```
 bash ./mixtral_offline_run.sh -a
 ```
 
-#### Run offline audit benchmark
-#### LLama2-70b:
-```
-bash ./llama_offline_run.sh -d
-
-```
-#### Mixtral-8x7b:
+##### Audit Only:
 ```
 bash ./mixtral_offline_run.sh -d
 ```
-
 
 ### Profiling
 

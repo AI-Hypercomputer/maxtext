@@ -42,7 +42,7 @@ jobs:
       device_type: tpu
       device_name: v4-8
       build_mode: stable_stack
-      base_image: us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:latest
+      base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
 
   gpu_image:
     needs: prelim
@@ -51,6 +51,7 @@ jobs:
       device_type: gpu
       device_name: a100-40gb-4
       build_mode: pinned
+      base_image: gcr.io/tpu-prod-env-multipod/maxtext_gpu_jax_pinned:latest
 
   tpu_unit_tests:
     needs: tpu_image
@@ -100,15 +101,30 @@ jobs:
       tf_force_gpu_allow_growth: true
       container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
 
-
   clean_up:
     if: ${{ always() }}  # always execute, regardless of previous jobs or steps.
     needs: [gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
     name: "Clean up"
     runs-on: ["self-hosted"]
+    permissions:
+      contents: read
+      issues: write  # for failed-build-issue
     steps:
     - name: Delete GPU image
       run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:gpu --force-delete-tags --quiet
     - name: Delete TPU image
       run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu --force-delete-tags --quiet
 
+  notify:
+    name: Notify failed build # creates an issue or modifies last open existing issue for failed build
+    needs: [gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
+    runs-on: ["self-hosted"]
+    steps:
+    - name: Check whether one of the jobs failed
+      if: ${{ failure() && github.event.pull_request == null }}
+      uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+    - name: Log message if dependent job succeeded
+      if: ${{ ! (failure() && github.event.pull_request == null) }}
+      run: echo "Conditions for creating/updating issue not met. Skipping."
