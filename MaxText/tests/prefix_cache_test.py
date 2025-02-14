@@ -14,7 +14,7 @@
 
 """Prefix Cache Test"""
 
-from prefix_cache import HBMCache, PrefixCacheTrie, Value
+from prefix_cache import HBMCache, PrefixCache, PrefixCacheTrie, Value
 
 import unittest
 import jax
@@ -237,6 +237,42 @@ class HBMCacheTest(unittest.TestCase):
     hbm_cache.add_to_cache((2), value2)
     assert hbm_cache.retrieve_from_cache((1)) == value1
     assert hbm_cache.retrieve_from_cache((2)) == value2
+
+
+class PrefixCacheTest(unittest.TestCase):
+
+  def test_cache_miss_save_hit_load(self):
+    hbm_bytes = 64 * 1024 * 1024 * 1024  # 64 GB
+    prefix_cache = PrefixCache(hbm_bytes)
+    tokens = (1, 2, 3)
+    no_matched_key = prefix_cache.fetch_longest_common_prefix_key(tokens)
+    # first seen prefix will not match any key
+    assert no_matched_key is None
+    # Use dummy cache which should be returned from prefill: cache, _ = prefill(tokens)
+    kv_cache = {
+        "decoder": {
+            "layer_0": {
+                "cached_prefill_key": jnp.array([1, 2, 3, 0, 0, 0, 0, 0], dtype=jnp.bfloat16),
+                "cached_prefill_value": jnp.array([1, 2, 3, 0, 0, 0, 0, 0], dtype=jnp.bfloat16),
+            },
+            "layer_1": {
+                "cached_prefill_key": jnp.array([1, 2, 3, 0, 0, 0, 0, 0], dtype=jnp.bfloat16),
+                "cached_prefill_value": jnp.array([1, 2, 3, 0, 0, 0, 0, 0], dtype=jnp.bfloat16),
+            },
+        }
+    }
+    # Should copy kv_cache before saved if the kv_cache is used after saved.
+    kv_cache_copy = jax.tree_util.tree_map(lambda x: x.copy(), kv_cache)
+    saved_value = Value(prefix=kv_cache_copy, true_length=len(tokens), padded_length=len(tokens), tokens=tokens)
+    prefix_cache.save(tokens, saved_value)
+
+    tokens_with_common_prefix = tokens + (4, 5, 6)
+    matched_key = prefix_cache.fetch_longest_common_prefix_key(tokens_with_common_prefix)
+    assert matched_key == tokens
+    loaded_value = prefix_cache.load(matched_key)
+    assert loaded_value == saved_value
+
+
 
 
 if __name__ == "__main__":
