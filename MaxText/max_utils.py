@@ -38,6 +38,7 @@ import max_logging
 
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
+import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
 
 import json
@@ -63,10 +64,6 @@ def with_memory_kind(t, memory_kind):
 def cast_dtype_from_to(nest, src, dst):
   """All items in nest with dtype src are casted to dtype dst."""
   return jax.tree_util.tree_map(lambda t: t.astype(dst) if t.dtype == src else t, nest)
-
-
-def cast_to_bf16(params):
-  return cast_dtype_from_to(params, np.float32, jnp.bfloat16)
 
 
 def find_nans_and_infs(pytree):
@@ -318,6 +315,39 @@ def initialize_jax_for_cpu(raw_keys):
   )
 
 
+def _wait_for_file_to_disappear(f, timeout=300):
+  for _ in range(timeout):
+    if not f.exists():
+      return True
+    time.sleep(1)
+  return False
+
+
+def _extract_step(f):
+  # The base file name is formatted as {job_name}-s{step}-n{node_rank}-g{gpu_rank}
+  return f.rsplit("-", 3)[1][1:]
+
+
+def _block_and_proces_restore_dir(directory, timeout=300):
+  """Block until a file ending with `.restore` appears, then extract the step number and rename
+  the directory using the step number.
+  """
+  WORD = ".restore"
+  for _ in range(timeout):
+    files = os.listdir(directory)
+    for f in files:
+      if f.endswith(WORD):
+        step = _extract_step(f)
+        if step != "0":
+          os.rename(epath.Path(directory) / f, epath.Path(directory) / step)
+          max_logging.log(f"Found a restore directory at step {step} and renamed it to {epath.Path(directory) / step}.")
+        else:
+          max_logging.log("Found a restore directory at step 0, skipping renaming.")
+        return
+    time.sleep(1)
+  max_logging.log(f"{timeout} seconds have passed but no .restore file was found.")
+
+
 def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
   """Initialize JAX distributed runtime for TPUs when emergency checkpointing is used.
   The information required to initialize JAX distributed runtime will be written by GKE to
@@ -340,6 +370,11 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
       REPLICATOR_FILE = "replicator.yaml"
       TEMP_FILE = REPLICATOR_FILE + ".tmp"
       replicator_file = epath.Path(raw_keys["local_checkpoint_directory"]) / REPLICATOR_FILE
+      if not _wait_for_file_to_disappear(replicator_file):
+        max_logging.log("There is existing replicator.yaml which did not disappear in time.")
+      else:
+        max_logging.log("replicator.yaml no longer exists, creating new replicator.yaml.")
+      TEMP_FILE = REPLICATOR_FILE + ".tmp"
       temp_file = epath.Path(raw_keys["local_checkpoint_directory"]) / TEMP_FILE
       num_slices = get_num_slices(raw_keys)
       num_nodes = jax.process_count()
@@ -366,6 +401,11 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
 
       temp_file.write_text("\n".join([l.strip() for l in replicator_yaml.split("\n")]))
       os.rename(temp_file, replicator_file)
+      if not _wait_for_file_to_disappear(replicator_file):
+        max_logging.log("The newly created replicator.yaml was not deleted in time.")
+      else:
+        max_logging.log("The newly created replicator.yaml was deleted, moving forward.")
+      _block_and_proces_restore_dir(raw_keys["local_checkpoint_directory"])
   else:
     max_logging.log(
         "Initializing JAX distributed runtime without args when emergency checkpointing is"
@@ -567,6 +607,30 @@ def is_valid_custom_mesh(ici_parallelism, strategy):
     raise ValueError(f"The strategy {strategy} to reshape the mesh is invalid.")
 
 
+def optimize_mesh_for_tpu_v6e(mesh, devices):
+  """Apply transformations to the mesh to optimize for TPU v6e"""
+  if devices[0].device_kind != "TPU v6 lite":
+    return mesh
+  num_devices = len(devices)
+  mesh_is_1d_ring = num_devices in mesh.shape
+  if not mesh_is_1d_ring:
+    return mesh
+  # check that the physical topology is 2x4
+  device_coords = [d.coords for d in devices]
+  coord_size = len(device_coords[0])
+  max_coords = tuple(max(dc[i] for dc in device_coords) for i in range(coord_size))
+  min_coords = tuple(min(dc[i] for dc in device_coords) for i in range(coord_size))
+  dims = tuple(h - l + 1 for (h, l) in zip(max_coords, min_coords))
+  if dims != (2, 4, 1):
+    return mesh
+  axis_idx = mesh.shape.index(num_devices)
+  new_mesh = np.moveaxis(mesh, axis_idx, 0)
+  new_mesh[4:] = new_mesh[-1:3:-1]
+  new_mesh = np.moveaxis(new_mesh, 0, axis_idx)
+  max_logging.log("Optimized the mesh for TPU v6e")
+  return new_mesh
+
+
 def create_device_mesh(config, devices=None):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
   if devices is None:
@@ -616,6 +680,8 @@ def create_device_mesh(config, devices=None):
           ici_parallelism,
           devices,
       )
+      if config.optimize_mesh_for_tpu_v6e:
+        mesh = optimize_mesh_for_tpu_v6e(mesh, devices)
 
   max_logging.log(f"Num_devices: {num_devices}, shape {mesh.shape}")
 
@@ -758,7 +824,13 @@ def setup_initial_state(
     )
 
     if restored:
-      if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
+      if isinstance(
+          checkpoint_manager,
+          (
+              emergency_checkpoint_manager.CheckpointManager,
+              emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
+          ),
+      ):
         state = restored
       else:
         if "iter" in restored and restored["iter"] is not None:

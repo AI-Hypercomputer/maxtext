@@ -36,6 +36,7 @@ import jax
 import numpy as np
 import orbax.checkpoint
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
+import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
 import checkpointing
 import max_utils
@@ -144,7 +145,8 @@ def write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step
     steps_to_write = step
 
   if metrics_to_write:
-    write_metrics_to_tensorboard(writer, metrics_to_write, steps_to_write, config, is_training)
+    if config.enable_tensorboard:
+      write_metrics_to_tensorboard(writer, metrics_to_write, steps_to_write, config, is_training)
 
     if config.metrics_file:
       max_utils.write_metrics_locally(metrics_to_write, steps_to_write, config, local_metrics_file, is_training)
@@ -225,7 +227,13 @@ def save_checkpoint(
     chunk_byte_size = config.checkpoint_storage_target_data_file_size_bytes
   save_args = jax.tree.map(lambda _: orbax.checkpoint.SaveArgs(chunk_byte_size=chunk_byte_size), state)
 
-  if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
+  if isinstance(
+      checkpoint_manager,
+      (
+          emergency_checkpoint_manager.CheckpointManager,
+          emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
+      ),
+  ):
     return checkpoint_manager.save(
         step,
         args=orbax.checkpoint.args.PyTreeSave(item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size),
@@ -519,11 +527,9 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   else:
     if config.optimizer_memory_host_offload:
       cast_params = jax.device_put(state.params, max_utils.with_memory_kind(state_mesh_shardings.params, "device"))
-      cast_params = max_utils.cast_to_bf16(cast_params)
       state = state.replace(params=cast_params)
       if config.use_dpo:
         reference_params = jax.device_put(reference_params, max_utils.with_memory_kind(reference_params_sharding, "device"))
-        reference_params = max_utils.cast_to_bf16(reference_params)
         extra_dpo_args = [reference_params]
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
@@ -895,10 +901,10 @@ def train_loop(config, state=None):
         state, metrics = p_train_step(state, example_batch, nextrng)
 
     step_time_delta = datetime.datetime.now() - last_step_completion
+    last_step_completion = datetime.datetime.now()
     record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
     if performance_metric_queue:
       performance_metric_queue.put(step_time_delta.total_seconds())
-    last_step_completion = datetime.datetime.now()
 
     if checkpoint_manager is not None:
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
@@ -1020,9 +1026,14 @@ def main(argv: Sequence[str]) -> None:
         monitoring_enabled=True,
         pathway_enabled=config.enable_pathways_goodput,
         include_badput_breakdown=True,
+        include_step_deviation=config.monitor_step_time_deviation,
+        step_deviation_interval_seconds=config.step_deviation_interval_seconds,
     )
     goodput_monitor.start_goodput_uploader()
     max_logging.log("Started Goodput upload to Tensorboard in the background!")
+    if config.monitor_step_time_deviation:
+      goodput_monitor.start_step_deviation_uploader()
+      max_logging.log("Started step time deviation upload to Tensorboard in the background!")
   debug_config = debug_configuration.DebugConfig(
       stack_trace_config=stack_trace_configuration.StackTraceConfig(
           collect_stack_trace=config.collect_stack_trace,

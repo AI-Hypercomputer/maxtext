@@ -10,20 +10,26 @@ Two approaches are here:
 - **benchmark_runner.py**: A cli interface to running a specific model recipe, on pathways or mcjax directly or with orchestration like xpk with one command.
 
 ```shell
-# McJax
+# McJax with XPK
 CLUSTER=my-cluster
 ZONE=my-zone
 PROJECT=my-project
-python3 benchmarks/benchmark_runner.py --project $PROJECT --zone $ZONE --cluster_name $CLUSTER --device_type v6e-256 --base_output_directory gs://maxtext-experiments-tpem/ --num_steps=5
+python3 benchmarks/benchmark_runner.py xpk --project $PROJECT --zone $ZONE --cluster_name $CLUSTER --device_type v6e-256 --base_output_directory gs://maxtext-experiments-tpem/ --num_steps=5
 ```
 
 ```shell
-# Pathways
+# Pathways with XPK
 export RUNNER=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable
 export PROXY_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/proxy_server:latest
 export SERVER_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/server:latest
 
-python3 benchmarks/benchmark_runner.py --project $PROJECT --zone $ZONE --cluster_name $CLUSTER --device_type v6e-256 --base_output_directory gs://maxtext-experiments-tpem/ --num_steps=5 --pathways_server_image="${SERVER_IMAGE}" --pathways_proxy_image="${PROXY_IMAGE}" --pathways_runner_image="${RUNNER}"
+python3 benchmarks/benchmark_runner.py xpk --project $PROJECT --zone $ZONE --cluster_name $CLUSTER --device_type v6e-256 --base_output_directory gs://maxtext-experiments-tpem/ --num_steps=5 --pathways_server_image="${SERVER_IMAGE}" --pathways_proxy_image="${PROXY_IMAGE}" --pathways_runner_image="${RUNNER}"
+```
+
+```shell
+# On-device
+# Run model benchmark on current device (must run same command on all workers).
+python3 benchmarks/benchmark_runner.py on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name="test-run" --num_steps=5
 ```
 
 - **maxtext_xpk_runner.py**: A pythonic way to run xpk workloads! With the magic of for looping and python code, run several xpk workloads across a sweep of parameters including libtpu version, gke clusters, and maxtext parameters with one python script.

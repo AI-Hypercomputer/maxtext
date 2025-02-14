@@ -196,4 +196,3 @@ else
     echo -e "\n\nError: You can only set MODE to [stable,nightly,libtpu-only].\n\n"
     exit 1
 fi
-
