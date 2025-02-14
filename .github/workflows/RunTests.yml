@@ -44,14 +44,14 @@ jobs:
   #     build_mode: stable_stack
   #     base_image: us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:latest
 
-  # tpu_pathways_image:
-  #   needs: prelim
-  #   uses: ./.github/workflows/build_upload_internal.yml
-  #   with:
-  #     device_type: tpu_pathways
-  #     device_name: v4-8
-  #     build_mode: stable_stack
-  #     base_image: us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:latest
+  tpu_pathways_image:
+    needs: prelim
+    uses: ./.github/workflows/build_upload_internal.yml
+    with:
+      device_type: tpu_pathways
+      device_name: v4-8
+      build_mode: stable_stack
+      base_image: us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:latest
 
   # gpu_image:
   #   needs: prelim
@@ -74,7 +74,7 @@ jobs:
   #     container_resource_option: "--privileged"
   
   tpu_pathways_unit_tests:
-    needs: [prelim]
+    needs: [tpu_pathways_image]
     uses: ./.github/workflows/run_tests_internal.yml
     with:
       device_type: tpu_pathways

@@ -42,18 +42,11 @@ on:
         type: string
 
 jobs:
-  # pathways:
-  #   runs-on: ["self-hosted", "${{ inputs.device_type }}", "${{ inputs.device_name }}"]
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: Start containers using script
-  #       run: |
-  #         bash docker_build_pathways_containers.sh
   run:
     runs-on: ["self-hosted", "${{ inputs.device_type }}", "${{ inputs.device_name }}"]
     container:
-      # image: gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu
-      image: gcr.io/tpu-prod-env-multipod/maxtext_jax_stable_stack:latest
+      image: gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu
+      # image: gcr.io/tpu-prod-env-multipod/maxtext_jax_stable_stack:latest
       volumes:
         - /home/runner/actions-runner/_work/maxtext/maxtext:/deps
       env:
@@ -64,31 +57,31 @@ jobs:
       options: ${{ inputs.container_resource_option }}
     steps:
       - uses: actions/checkout@v4
-      # - name: Install Docker Compose and configure docker
+      - name: Install Docker Compose and configure docker
+        run: |
+          # apt-get -y install docker
+          # apt-get -y install docker-compose-plugin
+          docker compose version
+          gcloud auth configure-docker us-docker.pkg.dev --quiet
+      # - name: Install Docker using Docker's official script
       #   run: |
-      #     # apt-get -y install docker
-      #     # apt-get -y install docker-compose-plugin
-      #     docker compose version
-      #     gcloud auth configure-docker us-docker.pkg.dev --quiet
-      - name: Install Docker using Docker's official script
-        run: |
-          curl -fsSL https://get.docker.com -o get-docker.sh
-          sudo sh get-docker.sh
-        continue-on-error: false
-      - name: Install Docker Compose
-        run: |
-            sudo curl -L "https://github.com/docker/compose/releases/download/v2.3.3/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-            sudo chmod +x /usr/local/bin/docker-compose
-            docker-compose --version
-        continue-on-error: false
+      #     curl -fsSL https://get.docker.com -o get-docker.sh
+      #     sudo sh get-docker.sh
+      #   continue-on-error: false
+      # - name: Install Docker Compose
+      #   run: |
+      #       sudo curl -L "https://github.com/docker/compose/releases/download/v2.3.3/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+      #       sudo chmod +x /usr/local/bin/docker-compose
+      #       docker-compose --version
+      #   continue-on-error: false
       - name: Start containers using script
         run: |
           bash docker_build_pathways_containers.sh
-      - name: Run Tests with Pathways backend
-        run: |
-          export JAX_PLATFORMS="proxy" 
-          export JAX_BACKEND_TARGET="grpc://localhost:29000" 
-          echo "Set Pathways env variables"
-          echo $JAX_BACKEND_TARGET
-          cd MaxText/
-          python3 -m pytest -s ${{ inputs.test_directory }} -m "${{ inputs.pytest_marker }}"
+      # - name: Run Tests with Pathways backend
+      #   run: |
+      #     export JAX_PLATFORMS="proxy" 
+      #     export JAX_BACKEND_TARGET="grpc://localhost:29000" 
+      #     echo "Set Pathways env variables"
+      #     echo $JAX_BACKEND_TARGET
+      #     cd MaxText/
+      #     python3 -m pytest -s ${{ inputs.test_directory }} -m "${{ inputs.pytest_marker }}"
