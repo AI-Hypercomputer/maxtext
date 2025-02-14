@@ -16,6 +16,7 @@
 
 from prefix_cache import HBMCache, PrefixCache, PrefixCacheTrie, Value
 
+import pytest
 import unittest
 import jax
 import jax.numpy as jnp
@@ -243,7 +244,7 @@ class PrefixCacheTest(unittest.TestCase):
 
   def test_cache_miss_save_hit_load(self):
     hbm_bytes = 64 * 1024 * 1024 * 1024  # 64 GB
-    prefix_cache = PrefixCache(hbm_bytes)
+    prefix_cache = PrefixCache(hbm_bytes=hbm_bytes)
     tokens = (1, 2, 3)
     no_matched_key = prefix_cache.fetch_longest_common_prefix_key(tokens)
     # first seen prefix will not match any key
@@ -272,7 +273,49 @@ class PrefixCacheTest(unittest.TestCase):
     loaded_value = prefix_cache.load(matched_key)
     assert loaded_value == saved_value
 
+  @pytest.mark.tpu_only
+  def test_hbm_memory_usage(self):
+    """Test HBM memory change.
+    Create the class instance will not pre allocate memory.
+    Save the cache will move without copy.
+    Load the cache will copy from cache.
+    Clear the cache will clear the saved cache.
+    """
+    device = jax.local_devices(0)[0]
 
+    def get_byte_in_use():
+      jax.clear_caches()
+      return device.memory_stats()["bytes_in_use"]
+
+    pre_bytes_in_use = get_byte_in_use()
+    hbm_bytes = 1024
+    prefix_cache = PrefixCache(hbm_bytes=hbm_bytes)
+    # prefix_cache will not pre allocate the memory
+    assert pre_bytes_in_use == get_byte_in_use()
+    prefix = {"cached_prefill_key": jnp.array([1, 2, 3, 4], dtype=jnp.bfloat16, device=device)}
+    prefix_create_bytes_in_use = get_byte_in_use()
+    # memory would be allocated with chunked minimum size
+    prefix_bytes = prefix_create_bytes_in_use - pre_bytes_in_use
+    assert prefix_create_bytes_in_use == pre_bytes_in_use + prefix_bytes
+    key = (1, 2, 3)
+    prefix_cache.save(key, create_default_value(prefix=prefix))
+    # cache save will not copy
+    assert prefix_create_bytes_in_use == get_byte_in_use()
+    del prefix
+    # prefix move into the cache
+    assert prefix_create_bytes_in_use == get_byte_in_use()
+    loaded_value = prefix_cache.load(key)
+    assert loaded_value is not None
+    loaded_bytes_in_use = get_byte_in_use()
+    # load cache copy from cache
+    assert loaded_bytes_in_use == prefix_create_bytes_in_use + prefix_bytes
+    del loaded_value
+    del_loaded_bytes_in_use = get_byte_in_use()
+    assert del_loaded_bytes_in_use == loaded_bytes_in_use - prefix_bytes
+    prefix_cache.clear()
+    clear_bytes_in_use = get_byte_in_use()
+    assert clear_bytes_in_use == del_loaded_bytes_in_use - prefix_bytes
+    assert prefix_cache.load(key) is None
 
 
 if __name__ == "__main__":
