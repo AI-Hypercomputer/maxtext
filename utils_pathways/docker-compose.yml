@@ -5,7 +5,6 @@ services:
   resource_manager:
     image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
     network_mode: host
-    # network_mode: bridge
     ports:
       - "29001:29001"
       - "29002:29002"
@@ -23,7 +22,6 @@ services:
   worker:
     image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
     network_mode: host
-    # network_mode: bridge
     ports:
       - "29005:29005"
       - "29006:29006"
@@ -34,8 +32,6 @@ services:
       - --server_port=29005
       - --resource_manager_address=localhost:29001
       - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
-    # depends_on:
-    #   - resource_manager
     environment:
       - TPU_WORKER_ID=0
       - TPU_WORKER_HOSTNAME=localhost
@@ -48,7 +44,6 @@ services:
   proxy:
     image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest
     network_mode: host
-    # network_mode: bridge
     ports:
       - "29000:29000"
     command:
@@ -57,17 +52,19 @@ services:
       - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
 
 
-  # maxtext:
-  #   image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest
-  #   # us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest
-  #   # gcr.io/tpu-prod-env-multipod/maxtext_jax_stable_stack:latest
-  #   network_mode: host
-  #   environment:
-  #     - JAX_PLATFORMS="proxy"
-  #     - JAX_BACKEND_TARGET="grpc://localhost:29000"
-  #   entrypoint: "/bin/bash"
-  #   command:
-  #     - "ls "
+  maxtext:
+    image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest
+    network_mode: host
+    privileged: true
+    volumes: 
+      - ../:/deps
+    environment:
+      - JAX_PLATFORMS=proxy
+      - JAX_BACKEND_TARGET=grpc://localhost:29000
+    entrypoint: ["bash", "-c"]
+    command:
+      - "cd MaxText ; python3 -m pytest -s tests/train_tests.py -m tpu_only"
+      # - "cd MaxText ; python3 -m pytest -m tpu_only tests -s"
 
 #### LOCAL NETWORK
 
