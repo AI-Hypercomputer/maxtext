@@ -116,15 +116,16 @@ def main(config, test_args):
       )
     full_train_logits = jax.experimental.multihost_utils.process_allgather(full_train_logits)
     max_logging.log(f"{golden_logits[2]=}")
-    max_logging.log(f"{full_train_logits[0, 2, :]=}")
+    max_logging.log(f"{full_train_logits[..., 0, 2, :]=}")
     token_size = int(test_args.token_size) if test_args.token_size else golden_logits.shape[0]
+    vocab_size = int(test_args.vocab_size) if test_args.vocab_size else golden_logits.shape[-1]
     # The ellipsis is used to currently support jax nightly versions newer than 1/9/2025 and stable tests. This can be simplified later
     max_logging.log(
-        f"Max Numerical Difference {np.max(np.subtract(full_train_logits[..., 0, :token_size, :], golden_logits[:token_size, :]))}"
+        f"Max Numerical Difference {np.max(np.subtract(full_train_logits[..., 0, :token_size, :vocab_size], golden_logits[:token_size, :vocab_size]))}"
     )
 
-    model_probabilities = jax.nn.softmax(full_train_logits[..., 0, :token_size, :], axis=-1)
-    golden_probabilities = jax.nn.softmax(golden_logits[:token_size, :], axis=-1)
+    model_probabilities = jax.nn.softmax(full_train_logits[..., 0, :token_size, :vocab_size], axis=-1)
+    golden_probabilities = jax.nn.softmax(golden_logits[:token_size, :vocab_size], axis=-1)
 
     max_logging.log(f"{golden_probabilities[1]=}")
     max_logging.log(f"{model_probabilities[1]=}")
@@ -140,8 +141,8 @@ def main(config, test_args):
     else:
       max_logging.log("Checking Numerical Differences between train logits and golden logits")
       assert jax.numpy.allclose(
-          full_train_logits[..., 0, :token_size, :],
-          golden_logits[:token_size, :],
+          full_train_logits[..., 0, :token_size, :vocab_size],
+          golden_logits[:token_size, :vocab_size],
           rtol=float(test_args.rtol),
           atol=float(test_args.atol),
           equal_nan=False,
@@ -156,6 +157,7 @@ if __name__ == "__main__":
   parser.add_argument("--atol", type=float, required=False, default=0.1)
   parser.add_argument("--rtol", type=float, required=False, default=0.1)
   parser.add_argument("--token_size", type=int, required=False)
+  parser.add_argument("--vocab_size", type=int, required=False)
   parser.add_argument("--max_kl_div", type=float, required=False, default=None)
   parser.add_argument("--golden_logits_path", type=str, required=False, default="")
   parser.add_argument("--hf_model_path", type=str, required=False, default="")
@@ -163,7 +165,7 @@ if __name__ == "__main__":
 
   # Remove args defined in this test file to avoid error from pyconfig
   model_args = sys.argv
-  to_remove_args = ["--atol", "--rtol", "--token_size", "--max_kl_div", "--golden_logits_path", "--hf_model_path"]
+  to_remove_args = ["--atol", "--rtol", "--token_size", "--vocab_size", "--max_kl_div", "--golden_logits_path", "--hf_model_path"]
   for arg in to_remove_args:
     model_args = [s for s in model_args if not s.startswith(arg)]
 

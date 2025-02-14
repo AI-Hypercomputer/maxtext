@@ -74,12 +74,18 @@ def load_hf_model(model_size):
   """
   if model_size == "llama2-7b":
     model = LlamaForCausalLM.from_pretrained("meta-llama/Llama-2-7b-hf")
+  elif model_size == "llama2-70b":
+    config = AutoConfig.from_pretrained("meta-llama/Llama-2-70b-hf")
+    model = AutoModelForCausalLM.from_config(config)
   elif model_size == "mistral-7b":
     model = MistralForCausalLM.from_pretrained("mistralai/Mistral-7B-v0.1")
   elif model_size == "mixtral-8x7b":
     model = AutoModelForCausalLM.from_pretrained("mistralai/Mixtral-8x7B-v0.1", device_map="auto")
   elif model_size == "llama3.1-8b":
     config = AutoConfig.from_pretrained("meta-llama/Llama-3.1-8B")
+    model = AutoModelForCausalLM.from_config(config)
+  elif model_size == "llama3.1-70b":
+    config = AutoConfig.from_pretrained("meta-llama/Llama-3.1-70B")
     model = AutoModelForCausalLM.from_config(config)
   else:
     raise NotImplementedError
