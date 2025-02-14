@@ -53,6 +53,10 @@ CF_FOR_ALL_REDUCE = (
     " --xla_enable_async_all_reduce=true"
 )
 
+MXLA_HIERARCHICAL_COllECTIVES = (
+    " --megascale_dcn_topology=tree{nodes{slice_ranges{slice_id_start:0,slice_id_end:30}}nodes{slice_ranges{slice_id_start:30,slice_id_end:60}}}"
+)
+
 # Continuation Fusion (CF) for All Gather and All Reduce Collectives.
 # Continuation Fusion is a form of parallelizing compute work with collectives.
 CF_FOR_ALL_REDUCE_AND_ALL_GATHER = (

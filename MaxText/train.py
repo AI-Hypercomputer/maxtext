@@ -993,6 +993,10 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+  # os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --megascale_dcn_topology=tree{nodes{slice_ranges{slice_id_start:0,slice_id_end:2}}nodes{slice_ranges{slice_id_start:2,slice_id_end:4}}}"
+  # os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --megascale_dcn_topology=tree{nodes{slice_ranges{slice_id_start:0,slice_id_end:25}}nodes{slice_ranges{slice_id_start:25,slice_id_end:50}}}"
+
+  # print(os.environ["LIBTPU_INIT_ARGS"])
   pyconfig.initialize(argv)
   config = pyconfig.config
   max_utils.print_system_information()
