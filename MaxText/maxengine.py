@@ -300,7 +300,7 @@ class MaxEngine(engine_api.Engine):
 
     return self.prefill(params=params, padded_tokens=padded_tokens, true_length=true_length, rng=rng)
 
-  @functools.partial(jax.jit, static_argnums=(0,))
+  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_samples",))
   def prefill(
       self,
       *,
@@ -310,6 +310,7 @@ class MaxEngine(engine_api.Engine):
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
+      num_samples: int = 1,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -333,6 +334,8 @@ class MaxEngine(engine_api.Engine):
     positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
 
     zero_to_n = jnp.arange(0, padded_tokens.shape[0])
+    # print(f"{type(true_length)=}")
+    # print(f"{true_length=}")
     ones_to_keep = zero_to_n < true_length
     one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
@@ -351,7 +354,6 @@ class MaxEngine(engine_api.Engine):
       )
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
-    generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
     selected_logits = jax.lax.dynamic_slice(
         flat_logits,
         (0, true_length - 1, 0),
@@ -360,18 +362,45 @@ class MaxEngine(engine_api.Engine):
     selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
 
     # sampling first token
-    first_generated_token = inference_utils.sampling(
-        selected_logits,
-        rng,
-        self.config.decode_sampling_strategy,
-        topk=self.config.decode_sampling_top_k,
-        nucleus_topp=self.config.decode_sampling_nucleus_p,
-        temperature=self.config.decode_sampling_temperature,
-    )
+    first_generated_tokens = []
+    # print(f"{type(num_samples)=}")
+    # print(f"{num_samples=}")
+    for _ in range(num_samples):
+      rng, new_rng = jax.random.split(rng)
+      first_generated_token = inference_utils.sampling(
+          selected_logits,
+          new_rng,
+          self.config.decode_sampling_strategy,
+          topk=self.config.decode_sampling_top_k,
+          nucleus_topp=self.config.decode_sampling_nucleus_p,
+          temperature=self.config.decode_sampling_temperature,
+      )
+      first_generated_tokens.append(first_generated_token)
+    first_generated_tokens = jnp.concatenate(first_generated_tokens, axis=0)
+    
+    # def sampling_step(carry, _):
+    #   rng, selected_logits = carry
+    #   rng, new_rng = jax.random.split(rng)
+    #   first_generated_token = inference_utils.sampling(
+    #       selected_logits,
+    #       new_rng,
+    #       self.config.decode_sampling_strategy,
+    #       topk=self.config.decode_sampling_top_k,
+    #       nucleus_topp=self.config.decode_sampling_nucleus_p,
+    #       temperature=self.config.decode_sampling_temperature,
+    #   )
+    #   return (rng, selected_logits), first_generated_token
 
-    all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
+    # carry_init = (rng, selected_logits)
+    # _, first_generated_tokens = jax.lax.scan(sampling_step, carry_init, None, length=num_samples)
+    # first_generated_tokens = jnp.squeeze(first_generated_tokens, axis=1)
+    
+    
+    
+    all_valid = jnp.ones((num_samples, 1), dtype=jnp.int8)
+    generated_tokens = jnp.zeros((num_samples, 1), dtype=jnp.int32)
     result = engine_api.ResultTokens(
-        data=jnp.concatenate((first_generated_token, all_valid, generated_tokens), axis=1),
+        data=jnp.concatenate((first_generated_tokens, all_valid, generated_tokens), axis=1),
         # Tokens are shape [batch, speculations], so when we concatenate
         # tokens, validity and length along their index 1 dimension then they
         # occupy 0:speculations.
@@ -380,18 +409,18 @@ class MaxEngine(engine_api.Engine):
         valid_idx=(1, 2),
         # And lengths is rank 1.
         length_idx=(2, 3),
-        samples_per_slot=1,
+        samples_per_slot=num_samples,
     )
 
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
 
     return {
-        "logits": selected_logits,
+        "logits": selected_logits, # (1, 1, 32000)
         "cache": cache,
-        "next_pos": next_pos,
+        "next_pos": next_pos, # (1, 1)
         "generated_tokens": generated_tokens,
-        "tokens": first_generated_token,
+        "tokens": first_generated_tokens,
     }, result
 
   @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_prompts",))
@@ -544,9 +573,10 @@ class MaxEngine(engine_api.Engine):
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
 
-    logging.warning(f"{self.config.decode_sampling_strategy=}")
-    logging.warning(f"{self.config.decode_sampling_top_k=}")
+    print(f"{self.config.decode_sampling_strategy=}")
+    # print(f"{self.config.decode_sampling_top_k=}")
     # sampling tokens
+    # print(f"{out_logits.shape=}")
     new_token = inference_utils.sampling(
         out_logits,
         rng,
@@ -555,7 +585,7 @@ class MaxEngine(engine_api.Engine):
         nucleus_topp=self.config.decode_sampling_nucleus_p,
         temperature=self.config.decode_sampling_temperature,
     )
-    logging.warning(f"{new_token.shape=}")
+    # print(f"{new_token.shape=}")
 
     all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
     result = engine_api.ResultTokens(
@@ -651,7 +681,10 @@ class MaxEngine(engine_api.Engine):
         decode_state["cache"],
         self.kv_cache_annotations_named,
     )
+    # print(f"{decode_state['logits'].shape=}")
+    # print(f"{unboxed_prefix['logits'].shape=}")
     inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state["logits"], unboxed_prefix["logits"], slot, 0)
+    # print(f"after: {decode_state['logits'].shape=}")
     inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state["next_pos"], unboxed_prefix["next_pos"], slot, 0)
     inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(
         decode_state["generated_tokens"],
