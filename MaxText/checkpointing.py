@@ -309,21 +309,47 @@ def setup_checkpoint_logger(config) -> cloud_logger.CloudLogger | None:
   return orbax_cloud_logger
 
 
-def load_params_from_path(load_parameters_from_path, abstract_unboxed_params):
+def load_params_from_path(load_parameters_from_path, abstract_unboxed_params, config=None):
   """Load decode params from checkpoint at specified path."""
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
   max_logging.log(f"restoring params from {load_parameters_from_path}")
   ckpt = epath.Path(load_parameters_from_path)
+  restore_args = ocp.checkpoint_utils.construct_restore_args(abstract_unboxed_params)
+
+  # if config is None:
   ckptr = ocp.PyTreeCheckpointer()
   # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
   # Rather than pass the entire abstract state, which could unnecessarily restore opt_state and such and waste
   # memory, we instead specify here that we are just restoring the params field of the checkpoint
   # (which itself may be a dictionary containing a key named 'params').
-  restore_args = ocp.checkpoint_utils.construct_restore_args(abstract_unboxed_params)
   restored = ckptr.restore(
       ckpt, item={"params": abstract_unboxed_params}, transforms={}, restore_args={"params": restore_args}
   )
   return restored["params"]
+  
+  # YY modified checkpoing manager version
+  logger = setup_checkpoint_logger(config)
+  use_ocdbt = config.checkpoint_storage_use_ocdbt
+  use_zarr3 = config.checkpoint_storage_use_zarr3
+  if config.enable_single_controller:
+    use_ocdbt, use_zarr3 = False, False
+  checkpoint_manager = create_orbax_checkpoint_manager(
+      config.load_parameters_path,
+      config.enable_checkpointing,
+      config.async_checkpointing,
+      config.checkpoint_period,
+      config.dataset_type,
+      logger,
+      use_ocdbt,
+      use_zarr3,
+  )
+  restored = checkpoint_manager.restore(0, args=ocp.args.Composite(
+            items=ocp.args.PyTreeRestore(
+                item={"params": abstract_unboxed_params}, transforms={}, restore_args={"params": restore_args}
+            )
+        ))
+  import pdb; pdb.set_trace()
+  return restored["items"]["params"]
 
 
 def save_params_to_path(checkpoint_dir, params):
