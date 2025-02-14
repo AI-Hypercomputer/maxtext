@@ -63,7 +63,6 @@ def main(argv: Sequence[str]) -> None:
       padded_tokens=tokens,
       true_length=true_length,
       rng=rng_prefill,
-      slot=slot,
   )
 
   rng, rng_init_decode = jax.random.split(rng)

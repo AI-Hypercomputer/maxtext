@@ -25,7 +25,6 @@ import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 import common_types
-from page_manager import PageState, PageManager
 from layers import attentions
 from layers import embeddings
 from layers import linears
@@ -93,6 +92,8 @@ class DecoderLayer(nn.Module):
         weight_dtype=cfg.weight_dtype,
         dropout_rate=cfg.dropout_rate,
         name="self_attention",
+        float32_qk_product=cfg.float32_qk_product,
+        float32_logits=cfg.float32_logits,
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
         prefill_cache_axis_order=tuple([int(i) for i in cfg.prefill_cache_axis_order.split(",")]),
@@ -108,7 +109,6 @@ class DecoderLayer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
-
     )
 
     attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
@@ -379,9 +379,6 @@ class Decoder(nn.Module):
       decoder_segment_ids=None,
       deterministic=False,
       model_mode=common_types.MODEL_MODE_TRAIN,
-      page_state: Optional[PageState] = None,
-      slot: Optional[int] = None,
-      true_length: Optional[int] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -417,7 +414,7 @@ class Decoder(nn.Module):
         partition_spec = None  # This partition spec is only used for the fsdp_ag_once feature.
       y = self.pipeline_module(
           y, decoder_segment_ids, decoder_positions, deterministic, model_mode, partition_spec=partition_spec
-        )
+      )
     else:
       if cfg.scan_layers:
         if cfg.decoder_block == "deepseek":
@@ -440,14 +437,14 @@ class Decoder(nn.Module):
               model_mode,
           )
         else:
-            RemattedBlockLayer = RemattedBlockLayers[0]
-            y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
-                y,
-                decoder_segment_ids,
-                decoder_positions,
-                deterministic,
-                model_mode,
-            )
+          RemattedBlockLayer = RemattedBlockLayers[0]
+          y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+          )
       else:
         if cfg.decoder_block == "deepseek":
           assert len(RemattedBlockLayers) == 2, f"Unscanned layers must have a length of 2 using deepseek."
@@ -467,18 +464,15 @@ class Decoder(nn.Module):
                 model_mode,
             )
         else:
-            for lyr in range(cfg.num_decoder_layers):
-                RemattedBlockLayer = RemattedBlockLayers[0]
-                y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
-                    y,
-                    decoder_segment_ids,
-                    decoder_positions,
-                    deterministic,
-                    model_mode,
-                    page_state=page_state,
-                    slot=slot,
-                    true_length=true_length,
-                )
+          for lyr in range(cfg.num_decoder_layers):
+            RemattedBlockLayer = RemattedBlockLayers[0]
+            y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
+                y,
+                decoder_segment_ids,
+                decoder_positions,
+                deterministic,
+                model_mode,
+            )
 
     y = self.get_norm_layer()(
         dtype=cfg.dtype,
@@ -532,34 +526,11 @@ class Transformer(nn.Module):
 
     cfg = self.config
     mesh = self.mesh
-
-    # Validate paged attention config if enabled
-    if cfg.attention == "paged":
-      if not hasattr(cfg, "tokens_per_page"):
-        raise ValueError("tokens_per_page must be set when using paged attention")
-      if not hasattr(cfg, "num_pages"):
-        raise ValueError("num_pages must be set when using paged attention")
-      if not hasattr(cfg, "max_pages_per_slot"):
-        raise ValueError("max_pages_per_slot must be set when using paged attention") 
-      
-      # Validate page size constraints
-      if cfg.max_target_length % cfg.tokens_per_page != 0:
-        raise ValueError(
-            f"max_target_length ({cfg.max_target_length}) must be divisible by "
-            f"tokens_per_page ({cfg.tokens_per_page})"
-        )
-      if cfg.max_prefill_predict_length % cfg.tokens_per_page != 0:
-        raise ValueError(
-            f"max_prefill_predict_length ({cfg.max_prefill_predict_length}) must be "
-            f"divisible by tokens_per_page ({cfg.tokens_per_page})"
-        )
-
-    # Initialize embeddings and decoder
     self.shared_embedding = Embed(
         num_embeddings=cfg.vocab_size,
         features=cfg.emb_dim,
         dtype=cfg.dtype,
-        attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,
+        attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
         embedding_init=nn.initializers.normal(stddev=1.0),
         name="token_embedder",
         config=cfg,
@@ -567,53 +538,27 @@ class Transformer(nn.Module):
 
     self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant)
 
-    # # Initialize page manager if using paged attention
-    # if self.config.attention == "paged":
-    #   self.page_manager = PageManager(
-    #       num_pages=self.config.num_pages,
-    #       tokens_per_page=self.config.tokens_per_page,
-    #       slots=int(self.config.per_device_batch_size * jax.device_count()),
-    #       max_target_length=self.config.max_target_length,
-    #       max_prefill_predict_length=self.config.max_prefill_predict_length,
-    #       max_pages_per_slot=self.config.max_target_length // self.config.tokens_per_page,
-    #   )
-
   def __call__(
-        self,
-        decoder_input_tokens,
-        decoder_positions,
-        decoder_segment_ids=None,
-        enable_dropout=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
-        slot: Optional[int] = None,
-        true_length: Optional[int] = None,
-    ):
-        # Get page state if using paged attention
-        page_state = None
-        if self.config.attention == "paged":
-            if model_mode in [common_types.MODEL_MODE_PREFILL, common_types.MODEL_MODE_AUTOREGRESSIVE]:
-                # if slot is None:
-                #     raise ValueError("slot must be provided for prefill/autoregressive with paged attention")
-                # if model_mode == common_types.MODEL_MODE_PREFILL and true_length is None:
-                #     raise ValueError("true_length must be provided for prefill with paged attention")
+      self,
+      decoder_input_tokens,
+      decoder_positions,
+      decoder_segment_ids=None,
+      enable_dropout=True,
+      model_mode=common_types.MODEL_MODE_TRAIN,
+  ):
+    """Applies Transformer decoder-branch on encoded-input and target."""
 
-                page_state = self.page_manager(
-                    model_mode=model_mode,
-                    slot=slot,
-                    true_length=true_length,
-                )
-            #else: # When model_mode is None, we keep page_state as None
-            #    page_state = None
+    if decoder_segment_ids is not None and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+      raise ValueError(
+          f"During autoregressive decoding we assume the tokens are in the active sequence"
+          f" which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}."
+      )
 
-        # Pass page_state through to decoder
-        logits = self.decoder(
-            decoder_input_tokens=decoder_input_tokens,
-            decoder_positions=decoder_positions,
-            decoder_segment_ids=decoder_segment_ids,
-            deterministic=not enable_dropout,
-            model_mode=model_mode,
-            page_state=page_state,
-            slot=slot,
-            true_length=true_length,
-        )
-        return logits
+    logits = self.decoder(
+        decoder_input_tokens=decoder_input_tokens,
+        decoder_positions=decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+        deterministic=not enable_dropout,
+        model_mode=model_mode,
+    )
+    return logits

@@ -319,7 +319,6 @@ class MaxEngine(engine_api.Engine):
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
-      slot: Optional[int] = 0,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -358,8 +357,6 @@ class MaxEngine(engine_api.Engine):
           model_mode=common_types.MODEL_MODE_PREFILL,
           rngs={"params": new_rng},
           mutable=["cache"],
-          slot=slot,
-          true_length=true_length,
       )
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
