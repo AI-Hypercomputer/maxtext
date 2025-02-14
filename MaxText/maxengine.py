@@ -304,7 +304,7 @@ class MaxEngine(engine_api.Engine):
 
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
-
+    jax.debug.print("prefill request shape next_pos {}, tokens: {}", next_pos, first_generated_token)
     return {
         "logits": selected_logits,
         "cache": cache,
@@ -432,7 +432,7 @@ class MaxEngine(engine_api.Engine):
       rng = jax.random.PRNGKey(0)
 
     previous_token = decode_state["tokens"]
-    #jax.debug.print("generate call next_pos: {}, tokens: {}", decode_state["next_pos"], decode_state["tokens"])
+    jax.debug.print("generate call next_pos: {}, tokens: {}", decode_state["next_pos"], decode_state["tokens"])
     rng, new_rng = jax.random.split(rng)
     # run one step generation
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):

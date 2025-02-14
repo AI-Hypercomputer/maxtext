@@ -255,7 +255,7 @@ class PageManager(nn.Module):
     _, page_map, page_status, current_page = jax.lax.fori_loop(
         0, prefill_slot_num_pages, _reserve_page, (slot, page_map, page_status, current_page)
     )
-
+    jax.debug.print("slot in prefill: {}", slot)
     sequence_lengths = sequence_lengths.at[slot].set(true_length)
     num_pages_used = num_pages_used.at[slot].set(prefill_slot_num_pages)
     current_page_position = current_page_position.at[slot].set(prefill_slot_page_slice_idx)
