@@ -281,28 +281,32 @@ class PrefixCache:
     Args:
       hbm_bytes: Total amount of HBM to use for cache.
     """
-    self.hbm_cache = HBMCache(max_size_bytes=hbm_bytes)
-    self.trie = PrefixCacheTrie()
+    self._hbm_bytes = hbm_bytes
+    # init in clear()
+    self._hbm_cache: HBMCache = None
+    self._trie: PrefixCacheTrie = None
+    self.clear()
 
   def fetch_longest_common_prefix_key(self, key: Key) -> Optional[Key]:
     """Returns key with longest common prefix matched or None if not found."""
-    return self.trie.get_longest_common_prefix_key(key)
+    return self._trie.get_longest_common_prefix_key(key)
 
   def save(self, key: Key, value: Value) -> bool:
     """Save key/value to the cache."""
-    if not self.hbm_cache.is_enough_space_remain(value):
+    if not self._hbm_cache.is_enough_space_remain(value):
       self._evict_least_recently_used_cache()
-    if not self.hbm_cache.add_to_cache(key, value):
+    if not self._hbm_cache.add_to_cache(key, value):
       return False
-    return self.trie.insert(key)
+    return self._trie.insert(key)
 
   def load(self, key: Key) -> Optional[Value]:
     """Returns Value stored with key or None if not found."""
-    return self.hbm_cache.retrieve_from_cache(key)
+    return self._hbm_cache.retrieve_from_cache(key)
 
   def clear(self):
     """Clear entire cache."""
-    raise NotImplementedError
+    self._hbm_cache = HBMCache(max_size_bytes=self._hbm_bytes)
+    self._trie = PrefixCacheTrie()
 
   def _evict_least_recently_used_cache(self):
     raise NotImplementedError
