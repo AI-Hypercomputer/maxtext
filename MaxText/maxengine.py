@@ -15,6 +15,7 @@
 """Implementation of Engine API for MaxText"""
 import copy as cp
 import functools
+import logging
 from typing import Any, List, Optional, Tuple, Callable
 from collections import defaultdict
 
@@ -543,6 +544,8 @@ class MaxEngine(engine_api.Engine):
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
 
+    logging.warning(f"{self.config.decode_sampling_strategy=}")
+    logging.warning(f"{self.config.decode_sampling_top_k=}")
     # sampling tokens
     new_token = inference_utils.sampling(
         out_logits,
@@ -552,6 +555,7 @@ class MaxEngine(engine_api.Engine):
         nucleus_topp=self.config.decode_sampling_nucleus_p,
         temperature=self.config.decode_sampling_temperature,
     )
+    logging.warning(f"{new_token.shape=}")
 
     all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
     result = engine_api.ResultTokens(
