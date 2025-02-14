@@ -1012,9 +1012,14 @@ def main(argv: Sequence[str]) -> None:
         monitoring_enabled=True,
         pathway_enabled=config.enable_pathways_goodput,
         include_badput_breakdown=True,
+        include_step_deviation=config.monitor_step_time_deviation,
+        step_deviation_interval_seconds=config.step_deviation_interval_seconds,
     )
     goodput_monitor.start_goodput_uploader()
     max_logging.log("Started Goodput upload to Tensorboard in the background!")
+    if config.monitor_step_time_deviation:
+      goodput_monitor.start_step_deviation_uploader()
+      max_logging.log("Started step time deviation upload to Tensorboard in the background!")
   debug_config = debug_configuration.DebugConfig(
       stack_trace_config=stack_trace_configuration.StackTraceConfig(
           collect_stack_trace=config.collect_stack_trace,
