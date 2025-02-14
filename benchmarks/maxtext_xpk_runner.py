@@ -41,7 +41,7 @@ import maxtext_trillium_model_configs as model_configs
 # Assumes you have xpk installed in a git clone repo of ~/{wl_config.xpk_path}/xpk.py
 _DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME = 'gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:latest'
 
-STORAGE_SYSTEM = "ps" # "ps" or "gcsfuse"
+STORAGE_SYSTEM = "gcsfuse" # "ps" or "gcsfuse"
 
 class LibTpuType(enum.Enum):
   NIGHTLY = 'nightly-libtpu'
@@ -585,7 +585,7 @@ def main() -> int:
           wl_config = WorkloadConfig(
             model=model,
             num_slices=num_slices,
-            num_steps=105,
+            num_steps=100,
             device_type=cluster_config.device_type,
             base_output_directory=base_output_dir,
             priority="high",
