@@ -103,7 +103,7 @@ jobs:
   #     container_resource_option: "--privileged"
   
   tpu_pathways_unit_tests:
-    needs: [prelim]
+    needs: [tpu_pathways_image]
     uses: ./.github/workflows/run_tests_internal.yml
     with:
       device_type: tpu_pathways
