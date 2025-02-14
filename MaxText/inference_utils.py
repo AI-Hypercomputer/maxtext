@@ -16,6 +16,7 @@ limitations under the License.
 
 import jax
 import jax.numpy as jnp
+import logging
 
 NEG_INF = -1.0e7  # Masking purpose
 
@@ -69,7 +70,11 @@ def sample_topk_logits(logits, topk, temperature, rng):
   """Restricting sampling to the best k logits."""
   if topk <= 0:
     raise ValueError("Can't apply algorithm topk with parameter {topk=} less than or equal to zero")
+  logging.warning(f"{logits.shape=}, {topk=}, {temperature=}") # logits.shape=(44, 1, 32000), topk=5, temperature=1.0
   topk_logits, topk_idxs = jax.lax.top_k(logits, topk)
+  # logging.warning(f"{topk_logits.shape=}, {topk_idxs.shape=}") # topk_logits.shape=(44, 1, 5), topk_idxs.shape=(44, 1, 5)
   topk_token = jnp.expand_dims(jax.random.categorical(rng, topk_logits / temperature).astype(jnp.int32), axis=-1)
+  # logging.warning(f"{topk_token.shape=}") # topk_token.shape=(44, 1, 1)
   sampled_tokens = jnp.squeeze(jnp.take_along_axis(topk_idxs, topk_token, axis=-1), axis=-1).astype(jnp.int32)
+  # logging.warning(f"{sampled_tokens.shape=}") # sampled_tokens.shape=(44, 1)
   return sampled_tokens
