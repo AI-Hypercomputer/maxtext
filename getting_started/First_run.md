@@ -28,7 +28,7 @@ python3 MaxText/train.py MaxText/configs/base.yml \
   dataset_type=synthetic \
   steps=10
 ```
-Next, you can try training on a HugginFace dataset, see [Data Input Pipeline](https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md) for data input options.
+Next, you can try training on a HuggingFace dataset, see [Data Input Pipeline](https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md) for data input options.
 
 5. If you want to decode, you can decode as follows.
 ```
