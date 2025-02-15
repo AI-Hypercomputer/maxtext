@@ -431,7 +431,7 @@ def main(argv):
   settings.scenario = lg.TestScenario.Offline
   user_conf = FLAGS.user_conf
 
-  settings.FromConfig(FLAGS.mlperf_conf, _MLPERF_ID, "Offline")
+  #settings.FromConfig(FLAGS.mlperf_conf, _MLPERF_ID, "Offline")
   settings.FromConfig(user_conf, _MLPERF_ID, "Offline")
   log.info("Mlperf config: %s", FLAGS.mlperf_conf)
   log.info("User config: %s", user_conf)
