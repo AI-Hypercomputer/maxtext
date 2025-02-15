@@ -182,8 +182,13 @@ class Decoder(nn.Module):
 
   def setup(self):
     """Initialize decoder layer."""
-    self.decoder_layer = self.get_decoder_layers()
+    cfg = self.config
+    if cfg.attention == "paged":
+      self.decoder_layers_cls = self.get_decoder_layers()
+    else:
+      self.decoder_layer = self.get_decoder_layers()
     self.norm_layer = self.get_norm_layer()
+
     if self.config.using_pipeline_parallelism:
       pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer[0])
       remat_policy = self.get_remat_policy()
@@ -402,9 +407,6 @@ class Decoder(nn.Module):
           config=cfg,
       )(decoder_positions)
 
-    policy = self.get_remat_policy()
-    RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, policy)
-
     if cfg.using_pipeline_parallelism:
       if cfg.pipeline_fsdp_ag_once:
         partition_spec = self.pipeline_module.get_weight_sharding(
@@ -415,64 +417,81 @@ class Decoder(nn.Module):
       y = self.pipeline_module(
           y, decoder_segment_ids, decoder_positions, deterministic, model_mode, partition_spec=partition_spec
       )
-    else:
-      if cfg.scan_layers:
-        if cfg.decoder_block == "deepseek":
-          assert len(RemattedBlockLayers) == 2, f"Scanned layers must have a length of 2 using deepseek."
-          dense_layer = RemattedBlockLayers[0]
-          moe_layer = RemattedBlockLayers[1]
-          y, _ = self.scan_decoder_layers(cfg, dense_layer, cfg.first_num_dense_layers, "dense_layers", mesh)(
+    else:  # No pipeline parallelism.
+      if cfg.attention == "paged":
+        # Paged attention: Instantiate layers WITHIN the loop.
+        for lyr in range(cfg.num_decoder_layers):
+          decoder_layer = self.decoder_layers_cls[0](config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)
+          y = decoder_layer(
               y,
               decoder_segment_ids,
               decoder_positions,
               deterministic,
               model_mode,
+              slot=None,
+              true_length=None,
           )
-          num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
-          y, _ = self.scan_decoder_layers(cfg, moe_layer, num_moe_layers, "moe_layers", mesh)(
-              y,
-              decoder_segment_ids,
-              decoder_positions,
-              deterministic,
-              model_mode,
-          )
-        else:
-          RemattedBlockLayer = RemattedBlockLayers[0]
-          y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
-              y,
-              decoder_segment_ids,
-              decoder_positions,
-              deterministic,
-              model_mode,
-          )
-      else:
-        if cfg.decoder_block == "deepseek":
-          assert len(RemattedBlockLayers) == 2, f"Unscanned layers must have a length of 2 using deepseek."
-          dense_layer = RemattedBlockLayers[0]
-          moe_layer = RemattedBlockLayers[1]
-          num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
+      else:  # Non-paged attention
+        policy = self.get_remat_policy()
+        RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, policy)
 
-          layers = [dense_layer, moe_layer]
-          layer_prefix = ["dense_layers", "moe_layers"]
-          num_layers = [cfg.first_num_dense_layers, num_moe_layers]
-          for index in range(len(layers)):
-            y = layers[index](config=cfg, mesh=mesh, name=f"{layer_prefix[index]}_{index}", quant=self.quant)(
+        if cfg.scan_layers:
+          if cfg.decoder_block == "deepseek":
+            assert len(RemattedBlockLayers) == 2, f"Scanned layers must have a length of 2 using deepseek."
+            dense_layer = RemattedBlockLayers[0]
+            moe_layer = RemattedBlockLayers[1]
+            y, _ = self.scan_decoder_layers(cfg, dense_layer, cfg.first_num_dense_layers, "dense_layers", mesh)(
                 y,
                 decoder_segment_ids,
                 decoder_positions,
                 deterministic,
                 model_mode,
             )
-        else:
-          for lyr in range(cfg.num_decoder_layers):
+            num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
+            y, _ = self.scan_decoder_layers(cfg, moe_layer, num_moe_layers, "moe_layers", mesh)(
+                y,
+                decoder_segment_ids,
+                decoder_positions,
+                deterministic,
+                model_mode,
+            )
+          else:
             RemattedBlockLayer = RemattedBlockLayers[0]
-            y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
+            y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
                 y,
                 decoder_segment_ids,
                 decoder_positions,
                 deterministic,
                 model_mode,
             )
+        else:  # Not scanned
+          if cfg.decoder_block == "deepseek":
+            assert len(RemattedBlockLayers) == 2, f"Unscanned layers must have a length of 2 using deepseek."
+            dense_layer = RemattedBlockLayers[0]
+            moe_layer = RemattedBlockLayers[1]
+            num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
+
+            layers = [dense_layer, moe_layer]
+            layer_prefix = ["dense_layers", "moe_layers"]
+            num_layers = [cfg.first_num_dense_layers, num_moe_layers]
+            for index in range(len(layers)):
+              y = layers[index](config=cfg, mesh=mesh, name=f"{layer_prefix[index]}_{index}", quant=self.quant)(
+                  y,
+                  decoder_segment_ids,
+                  decoder_positions,
+                  deterministic,
+                  model_mode,
+              )
+          else:
+            for lyr in range(cfg.num_decoder_layers):
+              RemattedBlockLayer = RemattedBlockLayers[0]
+              y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
+                  y,
+                  decoder_segment_ids,
+                  decoder_positions,
+                  deterministic,
+                  model_mode,
+              )
 
     y = self.get_norm_layer()(
         dtype=cfg.dtype,

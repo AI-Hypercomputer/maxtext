@@ -23,7 +23,7 @@ import jax
 from jax.sharding import Mesh
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-# from jax.experimental.pallas.ops.tpu import flash_attention
+from page_manager import PageManager
 from layers import attentions
 from layers import embeddings
 from layers import linears
@@ -63,9 +63,23 @@ Quant = quantizations.AqtQuantization
 
 class LlamaDecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
+
   config: models.Config
   mesh: Mesh
   quant: Optional[Quant] = None
+
+  def setup(self):
+      cfg = self.config
+      if cfg.attention == "paged":
+        self.page_manager = PageManager(
+            num_pages=cfg.num_pages,
+            tokens_per_page=cfg.tokens_per_page,
+            max_page_groups=int(cfg.per_device_batch_size * jax.device_count()),
+            max_target_length=cfg.max_target_length,
+            max_prefill_predict_length=cfg.max_prefill_predict_length,
+            max_pages_per_group=cfg.max_pages_per_group,
+            config = self.config # Pass config
+        )
 
   @nn.compact
   def __call__(
@@ -75,7 +89,6 @@ class LlamaDecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
-      page_state: Optional[PageState] = None,
       slot: Optional[int] = None,
       true_length: Optional[int] = None,
   ):
@@ -121,17 +134,30 @@ class LlamaDecoderLayer(nn.Module):
         ragged_block_size=cfg.ragged_block_size,
     )
 
-    attention_lnx = attention_layer(
-        lnx,
-        lnx,
-        decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        deterministic=deterministic,
-        model_mode=model_mode,
-        page_state=page_state,
-        page_group_id=slot,
-        true_length=true_length,
-    )
+    # Pass necessary arguments to attention_layer.
+    if cfg.attention == "paged":
+      attention_lnx = attention_layer(
+          lnx,
+          lnx,
+          decoder_positions,
+          decoder_segment_ids=decoder_segment_ids,
+          deterministic=deterministic,
+          model_mode=model_mode,
+          page_manager=self.page_manager,
+          page_group_id=slot,
+          true_length=true_length,
+      )
+    else:
+      attention_lnx = attention_layer(
+          lnx,
+          lnx,
+          decoder_positions,
+          decoder_segment_ids=decoder_segment_ids,
+          deterministic=deterministic,
+          model_mode=model_mode,
+          page_group_id=slot,
+          true_length=true_length,
+      )
 
     attention_lnx = nn.with_logical_constraint(
         attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")

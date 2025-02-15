@@ -43,21 +43,17 @@ def main(argv: Sequence[str]) -> None:
   text = config.prompt
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
-  tokens, true_length = tokenizer_model.encode(
-      text, 
-      is_bos=True,
-      prefill_lengths=[config.max_prefill_predict_length]
-  )
-  
+  tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
+
   assert true_length <= config.max_prefill_predict_length, "Too many tokens for prefill"
   assert config.quantization != "fp8", "fp8 on NVIDIA GPUs not supported in decode.py yet"
 
   # For paged attention, we need to assign a slot
   slot = 0  # For single-stream decoding, always use slot 0
-  
+
   # Split RNG before calling prefill
   rng, rng_prefill = jax.random.split(rng)
-  
+
   prefill_result, first_token = engine.prefill(
       params=params,
       padded_tokens=tokens,
@@ -72,27 +68,24 @@ def main(argv: Sequence[str]) -> None:
   steps = range(config.max_prefill_predict_length, config.max_target_length)
   sampled_tokens_list = []
   sampled_tokens_list.append(first_token)
-  
+
   for _ in steps:
     rng, rng_generate = jax.random.split(rng)
     decode_state, sampled_tokens = engine.generate(
-        params, 
-        decode_state, 
+        params,
+        decode_state,
         rng=rng_generate,
     )
     sampled_tokens_list.append(sampled_tokens)
 
-  results = [
-      sampled_tokens.get_result_at_slot(slot).tokens.item() 
-      for sampled_tokens in sampled_tokens_list
-  ]
+  results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
   output = tokenizer_model.decode(results)
   print(f"Input `{text}` -> `{output}`")
 
   if config.autoregressive_decode_assert != "":
-    assert output == config.autoregressive_decode_assert, (
-        f"generated text mismatch {output=} {config.autoregressive_decode_assert=}"
-    )
+    assert (
+        output == config.autoregressive_decode_assert
+    ), f"generated text mismatch {output=} {config.autoregressive_decode_assert=}"
 
 
 def validate_config(config):

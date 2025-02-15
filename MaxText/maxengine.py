@@ -186,15 +186,15 @@ class MaxEngine(engine_api.Engine):
 
     if rng is None:
       rng = jax.random.PRNGKey(0)
-    
+
     print("\nMaxEngine.load_params() entry:")
     print(f"  config.attention: {self.config.attention}")
     print(f"  config.max_target_length: {self.config.max_target_length}")
     print(f"  config.max_prefill_predict_length: {self.config.max_prefill_predict_length}")
     print(f"  config.per_device_batch_size: {self.config.per_device_batch_size}")
     if self.config.attention == "paged":
-        print(f"  config.num_pages: {self.config.num_pages}")
-        print(f"  config.tokens_per_page: {self.config.tokens_per_page}")
+      print(f"  config.num_pages: {self.config.num_pages}")
+      print(f"  config.tokens_per_page: {self.config.tokens_per_page}")
     max_utils.print_mem_stats("Before setup_decode_state")
 
     if self.model.quant and self.config.checkpoint_is_quantized:
@@ -393,7 +393,8 @@ class MaxEngine(engine_api.Engine):
     )
 
     cache = new_vars["cache"]
-    cache = self._maybe_stack_prefill_result_cache(cache)
+    if self.config.attention != "paged":
+      cache = self._maybe_stack_prefill_result_cache(cache)
 
     return {
         "logits": selected_logits,
@@ -600,65 +601,92 @@ class MaxEngine(engine_api.Engine):
       slot: int,
   ) -> DecodeState:
     """Insert a single computed prefill cache into KV cache."""
+
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
+    if self.config.attention != "paged":
+      unboxed_prefix["cache"] = self._maybe_unstack_prefill_result_cache(unboxed_prefix["cache"])
 
-    unboxed_prefix["cache"] = self._maybe_unstack_prefill_result_cache(unboxed_prefix["cache"])
+    def copy_layer_cache(layer_cache, layer_prefix_cache, layer_annotations):
+      def copy(path, partial_cache, full_cache, annotations):
+        path_key = path[-1].key
+        # Skip paged attention variables. They are handled by the PageManager.
+        if path_key in [
+            "key_pages",
+            "value_pages",
+            "page_status",
+            "page_map",
+            "sequence_lengths",
+            "num_pages_used",
+            "current_page",
+            "current_page_position",
+        ]:
+          return full_cache
 
-    def copy(path, partial_cache, full_cache, annotations):
-      path_key = path[-1].key
-      if path_key in ['key_pages', 'value_pages']:
-        return full_cache
-      if path_key in [
-          "cache_ar_index",
-          "cached_ar_key",
-          "cached_ar_value",
-          "cached_ar_key_scale",
-          "cached_ar_value_scale",
-      ]:
-        return full_cache  # we don't even zero these out because we can mask them out.
+        if path_key in [
+            "cache_ar_index",
+            "cached_ar_key",
+            "cached_ar_value",
+            "cached_ar_key_scale",
+            "cached_ar_value_scale",
+        ]:
+          return full_cache  # we don't even zero these out because we can mask them out.
 
-      batch_idx = -1
-      if "cache_batch" in annotations:
-        batch_idx = annotations.index("cache_batch")
-      elif "cache_scale_batch" in annotations:
-        batch_idx = annotations.index("cache_scale_batch")
+        batch_idx = -1
+        if "cache_batch" in annotations:
+          batch_idx = annotations.index("cache_batch")
+        elif "cache_scale_batch" in annotations:
+          batch_idx = annotations.index("cache_scale_batch")
 
-      if batch_idx < 0:
-        raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
+        if batch_idx < 0:
+          raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
 
-      if path_key == "cache_ar_segment_id":
-        ### goal: zero this out in case there is existing data
-        s = list(full_cache.shape)
-        s[batch_idx] = 1
-        zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
-        return jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
-      elif path_key == "cache_prefill_segment_id":
-        s = list(full_cache.shape)
-        s[batch_idx] = 1
-        zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
-        ## zero out in case prefill cache is too small to cover
-        full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
-        ## copy prefill cachce
-        full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
-        return full_cache
-      elif path_key == "cached_ar_lengths":
-        return full_cache.at[slot].set(0)
-      elif path_key in [
-          "cached_prefill_key",
-          "cached_prefill_value",
-          "cached_prefill_key_scale",
-          "cached_prefill_value_scale",
-      ]:
-        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
-      else:
-        raise ValueError(f"We don't have a strategy for inserting {path_key}")
+        if path_key == "cache_ar_segment_id":
+          ### goal: zero this out in case there is existing data
+          s = list(full_cache.shape)
+          s[batch_idx] = 1
+          zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
+          return jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
+        elif path_key == "cache_prefill_segment_id":
+          s = list(full_cache.shape)
+          s[batch_idx] = 1
+          zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
+          ## zero out in case prefill cache is too small to cover
+          full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
+          ## copy prefill cachce
+          full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+          return full_cache
+        elif path_key == "cached_ar_lengths":
+          return full_cache.at[slot].set(0)
+        elif path_key in [
+            "cached_prefill_key",
+            "cached_prefill_value",
+            "cached_prefill_key_scale",
+            "cached_prefill_value_scale",
+        ]:
+          return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+        else:
+          # Handle other cache variables as before.
+          return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
 
-    inserted_cache = jax.tree_util.tree_map_with_path(
-        copy,
-        unboxed_prefix["cache"],
-        decode_state["cache"],
-        self.kv_cache_annotations_named,
-    )
+      return jax.tree_util.tree_map_with_path(
+          copy,
+          layer_prefix_cache,  # Use the per-layer prefix cache
+          layer_cache,  # Use the per-layer decode_state cache
+          layer_annotations,
+      )
+
+    # Iterate over layers, updating the cache for each one.
+    new_cache = {}
+    for layer_idx in range(self.config.num_decoder_layers):
+      layer_name = f"layers_{layer_idx}"
+      new_cache[layer_name] = copy_layer_cache(
+          decode_state["cache"]["decoder"][layer_name],
+          unboxed_prefix["cache"]["decoder"][layer_name],
+          self.kv_cache_annotations_named["decoder"][layer_name],
+      )
+
+    inserted_cache = {"decoder": new_cache}
+
     inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state["logits"], unboxed_prefix["logits"], slot, 0)
     inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state["next_pos"], unboxed_prefix["next_pos"], slot, 0)
     inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(
@@ -898,12 +926,11 @@ class MaxEngine(engine_api.Engine):
       return isinstance(k, flax.linen.spmd.LogicallyPartitioned)
 
     def get_axis_names(x):
-        if isinstance(x, flax.linen.spmd.LogicallyPartitioned):
-            return tuple(x.names)
+      if isinstance(x, flax.linen.spmd.LogicallyPartitioned):
+        return tuple(x.names)
+
     self.kv_cache_annotations_named = jax.tree_util.tree_map(
-        get_axis_names,
-        cache,
-        is_leaf=lambda k: isinstance(k, (flax.linen.spmd.LogicallyPartitioned, jax.Array))
+        get_axis_names, cache, is_leaf=lambda k: isinstance(k, (flax.linen.spmd.LogicallyPartitioned, jax.Array))
     )
     zeroed = max_utils.unbox_logicallypartioned(init_state)
     return zeroed
