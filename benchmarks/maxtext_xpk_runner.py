@@ -504,6 +504,13 @@ def main() -> int:
       device_type='v6e-256',
   )
 
+  v5p_cluster_config = XpkClusterConfig(
+      cluster_name='mlperf-v5p-128',
+      project='cloud-tpu-multipod-dev',
+      zone='europe-west4',
+      device_type='v5p-128',
+  )
+
 
 
 
@@ -511,7 +518,8 @@ def main() -> int:
   xpk_workload_names = []
 
   list_of_models = [
-    model_configs.deepseek_a1,
+    #model_configs.deepseek_a1,
+    model_configs.deepseek_v5p_dp_a1,
     # model_configs.default_128
   ]
 
@@ -536,7 +544,7 @@ def main() -> int:
     # Run workloads on the below clusters
     for cluster_config in [
       # v5e_cluster_config,
-      v6e_cluster_config,
+      v5p_cluster_config,
       #v6e_cluster_config_yucmhab,
       # another_config,
     ]:
