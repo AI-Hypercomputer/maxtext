@@ -246,49 +246,54 @@ jax_cache_dir: "~/jax_cache"
 hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
 
 # Parallelism
-mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'tensor_sequence', 'expert', 'autoregressive']
+mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_heads', ['tensor','sequence','tensor_sequence']],
-                      ['activation_kv_heads', ['tensor','sequence','tensor_sequence']],
+                      ['activation_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
+                      ['activation_kv_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
                       ['activation_length', ['sequence']],
                       ['activation_norm_length', ['tensor_sequence', 'sequence']],
-                      ['activation_embed', 'tensor'],
-                      ['activation_mlp', ['tensor', 'tensor_sequence']],
-                      ['activation_kv', ['tensor', 'tensor_sequence']],
+                      ['activation_embed', ['tensor', 'tensor_transpose']],
+                      ['activation_mlp', ['tensor', 'tensor_transpose', 'tensor_sequence']],
+                      ['activation_kv', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_prefill_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_kv_head_dim', ['tensor', 'tensor_sequence']],
-                      ['activation_vocab', ['tensor', 'sequence', 'tensor_sequence']],
-                      ['activation_vocab', 'tensor'],
+                      ['activation_kv_head_dim', ['tensor', 'tensor_transpose', 'tensor_sequence']],
+                      ['activation_vocab', ['tensor', 'tensor_transpose', 'sequence', 'tensor_sequence']],
+                      ['activation_vocab', ['tensor', 'tensor_transpose']],
                       ['activation_vocab', 'tensor_sequence'],
                       ['activation_vocab', 'sequence'],
                       ['activation_stage', 'stage'],
                       ['activation_exp', 'expert'],
                       ['mlp', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
-                      ['vocab', ['tensor', 'tensor_sequence', 'autoregressive']],
+                      ['vocab', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
+                      ['heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
+                      ['q_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
+                      ['kv_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],  
+                      ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'expert']],
+                      ['embed', ['fsdp', 'sequence', 'tensor_transpose', 'expert']],
                       ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'expert']],
                       ['embed', ['fsdp', 'sequence', 'expert']],
+                      ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose']],
+                      ['embed_no_exp', ['fsdp', 'sequence', 'tensor_transpose']],
                       ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence']],
                       ['embed_no_exp', ['fsdp', 'sequence']],
-                      ['norm', ['tensor', 'tensor_sequence']],
-                      ['q_heads', ['tensor', 'tensor_sequence', 'autoregressive']],
-                      ['heads', ['tensor', 'tensor_sequence', 'autoregressive']],
+                      ['norm', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['layers', 'stage'],
                       ['kv', []],
-                      ['kv_heads', ['tensor', 'tensor_sequence', 'autoregressive']],
                       ['kv_head_dim', []],
                       ['cache_batch_prefill', []],
                       ['cache_batch', []],
+                      ['cache_heads', ['autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['cache_heads', ['autoregressive', 'tensor', 'tensor_sequence']],
                       ['cache_kv', []],
                       ['cache_sequence', []],
                       ['exp', 'expert'],
                     ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
-data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'tensor_sequence', 'expert', 'autoregressive']]
+data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']]
 
 # sharding tolerance: float between 0.0 and 1.0 representing the allowed percentage of non-sharded parameters.
 sharding_tolerance: 0.02
@@ -302,6 +307,7 @@ dcn_fsdp_parallelism: 1
 dcn_fsdp_transpose_parallelism: 1
 dcn_sequence_parallelism: 1  # never recommended
 dcn_tensor_parallelism: 1 # never recommended
+dcn_tensor_transpose_parallelism: 1
 dcn_tensor_sequence_parallelism: 1 # never recommended
 dcn_pipeline_parallelism: 1
 dcn_expert_parallelism: 1
@@ -311,6 +317,7 @@ ici_fsdp_parallelism: -1 # recommended ICI axis to be auto-sharded
 ici_fsdp_transpose_parallelism: 1
 ici_sequence_parallelism: 1
 ici_tensor_parallelism: 1
+ici_tensor_transpose_parallelism: 1
 ici_tensor_sequence_parallelism: 1
 ici_autoregressive_parallelism: 1
 ici_pipeline_parallelism: 1
