@@ -384,6 +384,8 @@ class Decoder(nn.Module):
       decoder_segment_ids=None,
       deterministic=False,
       model_mode=common_types.MODEL_MODE_TRAIN,
+      slot=None,
+      true_length=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -428,8 +430,8 @@ class Decoder(nn.Module):
               decoder_positions,
               deterministic,
               model_mode,
-              slot=None,
-              true_length=None,
+              slot=slot,
+              true_length=true_length,
           )
       else:  # Non-paged attention
         policy = self.get_remat_policy()

@@ -77,8 +77,8 @@ class LlamaDecoderLayer(nn.Module):
             max_page_groups=int(cfg.per_device_batch_size * jax.device_count()),
             max_target_length=cfg.max_target_length,
             max_prefill_predict_length=cfg.max_prefill_predict_length,
-            max_pages_per_group=cfg.max_pages_per_group,
-            config = self.config # Pass config
+            max_pages_per_group=(cfg.max_target_length + cfg.tokens_per_page - 1) // cfg.tokens_per_page,
+            config = self.config,
         )
 
   @nn.compact

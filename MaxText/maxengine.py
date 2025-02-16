@@ -319,6 +319,7 @@ class MaxEngine(engine_api.Engine):
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
+      slot: Optional[int] = None,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -790,7 +791,6 @@ class MaxEngine(engine_api.Engine):
 
         slice_size = tuple(slice_size)
         partial_cache = jax.lax.dynamic_slice(partial_cache, start_indices, slice_size)
-        # jax.debug.print("start_indices: {}, slice_size: {}", start_indices, slice_size)
 
         return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
       else:

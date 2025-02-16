@@ -718,20 +718,21 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
           {"params": rng, "dropout": rng, "aqt": rng},
           jnp.ones(input_shape, dtype=jnp.int32),
           jnp.ones(input_shape, dtype=jnp.int32),
-          model_mode=common_types.MODEL_MODE_PREFILL,  # Use PREFILL
-          mutable=["cache"],  # Make 'cache' mutable
+          model_mode=common_types.MODEL_MODE_PREFILL,
+          mutable=["params", "cache", "aqt"]
       )
-  print("MODEL VARS AFTER INIT:", model_vars)
 
   if config.load_parameters_path:
-    max_logging.log(f"Loading decode params from {config.load_parameters_path}")
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
-        loaded_params = checkpointing.load_params_from_path(
-            config.load_parameters_path, model_vars["params"]  # Load *into* existing params
-        )
-        model_vars = model_vars.copy({"params": loaded_params})
+      max_logging.log(f"Loading decode params from {config.load_parameters_path}")
+      with nn_partitioning.axis_rules(config.logical_axis_rules):
+          loaded_params = checkpointing.load_params_from_path(
+              config.load_parameters_path, model_vars["params"]
+          )
+          model_vars = flax.core.frozen_dict.freeze(
+              {**flax.core.unfreeze(model_vars), "params": loaded_params}
+          )
   else:
-    max_logging.log("No decode checkpoint specified - generating random weights.")
+      max_logging.log("No decode checkpoint specified - generating random weights.")
 
   state = init_decode_state(model.apply, model_vars)
   state = unbox_logicallypartioned(state)
