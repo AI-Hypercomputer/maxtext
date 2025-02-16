@@ -320,12 +320,13 @@ eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 
 # direct preference optimization (DPO)
 use_dpo: False
+# TODO: do we need label smoothing for GRPO?
 dpo_label_smoothing: 0.0
 dpo_beta: 0.1
 
 # Group Relative Policy Optimization (GRPO)
 use_grpo: False
-num_generations: 4
+num_generations: 8 # TRL is 8
 temperature: 0.9 #from TRL
 grpo_beta: 0.04 #from TRL
 
@@ -368,7 +369,7 @@ skip_jax_distributed_system: False # If True we will not initialize the jax dist
 # 2) Cosine decay from [learning_rate] to [learning_rate * cosine_learning_rate_final_fraction] from warmup to learning_rate_schedule_steps
 # 3) Constant learning rate of 0 from learning_rate_schedule_steps to steps.
 # The zero learning rate section can be used to more accurately measure the fully trained model's performance.
-learning_rate: 3.e-5
+learning_rate: 1.e-6 # from TRL
 cosine_learning_rate_final_fraction: 0.1
 warmup_steps_fraction: 0.1
 learning_rate_schedule_steps: -1 # By default the length of the schedule is set to the number of steps.

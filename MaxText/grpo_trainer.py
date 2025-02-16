@@ -602,6 +602,9 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
                                         ar_completions_segmentation,
                                         config,
                                         is_train=is_train, rngs={"dropout": rng1, "params": rng_fwd}) # [BxG,S-1,E]
+  # jax.debug.print("token_logps_policy={token_logps_policy}",token_logps_policy=token_logps_policy)
+  # token_logps_policy_has_negative = jnp.any(token_logps_policy<0)
+  # jax.debug.print("token_logps_policy_has_negative={token_logps_policy_has_negative}",token_logps_policy_has_negative=token_logps_policy_has_negative)
   token_logps_ref = compute_log_probs(model, 
                                       {"params": reference_params}, 
                                         ar_completions, 
@@ -609,7 +612,10 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
                                         ar_completions_segmentation,
                                         config,
                                         is_train=is_train, rngs={"dropout": rng1, "params": rng_fwd}) # [BxG,S-1,E]
- 
+  # jax.debug.print("token_logps_ref={token_logps_ref}",token_logps_ref=token_logps_ref)
+  # token_logps_ref_has_negative = jnp.any(token_logps_ref<0)
+  # jax.debug.print("token_logps_ref_has_negative={token_logps_ref_has_negative}",token_logps_ref_has_negative=token_logps_ref_has_negative)
+
   completion_target_segmentation = data["ar_completions_segmentation"][..., 1:] # [BxG,S-1]
   # Because of the shifting, token_logps have shape [BxG, S-1]. So, we create a mask for the valid tokens
   # Create a mask to clear out the last token position in the ar_completions 
@@ -620,15 +626,20 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   per_token_kl = jnp.exp(token_logps_ref - token_logps_policy) - (token_logps_ref - token_logps_policy) - 1
   # loss is computed on non-padding tokens
   per_token_kl = per_token_kl * valid_seq_mask
-
+  # jax.debug.print("per_token_kl={per_token_kl}",per_token_kl=per_token_kl)
+  # per_token_kl_has_negative = jnp.any(per_token_kl<0)
+  # jax.debug.print("per_token_kl_has_negative={per_token_kl_has_negative}",per_token_kl_has_negative=per_token_kl_has_negative)
+  
+  
   # --- (6) Decode prompts and completions (as text) to compute rewards.
   # Golden completions for each generation provided to us in data["completion"].
   golden_completions = jnp.repeat(data["completion"], config.num_generations, axis=0)  # shape: [BxG, ?]
 
   # Compute rewards (a scalar per generated completion); assume reward_fn is pure python.
-  jax.debug.print("ar_completions.shape={tokens1}",tokens1=ar_completions.shape)
-  jax.debug.print("golden_completions.shape={tokens2}",tokens2=golden_completions.shape)  
-  rewards = jaccard_reward_fn(ar_completions, golden_completions, config.vocab_size)
+  # jax.debug.print("ar_completions.shape={tokens1}",tokens1=ar_completions.shape)
+  # jax.debug.print("golden_completions.shape={tokens2}",tokens2=golden_completions.shape)  
+  rewards = dummy_reward_len(valid_seq_mask)
+  # rewards = jaccard_reward_fn(ar_completions, golden_completions, config.vocab_size)
   rewards = jnp.array(rewards)  # shape [BxG]
 
   # --- (7) Group rewards and compute normalized advantage.
@@ -645,17 +656,27 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   #   loss_token = - [ exp(policy_logp - stop_gradient(policy_logp)) * advantage - beta * kl ]
   # Make sure to expand advantage along the token dimension.
   advantages_exp = advantages[:, None]  # shape [BxG, 1]
+  # jax.debug.print("advantages_exp={advantages_exp}",advantages_exp=advantages_exp)
 
-  loss_tokens = -( jnp.exp(token_logps_policy - jax.lax.stop_gradient(token_logps_policy)) * advantages_exp - config.grpo_beta * per_token_kl )
+
+  policy_diff = token_logps_policy - jax.lax.stop_gradient(token_logps_policy)
+  # jax.debug.print("policy_diff={policy_diff}",policy_diff=policy_diff)
+  loss_tokens = -( jnp.exp(policy_diff) * advantages_exp - config.grpo_beta * per_token_kl )
+  # jax.debug.print("loss_tokens={loss_tokens}",loss_tokens=loss_tokens)
+  # loss_tokens_has_negative = jnp.any(loss_tokens<0)
+  # jax.debug.print("loss_tokens_has_negative={loss_tokens_has_negative}",loss_tokens_has_negative=loss_tokens_has_negative)
+ 
   # Average over tokens per generated completion.
-  loss_per_example = jnp.sum(loss_tokens, axis=1) / (jnp.sum(valid_seq_mask, axis=1) + EPS)
+  loss_per_example = jnp.sum(loss_tokens*valid_seq_mask, axis=1) / (jnp.sum(valid_seq_mask, axis=1)) 
+
+  # jax.debug.print("loss_per_example={loss_per_example}",loss_per_example=loss_per_example)
   loss = jnp.mean(loss_per_example)
 
   # --- (9) Compute auxiliary metrics.
-  avg_kl = jnp.mean((per_token_kl * valid_seq_mask) / (jnp.sum(valid_seq_mask, axis=1, keepdims=True) + EPS))
+  avg_kl = jnp.mean((per_token_kl * valid_seq_mask) / (jnp.sum(valid_seq_mask, axis=1, keepdims=True)))
   avg_reward = jnp.mean(rewards)
   avg_advantage = jnp.mean(advantages)
-  # avg_completion_length = jnp.mean(jnp.sum(completion_mask, axis=1))
+  avg_completion_length = jnp.mean(1 + jnp.sum(valid_seq_mask, axis=1))
  
   aux = {
       "total_loss": loss,
@@ -663,7 +684,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
       "avg_reward_std": jnp.mean(repeated_group_std),
       "avg_advantage": avg_advantage,
       "avg_kl": avg_kl,
-      # "completion_length": avg_completion_length,
+      "completion_length": avg_completion_length,
   }
 
   return loss, aux
@@ -762,7 +783,11 @@ def prompt_completions(config, engine, tokenizer_model, data, params, rng):
   return data
 
 
-
+def dummy_reward_len(valid_seq_mask):
+  # adding a 1 because valid_seq_mask is actually one less than the number of valid tokens
+  reward = -abs(20-(1+jnp.sum(valid_seq_mask,axis=-1))) # [BxG]
+  jax.debug.print("reward={reward}",reward=reward)
+  return reward
 def jaccard_reward_fn(tokens1, tokens2, vocab_size):
   """
     A simple Jaccard similarity for now
@@ -1286,12 +1311,12 @@ def train_loop(config, config_inference, state=None):
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       # do AR decoding here
       assert config.use_grpo, "Non grpo setting calling grpo_trainer"
-      # engine_params = engine.load_params(engine_rng)
+      # engine_params = engine.load_params(engine_rng)      
       example_batch = prompt_completions(config_inference, engine, tokenizer_model, example_batch, state.params, init_rng)
-      jax.debug.print("golden completion {x}",x=example_batch['completion'][0])
+      # jax.debug.print("golden completion {x}",x=example_batch['completion'][0])
       jax.debug.print("ar_completion[0] {x}",x=tokenizer_model.decode(example_batch['ar_completions'][0]))
-      jax.debug.print("ar_completion_segmentation {x}",x=example_batch['ar_completions_segmentation'][0])
-      jax.debug.print("ar_completion_position {x}",x=example_batch['ar_completions_position'][0])
+      # jax.debug.print("ar_completion_segmentation {x}",x=example_batch['ar_completions_segmentation'][0])
+      # jax.debug.print("ar_completion_position {x}",x=example_batch['ar_completions_position'][0])
       # TODO: ensure this partitioning is correct
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, nextrng)

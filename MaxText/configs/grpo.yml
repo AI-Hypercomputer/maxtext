@@ -4,11 +4,14 @@ use_grpo: True
 train_data_columns: ['prompt', 'completion']
 
 per_device_batch_size: 2.0
-steps: 10
-max_target_length: 1024
 
 enable_goodput_recording: False
 monitor_goodput: False
 
-# TODO: we update max_prefill_predict_length for grpo setting
-#max_prefill_predict_length
+# we update max_prefill_predict_length for grpo setting
+max_prefill_predict_length: 550
+max_target_length: 678 #  from TRL
+
+adam_b2: 0.999
+
+attention: dot_product
