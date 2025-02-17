@@ -270,6 +270,14 @@ class HBMCache:
       return self._saved_values[key].clone()
     return None
 
+  def evict_cache(self, key: Key) -> Optional[Value]:
+    """Evict and return value, or None if key is not in cache."""
+    if key not in self._saved_values:
+      return None
+    value = self._saved_values.pop(key)
+    self._remain_size_bytes += value.prefix_size_bytes
+    return value
+
 
 class LRUStrategy:
   """Least recently used cache strategy manage key."""
