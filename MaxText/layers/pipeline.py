@@ -253,7 +253,7 @@ class Pipeline(nn.Module):
     ids = self.shard_dim_by_stages(ids, 0)
     outs = jax.vmap(_gather_one, in_axes=(None, 0), out_axes=ids_dim)(xs, ids)
     return self.shard_dim_by_stages(outs, 0)
-
+  
   def get_new_loop_state(self, output, loop_state):
     """
     Update the various buffers given the output of the most recent iteration
@@ -586,7 +586,11 @@ class Pipeline(nn.Module):
         )
     )
     example_inputs = jax.lax.broadcast(inputs[0], [self.num_stages])  # dummy inputs fed to initialize the module weights.
+    ag_sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(None, None))
     if positions is not None:
+      # AG positions
+      positions = jax.lax.with_sharding_constraint(positions, ag_sharding)
+      
       positions = positions.reshape(
           (self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length)
       )
@@ -596,6 +600,7 @@ class Pipeline(nn.Module):
       example_position = None
       position_idx = None
     if segment_ids is not None:
+      segment_ids = jax.lax.with_sharding_constraint(segment_ids, ag_sharding)
       segment_ids = segment_ids.reshape(
           (self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length)
       )
