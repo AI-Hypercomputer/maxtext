@@ -14,7 +14,7 @@
 
 """Prefix Cache Test"""
 
-from prefix_cache import HBMCache, PrefixCache, PrefixCacheTrie, Value
+from prefix_cache import HBMCache, LRUStrategy, PrefixCache, PrefixCacheTrie, Value
 
 import pytest
 import unittest
@@ -238,6 +238,32 @@ class HBMCacheTest(unittest.TestCase):
     hbm_cache.add_to_cache((2), value2)
     assert hbm_cache.retrieve_from_cache((1)) == value1
     assert hbm_cache.retrieve_from_cache((2)) == value2
+
+
+class LRUStrategyTest(unittest.TestCase):
+
+  def test_evict_none_if_no_use(self):
+    strategy = LRUStrategy()
+    assert strategy.evict() is None
+
+  def test_evict_FIFO(self):
+    strategy = LRUStrategy()
+    strategy.use((1))
+    strategy.use((2))
+    strategy.use((3))
+    assert strategy.evict() == (1)
+    assert strategy.evict() == (2)
+    assert strategy.evict() == (3)
+    assert strategy.evict() is None
+
+  def test_use_in_the_middle_update_to_the_last(self):
+    strategy = LRUStrategy()
+    strategy.use((1))
+    strategy.use((2))
+    strategy.use((1))
+    assert strategy.evict() == (2)
+    assert strategy.evict() == (1)
+    assert strategy.evict() is None
 
 
 class PrefixCacheTest(unittest.TestCase):

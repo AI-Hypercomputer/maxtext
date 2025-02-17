@@ -56,6 +56,7 @@ if cached_prefix is None or matched_len != orig_key_len:
 
 """
 
+from collections import OrderedDict
 from typing import Tuple, Any, Optional
 import dataclasses
 import jax
@@ -268,6 +269,26 @@ class HBMCache:
     if key in self._saved_values:
       return self._saved_values[key].clone()
     return None
+
+
+class LRUStrategy:
+  """Least recently used cache strategy manage key."""
+
+  def __init__(self):
+    self._order: OrderedDict[Key, None] = OrderedDict()
+
+  def evict(self) -> Optional[Key]:
+    """Return and pop the least recently used key."""
+    if len(self._order) == 0:
+      return None
+    return self._order.popitem(last=False)[0]
+
+  def use(self, key: Key) -> None:
+    """Updated the usage history."""
+    if key not in self._order:
+      self._order[key] = None
+    else:
+      self._order.move_to_end(key, last=True)
 
 
 class PrefixCache:
