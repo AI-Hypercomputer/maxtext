@@ -9,9 +9,24 @@ enable_goodput_recording: False
 monitor_goodput: False
 
 # we update max_prefill_predict_length for grpo setting
-max_prefill_predict_length: 550
-max_target_length: 678 #  from TRL
+attention: dot_product
+
+#prefixed TRL
+# max_prefill_predict_length: 550
+# max_target_length: 678 #
+
+#TRL
+max_prefill_predict_length: 512
+max_target_length: 768 # from TRL
 
 adam_b2: 0.999
 
-attention: dot_product
+# Group Relative Policy Optimization (GRPO)
+num_generations: 4 # TRL is 8
+temperature: 0.9 #from TRL
+grpo_beta: 0.04 #from TRL
+
+learning_rate: 1.e-6 # from TRL
+decode_sampling_strategy: "weighted"
+per_device_batch_size: 1
+async_checkpointing: false

@@ -621,9 +621,20 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   # Create a mask to clear out the last token position in the ar_completions 
   # and to make sure loss is computed on non-padding tokens
   valid_seq_mask = (completion_target_segmentation != 0)  # [BxG, S-1]
+  valid_seq_mask_has_non_zero = jnp.sum(valid_seq_mask,axis=1) #[BxG]
+  jax.debug.print("valid_seq_mask_has_non_zero={valid_seq_mask_has_non_zero}",valid_seq_mask_has_non_zero=valid_seq_mask_has_non_zero)
       
   # --- (4) Compute per-token KL divergence for each token in the generated completion.
-  per_token_kl = jnp.exp(token_logps_ref - token_logps_policy) - (token_logps_ref - token_logps_policy) - 1
+  token_diff_logps_ref_policy = token_logps_ref - token_logps_policy
+  token_diff_logps_ref_policy_mean = jnp.mean(token_diff_logps_ref_policy,axis=1)
+  token_diff_logps_ref_policy_max = jnp.max(token_diff_logps_ref_policy,axis=1)
+  token_diff_logps_ref_policy_min = jnp.min(token_diff_logps_ref_policy,axis=1)
+  jax.debug.print("token_diff_logps_ref_policy_mean={token_diff_logps_ref_policy_mean}",token_diff_logps_ref_policy_mean=token_diff_logps_ref_policy_mean)
+  jax.debug.print("token_diff_logps_ref_policy_max={token_diff_logps_ref_policy_max}",token_diff_logps_ref_policy_max=token_diff_logps_ref_policy_max)
+  jax.debug.print("token_diff_logps_ref_policy_min={token_diff_logps_ref_policy_min}",token_diff_logps_ref_policy_min=token_diff_logps_ref_policy_min)
+
+
+  per_token_kl = jnp.exp(token_diff_logps_ref_policy) - (token_diff_logps_ref_policy) - 1
   # loss is computed on non-padding tokens
   per_token_kl = per_token_kl * valid_seq_mask
   # jax.debug.print("per_token_kl={per_token_kl}",per_token_kl=per_token_kl)
@@ -667,7 +678,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   # jax.debug.print("loss_tokens_has_negative={loss_tokens_has_negative}",loss_tokens_has_negative=loss_tokens_has_negative)
  
   # Average over tokens per generated completion.
-  loss_per_example = jnp.sum(loss_tokens*valid_seq_mask, axis=1) / (jnp.sum(valid_seq_mask, axis=1)) 
+  loss_per_example = jnp.sum(loss_tokens*valid_seq_mask, axis=1) / (jnp.sum(valid_seq_mask, axis=1) + EPS) 
 
   # jax.debug.print("loss_per_example={loss_per_example}",loss_per_example=loss_per_example)
   loss = jnp.mean(loss_per_example)
@@ -676,7 +687,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   avg_kl = jnp.mean((per_token_kl * valid_seq_mask) / (jnp.sum(valid_seq_mask, axis=1, keepdims=True)))
   avg_reward = jnp.mean(rewards)
   avg_advantage = jnp.mean(advantages)
-  avg_completion_length = jnp.mean(1 + jnp.sum(valid_seq_mask, axis=1))
+  avg_completion_length = jnp.mean(jnp.sum(data["ar_completions_segmentation"]!=0, axis=1))
  
   aux = {
       "total_loss": loss,
@@ -742,9 +753,15 @@ def generate_completions(params, data, config, rng, tokenizer_model, engine, tru
         # Temperature scaling done by using `weighted` as sampling method
         decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
         if sampled_tokens.get_result_at_slot(slot).tokens.item() == tokenizer_model.eos_token_id: # got EOS token
+          if step > 0:
+            completions.append(sampled_tokens.get_result_at_slot(slot).tokens.item())
+            break
+          else:
+            # TODO: if we get an eos as the first generated token
+            step -= 1
+            continue
+        else:
           completions.append(sampled_tokens.get_result_at_slot(slot).tokens.item())
-          break
-        completions.append(sampled_tokens.get_result_at_slot(slot).tokens.item())
 
         # # TODO: remove!! this is only for proxying the AR
         # if step < 5:
@@ -1421,6 +1438,7 @@ def train_loop(config, config_inference, state=None):
 
 
 def main(argv: Sequence[str]) -> None:
+  jax.config.update("jax_debug_nans", True)
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   # TF allocates extraneous GPU memory when using TFDS data
   # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
