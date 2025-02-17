@@ -61,8 +61,9 @@ from typing import Tuple, Any, Optional
 import dataclasses
 import jax
 import jax.numpy as jnp
+import logging
 
-import max_logging
+logger = logging.getLogger(__name__)
 
 Token = int
 # Tuple of tokens from prompt
@@ -142,7 +143,7 @@ class Value:
 
   def _maybe_adjust_true_length(self, true_length: int, tokens: list[int]) -> int:
     if true_length > len(tokens):
-      max_logging.log(f"WARNING: {true_length=} should <= {len(tokens)=}.")
+      logger.warning("true_length=%d should <= len(tokens)=%d.", true_length, len(tokens))
 
     return min(true_length, len(tokens))
 
@@ -314,28 +315,55 @@ class PrefixCache:
     # init in clear()
     self._hbm_cache: HBMCache = None
     self._trie: PrefixCacheTrie = None
+    self._cache_strategy: LRUStrategy = None
     self.clear()
 
   def fetch_longest_common_prefix_key(self, key: Key) -> Optional[Key]:
     """Returns key with longest common prefix matched or None if not found."""
-    return self._trie.get_longest_common_prefix_key(key)
+    logger.debug("fetch_longest_common_prefix_key, key=%r", key)
+    matched_key = self._trie.get_longest_common_prefix_key(key)
+    logger.debug("matched_key=%r", matched_key)
+    return matched_key
 
   def save(self, key: Key, value: Value) -> bool:
     """Save key/value to the cache."""
+    logger.debug("save key=%r", key)
     if not self._hbm_cache.is_enough_space_remain(value):
-      self._evict_least_recently_used_cache()
+      self._evict_cache()
     if not self._hbm_cache.add_to_cache(key, value):
+      logger.debug("cannot add to cache even after evict")
       return False
-    return self._trie.insert(key)
+    self._trie.insert(key)
+    self._cache_strategy.use(key)
+    return True
 
   def load(self, key: Key) -> Optional[Value]:
     """Returns Value stored with key or None if not found."""
-    return self._hbm_cache.retrieve_from_cache(key)
+    logger.debug("load key=%r", key)
+    value = self._hbm_cache.retrieve_from_cache(key)
+    if value is None:
+      logger.warning("The key should fetched by fetch_longest_common_prefix_key, load key=%r should be valid but not.", key)
+      return None
+    self._cache_strategy.use(key)
+    return value
 
   def clear(self):
     """Clear entire cache."""
+    logger.debug("clear cache")
     self._hbm_cache = HBMCache(max_size_bytes=self._hbm_bytes)
     self._trie = PrefixCacheTrie()
+    self._cache_strategy = LRUStrategy()
 
-  def _evict_least_recently_used_cache(self):
-    raise NotImplementedError
+  def _evict_cache(self) -> Optional[Value]:
+    """Evict cache based on strategy."""
+    logger.debug("_evict_cache")
+    key = self._cache_strategy.evict()
+    if key is None:
+      logger.debug("no key to evict")
+      return None
+    logger.debug("evict key=%r", key)
+    value = self._hbm_cache.evict_cache(key)
+    if value is None:
+      logger.warning("key=%r should exist in HBM cache.", key)
+    self._trie.erase(key)
+    return value

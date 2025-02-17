@@ -314,6 +314,46 @@ class PrefixCacheTest(unittest.TestCase):
     loaded_value = prefix_cache.load(matched_key)
     assert loaded_value == saved_value
 
+  def test_clear_cache(self):
+    tokens = (1, 2, 3)
+    value = create_default_value(tokens=tokens)
+    prefix_cache = PrefixCache(hbm_bytes=value.prefix_size_bytes)
+    assert prefix_cache.save(tokens, value) is True
+    assert prefix_cache.load(tokens) == value
+    prefix_cache.clear()
+    assert prefix_cache.load(tokens) is None
+
+  def test_evict_cache_with_LRU_strategy(self):
+    tokens1 = (1,)
+    value1 = create_default_value(tokens=tokens1)
+    tokens2 = (2,)
+    value2 = create_default_value(tokens=tokens2)
+    tokens3 = (3,)
+    value3 = create_default_value(tokens=tokens3)
+    # cache with 2 values size, and will evict with LRU
+    prefix_cache = PrefixCache(hbm_bytes=(value1.prefix_size_bytes) * 2)
+    assert prefix_cache.save(tokens1, value1) is True
+    assert prefix_cache.save(tokens2, value2) is True
+    assert prefix_cache.load(tokens1) == value1
+    assert prefix_cache.save(tokens3, value3) is True
+    assert prefix_cache.load(tokens2) is None
+
+  def test_fetch_longest_common_prefix_key_does_not_affect_LRU(self):
+    tokens1 = (1,)
+    value1 = create_default_value(tokens=tokens1)
+    tokens2 = (2,)
+    value2 = create_default_value(tokens=tokens2)
+    tokens3 = (3,)
+    value3 = create_default_value(tokens=tokens3)
+    # cache with 2 values size, and will evict with LRU
+    prefix_cache = PrefixCache(hbm_bytes=(value1.prefix_size_bytes) * 2)
+    assert prefix_cache.save(tokens1, value1) is True
+    assert prefix_cache.save(tokens2, value2) is True
+    assert prefix_cache.fetch_longest_common_prefix_key(tokens1) == tokens1
+    assert prefix_cache.save(tokens3, value3) is True
+    assert prefix_cache.fetch_longest_common_prefix_key(tokens1) is None
+    assert prefix_cache.load(tokens1) is None
+
   @pytest.mark.tpu_only
   def test_hbm_memory_usage(self):
     """Test HBM memory change.
