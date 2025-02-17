@@ -478,6 +478,10 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     rng2: A new rng key that can be used in future calls.
 
   """
+  if config.only_fwd:
+    metrics['loss'] = loss_fn(model, config, data, dropout_rng, state.params,  is_train=True)
+    return new_state, metrics
+
   reference_params, reference_params_sharding, extra_dpo_args, _loss_fn = [], [], [], loss_fn
   if config.use_dpo:
     state, reference_params = _split_dpo_state(state)
@@ -526,6 +530,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
       if config.use_dpo:
         reference_params = jax.device_put(reference_params, max_utils.with_memory_kind(reference_params_sharding, "device"))
         extra_dpo_args = [reference_params]
+
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
   intermediate_outputs = aux["intermediate_outputs"]
