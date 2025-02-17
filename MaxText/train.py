@@ -479,8 +479,10 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
 
   """
   if config.only_fwd:
-    metrics['loss'] = loss_fn(model, config, data, dropout_rng, state.params,  is_train=True)
-    return new_state, metrics
+    loss, aux = loss_fn(model, config, data, dropout_rng, state.params,  is_train=True)
+    metrics = {}
+    metrics['loss'] = loss
+    return state, metrics
 
   reference_params, reference_params_sharding, extra_dpo_args, _loss_fn = [], [], [], loss_fn
   if config.use_dpo:
@@ -900,7 +902,12 @@ def train_loop(config, state=None):
 
     step_time_delta = datetime.datetime.now() - last_step_completion
     last_step_completion = datetime.datetime.now()
-    record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
+    if not config.only_fwd:
+      record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
+    else:
+      ms = 1000 * step_time_delta.total_seconds()
+      print(f"step {step} completed in {ms} ms.")
+      step_time_delta
     if performance_metric_queue:
       performance_metric_queue.put(step_time_delta.total_seconds())
 
@@ -914,7 +921,8 @@ def train_loop(config, state=None):
         checkpoint_manager.wait_until_finished()
         sys.exit()
 
-    write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config)
+    if not config.only_fwd:
+      write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config)
 
     if config.dump_hlo and step == start_step:
       jax.block_until_ready(state)  # Ensure compilation has finished.
@@ -979,7 +987,8 @@ def train_loop(config, state=None):
 
   if checkpoint_manager is not None:
     checkpoint_manager.wait_until_finished()
-  write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config)  # final step metrics
+  if not config.only_fwd:
+    write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config)  # final step metrics
   max_utils.close_summary_writer(writer)
   record_goodput(recorder, config, recorder.record_job_end_time if recorder else None)
   clear_buffered_metrics()
