@@ -41,18 +41,23 @@ else:
 
 if cache_results:
    # load cache successfully
-   matched_len, cached_prefix, tokens = cache_results
-   key = full_key[match_len:]
+   matched_len = calculate_matched_len(full_key, matched_key)
+   cached_prefix = cache_results.prefix
 else:
    cached_prefix = None
 
 iii) Run prefill un-cached prompt and write to cache
 
-full_kv_cache = prefill(prompt, cached_prefix)
+full_kv_cache = prefill(prompt, cached_prefix, matched_len)
 
 # if the cache didn't contain prefix or if it was a partial match
 if cached_prefix is None or matched_len != orig_key_len:
-    prefix_cache.save(full_key, Value(full_kv_cache, orig_key_len))
+    prefix_cache.save(full_key, Value(
+        prefix=full_kv_cache,
+        true_length=true_length,
+        padded_length=padded_length,
+        tokens=full_key,
+    ))
 
 """
 
