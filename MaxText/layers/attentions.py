@@ -133,6 +133,113 @@ def apply_mask_to_logits(logits: Array, mask: Array):
   """
   return jnp.where((mask >= DEFAULT_MASK_VALUE * 0.5), logits, DEFAULT_MASK_VALUE)
 
+def get_prefill_contiguous_kv_cache_annotations(model, config, rng_prefill, mesh):
+  """Creates the KV cache annotations for prefill."""
+  with nn_partitioning.axis_rules(config.logical_axis_rules):
+      input_shape = (config.global_batch_size_to_load, 1) # dummy shape
+
+      # Initialize a "prefill" cache using a dummy input. We only care about the
+      # cache variables; the output logits are irrelevant.
+      _, initial_vars = model.init(
+              {"params": rng_prefill, "dropout": rng_prefill, "aqt": rng_prefill},
+              jnp.ones(input_shape, dtype=jnp.int32),
+              jnp.ones(input_shape, dtype=jnp.int32),
+              model_mode = common_types.MODEL_MODE_PREFILL,
+              mutable = ["cache"],
+          )
+
+  cache = initial_vars["cache"]
+
+  def get_axis_names(x):
+    if isinstance(x, flax.linen.spmd.LogicallyPartitioned):
+      return tuple(x.names)
+
+  annotations = jax.tree_util.tree_map(
+      get_axis_names, cache, is_leaf=lambda k: isinstance(k, (flax.linen.spmd.LogicallyPartitioned, jax.Array))
+  )
+
+  return annotations
+
+def get_initial_contiguous_kv_cache(model, config, batch_size, abstract=False):
+    """Creates the initial (all zeros) KV cache."""
+    if abstract:
+      input_shape = (batch_size, 1)
+      key = jax.random.PRNGKey(0)  # Need a key for jax.eval_shape
+      cache = jax.eval_shape(
+          lambda: model.init(
+              {"params": key, "dropout": key, "aqt": key},
+              jnp.ones(input_shape, dtype=jnp.int32),
+              jnp.ones(input_shape, dtype=jnp.int32),
+              model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+              mutable=["cache"],
+          )
+      )
+
+      return cache["cache"]
+    else:
+      raise ValueError("Contiguous attention only uses static shapes for kv-cache, and shouldn't rely on variables. Use abstract=True.")
+
+def get_initial_paged_kv_cache(model, config, batch_size, abstract=False):
+    if not abstract:
+        raise ValueError("PagedAttention only supports abstract initialization of KV cache, please use abstract=True")
+
+    def create_page_manager(config):
+        return PageManager(
+            num_pages=config.num_pages,
+            tokens_per_page=config.tokens_per_page,
+            max_page_groups=int(config.per_device_batch_size * jax.device_count()),
+            max_target_length=config.max_target_length,
+            max_prefill_predict_length=config.max_prefill_predict_length,
+            max_pages_per_group=(config.max_target_length + config.tokens_per_page - 1) // config.tokens_per_page,
+            config=config,
+        )
+
+    if config.attention == "paged":
+        page_managers = [create_page_manager(config) for _ in range(config.num_decoder_layers)]
+
+        def layer_page_state_shape(page_manager):
+            return jax.eval_shape(page_manager.get_page_state)
+
+        # Get shape of PageState for each layer.
+        layers_page_state_shapes = [layer_page_state_shape(pm) for pm in page_managers]
+
+        # Create overall cache structure.
+        cache = {}
+        for i, layer_page_state_shape in enumerate(layers_page_state_shapes):
+            cache[f"layers_{i}"] = layer_page_state_shape
+        return {"decoder": cache}  # Wrap in a 'decoder' dict to match the non-paged structure.
+
+    return {} # return a blank for non-paged attention
+
+def get_prefill_paged_kv_cache_annotations(model, config, rng_prefill, mesh):
+  """Creates the KV cache annotations for prefill."""
+  if config.attention == "paged":
+    with nn_partitioning.axis_rules(config.logical_axis_rules):
+      input_shape = (config.global_batch_size_to_load, 1)  # dummy shape
+
+      # Initialize a "prefill" cache using a dummy input. We only care about the
+      # cache variables; the output logits are irrelevant.
+      _, initial_vars = model.init(
+              {"params": rng_prefill, "dropout": rng_prefill, "aqt": rng_prefill},
+              jnp.ones(input_shape, dtype=jnp.int32),
+              jnp.ones(input_shape, dtype=jnp.int32),
+              model_mode = common_types.MODEL_MODE_PREFILL,
+              mutable = ["cache"],
+          )
+
+      cache = initial_vars["cache"]
+      def get_axis_names(x):
+        if isinstance(x, nn.spmd.LogicallyPartitioned):
+          return tuple(x.names)
+
+      annotations = jax.tree_util.tree_map(
+          get_axis_names, cache, is_leaf=lambda k: isinstance(k, (nn.spmd.LogicallyPartitioned, jax.Array))
+      )
+
+      return annotations
+  else:
+    raise ValueError("Incorrect config.attention.  Expected paged")
+
 
 class PagedAttentionOp(nn.Module):
   """Paged Attention Operator."""
@@ -140,11 +247,10 @@ class PagedAttentionOp(nn.Module):
   mesh: any
   num_kv_heads: int
   kv_head_dim_size: int
-  config: dict
+  config: Config
   output_dim: int
   dtype: any = jnp.bfloat16
   quant: Optional[Quant] = None
-
 
   def out_projection(self, output_dim: int, out: Array) -> Array:
     out_proj = DenseGeneral(
@@ -1508,7 +1614,7 @@ class Attention(nn.Module):
       *,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
       deterministic: bool = False,
-      page_manager: Optional[PageManager] = None,  # Pass PageManager directly
+      page_manager: Optional[PageManager] = None,
       page_group_id: Optional[int] = None,
       true_length: Optional[int] = None,
   ):
@@ -1546,14 +1652,13 @@ class Attention(nn.Module):
       key = checkpoint_name(key, "key_proj")
       value = checkpoint_name(value, "value_proj")
 
-      # Call PagedAttentionOp, passing the page_manager.  VERY IMPORTANT.
       out = self.attention_op(
           query=query,
           key=key,
           value=value,
           decoder_segment_ids=decoder_segment_ids,
           model_mode=model_mode,
-          page_manager=page_manager,  # Pass PageManager here!
+          page_manager=page_manager,
           page_group_id=page_group_id,
           true_length=true_length,
       )

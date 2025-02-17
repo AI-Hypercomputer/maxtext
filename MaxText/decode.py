@@ -15,16 +15,13 @@
 """CLI utility for running inference on a single stream"""
 
 import jax
-
 import max_utils
 import maxengine
-
 import os
 import pyconfig
-
 from typing import Sequence
 from absl import app
-
+from layers.models import Transformer
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
@@ -35,7 +32,11 @@ def main(argv: Sequence[str]) -> None:
   validate_config(config)
   max_utils.print_system_information()
 
-  engine = maxengine.MaxEngine(config)
+  # Initialize the model and engine.
+  model = Transformer(
+      config=config, mesh=max_utils.create_device_mesh(config), quant=None
+  )  # we have to initialize here
+  engine = maxengine.MaxEngine(config, model)  # pass in the model here
   rng = jax.random.PRNGKey(1234)
   rng, rng_load_params = jax.random.split(rng)
   params = engine.load_params(rng_load_params)
@@ -61,9 +62,10 @@ def main(argv: Sequence[str]) -> None:
       rng=rng_prefill,
       slot=slot,
   )
-
   rng, rng_init_decode = jax.random.split(rng)
-  decode_state = engine.init_decode_state(rng_init_decode)
+
+  # Key Change: Pass model and config to init_decode_state
+  decode_state = engine.init_decode_state(rng_init_decode, model, config)
   decode_state = engine.insert(prefill_result, decode_state, slot=slot)
 
   steps = range(config.max_prefill_predict_length, config.max_target_length)
@@ -72,11 +74,7 @@ def main(argv: Sequence[str]) -> None:
 
   for _ in steps:
     rng, rng_generate = jax.random.split(rng)
-    decode_state, sampled_tokens = engine.generate(
-        params,
-        decode_state,
-        rng=rng_generate,
-    )
+    decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate, slot=slot)
     sampled_tokens_list.append(sampled_tokens)
 
   results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]

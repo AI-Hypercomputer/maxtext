@@ -30,6 +30,7 @@ from layers import embeddings
 from layers import linears
 from layers import normalizations, quantizations
 from layers import pipeline
+from page_manager import PageManager # add this!
 
 Array = common_types.Array
 Config = common_types.Config
@@ -55,6 +56,21 @@ class DecoderLayer(nn.Module):
   mesh: Mesh
   quant: Optional[Quant] = None
 
+  def setup(self):
+      cfg = self.config
+      if cfg.attention == "paged":
+        self.page_manager = PageManager(
+            num_pages=cfg.num_pages,
+            tokens_per_page=cfg.tokens_per_page,
+            max_page_groups=int(cfg.per_device_batch_size * jax.device_count()),
+            max_target_length=cfg.max_target_length,
+            max_prefill_predict_length=cfg.max_prefill_predict_length,
+            max_pages_per_group=(cfg.max_target_length + cfg.tokens_per_page - 1) // cfg.tokens_per_page,
+            config = self.config,
+        )
+      else:
+        self.page_manager = None  # Make sure its defined in all cases.
+
   @nn.compact
   def __call__(
       self,
@@ -63,6 +79,8 @@ class DecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      slot = None,
+      true_length = None
   ):
     cfg = self.config
     mesh = self.mesh
@@ -109,6 +127,9 @@ class DecoderLayer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        page_manager=self.page_manager, # make sure to use slot here
+        page_group_id=slot,
+        true_length=true_length
     )
 
     attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
@@ -183,11 +204,9 @@ class Decoder(nn.Module):
   def setup(self):
     """Initialize decoder layer."""
     cfg = self.config
-    if cfg.attention == "paged":
-      self.decoder_layers_cls = self.get_decoder_layers()
-    else:
-      self.decoder_layer = self.get_decoder_layers()
+    self.decoder_layer = self.get_decoder_layers() # a list of decoder layers
     self.norm_layer = self.get_norm_layer()
+
 
     if self.config.using_pipeline_parallelism:
       pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer[0])
@@ -419,81 +438,28 @@ class Decoder(nn.Module):
       y = self.pipeline_module(
           y, decoder_segment_ids, decoder_positions, deterministic, model_mode, partition_spec=partition_spec
       )
-    else:  # No pipeline parallelism.
-      if cfg.attention == "paged":
-        # Paged attention: Instantiate layers WITHIN the loop.
+    else:
+        # Iterate through layers, and PageManagers *if* they exist
         for lyr in range(cfg.num_decoder_layers):
-          decoder_layer = self.decoder_layers_cls[0](config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)
-          y = decoder_layer(
-              y,
-              decoder_segment_ids,
-              decoder_positions,
-              deterministic,
-              model_mode,
-              slot=slot,
-              true_length=true_length,
-          )
-      else:  # Non-paged attention
-        policy = self.get_remat_policy()
-        RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, policy)
+            # Get the appropriate decoder layer class. This handles both scanned/unscanned
+            # and different decoder_block types (llama2, gemma, etc.).
+            RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, self.get_remat_policy())
+            current_layer_class = RemattedBlockLayers[lyr % len(RemattedBlockLayers)] # handle deepseek
+            if cfg.attention == "paged":
+                page_manager = self.page_managers.value[lyr]
+            else:
+                page_manager = None
 
-        if cfg.scan_layers:
-          if cfg.decoder_block == "deepseek":
-            assert len(RemattedBlockLayers) == 2, f"Scanned layers must have a length of 2 using deepseek."
-            dense_layer = RemattedBlockLayers[0]
-            moe_layer = RemattedBlockLayers[1]
-            y, _ = self.scan_decoder_layers(cfg, dense_layer, cfg.first_num_dense_layers, "dense_layers", mesh)(
+            y = current_layer_class(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, page_manager=page_manager)(
                 y,
                 decoder_segment_ids,
                 decoder_positions,
                 deterministic,
                 model_mode,
+                slot = slot,
+                true_length = true_length
             )
-            num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
-            y, _ = self.scan_decoder_layers(cfg, moe_layer, num_moe_layers, "moe_layers", mesh)(
-                y,
-                decoder_segment_ids,
-                decoder_positions,
-                deterministic,
-                model_mode,
-            )
-          else:
-            RemattedBlockLayer = RemattedBlockLayers[0]
-            y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
-                y,
-                decoder_segment_ids,
-                decoder_positions,
-                deterministic,
-                model_mode,
-            )
-        else:  # Not scanned
-          if cfg.decoder_block == "deepseek":
-            assert len(RemattedBlockLayers) == 2, f"Unscanned layers must have a length of 2 using deepseek."
-            dense_layer = RemattedBlockLayers[0]
-            moe_layer = RemattedBlockLayers[1]
-            num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
 
-            layers = [dense_layer, moe_layer]
-            layer_prefix = ["dense_layers", "moe_layers"]
-            num_layers = [cfg.first_num_dense_layers, num_moe_layers]
-            for index in range(len(layers)):
-              y = layers[index](config=cfg, mesh=mesh, name=f"{layer_prefix[index]}_{index}", quant=self.quant)(
-                  y,
-                  decoder_segment_ids,
-                  decoder_positions,
-                  deterministic,
-                  model_mode,
-              )
-          else:
-            for lyr in range(cfg.num_decoder_layers):
-              RemattedBlockLayer = RemattedBlockLayers[0]
-              y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
-                  y,
-                  decoder_segment_ids,
-                  decoder_positions,
-                  deterministic,
-                  model_mode,
-              )
 
     y = self.get_norm_layer()(
         dtype=cfg.dtype,
@@ -511,7 +477,7 @@ class Decoder(nn.Module):
       if self.config.normalize_embedding_logits:
         # Correctly normalize pre-softmax logits for this shared case.
         logits = logits / jnp.sqrt(y.shape[-1])
-      if cfg.final_logits_soft_cap:
+      if cfg.final_logits_soft_cap: # handle the case of a soft cap on final logits
         logits = logits / cfg.final_logits_soft_cap
         logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
     else:

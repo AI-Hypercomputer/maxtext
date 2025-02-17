@@ -68,19 +68,6 @@ class LlamaDecoderLayer(nn.Module):
   mesh: Mesh
   quant: Optional[Quant] = None
 
-  def setup(self):
-      cfg = self.config
-      if cfg.attention == "paged":
-        self.page_manager = PageManager(
-            num_pages=cfg.num_pages,
-            tokens_per_page=cfg.tokens_per_page,
-            max_page_groups=int(cfg.per_device_batch_size * jax.device_count()),
-            max_target_length=cfg.max_target_length,
-            max_prefill_predict_length=cfg.max_prefill_predict_length,
-            max_pages_per_group=(cfg.max_target_length + cfg.tokens_per_page - 1) // cfg.tokens_per_page,
-            config = self.config,
-        )
-
   @nn.compact
   def __call__(
       self,
@@ -116,7 +103,6 @@ class LlamaDecoderLayer(nn.Module):
         head_dim=cfg.head_dim,
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
-        attention_kernel=cfg.attention,
         mesh=mesh,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -126,10 +112,6 @@ class LlamaDecoderLayer(nn.Module):
         float32_logits=cfg.float32_logits,
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
-        prefill_cache_axis_order=tuple([int(i) for i in cfg.prefill_cache_axis_order.split(",")]),
-        ar_cache_axis_order=tuple([int(i) for i in cfg.ar_cache_axis_order.split(",")]),
-        compute_axis_order=tuple([int(i) for i in cfg.compute_axis_order.split(",")]),
-        reshape_q=cfg.reshape_q,
         use_ragged_attention=cfg.use_ragged_attention,
         ragged_block_size=cfg.ragged_block_size,
     )
