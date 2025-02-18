@@ -53,97 +53,56 @@ jobs:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
         JAX_PLATFORMS: "proxy"
-        JAX_BACKEND_TARGET: "grpc://localhost:29000"
+        JAX_BACKEND_TARGET: "grpc://localhost:29008"
       options: ${{ inputs.container_resource_option }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install Docker
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-          sudo apt-get update
-          sudo apt-get install -y docker-ce docker-ce-cli containerd.io
-          sudo usermod -aG docker $USER # Add current user to docker group
-      - name: Install Docker Compose
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y docker-compose-plugin # Install the compose plugin
-          docker compose version
-          gcloud auth configure-docker us-docker.pkg.dev --quiet
-      - name: Start Docker Compose Services
-        run: |
-          echo "Starting Docker Compose services..."
-          cat <<EOF > docker-compose.yml
-          services:
-            resource_manager:
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
-              network_mode: host
-              ports:
-                - "29001:29001"
-                - "29002:29002"
-              command:
-                - --server_port=29001
-                - --node_type=resource_manager
-                - --instance_count=1
-                - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
-                - --instance_type=tpuv4:2x2x1
-              environment:
-                - HOST_ADDRESS=localhost
-                - TPU_SKIP_MDS_QUERY=true
-
-            worker:
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
-              network_mode: host
-              ports:
-                - "29005:29005"
-                - "29006:29006"
-                - "8471:8471"
-                - "8080:8080"
-              command:
-                - --alsologtostderr
-                - --server_port=29005
-                - --resource_manager_address=localhost:29001
-                - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
-              environment:
-                - TPU_WORKER_ID=0
-                - TPU_WORKER_HOSTNAME=localhost
-                - MEGASCALE_NUM_SLICES=1
-                - MEGASCALE_SLICE_ID=0
-                - MEGASCALE_COORDINATOR_ADDRESS=localhost
-              privileged: true
-
-            proxy:
-              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest
-              network_mode: host
-              ports:
-                - "29000:29000"
-              command:
-                - --server_port=29000
-                - --resource_manager_address=localhost:29001
-                - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
-          EOF
-          docker compose up -d
-          sleep 10 # Give services time to start
       - name: Run Tests
         run: |
           cd MaxText
           python3 -m pytest ${{ inputs.test_directory }} -m "${{ inputs.pytest_marker }}"
-      - name: Stop Docker Compose Services
-        if: always()
-        run: |
-          echo "Stopping Docker Compose services..."
-          docker compose down
-
-      # - name: Start containers using script
-      #   run: |
-      #     bash docker_build_pathways_containers.sh
-      # # - name: Run Tests with Pathways backend
-      # #   run: |
-      # #     export JAX_PLATFORMS="proxy" 
-      # #     export JAX_BACKEND_TARGET="grpc://localhost:29000" 
-      # #     echo "Set Pathways env variables"
-      # #     echo $JAX_BACKEND_TARGET
-      # #     cd MaxText/
-      # #     python3 -m pytest -s ${{ inputs.test_directory }} -m "${{ inputs.pytest_marker }}"
+    
+    services:
+      resource_manager:
+        image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+        ports:
+          - "29001:29001"
+          - "29002:29002"
+        # command:
+          # "--server_port": 29001
+          # "--node_type": resource_manager
+          # "--instance_count": 1
+          # "--gcs_scratch_location": gs://cloud-pathways-staging/tmp
+          # "--instance_type": tpuv4:2x2x1
+        env:
+          HOST_ADDRESS: localhost
+          TPU_SKIP_MDS_QUERY: true
+      
+      worker:
+        image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+        ports:
+          - "29005:29005"
+          - "29006:29006"
+          - "8471:8471"
+          - "8080:8080"
+        env:
+          TPU_WORKER_ID: 0
+          TPU_WORKER_HOSTNAME: localhost
+          MEGASCALE_NUM_SLICES: 1
+          MEGASCALE_SLICE_ID: 0
+          MEGASCALE_COORDINATOR_ADDRESS: localhost
+        # command:
+          # "--server_port": 29005
+          # "--resource_manager_address": resource_manager:29001
+          # "--gcs_scratch_location": gs://cloud-pathways-staging/tmp
+        options:
+          --privileged
+      
+      proxy:
+        image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest
+        ports:
+          - "29008:29008"
+        # command:
+          # "--server_port": 29008
+          # "--resource_manager_address": resource_manager:29001
+          # "--gcs_scratch_location": gs://cloud-pathways-staging/tmp
