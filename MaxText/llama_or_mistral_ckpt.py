@@ -22,7 +22,7 @@ To save a ckpt
 python3 MaxText/llama_or_mistral_ckpt.py --base-model-path <path/to/meta/ckpt> \
     --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size llama2-7b
 
-The base model checkpoints should be in the format `{name}.{chkpt_idx}.pth` 
+The base model checkpoints should be in the format `{name}.{chkpt_idx}.pth`
 For example: `mistral-7b.00.pth`
 For large size model (e.g. 70B model), this script requires large memory VM.
 The script load and save weights in a single pass.
@@ -188,7 +188,7 @@ def _hf_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1) -> dict:
     f"model.layers.{layer_idx}.mlp.down_proj.weight": f"layers.{layer_idx}.feed_forward.w2.weight",
     f"model.layers.{layer_idx}.mlp.up_proj.weight": f"layers.{layer_idx}.feed_forward.w3.weight"
   }
-  
+
 
 @dataclass
 class _HFNamespaceMapper:
@@ -214,9 +214,11 @@ class _HFNamespaceMapper:
 
 
 def permute_to_match_maxtext_rope(arr):
-  evens = arr[..., ::2]
-  odds = arr[..., 1::2]
-  return np.concatenate((evens, odds), axis=arr.ndim - 1)
+  evens, odds = np.split(arr, 2, axis=arr.ndim - 1)
+  x = np.empty_like(arr)
+  x[..., ::2] = evens
+  x[..., 1::2] = odds
+  return x
 
 def convert_huggingface_to_jax_weights(base_model_path, model_size, huggingface_ckpt, model_params, mem_info):
   base_num_decoder_layers = model_params["num_layers"]
@@ -234,12 +236,6 @@ def convert_huggingface_to_jax_weights(base_model_path, model_size, huggingface_
 
     with safe_open(ckpt_path, framework="pt", device="cpu") as f:
       for key in f.keys():
-    # chkpt_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = checkpoint
-  # chkpt_vars = [chkpt_vars[i] for i in sorted(list(chkpt_vars.keys()))]
-  # import pdb; pdb.set_trace()
-  # map weight names if they use HuggingFace instead of PyTorch convention
-        # mapped_key = _HFNamespaceMapper(key)
-        # print(f"YY key {key}")
         parts = key.split(".")
         layer = int(parts[2]) if "layers" in key else 0
         mapped_key = _hf_to_maxtext_mapping(layer)[key]
@@ -265,15 +261,15 @@ def convert_huggingface_to_jax_weights(base_model_path, model_size, huggingface_
 
   # decoder norm scale ###########################################
   max_logging.log("Processing decoder norm scale")
-  decoder_norm_scale = chkpt_vars["norm.weight"].type(torch.float16).numpy()
+  decoder_norm_scale = chkpt_vars["norm.weight"].to(torch.float16).numpy()
   jax_weights["decoder"]["decoder_norm"]["scale"] = decoder_norm_scale
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   # logits dense #################################################
   max_logging.log("Processing logits dense")
-  
-  jax_weights["decoder"]["logits_dense"]["kernel"] = chkpt_vars["output.weight"].type(torch.float16).numpy().transpose()[:, :vocab_size]
+
+  jax_weights["decoder"]["logits_dense"]["kernel"] = chkpt_vars["output.weight"].to(torch.float16).numpy().transpose()[:, :vocab_size]
   # logits_dense = np.concatenate(
   #     [var["output.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0
   # ).transpose()[:, :vocab_size]
@@ -291,11 +287,11 @@ def convert_huggingface_to_jax_weights(base_model_path, model_size, huggingface_
   #       [var["tok_embeddings.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=1
   #   )[:vocab_size, :]
   # jax_weights["token_embedder"]["embedding"] = token_embedder
-  
+
   if model_size[:6] == "llama3":
-    jax_weights["token_embedder"]["embedding"] = chkpt_vars["tok_embeddings.weight"].type(torch.float16).numpy()
+    jax_weights["token_embedder"]["embedding"] = chkpt_vars["tok_embeddings.weight"].to(torch.float16).numpy()
   else:
-    jax_weights["token_embedder"]["embedding"] = chkpt_vars["tok_embeddings.weight"].type(torch.float16).numpy()[:vocab_size, :]
+    jax_weights["token_embedder"]["embedding"] = chkpt_vars["tok_embeddings.weight"].to(torch.float16).numpy()[:vocab_size, :]
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
@@ -317,14 +313,16 @@ def convert_huggingface_to_jax_weights(base_model_path, model_size, huggingface_
     # wv = np.concatenate(
     #     [var[f"layers.{layer_idx}.attention.wv.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0
     # ).transpose()
-    wq = chkpt_vars[f"layers.{layer_idx}.attention.wq.weight"].type(torch.float16).numpy().transpose()
-    wk = chkpt_vars[f"layers.{layer_idx}.attention.wk.weight"].type(torch.float16).numpy().transpose()
-    wv = chkpt_vars[f"layers.{layer_idx}.attention.wv.weight"].type(torch.float16).numpy().transpose()
+
+    wq = chkpt_vars[f"layers.{layer_idx}.attention.wq.weight"].to(torch.float16).numpy().transpose()
+    wk = chkpt_vars[f"layers.{layer_idx}.attention.wk.weight"].to(torch.float16).numpy().transpose()
+    wv = chkpt_vars[f"layers.{layer_idx}.attention.wv.weight"].to(torch.float16).numpy().transpose()
 
     wq = np.reshape(wq, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
     wk = np.reshape(wk, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
     wv = np.reshape(wv, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
-    if model_size[:8] != "llama3.1":
+
+    if model_size[:8] == "llama3.1":
       wq = permute_to_match_maxtext_rope(wq)
       wk = permute_to_match_maxtext_rope(wk)
 
@@ -332,7 +330,7 @@ def convert_huggingface_to_jax_weights(base_model_path, model_size, huggingface_
     #     [var[f"layers.{layer_idx}.attention.wo.weight"].type(torch.float16).numpy() for var in chkpt_vars],
     #     axis=1,
     # )
-    w_post = chkpt_vars[f"layers.{layer_idx}.attention.wo.weight"].type(torch.float16).numpy()
+    w_post = chkpt_vars[f"layers.{layer_idx}.attention.wo.weight"].to(torch.float16).numpy()
 
     w_post = np.reshape(w_post, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
 
@@ -803,7 +801,6 @@ def save_jax_weights_to_checkpoint(maxtext_model_path, jax_weights):
   # convert all weights to jax.numpy with sharding if applicable
   jax_weights_flat, jax_weights_struct = tree.flatten(jax_weights)
   jax_weights_new = []
-  # import pdb; pdb.set_trace()
   while len(jax_weights_flat) > 0:
     jax_weight = jax_weights_flat.pop(0)
     jax_weights_new.append(checkpoint_device_put(jax_weight))
@@ -833,8 +830,6 @@ def save_jax_weights_to_checkpoint(maxtext_model_path, jax_weights):
       max_logging.log(f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
     # Upon preemption, exit when and only when all ongoing saves are complete.
     checkpoint_manager.wait_until_finished()
-    
-  # import pdb; pdb.set_trace()
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
@@ -848,5 +843,4 @@ if __name__ == "__main__":
     raise NotImplementedError
 
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={SIMULATED_CPU_DEVICES_COUNT}"
-
   save_jax_weights_to_checkpoint(args.maxtext_model_path, convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint))
