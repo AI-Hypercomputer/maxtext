@@ -41,6 +41,7 @@ import checkpointing
 import max_utils
 import maxtext_utils
 import max_logging
+import mllog_utils
 import optimizers
 import profiler
 import pyconfig
@@ -50,7 +51,7 @@ import tensorflow as tf
 from vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
-from input_pipeline.input_pipeline_interface import create_data_iterator
+from input_pipeline.input_pipeline_interface import create_data_iterator, get_shaped_batch, get_shaped_batch_eval
 from layers import models
 
 from gcp_workload_monitor import GCPWorkloadMonitor
@@ -131,6 +132,8 @@ def write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step
   The logic is that this ensures that Jax is able to queues train_steps and we
   don't block when turning "lazy" Jax arrays into real Python numbers.
   """
+  if not config.enable_metric_writing:
+    return
   metrics_to_write, steps_to_write = None, None
   if is_training:
     global _buffered_step, _buffered_metrics
@@ -172,13 +175,14 @@ def write_metrics_to_tensorboard(writer, metrics, step, config, is_training=True
     if is_training:
       full_log = step % config.log_period == 0
 
-      max_logging.log(
-          f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
-          f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
-          f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
-          f"total_weights: {metrics['scalar']['learning/total_weights']}, "
-          f"loss: {metrics['scalar']['learning/loss']:.3f}"
-      )
+      if config.enable_step_logging:
+        max_logging.log(
+            f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
+            f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
+            f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
+            f"total_weights: {metrics['scalar']['learning/total_weights']}, "
+            f"loss: {metrics['scalar']['learning/loss']:.3f}"
+        )
 
       if full_log and jax.process_index() == 0:
         max_logging.log(f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'")
@@ -538,21 +542,24 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     )
   new_state = state.apply_gradients(grads=grads)
 
-  scalar_metrics = {
+  if config.enable_metric_writing:
+    scalar_metrics = {
       "learning/loss": loss,
       "learning/moe_lb_loss": moe_lb_loss,
       "learning/total_weights": total_weights,
-  }
-  if not config.optimizer_memory_host_offload:
-    scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
-    scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
-    scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(new_state.params)
-  if config.use_dpo:
-    scalar_metrics["learning/dpo_reward_accuracy"] = aux["reward_accuracy"]
-  metrics = {
-      "scalar": scalar_metrics,
-      "scalars": {},
-  }
+    }
+    if not config.optimizer_memory_host_offload:
+      scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
+      scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
+      scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(new_state.params)
+    if config.use_dpo:
+      scalar_metrics["learning/dpo_reward_accuracy"] = aux["reward_accuracy"]
+    metrics = {
+        "scalar": scalar_metrics,
+        "scalars": {},
+    }
+  else:
+    metrics = {'scalar': {'learning/loss': loss}, 'scalars': {}}
 
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
@@ -706,6 +713,7 @@ def setup_train_loop(config):
     data_iterator:
     state: the initialized train state
   """
+  mllog_utils.init_start()
   recorder = create_goodput_recorder(config)
   record_goodput(recorder, config, recorder.record_tpu_init_start_time if recorder else None)
   init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
@@ -757,6 +765,7 @@ def setup_train_loop(config):
       data_iterator,
       eval_data_iterator,
       state,
+      tx,
   )
 
 
@@ -783,6 +792,7 @@ def train_loop(config, state=None):
       data_iterator,
       eval_data_iterator,
       state,
+      tx,
   ) = setup_train_loop(config)
 
   if config.use_dpo:
@@ -828,6 +838,39 @@ def train_loop(config, state=None):
     # TODO: p_eval_step is not yet supported in load_compiled
     p_eval_step = None
     print("Loaded compiled function!", flush=True)
+  elif config.pre_compile:
+    train_shaped_batch = get_shaped_batch(config)
+    # pre compile graph
+    shaped_rng = jax.ShapeDtypeStruct(init_rng.shape, init_rng.dtype)
+    # Shaped state
+    abstract_state, state_mesh_annotations, _ =  max_utils.get_abstract_state(model, tx, config, init_rng, mesh)
+    # Shaped batch
+    func_input_args = (abstract_state, train_shaped_batch, shaped_rng)
+    func_input_kwargs = {}
+
+    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      p_train_step_lower = jax.jit(
+        functional_train,
+        in_shardings=in_shard_train,
+        out_shardings=out_shard_train,
+        static_argnums=static_argnums_train,
+        donate_argnums=donate_argnums_train).lower(*func_input_args, **func_input_kwargs)
+
+    p_train_step = p_train_step_lower.compile()
+
+    if eval_data_iterator:
+      eval_shaped_batch = get_shaped_batch_eval(config, mesh)
+      func_input_args = (abstract_state, eval_shaped_batch, shaped_rng)
+      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        p_eval_step_lower = jax.jit(
+          functional_eval,
+          in_shardings=in_shard_eval,
+          out_shardings=out_shard_eval,
+          static_argnums=static_argnums_eval,
+          donate_argnums=donate_argnums_eval,
+        ).lower(*func_input_args, **func_input_kwargs)
+
+      p_eval_step = p_eval_step_lower.compile()
   else:
     p_train_step = jax.jit(
         functional_train,
@@ -860,6 +903,11 @@ def train_loop(config, state=None):
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
+  p_random_next = jax.jit(jax.random.fold_in).lower(init_rng, start_step).compile()
+  mllog_utils.init_print(config, start_step)
+  mllog_utils.init_stop()
+  mllog_utils.run_start()
+  mllog_utils.block_start(config)
 
   performance_metric_queue = None
   if config.report_heartbeat_metric_for_gcp_monitoring or config.report_performance_metric_for_gcp_monitoring:
@@ -881,16 +929,18 @@ def train_loop(config, state=None):
       record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
       check_example_batch(config, example_batch=example_batch)
       # pylint: disable=not-callable
-      nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
+      nextrng = p_random_next(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, nextrng)
 
     step_time_delta = datetime.datetime.now() - last_step_completion
     last_step_completion = datetime.datetime.now()
-    record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
-    if performance_metric_queue:
-      performance_metric_queue.put(step_time_delta.total_seconds())
+    if config.enable_metric_writing:
+      record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
+    if config.enable_step_logging:
+      if performance_metric_queue:
+        performance_metric_queue.put(step_time_delta.total_seconds())
 
     if checkpoint_manager is not None:
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
@@ -914,7 +964,7 @@ def train_loop(config, state=None):
           all_host_upload=config.dump_hlo_upload_all,
       )
 
-    if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
+    if config.eval_interval > 0 and step > start_step and step % config.eval_interval == 0:
       assert eval_data_iterator
       cumulative_eval_metrics = {
           "scalar": {
@@ -950,10 +1000,12 @@ def train_loop(config, state=None):
       write_metrics(
           writer, local_metrics_file, running_gcs_metrics, cumulative_eval_metrics, step, config, is_training=False
       )
-      max_logging.log(
-          f"average loss after {step=}: {eval_step_count=}, {eval_loss=},"
-          f" total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}"
-      )
+      if config.enable_step_logging:
+        max_logging.log(
+            f"average loss after {step=}: {eval_step_count=}, {eval_loss=},"
+            f" total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}"
+        )
+      mllog_utils.early_stop_check(config, step, eval_loss, start_step)
       if eval_loss <= config.target_eval_loss:
         max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
         prof.deactivate()
@@ -971,17 +1023,18 @@ def train_loop(config, state=None):
   max_utils.close_summary_writer(writer)
   record_goodput(recorder, config, recorder.record_job_end_time if recorder else None)
   clear_buffered_metrics()
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    # pytype: disable=attribute-error
-    compiled = p_train_step.lower(state, example_batch, nextrng).compile()
-    compiled_stats = compiled.memory_analysis()
-    if compiled_stats is not None:
-      max_logging.log(
-          f"Output size: {compiled_stats.output_size_in_bytes}, "
-          f"temp size: {compiled_stats.temp_size_in_bytes}, "
-          f"argument size: {compiled_stats.argument_size_in_bytes}, "
-          f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
-      )
+  if not config.pre_compile:
+    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      # pytype: disable=attribute-error
+      compiled = p_train_step.lower(state, example_batch, nextrng).compile()
+      compiled_stats = compiled.memory_analysis()
+      if compiled_stats is not None:
+        max_logging.log(
+            f"Output size: {compiled_stats.output_size_in_bytes}, "
+            f"temp size: {compiled_stats.temp_size_in_bytes}, "
+            f"argument size: {compiled_stats.argument_size_in_bytes}, "
+            f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
+        )
   return state
 
 
