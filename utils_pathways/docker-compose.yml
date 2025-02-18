@@ -64,6 +64,9 @@ services:
     entrypoint: ["bash", "-c"]
     command:
       - "cd MaxText ; python3 -m pytest -s tests/train_tests.py -m tpu_only"
+
+
+
       # - "cd MaxText ; python3 -m pytest -m tpu_only tests -s"
 
 #### LOCAL NETWORK

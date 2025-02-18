@@ -19,7 +19,7 @@
 # docker compose version
 # gcloud auth configure-docker us-docker.pkg.dev --quiet
 
-cd utils_pathways
+cd MaxText/utils_pathways
 docker compose down
 sleep 10
 docker compose up &
