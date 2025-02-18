@@ -76,6 +76,11 @@ Key = Tuple[Token, ...]
 Prefix = Any  # KVCache for one prompt
 
 
+@jax.jit
+def tree_copy(tree):
+  return jax.tree.map(lambda x: x.copy() if isinstance(x, jax.Array) else x, tree)
+
+
 class Value:
   """Object stored contains the actual KVcache
 
@@ -93,12 +98,27 @@ class Value:
       Readonly. bytes of prefix.
   """
 
-  def __init__(self, *, prefix: Prefix, true_length: int, padded_length: int, tokens: list[int]):
+  def __init__(
+      self,
+      *,
+      prefix: Prefix,
+      true_length: int,
+      padded_length: int,
+      tokens: list[int],
+      prefix_size_bytes: Optional[int] = None,
+  ):
+    """Attributes to store.
+    If true_length shorter than len(tokens), true_length will adjust to len(tokens).
+    If prefix_size_bytes is not provided, calculate automatically.
+    """
     self._prefix = prefix
-    self._prefix_size_bytes: int = self._calculate_prefix_bytes(prefix)
     self._true_length = self._maybe_adjust_true_length(true_length, tokens)
     self._padded_length = padded_length
     self._tokens = tokens
+    if prefix_size_bytes is None:
+      self._prefix_size_bytes: int = self._calculate_prefix_bytes(prefix)
+    else:
+      self._prefix_size_bytes = prefix_size_bytes
 
   @property
   def prefix(self) -> Prefix:
@@ -122,8 +142,14 @@ class Value:
 
   def clone(self) -> "Value":
     """Clone to prevent use the same jax array."""
-    copied_prefix = jax.tree.map(lambda x: x.copy() if isinstance(x, jax.Array) else x, self._prefix)
-    return Value(prefix=copied_prefix, true_length=self._true_length, padded_length=self._padded_length, tokens=self._tokens)
+    copied_prefix = tree_copy(self._prefix)
+    return Value(
+        prefix=copied_prefix,
+        true_length=self._true_length,
+        padded_length=self._padded_length,
+        tokens=self._tokens,
+        prefix_size_bytes=self._prefix_size_bytes,
+    )
 
   def __eq__(self, other: Any) -> bool:
     if not isinstance(other, Value):
