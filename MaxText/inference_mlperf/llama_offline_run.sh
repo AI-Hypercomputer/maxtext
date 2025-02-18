@@ -186,7 +186,6 @@ run_loadgen_accuracy () {
     echo
     ${CMD} python3 ${EVAL_SCRIPT} \
       --checkpoint-path ${HF_CKPT} \
-      --tokenizer-path ${TOKENIZER_PATH} \
       --mlperf-accuracy-file ${OUTPUT_ACCURACY_JSON_PATH} \
       --dataset-file ${DATASET_PATH} 2>&1 | tee ${OUTPUT_LOG_DIR}/evaluate_offline_accuracy_log.log
   fi
