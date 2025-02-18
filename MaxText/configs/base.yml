@@ -564,3 +564,8 @@ sa_use_fused_bwd_kernel: False
 sa_q_layout: "HEAD_DIM_MINOR"
 sa_k_layout: "HEAD_DIM_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"
+
+prefix_cache_microbenchmark_prefill_lengths: "64,128,256,512,1024"
+prefix_cache_microbenchmark_loop_iters: 10
+prefix_cache_microbenchmark_cache_num: 100
+prefix_cache_microbenchmark_common_prefix_length: "16,32,64,128,256,512,1024"

@@ -27,6 +27,7 @@ from jetstream.engine import token_utils
 import max_utils
 import maxengine
 import maxtext_utils
+import prefix_cache
 import profiler
 import pyconfig
 
@@ -38,6 +39,36 @@ _WARMUP_ITERS = 2
 _FLATTEN_MICROBENCHMARK_RESULTS = False
 # pylint: disable=too-many-positional-arguments
 
+import random
+import string
+
+def simple_timeit(f, *args, tries=10, task=None, enable_profile=False):
+  """Simple utility to time a function for multiple runs"""
+  assert task is not None
+
+  trace_name = f"t_{task}_" + "".join(random.choice(string.ascii_uppercase + string.digits) for _ in range(10))
+  trace_dir = f"/tmp/{trace_name}"
+
+  outcomes_ms = []
+  jax.block_until_ready(f(*args))  # warm it up!
+  if enable_profile:
+    jax.profiler.start_trace(trace_dir)
+
+  for _ in range(tries):
+    s = datetime.datetime.now()
+    jax.block_until_ready(f(*args))
+    e = datetime.datetime.now()
+    outcomes_ms.append(1000 * (e - s).total_seconds())
+  if enable_profile:
+    jax.profiler.stop_trace()
+
+  average_time_ms = sum(outcomes_ms) / len(outcomes_ms)
+
+  print(f"{task}: average time milliseconds: {average_time_ms:.2f}")
+  if enable_profile:
+    print(f"trace {trace_dir}")
+  return average_time_ms
+
 
 def prefill_benchmark_loop(engine_prefill, params, tokens, true_length, iters):
   """Inner loop for benchmarking prefill step."""
@@ -45,6 +76,7 @@ def prefill_benchmark_loop(engine_prefill, params, tokens, true_length, iters):
   rng = jax.random.PRNGKey(1234)
   prefill_result = None
   for _ in range(iters):
+    # yyy
     rng, rng_prefill = jax.random.split(rng)
     prefill_result, _ = engine_prefill(params, tokens, true_length, rng_prefill)
   jax.block_until_ready(prefill_result)
@@ -330,6 +362,75 @@ def run_benchmarks(config):
       benchmark_results["insert"][prefill_length]["time_in_ms"] = (
           prefill_insert_time["time_in_ms"] - benchmark_results["prefill"][prefill_length]["time_in_ms"]
       )
+
+      # yyy
+      rng_cache = jax.random.PRNGKey(1234)
+      prefill_result, _ = prefill_executable[prefill_length](
+          params, prefill_tokens[prefill_length], prefill_true_lengths[prefill_length], rng_cache
+      )
+      value = prefix_cache.Value(
+          prefix=prefill_result,
+          true_length=prefill_true_lengths[prefill_length],
+          padded_length=prefill_length,
+          tokens=prefill_tokens[prefill_length]
+      )
+      cache_num = config.prefix_cache_microbenchmark_cache_num
+      prefix_cache_inst = prefix_cache.PrefixCache(cache_num * value.prefix_size_bytes)
+      common_len = prefill_length // 2
+      remain_len = prefill_length - common_len
+      common_prefix_key = tuple(i for i in range(common_len))
+
+      start = datetime.datetime.now()
+      new_value = None
+      for c_idx in range(cache_num):
+        # yyy: random the key with common prefix
+        key = common_prefix_key + tuple(i + c_idx * remain_len for i in range(remain_len))
+        new_value = value.clone()
+        jax.block_until_ready(new_value)
+        prefix_cache_inst.save(key, new_value)
+        del new_value
+
+      end = datetime.datetime.now()
+      save_sec = (end - start).total_seconds()
+      avg_save_ms = save_sec * 1000 / cache_num
+
+      key_load = common_prefix_key + tuple(i + cache_num * remain_len for i in range(remain_len))
+      
+      start = datetime.datetime.now()
+      matched_key = None
+      for _ in range(benchmark_loop_iters):
+        matched_key = prefix_cache_inst.fetch_longest_common_prefix_key(key_load)
+      end = datetime.datetime.now()
+      fetch_sec = (end - start).total_seconds()
+      avg_fetch_ms = fetch_sec * 1000 / benchmark_loop_iters
+      
+      start = datetime.datetime.now()
+      value = None
+      for _ in range(benchmark_loop_iters):
+        value = prefix_cache_inst.load(matched_key)
+        jax.block_until_ready(value)
+      end = datetime.datetime.now()
+      load_sec = (end - start).total_seconds()
+      avg_load_ms = load_sec * 1000 / benchmark_loop_iters
+
+      def load_cache_test():
+        value = prefix_cache_inst.load(matched_key)
+        jax.block_until_ready(value)
+
+      avg_load_ms2 = simple_timeit(load_cache_test, task="load_cache_test", enable_profile=True)
+
+      print("========")
+      print(f"{prefill_length=} :")
+      print(f"{value.prefix_size_bytes=}")
+      print(f"{avg_save_ms=}")
+      print(f"{avg_fetch_ms=}")
+      print(f"{avg_load_ms=}")
+      print(f"{avg_load_ms2=}")
+      print("========")
+      del value
+      del prefix_cache_inst
+
+
 
   if "generate" in stages_to_benchmark:
     benchmark_results["autoregressive"], decode_state = ar_benchmark(
