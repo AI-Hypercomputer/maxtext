@@ -60,6 +60,7 @@ import jax.numpy as jnp
 from jax import random
 from jax.sharding import Mesh
 from jax.experimental import checkify
+from jax._src.sharding_impls import TransferToMemoryKind
 
 from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
@@ -521,11 +522,12 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     aux = jax.tree_map(lambda x: jnp.sum(x, axis=0), aux)
   else:
     if config.optimizer_memory_host_offload:
-      cast_params = jax.device_put(state.params, max_utils.with_memory_kind(state_mesh_shardings.params, "device"))
-      state = state.replace(params=cast_params)
-      if config.use_dpo:
-        reference_params = jax.device_put(reference_params, max_utils.with_memory_kind(reference_params_sharding, "device"))
-        extra_dpo_args = [reference_params]
+      # cast_params = jax.device_put(state.params, max_utils.with_memory_kind(state_mesh_shardings.params, "device"))
+      # state = state.replace(params=cast_params)
+      # if config.use_dpo:
+      #   reference_params = jax.device_put(reference_params, max_utils.with_memory_kind(reference_params_sharding, "device"))
+      #   extra_dpo_args = [reference_params]
+      state = max_utils.move_state(state, TransferToMemoryKind('device'), scan_over = config.base_num_decoder_layers)
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
   intermediate_outputs = aux["intermediate_outputs"]
@@ -536,15 +538,9 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
   else:
     grads = raw_grads
-  if config.optimizer_memory_host_offload:
-    state = state.replace(
-        opt_state=jax.device_put(
-            state.opt_state,
-            jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="device"), state_mesh_shardings.opt_state),
-        )
-    )
   new_state = state.apply_gradients(grads=grads)
-
+  if config.optimizer_memory_host_offload:
+    new_state = max_utils.move_state(new_state, TransferToMemoryKind('pinned_host'), scan_over = config.base_num_decoder_layers)
   scalar_metrics = {
       "learning/loss": loss,
       "learning/moe_lb_loss": moe_lb_loss,

@@ -198,7 +198,7 @@ out_proj: 'remat'
 
 optimizer_memory_host_offload: False
 scan_layers: True # We recommend setting this to false when using pipeline parallelism, instead scanning the PP iterations.
-param_scan_axis: 1
+param_scan_axis: 0
 
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding

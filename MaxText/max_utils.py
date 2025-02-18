@@ -715,6 +715,132 @@ def init_training_state(apply_fn, params, tx):
   state = train_state.TrainState.create(apply_fn=apply_fn, params=params, tx=tx)
   return state
 
+def partition_pytree(params, predicate):
+  """
+  Partitions a PyTree into two PyTrees based on a predicate applied to the key names.
+  Args:
+      pytree: The PyTree to partition.
+      predicate: A function that takes a key (string) and returns True or False.
+  Returns:
+      A tuple of two PyTrees: (matched, unmatched).
+      - matched: Contains all key-value pairs where predicate(key) is True.
+      - unmatched: Contains all key-value pairs where predicate(key) is False.
+  """
+  def recursive_partition(path, subtree):
+    """Recursively partition the PyTree based on the predicate."""
+    if predicate(path):  # If the current path matches, include the whole subtree
+      return subtree, None
+    elif isinstance(subtree, dict):  # Recurse into dictionaries
+      matched, unmatched = {}, {}
+      for k, v in subtree.items():
+        child_path = path + (k,)
+        m, u = recursive_partition(child_path, v)
+        if m is not None:
+          matched[k] = m
+        if u is not None:
+          unmatched[k] = u
+      if matched or unmatched:
+        return matched or None, unmatched or None
+    return None, subtree  # Base case for leaves
+
+  matched_tree, unmatched_tree = recursive_partition((), params)
+  return matched_tree, unmatched_tree
+
+
+def partition_pytree_by_shape(params, predicate):
+  """
+  Partitions a PyTree into two PyTrees based on a predicate applied to the shape of values.
+
+  Args:
+    params: The PyTree to partition.
+    predicate: A function that takes a shape (tuple) and returns True or False.
+
+  Returns:
+    A tuple of two PyTrees: (matched, unmatched).
+    - matched: Contains all key-value pairs where predicate(value.shape) is True.
+    - unmatched: Contains all key-value pairs where predicate(value.shape) is False.
+  """
+
+  def recursive_partition(subtree):
+    """Recursively partition the PyTree based on the shape of values."""
+    if isinstance(subtree, dict):  # If it's a dictionary, recurse
+      matched, unmatched = {}, {}
+      for k, v in subtree.items():
+        m, u = recursive_partition(v)
+        if m is not None:
+          matched[k] = m
+        if u is not None:
+          unmatched[k] = u
+      return matched or None, unmatched or None
+    elif isinstance(subtree, jnp.ndarray):  # Apply predicate on shape for arrays
+      return (subtree, None) if predicate(subtree.shape) else (None, subtree)
+    return None, subtree  # For other types, treat as unmatched
+
+  matched_tree, unmatched_tree = recursive_partition(params)
+  return matched_tree, unmatched_tree
+
+def merge_pytrees(tree1, tree2):
+  """
+  Merges two PyTrees by combining their keys and values.
+  If the keys overlap, values from `tree2` will override those in `tree1`.
+  Args:
+      tree1: First PyTree (e.g., a nested dictionary).
+      tree2: Second PyTree to merge with the first.
+  Returns:
+      A merged PyTree.
+  """
+  def _merge_dicts(d1, d2):
+    merged = {}
+    all_keys = set(d1.keys()).union(set(d2.keys()))
+    for key in sorted(all_keys):  # Sort keys to ensure consistent ordering
+      if key in d1 and key in d2:
+        if isinstance(d1[key], dict) and isinstance(d2[key], dict):
+          merged[key] = _merge_dicts(d1[key], d2[key])
+        else:
+          # Handle conflicts (choose d2's value, or customize this logic)
+          merged[key] = d2[key]
+      elif key in d1:
+        merged[key] = d1[key]
+      else:
+        merged[key] = d2[key]
+    return merged
+
+  merged_dict = _merge_dicts(tree1, tree2)
+
+  # Reconstruct the merged PyTree with the combined structure
+  flat_leaves, treedef = jax.tree_util.tree_flatten_with_path(merged_dict)
+  flattened_values = [leaf for _, leaf in flat_leaves]
+  merged_tree = jax.tree_util.tree_unflatten(treedef, flattened_values)
+  return merged_tree
+
+
+def move_state(state, sharding, scan_over):
+  def body_fn(carry, xs):
+    del carry
+    params, mu, nu = xs
+    params = jax.device_put(params, sharding)
+    mu = jax.device_put(mu, sharding)
+    nu = jax.device_put(nu, sharding)
+    return (None, (params, mu, nu))
+  is_stacked = lambda shape: shape[0] == scan_over
+  
+  stacked_params, unstacked_params = partition_pytree_by_shape(state.params, is_stacked)
+  stacked_mu, unstacked_mu = partition_pytree_by_shape(state.opt_state[0].mu, is_stacked)
+  stacked_nu, unstacked_nu = partition_pytree_by_shape(state.opt_state[0].nu, is_stacked)
+
+  # device_put unstacked opt_state and params
+  unstacked_params = jax.device_put(unstacked_params, sharding)
+  unstacked_mu = jax.device_put(unstacked_mu, sharding)
+  unstacked_nu = jax.device_put(unstacked_nu, sharding)
+  
+  _, (stacked_params, stacked_mu, stacked_nu) = jax.lax.scan(body_fn, None, (stacked_params, stacked_mu, stacked_nu))
+
+  params = merge_pytrees(stacked_params, unstacked_params)
+  opt_state = state.opt_state[0]._replace(mu = merge_pytrees(stacked_mu, unstacked_mu), nu = merge_pytrees(stacked_nu, unstacked_nu))
+  
+  state = state.replace(params=params, opt_state=(opt_state,state.opt_state[1],state.opt_state[2]))
+  return state
+
 
 def init_initial_state(model, tx, config, is_training, key):
   """
