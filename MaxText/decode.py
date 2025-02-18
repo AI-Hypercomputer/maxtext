@@ -35,8 +35,8 @@ def main(argv: Sequence[str]) -> None:
   # Initialize the model and engine.
   model = Transformer(
       config=config, mesh=max_utils.create_device_mesh(config), quant=None
-  )  # we have to initialize here
-  engine = maxengine.MaxEngine(config, model)  # pass in the model here
+  )
+  engine = maxengine.MaxEngine(config, model)
   rng = jax.random.PRNGKey(1234)
   rng, rng_load_params = jax.random.split(rng)
   params = engine.load_params(rng_load_params)
@@ -65,7 +65,7 @@ def main(argv: Sequence[str]) -> None:
   rng, rng_init_decode = jax.random.split(rng)
 
   # Key Change: Pass model and config to init_decode_state
-  decode_state = engine.init_decode_state(rng_init_decode, model, config)
+  decode_state = engine.init_decode_state(rng_init_decode)
   decode_state = engine.insert(prefill_result, decode_state, slot=slot)
 
   steps = range(config.max_prefill_predict_length, config.max_target_length)

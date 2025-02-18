@@ -26,25 +26,56 @@ class PageManager(nn.Module):
 
   num_pages: int
   tokens_per_page: int
-  max_page_groups: int  # Renamed for clarity
+  max_page_groups: int
   max_target_length: int
   max_prefill_predict_length: int
   max_pages_per_group: int
   config: Any
 
   def setup(self):
+    """Initialize cache variables and data structures.
+    This runs during both initialization and normal execution.
+    """
     self._validate_init_params()
-    self.page_status = self.variable("cache", "page_status", lambda: jnp.zeros((self.num_pages,), jnp.int32))
-    self.page_map = self.variable(
-        "cache", "page_map", lambda: jnp.full((self.max_page_groups, self.max_pages_per_group), -1, jnp.int32)
-    )
-    self.sequence_lengths = self.variable("cache", "sequence_lengths", lambda: jnp.zeros((self.max_page_groups,), jnp.int32))
-    self.num_pages_used = self.variable("cache", "num_pages_used", lambda: jnp.zeros((self.max_page_groups,), jnp.int32))
-    self.current_page = self.variable("cache", "current_page", lambda: jnp.full((self.max_page_groups,), -1, jnp.int32))
-    self.current_page_position = self.variable(
-        "cache", "current_page_position", lambda: jnp.zeros((self.max_page_groups,), jnp.int32)
+
+    # Initialize tracking variables as Flax variables in the "cache" collection
+    self.page_status = self.variable(
+        "cache",
+        "page_status",
+        lambda: jnp.zeros((self.num_pages,), jnp.int32)
     )
 
+    self.page_map = self.variable(
+        "cache",
+        "page_map",
+        lambda: jnp.full((self.max_page_groups, self.max_pages_per_group), -1, jnp.int32)
+    )
+
+    self.sequence_lengths = self.variable(
+        "cache",
+        "sequence_lengths",
+        lambda: jnp.zeros((self.max_page_groups,), jnp.int32)
+    )
+
+    self.num_pages_used = self.variable(
+        "cache",
+        "num_pages_used",
+        lambda: jnp.zeros((self.max_page_groups,), jnp.int32)
+    )
+
+    self.current_page = self.variable(
+        "cache",
+        "current_page",
+        lambda: jnp.full((self.max_page_groups,), -1, jnp.int32)
+    )
+
+    self.current_page_position = self.variable(
+        "cache",
+        "current_page_position",
+        lambda: jnp.zeros((self.max_page_groups,), jnp.int32)
+    )
+
+    # Initialize key/value pages with proper sharding constraints
     key_pages_init = jnp.zeros(
         (self.num_pages, self.tokens_per_page, self.config.num_kv_heads, self.config.head_dim),
         dtype=self.config.dtype,
@@ -57,6 +88,7 @@ class PageManager(nn.Module):
     from flax.linen import partitioning as nn_partitioning
     from jax.sharding import PartitionSpec as P
 
+    # Apply sharding constraints to pages
     self.key_pages = self.variable(
         "cache",
         "key_pages",
@@ -64,12 +96,24 @@ class PageManager(nn.Module):
         key_pages_init,
         P(None, "tensor", None, None),
     )
+
     self.value_pages = self.variable(
         "cache",
         "value_pages",
         nn_partitioning.with_sharding_constraint,
         value_pages_init,
         P(None, "tensor", None, None),
+    )
+
+  def get_page_state(self) -> PageState:
+    """Returns current PageState without any model_mode-specific logic."""
+    return PageState(
+        page_status=self.page_status.value,
+        page_map=self.page_map.value,
+        sequence_lengths=self.sequence_lengths.value,
+        num_pages_used=self.num_pages_used.value,
+        current_page=self.current_page.value,
+        current_page_position=self.current_page_position.value,
     )
 
   def _validate_init_params(self):
@@ -298,72 +342,112 @@ class PageManager(nn.Module):
 
     return page_status, page_map, new_sequence_lengths, num_pages_used, current_page, new_current_page_position
 
-  def get_page_state(self) -> PageState:
-    return PageState(
-        page_status=self.page_status.value,
-        page_map=self.page_map.value,
-        sequence_lengths=self.sequence_lengths.value,
-        num_pages_used=self.num_pages_used.value,
-        current_page=self.current_page.value,
-        current_page_position=self.current_page_position.value,
+  def _handle_prefill(self, page_group_id: int, true_length: int, states):
+    """Handle prefill computations without string parameters"""
+    page_status, page_map, sequence_lengths, num_pages_used, current_page, current_page_position = states
+
+    return self.reserve_prefill_page_group_pages(
+        page_group_id,
+        true_length,
+        page_status,
+        page_map,
+        sequence_lengths,
+        num_pages_used,
+        current_page,
+        current_page_position,
     )
 
+  def _handle_autoregressive(self, states):
+    """Handle autoregressive computations without string parameters"""
+    return self.reserve_decode_step_pages(*states)
+
+  def get_autoregressive_state(self) -> PageState:
+      """Handle autoregressive mode without string mode parameter"""
+      return self._reserve_decode_step_pages()
+
   def __call__(
-      self, model_mode: Optional[str] = None, page_group_id: Optional[int] = None, true_length: Optional[int] = None
+      self,
+      model_mode: Optional[str] = None,
+      page_group_id: Optional[int] = None,
+      true_length: Optional[int] = None
   ) -> Optional[PageState]:
+      """Main entry point for page management.
 
-    if self.is_mutable_collection("params"):
-      return None
+      During initialization (when params collection is mutable), only returns None.
+      During runtime, handles prefill and autoregressive page management.
+      """
+      # During initialization, just return None
+      # This prevents JAX from tracing through the model_mode string
+      if self.is_mutable_collection("params"):
+          return None
 
-    if model_mode is None:
+      # Runtime behavior starts here
+      if model_mode is None:
+          return self.get_page_state()
+
+      # Get current state values
+      states = (
+          self.page_status.value,
+          self.page_map.value,
+          self.sequence_lengths.value,
+          self.num_pages_used.value,
+          self.current_page.value,
+          self.current_page_position.value,
+      )
+
+      # Handle different modes at runtime
+      if model_mode == "prefill":
+          if page_group_id is None or true_length is None:
+              raise ValueError("Prefill mode requires both page_group_id and true_length")
+
+          self._validate_page_group(page_group_id)
+          self._validate_length(true_length)
+
+          new_states = self._handle_prefill(page_group_id, true_length, states)
+
+      elif model_mode == "autoregressive":
+          if page_group_id is not None:
+              self._validate_page_group(page_group_id)
+
+          new_states = self._handle_autoregressive(states)
+
+      else:
+          raise ValueError(f"Invalid model_mode: {model_mode}")
+
+      # Update all state variables
+      (
+          self.page_status.value,
+          self.page_map.value,
+          self.sequence_lengths.value,
+          self.num_pages_used.value,
+          self.current_page.value,
+          self.current_page_position.value,
+      ) = new_states
+
       return self.get_page_state()
 
-    if model_mode not in ["prefill", "autoregressive"]:
-      raise ValueError(f"Invalid model_mode: {model_mode}")
 
-    # Get the current state *before* any modifications.
-    page_status = self.page_status.value
-    page_map = self.page_map.value
-    sequence_lengths = self.sequence_lengths.value
-    num_pages_used = self.num_pages_used.value
-    current_page = self.current_page.value
-    current_page_position = self.current_page_position.value
+class PageManagerLayer(nn.Module):
+    """Wrapper module to handle per-layer page management.
 
-    if model_mode == "prefill":
-      if page_group_id is None or true_length is None:
-        raise ValueError("Prefill mode requires both page_group_id and true_length")
-      self._validate_page_group(page_group_id)
-      self._validate_length(true_length)
+    This class manages the scope and lifecycle of a PageManager instance
+    within a single decoder layer's context.
+    """
+    config: Any
 
-      # Now perform allocation.
-      page_status, page_map, sequence_lengths, num_pages_used, current_page, current_page_position = (
-          self.reserve_prefill_page_group_pages(
-              page_group_id,
-              true_length,
-              page_status,
-              page_map,
-              sequence_lengths,
-              num_pages_used,
-              current_page,
-              current_page_position,
-          )
-      )
-    elif model_mode == "autoregressive":
-      if page_group_id is not None:
-        self._validate_page_group(page_group_id)
-      page_status, page_map, sequence_lengths, num_pages_used, current_page, current_page_position = (
-          self.reserve_decode_step_pages(
-              page_status, page_map, sequence_lengths, num_pages_used, current_page, current_page_position
-          )
-      )
+    def setup(self):
+        self.page_manager = PageManager(
+            num_pages=self.config.num_pages,
+            tokens_per_page=self.config.tokens_per_page,
+            max_page_groups=int(self.config.per_device_batch_size * jax.device_count()),
+            max_target_length=self.config.max_target_length,
+            max_prefill_predict_length=self.config.max_prefill_predict_length,
+            max_pages_per_group=(self.config.max_target_length +
+                               self.config.tokens_per_page - 1) //
+                               self.config.tokens_per_page,
+            config=self.config,
+        )
 
-    # Update the state *after* all modifications.
-    self.page_status.value = page_status
-    self.page_map.value = page_map
-    self.sequence_lengths.value = sequence_lengths
-    self.num_pages_used.value = num_pages_used
-    self.current_page.value = current_page
-    self.current_page_position.value = current_page_position
-
-    # Return the updated state.
-    return self.get_page_state()
+    def __call__(self, *args, **kwargs):
+        """Delegates to the underlying PageManager."""
+        return self.page_manager(*args, **kwargs)

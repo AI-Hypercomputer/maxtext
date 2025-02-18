@@ -95,7 +95,6 @@ class MaxEngine(engine_api.Engine):
 
     # Model and Optimizer definition
     quant = quantizations.configure_quantization(config)
-    # self.model = models.Transformer(config, mesh=self._mesh, quant=quant) # REMOVE
     self.replicated_sharding = jax.sharding.NamedSharding(self._mesh, P(None))
 
     self.abstract_params = None
@@ -110,14 +109,14 @@ class MaxEngine(engine_api.Engine):
     self.param_layouts = None
 
   def generate_aot(
-      self, params: Params, decode_state: DecodeState, rng: Optional[PRNGKeyType] = None
+    self, params: Params, decode_state: DecodeState, rng: Optional[PRNGKeyType] = None, model_mode: str = common_types.MODEL_MODE_AUTOREGRESSIVE
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
     """Wrapper to generate for ahead of time compilation."""
 
-    return self.generate(params=params, decode_state=decode_state, rng=rng)
+    return self.generate(params=params, decode_state=decode_state, rng=rng, model_mode=model_mode)
 
   def _compile_generate_and_get_layouts(
-      self, params: Any, decode_state: Any, rng_shape: Any, xla_flags: dict[str, Any] | None = None
+    self, params: Any, decode_state: Any, rng_shape: Any, xla_flags: dict[str, Any] | None = None
   ) -> tuple[Any, Any, Any, Any]:
     """Optimal memory layout for params and decode_state."""
 
@@ -128,10 +127,10 @@ class MaxEngine(engine_api.Engine):
     compiled_generate = (
         jax.jit(
             self.generate_aot,
-            in_shardings=(param_layout, decode_state_layout, None),
+            in_shardings=(param_layout, decode_state_layout, None, None), # Add None for model_mode
             out_shardings=(Layout(DLL.AUTO), Layout(DLL.AUTO)),
             donate_argnames=("decode_state",),
-        ).lower(params, decode_state, rng_shape)
+        ).lower(params, decode_state, rng_shape, common_types.MODEL_MODE_AUTOREGRESSIVE) # add model_mode
     ).compile(compiler_options=xla_flags)
 
     arg_layouts, _ = compiled_generate.input_layouts
@@ -309,12 +308,14 @@ class MaxEngine(engine_api.Engine):
       padded_tokens: jax.Array,
       true_length: int,
       rng: Optional[PRNGKeyType] = None,
-  ) -> Tuple[Prefix, engine_api.ResultTokens]:
-    """Wrapper for prefill for ahead-of-time compilation."""
+      model_mode: str = common_types.MODEL_MODE_PREFILL, # ADD model_mode
+      slot: Optional[int] = None,
+    ) -> Tuple[Prefix, engine_api.ResultTokens]:
+      """Wrapper for prefill for ahead-of-time compilation."""
 
-    return self.prefill(params=params, padded_tokens=padded_tokens, true_length=true_length, rng=rng)
+      return self.prefill(params=params, padded_tokens=padded_tokens, true_length=true_length, rng=rng, model_mode=model_mode, slot=slot)
 
-  @functools.partial(jax.jit, static_argnums=(0,))
+  @functools.partial(jax.jit)
   def prefill(
       self,
       *,
@@ -325,7 +326,8 @@ class MaxEngine(engine_api.Engine):
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
       slot: Optional[int] = None,
-  ) -> Tuple[Prefix, engine_api.ResultTokens]:
+      model_mode: str = common_types.MODEL_MODE_PREFILL, # ADD model_mode
+    ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
     Args:
@@ -360,9 +362,11 @@ class MaxEngine(engine_api.Engine):
           positions,
           decoder_segment_ids=sequence_indicator,
           enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_PREFILL,
+          model_mode=model_mode,  # Pass model_mode here
           rngs={"params": new_rng},
           mutable=["cache"],
+          slot=slot,
+          true_length=true_length,
       )
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
@@ -530,7 +534,7 @@ class MaxEngine(engine_api.Engine):
     prefix, _ = self.prefill(params=params, padded_tokens=padded_tokens, true_length=true_length, rng=rng)
     return self.insert(prefix, decode_state, slot)
 
-  @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
+  @functools.partial(jax.jit, donate_argnums=(2,)) # Keep jax.jit
   def generate(
       self,
       params: Params,
@@ -538,12 +542,13 @@ class MaxEngine(engine_api.Engine):
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
       slot: Optional[int] = None,  # Add slot here
+      model_mode: str = common_types.MODEL_MODE_AUTOREGRESSIVE, # ADD model_mode
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
     """Run one generate step"""
     if rng is None:
       rng = jax.random.PRNGKey(0)
 
-    previous_token = jnp.array([[decode_state["tokens"][slot, 0]]], dtype=jnp.int32)  # Get token at slot
+    previous_token = jnp.array([[decode_state["tokens"][slot, 0]]], dtype=jnp.int32)
     rng, new_rng = jax.random.split(rng)
     # run one step generation
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -552,9 +557,10 @@ class MaxEngine(engine_api.Engine):
           previous_token,
           decode_state["next_pos"],
           enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          model_mode=model_mode, # Pass model_mode
           rngs={"params": new_rng},
           mutable=[],
+          slot=slot,
       )
 
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
@@ -581,6 +587,7 @@ class MaxEngine(engine_api.Engine):
         "next_pos": decode_state["next_pos"] + 1,
         "generated_tokens": decode_state["generated_tokens"] + 1,
         "tokens": new_token,
+        "slot": decode_state["slot"],
     }
     updated_decode_state = self.insert(new_token, updated_decode_state, slot)
     return updated_decode_state, result
@@ -651,7 +658,7 @@ class MaxEngine(engine_api.Engine):
           zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
           ## zero out in case prefill cache is too small to cover
           full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
-          ## copy prefill cachce
+          ## copy prefill cache
           full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
           return full_cache
         elif path_key == "cached_ar_lengths":
@@ -708,6 +715,7 @@ class MaxEngine(engine_api.Engine):
         "next_pos": inserted_next_pos,
         "generated_tokens": inserted_generated_tokens,
         "tokens": inserted_tokens,
+        "slot": unboxed_prefix["slot"],
     }
 
   @functools.partial(
@@ -851,62 +859,55 @@ class MaxEngine(engine_api.Engine):
   def init_decode_state(
       self,
       rng: Optional[PRNGKeyType] = None,
-      model=None,
-      config=None,
   ) -> DecodeState:
     """Initialises any state which a generation step transforms."""
 
     if rng is None:
       rng = jax.random.PRNGKey(0)
+    # Initialize KV cache based on attention type
+    batch_size = int(self.config.per_device_batch_size * jax.device_count()) # Corrected batch size
+
+    if self.config.attention == "paged":
+      cache = get_initial_paged_kv_cache(self.model, self.config, batch_size, abstract=True)
+
+    else:
+      cache = get_initial_contiguous_kv_cache(self.model, self.config, batch_size, abstract=True)
 
     # pylint: disable=unused-argument
     def init(abstract_params):
-      x = jnp.ones(
-          (int(config.per_device_batch_size * jax.device_count()), 1),
-          dtype=jnp.int32,
-      )
-      # remove cache
-      _, _ = self.model.apply(
-          abstract_params,
-          x,
-          x,
-          enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-          rngs={"params": rng},
-          mutable=["cache"],
-      )
-
       next_pos = jnp.zeros(
-          (int(config.per_device_batch_size * jax.device_count()), 1),
+          (batch_size, 1),
           dtype=jnp.int32,
       )
       generated_tokens = jnp.zeros(
-          (int(config.per_device_batch_size * jax.device_count()), 1),
+          (batch_size, 1),
           dtype=jnp.int32,
       )
       tokens = jnp.zeros(
-          (int(config.per_device_batch_size * jax.device_count()), 1),
+          (batch_size, 1),
           dtype=jnp.int32,
       )
+
       return {
           "logits": jnp.zeros(
-              (
-                  int(config.per_device_batch_size * jax.device_count()),
-                  1,
-                  config.vocab_size,
-              )
+              (batch_size, 1, self.config.vocab_size)
           ),
+          "cache": cache,  # Use initialized KV cache here
           "next_pos": next_pos,
           "generated_tokens": generated_tokens,
           "tokens": tokens,
+          "slot": jnp.zeros((batch_size, 1), dtype=jnp.int32)
       }
 
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
-      abstract_outputs = jax.eval_shape(init, self.abstract_params)
+    with nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      abstract_outputs = jax.eval_shape(init, self.abstract_params)  # Use self.abstract_params
+
     logical_annotations = nn.get_partition_spec(abstract_outputs)
 
-    with self._mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       mesh_annotations = nn.logical_to_mesh(logical_annotations)
+    
+    self.kv_cache_annotations_named = mesh_annotations["cache"]
 
     shardings = jax.tree_util.tree_map(
         lambda mesh_annotation: jax.sharding.NamedSharding(self._mesh, mesh_annotation),

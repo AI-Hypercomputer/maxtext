@@ -678,71 +678,80 @@ def init_training_state(apply_fn, params, tx):
   state = train_state.TrainState.create(apply_fn=apply_fn, params=params, tx=tx)
   return state
 
-
 def init_initial_state(model, tx, config, is_training, key):
   """
-  We pass in "static" objects like model, tx, config as JAX compares them by
-  object hash, and instantiating them inside causes pjit top-level annotations
-  to fail to match as pytree prefixes if we re-instantiate.
-
-  Args: model, tx, config, is_training, key
+  Initializes the model state.
   """
   input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-  model_vars = model.init(
-      {"params": key, "dropout": key, "aqt": key},
-      np.ones(input_shape, dtype=jnp.int32),
-      np.ones(input_shape, dtype=jnp.int32),
-  )
-  if is_training:
-    return init_training_state(model.apply, model_vars, tx)
-  return init_decode_state(model.apply, model_vars)
 
-
-def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
-  """Setup decode state by loading params from a checkpoint.
-
-  Args:
-    model: the flax model to initialize
-    config: config object
-    rng: jax.prng key
-    mesh: jax.devices() mesh
-    checkpoint_manager: Checkpoint manager
-
-  Returns:
-    state: state with decode params loaded from the checkpoint
-    state_mesh_annotations: the mesh annotations for the state
-  """
-  print("\nEntering setup_decode_state:")
-  print(f"  model: {type(model).__name__}")
-  print(f"  mesh.shape: {mesh.shape}")
-  print(f"  logical_axis_rules: {config.logical_axis_rules}")
-  max_utils.print_mem_stats("Start of setup_decode_state")
-
-  input_shape = (config.global_batch_size_to_load, config.max_target_length)
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
-    model_vars = model.init(
-        {"params": rng, "dropout": rng, "aqt": rng},
+  init_fn = functools.partial(
+        model.init,
+        {"params": key, "dropout": key, "aqt": key},
         jnp.ones(input_shape, dtype=jnp.int32),
         jnp.ones(input_shape, dtype=jnp.int32),
-        model_mode=common_types.MODEL_MODE_PREFILL,
-        mutable=["params", "cache", "aqt"],  # Add mutable=['params', 'cache']
+        mutable=["params", "cache", "aqt"],
     )
-
-  if config.load_parameters_path:
-    max_logging.log(f"Loading decode params from {config.load_parameters_path}")
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
-      loaded_params = checkpointing.load_params_from_path(
-          config.load_parameters_path, model_vars["params"]  # Load ONLY the params
-      )
-      model_vars = flax.core.frozen_dict.freeze({**flax.core.unfreeze(model_vars), "params": loaded_params})
+  if is_training:
+    return init_training_state(model.apply, *jax.eval_shape(init_fn, config=config, tx=tx))
   else:
-    max_logging.log("No decode checkpoint specified - generating random weights.")
+    return init_decode_state(model.apply, *jax.eval_shape(init_fn, config=config))
 
-  state = init_decode_state(model.apply, model_vars["params"])  # Pass only params
-  state = unbox_logicallypartioned(state)
-  state_mesh_annotations = nn.get_partition_spec(state)
-  max_utils.print_mem_stats("After setup_decode_state")
-  return state, state_mesh_annotations
+
+# max_utils.py (setup_decode_state - TRULY Corrected)
+def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
+    """Setup decode state."""
+    print("\nEntering setup_decode_state:")
+    print(f"  model: {type(model).__name__}")
+    print(f"  mesh.shape: {mesh.shape}")
+    print(f"  logical_axis_rules: {config.logical_axis_rules}")
+    max_utils.print_mem_stats("Start of setup_decode_state")
+
+    input_shape = (config.global_batch_size_to_load, config.max_target_length)
+
+    # 1. Define a helper function that takes *only* array inputs.
+    def init_fn(rng, input_tokens, input_positions):
+        # 2.  Call model.init *inside* this function, but 'model' is NOT
+        #     an argument to init_fn itself. This is crucial.  This way,
+        #     jax.eval_shape only sees array arguments.
+        _, initial_vars = model.init(
+            {"params": rng, "dropout": rng, "aqt": rng},
+            input_tokens,
+            input_positions,
+            None, # decoder_segment_ids
+            True, # enable_dropout
+            is_prefill=True,  # Always True during initialization
+            slot=None,
+            true_length=None,
+            mutable=["params", "cache", "aqt"],
+        )
+        return initial_vars
+
+    with nn_partitioning.axis_rules(config.logical_axis_rules):
+        # 3. Call jax.eval_shape on the HELPER FUNCTION, passing dummy arrays.
+      model_vars = jax.eval_shape(
+          init_fn,
+          rng,
+          jnp.ones(input_shape, dtype=jnp.int32),  # Dummy input tokens
+          jnp.ones(input_shape, dtype=jnp.int32)   # Dummy input positions
+      )
+
+    if config.load_parameters_path:
+        max_logging.log(f"Loading decode params from {config.load_parameters_path}")
+        with nn_partitioning.axis_rules(config.logical_axis_rules):
+            loaded_params = checkpointing.load_params_from_path(
+                config.load_parameters_path, model_vars["params"]  # Load ONLY the params
+            )
+            model_vars = flax.core.frozen_dict.freeze(
+                {**flax.core.unfreeze(model_vars), "params": loaded_params}
+            )
+    else:
+        max_logging.log("No decode checkpoint specified - generating random weights.")
+
+    state = init_decode_state(model.apply, model_vars["params"])  # Pass only params
+    state = unbox_logicallypartioned(state)
+    state_mesh_annotations = nn.get_partition_spec(state)
+    max_utils.print_mem_stats("After setup_decode_state")
+    return state, state_mesh_annotations
 
 
 def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager):
@@ -813,10 +822,13 @@ def setup_initial_state(
       init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
       init_state_partial.__name__ = "initialize_state"
       # pylint: disable=not-callable
+
+      # Mark functools.partial object as static for jax.jit.
       state = jax.jit(
           init_state_partial,
           in_shardings=None,
           out_shardings=state_mesh_shardings,
+          static_argnums=(4,),  # The 5th argument (index 4) is 'key', which is static
       )(rng)
       if raw_params:  # If we loaded a partial state, we need to merge it.
         state = state.replace(params=raw_params)
@@ -969,11 +981,12 @@ cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd, _cross_entropy_
 
 
 def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
-  """Get a shaped abstraction of the state (including optimizer)"""
+  """Get a shaped abstraction of the state (including optimizer)."""
+  # model_mode will now be static via static_argnames in the jax.jit call below
   init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    abstract_state = jax.eval_shape(init_state_partial)
+    abstract_state = jax.eval_shape(init_state_partial, model_mode="train") #Pass model_mode and is_training
 
   state_logical_annotations = nn.get_partition_spec(abstract_state)
 
@@ -983,7 +996,8 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
     params = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.params)
     state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state, params=params)
 
-  abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape()
+  # Use static_argnames to treat is_training and model_mode statically.
+  abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings, static_argnames=('is_training','model_mode')).eval_shape(is_training=is_training, model_mode="train")
 
   unboxed_abstract_sharded_state = unbox_logicallypartioned(abstract_sharded_state)
   # Initialization
@@ -1028,7 +1042,8 @@ def get_kv_cache_annotations(model, config, rng, mesh):
         {"params": rng, "dropout": rng, "aqt": rng},
         jnp.ones(input_shape),
         jnp.ones(input_shape),
-        model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+        is_prefill=False,
+        mutable=["cache"],
     )
     return model_vars["cache"]
 

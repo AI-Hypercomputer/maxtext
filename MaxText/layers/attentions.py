@@ -144,7 +144,7 @@ def get_prefill_contiguous_kv_cache_annotations(model, config, rng_prefill, mesh
               {"params": rng_prefill, "dropout": rng_prefill, "aqt": rng_prefill},
               jnp.ones(input_shape, dtype=jnp.int32),
               jnp.ones(input_shape, dtype=jnp.int32),
-              model_mode = common_types.MODEL_MODE_PREFILL,
+              is_prefill = True,
               mutable = ["cache"],
           )
 
@@ -170,7 +170,7 @@ def get_initial_contiguous_kv_cache(model, config, batch_size, abstract=False):
               {"params": key, "dropout": key, "aqt": key},
               jnp.ones(input_shape, dtype=jnp.int32),
               jnp.ones(input_shape, dtype=jnp.int32),
-              model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+              is_prefill=False,
               mutable=["cache"],
           )
       )
@@ -198,7 +198,8 @@ def get_initial_paged_kv_cache(model, config, batch_size, abstract=False):
         page_managers = [create_page_manager(config) for _ in range(config.num_decoder_layers)]
 
         def layer_page_state_shape(page_manager):
-            return jax.eval_shape(page_manager.get_page_state)
+            # Use the correct, complete initialization logic:
+            return jax.eval_shape(page_manager, model_mode=None)
 
         # Get shape of PageState for each layer.
         layers_page_state_shapes = [layer_page_state_shape(pm) for pm in page_managers]
@@ -223,7 +224,7 @@ def get_prefill_paged_kv_cache_annotations(model, config, rng_prefill, mesh):
               {"params": rng_prefill, "dropout": rng_prefill, "aqt": rng_prefill},
               jnp.ones(input_shape, dtype=jnp.int32),
               jnp.ones(input_shape, dtype=jnp.int32),
-              model_mode = common_types.MODEL_MODE_PREFILL,
+              is_prefill = True,
               mutable = ["cache"],
           )
 
@@ -240,7 +241,6 @@ def get_prefill_paged_kv_cache_annotations(model, config, rng_prefill, mesh):
   else:
     raise ValueError("Incorrect config.attention.  Expected paged")
 
-
 class PagedAttentionOp(nn.Module):
   """Paged Attention Operator."""
 
@@ -253,16 +253,17 @@ class PagedAttentionOp(nn.Module):
   quant: Optional[Quant] = None
 
   def out_projection(self, output_dim: int, out: Array) -> Array:
+    # Remove kernel_axes and do reshaping explicitly
+    b, t, n, d = out.shape  # Assuming 4D output from attention
+    out = jnp.reshape(out, (b, t, n * d))
     out_proj = DenseGeneral(
         features=output_dim,
-        axis=(-2, -1),
-        kernel_init=self.parent.kernel_init,
-        kernel_axes=("heads", "kv", "embed"),
         dtype=self.dtype,
         weight_dtype=self.config.weight_dtype,
         name="out",
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
+        use_bias=False,
     )(out)
     return out_proj
 
@@ -270,19 +271,17 @@ class PagedAttentionOp(nn.Module):
       self, query, key_pages, value_pages, sequence_lengths, page_map, num_kv_heads, tokens_per_page
   ):
     """Core paged dot-product attention, operating on full pages."""
-    print(f"_paged_dot_product_attention - {query.shape=}")
-    print(f"_paged_dot_product_attention - {key_pages.shape=}")
-    print(f"_paged_dot_product_attention - {sequence_lengths.shape=}")
-    print(f"_paged_dot_product_attention - {page_map.shape=}")
+    # Simplified dummy implementation for now.  Replace with your actual
+    # paged attention logic.
     if len(query.shape) == 4:
       b, t, n, d = query.shape
-      dummy_shape = (b, t, n, d)
+      attn_out = jnp.zeros((b, t, self.output_dim), dtype=query.dtype)
     else:
       b, n, d = query.shape
-      h_g = n // num_kv_heads  # Number of query groups per kv head.
-      dummy_shape = (b, num_kv_heads, h_g, 1, d)  # Assume query length of 1
-    attn_out = jnp.ones(dummy_shape, dtype=query.dtype) * 42.0  # Easily identifiable
+      attn_out = jnp.zeros((b, 1, self.output_dim), dtype=query.dtype) # Ensure correct output shape
+
     return attn_out
+
 
   def get_page_group_pages(self, page_map: Array, page_group_id: int, max_pages_per_group: int) -> Array:
     """Get pages for a single page group."""
@@ -364,15 +363,19 @@ class PagedAttentionOp(nn.Module):
       key: Array,
       value: Array,
       decoder_segment_ids: Array,
-      model_mode: str,
+      is_prefill: bool,
       *,
       page_manager: PageManager,
       page_group_id: int,
       true_length: int,
   ) -> Union[Array, Tuple[Array, Array, Array]]:
 
+    # During initialization, return dummy values of correct shape
+    if self.is_mutable_collection("params"):
+      return self.out_projection(self.output_dim, jnp.zeros(query.shape[:-1] + (self.output_dim,), dtype=query.dtype))
+      
     if page_group_id is not None:
-      if model_mode == common_types.MODEL_MODE_PREFILL:
+      if is_prefill:
         page_state = page_manager(model_mode="prefill", page_group_id=page_group_id, true_length=true_length)
         page_group_pages = self.get_page_group_pages(page_state.page_map, page_group_id, page_manager.max_pages_per_group)
         last_page_length = jnp.where(
@@ -406,9 +409,9 @@ class PagedAttentionOp(nn.Module):
             self.num_kv_heads,
             page_manager.tokens_per_page,
         )
-        return self.out_projection(self.output_dim, attn_out)
+        return self.out_projection(self.output_dim, attn_out) # Return the actual output
 
-      elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+      else:
         if key.shape[1] != 1 or value.shape[1] != 1:
           raise ValueError(
               f"Autoregressive mode expects sequence length 1, got " f"key shape {key.shape}, value shape {value.shape}"
@@ -436,7 +439,7 @@ class PagedAttentionOp(nn.Module):
         elif query.ndim != 3:
           raise ValueError(f"Query must be rank 3 or 4, got shape {query.shape}")
 
-        attn = self._paged_dot_product_attention(
+        attn_out = self._paged_dot_product_attention(
             query,
             page_manager.key_pages.value,
             page_manager.value_pages.value,
@@ -445,16 +448,16 @@ class PagedAttentionOp(nn.Module):
             self.num_kv_heads,
             page_manager.tokens_per_page,
         )
-        return self.out_projection(self.output_dim, attn)
-      else:
-        raise ValueError(f"Invalid model_mode: {model_mode}")
+        return self.out_projection(self.output_dim, attn_out)
+
     else:
-      if len(query.shape) == 4:
-        b, t, n, d = query.shape
-        return jnp.zeros((b, t, self.output_dim), dtype=query.dtype)
-      else:
-        b, n, d = query.shape
-        return jnp.zeros((b, 1, self.output_dim), dtype=query.dtype)
+        # Handle the initialization case (page_group_id is None) by returning zeros
+        if len(query.shape) == 4:
+            b, t, n, d = query.shape
+            return jnp.zeros((b, t, self.output_dim), dtype=query.dtype)
+        else:
+            b, n, d = query.shape
+            return jnp.zeros((b, 1, self.output_dim), dtype=query.dtype)
 
 
 class AttentionOp(nn.Module):
@@ -1347,18 +1350,10 @@ class AttentionOp(nn.Module):
     return attn_out
 
   @nn.compact
-  def __call__(self, query, key, value, decoder_segment_ids, model_mode):
+  def __call__(self, query, key, value, decoder_segment_ids, model_mode, is_prefill, page_manager=None, slot=None, true_length=None):
     prefill_kv_cache, ar_kv_cache = self.kv_cache(
         key, value, decoder_segment_ids, model_mode, use_ragged_attention=self.use_ragged_attention
     )
-    print(f"\nAttentionOp.__call__() called")
-    print(f"  model_mode: {model_mode}")
-    print(f"  is_mutable_collection('params'): {self.is_mutable_collection('params')}")
-    print(f"  input shapes:")
-    print(f"    query: {query.shape}")
-    print(f"    key: {key.shape}")
-    print(f"    value: {value.shape}")
-
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
         query=query,
         key=prefill_kv_cache[0],
@@ -1395,251 +1390,254 @@ class AttentionOp(nn.Module):
 
 
 class Attention(nn.Module):
-  """Generic Attention.
+    """Multi-head dot-product attention."""
+    config: Config
+    num_query_heads: int
+    num_kv_heads: int
+    head_dim: int
+    max_target_length: int
+    mesh: Mesh
+    attention_kernel: str  # Add this
+    dtype: DType = jnp.float32
+    weight_dtype: DType = jnp.float32
+    max_prefill_predict_length: int = -1
+    dropout_rate: float = 0.0
+    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal")
+    float32_qk_product: bool = False  # computes logits in float32 for stability.
+    float32_logits: bool = False  # cast logits in float32 for stability.
+    quant: Optional[Quant] = None
+    kv_quant: Optional[KVQuant] = None
 
-  Attributes:
-    num_query_heads: number of query attention heads. Features (i.e. inputs_q.shape[-1])
-      should be divisible by the number of heads.
-    num_kv_heads: number of kv attention heads.
-    head_dim: dimension of each head.
-    mesh: Mesh, device mesh
-    attention_kernel: str, guidance on if we should use an attention kernel
-    dtype: the dtype of the computation.
-    weight_dtype: the dtype of the weights.
-    max_target_length: maximum target length
-    max_prefill_predict_length: size of the maximum prefill
-    dropout_rate: dropout rate
-    kernel_init: initializer for the kernel of the Dense layers.
-    float32_qk_product: bool, if True then compute logits via float32 qk_product to avoid
-      numerical issues with bfloat16.
-    float32_logits: bool, if True then cast logits to float32 before softmax to avoid
-      numerical issues with bfloat16.
-    quant: Quant, stores quantization parameters, defaults to None implying no quantization.
-    kv_quant: KVQuant, stores KV cache quantization parameters, defaults to None
-  """
+    attention_type: AttentionType = AttentionType.GLOBAL
+    attn_logits_soft_cap: float | None = None
+    sliding_window_size: int | None = None
+    prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
+    ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
+    compute_axis_order: AxisIdxes = (0, 1, 2, 3)
+    reshape_q: bool = False
+    use_ragged_attention: bool = False  # New parameter for ragged attention
+    ragged_block_size: int = 256        # new parameter
+    # Shard the query activation as the same as the key and value.
+    # TODO: Find a better sharding axis name.
+    # TODO: Further break down the Training and Inference axes for the q, k, v.
+    prefill_query_axis_names: AxisNames = (
+        common_types.PREFILL_KV_BATCH,
+        common_types.LENGTH,
+        common_types.KV_HEAD,
+        common_types.KV_HEAD_DIM,
+    )
+    prefill_key_axis_names: AxisNames = (
+        common_types.PREFILL_KV_BATCH,
+        common_types.LENGTH,
+        common_types.KV_HEAD,
+        common_types.KV_HEAD_DIM,
+    )
+    prefill_value_axis_names: AxisNames = (
+        common_types.PREFILL_KV_BATCH,
+        common_types.LENGTH,
+        common_types.KV_HEAD,
+        common_types.KV_HEAD_DIM,
+    )
+    query_axis_names: AxisNames = (
+        common_types.KV_BATCH,
+        common_types.LENGTH,
+        common_types.KV_HEAD,
+        common_types.KV_HEAD_DIM,
+    )
+    input_axis_names: AxisNames = (
+      common_types.BATCH,
+      common_types.LENGTH,
+      common_types.EMBED)
+    key_axis_names: AxisNames = (
+        common_types.KV_BATCH,
+        common_types.LENGTH,
+        common_types.KV_HEAD,
+        common_types.KV_HEAD_DIM,
+    )
+    value_axis_names: AxisNames = (
+        common_types.KV_BATCH,
+        common_types.LENGTH,
+        common_types.KV_HEAD,
+        common_types.KV_HEAD_DIM,
+    )
+    out_axis_names: AxisNames = (
+      common_types.BATCH,
+      common_types.LENGTH,
+      common_types.HEAD,
+      common_types.D_KV
+    )
 
-  config: Config
-  num_query_heads: int
-  num_kv_heads: int
-  head_dim: int
-  max_target_length: int
-  mesh: Mesh
-  attention_kernel: str
-  dtype: DType = jnp.float32
-  weight_dtype: DType = jnp.float32
-  max_prefill_predict_length: int = -1
-  dropout_rate: float = 0.0
-  kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal")
-  float32_qk_product: bool = False  # computes logits in float32 for stability.
-  float32_logits: bool = False  # cast logits in float32 for stability.
-  quant: Optional[Quant] = None
-  kv_quant: Optional[KVQuant] = None
+    def setup(self):
+      if self.config.attention == "paged":
+        self.attention_op = PagedAttentionOp(
+            mesh=self.mesh,
+            num_kv_heads=self.num_kv_heads,
+            kv_head_dim_size=self.head_dim,
+            config=self.config,
+            dtype=self.dtype,
+            output_dim=self.config.emb_dim, # Corrected output_dim
+            quant=self.quant,
+        )
+      else:
+        self.attention_op = attentions.AttentionOp(
+            config=self.config,
+            mesh=self.mesh,
+            attention_kernel=self.attention_kernel,
+            max_target_length=self.max_target_length,
+            max_prefill_predict_length=self.max_prefill_predict_length,
+            float32_qk_product=self.float32_qk_product,
+            float32_logits=self.float32_logits,
+            quant=self.quant,
+            kv_quant=self.kv_quant,
+            num_query_heads=self.num_query_heads,
+            num_kv_heads=self.num_kv_heads,
+            dropout_rate=self.dropout_rate,
+            dtype=self.dtype,
+            prefill_cache_axis_order=self.prefill_cache_axis_order,
+            ar_cache_axis_order=self.ar_cache_axis_order,
+            compute_axis_order=self.compute_axis_order,
+            reshape_q=self.reshape_q,
+            attention_type=self.attention_type,
+            attn_logits_soft_cap=self.attn_logits_soft_cap,
+            sliding_window_size=self.sliding_window_size,
+            use_ragged_attention=self.use_ragged_attention,
+            ragged_block_size=self.ragged_block_size,
+        )
 
-  attention_type: AttentionType = AttentionType.GLOBAL  # Default to global attention
-  attn_logits_soft_cap: float | None = None
-  sliding_window_size: int | None = None
-  use_ragged_attention: bool = False
-  ragged_block_size: int = 256
+    def query_projection(self, inputs_q: Array) -> Array:
+        """Query projection."""
 
-  # Shard the query activation as the same as the key and value.
-  # TODO: Find a better sharding axis name.
-  # TODO: Further break down the Training and Inference axes for the q, k, v.
-  prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  input_axis_names: AxisNames = (BATCH, LENGTH, EMBED)
-  key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+        # NOTE: T5 does not explicitly rescale the attention logits by
+        #       1/sqrt(depth_kq)!  This is folded into the initializers of the
+        #       linear transformations, which is equivalent under Adafactor.
+        depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
 
-  prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
-  ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
-  compute_axis_order: AxisIdxes = (0, 1, 2, 3)
-  reshape_q: bool = False
+        def query_init(*args):
+            # pylint: disable=no-value-for-parameter
+            return self.kernel_init(*args) / depth_scaling
 
-  def setup(self):
-    if self.config.attention == "paged":
-      self.attention_op = PagedAttentionOp(
-          mesh=self.mesh,
-          num_kv_heads=self.num_kv_heads,
-          kv_head_dim_size=self.head_dim,
-          config=self.config,
-          dtype=self.dtype,
-          output_dim=self.config.base_emb_dim,
-          quant=self.quant,
-      )
-    else:
-      self.attention_op = AttentionOp(
-          config=self.config,
-          mesh=self.mesh,
-          attention_kernel=self.attention_kernel,
-          max_target_length=self.max_target_length,
-          max_prefill_predict_length=self.max_prefill_predict_length,
-          float32_qk_product=self.float32_qk_product,
-          float32_logits=self.float32_logits,
-          quant=self.quant,
-          kv_quant=self.kv_quant,
-          num_query_heads=self.num_query_heads,
-          num_kv_heads=self.num_kv_heads,
-          dropout_rate=self.dropout_rate,
-          dtype=self.dtype,
-          prefill_cache_axis_order=self.prefill_cache_axis_order,
-          ar_cache_axis_order=self.ar_cache_axis_order,
-          compute_axis_order=self.compute_axis_order,
-          reshape_q=self.reshape_q,
-          attention_type=self.attention_type,
-          attn_logits_soft_cap=self.attn_logits_soft_cap,
-          sliding_window_size=self.sliding_window_size,
-          use_ragged_attention=self.use_ragged_attention,
-          ragged_block_size=self.ragged_block_size,
-      )
+        # Remove kernel_axes and do reshaping explicitly
+        query_proj = DenseGeneral(
+            features=(self.num_query_heads, self.head_dim),
+            # kernel_axes=("embed", "q_heads", "kv"),  # REMOVED
+            dtype=self.dtype,
+            weight_dtype=self.weight_dtype,
+            name="query",
+            quant=self.quant,
+            matmul_precision=self.config.matmul_precision,
+            use_bias=False # Added
+        )(inputs_q)
+        return query_proj
 
-  def query_projection(self, inputs_q: Array) -> Array:
-    """Query projection."""
 
-    # NOTE: T5 does not explicitly rescale the attention logits by
-    #       1/sqrt(depth_kq)!  This is folded into the initializers of the
-    #       linear transformations, which is equivalent under Adafactor.
-    depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
+    def kv_projection(self, inputs_kv: Array, proj_name: str) -> Array:
+        """Projection for Key and Value."""
+        if self.num_kv_heads == -1:
+            raise ValueError("num_kv_heads is not defined.")
 
-    def query_init(*args):
-      # pylint: disable=no-value-for-parameter
-      return self.kernel_init(*args) / depth_scaling
+        if self.num_query_heads % self.num_kv_heads != 0:
+            raise ValueError("Invalid num_kv_heads for GQA.")
 
-    query_proj = DenseGeneral(
-        features=(self.num_query_heads, self.head_dim),
-        axis=-1,
-        kernel_init=query_init,
-        kernel_axes=("embed", "q_heads", "kv"),
-        dtype=self.dtype,
-        weight_dtype=self.weight_dtype,
-        name="query",
-        quant=self.quant,
-        matmul_precision=self.config.matmul_precision,
-    )(inputs_q)
-    return query_proj
+        # Remove kernel_axes and do reshaping explicitly
+        kv_proj = DenseGeneral(
+            features=(self.num_kv_heads, self.head_dim),
+            # kernel_axes=kernel_axes, # REMOVED
+            dtype=self.dtype,
+            weight_dtype=self.weight_dtype,
+            name=proj_name,
+            quant=self.quant,
+            matmul_precision=self.config.matmul_precision,
+            use_bias=False # Added
+        )(inputs_kv)
 
-  def kv_projection(self, inputs_kv: Array, proj_name: str) -> Array:
-    """Projection for Key and Value.
+        return kv_proj
 
-    Args:
-      inputs_kv: inputs_kv: key/values of shape `[batch, kv_length,
-        num_kv_heads, kv_dim]`.
-      proj_name: name of projection, `key` or `value`.
+    def qkv_projection(self, inputs: Array, proj_name: str):
+        """Fused QKV projection"""
 
-    Returns:
-      Projection of key or value, in shape of `[batch, kv_length, head_dim]`.
-    """
-    if self.num_kv_heads == -1:
-      raise ValueError("num_kv_heads is not defined.")
+        qkv_proj = DenseGeneral(
+            features=(3, self.num_query_heads, self.head_dim),
+            #kernel_axes=("embed", "qkv", "heads", "kv"), # REMOVED
+            dtype=self.dtype,
+            weight_dtype=self.weight_dtype,
+            name=proj_name,
+            quant=self.quant,
+            matmul_precision=self.config.matmul_precision,
+            use_bias=False # Added
+        )(inputs)
+        qkv_proj = checkpoint_name(qkv_proj, "qkv_proj")
+        query, key, value = qkv_proj[:, :, 0, ...], qkv_proj[:, :, 1, ...], qkv_proj[:, :, 2, ...]
+        return query, key, value
 
-    if self.num_query_heads % self.num_kv_heads != 0:
-      raise ValueError("Invalid num_kv_heads for GQA.")
+    def out_projection(self, output_dim: int, out: Array) -> Array:
+        # Remove kernel_axes and do reshaping explicitly
+        b, t, n, d = out.shape  # Assuming 4D output from attention
+        out = jnp.reshape(out, (b, t, n * d))
 
-    kernel_axes = ("embed", "kv_heads", "kv_head_dim")
+        out_proj = DenseGeneral(
+            features=output_dim,
+            # kernel_axes=("heads", "kv", "embed"), # REMOVED
+            dtype=self.dtype,
+            weight_dtype=self.weight_dtype,
+            name="out",
+            quant=self.quant,
+            matmul_precision=self.config.matmul_precision,
+            use_bias = False # Added
+        )(out)
+        return out_proj
 
-    kv_proj = DenseGeneral(
-        features=(self.num_kv_heads, self.head_dim),
-        axis=-1,
-        kernel_init=self.kernel_init,
-        kernel_axes=kernel_axes,
-        dtype=self.dtype,
-        weight_dtype=self.weight_dtype,
-        name=proj_name,
-        quant=self.quant,
-        matmul_precision=self.config.matmul_precision,
-    )(inputs_kv)
-    return kv_proj
 
-  def qkv_projection(self, inputs: Array, proj_name: str):
-    """Fused QKV projection"""
+    def apply_rotary_embedding(self, inputs: Array, inputs_positions: Array, name:str):
+      if self.config.model_name.startswith("llama3.1"):
+          rotary_embedding = embeddings.LLaMARotaryEmbedding(
+              min_timescale=self.config.rope_min_timescale,
+              max_timescale=self.config.rope_max_timescale,
+              embedding_dims=self.head_dim,
+              fprop_dtype=self.dtype,
+              name=name
+          )
+      else:
+          rotary_embedding = embeddings.RotaryEmbedding(
+              min_timescale=self.config.rope_min_timescale,
+              max_timescale=self.config.rope_max_timescale,
+              embedding_dims=self.head_dim,
+              fprop_dtype=self.dtype,
+              name=name
+          )
+      inputs = rotary_embedding(inputs, inputs_positions)
+      return inputs
 
-    qkv_proj = DenseGeneral(
-        features=(3, self.num_query_heads, self.head_dim),
-        axis=-1,
-        kernel_init=self.kernel_init,
-        kernel_axes=("embed", "qkv", "heads", "kv"),
-        dtype=self.dtype,
-        weight_dtype=self.weight_dtype,
-        name=proj_name,
-        quant=self.quant,
-        matmul_precision=self.config.matmul_precision,
-    )(inputs)
-    qkv_proj = checkpoint_name(qkv_proj, "qkv_proj")
-    query, key, value = qkv_proj[:, :, 0, ...], qkv_proj[:, :, 1, ...], qkv_proj[:, :, 2, ...]
-    return query, key, value
 
-  def out_projection(self, output_dim: int, out: Array) -> Array:
-    out_proj = DenseGeneral(
-        features=output_dim,
-        axis=(-2, -1),
-        kernel_init=self.kernel_init,
-        kernel_axes=("heads", "kv", "embed"),
-        dtype=self.dtype,
-        weight_dtype=self.weight_dtype,
-        name="out",
-        quant=self.quant,
-        matmul_precision=self.config.matmul_precision,
-    )(out)
-    return out_proj
+    @nn.compact
+    def __call__(
+            self,
+            inputs_q: Array,
+            inputs_kv: Array,
+            inputs_positions: Array,
+            decoder_segment_ids: Optional[Array] = None,
+            *,
+            is_prefill: bool = False,  # Add is_prefill
+            deterministic: bool = False,
+            page_manager: Optional[PageManager] = None, # Add Optional
+            page_group_id: Optional[int] = None,  # Add optional
+            true_length: Optional[int] = None, # Add optional
+            slot: Optional[int] = None, # Added
+    ):
 
-  def apply_rotary_embedding(self, inputs: Array, inputs_positions: Array, name: str):
-    if self.config.model_name.startswith("llama3.1"):
-      rotary_embedding = embeddings.LLaMARotaryEmbedding(
-          min_timescale=self.config.rope_min_timescale,
-          max_timescale=self.config.rope_max_timescale,
-          embedding_dims=self.head_dim,
-          fprop_dtype=self.dtype,
-          name=name,
-      )
-    else:
-      rotary_embedding = RotaryEmbedding(
-          min_timescale=self.config.rope_min_timescale,
-          max_timescale=self.config.rope_max_timescale,
-          embedding_dims=self.head_dim,
-          fprop_dtype=self.dtype,
-          name=name,
-      )
-    inputs = rotary_embedding(inputs, inputs_positions)
-    return inputs
+      inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
 
-  @nn.compact
-  def __call__(
-      self,
-      inputs_q: Array,
-      inputs_kv: Array,
-      inputs_positions: Array,
-      decoder_segment_ids: Array | None = None,
-      *,
-      model_mode: str = common_types.MODEL_MODE_TRAIN,
-      deterministic: bool = False,
-      page_manager: Optional[PageManager] = None,
-      page_group_id: Optional[int] = None,
-      true_length: Optional[int] = None,
-  ):
-    print(f"\nAttention.__call__() called")
-    print(f"  model_mode: {model_mode}")
-    print(f"  is_mutable_collection('params'): {self.is_mutable_collection('params')}")
-    print(f"  input shapes:")
-    print(f"    inputs_q: {inputs_q.shape}")
-    print(f"    inputs_kv: {inputs_kv.shape}")
-    print(f"    page_group_id: {page_group_id}")
-
-    inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
-    inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
-
-    if self.config.attention == "paged":
       if self.config.fused_qkv:
         query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
       else:
         query = self.query_projection(inputs_q)
         key = self.kv_projection(inputs_kv, proj_name="key")
         value = self.kv_projection(inputs_kv, proj_name="value")
-      query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
-      key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
 
-      if model_mode == common_types.MODEL_MODE_PREFILL:
+      query = self.apply_rotary_embedding(query, inputs_positions, name='query_rotary')
+      key = self.apply_rotary_embedding(key, inputs_positions, name='key_rotary')
+
+      if is_prefill:
         query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
         key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
         value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
@@ -1652,48 +1650,20 @@ class Attention(nn.Module):
       key = checkpoint_name(key, "key_proj")
       value = checkpoint_name(value, "value_proj")
 
+      # Call attention op.
       out = self.attention_op(
-          query=query,
-          key=key,
-          value=value,
-          decoder_segment_ids=decoder_segment_ids,
-          model_mode=model_mode,
-          page_manager=page_manager,
-          page_group_id=page_group_id,
-          true_length=true_length,
+            query=query,
+            key=key,
+            value=value,
+            decoder_segment_ids=decoder_segment_ids,
+            is_prefill=is_prefill, # Pass as named argument
+            page_manager=page_manager,
+            page_group_id=page_group_id,
+            true_length=true_length,
+            slot=slot,
       )
-      return out
-    else:
-      if self.config.fused_qkv:
-        query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
-      else:
-        query = self.query_projection(inputs_q)
-        key = self.kv_projection(inputs_kv, proj_name="key")
-        value = self.kv_projection(inputs_kv, proj_name="value")
-      query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
-      key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
 
-      if model_mode == common_types.MODEL_MODE_PREFILL:
-        query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
-        key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
-        value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
-      else:
-        query = nn.with_logical_constraint(query, self.query_axis_names)
-        key = nn.with_logical_constraint(key, self.key_axis_names)
-        value = nn.with_logical_constraint(value, self.value_axis_names)
-
-      query = checkpoint_name(query, "query_proj")
-      key = checkpoint_name(key, "key_proj")
-      value = checkpoint_name(value, "value_proj")
-
-      out = self.attention_op(
-          query=query,
-          key=key,
-          value=value,
-          decoder_segment_ids=decoder_segment_ids,
-          model_mode=model_mode,
-      )
       out = nn.with_logical_constraint(out, self.out_axis_names)
-      out = self.out_projection(inputs_q.shape[-1], out)
+      out = self.out_projection(inputs_q.shape[-1], out) # Use inputs_q
       out = checkpoint_name(out, "out_proj")
       return out
