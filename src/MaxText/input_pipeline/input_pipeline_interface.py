@@ -107,3 +107,24 @@ def create_data_iterator(config: pyconfig.HyperParameters, mesh):
       assert len(process_indices_eval) == jax.process_count() // config.expansion_factor_real_data
     output_eval_iterator = create_process_specific_iterator(config, mesh, process_indices_eval, eval_iterator)
   return output_train_iterator, output_eval_iterator
+
+
+
+def get_shaped_batch_eval(config, mesh):
+  """ Return the shape of the batch - this is what eval_shape would return for the
+  output of create_data_iterator_with_tokenizer, but eval_shape doesn't work, see b/306901078."""
+  global_batch_size_to_load = config.global_batch_size_to_load
+  if config.eval_per_device_batch_size > 0:
+    eval_batch_size = config.eval_per_device_batch_size * mesh.size
+  else:
+    eval_batch_size = global_batch_size_to_load
+  batch_shape = (eval_batch_size, config.max_target_length)
+
+  shaped_batch = {}
+  shaped_batch['inputs'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  shaped_batch['inputs_position'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  shaped_batch['inputs_segmentation'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  shaped_batch['targets'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  shaped_batch['targets_position'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  shaped_batch['targets_segmentation'] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  return shaped_batch

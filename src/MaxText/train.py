@@ -538,6 +538,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
+  mllog_utils.init_start()
   # Create the Goodput recorder
   recorder = create_goodput_recorder(config)
 
