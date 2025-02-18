@@ -1248,3 +1248,164 @@ deepseek_v5p_dp_a1 = _add_to_model_dictionary(
     ),
   )
 )
+
+llama3_1_405b_8192_fsdp_dcn_matt = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama3-1-405b-8192-fsdp-dcn",
+    model_type="llama3.1-405b",
+    tuning_params={
+        "per_device_batch_size": 0.25,
+        "ici_fsdp_parallelism": 64,
+        "ici_tensor_parallelism": 4,
+        "dcn_fsdp_parallelism": 2,
+        "allow_split_physical_axes": True,
+        "custom_mesh": "hybrid_ring_64x4",
+        "remat_policy": "full",
+        # "decoder_layer_input": "offload",
+        # "query_proj": "offload",
+        # "key_proj": "offload",
+        # "value_proj": "offload",
+        # "out_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+  )
+)
+
+llama3_1_405b_8192_explicit_matt = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama3-1-405b-explicit",
+    model_type="default",
+    tuning_params={
+        "per_device_batch_size": 0.25,
+        "ici_fsdp_parallelism": 64,
+        "ici_tensor_parallelism": 4,
+        "dcn_fsdp_parallelism": 2,
+        "base_emb_dim": 16384,
+        "base_num_query_heads": 128,
+        "base_num_kv_heads": 8,
+        "base_num_decoder_layers": 126,
+        "base_mlp_dim": 53248,
+        "head_dim": 128,
+        "vocab_size": 128256,
+        "enable_dropout": False,
+        "logits_via_embedding": False,
+        "normalization_layer_epsilon": 1.0e-5,
+        "rope_max_timescale": 500_000,
+        "allow_split_physical_axes": True,
+        "custom_mesh": "hybrid_ring_64x4",
+        "remat_policy": "full",
+        # "decoder_layer_input": "offload",
+        # "query_proj": "offload",
+        # "key_proj": "offload",
+        # "value_proj": "offload",
+        # "out_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+  )
+)
+
+# 40GB OOM https://cloudlogging.app.goo.gl/4xYbHKv18uubzjNa9
+llama3_1_405b_8192_explicit_matt_pp = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama3-1-405b-explicit",
+    model_type="default",
+    tuning_params={
+        "per_device_batch_size": 0.25,
+        "ici_fsdp_parallelism": 64,
+        "ici_tensor_parallelism": 4,
+        "dcn_pipeline_parallelism": 2,
+        "base_emb_dim": 16384,
+        "base_num_query_heads": 128,
+        "base_num_kv_heads": 8,
+        "base_num_decoder_layers": 64,
+        "base_mlp_dim": 53248,
+        "head_dim": 128,
+        "vocab_size": 128256,
+        "enable_dropout": False,
+        "logits_via_embedding": False,
+        "normalization_layer_epsilon": 1.0e-5,
+        "rope_max_timescale": 500_000,
+        "allow_split_physical_axes": True,
+        "custom_mesh": "hybrid_ring_64x4",
+        "remat_policy": "full",
+        # "decoder_layer_input": "offload",
+        # "query_proj": "offload",
+        # "key_proj": "offload",
+        # "value_proj": "offload",
+        # "out_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+  )
+)
+
+matt_smoke_train = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="matt-smoke-train",
+    model_type="default",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+  )
+)

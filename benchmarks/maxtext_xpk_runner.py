@@ -409,7 +409,7 @@ def generate_xpk_workload_cmd(
           f' --num-slices={wl_config.num_slices}'
           f' --command="{user_command}"'
           f' {docker_image_flag}'
-          ' --enable-debug-logs'
+          #' --enable-debug-logs'
           f' --workload={name}'
           f' --priority={wl_config.priority}'
           f' --max-restarts={wl_config.max_restarts}'
@@ -519,8 +519,10 @@ def main() -> int:
 
   list_of_models = [
     #model_configs.deepseek_a1,
-    model_configs.deepseek_v5p_dp_a1,
+    #model_configs.deepseek_v5p_dp_a1,
     # model_configs.default_128
+    # model_configs.llama3_1_405b_8192_fsdp_dcn_matt
+    model_configs.llama3_1_405b_8192_explicit_matt_pp
   ]
 
   # Loop possibilities:
@@ -544,12 +546,12 @@ def main() -> int:
     # Run workloads on the below clusters
     for cluster_config in [
       # v5e_cluster_config,
-      v5p_cluster_config,
-      #v6e_cluster_config_yucmhab,
+      #v5p_cluster_config,
+      v6e_cluster_config, #yucmhab
       # another_config,
     ]:
       # Run workloads in the following slice configurations
-      for num_slices in [1,]:
+      for num_slices in [2,]:
         # Use the libtpu dependencies from:
         for libtpu_type in [
             # LibTpuType.CUSTOM
