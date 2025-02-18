@@ -19,6 +19,8 @@ import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
+import unittest
+
 import pyconfig
 import pytest
 from input_pipeline import _hf_data_processing
@@ -102,11 +104,6 @@ class HfDataProcessingTest(unittest.TestCase):
     self.assertTrue((train_batch1["inputs"] == train_batch2["inputs"]).all())
     self.assertTrue((train_batch1["targets"] == train_batch2["targets"]).all())
 
-  # def test_permutation_for_rope(self):
-  #   x = np.array([[1024, 2048]])
-  #   permutated = permute_to_match_maxtext_rope(x)
-  #   x_ = unpermute_from_match_maxtext_rope(permutated, "llama3.1")
-  #   assert np.array_equal(x, x_), "Test failed: x does not match x_"
 
 if __name__ == "__main__":
   unittest.main()
