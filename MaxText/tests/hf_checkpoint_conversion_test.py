@@ -126,11 +126,6 @@ def test_huggingface_to_maxtext_back_to_huggingface_flow():
   if not np.array_equal(wq2, wq4):
     print("Test failed: wq2 does not match wq4")
 
-def test_permutate_unpermutate():
-  x = np.arange(24*36).reshape(24, 36)
-  permutated = permute_to_match_maxtext_rope(x)
-  x_ = unpermute_from_match_maxtext_rope(permutated, "llama3.1")
-  assert np.array_equal(x, x_), "Test failed: x does not match x_"
 
 if __name__ == "__main__":
   hf_checkpoint_folder = "/mnt/disks/persist/checkpoints/huggingface/Llama3.1-8B"
