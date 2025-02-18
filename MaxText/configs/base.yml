@@ -499,6 +499,7 @@ vertex_tensorboard_region: ""
 max_checkify: False
 
 # Inference
+inference_microbenchmark_cache_num: 100
 inference_microbenchmark_prefill_lengths: "64,128,256,512,1024"
 inference_microbenchmark_stages: "prefill,generate"
 inference_microbenchmark_loop_iters: 10
