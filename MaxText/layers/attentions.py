@@ -144,7 +144,7 @@ def get_prefill_contiguous_kv_cache_annotations(model, config, rng_prefill, mesh
               {"params": rng_prefill, "dropout": rng_prefill, "aqt": rng_prefill},
               jnp.ones(input_shape, dtype=jnp.int32),
               jnp.ones(input_shape, dtype=jnp.int32),
-              is_prefill = True,
+              model_mode=common_types.MODEL_MODE_PREFILL,
               mutable = ["cache"],
           )
 
@@ -170,7 +170,7 @@ def get_initial_contiguous_kv_cache(model, config, batch_size, abstract=False):
               {"params": key, "dropout": key, "aqt": key},
               jnp.ones(input_shape, dtype=jnp.int32),
               jnp.ones(input_shape, dtype=jnp.int32),
-              is_prefill=False,
+              model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
               mutable=["cache"],
           )
       )
@@ -224,7 +224,7 @@ def get_prefill_paged_kv_cache_annotations(model, config, rng_prefill, mesh):
               {"params": rng_prefill, "dropout": rng_prefill, "aqt": rng_prefill},
               jnp.ones(input_shape, dtype=jnp.int32),
               jnp.ones(input_shape, dtype=jnp.int32),
-              is_prefill = True,
+              model_mode = common_types.MODEL_MODE_PREFILL,
               mutable = ["cache"],
           )
 
@@ -363,7 +363,7 @@ class PagedAttentionOp(nn.Module):
       key: Array,
       value: Array,
       decoder_segment_ids: Array,
-      is_prefill: bool,
+      model_mode: str,
       *,
       page_manager: PageManager,
       page_group_id: int,
@@ -375,7 +375,7 @@ class PagedAttentionOp(nn.Module):
       return self.out_projection(self.output_dim, jnp.zeros(query.shape[:-1] + (self.output_dim,), dtype=query.dtype))
       
     if page_group_id is not None:
-      if is_prefill:
+      if model_mode == common_types.MODEL_MODE_PREFILL:
         page_state = page_manager(model_mode="prefill", page_group_id=page_group_id, true_length=true_length)
         page_group_pages = self.get_page_group_pages(page_state.page_map, page_group_id, page_manager.max_pages_per_group)
         last_page_length = jnp.where(
@@ -1350,7 +1350,7 @@ class AttentionOp(nn.Module):
     return attn_out
 
   @nn.compact
-  def __call__(self, query, key, value, decoder_segment_ids, model_mode, is_prefill, page_manager=None, slot=None, true_length=None):
+  def __call__(self, query, key, value, decoder_segment_ids, model_mode, page_manager=None, slot=None, true_length=None):
     prefill_kv_cache, ar_kv_cache = self.kv_cache(
         key, value, decoder_segment_ids, model_mode, use_ragged_attention=self.use_ragged_attention
     )
@@ -1616,7 +1616,7 @@ class Attention(nn.Module):
             inputs_positions: Array,
             decoder_segment_ids: Optional[Array] = None,
             *,
-            is_prefill: bool = False,  # Add is_prefill
+            model_mode: str = common_types.MODEL_MODE_PREFILL,
             deterministic: bool = False,
             page_manager: Optional[PageManager] = None, # Add Optional
             page_group_id: Optional[int] = None,  # Add optional
@@ -1637,7 +1637,7 @@ class Attention(nn.Module):
       query = self.apply_rotary_embedding(query, inputs_positions, name='query_rotary')
       key = self.apply_rotary_embedding(key, inputs_positions, name='key_rotary')
 
-      if is_prefill:
+      if model_mode == common_types.MODEL_MODE_PREFILL:
         query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
         key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
         value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
@@ -1656,7 +1656,7 @@ class Attention(nn.Module):
             key=key,
             value=value,
             decoder_segment_ids=decoder_segment_ids,
-            is_prefill=is_prefill, # Pass as named argument
+            model_mode=model_mode,
             page_manager=page_manager,
             page_group_id=page_group_id,
             true_length=true_length,

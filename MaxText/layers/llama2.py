@@ -76,7 +76,7 @@ class LlamaDecoderLayer(nn.Module):
       decoder_segment_ids,
       decoder_positions,
       deterministic,
-      is_prefill, #boolean flag
+      model_mode,
       slot: Optional[int] = None,
       true_length: Optional[int] = None,
       page_manager: Optional[PageManager] = None,
@@ -123,7 +123,7 @@ class LlamaDecoderLayer(nn.Module):
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
-        is_prefill=is_prefill,  # Pass boolean flag
+        model_mode=model_mode,
         page_manager=page_manager,
         slot=slot,
         true_length=true_length,

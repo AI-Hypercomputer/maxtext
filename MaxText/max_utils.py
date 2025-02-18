@@ -719,7 +719,7 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
             input_positions,
             None, # decoder_segment_ids
             True, # enable_dropout
-            is_prefill=True,  # Always True during initialization
+            model_mode=common_types.MODEL_MODE_PREFILL,
             slot=None,
             true_length=None,
             mutable=["params", "cache", "aqt"],
@@ -752,7 +752,6 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
     state_mesh_annotations = nn.get_partition_spec(state)
     max_utils.print_mem_stats("After setup_decode_state")
     return state, state_mesh_annotations
-
 
 def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager):
   is_training = True
@@ -1042,7 +1041,7 @@ def get_kv_cache_annotations(model, config, rng, mesh):
         {"params": rng, "dropout": rng, "aqt": rng},
         jnp.ones(input_shape),
         jnp.ones(input_shape),
-        is_prefill=False,
+        model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
         mutable=["cache"],
     )
     return model_vars["cache"]

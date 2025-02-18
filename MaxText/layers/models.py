@@ -35,17 +35,13 @@ class DecoderLayer(nn.Module):
   quant: Optional[Quant] = None
 
   @nn.compact
-  @functools.partial(
-    jax.jit,
-    static_argnames=('is_prefill', 'slot', 'true_length')
-  )
   def __call__(
       self,
       inputs,
       decoder_segment_ids,
       decoder_positions,
       deterministic,
-      is_prefill,  # Use boolean flag instead of string
+      model_mode=common_types.MODEL_MODE_PREFILL,
       slot: Optional[int] = None,
       true_length: Optional[int] = None,
       page_manager: Optional[PageManager] = None,
@@ -95,7 +91,7 @@ class DecoderLayer(nn.Module):
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
-        is_prefill=is_prefill,  # Pass boolean flag
+        model_mode=model_mode,
         page_manager=page_manager,
         slot=slot,
         true_length=true_length
@@ -162,7 +158,7 @@ class Decoder(nn.Module):
                     base_class,
                     prevent_cse=not self.config.scan_layers,
                     policy=self.get_remat_policy(),
-                    static_argnums=(3, 4),  # deterministic and is_prefill # Keep
+                    static_argnums=(3, 4),
                 )
                 transformed_classes.append(transformed_class)
             decoder_layer_classes = transformed_classes
@@ -281,7 +277,7 @@ class Decoder(nn.Module):
           block_layer,
           prevent_cse=not self.config.scan_layers,
           policy=policy,
-          static_argnums=(3, 4),  # deterministic and is_prefill
+          static_argnums=(3, 4),
       )
       RemattedBlockLayers.append(layer)
     return RemattedBlockLayers
@@ -357,7 +353,7 @@ class Decoder(nn.Module):
             nn.broadcast,  # decoder_segment_ids
             nn.broadcast,  # decoder_positions
             nn.broadcast,  # deterministic
-            nn.broadcast,  # is_prefill
+            nn.broadcast,  # model_mode
             nn.broadcast,  # slot
             nn.broadcast,  # true_length
             nn.broadcast,  # page_manager
@@ -389,17 +385,14 @@ class Decoder(nn.Module):
       )
     return stage_module
 
-  @functools.partial(
-        jax.jit,
-        static_argnames=('is_prefill','slot','true_length',)
-  )
+  @nn.compact
   def __call__(
       self,
       decoder_input_tokens,
       decoder_positions,
       decoder_segment_ids=None,
       deterministic=False,
-      is_prefill=False,  # Use boolean flag
+      model_mode=common_types.MODEL_MODE_PREFILL,
       slot=None,
       true_length=None,
   ):
@@ -432,7 +425,7 @@ class Decoder(nn.Module):
       if cfg.using_pipeline_parallelism:
           if cfg.pipeline_fsdp_ag_once:
               partition_spec = self.pipeline_module.get_weight_sharding(
-                  y, decoder_segment_ids, decoder_positions, deterministic, is_prefill # Pass boolean
+                  y, decoder_segment_ids, decoder_positions, deterministic, model_mode
               )
           else:
               partition_spec = None
@@ -441,7 +434,7 @@ class Decoder(nn.Module):
               decoder_segment_ids,
               decoder_positions,
               deterministic,
-              is_prefill,  # Pass boolean
+              model_mode,
               partition_spec=partition_spec
           )
       else:
@@ -458,7 +451,7 @@ class Decoder(nn.Module):
                   decoder_segment_ids,
                   decoder_positions,
                   deterministic,
-                  is_prefill=is_prefill,  # Pass boolean
+                  model_mode=model_mode,
                   slot=slot,
                   true_length=true_length,
                   page_manager=page_manager
@@ -537,21 +530,22 @@ class Transformer(nn.Module):
 
     self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant)
 
-  @functools.partial(
-        jax.jit,
-        static_argnames=('is_prefill','slot','true_length',)
-  )
+  # @functools.partial(
+  #       jax.jit,
+  #       static_argnames=('is_prefill', 'slot', 'true_length')
+  # )
+  @nn.compact
   def __call__(
       self,
       decoder_input_tokens,
       decoder_positions,
       decoder_segment_ids=None,
       enable_dropout=True,
-      is_prefill=False, # boolean flag
+      model_mode=common_types.MODEL_MODE_PREFILL,
       slot = None,
       true_length = None
   ):
-    if decoder_segment_ids is not None and not is_prefill:
+    if decoder_segment_ids is not None and not model_mode:
       raise ValueError(
           f"During autoregressive decoding we assume the tokens are in the active sequence"
           f" which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}."
@@ -561,8 +555,8 @@ class Transformer(nn.Module):
       decoder_positions=decoder_positions,
       decoder_segment_ids=decoder_segment_ids,
       deterministic=not enable_dropout,
-      is_prefill = is_prefill,
-      slot = slot,
-      true_length=true_length
+      model_mode=model_mode,
+      slot=slot,
+      true_length=true_length,
     )
     return logits
