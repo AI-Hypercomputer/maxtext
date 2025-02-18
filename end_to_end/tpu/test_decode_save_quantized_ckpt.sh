@@ -4,8 +4,8 @@
 
 dry_run=false
 model='llama2-70b'
-run_name="mlperf_01302025"
-export QUANT_CFG="a4w4"
+run_name="mlperf_021425"
+export QUANT_CFG="" #skip_qkv_out"
 
 while getopts "nm:r:" opt
 do
@@ -42,7 +42,7 @@ export ICI_TENSOR_PARALLELISM=-1
 export SCAN_LAYERS=false
 export WEIGHT_DTYPE=bfloat16
 export PER_DEVICE_BATCH_SIZE=1
-export QUANTIZATION="intmp"
+export QUANTIZATION="int8" #intmp"
 export QUANT_CFG_PATH="MaxText/configs/quantization/${QUANT_CFG}.json"
 export QUANTIZE_KVCACHE=True
 export CHKPT_SUBDIR="${run_name}/${QUANTIZATION}_${QUANT_CFG}"

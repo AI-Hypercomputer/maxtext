@@ -3,10 +3,11 @@
 # Example run: bash end_to_end/tpu/test_decode_load_quantized_ckpt.sh  -m llama2-70b -r test -s decode -n
 
 dry_run=false
-model='llama2-7b'
+model='llama2-70b'
 script_name='decode'
-run_name="test_quant_ckpt"
-
+#run_name="test_quant_ckpt"
+run_name="mlperf_0225"
+export QUANT_CFG="a4w4"
 while getopts "nm:r:s:" opt
 do
   case "$opt" in
@@ -34,9 +35,10 @@ export ICI_TENSOR_PARALLELISM=-1
 export SCAN_LAYERS=false
 export WEIGHT_DTYPE=bfloat16
 export PER_DEVICE_BATCH_SIZE=20
-export QUANTIZATION="int8"
+export QUANTIZATION="intmp"
+export QUANT_CFG_PATH="MaxText/configs/quantization/${QUANT_CFG}.json"
 export QUANTIZE_KVCACHE=True
-export CHKPT_SUBDIR="${run_name}/${QUANTIZATION}_"
+export CHKPT_SUBDIR="${run_name}/${QUANTIZATION}_${QUANT_CFG}"
 export LOAD_PARAMETERS_PATH=gs://${USER}-bkt/checkpoints/quant_${MODEL_NAME}-chat/${CHKPT_SUBDIR}
 export OUTDIR="/tmp/${cmd}_res_${script_name}_chkpt/${CHKPT_SUBDIR}"
 export OUTFILE="${OUTDIR}/${script_name}.txt"
@@ -58,6 +60,7 @@ ${cmd} python MaxText/${script_name}.py \
   weight_dtype=${WEIGHT_DTYPE} \
   per_device_batch_size=${PER_DEVICE_BATCH_SIZE} \
   quantization=${QUANTIZATION} \
+  quant_cfg_path=${QUANT_CFG_PATH} \
   quantize_kvcache=${QUANTIZE_KVCACHE} \
   | tee -a $OUTFILE
 echo

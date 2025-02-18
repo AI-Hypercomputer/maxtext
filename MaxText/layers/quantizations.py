@@ -226,6 +226,7 @@ def _get_int8_quant_config(config):
 
 
 def _dot_general_make(quant_cfg):
+  print(f"QUANT CONFIG:\n\t{quant_cfg}")
   lhs_bits = quant_cfg[_A_BITS]
   lhs_scale = quant_cfg[_A_SCALE]
   rhs_bits = quant_cfg[_W_BITS]
