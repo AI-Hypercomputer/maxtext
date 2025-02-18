@@ -22,6 +22,7 @@ limitations under the License.
 
 import datetime
 import os
+import queue
 import sys
 import time
 import ray
@@ -55,6 +56,7 @@ from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 from ml_goodput_measurement import monitoring
 import orbax.checkpoint as ocp
+from gcp_workload_monitor import GCPWorkloadMonitor
 
 from train import (
   EPS,
@@ -113,9 +115,17 @@ class MaxtextTrainer(ray_cluster.ResilientWorker):
         tensorboard_dir=self.config.tensorboard_dir,
         upload_interval=self.config.goodput_upload_interval_seconds,
         monitoring_enabled=True,
+        pathway_enabled=self.config.enable_pathways_goodput,
         include_badput_breakdown=True,
-    )
-
+        include_step_deviation=self.config.monitor_step_time_deviation,
+        step_deviation_interval_seconds=self.config.step_deviation_interval_seconds,
+      )
+      self.goodput_monitor.start_goodput_uploader()
+      max_logging.log("Started Goodput upload to Tensorboard in the background!")
+      if self.config.monitor_step_time_deviation:
+        self.goodput_monitor.start_step_deviation_uploader()
+        max_logging.log("Started step time deviation upload to Tensorboard in the background!")
+      
     debug_config = debug_configuration.DebugConfig(
       stack_trace_config=stack_trace_configuration.StackTraceConfig(
           collect_stack_trace=self.config.collect_stack_trace,
@@ -240,7 +250,15 @@ class MaxtextTrainer(ray_cluster.ResilientWorker):
     example_batch = None
     last_step_completion = datetime.datetime.now()
     failure_timer_start = datetime.datetime.now()
-    prof = profiler.Profiler(self.config)
+    performance_metric_queue = None
+    if self.config.report_heartbeat_metric_for_gcp_monitoring or self.config.report_performance_metric_for_gcp_monitoring:
+      gcp_workload_monitor = GCPWorkloadMonitor(self.config.run_name)
+      if self.config.report_heartbeat_metric_for_gcp_monitoring:
+        gcp_workload_monitor.start_heartbeat_reporting_thread(self.config.heartbeat_reporting_interval_in_seconds)
+      if self.config.report_performance_metric_for_gcp_monitoring:
+        performance_metric_queue = queue.Queue()
+        gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
+
     for step in np.arange(start_step, self.config.steps):
       with self.EnableHeartbeat():
         if step == first_profiling_step or prof.should_activate_periodic_profile(step):
@@ -258,12 +276,12 @@ class MaxtextTrainer(ray_cluster.ResilientWorker):
           with mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
             state, metrics = p_train_step(state, example_batch, nextrng)
 
-        new_time = datetime.datetime.now()
-        record_scalar_metrics(
-            metrics, new_time - last_step_completion, per_device_tflops, learning_rate_schedule(step), per_device_tokens
-        )
-        last_step_completion = new_time
-
+        step_time_delta = datetime.datetime.now() - last_step_completion
+        last_step_completion = datetime.datetime.now()
+        record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
+        if performance_metric_queue:
+          performance_metric_queue.put(step_time_delta.total_seconds())
+        
         if checkpoint_manager is not None:
           state_to_save = state if not self.config.use_dpo else _split_dpo_state(state)[0]
           if save_checkpoint(checkpoint_manager, int(step), state_to_save, self.config.dataset_type, data_iterator, self.config):
@@ -316,6 +334,9 @@ class MaxtextTrainer(ray_cluster.ResilientWorker):
               + cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
           )
           cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
+          cumulative_eval_metrics["scalar"]["eval/avg_moe_lb_loss"] = (
+              cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
+          )
           if self.config.use_dpo:
             cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = eval_dpo_reward_accuracy / eval_step_count
           write_metrics(
@@ -347,6 +368,17 @@ class MaxtextTrainer(ray_cluster.ResilientWorker):
     max_utils.close_summary_writer(writer)
     record_goodput(recorder, self.config, recorder.record_job_end_time if recorder else None)
     clear_buffered_metrics()
+    with mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      # pytype: disable=attribute-error
+      compiled = p_train_step.lower(state, example_batch, nextrng).compile()
+      compiled_stats = compiled.memory_analysis()
+      if compiled_stats is not None:
+        max_logging.log(
+            f"Output size: {compiled_stats.output_size_in_bytes}, "
+            f"temp size: {compiled_stats.temp_size_in_bytes}, "
+            f"argument size: {compiled_stats.argument_size_in_bytes}, "
+            f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
+        )
     return state
 
   def run(self):
