@@ -203,7 +203,7 @@ param_scan_axis: 1
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
-attention_type: 'global' # Supported attention_type: global, local_sliding
+attention_type: 'global' # Supported attention_type: global, local_sliding, mla
 sliding_window_size: 0
 attn_logits_soft_cap: 0.0
 final_logits_soft_cap: 0.0
@@ -454,6 +454,7 @@ use_iota_embed: False
 use_untrainable_positional_embedding: False
 trainable_position_size: -1  # enable gpt3 position embedding with a positive trainable_position_size
 # Rope parameters
+rope_type: "default" # one of "default", "llama3.1" or "yarn"
 rope_min_timescale: 1
 rope_max_timescale: 10_000
 

@@ -113,6 +113,12 @@ def validate_prefill_and_target_lengths(max_prefill_length: int, max_target_leng
     )
 
 
+def validate_rope_type(rope_type: str) -> None:
+  valid_rope_types = ("default", "yarn", "llama3.1")
+  if rope_type not in valid_rope_types:
+    raise ValueError(f"Invalid RoPE type was passed. Got: {rope_type}. Valid options: {valid_rope_types}")
+
+
 def validate_keys(keys):
   validate_attention_kernel(keys["attention"])
   validate_attention_type(keys["attention_type"])
@@ -122,6 +128,7 @@ def validate_keys(keys):
   validate_kv_quant_axis(keys["kv_quant_axis"], keys["quantize_kvcache"])
   validate_model_call_mode(keys["model_call_mode"])
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
+  validate_rope_type(keys["rope_type"])
 
   assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys[
       "enable_checkpointing"
