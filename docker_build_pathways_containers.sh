@@ -19,11 +19,9 @@
 # docker compose version
 # gcloud auth configure-docker us-docker.pkg.dev --quiet
 
-cd MaxText/utils_pathways
+cd utils_pathways
 docker compose down
 sleep 10
-docker compose up &
+docker compose up
 sleep 20
 docker compose ps
-cd ..
-echo "Docker compose installation complete!"
