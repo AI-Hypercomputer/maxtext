@@ -379,6 +379,7 @@ class Decoder(nn.Module):
       decoder_segment_ids=None,
       deterministic=False,
       model_mode=common_types.MODEL_MODE_TRAIN,
+      previous_chunk=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -444,6 +445,7 @@ class Decoder(nn.Module):
               decoder_positions,
               deterministic,
               model_mode,
+              previous_chunk,
           )
       else:
         if cfg.decoder_block == "deepseek":
@@ -545,6 +547,7 @@ class Transformer(nn.Module):
       decoder_segment_ids=None,
       enable_dropout=True,
       model_mode=common_types.MODEL_MODE_TRAIN,
+      previous_chunk=None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target."""
 
@@ -560,5 +563,6 @@ class Transformer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=not enable_dropout,
         model_mode=model_mode,
+        previous_chunk=previous_chunk,
     )
     return logits
