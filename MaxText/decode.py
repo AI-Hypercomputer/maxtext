@@ -40,6 +40,9 @@ def main(argv: Sequence[str]) -> None:
   rng, rng_load_params = jax.random.split(rng)
   params = engine.load_params(rng_load_params)
 
+  if config.quantize_only:
+    return
+
   text = config.prompt
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
