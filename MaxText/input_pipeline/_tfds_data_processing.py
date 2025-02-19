@@ -75,6 +75,7 @@ def get_datasets(
 def preprocessing_pipeline(
     dataset,
     tokenizer_path,
+    tokenizer_type: str,
     global_batch_size: int,
     global_mesh,
     max_target_length: int,
@@ -91,6 +92,7 @@ def preprocessing_pipeline(
     drop_remainder: bool = True,
     prefetch_size=tf.data.experimental.AUTOTUNE,
     use_dpo: bool = False,
+    hf_access_token: str = "",
 ):
   """pipeline for preprocessing TFDS dataset."""
   if not use_dpo:
@@ -103,7 +105,7 @@ def preprocessing_pipeline(
 
   data_column_names = data_column_names if use_dpo else ("inputs", "targets")
   if tokenize:
-    tokenizer_model = _input_pipeline_utils.get_tokenizer(tokenizer_path, add_bos, add_eos)
+    tokenizer_model = _input_pipeline_utils.get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token)
     data_keys = data_column_names
     dataset = dataset.map(
         lambda x: tokenizer.TokenizeOp(tokenizer=tokenizer_model, features=x, data_keys=data_keys),
@@ -176,6 +178,7 @@ def make_tfds_train_iterator(
   train_iter = preprocessing_pipeline(
       dataset=train_ds,
       tokenizer_path=config.tokenizer_path,
+      tokenizer_type=config.tokenizer_type,
       global_batch_size=config.global_batch_size_to_load,
       global_mesh=global_mesh,
       max_target_length=config.max_target_length,
@@ -186,6 +189,7 @@ def make_tfds_train_iterator(
       add_bos=config.add_bos,
       add_eos=config.add_eos,
       use_dpo=config.use_dpo,
+      hf_access_token=config.hf_access_token,
   )
   return train_iter
 
@@ -195,6 +199,7 @@ def make_tfds_eval_iterator(
     global_mesh,
     process_indices_eval,
 ):
+  """load eval dataset, preprocess and return iterators"""
   eval_ds = get_datasets(
       dataset_name=config.eval_dataset_name,
       data_split=config.eval_split,
@@ -207,6 +212,7 @@ def make_tfds_eval_iterator(
   eval_iter = preprocessing_pipeline(
       dataset=eval_ds,
       tokenizer_path=config.tokenizer_path,
+      tokenizer_type=config.tokenizer_type,
       global_batch_size=config.global_batch_size_to_load_eval,
       global_mesh=global_mesh,
       max_target_length=config.max_target_length,
@@ -217,6 +223,7 @@ def make_tfds_eval_iterator(
       add_bos=config.add_bos,
       add_eos=config.add_eos,
       use_dpo=config.use_dpo,
+      hf_access_token=config.hf_access_token,
   )
 
   return eval_iter
