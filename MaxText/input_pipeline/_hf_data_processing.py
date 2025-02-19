@@ -107,7 +107,7 @@ def preprocessing_pipeline(
     operations.append(_input_pipeline_utils.PadToMaxLength(max_target_length))
     operations.append(grain.Batch(batch_size=global_batch_size // jax.process_count(), drop_remainder=drop_remainder))
   elif use_grpo:
-    operations.append(_input_pipeline_utils.PadToMaxLength(max_prefill_predict_length))
+    operations.append(_input_pipeline_utils.PadOrTrimToMaxLength(max_prefill_predict_length))
     operations.append(grain.Batch(batch_size=global_batch_size // jax.process_count(), drop_remainder=drop_remainder))
     operations.append(_input_pipeline_utils.LeftPad(tokenizer.pad_token_id))
 

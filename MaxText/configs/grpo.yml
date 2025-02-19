@@ -8,8 +8,6 @@ per_device_batch_size: 2.0
 enable_goodput_recording: False
 monitor_goodput: False
 
-# we update max_prefill_predict_length for grpo setting
-attention: dot_product
 
 #prefixed TRL
 # max_prefill_predict_length: 550
@@ -30,3 +28,20 @@ learning_rate: 1.e-6 # from TRL
 decode_sampling_strategy: "weighted"
 per_device_batch_size: 1
 async_checkpointing: false
+
+### Splash attention block sizes
+# These can be tuned for specific hardware generations, and can be set up to
+# the model's sequence length.
+sa_block_q: 128
+sa_block_kv: 128
+sa_block_kv_compute: 128
+sa_block_q_dkv: 128
+sa_block_kv_dkv: 128
+sa_block_kv_dkv_compute: 128
+sa_block_q_dq: 128
+sa_block_kv_dq: 128
+sa_use_fused_bwd_kernel: False
+sa_q_layout: "HEAD_DIM_MINOR"
+sa_k_layout: "HEAD_DIM_MINOR"
+sa_v_layout: "HEAD_DIM_MINOR"
+

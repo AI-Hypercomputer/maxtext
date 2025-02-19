@@ -103,7 +103,7 @@ class LeftPad(grain.MapTransform):
         if matches.size != 0:
           true_lengths.append(matches[0])
         else:
-          true_lengths.append(prompt.shape[1])
+          true_lengths.append(prompt.shape[0])
       return true_lengths
 
     # def _left_pad_right_align(prompts, true_lengths):
@@ -273,7 +273,7 @@ class ReformatPacking(grain.MapTransform):
 
 
 @dataclasses.dataclass
-class PadToMaxLength(grain.MapTransform):
+class PadOrTrimToMaxLength(grain.MapTransform):
   """Pads each input to the specified length"""
 
   def __init__(self, max_length):
@@ -285,7 +285,7 @@ class PadToMaxLength(grain.MapTransform):
     def _pad(x, max_length):
       pad_amount = max(max_length - x.shape[0], 0)
       pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
-      return np.pad(x, pad_amount)
+      return np.pad(x, pad_amount)[:max_length]
 
     data_columns = list(data.keys())
     for data_column in data_columns:
