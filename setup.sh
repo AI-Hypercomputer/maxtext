@@ -92,7 +92,7 @@ cd $run_name_folder_path && pip install --upgrade pip
 if [[ "$MODE" == "pinned" ]]; then
     pip3 install --no-cache-dir -U -r requirements.txt -c constraints_gpu.txt
 else
-    pip3 install --no-cache-dir -U -r requirements.txt
+    pip3 install --no-cache-dir -U -r requirements.txt -c constraints.txt
 fi
 
 # Uninstall existing jax, jaxlib and  libtpu-nightly
