@@ -50,10 +50,13 @@ class LibTpuType(enum.Enum):
 
 @dataclasses.dataclass
 class PathwaysConfig:
-  server_image: str
-  proxy_image: str
-  runner_image: str
-  remote_python_sidecar_image: str
+  server_image: str = None
+  proxy_server_image: str = None
+  runner_image: str = None
+  remote_python_sidecar_image: str = None
+  server_flags: str = ''
+  proxy_flags: str = ''
+  worker_flags: str = ''
 
 
 # TODO(@vbarr): Split out parameters related to XPK workload and a General workload
@@ -284,7 +287,7 @@ def build_user_command(
 
   install_libtpu_cmd = ''
   jax_platforms = None
-  vertex_tensorboard = None
+  vertex_tensorboard = ''
   # TODO() support modifying nightly / stable dependencies in pathway flow
   if is_pw_enabled:
     jax_platforms = 'proxy'
@@ -333,6 +336,43 @@ def build_user_command(
   return command
 
 
+def _get_pathways_specific_flags(wl_config: WorkloadConfig):
+  pw_config = wl_config.pathways_config
+  if pw_config is None:
+    return ''
+
+  remote_python_sidecar_image_flag = (
+      f' --remote-python-sidecar-image={pw_config.remote_python_sidecar_image}'
+      if pw_config.remote_python_sidecar_image is not None
+      else ''
+  )
+  server_image_flag = (
+      f' --server-image={pw_config.server_image}'
+      if pw_config.server_image is not None
+      else ''
+  )
+  proxy_server_image_flag = (
+      f' --proxy-server-image={pw_config.proxy_server_image}'
+      if pw_config.proxy_server_image is not None
+      else ''
+  )
+
+  proxy_flags = pw_config.proxy_flags + wl_config.model.xla_flags
+
+  pathways_specific_flags = (
+      f' {server_image_flag} '
+      f' {proxy_server_image_flag} '
+      f' {remote_python_sidecar_image_flag} '
+      f' --termination-grace-period-seconds=300 '
+      f' --pathways-gcs-location={wl_config.base_output_directory} '
+      f' --restart-on-user-code-failure'
+      f' --custom-pathways-server-args="{pw_config.server_flags}" '
+      f' --custom-pathways-proxy-server-args="{proxy_flags}" '
+      f' --custom-pathways-worker-args="{pw_config.worker_flags}" '
+  )
+  return pathways_specific_flags
+
+
 def generate_xpk_workload_cmd(
     cluster_config: XpkClusterConfig,
     wl_config: WorkloadConfig,
@@ -375,18 +415,13 @@ def generate_xpk_workload_cmd(
   docker_image_flag = ''
   # pathways-related flags
   pathways_specific_flags = ''
+  workload_create_command = f'python3 {wl_config.xpk_path}/xpk.py workload create'
+  device_type = f' --device-type={cluster_config.device_type}'
   if is_pathways_enabled:
     pw_config = wl_config.pathways_config
-    pathways_specific_flags = (
-        '--use-pathways'
-        f' --server-image={pw_config.server_image}'
-        f' --proxy-server-image={pw_config.proxy_image}'
-        f' --remote-python-sidecar-image={pw_config.remote_python_sidecar_image}'
-        if pw_config.remote_python_sidecar_image is not None else ''
-        ' --termination-grace-period-seconds=300'
-        f' --pathways-gcs-location={wl_config.base_output_directory}'
-        f' --restart-on-user-code-failure'
-        f' --debug-dump-gcs={wl_config.base_output_directory}'
+    device_type = f' --tpu-type={wl_config.device_type}'
+    workload_create_command = (
+        f'python3 {wl_config.xpk_path}/xpk.py workload create-pathways'
     )
     docker_image_flag = (
         f'--docker-image={pw_config.runner_image}'
@@ -394,16 +429,15 @@ def generate_xpk_workload_cmd(
   else:
     docker_image_flag = f'--base-docker-image="{wl_config.base_docker_image}"'
 
-
   print(f'User command: {user_command}')
   return (
       (
-          f'python3 {wl_config.xpk_path}/xpk.py workload create'
-          f' {pathways_specific_flags}'
+          f'{workload_create_command}'
+          f' {_get_pathways_specific_flags(wl_config)}'
           f' --cluster={cluster_config.cluster_name}'
           f' --project={cluster_config.project}'
           f' --zone={cluster_config.zone}'
-          f' --device-type={cluster_config.device_type}'
+          f' {device_type}'
           f' --num-slices={wl_config.num_slices}'
           f' --command="{user_command}"'
           f' {docker_image_flag}'

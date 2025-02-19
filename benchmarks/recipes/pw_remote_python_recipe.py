@@ -63,7 +63,7 @@ def main() -> int:
   ]
   pathways_config = mxr.PathwaysConfig(
       server_image=server_image,
-      proxy_image=proxy_image,
+      proxy_server_image=proxy_image,
       runner_image=runner,
       remote_python_sidecar_image=remote_python_image,
   )
