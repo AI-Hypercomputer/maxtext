@@ -1362,8 +1362,8 @@ llama3_1_405b_8192_explicit_matt_pp = _add_to_model_dictionary(
         "rope_max_timescale": 500_000,
         "allow_split_physical_axes": True,
         "custom_mesh": "hybrid_ring_32x8",
-        "remat_policy": "custom",
-        "decoder_layer_input": "offload",
+        "remat_policy": "full",
+        # "decoder_layer_input": "offload",
         # "query_proj": "offload",
         # "key_proj": "offload",
         # "value_proj": "offload",
@@ -1381,6 +1381,9 @@ llama3_1_405b_8192_explicit_matt_pp = _add_to_model_dictionary(
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
         "pipeline_fsdp_ag_once": True,
+        "num_pipeline_microbatches": 4,
+        "num_layers_per_pipeline_stage": 2,
+        "scan_layers": False
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG

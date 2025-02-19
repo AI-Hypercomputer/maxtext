@@ -490,12 +490,14 @@ def main() -> int:
       device_type='v5litepod-256',
   )
 
+
   v6e_cluster_config_big = XpkClusterConfig(
-      cluster_name='bodaborg-v6e-256-donotdelete-wv-c',
-      project='tpu-prod-env-multipod',
-      zone='us-east4-a',
-      device_type='v6e-256',
+    cluster_name='bodaborg-v6e-256-ts',
+    project='tpu-prod-env-multipod',
+    zone='us-west1-c',
+    device_type='v6e-256',
   )
+
 
   v6e_cluster_config = XpkClusterConfig(
       cluster_name='bodaborg-v6e-256-dnd-yucmhab',
@@ -548,7 +550,8 @@ def main() -> int:
     for cluster_config in [
       # v5e_cluster_config,
       #v5p_cluster_config,
-      v6e_cluster_config, #yucmhab
+      #v6e_cluster_config, #yucmhab
+      v6e_cluster_config_big
       # another_config,
     ]:
       # Run workloads in the following slice configurations
