@@ -117,7 +117,7 @@ def add_xpk_runner_arguments(custom_parser: argparse.ArgumentParser):
       help='version of pathways server image to be benchmarked command.',
   )
   custom_parser.add_argument(
-      '--pathways_proxy_image',
+      '--pathways_proxy_server_image',
       type=str,
       default='us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/proxy_server:latest',
       help='version of pathways proxy image to be benchmarked command.',
@@ -251,7 +251,7 @@ def main() -> None:
     if options.use_pathways:
       pw_config = PathwaysConfig(
         server_image=options.pathways_server_image,
-        proxy_image=options.pathways_proxy_image,
+        proxy_server_image=options.pathways_proxy_server_image,
         runner_image=options.pathways_runner_image,
         remote_python_sidecar_image=options.remote_python_sidecar_image,
       )
