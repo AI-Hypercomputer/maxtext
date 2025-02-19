@@ -393,7 +393,7 @@ def generate_xpk_workload_cmd(
     )
   else:
     #docker_image_flag = f'--docker-image="{wl_config.base_docker_image}"'
-    docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2025-02-12"'
+    docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-pp-remat-again"'
 
 
 
@@ -522,7 +522,8 @@ def main() -> int:
     #model_configs.deepseek_v5p_dp_a1,
     # model_configs.default_128
     # model_configs.llama3_1_405b_8192_fsdp_dcn_matt
-    model_configs.llama3_1_405b_8192_explicit_matt_pp
+    model_configs.llama3_1_405b_8192_explicit_matt_pp,
+    #model_configs.llama3_1_405b_8192_explicit_matt_pp_overlapped
   ]
 
   # Loop possibilities:
