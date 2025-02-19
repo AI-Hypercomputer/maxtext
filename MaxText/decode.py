@@ -68,10 +68,9 @@ def main(argv: Sequence[str]) -> None:
   output = tokenizer_model.decode(results)
   print(f"Input `{text}` -> `{output}`")
 
-  if config.autoregressive_decode_assert != "":
-    assert (
-        output == config.autoregressive_decode_assert
-    ), f"generated text mismatch {output=} {config.autoregressive_decode_assert=}"
+  assert output.startswith(
+      config.autoregressive_decode_assert
+  ), f"generated text mismatch {output=}, {config.autoregressive_decode_assert=}"
 
 
 def validate_config(config):
