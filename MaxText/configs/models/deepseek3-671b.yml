@@ -22,7 +22,6 @@ base_mlp_dim: 18432
 base_moe_mlp_dim: 2048
 base_num_decoder_layers: 61
 first_num_dense_layers: 3
-head_dim: 128
 mlp_activations: ["silu","linear"]
 vocab_size: 32000 # TODO(b/394635939): update after adding tokenizer 
 enable_dropout: False
@@ -34,5 +33,12 @@ shared_experts: 1
 routed_scaling_factor: 2.5
 routed_score_func: "sigmoid"
 routed_bias: True
-rope_max_timescale: 10_000
+# MLA
+attention_type: "mla"
+q_lora_rank: 1536
+kv_lora_rank: 512
+qk_nope_head_dim: 128
+qk_rope_head_dim: 64
+v_head_dim: 128
+rope_type: "yarn"
 decoder_block: "deepseek"
