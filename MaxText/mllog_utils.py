@@ -45,7 +45,7 @@ def init_print(config, start_step):
   """an initial mllog for mlperf sumbission compliance check."""
   if jax.process_index() == 0:
     mllogger.event(mllog.constants.SUBMISSION_ORG, 'Google')
-    mllogger.event(mllog.constants.SUBMISSION_PLATFORM, 'tpu-v5p')
+    mllogger.event(mllog.constants.SUBMISSION_PLATFORM, 'tpu-trillium')
     mllogger.event(mllog.constants.SUBMISSION_STATUS, mllog.constants.CLOUD)
     mllogger.event(mllog.constants.SUBMISSION_DIVISION, mllog.constants.CLOSED)
     mllogger.event(mllog.constants.SUBMISSION_BENCHMARK, mllog.constants.GPT3)
@@ -66,7 +66,7 @@ def init_print(config, start_step):
     mllogger.event(mllog.constants.GLOBAL_BATCH_SIZE, config.global_batch_size_to_train_on)
     mllogger.event(mllog.constants.MAX_SEQUENCE_LENGTH, config.max_target_length)
     mllogger.event(mllog.constants.GRADIENT_ACCUMULATION_STEPS, 1)
-    mllogger.event(mllog.constants.EVAL_SAMPLES, 24567)
+    mllogger.event(mllog.constants.EVAL_SAMPLES, 5760)
     mllogger.event(mllog.constants.SEED, config.data_shuffle_seed)
 
 def early_stop_check(config, step, eval_loss, start_step):
