@@ -253,9 +253,16 @@ class PagedAttentionOp(nn.Module):
   quant: Optional[Quant] = None
 
   def out_projection(self, output_dim: int, out: Array) -> Array:
-    # Remove kernel_axes and do reshaping explicitly
-    b, t, n, d = out.shape  # Assuming 4D output from attention
-    out = jnp.reshape(out, (b, t, n * d))
+    # Correctly handle both 3D and 4D tensors during initialization.
+    if out.ndim == 4:
+        b, t, n, d = out.shape
+        out = jnp.reshape(out, (b, t, n * d))
+    elif out.ndim == 3:
+        b, n, d = out.shape  # Directly unpack as 3D
+        out = jnp.reshape(out, (b, 1, n * d))
+    else:
+        raise ValueError(f"Unexpected output tensor shape: {out.shape}")
+
     out_proj = DenseGeneral(
         features=output_dim,
         dtype=self.dtype,
@@ -266,6 +273,7 @@ class PagedAttentionOp(nn.Module):
         use_bias=False,
     )(out)
     return out_proj
+
 
   def _paged_dot_product_attention(
       self, query, key_pages, value_pages, sequence_lengths, page_map, num_kv_heads, tokens_per_page
@@ -371,12 +379,17 @@ class PagedAttentionOp(nn.Module):
   ) -> Union[Array, Tuple[Array, Array, Array]]:
 
     # During initialization, return dummy values of correct shape
-    if self.is_mutable_collection("params"):
-      return self.out_projection(self.output_dim, jnp.zeros(query.shape[:-1] + (self.output_dim,), dtype=query.dtype))
+    if self.is_initializing(): # Use is_initializing()
+        if len(query.shape) == 4:
+            b,t,n,d = query.shape
+            return jnp.zeros((b,t,self.output_dim), dtype=query.dtype)
+        else:
+            b,n,d = query.shape
+            return jnp.zeros((b, 1, self.output_dim), dtype=query.dtype)
       
     if page_group_id is not None:
       if model_mode == common_types.MODEL_MODE_PREFILL:
-        page_state = page_manager(model_mode="prefill", page_group_id=page_group_id, true_length=true_length)
+        page_state = page_manager(model_mode=common_types.MODEL_MODE_PREFILL, page_group_id=page_group_id, true_length=true_length)
         page_group_pages = self.get_page_group_pages(page_state.page_map, page_group_id, page_manager.max_pages_per_group)
         last_page_length = jnp.where(
             true_length % page_manager.tokens_per_page == 0,
@@ -1570,9 +1583,16 @@ class Attention(nn.Module):
         return query, key, value
 
     def out_projection(self, output_dim: int, out: Array) -> Array:
-        # Remove kernel_axes and do reshaping explicitly
-        b, t, n, d = out.shape  # Assuming 4D output from attention
-        out = jnp.reshape(out, (b, t, n * d))
+        # Correctly handle both 3D and 4D tensors during initialization.
+        if out.ndim == 4:
+            b, t, n, d = out.shape
+            out = jnp.reshape(out, (b, t, n * d))
+        elif out.ndim == 3:
+            b, n, d = out.shape  # Directly unpack as 3D
+            out = jnp.reshape(out, (b, 1, n * d)) # add the seq len dimension.
+        else:
+            raise ValueError(f"Unexpected output tensor shape: {out.shape}")
+
 
         out_proj = DenseGeneral(
             features=output_dim,
@@ -1626,6 +1646,9 @@ class Attention(nn.Module):
 
       inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+
+      if self.is_initializing(): # Use is_initializing()
+        return self.out_projection(inputs_q.shape[-1], jnp.zeros(inputs_q.shape[:-1] + (inputs_q.shape[-1],), dtype=inputs_q.dtype))
 
       if self.config.fused_qkv:
         query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")

@@ -4,6 +4,8 @@ import jax
 import jax.numpy as jnp
 from typing import Optional, Tuple, Any
 
+import common_types
+
 
 @struct.dataclass
 class PageState:
@@ -377,9 +379,8 @@ class PageManager(nn.Module):
       During runtime, handles prefill and autoregressive page management.
       """
       # During initialization, just return None
-      # This prevents JAX from tracing through the model_mode string
-      if self.is_mutable_collection("params"):
-          return None
+      if self.is_initializing():
+          return self.out_projection(self.output_dim, jnp.zeros(query.shape[:-1] + (self.output_dim,), dtype=query.dtype))
 
       # Runtime behavior starts here
       if model_mode is None:
@@ -396,7 +397,7 @@ class PageManager(nn.Module):
       )
 
       # Handle different modes at runtime
-      if model_mode == "prefill":
+      if model_mode == common_types.MODEL_MODE_PREFILL:
           if page_group_id is None or true_length is None:
               raise ValueError("Prefill mode requires both page_group_id and true_length")
 
@@ -405,7 +406,7 @@ class PageManager(nn.Module):
 
           new_states = self._handle_prefill(page_group_id, true_length, states)
 
-      elif model_mode == "autoregressive":
+      elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
           if page_group_id is not None:
               self._validate_page_group(page_group_id)
 

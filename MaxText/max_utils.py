@@ -697,7 +697,6 @@ def init_initial_state(model, tx, config, is_training, key):
     return init_decode_state(model.apply, *jax.eval_shape(init_fn, config=config))
 
 
-# max_utils.py (setup_decode_state - TRULY Corrected)
 def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
     """Setup decode state."""
     print("\nEntering setup_decode_state:")
@@ -708,12 +707,11 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
 
     input_shape = (config.global_batch_size_to_load, config.max_target_length)
 
-    # 1. Define a helper function that takes *only* array inputs.
-    def init_fn(rng, input_tokens, input_positions):
-        # 2.  Call model.init *inside* this function, but 'model' is NOT
-        #     an argument to init_fn itself. This is crucial.  This way,
-        #     jax.eval_shape only sees array arguments.
-        _, initial_vars = model.init(
+    # 1. Define a helper function that takes *only* array inputs and static argnums.
+    def init_fn(input_tokens, input_positions):
+        # 2.  Call model.init *inside* this function.
+        #     jax.eval_shape only sees array arguments and static argnums.
+        model.init(
             {"params": rng, "dropout": rng, "aqt": rng},
             input_tokens,
             input_positions,
@@ -724,13 +722,13 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
             true_length=None,
             mutable=["params", "cache", "aqt"],
         )
-        return initial_vars
+        return  # We don't need to return anything
 
     with nn_partitioning.axis_rules(config.logical_axis_rules):
         # 3. Call jax.eval_shape on the HELPER FUNCTION, passing dummy arrays.
+        #    Crucially, pass model_mode as static_argnums
       model_vars = jax.eval_shape(
-          init_fn,
-          rng,
+          functools.partial(init_fn),
           jnp.ones(input_shape, dtype=jnp.int32),  # Dummy input tokens
           jnp.ones(input_shape, dtype=jnp.int32)   # Dummy input positions
       )
@@ -752,6 +750,7 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
     state_mesh_annotations = nn.get_partition_spec(state)
     max_utils.print_mem_stats("After setup_decode_state")
     return state, state_mesh_annotations
+
 
 def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager):
   is_training = True
@@ -985,7 +984,7 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    abstract_state = jax.eval_shape(init_state_partial, model_mode="train") #Pass model_mode and is_training
+    abstract_state = jax.eval_shape(init_state_partial, model_mode=common_types.MODEL_MODE_TRAIN) #Pass model_mode
 
   state_logical_annotations = nn.get_partition_spec(abstract_state)
 
@@ -996,7 +995,7 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
     state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state, params=params)
 
   # Use static_argnames to treat is_training and model_mode statically.
-  abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings, static_argnames=('is_training','model_mode')).eval_shape(is_training=is_training, model_mode="train")
+  abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings, static_argnames=('is_training','model_mode')).eval_shape(is_training=is_training, model_mode=common_types.MODEL_MODE_TRAIN)
 
   unboxed_abstract_sharded_state = unbox_logicallypartioned(abstract_sharded_state)
   # Initialization

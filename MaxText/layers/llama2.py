@@ -86,23 +86,25 @@ class LlamaDecoderLayer(nn.Module):
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
-    lnx = RMSNorm(
+    lnx = RMSNorm(  # Instantiate and call RMSNorm *here*.
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="pre_self_attention_layer_norm",
         epsilon=cfg.normalization_layer_epsilon,
         kernel_axes=("norm",),
-    )(inputs)
+    )(inputs)  # Call the layer with the inputs.
+
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
 
-    # Self-attention block
+
     attention_layer = Attention(
-        config=cfg,
+        config=self.config,
         num_query_heads=cfg.num_query_heads,
         num_kv_heads=cfg.num_kv_heads,
         head_dim=cfg.head_dim,
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
+        attention_kernel=cfg.attention,
         mesh=mesh,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -112,9 +114,12 @@ class LlamaDecoderLayer(nn.Module):
         float32_logits=cfg.float32_logits,
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
-        attention_kernel=cfg.attention,
-        use_ragged_attention=cfg.use_ragged_attention, # Added
-        ragged_block_size=cfg.ragged_block_size, # Added
+        prefill_cache_axis_order=tuple([int(i) for i in cfg.prefill_cache_axis_order.split(",")]),
+        ar_cache_axis_order=tuple([int(i) for i in cfg.ar_cache_axis_order.split(",")]),
+        compute_axis_order=tuple([int(i) for i in cfg.compute_axis_order.split(",")]),
+        reshape_q=cfg.reshape_q,
+        use_ragged_attention=cfg.use_ragged_attention,
+        ragged_block_size=cfg.ragged_block_size,
     )
 
     attention_lnx = attention_layer(
@@ -126,26 +131,11 @@ class LlamaDecoderLayer(nn.Module):
         model_mode=model_mode,
         page_manager=page_manager,
         slot=slot,
-        true_length=true_length,
+        true_length=true_length
     )
 
 
-    attention_lnx = nn.with_logical_constraint(
-        attention_lnx, ("activation_batch", "activation_length", "activation_embed")
-    )
-    intermediate_inputs = inputs + attention_lnx
-
-    # Fully Connected
-    hidden_states = RMSNorm(
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        name="post_self_attention_layer_norm",
-        epsilon=cfg.normalization_layer_epsilon,
-        kernel_axes=("norm",),
-    )(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(
-        hidden_states, ("activation_batch", "activation_length", "activation_embed")
-    )
+    attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
 
     # MLP block.
     mlp_lnx = linears.MlpBlock(
@@ -157,13 +147,16 @@ class LlamaDecoderLayer(nn.Module):
         name="mlp",
         config=cfg,
         quant=self.quant,
-    )(hidden_states, deterministic=deterministic)
+    )(lnx, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
 
-    layer_output = mlp_lnx + intermediate_inputs
+    next_layer_addition = mlp_lnx + attention_lnx
 
-    layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
+    next_layer_addition_dropped_out = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
+        next_layer_addition, deterministic=deterministic
+    )
 
+    layer_output = next_layer_addition_dropped_out + inputs
     layer_output = nn.with_logical_constraint(
         layer_output,
         ("activation_batch", "activation_length", "activation_embed"),
@@ -178,7 +171,4 @@ class LlamaDecoderLayer(nn.Module):
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
-    if cfg.scan_layers:
-      return layer_output, None
-    else:
-      return layer_output
+    return layer_output, None if cfg.scan_layers else layer_output

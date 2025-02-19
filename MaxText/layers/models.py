@@ -175,7 +175,12 @@ class Decoder(nn.Module):
         ]
 
         # 4. Initialize norm layer
-        self.norm_layer = self.get_norm_layer()
+        self.norm_layer = self.get_norm_layer()(
+            dtype=cfg.dtype,
+            weight_dtype=cfg.weight_dtype,
+            name="decoder_norm",
+            epsilon=cfg.normalization_layer_epsilon,
+            kernel_axes=("norm",),)
 
         # 5. Initialize page managers if needed
         if cfg.attention == "paged":
@@ -458,13 +463,7 @@ class Decoder(nn.Module):
               )
 
       # Apply final normalization
-      y = self.norm_layer()(
-          dtype=cfg.dtype,
-          weight_dtype=cfg.weight_dtype,
-          name="decoder_norm",
-          epsilon=cfg.normalization_layer_epsilon,
-          kernel_axes=("norm",),
-      )(y)
+      y = self.norm_layer(y)
 
       # Apply dropout after normalization
       y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
