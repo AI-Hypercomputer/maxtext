@@ -829,6 +829,49 @@ llama3_1_405b_8192_fsdp_dcn = _add_to_model_dictionary(
 )
 
 
+llama3_1_405b_8192_fsdp_dcn_mlperf = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama3-1-405b-8192-fsdp-dcn-mlperf",
+    model_type="llama3.1-405b",
+    tuning_params={
+        "per_device_batch_size": 1,
+        "ici_fsdp_parallelism": 64,
+        "ici_tensor_parallelism": 4,
+        "dcn_fsdp_parallelism": 2,
+        "allow_split_physical_axes": True,
+        "custom_mesh": "hybrid_ring_64x4",
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "out_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        # "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": True,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+        "opt_type": "adam_pax",
+        "load_parameters_path": "gs://mlperf_llama405b_artifacts/checkpoints/maxtext/0/items",
+        "tokenizer_path": "assets/tokenizer.mistral-v1",
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+  )
+)
+
+
 llama3_1_8b_8192 = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
