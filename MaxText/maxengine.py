@@ -17,6 +17,7 @@ import copy as cp
 import functools
 from typing import Any, List, Optional, Tuple, Callable
 from collections import defaultdict
+import uuid
 
 import flax
 from flax import linen as nn
@@ -225,6 +226,7 @@ class MaxEngine(engine_api.Engine):
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
       slot: int = 0,
+      request_id: uuid.UUID = None,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -266,6 +268,7 @@ class MaxEngine(engine_api.Engine):
           mutable=["cache"],
           slot=slot,
           true_length=true_length,
+          request_id=request_id,
       )
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
