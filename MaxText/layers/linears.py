@@ -35,6 +35,7 @@ import max_logging
 import max_utils
 from aqt.jax.v2 import aqt_tensor
 from kernels import megablox as mblx
+from enum import Enum, auto
 
 
 Array = common_types.Array
@@ -288,6 +289,12 @@ class MlpBlock(nn.Module):
     return output
 
 
+class TransformStrategy(Enum):
+  INPUT_OFFSET = auto()
+  SEND_SIZE = auto()
+  OUTPUT_OFFSET = auto()
+  RECV_SIZE = auto()
+
 class MoeBlock(nn.Module):
   """Mixture of Experts (MoE) block.
 
@@ -421,6 +428,21 @@ class MoeBlock(nn.Module):
   def sparse_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
     tile_size = (512, 1024, 1024)  # (m, k, n)
 
+  def transform_array(input_array, shard_id, strategy):
+    if strategy == TransformStrategy.INPUT_OFFSET:
+      local_array = input_array[shard_id]
+      return jnp.concatenate((jnp.array([0]), jnp.cumsum(local_array)[:-1]))
+    elif strategy == TransformStrategy.SEND_SIZE:
+      return input_array[shard_id]
+    elif strategy == TransformStrategy.OUTPUT_OFFSET:
+      if shard_id == 0:
+        return jnp.zeros_like(input_array[shard_id])
+      else:
+        array_to_cumulate = input_array[:shard_id, :]
+        return jnp.cumsum(array_to_cumulate, axis=1)
+    elif strategy == TransformStrategy.RECV_SIZE:
+      return input_array[:, shard_id]
+
     def gmm(inputs, kernel, group_sizes):
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
@@ -462,6 +484,18 @@ class MoeBlock(nn.Module):
         output = output[: hs_shape[0]]
       return output
 
+    def get_all_to_all_params(all_shards_group_sizes, local_expert_size, num_expert_shards):
+      local_id = jax.lax.axis_index("expert")
+      input_offsets = self.transform_array(all_shards_group_sizes, local_id, TransformStrategy.INPUT_OFFSET)
+      send_sizes = self.transform_array(all_shards_group_sizes, local_id, TransformStrategy.SEND_SIZE)
+      output_offsets = self.transform_array(all_shards_group_sizes, local_id, TransformStrategy.OUTPUT_OFFSET)
+      recv_sizes = self.transform_array(all_shards_group_sizes, local_id, TransformStrategy.RECV_SIZE)
+      breakpoint()
+      # TODO: update output buffer to a smaller size for efficiency
+      output_shape = jnp.zeros(num_expert_shards * jnp.sum(all_shards_group_sizes, axis=0))
+      breakpoint()
+      return input_offsets, send_sizes, output_offsets, recv_sizes, output_shape
+
     # Currently, we only support data and tensor parallelism with Megablox.
     # We all gather the input activations over tensor parallelism to follow strategy
     # in https://parsa.epfl.ch/course-info/cs723/papers/Megatron.pdf.
@@ -488,6 +522,30 @@ class MoeBlock(nn.Module):
     def wrapper(x, logits, w0, w1, wo):
       batch_size, sequence_length, _ = x.shape
       x, sorted_selected_experts, weights, group_sizes = self.permute(x, logits)
+
+      if self.get_expert_parallelism() > 1:
+        # get group sizes for each shard and all gather
+        global_group_sizes = group_sizes
+        axis_name = "expert"
+        local_expert_size = self.config.num_experts // self.get_expert_parallelism()
+        reshaped_group_sizes = jnp.sum(group_sizes.reshape(-1, local_expert_size), axis=1)
+        all_shards_group_sizes = lax.all_gather(reshaped_group_sizes, axis_name=axis_name)
+        breakpoint()
+        # calculate offsets and sizes for ragged_all_to_all operation
+        input_offsets, send_sizes, output_offsets, recv_sizes, output_shape = get_all_to_all_params(
+            all_shards_group_sizes, local_expert_size, self.get_expert_parallelism()
+        )
+        # group_sizes, sorted_local_experts = local_permute()
+        x = jax.lax.ragged_all_to_all(
+            x,
+            output_shape,
+            input_offsets,
+            send_sizes,
+            output_offsets,
+            recv_sizes,
+            axis_name=axis_name,
+        )
+
       layer_w0 = gmm(x, w0, group_sizes)
       layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
       layer_w1 = gmm(x, w1, group_sizes)
@@ -499,6 +557,9 @@ class MoeBlock(nn.Module):
       tensor_parallelism = self.config.ici_tensor_parallelism * self.config.dcn_tensor_parallelism
       if tensor_parallelism > 1:
         intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
+
+      # TODO: unsort + ragged_all_to_all
+
       output = self.unpermute(
           intermediate_output, sorted_selected_experts, weights, batch_size=batch_size, sequence_length=sequence_length
       )
@@ -607,11 +668,11 @@ class MoeBlock(nn.Module):
       einsum_op = jnp.einsum
     return einsum_op
 
-  def is_expert_parallelism_enabled(self):
-    return self.config.ici_expert_parallelism > 1 or self.config.dcn_expert_parallelism > 1
+  def get_expert_parallelism(self):
+    return self.config.ici_expert_parallelism * self.config.dcn_expert_parallelism
 
   def maybe_all_gather_kernel_weight_in_expert_parallelism(self, kernel, kernel_axes):
-    if self.is_expert_parallelism_enabled():
+    if self.get_expert_parallelism() > 1:
       # This will trigger all-gather using weight_dtype
       # relax it unless really necessary in expert parallelism only
       # Otherwise compiler will handle communication automatically
