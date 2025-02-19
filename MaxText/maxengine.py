@@ -503,7 +503,18 @@ class MaxEngine(engine_api.Engine):
     unboxed_prefix["cache"] = self._maybe_unstack_prefill_result_cache(unboxed_prefix["cache"])
     #jax.debug.print("prefix_logits: {}", unboxed_prefix["logits"][0][0])
     #jax.debug.print("logits: {}, next_pos: {}, generated_tokens: {}, tokens: {}", decode_state["logits"][0][0], decode_state["next_pos"][0], decode_state["generated_tokens"][0], decode_state["tokens"][0])
-
+    '''
+    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      self.model.apply(
+          None,
+          None,
+          None,
+          enable_dropout=False,
+          model_mode=common_types.MODEL_MODE_INSERT,
+          slot=slot,
+          true_length=16,
+      )
+    '''
     def copy(path, partial_cache, full_cache, annotations):
       path_key = path[-1].key
       #print(f"Path key: {path_key}")

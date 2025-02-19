@@ -396,6 +396,17 @@ class PageManager(nn.Module):
           current_page_var,
           current_page_position_var,
       )
+    elif model_mode == common_types.MODEL_MODE_INSERT:
+      self.reserve_prefix_slot_pages(
+          slot,
+          true_length,
+          page_status_var,
+          page_map_var,
+          sequence_lengths_var,
+          num_pages_used_var,
+          current_page_var,
+          current_page_position_var,
+      )
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       self.reserve_decode_step_pages(
           page_status_var,
