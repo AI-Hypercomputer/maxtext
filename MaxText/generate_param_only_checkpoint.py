@@ -142,8 +142,8 @@ def generate_decode_checkpoint(config):
 
 def main(argv: Sequence[str]) -> None:
   print(argv)
-  pyconfig.initialize(argv)
-  generate_decode_checkpoint(pyconfig.config)
+  config = pyconfig.initialize(argv)
+  generate_decode_checkpoint(config)
 
 
 if __name__ == "__main__":

@@ -42,7 +42,7 @@ class AttentionTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         per_device_batch_size=1.0,
         run_name="test",
@@ -50,7 +50,7 @@ class AttentionTest(unittest.TestCase):
         max_target_length=128,
         max_prefill_predict_length=16,
     )
-    self.cfg = pyconfig.config
+    self.cfg = config
     self.rng = jax.random.PRNGKey(0)
 
     devices_array = max_utils.create_device_mesh(self.cfg)
@@ -336,7 +336,7 @@ class AttentionTest(unittest.TestCase):
 
     rtol, atol = 1e-02, 1e-02
 
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         per_device_batch_size=1.0,
         run_name="test",
@@ -345,7 +345,6 @@ class AttentionTest(unittest.TestCase):
         max_prefill_predict_length=16,
         attention="dot_product",
     )
-    config = pyconfig.config
 
     prefill_length = config.max_prefill_predict_length
     decode_total_length = config.max_target_length
@@ -437,7 +436,7 @@ class AttentionTest(unittest.TestCase):
 
     rtol, atol = 1e-02, 1e-02
 
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         per_device_batch_size=1.0,
         run_name="test",
@@ -446,7 +445,6 @@ class AttentionTest(unittest.TestCase):
         max_prefill_predict_length=16,
         attention="dot_product",
     )
-    config = pyconfig.config
 
     prefill_length = config.max_prefill_predict_length
     decode_total_length = config.max_target_length

@@ -29,6 +29,7 @@ import accelerator_to_spec_map
 import max_logging
 import max_utils
 import yaml
+from omegaconf import OmegaConf
 
 # pylint: disable=line-too-long
 
@@ -507,9 +508,10 @@ class _HyperParameters:
       if not os.path.isfile(file_path):
         dir_path = os.path.dirname(os.path.realpath(__file__))
         file_path = os.path.join(dir_path, f"configs/models/{model_name}.yml")
-      with open(file_path, "r", encoding="utf-8") as file:
-        model_vars = yaml.safe_load(file)
-        updated_keys = list(model_vars.keys())
+      # Use OmegaConf to load the model-specific configuration.
+      model_vars = OmegaConf.load(file_path)
+      model_vars = OmegaConf.to_container(model_vars, resolve=True)
+      updated_keys = list(model_vars.keys())
       raw_keys = validate_and_update_keys(raw_keys, model_vars, config_name)
     return updated_keys
 
@@ -854,25 +856,34 @@ def using_expert_parallelism(raw_keys) -> bool:
 
 class HyperParameters:  # pylint: disable=missing-class-docstring
 
-  def __init__(self):
-    pass
+  def __init__(self, config):
+    object.__setattr__(self, "_config", config)
 
   def __getattr__(self, attr):
-    if attr not in _config.keys:
-      raise ValueError(f"Requested key {attr}, not in config")
-    return _config.keys[attr]
+    try:
+      # Attempt to perform the normal lookup
+      return object.__getattribute__(self, "_config").keys[attr]
+    except AttributeError:
+      # If still not found, you can return a default or raise an error.
+      # (This branch will normally be reached, because if the attribute
+      # exists, __getattr__ would never have been called.)
+      raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{attr}'")
 
   def __setattr__(self, attr, value):
-    raise ValueError
+    if attr != "_config" or attr in self.__dict__:
+      raise ValueError("Reinitialization of config is not allowed")
+    else: # we allow initilizing once
+      object.__setattr__(self, attr, value)
 
   def get_keys(self):
-    return _config.keys
+    return self.__getattribute__("_config").keys
 
 
 def initialize(argv, **kwargs):
-  global _config, config
+  # global _config, config
   _config = _HyperParameters(argv, **kwargs)
-  config = HyperParameters()
+  config = HyperParameters(_config)
+  return config
 
 
 if __name__ == "__main__":
