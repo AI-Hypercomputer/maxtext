@@ -451,7 +451,7 @@ class Decoder(nn.Module):
               )
 
               # Use pre-created layer instance from setup()
-              y = self.decoder_layers[lyr](
+              y, _ = self.decoder_layers[lyr](
                   y,
                   decoder_segment_ids,
                   decoder_positions,
@@ -529,10 +529,6 @@ class Transformer(nn.Module):
 
     self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant)
 
-  # @functools.partial(
-  #       jax.jit,
-  #       static_argnames=('is_prefill', 'slot', 'true_length')
-  # )
   @nn.compact
   def __call__(
       self,
@@ -549,6 +545,12 @@ class Transformer(nn.Module):
           f"During autoregressive decoding we assume the tokens are in the active sequence"
           f" which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}."
       )
+    rngs = {}
+    if enable_dropout:
+      rngs['dropout'] = self.make_rng('dropout')
+    rngs['params'] = self.make_rng('params')
+    rngs['aqt'] = self.make_rng('aqt')
+
     logits = self.decoder(
       decoder_input_tokens=decoder_input_tokens,
       decoder_positions=decoder_positions,

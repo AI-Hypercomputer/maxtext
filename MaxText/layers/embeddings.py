@@ -34,14 +34,7 @@ _MAX_WAVELENGTH = 10_000
 
 
 class Embed(nn.Module):
-  """A parameterized function from integers [0, n) to d-dimensional vectors.
-
-  Attributes:
-    num_embeddings: number of embeddings.
-    features: number of feature dimensions for each embedding.
-    dtype: the dtype of the embedding vectors (default: float32).
-    embedding_init: embedding initializer.
-  """
+  """Embedding Module."""
 
   # pylint: disable=attribute-defined-outside-init
   config: Config
@@ -52,56 +45,60 @@ class Embed(nn.Module):
   attend_dtype: Optional[DType] = None
   embedding_init: Initializer = default_embed_init
 
+  @nn.compact
   def setup(self):
-    self.embedding = self.param(
-        "embedding",
-        with_logical_partitioning(self.embedding_init, ("vocab", "embed")),
-        (self.num_embeddings, self.features),
-        self.config.weight_dtype,
+    # Use self.variable to register the embedding, even during tracing.
+    self.embedding = self.variable(
+        "params",  # Collection name.
+        "embedding",  # Variable name.
+        # The initializer function.  Flax handles passing 'key' and 'shape'.
+        self.embedding_init,
+        jax.random.PRNGKey(0),  # You *must* provide a key here.
+        (self.num_embeddings, self.features), # and shape
+        self.config.weight_dtype  # Pass dtype as an argument
     )
+    # Apply logical partitioning *after* initialization.
+    self.embedding.value = with_logical_partitioning(self.embedding.value, ("vocab", "embed"))
 
   def __call__(self, inputs: Array) -> Array:
-    """Embeds the inputs along the last dimension.
-
-    Args:
-      inputs: input data, all dimensions are considered batch dimensions.
-
-    Returns:
-      Output which is embedded input data.  The output shape follows the input,
-      with an additional `features` dimension appended.
-    """
+    """Embeds the inputs along the last dimension."""
     cfg = self.config
     if self.cast_input_dtype:
       inputs = inputs.astype(self.cast_input_dtype)
     if not jnp.issubdtype(inputs.dtype, jnp.integer):
       raise ValueError("Input type must be an integer or unsigned integer.")
 
+    if self.has_variable("params", "embedding"):
+      embedding = self.embedding.value
+    else:
+      embedding = jnp.zeros(
+          (self.num_embeddings, self.features), dtype=self.config.weight_dtype
+      )
+
     if cfg.use_iota_embed:
       iota = lax.iota(jnp.int32, self.num_embeddings)
       one_hot = jnp.array(inputs[..., jnp.newaxis] == iota, dtype=self.dtype)
-      output = jnp.dot(one_hot, jnp.asarray(self.embedding, self.dtype))
+      output = jnp.dot(one_hot, jnp.asarray(embedding, self.dtype))
     else:
-      output = jnp.asarray(self.embedding, self.dtype)[inputs]
+      output = jnp.asarray(embedding, self.dtype)[inputs]
+
     output = nn.with_logical_constraint(
         output, ("activation_embed_and_logits_batch", "activation_length", "activation_embed")
     )
     return output
 
   def attend(self, query: Array) -> Array:
-    """Attend over the embedding using a query array.
-
-    Args:
-      query: array with last dimension equal the feature depth `features` of the
-        embedding.
-
-    Returns:
-      An array with final dim `num_embeddings` corresponding to the batched
-      inner-product of the array of query vectors against each embedding.
-      Commonly used for weight-sharing between embeddings and logit transform
-      in NLP models.
-    """
+    """Attend over the embedding (for weight tying)."""
     dtype = self.attend_dtype if self.attend_dtype is not None else self.dtype
-    return jnp.dot(query, jnp.asarray(self.embedding, jnp.bfloat16).T)
+
+    if self.has_variable("params", "embedding"):
+        embedding = self.embedding.value
+    else:
+        embedding = jnp.zeros(
+            (self.num_embeddings, self.features), dtype=self.config.weight_dtype
+        )
+
+    return jnp.dot(query, jnp.asarray(embedding, dtype).T)
 
 
 class RotaryEmbedding(nn.Module):
