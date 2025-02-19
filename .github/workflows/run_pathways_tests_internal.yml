@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This file defines a module for building and starting Pathways containers for unit tests.
+# This file runs unit tests with Pathways backend.
 
-name: Start pathways containers
+name: Run Pathways Tests
 
 on:
   workflow_call:
@@ -28,11 +28,10 @@ on:
 
 jobs:
   start_pathways:
-    name: Start Pathways containers on (${{ inputs.device_name }})
+    name: Start Pathways tests on (${{ inputs.device_name }})
     runs-on: ["self-hosted", "${{ inputs.device_type }}", "${{ inputs.device_name }}"]
     steps:
       - uses: actions/checkout@v4
-      - name: Start containers using script
+      - name: Start Pathways and Maxtext containers using script
         run: |
-          bash docker_build_pathways_containers.sh
-
+          bash docker_run_pathways_containers.sh maxtext_image=gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu

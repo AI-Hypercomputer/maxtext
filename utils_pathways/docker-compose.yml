@@ -33,6 +33,8 @@ services:
       - --resource_manager_address=resource_manager:29001
       - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
     privileged: true
+    depends_on:
+      - resource_manager
 
 
   proxy:
@@ -44,10 +46,14 @@ services:
       - --server_port=29008
       - --resource_manager_address=resource_manager:29001
       - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
+    depends_on:
+      - worker
+      - resource_manager
 
 
   maxtext:
-    image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest
+    image: ${MAXTEXT_IMAGE}
+    # us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest
     privileged: true
     volumes: 
       - ../:/deps
@@ -57,81 +63,6 @@ services:
     entrypoint: ["bash", "-c"]
     command:
       - "cd MaxText ; python3 -m pytest -s tests/train_tests.py -m tpu_only"
-
-
-
+    depends_on:
+      - proxy
       # - "cd MaxText ; python3 -m pytest -m tpu_only tests -s"
-
-#### LOCAL NETWORK
-
-
-# networks:
-#   local: {}
-
-# services:
-
-#   resource_manager:
-#     image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
-#     # network_mode: host
-#     # network_mode: bridge
-#     ports:
-#       - "29001:29001"
-#       - "29002:29002"
-#     command:
-#       - --server_port=29001
-#       - --node_type=resource_manager
-#       - --instance_count=1
-#       - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
-#       - --instance_type=tpuv4:2x2x1
-#     environment:
-#       - HOST_ADDRESS=localhost
-#       - TPU_SKIP_MDS_QUERY=true
-#     networks:
-#       - local
-
-#   worker:
-#     image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
-#     # network_mode: host
-#     # network_mode: bridge
-#     ports:
-#       - "29005:29005"
-#       - "29006:29006"
-#       - "8471:8471"
-#       - "8080:8080"
-#     command:
-#       - --alsologtostderr
-#       - --server_port=29005
-#       # - --resource_manager_address=localhost:29001
-#       - --resource_manager_address=resource_manager:29001
-#       - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
-#     # depends_on:
-#     #   - resource_manager
-#     environment:
-#       - TPU_WORKER_ID=0
-#       - TPU_WORKER_HOSTNAME=localhost
-#       - MEGASCALE_NUM_SLICES=1
-#       - MEGASCALE_SLICE_ID=0
-#       - MEGASCALE_COORDINATOR_ADDRESS=localhost
-#     privileged: true
-#     networks:
-#       - local
-#     # links:
-#     #   - resource_manager
-
-#   proxy:
-#     image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest
-#     # network_mode: host
-#     # network_mode: bridge
-#     ports:
-#       - "29008:29008"
-#     command:
-#       - --server_port=29008
-#       # - --resource_manager_address=localhost:29001
-#       - --resource_manager_address=resource_manager:29001
-#       - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
-#     # depends_on:
-#     #   - resource_manager
-#     networks:
-#       - local
-#     # links:
-#     #   - resource_manager
