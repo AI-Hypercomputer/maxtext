@@ -217,8 +217,7 @@ def validate_config(config):
 if __name__ == "__main__":
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   flags.FLAGS(sys.argv)
-  pyconfig.initialize(sys.argv)
-  cfg = pyconfig.config
+  cfg = pyconfig.initialize(sys.argv)
   validate_config(cfg)
   max_utils.print_system_information()
   main(cfg)

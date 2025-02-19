@@ -199,7 +199,7 @@ def save_checkpoint(
     state,
     dataset_type="c4",
     data_iterator=None,
-    config: Optional[pyconfig.config] = None,
+    config = None,
 ) -> bool:
   """Wrapper for saving checkpoint."""
   if config and config.enable_checkpointing:
@@ -1000,8 +1000,7 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-  pyconfig.initialize(argv)
-  config = pyconfig.config
+  config = pyconfig.initialize(argv)
   max_utils.print_system_information()
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
