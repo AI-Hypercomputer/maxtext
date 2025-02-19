@@ -38,7 +38,7 @@ class TokenDroppingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    pyconfig.initialize(
+    self.cfg = pyconfig.initialize(
         [None, "configs/base.yml"],
         run_name="token_dropping_test",
         enable_checkpointing=False,
@@ -50,7 +50,6 @@ class TokenDroppingTest(unittest.TestCase):
         per_device_batch_size=1,
         capacity_factor=2,
     )
-    self.cfg = pyconfig.config
     self.rng = jax.random.PRNGKey(42)
     devices_array = max_utils.create_device_mesh(self.cfg)
     self.model = linears.MoeBlock(
@@ -263,7 +262,7 @@ class MoeBlockTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_megablox(self):
-    pyconfig.initialize(
+    cfg = pyconfig.initialize(
         [None, "configs/base.yml"],
         run_name="moe_block_megablox_test",
         enable_checkpointing=False,
@@ -274,7 +273,6 @@ class MoeBlockTest(unittest.TestCase):
         per_device_batch_size=4,
     )
 
-    cfg = pyconfig.config
     rng = jax.random.PRNGKey(1234)
     rng_model, rng_hidden_states = jax.random.split(rng)
     hidden_states = jax.random.uniform(
@@ -289,7 +287,7 @@ class MoeBlockTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_dense(self):
-    pyconfig.initialize(
+    cfg = pyconfig.initialize(
         [None, "configs/base.yml"],
         run_name="moe_block_dense_test",
         enable_checkpointing=False,
@@ -300,7 +298,6 @@ class MoeBlockTest(unittest.TestCase):
         per_device_batch_size=4,
     )
 
-    cfg = pyconfig.config
     rng = jax.random.PRNGKey(2345)
     rng_model, rng_hidden_states = jax.random.split(rng)
     hidden_states = jax.random.uniform(

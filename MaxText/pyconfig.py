@@ -869,7 +869,7 @@ class HyperParameters:  # pylint: disable=missing-class-docstring
       object.__setattr__(self, attr, value)
 
   def get_keys(self):
-    return self.__dict__.keys()
+    return self.__getattribute__("_config").keys
 
 
 def initialize(argv, **kwargs):

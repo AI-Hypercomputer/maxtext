@@ -38,8 +38,7 @@ class WeightDtypes(unittest.TestCase):
     """Gets model weights"""
 
     # Setup necessary inputs to build a model state
-    pyconfig.initialize(argv)
-    config = pyconfig.config
+    config = pyconfig.initialize(argv)
     quant = quantizations.configure_quantization(config)
     devices_array = max_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)

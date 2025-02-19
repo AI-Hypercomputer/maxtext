@@ -1003,6 +1003,8 @@ def main(argv: Sequence[str]) -> None:
   config = pyconfig.initialize(argv)
   max_utils.print_system_information()
   validate_train_config(config)
+  config_inference = pyconfig.initialize(argv + ['ici_tensor_parallelism=4'])
+  print(config_inference.get_keys)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   vertex_tensorboard_manager = VertexTensorboardManager()
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):

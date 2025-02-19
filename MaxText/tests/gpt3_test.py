@@ -60,15 +60,13 @@ class GPT3(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    pyconfig.initialize(
+    self.cfg = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         run_name="test",
         enable_checkpointing=False,
         model_name="gpt3-52k",
         dtype="float32",
     )
-
-    self.cfg = pyconfig.config
     self.rng = jax.random.PRNGKey(1234)
 
     devices_array = max_utils.create_device_mesh(self.cfg)
