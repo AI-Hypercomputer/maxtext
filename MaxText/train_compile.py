@@ -140,8 +140,7 @@ def main(argv: Sequence[str]) -> None:
   print("Starting train_compile.py...", flush=True)
 
   # Parse and validate configuration
-  pyconfig.initialize(argv)
-  config = pyconfig.config
+  config = pyconfig.initialize(argv)
   validate_config(config)
 
   # Create target mesh

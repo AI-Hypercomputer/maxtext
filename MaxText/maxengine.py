@@ -54,8 +54,7 @@ Layout = jax_layout.Layout
 
 class MaxEngineConfig:
   """Engine specific config class to allow using multiple MaxEngine instances in an inference run.
-  The default pyconfig.config is a global param shared across multiple instances and doesn't
-  allow using different config for each MaxEngine instance.
+  TODO: evaluate the need for this given the restructured pyconfig.py
   """
 
   def __init__(self, keys):
