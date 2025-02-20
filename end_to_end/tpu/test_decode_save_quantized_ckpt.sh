@@ -33,14 +33,14 @@ fi
 export MODEL_NAME=${model}
 export TOKENIZER_PATH=assets/tokenizer.llama2
 export LOAD_PARAMETERS_PATH=gs://inference-benchmarks/models/${MODEL_NAME}-chat/${checkpoint_ts}/param-only-decode-ckpt-maxtext/checkpoints/0/items
-export MAX_PREFILL_PREDICT_LENGTH=128
-export MAX_TARGET_LENGTH=256
+export MAX_PREFILL_PREDICT_LENGTH=8
+export MAX_TARGET_LENGTH=16
 export ICI_FSDP_PARALLELISM=1
 export ICI_AUTOREGRESSIVE_PARALLELISM=1
 export ICI_TENSOR_PARALLELISM=-1
 export SCAN_LAYERS=false
 export WEIGHT_DTYPE=bfloat16
-export PER_DEVICE_BATCH_SIZE=10
+export PER_DEVICE_BATCH_SIZE=1
 export QUANTIZATION="int8"
 export QUANTIZE_KVCACHE=True
 export CHKPT_SUBDIR="${run_name}/${QUANTIZATION}_"
@@ -50,7 +50,7 @@ export OUTFILE="${OUTDIR}/decode.txt"
 mkdir -p $OUTDIR
 echo
 # Run command
-${cmd} python MaxText/decode.py \
+${cmd} python MaxText/decode_quantize_checkpoint.py \
   MaxText/configs/base.yml \
   tokenizer_path=${TOKENIZER_PATH} \
   load_parameters_path=${LOAD_PARAMETERS_PATH} \

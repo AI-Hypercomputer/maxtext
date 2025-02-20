@@ -225,7 +225,7 @@ class MaxEngine(engine_api.Engine):
       params = self.quantize_params(state, rng3)
     else:
       params = state.params
-    max_utils.print_mem_stats("After load_params")
+      max_utils.print_mem_stats("After load_params")
     return params
 
   def quantize_params(self, state, rng: Optional[PRNGKeyType] = None):
