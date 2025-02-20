@@ -40,7 +40,9 @@ _FLATTEN_MICROBENCHMARK_RESULTS = False
 # pylint: disable=too-many-positional-arguments
 
 
-def prefix_cache_benchmark(prefix, prefill_length, true_length, prefix_cache_entries_num, iters):
+def prefix_cache_benchmark(
+    prefix, prefill_length: int, true_length: int, common_prefix_proportion: float, prefix_cache_entries_num: int, iters: int
+):
   """Handles running prefix cache benchmark, and printing results.
 
   Create different key with half of prefill_length common prefix insert into cache.
@@ -54,6 +56,7 @@ def prefix_cache_benchmark(prefix, prefill_length, true_length, prefix_cache_ent
     prefix: prefix return from prefill function
     prefill_length: prefill token length after padding
     true_length: true prefill token length
+    common_prefix_proportion: [0., 1.] common prefix proportion to the prefill_length
     prefix_cache_entries_num: number of prefix cache entries insert into PrefixCache
     iters: repeat time to test fetch_longest_common_prefix_key and load from cache
   """
@@ -68,7 +71,7 @@ def prefix_cache_benchmark(prefix, prefill_length, true_length, prefix_cache_ent
   )
   prefix_size_bytes_gb = value.prefix_size_bytes / 1024 / 1024 / 1024
   prefix_cache_inst = prefix_cache.PrefixCache(prefix_cache_entries_num * value.prefix_size_bytes)
-  common_len = prefill_length // 2
+  common_len = int(prefill_length * common_prefix_proportion)
   remain_len = prefill_length - common_len
   common_prefix_key = tuple(i for i in range(common_len))
 
@@ -408,6 +411,7 @@ def run_benchmarks(config):
             prefill_result,
             prefill_length,
             prefill_true_lengths[prefill_length],
+            config.inference_microbenchmark_prefix_cache_common_prefix_proportion,
             config.inference_microbenchmark_prefix_cache_entries_num,
             benchmark_loop_iters,
         )
