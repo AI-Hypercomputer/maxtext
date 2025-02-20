@@ -271,7 +271,7 @@ class HBMCache:
     self._remain_size_bytes = max_size_bytes
     self._saved_values: dict[Key, Value] = {}
 
-  def is_enough_space_remain(self, value: Value) -> bool:
+  def has_enough_space(self, value: Value) -> bool:
     """Calculate if value size can add to cache."""
     return self._remain_size_bytes >= value.prefix_size_bytes
 
@@ -283,7 +283,7 @@ class HBMCache:
     If the value need to be used after add_to_cache, make sure copy them before add_to_cache.
     Return False if cache is full.
     """
-    if not self.is_enough_space_remain(value):
+    if not self.has_enough_space(value):
       return False
 
     self._saved_values[key] = value
@@ -355,7 +355,7 @@ class PrefixCache:
   def save(self, key: Key, value: Value) -> bool:
     """Save key/value to the cache."""
     logger.debug("save key=%r", key)
-    if not self._hbm_cache.is_enough_space_remain(value):
+    if not self._hbm_cache.has_enough_space(value):
       self._evict_cache()
     if not self._hbm_cache.add_to_cache(key, value):
       logger.debug("cannot add to cache even after evict")

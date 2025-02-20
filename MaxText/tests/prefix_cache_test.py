@@ -210,9 +210,9 @@ class HBMCacheTest(unittest.TestCase):
   def test_is_enough_space_remain(self):
     value = create_default_value()
     hbm_cache = HBMCache(max_size_bytes=value.prefix_size_bytes)
-    assert hbm_cache.is_enough_space_remain(value) is True
+    assert hbm_cache.has_enough_space(value) is True
     hbm_cache = HBMCache(max_size_bytes=value.prefix_size_bytes - 1)
-    assert hbm_cache.is_enough_space_remain(value) is False
+    assert hbm_cache.has_enough_space(value) is False
 
   def test_add_to_cache_and_fetch_with_key_exactly_matched(self):
     key = (1, 2, 3)
