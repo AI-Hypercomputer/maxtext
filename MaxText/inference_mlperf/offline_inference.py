@@ -107,6 +107,8 @@ class OfflineInference:
       )
       if length == 64 or length == 1024:
         continue
+      if not self.enable_batch_prefill:
+        continue
       input_data_batch = jax.ShapeDtypeStruct((max_length,), jnp.dtype("int32"))
       min_num_prompts = max_length // length
       max_num_prompts = max_length // (length // 2)
