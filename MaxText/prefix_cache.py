@@ -194,6 +194,8 @@ class PrefixCacheTrie:
 
   @dataclasses.dataclass
   class Node:
+    parent: Optional["PrefixCacheTrie.Node"] = None
+    token: Optional[Token] = None
     children: dict[Token, "PrefixCacheTrie.Node"] = dataclasses.field(default_factory=dict)
 
     def is_leaf(self):
@@ -213,7 +215,7 @@ class PrefixCacheTrie:
     node = self._root
     for token in key:
       if token not in node.children:
-        node.children[token] = PrefixCacheTrie.Node()
+        node.children[token] = PrefixCacheTrie.Node(parent=node, token=token)
       node = node.children[token]
 
   def get_longest_common_prefix_key(self, key: Key) -> Optional[Key]:
@@ -242,23 +244,17 @@ class PrefixCacheTrie:
 
   def erase(self, key: Key) -> None:
     """Erase key in trie if it is leaf."""
+    node = self._root
+    for token in key:
+      if token not in node.children:
+        return
+      node = node.children[token]
 
-    def erase_from(node: PrefixCacheTrie.Node, idx: int) -> bool:
-      """
-      Erase node traverse from `node` and start from key index `idx`. Return true if the `node` is leaf needed deleted.
-      """
-      if idx >= len(key):
-        return node.is_leaf()
-
-      if key[idx] not in node.children:
-        return False
-
-      if erase_from(node.children[key[idx]], idx + 1):
-        del node.children[key[idx]]
-
-      return node.is_leaf()
-
-    erase_from(self._root, 0)
+    while node.is_leaf():
+      if node.parent is None:
+        return
+      del node.parent.children[node.token]
+      node = node.parent
 
 
 class HBMCache:

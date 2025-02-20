@@ -197,6 +197,13 @@ class PrefixCacheTrieTest(unittest.TestCase):
     trie.erase(second_matched_key)
     assert trie.get_longest_common_prefix_key((1, 2)) is None
 
+  def test_insert_after_erase_to_empty(self):
+    trie = PrefixCacheTrie()
+    trie.insert((1, 2, 3))
+    trie.erase((1, 2, 3))
+    trie.insert((4, 5, 6))
+    assert trie.get_longest_common_prefix_key((4, 5, 6)) == (4, 5, 6)
+
 
 class HBMCacheTest(unittest.TestCase):
 
