@@ -714,25 +714,27 @@ def setup_decode_state(model, config, rng, mesh, params):
       # initialize using train state
       input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
       abstract_state = jax.eval_shape(
-          lambda rng: model.init(
-              rng, # Use key directly
+          lambda rng1, rng2, rng3: model.init(
+              {"params" : rng, "dropout": rng, "cache": rng}, # Use key directly
               jnp.ones(input_shape, dtype=jnp.int32),
               jnp.ones(input_shape, dtype=jnp.int32),
               ),
-          {"params": rng, "dropout": rng, "cache": rng}
+          rng, rng, rng
           )
-      state = init_decode_state(model.apply, abstract_state)
+
+      #init_decode_state(model.apply, abstract_state) # state initialized
+      state = train_state.TrainState(step=0, apply_fn=model.apply, params=abstract_state["params"], tx=None, opt_state={})
 
       rng1, rng2 = jax.random.split(rng) # Split *before* calling get_kv_cache_annotations.
       kv_cache_annotations = get_kv_cache_annotations(model, config, rng2, mesh) # Pass rng2
 
-      state = nn.with_logical_partitioning(state, kv_cache_annotations)
 
       if params is not None:
-        state = state.replace(params=params)
-      state_mesh_annotations = nn.get_partition_spec(state)
+        state = state.replace(params=params)  # Now safe to call replace
 
-        # print(f"  KV Cache Annotations: {kv_cache_annotations}")  # Print annotations
+      state_mesh_annotations = nn.get_partition_spec(state)
+      state = nn.with_logical_partitioning(state, state_mesh_annotations) # Apply partitioning
+
     return state, state_mesh_annotations
 
 

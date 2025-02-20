@@ -21,77 +21,85 @@ import os
 import pyconfig
 from typing import Sequence
 from absl import app
-from layers.models import Transformer
+# from layers.models import Transformer  # REMOVE: Model creation handled by MaxEngine.
+
 
 def main(argv: Sequence[str]) -> None:
-  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+    jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
-  pyconfig.initialize(argv)
-  config = pyconfig.config
-  validate_config(config)
-  max_utils.print_system_information()
+    pyconfig.initialize(argv)
+    config = pyconfig.config
+    validate_config(config)
+    max_utils.print_system_information()
 
-  # Initialize the model and engine.
-  model = Transformer(
-      config=config, mesh=max_utils.create_device_mesh(config), quant=None
-  )  # we have to initialize here
-  engine = maxengine.MaxEngine(config, model)  # pass in the model here
-  rng = jax.random.PRNGKey(1234)
-  rng, rng_load_params = jax.random.split(rng)
-  params = engine.load_params(rng_load_params)
+    engine = maxengine.MaxEngine(config)  # MaxEngine handles model creation.
+    rng = jax.random.PRNGKey(1234)
+    rng, rng_load_params = jax.random.split(rng)
+    params = engine.load_params(rng_load_params) # Load Params
 
-  text = config.prompt
-  metadata = engine.get_tokenizer()
-  tokenizer_model = engine.build_tokenizer(metadata)
-  tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
-
-  assert true_length <= config.max_prefill_predict_length, "Too many tokens for prefill"
-  assert config.quantization != "fp8", "fp8 on NVIDIA GPUs not supported in decode.py yet"
-
-  # For paged attention, we need to assign a slot
-  slot = 0  # For single-stream decoding, always use slot 0
-
-  # Split RNG before calling prefill
-  rng, rng_prefill = jax.random.split(rng)
-
-  prefill_result, first_token = engine.prefill(
-      params=params,
-      padded_tokens=tokens,
-      true_length=true_length,
-      rng=rng_prefill,
-      slot=slot,
-  )
-  rng, rng_init_decode = jax.random.split(rng)
-
-  # Key Change: Pass model and config to init_decode_state
-  decode_state = engine.init_decode_state(rng_init_decode, model, config)
-  decode_state = engine.insert(prefill_result, decode_state, slot=slot)
-
-  steps = range(config.max_prefill_predict_length, config.max_target_length)
-  sampled_tokens_list = []
-  sampled_tokens_list.append(first_token)
-
-  for _ in steps:
-    rng, rng_generate = jax.random.split(rng)
-    decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate, slot=slot)
-    sampled_tokens_list.append(sampled_tokens)
-
-  results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
-  output = tokenizer_model.decode(results)
-  print(f"Input `{text}` -> `{output}`")
-
-  if config.autoregressive_decode_assert != "":
+    text = config.prompt
+    metadata = engine.get_tokenizer()
+    tokenizer_model = engine.build_tokenizer(metadata)
+    tokens, true_length = tokenizer_model.encode(
+        text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length]
+    )
     assert (
-        output == config.autoregressive_decode_assert
-    ), f"generated text mismatch {output=} {config.autoregressive_decode_assert=}"
+        true_length <= config.max_prefill_predict_length
+    ), "Too many tokens for prefill"
+    assert (
+        config.quantization != "fp8"
+    ), "fp8 on NVIDIA GPUs not supported in decode.py yet"
+
+    slot = 0  # Keep slot for Paged Attention.
+
+    # PREFILL
+    rng, rng_prefill = jax.random.split(rng)
+    prefill_result, first_token = engine.prefill(
+        params=params,
+        padded_tokens=tokens,
+        true_length=true_length,
+        rng=rng_prefill,
+        slot=slot, # Pass slot to prefill
+    )
+
+    rng, rng_init_decode = jax.random.split(rng)
+    decode_state = engine.init_decode_state(rng_init_decode)
+    print("decode.py: decode_state type:", type(decode_state))
+    decode_state = engine.insert(prefill_result, decode_state, slot=slot)
+
+    steps = range(config.max_prefill_predict_length, config.max_target_length)
+    sampled_tokens_list = []
+    sampled_tokens_list.append(first_token)
+
+    for _ in steps:
+        rng, rng_generate = jax.random.split(rng)
+        # Simplified generate call.  KV cache updates are now INSIDE generate.
+        decode_state, sampled_tokens = engine.generate(
+            params, decode_state, rng=rng_generate, slot=slot
+        )  # Pass slot.
+        sampled_tokens_list.append(sampled_tokens)
+
+    # Simplified access.
+    results = [
+        sampled_tokens.get_result_at_slot(slot).tokens.item()
+        for sampled_tokens in sampled_tokens_list
+    ]
+    output = tokenizer_model.decode(results)
+    print(f"Input `{text}` -> `{output}`")
+
+    if config.autoregressive_decode_assert != "":
+        assert (
+            output == config.autoregressive_decode_assert
+        ), f"generated text mismatch {output=} {config.autoregressive_decode_assert=}"
 
 
 def validate_config(config):
-  assert config.load_full_state_path == "", (
-      "Decode doesn't operate on full states! Convert to parameter checkpoint first." "Using generate_param_only_checkpoint."
-  )
+    assert config.load_full_state_path == "", (
+        "Decode doesn't operate on full states! Convert to parameter checkpoint first."
+        "Using generate_param_only_checkpoint."
+    )
 
 
 if __name__ == "__main__":
-  app.run(main)
+    app.run(main)
