@@ -182,18 +182,20 @@ def get_initial_contiguous_kv_cache(model, config, batch_size, abstract=False):
 def get_prefill_paged_kv_cache_annotations(model, config, rng, mesh):
     if config.attention == "paged":
         with nn_partitioning.axis_rules(config.logical_axis_rules):
-            input_shape = (config.global_batch_size_to_load, 1)
-            
-            # Initialize with full variable collection structure
-            variables = model.init(
-                {"params": rng, "dropout": rng, "cache": rng},
-                jnp.ones(input_shape, dtype=jnp.int32),
-                jnp.ones(input_shape, dtype=jnp.int32),
-                decoder_segment_ids=None,
-                enable_dropout=False,
-                model_mode=common_types.MODEL_MODE_PREFILL,
-            )
-            
+            input_shape = (config.global_batch_size_to_load, config.max_prefill_predict_length)
+
+            # Use jax.eval_shape to get the shapes and dtypes *without* allocating memory.
+            def init_fn():
+                return model.init(
+                    {"params": rng, "dropout": rng, "cache": rng},
+                    jnp.ones(input_shape, dtype=jnp.int32),
+                    jnp.ones(input_shape, dtype=jnp.int32),
+                    decoder_segment_ids=None,
+                    enable_dropout=False,
+                    model_mode=common_types.MODEL_MODE_PREFILL,  # Ensure PREFILL mode
+                )
+
+            variables = jax.eval_shape(init_fn) # Use eval_shape
             return variables.get("cache", {})
 
     raise ValueError("Incorrect config.attention. Expected paged")

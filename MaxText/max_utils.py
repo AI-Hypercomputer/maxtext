@@ -690,7 +690,7 @@ def init_initial_state(model, tx, config, is_training, key):
   """
   input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
   model_vars = model.init(
-      {"params": key, "dropout": key, "aqt": key},
+      key,
       np.ones(input_shape, dtype=jnp.int32),
       np.ones(input_shape, dtype=jnp.int32),
   )
@@ -708,25 +708,29 @@ def setup_decode_state(model, config, rng, mesh, params):
     print(f"  logical_axis_rules: {config.logical_axis_rules}")
 
     batch_size = config.per_device_batch_size * jax.device_count()
+
     with nn_partitioning.axis_rules(config.logical_axis_rules):
-        init_kv_cache_partial = functools.partial(
-            get_initial_kv_cache, model=model, config=config, batch_size=batch_size, abstract=True
-        )
-        # Use jax.eval_shape to get the shape and dtype of the cache.
-        abstract_state = jax.eval_shape(init_kv_cache_partial)
 
-        # Get the cache annotations.  This is necessary for pjit to know how to
-        # shard the cache arrays across devices.
-        rng1, rng2 = jax.random.split(rng)
-        kv_cache_annotations = get_kv_cache_annotations(model, config, rng2, mesh)
+      # initialize using train state
+      input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+      abstract_state = jax.eval_shape(
+          lambda rng: model.init(
+              rng, # Use key directly
+              jnp.ones(input_shape, dtype=jnp.int32),
+              jnp.ones(input_shape, dtype=jnp.int32),
+              ),
+          {"params": rng, "dropout": rng, "cache": rng}
+          )
+      state = init_decode_state(model.apply, abstract_state)
 
-        # init_kv_cache is called again here, but with abstract=False,
-        # it creates actual zero arrays of the correct shape and dtype.
-        state = abstract_state # Use the abstract state!
-        state = nn.with_logical_partitioning(state, kv_cache_annotations)
-        if params is not None:
-          state["params"] = params
-        state_mesh_annotations = nn.get_partition_spec(state)
+      rng1, rng2 = jax.random.split(rng) # Split *before* calling get_kv_cache_annotations.
+      kv_cache_annotations = get_kv_cache_annotations(model, config, rng2, mesh) # Pass rng2
+
+      state = nn.with_logical_partitioning(state, kv_cache_annotations)
+
+      if params is not None:
+        state = state.replace(params=params)
+      state_mesh_annotations = nn.get_partition_spec(state)
 
         # print(f"  KV Cache Annotations: {kv_cache_annotations}")  # Print annotations
     return state, state_mesh_annotations
@@ -1006,10 +1010,11 @@ def get_initial_kv_cache(model, config, batch_size, abstract=False):
 
 def get_kv_cache_annotations(model, config, rng, mesh):
     """Get the KV cache annotations for autoregressive and prefill modes."""
-    if config.attention == "paged":
-        return get_prefill_paged_kv_cache_annotations(model, config, rng, mesh)
-    else:
-        return get_prefill_contiguous_kv_cache_annotations(model, config, rng, mesh)
+    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      if config.attention == "paged":
+          return get_prefill_paged_kv_cache_annotations(model, config, rng, mesh)
+      else:
+          return get_prefill_contiguous_kv_cache_annotations(model, config, rng, mesh)
 
 
 

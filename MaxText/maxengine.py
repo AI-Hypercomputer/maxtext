@@ -40,6 +40,7 @@ from jetstream.engine import tokenizer_pb2
 from jetstream.engine import tokenizer_api
 from jetstream.engine import token_utils
 
+import checkpointing
 import max_utils
 import inference_utils
 import pyconfig
@@ -384,16 +385,29 @@ class MaxEngine(engine_api.Engine):
 
     rng, new_rng = jax.random.split(rng)
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      flat_logits, new_vars = self.model.apply(
-          params,
-          input_tokens,
-          positions,
-          decoder_segment_ids=sequence_indicator,
-          enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_PREFILL,
-          rngs={"params": new_rng},
-          mutable=["cache"],
-      )
+      if self.config.attention == "paged":
+        flat_logits, new_vars = self.model.apply(
+            params,
+            input_tokens,
+            positions,
+            decoder_segment_ids=sequence_indicator,
+            enable_dropout=False,
+            model_mode=common_types.MODEL_MODE_PREFILL,
+            rngs={"params": new_rng},
+            mutable=[], # Pass in the empty list when using paged attention.
+        )
+      else:
+          flat_logits, new_vars = self.model.apply(
+              params,
+              input_tokens,
+              positions,
+              decoder_segment_ids=sequence_indicator,
+              enable_dropout=False,
+              model_mode=common_types.MODEL_MODE_PREFILL,
+              rngs={"params": new_rng},
+              mutable=["cache"],
+          )
+
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
     generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
@@ -428,9 +442,11 @@ class MaxEngine(engine_api.Engine):
         samples_per_slot=1,
     )
 
-    cache = new_vars["cache"]
-    if self.config.attention != "paged":
-      cache = self._maybe_stack_prefill_result_cache(cache)
+    if self.config.attention == "paged":
+        cache = {} # new vars should be empty.
+    else:
+        cache = new_vars["cache"]
+        cache = self._maybe_stack_prefill_result_cache(cache)
 
     return {
         "logits": selected_logits,
