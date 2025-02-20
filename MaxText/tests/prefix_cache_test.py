@@ -267,6 +267,24 @@ class HBMCacheTest(unittest.TestCase):
     assert hbm_cache.add_to_cache((2), value2) is True
     assert hbm_cache.retrieve_from_cache((2)) == value2
 
+  def test_evict_multiple_caches(self):
+    key1 = (1,)
+    value1 = create_default_value(tokens=key1)
+    key2 = (
+        1,
+        2,
+    )
+    value2 = create_default_value(tokens=key2)
+    hbm_cache = HBMCache(max_size_bytes=value1.prefix_size_bytes * 2)
+    hbm_cache.add_to_cache(key1, value1)
+    hbm_cache.add_to_cache(key2, value2)
+    evict_value = hbm_cache.evict_cache(key2)
+    assert evict_value == value2
+    assert hbm_cache.retrieve_from_cache(key2) is None
+    assert hbm_cache.retrieve_from_cache(key1) is not None
+    evict_value = hbm_cache.evict_cache(key1)
+    assert hbm_cache.retrieve_from_cache(key1) is None
+
 
 class LRUStrategyTest(unittest.TestCase):
 
