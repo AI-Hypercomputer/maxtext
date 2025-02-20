@@ -13,7 +13,6 @@
  See the License for the specific language governing permissions and
  limitations under the License.
  """
-
 """This file contains commonly-used XLA Flags."""
 
 ### NOTICE ###
@@ -30,7 +29,9 @@ _MOE_VMEM_LIMIT = 81920
 
 DENSE_VMEM_LIMIT_FLAG = f" --xla_tpu_scoped_vmem_limit_kib={_DENSE_VMEM_LIMIT}"
 MOE_VMEM_LIMIT_FLAG = f" --xla_tpu_scoped_vmem_limit_kib={_MOE_VMEM_LIMIT}"
-CUSTOM_VMEM_LIMIT_FLAG = lambda vmem_limit: f"--xla_tpu_scoped_vmem_limit_kib={vmem_limit}"
+CUSTOM_VMEM_LIMIT_FLAG = (
+    lambda vmem_limit: f"--xla_tpu_scoped_vmem_limit_kib={vmem_limit}"
+)
 
 # Continuation Fusion (CF) for All Gather Collectives
 # Continuation Fusion is a form of parallelizing compute work with collectives.
@@ -86,9 +87,11 @@ ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR = (
     " --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false"
     " --xla_tpu_enable_async_collective_fusion_fuse_all_reduce=false"
     " --xla_tpu_enable_async_collective_fusion_fuse_reduce_scatter=false"
+
     " --xla_tpu_enable_sparse_core_collective_offload_all_gather=true"
     " --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true"
     " --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true"
+
     " --xla_tpu_enable_all_gather_offload_tracing=true"
     " --xla_tpu_enable_reduce_scatter_offload_tracing=true"
     " --xla_tpu_enable_all_reduce_offload_tracing=true"
@@ -145,7 +148,8 @@ REDUCE_SCATTER_FUSION = (
 # xla_tpu_enable_data_parallel_all_reduce_opt:
 #   optimize DCN all-reduces used for data parallel sharding
 DATA_PARALLEL_OVERLAP = (
-    " --xla_tpu_enable_data_parallel_all_reduce_opt=true" " --xla_tpu_data_parallel_opt_different_sized_ops=true"
+    " --xla_tpu_enable_data_parallel_all_reduce_opt=true"
+    " --xla_tpu_data_parallel_opt_different_sized_ops=true"
 )
 
 # Host offloading Flags. These are optimizations recommended when using host
@@ -165,11 +169,15 @@ HOST_OFFLOAD_FLAGS = (
 )
 
 # Flags to optimize pipeline parallelism over DCN with large host offloading.
-PIPELINING_FLAGS = " --xla_tpu_iova_dma_chunk_size_bytes=16777216"  # breaks DMA to/from host into 16M chunks
+PIPELINING_FLAGS = (
+    " --xla_tpu_iova_dma_chunk_size_bytes=16777216" # breaks DMA to/from host into 16M chunks
+)
 
 # Disable bundle-aware CostModel which was causing worse perf b/357103386.
 # Some fusions in the backward pass of the model were 3x slower without this.
-DISABLE_BUNDLE_AWARE_COST_MODEL = " --xla_tpu_use_bundle_aware_cost_model_for_fusions=false"
+DISABLE_BUNDLE_AWARE_COST_MODEL = (
+    " --xla_tpu_use_bundle_aware_cost_model_for_fusions=false"
+)
 
 # Enable Silent Data Corruption (SDC) Checker
 # SDC Checker will check for chip / ici / hardware corruption events.

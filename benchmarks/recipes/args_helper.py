@@ -27,7 +27,9 @@ import maxtext_xpk_runner as mxr
 DELETE = "delete"
 
 
-def _handle_delete(cluster_config: mxr.XpkClusterConfig, user: str, **kwargs) -> int:
+def _handle_delete(
+    cluster_config: mxr.XpkClusterConfig, user: str, **kwargs
+) -> int:
   """Handles the deletion of workloads.
 
   Args:
@@ -42,11 +44,16 @@ def _handle_delete(cluster_config: mxr.XpkClusterConfig, user: str, **kwargs) ->
       f"--project={cluster_config.project} --cluster={cluster_config.cluster_name}"
       f" --filter-by-job={first_five_chars} --zone={cluster_config.zone}"
   )
-  print(f"Deleting workloads starting with: {first_five_chars} using command:" f" {delete_command}")
+  print(
+      f"Deleting workloads starting with: {first_five_chars} using command:"
+      f" {delete_command}"
+  )
   os.system(delete_command)
 
 
-def handle_cmd_args(cluster_config: mxr.XpkClusterConfig, *actions: str, **kwargs) -> bool:
+def handle_cmd_args(
+    cluster_config: mxr.XpkClusterConfig, *actions: str, **kwargs
+) -> bool:
   """Parses command-line arguments and executes the specified actions.
 
   Args:
