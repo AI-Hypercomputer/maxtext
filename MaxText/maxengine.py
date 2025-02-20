@@ -40,7 +40,7 @@ from jetstream.engine import token_utils
 import max_utils
 import inference_utils
 import pyconfig
-
+import page_managers
 
 import logging
 
@@ -106,6 +106,16 @@ class MaxEngine(engine_api.Engine):
     self.prefill_kv_cache_shardings = None
     self.kv_cache_shardings = None
     self.state_mesh_annotations = None
+
+    if self.config.attention == "paged":
+      self.page_manager = page_managers.PageManager(
+          num_pages=self.config.num_pages,
+          tokens_per_page=self.config.tokens_per_page,
+          slots=int(self.config.per_device_batch_size * jax.device_count()),
+          max_target_length=self.config.max_target_length,
+          max_prefill_predict_length=self.config.max_prefill_predict_length,
+          max_pages_per_slot=self.config.max_target_length // self.config.tokens_per_page,
+      )
 
   def load_params(self, *args, rng: Optional[PRNGKeyType] = None, **kwargs) -> Params:
     """Load Parameters, typically from GCS"""
@@ -434,6 +444,7 @@ class MaxEngine(engine_api.Engine):
     if rng is None:
       rng = jax.random.PRNGKey(0)
 
+    page_state = self.page_manager(common_types.MODEL_MODE_AUTOREGRESSIVE)
     previous_token = decode_state["tokens"]
     jax.debug.print("generate call next_pos: {}, tokens: {}", decode_state["next_pos"], decode_state["tokens"])
     rng, new_rng = jax.random.split(rng)
@@ -447,6 +458,7 @@ class MaxEngine(engine_api.Engine):
           model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
           rngs={"params": new_rng},
           mutable=["cache"],
+          page_state=page_state,
       )
     #jax.debug.print("out logits: {}", out_logits)
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
@@ -487,12 +499,13 @@ class MaxEngine(engine_api.Engine):
       jax.jit,
       static_argnums=(0,),
       donate_argnums=(
-          1,
           2,
+          3,
       ),
   )
   def insert(
       self,
+      params: Params,
       prefix: Prefix,
       decode_state: DecodeState,
       slot: int,
@@ -503,18 +516,12 @@ class MaxEngine(engine_api.Engine):
     unboxed_prefix["cache"] = self._maybe_unstack_prefill_result_cache(unboxed_prefix["cache"])
     #jax.debug.print("prefix_logits: {}", unboxed_prefix["logits"][0][0])
     #jax.debug.print("logits: {}, next_pos: {}, generated_tokens: {}, tokens: {}", decode_state["logits"][0][0], decode_state["next_pos"][0], decode_state["generated_tokens"][0], decode_state["tokens"][0])
-    '''
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      self.model.apply(
-          None,
-          None,
-          None,
-          enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_INSERT,
-          slot=slot,
-          true_length=16,
-      )
-    '''
+    page_state = self.page_manager(
+        model_mode=common_types.MODEL_MODE_INSERT,
+        slot=slot,
+        true_length=16,
+        #need to update
+    )
     def copy(path, partial_cache, full_cache, annotations):
       path_key = path[-1].key
       #print(f"Path key: {path_key}")
@@ -566,6 +573,7 @@ class MaxEngine(engine_api.Engine):
     if self.config.attention == "paged":
 
       def copy_paged(path, prefix_cache, decode_state_cache):
+        jax.debug.print("path {}", path)
         if path[-2].key == "page_manager":
           return prefix_cache
         path_key = path[-1].key

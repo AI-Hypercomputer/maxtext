@@ -21,6 +21,7 @@ similar to virtual memory systems.
 """
 
 from typing import Optional, Tuple
+import uuid
 
 from flax import linen as nn
 from flax import struct
@@ -49,15 +50,91 @@ class PageState:
     current_page_position: Array tracking position within current pages
   """
 
-  page_status: Array
   page_map: Array
   sequence_lengths: Array
   num_pages_used: Array
   current_page: Array
   current_page_position: Array
 
+  def _init_(self, slots, max_pages_per_slot):
+    self.page_map = jnp.zeros((slots, max_pages_per_slot))
+    self.sequence_lengths = jnp.zeros(slots)
+    self.num_pages_used = jnp.zeros(slots)
+    self.current_page = jnp.zeros(slots)
+    self.current_page_position = jnp.zeros(slots)
 
-class PageManager(nn.Module):
+  def release_slot_pages(self, slot, page_status) -> Array:
+    """Releases all pages assigned to a specific slot.
+
+    This method frees up all pages currently assigned to the given slot,
+    resetting their status and updating the page mapping accordingly.
+
+    """
+    def _release_page(i) -> Array:
+      page_idx = self.page_map[slot][i]
+      page_status = page_status.at[page_idx].set(0)
+      self.page_map = self.page_map.at[slot, i].set(0)
+      return page_status
+
+    page_status = jax.lax.fori_loop(0, self.num_pages_used[slot], _release_page, page_status)
+    self.sequence_lengths = self.sequence_lengths.at[slot].set(0)
+    self.num_pages_used = self.num_pages_used.at[slot].set(0)
+    self.current_page = self.current_page.at[slot].set(0)
+    self.current_page_position = self.current_page_position.at[slot].set(0)
+
+    return page_status
+  
+  def reserve_prefill_slot_pages(self, slot, true_length, page_status, tokens_per_page) -> Array:
+    prefill_slot_num_pages = jnp.ceil(true_length / tokens_per_page).astype(jnp.int32)
+    prefill_slot_page_slice_idx = jnp.where(true_length == 0, 0, (true_length - 1) % tokens_per_page)
+
+    def _reserve_page(i, state):
+      slot, page_map, page_status, current_page = state
+      page_idx = jnp.where((page_status[1:] == 0), size=1)[0][0] + 1
+      page_status = page_status.at[page_idx].set(1)
+      page_map = page_map.at[slot, i].set(page_idx)
+      current_page = current_page.at[slot].set(page_idx)
+      return slot, page_map, page_status, current_page
+
+    _, self.page_map, page_status, self.current_page = jax.lax.fori_loop(
+        0, prefill_slot_num_pages, _reserve_page, (slot, self.page_map, page_status, self.current_page)
+    )
+    self.sequence_lengths = self.sequence_lengths.at[slot].set(true_length)
+    self.num_pages_used = self.num_pages_used.at[slot].set(prefill_slot_num_pages)
+    self.current_page_position = self.current_page_position.at[slot].set(prefill_slot_page_slice_idx)
+    return page_status
+
+  def reserve_decode_step_pages(self, tokens_per_page, page_status):
+    sequence_lengths_step = jnp.logical_and(jnp.ones(self.sequence_lengths.shape, dtype=jnp.int32), self.sequence_lengths).astype(
+        jnp.int32
+    )
+
+    self.sequence_lengths += sequence_lengths_step
+
+    current_num_pages_used = num_pages_used
+    num_pages_used = jnp.ceil(self.sequence_lengths / tokens_per_page).astype(jnp.int32)
+
+    self.current_page_position = jnp.where(self.sequence_lengths == 0, 0, (self.sequence_lengths - 1) % tokens_per_page)
+    seq_new_page = num_pages_used - current_num_pages_used
+
+    updating_slots = jnp.where((seq_new_page > 0), size=self.slots)[0]
+
+    def _reserve_page(i, state):
+      page_map, page_status, current_page, updating_slots = state
+      slot = jax.lax.dynamic_index_in_dim(updating_slots, i, axis=0, keepdims=False)
+      page_idx = jnp.where((page_status[1:] == 0), size=1)[0][0] + 1
+      page_status = page_status.at[page_idx].set(1)
+      page_map = page_map.at[slot, num_pages_used[slot] - 1].set(page_idx)
+      current_page = current_page.at[slot].set(page_idx)
+      jax.debug.print("slot_id: {}, page_idx: {}, num_pages_used: {}, current_page: {}", slot, page_idx, num_pages_used[slot], current_page.at[slot])
+      return page_map, page_status, current_page, updating_slots
+
+    self.page_map, page_status, self.current_page, _ = jax.lax.fori_loop(
+        0, jnp.count_nonzero(seq_new_page), _reserve_page, (self.page_map, page_status, self.current_page, updating_slots)
+    )
+    return page_status
+
+class PageManager:
   """Manages paged attention mechanism for efficient sequence processing.
 
   The PageManager implements a virtual memory-like system for attention, where the
@@ -79,279 +156,59 @@ class PageManager(nn.Module):
   max_target_length: int
   max_prefill_predict_length: int
   max_pages_per_slot: int
+  page_status: Array
+  decode_page_state: PageState
+  prefill_page_state: PageState
 
-  def init_or_get_vars(self):
-    """Initializes or retrieves the state variables for the paging system.
+  def __init__(self, num_pages, tokens_per_page, slots, max_target_length, max_prefill_predict_length, max_pages_per_slot):
+    self.num_pages = num_pages
+    self.tokens_per_page = tokens_per_page
+    self.slots = slots
+    self.max_target_length = max_target_length
+    self.max_prefill_predict_length = max_prefill_predict_length
+    self.max_pages_per_slot = max_pages_per_slot
+    self.page_status = jnp.zeros(num_pages)
+    self.decode_page_state = PageState(slots, max_pages_per_slot)
+    #choose a different prefill slots size
+    self.prefill_page_state = PageState(slots, max_prefill_predict_length // tokens_per_page)
 
-    Returns:
-      Tuple of nn.Variable objects representing:
-        - page_status: Status of each page (free/used)
-        - page_map: Mapping between slots and their assigned pages
-        - sequence_lengths: Length of sequence in each slot
-        - num_pages_used: Number of pages used by each slot
-        - current_page: Current active page for each slot
-        - current_page_position: Position within current pages
-    """
-    page_status_var = self.variable(
-        "cache", "page_status", nn.with_logical_partitioning(jnp.zeros, ("num_pages",)), (self.num_pages,), jnp.int32
-    )
-    page_map_var = self.variable(
-        "cache",
-        "page_map",
-        nn.with_logical_partitioning(jnp.zeros, ("slots", "max_pages_per_slot")),
-        (self.slots, self.max_pages_per_slot),
-        jnp.int32,
-    )
-    sequence_lengths_var = self.variable(
-        "cache", "sequence_lengths", nn.with_logical_partitioning(jnp.zeros, ("slots",)), (self.slots,), jnp.int32
-    )
-    num_pages_used_var = self.variable(
-        "cache", "num_pages_used", nn.with_logical_partitioning(jnp.zeros, ("slots",)), (self.slots,), jnp.int32
-    )
-    current_page_var = self.variable(
-        "cache", "current_page", nn.with_logical_partitioning(jnp.zeros, ("slots",)), (self.slots,), jnp.int32
-    )
-    current_page_position_var = self.variable(
-        "cache", "current_page_position", nn.with_logical_partitioning(jnp.zeros, ("slots",)), (self.slots,), jnp.int32
-    )
+  def release_prefill_slot_pages(self, slot: int):
+    self.page_status = self.prefill_page_state.release_slot_pages(slot)
 
-    return (
-        page_status_var,
-        page_map_var,
-        sequence_lengths_var,
-        num_pages_used_var,
-        current_page_var,
-        current_page_position_var,
-    )
-
-  def release_slot_pages(
-      self,
-      slot: int,
-      page_status_var: nn.Variable,
-      page_map_var: nn.Variable,
-      sequence_lengths_var: nn.Variable,
-      num_pages_used_var: nn.Variable,
-      current_page_var: nn.Variable,
-      current_page_position_var: nn.Variable,
-  ) -> Tuple:
-    """Releases all pages assigned to a specific slot.
-
-    This method frees up all pages currently assigned to the given slot,
-    resetting their status and updating the page mapping accordingly.
-
-    Args:
-      slot: Integer identifying the slot to be released
-      page_status_var: Variable tracking page usage status
-      page_map_var: Variable mapping slots to pages
-      sequence_lengths_var: Variable tracking sequence lengths
-      num_pages_used_var: Variable tracking page usage counts
-      current_page_var: Variable tracking current active pages
-      current_page_position_var: Variable tracking positions in current pages
-
-    Returns:
-      Tuple of updated variables after releasing the slot's pages
-    """
-    page_status = page_status_var.value
-    page_map = page_map_var.value
-    sequence_lengths = sequence_lengths_var.value
-    num_pages_used = num_pages_used_var.value
-    current_page = current_page_var.value
-    current_page_position = current_page_position_var.value
-
-    def _release_page(i, state):
-      page_map, page_status = state
-      page_idx = page_map[slot][i]
-      page_status = page_status.at[page_idx].set(0)
-      page_map = page_map.at[slot, i].set(0)
-      return page_map, page_status
-
-    page_map, page_status = jax.lax.fori_loop(0, num_pages_used[slot], _release_page, (page_map, page_status))
-
-    sequence_lengths = sequence_lengths.at[slot].set(0)
-    num_pages_used = num_pages_used.at[slot].set(0)
-    current_page = current_page.at[slot].set(0)
-    current_page_position = current_page_position.at[slot].set(0)
-
-    page_status_var.value = page_status
-    page_map_var.value = page_map
-    sequence_lengths_var.value = sequence_lengths
-    num_pages_used_var.value = num_pages_used
-    current_page_var.value = current_page
-    current_page_position_var.value = current_page_position
-
-    return (
-        page_status_var,
-        page_map_var,
-        sequence_lengths_var,
-        num_pages_used_var,
-        current_page_var,
-        current_page_position_var,
-    )
+  def release_decode_slot_pages(self, slot: int):
+    self.page_status = self.decode_page_state.release_slot_pages(slot)
 
   def reserve_prefix_slot_pages(
       self,
       slot: int,
       true_length: int,
-      page_status_var: nn.Variable,
-      page_map_var: nn.Variable,
-      sequence_lengths_var: nn.Variable,
-      num_pages_used_var: nn.Variable,
-      current_page_var: nn.Variable,
-      current_page_position_var: nn.Variable,
-  ) -> Tuple:
-    """Reserves pages for a prefix sequence in the specified slot.
+  ):
+    """Reserves pages for a prefix sequence in the specified slot before decode.
 
     This method allocates the necessary pages for a prefix sequence of given length,
     first releasing any existing pages assigned to the slot.
-
-    Args:
-      slot: Integer identifying the target slot
-      true_length: Actual length of the prefix sequence
-      page_status_var: Variable tracking page usage status
-      page_map_var: Variable mapping slots to pages
-      sequence_lengths_var: Variable tracking sequence lengths
-      num_pages_used_var: Variable tracking page usage counts
-      current_page_var: Variable tracking current active pages
-      current_page_position_var: Variable tracking positions in current pages
-
-    Returns:
-      Tuple of updated variables after reserving pages for the prefix
     """
-    (
-        page_status_var,
-        page_map_var,
-        sequence_lengths_var,
-        num_pages_used_var,
-        current_page_var,
-        current_page_position_var,
-    ) = self.release_slot_pages(
-        slot,
-        page_status_var,
-        page_map_var,
-        sequence_lengths_var,
-        num_pages_used_var,
-        current_page_var,
-        current_page_position_var,
-    )
+    # TODO: release pages for the prefill slot by default
+    self.release_prefill_slot_pages(slot)
+    self.page_status = self.prefill_page_state.reserve_prefill_slot_pages(slot, true_length, self.page_status, self.tokens_per_page)
 
-    page_status = page_status_var.value
-    page_map = page_map_var.value
-    sequence_lengths = sequence_lengths_var.value
-    num_pages_used = num_pages_used_var.value
-    current_page = current_page_var.value
-    current_page_position = current_page_position_var.value
-
-    prefill_slot_num_pages = jnp.ceil(true_length / self.tokens_per_page).astype(jnp.int32)
-    prefill_slot_page_slice_idx = jnp.where(true_length == 0, 0, (true_length - 1) % self.tokens_per_page)
-
-    def _reserve_page(i, state):
-      slot, page_map, page_status, current_page = state
-      page_idx = jnp.where((page_status[1:] == 0), size=1)[0][0] + 1
-      page_status = page_status.at[page_idx].set(1)
-      page_map = page_map.at[slot, i].set(page_idx)
-      current_page = current_page.at[slot].set(page_idx)
-      return slot, page_map, page_status, current_page
-
-    _, page_map, page_status, current_page = jax.lax.fori_loop(
-        0, prefill_slot_num_pages, _reserve_page, (slot, page_map, page_status, current_page)
-    )
-    jax.debug.print("slot in prefill: {}", slot)
-    sequence_lengths = sequence_lengths.at[slot].set(true_length)
-    num_pages_used = num_pages_used.at[slot].set(prefill_slot_num_pages)
-    current_page_position = current_page_position.at[slot].set(prefill_slot_page_slice_idx)
-
-    page_status_var.value = page_status
-    page_map_var.value = page_map
-    sequence_lengths_var.value = sequence_lengths
-    num_pages_used_var.value = num_pages_used
-    current_page_var.value = current_page
-    current_page_position_var.value = current_page_position
-
-    return (
-        page_status_var,
-        page_map_var,
-        sequence_lengths_var,
-        num_pages_used_var,
-        current_page_var,
-        current_page_position_var,
-    )
+  def place_request_to_decode_slot(slot: int, request_id: uuid.UUID):
+    """
+    Move the request in prefill slot to decode slot for interleaved mode
+    """
+    
 
   def reserve_decode_step_pages(
       self,
-      page_status_var: nn.Variable,
-      page_map_var: nn.Variable,
-      sequence_lengths_var: nn.Variable,
-      num_pages_used_var: nn.Variable,
-      current_page_var: nn.Variable,
-      current_page_position_var: nn.Variable,
   ) -> Tuple:
     """Reserves additional pages needed for a decoding step.
 
     This method allocates new pages as needed when sequences grow during
     autoregressive decoding, ensuring each active slot has sufficient pages
     for its sequence.
-
-    Args:
-      page_status_var: Variable tracking page usage status
-      page_map_var: Variable mapping slots to pages
-      sequence_lengths_var: Variable tracking sequence lengths
-      num_pages_used_var: Variable tracking page usage counts
-      current_page_var: Variable tracking current active pages
-      current_page_position_var: Variable tracking positions in current pages
-
-    Returns:
-      Tuple of updated variables after reserving pages for the decode step
     """
-    page_status = page_status_var.value
-    page_map = page_map_var.value
-    sequence_lengths = sequence_lengths_var.value
-    num_pages_used = num_pages_used_var.value
-    current_page = current_page_var.value
-    current_page_position = current_page_position_var.value
+    self.page_status = self.decode_page_state.reserve_decode_step_pages(self.tokens_per_page, self.page_status)
 
-    sequence_lengths_step = jnp.logical_and(jnp.ones(sequence_lengths.shape, dtype=jnp.int32), sequence_lengths).astype(
-        jnp.int32
-    )
-
-    sequence_lengths += sequence_lengths_step
-
-    current_num_pages_used = num_pages_used
-    num_pages_used = jnp.ceil(sequence_lengths / self.tokens_per_page).astype(jnp.int32)
-
-    current_page_position = jnp.where(sequence_lengths == 0, 0, (sequence_lengths - 1) % self.tokens_per_page)
-    seq_new_page = num_pages_used - current_num_pages_used
-
-    updating_slots = jnp.where((seq_new_page > 0), size=self.slots)[0]
-
-    def _reserve_page(i, state):
-      page_map, page_status, current_page, updating_slots = state
-      slot = jax.lax.dynamic_index_in_dim(updating_slots, i, axis=0, keepdims=False)
-      page_idx = jnp.where((page_status[1:] == 0), size=1)[0][0] + 1
-      page_status = page_status.at[page_idx].set(1)
-      page_map = page_map.at[slot, num_pages_used[slot] - 1].set(page_idx)
-      current_page = current_page.at[slot].set(page_idx)
-      jax.debug.print("slot_id: {}, page_idx: {}, num_pages_used: {}, current_page: {}", slot, page_idx, num_pages_used[slot], current_page.at[slot])
-      return page_map, page_status, current_page, updating_slots
-
-    page_map, page_status, current_page, _ = jax.lax.fori_loop(
-        0, jnp.count_nonzero(seq_new_page), _reserve_page, (page_map, page_status, current_page, updating_slots)
-    )
-
-    page_status_var.value = page_status
-    page_map_var.value = page_map
-    sequence_lengths_var.value = sequence_lengths
-    num_pages_used_var.value = num_pages_used
-    current_page_var.value = current_page
-    current_page_position_var.value = current_page_position
-
-    return (
-        page_status_var,
-        page_map_var,
-        sequence_lengths_var,
-        num_pages_used_var,
-        current_page_var,
-        current_page_position_var,
-    )
 
   @nn.compact
   def __call__(
