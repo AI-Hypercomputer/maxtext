@@ -27,7 +27,7 @@ python3 MaxText/tests/forward_pass_logit_checker.py MaxText/configs/base.yml bas
 # If not, we can convert the checkpoint back from MaxText to Huggingface and compare with the orignal one
 JAX_PLATFORMS=cpu python3 MaxText/llama_mistral_mixtral_orbax_to_hf.py MaxText/configs/base.yml base_output_directory=gs://runner-maxtext-logs load_parameters_path=${CHECKPOINT_TPU_SCANNED}/0/items run_name=convert_to_hf model_name=${MODEL_SIZE} hf_model_path=$CHECKPOINT_TPU_CONVERTED_BACK
 
-python3 MaxText/tests/hf_checkpoint_conversion_test.py --original_ckpt=${CHECKPOINT_ORIGINAL} --converted_cckpt=$CHECKPOINT_TPU_CONVERTED_BACK
+python3 -m MaxText.tests.hf_checkpoint_conversion_checker --original_ckpt=${CHECKPOINT_ORIGINAL} --converted_ckpt=${CHECKPOINT_TPU_CONVERTED_BACK}
 
 # If everything looks good, we move on to convert to the unrolled checkpoint for performant serving
 JAX_PLATFORMS=cpu python MaxText/generate_param_only_checkpoint.py MaxText/configs/base.yml async_checkpointing=false base_output_directory=${BASE_OUTPUT_PATH} load_parameters_path=${CHECKPOINT_TPU_SCANNED}/0/items run_name=${RUN_NAME} model_name=${MODEL_SIZE} force_unroll=true

@@ -38,15 +38,14 @@ import maxtext_trillium_model_configs as model_configs
 
 # Assumes you built maxtext dep image.
 # Assumes you have xpk installed in a git clone repo of ~/{wl_config.xpk_path}/xpk.py
-_DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME = "maxtext_base_image"
-
+_DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME = 'maxtext_base_image'
 
 class LibTpuType(enum.Enum):
-  NIGHTLY = "nightly-libtpu"
+  NIGHTLY = 'nightly-libtpu'
   # In order to use a custom libtpu, put a libtpu.so file in your local
   # working directory.
-  CUSTOM = "custom"
-  MAXTEXT = "maxtext-docker"
+  CUSTOM = 'custom'
+  MAXTEXT = 'maxtext-docker'
 
 
 @dataclasses.dataclass
@@ -71,11 +70,11 @@ class WorkloadConfig:
   base_output_directory: str
   base_docker_image: str
   libtpu_type: LibTpuType
-  libtpu_nightly_version: str = None  # A date in %Y%M%D format, 20241201
+  libtpu_nightly_version: str = None # A date in %Y%M%D format, 20241201
   num_steps: int = 20
   max_restarts: int = 0
   priority: str = "medium"
-  xpk_path: str = "~/xpk"
+  xpk_path: str = '~/xpk'
   pathways_config: PathwaysConfig = None
   run_name: str = None
 
@@ -113,7 +112,12 @@ def make_tmp_files(per_command_name):
     A list of temporary files for each command.
   """
   # Supports removal of spaces from command names before converting to file name.
-  return [tempfile.NamedTemporaryFile(delete=False, prefix=command.replace(" ", "-") + "-") for command in per_command_name]
+  return [
+      tempfile.NamedTemporaryFile(
+          delete=False, prefix=command.replace(' ', '-') + '-'
+      )
+      for command in per_command_name
+  ]
 
 
 def run_commands(commands, jobname, per_command_name, batch=10, dry_run=False):
@@ -133,14 +137,17 @@ def run_commands(commands, jobname, per_command_name, batch=10, dry_run=False):
   commands_batched = chunks(commands, batch)
   per_command_name_batches = chunks(per_command_name, batch)
 
-  print(f"Breaking up a total of {len(commands)} commands into" f" {len(commands_batched)} batches")
+  print(
+      f'Breaking up a total of {len(commands)} commands into'
+      f' {len(commands_batched)} batches'
+  )
   if dry_run:
-    print("Pretending all the jobs succeeded")
+    print('Pretending all the jobs succeeded')
     return 0
 
   max_return_code = 0
   for i, _ in enumerate(commands_batched):
-    print(f"Dispatching batch {i}/{len(commands_batched)}")
+    print(f'Dispatching batch {i}/{len(commands_batched)}')
     batch_max_return_code, _ = run_command_batch(
         commands_batched[i],
         jobname,
@@ -171,7 +178,9 @@ def run_command_batch(commands, jobname, per_command_name, output_logs):
   for i, command in enumerate(commands):
     children.append(
         # subprocess managed by list pylint: disable=consider-using-with
-        subprocess.Popen(command, stdout=output_logs[i], stderr=output_logs[i], shell=True)
+        subprocess.Popen(
+            command, stdout=output_logs[i], stderr=output_logs[i], shell=True
+        )
     )
 
   while True:
@@ -183,14 +192,25 @@ def run_command_batch(commands, jobname, per_command_name, output_logs):
     if completed < total:
       slow_worker_index = returncodes.index(None)
       slow_worker_text = per_command_name[slow_worker_index]
-      slow_str = f", task {slow_worker_text} still working, logfile" f" {output_logs[slow_worker_index].name}"
+      slow_str = (
+          f', task {slow_worker_text} still working, logfile'
+          f' {output_logs[slow_worker_index].name}'
+      )
     else:
-      slow_str = ""
-    print(f"[t={seconds_elapsed:.2f}, {jobname}] Completed" f" {completed}/{total}{slow_str}")
+      slow_str = ''
+    print(
+        f'[t={seconds_elapsed:.2f}, {jobname}] Completed'
+        f' {completed}/{total}{slow_str}'
+    )
     if max_returncode > 0:
-      failing_index = [i for i, x in enumerate(returncodes) if x is not None and x > 0][0]
-      print(f"Terminating all {jobname} processes since at least one failed.")
-      print(f"Failure is {per_command_name[failing_index]}" f" and logfile {output_logs[failing_index].name}")
+      failing_index = [
+          i for i, x in enumerate(returncodes) if x is not None and x > 0
+      ][0]
+      print(f'Terminating all {jobname} processes since at least one failed.')
+      print(
+          f'Failure is {per_command_name[failing_index]}'
+          f' and logfile {output_logs[failing_index].name}'
+      )
       for child in children:
         child.terminate()
       break
@@ -216,7 +236,9 @@ def run_command_with_updates(command, task, verbose=True) -> int:
   """
 
   if verbose:
-    print(f"Task: `{task}` is implemented by `{command}`, streaming output live.")
+    print(
+        f'Task: `{task}` is implemented by `{command}`, streaming output live.'
+    )
     with subprocess.Popen(
         command,
         stdout=sys.stdout,
@@ -227,23 +249,29 @@ def run_command_with_updates(command, task, verbose=True) -> int:
       while True:
         return_code = child.poll()
         if return_code is None:
-          print(f"Waiting for `{task}`, for {i} seconds")
+          print(f'Waiting for `{task}`, for {i} seconds')
           time.sleep(1)
           i += 1
         else:
-          print(f"Task: `{task}` terminated with code `{return_code}`")
+          print(f'Task: `{task}` terminated with code `{return_code}`')
           return return_code
   else:
-    print(f"Task: `{task}` is implemented by `{command}`, hiding output unless" " there is an error.")
+    print(
+        f'Task: `{task}` is implemented by `{command}`, hiding output unless'
+        ' there is an error.'
+    )
     try:
       subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT)
     except subprocess.CalledProcessError as e:
-      print(f"Task: `{task}` terminated with ERROR `{e.returncode}`, printing" " logs")
-      print("*" * 80)
+      print(
+          f'Task: `{task}` terminated with ERROR `{e.returncode}`, printing'
+          ' logs'
+      )
+      print('*' * 80)
       print(e.output)
-      print("*" * 80)
+      print('*' * 80)
       return e.returncode
-    print(f"Task: `{task}` succeeded.")
+    print(f'Task: `{task}` succeeded.')
     return 0
 
 
@@ -253,60 +281,58 @@ def build_user_command(
 ):
   is_pw_enabled = wl_config.pathways_config is not None
 
-  config_tuning_params = ""
+  config_tuning_params = ''
   for key, value in wl_config.model.tuning_params.items():
-    config_tuning_params += f"{key}={value} "
+    config_tuning_params += f'{key}={value} '
 
-  install_libtpu_cmd = ""
+  install_libtpu_cmd = ''
   jax_platforms = None
   vertex_tensorboard = ''
   # TODO() support modifying nightly / stable dependencies in pathway flow
   if is_pw_enabled:
-    jax_platforms = "proxy"
+    jax_platforms = 'proxy'
   else:
     if wl_config.libtpu_type == LibTpuType.NIGHTLY:
       install_libtpu_cmd += (
-          f" pip install libtpu-nightly==0.1.dev{wl_config.libtpu_nightly_version} -f"
-          " https://storage.googleapis.com/libtpu-releases/index.html &&"
+          f' pip install libtpu-nightly==0.1.dev{wl_config.libtpu_nightly_version} -f'
+          ' https://storage.googleapis.com/libtpu-releases/index.html &&'
       )
     elif wl_config.libtpu_type == LibTpuType.CUSTOM:
       # In order to use a custom libtpu, put a libtpu.so file in your local
       # working directory.
-      install_libtpu_cmd += " mv libtpu.so /lib/ &&"
+      install_libtpu_cmd += ' mv libtpu.so /lib/ &&'
     elif wl_config.libtpu_type == LibTpuType.MAXTEXT:
       # Use the libtpu dependent built in the docker image provided.
-      install_libtpu_cmd += ""
+      install_libtpu_cmd += ''
 
-    jax_platforms = "tpu,cpu"
+    jax_platforms = 'tpu,cpu'
     vertex_tensorboard = 'use_vertex_tensorboard=false vertex_tensorboard_project="" vertex_tensorboard_region=""'
 
-  assert jax_platforms is not None, "Error in setting jax_platforms"
+  assert jax_platforms is not None, 'Error in setting jax_platforms'
 
-  libtpu_flags = f"LIBTPU_INIT_ARGS='{wl_config.model.xla_flags}'"
+  libtpu_flags = f'LIBTPU_INIT_ARGS=\'{wl_config.model.xla_flags}\''
 
   if name is None:
-    run_name_command = ""
+    run_name_command=""
   else:
-    run_name_command = f"run_name={name}"
+    run_name_command=f'run_name={name}'
 
   # Construct the command string with proper formatting and line continuations
-  command = " ".join(
-      [
-          f"{install_libtpu_cmd}",
-          f"echo {libtpu_flags} &&" if not is_pw_enabled else "",
-          f"export {libtpu_flags} &&" if not is_pw_enabled else "",
-          "export ENABLE_PATHWAYS_PERSISTENCE=1 &&",
-          f"export JAX_PLATFORMS={jax_platforms} &&",
-          "export ENABLE_PJRT_COMPATIBILITY=true &&",
-          "python3 MaxText/train.py MaxText/configs/base.yml",
-          f"{config_tuning_params}",
-          f"steps={wl_config.num_steps}",
-          f"model_name={wl_config.model.model_type}",
-          f"base_output_directory={wl_config.base_output_directory}",
-          f"{vertex_tensorboard}",
-          f"{run_name_command}",
-      ]
-  )
+  command = ' '.join([
+      f'{install_libtpu_cmd}',
+      f'echo {libtpu_flags} &&' if not is_pw_enabled else '',
+      f'export {libtpu_flags} &&' if not is_pw_enabled else '',
+      'export ENABLE_PATHWAYS_PERSISTENCE=1 &&',
+      f'export JAX_PLATFORMS={jax_platforms} &&',
+      'export ENABLE_PJRT_COMPATIBILITY=true &&',
+      'python3 MaxText/train.py MaxText/configs/base.yml',
+      f'{config_tuning_params}',
+      f'steps={wl_config.num_steps}',
+      f'model_name={wl_config.model.model_type}',
+      f'base_output_directory={wl_config.base_output_directory}',
+      f'{vertex_tensorboard}',
+      f'{run_name_command}'
+  ])
   return command
 
 
@@ -357,66 +383,77 @@ def generate_xpk_workload_cmd(
 
   time.localtime()
   length_of_random_str = 3
-  temp_post_fix = "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(length_of_random_str))
+  temp_post_fix = ''.join(
+      random.choice(string.ascii_lowercase + string.digits) for _ in range(length_of_random_str)
+  )
 
   truncate_model_name = 12
   truncate_prefix = 5
   common_post_fix = f"-{wl_config.num_slices}-{time.strftime('%m%d%H', time.localtime())}-{temp_post_fix}"
-  common_prefix = os.environ["USER"]
+  common_prefix = os.environ['USER']
   pw_prefix = "pw-"
 
   if is_pathways_enabled:
-    name = f"{pw_prefix}{wl_config.model.model_name.replace('_', '-')[:truncate_model_name - len(pw_prefix)]}"
+    name = (
+        f"{pw_prefix}{wl_config.model.model_name.replace('_', '-')[:truncate_model_name - len(pw_prefix)]}"
+    )
   else:
-    name = f"{wl_config.model.model_name.replace('_', '-')[:truncate_model_name]}"
+    name = (
+      f"{wl_config.model.model_name.replace('_', '-')[:truncate_model_name]}"
+    )
   name = f"{common_prefix[:truncate_prefix]}-{name}{common_post_fix}"
 
-  user_command = build_user_command(name=name, wl_config=wl_config)
+  user_command = build_user_command(
+      name=name,
+      wl_config=wl_config
+  )
 
-  additional_flags = ""
+  additional_flags = ''
   if not is_pathways_enabled and wl_config.libtpu_type == LibTpuType.CUSTOM:
     additional_flags = '--env="TPU_LIBRARY_PATH=/lib/libtpu.so"'
 
-  docker_image_flag = ""
+  docker_image_flag = ''
   # pathways-related flags
-  pathways_specific_flags = ""
+  pathways_specific_flags = ''
   if is_pathways_enabled:
     pw_config = wl_config.pathways_config
     pathways_specific_flags = (
-        "--use-pathways"
-        f" --server-image={pw_config.server_image}"
-        f" --proxy-server-image={pw_config.proxy_image}"
-        f" --remote-python-sidecar-image={pw_config.remote_python_sidecar_image}"
-        if pw_config.remote_python_sidecar_image is not None
-        else ""
-        " --termination-grace-period-seconds=300"
-        f" --pathways-gcs-location={wl_config.base_output_directory}"
-        f" --restart-on-user-code-failure"
-        f" --debug-dump-gcs={wl_config.base_output_directory}"
+        '--use-pathways'
+        f' --server-image={pw_config.server_image}'
+        f' --proxy-server-image={pw_config.proxy_image}'
+        f' --remote-python-sidecar-image={pw_config.remote_python_sidecar_image}'
+        if pw_config.remote_python_sidecar_image is not None else ''
+        ' --termination-grace-period-seconds=300'
+        f' --pathways-gcs-location={wl_config.base_output_directory}'
+        f' --restart-on-user-code-failure'
+        f' --debug-dump-gcs={wl_config.base_output_directory}'
     )
-    docker_image_flag = f"--docker-image={pw_config.runner_image}"
+    docker_image_flag = (
+        f'--docker-image={pw_config.runner_image}'
+    )
   else:
     docker_image_flag = f'--base-docker-image="{wl_config.base_docker_image}"'
 
-  print(f"User command: {user_command}")
+
+  print(f'User command: {user_command}')
   return (
       (
-          f"python3 {wl_config.xpk_path}/xpk.py workload create"
-          f" {pathways_specific_flags}"
-          f" --cluster={cluster_config.cluster_name}"
-          f" --project={cluster_config.project}"
-          f" --zone={cluster_config.zone}"
-          f" --device-type={cluster_config.device_type}"
-          f" --num-slices={wl_config.num_slices}"
+          f'python3 {wl_config.xpk_path}/xpk.py workload create'
+          f' {pathways_specific_flags}'
+          f' --cluster={cluster_config.cluster_name}'
+          f' --project={cluster_config.project}'
+          f' --zone={cluster_config.zone}'
+          f' --device-type={cluster_config.device_type}'
+          f' --num-slices={wl_config.num_slices}'
           f' --command="{user_command}"'
-          f" {docker_image_flag}"
-          " --enable-debug-logs"
-          f" --workload={name}"
-          f" --priority={wl_config.priority}"
-          f" --max-restarts={wl_config.max_restarts}"
+          f' {docker_image_flag}'
+          ' --enable-debug-logs'
+          f' --workload={name}'
+          f' --priority={wl_config.priority}'
+          f' --max-restarts={wl_config.max_restarts}'
           # ' --use-vertex-tensorboard'
           # f' --experiment-name={test_purpose_name}'
-          f" {additional_flags}"
+          f' {additional_flags}'
       ),
       name,
   )
@@ -434,11 +471,12 @@ def run_xpk_workload(
 
   Returns:
   """
-  assert (
-      cluster_config.device_type == wl_config.device_type
-  ), f"The workload device size {wl_config.device_type}, and cluster device size {cluster_config.device_type} don't match."
-  command, _ = generate_xpk_workload_cmd(cluster_config=cluster_config, wl_config=wl_config)
-  return run_command_with_updates(command, "Run XPK workload")
+  assert cluster_config.device_type == wl_config.device_type, f"The workload device size {wl_config.device_type}, and cluster device size {cluster_config.device_type} don't match."
+  command, _ = generate_xpk_workload_cmd(
+      cluster_config=cluster_config,
+      wl_config=wl_config
+  )
+  return run_command_with_updates(command, 'Run XPK workload')
 
 
 def xpk_benchmark_runner(
@@ -448,7 +486,10 @@ def xpk_benchmark_runner(
   xpk_workload_names = []
   xpk_workload_cmds = []
   for wl_config in workload_configs:
-    command, name = generate_xpk_workload_cmd(cluster_config=cluster_config, wl_config=wl_config)
+    command, name = generate_xpk_workload_cmd(
+      cluster_config=cluster_config,
+      wl_config=wl_config
+    )
 
     print(f"Name of the workload is: {name} \n")
     xpk_workload_names.append(name)
@@ -460,45 +501,46 @@ def xpk_benchmark_runner(
   for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
     return_code = run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
     if return_code != 0:
-      print("Unable to run xpk workload: {xpk_workload_name}")
-
+      print('Unable to run xpk workload: {xpk_workload_name}')
 
 def on_device_benchmark_runner(
     workload_configs: list[WorkloadConfig],
 ):
   for wl_config in workload_configs:
-    user_command = build_user_command(name=wl_config.run_name, wl_config=wl_config)
-    print(f"User command: {user_command}")
+    user_command = build_user_command(
+      name=wl_config.run_name,
+      wl_config=wl_config
+    )
+    print(f'User command: {user_command}')
     subprocess.run(user_command, shell=True, text=True)
-
 
 # Run maxtext_xpk_runner.py as a script for executing multiple workloads pythonically!
 def main() -> int:
   # Variables to configure:
-  output_bucket = "gs://DIR"
+  output_bucket = 'gs://DIR'
   base_docker_image = _DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME
 
   # Set up the clusters to run workloads on!
   v5e_cluster_config = XpkClusterConfig(
-      cluster_name="v5e-256",
-      project="my-cool-project",
-      zone="us-central2-b",
-      device_type="v5litepod-256",
+      cluster_name='v5e-256',
+      project='my-cool-project',
+      zone='us-central2-b',
+      device_type='v5litepod-256',
   )
 
   v6e_cluster_config = XpkClusterConfig(
-      cluster_name="v6e-256",
-      project="my-cool-project",
-      zone="us-central2-b",
-      device_type="v6e-256",
+      cluster_name='v6e-256',
+      project='my-cool-project',
+      zone='us-central2-b',
+      device_type='v6e-256',
   )
 
   xpk_workload_cmds = []
   xpk_workload_names = []
 
   list_of_models = [
-      model_configs.llama2_70b_4096_sc,
-      # model_configs.default_128
+    model_configs.llama2_70b_4096_sc,
+    # model_configs.default_128
   ]
 
   # Loop possibilities:
@@ -515,21 +557,19 @@ def main() -> int:
 
   # 3. See other examples below
 
-  user = os.environ["USER"]
-  base_output_dir = os.path.join(output_bucket, user)
+  user = os.environ['USER']
+  base_output_dir = os.path.join(output_bucket,user)
 
   for model in list_of_models:
     # Run workloads on the below clusters
     for cluster_config in [
-        # v5e_cluster_config,
-        # v6e_cluster_config,
-        v6e_cluster_config_yucmhab,
-        # another_config,
+      # v5e_cluster_config,
+      # v6e_cluster_config,
+      v6e_cluster_config_yucmhab,
+      # another_config,
     ]:
       # Run workloads in the following slice configurations
-      for num_slices in [
-          1,
-      ]:
+      for num_slices in [1,]:
         # Use the libtpu dependencies from:
         for libtpu_type in [
             # LibTpuType.CUSTOM
@@ -537,18 +577,21 @@ def main() -> int:
             # LibTpuType.NIGHTLY
         ]:
           wl_config = WorkloadConfig(
-              model=model,
-              num_slices=num_slices,
-              device_type=cluster_config.device_type,
-              base_output_directory=base_output_dir,
-              priority="medium",
-              max_restarts=0,
-              libtpu_type=libtpu_type,
-              libtpu_nightly_version="",
-              base_docker_image=base_docker_image,
-              pathways_config=None,
+            model=model,
+            num_slices=num_slices,
+            device_type=cluster_config.device_type,
+            base_output_directory=base_output_dir,
+            priority="medium",
+            max_restarts=0,
+            libtpu_type=libtpu_type,
+            libtpu_nightly_version="",
+            base_docker_image=base_docker_image,
+            pathways_config=None
           )
-          command, name = generate_xpk_workload_cmd(cluster_config=cluster_config, wl_config=wl_config)
+          command, name = generate_xpk_workload_cmd(
+            cluster_config=cluster_config,
+            wl_config=wl_config
+          )
 
           print(f"Name of the workload is: {name} \n")
           xpk_workload_names.append(name)
@@ -559,7 +602,7 @@ def main() -> int:
   for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
     return_code = run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
     if return_code != 0:
-      print("Unable to run xpk workload: {xpk_workload_name}")
+      print('Unable to run xpk workload: {xpk_workload_name}')
 
   # Support Batch workloads one day. Note that this doesn't show the xpk logs per workload.
   # They are saved to file instead.
@@ -570,10 +613,9 @@ def main() -> int:
   #     batch=1,  # Parallel execution of workloads is not supported in XPK yet.
   #     dry_run=False,
   # )
+ # print(f'Return_codes: {return_codes}')
 
 
-# print(f'Return_codes: {return_codes}')
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
   main()
