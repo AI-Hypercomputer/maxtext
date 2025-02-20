@@ -167,26 +167,27 @@ def _hf_mapping(layer_idx: int = -1, expert_idx: int = -1) -> dict:
       f"layers.{layer_idx}.feed_forward.w3.weight": f"model.layers.{layer_idx}.mlp.up_proj.weight",
   }
 
+
 def _hf_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1) -> dict:
-      # pylint: disable=line-too-long
+  # pylint: disable=line-too-long
   return {
-    "model.embed_tokens.weight": "tok_embeddings.weight",
-    "model.norm.weight": "norm.weight",
-    "lm_head.weight": "output.weight",
-    f"model.layers.{layer_idx}.input_layernorm.weight": f"layers.{layer_idx}.attention_norm.weight",
-    f"model.layers.{layer_idx}.post_attention_layernorm.weight": f"layers.{layer_idx}.ffn_norm.weight",
-    f"model.layers.{layer_idx}.self_attn.q_proj.weight": f"layers.{layer_idx}.attention.wq.weight",
-    f"model.layers.{layer_idx}.self_attn.k_proj.weight": f"layers.{layer_idx}.attention.wk.weight",
-    f"model.layers.{layer_idx}.self_attn.v_proj.weight": f"layers.{layer_idx}.attention.wv.weight",
-    f"model.layers.{layer_idx}.self_attn.o_proj.weight": f"layers.{layer_idx}.attention.wo.weight",
-    # MOE model
-    f"model.layers.{layer_idx}.block_sparse_moe.gate.weight": f"layers.{layer_idx}.feed_forward.gate.weight",
-    f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.w1.weight": f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w1.weight",
-    f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.w2.weight": f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w2.weight",
-    f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.w3.weight": f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w3.weight",
-    f"model.layers.{layer_idx}.mlp.gate_proj.weight": f"layers.{layer_idx}.feed_forward.w1.weight",
-    f"model.layers.{layer_idx}.mlp.down_proj.weight": f"layers.{layer_idx}.feed_forward.w2.weight",
-    f"model.layers.{layer_idx}.mlp.up_proj.weight": f"layers.{layer_idx}.feed_forward.w3.weight"
+      "model.embed_tokens.weight": "tok_embeddings.weight",
+      "model.norm.weight": "norm.weight",
+      "lm_head.weight": "output.weight",
+      f"model.layers.{layer_idx}.input_layernorm.weight": f"layers.{layer_idx}.attention_norm.weight",
+      f"model.layers.{layer_idx}.post_attention_layernorm.weight": f"layers.{layer_idx}.ffn_norm.weight",
+      f"model.layers.{layer_idx}.self_attn.q_proj.weight": f"layers.{layer_idx}.attention.wq.weight",
+      f"model.layers.{layer_idx}.self_attn.k_proj.weight": f"layers.{layer_idx}.attention.wk.weight",
+      f"model.layers.{layer_idx}.self_attn.v_proj.weight": f"layers.{layer_idx}.attention.wv.weight",
+      f"model.layers.{layer_idx}.self_attn.o_proj.weight": f"layers.{layer_idx}.attention.wo.weight",
+      # MOE model
+      f"model.layers.{layer_idx}.block_sparse_moe.gate.weight": f"layers.{layer_idx}.feed_forward.gate.weight",
+      f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.w1.weight": f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w1.weight",
+      f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.w2.weight": f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w2.weight",
+      f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.w3.weight": f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w3.weight",
+      f"model.layers.{layer_idx}.mlp.gate_proj.weight": f"layers.{layer_idx}.feed_forward.w1.weight",
+      f"model.layers.{layer_idx}.mlp.down_proj.weight": f"layers.{layer_idx}.feed_forward.w2.weight",
+      f"model.layers.{layer_idx}.mlp.up_proj.weight": f"layers.{layer_idx}.feed_forward.w3.weight",
   }
 
 
@@ -220,6 +221,7 @@ def permute_to_match_maxtext_rope(arr):
   x[..., 1::2] = odds
   return x
 
+
 def convert_huggingface_to_jax_weights(base_model_path, model_size, huggingface_ckpt, model_params, mem_info):
   base_num_decoder_layers = model_params["num_layers"]
   base_num_query_heads = model_params["num_heads"]
@@ -239,7 +241,7 @@ def convert_huggingface_to_jax_weights(base_model_path, model_size, huggingface_
         parts = key.split(".")
         layer = int(parts[2]) if "layers" in key else 0
         mapped_key = _hf_to_maxtext_mapping(layer)[key]
-        chkpt_vars[mapped_key]=f.get_tensor(key)
+        chkpt_vars[mapped_key] = f.get_tensor(key)
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
@@ -269,12 +271,13 @@ def convert_huggingface_to_jax_weights(base_model_path, model_size, huggingface_
   # logits dense #################################################
   max_logging.log("Processing logits dense")
 
-  jax_weights["decoder"]["logits_dense"]["kernel"] = chkpt_vars["output.weight"].to(torch.float16).numpy().transpose()[:, :vocab_size]
+  jax_weights["decoder"]["logits_dense"]["kernel"] = (
+      chkpt_vars["output.weight"].to(torch.float16).numpy().transpose()[:, :vocab_size]
+  )
   # logits_dense = np.concatenate(
   #     [var["output.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0
   # ).transpose()[:, :vocab_size]
   # jax_weights["decoder"]["logits_dense"]["kernel"] = logits_dense
-
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
@@ -291,7 +294,9 @@ def convert_huggingface_to_jax_weights(base_model_path, model_size, huggingface_
   if model_size[:6] == "llama3":
     jax_weights["token_embedder"]["embedding"] = chkpt_vars["tok_embeddings.weight"].to(torch.float16).numpy()
   else:
-    jax_weights["token_embedder"]["embedding"] = chkpt_vars["tok_embeddings.weight"].to(torch.float16).numpy()[:vocab_size, :]
+    jax_weights["token_embedder"]["embedding"] = (
+        chkpt_vars["tok_embeddings.weight"].to(torch.float16).numpy()[:vocab_size, :]
+    )
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
@@ -522,7 +527,7 @@ def convert_to_jax_weights(base_model_path, model_size, huggingface_ckpt):
   max_logging.log(f"Loading the base model from {base_model_path}")
   # Skip any hidden files for checkpoints
   if huggingface_ckpt:
-    return convert_huggingface_to_jax_weights( base_model_path, model_size, huggingface_ckpt, model_params, mem_info)
+    return convert_huggingface_to_jax_weights(base_model_path, model_size, huggingface_ckpt, model_params, mem_info)
   chkpt_vars = {}
   checkpoint = {}
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.pth"))
@@ -831,6 +836,7 @@ def save_jax_weights_to_checkpoint(maxtext_model_path, jax_weights):
     # Upon preemption, exit when and only when all ongoing saves are complete.
     checkpoint_manager.wait_until_finished()
 
+
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
   parser.add_argument("--base-model-path", type=str, required=True)
@@ -843,4 +849,6 @@ if __name__ == "__main__":
     raise NotImplementedError
 
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={SIMULATED_CPU_DEVICES_COUNT}"
-  save_jax_weights_to_checkpoint(args.maxtext_model_path, convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint))
+  save_jax_weights_to_checkpoint(
+      args.maxtext_model_path, convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint)
+  )
