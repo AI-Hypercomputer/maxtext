@@ -239,8 +239,7 @@ class AttentionOp(nn.Module):
         if jax.devices()[0].platform == 'gpu':
           key = jnp.repeat(key, self.num_query_heads // self.num_kv_heads, axis=2)
           value = jnp.repeat(value, self.num_query_heads // self.num_kv_heads, axis=2)
-          sm_scale = 1.0 / math.sqrt(query.shape[-1])
-          out = pallas_attention.mha(query, key, value, decoder_segment_ids, sm_scale=sm_scale, causal=False)
+          out = pallas_attention.mha(query, key, value, decoder_segment_ids, sm_scale=1.0, causal=True)
           return out, None, None
         else:
           assert False
