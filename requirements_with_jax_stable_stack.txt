@@ -23,3 +23,4 @@ pathwaysutils@git+https://github.com/google/pathways-utils.git
 google-cloud-monitoring
 google-api-core
 google-api-python-client
+omegaconf
