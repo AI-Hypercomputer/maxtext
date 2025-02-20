@@ -415,18 +415,13 @@ def generate_xpk_workload_cmd(
   docker_image_flag = ''
   # pathways-related flags
   pathways_specific_flags = ''
+  workload_create_command = f'python3 {wl_config.xpk_path}/xpk.py workload create'
+  device_type = f' --device-type={cluster_config.device_type}'
   if is_pathways_enabled:
     pw_config = wl_config.pathways_config
-    pathways_specific_flags = (
-        '--use-pathways'
-        f' --server-image={pw_config.server_image}'
-        f' --proxy-server-image={pw_config.proxy_image}'
-        f' --remote-python-sidecar-image={pw_config.remote_python_sidecar_image}'
-        if pw_config.remote_python_sidecar_image is not None else ''
-        ' --termination-grace-period-seconds=300'
-        f' --pathways-gcs-location={wl_config.base_output_directory}'
-        f' --restart-on-user-code-failure'
-        f' --debug-dump-gcs={wl_config.base_output_directory}'
+    device_type = f' --tpu-type={wl_config.device_type}'
+    workload_create_command = (
+        f'python3 {wl_config.xpk_path}/xpk.py workload create-pathways'
     )
     docker_image_flag = (
         f'--docker-image={pw_config.runner_image}'
@@ -434,16 +429,15 @@ def generate_xpk_workload_cmd(
   else:
     docker_image_flag = f'--base-docker-image="{wl_config.base_docker_image}"'
 
-
   print(f'User command: {user_command}')
   return (
       (
-          f'python3 {wl_config.xpk_path}/xpk.py workload create'
-          f' {pathways_specific_flags}'
+          f'{workload_create_command}'
+          f' {_get_pathways_specific_flags(wl_config)}'
           f' --cluster={cluster_config.cluster_name}'
           f' --project={cluster_config.project}'
           f' --zone={cluster_config.zone}'
-          f' --device-type={cluster_config.device_type}'
+          f' {device_type}'
           f' --num-slices={wl_config.num_slices}'
           f' --command="{user_command}"'
           f' {docker_image_flag}'
