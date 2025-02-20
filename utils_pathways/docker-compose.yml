@@ -62,7 +62,8 @@ services:
       - JAX_BACKEND_TARGET=grpc://proxy:29008
     entrypoint: ["bash", "-c"]
     command:
-      - "cd MaxText ; python3 -m pytest -m tpu_only tests -s"
+      - cd MaxText ; python3 -m pytest tests -m "not gpu_only and not integration_test" -s
+      # - "cd MaxText ; python3 -m pytest -m tpu_only tests -s"
       # - "cd MaxText ; python3 -m pytest -s tests/train_tests.py -m tpu_only"
     depends_on:
       - proxy

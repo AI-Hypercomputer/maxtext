@@ -54,3 +54,4 @@ MAXTEXT_IMAGE=${maxtext_image} docker compose down
 # echo $?
 # sleep 20
 # docker compose ps
+# MAXTEXT_IMAGE=${maxtext_image} docker compose logs -f maxtext
