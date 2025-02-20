@@ -104,14 +104,14 @@ def test_huggingface_to_maxtext_back_to_huggingface_flow():
   wq1 = wq.transpose()
   wq2 = np.reshape(wq1, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
 
-  wq3 = llama_or_mistral_ckpt.permute_to_match_maxtext_rope(wq2)
+  wq3 = permute_to_match_maxtext_rope(wq2)
   stack_shape = (1,)
   x = np.zeros(stack_shape + wq3.shape, dtype=np.float16)
   x[0, ...] = wq3
   x = np.transpose(x, axes=(1, 0, 2, 3))
 
   x = x[:, 0, :, :]
-  wq4 = llama_mistral_mixtral_orbax_to_hf.unpermute_from_match_maxtext_rope(x, "llama3.1")
+  wq4 = unpermute_from_match_maxtext_rope(x, "llama3.1")
   wq5 = wq4.reshape(base_num_query_heads * head_dim, base_num_query_heads * head_dim)
   wq6 = wq5.transpose()
 
