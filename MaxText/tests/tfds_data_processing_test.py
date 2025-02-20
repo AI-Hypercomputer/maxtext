@@ -34,7 +34,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         per_device_batch_size=1,
         run_name="test",
@@ -47,8 +47,8 @@ class TfdsDataProcessingTest(unittest.TestCase):
         enable_checkpointing=False,
         eval_interval=10,
     )
-    os.environ["TFDS_DATA_DIR"] = pyconfig.config.dataset_path
-    self.config = pyconfig.config
+    os.environ["TFDS_DATA_DIR"] = config.dataset_path
+    self.config = config
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
     self.process_indices = input_pipeline_interface.get_process_loading_real_data(

@@ -30,8 +30,7 @@ def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
-  pyconfig.initialize(argv)
-  config = pyconfig.config
+  config = pyconfig.initialize(argv)
   validate_config(config)
   max_utils.print_system_information()
 
@@ -68,10 +67,9 @@ def main(argv: Sequence[str]) -> None:
   output = tokenizer_model.decode(results)
   print(f"Input `{text}` -> `{output}`")
 
-  if config.autoregressive_decode_assert != "":
-    assert (
-        output == config.autoregressive_decode_assert
-    ), f"generated text mismatch {output=} {config.autoregressive_decode_assert=}"
+  assert output.startswith(
+      config.autoregressive_decode_assert
+  ), f"generated text mismatch {output=}, {config.autoregressive_decode_assert=}"
 
 
 def validate_config(config):

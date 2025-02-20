@@ -30,6 +30,7 @@ import jax.numpy as jnp
 import common_types
 from kernels.ragged_attention import ragged_gqa
 from kernels.ragged_attention import ragged_mha
+from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from layers import embeddings
 from layers import initializers
 from layers import linears
@@ -237,17 +238,27 @@ class AttentionOp(nn.Module):
     ):
       return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
     elif self.attention_kernel == "flash" or self.attention_kernel == "autoselected":
-      if isinstance(key, KVTensor):
-        key = key.dequant()
-      if isinstance(value, KVTensor):
-        value = value.dequant()
+      if jax.devices()[0].platform == "tpu":
+        if isinstance(key, KVTensor):
+          key = key.dequant()
+        if isinstance(value, KVTensor):
+          value = value.dequant()
 
-      if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-        raise ValueError(
-            """Decode not supported with flash attention.
-                            Use `dot_product` instead."""
-        )
-      return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap), None, None
+        if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+          raise ValueError(
+              """Decode not supported with flash attention.
+                              Use `dot_product` instead."""
+          )
+        return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap), None, None
+      else:
+        if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+          # fallback to dot_product as pallas gpu flash attention doesn't support decode stage
+          return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
+        else:
+          key = jnp.repeat(key, self.num_query_heads // self.num_kv_heads, axis=2)
+          value = jnp.repeat(value, self.num_query_heads // self.num_kv_heads, axis=2)
+          out = gpu_pallas_attention.mha(query, key, value, decoder_segment_ids, sm_scale=1.0, causal=True)
+          return out, None, None
     elif self.attention_kernel == "cudnn_flash_te":
       if isinstance(key, KVTensor):
         key = key.dequant()
@@ -988,7 +999,7 @@ class AttentionOp(nn.Module):
       two tuples of (k, v, decoder_segments) -- either can be Nones
 
     """
-    if key.shape != value.shape:
+    if key.shape != value.shape and self.config.attention_type != AttentionType.MLA.value:
       raise ValueError(f"Can't KV cache with mismatched shapes {key.shape=}, {value.shape=}")
 
     if model_mode == common_types.MODEL_MODE_TRAIN:
@@ -1272,6 +1283,11 @@ class Attention(nn.Module):
     elif rope_type.startswith("yarn"):
       rotary_embedding = YarnRotaryEmbedding(
           max_seq_len=self.config.max_target_length,
+          original_seq_len=self.config.original_seq_len,
+          beta_fast=self.config.beta_fast,
+          beta_slow=self.config.beta_slow,
+          rope_theta=self.config.rope_theta,
+          rope_factor=self.config.rope_factor,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
           name=name,
@@ -1370,7 +1386,7 @@ class MLA(Attention):
   max_seq_len: int = 4096 * 4
   original_seq_len: int = 4096
   mscale: float = 1.0  # scaling factor for softmax
-  rope_factor: float = 10000.0  # rotary embedding factor
+  rope_factor: float = 40.0  # rotary embedding factor
 
   @property
   def qk_head_dim(self) -> int:
@@ -1381,7 +1397,9 @@ class MLA(Attention):
     super().setup()
 
     # Assert required configuration parameters for MLA attention.
-    assert self.config.attention_type == AttentionType.MLA.value, "MLA requires MLA attention type"
+    assert (
+        self.config.attention_type == AttentionType.MLA.value
+    ), f"MLA requires MLA attention type {AttentionType.MLA.value}"
     assert self.kv_lora_rank > 0, "KV LoRA rank must be > 0"
     assert self.qk_nope_head_dim > 0, "QK NoPe head dim must be > 0"
     assert self.qk_rope_head_dim > 0, "QK RoPE head dim must be > 0"
@@ -1392,7 +1410,7 @@ class MLA(Attention):
     if self.q_lora_rank == 0:
       # Standard Q projection (without LoRA).
       self.query_proj = DenseGeneral(
-          features=(self.num_query_heads, self.head_dim),
+          features=(self.num_query_heads, self.qk_head_dim),
           axis=-1,
           kernel_init=self.kernel_init,
           kernel_axes=("embed", "q_heads", "kv"),

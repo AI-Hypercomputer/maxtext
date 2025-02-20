@@ -50,14 +50,13 @@ class QuantTestModule(nn.Module):
 
 
 def _configure_quantization(quant_str="", quant_cfg_path="", mode_str="train", replicate_scale=False):
-  pyconfig.initialize(
+  config = pyconfig.initialize(
       [None, "configs/base.yml"],
       enable_checkpointing=False,
       quantization=quant_str,
       quant_cfg_path=quant_cfg_path,
       replicate_quant_scale=replicate_scale,
   )
-  config = pyconfig.config
   quant = quantizations.configure_quantization(config, mode_str)
   return quant
 
