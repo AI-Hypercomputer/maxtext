@@ -36,9 +36,7 @@ def main() -> int:
   xpk_path = "xpk"
 
   # Handle command line arguments using args_helper
-  should_continue = helper.handle_cmd_args(
-      cluster_config, helper.DELETE, xpk_path=xpk_path
-  )
+  should_continue = helper.handle_cmd_args(cluster_config, helper.DELETE, xpk_path=xpk_path)
 
   if not should_continue:
     return 0
@@ -46,14 +44,8 @@ def main() -> int:
   # Configure test images
   user = os.environ["USER"]
   region = "-".join(cluster_config.zone.split("-")[:-1])
-  proxy_image = (
-      f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/{user}/"
-      "proxy_server:latest"
-  )
-  server_image = (
-      f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/{user}/"
-      "server:latest"
-  )
+  proxy_image = f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/{user}/" "proxy_server:latest"
+  server_image = f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/{user}/" "server:latest"
   remote_python_image = f"gcr.io/{cluster_config.project}/{user}/remote_python_sidecar_latest:latest"
   runner = f"gcr.io/{cluster_config.project}/{user}_latest:latest"
   base_output_directory = f"gs://{user}-{region}/{user}"
@@ -92,9 +84,7 @@ def main() -> int:
             xpk_path=xpk_path,
             num_steps=1000000,
         )
-        command, name = mxr.generate_xpk_workload_cmd(
-            cluster_config=cluster_config, wl_config=wl_config
-        )
+        command, name = mxr.generate_xpk_workload_cmd(cluster_config=cluster_config, wl_config=wl_config)
 
         print(f"Name of the workload is: {name} \n")
         xpk_workload_names.append(name)
@@ -102,12 +92,8 @@ def main() -> int:
         print(f"XPK command to be used is: {command} \n")
         xpk_workload_cmds.append(command)
 
-  for xpk_workload_name, xpk_workload_cmd in zip(
-      xpk_workload_names, xpk_workload_cmds
-  ):
-    return_code = mxr.run_command_with_updates(
-        xpk_workload_cmd, xpk_workload_name
-    )
+  for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
+    return_code = mxr.run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
     if return_code != 0:
       print(f"Unable to run xpk workload: {xpk_workload_name}")
 

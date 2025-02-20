@@ -3,7 +3,7 @@
 # huggingface-cli download meta-llama/Llama-3.1-8B-Instruct --local-dir $CHECKPOINT_ORIGINAL
 
 # Or download the DeepSeek llama 8B model
-export CHECKPOINT_ORIGINAL=/mnt/disks/persist/checkpoints/huggingface/Llama3.1-8B-Instruct
+export CHECKPOINT_ORIGINAL=/mnt/disks/persist/checkpoints/huggingface/DeepSeek-R1-Distill-Llama-8B
 huggingface-cli download deepseek-ai/DeepSeek-R1-Distill-Llama-8B --local-dir $CHECKPOINT_ORIGINAL
 
 export CHECKPOINT_TPU_SCANNED=$CHECKPOINT_ORIGINAL/scanned_chkpt
@@ -12,29 +12,41 @@ export TOKENIZER=assets/tokenizer_llama3.tiktoken
 export BASE_OUTPUT_PATH=$CHECKPOINT_ORIGINAL
 export RUN_NAME=unscanned_chkpt
 export CHECKPOINT_TPU_UNSCANNED=$BASE_OUTPUT_PATH/$RUN_NAME/checkpoints/0/items
+export CHECKPOINT_TPU_CONVERTED_BACK=${CHECKPOINT_ORIGINAL}/converted_back
+export MODEL_SIZE=llama3.1-8b
 
-JAX_PLATFORMS=cpu python3 MaxText/llama_or_mistral_ckpt.py --base-model-path=$CHECKPOINT_ORIGINAL --model-size=llama3.1-8b --maxtext-model-path=$CHECKPOINT_TPU_SCANNED  --huggingface-checkpoint=true
+# Remove previous checkpoints to have a clean start
+rm $CHECKPOINT_ORIGINAL/scanned_chkpt $CHECKPOINT_ORIGINAL/unscanned_chkpt ${CHECKPOINT_ORIGINAL}/converted_back
+
+# Convert the checkpoints
+JAX_PLATFORMS=cpu python3 MaxText/llama_or_mistral_ckpt.py --base-model-path=$CHECKPOINT_ORIGINAL --model-size=$MODEL_SIZE --maxtext-model-path=$CHECKPOINT_TPU_SCANNED  --huggingface-checkpoint=true
 
 # Let's verify the generated scanned checkpoint to see if it matches with Huggingface golden logits
 python3 MaxText/tests/forward_pass_logit_checker.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_PATH} tokenizer_path=$TOKENIZER load_parameters_path=${CHECKPOINT_TPU_SCANNED}/0/items run_name=forward_pass_test_hf per_device_batch_size=1 model_name=$MODEL_SIZE max_prefill_predict_length=3 max_target_length=4 dataset_type=synthetic dtype=float32 activations_in_float32=true matmul_precision=float32 async_checkpointing=false scan_layers=true --max_kl_div=1e-4
 
 # If not, we can convert the checkpoint back from MaxText to Huggingface and compare with the orignal one
-JAX_PLATFORMS=cpu python3 MaxText/llama_mistral_mixtral_orbax_to_hf.py MaxText/configs/base.yml base_output_directory=gs://runner-maxtext-logs load_parameters_path=${CHECKPOINT_TPU_SCANNED}/0/items run_name=convert_to_hf model_name=${MODEL_SIZE} hf_model_path=/tmp/hf_llama3_1
-python3 MaxText load_checkpoint.py
+JAX_PLATFORMS=cpu python3 MaxText/llama_mistral_mixtral_orbax_to_hf.py MaxText/configs/base.yml base_output_directory=gs://runner-maxtext-logs load_parameters_path=${CHECKPOINT_TPU_SCANNED}/0/items run_name=convert_to_hf model_name=${MODEL_SIZE} hf_model_path=$CHECKPOINT_TPU_CONVERTED_BACK
+
+python3 MaxText/tests/hf_checkpoint_conversion_test.py --original_ckpt=${CHECKPOINT_ORIGINAL} --converted_cckpt=$CHECKPOINT_TPU_CONVERTED_BACK
 
 # If everything looks good, we move on to convert to the unrolled checkpoint for performant serving
 JAX_PLATFORMS=cpu python MaxText/generate_param_only_checkpoint.py MaxText/configs/base.yml async_checkpointing=false base_output_directory=${BASE_OUTPUT_PATH} load_parameters_path=${CHECKPOINT_TPU_SCANNED}/0/items run_name=${RUN_NAME} model_name=${MODEL_SIZE} force_unroll=true
 
+# Let's verify the generated unscanned checkpoint to see if it matches with Huggingface golden logits
+python3 MaxText/tests/forward_pass_logit_checker.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_PATH} tokenizer_path=$TOKENIZER load_parameters_path=${CHECKPOINT_TPU_UNSCANNED} run_name=forward_pass_test_hf per_device_batch_size=1 model_name=$MODEL_SIZE max_prefill_predict_length=3 max_target_length=4 dataset_type=synthetic dtype=float32 activations_in_float32=true matmul_precision=float32 async_checkpointing=false scan_layers=false --max_kl_div=1e-4
 
 JAX_PLATFORMS=tpu python MaxText/decode.py MaxText/configs/base.yml tokenizer_path=$TOKENIZER run_name=runner_2025-02-13-08-31 steps=10 weight_dtype=bfloat16 async_checkpointing=false model_name=$MODEL_SIZE ici_fsdp_parallelism=1 ici_autoregressive_parallelism=-1 per_device_batch_size=1 prompt="I love to" scan_layers=false load_parameters_path=$CHECKPOINT_TPU_UNSCANNED
 
-# Output from huggingface 8B model on MaxText:
+# You can also check the results from scanned version:
+JAX_PLATFORMS=tpu python MaxText/decode.py MaxText/configs/base.yml tokenizer_path=$TOKENIZER run_name=runner_2025-02-13-08-31 steps=10 weight_dtype=bfloat16 async_checkpointing=false model_name=$MODEL_SIZE ici_fsdp_parallelism=1 ici_autoregressive_parallelism=-1 per_device_batch_size=1 prompt="I love to" scan_layers=true load_parameters_path=$CHECKPOINT_TPU_SCANNED/0/items
+
+##### Output from huggingface llama 8B Instruct checkpoint on MaxText:
 #Input `I love to` -> ` travel and explore new places, but I also love to stay at home and relax. I'm a bit of a homebody, and I enjoy spending time with my family and friends. I'm a bit of a foodie, and I love trying new recipes and experimenting with different flavors and ingredients. I'm also a bit of a movie buff, and I love watching classic films and new releases alike.
 # I'm a bit of a hopeless romantic, and I believe in the idea of true love. I'm looking for someone who shares my values and my sense of humor, and who is always up for a good time. I'm a bit of a goofball, and I love to laugh and have fun. I'm looking for someone who can keep up with me and appreciate my quirks.
 # I'm a bit of a creative person, and I love to express myself through art, music, and writing. I'm a bit of a dreamer, and I love to imagine new possibilities and scenarios. I'm a bit of a perfectionist, and I always strive to do my best and be my best self.
 # ...
 
-# Output from huggingface DeekSeek 8B model on MaxText:
+##### Output from huggingface DeekSeek distilled llama 8B checkpoint on MaxText:
 # Input `I love to` -> ` write, but I'm not sure how to start a blog. I have some ideas, but I don't know where to begin. Maybe I should just start writing and see where it goes. But I don't want to end up with just a few posts and then stop. How do I keep going?
 
 # I also wonder if I should focus on a specific niche or write about a variety of topics. I like cooking, photography, and personal development. It's hard to decide which one to focus on. Maybe I can combine them somehow?
@@ -161,3 +173,6 @@ JAX_PLATFORMS=tpu python MaxText/decode.py MaxText/configs/base.yml tokenizer_pa
 # ### 1. **Choose a Niche**
 #    - **Start Small:** Begin with a specific niche that aligns with your interests, such as cooking, photography, or personal development.
 #    - **Combine Interests:** If you're unsure, consider blending your passions, like a food blog with photography tips or a personal development blog with`
+
+##### Output from the original Huggingface model 8B on GPU:
+# [{'generated_text': "I love to cook, but my problem is that I don't have enough space in my kitchen. I'm trying to figure out how to make the most of the limited space I have. I have a small kitchen, so I need to be strategic about how I use the existing space. Let me think about the different areas in my kitchen and how I can optimize them.\n\nFirst, my countertops are pretty cluttered. I have appliances like my coffee maker, toaster, and blender all out in the open. I wonder if I can find a better way to store these so they don't take up as much space. Maybe I can get some sort of organizers or racks to keep them in one place.\n\nThen, my cabinets are mostly empty, but I don't have enough storage for all my spices and utensils. I have a lot of spices in those small glass containers, and they take up a lot of space. Maybe I can get some spice racks or use some of those small containers to organize them better. Also, my utensils are all jumbled up in a drawer; I should probably get some dividers or a drawer organizer to keep them separate.\n\nI have a small pantry, but it's not very organized. I have canned goods and dry goods all mixed together. I think I need some kind of shelf or bin to separate them into categories like baking supplies, snacks, and pantry staples. That way, I can find what I need without digging through everything.\n\nThe sink area is another issue. I always have dishes piling up next to the sink. I should get some dish racks or maybe a small trash can with a lid to keep things tidy. Also, there's a lot of water spots on the counter; maybe a wet wipe container would help keep things clean.\n\nI have a small dining area that's also cluttered. I have a small table and chairs, but there's always stuff laying on the table. I should probably get some storage benches or a shelf to put things like mail or coats out of the way.\n\nIn the corner where the stove is, there's not much space. I have a pan rack there, but it's not enough. I might need a larger rack or maybe some hanging storage solutions to maximize the vertical space.\n\nThe floor is another area I can utilize. I have some extra boxes under the sink that I can maybe move elsewhere or get some stacking bins to store things like seasonal items or extra kitchen gadgets.\n\nI also have a lot of small kitchen appliances that I don't use often. Maybe I can find a place to store them more efficiently, like on the top shelf of the pantry or using some vertical storage.\n\nI think I need to focus on each area one by one and figure out the best way to organize them. Maybe start with the countertops by getting some organizers for the appliances. Then move on to the cabinets and pantry, organizing spices and utensils. After that, work on the sink area and dining area. Finally, look into the vertical spaces and floor storage to maximize the space.\n\nI should also think about multi-functional furniture, like a bench that can hold some storage or a kitchen cart that can help move things around without taking up too much space. Maybe using the walls for more storage with some hooks or shelves.\n\nIt's a bit overwhelming, but if I take it step by step, I can definitely make a big difference in my kitchen. I'll start by decluttering and then figure out the best storage solutions for each area.\n**Step-by-Step Explanation and Answer:**\n\nTo optimize your small kitchen, follow this organized approach:\n\n1. **Countertops:**\n   - **Clear Clutter:** Remove appliances like the coffee maker, toaster, and blender.\n   - **Storage Solutions:**\n     - Use a wall-mounted organizer or a shelf to keep these appliances tidy.\n     - Opt for a slim drawer or tray for small items like cutlery or utensils.\n\n2. **Cabinets:**\n   - **Spices:** Install a spice rack or use small, labeled containers for easy access.\n   - **Utensils:** Utilize drawer dividers or a kitchen utensil organizer to keep them sorted.\n\n3. **Pantry:**\n   - **Categorize Foods:** Use labeled bins or shelves for baking supplies, snacks, and staples.\n   - **Vertical Storage:** Install shelving or use hanging storage for frequently used items.\n\n4. **Sink Area:**\n   - **Dish Storage:** Place a dish rack near the sink for drying utensils or dishes.\n   - **Trash and Cleaning Supplies:** Keep a small trash can with a lid and store cleaning products on a shelf or under the sink.\n\n5. **Dining Area:**\n   - **Storage Solutions:**\n     - Use a small bench with storage for items like mail or coats.\n     - Install a shelf above the table for decor or extra storage.\n\n6. **"}]
