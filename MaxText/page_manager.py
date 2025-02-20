@@ -57,20 +57,24 @@ class PageManager(nn.Module):
     from flax.linen import partitioning as nn_partitioning
     from jax.sharding import PartitionSpec as P
 
-    self.key_pages = self.variable(
-        "cache",
-        "key_pages",
-        nn_partitioning.with_sharding_constraint,
-        key_pages_init,
-        P(None, "tensor", None, None),
-    )
-    self.value_pages = self.variable(
-        "cache",
-        "value_pages",
-        nn_partitioning.with_sharding_constraint,
-        value_pages_init,
-        P(None, "tensor", None, None),
-    )
+    if not jax.config.jax_dynamic_shapes: # Check for dynamic shapes.
+        self.key_pages = self.variable(
+            "cache",
+            "key_pages",
+            nn_partitioning.with_sharding_constraint,
+            key_pages_init,
+            P(None, "tensor", None, None),
+        )
+        self.value_pages = self.variable(
+            "cache",
+            "value_pages",
+            nn_partitioning.with_sharding_constraint,
+            value_pages_init,
+            P(None, "tensor", None, None),
+        )
+    else:
+        self.key_pages = self.variable("cache", "key_pages", lambda: key_pages_init)
+        self.value_pages = self.variable("cache", "value_pages", lambda: value_pages_init)
 
   def _validate_init_params(self):
     if self.num_pages <= 0:

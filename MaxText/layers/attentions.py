@@ -179,29 +179,43 @@ def get_initial_contiguous_kv_cache(model, config, batch_size, abstract=False):
     else:
       raise ValueError("Contiguous attention only uses static shapes for kv-cache, and shouldn't rely on variables. Use abstract=True.")
 
+def get_prefill_paged_kv_cache_annotations(model, config, rng, mesh):
+    if config.attention == "paged":
+        with nn_partitioning.axis_rules(config.logical_axis_rules):
+            input_shape = (config.global_batch_size_to_load, 1)
+            
+            # Initialize with full variable collection structure
+            variables = model.init(
+                {"params": rng, "dropout": rng, "cache": rng},
+                jnp.ones(input_shape, dtype=jnp.int32),
+                jnp.ones(input_shape, dtype=jnp.int32),
+                decoder_segment_ids=None,
+                enable_dropout=False,
+                model_mode=common_types.MODEL_MODE_PREFILL,
+            )
+            
+            return variables.get("cache", {})
+
+    raise ValueError("Incorrect config.attention. Expected paged")
+
 def get_initial_paged_kv_cache(model, config, batch_size, abstract=False):
     if not abstract:
         raise ValueError("PagedAttention only supports abstract initialization of KV cache, please use abstract=True")
 
-    def create_page_manager(config):
-        return PageManager(
-            num_pages=config.num_pages,
-            tokens_per_page=config.tokens_per_page,
-            max_page_groups=int(config.per_device_batch_size * jax.device_count()),
-            max_target_length=config.max_target_length,
-            max_prefill_predict_length=config.max_prefill_predict_length,
-            max_pages_per_group=(config.max_target_length + config.tokens_per_page - 1) // config.tokens_per_page,
-            config=config,
-        )
-
     if config.attention == "paged":
-        page_managers = [create_page_manager(config) for _ in range(config.num_decoder_layers)]
-
-        def layer_page_state_shape(page_manager):
-            return jax.eval_shape(page_manager.get_page_state)
+        def layer_page_state_shape(config):
+            return PageManager(
+                num_pages=config.num_pages,
+                tokens_per_page=config.tokens_per_page,
+                max_page_groups=int(config.per_device_batch_size * jax.device_count()),
+                max_target_length=config.max_target_length,
+                max_prefill_predict_length=config.max_prefill_predict_length,
+                max_pages_per_group=(config.max_target_length + config.tokens_per_page -1) // config.tokens_per_page,
+                config=config
+            ).get_page_state()
 
         # Get shape of PageState for each layer.
-        layers_page_state_shapes = [layer_page_state_shape(pm) for pm in page_managers]
+        layers_page_state_shapes = [layer_page_state_shape(config) for _ in range(config.num_decoder_layers)]
 
         # Create overall cache structure.
         cache = {}
@@ -210,39 +224,6 @@ def get_initial_paged_kv_cache(model, config, batch_size, abstract=False):
         return {"decoder": cache}  # Wrap in a 'decoder' dict to match the non-paged structure.
 
     return {} # return a blank for non-paged attention
-
-def get_prefill_paged_kv_cache_annotations(model, config, rng_prefill, mesh):
-    """Creates the KV cache annotations for prefill."""
-    if config.attention == "paged":
-        with nn_partitioning.axis_rules(config.logical_axis_rules):
-            input_shape = (config.global_batch_size_to_load, 1)  # dummy shape
-
-            # Initialize with both params and cache as mutable
-            variables = model.init(
-                {"params": rng_prefill, "dropout": rng_prefill, "aqt": rng_prefill},
-                jnp.ones(input_shape, dtype=jnp.int32),
-                jnp.ones(input_shape, dtype=jnp.int32),
-                model_mode=common_types.MODEL_MODE_PREFILL,
-                mutable=["params", "cache"],
-            )
-
-            # Get just the cache part
-            cache = variables["cache"]
-
-            def get_axis_names(x):
-                if isinstance(x, nn.spmd.LogicallyPartitioned):
-                    return tuple(x.names)
-
-            annotations = jax.tree_util.tree_map(
-                get_axis_names, 
-                cache,
-                is_leaf=lambda k: isinstance(k, (nn.spmd.LogicallyPartitioned, jax.Array))
-            )
-
-            return annotations
-    else:
-        raise ValueError("Incorrect config.attention. Expected paged")
-
 
 class PagedAttentionOp(nn.Module):
   """Paged Attention Operator."""

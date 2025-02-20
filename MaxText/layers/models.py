@@ -215,25 +215,8 @@ class Decoder(nn.Module):
     self.decoder_layer = self.get_decoder_layers()
     self.norm_layer = self.get_norm_layer()
 
-    if cfg.attention == "paged":
-      self.page_managers = self.variable(
-          "cache",
-          "page_managers",
-          lambda: [
-              PageManager(
-                  num_pages=cfg.num_pages,
-                  tokens_per_page=cfg.tokens_per_page,
-                  max_page_groups=int(cfg.per_device_batch_size * jax.device_count()),
-                  max_target_length=cfg.max_target_length,
-                  max_prefill_predict_length=cfg.max_prefill_predict_length,
-                  max_pages_per_group=(cfg.max_target_length + cfg.tokens_per_page - 1) // cfg.tokens_per_page,
-                  config=cfg
-              )
-              for _ in range(cfg.num_decoder_layers)
-          ],
-      )
-    else:
-        self.page_managers = None  # Explicitly set to None if not paged
+    # DO NOT create PageManagers here.  Delay this until needed.
+    self.page_managers = None
 
     if self.config.using_pipeline_parallelism:
       pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer[0])
@@ -241,6 +224,29 @@ class Decoder(nn.Module):
       self.pipeline_module = pipeline.Pipeline(
           config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
       )
+  
+  def _create_page_managers(self):
+      """Creates the PageManager instances (now a separate method)."""
+      cfg = self.config
+      if cfg.attention == "paged":
+        self.page_managers = self.variable(
+            "cache",
+            "page_managers",
+            lambda: [
+                PageManager(
+                    num_pages=cfg.num_pages,
+                    tokens_per_page=cfg.tokens_per_page,
+                    max_page_groups=int(cfg.per_device_batch_size * jax.device_count()),
+                    max_target_length=cfg.max_target_length,
+                    max_prefill_predict_length=cfg.max_prefill_predict_length,
+                    max_pages_per_group=(cfg.max_target_length + cfg.tokens_per_page - 1) // cfg.tokens_per_page,
+                    config=cfg
+                )
+                for _ in range(cfg.num_decoder_layers)
+            ],
+        )
+      else:
+          self.page_managers = None
 
   def get_remat_policy(self):
     cfg = self.config
@@ -432,13 +438,12 @@ class Decoder(nn.Module):
         model_mode=common_types.MODEL_MODE_TRAIN,
         slot=None,
         true_length=None,
-        page_manager=None,  # Added to Decoder
+        page_manager=None, # Keep page_manager
     ):
         cfg = self.config
         mesh = self.mesh
-        assert decoder_input_tokens.ndim == 2  # [batch, len]
+        assert decoder_input_tokens.ndim == 2
 
-        # [batch, length] -> [batch, length, emb_dim]
         y = self.shared_embedding(decoder_input_tokens.astype("int32"))
         y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
             y, deterministic=deterministic
@@ -469,7 +474,7 @@ class Decoder(nn.Module):
                 )
             else:
                 partition_spec = (
-                    None  # This partition spec is only used for the fsdp_ag_once feature.
+                    None
                 )
             y = self.pipeline_module(
                 y,
@@ -480,17 +485,21 @@ class Decoder(nn.Module):
                 partition_spec=partition_spec,
             )
         else:
-            # Iterate through layers, and PageManagers *if* they exist
+            if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE and cfg.attention == "paged":
+                if self.page_managers is None:  # First call
+                  self._create_page_managers()
+                page_managers_list = self.page_managers.value
+            else:
+                page_managers_list = None
+
+            # Iterate through layers
             for lyr in range(cfg.num_decoder_layers):
-                # Get the appropriate decoder layer class.
                 RemattedBlockLayers = self.set_remat_policy(
                     self.decoder_layer, self.get_remat_policy()
                 )
-                page_manager_instance = self.page_managers.value[lyr] if (self.page_managers is not None and model_mode == "autoregressive") else None
+                page_manager_instance = page_managers_list[lyr] if page_managers_list is not None else None
 
-                current_layer_class = RemattedBlockLayers[
-                    lyr % len(RemattedBlockLayers)
-                ]
+                current_layer_class = RemattedBlockLayers[lyr % len(RemattedBlockLayers)]
                 layer_instance = current_layer_class(
                     config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant
                 )
@@ -503,7 +512,7 @@ class Decoder(nn.Module):
                     model_mode,
                     slot=slot,
                     true_length=true_length,
-                    page_manager=page_manager_instance,  # Always pass, handle internally
+                    page_manager=page_manager_instance,
                 )
 
         y = self.get_norm_layer()(
