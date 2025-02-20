@@ -7,8 +7,6 @@ aqtp
 cloud-accelerator-diagnostics
 cloud-tpu-diagnostics
 datasets
-docker
-docker-compose-plugin
 gcsfs
 google-cloud-aiplatform==1.61.0
 google-cloud-storage

@@ -33,7 +33,9 @@ gcloud auth configure-docker us-docker.pkg.dev --quiet
 set -e
 # Default - 
 maxtext_image=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest
-# Set environment variables
+
+
+# Parse input variables
 for ARGUMENT in "$@"; do
     IFS='=' read -r KEY VALUE <<< "$ARGUMENT"
     export "$KEY"="$VALUE"
@@ -43,6 +45,7 @@ done
 cd utils_pathways
 MAXTEXT_IMAGE=${maxtext_image} docker compose down
 sleep 10
+echo "MAXTEXT image ----------------"
 echo $MAXTEXT_IMAGE
 MAXTEXT_IMAGE=${maxtext_image} docker compose up --exit-code-from maxtext
 sleep 10

@@ -29,7 +29,6 @@ from input_pipeline import input_pipeline_interface
 
 class HfDataProcessingTest(unittest.TestCase):
 
-  @pytest.mark.skip(reason="Tests are currently flaking / failing due to HF token issues")
   def setUp(self):
     super().setUp()
     config = pyconfig.initialize(
