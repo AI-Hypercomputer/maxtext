@@ -988,7 +988,7 @@ class AttentionOp(nn.Module):
       two tuples of (k, v, decoder_segments) -- either can be Nones
 
     """
-    if key.shape != value.shape:
+    if key.shape != value.shape and self.config.attention_type != AttentionType.MLA.value:
       raise ValueError(f"Can't KV cache with mismatched shapes {key.shape=}, {value.shape=}")
 
     if model_mode == common_types.MODEL_MODE_TRAIN:
@@ -1272,6 +1272,11 @@ class Attention(nn.Module):
     elif rope_type.startswith("yarn"):
       rotary_embedding = YarnRotaryEmbedding(
           max_seq_len=self.config.max_target_length,
+          original_seq_len=self.config.original_seq_len,
+          beta_fast=self.config.beta_fast,
+          beta_slow=self.config.beta_slow,
+          rope_theta=self.config.rope_theta,
+          rope_factor=self.config.rope_factor,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
           name=name,
@@ -1370,7 +1375,7 @@ class MLA(Attention):
   max_seq_len: int = 4096 * 4
   original_seq_len: int = 4096
   mscale: float = 1.0  # scaling factor for softmax
-  rope_factor: float = 10000.0  # rotary embedding factor
+  rope_factor: float = 40.0  # rotary embedding factor
 
   @property
   def qk_head_dim(self) -> int:
@@ -1381,7 +1386,9 @@ class MLA(Attention):
     super().setup()
 
     # Assert required configuration parameters for MLA attention.
-    assert self.config.attention_type == AttentionType.MLA.value, "MLA requires MLA attention type"
+    assert (
+        self.config.attention_type == AttentionType.MLA.value
+    ), f"MLA requires MLA attention type {AttentionType.MLA.value}"
     assert self.kv_lora_rank > 0, "KV LoRA rank must be > 0"
     assert self.qk_nope_head_dim > 0, "QK NoPe head dim must be > 0"
     assert self.qk_rope_head_dim > 0, "QK RoPE head dim must be > 0"
