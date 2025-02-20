@@ -40,7 +40,7 @@ _FLATTEN_MICROBENCHMARK_RESULTS = False
 # pylint: disable=too-many-positional-arguments
 
 
-def prefix_cache_benchmark(prefix, prefill_length, true_length, cache_num, iters):
+def prefix_cache_benchmark(prefix, prefill_length, true_length, prefix_cache_entries_num, iters):
   """Handles running prefix cache benchmark, and printing results."""
 
   print(f"Prefix Cache benchmark results for prefill length {prefill_length}:\n")
@@ -52,14 +52,14 @@ def prefix_cache_benchmark(prefix, prefill_length, true_length, cache_num, iters
       tokens=tuple(i for i in range(prefill_length)),
   )
   prefix_size_bytes_gb = value.prefix_size_bytes / 1024 / 1024 / 1024
-  prefix_cache_inst = prefix_cache.PrefixCache(cache_num * value.prefix_size_bytes)
+  prefix_cache_inst = prefix_cache.PrefixCache(prefix_cache_entries_num * value.prefix_size_bytes)
   common_len = prefill_length // 2
   remain_len = prefill_length - common_len
   common_prefix_key = tuple(i for i in range(common_len))
 
   # Fill the prefix caching
   new_value_list = []
-  for c_idx in range(cache_num):
+  for c_idx in range(prefix_cache_entries_num):
     key = tuple(i + c_idx * remain_len for i in range(prefill_length))
     new_value = value.clone()
     prefix_cache_inst.save(key, new_value)
@@ -70,7 +70,7 @@ def prefix_cache_benchmark(prefix, prefill_length, true_length, cache_num, iters
   # Save prefix
   start = datetime.datetime.now()
   new_value_list = []
-  for c_idx in range(cache_num):
+  for c_idx in range(prefix_cache_entries_num):
     key = common_prefix_key + tuple(i + c_idx * remain_len for i in range(remain_len))
     # values are not relevant for caching now, just clone the same tokens and values for test
     new_value = value.clone()
@@ -80,10 +80,10 @@ def prefix_cache_benchmark(prefix, prefill_length, true_length, cache_num, iters
   end = datetime.datetime.now()
   del new_value_list
   save_sec = (end - start).total_seconds()
-  save_avg_ms = save_sec * 1000 / cache_num
+  save_avg_ms = save_sec * 1000 / prefix_cache_entries_num
 
   # Fetch longest prefix key
-  key_load = common_prefix_key + tuple(i + cache_num * remain_len for i in range(remain_len))
+  key_load = common_prefix_key + tuple(i + prefix_cache_entries_num * remain_len for i in range(remain_len))
   start = datetime.datetime.now()
   matched_key = None
   for _ in range(iters):
@@ -390,7 +390,7 @@ def run_benchmarks(config):
             prefill_result,
             prefill_length,
             prefill_true_lengths[prefill_length],
-            config.inference_microbenchmark_cache_num,
+            config.inference_microbenchmark_prefix_cache_entries_num,
             benchmark_loop_iters,
         )
         del prefill_result
