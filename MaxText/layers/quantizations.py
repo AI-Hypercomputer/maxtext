@@ -221,6 +221,7 @@ class Fp8Einsum(nn.Module):
     e5m2_dtype: e5m2 variants, e.g., e5m2, e5m2fnuz.
     dtype: computation dtype.
   """
+
   amax_history_length: int = 1024
   e4m3_dtype: DType = jnp.float8_e4m3fn
   e5m2_dtype: DType = jnp.float8_e5m2
