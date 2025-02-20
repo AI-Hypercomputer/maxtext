@@ -15,6 +15,10 @@
 # the subfolders names aka RUN_NAMEs are static. Please remember to change BASE_OUTPUT_PATH across different runs.
 
 set -ex
+
+# Installing torch for deps in forward_pass_logit_chekcker.py
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+
 export MODEL_VARIATION='llama3.1-8b'
 
 if [ -z "${BASE_OUTPUT_PATH}" ]; then
@@ -49,3 +53,11 @@ python MaxText/train.py MaxText/configs/base.yml base_output_directory=${BASE_OU
 
 # We also test whether the forward pass logits match the golden logits for LLama3.1-8B
 python3 MaxText/tests/forward_pass_logit_checker.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_PATH} tokenizer_path=assets/tokenizer_llama3.tiktoken load_parameters_path=${UNSCANNED_CKPT_PATH} run_name=forward_pass_test per_device_batch_size=1 model_name=${MODEL_VARIATION} max_prefill_predict_length=4 max_target_length=4 dataset_type=synthetic dtype=float32 activations_in_float32=true matmul_precision=float32 async_checkpointing=false scan_layers=false  --max_kl_div=1e-4
+
+# Converting MaxText orbax checkpoint to HF
+JAX_PLATFORMS=cpu python3 MaxText/llama_mistral_mixtral_orbax_to_hf.py MaxText/configs/base.yml base_output_directory=gs://runner-maxtext-logs load_parameters_path=${CONVERTED_CHECKPOINT} run_name=convert_to_hf model_name=${MODEL_VARIATION} hf_model_path=/tmp/hf_llama3_1
+
+# Installing torch for running forward pass of a Huggingface checkpoint
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Test whether the forward pass logits match the golden logits for Huggingface checkpoint converted from MaxText orbax checkpoint
+python3 MaxText/tests/forward_pass_logit_checker.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_PATH} tokenizer_path=assets/tokenizer_llama3.tiktoken load_parameters_path=${UNSCANNED_CKPT_PATH} run_name=forward_pass_test_hf per_device_batch_size=1 model_name=${MODEL_VARIATION} max_prefill_predict_length=3 max_target_length=4 dataset_type=synthetic dtype=float32 activations_in_float32=true matmul_precision=float32 async_checkpointing=false scan_layers=false --hf_model_path=/tmp/hf_llama3_1 --max_kl_div=1e-4

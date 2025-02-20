@@ -26,8 +26,8 @@ MaxText aims to be a launching off point for ambitious LLM projects both in rese
 We have used MaxText to [demonstrate high-performance, well-converging training in int8](https://cloud.google.com/blog/products/compute/accurate-quantized-training-aqt-for-tpu-v5e) and [scale training to ~51K chips](https://cloud.google.com/blog/products/compute/the-worlds-largest-distributed-llm-training-job-on-tpu-v5e).
 
 Key supported features:
-* TPUs and GPUs (in preview)
-* Training and Inference (in preview)
+* TPUs and GPUs
+* Training and Inference
 * Models: Llama2, Mistral and Gemma
 
 # Table of Contents
@@ -59,7 +59,7 @@ More details on reproducing these results can be found in [MaxText/configs/READM
 
 | No. of params | Accelerator Type | TFLOP/chip/sec | Model flops utilization (MFU) |
 |---|---|---|---|
-| 32B | v5p-128 | 3.28e+02 | 71.47% |
+| 32B | v5p-128 | 3.28e+02 | 67.76% |
 | 64B | v5p-128 | 3.23e+02 | 70.31% |
 | 128B | v5p-256 | 3.15e+02 | 68.68% |
 | 128B | v5p-512 | 3.15e+02 | 68.53% |
@@ -193,3 +193,12 @@ As in the TPU case, note that the compilation environment must match the executi
 
 ## Automatically Upload Logs to Vertex Tensorboard
 MaxText supports automatic upload of logs collected in a directory to a Tensorboard instance in Vertex AI. Follow [user guide](getting_started/Use_Vertex_AI_Tensorboard.md) to know more.
+
+## Monitor Goodput of Your Workload
+If you are interested in monitoring Goodput metrics of your workload, follow this [user guide](getting_started/Monitor_Goodput.md).
+
+## Announcement
+
+### February 2025
+
+* (Preview): We're excited to announce the preview of building Maxtext Docker images using the JAX Stable Stack base image, available for both TPUs and GPUs. This provides a more reliable and consistent build environment. Learn more [Here](getting_started/Run_MaxText_via_xpk.md)

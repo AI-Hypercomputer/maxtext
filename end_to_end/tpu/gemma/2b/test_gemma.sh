@@ -14,6 +14,9 @@ set -ex
 idx=$(date +%Y-%m-%d-%H-%M)
 export MODEL_VARIATION='2b'
 
+# Installing torch for deps in forward_pass_logit_chekcker.py
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+
 # After downloading checkpoints, copy them to GCS bucket at $CHKPT_BUCKET \
 # Non-Googlers please remember to use separate GCS paths for uploading model weights from kaggle ($CHKPT_BUCKET) and MaxText compatible weights ($MODEL_BUCKET).
 # Non-Googlers please remember to point these variables to GCS buckets that you own, this script uses internal buckets for testing.

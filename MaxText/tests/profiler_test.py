@@ -14,66 +14,86 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-"""Profiler tests for TPUs."""
-import glob
-import json
-import os
+"""Profiler tests."""
+import sys
 import unittest
+import pytest
 
-from tensorboard_plugin_profile.convert import raw_to_tool_data
+import profiler
+import pyconfig
 
 
-class TpuJAXTest(unittest.TestCase):
-  """Test for profile collected with JAX."""
+class ProfilerTest(unittest.TestCase):
+  """Test for profiler."""
 
-  def _get_session_snapshot(self):
-    """Gets a session snapshot of current session. assume only one session."""
-    profile_plugin_root = "tensorboard/plugins/profile"
-    # The session exists under a director whose name is time-dependent.
-    profile_session_glob = os.path.join(profile_plugin_root, "*", "*.xplane.pb")
-    return glob.glob(profile_session_glob)
+  # These periodic proilfer tests can run on any platform (cpu, gpu or tpu)
+  @pytest.mark.tpu_only
+  def test_periodic_profiler_third_period_starts(self):
+    pyconfig.initialize(
+        [sys.argv[0], "configs/base.yml"],
+        enable_checkpointing=False,
+        run_name="test_periodic_profiler_starts_after_regular_profile",
+        profiler="xplane",
+        skip_first_n_steps_for_profiler=7,
+        profiler_steps=4,
+        profile_periodically_period=5,
+    )
+    config = pyconfig.config
+    prof = profiler.Profiler(config, offset_step=2)
 
-  def test_xplane_is_present(self):
-    files = self._get_session_snapshot()
-    self.assertEqual(len(files), 1)
+    step = 24  # 3 * 5 + 7 + 2: 3 periods of 5 after skipping initial 7 skip + 2 offset.
+    assert prof.should_activate_periodic_profile(step)
 
-  def test_overview_page(self):
-    xspace_filenames = self._get_session_snapshot()
-    result, _ = raw_to_tool_data.xspace_to_tool_data(xspace_filenames, "overview_page^", {})
-    result = json.loads(result)
-    run_environment = result[2]
-    self.assertEqual(run_environment["p"]["host_count"], "1")
-    self.assertRegex(run_environment["p"]["device_type"], "TPU.*")
+  @pytest.mark.tpu_only
+  def test_periodic_profiler_not_start_middle_period(self):
+    pyconfig.initialize(
+        [sys.argv[0], "configs/base.yml"],
+        enable_checkpointing=False,
+        run_name="test_periodic_profiler_starts_after_regular_profile",
+        profiler="xplane",
+        skip_first_n_steps_for_profiler=7,
+        profiler_steps=4,
+        profile_periodically_period=5,
+    )
+    config = pyconfig.config
+    prof = profiler.Profiler(config, offset_step=2)
 
-  def test_op_profile(self):
-    xspace_filenames = self._get_session_snapshot()
-    result, _ = raw_to_tool_data.xspace_to_tool_data(xspace_filenames, "op_profile^", {})
-    result = json.loads(result)
-    self.assertIn("byCategory", result)
-    self.assertIn("metrics", result["byCategory"])
-    overall_metrics = result["byCategory"]["metrics"]
-    self.assertIn("flops", overall_metrics)
-    self.assertIn("bandwidthUtils", overall_metrics)
-    self.assertGreater(overall_metrics["flops"], 0)
+    step = 25  # This corresponds to the middle of period 3 which started at step 24.
+    assert not prof.should_activate_periodic_profile(step)
 
-  def test_device_trace_contains_threads(self):
-    xspace_filenames = self._get_session_snapshot()
-    result, _ = raw_to_tool_data.xspace_to_tool_data(xspace_filenames, "trace_viewer^", {})
-    result = json.loads(result)
-    thread_names = []
-    for event in result["traceEvents"]:
-      if "name" in event and event["name"] == "thread_name":
-        thread_names.append((event["args"]["name"]))
-    expected_threads = [
-        "Framework Name Scope",
-        "Framework Ops",
-        "XLA Modules",
-        "XLA Ops",
-        "XLA TraceMe",
-        "Steps",
-    ]
-    # Ensure that thread_names contains at least all expected threads.
-    self.assertEqual(set(expected_threads) - set(thread_names), set())
+  @pytest.mark.tpu_only
+  def test_periodic_profiler_third_period_ends(self):
+    pyconfig.initialize(
+        [sys.argv[0], "configs/base.yml"],
+        enable_checkpointing=False,
+        run_name="test_periodic_profiler_starts_after_regular_profile",
+        profiler="xplane",
+        skip_first_n_steps_for_profiler=7,
+        profiler_steps=4,
+        profile_periodically_period=5,
+    )
+    config = pyconfig.config
+    prof = profiler.Profiler(config, offset_step=2)
+
+    step = 27  # 3 * 5 + 4 + 7 + 2: 3 periods of 5, profile takes 4 steps + skipping initial 7 skip + 2 offset
+    assert prof.should_deactivate_periodic_profile(step)
+
+  @pytest.mark.tpu_only
+  def test_periodic_profiler_third_period_middle_not_end(self):
+    pyconfig.initialize(
+        [sys.argv[0], "configs/base.yml"],
+        enable_checkpointing=False,
+        run_name="test_periodic_profiler_starts_after_regular_profile",
+        profiler="xplane",
+        skip_first_n_steps_for_profiler=7,
+        profiler_steps=4,
+        profile_periodically_period=5,
+    )
+    config = pyconfig.config
+    prof = profiler.Profiler(config, offset_step=2)
+
+    step = 28  # Corresponds to 1 after the third period ended.
+    assert not prof.should_deactivate_periodic_profile(step)
 
 
 if __name__ == "__main__":

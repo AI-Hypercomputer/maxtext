@@ -18,7 +18,7 @@ import pyconfig
 import pytest
 import unittest
 from absl.testing import absltest
-from inference_microbenchmark import main as inference_microbenchmark_main
+from inference_microbenchmark import run_benchmarks
 
 
 class Inference_Microbenchmark(unittest.TestCase):
@@ -38,7 +38,7 @@ class Inference_Microbenchmark(unittest.TestCase):
             "weight_dtype=bfloat16",
         ]
     )
-    inference_microbenchmark_main(pyconfig.config)
+    run_benchmarks(pyconfig.config)
 
 
 if __name__ == "__main__":

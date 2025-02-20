@@ -22,6 +22,7 @@ from jax.experimental import mesh_utils
 import unittest
 
 import pyconfig
+import pytest
 from input_pipeline import _hf_data_processing
 from input_pipeline import input_pipeline_interface
 
@@ -57,6 +58,8 @@ class HfDataProcessingTest(unittest.TestCase):
 
     self.train_iter = _hf_data_processing.make_hf_train_iterator(self.config, self.mesh, self.process_indices)
 
+  # TODO (b/393393501) : MaxText build failure in hf_data_processing_test.py
+  @pytest.mark.skip(reason="Tests are currently flaking / failing due to HF token issues")
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
     # For training we pack multiple short examples in one example.
@@ -74,6 +77,8 @@ class HfDataProcessingTest(unittest.TestCase):
         },
     )
 
+  # TODO (b/393393501) : MaxText build failure in hf_data_processing_test.py
+  @pytest.mark.skip(reason="Tests are currently flaking / failing due to HF token issues")
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
     train_iter = _hf_data_processing.make_hf_train_iterator(self.config, self.mesh, self.process_indices)
@@ -85,6 +90,8 @@ class HfDataProcessingTest(unittest.TestCase):
     self.assertTrue((batch1["inputs_position"] == batch2["inputs_position"]).all())
     self.assertTrue((batch1["targets_position"] == batch2["targets_position"]).all())
 
+  # TODO (b/393393501) : MaxText build failure in hf_data_processing_test.py
+  @pytest.mark.skip(reason="Tests are currently flaking / failing due to HF token issues")
   def test_for_loop_repeatable(self):
     def get_first_batch(iterator):
       batch = None

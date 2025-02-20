@@ -7,7 +7,7 @@
 # 1. Pull the checkpoint from a GCS bucket and uploads the new MaxText compatible checkpoint to destination GCS bucket.
 # 2. Convert the scanned checkpoint from step 1 into unscanned checkpoint format and run more efficient decoding.
 
-# Example Usage: export BASE_OUTPUT_PATH=/path/to/GCS/bucket; bash end_to_end/tpu/llama3/8b/1_test_llama3_8b.sh
+# Example Usage: export BASE_OUTPUT_PATH=/path/to/GCS/bucket; bash end_to_end/tpu/llama3.1/8b/1_test_llama3.1_8b.sh
 # Use the same BASE_OUTPUT_PATH as end_to_end/tpu/llama3.1/8b/2_test_llama3.1_8b.sh.
 # Please note that in these two scripts (1_test_llama3.1_8b.sh and 2_test_llama3.1_8b.sh) BASE_OUTPUT_PATH is assumed to be already a unique path across multiple runs and 
 # the subfolders names aka RUN_NAMEs are static. Please remember to change BASE_OUTPUT_PATH across different runs.

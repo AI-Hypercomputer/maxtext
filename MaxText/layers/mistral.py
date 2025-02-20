@@ -70,7 +70,7 @@ class MistralDecoderLayer(nn.Module):
     cfg = self.config
     mesh = self.mesh
 
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
+    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     lnx_rms = models.RMSNorm(
         dtype=cfg.dtype,
@@ -81,7 +81,7 @@ class MistralDecoderLayer(nn.Module):
     )
     lnx = lnx_rms(inputs)
 
-    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
+    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     # Self-attention block
     attention_layer = Attention(
@@ -97,6 +97,8 @@ class MistralDecoderLayer(nn.Module):
         weight_dtype=cfg.weight_dtype,
         dropout_rate=cfg.dropout_rate,
         name="self_attention",
+        float32_qk_product=cfg.float32_qk_product,
+        float32_logits=cfg.float32_logits,
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
     )
@@ -110,7 +112,9 @@ class MistralDecoderLayer(nn.Module):
         model_mode=model_mode,
     )
 
-    attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    attention_lnx = nn.with_logical_constraint(
+        attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
+    )
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
@@ -121,7 +125,9 @@ class MistralDecoderLayer(nn.Module):
         kernel_axes=("norm",),
         epsilon=cfg.normalization_layer_epsilon,
     )(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(hidden_states, ("activation_batch", "activation_length", "activation_embed"))
+    hidden_states = nn.with_logical_constraint(
+        hidden_states, ("activation_batch", "activation_norm_length", "activation_embed")
+    )
 
     load_balance_loss = None
     if cfg.num_experts > 1:
@@ -131,12 +137,13 @@ class MistralDecoderLayer(nn.Module):
           num_experts_per_tok=cfg.num_experts_per_tok,
           mesh=mesh,
           kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-          kernel_axes=("embed", "mlp"),
+          kernel_axes=("embed", None),
+          intermediate_dim=cfg.mlp_dim,
           dtype=cfg.dtype,
           weight_dtype=cfg.weight_dtype,
           quant=self.quant,
       )(hidden_states)
-      mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
+      mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
     else:
       mlp_lnx = linears.MlpBlock(
           intermediate_dim=cfg.mlp_dim,
@@ -148,14 +155,14 @@ class MistralDecoderLayer(nn.Module):
           config=cfg,
           quant=self.quant,
       )(hidden_states, deterministic=deterministic)
-      mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
+      mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
 
     layer_output = nn.with_logical_constraint(
         layer_output,
-        ("activation_batch", "activation_length", "activation_embed"),
+        ("activation_batch", "activation_norm_length", "activation_embed"),
     )
 
     if cfg.num_experts > 1 and load_balance_loss is not None:

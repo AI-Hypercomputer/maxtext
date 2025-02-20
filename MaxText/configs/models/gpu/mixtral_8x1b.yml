@@ -32,3 +32,4 @@ dataset_type: "synthetic"
 reuse_example_batch: 1
 enable_checkpointing: False
 megablox: False
+sparse_matmul: False
