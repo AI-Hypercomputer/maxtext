@@ -433,9 +433,9 @@ def convert_huggingface_to_jax_weights(base_model_path, model_size, huggingface_
         layer_weight["mlp"]["wi_0"]["kernel"] = np.zeros(stack_shape + wi_0.shape, dtype=np.float16)
         layer_weight["mlp"]["wi_1"]["kernel"] = np.zeros(stack_shape + wi_1.shape, dtype=np.float16)
         layer_weight["mlp"]["wo"]["kernel"] = np.zeros(stack_shape + wo.shape, dtype=np.float16)
-      layer_weight["mlp"]["wi_0"]["kernel"][layer_idx, ...] = wi_0  # pylint: disable=E1137
-      layer_weight["mlp"]["wi_1"]["kernel"][layer_idx, ...] = wi_1  # pylint: disable=E1137
-      layer_weight["mlp"]["wo"]["kernel"][layer_idx, ...] = wo  # pylint: disable=E1137
+      layer_weight["mlp"]["wi_0"]["kernel"][layer_idx, ...] = wi_0  # pytype: disable=unsupported-operands
+      layer_weight["mlp"]["wi_1"]["kernel"][layer_idx, ...] = wi_1  # pytype: disable=unsupported-operands
+      layer_weight["mlp"]["wo"]["kernel"][layer_idx, ...] = wo  # pytype: disable=unsupported-operands
     else:
       gate = np.concatenate(
           [var[f"layers.{layer_idx}.feed_forward.gate.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0
