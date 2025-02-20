@@ -63,6 +63,16 @@ class PageState:
     self.current_page = jnp.zeros(slots)
     self.current_page_position = jnp.zeros(slots)
 
+  def get_slot(self) -> int:
+    """
+    Find an available slot for placing requests
+    """
+    zeros = jnp.where(self.sequence_lengths==0)
+    if zeros[0].size > 0:
+      return zeros[0][0]
+    else:
+      return -1
+
   def release_slot_pages(self, slot, page_status) -> Array:
     """Releases all pages assigned to a specific slot.
 
@@ -159,6 +169,8 @@ class PageManager:
   page_status: Array
   decode_page_state: PageState
   prefill_page_state: PageState
+  decode_request_ids: Array
+  prefill_request_ids: Array
 
   def __init__(self, num_pages, tokens_per_page, slots, max_target_length, max_prefill_predict_length, max_pages_per_slot):
     self.num_pages = num_pages
@@ -169,8 +181,10 @@ class PageManager:
     self.max_pages_per_slot = max_pages_per_slot
     self.page_status = jnp.zeros(num_pages)
     self.decode_page_state = PageState(slots, max_pages_per_slot)
+    #self.decode_request_ids = {}
     #choose a different prefill slots size
     self.prefill_page_state = PageState(slots, max_prefill_predict_length // tokens_per_page)
+    self.prefill_request_ids = {}
 
   def release_prefill_slot_pages(self, slot: int):
     self.page_status = self.prefill_page_state.release_slot_pages(slot)
@@ -178,29 +192,46 @@ class PageManager:
   def release_decode_slot_pages(self, slot: int):
     self.page_status = self.decode_page_state.release_slot_pages(slot)
 
+  def get_prefill_slot(self):
+    return self.prefill_page_state.get_slot()
+
   def reserve_prefix_slot_pages(
       self,
       slot: int,
       true_length: int,
-  ):
+      request_id: uuid.UUID,
+  ) -> PageState:
     """Reserves pages for a prefix sequence in the specified slot before decode.
 
     This method allocates the necessary pages for a prefix sequence of given length,
     first releasing any existing pages assigned to the slot.
     """
-    # TODO: release pages for the prefill slot by default
-    self.release_prefill_slot_pages(slot)
+    
     self.page_status = self.prefill_page_state.reserve_prefill_slot_pages(slot, true_length, self.page_status, self.tokens_per_page)
+    self.prefill_request_ids[request_id] = slot
 
-  def place_request_to_decode_slot(slot: int, request_id: uuid.UUID):
+    return self.prefill_page_state
+
+  def place_request_to_decode_slot(self, slot: int, request_id: uuid.UUID):
     """
     Move the request in prefill slot to decode slot for interleaved mode
     """
-    
+    # release decode slot at first
+    self.release_decode_slot_pages(slot)
+    # get the prefill slot
+    prefill_slot = self.prefill_request_ids[request_id]
+    #insert prefill slot into decode slot
+    pages = self.decode_page_state.page_map[prefill_slot]
+    #assume pages.length < decode_page_map.max_pages_per_slot
+    self.decode_page_state.page_map[slot].at[0:pages.size].set(pages)
+    self.decode_page_state.sequence_lengths.at[slot].set(self.prefill_page_state.sequence_lengths[prefill_slot])
+    self.decode_page_state.current_page.at[slot].set(self.prefill_page_state.current_page[prefill_slot])
+    self.decode_page_state.current_page_position.at[slot].set(self.prefill_page_state.current_page_position[prefill_slot])
+
 
   def reserve_decode_step_pages(
       self,
-  ) -> Tuple:
+  ) -> PageState:
     """Reserves additional pages needed for a decoding step.
 
     This method allocates new pages as needed when sequences grow during
@@ -208,77 +239,4 @@ class PageManager:
     for its sequence.
     """
     self.page_status = self.decode_page_state.reserve_decode_step_pages(self.tokens_per_page, self.page_status)
-
-
-  @nn.compact
-  def __call__(
-      self, model_mode: Optional[str] = None, slot: Optional[int] = None, true_length: Optional[int] = None
-  ) -> PageState:
-
-    (
-        page_status_var,
-        page_map_var,
-        sequence_lengths_var,
-        num_pages_used_var,
-        current_page_var,
-        current_page_position_var,
-    ) = self.init_or_get_vars()
-
-    if model_mode == common_types.MODEL_MODE_PREFILL and self.is_mutable_collection("params"):
-      return PageState(
-          page_status_var.value,
-          page_map_var.value,
-          sequence_lengths_var.value,
-          num_pages_used_var.value,
-          current_page_var.value,
-          current_page_position_var.value,
-      )
-    elif model_mode == common_types.MODEL_MODE_PREFILL and slot is None and true_length is None:
-      return PageState(
-          page_status_var.value,
-          page_map_var.value,
-          sequence_lengths_var.value,
-          num_pages_used_var.value,
-          current_page_var.value,
-          current_page_position_var.value,
-      )
-    elif model_mode == common_types.MODEL_MODE_PREFILL:
-      self.reserve_prefix_slot_pages(
-          slot,
-          true_length,
-          page_status_var,
-          page_map_var,
-          sequence_lengths_var,
-          num_pages_used_var,
-          current_page_var,
-          current_page_position_var,
-      )
-    elif model_mode == common_types.MODEL_MODE_INSERT:
-      self.reserve_prefix_slot_pages(
-          slot,
-          true_length,
-          page_status_var,
-          page_map_var,
-          sequence_lengths_var,
-          num_pages_used_var,
-          current_page_var,
-          current_page_position_var,
-      )
-    elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-      self.reserve_decode_step_pages(
-          page_status_var,
-          page_map_var,
-          sequence_lengths_var,
-          num_pages_used_var,
-          current_page_var,
-          current_page_position_var,
-      )
-
-    return PageState(
-        page_status_var.value,
-        page_map_var.value,
-        sequence_lengths_var.value,
-        num_pages_used_var.value,
-        current_page_var.value,
-        current_page_position_var.value,
-    )
+    return self.decode_page_state

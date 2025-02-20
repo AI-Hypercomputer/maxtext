@@ -235,7 +235,6 @@ class MaxEngine(engine_api.Engine):
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
-      slot: int = 0,
       request_id: uuid.UUID = None,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
@@ -266,6 +265,17 @@ class MaxEngine(engine_api.Engine):
 
     rng, new_rng = jax.random.split(rng)
 
+    page_state = None
+    #allocate pages for prefill request
+    if self.config.attention == "paged":
+      slot = self.page_manager.get_prefill_slot()
+      if slot == -1:
+        #Todo admission control, should handle gracefully
+        raise ValueError("too many requests for prefill")
+      else:
+        page_state = self.page_manager.reserve_prefix_slot_pages(slot, true_length, request_id)
+        
+
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       flat_logits, new_vars = self.model.apply(
           params,
@@ -279,6 +289,7 @@ class MaxEngine(engine_api.Engine):
           slot=slot,
           true_length=true_length,
           request_id=request_id,
+          page_state=page_state,
       )
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
@@ -444,7 +455,8 @@ class MaxEngine(engine_api.Engine):
     if rng is None:
       rng = jax.random.PRNGKey(0)
 
-    page_state = self.page_manager(common_types.MODEL_MODE_AUTOREGRESSIVE)
+    if self.config.attention == "paged":
+      page_state = self.page_manager.reserve_decode_step_pages()
     previous_token = decode_state["tokens"]
     jax.debug.print("generate call next_pos: {}, tokens: {}", decode_state["next_pos"], decode_state["tokens"])
     rng, new_rng = jax.random.split(rng)
@@ -460,7 +472,6 @@ class MaxEngine(engine_api.Engine):
           mutable=["cache"],
           page_state=page_state,
       )
-    #jax.debug.print("out logits: {}", out_logits)
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
     # sampling tokens
@@ -499,16 +510,16 @@ class MaxEngine(engine_api.Engine):
       jax.jit,
       static_argnums=(0,),
       donate_argnums=(
+          1,
           2,
-          3,
       ),
   )
   def insert(
       self,
-      params: Params,
       prefix: Prefix,
       decode_state: DecodeState,
       slot: int,
+      request_id: uuid.UUID,
   ) -> DecodeState:
     """Insert a single computed prefill cache into KV cache."""
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
@@ -516,12 +527,9 @@ class MaxEngine(engine_api.Engine):
     unboxed_prefix["cache"] = self._maybe_unstack_prefill_result_cache(unboxed_prefix["cache"])
     #jax.debug.print("prefix_logits: {}", unboxed_prefix["logits"][0][0])
     #jax.debug.print("logits: {}, next_pos: {}, generated_tokens: {}, tokens: {}", decode_state["logits"][0][0], decode_state["next_pos"][0], decode_state["generated_tokens"][0], decode_state["tokens"][0])
-    page_state = self.page_manager(
-        model_mode=common_types.MODEL_MODE_INSERT,
-        slot=slot,
-        true_length=16,
-        #need to update
-    )
+    
+    if self.config.attention == "paged":
+      self.page_manager.place_request_to_decode_slot(slot, request_id)
     def copy(path, partial_cache, full_cache, annotations):
       path_key = path[-1].key
       #print(f"Path key: {path_key}")
@@ -634,8 +642,6 @@ class MaxEngine(engine_api.Engine):
         "tokens": inserted_tokens,
     }
 
-    #jax.debug.print("decode_state")
-    #jax.debug.print("logits: {}, next_pos: {}, generated_tokens: {}, tokens: {}", decode_s["logits"][slot][0], decode_s["next_pos"][slot], decode_s["generated_tokens"][slot], decode_s["tokens"][slot])
     return decode_s
 
   @functools.partial(
