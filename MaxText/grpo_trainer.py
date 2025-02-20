@@ -71,15 +71,55 @@ from ml_goodput_measurement import goodput
 from ml_goodput_measurement import monitoring
 
 import maxengine
-import tokenizer
 import transformers
 import pyconfig_inference
+
+import grpc
+import asyncio
+from jetstream.core.proto import jetstream_pb2_grpc
+from jetstream.core.proto import jetstream_pb2
 
 # pylint: disable=too-many-positional-arguments
 
 Transformer = models.Transformer
 EPS = 1e-8
 _DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE = 2 * 1024**3
+
+
+
+class AsyncCounter:
+  """An counter class for counting and quota management with asycio,
+  not thread safe. It's safe with asyncio as value changes are done
+  outside of await statements.
+  """
+
+  def __init__(self, init_value: int, block_on_zero_seconds=0.002):
+    """
+    Args:
+      init_value: Initial value for the counter.
+      block_on_zero_seconds: if greater than 0, the counter will spin when
+        value hits 0, hence can be used for quota management.
+    """
+    self._init_value = init_value
+    self._value = init_value
+    self._block_on_zero_seconds = block_on_zero_seconds
+
+  async def inc(self):
+    self._value += 1
+
+  async def dec(self):
+    while True:
+      if self._value > 0 or self._block_on_zero_seconds <= 0.0:
+        self._value -= 1
+        return
+      await asyncio.sleep(self._block_on_zero_seconds)
+
+  def value(self):
+    return self._value
+
+  def delta(self):
+    return self._init_value - self._value
+
 
 
 def validate_train_config(config):
@@ -800,6 +840,91 @@ def prompt_completions(config, engine, tokenizer_model, data, params, rng):
   return data
 
 
+async def grpc_async_request(server_url, request, prefill_quota, active_req_quota):
+  """ Send grpc request """
+  async with grpc.aio.insecure_channel(server_url) as channel:
+    stub = jetstream_pb2_grpc.OrchestratorStub(channel)
+    response = stub.Decode(request)
+    token_list = []
+    async for resp in response:
+      stream_resp_cnt += 1
+      if stream_resp_cnt == 1:
+        await prefill_quota.inc()
+      resp_tokens = resp.stream_content.samples[0].token_ids
+      token_list.extend(resp_tokens)
+    await active_req_quota.inc()
+    return token_list
+
+async def send_request(server_url, prompt, max_output_tokens, prefill_quota, active_req_quota):
+  """ Send async request to JetStream server """
+  request = jetstream_pb2.DecodeRequest(
+    token_content=jetstream_pb2.DecodeRequest.TokenContent(
+        token_ids=prompt
+    ),
+    max_tokens=max_output_tokens,
+    metadata=jetstream_pb2.DecodeRequest.Metadata(
+          start_time=time.perf_counter()
+      ),
+  )
+  out_tokens = await grpc_async_request(
+    server_url,
+    request,
+    prefill_quota,
+    active_req_quota,
+  )
+  return out_tokens
+
+
+async def get_request(input_request):
+  input_request = iter(input_request)
+  for request in input_request:
+    yield request
+
+async def prompt_completions_jetstream(config, example_batch, tokenizer_model, prefill_quota, active_req_quota):
+  """ Prompt completions using JetStream inference engine
+  """
+  tasks = []
+  async for prompt in get_request(example_batch['prompt']):
+    await prefill_quota.dec()
+    await active_req_quota.dec()
+    tasks.append(
+      asyncio.create_task(
+        send_request(
+          config.inference_server_url,
+          prompt,
+          config.max_target_length - config.max_prefill_predict_length,
+          prefill_quota,
+          active_req_quota
+        )
+      )
+    )
+  outputs = await asyncio.gather(*tasks)
+  breakpoint()
+  # with grpc.insecure_channel(config.inference_server_url) as channel:
+  #   grpc.channel_ready_future(channel).result()
+  #   stub = jetstream_pb2_grpc.OrchestratorStub(channel)
+  #   print(f"Sending request to: {config.inference_server_url}")
+  #   async for prompt in example_batch['prompt']:
+  #     request = jetstream_pb2.DecodeRequest(
+  #           token_content=jetstream_pb2.DecodeRequest.TokenContent(
+  #               token_ids=prompt
+  #           ),
+  #           max_tokens=(config.max_target_length - config.max_prefill_predict_length),
+  #       )
+  #     # _GetResponse(stub, request)
+  #     response = stub.Decode(request)
+  #     token_list = []
+  #     for resp in response:
+  #       token_list.extend(resp.stream_content.samples[0].token_ids)
+  #     breakpoint()
+    # request = jetstream_pb2.DecodeRequest(
+    #       token_content=jetstream_pb2.DecodeRequest.TokenContent(
+    #           token_ids=token_ids
+    #       ),
+    #       max_tokens=_MAX_TOKENS.value,
+    #   )
+
+
 def dummy_reward_len(valid_seq_mask):
   # adding a 1 because valid_seq_mask is actually one less than the number of valid tokens
   reward = -abs(20-(1+jnp.sum(valid_seq_mask,axis=-1))) # [BxG]
@@ -1329,7 +1454,10 @@ def train_loop(config, config_inference, state=None):
       # do AR decoding here
       assert config.use_grpo, "Non grpo setting calling grpo_trainer"
       # engine_params = engine.load_params(engine_rng)      
-      example_batch = prompt_completions(config_inference, engine, tokenizer_model, example_batch, state.params, init_rng)
+      # example_batch = prompt_completions(config_inference, engine, tokenizer_model, example_batch, state.params, init_rng)
+      prefill_quota = AsyncCounter(init_value=config.inference_prefill_quota)
+      active_req_quota = AsyncCounter(init_value=config.inference_active_request_quota)
+      example_batch = asyncio.run(prompt_completions_jetstream(config, example_batch, tokenizer_model, prefill_quota, active_req_quota))
       # jax.debug.print("golden completion {x}",x=example_batch['completion'][0])
       jax.debug.print("ar_completion[0] {x}",x=tokenizer_model.decode(example_batch['ar_completions'][0]))
       # jax.debug.print("ar_completion_segmentation {x}",x=example_batch['ar_completions_segmentation'][0])

@@ -1,5 +1,9 @@
 base_config: "base.yml"
 
+inference_server_url: "10.164.0.16:9000"
+inference_prefill_quota: 3
+inference_active_request_quota: 450
+
 use_grpo: True
 train_data_columns: ['prompt', 'completion']
 
