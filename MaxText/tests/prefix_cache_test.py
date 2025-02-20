@@ -246,14 +246,20 @@ class HBMCacheTest(unittest.TestCase):
     assert hbm_cache.retrieve_from_cache((1)) == value1
     assert hbm_cache.retrieve_from_cache((2)) == value2
 
-  def test_evict_cache(self):
+  def test_evict_cache_return_evicted_value(self):
+    value = create_default_value()
+    hbm_cache = HBMCache(max_size_bytes=value.prefix_size_bytes)
+    hbm_cache.add_to_cache((1), value)
+    evict_value = hbm_cache.evict_cache((1))
+    assert evict_value == value
+
+  def test_evict_cache_will_release_the_memory_usage_and_cannot_retrieve_and_evict_after_evict(self):
     value = create_default_value()
     hbm_cache = HBMCache(max_size_bytes=value.prefix_size_bytes)
     hbm_cache.add_to_cache((1), value)
     # memory is not enough
     assert hbm_cache.add_to_cache((2), create_default_value()) is False
-    evict_value = hbm_cache.evict_cache((1))
-    assert evict_value == value
+    hbm_cache.evict_cache((1))
     assert hbm_cache.retrieve_from_cache((1)) is None
     assert hbm_cache.evict_cache((1)) is None
     # should add another after evict
