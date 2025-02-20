@@ -555,7 +555,7 @@ def main() -> int:
       # another_config,
     ]:
       # Run workloads in the following slice configurations
-      for num_slices in [2,]:
+      for num_slices in [21,]:
         # Use the libtpu dependencies from:
         for libtpu_type in [
             # LibTpuType.CUSTOM
