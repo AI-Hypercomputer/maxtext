@@ -85,40 +85,41 @@ def prefix_cache_benchmark(prefix, prefill_length, true_length, prefix_cache_ent
   del new_value_list
 
   # Save prefix
-  start = datetime.datetime.now()
-  new_value_list = []
+  new_value = None
+  save_sec = 0
   for c_idx in range(iters):
     key = common_prefix_key + tuple(i + c_idx * remain_len for i in range(remain_len))
     # values are not relevant for caching now, just clone the same tokens and values for test
     new_value = value.clone()
+    jax.block_until_ready(new_value)
+    start = datetime.datetime.now()
     prefix_cache_inst.save(key, new_value)
-    new_value_list.append(new_value)
-  jax.block_until_ready(new_value_list)
-  end = datetime.datetime.now()
-  del new_value_list
-  save_sec = (end - start).total_seconds()
+    end = datetime.datetime.now()
+    save_sec += (end - start).total_seconds()
+  del new_value
   save_avg_ms = save_sec * 1000 / iters
 
   # Fetch longest prefix key
   key_load = common_prefix_key + tuple(i + prefix_cache_entries_num * remain_len for i in range(remain_len))
-  start = datetime.datetime.now()
   matched_key = None
+  fetch_sec = 0
   for _ in range(iters):
+    start = datetime.datetime.now()
     matched_key = prefix_cache_inst.fetch_longest_common_prefix_key(key_load)
-  end = datetime.datetime.now()
-  fetch_sec = (end - start).total_seconds()
+    end = datetime.datetime.now()
+    fetch_sec += (end - start).total_seconds()
   fetch_avg_ms = fetch_sec * 1000 / iters
 
   # Load prefix
-  start = datetime.datetime.now()
-  value_load_list = []
+  load_sec = 0
+  value_load = None
   for _ in range(iters):
+    start = datetime.datetime.now()
     value = prefix_cache_inst.load(matched_key)
-    value_load_list.append(value)
-  jax.block_until_ready(value_load_list)
-  end = datetime.datetime.now()
-  del value_load_list
-  load_sec = (end - start).total_seconds()
+    jax.block_until_ready(value)
+    end = datetime.datetime.now()
+    load_sec += (end - start).total_seconds()
+  del value_load
   load_avg_ms = load_sec * 1000 / iters
 
   print(
