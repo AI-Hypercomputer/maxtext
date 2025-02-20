@@ -1,3 +1,4 @@
+# llama2.py
 """
 Copyright 2023 Google LLC
 
@@ -23,7 +24,7 @@ import jax
 from jax.sharding import Mesh
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-from page_manager import PageManager
+# Removed page_manager import
 from layers import attentions
 from layers import embeddings
 from layers import linears
@@ -32,7 +33,7 @@ from layers import models
 from layers import quantizations
 
 import common_types
-from page_manager import PageState
+# Removed page_manager import
 from typing import Optional
 
 Array = common_types.Array
@@ -78,6 +79,7 @@ class LlamaDecoderLayer(nn.Module):
       model_mode,
       slot: Optional[int] = None,
       true_length: Optional[int] = None,
+      page_manager = None, # add page_manager here
   ):
     cfg = self.config
     mesh = self.mesh
@@ -103,6 +105,7 @@ class LlamaDecoderLayer(nn.Module):
         head_dim=cfg.head_dim,
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
+        attention_kernel=cfg.attention,
         mesh=mesh,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -117,29 +120,31 @@ class LlamaDecoderLayer(nn.Module):
     )
 
     # Pass necessary arguments to attention_layer.
-    if cfg.attention == "paged":
+    # Conditionally use page_manager
+    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       attention_lnx = attention_layer(
           lnx,
           lnx,
           decoder_positions,
           decoder_segment_ids=decoder_segment_ids,
-          deterministic=deterministic,
           model_mode=model_mode,
-          page_manager=self.page_manager,
           page_group_id=slot,
           true_length=true_length,
+          page_manager = page_manager #pass it here
       )
     else:
       attention_lnx = attention_layer(
-          lnx,
-          lnx,
-          decoder_positions,
-          decoder_segment_ids=decoder_segment_ids,
-          deterministic=deterministic,
-          model_mode=model_mode,
-          page_group_id=slot,
-          true_length=true_length,
+        lnx,
+        lnx,
+        decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+        model_mode=model_mode,
+        page_group_id=slot,
+        true_length=true_length,
+        use_fused_qkv=cfg.fused_qkv,
       )
+
+
 
     attention_lnx = nn.with_logical_constraint(
         attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
@@ -192,4 +197,4 @@ class LlamaDecoderLayer(nn.Module):
     if cfg.scan_layers:
       return layer_output, None
     else:
-      return layer_output
+      return layer_output, None

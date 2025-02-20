@@ -212,33 +212,36 @@ def get_initial_paged_kv_cache(model, config, batch_size, abstract=False):
     return {} # return a blank for non-paged attention
 
 def get_prefill_paged_kv_cache_annotations(model, config, rng_prefill, mesh):
-  """Creates the KV cache annotations for prefill."""
-  if config.attention == "paged":
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
-      input_shape = (config.global_batch_size_to_load, 1)  # dummy shape
+    """Creates the KV cache annotations for prefill."""
+    if config.attention == "paged":
+        with nn_partitioning.axis_rules(config.logical_axis_rules):
+            input_shape = (config.global_batch_size_to_load, 1)  # dummy shape
 
-      # Initialize a "prefill" cache using a dummy input. We only care about the
-      # cache variables; the output logits are irrelevant.
-      _, initial_vars = model.init(
-              {"params": rng_prefill, "dropout": rng_prefill, "aqt": rng_prefill},
-              jnp.ones(input_shape, dtype=jnp.int32),
-              jnp.ones(input_shape, dtype=jnp.int32),
-              model_mode = common_types.MODEL_MODE_PREFILL,
-              mutable = ["cache"],
-          )
+            # Initialize with both params and cache as mutable
+            variables = model.init(
+                {"params": rng_prefill, "dropout": rng_prefill, "aqt": rng_prefill},
+                jnp.ones(input_shape, dtype=jnp.int32),
+                jnp.ones(input_shape, dtype=jnp.int32),
+                model_mode=common_types.MODEL_MODE_PREFILL,
+                mutable=["params", "cache"],
+            )
 
-      cache = initial_vars["cache"]
-      def get_axis_names(x):
-        if isinstance(x, nn.spmd.LogicallyPartitioned):
-          return tuple(x.names)
+            # Get just the cache part
+            cache = variables["cache"]
 
-      annotations = jax.tree_util.tree_map(
-          get_axis_names, cache, is_leaf=lambda k: isinstance(k, (nn.spmd.LogicallyPartitioned, jax.Array))
-      )
+            def get_axis_names(x):
+                if isinstance(x, nn.spmd.LogicallyPartitioned):
+                    return tuple(x.names)
 
-      return annotations
-  else:
-    raise ValueError("Incorrect config.attention.  Expected paged")
+            annotations = jax.tree_util.tree_map(
+                get_axis_names, 
+                cache,
+                is_leaf=lambda k: isinstance(k, (nn.spmd.LogicallyPartitioned, jax.Array))
+            )
+
+            return annotations
+    else:
+        raise ValueError("Incorrect config.attention. Expected paged")
 
 
 class PagedAttentionOp(nn.Module):
@@ -370,7 +373,9 @@ class PagedAttentionOp(nn.Module):
       page_group_id: int,
       true_length: int,
   ) -> Union[Array, Tuple[Array, Array, Array]]:
-
+    self.sow('intermediates', 'static_configs',
+             {'model_mode': model_mode, 'page_manager': page_manager},
+             reduce_fn=lambda x, y: y)
     if page_group_id is not None:
       if model_mode == common_types.MODEL_MODE_PREFILL:
         page_state = page_manager(model_mode="prefill", page_group_id=page_group_id, true_length=true_length)
@@ -390,11 +395,11 @@ class PagedAttentionOp(nn.Module):
             true_length,
             page_group_pages,
             num_full_pages,
-            page_manager.key_pages.value,
-            page_manager.value_pages.value,
+            page_manager.key_pages.value,  # Access .value inside the conditional
+            page_manager.value_pages.value, # Access .value inside the conditional
             page_manager.tokens_per_page,
         )
-        page_manager.key_pages.value = key_pages
+        page_manager.key_pages.value = key_pages  # And update .value inside the conditional
         page_manager.value_pages.value = value_pages
 
         attn_out = self._paged_dot_product_attention(
@@ -456,7 +461,6 @@ class PagedAttentionOp(nn.Module):
         b, n, d = query.shape
         return jnp.zeros((b, 1, self.output_dim), dtype=query.dtype)
 
-
 class AttentionOp(nn.Module):
   config: Config
   mesh: Mesh
@@ -486,6 +490,9 @@ class AttentionOp(nn.Module):
   sliding_window_size: int | None = None
   use_ragged_attention: bool = False
   ragged_block_size: int = 256
+
+  def setup(self):
+    self.output_dim = self.config
 
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
     """Check attention inputs."""
@@ -1440,6 +1447,7 @@ class Attention(nn.Module):
   sliding_window_size: int | None = None
   use_ragged_attention: bool = False
   ragged_block_size: int = 256
+  page_manager: Optional[PageManager] = None
 
   # Shard the query activation as the same as the key and value.
   # TODO: Find a better sharding axis name.
@@ -1459,6 +1467,9 @@ class Attention(nn.Module):
   reshape_q: bool = False
 
   def setup(self):
+    # cfg = self.config
+    # self.use_fused_qkv = cfg.fused_qkv
+
     if self.config.attention == "paged":
       self.attention_op = PagedAttentionOp(
           mesh=self.mesh,
@@ -1604,6 +1615,7 @@ class Attention(nn.Module):
     inputs = rotary_embedding(inputs, inputs_positions)
     return inputs
 
+  # @functools.partial(jax.jit, static_argnames=['model_mode', 'page_manager', 'page_group_id', 'true_length', 'use_fused_qkv'])
   @nn.compact
   def __call__(
       self,
@@ -1613,45 +1625,38 @@ class Attention(nn.Module):
       decoder_segment_ids: Array | None = None,
       *,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
-      deterministic: bool = False,
       page_manager: Optional[PageManager] = None,
       page_group_id: Optional[int] = None,
       true_length: Optional[int] = None,
+      use_fused_qkv: Optional[bool] = False,
   ):
-    print(f"\nAttention.__call__() called")
-    print(f"  model_mode: {model_mode}")
-    print(f"  is_mutable_collection('params'): {self.is_mutable_collection('params')}")
-    print(f"  input shapes:")
-    print(f"    inputs_q: {inputs_q.shape}")
-    print(f"    inputs_kv: {inputs_kv.shape}")
-    print(f"    page_group_id: {page_group_id}")
 
-    inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
-    inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+      deterministic = model_mode != common_types.MODEL_MODE_TRAIN
 
-    if self.config.attention == "paged":
-      if self.config.fused_qkv:
-        query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
+      if use_fused_qkv:
+          query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
       else:
-        query = self.query_projection(inputs_q)
-        key = self.kv_projection(inputs_kv, proj_name="key")
-        value = self.kv_projection(inputs_kv, proj_name="value")
+          query = self.query_projection(inputs_q)
+          key = self.kv_projection(inputs_kv, proj_name="key")
+          value = self.kv_projection(inputs_kv, proj_name="value")
+
       query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
       key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
 
       if model_mode == common_types.MODEL_MODE_PREFILL:
-        query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
-        key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
-        value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
+          query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
+          key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
+          value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
       else:
-        query = nn.with_logical_constraint(query, self.query_axis_names)
-        key = nn.with_logical_constraint(key, self.key_axis_names)
-        value = nn.with_logical_constraint(value, self.value_axis_names)
+          query = nn.with_logical_constraint(query, self.query_axis_names)
+          key = nn.with_logical_constraint(key, self.key_axis_names)
+          value = nn.with_logical_constraint(value, self.value_axis_names)
 
       query = checkpoint_name(query, "query_proj")
       key = checkpoint_name(key, "key_proj")
       value = checkpoint_name(value, "value_proj")
 
+      # Call the attention operator (already chosen in setup).
       out = self.attention_op(
           query=query,
           key=key,
@@ -1662,38 +1667,9 @@ class Attention(nn.Module):
           page_group_id=page_group_id,
           true_length=true_length,
       )
-      return out
-    else:
-      if self.config.fused_qkv:
-        query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
-      else:
-        query = self.query_projection(inputs_q)
-        key = self.kv_projection(inputs_kv, proj_name="key")
-        value = self.kv_projection(inputs_kv, proj_name="value")
-      query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
-      key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
+      if not isinstance(self.attention_op, PagedAttentionOp):
+        out = nn.with_logical_constraint(out, self.out_axis_names)
+        out = self.attention_op.out_projection(out) # call out_projection from attention_op
+        out = checkpoint_name(out, "out_proj")
 
-      if model_mode == common_types.MODEL_MODE_PREFILL:
-        query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
-        key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
-        value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
-      else:
-        query = nn.with_logical_constraint(query, self.query_axis_names)
-        key = nn.with_logical_constraint(key, self.key_axis_names)
-        value = nn.with_logical_constraint(value, self.value_axis_names)
-
-      query = checkpoint_name(query, "query_proj")
-      key = checkpoint_name(key, "key_proj")
-      value = checkpoint_name(value, "value_proj")
-
-      out = self.attention_op(
-          query=query,
-          key=key,
-          value=value,
-          decoder_segment_ids=decoder_segment_ids,
-          model_mode=model_mode,
-      )
-      out = nn.with_logical_constraint(out, self.out_axis_names)
-      out = self.out_projection(inputs_q.shape[-1], out)
-      out = checkpoint_name(out, "out_proj")
       return out

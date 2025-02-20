@@ -208,14 +208,22 @@ class MaxEngine(engine_api.Engine):
 
     rng1, rng2, rng3 = jax.random.split(rng, 3)
     state, self.state_mesh_annotations = max_utils.setup_decode_state(self.model, self.config, rng1, self._mesh, None)
-    # pylint: disable=isinstance-second-argument-not-valid-type
-    self.abstract_params = jax.tree_util.tree_map(
+
+    # Create abstract_params based on whether attention is paged or not.
+    if self.config.attention == "paged":
+      self.abstract_params = jax.tree_util.tree_map(
+          lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
+          if isinstance(x, jax.Array)
+          else None,
+          state,  # For paged, use entire state
+      )
+    else:  # Not paged.
+      self.abstract_params = jax.tree_util.tree_map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
         if isinstance(x, jax.Array)
         else None,
-        state.params,
-    )
-
+        state, # Use the whole state.
+      )
     self.prefill_kv_cache_annotations = max_utils.get_prefill_kv_cache_annotations(self.model, self.config, rng2, self._mesh)
     self.prefill_kv_cache_shardings = jax.tree_util.tree_map(
         lambda x: jax.sharding.NamedSharding(self._mesh, x),
@@ -236,10 +244,32 @@ class MaxEngine(engine_api.Engine):
         self.kv_cache_annotations,
     )
 
+    # We now load params separately, *after* getting the abstract state.
+    restored, raw_params = checkpointing.load_state_if_possible(
+        None, # No checkpoint manager needed here
+        None, # No data iterator either
+        self.config.load_parameters_path,
+        self.config.load_full_state_path,
+        state, # Pass the abstract state
+        self.config.enable_single_replica_ckpt_restoring,
+        self.config.dataset_type,
+    )
+
+    if restored and "items" in restored:
+        params = restored["items"]["params"]
+    elif raw_params:
+        params = raw_params
+    else:  # Initialize params if not restored
+        init_state_partial = functools.partial(max_utils.init_initial_state, self.model, None, self.config, False)  # tx is not needed for decode
+        init_state_partial.__name__ = "initialize_state"
+
+        abstract_state = jax.eval_shape(init_state_partial, rng1)
+        params = abstract_state.params  # Now we correctly have params.
+
+
     if self.model.quant and not self.config.checkpoint_is_quantized:
-      params = self.quantize_params(state, rng3)
-    else:
-      params = state.params
+      params = self.quantize_params(params, rng3) # Pass params, not the state
+
     max_utils.print_mem_stats("After load_params")
     return params
 

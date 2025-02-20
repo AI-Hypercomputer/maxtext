@@ -41,6 +41,7 @@ from layers.attentions import (
     get_initial_contiguous_kv_cache,
     get_prefill_contiguous_kv_cache_annotations,
 )
+from page_manager import PageManager
 
 
 import orbax.checkpoint as ocp
@@ -698,51 +699,37 @@ def init_initial_state(model, tx, config, is_training, key):
   return init_decode_state(model.apply, model_vars)
 
 
-def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
-  """Setup decode state by loading params from a checkpoint.
+def setup_decode_state(model, config, rng, mesh, params):
+    """Sets up the autoregressive decoding state, including cache and PageManager state."""
 
-  Args:
-    model: the flax model to initialize
-    config: config object
-    rng: jax.prng key
-    mesh: jax.devices() mesh
-    checkpoint_manager: Checkpoint manager
+    print("\nEntering setup_decode_state:")
+    print(f"  model: {type(model).__name__}")
+    print(f"  mesh.shape: {mesh.shape}")
+    print(f"  logical_axis_rules: {config.logical_axis_rules}")
 
-  Returns:
-    state: state with decode params loaded from the checkpoint
-    state_mesh_annotations: the mesh annotations for the state
-  """
-  print("\nEntering setup_decode_state:")
-  print(f"  model: {type(model).__name__}")
-  print(f"  mesh.shape: {mesh.shape}")
-  print(f"  logical_axis_rules: {config.logical_axis_rules}")
-  max_utils.print_mem_stats("Start of setup_decode_state")
-
-  input_shape = (config.global_batch_size_to_load, config.max_target_length)
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
-    model_vars = model.init(
-        {"params": rng, "dropout": rng, "aqt": rng},
-        jnp.ones(input_shape, dtype=jnp.int32),
-        jnp.ones(input_shape, dtype=jnp.int32),
-        model_mode=common_types.MODEL_MODE_PREFILL,
-        mutable=["params", "cache", "aqt"],  # Add mutable=['params', 'cache']
-    )
-
-  if config.load_parameters_path:
-    max_logging.log(f"Loading decode params from {config.load_parameters_path}")
+    batch_size = config.per_device_batch_size * jax.device_count()
     with nn_partitioning.axis_rules(config.logical_axis_rules):
-      loaded_params = checkpointing.load_params_from_path(
-          config.load_parameters_path, model_vars["params"]  # Load ONLY the params
-      )
-      model_vars = flax.core.frozen_dict.freeze({**flax.core.unfreeze(model_vars), "params": loaded_params})
-  else:
-    max_logging.log("No decode checkpoint specified - generating random weights.")
+        init_kv_cache_partial = functools.partial(
+            get_initial_kv_cache, model=model, config=config, batch_size=batch_size, abstract=True
+        )
+        # Use jax.eval_shape to get the shape and dtype of the cache.
+        abstract_state = jax.eval_shape(init_kv_cache_partial)
 
-  state = init_decode_state(model.apply, model_vars["params"])  # Pass only params
-  state = unbox_logicallypartioned(state)
-  state_mesh_annotations = nn.get_partition_spec(state)
-  max_utils.print_mem_stats("After setup_decode_state")
-  return state, state_mesh_annotations
+        # Get the cache annotations.  This is necessary for pjit to know how to
+        # shard the cache arrays across devices.
+        rng1, rng2 = jax.random.split(rng)
+        kv_cache_annotations = get_kv_cache_annotations(model, config, rng2, mesh)
+
+        # init_kv_cache is called again here, but with abstract=False,
+        # it creates actual zero arrays of the correct shape and dtype.
+        state = abstract_state # Use the abstract state!
+        state = nn.with_logical_partitioning(state, kv_cache_annotations)
+        if params is not None:
+          state["params"] = params
+        state_mesh_annotations = nn.get_partition_spec(state)
+
+        # print(f"  KV Cache Annotations: {kv_cache_annotations}")  # Print annotations
+    return state, state_mesh_annotations
 
 
 def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager):
@@ -1009,36 +996,21 @@ def get_prefill_kv_cache_annotations(model, config, rng_prefill, mesh):
 def get_initial_kv_cache(model, config, batch_size, abstract=False):
   """Creates the initial (all zeros) KV cache for decode."""
   if config.attention == "paged":
+    # Use existing function for paged attention.
     return get_initial_paged_kv_cache(model, config, batch_size, abstract)
-  elif config.attention == "dot_product":  # Handles all AttentionOp types
-    return get_initial_contiguous_kv_cache(model, config, batch_size, abstract)
   else:
-    raise ValueError(f"Unsupported attention type: {config.attention}")
+    # Use existing function for contiguous attention.
+    return get_initial_contiguous_kv_cache(model, config, batch_size, abstract)
+
 
 
 def get_kv_cache_annotations(model, config, rng, mesh):
-  """Get a shaped abstraction of the state (including optimizer)"""
+    """Get the KV cache annotations for autoregressive and prefill modes."""
+    if config.attention == "paged":
+        return get_prefill_paged_kv_cache_annotations(model, config, rng, mesh)
+    else:
+        return get_prefill_contiguous_kv_cache_annotations(model, config, rng, mesh)
 
-  def init_kv_cache(model, config):
-    input_shape = (
-        config.global_batch_size_to_load,
-        1,
-    )
-    model_vars = model.init(
-        {"params": rng, "dropout": rng, "aqt": rng},
-        jnp.ones(input_shape),
-        jnp.ones(input_shape),
-        model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-    )
-    return model_vars["cache"]
-
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
-    init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
-    abstract_state = jax.eval_shape(init_kv_cache_partial)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  return state_mesh_annotations
 
 
 def print_pytree_shape(print_str, ptree):

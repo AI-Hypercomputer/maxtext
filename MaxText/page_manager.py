@@ -299,14 +299,18 @@ class PageManager(nn.Module):
     return page_status, page_map, new_sequence_lengths, num_pages_used, current_page, new_current_page_position
 
   def get_page_state(self) -> PageState:
-    return PageState(
-        page_status=self.page_status.value,
-        page_map=self.page_map.value,
-        sequence_lengths=self.sequence_lengths.value,
-        num_pages_used=self.num_pages_used.value,
-        current_page=self.current_page.value,
-        current_page_position=self.current_page_position.value,
-    )
+      def _get_page_state_shape(name, init_fn, *args):
+          return jax.eval_shape(lambda: init_fn(*args))
+
+      return PageState(
+          page_status=_get_page_state_shape("page_status", jnp.zeros, (self.num_pages,), jnp.int32),
+          page_map=_get_page_state_shape("page_map", jnp.full, (self.max_page_groups, self.max_pages_per_group), -1, jnp.int32),
+          sequence_lengths=_get_page_state_shape("sequence_lengths", jnp.zeros, (self.max_page_groups,), jnp.int32),
+          num_pages_used=_get_page_state_shape("num_pages_used", jnp.zeros, (self.max_page_groups,), jnp.int32),
+          current_page=_get_page_state_shape("current_page", jnp.full, (self.max_page_groups,), -1, jnp.int32),
+          current_page_position=_get_page_state_shape("current_page_position", jnp.zeros, (self.max_page_groups,), jnp.int32),
+      )
+
 
   def __call__(
       self, model_mode: Optional[str] = None, page_group_id: Optional[int] = None, true_length: Optional[int] = None
