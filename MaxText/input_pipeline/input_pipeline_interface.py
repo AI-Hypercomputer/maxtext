@@ -208,7 +208,7 @@ def get_shaped_batch_eval(config, mesh):
   output of create_data_iterator_with_tokenizer, but eval_shape doesn't work, see b/306901078."""
   global_batch_size_to_load = config.global_batch_size_to_load
   if config.eval_per_device_batch_size > 0:
-    eval_batch_size = config.eval_per_device_batch_size * mesh.size
+    eval_batch_size = int(config.eval_per_device_batch_size * mesh.size)
   else:
     eval_batch_size = global_batch_size_to_load
   batch_shape = (eval_batch_size, config.max_target_length)

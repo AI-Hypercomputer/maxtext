@@ -851,17 +851,20 @@ llama3_1_405b_8192_fsdp_dcn_mlperf = _add_to_model_dictionary(
         "attention": "flash",
         "gcs_metrics": True,
         "use_iota_embed": True,
-        "dataset_path": "gs://max-datasets-rogue",
         # "dataset_type": "synthetic",
-        "reuse_example_batch": 1,
-        "enable_checkpointing": True,
+        "reuse_example_batch": -1,
         "profiler": "xplane",
         "sa_block_q": 1024,
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
         "opt_type": "adam_pax",
+        "enable_checkpointing": True,
         "load_parameters_path": "gs://mlperf_llama405b_artifacts/checkpoints/maxtext/0/items",
         "tokenizer_path": "assets/tokenizer.mistral-v1",
+        "dataset_path": "gs://mlperf-llm-public2",
+        "dataset_type": "c4_mlperf",
+        "dataset_name": "c4/en:3.0.4",
+        "eval_dataset_name": "c4/en:3.0.4",
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -1120,16 +1123,11 @@ mixtral_8x22b_dropped = _add_to_model_dictionary(
     model_name="mixtral_8x22b_dropped",
     model_type="mixtral-8x22b",
     tuning_params={
-        "per_device_batch_size": 8,
-        "max_target_length": 4096,
+        "per_device_batch_size": 2,
+        "max_target_length": 8192,
         "ici_fsdp_parallelism": 64,
         "ici_expert_parallelism": 4,
-        "remat_policy": "custom",
-        "decoder_layer_input": "offload",
-        "out_proj": "offload",
-        "query_proj": "offload",
-        "key_proj": "offload",
-        "value_proj": "offload",
+        "remat_policy": "qkv_proj_offloaded",
         "attention": "flash",
         "gcs_metrics": True,
         "use_iota_embed": True,
@@ -1222,3 +1220,6 @@ gemma2_27b_8192 = _add_to_model_dictionary(
     ),
   )
 )
+
+def setupConvHParams(model: MaxTextModel, gbs: int, num_devices: int):
+    model.tuning_params["per_device_batch_size"] = float(gbs / num_devices)

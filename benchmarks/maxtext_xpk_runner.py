@@ -35,10 +35,12 @@ import tempfile
 import time
 
 import maxtext_trillium_model_configs as model_configs
+import maxtext_viperfish_model_configs as v5p_model_configs
+from maxtext_trillium_model_configs import setupConvHParams
 
 # Assumes you built maxtext dep image.
 # Assumes you have xpk installed in a git clone repo of ~/{wl_config.xpk_path}/xpk.py
-_DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME = 'maxtext_base_image'
+_DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME = 'maxtext_base_image_latest'
 
 class LibTpuType(enum.Enum):
   NIGHTLY = 'nightly-libtpu'
@@ -474,10 +476,9 @@ def on_device_benchmark_runner(
     print(f'User command: {user_command}')
     subprocess.run(user_command, shell=True, text=True)
 
-# Run maxtext_xpk_runner.py as a script for executing multiple workloads pythonically!
-def main() -> int:
-  # Variables to configure:
-  output_bucket = 'gs://DIR'
+def run_moe():
+ # Variables to configure:
+  output_bucket = 'gs://qinwen-mlperf/moe_perf/'
   base_docker_image = _DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME
 
   # Set up the clusters to run workloads on!
@@ -488,10 +489,17 @@ def main() -> int:
       device_type='v5litepod-256',
   )
 
+  # v6e_cluster_config = XpkClusterConfig(
+  #     cluster_name='bodaborg-v6e-256-ts',
+  #     project='tpu-prod-env-multipod',
+  #     zone='us-west1-c',
+  #     device_type='v6e-256',
+  # )
+
   v6e_cluster_config = XpkClusterConfig(
-      cluster_name='v6e-256',
-      project='my-cool-project',
-      zone='us-central2-b',
+      cluster_name='bodaborg-v6e-256-donotdelete-wv-c',
+      project='tpu-prod-env-multipod',
+      zone='us-east4-a',
       device_type='v6e-256',
   )
 
@@ -499,7 +507,7 @@ def main() -> int:
   xpk_workload_names = []
 
   list_of_models = [
-    model_configs.llama2_70b_4096_sc,
+    model_configs.mixtral_8x22b_dropped,
     # model_configs.default_128
   ]
 
@@ -524,24 +532,120 @@ def main() -> int:
     # Run workloads on the below clusters
     for cluster_config in [
       # v5e_cluster_config,
-      # v6e_cluster_config,
-      v6e_cluster_config_yucmhab,
+      v6e_cluster_config,
+      #v6e_cluster_config_yucmhab,
       # another_config,
     ]:
       # Run workloads in the following slice configurations
-      for num_slices in [1,]:
+      for num_slices in [4, ]:
         # Use the libtpu dependencies from:
         for libtpu_type in [
             # LibTpuType.CUSTOM
             LibTpuType.MAXTEXT
             # LibTpuType.NIGHTLY
-        ]:
+        ]:  
+          for ici_pipeline_parallelism in [4, ]:
+            setupConvHParams(model, 128, 256 * num_slices)
+            model.tuning_params['dcn_pipeline_parallelism'] = ici_pipeline_parallelism
+            model.tuning_params['num_layers_per_pipeline_stage'] = 1
+
+            wl_config = WorkloadConfig(
+              model=model,
+              num_slices=num_slices,
+              device_type=cluster_config.device_type,
+              base_output_directory=base_output_dir,
+              priority="high",
+              max_restarts=0,
+              libtpu_type=libtpu_type,
+              libtpu_nightly_version="",
+              base_docker_image=base_docker_image,
+              pathways_config=None
+            )
+            command, name = generate_xpk_workload_cmd(
+              cluster_config=cluster_config,
+              wl_config=wl_config
+            )
+
+            print(f"Name of the workload is: {name} \n")
+            xpk_workload_names.append(name)
+
+            print(f"XPK command to be used is: {command} \n")
+            xpk_workload_cmds.append(command)
+
+  for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
+    return_code = run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
+    if return_code != 0:
+      print('Unable to run xpk workload: {xpk_workload_name}')
+# Run maxtext_xpk_runner.py as a script for executing multiple workloads pythonically!
+
+def run_llama3():
+   # Variables to configure:
+  output_bucket = 'gs://qinwen-mlperf/llama405_perf/'
+  base_docker_image = _DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME
+
+  # Set up the clusters to run workloads on!
+  v5p_cluster_config = XpkClusterConfig(
+      cluster_name='mlperf-v5p-128-1',
+      project='cloud-tpu-multipod-dev',
+      zone='europe-west4-b',
+      device_type='v5p-128',
+  )
+
+  v6e_cluster_config = XpkClusterConfig(
+      cluster_name='bodaborg-v6e-256-ts',
+      project='tpu-prod-env-multipod',
+      zone='us-west1-c',
+      device_type='v6e-256',
+  )
+
+  # v6e_cluster_config = XpkClusterConfig(
+  #     cluster_name='bodaborg-v6e-256-donotdelete-wv-c',
+  #     project='tpu-prod-env-multipod',
+  #     zone='us-east4-a',
+  #     device_type='v6e-256',
+  # )
+
+  # v6e_cluster_config = XpkClusterConfig(
+  #     cluster_name='bodaborg-v6e-256-dnd-yucmhab',
+  #     project='tpu-prod-env-one-vm',
+  #     zone='us-east5-b',
+  #     device_type='v6e-256',
+  # )
+
+  xpk_workload_cmds = []
+  xpk_workload_names = []
+
+  list_of_models = [
+    model_configs.llama3_1_405b_8192_fsdp_dcn_mlperf,
+    #v5p_model_configs.llama3_1_405b_8192_fsdp_dcn_mlperf
+    # model_configs.default_128
+  ]
+
+  user = os.environ['USER']
+  base_output_dir = os.path.join(output_bucket,user)
+
+  for model in list_of_models:
+    # Run workloads on the below clusters
+    for cluster_config in [
+      v6e_cluster_config,
+      #v6e_cluster_config,
+      #v6e_cluster_config_yucmhab,
+      # another_config,
+    ]:
+      # Run workloads in the following slice configurations
+      for num_slices in [2, ]:
+        # Use the libtpu dependencies from:
+        for libtpu_type in [
+            # LibTpuType.CUSTOM
+            LibTpuType.MAXTEXT
+            # LibTpuType.NIGHTLY
+        ]:  
           wl_config = WorkloadConfig(
             model=model,
             num_slices=num_slices,
             device_type=cluster_config.device_type,
             base_output_directory=base_output_dir,
-            priority="medium",
+            priority="high",
             max_restarts=0,
             libtpu_type=libtpu_type,
             libtpu_nightly_version="",
@@ -564,16 +668,98 @@ def main() -> int:
     if return_code != 0:
       print('Unable to run xpk workload: {xpk_workload_name}')
 
-  # Support Batch workloads one day. Note that this doesn't show the xpk logs per workload.
-  # They are saved to file instead.
-  # return_codes = run_commands(
-  #     xpk_workload_cmds,
-  #     'Run XPK workloads',
-  #     xpk_workload_names,
-  #     batch=1,  # Parallel execution of workloads is not supported in XPK yet.
-  #     dry_run=False,
+def run_llama3_v5():
+   # Variables to configure:
+  output_bucket = 'gs://qinwen-mlperf/llama405_perf/'
+  base_docker_image = _DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME
+
+  # Set up the clusters to run workloads on!
+  v5p_cluster_config = XpkClusterConfig(
+      cluster_name='mlperf-v5p-512',
+      project='cloud-tpu-multipod-dev',
+      zone='europe-west4-b',
+      device_type='v5p-512',
+  )
+
+  v6e_cluster_config = XpkClusterConfig(
+      cluster_name='bodaborg-v6e-256-ts',
+      project='tpu-prod-env-multipod',
+      zone='us-west1-c',
+      device_type='v6e-256',
+  )
+
+  # v6e_cluster_config = XpkClusterConfig(
+  #     cluster_name='bodaborg-v6e-256-donotdelete-wv-c',
+  #     project='tpu-prod-env-multipod',
+  #     zone='us-east4-a',
+  #     device_type='v6e-256',
   # )
- # print(f'Return_codes: {return_codes}')
+
+  # v6e_cluster_config = XpkClusterConfig(
+  #     cluster_name='bodaborg-v6e-256-dnd-yucmhab',
+  #     project='tpu-prod-env-one-vm',
+  #     zone='us-east5-b',
+  #     device_type='v6e-256',
+  # )
+
+  xpk_workload_cmds = []
+  xpk_workload_names = []
+
+  list_of_models = [
+    #model_configs.llama3_1_405b_8192_fsdp_dcn_mlperf,
+    v5p_model_configs.llama3_1_405b_8192_fsdp_dcn_mlperf
+    # model_configs.default_128
+  ]
+
+  user = os.environ['USER']
+  base_output_dir = os.path.join(output_bucket,user)
+
+  for model in list_of_models:
+    # Run workloads on the below clusters
+    for cluster_config in [
+      #v6e_cluster_config,
+      v5p_cluster_config,
+      #v6e_cluster_config_yucmhab,
+      # another_config,
+    ]:
+      # Run workloads in the following slice configurations
+      for num_slices in [1, ]:
+        # Use the libtpu dependencies from:
+        for libtpu_type in [
+            # LibTpuType.CUSTOM
+            LibTpuType.MAXTEXT
+            # LibTpuType.NIGHTLY
+        ]:  
+          wl_config = WorkloadConfig(
+            model=model,
+            num_slices=num_slices,
+            device_type=cluster_config.device_type,
+            base_output_directory=base_output_dir,
+            priority="high",
+            max_restarts=0,
+            libtpu_type=libtpu_type,
+            libtpu_nightly_version="",
+            base_docker_image=base_docker_image,
+            pathways_config=None
+          )
+          command, name = generate_xpk_workload_cmd(
+            cluster_config=cluster_config,
+            wl_config=wl_config
+          )
+
+          print(f"Name of the workload is: {name} \n")
+          xpk_workload_names.append(name)
+
+          print(f"XPK command to be used is: {command} \n")
+          xpk_workload_cmds.append(command)
+
+  for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
+    return_code = run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
+    if return_code != 0:
+      print('Unable to run xpk workload: {xpk_workload_name}')
+
+def main() -> int:
+  run_llama3_v5()
 
 
 
