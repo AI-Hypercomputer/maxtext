@@ -41,7 +41,22 @@ _FLATTEN_MICROBENCHMARK_RESULTS = False
 
 
 def prefix_cache_benchmark(prefix, prefill_length, true_length, prefix_cache_entries_num, iters):
-  """Handles running prefix cache benchmark, and printing results."""
+  """Handles running prefix cache benchmark, and printing results.
+
+  Create different key with half of prefill_length common prefix insert into cache.
+  The value is not relevant to the cache for now. Just copy the prefix for every cache entry.
+  1. Fill the prefix cache to full capacity.
+  2. Benchmark save prefix cache with evicting time average by prefix_cache_entries_num.
+  3. Benchmark fetch_longest_common_prefix_key average by iters.
+  4. Benchmark load prefix cache time average by iters.
+
+  Args:
+    prefix: prefix return from prefill function
+    prefill_length: prefill token length after padding
+    true_length: true prefill token length
+    prefix_cache_entries_num: number of prefix cache entries insert into PrefixCache
+    iters: repeat time to test fetch_longest_common_prefix_key and load from cache
+  """
 
   print(f"Prefix Cache benchmark results for prefill length {prefill_length}:\n")
 
@@ -60,7 +75,9 @@ def prefix_cache_benchmark(prefix, prefill_length, true_length, prefix_cache_ent
   # Fill the prefix caching
   new_value_list = []
   for c_idx in range(prefix_cache_entries_num):
-    key = tuple(i + c_idx * remain_len for i in range(prefill_length))
+    # Add 100 to make sure filled prefix caching will not share the common_prefix_key.
+    # The later save prefix part will evict all of them.
+    key = tuple(100 + i + c_idx * prefill_length for i in range(prefill_length))
     new_value = value.clone()
     prefix_cache_inst.save(key, new_value)
     new_value_list.append(new_value)
@@ -70,7 +87,7 @@ def prefix_cache_benchmark(prefix, prefill_length, true_length, prefix_cache_ent
   # Save prefix
   start = datetime.datetime.now()
   new_value_list = []
-  for c_idx in range(prefix_cache_entries_num):
+  for c_idx in range(iters):
     key = common_prefix_key + tuple(i + c_idx * remain_len for i in range(remain_len))
     # values are not relevant for caching now, just clone the same tokens and values for test
     new_value = value.clone()
@@ -80,7 +97,7 @@ def prefix_cache_benchmark(prefix, prefill_length, true_length, prefix_cache_ent
   end = datetime.datetime.now()
   del new_value_list
   save_sec = (end - start).total_seconds()
-  save_avg_ms = save_sec * 1000 / prefix_cache_entries_num
+  save_avg_ms = save_sec * 1000 / iters
 
   # Fetch longest prefix key
   key_load = common_prefix_key + tuple(i + prefix_cache_entries_num * remain_len for i in range(remain_len))
