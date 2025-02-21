@@ -974,7 +974,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh):
   return state_mesh_annotations
 
 
-def get_kv_cache_annotations(model, config, rng, mesh, page_state: page_managers.PageState):
+def get_kv_cache_annotations(model, config, rng, mesh, page_state: page_managers.PageStateSnapshot):
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_ar_kv_cache(model, config):
