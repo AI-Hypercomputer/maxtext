@@ -80,3 +80,4 @@ class FakeElasticUtils(ElasticUtils):
     if not isinstance(dst_sharding, jax.sharding.Sharding):
       raise ValueError("`sharding` must contain only `Sharding` instances.")
     return jax.numpy.ones_like(arr, device=dst_sharding)
+

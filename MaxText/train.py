@@ -814,6 +814,7 @@ def reshard_fn(config: pyconfig.HyperParameters):
                 lambda x: jax.sharding.NamedSharding(mesh, x.sharding.spec),
                 arr,
             ),
+            put_array=config.eu.put_array_device_put2,
         )
 
       state = state.replace(step=0, params=None, opt_state=None)
