@@ -327,12 +327,20 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_size, model_param
     self_attention["value"]["kernel"][layer_idx, ...] = wv  # pylint: disable=E1137
     self_attention["out"]["kernel"][layer_idx, ...] = w_post  # pylint: disable=E1137
 
-  self_attention["query"]["kernel"] = np.transpose(self_attention["query"]["kernel"], axes=(1, 0, 2, 3))
-  self_attention["key"]["kernel"] = np.transpose(self_attention["key"]["kernel"], axes=(1, 0, 2, 3))
-  self_attention["value"]["kernel"] = np.transpose(self_attention["value"]["kernel"], axes=(1, 0, 2, 3))
+  self_attention["query"]["kernel"] = np.transpose(
+      self_attention["query"]["kernel"], axes=(1, 0, 2, 3)
+  )  # [embed, layer, q, head_dim]
+  self_attention["key"]["kernel"] = np.transpose(
+      self_attention["key"]["kernel"], axes=(1, 0, 2, 3)
+  )  # [embed, layer, kv, head_dim]
+  self_attention["value"]["kernel"] = np.transpose(
+      self_attention["value"]["kernel"], axes=(1, 0, 2, 3)
+  )  # [embed, layer, kv, head_dim]
   # layers, base_num_query_heads * head_dim, base_num_query_heads, head_dim =>
   # base_num_query_heads, layers,head_dim, base_num_query_heads * head_dim
-  self_attention["out"]["kernel"] = np.transpose(self_attention["out"]["kernel"], axes=(2, 0, 3, 1))
+  self_attention["out"]["kernel"] = np.transpose(
+      self_attention["out"]["kernel"], axes=(2, 0, 3, 1)
+  )  # [q, layer, head_dim, embed]
 
   # scale the query weights
   self_attention["query"]["kernel"] = self_attention["query"]["kernel"] / np.sqrt(head_dim)
@@ -450,30 +458,15 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_size, model_param
   return jax_weights
 
 
-def convert_to_jax_weights(base_model_path, model_size, huggingface_ckpt):
-  """
-  Function to convert the checkpoint at base_model_path into Orbax checkpoint
-  for MaxText and output jax_weights ready for MaxText
-
-  Attributes:
-  base_model_path: checkpoint path
-  model_size: llama2-7b to 70b, mistral-7b, or mixtral-8x7b, mixtral-8x22b
-  """
-  """Convert model to maxtext."""
-  model_params = MODEL_PARAMS_DICT[model_size]
+def _convert_pytorch_to_jax_weights(base_model_path, model_size, model_params, mem_info):
+  """Convert Pytorch Checkpoint To Jax Weights."""
   base_num_decoder_layers = model_params["num_layers"]
   base_num_query_heads = model_params["num_heads"]
   head_dim = model_params["dims_per_head"]
   base_num_kv_heads = model_params["num_kv_heads"]
   vocab_size = model_params["vocab"]
   num_experts = model_params["num_experts"] if "num_experts" in model_params else None
-  mem_info = psutil.Process()
-  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
-  max_logging.log(f"Loading the base model from {base_model_path}")
-  # Skip any hidden files for checkpoints
-  if huggingface_ckpt:
-    return _convert_huggingface_to_jax_weights(base_model_path, model_size, model_params, mem_info)
   chkpt_vars = {}
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.pth"))
   for i, ckpt_path in enumerate(ckpt_paths):
@@ -715,7 +708,28 @@ def convert_to_jax_weights(base_model_path, model_size, huggingface_ckpt):
   del chkpt_vars
   gc.collect()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
-  return jax_weights
+
+
+def convert_to_jax_weights(base_model_path, model_size, huggingface_ckpt):
+  """
+  Function to convert the checkpoint at base_model_path into Orbax checkpoint
+  for MaxText and output jax_weights ready for MaxText
+
+  Attributes:
+  base_model_path: checkpoint path
+  model_size: llama2-7b to 70b, mistral-7b, or mixtral-8x7b, mixtral-8x22b
+  """
+  """Convert model to maxtext."""
+  model_params = MODEL_PARAMS_DICT[model_size]
+  mem_info = psutil.Process()
+  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+
+  max_logging.log(f"Loading the base model from {base_model_path}")
+
+  if huggingface_ckpt:
+    return _convert_huggingface_to_jax_weights(base_model_path, model_size, model_params, mem_info)
+
+  return _convert_pytorch_to_jax_weights(base_model_path, model_size, model_params, mem_info)
 
 
 def save_jax_weights_to_checkpoint(maxtext_model_path, jax_weights):
