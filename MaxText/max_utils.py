@@ -700,40 +700,46 @@ def init_initial_state(model, tx, config, is_training, key):
 
 
 def setup_decode_state(model, config, rng, mesh, params):
-    """Sets up the autoregressive decoding state, including cache and PageManager state."""
-
-    print("\nEntering setup_decode_state:")
-    print(f"  model: {type(model).__name__}")
-    print(f"  mesh.shape: {mesh.shape}")
-    print(f"  logical_axis_rules: {config.logical_axis_rules}")
-
-    batch_size = config.per_device_batch_size * jax.device_count()
-
+    print("\n=== VERIFYING SETUP_DECODE_STATE ===")
+    print(f"Input params type: {type(params)}")
+    print(f"Input params structure: {jax.tree_util.tree_structure(params)}")
     with nn_partitioning.axis_rules(config.logical_axis_rules):
+        # Initialize
+        input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+        initial_vars = model.init(
+            {"params": rng, "dropout": rng, "cache": rng}, 
+            jnp.ones(input_shape, dtype=jnp.int32),
+            jnp.ones(input_shape, dtype=jnp.int32),
+        )
+        print("\n=== DEBUGGING setup_decode_state() - After model.init() ===")
+        print("Initial vars keys:", initial_vars.keys())
+        print("Initial vars structure:", jax.tree_util.tree_structure(initial_vars))
+        if 'params' in initial_vars:
+            params_in_initial_vars = initial_vars['params']
+            print("Params in initial_vars keys:", params_in_initial_vars.keys())
+            if 'token_embedder' in params_in_initial_vars:
+                print("token_embedder keys in params:", params_in_initial_vars['token_embedder'].keys())
+                if 'embedding' in params_in_initial_vars['token_embedder']:
+                    print("embedding parameter SHAPE in initial_vars:", params_in_initial_vars['token_embedder']['embedding'].shape)
+                else:
+                    print("ERROR: embedding parameter NOT FOUND in token_embedder in initial_vars")
+            else:
+                print("ERROR: token_embedder NOT FOUND in params in initial_vars")
+        else:
+            print("ERROR: params NOT FOUND in initial_vars")
+        print("\nInitial vars:")
+        print(f"- Structure: {jax.tree_util.tree_structure(initial_vars)}")
+        print(f"- Contains cache: {'cache' in initial_vars}")
+        if 'cache' in initial_vars:
+            print(f"- Cache structure: {jax.tree_util.tree_structure(initial_vars['cache'])}")
 
-      # initialize using train state
-      input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-      abstract_state = jax.eval_shape(
-          lambda rng1, rng2, rng3: model.init(
-              {"params" : rng, "dropout": rng, "cache": rng}, # Use key directly
-              jnp.ones(input_shape, dtype=jnp.int32),
-              jnp.ones(input_shape, dtype=jnp.int32),
-              ),
-          rng, rng, rng
-          )
+        if params is not None:
+            initial_vars["params"] = params 
 
-      #init_decode_state(model.apply, abstract_state) # state initialized
-      state = train_state.TrainState(step=0, apply_fn=model.apply, params=abstract_state["params"], tx=None, opt_state={})
-
-      rng1, rng2 = jax.random.split(rng) # Split *before* calling get_kv_cache_annotations.
-      kv_cache_annotations = get_kv_cache_annotations(model, config, rng2, mesh) # Pass rng2
-
-
-      if params is not None:
-        state = state.replace(params=params)  # Now safe to call replace
-
-      state_mesh_annotations = nn.get_partition_spec(state)
-      state = nn.with_logical_partitioning(state, state_mesh_annotations) # Apply partitioning
+        # Get annotations and convert to mesh
+        state_mesh_annotations = nn.get_partition_spec(initial_vars)
+        with mesh:
+            state = init_decode_state(model.apply, initial_vars["params"])
 
     return state, state_mesh_annotations
 
@@ -989,16 +995,6 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   )
 
 
-def get_prefill_kv_cache_annotations(model, config, rng_prefill, mesh):
-  """Creates the KV cache annotations for prefill."""
-  if config.attention == "paged":
-    return get_prefill_paged_kv_cache_annotations(model, config, rng_prefill, mesh)
-  elif config.attention == "dot_product":  # Handles all AttentionOp types
-    return get_prefill_contiguous_kv_cache_annotations(model, config, rng_prefill, mesh)
-  else:
-    raise ValueError(f"Unsupported attention type: {config.attention}")
-
-
 def get_initial_kv_cache(model, config, batch_size, abstract=False):
   """Creates the initial (all zeros) KV cache for decode."""
   if config.attention == "paged":
@@ -1009,14 +1005,25 @@ def get_initial_kv_cache(model, config, batch_size, abstract=False):
     return get_initial_contiguous_kv_cache(model, config, batch_size, abstract)
 
 
-
 def get_kv_cache_annotations(model, config, rng, mesh):
     """Get the KV cache annotations for autoregressive and prefill modes."""
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       if config.attention == "paged":
-          return get_prefill_paged_kv_cache_annotations(model, config, rng, mesh)
+          ret = get_initial_paged_kv_cache(
+            model, 
+            config, 
+            batch_size=int(config.per_device_batch_size*jax.device_count()), 
+            abstract=True)
+          jax.debug.print("Inside get_kv_cache_annotations, paged, abstract=True: {}", jax.tree_util.tree_structure(ret))
+          return ret
       else:
-          return get_prefill_contiguous_kv_cache_annotations(model, config, rng, mesh)
+          ret = get_initial_contiguous_kv_cache(
+            model, 
+            config, 
+            batch_size=int(config.per_device_batch_size*jax.device_count()), 
+            abstract=True)
+          jax.debug.print("Inside get_kv_cache_annotations, contiguous, abstract=True: {}", jax.tree_util.tree_structure(ret))
+          return ret
 
 
 

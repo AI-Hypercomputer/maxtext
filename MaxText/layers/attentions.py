@@ -361,40 +361,18 @@ class PagedAttentionOp(nn.Module):
              reduce_fn=lambda x, y: y)
     if page_group_id is not None:
       if model_mode == common_types.MODEL_MODE_PREFILL:
-        page_state = page_manager(model_mode="prefill", page_group_id=page_group_id, true_length=true_length)
-        page_group_pages = self.get_page_group_pages(page_state.page_map, page_group_id, page_manager.max_pages_per_group)
-        last_page_length = jnp.where(
-            true_length % page_manager.tokens_per_page == 0,
-            page_manager.tokens_per_page,
-            true_length % page_manager.tokens_per_page,
-        )
-        num_full_pages = (true_length - last_page_length) // page_manager.tokens_per_page
-        start_index = true_length - last_page_length
-
-        key_pages, value_pages = self._paged_prefill_impl(
-            key,
-            value,
-            start_index,
-            true_length,
-            page_group_pages,
-            num_full_pages,
-            page_manager.key_pages.value,  # Access .value inside the conditional
-            page_manager.value_pages.value, # Access .value inside the conditional
-            page_manager.tokens_per_page,
-        )
-        page_manager.key_pages.value = key_pages  # And update .value inside the conditional
-        page_manager.value_pages.value = value_pages
-
-        attn_out = self._paged_dot_product_attention(
-            query,
-            page_manager.key_pages.value,
-            page_manager.value_pages.value,
-            page_state.sequence_lengths,
-            page_state.page_map,
-            self.num_kv_heads,
-            page_manager.tokens_per_page,
-        )
-        return self.out_projection(self.output_dim, attn_out)
+        # Handle prefill
+        cache = self.variable("cache", f"layer_{self.layer_idx}_key_pages").value
+        value_pages = self.variable("cache", f"layer_{self.layer_idx}_value_pages").value
+        page_map = self.variable("cache", f"layer_{self.layer_idx}_page_map").value
+        
+        # Update page map and pages for this slot
+        page_idx = self._allocate_pages(page_group_id, true_length)
+        self._store_kv_in_pages(key, value, page_idx, true_length)
+        
+        # Compute attention using pages
+        return self._paged_dot_product_attention(query, cache, value_pages, 
+                                               page_map, page_group_id)
 
       elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
         if key.shape[1] != 1 or value.shape[1] != 1:

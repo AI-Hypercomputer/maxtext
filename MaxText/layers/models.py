@@ -215,8 +215,21 @@ class Decoder(nn.Module):
     self.decoder_layer = self.get_decoder_layers()
     self.norm_layer = self.get_norm_layer()
 
-    # DO NOT create PageManagers here.  Delay this until needed.
-    self.page_managers = None
+    if cfg.attention == "paged":
+        # Initialize cache variables
+        for i in range(cfg.num_decoder_layers):
+            self.variable("cache", f"layer_{i}_key_pages",
+                lambda: jnp.zeros((cfg.num_pages, cfg.tokens_per_page,
+                                 cfg.num_kv_heads, cfg.head_dim)))
+            self.variable("cache", f"layer_{i}_value_pages",
+                lambda: jnp.zeros((cfg.num_pages, cfg.tokens_per_page,
+                                 cfg.num_kv_heads, cfg.head_dim)))
+            # Page management state
+            self.variable("cache", f"layer_{i}_page_status",
+                lambda: jnp.zeros((cfg.num_pages,), dtype=jnp.int32))
+            self.variable("cache", f"layer_{i}_page_map",
+                lambda: jnp.full((int(cfg.per_device_batch_size * jax.device_count()),
+                                (int(cfg.max_target_length + cfg.tokens_per_page - 1)) // cfg.tokens_per_page,), -1, dtype=jnp.int32))
 
     if self.config.using_pipeline_parallelism:
       pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer[0])
@@ -228,25 +241,22 @@ class Decoder(nn.Module):
   def _create_page_managers(self):
       """Creates the PageManager instances (now a separate method)."""
       cfg = self.config
-      if cfg.attention == "paged":
-        self.page_managers = self.variable(
-            "cache",
-            "page_managers",
-            lambda: [
-                PageManager(
-                    num_pages=cfg.num_pages,
-                    tokens_per_page=cfg.tokens_per_page,
-                    max_page_groups=int(cfg.per_device_batch_size * jax.device_count()),
-                    max_target_length=cfg.max_target_length,
-                    max_prefill_predict_length=cfg.max_prefill_predict_length,
-                    max_pages_per_group=(cfg.max_target_length + cfg.tokens_per_page - 1) // cfg.tokens_per_page,
-                    config=cfg
-                )
-                for _ in range(cfg.num_decoder_layers)
-            ],
-        )
-      else:
-          self.page_managers = None
+      self.page_managers = self.variable(
+          "cache",
+          "page_managers",
+          lambda: [
+              PageManager(
+                  num_pages=cfg.num_pages,
+                  tokens_per_page=cfg.tokens_per_page,
+                  max_page_groups=int(cfg.per_device_batch_size * jax.device_count()),
+                  max_target_length=cfg.max_target_length,
+                  max_prefill_predict_length=cfg.max_prefill_predict_length,
+                  max_pages_per_group=(cfg.max_target_length + cfg.tokens_per_page - 1) // cfg.tokens_per_page,
+                  config=cfg
+              )
+              for _ in range(cfg.num_decoder_layers)
+          ],
+      )
 
   def get_remat_policy(self):
     cfg = self.config
@@ -486,8 +496,19 @@ class Decoder(nn.Module):
             )
         else:
             if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE and cfg.attention == "paged":
-                if self.page_managers is None:  # First call
-                  self._create_page_managers()
+                if self.page_managers.value is None:  # First call
+                    self.page_managers.value = [
+                        PageManager(
+                            num_pages=cfg.num_pages,
+                            tokens_per_page=cfg.tokens_per_page,
+                            max_page_groups=int(cfg.per_device_batch_size * jax.device_count()),
+                            max_target_length=cfg.max_target_length,
+                            max_prefill_predict_length=cfg.max_prefill_predict_length,
+                            max_pages_per_group=(cfg.max_target_length + cfg.tokens_per_page - 1) // cfg.tokens_per_page,
+                            config=cfg
+                        )
+                        for _ in range(cfg.num_decoder_layers)
+                    ]
                 page_managers_list = self.page_managers.value
             else:
                 page_managers_list = None

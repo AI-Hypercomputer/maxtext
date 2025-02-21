@@ -306,7 +306,8 @@ class PageManager(nn.Module):
       def _get_page_state_shape(name, init_fn, *args):
           return jax.eval_shape(lambda: init_fn(*args))
 
-      return PageState(
+      print("\n=== VERIFYING PAGE MANAGER STATE ===")
+      page_state = PageState(
           page_status=_get_page_state_shape("page_status", jnp.zeros, (self.num_pages,), jnp.int32),
           page_map=_get_page_state_shape("page_map", jnp.full, (self.max_page_groups, self.max_pages_per_group), -1, jnp.int32),
           sequence_lengths=_get_page_state_shape("sequence_lengths", jnp.zeros, (self.max_page_groups,), jnp.int32),
@@ -314,6 +315,11 @@ class PageManager(nn.Module):
           current_page=_get_page_state_shape("current_page", jnp.full, (self.max_page_groups,), -1, jnp.int32),
           current_page_position=_get_page_state_shape("current_page_position", jnp.zeros, (self.max_page_groups,), jnp.int32),
       )
+      print(f"Page state components:")
+      print(f"- page_status shape: {page_state.page_status.shape}")
+      print(f"- page_map shape: {page_state.page_map.shape}")
+      print(f"- sequence_lengths shape: {page_state.sequence_lengths.shape}")
+      return page_state
 
 
   def __call__(
