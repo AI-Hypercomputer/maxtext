@@ -317,6 +317,7 @@ def make_c4_mlperf_train_iterator(
       dataloading_host_count=len(process_indices),
       enable_data_shuffling=config.enable_data_shuffling,
       data_shuffle_seed=config.data_shuffle_seed,
+      shard_in_read=True,
   )
   train_ds = rekey(train_ds, {"inputs": None, "targets": "text"})
 
@@ -328,7 +329,7 @@ def make_c4_mlperf_train_iterator(
       sp_tokenizer=sp_tokenizer,
       train_global_batch_size_to_load=config.global_batch_size_to_load,
       max_target_length=config.max_target_length,
-      shuffle_buffer_size=128,
+      shuffle_buffer_size=32,
       data_shuffle_seed=config.data_shuffle_seed,
   )
   train_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(train_ds, global_mesh)
