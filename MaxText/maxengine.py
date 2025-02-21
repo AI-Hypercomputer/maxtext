@@ -30,6 +30,7 @@ from jax.sharding import PartitionSpec as P
 from jax.experimental import layout as jax_layout
 
 import common_types
+from page_manager import PageManager
 from layers.attentions import (
     get_initial_paged_kv_cache,
     get_initial_contiguous_kv_cache,
@@ -107,6 +108,66 @@ class MaxEngine(engine_api.Engine):
         self.decode_state_shapes = None
         self.params = None # Initialize self.params
 
+        if self.config.attention == "paged":
+            self.page_manager = PageManager(
+                num_pages=self.config.num_pages,
+                tokens_per_page=self.config.tokens_per_page,
+                max_page_groups=int(self.config.per_device_batch_size * jax.device_count()),
+                max_target_length=self.config.max_target_length,
+                max_prefill_predict_length=self.config.max_prefill_predict_length,
+                max_pages_per_group=(self.config.max_target_length + self.config.tokens_per_page - 1) // self.config.tokens_per_page,
+                config=self.config,
+            )
+        else:
+            self.page_manager = None
+
+    def create_decode_state(self, rng: Optional[PRNGKeyType] = None):
+        """Creates a new decode state, including the PageManager state."""
+        if rng is None:
+            rng = jax.random.PRNGKey(0)
+
+        batch_size = int(self.config.per_device_batch_size * jax.device_count())
+
+        if self.config.attention == "paged":
+            page_manager = PageManager(
+                num_pages=self.config.num_pages,
+                tokens_per_page=self.config.tokens_per_page,
+                max_page_groups=batch_size,
+                max_target_length=self.config.max_target_length,
+                max_prefill_predict_length=self.config.max_prefill_predict_length,
+                max_pages_per_group=(self.config.max_target_length + self.config.tokens_per_page - 1) // self.config.tokens_per_page,
+                config=self.config,
+            )
+
+            abstract_cache = max_utils.get_initial_kv_cache(
+                self.model,
+                self.config,
+                batch_size=batch_size,
+                abstract=True  # Get shapes/dtypes only
+            )
+
+            decode_state = {
+                "logits": jnp.zeros((batch_size, 1, self.config.vocab_size)),
+                "cache": abstract_cache,
+                "next_pos": jnp.zeros((batch_size, 1), dtype=jnp.int32),
+                "generated_tokens": jnp.zeros((batch_size, 1), dtype=jnp.int32),
+                "tokens": jnp.zeros((batch_size, 1), dtype=jnp.int32),
+            }
+        else:  # Contiguous attention
+            decode_state = {
+                "logits": jnp.zeros((batch_size, 1, self.config.vocab_size)),
+                "cache": max_utils.get_initial_kv_cache(
+                    self.model,
+                    self.config,
+                    batch_size=batch_size,
+                    abstract=False,  # Get concrete arrays
+                ),
+                "next_pos": jnp.zeros((batch_size, 1), dtype=jnp.int32),
+                "generated_tokens": jnp.zeros((batch_size, 1), dtype=jnp.int32),
+                "tokens": jnp.zeros((batch_size, 1), dtype=jnp.int32),
+            }
+
+        return decode_state
 
     def generate_aot(
         self, params: Params, decode_state: DecodeState, rng: Optional[PRNGKeyType] = None
@@ -201,67 +262,44 @@ class MaxEngine(engine_api.Engine):
 
         rng1, rng2, rng3 = jax.random.split(rng, 3)
 
-        # 1. Initialize the model parameters (but NOT the full decode state yet)
-        init_state_partial = functools.partial(max_utils.init_initial_state, self.model, None, self.config, False)
-        init_state_partial.__name__ = "initialize_state"
-
+        # 1. Initialize the model parameters *ONLY*.
         input_shape = (self.config.micro_batch_size_to_train_on, self.config.max_target_length)
         model_vars = self.model.init(
             {"params": rng1, "dropout": rng1, "cache": rng1},
             jnp.ones(input_shape, dtype=jnp.int32),
             jnp.ones(input_shape, dtype=jnp.int32),
         )
-        params = model_vars['params']  # Get params
+        self.params = model_vars['params']
 
-        print("\n=== DEBUGGING load_params() - After model_vars['params'] ===")
-        print("Params keys:", params.keys())
-        print("Params structure:", jax.tree_util.tree_structure(params))
-        if 'token_embedder' in params:
-            print("token_embedder keys:", params['token_embedder'].keys())
-            if 'embedding' in params['token_embedder']:
-                embedding_param = params['token_embedder']['embedding']
-                print(f"embedding parameter TYPE after load: {type(embedding_param)}")
-                is_partitioned = isinstance(embedding_param, flax.linen.spmd.LogicallyPartitioned)
-                print(f"embedding parameter is LogicallyPartitioned: {is_partitioned}")
-                if is_partitioned:
-                    embedding_shape = embedding_param.block_spec.shape
-                    # embedding_shape = jax.eval_shape(lambda: embedding_param).shape # Use jax.eval_shape to get shape
-                    print(f"embedding parameter LOGICAL SHAPE: {embedding_shape}")
-                    print(f"embedding parameter SHARDING: {embedding_param.sharding}") # Print sharding info
-                else:
-                    print("embedding parameter SHAPE:", embedding_param.shape) # Fallback for non-partitioned case
+        # 2. Get KV Cache annotations (using the model and config)
+        self.kv_cache_annotations = max_utils.get_initial_kv_cache(
+            self.model, self.config, batch_size=int(self.config.per_device_batch_size * jax.device_count()), abstract=True
+        )
+
+        # 3. Create NamedShardings from annotations, BUT FILTER!
+        def create_sharding(x):
+            # IMPORTANT:  Only create NamedSharding for Arrays (the actual data).
+            # For the PageManager's state (ShapeDtypeStruct), return None.
+            if isinstance(x, jax.sharding.PartitionSpec):
+                return jax.sharding.NamedSharding(self._mesh, x)
             else:
-                print("ERROR: embedding parameter NOT FOUND in token_embedder")
-        else:
-            print("ERROR: token_embedder NOT FOUND in params")
+                return None  # Or you could use self.replicated_sharding
 
-
-        # 2. Initialize the full decode state (including cache)
-        state, self.state_mesh_annotations = max_utils.setup_decode_state(
-            self.model, self.config, rng1, self._mesh, params
-        )
-
-        # 3. Get KV Cache annotations
-        self.kv_cache_annotations = max_utils.get_kv_cache_annotations(
-            self.model, self.config, rng2, self._mesh
-        )
-
-        # 4. Get annotations from state_mesh_annotations
-        cache_annotations = self.state_mesh_annotations['cache']  # Use dict access
-        self.kv_cache_annotations_named = jax.tree_util.tree_map(
-            lambda x: x,  # Pass through the PartitionSpec
-            cache_annotations,
-            is_leaf=lambda k: isinstance(k, jax.sharding.PartitionSpec)
-        )
-
-        # 5. Create NamedShardings from annotations
         self.kv_cache_shardings = jax.tree_util.tree_map(
-            lambda x: jax.sharding.NamedSharding(self._mesh, x),
-            self.state_mesh_annotations['cache'],  # Use dict access
-            is_leaf=lambda k: isinstance(k, jax.sharding.PartitionSpec)
+            create_sharding,
+            self.kv_cache_annotations,
+            is_leaf=lambda x: isinstance(x, (jax.sharding.PartitionSpec, jax.ShapeDtypeStruct)),
         )
 
-        return params
+        # 4. Create abstract params.
+        self.abstract_params = jax.tree_util.tree_map(
+            lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
+            if isinstance(x, jax.Array)
+            else None,
+            self.params,
+        )
+
+        return self.params
 
     def quantize_params(self, state, rng: Optional[PRNGKeyType] = None):
         """Forward pass to quantize decode params."""

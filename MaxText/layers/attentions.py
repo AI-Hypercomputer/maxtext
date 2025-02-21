@@ -202,30 +202,43 @@ def get_prefill_paged_kv_cache_annotations(model, config, rng, mesh):
 
 def get_initial_paged_kv_cache(model, config, batch_size, abstract=False):
     if not abstract:
-        raise ValueError("PagedAttention only supports abstract initialization of KV cache, please use abstract=True")
+        raise ValueError(
+            "PagedAttention only supports abstract initialization of KV cache, "
+            "please use abstract=True"
+        )
 
     if config.attention == "paged":
-        def layer_page_state_shape(config):
-            return PageManager(
-                num_pages=config.num_pages,
-                tokens_per_page=config.tokens_per_page,
-                max_page_groups=int(config.per_device_batch_size * jax.device_count()),
-                max_target_length=config.max_target_length,
-                max_prefill_predict_length=config.max_prefill_predict_length,
-                max_pages_per_group=(config.max_target_length + config.tokens_per_page -1) // config.tokens_per_page,
-                config=config
-            ).get_page_state()
+        # Create a single PageManager instance to get the shape of PageState.
+        page_manager = PageManager(
+            num_pages=config.num_pages,
+            tokens_per_page=config.tokens_per_page,
+            max_page_groups=int(config.per_device_batch_size * jax.device_count()),
+            max_target_length=config.max_target_length,
+            max_prefill_predict_length=config.max_prefill_predict_length,
+            max_pages_per_group=(config.max_target_length + config.tokens_per_page -1) // config.tokens_per_page,
+            config=config,
+        )
+        initial_page_state = page_manager.get_page_state()
 
-        # Get shape of PageState for each layer.
-        layers_page_state_shapes = [layer_page_state_shape(config) for _ in range(config.num_decoder_layers)]
-
-        # Create overall cache structure.
+        # Create overall cache structure
         cache = {}
-        for i, layer_page_state_shape in enumerate(layers_page_state_shapes):
-            cache[f"layers_{i}"] = layer_page_state_shape
-        return {"decoder": cache}  # Wrap in a 'decoder' dict to match the non-paged structure.
+        cache["page_manager"] = initial_page_state
 
-    return {} # return a blank for non-paged attention
+        # Create the per-layer structure for key_pages and value_pages
+        key_pages_shape = (config.num_pages, config.tokens_per_page, config.num_kv_heads, config.head_dim)
+        value_pages_shape = (config.num_pages, config.tokens_per_page, config.num_kv_heads, config.head_dim)
+        key_pages_struct = jax.ShapeDtypeStruct(shape=key_pages_shape, dtype=config.dtype)
+        value_pages_struct = jax.ShapeDtypeStruct(shape=value_pages_shape, dtype=config.dtype)
+
+        decoder_cache = {}
+        for i in range(config.num_decoder_layers):
+            decoder_cache[f"layers_{i}"] = {
+                "key_pages": key_pages_struct,
+                "value_pages": value_pages_struct,
+            }
+        cache["decoder"] = decoder_cache
+        return cache
+    return {}
 
 class PagedAttentionOp(nn.Module):
   """Paged Attention Operator."""
