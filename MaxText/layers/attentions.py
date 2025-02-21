@@ -384,6 +384,8 @@ class PagedAttentionOp(nn.Module):
     kv_indices = jnp.arange(kv_heads)[:, None]  # [n_kv, 1]
     kv_indices = jnp.tile(kv_indices, (1, batch_size))  # [n_kv, b]
 
+    jax.debug.print("current_page {}, current_page_position {}", page_state.current_page, page_state.current_page_position)
+
     key_pages_updated = key_pages.at[kv_indices, broadcast_pages, broadcast_pos].set(new_key)
     value_pages_updated = value_pages.at[kv_indices, broadcast_pages, broadcast_pos].set(new_value)
 
