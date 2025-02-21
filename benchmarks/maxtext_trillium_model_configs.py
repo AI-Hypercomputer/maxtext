@@ -1566,3 +1566,49 @@ matt_simple = _add_to_model_dictionary(
     ),
   )
 )
+
+
+deepseek_big = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="deepseek_big",
+    model_type="default",
+    tuning_params={
+        "steps": 20,
+        "per_device_batch_size": 2,
+        "max_target_length": 4096,
+        "enable_checkpointing": False,
+        "dataset_type": "synthetic",
+        "base_output_directory": "gs://maxtext-experiments-multipod",
+        "decoder_block": "mistral",
+        "ici_expert_parallelism": 256,
+        "num_experts": 256, # 256
+        "num_experts_per_tok": 8,
+        "base_emb_dim": 4096, #7168
+        "base_mlp_dim": 24576,
+        "base_num_query_heads": 32,
+        "base_num_kv_heads": 8,
+        "head_dim": 128,
+        "skip_first_n_steps_for_profiler": 12,
+        "allow_split_physical_axes": False,
+        "sparse_matmul": False, # False
+        "megablox": False, # True
+        "capacity_factor": 1,
+        "profiler": "xplane",
+        "opt_type": "sgd",
+        "weight_dtype": "bfloat16",
+        "remat_policy": "full",
+        "base_num_decoder_layers": 16, # PP * 8
+        "dcn_pipeline_parallelism": 2,
+        "num_pipeline_microbatches": 4, # PP * 2
+        "num_layers_per_pipeline_stage": 2,
+        "scan_layers": False,
+    },
+    xla_flags=(
+        xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(81920)
+        + xla_flags_library.REDUCE_SCATTER_FUSION
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+    ),
+  )
+)
