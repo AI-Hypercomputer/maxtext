@@ -28,7 +28,8 @@ class FakeElasticUtils(ElasticUtils):
       total_slice_count: int,
       save_period: Optional[int] = None,
       reshard_check_period: Optional[int] = None,
-      max_failures: Optional[int] = None,
+      max_failure_count: Optional[int] = None,
+      max_reshard_retry_count: Optional[int] = None,
   ):
     self.fake_good_slice_indices = set(d.slice_index for d in devices)
 
@@ -38,6 +39,7 @@ class FakeElasticUtils(ElasticUtils):
         save_period,
         reshard_check_period,
         max_failures,
+        max_reshard_retry_count,
     )
 
   def update_good_slice_indices(self, good_slice_indices: set[int]):

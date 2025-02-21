@@ -83,7 +83,8 @@ class ElasticUtils:
       total_slice_count: int,
       save_period: Optional[int] = None,
       reshard_check_period: Optional[int] = None,
-      max_failures: Optional[int] = None,
+      max_failure_count: Optional[int] = None,
+      max_reshard_retry_count: Optional[int] = None,
   ):
     self.devices = devices
     self.total_slice_count = total_slice_count
@@ -96,25 +97,40 @@ class ElasticUtils:
       reshard_check_period = 1
     self.reshard_check_period = reshard_check_period
 
-    if max_failures is None:
-      max_failures = float("inf")
-    self.max_failures = max_failures
+    if max_failure_count is None:
+      max_failure_count = float("inf")
+    self.max_failure_count = max_failure_count
+
+    if max_reshard_retry_count is None:
+      max_reshard_retry_count = float("inf")
+    self.max_reshard_retry_count = max_reshard_retry_count
 
     self.failure_count = 0
+    self.reshard_retry_count = 0
     self.good_slice_indices = self.get_slice_availability()
     self.data = {}
 
-  def slice_down(self):
+  def slice_down(self, reshard_retry: bool = False):
     """Slice down."""
     logger.info("Slice down")
     self.good_slice_indices = self.get_slice_availability()
     self.failure_count += 1
+    if reshard_retry:
+      self.reshard_retry_count += 1
+    else:
+      self.reshard_retry_count = 0
+
+    logger.info(f"{self.failure_count=} {self.max_failure_count=}")
+    if self.failure_count >= self.max_failure_count:
+      logger.fatal(f"Max failure count reached {self.max_failure_count}")
 
     logger.info(
-        f"Failure count: {self.failure_count} with max {self.max_failures}"
+        f"{self.reshard_retry_count=} {self.max_reshard_retry_count=}"
     )
-    if self.failure_count >= self.max_failures:
-      logger.fatal(f"Max failures reached {self.max_failures}")
+    if self.reshard_retry_count > self.max_reshard_retry_count:
+      logger.fatal(
+          f"Max reshard retry count reached {self.max_reshard_retry_count}"
+      )
 
   @timeit
   def save(self, save_step: int, blocking: bool = True, **kwargs):
@@ -485,7 +501,6 @@ class ElasticUtils:
     return jax.make_array_from_single_device_arrays(
         arr.shape, dst_sharding, arrays
     )
-
 
   def scale_by_good_slices(self, x: int | float) -> int | float:
     """Scale x by the number of good slices."""

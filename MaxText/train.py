@@ -863,7 +863,7 @@ def reshard_fn(config: pyconfig.HyperParameters):
         max_logging.log("Unknown JaxRuntimeError during resharding!")
         raise
 
-      config.eu.slice_down()
+      config.eu.slice_down(reshard_retry=True)
 
   return (
       restore_step,
