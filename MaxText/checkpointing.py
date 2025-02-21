@@ -316,7 +316,7 @@ def load_params_from_path(load_parameters_from_path, abstract_unboxed_params, st
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
   max_logging.log(f"restoring params from {load_parameters_from_path}")
   ckpt = epath.Path(load_parameters_from_path)
-  ckptr = ocp.PyTreeCheckpointer()
+  ckptr = ocp.Checkpointer(ocp.PyTreeCheckpointHandler(restore_concurrent_gb=500, save_concurrent_gb=500))
   # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
   # Rather than pass the entire abstract state, which could unnecessarily restore opt_state and such and waste
   # memory, we instead specify here that we are just restoring the params field of the checkpoint

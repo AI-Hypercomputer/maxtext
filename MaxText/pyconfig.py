@@ -495,6 +495,7 @@ class _HyperParameters:
     # follow https://github.com/google/paxml/blob/19db52eed85ae0d2365339b83a97cd0b873bbf73/paxml/tasks/lm/params/c4.py#L280
     #   according to training_rules of mlperf gpt3 training
     global_batch_size_to_train_on = raw_keys["global_batch_size_to_train_on"]
+    global_batch_size_to_eval_on = raw_keys["global_batch_size_to_eval_on"]
     max_target_length = raw_keys["max_target_length"]
     # if global_batch_size_to_train_on <= 3584:
     #   raw_keys["learning_rate"] = 2e-5
@@ -504,6 +505,7 @@ class _HyperParameters:
     # decay_end_step = math.ceil(108600.0 * 1536 / global_batch_size_to_train_on - 1e-6)
     # raw_keys["learning_rate_schedule_steps"] = decay_end_step
     # raw_keys["warmup_steps_fraction"] = warmup_steps / decay_end_step
+    raw_keys["eval_step"] = math.ceil(5760 * 8192 / max_target_length /global_batch_size_to_eval_on)
     raw_keys["eval_interval"] = math.ceil(377487360 / max_target_length / global_batch_size_to_train_on)
 
   @staticmethod

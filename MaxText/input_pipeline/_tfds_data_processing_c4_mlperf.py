@@ -373,7 +373,7 @@ def make_c4_mlperf_eval_iterator(
 
     eval_ds = rekey(eval_ds, {"inputs": None, "targets": "text"})
 
-  sp_tokenizer = get_tokenizer(config.tokenizer_path, config.add_bos, config.add_eos)
+  sp_tokenizer = get_tokenizer(config.tokenizer_path, config.tokenizer_type, config.add_bos, config.add_eos)
 
 
   eval_ds = preprocess_eval_dataset(
