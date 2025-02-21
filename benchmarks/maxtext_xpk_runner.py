@@ -36,7 +36,6 @@ import time
 
 import maxtext_trillium_model_configs as model_configs
 import maxtext_viperfish_model_configs as v5p_model_configs
-from maxtext_trillium_model_configs import setupConvHParams
 
 # Assumes you built maxtext dep image.
 # Assumes you have xpk installed in a git clone repo of ~/{wl_config.xpk_path}/xpk.py
@@ -316,6 +315,9 @@ def build_user_command(
   else:
     run_name_command=f'run_name={name}'
 
+  steps_to_run = wl_config.num_steps
+  if 'steps' in wl_config.model.tuning_params:
+    steps_to_run = wl_config.model.tuning_params['steps']
   # Construct the command string with proper formatting and line continuations
   command = ' '.join([
       f'{install_libtpu_cmd}',
@@ -326,7 +328,7 @@ def build_user_command(
       'export ENABLE_PJRT_COMPATIBILITY=true &&',
       'python3 MaxText/train.py MaxText/configs/base.yml',
       f'{config_tuning_params}',
-      f'steps={wl_config.num_steps}',
+      f'steps={steps_to_run}',
       f'model_name={wl_config.model.model_type}',
       f'base_output_directory={wl_config.base_output_directory}',
       f'{vertex_tensorboard}',
@@ -585,10 +587,10 @@ def run_llama3():
 
   # Set up the clusters to run workloads on!
   v5p_cluster_config = XpkClusterConfig(
-      cluster_name='mlperf-v5p-128-1',
+      cluster_name='mlperf-v5p-256',
       project='cloud-tpu-multipod-dev',
       zone='europe-west4-b',
-      device_type='v5p-128',
+      device_type='v5p-256',
   )
 
   v6e_cluster_config = XpkClusterConfig(
@@ -675,10 +677,10 @@ def run_llama3_v5():
 
   # Set up the clusters to run workloads on!
   v5p_cluster_config = XpkClusterConfig(
-      cluster_name='mlperf-v5p-512',
+      cluster_name='mlperf-v5p-256-1',
       project='cloud-tpu-multipod-dev',
       zone='europe-west4-b',
-      device_type='v5p-512',
+      device_type='v5p-256',
   )
 
   v6e_cluster_config = XpkClusterConfig(
