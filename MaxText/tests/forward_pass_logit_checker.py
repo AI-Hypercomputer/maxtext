@@ -77,12 +77,12 @@ def get_data(golden_data, golden_data_index, config):
   return ids, decoder_segment_ids, decoder_positions, logits
 
 
-def main(config, test_args):
+def main(config, testing_args):  # pylint: disable=W0621
   """Test the Whole Model of model_name"""
 
   # initialize the model with weights from reference ckpt
-  if test_args.hf_model_path != "":  # Initialize model from the given HF path
-    model = AutoModelForCausalLM.from_pretrained(test_args.hf_model_path)
+  if testing_args.hf_model_path != "":  # Initialize model from the given HF path
+    model = AutoModelForCausalLM.from_pretrained(testing_args.hf_model_path)
   else:  # Initialize MaxText model
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
     init_rng, rng1 = jax.random.split(init_rng)
@@ -92,17 +92,17 @@ def main(config, test_args):
     model = models.Transformer(config, mesh=mesh, quant=quant)
     state, _ = max_utils.setup_decode_state(model, config, rng1, mesh, None)
 
-  if test_args.golden_logits_path == "":
+  if testing_args.golden_logits_path == "":
     input_golden_data_path = "MaxText/test_assets/golden_data_" + config.model_name + ".jsonl"
   else:
-    input_golden_data_path = test_args.golden_logits_path
+    input_golden_data_path = testing_args.golden_logits_path
   with jsonlines.open(input_golden_data_path, "r") as f:
     golden_data = list(f)
 
   for golden_data_index in range(len(golden_data)):
     ids, decoder_segment_ids, decoder_positions, golden_logits = get_data(golden_data, golden_data_index, config)
 
-    if test_args.hf_model_path != "":
+    if testing_args.hf_model_path != "":
       with torch.no_grad():
         full_train_logits = model(torch.tensor(ids.tolist())).logits.cpu().numpy().astype("float32")
     else:
@@ -117,10 +117,11 @@ def main(config, test_args):
     full_train_logits = jax.experimental.multihost_utils.process_allgather(full_train_logits)
     max_logging.log(f"{golden_logits[2]=}")
     max_logging.log(f"{full_train_logits[0, 2, :]=}")
-    token_size = int(test_args.token_size) if test_args.token_size else golden_logits.shape[0]
-    # The ellipsis is used to currently support jax nightly versions newer than 1/9/2025 and stable tests. This can be simplified later
+    token_size = int(testing_args.token_size) if testing_args.token_size else golden_logits.shape[0]
+    # The ellipsis is used to currently support jax nightly versions newer than
+    # 1/9/2025 and stable tests. This can be simplified later
     max_logging.log(
-        f"Max Numerical Difference {np.max(np.subtract(full_train_logits[..., 0, :token_size, :], golden_logits[:token_size, :]))}"
+        f"Max Numerical Difference {np.max(np.subtract(full_train_logits[..., 0, :token_size, :], golden_logits[:token_size, :]))}"  # pylint: disable=C0301
     )
 
     model_probabilities = jax.nn.softmax(full_train_logits[..., 0, :token_size, :], axis=-1)
@@ -132,20 +133,19 @@ def main(config, test_args):
     kl_div = jax.numpy.sum(jax.scipy.special.kl_div(golden_probabilities, model_probabilities), axis=-1)
     max_logging.log(f"KL divergence = {kl_div}, max KL divergence = {jax.numpy.max(kl_div)}")
 
-    if test_args.max_kl_div is not None:
-      max_logging.log("Checking KL Divergence between train distribution and golden distribution")
-      assert jax.numpy.all(
-          kl_div < test_args.max_kl_div
-      ), f"KL divergence values exceed the specified threshold of {test_args.max_kl_div}. Max divergence: {jax.numpy.max(kl_div)}"
+    if testing_args.max_kl_div is not None:
+      max_logging.log("Checking KL Divergence between train distribution and " "golden distribution")
+      assert jax.numpy.all(kl_div < testing_args.max_kl_div), f"KL divergence values exceed the specified threshold of {testing_args.max_kl_div}. Max divergence: {jax.numpy.max(kl_div)}"  # pylint: disable=C0301
     else:
-      max_logging.log("Checking Numerical Differences between train logits and golden logits")
+      max_logging.log("Checking Numerical Differences between train logits and " "golden logits")
       assert jax.numpy.allclose(
           full_train_logits[..., 0, :token_size, :],
           golden_logits[:token_size, :],
-          rtol=float(test_args.rtol),
-          atol=float(test_args.atol),
+          rtol=float(testing_args.rtol),
+          atol=float(testing_args.atol),
           equal_nan=False,
-      ), f"Logits do not match closely enough. Required rtol={test_args.rtol}, atol={test_args.atol}."
+      ), f"Logits do not match closely enough. Required rtol={testing_args.rtol}, "
+      "atol={testing_args.atol}."
 
 
 if __name__ == "__main__":
@@ -159,7 +159,7 @@ if __name__ == "__main__":
   parser.add_argument("--max_kl_div", type=float, required=False, default=None)
   parser.add_argument("--golden_logits_path", type=str, required=False, default="")
   parser.add_argument("--hf_model_path", type=str, required=False, default="")
-  test_args, _ = parser.parse_known_args()
+  testing_args, _ = parser.parse_known_args()
 
   # Remove args defined in this test file to avoid error from pyconfig
   model_args = sys.argv
@@ -169,4 +169,4 @@ if __name__ == "__main__":
 
   pyconfig.initialize(model_args)
   cfg = pyconfig.config
-  main(cfg, test_args)
+  main(cfg, testing_args)
