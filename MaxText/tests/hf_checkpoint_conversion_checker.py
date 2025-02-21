@@ -80,6 +80,7 @@ def compare_pytrees(tree1, tree2, atol=0.001):
   named_leaves1 = get_named_leaves(tree1)
   named_leaves2 = get_named_leaves(tree2)
 
+  print(f"There are {len(named_leaves1.keys())} leaves to check.")
   for key in named_leaves1:  # pylint: disable=C0206
     if key not in named_leaves2:
       print(f"Missing key in second tree: {key}")
@@ -96,7 +97,7 @@ def compare_pytrees(tree1, tree2, atol=0.001):
     except:  # pylint: disable=W0702
       print(f"The issue is with {key}")
 
-  print("All leaves match within tolerance.")
+  print(f"All {len(named_leaves1.keys())} leaves match within tolerance.")
 
 
 def test_huggingface_to_maxtext_back_to_huggingface_flow():
