@@ -1399,7 +1399,7 @@ class MLA(Attention):
     if self.q_lora_rank == 0:
       # Standard Q projection (without LoRA).
       self.query_proj = DenseGeneral(
-          features=(self.num_query_heads, self.head_dim),
+          features=(self.num_query_heads, self.qk_head_dim),
           axis=-1,
           kernel_init=self.kernel_init,
           kernel_axes=("embed", "q_heads", "kv"),
