@@ -891,6 +891,44 @@ def train_loop(config, state=None):
     else:
       p_eval_step = None
 
+  if eval_data_iterator:
+    cumulative_eval_metrics = {
+        "scalar": {
+            "eval/total_loss": 0.0,
+            "eval/total_weights": 0.0,
+            "eval/avg_loss": 0.0,
+            "eval/moe_lb_loss": 0.0,
+        }
+    }
+    eval_step_count = 0
+    # pylint: disable=not-callable
+    eval_dpo_reward_accuracy = 0.0
+    eval_step_count = 0
+    # pylint: disable=not-callable
+    for eval_batch in eval_data_iterator:
+      if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
+        break
+      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        eval_metrics = p_eval_step(state, eval_batch, init_rng)
+      cumulative_eval_metrics["scalar"]["eval/total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
+      cumulative_eval_metrics["scalar"]["eval/total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
+      cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] += float(eval_metrics["scalar"]["evaluation/moe_lb_loss"])
+      eval_dpo_reward_accuracy += float(eval_metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0))  # for dpo only
+      max_logging.log(f"Completed eval step {eval_step_count}")
+      eval_step_count += 1
+    eval_loss = (
+        cumulative_eval_metrics["scalar"]["eval/total_loss"]
+        / (cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS)
+        + cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
+    )
+    cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
+    if config.use_dpo:
+      cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = eval_dpo_reward_accuracy / eval_step_count
+    max_logging.log(
+        f"average loss before training: {eval_step_count=}, {eval_loss=},"
+        f" total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}"
+    )
+    
   local_metrics_file = open(config.metrics_file, "a", encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
 
