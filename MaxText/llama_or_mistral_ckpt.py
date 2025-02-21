@@ -215,14 +215,16 @@ class _HFNamespaceMapper:
 
 
 def permute_to_match_maxtext_rope(arr):
-  evens, odds = np.split(arr, 2, axis=arr.ndim - 1)
+  assert arr.shape[-1] % 2 == 0, "The last dimension for rope has to be even."
+  evens, odds = np.split(arr, 2, axis=arr.ndim - 1)  # pylint: disable=W0632
   x = np.empty_like(arr)
   x[..., ::2] = evens
   x[..., 1::2] = odds
   return x
 
 
-def convert_huggingface_to_jax_weights(base_model_path, model_size, huggingface_ckpt, model_params, mem_info):
+def _convert_huggingface_to_jax_weights(base_model_path, model_size, model_params, mem_info):
+  """Convert Huggingface Checkpoint to Jax."""
   base_num_decoder_layers = model_params["num_layers"]
   base_num_query_heads = model_params["num_heads"]
   head_dim = model_params["dims_per_head"]
@@ -231,7 +233,6 @@ def convert_huggingface_to_jax_weights(base_model_path, model_size, huggingface_
   num_experts = model_params["num_experts"] if "num_experts" in model_params else None
 
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.safetensors"))
-  checkpoint = {}
   chkpt_vars = {}
   for i, ckpt_path in enumerate(ckpt_paths):
     max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
@@ -274,22 +275,11 @@ def convert_huggingface_to_jax_weights(base_model_path, model_size, huggingface_
   jax_weights["decoder"]["logits_dense"]["kernel"] = (
       chkpt_vars["output.weight"].to(torch.float16).numpy().transpose()[:, :vocab_size]
   )
-  # logits_dense = np.concatenate(
-  #     [var["output.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0
-  # ).transpose()[:, :vocab_size]
-  # jax_weights["decoder"]["logits_dense"]["kernel"] = logits_dense
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   # token embedding ##############################################
   max_logging.log("Processing token embeddings")
-  # if model_size[:6] == "llama3":
-  #   token_embedder = np.concatenate([var["tok_embeddings.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0)
-  # else:
-  #   token_embedder = np.concatenate(
-  #       [var["tok_embeddings.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=1
-  #   )[:vocab_size, :]
-  # jax_weights["token_embedder"]["embedding"] = token_embedder
 
   if model_size[:6] == "llama3":
     jax_weights["token_embedder"]["embedding"] = chkpt_vars["tok_embeddings.weight"].to(torch.float16).numpy()
@@ -309,16 +299,6 @@ def convert_huggingface_to_jax_weights(base_model_path, model_size, huggingface_
       "out": {"kernel": None},
   }
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
-    # wq = np.concatenate(
-    #     [var[f"layers.{layer_idx}.attention.wq.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0
-    # ).transpose()
-    # wk = np.concatenate(
-    #     [var[f"layers.{layer_idx}.attention.wk.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0
-    # ).transpose()
-    # wv = np.concatenate(
-    #     [var[f"layers.{layer_idx}.attention.wv.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0
-    # ).transpose()
-
     wq = chkpt_vars[f"layers.{layer_idx}.attention.wq.weight"].to(torch.float16).numpy().transpose()
     wk = chkpt_vars[f"layers.{layer_idx}.attention.wk.weight"].to(torch.float16).numpy().transpose()
     wv = chkpt_vars[f"layers.{layer_idx}.attention.wv.weight"].to(torch.float16).numpy().transpose()
@@ -331,10 +311,6 @@ def convert_huggingface_to_jax_weights(base_model_path, model_size, huggingface_
       wq = permute_to_match_maxtext_rope(wq)
       wk = permute_to_match_maxtext_rope(wk)
 
-    # w_post = np.concatenate(
-    #     [var[f"layers.{layer_idx}.attention.wo.weight"].type(torch.float16).numpy() for var in chkpt_vars],
-    #     axis=1,
-    # )
     w_post = chkpt_vars[f"layers.{layer_idx}.attention.wo.weight"].to(torch.float16).numpy()
 
     w_post = np.reshape(w_post, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
@@ -415,15 +391,6 @@ def convert_huggingface_to_jax_weights(base_model_path, model_size, huggingface_
 
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
     if num_experts is None:
-      # wi_0 = np.concatenate(
-      #     [var[f"layers.{layer_idx}.feed_forward.w1.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0
-      # ).transpose()
-      # wi_1 = np.concatenate(
-      #     [var[f"layers.{layer_idx}.feed_forward.w3.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0
-      # ).transpose()
-      # wo = np.concatenate(
-      #     [var[f"layers.{layer_idx}.feed_forward.w2.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=1
-      # ).transpose()
       wi_0 = chkpt_vars[f"layers.{layer_idx}.feed_forward.w1.weight"].type(torch.float16).numpy().transpose()
       wi_1 = chkpt_vars[f"layers.{layer_idx}.feed_forward.w3.weight"].type(torch.float16).numpy().transpose()
       wo = chkpt_vars[f"layers.{layer_idx}.feed_forward.w2.weight"].type(torch.float16).numpy().transpose()
@@ -445,27 +412,6 @@ def convert_huggingface_to_jax_weights(base_model_path, model_size, huggingface_
         layer_weight["gate"]["kernel"] = np.zeros(stack_shape + gate.shape, dtype=np.float16)
       layer_weight["gate"]["kernel"][layer_idx, ...] = gate
       for k in tqdm(range(num_experts), desc="experts", leave=False):
-        # wi_0 = np.concatenate(
-        #     [
-        #         var[f"layers.{layer_idx}.feed_forward.experts.{k}.w1.weight"].type(torch.float16).numpy()
-        #         for var in chkpt_vars
-        #     ],
-        #     axis=0,
-        # ).transpose()
-        # wi_1 = np.concatenate(
-        #     [
-        #         var[f"layers.{layer_idx}.feed_forward.experts.{k}.w3.weight"].type(torch.float16).numpy()
-        #         for var in chkpt_vars
-        #     ],
-        #     axis=0,
-        # ).transpose()
-        # wo = np.concatenate(
-        #     [
-        #         var[f"layers.{layer_idx}.feed_forward.experts.{k}.w2.weight"].type(torch.float16).numpy()
-        #         for var in chkpt_vars
-        #     ],
-        #     axis=1,
-        # ).transpose()
         wi_0 = chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.{k}.w1.weight"].type(torch.float16).numpy().transpose()
         wi_1 = chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.{k}.w3.weight"].type(torch.float16).numpy().transpose()
         wo = chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.{k}.w2.weight"].type(torch.float16).numpy().transpose()
@@ -527,14 +473,12 @@ def convert_to_jax_weights(base_model_path, model_size, huggingface_ckpt):
   max_logging.log(f"Loading the base model from {base_model_path}")
   # Skip any hidden files for checkpoints
   if huggingface_ckpt:
-    return convert_huggingface_to_jax_weights(base_model_path, model_size, huggingface_ckpt, model_params, mem_info)
+    return _convert_huggingface_to_jax_weights(base_model_path, model_size, model_params, mem_info)
   chkpt_vars = {}
-  checkpoint = {}
   ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.pth"))
   for i, ckpt_path in enumerate(ckpt_paths):
     max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
-    checkpoint = torch.load(ckpt_path, map_location="cpu")
-    chkpt_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = checkpoint
+    chkpt_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = torch.load(ckpt_path, map_location="cpu")
   chkpt_vars = [chkpt_vars[i] for i in sorted(list(chkpt_vars.keys()))]
   # map weight names if they use HuggingFace instead of PyTorch convention
   chkpt_vars = [_HFNamespaceMapper(var) for var in chkpt_vars]

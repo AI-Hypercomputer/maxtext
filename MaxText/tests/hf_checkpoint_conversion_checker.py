@@ -1,23 +1,29 @@
+"""
+Copyright 2023 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+     https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+"""
+
 import glob
 import os
 import torch
 from safetensors import safe_open
 import pathlib
 import jax
-import jax.numpy as jnp
 import numpy as np
-import torch
 from MaxText.llama_or_mistral_ckpt import permute_to_match_maxtext_rope
 from MaxText.llama_mistral_mixtral_orbax_to_hf import unpermute_from_match_maxtext_rope
-import sys
-import jax
-from jax.sharding import Mesh
-from jax.experimental import mesh_utils
 import argparse
-import pyconfig
-import pytest
-
-import unittest
 
 
 def load_hf(hf_checkpoint_folder):
@@ -34,7 +40,7 @@ def load_hf(hf_checkpoint_folder):
 def load_meta(meta_checkpoint_folder):
   meta_tensor = {}
   ckpt_paths = sorted(pathlib.Path(meta_checkpoint_folder).glob("[!.]*.pth"))
-  for i, ckpt_path in enumerate(ckpt_paths):
+  for ckpt_path in ckpt_paths:
     meta_tensor = torch.load(ckpt_path, map_location="cpu")
   return meta_tensor
 
@@ -54,9 +60,11 @@ def compare_pytrees(tree1, tree2, atol=0.001):
   # Ensure both trees have the same structure
   if jax.tree_util.tree_structure(tree1) != jax.tree_util.tree_structure(tree2):
     print(
-        f"Pytrees have different structures! Tree1: {jax.tree_util.tree_structure(tree1)} \n\n\nTree2: {jax.tree_util.tree_structure(tree2)}"
+        "Pytrees have different structures! Tree1:"
+        f"{jax.tree_util.tree_structure(tree1)} \n\n\n"
+        f"Tree2: {jax.tree_util.tree_structure(tree2)}"
     )
-    return False
+    return
 
   # Compare leaves with names
   def get_named_leaves(pytree, parent_key=""):
@@ -72,31 +80,27 @@ def compare_pytrees(tree1, tree2, atol=0.001):
   named_leaves1 = get_named_leaves(tree1)
   named_leaves2 = get_named_leaves(tree2)
 
-  for key in named_leaves1:
-    # import pdb; pdb.set_trace()
+  for key in named_leaves1:  # pylint: disable=C0206
     if key not in named_leaves2:
       print(f"Missing key in second tree: {key}")
-      return False
+      return
     try:
       if not np.allclose(named_leaves1[key], named_leaves2[key], atol=atol):
-        mismatch_values1 = named_leaves1[key].flatten()[:10]
-        mismatch_values2 = named_leaves2[key].flatten()[:10]
         print(f"Mismatch at leaf '{key}' with shape {named_leaves1[key].shape}:\n")
         for i in range(10):
           print(f"{named_leaves1[key][..., i, :]}\n")
-        print(f"The second tensor:\n")
+        print("The second tensor:\n")
         for i in range(10):
           print(f"{named_leaves2[key][..., i, :]}\n")
         return
-    except:
+    except:  # pylint: disable=W0702
       print(f"The issue is with {key}")
 
   print("All leaves match within tolerance.")
-  return True
 
 
 def test_huggingface_to_maxtext_back_to_huggingface_flow():
-  base_num_query_heads = base_num_kv_heads = 16
+  base_num_query_heads = 16
   head_dim = 32
   wq = np.arange(base_num_query_heads * head_dim * base_num_query_heads * head_dim, dtype=np.float16).reshape(
       base_num_query_heads * head_dim, base_num_query_heads * head_dim
