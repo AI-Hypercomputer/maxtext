@@ -375,7 +375,8 @@ class MoeBlock(nn.Module):
     """Scales weights according to DeepSeek's v3 reference implementation.
     https://github.com/deepseek-ai/DeepSeek-V3/blob/2f7b80eecebf3d1c84da5a0d465f6639ea175012/inference/model.py#L592-L594
     """
-    weights /= weights.sum(-1, keepdims=True)
+    if self.config.routed_score_func == "sigmoid":
+      weights /= weights.sum(-1, keepdims=True)
     weights *= self.config.routed_scaling_factor
     return weights
 
