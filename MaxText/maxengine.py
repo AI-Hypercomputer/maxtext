@@ -412,9 +412,7 @@ class MaxEngine(engine_api.Engine):
 
         print("\n=== VERIFYING PREFILL CACHE ===")
         print(f"Initial params structure: {jax.tree_util.tree_structure(params)}")
-        params_with_cache = params | {"cache": {}}
-        print(f"Modified params structure: {jax.tree_util.tree_structure(params_with_cache)}")
-        
+
         # Before model.apply
         print("\nPre-apply state:")
         print(f"- Input token shape: {padded_tokens.shape}")
@@ -423,20 +421,23 @@ class MaxEngine(engine_api.Engine):
         rng, new_rng = jax.random.split(rng)
         with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
           if self.config.attention == "paged":
-            # params_with_cache = params | {"cache": {}}
+            # Unbox the parameters *before* passing them to model.apply
+            unboxed_params = max_utils.unbox_logicallypartioned(params)
+
             flat_logits, new_vars = self.model.apply(
-                params_with_cache,
+                unboxed_params,  # Pass the UNBOXED parameters
                 input_tokens,
                 positions,
                 decoder_segment_ids=sequence_indicator,
                 enable_dropout=False,
                 model_mode=common_types.MODEL_MODE_PREFILL,
                 rngs={"params": new_rng},
-                mutable=["cache"], # Pass in the empty list when using paged attention.
+                mutable=["cache", "params"],  # <--- MAKE PARAMS MUTABLE HERE
             )
           else:
+              # For non-paged attention, keep the existing logic (for now)
               flat_logits, new_vars = self.model.apply(
-                  params,
+                  params | {"cache": {}},
                   input_tokens,
                   positions,
                   decoder_segment_ids=sequence_indicator,
@@ -497,7 +498,6 @@ class MaxEngine(engine_api.Engine):
             "generated_tokens": generated_tokens,
             "tokens": first_generated_token,
         }, result
-
 
     @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
     def generate(
