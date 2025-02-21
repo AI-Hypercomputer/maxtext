@@ -137,15 +137,14 @@ def main(config, test_args):  # pylint: disable=W0621
       max_logging.log("Checking KL Divergence between train distribution and " "golden distribution")
       assert jax.numpy.all(kl_div < test_args.max_kl_div), f"KL divergence values exceed the specified threshold of {test_args.max_kl_div}. Max divergence: {jax.numpy.max(kl_div)}"  # pylint: disable=C0301
     else:
-      max_logging.log("Checking Numerical Differences between train logits and " "golden logits")
+      max_logging.log("Checking Numerical Differences between train logits and golden logits")  # pylint: disable=C0301
       assert jax.numpy.allclose(
           full_train_logits[..., 0, :token_size, :],
           golden_logits[:token_size, :],
           rtol=float(test_args.rtol),
           atol=float(test_args.atol),
           equal_nan=False,
-      ), f"Logits do not match closely enough. Required rtol={test_args.rtol}, "
-      "atol={test_args.atol}."
+      ), f"Logits do not match closely enough. Required rtol={test_args.rtol}, atol={test_args.atol}."  # pylint: disable=C0301
 
 
 if __name__ == "__main__":
