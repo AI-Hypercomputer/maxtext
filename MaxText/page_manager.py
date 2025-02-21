@@ -381,12 +381,20 @@ class PageManager(nn.Module):
         )
 
     def __call__(
-        self, model_mode: Optional[str] = None, page_group_id: Optional[int] = None, true_length: Optional[int] = None
+        self, 
+        model_mode: Optional[str] = None, 
+        page_group_id: Optional[int] = None, 
+        true_length: Optional[int] = None,
     ) -> Optional[PageState]:
         """
         Callable method for the PageManager.  Handles page allocation and
         returns the updated PageState.
         """
+        print("\n=== PageManager.__call__() ENTRY ===")
+        print(f"Called with:")
+        print(f"  model_mode: {model_mode}")
+        print(f"  page_group_id: {page_group_id}")
+        print(f"  true_length: {true_length}")
 
         # If no model_mode is provided, return the current page state (for inspection/copying).
         if model_mode is None:

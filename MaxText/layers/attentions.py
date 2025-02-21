@@ -369,6 +369,21 @@ class PagedAttentionOp(nn.Module):
       page_group_id: int,
       true_length: int,
   ) -> Union[Array, Tuple[Array, Array, Array]]:
+    print("\n=== PagedAttentionOp.__call__() ENTRY ===")
+    print(f"Input shapes:")
+    print(f"  query: {query.shape}")
+    print(f"  key: {key.shape}") 
+    print(f"  value: {value.shape}")
+    print(f"  decoder_segment_ids: {decoder_segment_ids.shape if decoder_segment_ids is not None else None}")
+    print(f"Model mode: {model_mode}")
+    print(f"Page group ID: {page_group_id}")
+    print(f"True length: {true_length}")
+    if page_manager is not None:
+        print("\nPage Manager state:")
+        page_state = page_manager()  # Get current state
+        print(f"  Current sequences: {page_state.sequence_lengths}")
+        print(f"  Pages used: {page_state.num_pages_used}")
+        print(f"  Current pages: {page_state.current_page}")
     self.sow('intermediates', 'static_configs',
              {'model_mode': model_mode, 'page_manager': page_manager},
              reduce_fn=lambda x, y: y)

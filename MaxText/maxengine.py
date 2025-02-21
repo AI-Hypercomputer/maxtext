@@ -382,28 +382,37 @@ class MaxEngine(engine_api.Engine):
         true_length: int,
         sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
         rng: Optional[PRNGKeyType] = None,
-        slot: Optional[int] = None, # Added for consistency
+        slot: Optional[int] = None,
     ) -> Tuple[Prefix, engine_api.ResultTokens]:
-        """Computes a kv-cache for a new generate request.
+        """Computes prefill for a new generate request.
 
         Args:
-          params: Scalar multiplier.
-          existing_prefix: If provided, represents a prefix that has already been
+        params: Model parameters
+        existing_prefix: If provided, represents a prefix that has already been
             processed by the underlying model.
-          padded_tokens: Logically appended tokens to any existing prefix, this is
-            what we compute prefill on.
-          true_length: The real length of the tokens, pre-pad.
+        padded_tokens: Logically appended tokens to any existing prefix
+        true_length: The real length of the tokens, pre-pad.
+        slot: The slot index for this sequence
         Returns:
-          kv_cache: For the resulting text.
+        kv_cache: For the resulting text.
         """
+        print("\n=== MaxEngine.prefill() ENTRY ===")
+        print(f"Input shapes:")
+        print(f"  padded_tokens: {padded_tokens.shape}")
+        print(f"  true_length: {true_length}")
+        print(f"  slot: {slot}")
+        print(f"  attention_type: {self.config.attention}")
         if existing_prefix:
-          raise ValueError("We don't know what to do with existing_prefix")
+            raise ValueError("We don't know what to do with existing_prefix")
 
         if rng is None:
-          rng = jax.random.PRNGKey(0)
+            rng = jax.random.PRNGKey(0)
 
         input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
         positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
+        print(f"\nExpanded shapes:")
+        print(f"  input_tokens: {input_tokens.shape}")
+        print(f"  positions: {positions.shape}")
 
         zero_to_n = jnp.arange(0, padded_tokens.shape[0])
         ones_to_keep = zero_to_n < true_length
@@ -420,37 +429,42 @@ class MaxEngine(engine_api.Engine):
 
         rng, new_rng = jax.random.split(rng)
         with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-          if self.config.attention == "paged":
-            # Unbox the parameters *before* passing them to model.apply
-            unboxed_params = max_utils.unbox_logicallypartioned(params)
+            if self.config.attention == "paged":
+                print("\nApplying model with paged attention")
+                # Unbox the parameters *before* passing them to model.apply
+                unboxed_params = max_utils.unbox_logicallypartioned(params)
 
-            flat_logits, new_vars = self.model.apply(
-                unboxed_params,  # Pass the UNBOXED parameters
-                input_tokens,
-                positions,
-                decoder_segment_ids=sequence_indicator,
-                enable_dropout=False,
-                model_mode=common_types.MODEL_MODE_PREFILL,
-                rngs={"params": new_rng},
-                mutable=["cache", "params"],  # <--- MAKE PARAMS MUTABLE HERE
-            )
-          else:
-              # For non-paged attention, keep the existing logic (for now)
-              flat_logits, new_vars = self.model.apply(
-                  params | {"cache": {}},
-                  input_tokens,
-                  positions,
-                  decoder_segment_ids=sequence_indicator,
-                  enable_dropout=False,
-                  model_mode=common_types.MODEL_MODE_PREFILL,
-                  rngs={"params": new_rng},
-                  mutable=["cache"],
-              )
+                flat_logits, new_vars = self.model.apply(
+                    unboxed_params,  # Pass the UNBOXED parameters
+                    input_tokens,
+                    positions,
+                    decoder_segment_ids=sequence_indicator,
+                    enable_dropout=False,
+                    model_mode=common_types.MODEL_MODE_PREFILL,
+                    rngs={"params": new_rng},
+                    mutable=["cache", "params"],  # <--- MAKE PARAMS MUTABLE HERE
+                    slot=slot,  # Pass the slot
+                    true_length=true_length,  # Pass true_length
+                )
+            else:
+                print("\nApplying model with standard attention")
+                # For non-paged attention, keep the existing logic
+                flat_logits, new_vars = self.model.apply(
+                    params | {"cache": {}},
+                    input_tokens,
+                    positions,
+                    decoder_segment_ids=sequence_indicator,
+                    enable_dropout=False,
+                    model_mode=common_types.MODEL_MODE_PREFILL,
+                    rngs={"params": new_rng},
+                    mutable=["cache"],
+                )
 
-        print("\nPost-apply state:")
-        print(f"- new_vars keys: {list(new_vars.keys() if new_vars else [])}")
+        print("\nAfter model.apply:")
+        print(f"  flat_logits shape: {flat_logits.shape}")
+        print(f"  new_vars keys: {list(new_vars.keys() if new_vars else [])}")
         if new_vars and 'cache' in new_vars:
-            print(f"- Cache structure: {jax.tree_util.tree_structure(new_vars['cache'])}")
+            print(f"  cache structure: {jax.tree_util.tree_structure(new_vars['cache'])}")
 
         next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
         generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
@@ -474,19 +488,14 @@ class MaxEngine(engine_api.Engine):
         all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
         result = engine_api.ResultTokens(
             data=jnp.concatenate((first_generated_token, all_valid, generated_tokens), axis=1),
-            # Tokens are shape [batch, speculations], so when we concatenate
-            # tokens, validity and length along their index 1 dimension then they
-            # occupy 0:speculations.
             tokens_idx=(0, 1),
-            # Validity occupies the same amount of space, but next in line.
             valid_idx=(1, 2),
-            # And lengths is rank 1.
             length_idx=(2, 3),
             samples_per_slot=1,
         )
 
         if self.config.attention == "paged":
-            cache = {} # new vars should be empty.
+            cache = {}  # new vars should be empty
         else:
             cache = new_vars["cache"]
             cache = self._maybe_stack_prefill_result_cache(cache)
@@ -498,6 +507,7 @@ class MaxEngine(engine_api.Engine):
             "generated_tokens": generated_tokens,
             "tokens": first_generated_token,
         }, result
+
 
     @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
     def generate(

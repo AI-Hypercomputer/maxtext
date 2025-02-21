@@ -609,8 +609,18 @@ class Transformer(nn.Module):
       decoder_segment_ids=None,
       enable_dropout=True,
       model_mode=common_types.MODEL_MODE_TRAIN,
+      slot=None,
+      true_length=None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target."""
+    print("\n=== Transformer.__call__() ENTRY ===")
+    print(f"Input shapes:")
+    print(f"  decoder_input_tokens: {decoder_input_tokens.shape}")
+    print(f"  decoder_positions: {decoder_positions.shape}")
+    print(f"  decoder_segment_ids: {decoder_segment_ids.shape if decoder_segment_ids is not None else None}")
+    print(f"  model_mode: {model_mode}")
+    print(f"  slot: {slot}")
+    print(f"  true_length: {true_length}")
 
     if decoder_segment_ids is not None and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       raise ValueError(
