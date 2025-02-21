@@ -526,6 +526,7 @@ def main() -> int:
     # model_configs.llama3_1_405b_8192_fsdp_dcn_matt
     model_configs.llama3_1_405b_8192_explicit_matt_pp,
     #model_configs.llama3_1_405b_8192_explicit_matt_pp_overlapped
+    #model_configs.matt_simple
   ]
 
   # Loop possibilities:

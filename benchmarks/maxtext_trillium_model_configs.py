@@ -1400,14 +1400,14 @@ llama3_1_405b_8192_explicit_matt_pp = _add_to_model_dictionary(
     model_name="llama3-1-405b-explicit",
     model_type="default",
     tuning_params={
-        "per_device_batch_size": 0.25,
-        "ici_fsdp_parallelism": 32,
-        "ici_tensor_parallelism": 8,
+        "per_device_batch_size": 1.0,
+        "ici_fsdp_parallelism": 64,
+        "ici_tensor_parallelism": 4,
         "dcn_pipeline_parallelism": 21,
         "base_emb_dim": 16384,
         "base_num_query_heads": 128,
         "base_num_kv_heads": 8,
-        "base_num_decoder_layers": 126, # 6 * PP
+        "base_num_decoder_layers": 63, # 6 * PP
         "base_mlp_dim": 53248,
         "head_dim": 128,
         "vocab_size": 128256,
@@ -1416,7 +1416,7 @@ llama3_1_405b_8192_explicit_matt_pp = _add_to_model_dictionary(
         "normalization_layer_epsilon": 1.0e-5,
         "rope_max_timescale": 500_000,
         "allow_split_physical_axes": True,
-        "custom_mesh": "hybrid_ring_32x8",
+        "custom_mesh": "hybrid_ring_64x4",
         "remat_policy": "full",
         # "decoder_layer_input": "offload",
         # "query_proj": "offload",
@@ -1436,9 +1436,13 @@ llama3_1_405b_8192_explicit_matt_pp = _add_to_model_dictionary(
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
         "pipeline_fsdp_ag_once": True,
-        "num_pipeline_microbatches": 42, # PP * 2
-        "num_layers_per_pipeline_stage": 2,
-        "scan_layers": False
+        "num_pipeline_microbatches": 84, # PP * 2
+        "num_layers_per_pipeline_stage": 3,
+        "scan_layers": False,
+        "opt_type": "sgd",
+        "weight_dtype": "float32",
+        "skip_first_n_steps_for_profiler": 14,
+        "dump_hlo": True
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -1512,6 +1516,48 @@ matt_smoke_train = _add_to_model_dictionary(
         "reuse_example_batch": 1,
         "enable_checkpointing": False,
         "profiler": "xplane",
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+  )
+)
+
+# 40GB OOM https://cloudlogging.app.goo.gl/4xYbHKv18uubzjNa9
+matt_simple = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="matt-simple",
+    model_type="default",
+    tuning_params={
+        "per_device_batch_size": 1,
+        "ici_data_parallelism": 256,
+        "dcn_pipeline_parallelism": 2,
+        "base_emb_dim": 8192,
+        "base_num_decoder_layers": 8, # 6 * PP
+        "vocab_size": 32000,
+        "enable_dropout": False,
+        "logits_via_embedding": False,
+        "normalization_layer_epsilon": 1.0e-5,
+        "rope_max_timescale": 500_000,
+        "decoder_block": "simple",
+        "remat_policy": "full",
+        "max_target_length": 2048,
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "num_pipeline_microbatches": 2, # PP * 2
+        "num_layers_per_pipeline_stage": 1,
+        "scan_layers": False,
+        "opt_type": "sgd",
+        "weight_dtype": "float32",
+        "dump_hlo": True
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
