@@ -1,5 +1,17 @@
+# Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-#### LOCAL NETWORK
 services:
 
   resource_manager:
@@ -53,7 +65,6 @@ services:
 
   maxtext:
     image: ${MAXTEXT_IMAGE}
-    # us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest
     privileged: true
     volumes: 
       - ../:/deps
@@ -62,8 +73,6 @@ services:
       - JAX_BACKEND_TARGET=grpc://proxy:29008
     entrypoint: ["bash", "-c"]
     command:
-      - cd MaxText ; python3 -m pytest tests -m "not gpu_only and not integration_test" -s
-      # - "cd MaxText ; python3 -m pytest -m tpu_only tests -s"
-      # - "cd MaxText ; python3 -m pytest -s tests/train_tests.py -m tpu_only"
+      - ${COMMAND}
     depends_on:
       - proxy

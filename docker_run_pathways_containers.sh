@@ -14,26 +14,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Example - # bash docker_run_pathways_containers.sh maxtext_image=<>
-
-# bash docker_run_pathways_containers.sh maxtext_image=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest
+# Example - bash docker_run_pathways_containers.sh maxtext_image=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest command="cd MaxText ; python3 -m pytest tests -m 'not gpu_only and not integration_test' -s" 
 
 # Stop execution if any command exits with error
 
 
 echo "Running docker_run_pathways_containers.sh"
 
-# Prerequisites on the self-hosted runner
-echo "Setting up the prerequisites"
-apt-get install docker
-apt-get install docker-compose-plugin
-docker compose version # To ensure docker compose is installed
-gcloud auth configure-docker us-docker.pkg.dev --quiet
-
 set -e
-# Default - 
-maxtext_image=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest
 
+# Defaults - 
+maxtext_image=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest
+command="cd MaxText ; python3 -m pytest tests -m 'not gpu_only and not integration_test' -s"
 
 # Parse input variables
 for ARGUMENT in "$@"; do
@@ -43,15 +35,8 @@ for ARGUMENT in "$@"; do
 done
 
 cd utils_pathways
-MAXTEXT_IMAGE=${maxtext_image} docker compose down
+MAXTEXT_IMAGE=${maxtext_image} COMMAND=${command} docker compose down
 sleep 10
-echo "MAXTEXT image ----------------"
-echo $MAXTEXT_IMAGE
-MAXTEXT_IMAGE=${maxtext_image} docker compose up --exit-code-from maxtext
+MAXTEXT_IMAGE=${maxtext_image} COMMAND=${command} docker compose up --exit-code-from maxtext
 sleep 10
-MAXTEXT_IMAGE=${maxtext_image} docker compose down
-# echo "Exit code from Maxtext..."
-# echo $?
-# sleep 20
-# docker compose ps
-# MAXTEXT_IMAGE=${maxtext_image} docker compose logs -f maxtext
+MAXTEXT_IMAGE=${maxtext_image} COMMAND=${command} docker compose down
