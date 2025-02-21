@@ -343,8 +343,12 @@ def make_c4_mlperf_eval_iterator(
     is_tokenized_dataset = True
   elif config.eval_dataset_name == "c4/en:3.0.4":
     is_tokenized_dataset = False
+    eval_slit = "validation_24567exp"
+  elif config.eval_dataset_name == "c4/en:3.0.1":
+    is_tokenized_dataset = False
+    eval_slit = "validation"
   else:
-    raise ValueError(f"{config.eval_dataset_name=} should be one of ('c4/en:3.0.4', 'c4/en:3.0.5')")
+    raise ValueError(f"{config.eval_dataset_name=} should be one of ('c4/en:3.0.1', 'c4/en:3.0.4', 'c4/en:3.0.5')")
   if is_tokenized_dataset:
     eval_ds = get_dataset(
         dataset_name=config.eval_dataset_name,
@@ -359,7 +363,7 @@ def make_c4_mlperf_eval_iterator(
   else:
     eval_ds = get_dataset(
         dataset_name=config.eval_dataset_name,
-        split="validation_24567exp",
+        split=eval_slit,
         dataloading_host_index=process_indices.index(jax.process_index()),
         dataloading_host_count=len(process_indices),
         enable_data_shuffling=False,
