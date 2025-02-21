@@ -215,6 +215,12 @@ class _HFNamespaceMapper:
 
 
 def permute_to_match_maxtext_rope(arr):
+  evens = arr[..., ::2]
+  odds = arr[..., 1::2]
+  return np.concatenate((evens, odds), axis=arr.ndim - 1)
+
+
+def _permute_to_match_maxtext_rope(arr):
   assert arr.shape[-1] % 2 == 0, "The last dimension for rope has to be even."
   evens, odds = np.split(arr, 2, axis=arr.ndim - 1)  # pylint: disable=W0632
   x = np.empty_like(arr)
@@ -308,8 +314,8 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_size, model_param
     wv = np.reshape(wv, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
 
     if model_size[:8] == "llama3.1":
-      wq = permute_to_match_maxtext_rope(wq)
-      wk = permute_to_match_maxtext_rope(wk)
+      wq = _permute_to_match_maxtext_rope(wq)
+      wk = _permute_to_match_maxtext_rope(wk)
 
     w_post = chkpt_vars[f"layers.{layer_idx}.attention.wo.weight"].to(torch.float16).numpy()
 
