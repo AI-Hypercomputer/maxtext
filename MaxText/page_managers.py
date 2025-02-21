@@ -38,6 +38,13 @@ AxisNames = common_types.AxisNames
 
 
 @struct.dataclass
+class PageStateSnapshot:
+  page_map: Array
+  sequence_lengths: Array
+  num_pages_used: Array
+  current_page: Array
+  current_page_position: Array
+
 class PageState:
   """Represents the current state of the paging system.
 
@@ -56,7 +63,7 @@ class PageState:
   current_page: Array
   current_page_position: Array
 
-  def _init_(self, slots, max_pages_per_slot):
+  def __init__(self, slots, max_pages_per_slot):
     self.page_map = jnp.zeros((slots, max_pages_per_slot))
     self.sequence_lengths = jnp.zeros(slots)
     self.num_pages_used = jnp.zeros(slots)
@@ -113,8 +120,17 @@ class PageState:
     self.num_pages_used = self.num_pages_used.at[slot].set(prefill_slot_num_pages)
     self.current_page_position = self.current_page_position.at[slot].set(prefill_slot_page_slice_idx)
     return page_status
+  
+  def snapshot(self) -> PageStateSnapshot:
+    return PageStateSnapshot(
+      self.page_map,
+      self.sequence_lengths,
+      self.num_pages_used,
+      self.current_page,
+      self.current_page_position,
+    )
 
-  def reserve_decode_step_pages(self, tokens_per_page, page_status):
+  def reserve_decode_step_pages(self, tokens_per_page, page_status) -> Array:
     sequence_lengths_step = jnp.logical_and(jnp.ones(self.sequence_lengths.shape, dtype=jnp.int32), self.sequence_lengths).astype(
         jnp.int32
     )
@@ -240,3 +256,7 @@ class PageManager:
     """
     self.page_status = self.decode_page_state.reserve_decode_step_pages(self.tokens_per_page, self.page_status)
     return self.decode_page_state
+  
+  def get_dummy_page_state(self) -> PageState:
+    #TODO pass in a correct page state
+    return PageState(self.slots, self.max_pages_per_slot)

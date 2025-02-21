@@ -482,7 +482,7 @@ class Transformer(nn.Module):
       slot: Optional[int] = None,
       true_length: Optional[int] = None,
       request_id: uuid.UUID = None,
-      page_state: page_managers.PageState = None,
+      page_state: page_managers.PageStateSnapshot = None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target."""
 

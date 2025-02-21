@@ -151,8 +151,11 @@ class MaxEngine(engine_api.Engine):
           self.prefill_kv_cache_shardings,
       )
       self.prefill_kv_cache_shardings = self.prefill_kv_cache_shardings["decoder"]["layers_0"]
-
-    self.kv_cache_annotations = max_utils.get_kv_cache_annotations(self.model, self.config, rng2, self._mesh)
+    
+    page_state = None
+    if self.config.attention == "paged":
+      page_state = self.page_manager.get_dummy_page_state().snapshot()
+    self.kv_cache_annotations = max_utils.get_kv_cache_annotations(self.model, self.config, rng2, self._mesh, page_state)
     self.kv_cache_shardings = jax.tree_util.tree_map(
         lambda x: jax.sharding.NamedSharding(self._mesh, x),
         self.kv_cache_annotations,
@@ -273,7 +276,7 @@ class MaxEngine(engine_api.Engine):
         #Todo admission control, should handle gracefully
         raise ValueError("too many requests for prefill")
       else:
-        page_state = self.page_manager.reserve_prefix_slot_pages(slot, true_length, request_id)
+        page_state = self.page_manager.reserve_prefix_slot_pages(slot, true_length, request_id).snapshot()
         
 
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -456,7 +459,7 @@ class MaxEngine(engine_api.Engine):
       rng = jax.random.PRNGKey(0)
 
     if self.config.attention == "paged":
-      page_state = self.page_manager.reserve_decode_step_pages()
+      page_state = self.page_manager.reserve_decode_step_pages().snapshot()
     previous_token = decode_state["tokens"]
     jax.debug.print("generate call next_pos: {}, tokens: {}", decode_state["next_pos"], decode_state["tokens"])
     rng, new_rng = jax.random.split(rng)

@@ -34,7 +34,7 @@ import collections
 from typing import Any, Tuple
 
 import max_logging
-
+import page_managers
 
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
@@ -974,7 +974,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh):
   return state_mesh_annotations
 
 
-def get_kv_cache_annotations(model, config, rng, mesh):
+def get_kv_cache_annotations(model, config, rng, mesh, page_state: page_managers.PageState):
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_ar_kv_cache(model, config):
@@ -982,12 +982,12 @@ def get_kv_cache_annotations(model, config, rng, mesh):
         config.global_batch_size_to_load,
         1,
     )
-
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
         jnp.ones(input_shape),
         jnp.ones(input_shape),
         model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+        page_state=page_state,
     )
     return model_vars["cache"]
 

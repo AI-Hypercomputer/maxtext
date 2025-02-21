@@ -222,7 +222,7 @@ class PagedAttentionOp(nn.Module):
       query: Array,
       key_pages_var: nn.Variable,
       value_pages_var: nn.Variable,
-      page_state: page_managers.PageState,
+      page_state: page_managers.PageStateSnapshot,
   ) -> Array:
     """Apply Paged Attention.
 
@@ -287,7 +287,7 @@ class PagedAttentionOp(nn.Module):
       value: Array,
       decoder_segment_ids: Array,
       model_mode: str,
-      page_state: page_managers.PageState,
+      page_state: page_managers.PageStateSnapshot,
   ) -> Array:
     """Apply paged attention mechanism.
 
@@ -313,7 +313,7 @@ class PagedAttentionOp(nn.Module):
       key: Array,
       value: Array,
       model_mode: str,
-      page_state: Optional[page_managers.PageState] = None,
+      page_state: Optional[page_managers.PageStateSnapshot] = None,
   ) -> None:
     """Update KV Pages."""
     if model_mode == common_types.MODEL_MODE_PREFILL:
@@ -397,8 +397,8 @@ class PagedAttentionOp(nn.Module):
   def release_slot(
       self,
       slot: int,
-      page_state: page_managers.PageState,
-  ) -> page_managers.PageState:
+      page_state: page_managers.PageStateSnapshot,
+  ) -> page_managers.PageStateSnapshot:
     """Releases all pages assigned to a slot and updates page state.
     
     Args:
@@ -424,7 +424,7 @@ class PagedAttentionOp(nn.Module):
     new_current_page = page_state.current_page.at[slot].set(0)
     new_current_page_position = page_state.current_page_position.at[slot].set(0)
 
-    return page_managers.PageState(
+    return page_managers.PageStateSnapshot(
         page_status=new_page_status,
         page_map=new_page_map, 
         sequence_lengths=new_sequence_lengths,
@@ -1548,7 +1548,7 @@ class Attention(nn.Module):
       *,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
       deterministic: bool = False,
-      page_state: Optional[page_managers.PageState] = None,
+      page_state: Optional[page_managers.PageStateSnapshot] = None,
   ):
     """Applies Attention on the input data.
 
