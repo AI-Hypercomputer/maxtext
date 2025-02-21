@@ -59,6 +59,7 @@ checkpoint_storage_use_zarr3: True
 
 reuse_example_batch: 0 # for testing TPU performance, this options repeated uses the same batch.
 
+
 metrics_file: "" # for testing, local file that stores scalar metrics. If empty, no metrics are written.
 # If true save metrics such as loss and TFLOPS to GCS in {base_output_directory}/{run_name}/metrics/
 gcs_metrics: False
@@ -277,7 +278,7 @@ logical_axis_rules: [
                       ['vocab', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['q_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
-                      ['kv_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],  
+                      ['kv_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'expert']],
                       ['embed', ['fsdp', 'sequence', 'tensor_transpose', 'expert']],
                       ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'expert']],
@@ -532,6 +533,7 @@ inference_metadata_file: "" # path to a json file
 inference_server: "MaxtextInterleavedServer"  # inference server to start
 inference_benchmark_test: False
 enable_model_warmup: False
+hf_model_path: ""  # inference checkpoint correctness verification
 
 # Stack prefill cache across the layer to reduce the
 # Python layer latency.
