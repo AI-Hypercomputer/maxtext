@@ -854,9 +854,14 @@ llama3_1_405b_8192_fsdp_dcn_mlperf = _add_to_model_dictionary(
         # "dataset_type": "synthetic",
         "reuse_example_batch": -1,
         "profiler": "xplane",
-        "sa_block_q": 1024,
+        "sa_block_q": 2048,
+        "sa_block_kv": 2048,
+        "sa_block_kv_compute": 2048,
         "sa_block_q_dkv": 2048,
+        "sa_block_kv_dkv": 2048,
+        "sa_block_kv_dkv_compute": 2048,
         "sa_block_q_dq": 2048,
+        "sa_block_kv_dq": 2048,
         "opt_type": "adam_pax",
         "enable_checkpointing": True,
         "load_parameters_path": "gs://trillium-scale-datasets-q1-25-west/mlperf50_llama405b_checkpoints/scanned_sharded/0/items",
@@ -876,7 +881,7 @@ llama3_1_405b_8192_fsdp_dcn_mlperf = _add_to_model_dictionary(
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR
         + xla_flags_library.HOST_OFFLOAD_FLAGS
     ),
   )
