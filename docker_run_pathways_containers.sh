@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Example - bash docker_run_pathways_containers.sh maxtext_image=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest command="cd MaxText ; python3 -m pytest tests -m 'not gpu_only and not integration_test' -s" 
+# Example - bash docker_run_pathways_containers.sh maxtext_image=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest command="cd MaxText ; python3 -m pytest tests -m 'not gpu_only and not integration_test' -s"
 
 # Stop execution if any command exits with error
 
@@ -23,7 +23,7 @@ echo "Running docker_run_pathways_containers.sh"
 
 set -e
 
-# Defaults - 
+# Defaults -
 maxtext_image=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest
 command="cd MaxText ; python3 -m pytest tests -m 'not gpu_only and not integration_test' -s"
 

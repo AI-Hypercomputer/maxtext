@@ -166,8 +166,9 @@ class TrainTests(unittest.TestCase):
   def test_gpu_dropout(self):
     train_main(TrainTests.CONFIGS["dropout"] + ["attention=dot_product"])
 
-  # TODO (b/393393501) : MaxText build failure in hf_data_processing_test.py
-  @pytest.mark.skip(reason="Tests are currently flaking / failing due to HF token issues")
+  # # TODO (b/393393501) : MaxText build failure in hf_data_processing_test.py
+  # @pytest.mark.skip(reason="Tests are currently flaking / failing due to HF token issues")
+  @pytest.mark.tpu_only
   def test_tpu_hf_input_pipeline(self):
     train_main(TrainTests.CONFIGS["hf_input_pipeline"])
 
