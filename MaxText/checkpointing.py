@@ -67,7 +67,7 @@ def create_orbax_checkpoint_manager(
   p.mkdir(exist_ok=True, parents=True)
   # we need to use ocdbt and zarr3 to control max file size in the checkpoint
   # omitting `iter` uses default handler for `iter`
-  item_handlers = {"items": PyTreeCheckpointHandler(use_ocdbt=use_ocdbt, use_zarr3=use_zarr3)}
+  item_handlers = {"items": PyTreeCheckpointHandler(restore_concurrent_gb=500, use_ocdbt=use_ocdbt, use_zarr3=use_zarr3)}
   mngr = CheckpointManager(
       p,
       item_names=item_names,
@@ -320,7 +320,8 @@ def load_params_from_path(load_parameters_from_path, abstract_unboxed_params):
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
   max_logging.log(f"restoring params from {load_parameters_from_path}")
   ckpt = epath.Path(load_parameters_from_path)
-  ckptr = ocp.PyTreeCheckpointer()
+  # ckptr = ocp.PyTreeCheckpointer()
+  ckptr = ocp.Checkpointer(ocp.PyTreeCheckpointHandler(restore_concurrent_gb=500))
   # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
   # Rather than pass the entire abstract state, which could unnecessarily restore opt_state and such and waste
   # memory, we instead specify here that we are just restoring the params field of the checkpoint

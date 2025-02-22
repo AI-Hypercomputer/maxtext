@@ -282,15 +282,19 @@ def convert_to_jax_weights(base_model_path, model_size):
       "value": {"kernel": None},
       "out": {"kernel": None},
   }
+
+  # llama3.1-405b kv weight is replicated within every two files.
+  wkv_step = 1 if model_size != "llama3.1-405b" else 2
+
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
     wq = np.concatenate(
         [var[f"layers.{layer_idx}.attention.wq.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0
     ).transpose()
     wk = np.concatenate(
-        [var[f"layers.{layer_idx}.attention.wk.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0
+        [var[f"layers.{layer_idx}.attention.wk.weight"].type(torch.float16).numpy() for var in chkpt_vars[::wkv_step]], axis=0
     ).transpose()
     wv = np.concatenate(
-        [var[f"layers.{layer_idx}.attention.wv.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0
+        [var[f"layers.{layer_idx}.attention.wv.weight"].type(torch.float16).numpy() for var in chkpt_vars[::wkv_step]], axis=0
     ).transpose()
 
     wq = np.reshape(wq, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
