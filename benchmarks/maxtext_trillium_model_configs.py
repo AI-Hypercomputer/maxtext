@@ -890,9 +890,13 @@ llama3_1_70b_8192 = _add_to_model_dictionary(
         "max_target_length": 8192,
         "attention": "flash",
         "use_iota_embed": True,
-        "dataset_path": "gs://max-datasets-rogue",
-        "dataset_type": "synthetic",
-        "enable_checkpointing": False,
+        "dataset_path": "/tmp/dataset",
+        "dataset_type": "grain",
+        "grain_train_files": "/tmp/dataset/array-record/c4/en/3.0.1/c4-train.array_record*",
+        "grain_worker_count": 4,
+        "enable_checkpointing": True,
+        "async_checkpointing": True, 
+        "checkpoint_period": 20,
         "sa_block_q": 2048,
         "sa_block_kv": 2048,
         "sa_block_kv_compute": 2048,
@@ -912,6 +916,7 @@ llama3_1_70b_8192 = _add_to_model_dictionary(
         + xla_flags_library.DATA_PARALLEL_OVERLAP
         + xla_flags_library.CF_FOR_ALL_GATHER
         + xla_flags_library.HOST_OFFLOAD_FLAGS
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR
     ),
   )
 )
