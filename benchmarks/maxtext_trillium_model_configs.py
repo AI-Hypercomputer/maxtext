@@ -866,7 +866,7 @@ llama3_1_405b_8192_fsdp_dcn_mlperf = _add_to_model_dictionary(
         "dataset_type": "c4_mlperf",
         "dataset_name": "c4/en:3.0.4",
         "eval_dataset_name": "c4/en:3.0.1",
-        "skip_first_n_steps_for_profiler": 500, 
+        "skip_first_n_steps_for_profiler": 295, 
         "weight_dtype": "bfloat16",
         "dtype": "bfloat16",
         "steps": 300, 
