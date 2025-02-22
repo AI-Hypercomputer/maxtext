@@ -206,7 +206,7 @@ def save_checkpoint(
 ) -> bool:
   """Wrapper for saving checkpoint."""
   if config and config.enable_checkpointing:
-    if (step % config.checkpoint_period == 0) or (
+    if (step % config.checkpoint_period == 0 and step != 0) or (
         config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0
     ):
       blocking_until_ready_start = time.time()
