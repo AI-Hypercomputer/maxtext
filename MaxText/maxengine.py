@@ -430,11 +430,13 @@ class MaxEngine(engine_api.Engine):
         rng, new_rng = jax.random.split(rng)
         with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
             if self.config.attention == "paged":
+                # Get page allocation first - no changes here
                 page_state = self.page_manager(
                     model_mode="prefill",
                     page_group_id=slot, 
                     true_length=true_length
                 )
+
                 unboxed_params = max_utils.unbox_logicallypartioned(params)
                 flat_logits, new_vars = self.model.apply(
                     unboxed_params,
@@ -446,6 +448,26 @@ class MaxEngine(engine_api.Engine):
                     rngs={"params": new_rng},
                     mutable=["cache", "params"],
                 )
+
+                # Create cache with same structure as get_initial_paged_kv_cache
+                cache = {
+                    "page_manager": page_state,
+                    "decoder": {}
+                }
+                
+                for i in range(self.config.num_decoder_layers):
+                    cache["decoder"][f"layers_{i}"] = {
+                        "key_pages": jnp.zeros(
+                            (self.config.num_pages, self.config.tokens_per_page, 
+                            self.config.num_kv_heads, self.config.head_dim),
+                            dtype=self.config.dtype
+                        ),
+                        "value_pages": jnp.zeros(
+                            (self.config.num_pages, self.config.tokens_per_page,
+                            self.config.num_kv_heads, self.config.head_dim),
+                            dtype=self.config.dtype
+                        )
+                    }
             else:
                 print("\nApplying model with standard attention")
                 # For non-paged attention, keep the existing logic
@@ -494,9 +516,7 @@ class MaxEngine(engine_api.Engine):
             samples_per_slot=1,
         )
 
-        if self.config.attention == "paged":
-            cache = {}  # new vars should be empty
-        else:
+        if self.config.attention != "paged":
             cache = new_vars["cache"]
             cache = self._maybe_stack_prefill_result_cache(cache)
 

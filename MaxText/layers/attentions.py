@@ -266,22 +266,60 @@ class PagedAttentionOp(nn.Module):
     return out_proj
 
   def _paged_dot_product_attention(
-      self, query, key_pages, value_pages, sequence_lengths, page_map, num_kv_heads, tokens_per_page
+        self, query, key_pages, value_pages, sequence_lengths, page_map, num_kv_heads, tokens_per_page
   ):
-    """Core paged dot-product attention, operating on full pages."""
-    print(f"_paged_dot_product_attention - {query.shape=}")
-    print(f"_paged_dot_product_attention - {key_pages.shape=}")
-    print(f"_paged_dot_product_attention - {sequence_lengths.shape=}")
-    print(f"_paged_dot_product_attention - {page_map.shape=}")
+    """Core paged dot-product attention, operating on full pages.
+    
+    Args:
+        query: [batch, seq_len, num_heads, head_dim] or [batch, num_heads, head_dim] 
+        key_pages: [num_pages, tokens_per_page, num_kv_heads, head_dim]
+        value_pages: [num_pages, tokens_per_page, num_kv_heads, head_dim]
+        sequence_lengths: [batch] number of valid tokens in each sequence
+        page_map: [batch, max_pages_per_group] maps sequence positions to physical pages
+        num_kv_heads: int, number of key/value heads
+        tokens_per_page: int, number of tokens per page
+    """
+    # Print all input shapes for verification
+    jax.debug.print("\n=== Paged Attention Shapes ===")
+    jax.debug.print("query: {}", query.shape)
+    jax.debug.print("key_pages: {}", key_pages.shape)
+    jax.debug.print("value_pages: {}", value_pages.shape)
+    jax.debug.print("sequence_lengths: {}", sequence_lengths.shape)
+    jax.debug.print("page_map: {}", page_map.shape) 
+
+    # Get shapes
     if len(query.shape) == 4:
-      b, t, n, d = query.shape
-      dummy_shape = (b, t, n, d)
+        batch_size, seq_len, num_heads, head_dim = query.shape
     else:
-      b, n, d = query.shape
-      h_g = n // num_kv_heads  # Number of query groups per kv head.
-      dummy_shape = (b, num_kv_heads, h_g, 1, d)  # Assume query length of 1
-    attn_out = jnp.ones(dummy_shape, dtype=query.dtype) * 42.0  # Easily identifiable
-    return attn_out
+        batch_size, num_heads, head_dim = query.shape
+        seq_len = 1
+
+    # Print key attention parameters
+    jax.debug.print("\n=== Attention Parameters ===")
+    jax.debug.print("batch_size: {}", batch_size)
+    jax.debug.print("seq_len: {}", seq_len)
+    jax.debug.print("num_heads: {}", num_heads)
+    jax.debug.print("head_dim: {}", head_dim)
+    jax.debug.print("num_kv_heads: {}", num_kv_heads)
+
+    # For each sequence position (batch, seq_len), find its page and position within page
+    current_pages = jnp.take_along_axis(
+        page_map,
+        jnp.expand_dims(sequence_lengths - 1, -1),  # Get current position
+        axis=1
+    )
+    positions_in_page = jnp.mod(sequence_lengths - 1, tokens_per_page)
+
+    jax.debug.print("\n=== Page Access Info ===")
+    jax.debug.print("current_pages: {}", current_pages)
+    jax.debug.print("positions_in_page: {}", positions_in_page)
+
+    # For now return dummy values with correct shape
+    if len(query.shape) == 4:
+        return jnp.ones((batch_size, seq_len, num_heads, head_dim)) * 42.0
+    else:
+        return jnp.ones((batch_size, 1, num_heads, head_dim)) * 42.0
+
 
   def get_page_group_pages(self, page_map: Array, page_group_id: int, max_pages_per_group: int) -> Array:
     """Get pages for a single page group."""
@@ -357,6 +395,7 @@ class PagedAttentionOp(nn.Module):
 
     return jax.lax.cond(has_partial, lambda _: update_partial(), lambda _: (key_pages, value_pages), operand=None)
 
+  @nn.compact
   def __call__(
       self,
       query: Array,
@@ -369,86 +408,74 @@ class PagedAttentionOp(nn.Module):
       page_group_id: int,
       true_length: int,
   ) -> Union[Array, Tuple[Array, Array, Array]]:
-    print("\n=== PagedAttentionOp.__call__() ENTRY ===")
-    print(f"Input shapes:")
-    print(f"  query: {query.shape}")
-    print(f"  key: {key.shape}") 
-    print(f"  value: {value.shape}")
-    print(f"  decoder_segment_ids: {decoder_segment_ids.shape if decoder_segment_ids is not None else None}")
-    print(f"Model mode: {model_mode}")
-    print(f"Page group ID: {page_group_id}")
-    print(f"True length: {true_length}")
-    if page_manager is not None:
-        print("\nPage Manager state:")
-        page_state = page_manager()  # Get current state
-        print(f"  Current sequences: {page_state.sequence_lengths}")
-        print(f"  Pages used: {page_state.num_pages_used}")
-        print(f"  Current pages: {page_state.current_page}")
-    self.sow('intermediates', 'static_configs',
-             {'model_mode': model_mode, 'page_manager': page_manager},
-             reduce_fn=lambda x, y: y)
-    if page_group_id is not None:
-      if model_mode == common_types.MODEL_MODE_PREFILL:
-        # Handle prefill
-        cache = self.variable("cache", f"layer_{self.layer_idx}_key_pages").value
-        value_pages = self.variable("cache", f"layer_{self.layer_idx}_value_pages").value
-        page_map = self.variable("cache", f"layer_{self.layer_idx}_page_map").value
-        
-        # Update page map and pages for this slot
-        page_idx = self._allocate_pages(page_group_id, true_length)
-        self._store_kv_in_pages(key, value, page_idx, true_length)
-        
-        # Compute attention using pages
-        return self._paged_dot_product_attention(query, cache, value_pages, 
-                                               page_map, page_group_id)
+      self.sow('intermediates', 'static_configs',
+              {'model_mode': model_mode, 'page_manager': page_manager},
+              reduce_fn=lambda x, y: y)
+      if page_group_id is not None:
+          if model_mode == common_types.MODEL_MODE_PREFILL:
+              # Get page state 
+              page_state = page_manager(
+                  model_mode="prefill",
+                  page_group_id=page_group_id,
+                  true_length=true_length
+              )
 
-      elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-        if key.shape[1] != 1 or value.shape[1] != 1:
-          raise ValueError(
-              f"Autoregressive mode expects sequence length 1, got " f"key shape {key.shape}, value shape {value.shape}"
-          )
-        page_state = page_manager(model_mode="autoregressive", page_group_id=page_group_id)
-        current_page = page_state.current_page[page_group_id]
-        current_page_position = page_state.current_page_position[page_group_id]
-        if current_page == -1:
-          raise ValueError("Invalid page allocation in autoregressive mode")
+              # Get the layer's key/value pages
+              key_pages = self.variable("cache", "key_pages", lambda: jnp.zeros(
+                  (self.config.num_pages, self.config.tokens_per_page, 
+                  self.num_kv_heads, self.kv_head_dim_size), dtype=self.dtype))
+              value_pages = self.variable("cache", "value_pages", lambda: jnp.zeros(
+                  (self.config.num_pages, self.config.tokens_per_page,
+                  self.num_kv_heads, self.kv_head_dim_size), dtype=self.dtype))
 
-        squeezed_key = jnp.squeeze(key, axis=1)
-        squeezed_value = jnp.squeeze(value, axis=1)
+              # Compute attention using pages
+              attn_out = self._paged_dot_product_attention(
+                  query=query,
+                  key_pages=key_pages.value,
+                  value_pages=value_pages.value,
+                  sequence_lengths=page_state.sequence_lengths,
+                  page_map=page_state.page_map,
+                  num_kv_heads=self.num_kv_heads,
+                  tokens_per_page=self.config.tokens_per_page
+              )
+              return self.out_projection(self.output_dim, attn_out)
 
-        page_manager.key_pages.value = jax.lax.dynamic_update_slice(
-            page_manager.key_pages.value, squeezed_key[None, None, :, :], (0, current_page, current_page_position, 0)
-        )
-        page_manager.value_pages.value = jax.lax.dynamic_update_slice(
-            page_manager.value_pages.value, squeezed_value[None, None, :, :], (0, current_page, current_page_position, 0)
-        )
+          elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+              if key.shape[1] != 1 or value.shape[1] != 1:
+                  raise ValueError(
+                      f"Autoregressive mode expects sequence length 1, got " 
+                      f"key shape {key.shape}, value shape {value.shape}"
+                  )
+              # Keep existing autoregressive handling
 
-        if query.ndim == 4:
-          if query.shape[1] != 1:
-            raise ValueError(f"Expected sequence length 1, got shape {query.shape}")
-          query = jnp.squeeze(query, axis=1)
-        elif query.ndim != 3:
-          raise ValueError(f"Query must be rank 3 or 4, got shape {query.shape}")
+              # Use same pattern as prefill for page-based attention
+              page_state = page_manager(
+                  model_mode="autoregressive",
+                  page_group_id=page_group_id
+              )
 
-        attn = self._paged_dot_product_attention(
-            query,
-            page_manager.key_pages.value,
-            page_manager.value_pages.value,
-            page_state.sequence_lengths,
-            page_state.page_map,
-            self.num_kv_heads,
-            page_manager.tokens_per_page,
-        )
-        return self.out_projection(self.output_dim, attn)
+              key_pages = self.variable("cache", "key_pages").value
+              value_pages = self.variable("cache", "value_pages").value
+
+              attn_out = self._paged_dot_product_attention(
+                  query=query,
+                  key_pages=key_pages,
+                  value_pages=value_pages,
+                  sequence_lengths=page_state.sequence_lengths,
+                  page_map=page_state.page_map,
+                  num_kv_heads=self.num_kv_heads,
+                  tokens_per_page=self.config.tokens_per_page
+              )
+              return self.out_projection(self.output_dim, attn_out)
+          else:
+              raise ValueError(f"Invalid model_mode: {model_mode}")
       else:
-        raise ValueError(f"Invalid model_mode: {model_mode}")
-    else:
-      if len(query.shape) == 4:
-        b, t, n, d = query.shape
-        return jnp.zeros((b, t, self.output_dim), dtype=query.dtype)
-      else:
-        b, n, d = query.shape
-        return jnp.zeros((b, 1, self.output_dim), dtype=query.dtype)
+          if len(query.shape) == 4:
+              b, t, n, d = query.shape
+              return jnp.zeros((b, t, self.output_dim), dtype=query.dtype)
+          else:
+              b, n, d = query.shape
+              return jnp.zeros((b, 1, self.output_dim), dtype=query.dtype)
 
 class AttentionOp(nn.Module):
   config: Config
