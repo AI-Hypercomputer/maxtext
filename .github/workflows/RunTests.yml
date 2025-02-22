@@ -34,6 +34,8 @@ jobs:
       run: which gsutil >/dev/null 2>&1 || { echo >&2 "gsutil is required but not installed. Aborting"; exit 24;}
     - name: Cleanup old docker images
       run: docker system prune --all --force
+    - name: Authenticate gcloud
+      run: gcloud auth configure-docker us-docker.pkg.dev --quiet
 
   tpu_image:
     needs: prelim
