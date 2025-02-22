@@ -195,6 +195,7 @@ toml==0.10.2
 tomli==2.0.2
 tomlkit==0.13.2
 toolz==1.0.0
+torch==2.6.0
 tqdm==4.66.5
 transformer-engine==1.13.0+e5edd6c
 transformers==4.46.0
