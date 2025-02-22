@@ -30,7 +30,7 @@ from jax.sharding import PartitionSpec as P
 from jax.experimental import layout as jax_layout
 
 import common_types
-from page_manager import PageManager
+from page_manager import PageManager, PageState
 from layers.attentions import (
     get_initial_paged_kv_cache,
     get_initial_contiguous_kv_cache,
@@ -383,7 +383,7 @@ class MaxEngine(engine_api.Engine):
         sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
         rng: Optional[PRNGKeyType] = None,
         slot: Optional[int] = None,
-    ) -> Tuple[Prefix, engine_api.ResultTokens]:
+    ) -> Tuple[Prefix, engine_api.ResultTokens, Optional[PageState]]:
         """Computes prefill for a new generate request.
 
         Args:
@@ -430,21 +430,21 @@ class MaxEngine(engine_api.Engine):
         rng, new_rng = jax.random.split(rng)
         with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
             if self.config.attention == "paged":
-                print("\nApplying model with paged attention")
-                # Unbox the parameters *before* passing them to model.apply
+                page_state = self.page_manager(
+                    model_mode="prefill",
+                    page_group_id=slot, 
+                    true_length=true_length
+                )
                 unboxed_params = max_utils.unbox_logicallypartioned(params)
-
                 flat_logits, new_vars = self.model.apply(
-                    unboxed_params,  # Pass the UNBOXED parameters
+                    unboxed_params,
                     input_tokens,
                     positions,
                     decoder_segment_ids=sequence_indicator,
                     enable_dropout=False,
                     model_mode=common_types.MODEL_MODE_PREFILL,
                     rngs={"params": new_rng},
-                    mutable=["cache", "params"],  # <--- MAKE PARAMS MUTABLE HERE
-                    slot=slot,  # Pass the slot
-                    true_length=true_length,  # Pass true_length
+                    mutable=["cache", "params"],
                 )
             else:
                 print("\nApplying model with standard attention")
@@ -506,7 +506,7 @@ class MaxEngine(engine_api.Engine):
             "next_pos": next_pos,
             "generated_tokens": generated_tokens,
             "tokens": first_generated_token,
-        }, result
+        }, result, page_state
 
 
     @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))

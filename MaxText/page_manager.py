@@ -1,79 +1,164 @@
-from flax import linen as nn
-from flax import struct
 import jax
 import jax.numpy as jnp
-from typing import Optional, Tuple, Any
-from flax.linen import partitioning as nn_partitioning
-from jax.sharding import PartitionSpec as P
+from flax import struct
+from typing import Optional, Any, Tuple
 
-@struct.dataclass
+@struct.dataclass 
 class PageState:
     """
     Dataclass that holds the state of pages managed by PageManager.
     """
     page_status: jnp.ndarray  # [num_pages] | 0: free, 1: allocated
-    page_map: jnp.ndarray     # [max_page_groups, max_pages_per_group]  | Maps logical page indices to physical page indices.
+    page_map: jnp.ndarray     # [max_page_groups, max_pages_per_group] | Maps logical page indices to physical page indices.
     sequence_lengths: jnp.ndarray # [max_page_groups] | Current length of each sequence.
     num_pages_used: jnp.ndarray  # [max_page_groups] | Number of pages currently used by each sequence.
-    current_page: jnp.ndarray     # [max_page_groups] | Index of the current page for each sequence.
+    current_page: jnp.ndarray    # [max_page_groups] | Index of the current page for each sequence.
     current_page_position: jnp.ndarray  # [max_page_groups] | Current position (token offset) within the current page.
 
-
-class PageManager(nn.Module):
+class PageManager:
     """
-    Module that manages page allocation for prefill and autoregressive decoding.
+    Class that manages page allocation for prefill and autoregressive decoding.
     """
-    num_pages: int
-    tokens_per_page: int
-    max_page_groups: int  # Renamed for clarity (formerly max_concurrent_sequences)
-    max_target_length: int
-    max_prefill_predict_length: int
-    max_pages_per_group: int  # Maximum pages a *single* sequence can use.
-    config: Any
+    def __init__(self, num_pages: int, tokens_per_page: int, max_page_groups: int,
+                 max_target_length: int, max_prefill_predict_length: int,
+                 max_pages_per_group: int, config: Any):
+        """Initialize the page manager with configuration parameters."""
+        self.num_pages = num_pages
+        self.tokens_per_page = tokens_per_page
+        self.max_page_groups = max_page_groups  # Maximum number of concurrent sequences
+        self.max_target_length = max_target_length
+        self.max_prefill_predict_length = max_prefill_predict_length
+        self.max_pages_per_group = max_pages_per_group  # Maximum pages a single sequence can use
+        self.config = config
 
-    def setup(self):
+        # Validate initialization parameters
         self._validate_init_params()
 
-        # Initialize page states.  These are *variables* within the Flax module.
-        self.page_status = self.variable("cache", "page_status", lambda: jnp.zeros((self.num_pages,), jnp.int32))
-        self.page_map = self.variable(
-            "cache", "page_map", lambda: jnp.full((self.max_page_groups, self.max_pages_per_group), -1, jnp.int32)
+        # Initialize page states directly as class attributes
+        self.page_status = jnp.zeros((self.num_pages,), jnp.int32)
+        self.page_map = jnp.full((self.max_page_groups, self.max_pages_per_group), -1, jnp.int32)
+        self.sequence_lengths = jnp.zeros((self.max_page_groups,), jnp.int32)
+        self.num_pages_used = jnp.zeros((self.max_page_groups,), jnp.int32)
+        self.current_page = jnp.full((self.max_page_groups,), -1, jnp.int32)
+        self.current_page_position = jnp.zeros((self.max_page_groups,), jnp.int32)
+
+        # Initialize key and value pages
+        self.key_pages = jnp.zeros(
+            (self.num_pages, self.tokens_per_page, self.config.num_kv_heads, self.config.head_dim),
+            dtype=self.config.dtype
         )
-        self.sequence_lengths = self.variable("cache", "sequence_lengths", lambda: jnp.zeros((self.max_page_groups,), jnp.int32))
-        self.num_pages_used = self.variable("cache", "num_pages_used", lambda: jnp.zeros((self.max_page_groups,), jnp.int32))
-        self.current_page = self.variable("cache", "current_page", lambda: jnp.full((self.max_page_groups,), -1, jnp.int32))
-        self.current_page_position = self.variable(
-            "cache", "current_page_position", lambda: jnp.zeros((self.max_page_groups,), jnp.int32)
+        self.value_pages = jnp.zeros(
+            (self.num_pages, self.tokens_per_page, self.config.num_kv_heads, self.config.head_dim),
+            dtype=self.config.dtype
         )
 
-        # Initialize the actual key and value pages.
-        key_pages_init = jnp.zeros(
-            (self.num_pages, self.tokens_per_page, self.config.num_kv_heads, self.config.head_dim),
-            dtype=self.config.dtype,
-        )
-        value_pages_init = jnp.zeros(
-            (self.num_pages, self.tokens_per_page, self.config.num_kv_heads, self.config.head_dim),
-            dtype=self.config.dtype,
+    def _validate_init_params(self):
+        """Validates the initialization parameters."""
+        if self.num_pages <= 0:
+            raise ValueError(f"Invalid num_pages: {self.num_pages}")
+        if self.tokens_per_page <= 0:
+            raise ValueError(f"Invalid tokens_per_page: {self.tokens_per_page}")
+        if self.max_page_groups <= 0:
+            raise ValueError(f"Invalid max_page_groups: {self.max_page_groups}")
+        if self.max_pages_per_group <= 0:
+            raise ValueError(f"Invalid max_pages_per_page_group: {self.max_pages_per_group}")
+
+        # Ensure max_pages_per_group is large enough for both max_target_length
+        # and max_prefill_predict_length
+        pages_needed_for_max_target = (self.max_target_length + self.tokens_per_page - 1) // self.tokens_per_page
+        if pages_needed_for_max_target > self.max_pages_per_group:
+            raise ValueError(
+                f"max_target_length of {self.max_target_length} would require "
+                f"{pages_needed_for_max_target} pages but max_pages_per_group is {self.max_pages_per_group}"
+            )
+
+        pages_needed_for_max_prefill = (self.max_prefill_predict_length + self.tokens_per_page - 1) // self.tokens_per_page
+        if pages_needed_for_max_prefill > self.max_pages_per_group:
+            raise ValueError(
+                f"max_prefill_predict_length of {self.max_prefill_predict_length} would require "
+                f"{pages_needed_for_max_prefill} pages but max_pages_per_group is {self.max_pages_per_group}"
+            )
+
+    def __call__(
+        self, model_mode: Optional[str] = None, page_group_id: Optional[int] = None, true_length: Optional[int] = None
+    ) -> PageState:
+        """
+        Callable method for the PageManager. Handles page allocation and returns the updated PageState.
+        """
+        # Start with current state
+        page_state = PageState(
+            page_status=self.page_status,
+            page_map=self.page_map,
+            sequence_lengths=self.sequence_lengths,
+            num_pages_used=self.num_pages_used,
+            current_page=self.current_page,
+            current_page_position=self.current_page_position,
         )
 
-        if not jax.config.jax_dynamic_shapes:
-          self.key_pages = self.variable(
-              "cache",
-              "key_pages",
-              nn_partitioning.with_sharding_constraint,
-              key_pages_init,
-              P("tensor", None, None, None),  # Example sharding
-          )
-          self.value_pages = self.variable(
-              "cache",
-              "value_pages",
-              nn_partitioning.with_sharding_constraint,
-              value_pages_init,
-              P("tensor", None, None, None),  # Example sharding
-          )
-        else:
-          self.key_pages = self.variable("cache", "key_pages", lambda: key_pages_init)
-          self.value_pages = self.variable("cache", "value_pages", lambda: value_pages_init)
+        if model_mode is None:
+            return page_state
+
+        if model_mode not in ["prefill", "autoregressive"]:
+            raise ValueError(f"Invalid model_mode: {model_mode}")
+
+        if model_mode == "prefill":
+            if page_group_id is None or true_length is None:
+                raise ValueError("Prefill mode requires both page_group_id and true_length")
+            self._validate_page_group(page_group_id)
+            self._validate_length(true_length)
+
+            # Get new state without updating instance variables
+            (new_page_status, new_page_map, new_sequence_lengths,
+            new_num_pages_used, new_current_page, new_current_page_position) = (
+                self.reserve_prefill_page_group_pages(
+                    page_group_id,
+                    true_length,
+                    page_state.page_status,
+                    page_state.page_map,
+                    page_state.sequence_lengths,
+                    page_state.num_pages_used,
+                    page_state.current_page,
+                    page_state.current_page_position,
+                )
+            )
+
+        elif model_mode == "autoregressive":
+            if page_group_id is not None:
+                self._validate_page_group(page_group_id)
+            
+            # Get new state without updating instance variables  
+            (new_page_status, new_page_map, new_sequence_lengths,
+            new_num_pages_used, new_current_page, new_current_page_position) = (
+                self.reserve_decode_step_pages(
+                    page_state.page_status, 
+                    page_state.page_map,
+                    page_state.sequence_lengths,
+                    page_state.num_pages_used,
+                    page_state.current_page,
+                    page_state.current_page_position
+                )
+            )
+
+        # Return new state without modifying self
+        return PageState(
+            page_status=new_page_status,
+            page_map=new_page_map,
+            sequence_lengths=new_sequence_lengths,
+            num_pages_used=new_num_pages_used,
+            current_page=new_current_page,
+            current_page_position=new_current_page_position,
+        )
+
+    def get_page_state(self) -> PageState:
+        """Returns a PageState object representing the current state."""
+        return PageState(
+            page_status=self.page_status,
+            page_map=self.page_map,
+            sequence_lengths=self.sequence_lengths,
+            num_pages_used=self.num_pages_used,
+            current_page=self.current_page,
+            current_page_position=self.current_page_position,
+        )
 
     def _validate_init_params(self):
         """Validates the initialization parameters."""
@@ -379,78 +464,3 @@ class PageManager(nn.Module):
             current_page=_get_page_state_shape("current_page", jnp.full, (self.max_page_groups,), -1, jnp.int32),
             current_page_position=_get_page_state_shape("current_page_position", jnp.zeros, (self.max_page_groups,), jnp.int32),
         )
-
-    def __call__(
-        self, 
-        model_mode: Optional[str] = None, 
-        page_group_id: Optional[int] = None, 
-        true_length: Optional[int] = None,
-    ) -> Optional[PageState]:
-        """
-        Callable method for the PageManager.  Handles page allocation and
-        returns the updated PageState.
-        """
-        print("\n=== PageManager.__call__() ENTRY ===")
-        print(f"Called with:")
-        print(f"  model_mode: {model_mode}")
-        print(f"  page_group_id: {page_group_id}")
-        print(f"  true_length: {true_length}")
-
-        # If no model_mode is provided, return the current page state (for inspection/copying).
-        if model_mode is None:
-            return self.get_page_state()
-
-        if model_mode not in ["prefill", "autoregressive"]:
-            raise ValueError(f"Invalid model_mode: {model_mode}")
-
-        # Get the current state *before* any modifications.
-        page_status = self.page_status.value
-        page_map = self.page_map.value
-        sequence_lengths = self.sequence_lengths.value
-        num_pages_used = self.num_pages_used.value
-        current_page = self.current_page.value
-        current_page_position = self.current_page_position.value
-
-
-        if model_mode == "prefill":
-            # PREFILL mode: Allocate pages for a new sequence.
-            if page_group_id is None or true_length is None:
-                raise ValueError("Prefill mode requires both page_group_id and true_length")
-            self._validate_page_group(page_group_id)  # Check for valid inputs
-            self._validate_length(true_length)
-
-            # Now perform allocation.
-            page_status, page_map, sequence_lengths, num_pages_used, current_page, current_page_position = (
-                self.reserve_prefill_page_group_pages(
-                    page_group_id,
-                    true_length,
-                    page_status,
-                    page_map,
-                    sequence_lengths,
-                    num_pages_used,
-                    current_page,
-                    current_page_position,
-                )
-            )
-        elif model_mode == "autoregressive":
-            # AUTOREGRESSIVE mode:  Allocate a new page if the current one is full.
-            # If page_group_id is given, we are in a prefill_and_decode setting
-            if page_group_id is not None:
-              self._validate_page_group(page_group_id)
-            page_status, page_map, sequence_lengths, num_pages_used, current_page, current_page_position = (
-                self.reserve_decode_step_pages(
-                    page_status, page_map, sequence_lengths, num_pages_used, current_page, current_page_position
-                )
-            )
-
-
-        # Update the state *after* all modifications.
-        self.page_status.value = page_status
-        self.page_map.value = page_map
-        self.sequence_lengths.value = sequence_lengths
-        self.num_pages_used.value = num_pages_used
-        self.current_page.value = current_page
-        self.current_page_position.value = current_page_position
-
-        # Return the updated state.
-        return self.get_page_state()
