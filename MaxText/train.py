@@ -1046,7 +1046,8 @@ def train_loop(config, state=None):
       mllog_utils.early_stop_check(config, step, eval_loss, start_step)
       if eval_loss <= config.target_eval_loss:
         max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
-        prof.deactivate()
+        if step > first_profiling_step:
+          prof.deactivate()
         break
 
     if step == last_profiling_step or prof.should_deactivate_periodic_profile(step):

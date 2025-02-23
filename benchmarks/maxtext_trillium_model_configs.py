@@ -869,7 +869,7 @@ llama3_1_405b_8192_fsdp_dcn_mlperf = _add_to_model_dictionary(
         "tokenizer_path": "assets/mistral/tokenizer",
         "dataset_path": "gs://trillium-scale-datasets-q1-25-west",
         "dataset_type": "c4_mlperf",
-        "dataset_name": "c4/en:3.0.4",
+        "dataset_name": "c4/en:3.0.7",
         "eval_dataset_name": "c4/en:3.0.1",
         "skip_first_n_steps_for_profiler": 295, 
         "weight_dtype": "float32",
@@ -878,6 +878,8 @@ llama3_1_405b_8192_fsdp_dcn_mlperf = _add_to_model_dictionary(
         "learning_rate": 8.e-5,
         "warmup_steps_fraction": 0.0067,
         "learning_rate_schedule_steps": 2400000,
+        "target_eval_loss": 5.6,
+        "data_shuffle_seed": 8976,
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
