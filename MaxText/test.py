@@ -155,7 +155,6 @@ def main(argv: Sequence[str]) -> None:
         true_length=true_length,
         rng=rng_prefill,
         slot=slot,
-        layer_id=0,
     )
 
     print("\n=== Prefill Results ===")
@@ -163,6 +162,7 @@ def main(argv: Sequence[str]) -> None:
         # page_state = engine.page_manager(
         #     model_mode=None  # Just get current state
         # )
+        print(f"Prefill Result Cache Structure: {jax.tree_util.tree_structure(prefill_result['cache'])}")
         print_page_allocation_info(slot, true_length, page_state)
         print_cache_info(prefill_result)
         print_paged_attention_info(page_state, prefill_result["cache"])
@@ -181,6 +181,11 @@ def main(argv: Sequence[str]) -> None:
             page_state,
             config
         )
+
+        print(f"First key page (layer 0): {prefill_result['cache']['decoder']['layers_0']['key_pages'][0, 0]}")
+        print(f"First value page (layer 0): {prefill_result['cache']['decoder']['layers_0']['value_pages'][0, 0]}")
+        print(f"First key page (layer 0): {prefill_result['cache']['decoder']['layers_0']['key_pages'][0, 1]}")
+        print(f"First value page (layer 0): {prefill_result['cache']['decoder']['layers_0']['value_pages'][0, 1]}")
 
 
 if __name__ == "__main__":

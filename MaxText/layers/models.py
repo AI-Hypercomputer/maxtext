@@ -556,6 +556,7 @@ class Transformer(nn.Module):
       model_mode=common_types.MODEL_MODE_TRAIN,
       slot=None,
       true_length=None,
+      layer_id: Optional[int] = None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target."""
     print("\n=== Transformer.__call__() ENTRY ===")

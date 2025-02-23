@@ -385,7 +385,6 @@ class MaxEngine(engine_api.Engine):
         sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
         rng: Optional[PRNGKeyType] = None,
         slot: Optional[int] = None,
-        layer_id: Optional[int] = None,
     ) -> Tuple[Prefix, engine_api.ResultTokens, Optional[PageState]]:
         """Computes prefill for a new generate request.
 
@@ -433,15 +432,33 @@ class MaxEngine(engine_api.Engine):
         rng, new_rng = jax.random.split(rng)
         with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
             if self.config.attention == "paged":
-                # Get page allocation first - no changes here
                 page_state = self.page_manager(
                     model_mode="prefill",
                     page_group_id=slot, 
                     true_length=true_length,
-                    layer_id=layer_id,
+                    layer_id=0,
                 )
 
                 unboxed_params = max_utils.unbox_logicallypartioned(params)
+
+                cache = {
+                    "page_manager": page_state,
+                    "decoder": {
+                        f"layers_{i}": {
+                            "key_pages": jnp.zeros(
+                                (self.config.num_pages, self.config.tokens_per_page,
+                                 self.config.num_kv_heads, self.config.head_dim),
+                                dtype=self.config.dtype
+                            ),
+                            "value_pages": jnp.zeros(
+                                (self.config.num_pages, self.config.tokens_per_page,
+                                 self.config.num_kv_heads, self.config.head_dim),
+                                dtype=self.config.dtype
+                            )
+                        } for i in range(self.config.num_decoder_layers)
+                    }
+                }
+
                 flat_logits, new_vars = self.model.apply(
                     unboxed_params,
                     input_tokens,
@@ -449,29 +466,46 @@ class MaxEngine(engine_api.Engine):
                     decoder_segment_ids=sequence_indicator,
                     enable_dropout=False,
                     model_mode=common_types.MODEL_MODE_PREFILL,
-                    rngs={"params": new_rng},
+                    rngs={"params": new_rng, "cache": rng},
                     mutable=["cache", "params"],
                 )
 
-                # Create cache with same structure as get_initial_paged_kv_cache
-                cache = {
-                    "page_manager": page_state,
-                    "decoder": {}
-                }
-                
-                for i in range(self.config.num_decoder_layers):
-                    cache["decoder"][f"layers_{i}"] = {
-                        "key_pages": jnp.zeros(
-                            (self.config.num_pages, self.config.tokens_per_page, 
-                            self.config.num_kv_heads, self.config.head_dim),
-                            dtype=self.config.dtype
-                        ),
-                        "value_pages": jnp.zeros(
-                            (self.config.num_pages, self.config.tokens_per_page,
-                            self.config.num_kv_heads, self.config.head_dim),
-                            dtype=self.config.dtype
-                        )
-                    }
+                for layer_id in range(self.config.num_decoder_layers):
+                    key_pages = cache["decoder"][f"layers_{layer_id}"]["key_pages"]
+                    value_pages = cache["decoder"][f"layers_{layer_id}"]["value_pages"]
+
+                    # Get the first key/value vector.  Shape is [1, 1, num_heads, head_dim]
+                    # We get this from the attention layer's output 
+                    layer_keys = new_vars['params']['decoder'][f'layers_{layer_id}']['self_attention']['key']['kernel']
+                    layer_values = new_vars['params']['decoder'][f'layers_{layer_id}']['self_attention']['value']['kernel']
+
+                    layer_keys = max_utils.unbox_logicallypartioned(layer_keys)
+                    layer_values = max_utils.unbox_logicallypartioned(layer_values)
+
+                    # Need to transpose these to be in the correct order
+                    layer_keys = jnp.transpose(layer_keys, (1, 2, 0))
+                    layer_values = jnp.transpose(layer_values, (1, 2, 0))
+                    
+                    first_key = jax.lax.dynamic_slice(
+                        layer_keys,
+                        (0, 0, 0),
+                        (self.config.num_kv_heads, self.config.head_dim, 1)  # Slice out first token
+                    )
+                    first_value = jax.lax.dynamic_slice(
+                        layer_values,
+                        (0, 0, 0),
+                        (self.config.num_kv_heads, self.config.head_dim, 1)
+                    )
+                    # Write to page 0, position 0
+
+                    key_pages = key_pages.at[0, 0].set(jnp.squeeze(first_key, axis=(2,)))
+                    value_pages = value_pages.at[0, 0].set(jnp.squeeze(first_value, axis=(2,)))
+
+                    cache["decoder"][f"layers_{layer_id}"]["key_pages"] = key_pages
+                    cache["decoder"][f"layers_{layer_id}"]["value_pages"] = value_pages
+
+                    cache["page_manager"] = page_state # Update page manager in cache
+
             else:
                 print("\nApplying model with standard attention")
                 # For non-paged attention, keep the existing logic
