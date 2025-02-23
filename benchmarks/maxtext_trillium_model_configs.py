@@ -1575,8 +1575,8 @@ deepseek_big = _add_to_model_dictionary(
     model_type="default",
     tuning_params={
         "steps": 20,
-        "per_device_batch_size": 2,
-        "max_target_length": 4096,
+        "per_device_batch_size": 1,
+        "max_target_length": 2048,
         "enable_checkpointing": False,
         "dataset_type": "synthetic",
         "base_output_directory": "gs://maxtext-experiments-multipod",
@@ -1587,7 +1587,7 @@ deepseek_big = _add_to_model_dictionary(
         "base_emb_dim": 4096, #7168
         "base_mlp_dim": 24576,
         "base_num_query_heads": 32,
-        "base_num_kv_heads": 8,
+        "base_num_kv_heads": 16,
         "head_dim": 128,
         "skip_first_n_steps_for_profiler": 12,
         "allow_split_physical_axes": False,
@@ -1600,7 +1600,7 @@ deepseek_big = _add_to_model_dictionary(
         "remat_policy": "full",
         "base_num_decoder_layers": 16, # PP * 8
         "dcn_pipeline_parallelism": 2,
-        "num_pipeline_microbatches": 4, # PP * 2
+        "num_pipeline_microbatches": 2, # PP * 2 or since we are sad PP * 1
         "num_layers_per_pipeline_stage": 2,
         "scan_layers": False,
     },
