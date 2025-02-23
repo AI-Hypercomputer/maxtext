@@ -1009,18 +1009,14 @@ def get_kv_cache_annotations(model, config, rng, mesh):
     """Get the KV cache annotations for autoregressive and prefill modes."""
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       if config.attention == "paged":
-          ret = get_initial_paged_kv_cache(
-            model, 
-            config, 
-            batch_size=int(config.per_device_batch_size*jax.device_count()), 
-            abstract=True)
+          ret = get_prefill_paged_kv_cache_annotations(model, config, rng, mesh)
           jax.debug.print("Inside get_kv_cache_annotations, paged, abstract=True: {}", jax.tree_util.tree_structure(ret))
           return ret
       else:
           ret = get_initial_contiguous_kv_cache(
-            model, 
-            config, 
-            batch_size=int(config.per_device_batch_size*jax.device_count()), 
+            model,
+            config,
+            batch_size=int(config.per_device_batch_size*jax.device_count()),
             abstract=True)
           jax.debug.print("Inside get_kv_cache_annotations, contiguous, abstract=True: {}", jax.tree_util.tree_structure(ret))
           return ret

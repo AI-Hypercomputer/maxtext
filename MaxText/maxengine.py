@@ -116,6 +116,7 @@ class MaxEngine(engine_api.Engine):
                 max_target_length=self.config.max_target_length,
                 max_prefill_predict_length=self.config.max_prefill_predict_length,
                 max_pages_per_group=(self.config.max_target_length + self.config.tokens_per_page - 1) // self.config.tokens_per_page,
+                num_layers=self.config.num_decoder_layers,
                 config=self.config,
             )
         else:
@@ -136,6 +137,7 @@ class MaxEngine(engine_api.Engine):
                 max_target_length=self.config.max_target_length,
                 max_prefill_predict_length=self.config.max_prefill_predict_length,
                 max_pages_per_group=(self.config.max_target_length + self.config.tokens_per_page - 1) // self.config.tokens_per_page,
+                num_layers=self.config.num_decoder_layers,
                 config=self.config,
             )
 
@@ -265,7 +267,7 @@ class MaxEngine(engine_api.Engine):
         # 1. Initialize the model parameters *ONLY*.
         input_shape = (self.config.micro_batch_size_to_train_on, self.config.max_target_length)
         model_vars = self.model.init(
-            {"params": rng1, "dropout": rng1, "cache": rng1},
+            {"params": rng1, "dropout": rng1, "cache": rng1, "page_manager": rng1},
             jnp.ones(input_shape, dtype=jnp.int32),
             jnp.ones(input_shape, dtype=jnp.int32),
         )
@@ -383,6 +385,7 @@ class MaxEngine(engine_api.Engine):
         sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
         rng: Optional[PRNGKeyType] = None,
         slot: Optional[int] = None,
+        layer_id: Optional[int] = None,
     ) -> Tuple[Prefix, engine_api.ResultTokens, Optional[PageState]]:
         """Computes prefill for a new generate request.
 
@@ -434,7 +437,8 @@ class MaxEngine(engine_api.Engine):
                 page_state = self.page_manager(
                     model_mode="prefill",
                     page_group_id=slot, 
-                    true_length=true_length
+                    true_length=true_length,
+                    layer_id=layer_id,
                 )
 
                 unboxed_params = max_utils.unbox_logicallypartioned(params)

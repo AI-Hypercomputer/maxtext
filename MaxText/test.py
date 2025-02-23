@@ -155,6 +155,7 @@ def main(argv: Sequence[str]) -> None:
         true_length=true_length,
         rng=rng_prefill,
         slot=slot,
+        layer_id=0,
     )
 
     print("\n=== Prefill Results ===")
@@ -181,18 +182,6 @@ def main(argv: Sequence[str]) -> None:
             config
         )
 
-        
-
-    # print(f"First token shape: {first_token.data.shape}")
-    # print(f"First token value: {first_token.data[0,0]}")
-    
-    # # Try decoding the first token
-    # if hasattr(tokenizer_model, 'decode'):
-    #     try:
-    #         decoded = tokenizer_model.decode(first_token.data[0,0:1])
-    #         print(f"Decoded first token: '{decoded}'")
-    #     except Exception as e:
-    #         print(f"Could not decode first token: {e}")
 
 if __name__ == "__main__":
     app.run(main)

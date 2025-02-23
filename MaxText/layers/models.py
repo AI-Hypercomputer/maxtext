@@ -95,7 +95,8 @@ class DecoderLayer(nn.Module):
     model_mode,
     slot=None,
     true_length=None,
-    page_manager=None,  # Add page_manager here
+    page_manager=None,
+    layer_id: Optional[int] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -111,32 +112,18 @@ class DecoderLayer(nn.Module):
     )(inputs)
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
 
-    # Conditionally use page_manager
-    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-        attention_lnx = self.attention_layer(
-            lnx,
-            lnx,
-            decoder_positions,
-            decoder_segment_ids=decoder_segment_ids,
-            model_mode=model_mode,
-            page_manager=page_manager,  # Pass page_manager only in autoregressive mode
-            page_group_id=slot,
-            true_length=true_length,
-            use_fused_qkv=self.use_fused_qkv
-        )
-    else:
-        attention_lnx = self.attention_layer(
-            lnx,
-            lnx,
-            decoder_positions,
-            decoder_segment_ids=decoder_segment_ids,
-            model_mode=model_mode,
-            # No page_manager needed in prefill or train mode
-            page_group_id=slot,
-            true_length=true_length,
-            use_fused_qkv=self.use_fused_qkv,
-        )
-
+    attention_lnx = self.attention_layer(
+        lnx,
+        lnx,
+        decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+        model_mode=model_mode,
+        page_manager=page_manager,  # Pass page_manager only in autoregressive mode
+        page_group_id=slot,
+        true_length=true_length,
+        use_fused_qkv=self.use_fused_qkv,
+        layer_id=layer_id,
+    )
 
     attention_lnx = nn.with_logical_constraint(
         attention_lnx, ("activation_batch", "activation_length", "activation_embed")
@@ -208,28 +195,13 @@ class Decoder(nn.Module):
   shared_embedding: nn.Module
   mesh: Mesh
   quant: Optional[Quant] = None
+  page_manager: Optional[PageManager] = None
 
   def setup(self):
     """Initialize decoder layer."""
     cfg = self.config
     self.decoder_layer = self.get_decoder_layers()
     self.norm_layer = self.get_norm_layer()
-
-    if cfg.attention == "paged":
-        # Initialize cache variables
-        for i in range(cfg.num_decoder_layers):
-            self.variable("cache", f"layer_{i}_key_pages",
-                lambda: jnp.zeros((cfg.num_pages, cfg.tokens_per_page,
-                                 cfg.num_kv_heads, cfg.head_dim)))
-            self.variable("cache", f"layer_{i}_value_pages",
-                lambda: jnp.zeros((cfg.num_pages, cfg.tokens_per_page,
-                                 cfg.num_kv_heads, cfg.head_dim)))
-            # Page management state
-            self.variable("cache", f"layer_{i}_page_status",
-                lambda: jnp.zeros((cfg.num_pages,), dtype=jnp.int32))
-            self.variable("cache", f"layer_{i}_page_map",
-                lambda: jnp.full((int(cfg.per_device_batch_size * jax.device_count()),
-                                (int(cfg.max_target_length + cfg.tokens_per_page - 1)) // cfg.tokens_per_page,), -1, dtype=jnp.int32))
 
     if self.config.using_pipeline_parallelism:
       pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer[0])
@@ -238,26 +210,6 @@ class Decoder(nn.Module):
           config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
       )
   
-  def _create_page_managers(self):
-      """Creates the PageManager instances (now a separate method)."""
-      cfg = self.config
-      self.page_managers = self.variable(
-          "cache",
-          "page_managers",
-          lambda: [
-              PageManager(
-                  num_pages=cfg.num_pages,
-                  tokens_per_page=cfg.tokens_per_page,
-                  max_page_groups=int(cfg.per_device_batch_size * jax.device_count()),
-                  max_target_length=cfg.max_target_length,
-                  max_prefill_predict_length=cfg.max_prefill_predict_length,
-                  max_pages_per_group=(cfg.max_target_length + cfg.tokens_per_page - 1) // cfg.tokens_per_page,
-                  config=cfg
-              )
-              for _ in range(cfg.num_decoder_layers)
-          ],
-      )
-
   def get_remat_policy(self):
     cfg = self.config
     if cfg.remat_policy != "none":
@@ -448,7 +400,6 @@ class Decoder(nn.Module):
         model_mode=common_types.MODEL_MODE_TRAIN,
         slot=None,
         true_length=None,
-        page_manager=None, # Keep page_manager
     ):
         cfg = self.config
         mesh = self.mesh
@@ -495,30 +446,11 @@ class Decoder(nn.Module):
                 partition_spec=partition_spec,
             )
         else:
-            if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE and cfg.attention == "paged":
-                if self.page_managers.value is None:  # First call
-                    self.page_managers.value = [
-                        PageManager(
-                            num_pages=cfg.num_pages,
-                            tokens_per_page=cfg.tokens_per_page,
-                            max_page_groups=int(cfg.per_device_batch_size * jax.device_count()),
-                            max_target_length=cfg.max_target_length,
-                            max_prefill_predict_length=cfg.max_prefill_predict_length,
-                            max_pages_per_group=(cfg.max_target_length + cfg.tokens_per_page - 1) // cfg.tokens_per_page,
-                            config=cfg
-                        )
-                        for _ in range(cfg.num_decoder_layers)
-                    ]
-                page_managers_list = self.page_managers.value
-            else:
-                page_managers_list = None
-
             # Iterate through layers
             for lyr in range(cfg.num_decoder_layers):
                 RemattedBlockLayers = self.set_remat_policy(
                     self.decoder_layer, self.get_remat_policy()
                 )
-                page_manager_instance = page_managers_list[lyr] if page_managers_list is not None else None
 
                 current_layer_class = RemattedBlockLayers[lyr % len(RemattedBlockLayers)]
                 layer_instance = current_layer_class(
@@ -533,7 +465,8 @@ class Decoder(nn.Module):
                     model_mode,
                     slot=slot,
                     true_length=true_length,
-                    page_manager=page_manager_instance,
+                    page_manager=self.page_manager,
+                    layer_id=lyr,
                 )
 
         y = self.get_norm_layer()(
@@ -600,7 +533,19 @@ class Transformer(nn.Module):
         config=cfg,
     )
 
-    self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant)
+    if cfg.attention == "paged":
+        self.page_manager = self.make_rng("page_manager")
+      # page_manager = self.variable("page_manager", "manager", lambda: self.parent.page_manager).value
+    else:
+        self.page_manager = None
+
+    self.decoder = Decoder(
+      config=cfg, 
+      shared_embedding=self.shared_embedding, 
+      mesh=mesh, 
+      quant=self.quant, 
+      page_manager=self.page_manager,
+    ) 
 
   def __call__(
       self,
@@ -627,10 +572,6 @@ class Transformer(nn.Module):
           f"During autoregressive decoding we assume the tokens are in the active sequence"
           f" which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}."
       )
-    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE and self.decoder.page_managers is not None:
-        page_managers_list = self.decoder.page_managers.value
-    else:
-        page_managers_list = None
 
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
@@ -638,6 +579,7 @@ class Transformer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=not enable_dropout,
         model_mode=model_mode,
-        page_manager=page_managers_list, # Passed based on mode
+        slot=slot,
+        true_length=true_length,
     )
     return logits

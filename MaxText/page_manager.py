@@ -19,36 +19,42 @@ class PageManager:
     """
     Class that manages page allocation for prefill and autoregressive decoding.
     """
-    def __init__(self, num_pages: int, tokens_per_page: int, max_page_groups: int,
-                 max_target_length: int, max_prefill_predict_length: int,
-                 max_pages_per_group: int, config: Any):
-        """Initialize the page manager with configuration parameters."""
+    def __init__(self, 
+                 num_pages: int,
+                 tokens_per_page: int, 
+                 max_page_groups: int,
+                 max_target_length: int,
+                 max_prefill_predict_length: int,
+                 max_pages_per_group: int,
+                 num_layers: int,
+                 config: Any):
+        """Initialize the page manager."""
         self.num_pages = num_pages
         self.tokens_per_page = tokens_per_page
-        self.max_page_groups = max_page_groups  # Maximum number of concurrent sequences
+        self.max_page_groups = max_page_groups
         self.max_target_length = max_target_length
         self.max_prefill_predict_length = max_prefill_predict_length
-        self.max_pages_per_group = max_pages_per_group  # Maximum pages a single sequence can use
+        self.max_pages_per_group = max_pages_per_group
+        self.num_layers = num_layers  # Store number of layers
         self.config = config
 
-        # Validate initialization parameters
-        self._validate_init_params()
-
-        # Initialize page states directly as class attributes
-        self.page_status = jnp.zeros((self.num_pages,), jnp.int32)
-        self.page_map = jnp.full((self.max_page_groups, self.max_pages_per_group), -1, jnp.int32)
+        # Initialize page states
+        self.page_status = jnp.zeros((num_layers, self.num_pages,), jnp.int32)
+        self.page_map = jnp.full((num_layers, self.max_page_groups, self.max_pages_per_group), -1, jnp.int32)
         self.sequence_lengths = jnp.zeros((self.max_page_groups,), jnp.int32)
-        self.num_pages_used = jnp.zeros((self.max_page_groups,), jnp.int32)
-        self.current_page = jnp.full((self.max_page_groups,), -1, jnp.int32)
-        self.current_page_position = jnp.zeros((self.max_page_groups,), jnp.int32)
+        self.num_pages_used = jnp.zeros((num_layers, self.max_page_groups,), jnp.int32)
+        self.current_page = jnp.full((num_layers, self.max_page_groups,), -1, jnp.int32)
+        self.current_page_position = jnp.zeros((num_layers, self.max_page_groups,), jnp.int32)
 
-        # Initialize key and value pages
+        # Initialize key and value pages with layer dimension
         self.key_pages = jnp.zeros(
-            (self.num_pages, self.tokens_per_page, self.config.num_kv_heads, self.config.head_dim),
+            (num_layers, self.num_pages, self.tokens_per_page, 
+             self.config.num_kv_heads, self.config.head_dim),
             dtype=self.config.dtype
         )
         self.value_pages = jnp.zeros(
-            (self.num_pages, self.tokens_per_page, self.config.num_kv_heads, self.config.head_dim),
+            (num_layers, self.num_pages, self.tokens_per_page,
+             self.config.num_kv_heads, self.config.head_dim),
             dtype=self.config.dtype
         )
 
@@ -80,73 +86,139 @@ class PageManager:
             )
 
     def __call__(
-        self, model_mode: Optional[str] = None, page_group_id: Optional[int] = None, true_length: Optional[int] = None
+        self,
+        model_mode: str,
+        page_group_id: Optional[int] = None,
+        true_length: Optional[int] = None,
+        layer_id: Optional[int] = None,
     ) -> PageState:
-        """
-        Callable method for the PageManager. Handles page allocation and returns the updated PageState.
-        """
-        # Start with current state
-        page_state = PageState(
-            page_status=self.page_status,
-            page_map=self.page_map,
-            sequence_lengths=self.sequence_lengths,
-            num_pages_used=self.num_pages_used,
-            current_page=self.current_page,
-            current_page_position=self.current_page_position,
-        )
-
-        if model_mode is None:
-            return page_state
-
-        if model_mode not in ["prefill", "autoregressive"]:
-            raise ValueError(f"Invalid model_mode: {model_mode}")
+        """Updates internal state and returns PageState."""
+        # Get current state for this layer or overall
+        if layer_id is not None:
+            page_status = self.page_status[layer_id]
+            page_map = self.page_map[layer_id] 
+            num_pages_used = self.num_pages_used[layer_id]
+            current_page = self.current_page[layer_id]
+            current_page_position = self.current_page_position[layer_id]
+        else:
+            return PageState(
+                page_status=self.page_status,
+                page_map=self.page_map,
+                sequence_lengths=self.sequence_lengths,
+                num_pages_used=self.num_pages_used,
+                current_page=self.current_page,
+                current_page_position=self.current_page_position,
+            )
 
         if model_mode == "prefill":
             if page_group_id is None or true_length is None:
                 raise ValueError("Prefill mode requires both page_group_id and true_length")
-            self._validate_page_group(page_group_id)
-            self._validate_length(true_length)
 
-            # Get new state without updating instance variables
-            (new_page_status, new_page_map, new_sequence_lengths,
-            new_num_pages_used, new_current_page, new_current_page_position) = (
-                self.reserve_prefill_page_group_pages(
-                    page_group_id,
-                    true_length,
-                    page_state.page_status,
-                    page_state.page_map,
-                    page_state.sequence_lengths,
-                    page_state.num_pages_used,
-                    page_state.current_page,
-                    page_state.current_page_position,
-                )
+            # Calculate pages needed for this sequence
+            num_pages_needed = (true_length + self.tokens_per_page - 1) // self.tokens_per_page
+            last_page_position = jnp.where(true_length > 0, (true_length - 1) % self.tokens_per_page, 0)
+
+            # Release any existing pages for this page_group_id
+            def release_via_scan(carry, page_idx_in_group):
+                ps, pm = carry
+                old_page = pm[page_group_id, page_idx_in_group]
+                new_ps = jnp.where(old_page >= 0, ps.at[old_page].set(0), ps)
+                return (new_ps, pm), None
+
+            (page_status, page_map), _ = jax.lax.scan(
+                release_via_scan, (page_status, page_map), jnp.arange(self.max_pages_per_group)
             )
+
+            # Verify we have enough free pages
+            # def raise_error(dummy):
+            #     raise ValueError("No free pages available")
+            # def no_op(dummy):
+            #    return
+            # num_free_pages = jnp.sum(page_status == 0)
+            # jax.lax.cond(num_free_pages < num_pages_needed, raise_error, no_op, operand=None)
+
+            # Invalidate entire row for this page group
+            page_map = page_map.at[page_group_id].set(
+                jnp.full((self.max_pages_per_group,), -1, jnp.int32)
+            )
+
+            # Allocate new pages
+            def allocate_loop_body(idx, carry):
+                ps, pm = carry
+                next_free = self.find_next_free_page(ps)
+
+                def do_allocate(args):
+                    ps, pm = args
+                    new_ps = ps.at[next_free].set(1)  # Mark as used
+                    new_pm = pm.at[page_group_id, idx].set(next_free)
+                    return new_ps, new_pm
+
+                ps, pm = jax.lax.cond(
+                    (idx < num_pages_needed) & (next_free >= 0),
+                    do_allocate,
+                    lambda x: x,
+                    (ps, pm)
+                )
+                return ps, pm
+
+            page_status, page_map = jax.lax.fori_loop(
+                0, self.max_pages_per_group, allocate_loop_body, (page_status, page_map)
+            )
+
+            # Update sequence tracking
+            self.sequence_lengths = self.sequence_lengths.at[page_group_id].set(true_length)
+            num_pages_used = num_pages_used.at[page_group_id].set(num_pages_needed)
+
+            # Update current page tracking
+            cur_page = jnp.where(num_pages_needed > 0, page_map[page_group_id, num_pages_needed - 1], -1)
+            current_page = current_page.at[page_group_id].set(cur_page)
+            current_page_position = current_page_position.at[page_group_id].set(last_page_position)
+
+            # Update layer-specific state in the PageManager
+            self.page_status = self.page_status.at[layer_id].set(page_status)
+            self.page_map = self.page_map.at[layer_id].set(page_map)
+            self.num_pages_used = self.num_pages_used.at[layer_id].set(num_pages_used)
+            self.current_page = self.current_page.at[layer_id].set(current_page)
+            self.current_page_position = self.current_page_position.at[layer_id].set(current_page_position)
 
         elif model_mode == "autoregressive":
-            if page_group_id is not None:
-                self._validate_page_group(page_group_id)
-            
-            # Get new state without updating instance variables  
-            (new_page_status, new_page_map, new_sequence_lengths,
-            new_num_pages_used, new_current_page, new_current_page_position) = (
-                self.reserve_decode_step_pages(
-                    page_state.page_status, 
-                    page_state.page_map,
-                    page_state.sequence_lengths,
-                    page_state.num_pages_used,
-                    page_state.current_page,
-                    page_state.current_page_position
-                )
+            # Get new state for autoregressive generation
+            page_state = self.page_manager(
+                model_mode="autoregressive",
+                page_group_id=page_group_id
             )
+            # Update layer-specific autoregressive state
+            self.sequence_lengths = self.sequence_lengths.at[page_group_id].add(1)
+            current_page_position = current_page_position.at[page_group_id].add(1)
+            
+            # If we've filled the current page, allocate a new one
+            needs_new_page = current_page_position[page_group_id] >= self.tokens_per_page
+            if needs_new_page:
+                # Find next free page and update state
+                next_free = self.find_next_free_page(page_status)
+                if next_free >= 0:
+                    page_status = page_status.at[next_free].set(1)
+                    num_pages = num_pages_used[page_group_id]
+                    page_map = page_map.at[page_group_id, num_pages].set(next_free)
+                    current_page = current_page.at[page_group_id].set(next_free)
+                    current_page_position = current_page_position.at[page_group_id].set(0)
+                    num_pages_used = num_pages_used.at[page_group_id].add(1)
+                    
+                    # Update layer state
+                    self.page_status = self.page_status.at[layer_id].set(page_status)
+                    self.page_map = self.page_map.at[layer_id].set(page_map)
+                    self.current_page = self.current_page.at[layer_id].set(current_page)
+                    self.current_page_position = self.current_page_position.at[layer_id].set(current_page_position)
+                    self.num_pages_used = self.num_pages_used.at[layer_id].set(num_pages_used)
 
-        # Return new state without modifying self
+        # Return current state for this layer
         return PageState(
-            page_status=new_page_status,
-            page_map=new_page_map,
-            sequence_lengths=new_sequence_lengths,
-            num_pages_used=new_num_pages_used,
-            current_page=new_current_page,
-            current_page_position=new_current_page_position,
+            page_status=page_status,
+            page_map=page_map,
+            sequence_lengths=self.sequence_lengths,
+            num_pages_used=num_pages_used,
+            current_page=current_page,
+            current_page_position=current_page_position,
         )
 
     def get_page_state(self) -> PageState:

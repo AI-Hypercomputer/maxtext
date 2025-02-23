@@ -79,7 +79,8 @@ class LlamaDecoderLayer(nn.Module):
       model_mode,
       slot: Optional[int] = None,
       true_length: Optional[int] = None,
-      page_manager = None, # add page_manager here
+      layer_id: Optional[int] = None,
+      page_manager = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -119,31 +120,18 @@ class LlamaDecoderLayer(nn.Module):
         ragged_block_size=cfg.ragged_block_size,
     )
 
-    # Pass necessary arguments to attention_layer.
-    # Conditionally use page_manager
-    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-      attention_lnx = attention_layer(
-          lnx,
-          lnx,
-          decoder_positions,
-          decoder_segment_ids=decoder_segment_ids,
-          model_mode=model_mode,
-          page_group_id=slot,
-          true_length=true_length,
-          page_manager = page_manager #pass it here
-      )
-    else:
-      attention_lnx = attention_layer(
-        lnx,
-        lnx,
-        decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        model_mode=model_mode,
-        page_group_id=slot,
-        true_length=true_length,
-        use_fused_qkv=cfg.fused_qkv,
-      )
-
+    attention_lnx = attention_layer(
+      lnx,
+      lnx,
+      decoder_positions,
+      decoder_segment_ids=decoder_segment_ids,
+      model_mode=model_mode,
+      page_group_id=slot,
+      true_length=true_length,
+      page_manager=page_manager,
+      layer_id=layer_id,
+      use_fused_qkv=cfg.fused_qkv if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE else None,
+    )
 
 
     attention_lnx = nn.with_logical_constraint(

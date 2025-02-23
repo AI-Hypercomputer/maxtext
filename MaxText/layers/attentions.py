@@ -187,7 +187,7 @@ def get_prefill_paged_kv_cache_annotations(model, config, rng, mesh):
             # Use jax.eval_shape to get the shapes and dtypes *without* allocating memory.
             def init_fn():
                 return model.init(
-                    {"params": rng, "dropout": rng, "cache": rng},
+                    {"params": rng, "dropout": rng, "cache": rng, "page_manager": rng},
                     jnp.ones(input_shape, dtype=jnp.int32),
                     jnp.ones(input_shape, dtype=jnp.int32),
                     decoder_segment_ids=None,
@@ -216,6 +216,7 @@ def get_initial_paged_kv_cache(model, config, batch_size, abstract=False):
             max_target_length=config.max_target_length,
             max_prefill_predict_length=config.max_prefill_predict_length,
             max_pages_per_group=(config.max_target_length + config.tokens_per_page -1) // config.tokens_per_page,
+            num_layers=config.num_decoder_layers,
             config=config,
         )
         initial_page_state = page_manager.get_page_state()
@@ -266,7 +267,14 @@ class PagedAttentionOp(nn.Module):
     return out_proj
 
   def _paged_dot_product_attention(
-        self, query, key_pages, value_pages, sequence_lengths, page_map, num_kv_heads, tokens_per_page
+        self, 
+        query, 
+        key_pages, 
+        value_pages, 
+        sequence_lengths, 
+        page_map, 
+        num_kv_heads, 
+        tokens_per_page,
   ):
     """Core paged dot-product attention, operating on full pages.
     
@@ -407,28 +415,19 @@ class PagedAttentionOp(nn.Module):
       page_manager: PageManager,
       page_group_id: int,
       true_length: int,
+      layer_id: Optional[int] = None,
   ) -> Union[Array, Tuple[Array, Array, Array]]:
-      self.sow('intermediates', 'static_configs',
-              {'model_mode': model_mode, 'page_manager': page_manager},
-              reduce_fn=lambda x, y: y)
       if page_group_id is not None:
           if model_mode == common_types.MODEL_MODE_PREFILL:
-              # Get page state 
               page_state = page_manager(
                   model_mode="prefill",
                   page_group_id=page_group_id,
-                  true_length=true_length
+                  true_length=true_length,
+                  layer_id=layer_id,
               )
+              key_pages = page_manager.key_pages[layer_id]
+              value_pages = page_manager.value_pages[layer_id]
 
-              # Get the layer's key/value pages
-              key_pages = self.variable("cache", "key_pages", lambda: jnp.zeros(
-                  (self.config.num_pages, self.config.tokens_per_page, 
-                  self.num_kv_heads, self.kv_head_dim_size), dtype=self.dtype))
-              value_pages = self.variable("cache", "value_pages", lambda: jnp.zeros(
-                  (self.config.num_pages, self.config.tokens_per_page,
-                  self.num_kv_heads, self.kv_head_dim_size), dtype=self.dtype))
-
-              # Compute attention using pages
               attn_out = self._paged_dot_product_attention(
                   query=query,
                   key_pages=key_pages.value,
@@ -446,16 +445,14 @@ class PagedAttentionOp(nn.Module):
                       f"Autoregressive mode expects sequence length 1, got " 
                       f"key shape {key.shape}, value shape {value.shape}"
                   )
-              # Keep existing autoregressive handling
-
-              # Use same pattern as prefill for page-based attention
               page_state = page_manager(
-                  model_mode="autoregressive",
-                  page_group_id=page_group_id
+                  model_mode=model_mode,
+                  page_group_id=page_group_id,
+                  layer_id=layer_id
               )
 
-              key_pages = self.variable("cache", "key_pages").value
-              value_pages = self.variable("cache", "value_pages").value
+              key_pages = page_manager.key_pages[layer_id]
+              value_pages = page_manager.value_pages[layer_id]
 
               attn_out = self._paged_dot_product_attention(
                   query=query,
@@ -1645,6 +1642,7 @@ class Attention(nn.Module):
       page_group_id: Optional[int] = None,
       true_length: Optional[int] = None,
       use_fused_qkv: Optional[bool] = False,
+      layer_id: Optional[int] = None,
   ):
 
       deterministic = model_mode != common_types.MODEL_MODE_TRAIN
@@ -1682,6 +1680,7 @@ class Attention(nn.Module):
           page_manager=page_manager,
           page_group_id=page_group_id,
           true_length=true_length,
+          layer_id=layer_id,
       )
       if not isinstance(self.attention_op, PagedAttentionOp):
         out = nn.with_logical_constraint(out, self.out_axis_names)
