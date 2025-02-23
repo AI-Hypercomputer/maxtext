@@ -473,12 +473,10 @@ class MaxEngine(engine_api.Engine):
                 for layer_id in range(self.config.num_decoder_layers):
                     key_pages = cache["decoder"][f"layers_{layer_id}"]["key_pages"]
                     value_pages = cache["decoder"][f"layers_{layer_id}"]["value_pages"]
-
-                    # Get the first key/value vector.  Shape is [1, 1, num_heads, head_dim]
-                    # We get this from the attention layer's output 
                     layer_keys = new_vars['params']['decoder'][f'layers_{layer_id}']['self_attention']['key']['kernel']
                     layer_values = new_vars['params']['decoder'][f'layers_{layer_id}']['self_attention']['value']['kernel']
 
+                    # Unbox the LogicallyPartitioned objects before transposing.
                     layer_keys = max_utils.unbox_logicallypartioned(layer_keys)
                     layer_values = max_utils.unbox_logicallypartioned(layer_values)
 
@@ -486,20 +484,24 @@ class MaxEngine(engine_api.Engine):
                     layer_keys = jnp.transpose(layer_keys, (1, 2, 0))
                     layer_values = jnp.transpose(layer_values, (1, 2, 0))
                     
-                    first_key = jax.lax.dynamic_slice(
-                        layer_keys,
-                        (0, 0, 0),
-                        (self.config.num_kv_heads, self.config.head_dim, 1)  # Slice out first token
-                    )
-                    first_value = jax.lax.dynamic_slice(
-                        layer_values,
-                        (0, 0, 0),
-                        (self.config.num_kv_heads, self.config.head_dim, 1)
-                    )
-                    # Write to page 0, position 0
+                    def loop_body(i, carry):
+                        key_pages, value_pages = carry
 
-                    key_pages = key_pages.at[0, 0].set(jnp.squeeze(first_key, axis=(2,)))
-                    value_pages = value_pages.at[0, 0].set(jnp.squeeze(first_value, axis=(2,)))
+                        key_slice = jax.lax.dynamic_slice(
+                            layer_keys,
+                            (0, 0, i),  # Start index: (kv_head, head_dim, token_index)
+                            (self.config.num_kv_heads, self.config.head_dim, 1)  # Slice size: one token
+                        )
+                        value_slice = jax.lax.dynamic_slice(
+                            layer_values,
+                            (0, 0, i),
+                            (self.config.num_kv_heads, self.config.head_dim, 1)
+                        )
+                        key_pages = key_pages.at[0, i].set(jnp.squeeze(key_slice, axis=(2,)))
+                        value_pages = value_pages.at[0, i].set(jnp.squeeze(value_slice, axis=(2,)))
+                        return key_pages, value_pages
+                    
+                    key_pages, value_pages = jax.lax.fori_loop(0, true_length, loop_body, (key_pages, value_pages))
 
                     cache["decoder"][f"layers_{layer_id}"]["key_pages"] = key_pages
                     cache["decoder"][f"layers_{layer_id}"]["value_pages"] = value_pages

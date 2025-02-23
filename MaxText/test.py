@@ -186,6 +186,20 @@ def main(argv: Sequence[str]) -> None:
         print(f"First value page (layer 0): {prefill_result['cache']['decoder']['layers_0']['value_pages'][0, 0]}")
         print(f"First key page (layer 0): {prefill_result['cache']['decoder']['layers_0']['key_pages'][0, 1]}")
         print(f"First value page (layer 0): {prefill_result['cache']['decoder']['layers_0']['value_pages'][0, 1]}")
+        print("\n=== Verification: Step 3 (Prefill - All Tokens, First Page) ===")
+        print(f"True Length: {true_length}")
+
+        num_layers = config.num_decoder_layers
+        for layer_id in range(num_layers):
+            print(f"\nLayer {layer_id}:")
+            key_pages = prefill_result['cache']['decoder'][f'layers_{layer_id}']['key_pages']
+            value_pages = prefill_result['cache']['decoder'][f'layers_{layer_id}']['value_pages']
+
+            print(f"  Key Pages (Page 0, first {true_length+1} tokens):")
+            print(key_pages[0, :true_length+1, :, :])
+
+            print(f"  Value Pages (Page 0, first {true_length+1} tokens):")
+            print(value_pages[0, :true_length+1, :, :])
 
 
 if __name__ == "__main__":
