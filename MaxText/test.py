@@ -1,10 +1,74 @@
 import jax
+import jax.numpy as jnp
 import max_utils
 import maxengine
 import os
 import pyconfig
 from typing import Sequence
 from absl import app
+
+def verify_page_content_bounds(key_pages, page_idx, expected_tokens):
+    """Verify only expected positions contain non-zero values"""
+    nonzero_positions = jnp.sum(jnp.any(key_pages[page_idx] != 0, axis=(1,2)))
+    print(f"Page {page_idx}: {nonzero_positions} positions contain data")
+
+def verify_page_memory_access(prefill_result, page_state, slot, true_length, config):
+    """Verify memory access patterns and content for paged attention.
+    
+    Args:
+        prefill_result: Dict containing cache with decoder key/value pages
+        page_state: PageState with allocation info
+        slot: Current page group being checked 
+        true_length: Actual sequence length
+        config: Config object with attention params
+    """
+    print("\n=== Memory Access Verification ===")
+    
+    # Verify basic parameters are valid
+    num_pages_needed = (true_length + config.tokens_per_page - 1) // config.tokens_per_page
+    print(f"\nSequence requires {num_pages_needed} pages:")
+    print(f"- True length: {true_length}")
+    print(f"- Tokens per page: {config.tokens_per_page}")
+
+    # Access decoder cache and verify structure
+    cache = prefill_result["cache"]["decoder"]
+    if not isinstance(cache, dict) or not any(k.startswith("layers_") for k in cache.keys()):
+        raise ValueError(f"Unexpected cache structure: {cache.keys()}")
+
+    # Print key shape info for validation
+    print("\nShape verification:")
+    print(f"- page_status: {page_state.page_status.shape}")
+    print(f"- page_map: {page_state.page_map.shape}")
+    print(f"- key_pages (layer 0): {cache['layers_0']['key_pages'].shape}")
+    print(f"- value_pages (layer 0): {cache['layers_0']['value_pages'].shape}")
+
+    # Identify allocated pages for this slot
+    mask = page_state.page_map[slot] >= 0
+    used_pages = page_state.page_map[slot][mask]
+    print(f"\nAllocated pages for slot {slot}: {used_pages}")
+
+    # Verify each layer's memory content
+    for layer_id in range(config.num_decoder_layers):
+        key_pages = cache[f"layers_{layer_id}"]["key_pages"]
+        value_pages = cache[f"layers_{layer_id}"]["value_pages"]
+        
+        print(f"\nLayer {layer_id} verification:")
+        # Check allocated pages have non-zero content
+        for page_idx in used_pages:
+            key_nonzero = jnp.any(key_pages[page_idx] != 0)
+            value_nonzero = jnp.any(value_pages[page_idx] != 0)
+            print(f"  Page {page_idx}:")
+            print(f"    - Has key content: {key_nonzero}")
+            print(f"    - Has value content: {value_nonzero}")
+            expected_tokens = min(config.tokens_per_page, true_length - page_idx * config.tokens_per_page)
+            verify_page_content_bounds(key_pages, page_idx, expected_tokens)
+
+        # Sample some content for visual inspection
+        if len(used_pages) > 0:
+            first_page = used_pages[0]
+            print(f"\n  First allocated page ({first_page}) content sample:")
+            print(f"    Keys (first row): {key_pages[first_page][0][0]}")
+            print(f"    Values (first row): {value_pages[first_page][0][0]}")
 
 def verify_paged_attention(query_shape, key_pages_shape, page_state, config):
     """Verify paged attention shapes and parameters."""
@@ -145,6 +209,7 @@ def main(argv: Sequence[str]) -> None:
     print(f"Tokens: {tokens[:true_length]}")
 
     slot = 0
+    true_length = 72
 
     # Prefill
     rng, rng_prefill = jax.random.split(rng)
@@ -189,17 +254,18 @@ def main(argv: Sequence[str]) -> None:
         print("\n=== Verification: Step 3 (Prefill - All Tokens, First Page) ===")
         print(f"True Length: {true_length}")
 
-        num_layers = config.num_decoder_layers
-        for layer_id in range(num_layers):
-            print(f"\nLayer {layer_id}:")
-            key_pages = prefill_result['cache']['decoder'][f'layers_{layer_id}']['key_pages']
-            value_pages = prefill_result['cache']['decoder'][f'layers_{layer_id}']['value_pages']
+        # num_layers = config.num_decoder_layers
+        # for layer_id in range(num_layers):
+        #     print(f"\nLayer {layer_id}:")
+        #     key_pages = prefill_result['cache']['decoder'][f'layers_{layer_id}']['key_pages']
+        #     value_pages = prefill_result['cache']['decoder'][f'layers_{layer_id}']['value_pages']
 
-            print(f"  Key Pages (Page 0, first {true_length+1} tokens):")
-            print(key_pages[0, :true_length+1, :, :])
+        #     print(f"  Key Pages (Page 0, first {true_length+1} tokens):")
+        #     print(key_pages[0, :true_length+1, :, :])
 
-            print(f"  Value Pages (Page 0, first {true_length+1} tokens):")
-            print(value_pages[0, :true_length+1, :, :])
+        #     print(f"  Value Pages (Page 0, first {true_length+1} tokens):")
+        #     print(value_pages[0, :true_length+1, :, :])
+        verify_page_memory_access(prefill_result, page_state, slot, true_length, config)
 
 
 if __name__ == "__main__":

@@ -294,6 +294,15 @@ class PagedAttentionOp(nn.Module):
     jax.debug.print("value_pages: {}", value_pages.shape)
     jax.debug.print("sequence_lengths: {}", sequence_lengths.shape)
     jax.debug.print("page_map: {}", page_map.shape) 
+    jax.debug.print("Current sequence lengths: {}", sequence_lengths)
+    jax.debug.print("Current page map: {}", page_map)
+
+    current_pages = jnp.take_along_axis(
+        page_map,
+        jnp.expand_dims(sequence_lengths - 1, -1),
+        axis=1
+    )
+    jax.debug.print("Accessing pages: {}", current_pages)
 
     # Get shapes
     if len(query.shape) == 4:

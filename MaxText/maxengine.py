@@ -130,17 +130,6 @@ class MaxEngine(engine_api.Engine):
         batch_size = int(self.config.per_device_batch_size * jax.device_count())
 
         if self.config.attention == "paged":
-            page_manager = PageManager(
-                num_pages=self.config.num_pages,
-                tokens_per_page=self.config.tokens_per_page,
-                max_page_groups=batch_size,
-                max_target_length=self.config.max_target_length,
-                max_prefill_predict_length=self.config.max_prefill_predict_length,
-                max_pages_per_group=(self.config.max_target_length + self.config.tokens_per_page - 1) // self.config.tokens_per_page,
-                num_layers=self.config.num_decoder_layers,
-                config=self.config,
-            )
-
             abstract_cache = max_utils.get_initial_kv_cache(
                 self.model,
                 self.config,
@@ -475,33 +464,59 @@ class MaxEngine(engine_api.Engine):
                     value_pages = cache["decoder"][f"layers_{layer_id}"]["value_pages"]
                     layer_keys = new_vars['params']['decoder'][f'layers_{layer_id}']['self_attention']['key']['kernel']
                     layer_values = new_vars['params']['decoder'][f'layers_{layer_id}']['self_attention']['value']['kernel']
-
-                    # Unbox the LogicallyPartitioned objects before transposing.
-                    layer_keys = max_utils.unbox_logicallypartioned(layer_keys)
-                    layer_values = max_utils.unbox_logicallypartioned(layer_values)
-
-                    # Need to transpose these to be in the correct order
+                    layer_keys = max_utils.unbox_logicallypartioned(layer_keys)  # Unbox
+                    layer_values = max_utils.unbox_logicallypartioned(layer_values) # Unbox
                     layer_keys = jnp.transpose(layer_keys, (1, 2, 0))
                     layer_values = jnp.transpose(layer_values, (1, 2, 0))
-                    
-                    def loop_body(i, carry):
+                    # 1. Calculate the number of pages needed.
+                    num_pages_needed = (true_length + self.config.tokens_per_page - 1) // self.config.tokens_per_page
+
+                    # 2. Use jax.lax.fori_loop to iterate through the *logical* pages.
+                    def outer_loop_body(logical_page_idx, carry):
                         key_pages, value_pages = carry
 
-                        key_slice = jax.lax.dynamic_slice(
-                            layer_keys,
-                            (0, 0, i),  # Start index: (kv_head, head_dim, token_index)
-                            (self.config.num_kv_heads, self.config.head_dim, 1)  # Slice size: one token
-                        )
-                        value_slice = jax.lax.dynamic_slice(
-                            layer_values,
-                            (0, 0, i),
-                            (self.config.num_kv_heads, self.config.head_dim, 1)
-                        )
-                        key_pages = key_pages.at[0, i].set(jnp.squeeze(key_slice, axis=(2,)))
-                        value_pages = value_pages.at[0, i].set(jnp.squeeze(value_slice, axis=(2,)))
+                        # 3. Get the *physical* page index from the page_map.
+                        physical_page_idx = page_state.page_map[slot, logical_page_idx]
+
+                        def raise_error(dummy):
+                          raise ValueError(f"Invalid physical page index: {physical_page_idx} for slot {slot} and logical page {logical_page_idx}")
+                        def no_op(dummy):
+                          return
+
+                        jax.lax.cond(physical_page_idx < 0, lambda: jax.debug.callback(raise_error), lambda: None)
+
+
+                        # 4. Calculate the start and end token indices for this page.
+                        start_token_idx = logical_page_idx * self.config.tokens_per_page
+                        end_token_idx = jax.lax.min((logical_page_idx + 1) * self.config.tokens_per_page, true_length) # USE jax.lax.min
+
+                        # 5. Loop through tokens within this page.
+                        def inner_loop_body(i, carry):
+                            key_pages, value_pages = carry
+                            #convert global token index to local token index
+                            local_token_idx = i - start_token_idx
+
+                            key_slice = jax.lax.dynamic_slice(
+                                layer_keys,
+                                (0, 0, i),
+                                (self.config.num_kv_heads, self.config.head_dim, 1)
+                            )
+                            value_slice = jax.lax.dynamic_slice(
+                                layer_values,
+                                (0, 0, i),
+                                (self.config.num_kv_heads, self.config.head_dim, 1)
+                            )
+
+                            key_pages = key_pages.at[physical_page_idx, local_token_idx].set(jnp.squeeze(key_slice, axis=(2,)))
+                            value_pages = value_pages.at[physical_page_idx, local_token_idx].set(jnp.squeeze(value_slice, axis=(2,)))
+
+                            return key_pages, value_pages
+
+                        # Use another fori_loop for the inner loop.
+                        key_pages, value_pages = jax.lax.fori_loop(start_token_idx, end_token_idx, inner_loop_body, (key_pages, value_pages))
                         return key_pages, value_pages
-                    
-                    key_pages, value_pages = jax.lax.fori_loop(0, true_length, loop_body, (key_pages, value_pages))
+
+                    key_pages, value_pages = jax.lax.fori_loop(0, num_pages_needed, outer_loop_body, (key_pages, value_pages))
 
                     cache["decoder"][f"layers_{layer_id}"]["key_pages"] = key_pages
                     cache["decoder"][f"layers_{layer_id}"]["value_pages"] = value_pages

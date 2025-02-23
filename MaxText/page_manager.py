@@ -3,17 +3,17 @@ import jax.numpy as jnp
 from flax import struct
 from typing import Optional, Any, Tuple
 
-@struct.dataclass 
+@struct.dataclass
 class PageState:
     """
     Dataclass that holds the state of pages managed by PageManager.
     """
-    page_status: jnp.ndarray  # [num_pages] | 0: free, 1: allocated
-    page_map: jnp.ndarray     # [max_page_groups, max_pages_per_group] | Maps logical page indices to physical page indices.
+    page_status: jnp.ndarray  # [num_layers, num_pages] | 0: free, 1: allocated
+    page_map: jnp.ndarray     # [num_layers, max_page_groups, max_pages_per_group]
     sequence_lengths: jnp.ndarray # [max_page_groups] | Current length of each sequence.
-    num_pages_used: jnp.ndarray  # [max_page_groups] | Number of pages currently used by each sequence.
-    current_page: jnp.ndarray    # [max_page_groups] | Index of the current page for each sequence.
-    current_page_position: jnp.ndarray  # [max_page_groups] | Current position (token offset) within the current page.
+    num_pages_used: jnp.ndarray  # [num_layers, max_page_groups]
+    current_page: jnp.ndarray    # [num_layers, max_page_groups]
+    current_page_position: jnp.ndarray  # [num_layers, max_page_groups]
 
 class PageManager:
     """
@@ -93,7 +93,9 @@ class PageManager:
         layer_id: Optional[int] = None,
     ) -> PageState:
         """Updates internal state and returns PageState."""
-        # Get current state for this layer or overall
+        jax.debug.print("\nPageManager call:")
+        jax.debug.print("  mode: {}, group: {}, length: {}, layer: {}", 
+            model_mode, page_group_id, true_length, layer_id)
         if layer_id is not None:
             page_status = self.page_status[layer_id]
             page_map = self.page_map[layer_id] 
@@ -111,6 +113,9 @@ class PageManager:
             )
 
         if model_mode == "prefill":
+            jax.debug.print("Pre-allocation status:")
+            jax.debug.print("  Free pages: {}", jnp.sum(self.page_status == 0))
+            jax.debug.print("  Current mapping: {}", self.page_map[page_group_id])
             if page_group_id is None or true_length is None:
                 raise ValueError("Prefill mode requires both page_group_id and true_length")
 
