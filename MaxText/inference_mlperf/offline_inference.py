@@ -340,10 +340,10 @@ class OfflineInference:
         else:
           assert False, "no generate fn"
         result_tokens_l = []
-        for i in range(5):
+        for i in range(10):
           self.decode_state, result_tokens = gen_fn(self.params, self.decode_state, None)
           result_tokens_l.append(result_tokens)
-      for i in range(5):
+      for i in range(10):
         # result_tokens.copy_to_host_async()
         result_tokens = result_tokens_l[i].convert_to_numpy()
         self.detokenize_backlog.put((result_tokens, False, 0, 0), block=True)
@@ -414,7 +414,7 @@ class OfflineInference:
         self.detokenize_backlog.put((first_token, True, row.id, slot), block=True)
         continue
 
-      if len(self.prefill_buckets[padded_len // 2]) == 0:
+      if len(self.prefill_buckets[padded_len // 2]) != 0:
         prefill_batch(self.prefill_buckets[padded_len // 2], padded_len // 2)
         self.prefill_buckets[padded_len // 2] = []
       if padded_len == self.max_prefill_length:
