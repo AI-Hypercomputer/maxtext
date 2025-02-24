@@ -26,6 +26,7 @@ import sys
 import functools
 import time
 import queue
+from collections import defaultdict
 
 from typing import Sequence, Optional
 from absl import app
@@ -730,9 +731,7 @@ def generate_completions(params, data, config, rng, tokenizer_model, engine, tru
   #TODO: Improve the token generation by using batch inference
   rng, rng_init_decode = jax.random.split(rng_load_params)
   decode_state = engine.init_decode_state(rng_init_decode)
-  ar_completions = []
-  ar_completions_segmentation = []
-  ar_completions_position = []
+  slot = 0
   for i in range(prompts.shape[0]):
     tokens = prompts[i]
     current_token_true_length = true_length[i]
@@ -740,39 +739,54 @@ def generate_completions(params, data, config, rng, tokenizer_model, engine, tru
     # Split RNG before calling prefill
     rng, rng_prefill = jax.random.split(rng)
     # generate the KV cache by prefilling the prompt tokens
-    slot = 0
     # Generate G completions for a prompt with different rng
     for _ in range(G):
       prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=current_token_true_length, rng=rng_prefill)
       decode_state = engine.insert(prefill_result, decode_state, slot=slot)
-      # Autoregressively generate tokens for max_target_length steps.
-      steps = config.max_target_length - config.max_prefill_predict_length
-      completions = []
-      for step in range(steps):
-        rng, rng_generate = jax.random.split(rng)
-        # Temperature scaling done by using `weighted` as sampling method
-        decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
-        if sampled_tokens.get_result_at_slot(slot).tokens.item() == tokenizer_model.eos_token_id: # got EOS token
-          if step > 0:
-            completions.append(sampled_tokens.get_result_at_slot(slot).tokens.item())
-            break
-          else:
-            # TODO: if we get an eos as the first generated token
-            step -= 1
-            continue
-        else:
-          completions.append(sampled_tokens.get_result_at_slot(slot).tokens.item())
+      slot += 1
+  steps = config.max_target_length - config.max_prefill_predict_length
+  completions = defaultdict(list)
+  for _ in range(steps):
+    rng, rng_generate = jax.random.split(rng)
+    decode_state, result_tokens = engine.generate(params, decode_state, rng=rng_generate)
+    for i in range(slot):
+      completions[i].append(result_tokens.get_result_at_slot(i).tokens.item())
+  completions = jnp.array(list(completions.values()))
+  eos_positions = jnp.argmax(completions == tokenizer_model.eos_token_id, axis=1, keepdims=True)
+  row_indices = jnp.arange(completions.shape[1])
+  mask = row_indices <= eos_positions
+  data['ar_completions'] = completions * mask
+  data['ar_completions_segmentation'] = mask.astype(jnp.int32)
+  data['ar_completions_position'] = jnp.where(mask, row_indices + 1, 0)
+    
+      # # Autoregressively generate tokens for max_target_length steps.
+      # steps = config.max_target_length - config.max_prefill_predict_length
+      # completions = []
+      # for step in range(steps):
+      #   rng, rng_generate = jax.random.split(rng)
+      #   # Temperature scaling done by using `weighted` as sampling method
+      #   decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
+      #   if sampled_tokens.get_result_at_slot(slot).tokens.item() == tokenizer_model.eos_token_id: # got EOS token
+      #     if step > 0:
+      #       completions.append(sampled_tokens.get_result_at_slot(slot).tokens.item())
+      #       break
+      #     else:
+      #       # TODO: if we get an eos as the first generated token
+      #       step -= 1
+      #       continue
+      #   else:
+      #     completions.append(sampled_tokens.get_result_at_slot(slot).tokens.item())
 
-        # # TODO: remove!! this is only for proxying the AR
-        # if step < 5:
-        #   completions.append(100)
+      #   # # TODO: remove!! this is only for proxying the AR
+      #   # if step < 5:
+      #   #   completions.append(100)
 
-      ar_completions.append(completions + [tokenizer_model.pad_token_id] * (steps - len(completions)))
-      ar_completions_segmentation.append([1] * len(completions) + [0] * (steps - len(completions)))
-      ar_completions_position.append(list(range(len(completions))) + [0] * (steps - len(completions)))
-  data['ar_completions'] = jnp.array(ar_completions)
-  data['ar_completions_segmentation'] = jnp.array(ar_completions_segmentation)
-  data['ar_completions_position'] = jnp.array(ar_completions_position)
+      # ar_completions.append(completions + [tokenizer_model.pad_token_id] * (steps - len(completions)))
+      # ar_completions_segmentation.append([1] * len(completions) + [0] * (steps - len(completions)))
+      # ar_completions_position.append(list(range(len(completions))) + [0] * (steps - len(completions)))
+  # data['ar_completions'] = jnp.array(ar_completions)
+  # data['ar_completions_segmentation'] = jnp.array(ar_completions_segmentation)
+  # data['ar_completions_position'] = jnp.array(ar_completions_position)
   # TODO:Since ar_completions are generated through inference. These arrays and NOT sharded. 
   return data
 
@@ -1447,7 +1461,7 @@ def main(argv: Sequence[str]) -> None:
     os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   pyconfig.initialize(argv)
   config = pyconfig.config
-  pyconfig_inference.initialize(argv + ['ici_tensor_parallelism=4'])
+  pyconfig_inference.initialize(argv + ['ici_tensor_parallelism=4', 'per_device_batch_size='+str(config.per_device_batch_size * config.num_generations)])
   config_inference = pyconfig_inference.config
   max_utils.print_system_information()
   validate_train_config(config)
