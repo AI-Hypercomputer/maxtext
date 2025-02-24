@@ -27,11 +27,13 @@ import dataclasses
 import datetime
 import enum
 import os
+import queue
 import random
 import string
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 import maxtext_trillium_model_configs as model_configs
@@ -40,6 +42,8 @@ import xla_flags_library as xla_flags
 # Assumes you built maxtext dep image.
 # Assumes you have xpk installed in a git clone repo of ~/{wl_config.xpk_path}/xpk.py
 _DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME = 'maxtext_base_image'
+
+COMPLETION_TIMEOUT_SECONDS = 10
 
 
 class LibTpuType(enum.Enum):
@@ -275,6 +279,85 @@ def run_command_with_updates(command, task, verbose=True) -> int:
       return e.returncode
     print(f'Task: `{task}` succeeded.')
     return 0
+
+
+def wait_for_xpk_workload_completion(
+    cluster_config: XpkClusterConfig, workload_name, xpk_path
+) -> int:
+  """Waits for the given XPK workload to complete.
+
+  Args:
+    cluster_config: XPK cluster configuration.
+    workload_name: Name of the workload to wait for.
+    xpk_path: Path to the xpk.py script.
+  Returns:
+    return_code: 0 if successful and non-zero otherwise.
+  """
+  wait_command = [
+      f'python3 {xpk_path}/xpk.py workload list',
+      f'--cluster={cluster_config.cluster_name}',
+      f'--project={cluster_config.project}',
+      f'--zone={cluster_config.zone}',
+      f'--wait-for-job-completion={workload_name}',
+  ]
+  wait_command_str = ' '.join(wait_command)
+  print(f'Waiting for workload "{workload_name}" to complete...')
+  return_code = run_command_with_updates(
+      wait_command_str, f'Wait for {workload_name} completion'
+  )
+  if return_code != 0:
+    print(
+        f'Error waiting for workload {workload_name} to complete. Return code:'
+        f' {return_code}'
+    )
+  else:
+    print(f'Workload "{workload_name}" completed successfully.')
+  return return_code
+
+
+def wait_for_xpk_workloads_completion_async(
+    cluster_config: XpkClusterConfig, workload_names, xpk_path
+):
+  """Waits for a list of XPK workloads to complete in parallel and yields names and exit codes as they complete.
+
+  Args:
+    cluster_config: XPK cluster configuration.
+    workload_names: List of workload names to wait for.
+    xpk_path: Path to the xpk.py script.
+
+  Yields:
+    Tuple[workload_name, return_code]: The name of the workload that has just
+      completed and its return code.
+  """
+  threads = []
+  result_queue = queue.Queue()
+
+  def _wait_for_completion_threaded(name):
+    return_code = wait_for_xpk_workload_completion(
+        cluster_config, name, xpk_path
+    )
+    result_queue.put((name, return_code))
+
+  for name in workload_names:
+    thread = threading.Thread(
+        target=_wait_for_completion_threaded, args=(name,)
+    )
+    threads.append(thread)
+    thread.start()
+
+  completed_count = 0
+  while completed_count < len(workload_names):
+    try:
+      # Wait for a result with a timeout
+      workload_name, return_code = result_queue.get(timeout=COMPLETION_TIMEOUT_SECONDS)
+      completed_count += 1
+
+      # Yield the result as soon as it's available
+      yield workload_name, return_code
+    except queue.Empty:
+      # Queue is empty, no thread has finished yet, continue waiting
+      print('Waiting for workloads to complete...')
+      time.sleep(10)
 
 
 def _get_config_tuning_params(wl_config: WorkloadConfig):
@@ -524,6 +607,7 @@ def _get_pathways_specific_flags(wl_config: WorkloadConfig):
 def generate_xpk_workload_cmd(
     cluster_config: XpkClusterConfig,
     wl_config: WorkloadConfig,
+    workload_name=None,
 ):
   """Generates a command to run a maxtext model on XPK."""
 
@@ -541,15 +625,18 @@ def generate_xpk_workload_cmd(
   common_prefix = os.environ['USER']
   pw_prefix = "pw-"
 
-  if is_pathways_enabled:
-    name = (
-        f"{pw_prefix}{wl_config.model.model_name.replace('_', '-')[:truncate_model_name - len(pw_prefix)]}"
-    )
+  if workload_name is None: # Generate name if not provided
+    if is_pathways_enabled:
+      name = (
+          f"{pw_prefix}{wl_config.model.model_name.replace('_', '-')[:truncate_model_name - len(pw_prefix)]}"
+      )
+    else:
+      name = (
+        f"{wl_config.model.model_name.replace('_', '-')[:truncate_model_name]}"
+      )
+    name = f"{common_prefix[:truncate_prefix]}-{name}{common_post_fix}"
   else:
-    name = (
-      f"{wl_config.model.model_name.replace('_', '-')[:truncate_model_name]}"
-    )
-  name = f"{common_prefix[:truncate_prefix]}-{name}{common_post_fix}"
+    name = workload_name # Use provided name
 
   user_command = build_user_command(
       name=name,
@@ -604,21 +691,29 @@ def generate_xpk_workload_cmd(
 def run_xpk_workload(
     cluster_config: XpkClusterConfig,
     wl_config: WorkloadConfig,
-):
-  """Runs a maxtext model on XPK.
+    wait_for_completion: bool = False,
+) -> int:
+  """Runs a maxtext model on XPK and waits for completion.
 
   Args:
-    model:
-    cluster_config:
+    cluster_config: XPK cluster configuration.
+    wl_config: Workload configuration.
+    wait_for_completion: Whether to wait for workload completion. Defaults to
+      False.
 
   Returns:
+    return_code: Return code of the workload creation command, or workload
+    completion wait command if wait_for_completion is True.
   """
   assert cluster_config.device_type == wl_config.device_type, f"The workload device size {wl_config.device_type}, and cluster device size {cluster_config.device_type} don't match."
-  command, _ = generate_xpk_workload_cmd(
+  command, workload_name = generate_xpk_workload_cmd(
       cluster_config=cluster_config,
       wl_config=wl_config
   )
-  return run_command_with_updates(command, 'Run XPK workload')
+  return_code = run_command_with_updates(command, 'Run XPK workload')
+  if return_code == 0 and wait_for_completion:
+    return_code = wait_for_xpk_workload_completion(cluster_config, workload_name, wl_config.xpk_path) # Wait for completion after successful run
+  return return_code
 
 
 def xpk_benchmark_runner(
