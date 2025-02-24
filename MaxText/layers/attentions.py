@@ -208,7 +208,7 @@ def get_prefill_paged_kv_cache_annotations(model, config, rng, mesh):
 
 def get_initial_paged_kv_cache(model, config, batch_size, abstract=False):
   if not abstract:
-    raise ValueError("PagedAttention only supports abstract initialization of KV cache, " "please use abstract=True")
+    raise ValueError("PagedAttention only supports abstract initialization of KV cache.")
 
   if config.attention == "paged":
     # Create a single PageManager instance to get the shape of PageState.
@@ -224,7 +224,6 @@ def get_initial_paged_kv_cache(model, config, batch_size, abstract=False):
     )
     initial_page_state = page_manager.get_page_state()
 
-    # Create overall cache structure
     cache = {}
     cache["page_manager"] = initial_page_state
 

@@ -34,13 +34,6 @@ import collections
 from typing import Any, Tuple
 
 import max_logging
-import max_utils
-from layers.attentions import (
-    get_initial_paged_kv_cache,
-    get_prefill_paged_kv_cache_annotations,
-    get_initial_contiguous_kv_cache,
-    get_prefill_contiguous_kv_cache_annotations,
-)
 from page_manager import PageManager
 
 
@@ -704,7 +697,7 @@ def setup_decode_state(model, config, rng, mesh, params):
   print(f"Input params type: {type(params)}")
   print(f"Input params structure: {jax.tree_util.tree_structure(params)}")
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    # Initialize
+    # Initialize  
     input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
     initial_vars = model.init(
         {"params": rng, "dropout": rng, "cache": rng},
@@ -720,7 +713,8 @@ def setup_decode_state(model, config, rng, mesh, params):
       if "token_embedder" in params_in_initial_vars:
         print("token_embedder keys in params:", params_in_initial_vars["token_embedder"].keys())
         if "embedding" in params_in_initial_vars["token_embedder"]:
-          print("embedding parameter SHAPE in initial_vars:", params_in_initial_vars["token_embedder"]["embedding"].shape)
+          print("embedding parameter SHAPE in initial_vars:", 
+                params_in_initial_vars["token_embedder"]["embedding"].shape)
         else:
           print("ERROR: embedding parameter NOT FOUND in token_embedder in initial_vars")
       else:
@@ -737,7 +731,7 @@ def setup_decode_state(model, config, rng, mesh, params):
       initial_vars["params"] = params
 
     # Get annotations and convert to mesh
-    state_mesh_annotations = nn.get_partition_spec(initial_vars)
+    state_mesh_annotations = nn.get_partition_spec(initial_vars)  
     with mesh:
       state = init_decode_state(model.apply, initial_vars["params"])
 
@@ -993,32 +987,6 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
       state_mesh_annotations,
       state_mesh_shardings,
   )
-
-
-def get_initial_kv_cache(model, config, batch_size, abstract=False):
-  """Creates the initial (all zeros) KV cache for decode."""
-  if config.attention == "paged":
-    # Use existing function for paged attention.
-    return get_initial_paged_kv_cache(model, config, batch_size, abstract)
-  else:
-    # Use existing function for contiguous attention.
-    return get_initial_contiguous_kv_cache(model, config, batch_size, abstract)
-
-
-def get_kv_cache_annotations(model, config, rng, mesh):
-  """Get the KV cache annotations for autoregressive and prefill modes."""
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    if config.attention == "paged":
-      ret = get_prefill_paged_kv_cache_annotations(model, config, rng, mesh)
-      jax.debug.print("Inside get_kv_cache_annotations, paged, abstract=True: {}", jax.tree_util.tree_structure(ret))
-      return ret
-    else:
-      ret = get_initial_contiguous_kv_cache(
-          model, config, batch_size=int(config.per_device_batch_size * jax.device_count()), abstract=True
-      )
-      jax.debug.print("Inside get_kv_cache_annotations, contiguous, abstract=True: {}", jax.tree_util.tree_structure(ret))
-      return ret
-
 
 def print_pytree_shape(print_str, ptree):
   print("\n")
