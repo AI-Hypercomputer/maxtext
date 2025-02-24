@@ -532,6 +532,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["ici_fsdp_parallelism"],
       raw_keys["ici_fsdp_transpose_parallelism"],
       raw_keys["ici_sequence_parallelism"],
+      raw_keys["ici_context_parallelism"],
       raw_keys["ici_tensor_parallelism"],
       raw_keys["ici_tensor_transpose_parallelism"],
       raw_keys["ici_tensor_sequence_parallelism"],
@@ -544,6 +545,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["dcn_fsdp_parallelism"],
       raw_keys["dcn_fsdp_transpose_parallelism"],
       raw_keys["dcn_sequence_parallelism"],
+      raw_keys["dcn_context_parallelism"],
       raw_keys["dcn_tensor_parallelism"],
       raw_keys["dcn_tensor_transpose_parallelism"],
       raw_keys["dcn_tensor_sequence_parallelism"],
@@ -585,6 +587,7 @@ def validate_multiple_slices(raw_keys):
                   raw_keys["dcn_fsdp_parallelism"],
                   raw_keys["dcn_fsdp_transpose_parallelism"],
                   raw_keys["dcn_sequence_parallelism"],
+                  raw_keys["dcn_context_parallelism"],
                   raw_keys["dcn_tensor_parallelism"],
                   raw_keys["dcn_tensor_sequence_parallelism"],
                   raw_keys["dcn_expert_parallelism"],
@@ -621,6 +624,7 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["ici_fsdp_parallelism"],
           raw_keys["ici_fsdp_transpose_parallelism"],
           raw_keys["ici_sequence_parallelism"],
+          raw_keys["ici_context_parallelism"],
           raw_keys["ici_tensor_parallelism"],
           raw_keys["ici_tensor_transpose_parallelism"],
           raw_keys["ici_tensor_sequence_parallelism"],
@@ -633,6 +637,7 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["dcn_fsdp_parallelism"],
           raw_keys["dcn_fsdp_transpose_parallelism"],
           raw_keys["dcn_sequence_parallelism"],
+          raw_keys["dcn_context_parallelism"],
           raw_keys["dcn_tensor_parallelism"],
           raw_keys["dcn_tensor_transpose_parallelism"],
           raw_keys["dcn_tensor_sequence_parallelism"],
@@ -645,6 +650,7 @@ def set_and_validate_pipeline_config(raw_keys):
           "fsdp",
           "fsdp_transpose",
           "sequence",
+          "context",
           "tensor",
           "tensor_transpose",
           "tensor_sequence",
@@ -658,6 +664,7 @@ def set_and_validate_pipeline_config(raw_keys):
               "fsdp",
               "fsdp_transpose",
               "sequence",
+              "context",
               "tensor",
               "tensor_transpose",
               "tensor_sequence",
@@ -857,6 +864,10 @@ def using_tensor_parallelism(raw_keys) -> bool:
 
 def using_sequence_parallelism(raw_keys) -> bool:
   return int(raw_keys["ici_sequence_parallelism"]) > 1 or int(raw_keys["dcn_sequence_parallelism"]) > 1
+
+
+def using_context_parallelism(raw_keys) -> bool:
+  return int(raw_keys["ici_context_parallelism"]) > 1 or int(raw_keys["dcn_context_parallelism"]) > 1
 
 
 def using_expert_parallelism(raw_keys) -> bool:

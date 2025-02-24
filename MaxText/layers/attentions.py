@@ -405,11 +405,18 @@ class AttentionOp(nn.Module):
 
     _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
 
+    using_context_parallelism = self.config.ici_context_parallelism > 1 or self.config.dcn_context_parallelism > 1
+
+    if self.attention_type == AttentionType.LOCAL_SLIDING and using_context_parallelism:
+      raise AssertionError("Sliding window attention is not supported when context parallelism is enabled")
+
     sliding_window_size = self.sliding_window_size
     if self.attention_type == AttentionType.LOCAL_SLIDING:
-      sliding_window_size = [self.sliding_window_size, 0]
-      mask_type = "causal"  # SWA only works with causal masking
-      attn_mask = None
+      sliding_window_size = [self.sliding_window_size, 0]    
+    
+    if self.attention_type == AttentionType.LOCAL_SLIDING or using_context_parallelism:
+      mask_type = "causal"  # SWA and Context Parallelism only work with causal masking
+      attn_mask = None      
     else:
       # generate attn_mask
       mask_type = "padding_causal"  # only padding_causal mask type can take a created mask
@@ -429,6 +436,8 @@ class AttentionOp(nn.Module):
         scale_factor=1.0 / math.sqrt(head_dim),
         transpose_batch_sequence=False,
         window_size=sliding_window_size,
+        context_parallel_causal_load_balanced=True,
+        context_parallel_axis='context',
     )
     return dpa_layer(query, key, value, mask=attn_mask)
 
