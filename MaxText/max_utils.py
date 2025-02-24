@@ -700,48 +700,48 @@ def init_initial_state(model, tx, config, is_training, key):
 
 
 def setup_decode_state(model, config, rng, mesh, params):
-    print("\n=== VERIFYING SETUP_DECODE_STATE ===")
-    print(f"Input params type: {type(params)}")
-    print(f"Input params structure: {jax.tree_util.tree_structure(params)}")
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
-        # Initialize
-        input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-        initial_vars = model.init(
-            {"params": rng, "dropout": rng, "cache": rng}, 
-            jnp.ones(input_shape, dtype=jnp.int32),
-            jnp.ones(input_shape, dtype=jnp.int32),
-        )
-        print("\n=== DEBUGGING setup_decode_state() - After model.init() ===")
-        print("Initial vars keys:", initial_vars.keys())
-        print("Initial vars structure:", jax.tree_util.tree_structure(initial_vars))
-        if 'params' in initial_vars:
-            params_in_initial_vars = initial_vars['params']
-            print("Params in initial_vars keys:", params_in_initial_vars.keys())
-            if 'token_embedder' in params_in_initial_vars:
-                print("token_embedder keys in params:", params_in_initial_vars['token_embedder'].keys())
-                if 'embedding' in params_in_initial_vars['token_embedder']:
-                    print("embedding parameter SHAPE in initial_vars:", params_in_initial_vars['token_embedder']['embedding'].shape)
-                else:
-                    print("ERROR: embedding parameter NOT FOUND in token_embedder in initial_vars")
-            else:
-                print("ERROR: token_embedder NOT FOUND in params in initial_vars")
+  print("\n=== VERIFYING SETUP_DECODE_STATE ===")
+  print(f"Input params type: {type(params)}")
+  print(f"Input params structure: {jax.tree_util.tree_structure(params)}")
+  with nn_partitioning.axis_rules(config.logical_axis_rules):
+    # Initialize
+    input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+    initial_vars = model.init(
+        {"params": rng, "dropout": rng, "cache": rng},
+        jnp.ones(input_shape, dtype=jnp.int32),
+        jnp.ones(input_shape, dtype=jnp.int32),
+    )
+    print("\n=== DEBUGGING setup_decode_state() - After model.init() ===")
+    print("Initial vars keys:", initial_vars.keys())
+    print("Initial vars structure:", jax.tree_util.tree_structure(initial_vars))
+    if "params" in initial_vars:
+      params_in_initial_vars = initial_vars["params"]
+      print("Params in initial_vars keys:", params_in_initial_vars.keys())
+      if "token_embedder" in params_in_initial_vars:
+        print("token_embedder keys in params:", params_in_initial_vars["token_embedder"].keys())
+        if "embedding" in params_in_initial_vars["token_embedder"]:
+          print("embedding parameter SHAPE in initial_vars:", params_in_initial_vars["token_embedder"]["embedding"].shape)
         else:
-            print("ERROR: params NOT FOUND in initial_vars")
-        print("\nInitial vars:")
-        print(f"- Structure: {jax.tree_util.tree_structure(initial_vars)}")
-        print(f"- Contains cache: {'cache' in initial_vars}")
-        if 'cache' in initial_vars:
-            print(f"- Cache structure: {jax.tree_util.tree_structure(initial_vars['cache'])}")
+          print("ERROR: embedding parameter NOT FOUND in token_embedder in initial_vars")
+      else:
+        print("ERROR: token_embedder NOT FOUND in params in initial_vars")
+    else:
+      print("ERROR: params NOT FOUND in initial_vars")
+    print("\nInitial vars:")
+    print(f"- Structure: {jax.tree_util.tree_structure(initial_vars)}")
+    print(f"- Contains cache: {'cache' in initial_vars}")
+    if "cache" in initial_vars:
+      print(f"- Cache structure: {jax.tree_util.tree_structure(initial_vars['cache'])}")
 
-        if params is not None:
-            initial_vars["params"] = params 
+    if params is not None:
+      initial_vars["params"] = params
 
-        # Get annotations and convert to mesh
-        state_mesh_annotations = nn.get_partition_spec(initial_vars)
-        with mesh:
-            state = init_decode_state(model.apply, initial_vars["params"])
+    # Get annotations and convert to mesh
+    state_mesh_annotations = nn.get_partition_spec(initial_vars)
+    with mesh:
+      state = init_decode_state(model.apply, initial_vars["params"])
 
-    return state, state_mesh_annotations
+  return state, state_mesh_annotations
 
 
 def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager):
@@ -1006,21 +1006,18 @@ def get_initial_kv_cache(model, config, batch_size, abstract=False):
 
 
 def get_kv_cache_annotations(model, config, rng, mesh):
-    """Get the KV cache annotations for autoregressive and prefill modes."""
-    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      if config.attention == "paged":
-          ret = get_prefill_paged_kv_cache_annotations(model, config, rng, mesh)
-          jax.debug.print("Inside get_kv_cache_annotations, paged, abstract=True: {}", jax.tree_util.tree_structure(ret))
-          return ret
-      else:
-          ret = get_initial_contiguous_kv_cache(
-            model,
-            config,
-            batch_size=int(config.per_device_batch_size*jax.device_count()),
-            abstract=True)
-          jax.debug.print("Inside get_kv_cache_annotations, contiguous, abstract=True: {}", jax.tree_util.tree_structure(ret))
-          return ret
-
+  """Get the KV cache annotations for autoregressive and prefill modes."""
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    if config.attention == "paged":
+      ret = get_prefill_paged_kv_cache_annotations(model, config, rng, mesh)
+      jax.debug.print("Inside get_kv_cache_annotations, paged, abstract=True: {}", jax.tree_util.tree_structure(ret))
+      return ret
+    else:
+      ret = get_initial_contiguous_kv_cache(
+          model, config, batch_size=int(config.per_device_batch_size * jax.device_count()), abstract=True
+      )
+      jax.debug.print("Inside get_kv_cache_annotations, contiguous, abstract=True: {}", jax.tree_util.tree_structure(ret))
+      return ret
 
 
 def print_pytree_shape(print_str, ptree):

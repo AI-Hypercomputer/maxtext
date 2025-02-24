@@ -87,16 +87,16 @@ class DecoderLayer(nn.Module):
 
   @nn.compact
   def __call__(
-    self,
-    inputs,
-    decoder_segment_ids,
-    decoder_positions,
-    deterministic,
-    model_mode,
-    slot=None,
-    true_length=None,
-    page_manager=None,
-    layer_id: Optional[int] = None,
+      self,
+      inputs,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      slot=None,
+      true_length=None,
+      page_manager=None,
+      layer_id: Optional[int] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -125,9 +125,7 @@ class DecoderLayer(nn.Module):
         layer_id=layer_id,
     )
 
-    attention_lnx = nn.with_logical_constraint(
-        attention_lnx, ("activation_batch", "activation_length", "activation_embed")
-    )
+    attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
 
     # MLP block.
     mlp_lnx = linears.MlpBlock(
@@ -209,7 +207,7 @@ class Decoder(nn.Module):
       self.pipeline_module = pipeline.Pipeline(
           config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
       )
-  
+
   def get_remat_policy(self):
     cfg = self.config
     if cfg.remat_policy != "none":
@@ -287,7 +285,7 @@ class Decoder(nn.Module):
           block_layer,
           prevent_cse=not self.config.scan_layers,
           policy=policy,
-          static_argnums=tuple(range(-len(block_layer.__call__.__code__.co_varnames) + 1, 0))
+          static_argnums=tuple(range(-len(block_layer.__call__.__code__.co_varnames) + 1, 0)),
       )
       RemattedBlockLayers.append(layer)
     return RemattedBlockLayers
@@ -392,122 +390,113 @@ class Decoder(nn.Module):
 
   @nn.compact
   def __call__(
-        self,
-        decoder_input_tokens,
-        decoder_positions,
-        decoder_segment_ids=None,
-        deterministic=False,
-        model_mode=common_types.MODEL_MODE_TRAIN,
-        slot=None,
-        true_length=None,
-    ):
-        cfg = self.config
-        mesh = self.mesh
-        assert decoder_input_tokens.ndim == 2
+      self,
+      decoder_input_tokens,
+      decoder_positions,
+      decoder_segment_ids=None,
+      deterministic=False,
+      model_mode=common_types.MODEL_MODE_TRAIN,
+      slot=None,
+      true_length=None,
+  ):
+    cfg = self.config
+    mesh = self.mesh
+    assert decoder_input_tokens.ndim == 2
 
-        y = self.shared_embedding(decoder_input_tokens.astype("int32"))
-        y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
-            y, deterministic=deterministic
+    y = self.shared_embedding(decoder_input_tokens.astype("int32"))
+    y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
+    y = y.astype(cfg.dtype)
+
+    if cfg.use_untrainable_positional_embedding:
+      y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
+
+    if cfg.trainable_position_size > 0:
+      y += Embed(
+          num_embeddings=cfg.trainable_position_size,
+          features=cfg.emb_dim,
+          dtype=cfg.dtype,
+          embedding_init=nn.initializers.normal(stddev=1.0),
+          name="position_embedder",
+          config=cfg,
+      )(decoder_positions)
+
+    if cfg.using_pipeline_parallelism:
+      if cfg.pipeline_fsdp_ag_once:
+        partition_spec = self.pipeline_module.get_weight_sharding(
+            y,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
         )
-        y = y.astype(cfg.dtype)
+      else:
+        partition_spec = None
+      y = self.pipeline_module(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          partition_spec=partition_spec,
+      )
+    else:
+      # Iterate through layers
+      for lyr in range(cfg.num_decoder_layers):
+        RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, self.get_remat_policy())
 
-        if cfg.use_untrainable_positional_embedding:
-            y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
+        current_layer_class = RemattedBlockLayers[lyr % len(RemattedBlockLayers)]
+        layer_instance = current_layer_class(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)
 
-        if cfg.trainable_position_size > 0:
-            y += Embed(
-                num_embeddings=cfg.trainable_position_size,
-                features=cfg.emb_dim,
-                dtype=cfg.dtype,
-                embedding_init=nn.initializers.normal(stddev=1.0),
-                name="position_embedder",
-                config=cfg,
-            )(decoder_positions)
-
-        if cfg.using_pipeline_parallelism:
-            if cfg.pipeline_fsdp_ag_once:
-                partition_spec = self.pipeline_module.get_weight_sharding(
-                    y,
-                    decoder_segment_ids,
-                    decoder_positions,
-                    deterministic,
-                    model_mode,
-                )
-            else:
-                partition_spec = (
-                    None
-                )
-            y = self.pipeline_module(
-                y,
-                decoder_segment_ids,
-                decoder_positions,
-                deterministic,
-                model_mode,
-                partition_spec=partition_spec,
-            )
-        else:
-            # Iterate through layers
-            for lyr in range(cfg.num_decoder_layers):
-                RemattedBlockLayers = self.set_remat_policy(
-                    self.decoder_layer, self.get_remat_policy()
-                )
-
-                current_layer_class = RemattedBlockLayers[lyr % len(RemattedBlockLayers)]
-                layer_instance = current_layer_class(
-                    config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant
-                )
-
-                y, _ = layer_instance(
-                    y,
-                    decoder_segment_ids,
-                    decoder_positions,
-                    deterministic,
-                    model_mode,
-                    slot=slot,
-                    true_length=true_length,
-                    page_manager=self.page_manager,
-                    layer_id=lyr,
-                )
-
-        y = self.get_norm_layer()(
-            dtype=cfg.dtype,
-            weight_dtype=cfg.weight_dtype,
-            name="decoder_norm",
-            epsilon=cfg.normalization_layer_epsilon,
-            kernel_axes=("norm",),
-        )(y)
-        y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
-            y, deterministic=deterministic
+        y, _ = layer_instance(
+            y,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            slot=slot,
+            true_length=true_length,
+            page_manager=self.page_manager,
+            layer_id=lyr,
         )
 
-        # [batch, length, emb_dim] -> [batch, length, vocab_size]
-        if cfg.logits_via_embedding:
-            # Use the transpose of embedding matrix for logit transform.
-            logits = self.shared_embedding.attend(y)
-            if self.config.normalize_embedding_logits:
-                # Correctly normalize pre-softmax logits for this shared case.
-                logits = logits / jnp.sqrt(y.shape[-1])
-            if cfg.final_logits_soft_cap:  # handle the case of a soft cap on final logits
-                logits = logits / cfg.final_logits_soft_cap
-                logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
-        else:
-            logits = linears.DenseGeneral(
-                cfg.vocab_size,
-                weight_dtype=cfg.weight_dtype,
-                dtype=jnp.float32
-                if cfg.logits_dot_in_fp32
-                else cfg.dtype,  # for logit training stability
-                kernel_axes=("embed", "vocab"),
-                name="logits_dense",
-                matmul_precision=self.config.matmul_precision,
-            )(y)  # We do not quantize the logits matmul.
-        logits = nn.with_logical_constraint(
-            logits,
-            ("activation_embed_and_logits_batch", "activation_length", "activation_vocab"),
-        )
-        if self.config.cast_logits_to_fp32:
-            logits = logits.astype(jnp.float32)
-        return logits
+    y = self.get_norm_layer()(
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        name="decoder_norm",
+        epsilon=cfg.normalization_layer_epsilon,
+        kernel_axes=("norm",),
+    )(y)
+    y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
+
+    # [batch, length, emb_dim] -> [batch, length, vocab_size]
+    if cfg.logits_via_embedding:
+      # Use the transpose of embedding matrix for logit transform.
+      logits = self.shared_embedding.attend(y)
+      if self.config.normalize_embedding_logits:
+        # Correctly normalize pre-softmax logits for this shared case.
+        logits = logits / jnp.sqrt(y.shape[-1])
+      if cfg.final_logits_soft_cap:  # handle the case of a soft cap on final logits
+        logits = logits / cfg.final_logits_soft_cap
+        logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
+    else:
+      logits = linears.DenseGeneral(
+          cfg.vocab_size,
+          weight_dtype=cfg.weight_dtype,
+          dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
+          kernel_axes=("embed", "vocab"),
+          name="logits_dense",
+          matmul_precision=self.config.matmul_precision,
+      )(
+          y
+      )  # We do not quantize the logits matmul.
+    logits = nn.with_logical_constraint(
+        logits,
+        ("activation_embed_and_logits_batch", "activation_length", "activation_vocab"),
+    )
+    if self.config.cast_logits_to_fp32:
+      logits = logits.astype(jnp.float32)
+    return logits
+
 
 class Transformer(nn.Module):
   """An decoder-only Transformer model."""
@@ -534,18 +523,18 @@ class Transformer(nn.Module):
     )
 
     if cfg.attention == "paged":
-        self.page_manager = self.make_rng("page_manager")
-      # page_manager = self.variable("page_manager", "manager", lambda: self.parent.page_manager).value
+      self.page_manager = self.make_rng("page_manager")
+    # page_manager = self.variable("page_manager", "manager", lambda: self.parent.page_manager).value
     else:
-        self.page_manager = None
+      self.page_manager = None
 
     self.decoder = Decoder(
-      config=cfg, 
-      shared_embedding=self.shared_embedding, 
-      mesh=mesh, 
-      quant=self.quant, 
-      page_manager=self.page_manager,
-    ) 
+        config=cfg,
+        shared_embedding=self.shared_embedding,
+        mesh=mesh,
+        quant=self.quant,
+        page_manager=self.page_manager,
+    )
 
   def __call__(
       self,

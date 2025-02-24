@@ -80,7 +80,7 @@ class LlamaDecoderLayer(nn.Module):
       slot: Optional[int] = None,
       true_length: Optional[int] = None,
       layer_id: Optional[int] = None,
-      page_manager = None,
+      page_manager=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -121,18 +121,17 @@ class LlamaDecoderLayer(nn.Module):
     )
 
     attention_lnx = attention_layer(
-      lnx,
-      lnx,
-      decoder_positions,
-      decoder_segment_ids=decoder_segment_ids,
-      model_mode=model_mode,
-      page_group_id=slot,
-      true_length=true_length,
-      page_manager=page_manager,
-      layer_id=layer_id,
-      use_fused_qkv=cfg.fused_qkv if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE else None,
+        lnx,
+        lnx,
+        decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+        model_mode=model_mode,
+        page_group_id=slot,
+        true_length=true_length,
+        page_manager=page_manager,
+        layer_id=layer_id,
+        use_fused_qkv=cfg.fused_qkv if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE else None,
     )
-
 
     attention_lnx = nn.with_logical_constraint(
         attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
@@ -161,7 +160,6 @@ class LlamaDecoderLayer(nn.Module):
         config=cfg,
         quant=self.quant,
     )(hidden_states, attention_lnx, deterministic=deterministic)
-
 
     layer_output = nn.with_logical_constraint(
         layer_output,
