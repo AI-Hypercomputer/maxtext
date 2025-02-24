@@ -124,7 +124,6 @@ class SFTPromptMasking(grain.MapTransform):
         "targets": np.asarray(targets[: self.max_target_length], dtype=np.int32),
     }
 
-
 @dataclasses.dataclass
 class HFNormalizeFeatures(grain.MapTransform):
   """Normalize feature keys for HuggingFace input"""

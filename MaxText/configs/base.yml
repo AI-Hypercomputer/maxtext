@@ -367,7 +367,7 @@ use_dpo: False
 dpo_label_smoothing: 0.0
 dpo_beta: 0.1
 
-# SFT
+# Supervised Fine-Tuning (SFT)
 use_sft: False
 sft_train_on_completion: False
 
@@ -378,12 +378,10 @@ dataset_type: tfds
 dataset_path: "" # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
 dataset_name: 'c4/en:3.0.1'
 eval_dataset_name: 'c4/en:3.0.1'
-# train_split: 'train'  # used for trl-lib/ultrafeedback-gpt-3.5-turbo-helpfulness dataset
-train_split: 'train_sft' # used for HuggingFaceH4/ultrachat_200k
+train_split: 'train'
 eval_split: 'validation'
 # for HuggingFace input pipeline (dataset_type=hf)
-# hf_path: 'trl-lib/ultrafeedback-gpt-3.5-turbo-helpfulness'
-hf_path: 'HuggingFaceH4/ultrachat_200k'
+hf_path: ''
 hf_data_dir: ''
 hf_train_files: ''
 hf_eval_split: ''
