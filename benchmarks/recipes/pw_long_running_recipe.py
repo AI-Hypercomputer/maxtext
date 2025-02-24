@@ -36,13 +36,37 @@ ZONE = "us-east5-b"
 COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
+################################################################################
+
+PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/sujinesh/unsanitized_proxy_server:latest"
+SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/sujinesh/unsanitized_server:latest"
+RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest"
+
+CLUSTER = "bodaborg-v6e-16-debug"
+PROJECT = "tpu-prod-env-one-vm"
+ZONE = "us-east5-b"
+COUNTRY = "us"
+DEVICE_TYPE = "v6e-16"
+
+CLUSTER = "bodaborg-v6e-256-ts"
+PROJECT = "tpu-prod-env-multipod"
+ZONE = "us-west1-c"
+COUNTRY = "us"
+DEVICE_TYPE = "v6e-256"
+
+################################################################################
+
 # Other parameters (MUST BE SET BY USER)
 XPK_PATH = "../xpk"  # We're running this script from the maxtext directory
 USER = os.environ["USER"]
+# BASE_OUTPUT_DIRECTORY = (
+#     f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
+# )
 BASE_OUTPUT_DIRECTORY = (
-    f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
+    f"gs://trillium-scale-tests-q1-25-west/pw_mcjax_benchmarking/{USER}/long_running_tests/"
 )
 
+MAX_RESTARTS = 10_000
 BENCHMARK_STEPS=10_000_000
 
 
@@ -65,7 +89,8 @@ def main() -> int:
 
   model_list = [
       # model_configs.llama3_1_70b_8192_pw_lr_real_data,
-      model_configs.llama3_1_8b_8192_pw,
+      # model_configs.llama3_1_8b_8192,
+      model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
   ]
   pathways_config = mxr.PathwaysConfig(
       server_image=SERVER_IMAGE,
@@ -73,12 +98,16 @@ def main() -> int:
       runner_image=RUNNER,
 
       # User can add additional flags here.
-      server_flags="",
-      proxy_flags="",
-      worker_flags="",
+      # server_flags="--enable_metrics_collection=true",
+      # proxy_flags="--enable_metrics_collection=true",
+      # worker_flags="--enable_metrics_collection=true",
+
+      server_flags="--enable_metrics_collection=false",
+      proxy_flags="--enable_metrics_collection=false",
+      worker_flags="--enable_metrics_collection=false",
   )
   num_slices_list = [
-      2
+      48
   ]
 
   xpk_workload_cmds = []
@@ -96,7 +125,7 @@ def main() -> int:
             num_slices=num_slices,
             device_type=cluster_config.device_type,
             base_output_directory=BASE_OUTPUT_DIRECTORY,
-            max_restarts=10_000,
+            max_restarts=MAX_RESTARTS,
             libtpu_type=None,
             libtpu_nightly_version="",
             base_docker_image=None,
