@@ -41,6 +41,8 @@ class TfdsDataProcessingTest(unittest.TestCase):
         mesh_axes=["data"],
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
+        train_data_columns=["text"],
+        train_split="train",
         base_output_directory="gs://max-experiments/",
         dataset_path="gs://maxtext-dataset/",
         tokenizer_path="../assets/tokenizer",

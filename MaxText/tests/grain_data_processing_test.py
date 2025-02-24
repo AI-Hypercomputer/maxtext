@@ -47,6 +47,8 @@ class GrainDataProcessingTest(unittest.TestCase):
         mesh_axes=["data"],
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
+        train_data_columns=["text"],
+        train_split="train",
         base_output_directory="gs://max-experiments/",
         dataset_type="grain",
         grain_train_files="/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*",

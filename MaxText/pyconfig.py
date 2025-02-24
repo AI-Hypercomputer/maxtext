@@ -166,6 +166,8 @@ def validate_data_input(keys):
         f"dataset_type set to hf, will use {keys['hf_path']=}, {keys['hf_data_dir']=} and {keys['hf_train_files']=} to read data"
     )
     assert keys["hf_path"] != "", "hf_path can't be empty when dataset_type=hf"
+    if not keys["hf_access_token"]:
+      keys["hf_access_token"] = None
     if not keys["hf_train_files"]:
       keys["hf_train_files"] = None
     if not keys["hf_eval_files"]:
