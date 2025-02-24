@@ -66,12 +66,63 @@ def add_segmentation_and_position(x, data_columns):
 ########## Functions used by HF pipeline
 
 
+def combine_columns(example, columns):
+  assert len(columns) > 1
+  combined = []
+  for i in range(len(example[columns[0]])):
+    for c in columns:
+      combined.append(example[c][i])
+  example[columns[0]] = combined
+  return example
+
+
+def extract_messages_and_mask(example, data_column_name):
+  example["is_prompt"] = [x["role"] == "user" for x in example[data_column_name]]
+  example[data_column_name] = [x["content"] for x in example[data_column_name]]
+  return example
+
+
 def tokenization(example, hf_tokenizer, max_length, column_names):
   """Tokenize a HuggingFace dataset"""
-  return {
-      column_name: hf_tokenizer(example[column_name], truncation=True, max_length=max_length)["input_ids"]
-      for column_name in column_names
-  }
+  for column_name in column_names:
+    if isinstance(example[column_name], list):
+      example[column_name] = [
+          hf_tokenizer(x, truncation=True, max_length=max_length)["input_ids"] for x in example[column_name]
+      ]
+    elif isinstance(example[column_name], str):
+      example[column_name] = hf_tokenizer(example[column_name], truncation=True, max_length=max_length)["input_ids"]
+  return example
+
+
+@dataclasses.dataclass
+class SFTPromptMasking(grain.MapTransform):
+
+  def __init__(self, text_column_name, completion_only, max_target_length, add_bos, add_eos, bos_id=None, eos_id=None):
+    self.text_column_name = text_column_name
+    self.completion_only = completion_only
+    self.max_target_length = max_target_length
+    self.add_bos = add_bos
+    self.add_eos = add_eos
+    if self.add_bos:
+      self.bos_id = bos_id
+    if self.add_eos:
+      self.eos_id = eos_id
+
+  def map(self, features):
+    inputs, targets = [], []
+    for i, text in enumerate(features[self.text_column_name]):
+      inputs += text
+      targets += [0] * len(text) if self.completion_only and features["is_prompt"][i] else text
+    if self.add_bos:
+      inputs = [self.bos_id] + inputs
+      targets = [self.bos_id] + targets
+    if self.add_eos:
+      inputs += [self.eos_id]
+      targets += [self.eos_id]
+    return {
+        "inputs": np.asarray(inputs[: self.max_target_length], dtype=np.int32),
+        "targets": np.asarray(targets[: self.max_target_length], dtype=np.int32),
+    }
 
 
 @dataclasses.dataclass
@@ -270,16 +321,27 @@ def shift_right(x, axis=1):
   return padded[tuple(slices)]
 
 
-def shift_and_refine(x, axis=1):
-  """Shift inputs, set segmentation to 0 when target element is 0.
-  Replace EOS by 0 for packed inputs."""
-  x["inputs"] = shift_right(x["inputs"], axis=axis)
-  targets_nonzero = x["targets"] != 0
-  x["inputs_segmentation"] *= targets_nonzero
-  x["targets_segmentation"] *= targets_nonzero
-  # For packed targets, the first shifted token of a new sequence is made
-  # 0, rather than being the EOS token for the last sequence.
-  x["inputs"] *= x["inputs_segmentation"] == shift_right(x["inputs_segmentation"], axis=axis)
+def shift_left(x, axis=1):
+  """Shift to the left and pad."""
+  pad_widths = [(0, 0)] * len(x.shape)
+  pad_widths[axis] = (0, 1)
+  slices = [
+      slice(None),
+  ] * len(x.shape)
+  slices[axis] = slice(1, None)
+  padded = np.pad(x, pad_widths, mode="constant", constant_values=x.dtype.type(0))
+  return padded[tuple(slices)]
+
+
+def shift_and_refine(x, bos_id, axis=1):
+  """Shift inputs, set segmentation to 0 when target element is 0 or bos_id if provided"""
+  x["targets"] = shift_left(x["targets"], axis=axis)
+  if bos_id:
+    x["targets_segmentation"] = np.where((x["targets"] != 0) & (x["targets"] != bos_id), x["targets_segmentation"], 0)
+  else:
+    x["targets_segmentation"] = np.where(x["targets"] != 0, x["targets_segmentation"], 0)
+
+  x["inputs_segmentation"] = x["targets_segmentation"]
 
   return x
 
@@ -288,8 +350,9 @@ def shift_and_refine(x, axis=1):
 class ShiftData(grain.MapTransform):
   """Shift inputs and refine annotations."""
 
-  def __init__(self, axis=1):
+  def __init__(self, bos_id=None, axis=1):
     self.axis = axis
+    self.bos_id = bos_id
 
   def map(self, data):
-    return shift_and_refine(data, axis=self.axis)
+    return shift_and_refine(data, bos_id=self.bos_id, axis=self.axis)
