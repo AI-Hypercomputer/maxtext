@@ -60,7 +60,7 @@ def test_decode_paged_attention(config):
     print("\nTesting prefill...")
     slot = 0  # Use first slot
 
-    decode_state, first_token, _ = engine.prefill(
+    decode_state, first_token, page_state = engine.prefill(
         params=params,
         padded_tokens=tokens,
         true_length=true_length,
@@ -81,14 +81,15 @@ def test_decode_paged_attention(config):
             rng=rng,
             slot=slot
         )
-        print_state_info(decode_state, f"After generate step {i}:")
-        sampled_tokens_list.append(sampled_tokens)
-        decode_state = decode_state  # Update for next iteration
+        
         engine.update_page_manager_for_token(
             slot=slot,
             token=sampled_tokens.get_result_at_slot(slot).tokens.item(),
             position=decode_state["next_pos"][slot, 0] - 1  # -1 because next_pos was already incremented
         )
+        
+        print_state_info(decode_state, f"After generate step {i}:")
+        sampled_tokens_list.append(sampled_tokens)
     
     results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
     output = tokenizer_model.decode(results)
@@ -99,7 +100,6 @@ def test_decode_paged_attention(config):
             output == config.autoregressive_decode_assert
         ), f"generated text mismatch {output=} {config.autoregressive_decode_assert=}"
     print("\n=== Test Complete ===")
-
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
