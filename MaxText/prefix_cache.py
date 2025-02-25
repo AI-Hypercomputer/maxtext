@@ -195,6 +195,8 @@ class PrefixCacheTrie:
 
   @dataclasses.dataclass
   class Node:
+    """Trie Node."""
+
     parent: Optional["PrefixCacheTrie.Node"] = None
     token: Optional[Token] = None
     children: dict[Token, "PrefixCacheTrie.Node"] = dataclasses.field(default_factory=dict)
