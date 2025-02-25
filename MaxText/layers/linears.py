@@ -600,7 +600,9 @@ class MoeBlock(nn.Module):
 
       def aqt_einsum(*args, **kwargs):
         # simply skip kwargs, since aqt einsum doesn't support any kwargs like precision
-        return self.quant.einsum(rhs_mesh_axes)(*args)
+        is_aqt = not isinstance(self.quant, quantizations.Fp8Quantization)
+        kw = {"mesh_axes": rhs_mesh_axes} if is_aqt else {"dtype": self.dtype}
+        return self.quant.einsum(**kw)(*args)
 
       einsum_op = aqt_einsum
     else:
