@@ -896,6 +896,11 @@ def train_loop(config, state=None):
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
       example_batch = load_next_batch(data_iterator, example_batch, config)
+      # Anisha: reorder here everything in example_data, so tokens/pos/seg_id for both inputs and targets
+      cp_size = mesh.shape["context"]
+      for key,value in example_batch.items():
+        example_batch[key] = max_utils.reorder_tokens_context_parallelism(tensor=value, cp_size=cp_size, seq_dim=1, to_contiguous=False)
+
       record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
       check_example_batch(config, example_batch=example_batch)
       # pylint: disable=not-callable
