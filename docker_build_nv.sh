@@ -46,6 +46,7 @@ if [[ ! -v CLOUD_IMAGE_NAME ]]; then
 fi
 
 docker build --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} -f ./maxtext_build_nv.Dockerfile -t ${LOCAL_IMAGE_NAME_RUNNER} .
+# docker build --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} -f ./maxtext_build_jsts_david.Dockerfile -t ${LOCAL_IMAGE_NAME_RUNNER} .
 
 docker tag ${LOCAL_IMAGE_NAME_RUNNER} gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:latest
 docker push gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:latest

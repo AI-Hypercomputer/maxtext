@@ -38,8 +38,8 @@ WORKDIR /deps
 COPY setup_nv_additional.sh ./
 COPY requirements_maxtext_nv_image.txt ./
 RUN echo "Running command: bash setup_stable_stack_additional.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE}"
-RUN --mount=type=cache,target=/root/.cache/pip bash setup_nv_additional.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} DEVICE=${ENV_DEVICE}
+RUN --mount=type=cache,target=/root/.cache/pip bash setup_nv_additional.sh
 
-COPY . .
+# COPY . .
 
 WORKDIR /deps
