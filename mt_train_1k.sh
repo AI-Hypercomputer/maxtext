@@ -124,7 +124,13 @@ EOF
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-0220-stable-stack-additional-deps # Now this version contains the first fix, and all the deps
 
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-nv-0212:latest # This version has fix 1 and 2
-export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-nv-0212-no-fix
+# export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-nv-0212-no-fix # This version reverts all the fix
+# export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-0201-stable-stack
+export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-0215-stable-stack
+# export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-nv-0212-no-local-maxtext
+# export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-nv-1204-no-local-maxtext # No PTX compiliation provider is available
+# export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-nv-0110-no-local-maxtext # No PTX
+gcr.io/supercomputer-testing/lance-nv-0110-jsts
 
 call_config() {
 
@@ -162,11 +168,11 @@ call_config() {
 
     echo 'NUM_NODES' ${NUM_NODES} 'PER_DEVICE_BATCH_SIZE' ${PER_DEVICE_BATCH_SIZE} 'ICI_TP' ${ICI_TP} 'DCN_FSDP' ${DCN_FSDP} 'DCN_PP' ${DCN_PP} 'NUM_LAYERS_PER_PP_STAGE' ${NUM_LAYERS_PER_PP_STAGE} 'REMAT_POLICY' ${REMAT_POLICY} 'ATTENTION' ${ATTENTION} WORKLOAD_NAME ${WORKLOAD_NAME}
 
-    COMMAND="python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml hardware=gpu run_name=$RUN_NAME steps=10 max_target_length=4096 model_name=$MODEL_NAME enable_checkpointing=false attention=$ATTENTION dataset_type=synthetic async_checkpointing=false base_output_directory=$OUTPUT_BUCKET logits_dot_in_fp32=false use_iota_embed=true scan_layers=true ici_tensor_parallelism=$ICI_TP ici_tensor_sequence_parallelism=$T_SEQ dcn_fsdp_parallelism=$DCN_FSDP dcn_pipeline_parallelism=$DCN_PP per_device_batch_size=$PER_DEVICE_BATCH_SIZE num_layers_per_pipeline_stage=$NUM_LAYERS_PER_PP_STAGE weight_dtype=bfloat16 remat_policy=$REMAT_POLICY profiler=xplane skip_first_n_steps_for_profiler=5";
-
+    COMMAND="python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml hardware=gpu run_name=$RUN_NAME steps=10 max_target_length=4096 model_name=$MODEL_NAME enable_checkpointing=false attention=$ATTENTION dataset_type=synthetic async_checkpointing=false base_output_directory=$OUTPUT_BUCKET logits_dot_in_fp32=false use_iota_embed=true scan_layers=true ici_tensor_parallelism=$ICI_TP dcn_fsdp_parallelism=$DCN_FSDP dcn_pipeline_parallelism=$DCN_PP per_device_batch_size=$PER_DEVICE_BATCH_SIZE num_layers_per_pipeline_stage=$NUM_LAYERS_PER_PP_STAGE weight_dtype=bfloat16 remat_policy=$REMAT_POLICY profiler=xplane skip_first_n_steps_for_profiler=5";
+    # ici_tensor_sequence_parallelism=$T_SEQ
     # quantization=fp8
 
-    COMMAND='export LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:$LD_LIBRARY_PATH;'"${COMMAND};""gsutil -m cp -r /var/log/yy $OUTPUT_BUCKET";
+    COMMAND="${COMMAND};""gsutil -m cp -r /var/log/yy $OUTPUT_BUCKET";
 
     echo 'COMMAND is:' ${COMMAND}
     python ../xpk/xpk.py workload delete --cluster $CLUSTER_NAME --workload $WORKLOAD_NAME;
@@ -186,7 +192,7 @@ call_config() {
 # submit 126
 
 # Test run with 2 nodes, cuda kernel fails
-export NODES=64
+export NODES=16
 # call_config --NUM_LAYERS 126  --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 1 --T_SEQ 1 --ICI_TP 8 --ICI_FSDP 1 --DCN_FSDP $NODES --DCN_PP 1 --REMAT_POLICY full --ATTENTION cudnn_flash_te --NUM_LAYERS_PER_PP_STAGE 0
 call_config --NUM_LAYERS 126  --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 1 --T_SEQ 1 --ICI_TP 1 --ICI_FSDP 8 --DCN_FSDP $NODES --DCN_PP 1 --REMAT_POLICY save_qkv_proj --ATTENTION cudnn_flash_te --NUM_LAYERS_PER_PP_STAGE 0
 
