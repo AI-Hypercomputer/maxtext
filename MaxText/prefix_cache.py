@@ -292,10 +292,10 @@ class HBMCache:
 
   def retrieve_from_cache(self, key: Key) -> Optional[Value]:
     """Return value copied from cache or None if not found.
-    To avoid modified value in the cache, always copied the value before return.
+    Be aware the cache is not return a copy. If additional modified needed, clone the Value first.
     """
     if key in self._saved_values:
-      return self._saved_values[key].clone()
+      return self._saved_values[key]
     return None
 
   def evict_cache(self, key: Key) -> Optional[Value]:

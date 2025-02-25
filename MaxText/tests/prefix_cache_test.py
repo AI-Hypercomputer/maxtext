@@ -419,11 +419,11 @@ class PrefixCacheTest(unittest.TestCase):
     loaded_value = prefix_cache.load(key)
     assert loaded_value is not None
     loaded_bytes_in_use = get_byte_in_use()
-    # load cache copy from cache
-    assert loaded_bytes_in_use == prefix_create_bytes_in_use + prefix_bytes
+    # load cache will not copy from cache
+    assert loaded_bytes_in_use == prefix_create_bytes_in_use
     del loaded_value
     del_loaded_bytes_in_use = get_byte_in_use()
-    assert del_loaded_bytes_in_use == loaded_bytes_in_use - prefix_bytes
+    assert del_loaded_bytes_in_use == loaded_bytes_in_use
     prefix_cache.clear()
     clear_bytes_in_use = get_byte_in_use()
     assert clear_bytes_in_use == del_loaded_bytes_in_use - prefix_bytes
