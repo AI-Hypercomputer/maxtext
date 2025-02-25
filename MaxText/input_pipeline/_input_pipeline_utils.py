@@ -67,6 +67,7 @@ def add_segmentation_and_position(x, data_columns):
 
 
 def combine_columns(example, columns):
+  """Combine columns such as 'prompt' and 'completion' for sft training"""
   assert len(columns) > 1
   combined = []
   for i in range(len(example[columns[0]])):
@@ -77,6 +78,8 @@ def combine_columns(example, columns):
 
 
 def extract_messages_and_mask(example, data_column_name):
+  """For sft training, we will have a column containing all the message contents,
+  and the 'is_prompt' column indicating whether each message is prompt or not."""
   example["is_prompt"] = [x["role"] == "user" for x in example[data_column_name]]
   example[data_column_name] = [x["content"] for x in example[data_column_name]]
   return example
@@ -96,8 +99,13 @@ def tokenization(example, hf_tokenizer, max_length, column_names):
 
 @dataclasses.dataclass
 class SFTPromptMasking(grain.MapTransform):
+  """Construct inputs and targets for SFT training. Concat prompt and completion to generate inputs.
+  For targets, if train on completion only, the prompt will be masked by unk_id. Otherwise the same as inputs.
+  """
 
-  def __init__(self, text_column_name, completion_only, max_target_length, add_bos, add_eos, bos_id=None, eos_id=None):
+  def __init__(
+      self, text_column_name, completion_only, max_target_length, add_bos, add_eos, bos_id=None, eos_id=None, unk_id=0
+  ):
     self.text_column_name = text_column_name
     self.completion_only = completion_only
     self.max_target_length = max_target_length
@@ -107,12 +115,13 @@ class SFTPromptMasking(grain.MapTransform):
       self.bos_id = bos_id
     if self.add_eos:
       self.eos_id = eos_id
+    self.unk_id = unk_id
 
   def map(self, features):
     inputs, targets = [], []
     for i, text in enumerate(features[self.text_column_name]):
       inputs += text
-      targets += [0] * len(text) if self.completion_only and features["is_prompt"][i] else text
+      targets += [self.unk_id] * len(text) if self.completion_only and features["is_prompt"][i] else text
     if self.add_bos:
       inputs = [self.bos_id] + inputs
       targets = [self.bos_id] + targets
@@ -332,15 +341,13 @@ def shift_left(x, axis=1):
   return padded[tuple(slices)]
 
 
-def shift_and_refine(x, bos_id, axis=1):
-  """Shift inputs, set segmentation to 0 when target element is 0 or bos_id if provided"""
+def shift_and_refine(x, bos_id=None, unk_id=0, axis=1):
+  """Shift inputs, set segmentation to 0 when target element is unk_id and bos_id if provided"""
   x["targets"] = shift_left(x["targets"], axis=axis)
   if bos_id:
-    x["targets_segmentation"] = np.where((x["targets"] != 0) & (x["targets"] != bos_id), x["targets_segmentation"], 0)
+    x["targets_segmentation"] = np.where((x["targets"] != unk_id) & (x["targets"] != bos_id), x["targets_segmentation"], 0)
   else:
-    x["targets_segmentation"] = np.where(x["targets"] != 0, x["targets_segmentation"], 0)
-
-  x["inputs_segmentation"] = x["targets_segmentation"]
+    x["targets_segmentation"] = np.where(x["targets"] != unk_id, x["targets_segmentation"], 0)
 
   return x
 
@@ -349,9 +356,10 @@ def shift_and_refine(x, bos_id, axis=1):
 class ShiftData(grain.MapTransform):
   """Shift inputs and refine annotations."""
 
-  def __init__(self, bos_id=None, axis=1):
+  def __init__(self, bos_id=None, unk_id=0, axis=1):
     self.axis = axis
     self.bos_id = bos_id
+    self.unk_id = unk_id
 
   def map(self, data):
-    return shift_and_refine(data, bos_id=self.bos_id, axis=self.axis)
+    return shift_and_refine(data, bos_id=self.bos_id, unk_id=self.unk_id, axis=self.axis)
