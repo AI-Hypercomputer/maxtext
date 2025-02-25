@@ -355,8 +355,13 @@ class PrefixCache:
   def save(self, key: Key, value: Value) -> bool:
     """Save key/value to the cache."""
     logger.debug("save key=%r", key)
-    if not self._hbm_cache.has_enough_space(value):
-      self._evict_cache()
+    while not self._hbm_cache.has_enough_space(value):
+      if self._hbm_bytes < value.prefix_size_bytes:
+        logger.debug("hbm_bytes=%r < value.prefix_size_bytes=%r", self._hbm_bytes, value.prefix_size_bytes)
+        break
+      if self._evict_cache() is None:
+        logger.debug("cannot evict cache")
+        break
     if not self._hbm_cache.add_to_cache(key, value):
       logger.debug("cannot add to cache even after evict")
       return False

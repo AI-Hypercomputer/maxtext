@@ -385,6 +385,38 @@ class PrefixCacheTest(unittest.TestCase):
     assert prefix_cache.fetch_longest_common_prefix_key(tokens1) is None
     assert prefix_cache.load(tokens1) is None
 
+  def test_evict_cache_until_feasible_to_new_cache(self):
+    # value2 is double size of value1
+    value1 = create_default_value(prefix=[jnp.array([1, 2, 3]) for _ in range(1)])
+    value2 = create_default_value(prefix=[jnp.array([1, 2, 3]) for _ in range(2)])
+
+    # Only feasible for two value1 or one value2
+    prefix_cache = PrefixCache(hbm_bytes=(value1.prefix_size_bytes) * 2)
+    assert prefix_cache.save(key=(1,), value=value1) is True
+    assert prefix_cache.save(key=(2,), value=value1) is True
+    assert prefix_cache.load(key=(1,)) == value1
+    assert prefix_cache.load(key=(2,)) == value1
+    assert prefix_cache.save(key=(3,), value=value2) is True
+    assert prefix_cache.load(key=(1,)) is None
+    assert prefix_cache.load(key=(2,)) is None
+    assert prefix_cache.load(key=(3,)) == value2
+
+  def test_will_not_evict_if_whole_cache_is_not_feasible(self):
+    # value2 is triple size of value1
+    value1 = create_default_value(prefix=[jnp.array([1, 2, 3]) for _ in range(1)])
+    value2 = create_default_value(prefix=[jnp.array([1, 2, 3]) for _ in range(3)])
+
+    # Only feasible for two value1 and never value2
+    prefix_cache = PrefixCache(hbm_bytes=(value1.prefix_size_bytes) * 2)
+    assert prefix_cache.save(key=(1,), value=value1) is True
+    assert prefix_cache.save(key=(2,), value=value1) is True
+    assert prefix_cache.load(key=(1,)) == value1
+    assert prefix_cache.load(key=(2,)) == value1
+    assert prefix_cache.save(key=(3,), value=value2) is False
+    assert prefix_cache.load(key=(1,)) == value1
+    assert prefix_cache.load(key=(2,)) == value1
+    assert prefix_cache.load(key=(3,)) is None
+
   @pytest.mark.tpu_only
   def test_hbm_memory_usage(self):
     """Test HBM memory change.
