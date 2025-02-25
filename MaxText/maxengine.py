@@ -728,6 +728,10 @@ class MaxEngine(engine_api.Engine):
         zeros = jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32)
         ## zero out in case prefill cache is too small to cover
         full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
+        # In case partial_cache is too small to slice at the given index, pad it with an extra seqlen
+        if i == num_prompts - 1:
+          pad = jnp.zeros((1, seq_len), dtype=int)
+          partial_cache = jnp.concatenate([partial_cache, pad], axis=1)
         ## copy prefill cache
         partial_cache = jax.lax.dynamic_slice(partial_cache, (0, start_idx), (1, seq_len))
         partial_cache = (partial_cache == partial_cache[0, 0]).astype(int)
@@ -748,8 +752,11 @@ class MaxEngine(engine_api.Engine):
         slice_size[seqlen_index] = seq_len
 
         slice_size = tuple(slice_size)
+        # Same as in prefill_segment_id processing
+        if i == num_prompts - 1:
+          pad = jnp.zeros(slice_size, dtype=partial_cache.dtype)
+          partial_cache = jnp.concatenate([partial_cache, pad], axis=seqlen_index)
         partial_cache = jax.lax.dynamic_slice(partial_cache, start_indices, slice_size)
-        # jax.debug.print("start_indices: {}, slice_size: {}", start_indices, slice_size)
 
         return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
       else:

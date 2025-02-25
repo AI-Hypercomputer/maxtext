@@ -496,10 +496,10 @@ class Pipeline(nn.Module):
   def get_pipeline_remat_policy(self):
     # We ensure that the decoder layer inputs are saved, although we leave it to a custom
     # policy if they should be saved to device or offloaded.
-    if self.remat_policy != "custom":
-      save_input_policy = jax.checkpoint_policies.save_only_these_names("iteration_input", "decoder_layer_input")
-    else:
-      save_input_policy = jax.checkpoint_policies.save_only_these_names("iteration_input")
+    if self.config.remat_policy == "custom":
+      return self.remat_policy
+
+    save_input_policy = jax.checkpoint_policies.save_only_these_names("iteration_input", "decoder_layer_input")
     if self.remat_policy is not None:
       remat_policy = jax.checkpoint_policies.save_from_both_policies(self.remat_policy, save_input_policy)
     else:
