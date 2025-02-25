@@ -20,7 +20,7 @@
 # bash docker_build_dependency_image.sh MODE=nightly
 # bash docker_build_dependency_image.sh MODE=stable JAX_VERSION=0.4.13
 # Nightly build with JAX_VERSION for GPUs. Available versions listed at https://storage.googleapis.com/jax-releases/jax_nightly_releases.html:
-# bash docker_build_dependency_image.sh DEVICE=gpu MODE=nightly JAX_VERSION=0.4.36.dev20241109 # Note: this sets both jax-nightly and jaxlib-nightly 
+# bash docker_build_dependency_image.sh DEVICE=gpu MODE=nightly JAX_VERSION=0.4.36.dev20241109 # Note: this sets both jax-nightly and jaxlib-nightly
 # MODE=custom_wheels is the same as nightly except that it reinstalls any
 # additional wheels that are present in the maxtext directory.
 # The main use case is to install custom jax or jaxlib wheels but it also
@@ -94,7 +94,8 @@ if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
       if [[ ${MODE} == "pinned" ]]; then
         export BASEIMAGE=ghcr.io/nvidia/jax:base-2024-12-04
       else
-        export BASEIMAGE=ghcr.io/nvidia/jax:base
+        # export BASEIMAGE=ghcr.io/nvidia/jax:base
+        export BASEIMAGE=ghcr.io/nvidia/jax:maxtext-2025-02-12
       fi
       docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg DEVICE=$DEVICE --build-arg BASEIMAGE=$BASEIMAGE -f ./maxtext_gpu_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
     fi

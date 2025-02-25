@@ -8,11 +8,13 @@ FROM $BASEIMAGE
 # Set the working directory in the container
 WORKDIR /deps
 
-# Copy assets separately 
-COPY assets/ .
-COPY MaxText/test_assets/ MaxText/.
+# Copy assets separately
+# COPY assets/ .
+# COPY MaxText/test_assets/ MaxText/.
 
-# Copy all files except assets from local workspace into docker container
-COPY --exclude=assets --exclude=MaxText/test_assets . .
+# # Copy all files except assets from local workspace into docker container
+# COPY --exclude=assets --exclude=MaxText/test_assets . .
+
+COPY . .
 
 WORKDIR /deps

@@ -488,7 +488,7 @@ class AttentionOp(nn.Module):
     from transformer_engine.jax.flax.transformer import DotProductAttention  # pytype: disable=import-error
 
     _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
-
+    # decoder_segment_ids = nn.with_logical_constraint(decoder_segment_ids, ("activation_batch", "activation_length"))
     sliding_window_size = self.sliding_window_size
     if self.attention_type == AttentionType.LOCAL_SLIDING:
       sliding_window_size = [self.sliding_window_size, 0]

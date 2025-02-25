@@ -1,5 +1,6 @@
-# syntax=docker/dockerfile:experimental
-ARG BASEIMAGE=ghcr.io/nvidia/jax:maxtext
+# syntax=docker.io/docker/dockerfile:1.7-labs
+
+ARG BASEIMAGE=maxtext_base_image
 FROM $BASEIMAGE
 
 # Stopgaps measure to circumvent gpg key setup issue.
@@ -24,27 +25,21 @@ ENV PATH="/usr/local/google-cloud-sdk/bin:${PATH}"
 # Upgrade libcusprase to work with Jax
 RUN apt-get update && apt-get install -y libcusparse-12-8
 
-ARG MODE
-ENV ENV_MODE=$MODE
-
-ARG JAX_VERSION
-ENV ENV_JAX_VERSION=$JAX_VERSION
-
-ARG DEVICE
-ENV ENV_DEVICE=$DEVICE
-
-RUN mkdir -p /deps
-
 # Set the working directory in the container
 WORKDIR /deps
 
-# Copy setup files and dependency files separately for better caching
-COPY setup.sh ./
-COPY constraints_gpu.txt requirements.txt requirements_with_jax_stable_stack.txt ./
+# Copy assets separately
+# COPY assets/ .
+# COPY MaxText/test_assets/ MaxText/.
 
-# Install dependencies - these steps are cached unless the copied files change
-RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE}"
-RUN --mount=type=cache,target=/root/.cache/pip bash setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} DEVICE=${ENV_DEVICE}
+# # Copy all files except assets from local workspace into docker container
+# COPY --exclude=assets --exclude=MaxText/test_assets . .
 
-# Now copy the remaining code (source files that may change frequently)
+COPY setup_stable_stack_additional.sh ./
+COPY requirements_stable_stack_additional.txt ./
+RUN echo "Running command: bash setup_stable_stack_additional.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE}"
+RUN --mount=type=cache,target=/root/.cache/pip bash setup_stable_stack_additional.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} DEVICE=${ENV_DEVICE}
+
 COPY . .
+
+WORKDIR /deps
