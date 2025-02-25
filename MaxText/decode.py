@@ -24,7 +24,7 @@ import pyconfig
 
 from typing import Sequence
 from absl import app
-import numpy as np
+
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
@@ -40,53 +40,33 @@ def main(argv: Sequence[str]) -> None:
   rng, rng_load_params = jax.random.split(rng)
   params = engine.load_params(rng_load_params)
 
-  # text = config.prompt
-  #Anisha
-  texts = ["I love to", "Sky is the"]
-  outputs = []
+  text = config.prompt
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
-  batch_tokens = []
-  batch_true_lengths = []
-  for text in texts:
-    tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
-    assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
-    assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
-    batch_tokens.append(tokens)
-    batch_true_lengths.append(true_length)
+  tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
+  assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
+  assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
 
-  batch_tokens = jax.numpy.array(batch_tokens)
-  batch_true_lengths = jax.numpy.array(batch_true_lengths)
-  batch_tokens = jax.numpy.repeat(batch_tokens, repeats=5, axis=0)  # shape [B*G, L_prompt]
-  batch_true_lengths = jax.numpy.repeat(batch_true_lengths,repeats=5,axis=0)
+  # Split RNG before calling prefill
+  rng, rng_prefill = jax.random.split(rng)
+  prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
+  slot = 0
 
-  for i in range(batch_tokens.shape[0]):
-    tokens = batch_tokens[i]
-    true_length = batch_true_lengths[i]
+  rng, rng_init_decode = jax.random.split(rng)
+  decode_state = engine.init_decode_state(rng_init_decode)
+  decode_state = engine.insert(prefill_result, decode_state, slot=slot)
 
-    # Split RNG before calling prefill
-    rng, rng_prefill = jax.random.split(rng)
-    prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
-    slot = 0
+  steps = range(config.max_prefill_predict_length, config.max_target_length)
+  sampled_tokens_list = []
+  sampled_tokens_list.append(first_token)
+  for _ in steps:
+    rng, rng_generate = jax.random.split(rng)
+    decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
+    sampled_tokens_list.append(sampled_tokens)
 
-    rng, rng_init_decode = jax.random.split(rng)
-    decode_state = engine.init_decode_state(rng_init_decode)
-    decode_state = engine.insert(prefill_result, decode_state, slot=slot)
-
-    steps = range(config.max_prefill_predict_length, config.max_target_length)
-    sampled_tokens_list = []
-    sampled_tokens_list.append(first_token)
-    for _ in steps:
-      rng, rng_generate = jax.random.split(rng)
-      decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
-      sampled_tokens_list.append(sampled_tokens)
-
-    results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
-
-
-    output = tokenizer_model.decode(results)
-    print(f"Input `{tokenizer_model.decode(tokens.tolist())}` -> `{output}`")
-    outputs.append(output)
+  results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
+  output = tokenizer_model.decode(results)
+  print(f"Input `{text}` -> `{output}`")
 
   if config.autoregressive_decode_assert != "":
     assert (

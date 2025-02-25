@@ -684,7 +684,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   loss = jnp.mean(loss_per_example)
 
   # --- (9) Compute auxiliary metrics.
-  avg_kl = jnp.mean((per_token_kl * valid_seq_mask) / (jnp.sum(valid_seq_mask, axis=1, keepdims=True)))
+  avg_kl = jnp.mean((per_token_kl * valid_seq_mask) / (jnp.sum(valid_seq_mask, axis=1, keepdims=True) + EPS))
   avg_reward = jnp.mean(rewards)
   avg_advantage = jnp.mean(advantages)
   avg_completion_length = jnp.mean(jnp.sum(data["ar_completions_segmentation"]!=0, axis=1))
