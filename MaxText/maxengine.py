@@ -730,7 +730,7 @@ class MaxEngine(engine_api.Engine):
         full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
         # In case partial_cache is too small to slice at the given index, pad it with an extra seqlen
         if i == num_prompts - 1:
-          pad = jnp.zeros((1, seq_len), dtype=int)
+          pad = jnp.zeros((1, seq_len), dtype=partial_cache)
           partial_cache = jnp.concatenate([partial_cache, pad], axis=1)
         ## copy prefill cache
         partial_cache = jax.lax.dynamic_slice(partial_cache, (0, start_idx), (1, seq_len))
@@ -966,7 +966,7 @@ def create_engine_from_config_flags(batch_size, max_prefill_predict_length, max_
     option = f"{k}={v}"
     updated_args.append(option)
   print(f"Invoking maxengine with args:\n \t{updated_args}")
-  pyconfig.initialize(updated_args)
-  cfg = MaxEngineConfig(cp.deepcopy(pyconfig._config.keys))  # pylint: disable=protected-access
+  config = pyconfig.initialize(updated_args)
+  cfg = MaxEngineConfig(cp.deepcopy(config.get_keys())) # pylint: disable=protected-access
   engine = MaxEngine(cfg)
   return engine
