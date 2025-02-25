@@ -159,6 +159,10 @@ PIPELINING_FLAGS = (
     " --xla_tpu_iova_dma_chunk_size_bytes=16777216" # breaks DMA to/from host into 16M chunks
 )
 
+PP_MORE_FLAGS = (
+  " --megascale_grpc_premap_memory_bytes=17179869184"
+)
+
 # Disable bundle-aware CostModel which was causing worse perf b/357103386.
 # Some fusions in the backward pass of the model were 3x slower without this.
 DISABLE_BUNDLE_AWARE_COST_MODEL = (

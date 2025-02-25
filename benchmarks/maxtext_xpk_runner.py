@@ -527,7 +527,10 @@ def main() -> int:
     #model_configs.llama3_1_405b_8192_explicit_matt_pp,
     #model_configs.llama3_1_405b_8192_explicit_matt_pp_overlapped
     #model_configs.matt_simple
-    model_configs.deepseek_big
+    #model_configs.deepseek_big,
+    #model_configs.llama_oom
+    #model_configs.llama_matt_improvement,
+    model_configs.llama_seq_small
   ]
 
   # Loop possibilities:
@@ -557,7 +560,7 @@ def main() -> int:
       # another_config,
     ]:
       # Run workloads in the following slice configurations
-      for num_slices in [4,]:
+      for num_slices in [2,]:
         # Use the libtpu dependencies from:
         for libtpu_type in [
             # LibTpuType.CUSTOM
@@ -569,7 +572,7 @@ def main() -> int:
             num_slices=num_slices,
             device_type=cluster_config.device_type,
             base_output_directory=base_output_dir,
-            priority="medium",
+            priority="low",
             max_restarts=0,
             libtpu_type=libtpu_type,
             libtpu_nightly_version="",
