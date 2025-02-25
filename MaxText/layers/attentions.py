@@ -20,6 +20,7 @@ import math
 from typing import Any, Optional
 
 from flax import linen as nn
+from flax.linen import partitioning
 import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
@@ -458,6 +459,8 @@ class AttentionOp(nn.Module):
 
     local_out = self.wv_product(local_exps, value, model_mode)
 
+    local_out = partitioning.with_sharding_constraint(local_out, (BATCH, KV_LENGTH, HEAD, D_KV))
+
     if self.reshape_q and q_seq_len == 1:
       local_max = local_max[:, 0:1, :, :]
       local_sum = local_sum[:, 0:1, :, :]
@@ -482,20 +485,58 @@ class AttentionOp(nn.Module):
       query = query.astype(jnp.float32)
       key = key.astype(jnp.float32)
 
-    q_seq_len = query.shape[1]
-    attn_weights = self.qk_product(query, key, q_seq_len, model_mode)
+    segment_axis_names_q = None
+    segment_axis_names_kv = None
 
-    if self.attn_logits_soft_cap:
-      attn_weights = jnp.tanh(attn_weights / self.attn_logits_soft_cap)
-      attn_weights = attn_weights * self.attn_logits_soft_cap
+    if decoder_segment_ids is not None:
+      segment_axis_names_q = nn.logical_to_mesh_axes((BATCH, "activation_length_q"))
+      segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH, "activation_length_kv"))
 
-    # Casting softmaxt computation for float32 for model stability.
-    if model_mode == common_types.MODEL_MODE_TRAIN and self.float32_logits:
-      attn_weights = attn_weights.astype(jnp.float32)
-    attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
-    if attn_mask is not None:
-      attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
-    return self.compute_local_attention(attn_weights, value, q_seq_len, model_mode)
+    axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
+    axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
+
+    # @functools.partial(
+    #     shard_map,
+    #     mesh=self.mesh,
+    #     in_specs=(
+    #         axis_names_q,
+    #         axis_names_kv,
+    #         axis_names_kv,
+    #         segment_axis_names_kv,
+    #     ),
+    #     out_specs=axis_names_q,
+    #     check_rep=False,
+    # )
+    def wrap_attention_dot(
+      query: Array,
+      key: Array | KVTensor,
+      value: Array | KVTensor,
+      decoder_segment_ids: Array | None,
+  ):
+      q_seq_len = query.shape[1]
+      
+      #print(query.shape)
+      query = partitioning.with_sharding_constraint(query, (BATCH, LENGTH, HEAD, D_KV))
+      key = partitioning.with_sharding_constraint(key, (BATCH, KV_LENGTH, HEAD, D_KV))
+      value = partitioning.with_sharding_constraint(value, (BATCH, KV_LENGTH, HEAD, D_KV))
+
+      attn_weights = self.qk_product(query, key, q_seq_len, model_mode)
+
+      attn_weights = partitioning.with_sharding_constraint(attn_weights, (BATCH, HEAD, None, LENGTH, KV_LENGTH))
+
+      if self.attn_logits_soft_cap:
+        attn_weights = jnp.tanh(attn_weights / self.attn_logits_soft_cap)
+        attn_weights = attn_weights * self.attn_logits_soft_cap
+
+      attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
+      attn_mask = partitioning.with_sharding_constraint(attn_mask, (BATCH, HEAD, None, LENGTH, KV_LENGTH))
+      
+      if attn_mask is not None:
+        attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
+      return self.compute_local_attention(attn_weights, value, q_seq_len, model_mode)
+    
+    x = wrap_attention_dot(query, key, value, decoder_segment_ids)
+    return x
 
   def qk_product(self, query: Array, key: Array | KVTensor, q_seq_len: int, model_mode: str) -> Array:
     """Query-Key product.
