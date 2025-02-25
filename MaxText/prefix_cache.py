@@ -77,17 +77,18 @@ Key = Tuple[Token, ...]
 Prefix = Any  # KVCache for one prompt
 
 
+# YYY: need to prevent accidentally copy to device using jit, while prevent tree parse overhead
 @jax.jit
 def tree_copy(tree):
   return jax.tree.map(lambda x: x.copy() if isinstance(x, jax.Array) else x, tree)
 
-
+# YYY: make assumption prefix will all jnp.array
 class Value:
   """Object stored contains the actual KVcache
 
   Attributes:
     prefix:
-      Readonly. Prefix Cache using in model. Should be dictionary of jnp.array.
+      Readonly. Prefix Cache using in model. Should be PyTree of all jnp.array.
     true_length:
       Readonly. True length of tokens calculate prefix. Should be <= than len(tokens).
       true_length will be min(true_length, len(tokens))
@@ -97,6 +98,8 @@ class Value:
       Readonly. Tokens calculate prefix. may include partial of padding.
     prefix_size_bytes:
       Readonly. bytes of prefix.
+    device:
+      Readonly. Devices of prefix. The same structure of PyTree to prefix.
   """
 
   def __init__(
@@ -107,6 +110,7 @@ class Value:
       padded_length: int,
       tokens: list[int],
       prefix_size_bytes: Optional[int] = None,
+      device=None,
   ):
     """Attributes to store.
     If true_length shorter than len(tokens), true_length will adjust to len(tokens).
@@ -117,9 +121,18 @@ class Value:
     self._padded_length = padded_length
     self._tokens = tokens
     if prefix_size_bytes is None:
-      self._prefix_size_bytes: int = self._calculate_prefix_bytes(prefix)
+      self._prefix_size_bytes: int = jax.tree.reduce(
+          lambda acc, array: acc + (array.nbytes if isinstance(array, jax.Array) else 0),
+          prefix,
+          0,
+      )
     else:
       self._prefix_size_bytes = prefix_size_bytes
+
+    if device is None:
+      self._device = jax.tree.map(lambda x: x.device if isinstance(x, jax.Array) else x, prefix)
+    else:
+      self._device = device
 
   @property
   def prefix(self) -> Prefix:
@@ -141,6 +154,10 @@ class Value:
   def prefix_size_bytes(self) -> int:
     return self._prefix_size_bytes
 
+  @property
+  def device(self) -> int:
+    return self._device
+
   def clone(self) -> "Value":
     """Clone to prevent use the same jax array."""
     copied_prefix = tree_copy(self._prefix)
@@ -150,6 +167,7 @@ class Value:
         padded_length=self._padded_length,
         tokens=self._tokens,
         prefix_size_bytes=self._prefix_size_bytes,
+        device=self._device,
     )
 
   def __eq__(self, other: Any) -> bool:
@@ -163,12 +181,9 @@ class Value:
     )
 
   def _calculate_prefix_bytes(self, prefix: Prefix) -> int:
-    def has_nbytes_int(obj) -> bool:
-      return hasattr(obj, "nbytes") and isinstance(obj.nbytes, int)
-
     # calculate all bytes of jnp.array in the prefix
     return jax.tree.reduce(
-        lambda acc, array: acc + (array.nbytes if has_nbytes_int(array) else 0),
+        lambda acc, array: acc + (array.nbytes if isinstance(array, jax.Array) else 0),
         prefix,
         0,
     )
@@ -299,6 +314,77 @@ class HBMCache:
     """
     if key in self._saved_values:
       return self._saved_values[key]
+    return None
+
+  def evict_cache(self, key: Key) -> Optional[Value]:
+    """Evict and return value, or None if key is not in cache."""
+    if key not in self._saved_values:
+      return None
+    value = self._saved_values.pop(key)
+    self._remain_size_bytes += value.prefix_size_bytes
+    return value
+
+
+class HostCache:
+  """Stores KV Cache values in host DRAM."""
+
+  def __init__(self, max_size_bytes: int):
+    """
+    Args:
+      max_size_bytes: Maximum bytes of host DRAM to use for cache
+    """
+    self._remain_size_bytes = max_size_bytes
+    self._saved_values: dict[Key, Value] = {}
+
+  def has_enough_space(self, value: Value) -> bool:
+    """Calculate if value size can add to cache."""
+    return self._remain_size_bytes >= value.prefix_size_bytes
+
+  def add_to_cache(self, key: Key, value: Value) -> bool:
+    """Add value into host DRAM preserving the original device status.
+
+    The cache will copy to the host DRAM if originally on device,
+    or with the same reference to the value if originally on host.
+    Do not use the value after add_to_cache if on device.
+
+    Args:
+      key: key for the value
+      value: Prefix Cache value
+    Return:
+      False if cache is full.
+    """
+    if not self.has_enough_space(value):
+      return False
+
+    host_value = Value(
+        prefix=jax.device_get(value.prefix),
+        true_length=value.true_length,
+        padded_length=value.padded_length,
+        tokens=value.tokens,
+        prefix_size_bytes=value.prefix_size_bytes,
+        device=value.device,
+    )
+
+    self._saved_values[key] = host_value
+    self._remain_size_bytes -= value.prefix_size_bytes
+    return True
+
+  def retrieve_from_cache(self, key: Key) -> Optional[Value]:
+    """Return value from cache to the original device or None if not found.
+    If the original device save in the cache is cpu, the cache will not copied.
+    Do not modify the cache prefix retrieved.
+    """
+    if key in self._saved_values:
+      value = self._saved_values[key]
+      device_value = Value(
+          prefix=jax.device_put(value.prefix, value.device),
+          true_length=value.true_length,
+          padded_length=value.padded_length,
+          tokens=value.tokens,
+          prefix_size_bytes=value.prefix_size_bytes,
+          device=value.device,
+      )
+      return device_value
     return None
 
   def evict_cache(self, key: Key) -> Optional[Value]:
