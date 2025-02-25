@@ -25,6 +25,7 @@ import pyconfig
 from typing import Sequence
 from absl import app
 import numpy as np
+import transformers
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
@@ -42,23 +43,38 @@ def main(argv: Sequence[str]) -> None:
 
   # text = config.prompt
   #Anisha
-  texts = ["I love to", "Sky is the"]
+  # texts = ["I love to", "Sky is the"]
+  texts = [config.prompt]
   outputs = []
   metadata = engine.get_tokenizer()
-  tokenizer_model = engine.build_tokenizer(metadata)
+  # tokenizer_model = engine.build_tokenizer(metadata)
+  tokenizer_model = tokenizer_model = transformers.AutoTokenizer.from_pretrained(
+    config.tokenizer_path,
+    add_bos_token=config.add_bos,
+    add_eos_token=False, #config.add_eos,
+    model_max_length=config.max_target_length,
+    legacy=False,
+    token=config.hf_access_token,
+  )
   batch_tokens = []
   batch_true_lengths = []
   for text in texts:
-    tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
-    assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
-    assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
-    batch_tokens.append(tokens)
+    # tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
+    # assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
+    # assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
+    tokens = tokenizer_model(
+    text,
+    truncation=True,      # Enable truncation if the text exceeds max_length
+    max_length=512,        
+    )
+    batch_tokens.append(tokens['input_ids'])
+    true_length = len(tokens['input_ids'])
     batch_true_lengths.append(true_length)
 
   batch_tokens = jax.numpy.array(batch_tokens)
   batch_true_lengths = jax.numpy.array(batch_true_lengths)
-  batch_tokens = jax.numpy.repeat(batch_tokens, repeats=5, axis=0)  # shape [B*G, L_prompt]
-  batch_true_lengths = jax.numpy.repeat(batch_true_lengths,repeats=5,axis=0)
+  # batch_tokens = jax.numpy.repeat(batch_tokens, repeats=5, axis=0)  # shape [B*G, L_prompt]
+  # batch_true_lengths = jax.numpy.repeat(batch_true_lengths,repeats=5,axis=0)
 
   for i in range(batch_tokens.shape[0]):
     tokens = batch_tokens[i]
