@@ -1,8 +1,6 @@
 base_config: "base.yml"
 
 use_sft: True
-# train_data_columns: ['prompt', 'completion'] # for trl-lib/ultrafeedback-gpt-3.5-turbo-helpfulness
-train_data_columns: ['messages'] # for HuggingFaceH4/ultrachat_200k
 sft_train_on_completion: True
 
 per_device_batch_size: 1.0
@@ -13,11 +11,18 @@ eval_steps: 2
 
 # HF pipeline
 dataset_type: hf
-# hf_path: 'trl-lib/ultrafeedback-gpt-3.5-turbo-helpfulness'
+# configurations for HuggingFaceH4/ultrachat_200k dataset
 hf_path: 'HuggingFaceH4/ultrachat_200k'
-# train_split: 'train'  # used for trl-lib/ultrafeedback-gpt-3.5-turbo-helpfulness dataset
-train_split: 'train_sft' # used for HuggingFaceH4/ultrachat_200k dataset
+train_split: 'train_sft'
 hf_eval_split: 'test_sft'
+train_data_columns: ['messages']
+eval_data_columns: ['messages']
+# configurations for trl-lib/ultrafeedback-gpt-3.5-turbo-helpfulness dataset
+#hf_path: 'trl-lib/ultrafeedback-gpt-3.5-turbo-helpfulness'
+#train_split: 'train'
+#hf_eval_split: 'test'
+#train_data_columns: ['prompt', 'completion']
+#eval_data_columns: ['prompt', 'completion']
 
 enable_goodput_recording: False
 monitor_goodput: False
