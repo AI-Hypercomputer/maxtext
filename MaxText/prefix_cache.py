@@ -261,9 +261,9 @@ class PrefixCacheTrie:
 
 
 class HBMCache:
-  """Stores kv cache values in HBM and supports eviction using LRU.
+  """Stores kv cache values in HBM.
 
-  Cache is distributed across all devices on the VM.
+  Cache is remain the sharding status before save.
   """
 
   def __init__(self, max_size_bytes: int):
@@ -294,7 +294,7 @@ class HBMCache:
     return True
 
   def retrieve_from_cache(self, key: Key) -> Optional[Value]:
-    """Return value copied from cache or None if not found.
+    """Return value from cache or None if not found.
     Be aware the cache is not return a copy. If additional modified needed, clone the Value first.
     """
     if key in self._saved_values:
