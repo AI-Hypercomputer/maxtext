@@ -415,26 +415,24 @@ class PagedAttentionOp(nn.Module):
       decoder_segment_ids: Array,
       model_mode: str,
       *,
-      page_manager: PageManager,
-      page_group_id: int,
-      true_length: int,
+      page_state: Optional[PageState] = None,
+      page_group_id: Optional[int] = None,
+      true_length: Optional[int] = None,
       layer_id: Optional[int] = None,
+      key_pages: Optional[jnp.ndarray] = None,
+      value_pages: Optional[jnp.ndarray] = None,
   ) -> Union[Array, Tuple[Array, Array, Array]]:
     if page_group_id is not None:
       if model_mode == common_types.MODEL_MODE_PREFILL:
-        page_state = page_manager(
-            model_mode="prefill",
-            page_group_id=page_group_id,
-            true_length=true_length,
-            layer_id=layer_id,
-        )
-        key_pages = page_manager.key_pages[layer_id]
-        value_pages = page_manager.value_pages[layer_id]
+        if page_state is None:
+            raise ValueError("page_state must be provided in PREFILL mode")
+        if key_pages is None or value_pages is None:
+            raise ValueError("key_pages and value_pages must be provided")
 
         attn_out = self._paged_dot_product_attention(
             query=query,
-            key_pages=key_pages.value,
-            value_pages=value_pages.value,
+            key_pages=key_pages,
+            value_pages=value_pages,
             sequence_lengths=page_state.sequence_lengths,
             page_map=page_state.page_map,
             num_kv_heads=self.num_kv_heads,
@@ -447,10 +445,10 @@ class PagedAttentionOp(nn.Module):
           raise ValueError(
               f"Autoregressive mode expects sequence length 1, got " f"key shape {key.shape}, value shape {value.shape}"
           )
-        page_state = page_manager(model_mode=model_mode, page_group_id=page_group_id, layer_id=layer_id)
-
-        key_pages = page_manager.key_pages[layer_id]
-        value_pages = page_manager.value_pages[layer_id]
+        if page_state is None:
+            raise ValueError("page_state must be provided in AUTOREGRESSIVE mode")
+        if key_pages is None or value_pages is None:
+            raise ValueError("key_pages and value_pages must be provided")
 
         attn_out = self._paged_dot_product_attention(
             query=query,
@@ -1637,11 +1635,13 @@ class Attention(nn.Module):
       decoder_segment_ids: Array | None = None,
       *,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
-      page_manager: Optional[PageManager] = None,
+      page_state: Optional[PageState] = None,
       page_group_id: Optional[int] = None,
       true_length: Optional[int] = None,
       use_fused_qkv: Optional[bool] = False,
       layer_id: Optional[int] = None,
+      key_pages: Optional[jnp.ndarray] = None,
+      value_pages: Optional[jnp.ndarray] = None,
   ):
 
     deterministic = model_mode != common_types.MODEL_MODE_TRAIN
@@ -1669,21 +1669,22 @@ class Attention(nn.Module):
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
 
-    # Call the attention operator (already chosen in setup).
     out = self.attention_op(
         query=query,
         key=key,
         value=value,
         decoder_segment_ids=decoder_segment_ids,
         model_mode=model_mode,
-        page_manager=page_manager,
+        page_state=page_state,
         page_group_id=page_group_id,
         true_length=true_length,
         layer_id=layer_id,
+        key_pages=key_pages,
+        value_pages=value_pages,
     )
     if not isinstance(self.attention_op, PagedAttentionOp):
       out = nn.with_logical_constraint(out, self.out_axis_names)
-      out = self.attention_op.out_projection(out)  # call out_projection from attention_op
+      out = self.attention_op.out_projection(out)
       out = checkpoint_name(out, "out_proj")
 
     return out

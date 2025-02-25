@@ -24,16 +24,15 @@ import jax
 from jax.sharding import Mesh
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-# Removed page_manager import
 from layers import attentions
 from layers import embeddings
 from layers import linears
 from layers import normalizations
 from layers import models
 from layers import quantizations
+from page_manager import PageState
 
 import common_types
-# Removed page_manager import
 from typing import Optional
 
 Array = common_types.Array
@@ -80,7 +79,9 @@ class LlamaDecoderLayer(nn.Module):
       slot: Optional[int] = None,
       true_length: Optional[int] = None,
       layer_id: Optional[int] = None,
-      page_manager=None,
+      page_state: Optional[PageState] = None,
+      key_pages: Optional[jnp.ndarray] = None,
+      value_pages: Optional[jnp.ndarray] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -95,7 +96,6 @@ class LlamaDecoderLayer(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
     )
     lnx = lnx_rms(inputs)
-
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     # Self-attention block
@@ -126,10 +126,12 @@ class LlamaDecoderLayer(nn.Module):
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         model_mode=model_mode,
+        page_state=page_state,
         page_group_id=slot,
         true_length=true_length,
-        page_manager=page_manager,
         layer_id=layer_id,
+        key_pages=key_pages,
+        value_pages=value_pages,
         use_fused_qkv=cfg.fused_qkv if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE else None,
     )
 
@@ -175,7 +177,4 @@ class LlamaDecoderLayer(nn.Module):
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
-    if cfg.scan_layers:
-      return layer_output, None
-    else:
-      return layer_output, None
+    return layer_output, None

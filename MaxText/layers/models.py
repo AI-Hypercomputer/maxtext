@@ -398,6 +398,7 @@ class Decoder(nn.Module):
       model_mode=common_types.MODEL_MODE_TRAIN,
       slot=None,
       true_length=None,
+      page_state_dict=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -441,11 +442,24 @@ class Decoder(nn.Module):
       )
     else:
       # Iterate through layers
-      for lyr in range(cfg.num_decoder_layers):
+      for layer_id in range(cfg.num_decoder_layers):
         RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, self.get_remat_policy())
+        current_layer_class = RemattedBlockLayers[layer_id % len(RemattedBlockLayers)]
+        layer_instance = current_layer_class(config=cfg, mesh=mesh, name=f"layers_{layer_id}", quant=self.quant)
 
-        current_layer_class = RemattedBlockLayers[lyr % len(RemattedBlockLayers)]
-        layer_instance = current_layer_class(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)
+        layer_page_state = None
+        layer_key_pages = None
+        layer_value_pages = None
+        
+        if page_state_dict is not None:
+          if "page_states" in page_state_dict and layer_id in page_state_dict["page_states"]:
+              layer_page_state = page_state_dict["page_states"][layer_id]
+          
+          if "key_pages" in page_state_dict and layer_id in page_state_dict["key_pages"]:
+              layer_key_pages = page_state_dict["key_pages"][layer_id]
+              
+          if "value_pages" in page_state_dict and layer_id in page_state_dict["value_pages"]:
+              layer_value_pages = page_state_dict["value_pages"][layer_id]
 
         y, _ = layer_instance(
             y,
@@ -455,8 +469,10 @@ class Decoder(nn.Module):
             model_mode,
             slot=slot,
             true_length=true_length,
-            page_manager=self.page_manager,
-            layer_id=lyr,
+            layer_id=layer_id,
+            page_state=layer_page_state,
+            key_pages=layer_key_pages,
+            value_pages=layer_value_pages,
         )
 
     y = self.get_norm_layer()(
@@ -545,7 +561,7 @@ class Transformer(nn.Module):
       model_mode=common_types.MODEL_MODE_TRAIN,
       slot=None,
       true_length=None,
-      layer_id: Optional[int] = None,
+      page_state_dict=None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target."""
     print("\n=== Transformer.__call__() ENTRY ===")
@@ -556,6 +572,9 @@ class Transformer(nn.Module):
     print(f"  model_mode: {model_mode}")
     print(f"  slot: {slot}")
     print(f"  true_length: {true_length}")
+    if page_state_dict is not None:
+        print(f"  page_state_dict: has {len(page_state_dict.get('page_states', {}))} layer states")
+
 
     if decoder_segment_ids is not None and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       raise ValueError(
@@ -571,5 +590,6 @@ class Transformer(nn.Module):
         model_mode=model_mode,
         slot=slot,
         true_length=true_length,
+        page_state_dict=page_state_dict,
     )
     return logits
