@@ -497,48 +497,20 @@ class AttentionOp(nn.Module):
       query = query.astype(jnp.float32)
       key = key.astype(jnp.float32)
 
-    segment_axis_names_q = None
-    segment_axis_names_kv = None
+    q_seq_len = query.shape[1]
+    
+    #print(query.shape)
+    query = partitioning.with_sharding_constraint(query, (BATCH, LENGTH, HEAD, D_KV))
+    key = partitioning.with_sharding_constraint(key, (BATCH, KV_LENGTH, HEAD, D_KV))
+    value = partitioning.with_sharding_constraint(value, (BATCH, KV_LENGTH, HEAD, D_KV))
 
-    if decoder_segment_ids is not None:
-      segment_axis_names_q = nn.logical_to_mesh_axes((BATCH, "activation_length_q"))
-      segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH, "activation_length_kv"))
+    attn_weights = self.qk_product(query, key, q_seq_len, model_mode)
 
-    axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
-    axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
+    attn_weights = partitioning.with_sharding_constraint(attn_weights, (BATCH, HEAD, None, LENGTH, KV_LENGTH))
 
-    # @functools.partial(
-    #     shard_map,
-    #     mesh=self.mesh,
-    #     in_specs=(
-    #         axis_names_q,
-    #         axis_names_kv,
-    #         axis_names_kv,
-    #         segment_axis_names_kv,
-    #     ),
-    #     out_specs=axis_names_q,
-    #     check_rep=False,
-    # )
-    def wrap_attention_dot(
-      query: Array,
-      key: Array | KVTensor,
-      value: Array | KVTensor,
-      decoder_segment_ids: Array | None,
-  ):
-      q_seq_len = query.shape[1]
-      
-      #print(query.shape)
-      query = partitioning.with_sharding_constraint(query, (BATCH, LENGTH, HEAD, D_KV))
-      key = partitioning.with_sharding_constraint(key, (BATCH, KV_LENGTH, HEAD, D_KV))
-      value = partitioning.with_sharding_constraint(value, (BATCH, KV_LENGTH, HEAD, D_KV))
-
-      attn_weights = self.qk_product(query, key, q_seq_len, model_mode)
-
-      attn_weights = partitioning.with_sharding_constraint(attn_weights, (BATCH, HEAD, None, LENGTH, KV_LENGTH))
-
-      if self.attn_logits_soft_cap:
-        attn_weights = jnp.tanh(attn_weights / self.attn_logits_soft_cap)
-        attn_weights = attn_weights * self.attn_logits_soft_cap
+    if self.attn_logits_soft_cap:
+      attn_weights = jnp.tanh(attn_weights / self.attn_logits_soft_cap)
+      attn_weights = attn_weights * self.attn_logits_soft_cap
 
     # Casting softmaxt computation for float32 for model stability.
     if model_mode == common_types.MODEL_MODE_TRAIN and self.float32_logits:
