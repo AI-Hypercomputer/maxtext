@@ -15,7 +15,7 @@ FIXES: b/123456
 FIXES: #123456
 
 *Notice 1* Once all tests pass, the "pull ready" label will automatically be assigned. This label is used
-for Github/Google3 synchronization of MaxText. Please do not add it manually.
+for administrative purposes. Please do not add it manually.
 
 *Notice 2* For external contributions, our settings currently require an approval from a MaxText maintainer to trigger CI tests.
 
