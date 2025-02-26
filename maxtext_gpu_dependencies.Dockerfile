@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:experimental
-ARG BASEIMAGE=ghcr.io/nvidia/jax:base
+ARG BASEIMAGE=us-central1-docker.pkg.dev/supercomputer-testing/yangyuwei-maxtext/maxtext-mantaray:latest-ray
 FROM $BASEIMAGE
 
 # Stopgaps measure to circumvent gpg key setup issue.
@@ -43,8 +43,8 @@ COPY setup.sh ./
 COPY constraints_gpu.txt requirements.txt requirements_with_jax_stable_stack.txt ./
 
 # Install dependencies - these steps are cached unless the copied files change
-RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE}"
-RUN --mount=type=cache,target=/root/.cache/pip bash setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} DEVICE=${ENV_DEVICE}
+# RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE}"
+# RUN --mount=type=cache,target=/root/.cache/pip bash setup.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} DEVICE=${ENV_DEVICE}
 
 # Now copy the remaining code (source files that may change frequently)
 COPY . .
