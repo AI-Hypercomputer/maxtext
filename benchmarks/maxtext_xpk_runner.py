@@ -38,6 +38,7 @@ import time
 
 import maxtext_trillium_model_configs as model_configs
 import xla_flags_library as xla_flags
+from disruption_manager import DisruptionConfig, DisruptionMethod, TriggerType, DisruptionManager
 
 # Assumes you built maxtext dep image.
 # Assumes you have xpk installed in a git clone repo of ~/{wl_config.xpk_path}/xpk.py
@@ -81,6 +82,7 @@ class WorkloadConfig:
   xpk_path: str = '~/xpk'
   pathways_config: PathwaysConfig = None
   run_name: str = None
+  disruption_configs: list[DisruptionConfig] = None
 
 
 @dataclasses.dataclass
@@ -721,12 +723,14 @@ def run_xpk_workload(
 def xpk_benchmark_runner(
     cluster_config: XpkClusterConfig,
     workload_configs: list[WorkloadConfig],
+    disruption_manager: DisruptionManager = None,
 ):
   """Runs a list of maxtext models on XPK in parallel and waits for all to complete.
 
   Args:
     cluster_config: XPK cluster configuration.
     workload_configs: List of workload configurations.
+    disruption_manager: DisruptionManager instance (optional).
   """
   xpk_workload_names = []
   xpk_workload_cmds = []
@@ -741,6 +745,14 @@ def xpk_benchmark_runner(
     print(f"XPK command to be used is: {command} \n")
     xpk_workload_cmds.append(command)
 
+    if disruption_manager and wl_config.disruption_configs:
+      print(f"Adding workload '{name}' to disruption manager.")
+      disruption_manager.add_workload(
+          workload_name=name,
+          cluster_config=cluster_config,
+          disruption_configs=wl_config.disruption_configs
+      )
+
   # Launch all workloads
   workload_creation_return_codes = {}
   for workload_name, workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
@@ -748,7 +760,6 @@ def xpk_benchmark_runner(
     workload_creation_return_codes[workload_name] = return_code
     if return_code != 0:
       print(f'Warning: Unable to start xpk workload: {workload_name}, but continuing to launch others.')
-
 
   # Wait for workloads to complete in parallel and process them as they finish
   completed_workload_names = wait_for_xpk_workloads_completion_async(
