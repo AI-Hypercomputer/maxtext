@@ -302,19 +302,21 @@ class AttentionOp(nn.Module):
       value: Array,
       decoder_segment_ids: Array | None,
       attn_logits_soft_cap: float | None = None,
-      load_balanced_context_parallel: bool = True,
+      load_balanced_context_parallel: bool = True, #TODO: put this in base.yml
   ) -> Array:
     """TPU Flash Attention."""
 
-    decoder_segment_ids_permuted = None
+    # decoder_segment_ids_permuted = None
 
-    # Reorder tensors which is currently [B,S,H,KV]
+    # Reorder tensors which is currently [B,S,H,KV] => 
+    # don't need this here anymore because we have permuted everything at the beginnning, 
+    # TODO: but we unpermute the decoder_segment_ids pertaining to KV
     cp_size = self.mesh.shape["context"]
-    if cp_size > 1 and load_balanced_context_parallel:
-      query = self.reorder_causal_load_balancing(tensor=query, cp_size=cp_size, seq_dim=1, to_contiguous=False)
-      decoder_segment_ids_permuted = self.reorder_causal_load_balancing(
-          tensor=decoder_segment_ids, cp_size=cp_size, seq_dim=1, to_contiguous=False
-      )
+    # if cp_size > 1 and load_balanced_context_parallel:
+    #   query = self.reorder_causal_load_balancing(tensor=query, cp_size=cp_size, seq_dim=1, to_contiguous=False)
+    #   decoder_segment_ids_permuted = self.reorder_causal_load_balancing(
+    #       tensor=decoder_segment_ids, cp_size=cp_size, seq_dim=1, to_contiguous=False
+    #   )
 
     # Transpose to ('batch', 'heads', 'length', 'kv')
     query = jnp.transpose(query, axes=(0, 2, 1, 3))
@@ -424,14 +426,24 @@ class AttentionOp(nn.Module):
             segment_axis_names_q,
             segment_axis_names_kv,
             segment_axis_names_splash_kernel,
+            None,
+            None
         ),
         out_specs=axis_names_q,
         check_rep=False,
     )
-    def wrap_flash_attention(query, key, value, decoder_segment_ids_q, decoder_segment_ids_kv, splash_kernel):
-
+    def wrap_flash_attention(query, key, value, decoder_segment_ids_q, decoder_segment_ids_kv, splash_kernel, cp_size, load_balanced_context_parallel):
+      if cp_size > 1 and load_balanced_context_parallel:
+          key = self.reorder_causal_load_balancing(tensor=key, cp_size=cp_size, seq_dim=2, to_contiguous=True)
+          value = self.reorder_causal_load_balancing(tensor=value, cp_size=cp_size, seq_dim=2, to_contiguous=True)
+          decoder_segment_ids_unpermuted = self.reorder_causal_load_balancing(
+              tensor=decoder_segment_ids_kv, cp_size=cp_size, seq_dim=1, to_contiguous=True
+          )
+          
+      jax.debug.print("decoder_segment_ids_unpermuted={decoder_segment_ids_unpermuted}",decoder_segment_ids_unpermuted=decoder_segment_ids_unpermuted)
+      jax.debug.print("decoder_segment_ids_q={decoder_segment_ids_q}",decoder_segment_ids_q=decoder_segment_ids_q)
       if decoder_segment_ids_q is not None:
-        decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(decoder_segment_ids_q, decoder_segment_ids_kv)
+        decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(decoder_segment_ids_q, decoder_segment_ids_unpermuted)
       else:
         decoder_segment_ids_tuple = None
       attention_output = jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids_tuple)
@@ -444,18 +456,177 @@ class AttentionOp(nn.Module):
 
       return attention_output
 
-    if cp_size > 1 and load_balanced_context_parallel:
-      x = wrap_flash_attention(query, key, value, decoder_segment_ids_permuted, decoder_segment_ids, splash_kernel)
-    else:
-      x = wrap_flash_attention(query, key, value, decoder_segment_ids, decoder_segment_ids, splash_kernel)
+    x = wrap_flash_attention(query, key, value, decoder_segment_ids, decoder_segment_ids, splash_kernel, cp_size, load_balanced_context_parallel)
 
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
 
-    if cp_size > 1 and load_balanced_context_parallel:
-      # inverse reorder for load_balancing
-      x = self.reorder_causal_load_balancing(tensor=x, cp_size=cp_size, seq_dim=1, to_contiguous=True)
+    # if cp_size > 1 and load_balanced_context_parallel:
+    #   # inverse reorder for load_balancing
+    #   x = self.reorder_causal_load_balancing(tensor=x, cp_size=cp_size, seq_dim=1, to_contiguous=True)
 
     return x
+
+  # def tpu_flash_attention(
+  #     self,
+  #     query: Array,
+  #     key: Array,
+  #     value: Array,
+  #     decoder_segment_ids: Array | None,
+  #     attn_logits_soft_cap: float | None = None,
+  #     load_balanced_context_parallel: bool = True,
+  # ) -> Array:
+  #   """TPU Flash Attention."""
+
+  #   decoder_segment_ids_permuted = None
+
+  #   # Reorder tensors which is currently [B,S,H,KV]
+  #   cp_size = self.mesh.shape["context"]
+  #   if cp_size > 1 and load_balanced_context_parallel:
+  #     query = self.reorder_causal_load_balancing(tensor=query, cp_size=cp_size, seq_dim=1, to_contiguous=False)
+  #     decoder_segment_ids_permuted = self.reorder_causal_load_balancing(
+  #         tensor=decoder_segment_ids, cp_size=cp_size, seq_dim=1, to_contiguous=False
+  #     )
+
+  #   # Transpose to ('batch', 'heads', 'length', 'kv')
+  #   query = jnp.transpose(query, axes=(0, 2, 1, 3))
+  #   key = jnp.transpose(key, axes=(0, 2, 1, 3))
+  #   value = jnp.transpose(value, axes=(0, 2, 1, 3))
+  #   segment_axis_names_q = None
+  #   segment_axis_names_kv = None
+  #   if decoder_segment_ids is not None:
+  #     segment_axis_names_q = nn.logical_to_mesh_axes((BATCH, "activation_length_q"))
+  #     segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH, "activation_length_kv"))
+  #   axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
+  #   axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
+  #   axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
+  #   max_logging.log(f"axis_names_q: {axis_names_q}")
+  #   max_logging.log(f"axis_names_kv: {axis_names_kv}")
+  #   max_logging.log(f"axis_names_splash_kernel: {axis_names_splash_kernel}")
+
+  #   global_block_q = self.config.sa_block_q
+  #   global_block_kv = self.config.sa_block_kv
+  #   global_block_kv_compute = self.config.sa_block_kv_compute
+  #   global_block_q_dkv = self.config.sa_block_q_dkv
+  #   global_block_kv_dkv = self.config.sa_block_kv_dkv
+  #   global_block_kv_dkv_compute = self.config.sa_block_kv_dkv_compute
+  #   global_block_q_dq = self.config.sa_block_q_dq
+  #   global_block_kv_dq = self.config.sa_block_kv_dq
+  #   global_use_fused_bwd_kernel = self.config.sa_use_fused_bwd_kernel
+  #   global_q_layout = self.config.sa_q_layout
+  #   global_k_layout = self.config.sa_k_layout
+  #   global_v_layout = self.config.sa_v_layout
+
+  #   devices_in_data_fsdp = self.mesh.shape["data"] * self.mesh.shape["fsdp"]
+  #   assert (query.shape[0] / devices_in_data_fsdp).is_integer(), (
+  #       "Batch dimension should be shardable among the devices in data and fsdp" " axis"
+  #   )
+
+  #   # create_splash_attention kernel
+  #   block_sizes = splash_attention_kernel.BlockSizes(
+  #       block_q=min(global_block_q, query.shape[2]),
+  #       block_kv=min(global_block_kv, key.shape[2]),
+  #       block_kv_compute=min(global_block_kv_compute, key.shape[2]),
+  #       block_q_dkv=min(global_block_q_dkv, query.shape[2]),
+  #       block_kv_dkv=min(global_block_kv_dkv, key.shape[2]),
+  #       block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
+  #       block_q_dq=None if global_use_fused_bwd_kernel else min(global_block_q_dq, query.shape[2]),
+  #       block_kv_dq=None if global_use_fused_bwd_kernel else min(global_block_kv_dq, query.shape[2]),
+  #       use_fused_bwd_kernel=global_use_fused_bwd_kernel,
+  #       q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
+  #       k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
+  #       v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
+  #   )
+
+  #   # mask_shape = (query.shape[2], key.shape[2])
+  #   mask_shape = (self.config.max_target_length, self.config.max_target_length)
+  #   mask = splash_attention_mask.CausalMask(shape=mask_shape)
+
+  #   # permute the mask if cp and load_balancing
+  #   if cp_size > 1 and load_balanced_context_parallel:
+  #     # mask = create_load_balance_causal_mask(shape=mask_shape,cp_size=cp_size)
+  #     mask = LoadBalancedCausalMask(shape=mask_shape, cp_size=cp_size)
+
+  #   # jax.debug.print("permuted: mask items = {items}", items = new_mask.__getitem__((slice(mask.shape[0]),slice(mask.shape[1]))))
+
+  #   # jax.debug.print("new_mask == old_mask = {equal}", equal = new_mask.__getitem__((slice(mask.shape[0]),slice(mask.shape[1])))==mask.__getitem__((slice(mask.shape[0]),slice(mask.shape[1]))))
+
+  #   # TODO: figure out local_sliding attention + load_balancing, default is global
+  #   # Apply local masking if local sliding attention is enabled.
+  #   if self.attention_type == AttentionType.LOCAL_SLIDING:
+  #     if self.sliding_window_size is None:
+  #       raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
+  #     mask &= splash_attention_mask.LocalMask(
+  #         shape=(query.shape[2], key.shape[2]),
+  #         window_size=(self.sliding_window_size, self.sliding_window_size),
+  #         offset=0,
+  #     )
+
+  #   # Create multi-head mask
+  #   multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
+
+  #   @partial(
+  #       jax.jit,
+  #       static_argnames=[
+  #           "multi_head_mask",
+  #       ],
+  #   )
+  #   def wrap_splash_kernel(multi_head_mask):
+  #     splash_kernel = splash_attention_kernel.make_splash_mha(
+  #         mask=multi_head_mask,
+  #         head_shards=1,  # we would need to change this to the size of the axis if sharding over heads
+  #         q_seq_shards=cp_size,  # axis for sequence sharding
+  #         block_sizes=block_sizes,
+  #         attn_logits_soft_cap=attn_logits_soft_cap,
+  #     )
+  #     return splash_kernel
+
+  #   splash_kernel = wrap_splash_kernel(multi_head_mask)
+
+  #   named_sharding = jax.sharding.NamedSharding(self.mesh, axis_names_splash_kernel)
+  #   segment_axis_names_splash_kernel = splash_kernel.manual_sharding_spec(named_sharding)
+
+  #   @functools.partial(
+  #       shard_map,
+  #       mesh=self.mesh,
+  #       in_specs=(
+  #           axis_names_q,
+  #           axis_names_kv,
+  #           axis_names_kv,
+  #           segment_axis_names_q,
+  #           segment_axis_names_kv,
+  #           segment_axis_names_splash_kernel,
+  #       ),
+  #       out_specs=axis_names_q,
+  #       check_rep=False,
+  #   )
+  #   def wrap_flash_attention(query, key, value, decoder_segment_ids_q, decoder_segment_ids_kv, splash_kernel):
+
+  #     if decoder_segment_ids_q is not None:
+  #       decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(decoder_segment_ids_q, decoder_segment_ids_kv)
+  #     else:
+  #       decoder_segment_ids_tuple = None
+  #     attention_output = jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids_tuple)
+  #     # pdb.set_trace()
+  #     # jax.debug.print("attention_output.shape = {ash}", ash = attention_output.shape)
+  #     # full_mask = [per_head_mask for per_head_mask in multi_head_mask.masks]
+  #     # valid_tokens = multi_head_mask.masks.any(dim=-1) # [q_sl] -> [q_sl, 1] -> [q_sl, head_dim]
+  #     # valid_tokens = decoder_segment_ids_q & multi_head_mask.masks.any(dim=-1)
+  #     # attention_output = attention_output * valid_tokens # broadcasting along head_dim
+
+  #     return attention_output
+
+  #   if cp_size > 1 and load_balanced_context_parallel:
+  #     x = wrap_flash_attention(query, key, value, decoder_segment_ids_permuted, decoder_segment_ids, splash_kernel)
+  #   else:
+  #     x = wrap_flash_attention(query, key, value, decoder_segment_ids, decoder_segment_ids, splash_kernel)
+
+  #   x = jnp.transpose(x, axes=(0, 2, 1, 3))
+
+  #   if cp_size > 1 and load_balanced_context_parallel:
+  #     # inverse reorder for load_balancing
+  #     x = self.reorder_causal_load_balancing(tensor=x, cp_size=cp_size, seq_dim=1, to_contiguous=True)
+
+  #   return x
 
   # @functools.partial(
   #     jax.jit,
