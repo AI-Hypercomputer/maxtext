@@ -97,6 +97,8 @@ class Value:
       Readonly. Tokens calculate prefix. may include partial of padding.
     prefix_size_bytes:
       Readonly. bytes of prefix.
+    device:
+      Readonly. Devices of prefix. The same structure of pytree to prefix.
   """
 
   def __init__(
@@ -107,10 +109,12 @@ class Value:
       padded_length: int,
       tokens: tuple[Token, ...],
       prefix_size_bytes: Optional[int] = None,
+      device=None,
   ):
     """Attributes to store.
     If true_length shorter than len(tokens), true_length will adjust to len(tokens).
     If prefix_size_bytes is not provided, calculate automatically.
+    prefix should be pytree of all jax.Array. It may raise exception if there is anything not a jax.Array,
     """
     self._prefix = prefix
     self._true_length = self._maybe_adjust_true_length(true_length, tokens)
@@ -124,6 +128,11 @@ class Value:
       )
     else:
       self._prefix_size_bytes = prefix_size_bytes
+
+    if device is None:
+      self._device = jax.tree.map(lambda x: x.device, prefix)
+    else:
+      self._device = device
 
   @property
   def prefix(self) -> Prefix:
@@ -145,6 +154,10 @@ class Value:
   def prefix_size_bytes(self) -> int:
     return self._prefix_size_bytes
 
+  @property
+  def device(self) -> int:
+    return self._device
+
   def clone(self) -> "Value":
     """Clone to prevent using the same jax array."""
     copied_prefix = tree_copy(self._prefix)
@@ -154,6 +167,7 @@ class Value:
         padded_length=self._padded_length,
         tokens=self._tokens,
         prefix_size_bytes=self._prefix_size_bytes,
+        device=self._device,
     )
 
   def __eq__(self, other: Any) -> bool:
