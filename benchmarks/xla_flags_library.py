@@ -64,6 +64,10 @@ CF_FOR_ALL_REDUCE_AND_ALL_GATHER = (
     " --xla_tpu_enable_async_collective_fusion_multiple_steps=true"
 )
 
+BLAKE_CM = (
+  " --xla_tpu_decompose_all_gather_einsum"
+  " --xla_tpu_decompose_einsum_reduce_scatter"
+)
 
 # Base Flags needed when enabling sparsecore offloading
 ENABLE_SPARSECORE_OFFLOADING_BASE_FLAGS = (

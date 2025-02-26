@@ -1612,3 +1612,61 @@ deepseek_big = _add_to_model_dictionary(
     ),
   )
 )
+
+# 40GB OOM https://cloudlogging.app.goo.gl/4xYbHKv18uubzjNa9
+mattbar_a1 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama3-1-405b-explicit",
+    model_type="default",
+    tuning_params={
+        "per_device_batch_size": 0.5,
+        "max_target_length": 8192,
+        "ici_fsdp_parallelism": 16,
+        "ici_tensor_parallelism": 16,
+        "dcn_fsdp_parallelism": 1,
+        "base_emb_dim": 16384,
+        "base_mlp_dim": 131072,
+        "base_num_query_heads": 64,
+        "base_num_kv_heads": 16,
+        "head_dim": 256,
+        "vocab_size": 128256,
+        "enable_dropout": False,
+        "logits_via_embedding": False,
+        "normalization_layer_epsilon": 1.0e-5,
+        "rope_max_timescale": 500_000,
+        "allow_split_physical_axes": True,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        # "query_proj": "offload",
+        # "key_proj": "offload",
+        # "value_proj": "offload",
+        # "out_proj": "offload",
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+        "base_num_decoder_layers": 32,
+        "dcn_pipeline_parallelism": 1,
+        "pipeline_fsdp_ag_once": True,
+        "num_pipeline_microbatches": 84, # PP * 2
+        "num_layers_per_pipeline_stage": 3,
+        "scan_layers": True,
+        "skip_first_n_steps_for_profiler": 14,
+        "dump_hlo": True
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+        + xla_flags_library.BLAKE_CM # performs poorly =(
+    ),
+  )
+)
