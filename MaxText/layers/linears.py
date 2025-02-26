@@ -500,6 +500,8 @@ class MoeBlock(nn.Module):
             self.config.capacity_factor,
         )
     )
+    if seq_len % 4 == 0:
+      expert_capacity_per_batch = max(math.ceil(expert_capacity_per_batch / 4), self.config.capacity_factor)
     max_logging.log(f"Applying potential token dropping with a batch expert_capacity of {expert_capacity_per_batch}")
 
     # calculate expert mask and drop tokens if needed
