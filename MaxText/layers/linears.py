@@ -500,8 +500,9 @@ class MoeBlock(nn.Module):
             self.config.capacity_factor,
         )
     )
-    if seq_len % 4 == 0:
-      expert_capacity_per_batch = max(math.ceil(expert_capacity_per_batch / 4), self.config.capacity_factor)
+    cp = self.config.ici_context_parallelism
+    if seq_len % cp == 0:
+      expert_capacity_per_batch = max(math.ceil(expert_capacity_per_batch / cp), self.config.capacity_factor)
     max_logging.log(f"Applying potential token dropping with a batch expert_capacity of {expert_capacity_per_batch}")
 
     # calculate expert mask and drop tokens if needed
@@ -551,9 +552,9 @@ class MoeBlock(nn.Module):
     dispatch_mask = combine_mask.astype(bool)
 
     #ici_context_parallelism
-    if seq_len % 4 == 0:
-      dispatch_mask = jnp.reshape(dispatch_mask, (batch_size, 4, seq_len//4, self.num_experts, expert_capacity_per_batch))
-      combine_mask = jnp.reshape(combine_mask, (batch_size, 4, seq_len//4, self.num_experts, expert_capacity_per_batch))
+    if seq_len % cp == 0:
+      dispatch_mask = jnp.reshape(dispatch_mask, (batch_size, cp, seq_len//cp, self.num_experts, expert_capacity_per_batch))
+      combine_mask = jnp.reshape(combine_mask, (batch_size, cp, seq_len//cp, self.num_experts, expert_capacity_per_batch))
 
     return dispatch_mask, combine_mask
 
@@ -607,13 +608,16 @@ class MoeBlock(nn.Module):
     top_k_weights, top_k_indices = jax.lax.top_k(softmax_probs, self.num_experts_per_tok)
     matmul_precision = lax.Precision(self.config.matmul_precision)
 
+    cp = self.config.ici_context_parallelism
+    batch_size = inputs.shape[0]
+    seq_len = inputs.shape[1]
+
+    do_cp =  seq_len % cp == 0
     if self.config.capacity_factor > 0:
       # token dropping if needed
       dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs)
-      batch_size = inputs.shape[0]
-      seq_len = inputs.shape[1]
       mask_axes = ("activation_batch", "activation_length", None, None, None)
-      if seq_len % 4 == 0:
+      if do_cp:
         mask_axes = ("activation_batch", "activation_length", None, None, None)
         input_axis = ("activation_batch", "activation_length", None, "activation_embed")
         dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_embed")
@@ -631,13 +635,13 @@ class MoeBlock(nn.Module):
       else:
         loss = 0
 
-      if seq_len % 4 == 0:
-        inputs = jnp.reshape(inputs,(batch_size, 4, seq_len//4, inputs.shape[2]))
+      if do_cp:
+        inputs = jnp.reshape(inputs,(batch_size, cp, seq_len//cp, inputs.shape[2]))
 
       inputs = nn.with_logical_constraint(inputs, input_axis)     
 
       with jax.named_scope("dispatch"):
-        if seq_len % 4 == 0:
+        if do_cp:
           dispatch = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=DISPATCH)(
               "BNSM,BNSEC -> EBNCM", inputs, dispatch_mask, precision=matmul_precision
           )
@@ -657,7 +661,7 @@ class MoeBlock(nn.Module):
       with jax.named_scope("wi_0"):
         w0_kernel_axes = ("exp", None, "mlp")
         w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
-        if seq_len % 4 == 0:
+        if do_cp:
           layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
               "EBNCM,EMH -> EBNCH", dispatch, w0_kernel, precision=matmul_precision
           )
@@ -676,7 +680,7 @@ class MoeBlock(nn.Module):
       with jax.named_scope("wi_1"):
         w1_kernel_axes = ("exp", None, "mlp")
         w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
-        if seq_len % 4 == 0:
+        if do_cp:
           layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
               "EBNCM,EMH -> EBNCH", dispatch, w1_kernel, precision=matmul_precision
           )
@@ -696,7 +700,7 @@ class MoeBlock(nn.Module):
       with jax.named_scope("wo"):
         wo_kernel_axes = ("exp", "mlp", None)
         wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
-        if seq_len % 4 == 0:
+        if do_cp:
           intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
               "EBNCH,EHM -> EBNCM", layer_multiply, wo_kernel, precision=matmul_precision
           )
@@ -711,7 +715,7 @@ class MoeBlock(nn.Module):
         intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("combine"):
         # Matmul & element wise operation
-        if seq_len % 4 == 0:
+        if do_cp:
           output = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=COMBINE)(
               "EBNCM,BNSEC -> BNSM",
               intermediate_layer,
