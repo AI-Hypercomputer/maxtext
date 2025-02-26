@@ -24,18 +24,29 @@ import datetime
 import os
 import sys
 import functools
+from collections import defaultdict
 import time
 import queue
 
 from typing import Sequence, Optional
 from absl import app
+import tensorflow as tf
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 import grain.python as grain
 import jax
+import jax.numpy as jnp
+from jax import random
+from jax.sharding import Mesh
+from jax.experimental import checkify
 import numpy as np
 import orbax.checkpoint
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
+
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+maxtext_parent_dir = os.path.dirname(os.path.dirname(current_dir))
+sys.path.append(maxtext_parent_dir)
 
 import checkpointing
 import max_utils
@@ -45,7 +56,6 @@ import optimizers
 import profiler
 import pyconfig
 import pathwaysutils  # pylint: disable=unused-import
-import tensorflow as tf
 
 from vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
@@ -56,10 +66,11 @@ from layers import models
 
 from gcp_workload_monitor import GCPWorkloadMonitor
 
-import jax.numpy as jnp
-from jax import random
-from jax.sharding import Mesh
-from jax.experimental import checkify
+from train import (validate_train_config,
+                   get_first_step, load_next_batch,
+                   record_scalar_metrics, save_checkpoint,
+                   record_goodput, create_goodput_recorder,
+                   check_example_batch, )
 
 from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
@@ -72,9 +83,7 @@ from ml_goodput_measurement import goodput
 from ml_goodput_measurement import monitoring
 
 import maxengine
-import tokenizer
 import transformers
-import pyconfig_inference
 
 # pylint: disable=too-many-positional-arguments
 
@@ -83,45 +92,7 @@ EPS = 1e-8
 _DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE = 2 * 1024**3
 
 
-def validate_train_config(config):
-  """Validates the configuration is set correctly for train.py"""
 
-  assert config.run_name, "Erroring out, need a real run_name"
-  if not config.dataset_path.startswith("gs://"):
-    max_logging.log("WARNING: 'dataset_path' might be pointing your local file system")
-  if not config.base_output_directory.startswith("gs://"):
-    max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
-  assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive integer."
-
-  if config.quantization == "fp8":
-    # pylint: disable=line-too-long
-    assert (
-        config.gradient_accumulation_steps == 1
-    ), "fp8 can't be used with gradient_accumulation_steps right now. Please use other quantization or set gradient_accumulation_steps to 1"
-
-
-def get_first_step(state):
-  with jax.spmd_mode("allow_all"):
-    return int(state.step)
-
-
-def load_next_batch(train_iter, example_batch, config):
-  """Loads the next batch. Can keep reusing the same batch for performance reasons"""
-
-  if config.reuse_example_batch and example_batch is not None:
-    return example_batch
-  else:
-    return next(train_iter)
-
-
-def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr, per_device_tokens):
-  """Records scalar metrics to be written to tensorboard"""
-  metrics["scalar"].update({"perf/step_time_seconds": step_time_delta.total_seconds()})
-  metrics["scalar"].update({"perf/per_device_tflops": per_device_tflops})
-  metrics["scalar"].update({"perf/per_device_tflops_per_sec": per_device_tflops / step_time_delta.total_seconds()})
-  metrics["scalar"].update({"perf/per_device_tokens": per_device_tokens})
-  metrics["scalar"].update({"perf/per_device_tokens_per_sec": per_device_tokens / step_time_delta.total_seconds()})
-  metrics["scalar"].update({"learning/current_learning_rate": lr})
 
 
 _buffered_step = None
@@ -202,61 +173,6 @@ def clear_buffered_metrics():
   _buffered_metrics = None
 
 
-def save_checkpoint(
-    checkpoint_manager,
-    step,
-    state,
-    dataset_type="c4",
-    data_iterator=None,
-    config: Optional[pyconfig.config] = None,
-) -> bool:
-  """Wrapper for saving checkpoint."""
-  if config and config.enable_checkpointing:
-    if (step % config.checkpoint_period == 0) or (
-        config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0
-    ):
-      blocking_until_ready_start = time.time()
-      max_logging.log(f"Waiting for step {step} to finish before checkpoint...")
-      # We block here on the step finishing so that our checkpointing metrics
-      # measure only checkpointing time, not training time.
-      jax.block_until_ready(state)
-      max_logging.log(
-          f"Waited {time.time() - blocking_until_ready_start} seconds for step "
-          f"{step} to finish before starting checkpointing."
-      )
-
-  # specify chunk_byte_size to force orbax to control maximum file size in checkpoint
-  chunk_byte_size = _DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
-  if config:
-    chunk_byte_size = config.checkpoint_storage_target_data_file_size_bytes
-  save_args = jax.tree.map(lambda _: orbax.checkpoint.SaveArgs(chunk_byte_size=chunk_byte_size), state)
-
-  if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
-    return checkpoint_manager.save(
-        step,
-        args=orbax.checkpoint.args.PyTreeSave(item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size),
-    )
-
-  if dataset_type == "grain":
-    return checkpoint_manager.save(
-        step,
-        args=orbax.checkpoint.args.Composite(
-            items=orbax.checkpoint.args.PyTreeSave(
-                item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size
-            ),
-            iter=grain.PyGrainCheckpointSave(data_iterator.local_iterator),
-        ),
-    )
-  else:
-    return checkpoint_manager.save(
-        step,
-        args=orbax.checkpoint.args.Composite(
-            items=orbax.checkpoint.args.PyTreeSave(
-                item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size
-            )
-        ),
-    )
-
 
 # -----------------------------------------------------------------------------
 # Top-level Functions
@@ -282,196 +198,21 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
       output_metrics["scalar"][f"activ_mean/layer_{layer_num:03d}"] = layer["activation_mean"][0]
       output_metrics["scalar"][f"activ_stdev/layer_{layer_num:03d}"] = layer["activation_stdev"][0]
 
+
 # -----------------------------------------------------------------------------
-# DPO
+# GRPO
 # -----------------------------------------------------------------------------
 
 
-def _split_dpo_state(state):
+def _split_grpo_state(state):
   reference_params = state.params["reference_params"]
   new_state = state.replace(params={k: v for k, v in state.params.items() if k != "reference_params"})
   return new_state, reference_params
 
 
-def _merge_dpo_state(state, reference_params):
+def _merge_grpo_state(state, reference_params):
   return state.replace(params=dict(state.params, reference_params=reference_params))
 
-
-def dpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_train=True):
-  """loss_fn for both train and eval.
-
-  Args:
-    model: A nn.Module
-    config: Config of parameters
-    data: Batch of data to apply to the model
-    dropout_rng: A key to use to generate rng for dropout
-    params: Model params
-    is_train: True for train_step and False for eval_step
-
-  Returns:
-    loss: average loss
-    aux: a dictionary including intermediate_outputs, total_loss, and total_weights
-  """
-  # inputs, targets, segments, positions = apply_args
-  rng1, aqt_rng = jax.random.split(dropout_rng)
-
-  # decimate proportion of data when per_device_batch_size<1
-  if is_train:
-    for k, v in data.items():
-      data[k] = v[: config.micro_batch_size_to_train_on, :]
-
-  # for DPO we don't support packed sequence (they shouldn't be present in the first place)
-  data["chosen_segmentation"] = (data["chosen_segmentation"] == 1).astype(jnp.int32)
-  data["rejected_segmentation"] = (data["rejected_segmentation"] == 1).astype(jnp.int32)
-  data["chosen_position"] = data["chosen_position"] * (data["chosen_segmentation"] == 1)
-  data["rejected_position"] = data["rejected_position"] * (data["rejected_segmentation"] == 1)
-
-  # concatenated model and reference model forward pass
-  inputs = jnp.concatenate([data["chosen"], data["rejected"]], 0)
-  inputs_position = jnp.concatenate([data["chosen_position"], data["rejected_position"]], 0)
-  inputs_segmentation = jnp.concatenate([data["chosen_segmentation"], data["rejected_segmentation"]], 0)
-
-  logits, intermediate_outputs = model.apply(
-      params,
-      inputs,
-      inputs_position,
-      decoder_segment_ids=inputs_segmentation,
-      enable_dropout=config.enable_dropout if is_train else False,
-      rngs={"dropout": rng1, "params": aqt_rng},
-      mutable="intermediates",
-  )
-  ref_logits = model.apply(
-      {"params": reference_params},
-      inputs,
-      inputs_position,
-      decoder_segment_ids=inputs_segmentation,
-      enable_dropout=False,
-      rngs={"dropout": rng1, "params": aqt_rng},
-  )
-  ref_logits = jax.lax.stop_gradient(ref_logits)
-
-  # extract token ids, segmentation and logits for chosen and rejected sequences
-  chosen_ids = data["chosen"][..., 1:]
-  rejected_ids = data["rejected"][..., 1:]
-  chosen_segmentation = data["chosen_segmentation"][..., 1:]
-  rejected_segmentation = data["rejected_segmentation"][..., 1:]
-  n_logits = logits.shape[-3] // 2  # [B, S, E] - [batch, sequence, embedding/vocab]
-  chosen_logits, rejected_logits = logits[:n_logits, :, :], logits[n_logits:, :, :]  # [B, S, E], [B, S, E]
-  chosen_ref_logits, rejected_ref_logits = ref_logits[:n_logits, :, :], ref_logits[n_logits:, :, :]  # [B, S, E], [B, S, E]
-
-  # common subsequence and padding mask
-  common_prefix_mask = jnp.cumsum(chosen_ids != rejected_ids, axis=-1) == 0  # [B, S]
-  valid_seq_mask = (chosen_segmentation != 0) & (rejected_segmentation != 0) & ~common_prefix_mask  # [B, S]
-
-  # compute logratios from the sequence-reduced observed token log-probability
-  chosen_logps_seq = jnp.take_along_axis(  # [B, S]
-      jax.nn.log_softmax(chosen_logits[..., :-1, :], axis=-1), chosen_ids[..., None], axis=-1
-  )[..., 0]
-  chosen_logps = jnp.sum(chosen_logps_seq * valid_seq_mask, axis=-1)  # [B]
-  chosen_ref_logps_seq = jnp.take_along_axis(  # [B, S]
-      jax.nn.log_softmax(chosen_ref_logits[..., :-1, :], axis=-1), chosen_ids[..., None], axis=-1
-  )[..., 0]
-  chosen_ref_logps = jnp.sum(chosen_ref_logps_seq * valid_seq_mask, axis=-1)  # [B]
-  chosen_logratios = chosen_logps - chosen_ref_logps  # [B]
-
-  rejected_logps_seq = jnp.take_along_axis(  # [B, S]
-      jax.nn.log_softmax(rejected_logits[..., :-1, :], axis=-1), rejected_ids[..., None], axis=-1
-  )[..., 0]
-  rejected_logps = jnp.sum(rejected_logps_seq * valid_seq_mask, axis=-1)  # [B]
-  rejected_ref_logps_seq = jnp.take_along_axis(  # [B, S]
-      jax.nn.log_softmax(rejected_ref_logits[..., :-1, :], axis=-1), rejected_ids[..., None], axis=-1
-  )[..., 0]
-  rejected_ref_logps = jnp.sum(rejected_ref_logps_seq * valid_seq_mask, axis=-1)  # [B]
-  rejected_logratios = rejected_logps - rejected_ref_logps  # [B]
-
-  # DPO loss from chosen and rejected logratios
-  LABEL_SMOOTHING, BETA = config.dpo_label_smoothing, config.dpo_beta
-  logratios_delta = BETA * (chosen_logratios - rejected_logratios)  # [B]
-  losses = (  # [B]
-      -jax.nn.log_sigmoid(BETA * logratios_delta) * (1 - LABEL_SMOOTHING)
-      - jax.nn.log_sigmoid(-BETA * logratios_delta) * LABEL_SMOOTHING
-  )
-  total_loss, total_weights = jnp.mean(losses), losses.shape[0]
-  loss = total_loss
-
-  moe_lb_loss = 0.0
-  if config.num_experts > 1:
-    nested_key = ("intermediates", "decoder", "layers", "moe_lb_loss")
-    total_moe_lb_loss = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, 0.0)
-    moe_lb_loss = jnp.mean(jnp.array(total_moe_lb_loss))
-    loss += moe_lb_loss
-  reward_accuracy = jnp.mean(chosen_logratios > rejected_logratios)
-  aux = {
-      "intermediate_outputs": intermediate_outputs,
-      "total_loss": total_loss,
-      "total_weights": total_weights,
-      "moe_lb_loss": moe_lb_loss,
-      "reward_accuracy": reward_accuracy,
-  }
-  return loss, aux
-
-
-def loss_fn(model, config, data, dropout_rng, params, is_train=True):
-  """loss_fn for both train and eval.
-
-  Args:
-    model: A nn.Module
-    config: Config of parameters
-    data: Batch of data to apply to the model
-    dropout_rng: A key to use to generate rng for dropout
-    params: Model params
-    is_train: True for train_step and False for eval_step
-
-  Returns:
-    loss: average loss
-    aux: a dictionary including intermediate_outputs, total_loss, and total_weights
-  """
-  # inputs, targets, segments, positions = apply_args
-  rng1, aqt_rng = jax.random.split(dropout_rng)
-
-  # decimate proportion of data when per_device_batch_size<1
-  if is_train:
-    for k, v in data.items():
-      data[k] = v[: config.micro_batch_size_to_train_on, :]
-  else:
-    for k, v in data.items():
-      data[k] = v[: config.micro_batch_size_to_eval_on, :]
-
-  logits, intermediate_outputs = model.apply(
-      params,
-      data["inputs"],
-      data["inputs_position"],
-      decoder_segment_ids=data["inputs_segmentation"],
-      enable_dropout=config.enable_dropout if is_train else False,
-      rngs={"dropout": rng1, "params": aqt_rng},
-      mutable="intermediates",
-  )
-  one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
-  xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
-  xent = nn.with_logical_constraint(xent, ("activation_embed_and_logits_batch", "activation_length"))
-  # Mask out paddings at the end of each example.
-  xent = xent * (data["targets_segmentation"] != 0)
-  total_loss = jnp.sum(xent)
-  total_weights = jnp.sum(data["targets_segmentation"] != 0)
-  loss = total_loss / (total_weights + EPS)
-  # get moe load balance loss
-  moe_lb_loss = 0.0
-  if config.num_experts > 1:
-    nested_key = ("intermediates", "decoder", "layers", "moe_lb_loss")
-    total_moe_lb_loss = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, 0.0)
-    moe_lb_loss = jnp.mean(jnp.array(total_moe_lb_loss))
-    loss += moe_lb_loss
-  aux = {
-      "intermediate_outputs": intermediate_outputs,
-      "total_loss": total_loss,
-      "total_weights": total_weights,
-      "moe_lb_loss": moe_lb_loss,
-  }
-  return loss, aux
-
-# -----------------------------------------------------------------------------
-# GRPO
-# -----------------------------------------------------------------------------
 
 @jax.jit
 def compute_comp_logps_policy(token_logps_policy: jnp.ndarray, L_prompt: int) -> jnp.ndarray:
@@ -520,7 +261,6 @@ def compute_comp_logps_policy(token_logps_policy: jnp.ndarray, L_prompt: int) ->
 
 
 
-EPS = 1e-8
 
 def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_train=True):
   """
@@ -731,9 +471,7 @@ def generate_completions(params, data, config, rng, tokenizer_model, engine, tru
   #TODO: Improve the token generation by using batch inference
   rng, rng_init_decode = jax.random.split(rng_load_params)
   decode_state = engine.init_decode_state(rng_init_decode)
-  ar_completions = []
-  ar_completions_segmentation = []
-  ar_completions_position = []
+  slot = 0
   for i in range(prompts.shape[0]):
     tokens = prompts[i]
     current_token_true_length = true_length[i]
@@ -741,40 +479,27 @@ def generate_completions(params, data, config, rng, tokenizer_model, engine, tru
     # Split RNG before calling prefill
     rng, rng_prefill = jax.random.split(rng)
     # generate the KV cache by prefilling the prompt tokens
-    slot = 0
     # Generate G completions for a prompt with different rng
     for _ in range(G):
-      prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=current_token_true_length, rng=rng_prefill)
+      prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=current_token_true_length[0], rng=rng_prefill)
       decode_state = engine.insert(prefill_result, decode_state, slot=slot)
-      # Autoregressively generate tokens for max_target_length steps.
-      steps = config.max_target_length - config.max_prefill_predict_length
-      completions = []
-      for step in range(steps):
-        rng, rng_generate = jax.random.split(rng)
-        # Temperature scaling done by using `weighted` as sampling method
-        decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
-        if sampled_tokens.get_result_at_slot(slot).tokens.item() == tokenizer_model.eos_token_id: # got EOS token
-          if step > 0:
-            completions.append(sampled_tokens.get_result_at_slot(slot).tokens.item())
-            break
-          else:
-            # TODO: if we get an eos as the first generated token
-            step -= 1
-            continue
-        else:
-          completions.append(sampled_tokens.get_result_at_slot(slot).tokens.item())
-
-        # # TODO: remove!! this is only for proxying the AR
-        # if step < 5:
-        #   completions.append(100)
-
-      ar_completions.append(completions + [tokenizer_model.pad_token_id] * (steps - len(completions)))
-      ar_completions_segmentation.append([1] * len(completions) + [0] * (steps - len(completions)))
-      ar_completions_position.append(list(range(len(completions))) + [0] * (steps - len(completions)))
-  data['ar_completions'] = jnp.array(ar_completions)
-  data['ar_completions_segmentation'] = jnp.array(ar_completions_segmentation)
-  data['ar_completions_position'] = jnp.array(ar_completions_position)
-  # TODO:Since ar_completions are generated through inference. These arrays and NOT sharded. 
+      slot += 1
+  steps = config.max_target_length - config.max_prefill_predict_length
+  completions = defaultdict(list)
+  for _ in range(steps):
+    rng, rng_generate = jax.random.split(rng)
+    decode_state, result_tokens = engine.generate(params, decode_state, rng=rng_generate)
+    for i in range(slot):
+      completions[i].append(result_tokens.get_result_at_slot(i).tokens.item())
+  completions = jnp.array(list(completions.values()))
+  eos_positions = jnp.argmax(completions == tokenizer_model.eos_token_id, axis=1, keepdims=True)
+  eos_not_found = jnp.all(eos_positions == 0, axis=1, keepdims=True)
+  eos_positions = jnp.where(eos_not_found, steps, eos_positions)
+  row_indices = jnp.arange(completions.shape[1])
+  mask = row_indices <= eos_positions
+  data['ar_completions'] = completions * mask
+  data['ar_completions_segmentation'] = mask.astype(jnp.int32)
+  data['ar_completions_position'] = jnp.where(mask, row_indices + 1, 0)
   return data
 
 def prompt_completions(config, engine, tokenizer_model, data, params, rng):
@@ -885,15 +610,10 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     rng2: A new rng key that can be used in future calls.
 
   """
-  reference_params, reference_params_sharding, extra_dpo_args, _loss_fn = [], [], [], loss_fn
-  if config.use_dpo or config.use_grpo:
-    state, reference_params = _split_dpo_state(state)
-    state_mesh_shardings, reference_params_sharding = _split_dpo_state(state_mesh_shardings)
-    extra_dpo_args = [reference_params]
-    if config.use_dpo:
-      _loss_fn = dpo_loss_fn
-    elif config.use_grpo:
-      _loss_fn = grpo_loss_fn
+  state, reference_params = _split_grpo_state(state)
+  state_mesh_shardings, reference_params_sharding = _split_grpo_state(state_mesh_shardings)
+  extra_dpo_args = [reference_params]
+  _loss_fn = grpo_loss_fn
 
   if config.gradient_accumulation_steps > 1:
 
@@ -983,7 +703,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   #   record_activation_metrics(metrics, intermediate_outputs, config)
 
   if config.use_dpo or config.use_grpo:
-    new_state = _merge_dpo_state(new_state, reference_params)
+    new_state = _merge_grpo_state(new_state, reference_params)
 
   return new_state, metrics
 
@@ -991,11 +711,8 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
 def eval_step(model, config, state, data, dropout_rng):
   """eval_step no backprop and new state compared with train_step."""
 
-  reference_params, extra_dpo_args, _loss_fn = [], [], loss_fn
-  if config.use_dpo:
-    state, reference_params = _split_dpo_state(state)
-    extra_dpo_args = [reference_params]
-    _loss_fn = dpo_loss_fn
+  reference_params, extra_dpo_args, _loss_fn = [], [], grpo_loss_fn
+  # TODO: Add support for eval dataset in GRPO 
 
   eval_loss_fn = functools.partial(_loss_fn, model, config, data, dropout_rng, is_train=False)
   loss, aux = eval_loss_fn(state.params, *extra_dpo_args)
@@ -1016,32 +733,6 @@ def eval_step(model, config, state, data, dropout_rng):
   return metrics
 
 
-def create_goodput_recorder(config):
-  if config.enable_goodput_recording:
-    logger_name = f"goodput_{config.run_name}"
-    recorder = goodput.GoodputRecorder(config.run_name, logger_name, jax.process_index() == 0)
-    return recorder
-  return None
-
-
-def record_goodput(
-    recorder,
-    config,
-    record_func,
-    *args,
-):
-  """Record data for Goodput and Badput computation."""
-  if recorder and config.enable_goodput_recording:
-    record_func(*args)
-
-
-def check_example_batch(config, example_batch):
-  if config.max_checkify:
-    jittable_f = checkify.checkify(lambda x: checkify.check(jnp.any(x > -1), "Batch contains bad synthetic data!"))
-    # Check if inputs in batch contains bad synthetic data.
-    # pylint: disable=not-callable
-    err, _ = jax.jit(jittable_f)(example_batch["inputs"][: config.global_batch_size_to_train_on, :])
-    err.throw()
 
 
 def setup_mesh_and_model(config):
@@ -1139,7 +830,6 @@ def setup_train_loop(config):
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
   # data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
-  breakpoint()
   state, _, state_mesh_shardings, data_iterator = max_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
@@ -1166,7 +856,7 @@ def setup_train_loop(config):
       step0_restored = None
     if step0_restored is not None:
       reference_params = step0_restored["items"].params["params"]
-      state = _merge_dpo_state(state, reference_params)
+      state = _merge_grpo_state(state, reference_params)
     else:
       max_logging.log(
           f"Could not restore reference parameters for DPO from '{os.path.join(str(config.checkpoint_dir), str(0))}'"
@@ -1223,8 +913,8 @@ def train_loop(config, config_inference, state=None):
   if config.use_grpo:
     if "reference_params" not in state.params:
       reference_params = jax.tree.map(jnp.copy, state.params["params"])
-      state = _merge_dpo_state(state, reference_params)
-    state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
+      state = _merge_grpo_state(state, reference_params)
+    state_mesh_shardings = _merge_grpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
   else:
     raise TypeError("Non grpo code calling grpo_trainer")
 
@@ -1324,7 +1014,6 @@ def train_loop(config, config_inference, state=None):
       example_batch = load_next_batch(data_iterator, example_batch, config)
       record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
       check_example_batch(config, example_batch=example_batch)
-      # breakpoint()
       # pylint: disable=not-callable
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
@@ -1347,7 +1036,7 @@ def train_loop(config, config_inference, state=None):
       performance_metric_queue.put(step_time_delta.total_seconds())
 
     if checkpoint_manager is not None:
-      state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
+      state_to_save = state if not config.use_dpo else _split_grpo_state(state)[0]
       if save_checkpoint(checkpoint_manager, int(step), state_to_save, config.dataset_type, data_iterator, config):
         checkpointing.print_save_message(step, config.async_checkpointing)
 
@@ -1447,10 +1136,8 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-  pyconfig.initialize(argv)
-  config = pyconfig.config
-  pyconfig_inference.initialize(argv + ['ici_tensor_parallelism=4'])
-  config_inference = pyconfig_inference.config
+  config = pyconfig.initialize(argv)
+  config_inference = pyconfig.initialize(argv + ['ici_tensor_parallelism=4', 'per_device_batch_size='+str(config.per_device_batch_size * config.num_generations)])
   max_utils.print_system_information()
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
@@ -1485,7 +1172,7 @@ def main(argv: Sequence[str]) -> None:
   
   # TODO: ensure we can run decode with full_state_path 
   with diagnostic.diagnose(diagnostic_config):
-    train_loop(config,config_inference)
+    train_loop(config, config_inference)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 import jax
 from jax.sharding import Mesh
+import jax.numpy as jnp
 import numpy as np
 from input_pipeline import input_pipeline_interface
 from input_pipeline import _input_pipeline_utils
@@ -8,6 +9,8 @@ import datasets
 import transformers
 import grain.python as grain
 from collections.abc import Iterable
+from functools import partial
+import jax.tree_util as jtu
 
 class SingleHostDataLoader:
   def __init__(self, dataloader: grain.DataLoader, global_mesh: Mesh):
@@ -30,15 +33,18 @@ class SingleHostDataLoader:
 
   def __next__(self):
     local_data = next(self.local_iterator)
-    try:
-      local_device_arrays = np.split(local_data, len(self.global_mesh.local_devices), axis=0)
-    except ValueError as array_split_error:
-      raise ValueError(
-          f"Unable to put to devices shape {local_data.shape} with "
-          f"local device count {len(self.global_mesh.local_devices)} "
-      ) from array_split_error
-    local_device_buffers = jax.device_put(local_device_arrays, self.global_mesh.local_devices)
-    return local_device_buffers
+    # def _get_local_device_buffers(arr):
+    #   try:
+    #     local_device_arrays = np.split(arr, len(self.global_mesh.local_devices), axis=0)
+    #   except ValueError as array_split_error:
+    #     raise ValueError(
+    #         f"Unable to put to devices shape {arr.shape} with "
+    #         f"local device count {len(self.global_mesh.local_devices)} "
+    #     ) from array_split_error
+    #   return jnp.vstack(jax.device_put(local_device_arrays, self.global_mesh.local_devices))
+    # local_device_buffers = jtu.tree_map(partial(_get_local_device_buffers), local_data)
+
+    return local_data
 
 def preprocessing_pipeline(dataloading_host_index,
     dataloading_host_count,
@@ -77,7 +83,18 @@ def preprocessing_pipeline(dataloading_host_index,
         fn_kwargs={"hf_tokenizer": tokenizer, "max_length": max_target_length - 1, "column_names": data_column_names},
     )
   dataset = dataset.select_columns(data_column_names)
+  dataset = _input_pipeline_utils.HFDataSource(
+    dataset,
+    dataloading_host_index,
+    dataloading_host_count,
+    num_threads,
+    False,
+    max_target_length,
+    data_column_names,
+  )
   operations = []
+  lists2array = lambda x: jax.tree.map(np.asarray, x, is_leaf=lambda x: isinstance(x, (list, tuple)))
+  operations.append(grain.MapOperation(lists2array))
   operations.append(_input_pipeline_utils.PadOrTrimToMaxLength(max_target_length))
   operations.append(grain.Batch(batch_size=global_batch_size // jax.process_count(), drop_remainder=drop_remainder))
 
@@ -103,8 +120,8 @@ def preprocessing_pipeline(dataloading_host_index,
       read_options=grain.ReadOptions(num_threads=num_threads, prefetch_buffer_size=128),
   )
 
-  single_host_gen = SingleHostDataLoader(dataloader, global_mesh)
-  return single_host_gen
+  # single_host_gen = SingleHostDataLoader(dataloader, global_mesh)
+  return iter(dataloader)
 
 
 
@@ -127,6 +144,12 @@ def make_hf_train_iterator(
       dataloading_host_count=len(process_indices_train),
       global_mesh=global_mesh,
       dataset=train_ds,
+      data_column_names=config.train_data_columns,
+      tokenize=config.tokenize_train_data,
+      tokenizer_path=config.tokenizer_path,
+      hf_access_token=config.hf_access_token,
+      global_batch_size=config.global_batch_size_to_load,
+      max_target_length=config.max_prefill_predict_length,
   )
   return local_iter
 

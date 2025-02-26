@@ -235,6 +235,46 @@ class ReformatPacking(grain.MapTransform):
 
 
 @dataclasses.dataclass
+class PadOrTrimToMaxLength(grain.MapTransform):
+  """Pads/Trims each input to the specified length 
+     and returns true_length of input
+  """
+
+  def __init__(self, max_length):
+    self.max_length = max_length
+
+  def map(self, data: dict[str, np.ndarray]):
+    """map to each element"""
+
+    def _max_true_length(prompts, pad_token_id):
+      true_lengths = []
+      for prompt in prompts:
+        matches = np.where(prompt == pad_token_id)[0]
+        if matches.size != 0:
+          true_lengths.append(matches[0])
+        else:
+          true_lengths.append(prompts.shape[0])
+      return true_lengths
+
+    def _pad(x, max_length):
+      pad_amount = max(max_length - x.shape[0], 0)
+      pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
+      return np.pad(x, pad_amount)[:max_length]
+
+    data_columns = list(data.keys())
+    for data_column in data_columns:
+      data[f"{data_column}_segmentation"] = (data[data_column] != 0).astype(np.int32)
+      data[f"{data_column}_position"] = np.arange(data[data_column].shape[0], dtype=np.int32)
+      data[f"{data_column}_true_length"] = np.array([data[data_column].shape[0]], dtype=np.int32)
+    for key, _ in data.items():
+      if 'true_length' not in key:
+        data[key] = _pad(data[key], self.max_length)
+    # for data_column in data_columns:
+    #   data[f"{data_column}_true_length"] = _max_true_length(data[data_column], 0)
+    return data
+
+
+@dataclasses.dataclass
 class PadToMaxLength(grain.MapTransform):
   """Pads each input to the specified length"""
 
