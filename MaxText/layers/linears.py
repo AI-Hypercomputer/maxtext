@@ -295,6 +295,7 @@ class TransformStrategy(Enum):
   OUTPUT_OFFSET = auto()
   RECV_SIZE = auto()
 
+
 class MoeBlock(nn.Module):
   """Mixture of Experts (MoE) block.
 
@@ -428,20 +429,32 @@ class MoeBlock(nn.Module):
   def sparse_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
     tile_size = (512, 1024, 1024)  # (m, k, n)
 
-  def transform_array(input_array, shard_id, strategy):
-    if strategy == TransformStrategy.INPUT_OFFSET:
-      local_array = input_array[shard_id]
-      return jnp.concatenate((jnp.array([0]), jnp.cumsum(local_array)[:-1]))
-    elif strategy == TransformStrategy.SEND_SIZE:
-      return input_array[shard_id]
-    elif strategy == TransformStrategy.OUTPUT_OFFSET:
-      if shard_id == 0:
-        return jnp.zeros_like(input_array[shard_id])
+    def transform_array(input_array, shard_id, strategy):
+      if strategy == TransformStrategy.INPUT_OFFSET:
+        local_array = input_array[shard_id]
+        return jnp.concatenate((jnp.array([0]), jnp.cumsum(local_array)[:-1]))
+      elif strategy == TransformStrategy.SEND_SIZE:
+        return input_array[shard_id]
+      elif strategy == TransformStrategy.OUTPUT_OFFSET:
+        zero_row = jnp.zeros((1,) + input_array.shape[1:], dtype=input_array.dtype)
+        array_with_zeros = jnp.concatenate((zero_row, input_array), axis=0)
+        cumulated_array = jnp.cumsum(array_with_zeros, axis=0, dtype=input_array.dtype)
+        return cumulated_array[shard_id]
+      elif strategy == TransformStrategy.RECV_SIZE:
+        return input_array[:, shard_id]
       else:
-        array_to_cumulate = input_array[:shard_id, :]
-        return jnp.cumsum(array_to_cumulate, axis=1)
-    elif strategy == TransformStrategy.RECV_SIZE:
-      return input_array[:, shard_id]
+        raise ValueError(f"Unknown tranform array strategy: {strategy}")
+
+    def local_permute(inputs, global_group_sizes, local_expert_size):
+      local_id = jax.lax.axis_index("expert")
+      local_sizes = jax.lax.dynamic_slice_in_dim(global_group_sizes, local_id * local_expert_size, local_expert_size, axis=1).reshape(-1)
+      base_indices = jnp.mod(jnp.arange(local_sizes.shape[0]), local_expert_size)
+      expert_indices = jnp.repeat(base_indices, local_sizes, total_repeat_length=inputs.shape[0])
+      sorted_indices = jnp.argsort(expert_indices)
+      sorted_inputs = jnp.take(inputs, indices=sorted_indices, axis=0)
+      group_size = jnp.bincount(expert_indices, length=local_expert_size)
+      return sorted_inputs, sorted_indices, group_size
+
 
     def gmm(inputs, kernel, group_sizes):
       hs_shape = inputs.shape
@@ -486,15 +499,11 @@ class MoeBlock(nn.Module):
 
     def get_all_to_all_params(all_shards_group_sizes, local_expert_size, num_expert_shards):
       local_id = jax.lax.axis_index("expert")
-      input_offsets = self.transform_array(all_shards_group_sizes, local_id, TransformStrategy.INPUT_OFFSET)
-      send_sizes = self.transform_array(all_shards_group_sizes, local_id, TransformStrategy.SEND_SIZE)
-      output_offsets = self.transform_array(all_shards_group_sizes, local_id, TransformStrategy.OUTPUT_OFFSET)
-      recv_sizes = self.transform_array(all_shards_group_sizes, local_id, TransformStrategy.RECV_SIZE)
-      breakpoint()
-      # TODO: update output buffer to a smaller size for efficiency
-      output_shape = jnp.zeros(num_expert_shards * jnp.sum(all_shards_group_sizes, axis=0))
-      breakpoint()
-      return input_offsets, send_sizes, output_offsets, recv_sizes, output_shape
+      input_offsets = transform_array(all_shards_group_sizes, local_id, TransformStrategy.INPUT_OFFSET)
+      send_sizes = transform_array(all_shards_group_sizes, local_id, TransformStrategy.SEND_SIZE)
+      output_offsets = transform_array(all_shards_group_sizes, local_id, TransformStrategy.OUTPUT_OFFSET)
+      recv_sizes = transform_array(all_shards_group_sizes, local_id, TransformStrategy.RECV_SIZE)
+      return input_offsets, send_sizes, output_offsets, recv_sizes
 
     # Currently, we only support data and tensor parallelism with Megablox.
     # We all gather the input activations over tensor parallelism to follow strategy
@@ -525,17 +534,25 @@ class MoeBlock(nn.Module):
 
       if self.get_expert_parallelism() > 1:
         # get group sizes for each shard and all gather
-        global_group_sizes = group_sizes
         axis_name = "expert"
+        global_group_sizes = lax.all_gather(group_sizes, axis_name=axis_name)
         local_expert_size = self.config.num_experts // self.get_expert_parallelism()
         reshaped_group_sizes = jnp.sum(group_sizes.reshape(-1, local_expert_size), axis=1)
         all_shards_group_sizes = lax.all_gather(reshaped_group_sizes, axis_name=axis_name)
-        breakpoint()
         # calculate offsets and sizes for ragged_all_to_all operation
-        input_offsets, send_sizes, output_offsets, recv_sizes, output_shape = get_all_to_all_params(
+        input_offsets, send_sizes, output_offsets, recv_sizes = get_all_to_all_params(
             all_shards_group_sizes, local_expert_size, self.get_expert_parallelism()
         )
-        # group_sizes, sorted_local_experts = local_permute()
+        # TODO: update output buffer to a smaller size for efficiency
+        buffer_size = int(
+            self.get_expert_parallelism()
+            * self.config.per_device_batch_size
+            * self.config.max_target_length
+            * self.config.num_experts_per_tok
+        )
+        output_shape = jnp.zeros(buffer_size, dtype=x.dtype)
+        breakpoint()
+        # TODO: Check failed: input_shape.rank() == output_shape.rank() (2 vs. 1)
         x = jax.lax.ragged_all_to_all(
             x,
             output_shape,
@@ -545,6 +562,8 @@ class MoeBlock(nn.Module):
             recv_sizes,
             axis_name=axis_name,
         )
+        x, local_sorted_indices, group_sizes = local_permute(x, global_group_sizes, local_expert_size)
+        breakpoint()
 
       layer_w0 = gmm(x, w0, group_sizes)
       layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
@@ -828,7 +847,6 @@ class MoeBlock(nn.Module):
         bias_norm=self.config.routed_score_func,
         matmul_precision=self.config.matmul_precision,
     )(inputs)
-
     w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts, cfg.emb_dim, self.intermediate_dim)
     if cfg.sparse_matmul:
       max_logging.log("Running MoE sparse matmul implementation.")

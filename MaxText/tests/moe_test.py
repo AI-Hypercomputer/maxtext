@@ -34,129 +34,127 @@ DType = common_types.DType
 NdInitializer = initializers.NdInitializer
 
 
-# class TokenDroppingTest(unittest.TestCase):
+class TokenDroppingTest(unittest.TestCase):
 
-#   def setUp(self):
-#     super().setUp()
-#     pyconfig.initialize(
-#         [None, "configs/base.yml"],
-#         run_name="token_dropping_test",
-#         enable_checkpointing=False,
-#         model_name="mixtral-8x7b",
-#         dtype="bfloat16",
-#         megablox=False,
-#         sparse_matmul=False,
-#         max_target_length=80,
-#         per_device_batch_size=1,
-#         capacity_factor=2,
-#     )
-#     self.cfg = pyconfig.config
-#     self.rng = jax.random.PRNGKey(42)
-#     devices_array = max_utils.create_device_mesh(self.cfg)
-#     self.model = linears.MoeBlock(
-#         config=self.cfg,
-#         num_experts=self.cfg.num_experts,
-#         num_experts_per_tok=self.cfg.num_experts_per_tok,
-#         mesh=Mesh(devices_array, self.cfg.mesh_axes),
-#         kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-#         kernel_axes=("embed", "mlp"),
-#         dtype=self.cfg.dtype,
-#     )
->>>>>>> f8264f13 (Add expert parallelism with dropless)
+  def setUp(self):
+    super().setUp()
+    self.cfg = pyconfig.initialize(
+        [None, "configs/base.yml"],
+        run_name="token_dropping_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        megablox=False,
+        sparse_matmul=False,
+        max_target_length=80,
+        per_device_batch_size=1,
+        capacity_factor=2,
+    )
+    self.rng = jax.random.PRNGKey(42)
+    devices_array = max_utils.create_device_mesh(self.cfg)
+    self.model = linears.MoeBlock(
+        config=self.cfg,
+        num_experts=self.cfg.num_experts,
+        num_experts_per_tok=self.cfg.num_experts_per_tok,
+        mesh=Mesh(devices_array, self.cfg.mesh_axes),
+        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        dtype=self.cfg.dtype,
+    )
 
-#   def test_generate_masks(self):
-#     # expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
-#     # expert_capacity_in_batch = (4 * 2 / 8) * 2 = 2
-#     top_k_indices = jnp.array(
-#         [
-#             [[0, 5], [0, 4], [1, 0], [3, 5]],
-#             [[1, 2], [4, 1], [5, 0], [7, 1]],
-#             [[6, 2], [2, 3], [4, 2], [1, 2]],
-#             [[4, 1], [0, 7], [5, 0], [4, 7]],
-#         ]
-#     )
-#     softmax_probs = jnp.array(
-#         [
-#             [
-#                 [0.20, 0, 0, 0, 0, 0.80, 0, 0],
-#                 [0.68, 0, 0, 0, 0.32, 0, 0, 0],
-#                 [0.22, 0.78, 0, 0, 0, 0, 0, 0],
-#                 [0, 0, 0, 0.32, 0, 0.68, 0, 0],
-#             ],
-#             [
-#                 [0, 0.26, 0.74, 0, 0, 0, 0, 0],
-#                 [0, 0.79, 0, 0, 0.21, 0, 0, 0],
-#                 [0.89, 0, 0, 0, 0, 0.11, 0, 0],
-#                 [0, 0.11, 0, 0, 0, 0, 0, 0.89],
-#             ],
-#             [
-#                 [0, 0, 0.26, 0, 0, 0, 0.74, 0],
-#                 [0, 0, 0.88, 0.12, 0, 0, 0, 0],
-#                 [0, 0, 0.17, 0, 0.83, 0, 0, 0],
-#                 [0, 0.35, 0.65, 0, 0, 0, 0, 0],
-#             ],
-#             [
-#                 [0, 0.47, 0, 0, 0.53, 0, 0, 0],
-#                 [0.36, 0, 0, 0, 0, 0, 0, 0.64],
-#                 [0.15, 0, 0, 0, 0, 0.85, 0, 0],
-#                 [0, 0, 0, 0, 0.18, 0, 0, 0.82],
-#             ],
-#         ]
-#     )
+  def test_generate_masks(self):
+    # expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
+    # expert_capacity_in_batch = (4 * 2 / 8) * 2 = 2
+    top_k_indices = jnp.array(
+        [
+            [[0, 5], [0, 4], [1, 0], [3, 5]],
+            [[1, 2], [4, 1], [5, 0], [7, 1]],
+            [[6, 2], [2, 3], [4, 2], [1, 2]],
+            [[4, 1], [0, 7], [5, 0], [4, 7]],
+        ]
+    )
+    softmax_probs = jnp.array(
+        [
+            [
+                [0.20, 0, 0, 0, 0, 0.80, 0, 0],
+                [0.68, 0, 0, 0, 0.32, 0, 0, 0],
+                [0.22, 0.78, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0.32, 0, 0.68, 0, 0],
+            ],
+            [
+                [0, 0.26, 0.74, 0, 0, 0, 0, 0],
+                [0, 0.79, 0, 0, 0.21, 0, 0, 0],
+                [0.89, 0, 0, 0, 0, 0.11, 0, 0],
+                [0, 0.11, 0, 0, 0, 0, 0, 0.89],
+            ],
+            [
+                [0, 0, 0.26, 0, 0, 0, 0.74, 0],
+                [0, 0, 0.88, 0.12, 0, 0, 0, 0],
+                [0, 0, 0.17, 0, 0.83, 0, 0, 0],
+                [0, 0.35, 0.65, 0, 0, 0, 0, 0],
+            ],
+            [
+                [0, 0.47, 0, 0, 0.53, 0, 0, 0],
+                [0.36, 0, 0, 0, 0, 0, 0, 0.64],
+                [0.15, 0, 0, 0, 0, 0.85, 0, 0],
+                [0, 0, 0, 0, 0.18, 0, 0, 0.82],
+            ],
+        ]
+    )
 
-#     # As expert_capacity_in_batch=2, so updated softmax_probs become (4 tokens were dropped):
-#     # softmax_probs = jnp.array([[[0.20, 0, 0, 0, 0, 0.80, 0, 0],
-#     #                             [0.68, 0, 0, 0, 0.32, 0, 0, 0],
-#     #                             [0, 0.78, 0, 0, 0, 0, 0, 0],
-#     #                             [0, 0, 0, 0.32, 0, 0.68, 0, 0]],
-#     #                            [[0, 0.26, 0.74, 0, 0, 0, 0, 0],
-#     #                             [0, 0.79, 0, 0, 0.21, 0, 0, 0],
-#     #                             [0.89, 0, 0, 0, 0, 0.11, 0, 0],
-#     #                             [0, 0, 0, 0, 0, 0, 0, 0.89]],
-#     #                            [[0, 0, 0.26, 0, 0, 0, 0.74, 0],
-#     #                             [0, 0, 0.88, 0.12, 0, 0, 0, 0],
-#     #                             [0, 0, 0, 0, 0.83, 0, 0, 0],
-#     #                             [0, 0.35, 0, 0, 0, 0, 0, 0]],
-#     #                            [[0, 0.47, 0, 0, 0.53, 0, 0, 0],
-#     #                             [0.36, 0, 0, 0, 0, 0, 0, 0.64],
-#     #                             [0.15, 0, 0, 0, 0, 0.85, 0, 0],
-#     #                             [0, 0, 0, 0, 0.18, 0, 0, 0.82]]])
+    # As expert_capacity_in_batch=2, so updated softmax_probs become (4 tokens were dropped):
+    # softmax_probs = jnp.array([[[0.20, 0, 0, 0, 0, 0.80, 0, 0],
+    #                             [0.68, 0, 0, 0, 0.32, 0, 0, 0],
+    #                             [0, 0.78, 0, 0, 0, 0, 0, 0],
+    #                             [0, 0, 0, 0.32, 0, 0.68, 0, 0]],
+    #                            [[0, 0.26, 0.74, 0, 0, 0, 0, 0],
+    #                             [0, 0.79, 0, 0, 0.21, 0, 0, 0],
+    #                             [0.89, 0, 0, 0, 0, 0.11, 0, 0],
+    #                             [0, 0, 0, 0, 0, 0, 0, 0.89]],
+    #                            [[0, 0, 0.26, 0, 0, 0, 0.74, 0],
+    #                             [0, 0, 0.88, 0.12, 0, 0, 0, 0],
+    #                             [0, 0, 0, 0, 0.83, 0, 0, 0],
+    #                             [0, 0.35, 0, 0, 0, 0, 0, 0]],
+    #                            [[0, 0.47, 0, 0, 0.53, 0, 0, 0],
+    #                             [0.36, 0, 0, 0, 0, 0, 0, 0.64],
+    #                             [0.15, 0, 0, 0, 0, 0.85, 0, 0],
+    #                             [0, 0, 0, 0, 0.18, 0, 0, 0.82]]])
 
-#     # shape of dispatch_mask & combine_mask: (batch_size, seq_len, num_experts, expert_capacity_per_batch)
-#     expected_combine_mask = jnp.array(
-#         [
-#             [
-#                 [[0.2, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0.8, 0], [0, 0], [0, 0]],
-#                 [[0, 0.68], [0, 0], [0, 0], [0, 0], [0.32, 0], [0, 0], [0, 0], [0, 0]],
-#                 [[0, 0], [0.78, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0]],
-#                 [[0, 0], [0, 0], [0, 0], [0.32, 0], [0, 0], [0, 0.68], [0, 0], [0, 0]],
-#             ],
-#             [
-#                 [[0, 0], [0.26, 0], [0.74, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0]],
-#                 [[0, 0], [0, 0.79], [0, 0], [0, 0], [0.21, 0], [0, 0], [0, 0], [0, 0]],
-#                 [[0.89, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0.11, 0], [0, 0], [0, 0]],
-#                 [[0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0.89, 0]],
-#             ],
-#             [
-#                 [[0, 0], [0, 0], [0.26, 0], [0, 0], [0, 0], [0, 0], [0.74, 0], [0, 0]],
-#                 [[0, 0], [0, 0], [0, 0.88], [0.12, 0], [0, 0], [0, 0], [0, 0], [0, 0]],
-#                 [[0, 0], [0, 0], [0, 0], [0, 0], [0.83, 0], [0, 0], [0, 0], [0, 0]],
-#                 [[0, 0], [0.35, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0]],
-#             ],
-#             [
-#                 [[0, 0], [0.47, 0], [0, 0], [0, 0], [0.53, 0], [0, 0], [0, 0], [0, 0]],
-#                 [[0.36, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0.64, 0]],
-#                 [[0, 0.15], [0, 0], [0, 0], [0, 0], [0, 0], [0.85, 0], [0, 0], [0, 0]],
-#                 [[0, 0], [0, 0], [0, 0], [0, 0], [0, 0.18], [0, 0], [0, 0], [0, 0.82]],
-#             ],
-#         ],
-#         dtype=jnp.float32,
-#     )
-#     expected_dispatch_mask = expected_combine_mask.astype(bool)
-#     actual_dispatch_mask, actual_combine_mask = self.model.generate_masks(top_k_indices, softmax_probs)
+    # shape of dispatch_mask & combine_mask: (batch_size, seq_len, num_experts, expert_capacity_per_batch)
+    expected_combine_mask = jnp.array(
+        [
+            [
+                [[0.2, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0.8, 0], [0, 0], [0, 0]],
+                [[0, 0.68], [0, 0], [0, 0], [0, 0], [0.32, 0], [0, 0], [0, 0], [0, 0]],
+                [[0, 0], [0.78, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0]],
+                [[0, 0], [0, 0], [0, 0], [0.32, 0], [0, 0], [0, 0.68], [0, 0], [0, 0]],
+            ],
+            [
+                [[0, 0], [0.26, 0], [0.74, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0]],
+                [[0, 0], [0, 0.79], [0, 0], [0, 0], [0.21, 0], [0, 0], [0, 0], [0, 0]],
+                [[0.89, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0.11, 0], [0, 0], [0, 0]],
+                [[0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0.89, 0]],
+            ],
+            [
+                [[0, 0], [0, 0], [0.26, 0], [0, 0], [0, 0], [0, 0], [0.74, 0], [0, 0]],
+                [[0, 0], [0, 0], [0, 0.88], [0.12, 0], [0, 0], [0, 0], [0, 0], [0, 0]],
+                [[0, 0], [0, 0], [0, 0], [0, 0], [0.83, 0], [0, 0], [0, 0], [0, 0]],
+                [[0, 0], [0.35, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0]],
+            ],
+            [
+                [[0, 0], [0.47, 0], [0, 0], [0, 0], [0.53, 0], [0, 0], [0, 0], [0, 0]],
+                [[0.36, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0.64, 0]],
+                [[0, 0.15], [0, 0], [0, 0], [0, 0], [0, 0], [0.85, 0], [0, 0], [0, 0]],
+                [[0, 0], [0, 0], [0, 0], [0, 0], [0, 0.18], [0, 0], [0, 0], [0, 0.82]],
+            ],
+        ],
+        dtype=jnp.float32,
+    )
+    expected_dispatch_mask = expected_combine_mask.astype(bool)
+    actual_dispatch_mask, actual_combine_mask = self.model.generate_masks(top_k_indices, softmax_probs)
 
-#     self.assertTrue((expected_dispatch_mask == actual_dispatch_mask).all())
-#     self.assertTrue(jax.numpy.allclose(expected_combine_mask, actual_combine_mask, rtol=1e-02, atol=1e-02))
+    self.assertTrue((expected_dispatch_mask == actual_dispatch_mask).all())
+    self.assertTrue(jax.numpy.allclose(expected_combine_mask, actual_combine_mask, rtol=1e-02, atol=1e-02))
 
 
 class MoeLoopBlock(nn.Module):
@@ -259,76 +257,20 @@ class MoeBlockTest(unittest.TestCase):
 
     moe_variables = {"params": {"gate": {"kernel": kernel}, "wi_0": wi_0, "wi_1": wi_1, "wo": wo}}
 
-    output = model.apply(moe_variables, hidden_states)
+    output = jax.jit(model.apply)(moe_variables, hidden_states)
     return output
 
-  #   @pytest.mark.tpu_only
-  #   def test_megablox(self):
-  #     pyconfig.initialize(
-  #         [None, "configs/base.yml"],
-  #         run_name="moe_block_megablox_test",
-  #         enable_checkpointing=False,
-  #         model_name="mixtral-8x7b",
-  #         dtype="bfloat16",
-  #         megablox=True,
-  #         sparse_matmul=True,
-  #         per_device_batch_size=4,
-  #     )
-
-  #     cfg = pyconfig.config
-  #     rng = jax.random.PRNGKey(1234)
-  #     rng_model, rng_hidden_states = jax.random.split(rng)
-  #     hidden_states = jax.random.uniform(
-  #         rng_hidden_states, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
-  #     )
-
-  #     devices_array = max_utils.create_device_mesh(cfg)
-  #     mesh = Mesh(devices_array, cfg.mesh_axes)
-  #     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
-  #     actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-  #     self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
-
-  #   @pytest.mark.tpu_only
-  #   def test_dense(self):
-  #     pyconfig.initialize(
-  #         [None, "configs/base.yml"],
-  #         run_name="moe_block_dense_test",
-  #         enable_checkpointing=False,
-  #         model_name="mixtral-8x7b",
-  #         dtype="bfloat16",
-  #         megablox=False,
-  #         sparse_matmul=False,
-  #         per_device_batch_size=4,
-  #     )
-
-  #     cfg = pyconfig.config
-  #     rng = jax.random.PRNGKey(2345)
-  #     rng_model, rng_hidden_states = jax.random.split(rng)
-  #     hidden_states = jax.random.uniform(
-  #         rng_hidden_states, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
-  #     )
-
-  #     devices_array = max_utils.create_device_mesh(cfg)
-  #     mesh = Mesh(devices_array, cfg.mesh_axes)
-  #     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
-  #     actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-  #     # suspect numeric issues in the dense matmul
-  #     self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=5e-01, atol=5e-01, equal_nan=False))
-
   @pytest.mark.tpu_only
-  def test_ragged_all_to_all(self):
+  def test_megablox(self):
     cfg = pyconfig.initialize(
         [None, "configs/base.yml"],
-        run_name="moe_all_to_all_test",
+        run_name="moe_block_megablox_test",
         enable_checkpointing=False,
-        model_name="mixtral-test",
+        model_name="mixtral-8x7b",
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
-        per_device_batch_size=1,
-        ici_expert_parallelism=4,
-        ici_fsdp_parallelism=1,
-        max_target_length=64,
+        per_device_batch_size=4,
     )
 
     rng = jax.random.PRNGKey(1234)
@@ -341,83 +283,33 @@ class MoeBlockTest(unittest.TestCase):
     mesh = Mesh(devices_array, cfg.mesh_axes)
     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
     actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
+    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
-    # from jax.sharding import PartitionSpec as P
-    # from jax.experimental.shard_map import shard_map
-    # from functools import partial
+  @pytest.mark.tpu_only
+  def test_dense(self):
+    cfg = pyconfig.initialize(
+        [None, "configs/base.yml"],
+        run_name="moe_block_dense_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        megablox=False,
+        sparse_matmul=False,
+        per_device_batch_size=4,
+    )
 
-    # axis_name = "fsdp"
-    # operand = jax.device_put(
-    #     jnp.array([[1, 2, 2], [3, 4, 0],
-    #                [10, 20, 20], [30, 40, 0]], dtype=jnp.int32),
-    #     jax.sharding.NamedSharding(mesh, P(axis_name, None)),
-    # )
-    # output = jax.device_put(
-    #     jnp.zeros((4, 4), dtype=jnp.int32),
-    #     jax.sharding.NamedSharding(mesh, P(axis_name, None)),
-    # )
-    # input_offsets = jax.device_put(
-    #     jnp.array([[0, 1], [0, 1],
-    #                [0, 1], [0, 1]], dtype=jnp.int32),
-    #     jax.sharding.NamedSharding(mesh, P(axis_name, None)),
-    # )
-    # send_sizes = jax.device_put(
-    #     jnp.array([[1, 2], [1, 1],
-    #                [1, 2], [1, 1]], dtype=jnp.int32),
-    #     jax.sharding.NamedSharding(mesh, P(axis_name, None)),
-    # )
-    # output_offsets = jax.device_put(
-    #     jnp.array([[0, 0], [1, 2],
-    #                [0, 0], [1, 2]], dtype=jnp.int32),
-    #     jax.sharding.NamedSharding(mesh, P(axis_name, None)),
-    # )
-    # recv_sizes = jax.device_put(
-    #     jnp.array([[1, 1], [2, 1],
-    #                [1, 1], [2, 1]], dtype=jnp.int32),
-    #     jax.sharding.NamedSharding(mesh, P(axis_name, None)),
-    # )
-    # axis_index_groups = ((0, 1), (2, 3))
+    rng = jax.random.PRNGKey(2345)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    hidden_states = jax.random.uniform(
+        rng_hidden_states, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
+    )
 
-    # # @jax.jit
-    # @partial(
-    #     shard_map,
-    #     mesh=mesh,
-    #     in_specs=(
-    #         P(axis_name, None),
-    #         P(axis_name, None),
-    #         P(axis_name, None),
-    #         P(axis_name, None),
-    #         P(axis_name, None),
-    #         P(axis_name, None),
-    #     ),
-    #     out_specs=P(axis_name),
-    #     check_rep=False,
-    # )
-    # def fwd(
-    #     operand, output, input_offsets, send_sizes, output_offsets, recv_sizes
-    # ):
-    #   operand = operand.reshape(operand.shape[1:])
-    #   output = output.reshape(output.shape[1:])
-    #   input_offsets = input_offsets.reshape(input_offsets.shape[1:])
-    #   send_sizes = send_sizes.reshape(send_sizes.shape[1:])
-    #   output_offsets = output_offsets.reshape(output_offsets.shape[1:])
-    #   recv_sizes = recv_sizes.reshape(recv_sizes.shape[1:])
-    #   breakpoint()
-    #   result = jax.lax.ragged_all_to_all(
-    #       operand,
-    #       output,
-    #       input_offsets,
-    #       send_sizes,
-    #       output_offsets,
-    #       recv_sizes,
-    #       axis_name=axis_name,
-    #   )
-    #   return result
-
-    # final_result = fwd(
-    #     operand, output, input_offsets, send_sizes, output_offsets, recv_sizes
-    # )
-    # breakpoint()
+    devices_array = max_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
+    actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
+    # suspect numeric issues in the dense matmul
+    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=5e-01, atol=5e-01, equal_nan=False))
 
 
 if __name__ == "__main__":
