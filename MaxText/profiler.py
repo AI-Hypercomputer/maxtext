@@ -57,6 +57,10 @@ class Profiler:
         return
       self.libcudart.cudaProfilerStart()
     elif self.mode == "xplane":
+      # when running on GPU, seems the gs bucket upload fails
+      if self.output_path.startswith("gs://"):
+        self.output_path = "/tmp/jax-profiles/" + self.output_path[4:]
+      print("Start profiling {}".format(self.output_path))
       jax.profiler.start_trace(self.output_path)
 
   def deactivate(self, blocking_object=None):
