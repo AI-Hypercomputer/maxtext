@@ -122,83 +122,6 @@ def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr, per_d
   metrics["scalar"].update({"learning/current_learning_rate": lr})
 
 
-_buffered_step = None
-_buffered_metrics = None
-
-
-def write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config, is_training=True):
-  """Entry point for all metrics writing in Train's Main.
-  TODO: would be better as a Class in the future (that initialized all state!)
-
-  To avoid introducing an unnecessary dependency, we "double buffer" -- we hold
-  onto the last metrics and step and only publish when we receive a new metrics and step.
-  The logic is that this ensures that Jax is able to queues train_steps and we
-  don't block when turning "lazy" Jax arrays into real Python numbers.
-  """
-  if not config.enable_metric_writing:
-    return
-  metrics_to_write, steps_to_write = None, None
-  if is_training:
-    global _buffered_step, _buffered_metrics
-    if _buffered_metrics is not None:
-      if _buffered_step is None:
-        raise ValueError(f"When writing metrics, {_buffered_step=} was none")
-      metrics_to_write = _buffered_metrics
-      steps_to_write = _buffered_step
-  else:
-    metrics_to_write = metrics
-    steps_to_write = step
-
-  if metrics_to_write:
-    if config.enable_tensorboard:
-      write_metrics_to_tensorboard(writer, metrics_to_write, steps_to_write, config, is_training)
-
-    if config.metrics_file:
-      max_utils.write_metrics_locally(metrics_to_write, steps_to_write, config, local_metrics_file, is_training)
-
-    if config.gcs_metrics and jax.process_index() == 0:
-      running_gcs_metrics = max_utils.write_metrics_for_gcs(
-          metrics_to_write, steps_to_write, config, running_gcs_metrics, is_training
-      )
-
-  if is_training:
-    _buffered_step = step
-    _buffered_metrics = metrics
-
-
-def write_metrics_to_tensorboard(writer, metrics, step, config, is_training=True):
-  """Writes metrics to tensorboard"""
-  with jax.spmd_mode("allow_all"):
-    if jax.process_index() == 0:
-      for metric_name in metrics.get("scalar", []):
-        writer.add_scalar(metric_name, np.array(metrics["scalar"][metric_name]), step)
-      for metric_name in metrics.get("scalars", []):
-        writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
-
-    if is_training:
-      full_log = step % config.log_period == 0
-
-      if config.enable_step_logging:
-        max_logging.log(
-            f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
-            f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
-            f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
-            f"total_weights: {metrics['scalar']['learning/total_weights']}, "
-            f"loss: {metrics['scalar']['learning/loss']:.3f}"
-        )
-
-      if full_log and jax.process_index() == 0:
-        max_logging.log(f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'")
-        writer.flush()
-
-
-def clear_buffered_metrics():
-  global _buffered_step
-  global _buffered_metrics
-  _buffered_step = None
-  _buffered_metrics = None
-
-
 def save_checkpoint(
     checkpoint_manager,
     step,
@@ -905,45 +828,6 @@ def train_loop(config, state=None):
     else:
       p_eval_step = None
 
-  if eval_data_iterator:
-    cumulative_eval_metrics = {
-        "scalar": {
-            "eval/total_loss": 0.0,
-            "eval/total_weights": 0.0,
-            "eval/avg_loss": 0.0,
-            "eval/moe_lb_loss": 0.0,
-        }
-    }
-    eval_step_count = 0
-    # pylint: disable=not-callable
-    eval_dpo_reward_accuracy = 0.0
-    eval_step_count = 0
-    # pylint: disable=not-callable
-    for eval_batch in eval_data_iterator:
-      if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
-        break
-      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        eval_metrics = p_eval_step(state, eval_batch, init_rng)
-      cumulative_eval_metrics["scalar"]["eval/total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
-      cumulative_eval_metrics["scalar"]["eval/total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
-      cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] += float(eval_metrics["scalar"]["evaluation/moe_lb_loss"])
-      eval_dpo_reward_accuracy += float(eval_metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0))  # for dpo only
-      max_logging.log(f"Completed eval step {eval_step_count}")
-      eval_step_count += 1
-    eval_loss = (
-        cumulative_eval_metrics["scalar"]["eval/total_loss"]
-        / (cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS)
-        + cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
-    )
-    cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
-    if config.use_dpo:
-      cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = eval_dpo_reward_accuracy / eval_step_count
-    max_logging.log(
-        f"average loss before training: {eval_step_count=}, {eval_loss=},"
-        f" total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}"
-    )
-    
-  local_metrics_file = open(config.metrics_file, "a", encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
 
   start_step = get_first_step(state)  # this is the start_step for training
@@ -1054,15 +938,11 @@ def train_loop(config, state=None):
       )
       if config.use_dpo:
         cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = eval_dpo_reward_accuracy / eval_step_count
-      write_metrics(
-          writer, local_metrics_file, running_gcs_metrics, cumulative_eval_metrics, step, config, is_training=False
+      metric_logger.write_metrics(running_gcs_metrics, cumulative_eval_metrics, step, is_training=False)
+      max_logging.log(
+          f"average loss after {step=}: {eval_step_count=}, {eval_loss=},"
+          f" total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}"
       )
-      if config.enable_step_logging:
-        max_logging.log(
-            f"average loss after {step=}: {eval_step_count=}, {eval_loss=},"
-            f" total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}"
-        )
-      mllog_utils.early_stop_check(config, step, eval_loss, start_step)
       if eval_loss <= config.target_eval_loss:
         max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
         if step > first_profiling_step:
@@ -1096,19 +976,17 @@ def train_loop(config, state=None):
   metric_logger.write_metrics(running_gcs_metrics, metrics, config.steps - 1)  # final step metrics
   max_utils.close_summary_writer(writer)
   record_goodput(recorder, config, recorder.record_job_end_time if recorder else None)
-  clear_buffered_metrics()
-  if not config.pre_compile:
-    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      # pytype: disable=attribute-error
-      compiled = p_train_step.lower(state, example_batch, nextrng).compile()
-      compiled_stats = compiled.memory_analysis()
-      if compiled_stats is not None:
-        max_logging.log(
-            f"Output size: {compiled_stats.output_size_in_bytes}, "
-            f"temp size: {compiled_stats.temp_size_in_bytes}, "
-            f"argument size: {compiled_stats.argument_size_in_bytes}, "
-            f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
-        )
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    # pytype: disable=attribute-error
+    compiled = p_train_step.lower(state, example_batch, nextrng).compile()
+    compiled_stats = compiled.memory_analysis()
+    if compiled_stats is not None:
+      max_logging.log(
+          f"Output size: {compiled_stats.output_size_in_bytes}, "
+          f"temp size: {compiled_stats.temp_size_in_bytes}, "
+          f"argument size: {compiled_stats.argument_size_in_bytes}, "
+          f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
+      )
   return state
 
 
