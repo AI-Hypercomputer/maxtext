@@ -93,7 +93,7 @@ if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
       if [[ ${MODE} == "pinned" ]]; then
         export BASEIMAGE=ghcr.io/nvidia/jax:base-2024-12-04
       else
-        export BASEIMAGE=us-central1-docker.pkg.dev/supercomputer-testing/yangyuwei-maxtext/maxtext-mantaray:latest-ray
+        export BASEIMAGE=gcr.io/tpu-prod-env-multipod/maxtext_gpu_jax_stable_stack_a3u:latest
       fi
       docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg DEVICE=$DEVICE --build-arg BASEIMAGE=$BASEIMAGE -f ./maxtext_gpu_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
     fi

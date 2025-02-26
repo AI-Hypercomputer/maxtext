@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:experimental
-ARG BASEIMAGE=us-central1-docker.pkg.dev/supercomputer-testing/yangyuwei-maxtext/maxtext-mantaray:latest-ray
+ARG BASEIMAGE=gcr.io/tpu-prod-env-multipod/maxtext_gpu_jax_stable_stack_a3u:latest
 FROM $BASEIMAGE
 
 # Stopgaps measure to circumvent gpg key setup issue.
