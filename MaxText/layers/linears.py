@@ -615,7 +615,7 @@ class MoeBlock(nn.Module):
         )
         dispatch = nn.with_logical_constraint(
             dispatch,
-            (None, "activation_batch_no_exp", "activation_length", "activation_embed"),
+            ("activation_length", "activation_batch_no_exp", None, "activation_embed"),
         )
       with jax.named_scope("wi_0"):
         w0_kernel_axes = ("exp", None, "mlp")
