@@ -78,7 +78,7 @@ class LlamaDecoderLayer(nn.Module):
     cfg = self.config
     mesh = self.mesh
 
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
+    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     lnx_rms = models.RMSNorm(
         dtype=cfg.dtype,
@@ -89,7 +89,7 @@ class LlamaDecoderLayer(nn.Module):
     )
     lnx = lnx_rms(inputs)
 
-    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
+    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     # Self-attention block
     attention_layer = Attention(
@@ -105,6 +105,8 @@ class LlamaDecoderLayer(nn.Module):
         weight_dtype=cfg.weight_dtype,
         dropout_rate=cfg.dropout_rate,
         name="self_attention",
+        float32_qk_product=cfg.float32_qk_product,
+        float32_logits=cfg.float32_logits,
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
         prefill_cache_axis_order=tuple([int(i) for i in cfg.prefill_cache_axis_order.split(",")]),
@@ -124,7 +126,9 @@ class LlamaDecoderLayer(nn.Module):
         model_mode=model_mode,
     )
 
-    attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    attention_lnx = nn.with_logical_constraint(
+        attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
+    )
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
@@ -135,7 +139,9 @@ class LlamaDecoderLayer(nn.Module):
         kernel_axes=("norm",),
         epsilon=cfg.normalization_layer_epsilon,
     )(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(hidden_states, ("activation_batch", "activation_length", "activation_embed"))
+    hidden_states = nn.with_logical_constraint(
+        hidden_states, ("activation_batch", "activation_norm_length", "activation_embed")
+    )
 
     # MLP block.
     mlp_lnx = linears.MlpBlock(
@@ -148,7 +154,7 @@ class LlamaDecoderLayer(nn.Module):
         config=cfg,
         quant=self.quant,
     )(hidden_states, deterministic=deterministic)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     layer_output = mlp_lnx + intermediate_inputs
 
@@ -156,7 +162,7 @@ class LlamaDecoderLayer(nn.Module):
 
     layer_output = nn.with_logical_constraint(
         layer_output,
-        ("activation_batch", "activation_length", "activation_embed"),
+        ("activation_batch", "activation_norm_length", "activation_embed"),
     )
 
     if cfg.record_internal_nn_metrics:

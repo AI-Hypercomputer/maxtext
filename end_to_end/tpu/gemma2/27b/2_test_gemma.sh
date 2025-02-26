@@ -24,6 +24,8 @@ if [ -z "${BASE_OUTPUT_PATH}" ]; then
     echo "BASE_OUTPUT_PATH is not set, using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}"
 fi
 
+# Installing torch for deps in forward_pass_logit_chekcker.py
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # Non-Googlers please remember to point `DATASET_PATH` to the GCS bucket where you have your training data
 export DATASET_PATH=gs://maxtext-dataset

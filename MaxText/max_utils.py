@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 """ Common Max Utils needed by multiple modules"""
+import shutil
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -37,6 +38,7 @@ import max_logging
 
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
+import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
 
 import json
@@ -62,10 +64,6 @@ def with_memory_kind(t, memory_kind):
 def cast_dtype_from_to(nest, src, dst):
   """All items in nest with dtype src are casted to dtype dst."""
   return jax.tree_util.tree_map(lambda t: t.astype(dst) if t.dtype == src else t, nest)
-
-
-def cast_to_bf16(params):
-  return cast_dtype_from_to(params, np.float32, jnp.bfloat16)
 
 
 def find_nans_and_infs(pytree):
@@ -202,6 +200,12 @@ def parse_gcs_bucket_and_prefix(destination_gcs_name):
   return bucket, key
 
 
+def add_trailing_slash(path):
+  if not path.endswith("/"):
+    return path + "/"
+  return path
+
+
 def upload_blob(destination_gcs_name, source_file_name):
   """Uploads a file to a GCS location"""
   bucket_name, prefix_name = parse_gcs_bucket_and_prefix(destination_gcs_name)
@@ -209,6 +213,34 @@ def upload_blob(destination_gcs_name, source_file_name):
   bucket = storage_client.get_bucket(bucket_name)
   blob = bucket.blob(prefix_name)
   blob.upload_from_filename(source_file_name)
+
+
+def upload_dump(local_dir, target_dir, module_name=None, delete_local_after=True, all_host_upload=False):
+  """Uploads a directory to a GCS location, with an optional filter"""
+  if not all_host_upload and jax.process_index() != 0:
+    return
+  storage_client = storage.Client()
+  bucket_name, prefix_name = parse_gcs_bucket_and_prefix(target_dir)
+  bucket = storage_client.get_bucket(bucket_name)
+  if all_host_upload:
+    hostname = socket.gethostname()  # Alternatively can use jax.process_id()
+    prefix_name = os.path.join(prefix_name, hostname)
+    target_dir = os.path.join(target_dir, hostname)
+  max_logging.log(f"Uploading HLO Dump to {target_dir}...")
+  for root, _, files in os.walk(local_dir):
+    for file in files:
+      if module_name and module_name not in file:
+        continue
+      else:
+        max_logging.log(f"Uploading {file}")
+      local_path = os.path.join(root, file)
+      relative_path = os.path.relpath(local_path, local_dir)
+      blob_name = os.path.join(prefix_name, relative_path)
+      blob = bucket.blob(blob_name)
+      blob.upload_from_filename(local_path)
+  max_logging.log(f"HLO Dump Uploaded to {target_dir}!")
+  if delete_local_after:
+    shutil.rmtree(local_dir)
 
 
 def maybe_initialize_jax_distributed_system(raw_keys):
@@ -219,16 +251,22 @@ def maybe_initialize_jax_distributed_system(raw_keys):
 
   For CPUs, we call jax.distributed.initialize() explicitly, with the specified arguments.
   """
+  if raw_keys["skip_jax_distributed_system"]:
+    max_logging.log("Skipping jax distributed system due to skip_jax_distributed_system=True flag.")
+    return
+  if raw_keys["inference_benchmark_test"]:
+    # Disable initialization for inference benmark test.
+    return
   if raw_keys["compile_topology"]:
     # Don't initialize jax distributed with AOT compilation
     return
   if is_gpu_backend(raw_keys):
     max_logging.log("Attempting to initialize the jax distributed system for GPU backend...")
-    initialize_jax_for_gpu()
+    initialize_jax_for_gpu(raw_keys)
     max_logging.log("Jax distributed system initialized on GPU!")
   elif is_cpu_backend(raw_keys):
     max_logging.log("Attempting to initialize the jax distributed system for CPU backend...")
-    initialize_jax_for_cpu()
+    initialize_jax_for_cpu(raw_keys)
     max_logging.log("Jax distributed system initialized on CPUs!")
   elif (
       raw_keys["enable_checkpointing"]
@@ -238,13 +276,13 @@ def maybe_initialize_jax_distributed_system(raw_keys):
   ) or raw_keys["hardware"] == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system...")
     if not raw_keys["enable_emergency_checkpoint"]:
-      jax.distributed.initialize()
+      jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
     else:
       initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
     max_logging.log("Jax distributed system initialized!")
 
 
-def initialize_jax_for_gpu():
+def initialize_jax_for_gpu(raw_keys):
   """Jax distributed initialize for GPUs."""
   if os.environ.get("JAX_COORDINATOR_IP") is not None:
     coordinator_ip = str(os.getenv("JAX_COORDINATOR_IP"))
@@ -253,11 +291,12 @@ def initialize_jax_for_gpu():
         coordinator_address=f"{coordinator_ip}:{coordinator_port}",
         num_processes=int(os.getenv("NNODES")),
         process_id=int(os.getenv("NODE_RANK")),
+        initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
     )
     max_logging.log(f"JAX global devices: {jax.devices()}")
 
 
-def initialize_jax_for_cpu():
+def initialize_jax_for_cpu(raw_keys):
   """Jax distributed initialize for CPUs. Includes retries until the coordinator is ready."""
   coordinator_ip_address = get_coordinator_ip_address()
   coordinator_address = coordinator_ip_address + ":1234"  # JAX coordinator port used in XPK
@@ -272,7 +311,41 @@ def initialize_jax_for_cpu():
       coordinator_address=coordinator_address,
       process_id=pid,
       num_processes=int(os.environ.get("JAX_PROCESS_COUNT")),
+      initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
   )
+
+
+def _wait_for_file_to_disappear(f, timeout=300):
+  for _ in range(timeout):
+    if not f.exists():
+      return True
+    time.sleep(1)
+  return False
+
+
+def _extract_step(f):
+  # The base file name is formatted as {job_name}-s{step}-n{node_rank}-g{gpu_rank}
+  return f.rsplit("-", 3)[1][1:]
+
+
+def _block_and_proces_restore_dir(directory, timeout=300):
+  """Block until a file ending with `.restore` appears, then extract the step number and rename
+  the directory using the step number.
+  """
+  WORD = ".restore"
+  for _ in range(timeout):
+    files = os.listdir(directory)
+    for f in files:
+      if f.endswith(WORD):
+        step = _extract_step(f)
+        if step != "0":
+          os.rename(epath.Path(directory) / f, epath.Path(directory) / step)
+          max_logging.log(f"Found a restore directory at step {step} and renamed it to {epath.Path(directory) / step}.")
+        else:
+          max_logging.log("Found a restore directory at step 0, skipping renaming.")
+        return
+    time.sleep(1)
+  max_logging.log(f"{timeout} seconds have passed but no .restore file was found.")
 
 
 def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
@@ -288,11 +361,20 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
         f"Using {process_id} as the process_id and {coordinator_address} as the"
         " coordinator_address to initialize JAX distributed runtime..."
     )
-    jax.distributed.initialize(coordinator_address=coordinator_address, process_id=int(process_id))
+    jax.distributed.initialize(
+        coordinator_address=coordinator_address,
+        process_id=int(process_id),
+        initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
+    )
     if raw_keys["use_replicator_service"]:
       REPLICATOR_FILE = "replicator.yaml"
       TEMP_FILE = REPLICATOR_FILE + ".tmp"
       replicator_file = epath.Path(raw_keys["local_checkpoint_directory"]) / REPLICATOR_FILE
+      if not _wait_for_file_to_disappear(replicator_file):
+        max_logging.log("There is existing replicator.yaml which did not disappear in time.")
+      else:
+        max_logging.log("replicator.yaml no longer exists, creating new replicator.yaml.")
+      TEMP_FILE = REPLICATOR_FILE + ".tmp"
       temp_file = epath.Path(raw_keys["local_checkpoint_directory"]) / TEMP_FILE
       num_slices = get_num_slices(raw_keys)
       num_nodes = jax.process_count()
@@ -319,12 +401,17 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
 
       temp_file.write_text("\n".join([l.strip() for l in replicator_yaml.split("\n")]))
       os.rename(temp_file, replicator_file)
+      if not _wait_for_file_to_disappear(replicator_file):
+        max_logging.log("The newly created replicator.yaml was not deleted in time.")
+      else:
+        max_logging.log("The newly created replicator.yaml was deleted, moving forward.")
+      _block_and_proces_restore_dir(raw_keys["local_checkpoint_directory"])
   else:
     max_logging.log(
         "Initializing JAX distributed runtime without args when emergency checkpointing is"
         " enabled. This should not happen and your workload may have unexpected behavior."
     )
-    jax.distributed.initialize()
+    jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
 
   ocp.multihost.initialize_runtime_to_distributed_ids()
   ocp.multihost.initialize_distributed_to_device_ids()
@@ -416,10 +503,10 @@ def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_typ
     parallelism_vals[parallelism_vals.index(-1)] = int(determined_val)
 
   target_type = "slices" if parallelism_type == "DCN" else "devices per slice"
-  assert (
-      np.prod(parallelism_vals) == target_product
-  ), f"Number of {target_type} {target_product} does not match\
-    the product of the {parallelism_type} parallelism {np.prod(parallelism_vals)}"
+  assert np.prod(parallelism_vals) == target_product, (
+      f"Number of {target_type} {target_product} does not match"
+      f" the product of the {parallelism_type} parallelism {np.prod(parallelism_vals)}"
+  )
 
   return parallelism_vals
 
@@ -520,23 +607,47 @@ def is_valid_custom_mesh(ici_parallelism, strategy):
     raise ValueError(f"The strategy {strategy} to reshape the mesh is invalid.")
 
 
+def optimize_mesh_for_tpu_v6e(mesh, devices):
+  """Apply transformations to the mesh to optimize for TPU v6e"""
+  if devices[0].device_kind != "TPU v6 lite":
+    return mesh
+  num_devices = len(devices)
+  mesh_is_1d_ring = num_devices in mesh.shape
+  if not mesh_is_1d_ring:
+    return mesh
+  # check that the physical topology is 2x4
+  device_coords = [d.coords for d in devices]
+  coord_size = len(device_coords[0])
+  max_coords = tuple(max(dc[i] for dc in device_coords) for i in range(coord_size))
+  min_coords = tuple(min(dc[i] for dc in device_coords) for i in range(coord_size))
+  dims = tuple(h - l + 1 for (h, l) in zip(max_coords, min_coords))
+  if dims != (2, 4, 1):
+    return mesh
+  axis_idx = mesh.shape.index(num_devices)
+  new_mesh = np.moveaxis(mesh, axis_idx, 0)
+  new_mesh[4:] = new_mesh[-1:3:-1]
+  new_mesh = np.moveaxis(new_mesh, 0, axis_idx)
+  max_logging.log("Optimized the mesh for TPU v6e")
+  return new_mesh
+
+
 def create_device_mesh(config, devices=None):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
   if devices is None:
     devices = jax.devices()
   num_devices = len(devices)
-  num_slices = config.num_slices
+  num_slices = 1 if config.inference_benchmark_test else config.num_slices
   num_devices_per_slice = num_devices // num_slices
 
   multi_slice_env = num_slices > 1
 
   # Find possible unspecified parallelisms
-  ici_parallelism = fill_unspecified_mesh_axes(config.ici_parallelism, num_devices_per_slice, "ICI")
+  ici_parallelism = fill_unspecified_mesh_axes(config.ici_parallelism.copy(), num_devices_per_slice, "ICI")
 
   allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
 
   if multi_slice_env:
-    dcn_parallelism = fill_unspecified_mesh_axes(config.dcn_parallelism, num_slices, "DCN")
+    dcn_parallelism = fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN")
     if is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
       mesh = create_custom_device_mesh(ici_parallelism, dcn_parallelism, devices, config.custom_mesh)
     else:
@@ -569,6 +680,8 @@ def create_device_mesh(config, devices=None):
           ici_parallelism,
           devices,
       )
+      if config.optimize_mesh_for_tpu_v6e:
+        mesh = optimize_mesh_for_tpu_v6e(mesh, devices)
 
   max_logging.log(f"Num_devices: {num_devices}, shape {mesh.shape}")
 
@@ -711,7 +824,13 @@ def setup_initial_state(
     )
 
     if restored:
-      if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
+      if isinstance(
+          checkpoint_manager,
+          (
+              emergency_checkpoint_manager.CheckpointManager,
+              emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
+          ),
+      ):
         state = restored
       else:
         if "iter" in restored and restored["iter"] is not None:
@@ -1018,15 +1137,15 @@ def save_quantized_checkpoint_if_configured(config, params):
 
 
 def print_mem_stats(label: str):
-  print(f"\nMemstats: {label}:")
+  max_logging.log(f"\nMemstats: {label}:")
   try:
     for d in jax.local_devices():
       stats = d.memory_stats()
       used = round(stats["bytes_in_use"] / 2**30, 2)
       limit = round(stats["bytes_limit"] / 2**30, 2)
-      print(f"\tUsing (GB) {used} / {limit} ({used/limit:%}) on {d}")
+      max_logging.log(f"\tUsing (GB) {used} / {limit} ({used/limit:%}) on {d}")
   except (RuntimeError, KeyError, TypeError) as ex:
-    print(f"\tMemstats unavailable, error: {ex}")
+    max_logging.log(f"\tMemstats unavailable, error: {ex}")
 
 
 def print_system_information():
@@ -1035,3 +1154,24 @@ def print_system_information():
   max_logging.log(f"System Information: Jax Version: {jax.__version__}")
   max_logging.log(f"System Information: Jaxlib Version: {jax.lib.__version__}")
   max_logging.log(f"System Information: Jax Backend: {jax.lib.xla_bridge.get_backend().platform_version}")
+
+
+def permute_to_match_maxtext_rope(arr):
+  """Permutes the Huggingface Rope to match the MaxText logic."""
+  assert arr.shape[-1] % 2 == 0, "The last dimension for rope has to be even."
+  evens, odds = np.split(arr, 2, axis=arr.ndim - 1)  # pylint: disable=W0632
+  x = np.empty_like(arr)
+  x[..., ::2] = evens
+  x[..., 1::2] = odds
+  return x
+
+
+def unpermute_from_match_maxtext_rope(arr, model_size):
+  """
+  Function to get the RoPE values in correct ordering
+  """
+  if model_size[:8] != "llama3.1":
+    return arr
+  evens = arr[..., ::2]
+  odds = arr[..., 1::2]
+  return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)

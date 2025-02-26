@@ -25,6 +25,8 @@ from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
 import common_types
 from dataclasses import dataclass
+from flax.linen import fp8_ops
+from flax.linen import initializers as flax_initializers
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
@@ -45,6 +47,7 @@ MAX_INT4 = 7.5
 
 Array = common_types.Array
 Config = common_types.Config
+DType = common_types.DType
 AxisIdxes = common_types.AxisIdxes
 AxisNames = common_types.AxisNames
 CACHE_HEADS = common_types.CACHE_HEADS
@@ -58,6 +61,10 @@ class Quantization:
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Placeholder for dot_general implementation in subclasses."""
+    pass
+
+  def einsum(self, dtype: DType = jnp.float32):
+    """Placeholder for einsum implementation in subclasses."""
     pass
 
 
@@ -153,6 +160,8 @@ class AqtQuantization:
     rhs_axis_metadata_wrapper = self._get_rhs_axis_metadata_wrapper(
         mesh_axes, is_tiled, replicate_scale=self.replicate_scale
     )
+    # module_path = "/".join(nn.module._context.module_stack[-1].path)
+    # print(f"quant_dg: {quant_dg}, is_tiled: {is_tiled}, module_path: {module_path}")
     aqt_dg_cls = functools.partial(
         aqt_flax.AqtDotGeneral,
         quant_dg,
@@ -198,6 +207,71 @@ class Fp8Quantization(Quantization):
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
     return nn.Fp8DotGeneralOp
+
+  def einsum(self, dtype: DType = jnp.float32):
+    return Fp8Einsum(dtype=dtype)
+
+
+class Fp8Einsum(nn.Module):
+  """An fp8 einsum op.
+
+  Attributes:
+    amax_history_length: size of the amax history.
+    e4m3_dtype: e4m3 variants, e.g., e4m3fn, e4m3fnuz.
+    e5m2_dtype: e5m2 variants, e.g., e5m2, e5m2fnuz.
+    dtype: computation dtype.
+  """
+
+  amax_history_length: int = 1024
+  e4m3_dtype: DType = jnp.float8_e4m3fn
+  e5m2_dtype: DType = jnp.float8_e5m2
+  dtype: DType = jnp.float32
+
+  def setup(self) -> None:
+    scale_args = (
+        flax_initializers.ones_init(),
+        jax.random.PRNGKey(0),
+        (1,),
+        jnp.float32,
+    )
+    amax_history_args = (
+        flax_initializers.zeros_init(),
+        jax.random.PRNGKey(0),
+        (self.amax_history_length,),
+        jnp.float32,
+    )
+
+    OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
+    self.input_amax_history = self.variable(OVERWRITE_WITH_GRADIENT, "input_amax_history", *amax_history_args)
+    self.kernel_amax_history = self.variable(OVERWRITE_WITH_GRADIENT, "kernel_amax_history", *amax_history_args)
+    self.output_grad_amax_history = self.variable(OVERWRITE_WITH_GRADIENT, "output_grad_amax_history", *amax_history_args)
+
+    self.input_scale = self.variable(OVERWRITE_WITH_GRADIENT, "input_scale", *scale_args)
+    self.kernel_scale = self.variable(OVERWRITE_WITH_GRADIENT, "kernel_scale", *scale_args)
+    self.output_grad_scale = self.variable(OVERWRITE_WITH_GRADIENT, "output_grad_scale", *scale_args)
+
+  def __call__(self, eqn, *args, **kwargs):
+    assert len(args) == 2
+    x = args[0]
+    k = args[1]
+
+    comp_dtype = self.dtype
+    k = jnp.asarray(k, comp_dtype)
+    x = jnp.asarray(x, comp_dtype)
+
+    x_qdq = fp8_ops.in_qdq(comp_dtype, self.e4m3_dtype, x, self.input_scale.value, self.input_amax_history.value)
+    k_qdq = fp8_ops.in_qdq(comp_dtype, self.e4m3_dtype, k, self.kernel_scale.value, self.kernel_amax_history.value)
+
+    y_qdq = jnp.einsum(eqn, x_qdq, k_qdq, _dot_general=fp8_ops.dot_general_with_precision)
+
+    y = fp8_ops.out_qdq(
+        comp_dtype,
+        self.e5m2_dtype,
+        y_qdq,
+        self.output_grad_scale.value,
+        self.output_grad_amax_history.value,
+    )
+    return y
 
 
 def _get_int8_quant_config(config):
@@ -247,7 +321,9 @@ def _get_mixed_precision_quant_config(mixed_precision_config):
   ret_config = {}
   default_mp_config = _get_default_mp_config(default=mixed_precision_config.get(DEFAULT, None))
   for layer_name_re, layer_quantization_config in mixed_precision_config.items():
-    quant_config = default_mp_config
+    # Make a copy of default_mp_config to avoid updaing original dict
+    quant_config = default_mp_config.copy()
+    # print(f"Mixed precision config: processing {layer_name_re} - {layer_quantization_config}, default config - {quant_config}")
     if layer_name_re != DEFAULT:
       for k in quant_config.keys():
         quant_config[k] = layer_quantization_config.get(k, default_mp_config[k])

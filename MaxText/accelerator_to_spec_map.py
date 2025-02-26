@@ -45,6 +45,9 @@ UserFacingNameToSystemCharacteristics = {
     "v6e-128": SystemCharacteristics("tpu", "v6e:8x16", "default", (2, 2, 1), 128, (False, True, False)),
     "v6e-256": SystemCharacteristics("tpu", "v6e:16x16", "default", (2, 2, 1), 256, (True, True, False)),
     # v5e: one core per chip with 16 GB HBM
+    "v5e-1": SystemCharacteristics("tpu", "v5e:1x1", "default", (1, 1, 1), 1, (False, False, False)),
+    "v5e-4": SystemCharacteristics("tpu", "v5e:2x2", "default", (2, 2, 1), 4, (False, False, False)),
+    "v5e-8": SystemCharacteristics("tpu", "v5e:2x4", "default", (2, 2, 1), 8, (False, False, False)),
     "v5e-16": SystemCharacteristics("tpu", "v5e:4x4", "default", (2, 2, 1), 16, (False, False, False)),
     "v5e-32": SystemCharacteristics("tpu", "v5e:4x8", "default", (2, 2, 1), 32, (False, False, False)),
     "v5e-64": SystemCharacteristics("tpu", "v5e:8x8", "default", (2, 2, 1), 64, (False, False, False)),
@@ -169,4 +172,9 @@ UserFacingNameToSystemCharacteristics = {
 
 
 def get_system_characteristics(user_facing_name):
-  return UserFacingNameToSystemCharacteristics.get(user_facing_name)
+  system_characteristics = UserFacingNameToSystemCharacteristics.get(user_facing_name)
+  if system_characteristics is None:
+    raise ValueError(
+        f"Invalid compile topology: {user_facing_name}. Valid topology names: {UserFacingNameToSystemCharacteristics.keys()}"
+    )
+  return system_characteristics

@@ -35,7 +35,7 @@ class MultihostDataloadingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     batch_size = 4
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         per_device_batch_size=1,
         run_name="test",
@@ -46,7 +46,6 @@ class MultihostDataloadingTest(unittest.TestCase):
         dataset_path="gs://maxtext-dataset/",
         enable_checkpointing=False,
     )
-    config = pyconfig.config
     global_data_shape = PartitionSpec(batch_size, config.max_target_length)
     data_sharding = ("data",)
     mesh_shape_1d = (len(jax.devices()),)
@@ -62,7 +61,7 @@ class MultihostDataloadingTest(unittest.TestCase):
     dataset = dataset.batch(batch_size)
     self.multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataset, self.mesh)
 
-  @pytest.mark.tpu
+  @pytest.mark.tpu_only
   def test_batch_sharded_data_pipeline(self):
     first_batch = next(self.multihost_gen)
     sec_batch = next(self.multihost_gen)

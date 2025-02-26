@@ -6,7 +6,7 @@
 # enable profiling using -p option and capture using
 # tensorboard --logdir /tmp/tensorboard/
 
-run_name="test_int8_kv_bs_216-108-54"
+run_name="llama_offline_benchmarks"
 dry_run=false
 skip_warmup=false
 test_run=false
@@ -15,6 +15,7 @@ performance=true
 audit=false
 accuracy=false
 fast_eval=false
+enable_batch_prefill=false
 
 for arg in "$@"; do
   case $arg in
@@ -22,6 +23,7 @@ for arg in "$@"; do
     -t) test_run=true ;;
     -s) skip_warmup=true ;;
     -p) enable_profiler=true ;;
+    -c) enable_batch_prefill=true ;;
     -d) audit=true ;;
     -a) accuracy=true ;;
     -f) fast_eval=true ;;
@@ -36,9 +38,9 @@ done
 
 
 if "$dry_run"; then
-    cmd=echo
+    CMD=echo
 else
-    cmd=''
+    CMD=''
 fi
 
 SKIP_WARMUP_OPTION=""
@@ -51,14 +53,19 @@ if "$enable_profiler"; then
     PROFILER_OPTION="--enable_profile"
 fi
 
+BATCH_PREFILL_OPTION=""
+if "$enable_batch_prefill"; then
+    BATCH_PREFILL_OPTION="--enable_batch_prefill"
+fi
+
 if [ -z "$TOKENIZER_PATH" ]; then
   TOKENIZER_PATH=/home/${USER}/maxtext/assets/tokenizer.llama2
 fi
 
 BATCH_STR=""
-if [ -z "$BATCH_AND_PREFILL_LEN" ];
+if [ -z "$PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES" ];
 then
-  BATCH_AND_PREFILL_LEN="256,216|512,108|1024,54"
+  PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES="256,216|512,108|1024,54"
 fi
 
 if [ -z "$TOK_OUTLEN_MULTIPLIER" ];
@@ -66,13 +73,24 @@ then
   TOK_OUTLEN_MULTIPLIER="2.5"
 fi
 
+if [ -z "$MODEL_NAME" ];
+then
+  MODEL_NAME="llama2-70b"
+fi
+
+if [ -z "$HF_CKPT" ];
+then
+  HF_CKPT="meta-llama/Llama-2-70b-chat-hf"
+fi
+
+
+
 if [ -z "$MAXENGINE_ARGS" ];
 then
-  CHECKPOINT="gs://msingh-bkt/checkpoints/quant_llama2-70b-chat/mlperf_070924/int8_"
-  BASE_CFG="model_name=llama2-70b tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT}"
+  CHECKPOINT="gs://msingh-bkt/checkpoints/quant_${MODEL_NAME}-chat/mlperf_070924/int8_"
+  BASE_CFG="model_name=${MODEL_NAME} tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT}"
   QUANT_CFG="quantization=int8 quantize_kvcache=True checkpoint_is_quantized=True"
-  LAYOUT_CFG="compute_axis_order=0,1,2,3 ar_cache_axis_order=0,1,2,3"
-  MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${LAYOUT_CFG}"
+  MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG}"
 fi
 
 if [ -z "$BASEDIR" ];
@@ -90,7 +108,7 @@ export API_URL=0.0.0.0:9000
 if "$test_run"; then
   export DATASET_TYPE=test
   export DATASET_PATH=${DATA_DISK_DIR}/processed-data.pkl
-  export TOTAL_SAMPLE_COUNT=100
+  export TOTAL_SAMPLE_COUNT=1000
   export USER_CONFIG=user${TOTAL_SAMPLE_COUNT}.conf
 else
   export DATASET_TYPE=full
@@ -115,10 +133,10 @@ run_loadgen() {
   echo "TOTAL_SAMPLE_COUNT: ${TOTAL_SAMPLE_COUNT}"
   echo "OUTPUT_LOG_DIR: ${OUTPUT_LOG_DIR}"
   echo "USER_CONFIG: ${USER_CONFIG}"
-  echo "BATCH_AND_PREFILL_LEN: ${BATCH_AND_PREFILL_LEN}"
+  echo "PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES: ${PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES}"
   echo "MAXENGINE_ARGS: ${MAXENGINE_ARGS}"
-
-  ${cmd} python -m offline_mode \
+  echo
+  ${CMD} python -m offline_mode \
     --mlperf_test_mode=${TEST_MODE} \
     --input_mode tokenized \
     --output_mode tokenized \
@@ -127,11 +145,11 @@ run_loadgen() {
     --audit_conf ${AUDIT_CONF}  \
     --total_sample_count ${TOTAL_SAMPLE_COUNT} \
     --dataset_path ${DATASET_PATH} \
-    --prefill_lengths_and_batch_sizes ${BATCH_AND_PREFILL_LEN} \
+    --prefill_lengths_and_per_device_batch_sizes ${PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES} \
     --maxengine_args "${MAXENGINE_ARGS}" \
     --output_log_dir ${OUTPUT_LOG_DIR} \
     --tok_outlen_multiplier ${TOK_OUTLEN_MULTIPLIER} \
-    ${SKIP_WARMUP_OPTION} ${PROFILER_OPTION} 2>&1 | tee ${OUTPUT_LOG_DIR}/${LOADGEN_RUN_TYPE}_log.log
+    ${SKIP_WARMUP_OPTION} ${PROFILER_OPTION} ${BATCH_PREFILL_OPTION} 2>&1 | tee ${OUTPUT_LOG_DIR}/${LOADGEN_RUN_TYPE}_log.log
 }
 
 run_loadgen_performance () {
@@ -154,6 +172,10 @@ run_loadgen_accuracy () {
   AUDIT_CONF="no_audit"
   run_loadgen
 
+  if [ $dry_run ] ; then
+    touch ${OUTPUT_ACCURACY_JSON_PATH}
+  fi
+
   # Eval Run
   if [ -e ${OUTPUT_ACCURACY_JSON_PATH} ]; then
     if [ "${FAST_EVAL:-false}" = "true" ] || "$fast_eval"; then
@@ -161,9 +183,9 @@ run_loadgen_accuracy () {
     else
       EVAL_SCRIPT="evaluate-accuracy.py"
     fi
-    
+    echo
     ${CMD} python3 ${EVAL_SCRIPT} \
-      --tokenizer-path ${TOKENIZER_PATH} \
+      --checkpoint-path ${HF_CKPT} \
       --mlperf-accuracy-file ${OUTPUT_ACCURACY_JSON_PATH} \
       --dataset-file ${DATASET_PATH} 2>&1 | tee ${OUTPUT_LOG_DIR}/evaluate_offline_accuracy_log.log
   fi

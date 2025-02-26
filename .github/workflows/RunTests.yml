@@ -1,0 +1,132 @@
+# Copyright 2023 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow will install Python dependencies, run tests and lint with a variety of Python versions
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
+
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+  schedule:
+    # Run the job every 4 hours
+    - cron:  '0 */4 * * *'
+
+jobs:
+  prelim:
+    runs-on: ["self-hosted"]
+    steps:
+    - name: Test gsutil installation
+      run: which gsutil >/dev/null 2>&1 || { echo >&2 "gsutil is required but not installed. Aborting"; exit 24;}
+    - name: Cleanup old docker images
+      run: docker system prune --all --force
+    - name: Authenticate gcloud
+      run: gcloud auth configure-docker us-docker.pkg.dev --quiet
+
+  tpu_image:
+    needs: prelim
+    uses: ./.github/workflows/build_upload_internal.yml
+    with:
+      device_type: tpu
+      device_name: v4-8
+      build_mode: stable_stack
+      base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
+
+  gpu_image:
+    needs: prelim
+    uses: ./.github/workflows/build_upload_internal.yml
+    with:
+      device_type: gpu
+      device_name: a100-40gb-4
+      build_mode: pinned
+      base_image: gcr.io/tpu-prod-env-multipod/maxtext_gpu_jax_pinned:latest
+
+  tpu_unit_tests:
+    needs: tpu_image
+    uses: ./.github/workflows/run_tests_internal.yml
+    with:
+      device_type: tpu
+      device_name: v4-8
+      pytest_marker: 'not gpu_only and not integration_test'
+      test_directory: 'tests'
+      xla_python_client_mem_fraction: 0.75
+      tf_force_gpu_allow_growth: false
+      container_resource_option: "--privileged"
+
+  tpu_integration_tests:
+    needs: tpu_image
+    uses: ./.github/workflows/run_tests_internal.yml
+    with:
+      device_type: tpu
+      device_name: v4-8
+      pytest_marker: 'not gpu_only and integration_test'
+      test_directory: 'tests/integration_tests'
+      xla_python_client_mem_fraction: 0.75
+      tf_force_gpu_allow_growth: false
+      container_resource_option: "--privileged"
+
+  gpu_unit_tests:
+    needs: gpu_image
+    uses: ./.github/workflows/run_tests_internal.yml
+    with:
+      device_type: gpu
+      device_name: a100-40gb-4
+      pytest_marker: 'not tpu_only and not integration_test'
+      test_directory: 'tests'
+      xla_python_client_mem_fraction: 0.65
+      tf_force_gpu_allow_growth: true
+      container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
+
+  gpu_integration_tests:
+    needs: gpu_image
+    uses: ./.github/workflows/run_tests_internal.yml
+    with:
+      device_type: gpu
+      device_name: a100-40gb-4
+      pytest_marker: 'not tpu_only and integration_test'
+      test_directory: 'tests/integration_tests'
+      xla_python_client_mem_fraction: 0.65
+      tf_force_gpu_allow_growth: true
+      container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
+
+  clean_up:
+    if: ${{ always() }}  # always execute, regardless of previous jobs or steps.
+    needs: [gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
+    name: "Clean up"
+    runs-on: ["self-hosted"]
+    permissions:
+      contents: read
+      issues: write  # for failed-build-issue
+    steps:
+    - name: Delete GPU image
+      run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:gpu --force-delete-tags --quiet
+    - name: Delete TPU image
+      run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu --force-delete-tags --quiet
+
+  notify:
+    name: Notify failed build # creates an issue or modifies last open existing issue for failed build
+    needs: [gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
+    runs-on: ["self-hosted"]
+    steps:
+    - name: Check whether one of the jobs failed
+      if: ${{ failure() && github.event.pull_request == null }}
+      uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+    - name: Log message if dependent job succeeded
+      if: ${{ ! (failure() && github.event.pull_request == null) }}
+      run: echo "Conditions for creating/updating issue not met. Skipping."

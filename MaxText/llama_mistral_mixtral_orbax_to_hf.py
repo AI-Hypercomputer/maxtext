@@ -22,9 +22,9 @@ To save a ckpt
 python3 MaxText/llama_or_mistral_ckpt.py --base-model-path <path/to/meta/ckpt> \
     --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size llama2-7b
 
-python3 MaxText/llama_mistral_mixtral_orbax_to_hf.py MaxText/configs/base.yml 
+python3 MaxText/llama_mistral_mixtral_orbax_to_hf.py MaxText/configs/base.yml
             base_output_directory=path/to/saving/intermediate_MaxText_files
-            load_parameters_path=/path/to/MaxText/checkpoint run_name=<your run name> model_name=<llama2 or mistral> 
+            load_parameters_path=/path/to/MaxText/checkpoint run_name=<your run name> model_name=<llama2 or mistral>
             hardware=gpu
             hf_model_path=/local/path/to/save/HF/model/to
 
@@ -39,23 +39,13 @@ from absl import app
 import numpy as np
 import pyconfig
 import max_utils
-import jax
 from jax.sharding import Mesh
 import max_logging
 import checkpointing
 from generate_param_only_checkpoint import _read_train_checkpoint
 import llama_or_mistral_ckpt
-from transformers import LlamaForCausalLM, MistralForCausalLM, AutoModelForCausalLM
-
-
-def unpermute_from_match_maxtext_rope(arr):
-  """
-  Function to get the RoPE values in correct ordering
-  """
-  split_size = arr.shape[-1] // 2  # Assuming half for evens, half for odds
-  evens = arr[..., :split_size]
-  odds = arr[..., split_size:]
-  return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
+from transformers import LlamaForCausalLM, MistralForCausalLM, AutoModelForCausalLM, AutoConfig
+from max_utils import unpermute_from_match_maxtext_rope
 
 
 def reverse_scale(arr, scale):
@@ -77,6 +67,9 @@ def load_hf_model(model_size):
     model = MistralForCausalLM.from_pretrained("mistralai/Mistral-7B-v0.1")
   elif model_size == "mixtral-8x7b":
     model = AutoModelForCausalLM.from_pretrained("mistralai/Mixtral-8x7B-v0.1", device_map="auto")
+  elif model_size == "llama3.1-8b":
+    config = AutoConfig.from_pretrained("meta-llama/Llama-3.1-8B")
+    model = AutoModelForCausalLM.from_config(config)
   else:
     raise NotImplementedError
   return model
@@ -138,7 +131,8 @@ def convert_state_to_hf(training_state, model_size):
                         :, layer_int, :, :
                     ],
                     head_dim,
-                )
+                ),
+                model_size,
             )
             .reshape(base_num_query_heads * head_dim, base_num_query_heads * head_dim)
             .T
@@ -149,7 +143,8 @@ def convert_state_to_hf(training_state, model_size):
     hf_model_params[f"model.layers.{layer_int}.self_attn.k_proj.weight"] = torch.tensor(
         np.asarray(
             unpermute_from_match_maxtext_rope(
-                training_state.params["params"]["decoder"]["layers"]["self_attention"]["key"]["kernel"][:, layer_int, :, :]
+                training_state.params["params"]["decoder"]["layers"]["self_attention"]["key"]["kernel"][:, layer_int, :, :],
+                model_size,
             )
             .reshape(base_num_query_heads * head_dim, base_num_kv_heads * head_dim)
             .T
@@ -252,11 +247,11 @@ def convert_orbax_hf(hf_model_path, config):
 
 
 def main(argv: Sequence[str]):
-  pyconfig.initialize(argv[:-1])
+  config = pyconfig.initialize(argv[:-1])
   hf_model_path = argv[-1].split("=")[1]
   print(f"Will save converted HuggingFace checkpoint to path = {hf_model_path}")
 
-  convert_orbax_hf(hf_model_path, pyconfig.config)
+  convert_orbax_hf(hf_model_path, config)
 
 
 if __name__ == "__main__":

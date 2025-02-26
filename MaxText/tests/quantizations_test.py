@@ -27,6 +27,7 @@ from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2 import calibration
 
 _QUERY_REGEX = ".*/query"
+_VALUE_REGEX = ".*/value"
 
 
 class QuantTestModule(nn.Module):
@@ -49,14 +50,13 @@ class QuantTestModule(nn.Module):
 
 
 def _configure_quantization(quant_str="", quant_cfg_path="", mode_str="train", replicate_scale=False):
-  pyconfig.initialize(
+  config = pyconfig.initialize(
       [None, "configs/base.yml"],
       enable_checkpointing=False,
       quantization=quant_str,
       quant_cfg_path=quant_cfg_path,
       replicate_quant_scale=replicate_scale,
   )
-  config = pyconfig.config
   quant = quantizations.configure_quantization(config, mode_str)
   return quant
 
@@ -146,6 +146,11 @@ class QuantizationTest(unittest.TestCase):
     self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.bits, 8)
     self.assertEqual(quant_cfg.fwd.dg_quantizer.rhs.numerics.bits, 4)
     self.assertEqual(tile_size, 128)
+
+    quant_cfg, tile_size = quant.quant_dg[_VALUE_REGEX]
+    self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.bits, 8)
+    self.assertEqual(quant_cfg.fwd.dg_quantizer.rhs.numerics.bits, 4)
+    self.assertEqual(tile_size, -1)
 
   def test_remove_quantized_params(self):
     _params = {

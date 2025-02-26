@@ -92,7 +92,8 @@ class DenseGeneral(nn.Module):
     weight_dtype: the dtype of the weights (default: float32).
     dtype: the dtype of the computation (default: float32).
     kernel_init: initializer function for the weight matrix.
-    use_bias: whether to add bias in linear transformation
+    use_bias: whether to add bias in linear transformation.
+    bias_norm: whether to add normalization before adding bias.
     quant: quantization config, defaults to None implying no quantization.
   """
 
@@ -101,9 +102,10 @@ class DenseGeneral(nn.Module):
   weight_dtype: DType = jnp.float32
   dtype: DType = jnp.float32
   kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal")
-  kernel_axes: Tuple[str, ...] = ()
+  kernel_axes: Tuple[Optional[str], ...] = ()
   quant: Optional[Quant] = None
   use_bias: bool = False
+  bias_norm: str = ""
   matmul_precision: str = "default"
 
   @nn.compact
@@ -166,6 +168,9 @@ class DenseGeneral(nn.Module):
           self.weight_dtype,
       )
       bias = jnp.asarray(bias, self.dtype)
+
+      if self.bias_norm:
+        output = _convert_to_activation_function(self.bias_norm)(output)
       output += bias
     return output
 
@@ -199,7 +204,7 @@ class MlpBlock(nn.Module):
   quant: Optional[Quant] = None
 
   def get_norm_layer(self):
-    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma"):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma", "deepseek"):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
@@ -293,6 +298,7 @@ class MoeBlock(nn.Module):
     mesh: Mesh, device mesh.
     kernel_init: Kernel function, passed to the dense layers.
     kernel_axes: Tuple with axes to apply kernel function.
+    intermediate_dim: Intermediate dimension of MoE.
     weight_dtype: Type for the weights.
     dtype: Type for the dense layer.
     quant: Optional quantization config, no quantization if None.
@@ -303,7 +309,8 @@ class MoeBlock(nn.Module):
   num_experts_per_tok: int
   mesh: Mesh
   kernel_init: NdInitializer
-  kernel_axes: Tuple[str, ...]
+  kernel_axes: Tuple[Optional[str], ...]
+  intermediate_dim: int = 2048
   weight_dtype: DType = jnp.float32
   dtype: DType = jnp.float32
   quant: Optional[Quant] = None
@@ -365,6 +372,15 @@ class MoeBlock(nn.Module):
     wo_kernel = jnp.asarray(wo_kernel, self.dtype)
     return w0_kernel, w1_kernel, wo_kernel
 
+  def deepseek_scale_weights(self, weights):
+    """Scales weights according to DeepSeek's v3 reference implementation.
+    https://github.com/deepseek-ai/DeepSeek-V3/blob/2f7b80eecebf3d1c84da5a0d465f6639ea175012/inference/model.py#L592-L594
+    """
+    if self.config.routed_score_func == "sigmoid":
+      weights /= weights.sum(-1, keepdims=True)
+    weights *= self.config.routed_scaling_factor
+    return weights
+
   def permute(self, inputs, gate_logits):
     """Permute tokens to group by expert to fit gmm call."""
 
@@ -372,7 +388,10 @@ class MoeBlock(nn.Module):
     inputs_shape = inputs.shape
     inputs_2d = jnp.reshape(inputs, (inputs_shape[0] * inputs_shape[1], inputs_shape[2]))
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
-    weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+    if self.config.decoder_block == "deepseek":
+      weights = self.deepseek_scale_weights(weights)
+    else:
+      weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.dtype)
     flatten_selected_experts = jnp.ravel(selected_experts)
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
     sorted_indices = sorted_selected_experts // self.num_experts_per_tok
@@ -400,8 +419,8 @@ class MoeBlock(nn.Module):
       )
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
 
-  def megablox(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
-    tile_size = (512, 1024, 1024)
+  def sparse_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
+    tile_size = (512, 1024, 1024)  # (m, k, n)
 
     def gmm(inputs, kernel, group_sizes):
       hs_shape = inputs.shape
@@ -420,15 +439,26 @@ class MoeBlock(nn.Module):
         lhs_quantize_dtype = quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype()
         rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
 
-      output = mblx.gmm(
-          lhs=inputs,
-          rhs=kernel,
-          group_sizes=group_sizes,
-          preferred_element_type=jnp.bfloat16,
-          tiling=tile_size,
-          lhs_quantize_dtype=lhs_quantize_dtype,
-          rhs_quantize_dtype=rhs_quantize_dtype,
-      )
+      if self.config.megablox:
+        m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
+        output = mblx.gmm(
+            lhs=inputs,
+            rhs=kernel,
+            group_sizes=group_sizes,
+            preferred_element_type=jnp.bfloat16,
+            tiling=(min(tile_size[0], m), min(tile_size[1], k), min(tile_size[2], n)),
+            lhs_quantize_dtype=lhs_quantize_dtype,
+            rhs_quantize_dtype=rhs_quantize_dtype,
+        )
+      else:
+        if self.quant is not None:
+          raise NotImplementedError("Quantization is not yet supported with ragged_dot, please set" " megablox=True")
+        output = jax.lax.ragged_dot(
+            lhs=inputs,
+            rhs=kernel,
+            group_sizes=group_sizes,
+            preferred_element_type=jnp.bfloat16,
+        )
       if hs_shape[0] % pad_length:
         output = output[: hs_shape[0]]
       return output
@@ -580,7 +610,9 @@ class MoeBlock(nn.Module):
 
       def aqt_einsum(*args, **kwargs):
         # simply skip kwargs, since aqt einsum doesn't support any kwargs like precision
-        return self.quant.einsum(rhs_mesh_axes)(*args)
+        is_aqt = not isinstance(self.quant, quantizations.Fp8Quantization)
+        kw = {"mesh_axes": rhs_mesh_axes} if is_aqt else {"dtype": self.dtype}
+        return self.quant.einsum(**kw)(*args)
 
       einsum_op = aqt_einsum
     else:
@@ -600,12 +632,17 @@ class MoeBlock(nn.Module):
     return kernel
 
   def dense_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
-    # gate_logits: batch, length, expert
-    # follow router_logits = shd.shard(router_logits, (None, None, None))
-    gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", None))
+    gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", "activation_embed"))
     softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
     # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
-    top_k_weights, top_k_indices = jax.lax.top_k(softmax_probs, self.num_experts_per_tok)
+    top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+
+    if self.config.decoder_block == "deepseek":
+      top_k_weights = self.deepseek_scale_weights(top_k_weights)
+    else:
+      top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+
+    weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
     matmul_precision = lax.Precision(self.config.matmul_precision)
 
     cp = self.config.ici_context_parallelism
@@ -615,7 +652,7 @@ class MoeBlock(nn.Module):
     do_cp =  seq_len % cp == 0
     if self.config.capacity_factor > 0:
       # token dropping if needed
-      dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs)
+      dispatch_mask, combine_mask = self.generate_masks(top_k_indices, weights)
       mask_axes = ("activation_batch", "activation_length", None, None, None)
       if do_cp:
         mask_axes = ("activation_batch", "activation_length", None, None, None)
@@ -631,9 +668,9 @@ class MoeBlock(nn.Module):
       dispatch_mask = nn.with_logical_constraint(dispatch_mask, mask_axes)
       combine_mask = nn.with_logical_constraint(combine_mask, mask_axes)
       if self.config.model_call_mode != "inference":
-        loss = self.load_balance_loss(top_k_indices, softmax_probs)
+        loss = self.load_balance_loss(top_k_indices, weights)
       else:
-        loss = 0
+        loss = None
 
       if do_cp:
         inputs = jnp.reshape(inputs,(batch_size, cp, seq_len//cp, inputs.shape[2]))
@@ -712,6 +749,8 @@ class MoeBlock(nn.Module):
         #     intermediate_layer,
         #     ("activation_exp", "activation_batch_no_exp", None, "activation_embed"),
         # )
+        if self.config.activations_in_float32:
+          intermediate_layer = intermediate_layer.astype(jnp.float32)
         intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("combine"):
         # Matmul & element wise operation
@@ -729,22 +768,24 @@ class MoeBlock(nn.Module):
           intermediate_layer,
           combine_mask,
           precision=matmul_precision,
-        )    
+        ).astype(self.dtype)
       return output, loss
     else:
-      top_k_weights /= top_k_weights.sum(-1, keepdims=True)
-      weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
 
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
       with jax.named_scope("wi_0"):
         layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
             "BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision
-        ).astype(jnp.float32)
+        )
+        if self.config.activations_in_float32:
+          layer_w0 = layer_w0.astype(jnp.float32)
         layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
       with jax.named_scope("wi_1"):
         layer_w1 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
             "BSM,EMH -> BSEH", inputs, w1_kernel, precision=matmul_precision
-        ).astype(jnp.float32)
+        )
+        if self.config.activations_in_float32:
+          layer_w1 = layer_w1.astype(jnp.float32)
         layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
       layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
@@ -752,12 +793,14 @@ class MoeBlock(nn.Module):
         intermediate_layer = self.get_einsum(rhs_mesh_axes=self.wo_kernel_axes)(
             "BSEH,EHM -> BSEM", layer_multiply, wo_kernel, precision=matmul_precision
         )
+        if self.config.activations_in_float32:
+          intermediate_layer = intermediate_layer.astype(jnp.float32)
         intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("w_sum"):
         output = jnp.einsum(
             "BSEM,BSE -> BSM",
-            intermediate_layer.astype(jnp.float32),
-            weights.astype(jnp.float32),
+            intermediate_layer,
+            weights,
         ).astype(self.dtype)
       return output, None
 
@@ -789,16 +832,70 @@ class MoeBlock(nn.Module):
         kernel_init=self.kernel_init,
         kernel_axes=("embed", None),
         name="gate",
+        use_bias=self.config.routed_bias,
+        bias_norm=self.config.routed_score_func,
         matmul_precision=self.config.matmul_precision,
     )(inputs)
-    w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts, cfg.emb_dim, cfg.mlp_dim)
-    if cfg.megablox:
-      max_logging.log("Running MoE megablox implementation.")
+
+    w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts, cfg.emb_dim, self.intermediate_dim)
+    if cfg.sparse_matmul:
+      max_logging.log("Running MoE sparse matmul implementation.")
       if quantizations.in_serve_mode(self.quant):
         w0_kernel, w1_kernel, wo_kernel = self.retrieve_quantized_weight(
             inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel
         )
-      return self.megablox(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+      return self.sparse_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
     else:
-      max_logging.log("Running MoE matmul implementation.")
+      max_logging.log("Running MoE dense matmul implementation.")
       return self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+
+
+class DeepSeekMoeBlock(nn.Module):
+  """DeepSeek MoE block, combining shared and routed experts.
+
+  Attributes:
+    config: Model configs.
+    mesh: Mesh, device mesh.
+    kernel_init: Kernel function, passed to the dense layers.
+    kernel_axes: Tuple with axes to apply kernel function.
+    weight_dtype: Type for the weights.
+    dtype: Type for the dense layer.
+    quant: Optional quantization config, no quantization if None.
+  """
+
+  config: Config
+  mesh: Mesh
+  kernel_init: NdInitializer
+  kernel_axes: Tuple[Optional[str], ...]
+  weight_dtype: DType = jnp.float32
+  dtype: DType = jnp.float32
+  quant: Optional[Quant] = None
+
+  @nn.compact
+  def __call__(self, inputs):
+    cfg = self.config
+    routed_experts, _ = MoeBlock(
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=self.mesh,
+        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", None),
+        intermediate_dim=cfg.moe_mlp_dim,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        quant=self.quant,
+    )(inputs)
+
+    shared_experts = MlpBlock(
+        intermediate_dim=cfg.shared_experts * cfg.moe_mlp_dim,
+        activations=cfg.mlp_activations,
+        intermediate_dropout_rate=cfg.dropout_rate,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        name=f"shared_experts",
+        config=cfg,
+        quant=self.quant,
+    )(inputs)
+
+    return routed_experts + shared_experts
