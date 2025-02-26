@@ -87,7 +87,7 @@ class Value:
 
   Attributes:
     prefix:
-      Readonly. Prefix Cache using in model. Should be dictionary of jnp.array.
+      Readonly. Prefix Cache using in model. Should be pytree of all jax.Array.
     true_length:
       Readonly. True length of tokens calculate prefix. Should be <= than len(tokens).
       true_length will be min(true_length, len(tokens))
@@ -117,7 +117,11 @@ class Value:
     self._padded_length = padded_length
     self._tokens = tokens
     if prefix_size_bytes is None:
-      self._prefix_size_bytes: int = self._calculate_prefix_bytes(prefix)
+      self._prefix_size_bytes: int = jax.tree.reduce(
+          lambda acc, array: acc + array.nbytes,
+          prefix,
+          0,
+      )
     else:
       self._prefix_size_bytes = prefix_size_bytes
 
@@ -160,17 +164,6 @@ class Value:
         and other.tokens == self.tokens
         and jax.tree.all(jax.tree.map(jnp.array_equal, other.prefix, self.prefix))
         and other.prefix_size_bytes == self.prefix_size_bytes
-    )
-
-  def _calculate_prefix_bytes(self, prefix: Prefix) -> int:
-    def has_nbytes_int(obj) -> bool:
-      return hasattr(obj, "nbytes") and isinstance(obj.nbytes, int)
-
-    # calculate all bytes of jnp.array in the prefix
-    return jax.tree.reduce(
-        lambda acc, array: acc + (array.nbytes if has_nbytes_int(array) else 0),
-        prefix,
-        0,
     )
 
   def _maybe_adjust_true_length(self, true_length: int, tokens: tuple[Token, ...]) -> int:

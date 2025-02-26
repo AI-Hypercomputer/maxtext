@@ -81,15 +81,9 @@ class ValueTest(unittest.TestCase):
     assert value.prefix is None
     assert value.prefix_size_bytes == 0
 
-  def test_set_prefix_tree_with_non_jax_array_member_ignore_the_bytes(self):
-    prefix = {
-        "non_jax_array": "member",
-        "jax_array": jnp.array([1, 2, 3], dtype=jnp.int8),
-    }
-    prefix_size_bytes = 3
-    value = create_default_value(prefix=prefix)
-    assert value.prefix == prefix
-    assert value.prefix_size_bytes == prefix_size_bytes
+  def test_throw_exception_if_prefix_containing_non_array(self):
+    with self.assertRaises(Exception):
+      create_default_value(prefix={"a": "abc"})
 
   def test_adjust_true_length_shorter_equal_than_tokens(self):
     value = create_default_value(true_length=100, tokens=jnp.array([1, 2, 3]))
