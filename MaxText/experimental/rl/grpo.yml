@@ -1,0 +1,62 @@
+base_config: "base.yml"
+
+use_grpo: True
+train_data_columns: ['prompt', 'completion']
+tokenizer_path: 'google/gemma-2-2b-it' 
+model_name: gemma2-2b 
+
+per_device_batch_size: 1.0
+learning_rate: 1.e-6
+
+enable_goodput_recording: False
+monitor_goodput: False
+dataset_type: hf 
+hf_path: 'json' 
+hf_data_dir: '' 
+run_name: ${USER}-$(date +%Y-%m-%d-%H-%M) 
+
+#prefixed TRL
+# max_prefill_predict_length: 550
+# max_target_length: 678 #
+max_prefill_predict_length: 512
+max_target_length: 1024
+hf_train_files: 'gs://mazumdera-test-bucket-europe-west4/rl-datasets/prefixed_tldr_dataset.jsonl' 
+
+#TRL
+# max_prefill_predict_length: 512
+# max_target_length: 768 # from TRL
+max_prefill_predict_length: 512
+max_target_length: 1024
+# hf_train_files: 'gs://mazumdera-test-bucket-europe-west4/rl-datasets/tldr_dataset.jsonl' 
+
+
+adam_b2: 0.999
+
+checkpoint_period: 20
+
+# Group Relative Policy Optimization (GRPO)
+num_generations: 4 # TRL is 8
+temperature: 0.9 #from TRL
+grpo_beta: 20 #100 # 0.04 #from TRL
+
+learning_rate: 1.e-6 # from TRL
+decode_sampling_strategy: "weighted"
+per_device_batch_size: 1
+async_checkpointing: false
+
+### Splash attention block sizes
+# These can be tuned for specific hardware generations, and can be set up to
+# the model's sequence length.
+sa_block_q: 128
+sa_block_kv: 128
+sa_block_kv_compute: 128
+sa_block_q_dkv: 128
+sa_block_kv_dkv: 128
+sa_block_kv_dkv_compute: 128
+sa_block_q_dq: 128
+sa_block_kv_dq: 128
+sa_use_fused_bwd_kernel: False
+sa_q_layout: "HEAD_DIM_MINOR"
+sa_k_layout: "HEAD_DIM_MINOR"
+sa_v_layout: "HEAD_DIM_MINOR"
+
