@@ -42,11 +42,11 @@ COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
 # Sustained Capacity Cluster
-# CLUSTER = "bodaborg-v6e-256-dnd-yucmhab"
-# PROJECT = "tpu-prod-env-one-vm"
-# ZONE = "us-east5-b"
-# COUNTRY = "us"
-# DEVICE_TYPE = "v6e-256"
+CLUSTER="bodaborg-v6e-256-dnd-yucmhab"
+PROJECT="tpu-prod-env-one-vm"
+ZONE="us-east5-b"
+COUNTRY="us"
+DEVICE_TYPE="v6e-256"
 
 # Debug Cluster
 # CLUSTER = "bodaborg-v6e-16-debug"
@@ -56,18 +56,18 @@ DEVICE_TYPE = "v6e-256"
 # DEVICE_TYPE = "v6e-16"
 
 # High scale cluster
-CLUSTER = "bodaborg-v6e-256-ts"
-PROJECT = "tpu-prod-env-multipod"
-ZONE = "us-west1-c"
-COUNTRY = "us"
-DEVICE_TYPE = "v6e-256"
+# CLUSTER = "bodaborg-v6e-256-ts"
+# PROJECT="tpu-prod-env-multipod"
+# ZONE="us-west1-c"
+# COUNTRY = "us"
+# DEVICE_TYPE = "v6e-256"
 
 # Other parameters (MUST BE SET BY USER)
 XPK_PATH = "../xpk"  # We're running this script from the maxtext directory
 USER = os.environ["USER"]
 
 MAX_RESTARTS = 2
-BENCHMARK_STEPS = 200
+BENCHMARK_STEPS = 1000
 USE_GCSFUSE = False
 
 BASE_OUTPUT_DIRECTORY = (
@@ -120,7 +120,7 @@ def main() -> int:
     ),
   )
   num_slices_list = [
-      4
+      2
   ]
 
   xpk_workload_cmds = []
