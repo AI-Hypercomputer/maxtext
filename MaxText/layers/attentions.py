@@ -152,11 +152,11 @@ def get_prefill_contiguous_kv_cache_annotations(model, config, rng_prefill, mesh
   cache = initial_vars["cache"]
 
   def get_axis_names(x):
-    if isinstance(x, flax.linen.spmd.LogicallyPartitioned):
+    if isinstance(x, nn.spmd.LogicallyPartitioned):
       return tuple(x.names)
 
   annotations = jax.tree_util.tree_map(
-      get_axis_names, cache, is_leaf=lambda k: isinstance(k, (flax.linen.spmd.LogicallyPartitioned, jax.Array))
+      get_axis_names, cache, is_leaf=lambda k: isinstance(k, (nn.spmd.LogicallyPartitioned, jax.Array))
   )
 
   return annotations
@@ -166,7 +166,7 @@ def get_initial_contiguous_kv_cache(model, config, batch_size, abstract=False):
   """Creates the initial (all zeros) KV cache."""
   if abstract:
     input_shape = (batch_size, 1)
-    key = jax.random.PRNGKey(0)  # Need a key for jax.eval_shape
+    key = jax.random.PRNGKey(0)
     cache = jax.eval_shape(
         lambda: model.init(
             {"params": key, "dropout": key, "aqt": key},
@@ -247,19 +247,20 @@ def get_initial_paged_kv_cache(model, config, batch_size, abstract=False):
 class PagedAttentionOp(nn.Module):
   """Paged Attention Operator."""
 
-  mesh: any
+  mesh: Any
   num_kv_heads: int
   kv_head_dim_size: int
   config: Config
   output_dim: int
-  dtype: any = jnp.bfloat16
-  quant: Optional[Quant] = None
+  dtype: Any = jnp.bfloat16
+  quant: Optional[Any] = None
 
   def out_projection(self, output_dim: int, out: Array) -> Array:
+    """Project attention output to model dimension."""
     out_proj = DenseGeneral(
         features=output_dim,
         axis=(-2, -1),
-        kernel_init=self.parent.kernel_init,
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
         kernel_axes=("heads", "kv", "embed"),
         dtype=self.dtype,
         weight_dtype=self.config.weight_dtype,
@@ -269,142 +270,234 @@ class PagedAttentionOp(nn.Module):
     )(out)
     return out_proj
 
-  def _paged_dot_product_attention(
+  def _paged_attention_for_prefill(
       self,
-      query,
-      key_pages,
-      value_pages,
-      sequence_lengths,
-      page_map,
-      num_kv_heads,
-      tokens_per_page,
-  ):
-    """Core paged dot-product attention, operating on full pages.
+      query: Array,
+      key_pages: Array,
+      value_pages: Array,
+      page_map: Array,
+      sequence_lengths: Array,
+      page_group_id: int,
+  ) -> Array:
+    """Compute paged attention for prefill mode."""
+    batch_size, seq_len, num_heads, head_dim = query.shape
+    tokens_per_page = self.config.tokens_per_page
 
-    Args:
-        query: [batch, seq_len, num_heads, head_dim] or [batch, num_heads, head_dim]
-        key_pages: [num_pages, tokens_per_page, num_kv_heads, head_dim]
-        value_pages: [num_pages, tokens_per_page, num_kv_heads, head_dim]
-        sequence_lengths: [batch] number of valid tokens in each sequence
-        page_map: [batch, max_pages_per_group] maps sequence positions to physical pages
-        num_kv_heads: int, number of key/value heads
-        tokens_per_page: int, number of tokens per page
-    """
-    # Print all input shapes for verification
-    jax.debug.print("\n=== Paged Attention Shapes ===")
-    jax.debug.print("query: {}", query.shape)
-    jax.debug.print("key_pages: {}", key_pages.shape)
-    jax.debug.print("value_pages: {}", value_pages.shape)
-    jax.debug.print("sequence_lengths: {}", sequence_lengths.shape)
-    jax.debug.print("page_map: {}", page_map.shape)
-    jax.debug.print("Current sequence lengths: {}", sequence_lengths)
-    jax.debug.print("Current page map: {}", page_map)
+    true_length = sequence_lengths[page_group_id]
+    # Handle edge case where true_length is 0
+    if true_length == 0:
+      return jnp.zeros_like(query)
 
-    current_pages = jnp.take_along_axis(page_map, jnp.expand_dims(sequence_lengths - 1, -1), axis=1)
-    jax.debug.print("Accessing pages: {}", current_pages)
+    # Extract the page map for this page group
+    page_group_slice = jax.lax.dynamic_slice(page_map, (page_group_id, 0), (1, page_map.shape[1]))
+    group_page_map = jnp.squeeze(page_group_slice, axis=0)
 
-    # Get shapes
-    if len(query.shape) == 4:
-      batch_size, seq_len, num_heads, head_dim = query.shape
-    else:
-      batch_size, num_heads, head_dim = query.shape
-      seq_len = 1
+    # Initialize result array
+    result = jnp.zeros((batch_size, seq_len, num_heads, head_dim), dtype=query.dtype)
 
-    # Print key attention parameters
-    jax.debug.print("\n=== Attention Parameters ===")
-    jax.debug.print("batch_size: {}", batch_size)
-    jax.debug.print("seq_len: {}", seq_len)
-    jax.debug.print("num_heads: {}", num_heads)
-    jax.debug.print("head_dim: {}", head_dim)
-    jax.debug.print("num_kv_heads: {}", num_kv_heads)
+    # Calculate number of pages needed
+    num_pages = (true_length + tokens_per_page - 1) // tokens_per_page
 
-    # For each sequence position (batch, seq_len), find its page and position within page
-    current_pages = jnp.take_along_axis(page_map, jnp.expand_dims(sequence_lengths - 1, -1), axis=1)  # Get current position
-    positions_in_page = jnp.mod(sequence_lengths - 1, tokens_per_page)
+    for page_idx in range(num_pages):
+      physical_page = group_page_map[page_idx]
 
-    jax.debug.print("\n=== Page Access Info ===")
-    jax.debug.print("current_pages: {}", current_pages)
-    jax.debug.print("positions_in_page: {}", positions_in_page)
+      # Skip invalid pages
+      if physical_page < 0:
+        continue
 
-    # For now return dummy values with correct shape
-    if len(query.shape) == 4:
-      return jnp.ones((batch_size, seq_len, num_heads, head_dim)) * 42.0
-    else:
-      return jnp.ones((batch_size, 1, num_heads, head_dim)) * 42.0
+      # Calculate token range for this page
+      start_token = page_idx * tokens_per_page
+      end_token = jnp.minimum((page_idx + 1) * tokens_per_page, true_length)
+      tokens_in_page = end_token - start_token
 
-  def get_page_group_pages(self, page_map: Array, page_group_id: int, max_pages_per_group: int) -> Array:
-    """Get pages for a single page group."""
-    assert len(page_map.shape) == 2
-    assert page_map.shape[1] == max_pages_per_group
-    page_group_pages = jax.lax.dynamic_slice(page_map, (page_group_id, 0), (1, max_pages_per_group))
-    return jnp.squeeze(page_group_pages, axis=0)
+      # Slice query to match tokens in page
+      query_slice = jax.lax.dynamic_slice(query, (0, start_token, 0, 0), (batch_size, tokens_in_page, num_heads, head_dim))
 
-  def _paged_prefill_impl(
-      self, key, value, start_index, true_length, page_group_pages, num_full_pages, key_pages, value_pages, tokens_per_page
-  ):
-    """JIT-compatible implementation of paged prefill."""
-
-    def update_full_page(i, carry):
-      k_pages, v_pages = carry
-      page_idx = page_group_pages[i]
-      start_idx = i * tokens_per_page
-
-      update_idx = (0, page_idx, 0, 0)
-
+      # Extract key/value data for this page
       page_key_data = jax.lax.dynamic_slice(
-          key, (0, start_idx, 0, 0), (key.shape[0], tokens_per_page, key.shape[2], key.shape[3])
+          key_pages, (physical_page, 0, 0, 0), (1, tokens_per_page, self.num_kv_heads, head_dim)
       )
-
-      k_pages = jax.lax.dynamic_update_slice(k_pages, page_key_data, update_idx)
-
       page_value_data = jax.lax.dynamic_slice(
-          value, (0, start_idx, 0, 0), (value.shape[0], tokens_per_page, value.shape[2], value.shape[3])
+          value_pages, (physical_page, 0, 0, 0), (1, tokens_per_page, self.num_kv_heads, head_dim)
       )
 
-      v_pages = jax.lax.dynamic_update_slice(v_pages, page_value_data, update_idx)
+      # Remove the first dimension
+      page_key_data = jnp.squeeze(page_key_data, axis=0)
+      page_value_data = jnp.squeeze(page_value_data, axis=0)
 
-      return k_pages, v_pages
+      # Use only the valid tokens in this page
+      page_key_data = page_key_data[:tokens_in_page]
+      page_value_data = page_value_data[:tokens_in_page]
 
-    # Handle full pages
-    key_pages, value_pages = jax.lax.fori_loop(0, num_full_pages, update_full_page, (key_pages, value_pages))
+      # Compute attention with basic operations to avoid einsum issues
+      qk_product = jnp.zeros((batch_size, tokens_in_page, num_heads, tokens_in_page), dtype=query.dtype)
 
-    # Handle partial page using static shapes and masking
-    def update_partial():
-      last_page_idx = page_group_pages[num_full_pages]
-      update_idx = (0, last_page_idx, 0, 0)
-      start_pos = start_index + (num_full_pages * tokens_per_page)
+      # Manual implementation of attention
+      for b in range(batch_size):
+        for t1 in range(tokens_in_page):
+          for h in range(num_heads):
+            # Map query head to corresponding kv head in GQA setup
+            kv_head = h % self.num_kv_heads
+            for t2 in range(tokens_in_page):
+              # Dot product for each token pair
+              dot_product = 0.0
+              for d in range(head_dim):
+                dot_product += query_slice[b, t1, h, d] * page_key_data[t2, kv_head, d]
+              # Scale and store
+              qk_product = qk_product.at[b, t1, h, t2].set(dot_product / jnp.sqrt(head_dim))
 
-      # Always slice a full page worth of data
-      partial_key_data = jax.lax.dynamic_slice(
-          key, (0, start_pos, 0, 0), (key.shape[0], tokens_per_page, key.shape[2], key.shape[3])
+      # Create and apply causal mask
+      mask = jnp.tril(jnp.ones((tokens_in_page, tokens_in_page), dtype=jnp.bool_))
+      mask = jnp.reshape(mask, (1, tokens_in_page, 1, tokens_in_page))
+      masked_qk_product = jnp.where(mask, qk_product, jnp.full_like(qk_product, -1e10))
+
+      # Apply softmax along the last dimension
+      attn_weights = jax.nn.softmax(masked_qk_product, axis=-1)
+
+      # Compute attention output
+      attn_output = jnp.zeros((batch_size, tokens_in_page, num_heads, head_dim), dtype=query.dtype)
+
+      # Manual implementation of attention output
+      for b in range(batch_size):
+        for t1 in range(tokens_in_page):
+          for h in range(num_heads):
+            # Map query head to corresponding kv head in GQA setup
+            kv_head = h % self.num_kv_heads
+            for d in range(head_dim):
+              # Weighted sum for each output dimension
+              weighted_sum = 0.0
+              for t2 in range(tokens_in_page):
+                weighted_sum += attn_weights[b, t1, h, t2] * page_value_data[t2, kv_head, d]
+              attn_output = attn_output.at[b, t1, h, d].set(weighted_sum)
+
+      # Update the result with the attention output for this page
+      result = jax.lax.dynamic_update_slice(result, attn_output, (0, start_token, 0, 0))
+
+    return result
+
+  def _paged_attention_for_decode(
+      self,
+      query: Array,
+      key_pages: Array,
+      value_pages: Array,
+      page_map: Array,
+      sequence_lengths: Array,
+      page_group_id: int,
+  ) -> Array:
+    """Compute paged attention for autoregressive decode mode."""
+    batch_size, seq_len, num_heads, head_dim = query.shape
+    assert seq_len == 1, "Decode mode expects sequence length of 1"
+    tokens_per_page = self.config.tokens_per_page
+
+    # Get the current sequence length (before adding new token)
+    current_seq_len = sequence_lengths[page_group_id]
+
+    # Early return if sequence is empty
+    if current_seq_len == 0:
+      return jnp.zeros_like(query)
+
+    # Calculate which page the current token is in
+    page_idx = current_seq_len // tokens_per_page
+    position_in_page = current_seq_len % tokens_per_page
+
+    # Get the page map for this page group
+    page_group_slice = jax.lax.dynamic_slice(page_map, (page_group_id, 0), (1, page_map.shape[1]))
+    group_page_map = jnp.squeeze(page_group_slice, axis=0)
+
+    # Initialize the attention output
+    result = jnp.zeros((batch_size, 1, num_heads, head_dim), dtype=query.dtype)
+
+    # We'll accumulate attention scores and then normalize at the end
+    all_scores = []
+    all_values = []
+
+    # Process each page
+    for idx in range(page_idx + 1):
+      physical_page = group_page_map[idx]
+
+      # Skip invalid pages
+      if physical_page < 0:
+        continue
+
+      # Determine number of tokens to attend to in this page
+      if idx < page_idx:
+        # For previous pages, attend to all tokens
+        tokens_to_attend = tokens_per_page
+      else:
+        # For current page, attend only up to current position
+        tokens_to_attend = position_in_page
+
+      # Skip if no tokens to attend
+      if tokens_to_attend <= 0:
+        continue
+
+      # Extract key/value data for this page
+      page_key_data = jax.lax.dynamic_slice(
+          key_pages, (physical_page, 0, 0, 0), (1, tokens_per_page, self.num_kv_heads, head_dim)
+      )
+      page_value_data = jax.lax.dynamic_slice(
+          value_pages, (physical_page, 0, 0, 0), (1, tokens_per_page, self.num_kv_heads, head_dim)
       )
 
-      partial_value_data = jax.lax.dynamic_slice(
-          value, (0, start_pos, 0, 0), (value.shape[0], tokens_per_page, value.shape[2], value.shape[3])
-      )
+      # Remove the first dimension
+      page_key_data = jnp.squeeze(page_key_data, axis=0)
+      page_value_data = jnp.squeeze(page_value_data, axis=0)
 
-      # Create mask for valid tokens
-      valid_length = true_length - (num_full_pages * tokens_per_page)
-      token_indices = jnp.arange(tokens_per_page)
-      mask = token_indices < valid_length
+      # Use only valid tokens
+      page_key_data = page_key_data[:tokens_to_attend]
+      page_value_data = page_value_data[:tokens_to_attend]
 
-      # Apply mask to zero out invalid tokens
-      mask_shape = (1, mask.shape[0], 1, 1)  # Shape to match data dimensions
-      mask = jnp.reshape(mask, mask_shape)
-      partial_key_data = partial_key_data * mask
-      partial_value_data = partial_value_data * mask
+      # Store for later processing
+      all_scores.append((page_key_data, tokens_to_attend))
+      all_values.append((page_value_data, tokens_to_attend))
 
-      # Update pages with masked data
-      k_pages = jax.lax.dynamic_update_slice(key_pages, partial_key_data, update_idx)
+    # Now compute attention over all collected tokens
+    if not all_scores:  # No valid pages
+      return result
 
-      v_pages = jax.lax.dynamic_update_slice(value_pages, partial_value_data, update_idx)
+    # Compute attention
+    # First, prepare a single attention operation over all tokens
+    total_tokens = sum(tokens for _, tokens in all_scores)
 
-      return k_pages, v_pages
+    # Prepare flattened key and value tensors
+    flat_keys = jnp.zeros((total_tokens, self.num_kv_heads, head_dim), dtype=query.dtype)
+    flat_values = jnp.zeros((total_tokens, self.num_kv_heads, head_dim), dtype=query.dtype)
 
-    # Check if we need partial page update
-    has_partial = (true_length - (num_full_pages * tokens_per_page)) > 0
+    # Fill the flattened tensors
+    pos = 0
+    for (keys, token_count), (values, _) in zip(all_scores, all_values):
+      flat_keys = flat_keys.at[pos : pos + token_count].set(keys)
+      flat_values = flat_values.at[pos : pos + token_count].set(values)
+      pos += token_count
 
-    return jax.lax.cond(has_partial, lambda _: update_partial(), lambda _: (key_pages, value_pages), operand=None)
+    # Compute scores using dot product
+    scores = jnp.zeros((batch_size, num_heads, total_tokens), dtype=query.dtype)
+
+    # Manual dot product to avoid einsum issues
+    for b in range(batch_size):
+      for h in range(num_heads):
+        kv_head = h % self.num_kv_heads
+        for t in range(total_tokens):
+          dot_product = 0.0
+          for d in range(head_dim):
+            dot_product += query[b, 0, h, d] * flat_keys[t, kv_head, d]
+          scores = scores.at[b, h, t].set(dot_product)
+
+    # Scale and apply softmax
+    scores = scores / jnp.sqrt(head_dim)
+    attention_weights = jax.nn.softmax(scores, axis=-1)
+
+    # Apply attention weights to values
+    for b in range(batch_size):
+      for h in range(num_heads):
+        kv_head = h % self.num_kv_heads
+        for d in range(head_dim):
+          weighted_sum = 0.0
+          for t in range(total_tokens):
+            weighted_sum += attention_weights[b, h, t] * flat_values[t, kv_head, d]
+          result = result.at[b, 0, h, d].set(weighted_sum)
+
+    return result
 
   @nn.compact
   def __call__(
@@ -421,54 +514,49 @@ class PagedAttentionOp(nn.Module):
       layer_id: Optional[int] = None,
       key_pages: Optional[jnp.ndarray] = None,
       value_pages: Optional[jnp.ndarray] = None,
+      page_map: Optional[jnp.ndarray] = None,
+      sequence_lengths: Optional[jnp.ndarray] = None,
+      is_initialized: bool = False,
+      current_page: Optional[jnp.ndarray] = None,
+      current_page_position: Optional[jnp.ndarray] = None,
   ) -> Union[Array, Tuple[Array, Array, Array]]:
-    if page_group_id is not None:
-      if model_mode == common_types.MODEL_MODE_PREFILL:
-        if page_state is None:
-            raise ValueError("page_state must be provided in PREFILL mode")
-        if key_pages is None or value_pages is None:
-            raise ValueError("key_pages and value_pages must be provided")
+    """Paged attention implementation."""
+    # Handle uninitialized case
+    if not is_initialized:
+      batch_size = query.shape[0]
+      seq_len = query.shape[1]
+      return jnp.zeros((batch_size, seq_len, self.output_dim), dtype=query.dtype)
 
-        attn_out = self._paged_dot_product_attention(
-            query=query,
-            key_pages=key_pages,
-            value_pages=value_pages,
-            sequence_lengths=page_state.sequence_lengths,
-            page_map=page_state.page_map,
-            num_kv_heads=self.num_kv_heads,
-            tokens_per_page=self.config.tokens_per_page,
-        )
-        return self.out_projection(self.output_dim, attn_out)
+    # Choose the appropriate attention implementation based on model mode
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      # Prefill mode - allow any sequence length
+      attn_out = self._paged_attention_for_prefill(
+          query=query,
+          key_pages=key_pages,
+          value_pages=value_pages,
+          page_map=page_map,
+          sequence_lengths=sequence_lengths,
+          page_group_id=page_group_id,
+      )
+    elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+      # Autoregressive mode - enforce seq_len == 1
+      batch_size, seq_len, num_heads, head_dim = query.shape
+      if seq_len != 1:
+        raise ValueError(f"Decode mode expects sequence length of 1, got {seq_len}")
 
-      elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-        if key.shape[1] != 1 or value.shape[1] != 1:
-          raise ValueError(
-              f"Autoregressive mode expects sequence length 1, got " f"key shape {key.shape}, value shape {value.shape}"
-          )
-        if page_state is None:
-            raise ValueError("page_state must be provided in AUTOREGRESSIVE mode")
-        if key_pages is None or value_pages is None:
-            raise ValueError("key_pages and value_pages must be provided")
-
-        attn_out = self._paged_dot_product_attention(
-            query=query,
-            key_pages=key_pages,
-            value_pages=value_pages,
-            sequence_lengths=page_state.sequence_lengths,
-            page_map=page_state.page_map,
-            num_kv_heads=self.num_kv_heads,
-            tokens_per_page=self.config.tokens_per_page,
-        )
-        return self.out_projection(self.output_dim, attn_out)
-      else:
-        raise ValueError(f"Invalid model_mode: {model_mode}")
+      attn_out = self._paged_attention_for_decode(
+          query=query,
+          key_pages=key_pages,
+          value_pages=value_pages,
+          page_map=page_map,
+          sequence_lengths=sequence_lengths,
+          page_group_id=page_group_id,
+      )
     else:
-      if len(query.shape) == 4:
-        b, t, n, d = query.shape
-        return jnp.zeros((b, t, self.output_dim), dtype=query.dtype)
-      else:
-        b, n, d = query.shape
-        return jnp.zeros((b, 1, self.output_dim), dtype=query.dtype)
+      raise ValueError(f"Unsupported model mode: {model_mode}")
+
+    # Project attention output to model dimension
+    return self.out_projection(self.output_dim, attn_out)
 
 
 class AttentionOp(nn.Module):

@@ -93,10 +93,10 @@ class DecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      page_state_dict=None,
       slot=None,
       true_length=None,
-      page_manager=None,
-      layer_id: Optional[int] = None,
+      layer_id=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -112,17 +112,35 @@ class DecoderLayer(nn.Module):
     )(inputs)
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
 
+    is_initialized = False
+    key_pages = None
+    value_pages = None
+    page_map = None
+    sequence_lengths = None
+
+    if page_state_dict is not None:
+      page_state = page_state_dict["page_state"]  # Still get PageState
+      is_initialized = True
+      key_pages = page_state.key_pages[layer_id]
+      value_pages = page_state.value_pages[layer_id]
+      page_map = page_state.page_map[layer_id]
+      sequence_lengths = page_state.sequence_lengths[layer_id]
+
     attention_lnx = self.attention_layer(
         lnx,
         lnx,
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         model_mode=model_mode,
-        page_manager=page_manager,  # Pass page_manager only in autoregressive mode
         page_group_id=slot,
         true_length=true_length,
-        use_fused_qkv=self.use_fused_qkv,
         layer_id=layer_id,
+        key_pages=key_pages,
+        value_pages=value_pages,
+        page_map=page_map,
+        sequence_lengths=sequence_lengths,
+        is_initialized=is_initialized,
+        use_fused_qkv=self.use_fused_qkv if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE else None,
     )
 
     attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
@@ -432,47 +450,32 @@ class Decoder(nn.Module):
         )
       else:
         partition_spec = None
-      y = self.pipeline_module(
-          y,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          partition_spec=partition_spec,
-      )
+        y = self.pipeline_module(
+            y,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            partition_spec=partition_spec,
+        )
     else:
-      # Iterate through layers
+      # Process all layers
       for layer_id in range(cfg.num_decoder_layers):
         RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, self.get_remat_policy())
         current_layer_class = RemattedBlockLayers[layer_id % len(RemattedBlockLayers)]
         layer_instance = current_layer_class(config=cfg, mesh=mesh, name=f"layers_{layer_id}", quant=self.quant)
 
-        layer_page_state = None
-        layer_key_pages = None
-        layer_value_pages = None
-        
-        if page_state_dict is not None:
-          if "page_states" in page_state_dict and layer_id in page_state_dict["page_states"]:
-              layer_page_state = page_state_dict["page_states"][layer_id]
-          
-          if "key_pages" in page_state_dict and layer_id in page_state_dict["key_pages"]:
-              layer_key_pages = page_state_dict["key_pages"][layer_id]
-              
-          if "value_pages" in page_state_dict and layer_id in page_state_dict["value_pages"]:
-              layer_value_pages = page_state_dict["value_pages"][layer_id]
-
+        # Call layer with page state
         y, _ = layer_instance(
             y,
             decoder_segment_ids,
             decoder_positions,
             deterministic,
             model_mode,
+            page_state_dict=page_state_dict,
             slot=slot,
             true_length=true_length,
             layer_id=layer_id,
-            page_state=layer_page_state,
-            key_pages=layer_key_pages,
-            value_pages=layer_value_pages,
         )
 
     y = self.get_norm_layer()(
@@ -515,41 +518,31 @@ class Decoder(nn.Module):
 
 
 class Transformer(nn.Module):
-  """An decoder-only Transformer model."""
+  """A decoder-only Transformer model."""
 
-  # Make new attributes required, so that all Transformer dependencies (train, decode, compile, etc) will error instead of silently use defaults.
-  # pylint: disable=attribute-defined-outside-init
   config: Config
   mesh: Mesh
   quant: Quant
 
   def setup(self):
     """Initialize shared_embedding & decoder layers."""
-
     cfg = self.config
     mesh = self.mesh
     self.shared_embedding = Embed(
         num_embeddings=cfg.vocab_size,
         features=cfg.emb_dim,
         dtype=cfg.dtype,
-        attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
+        attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,
         embedding_init=nn.initializers.normal(stddev=1.0),
         name="token_embedder",
         config=cfg,
     )
-
-    if cfg.attention == "paged":
-      self.page_manager = self.make_rng("page_manager")
-    # page_manager = self.variable("page_manager", "manager", lambda: self.parent.page_manager).value
-    else:
-      self.page_manager = None
 
     self.decoder = Decoder(
         config=cfg,
         shared_embedding=self.shared_embedding,
         mesh=mesh,
         quant=self.quant,
-        page_manager=self.page_manager,
     )
 
   def __call__(
@@ -564,23 +557,6 @@ class Transformer(nn.Module):
       page_state_dict=None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target."""
-    print("\n=== Transformer.__call__() ENTRY ===")
-    print(f"Input shapes:")
-    print(f"  decoder_input_tokens: {decoder_input_tokens.shape}")
-    print(f"  decoder_positions: {decoder_positions.shape}")
-    print(f"  decoder_segment_ids: {decoder_segment_ids.shape if decoder_segment_ids is not None else None}")
-    print(f"  model_mode: {model_mode}")
-    print(f"  slot: {slot}")
-    print(f"  true_length: {true_length}")
-    if page_state_dict is not None:
-        print(f"  page_state_dict: has {len(page_state_dict.get('page_states', {}))} layer states")
-
-
-    if decoder_segment_ids is not None and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-      raise ValueError(
-          f"During autoregressive decoding we assume the tokens are in the active sequence"
-          f" which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}."
-      )
 
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,

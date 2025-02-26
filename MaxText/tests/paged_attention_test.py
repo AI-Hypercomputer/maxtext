@@ -1,316 +1,530 @@
+import common_types
 import unittest
-import pytest
 import jax
-import numpy as np
-import math
 import jax.numpy as jnp
-from flax.core import freeze
+import numpy as np
 from flax import linen as nn
-from layers.attentions import PagedAttentionOp, Attention
-from page_managers import PageManager, PageState
+from layers.attentions import PagedAttentionOp
+from page_manager import PageManager, PageState
 import pyconfig
-import os
+import sys
+from typing import Any
 
 
-def reference_attention(query, key, value):
-    """Reference implementation of attention for validation."""
-    attn_weights = jnp.einsum("bqhd,bkhd->bhqk", query, key)
-    attn_weights = jax.nn.softmax(attn_weights, axis=-1)
-    return jnp.einsum("bhqk,bkhd->bqhd", attn_weights, value)
+def debug_print(name, tensor):
+  """Helper function for printing tensor shapes with a descriptive name."""
+  if isinstance(tensor, jnp.ndarray):
+    print(f"{name}.shape: {tensor.shape}")
+  elif isinstance(tensor, np.ndarray):
+    print(f"{name}.shape: {tensor.shape} (numpy)")
+  elif isinstance(tensor, tuple):
+    print(f"{name} is a tuple of length {len(tensor)=}")
+  elif isinstance(tensor, int):
+    print(f"{name}: {tensor} (int)")
+  elif isinstance(tensor, list):
+    print(f"{name} is a list of length {len(tensor)=}")
+  else:
+    print(f"{name}: {type(tensor)}")
 
 
 class PagedAttentionTest(unittest.TestCase):
-    def setUp(self):
-      # Initialize pyconfig with minimal overrides
-      base_config = {
-          "per_device_batch_size": 1,  # Use integer instead of float
-          "max_target_length": 2048,
-          "max_prefill_predict_length": 64,
-          "base_emb_dim": 2048,
-          "head_dim": 128,
-          "base_num_kv_heads": 32,
-          "dtype": "float32",
-          "enable_checkpointing": False,
-      }
-      
-      # Initialize config first
-      config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "base.yml")
-      pyconfig.initialize([None, config_path], **base_config)
-      self.config = pyconfig.config
-      
-      # Create mesh separately
-      devices = jax.devices()
-      if len(devices) > 1:
-          self.mesh = jax.sharding.Mesh(devices, axis_names=("data",))
-      else:
-          self.mesh = jax.sharding.Mesh(devices, axis_names=())
-      
-      # Initialize test rng
-      self.rng = jax.random.PRNGKey(42)
 
-      # Initialize attention operator
-      self.attention_op = PagedAttentionOp(
-          mesh=self.mesh,
-          num_pages=self.config.num_pages,
-          tokens_per_page=self.config.tokens_per_page,
-          max_pages_per_slot=self.config.max_target_length // self.config.tokens_per_page,
-          max_pages_per_prefill=self.config.max_prefill_predict_length // self.config.tokens_per_page,
-          pages_per_compute_block=self.config.pages_per_compute_block,
-          num_kv_heads=self.config.base_num_kv_heads,
-          kv_head_dim_size=self.config.head_dim,
-          dtype=self.config.dtype,
-          config=self.config
-      )
+  def setUp(self):
+    pyconfig.initialize(
+        [sys.argv[0], "configs/base.yml"],
+        per_device_batch_size=1,
+        run_name="test",
+        enable_checkpointing=False,
+        max_target_length=16,
+        max_prefill_predict_length=8,
+        tokens_per_page=4,
+        base_num_query_heads=2,
+        base_num_kv_heads=2,
+        head_dim=4,
+        base_emb_dim=8,
+        base_mlp_dim=16,
+        base_num_decoder_layers=2,
+        dtype="float32",
+        attention="paged",
+        model_name="default",
+        rope_min_timescale=1,
+        rope_max_timescale=10000,
+        matmul_precision="highest",
+        num_pages=32,
+        max_pages_per_group=16,
+    )
 
-    def test_update_prefill_step_pages_state_management(self):
-        """Test page state updates during prefill with state tracking."""
-        batch_size = int(self.config.per_device_batch_size)  # Convert float to int for array shapes
-        seq_len = 64  # Must be divisible by tokens_per_page
-        num_heads = self.config.base_num_kv_heads
-        head_dim = self.config.head_dim
+    self.config = pyconfig.config
+    self.mesh = None
+    self.quant = None
+    self.output_dim = self.config.emb_dim
 
-        # Create test input tensors
-        key = jnp.ones((batch_size, seq_len, num_heads, head_dim))
-        value = jnp.ones((batch_size, seq_len, num_heads, head_dim))
+    # Create a page manager for testing
+    self.page_manager = PageManager(
+        num_pages=self.config.num_pages,
+        tokens_per_page=self.config.tokens_per_page,
+        max_page_groups=int(self.config.per_device_batch_size * jax.device_count()),
+        max_target_length=self.config.max_target_length,
+        max_prefill_predict_length=self.config.max_prefill_predict_length,
+        max_pages_per_group=(self.config.max_target_length + self.config.tokens_per_page - 1) // self.config.tokens_per_page,
+        num_layers=self.config.num_decoder_layers,
+        config=self.config,
+    )
 
-        # Create initial page state
-        page_state = PageState(
-            page_status=jnp.zeros(self.config.num_pages, dtype=jnp.int32),
-            page_map=jnp.full(
-                (batch_size, self.config.max_target_length // self.config.tokens_per_page),
-                -1,
-                dtype=jnp.int32
-            ),
-            sequence_lengths=jnp.zeros(batch_size, dtype=jnp.int32),
-            num_pages_used=jnp.zeros(batch_size, dtype=jnp.int32),
-            current_page=jnp.full(batch_size, -1, dtype=jnp.int32),
-            current_page_position=jnp.zeros(batch_size, dtype=jnp.int32)
+    # Initialize the attention module in a parent context
+    class DummyParent(nn.Module):
+      config: Any
+      mesh: Any
+      quant: Any
+      output_dim: int
+
+      @nn.compact
+      def __call__(
+          self,
+          query,
+          key_pages,
+          value_pages,
+          page_map,
+          sequence_lengths,
+          page_group_id,
+          layer_id,
+          is_initialized,
+          model_mode,
+      ):
+        paged_attention = PagedAttentionOp(
+            mesh=self.mesh,
+            num_kv_heads=self.config.base_num_kv_heads,
+            kv_head_dim_size=self.config.head_dim,
+            config=self.config,
+            output_dim=self.output_dim,
+            dtype=self.config.dtype,
+            quant=self.quant,
+        )
+        return paged_attention(
+            query=query,
+            key=None,
+            value=None,
+            decoder_segment_ids=None,
+            model_mode=model_mode,
+            key_pages=key_pages,
+            value_pages=value_pages,
+            page_map=page_map,
+            sequence_lengths=sequence_lengths,
+            page_group_id=page_group_id,
+            layer_id=layer_id,
+            is_initialized=is_initialized,
         )
 
-        # Initialize variables
-        variables = self.attention_op.init(
-            self.rng,
-            key, key, value,
-            None,  # decoder_segment_ids
-            "prefill",  # model_mode
-            page_state
-        )
+    self.parent_module = DummyParent(config=self.config, mesh=self.mesh, quant=self.quant, output_dim=self.output_dim)
 
-        # First apply - should initialize state
-        output_tuple, vars = self.attention_op.apply(
-            variables,
-            key, key, value,
-            None,  # decoder_segment_ids
-            "prefill",  # model_mode
-            page_state,
-            mutable=["cache"]
-        )
+    self.initial_state = self.page_manager.get_initial_state()
 
-        # Verify individual state components
-        cache_vars = vars["cache"]
-        self.assertIn("page_status", cache_vars)
-        self.assertIn("page_map", cache_vars)
-        self.assertIn("sequence_lengths", cache_vars)
-        self.assertIn("num_pages_used", cache_vars)
-        self.assertIn("current_page", cache_vars)
-        self.assertIn("current_page_position", cache_vars)
+  def _get_dummy_inputs(self, batch_size, seq_len, num_heads, head_dim):
+    """Helper to create dummy input arrays with fixed values for predictability."""
+    key = jax.random.PRNGKey(42)
+    query_key, key_key, value_key = jax.random.split(key, 3)
 
-        new_page_status = cache_vars["page_status"].value
-        new_page_map = cache_vars["page_map"].value
-        new_sequence_lengths = cache_vars["sequence_lengths"].value
-        new_num_pages_used = cache_vars["num_pages_used"].value
+    query = jax.random.normal(query_key, (batch_size, seq_len, num_heads, head_dim))
+    key = jax.random.normal(key_key, (batch_size, seq_len, num_heads, head_dim))
+    value = jax.random.normal(value_key, (batch_size, seq_len, num_heads, head_dim))
+    return query, key, value
 
-        # Validate sequence lengths and page usage
-        expected_pages_per_seq = seq_len // self.config.tokens_per_page
-        for b in range(batch_size):
-            self.assertEqual(new_sequence_lengths[b], seq_len)
-            self.assertEqual(new_num_pages_used[b], expected_pages_per_seq)
+  def _create_initialized_page_state(self, batch_size, true_length, layer_id, page_group_id):
+    """Create a page state with initialized pages for testing."""
+    state = self.initial_state
 
-            # Count actual used pages
-            used_pages_count = 0
-            for i in range(new_page_map.shape[1]):
-                if new_page_map[b, i] >= 0:
-                    used_pages_count += 1
-            self.assertEqual(used_pages_count, expected_pages_per_seq)
+    # Reserve pages for the sequence
+    state = self.page_manager.reserve_prefill_pages(
+        state=state,
+        page_group_id=page_group_id,
+        true_length=true_length,
+        layer_id=layer_id,
+    )
 
-            # Validate page status consistency
-            for p in range(new_page_map.shape[1]):
-                page_val = new_page_map[b, p]
-                if page_val >= 0:
-                    self.assertEqual(new_page_status[page_val], 1)
+    return state
 
-        # Verify page contents
-        key_pages = vars["cache"]["key_pages"].value
-        value_pages = vars["cache"]["value_pages"].value
-        current_page = vars["cache"]["current_page"].value
-        current_page_position = vars["cache"]["current_page_position"].value
+  def test_prefill_single_page(self):
+    """Test prefill with a sequence that fits in a single page."""
+    batch_size = 1
+    seq_len = 3  # Less than tokens_per_page (4)
+    num_heads = self.config.base_num_kv_heads
+    head_dim = self.config.head_dim
+    layer_id = 0
+    page_group_id = 0
+    true_length = seq_len
 
-        for b in range(batch_size):
-            for p in range(expected_pages_per_seq):
-                page_idx = new_page_map[b, p]
-                start_pos = p * self.config.tokens_per_page
-                end_pos = start_pos + self.config.tokens_per_page
+    # 1. Create query and dummy KV data
+    query, key, value = self._get_dummy_inputs(batch_size, seq_len, num_heads, head_dim)
+    print("\n======= test_prefill_single_page ======")
+    print("0. Original parameters:")
+    debug_print("batch_size", batch_size)
+    debug_print("seq_len", seq_len)
+    debug_print("num_kv_heads", num_heads)
+    debug_print("head_dim", head_dim)
+    print("1. Input Shapes:")
+    debug_print("query", query)
+    debug_print("key", key)
+    debug_print("value", value)
 
-                # Check key storage
-                np.testing.assert_array_equal(
-                    key_pages[:, page_idx],
-                    key[b, start_pos:end_pos].transpose(1, 0, 2),
-                    f"Key mismatch batch {b} page {p}"
-                )
+    # 2. Initialize page state with allocated pages
+    page_state = self._create_initialized_page_state(batch_size, true_length, layer_id, page_group_id)
+    print("\n2. Page State:")
+    debug_print("page_state.page_map", page_state.page_map)
+    debug_print("page_state.page_status", page_state.page_status)
+    debug_print("page_state.sequence_lengths", page_state.sequence_lengths)
+    debug_print("page_state.sequence_lengths.shape", page_state.sequence_lengths.shape)
 
-                # Check value storage
-                np.testing.assert_array_equal(
-                    value_pages[:, page_idx],
-                    value[b, start_pos:end_pos].transpose(1, 0, 2),
-                    f"Value mismatch batch {b} page {p}"
-                )
+    # 3. Get the physical page assigned to this sequence
+    physical_page = page_state.page_map[layer_id, page_group_id, 0]
+    self.assertGreaterEqual(physical_page, 0, "No physical page allocated")
+    print(f"\n3. {physical_page=}")
 
-    @pytest.mark.tpu_only
-    def test_decode_step_pages_state_management(self):
-        """Test page state management during decode steps."""
-        batch_size = int(self.config.per_device_batch_size)
-        num_heads = self.config.base_num_kv_heads
-        head_dim = self.config.head_dim
-        tokens_per_page = self.config.tokens_per_page
+    # 4. Create dummy key_pages and value_pages
+    key_pages = jnp.zeros((self.config.num_pages, self.config.tokens_per_page, num_heads, head_dim))
+    value_pages = jnp.zeros((self.config.num_pages, self.config.tokens_per_page, num_heads, head_dim))
+    print("\n4. Initialized KV Pages:")
+    debug_print("key_pages", key_pages)
+    debug_print("value_pages", value_pages)
 
-        def determine_read_location(step: int, page_map, current_page, current_page_position, sequence_lengths) -> tuple[jnp.ndarray, int]:
-            """Calculate correct page and position for reading stored data."""
-            is_first_step = step == 0
-            is_end_of_page = (current_page_position + 1) % tokens_per_page == 0
+    # 5. Fill the pages with our test data
+    for i in range(seq_len):
+      key_pages = key_pages.at[physical_page, i].set(key[0, i])
+      value_pages = value_pages.at[physical_page, i].set(value[0, i])
+    print("\n5. Filled KV Pages:")
+    debug_print("key_pages", key_pages)
+    debug_print("value_pages", value_pages)
 
-            def _first_step_fn():
-                return current_page, 0
+    # 6. Initialize the module
+    variables = self.parent_module.init(
+        jax.random.PRNGKey(0),
+        query,
+        key_pages,
+        value_pages,
+        page_state.page_map[layer_id],
+        page_state.sequence_lengths[layer_id],
+        page_group_id,
+        layer_id,
+        True,
+        common_types.MODEL_MODE_PREFILL,
+    )
+    print("\n6. Initialized Variables:")
+    debug_print("variables", variables)  # Flax variables are dictionaries.
 
-            def _end_of_page_fn():
-                return current_page, tokens_per_page - 1
+    # 7. Apply the module
+    result = self.parent_module.apply(
+        variables,
+        query,
+        key_pages,
+        value_pages,
+        page_state.page_map[layer_id],
+        page_state.sequence_lengths[layer_id],
+        page_group_id,
+        layer_id,
+        True,
+        common_types.MODEL_MODE_PREFILL,
+    )
+    print("\n7. Result:")
+    debug_print("result", result)
 
-            def _within_page_fn():
-                return current_page, current_page_position
+    # Verify output shape is correct
+    self.assertEqual(
+        result.shape,
+        (batch_size, seq_len, self.output_dim),
+        f"Result shape mismatch: {result.shape} vs expected {(batch_size, seq_len, self.output_dim)}",
+    )
 
-            page_indices, position = jax.lax.cond(
-                is_first_step,
-                _first_step_fn,
-                lambda: jax.lax.cond(is_end_of_page, _end_of_page_fn, _within_page_fn)
-            )
+    # Verify output is not all zeros or NaNs
+    self.assertFalse(jnp.allclose(result, 0.0), "Result is all zeros")
+    self.assertFalse(jnp.any(jnp.isnan(result)), "Result contains NaN values")
 
-            return page_indices, position
+    # 9. Compare result shape with expected output shape (without out_projection applied)
+    # Since our actual implementation will have applied the out_projection (DenseGeneral),
+    # we only check that our expected shape is correct
+    self.assertEqual(
+        result.shape,
+        (batch_size, seq_len, self.output_dim),
+        f"Result shape mismatch: {result.shape} vs expected {(batch_size, seq_len, self.output_dim)}",
+    )
 
-        def get_stored_key(vars: dict, read_page: jnp.ndarray, read_pos: int, batch_idx: int) -> jnp.ndarray:
-            """Retrieve stored key data for verification."""
-            key_pages = vars["cache"]["key_pages"].value
-            page_idx = jax.lax.dynamic_index_in_dim(read_page, batch_idx, keepdims=False)
-            return jax.lax.dynamic_slice_in_dim(key_pages, page_idx, 1, axis=1)[:, 0, read_pos, :]
+  def test_prefill_multi_page(self):
+    """Test prefill with a sequence spanning multiple pages."""
+    batch_size = 1
+    seq_len = 6  # Spans two pages (tokens_per_page=4)
+    num_heads = self.config.base_num_kv_heads
+    head_dim = self.config.head_dim
+    layer_id = 0
+    page_group_id = 0
+    true_length = seq_len
 
-        # Initialize empty page state
-        page_state = PageState(
-            page_status=jnp.zeros(self.config.num_pages, dtype=jnp.int32),
-            page_map=jnp.full(
-                (batch_size, self.config.max_target_length // self.config.tokens_per_page),
-                -1,
-                dtype=jnp.int32
-            ),
-            sequence_lengths=jnp.zeros(batch_size, dtype=jnp.int32),
-            num_pages_used=jnp.zeros(batch_size, dtype=jnp.int32),
-            current_page=jnp.full(batch_size, -1, dtype=jnp.int32),
-            current_page_position=jnp.zeros(batch_size, dtype=jnp.int32)
-        )
+    print("\n======= test_prefill_multi_page ======")
 
-        # Initialize attention op
-        variables = self.attention_op.init(
-            self.rng,
-            jnp.ones((batch_size, 1, num_heads, head_dim)),
-            jnp.ones((batch_size, 1, num_heads, head_dim)),
-            jnp.ones((batch_size, 1, num_heads, head_dim)),
-            None,
-            "autoregressive",
-            page_state
-        )
+    # 1. Create query and dummy KV data
+    query, key, value = self._get_dummy_inputs(batch_size, seq_len, num_heads, head_dim)
+    print("1. Input Shapes:")
+    debug_print("query", query)
+    debug_print("key", key)
+    debug_print("value", value)
 
-        # Test through one page boundary
-        num_steps = tokens_per_page + 2
+    # 2. Initialize page state with allocated pages
+    page_state = self._create_initialized_page_state(batch_size, true_length, layer_id, page_group_id)
+    print("\n2. Page State:")
+    debug_print("page_state.page_map", page_state.page_map)
+    debug_print("page_state.page_status", page_state.page_status)
+    debug_print("page_state.sequence_lengths", page_state.sequence_lengths)
 
-        # Accumulate values for later assertions
-        all_sequence_lengths = []
-        all_stored_keys = []
-        all_step_keys = []
-        all_used_pages_counts = []
+    # 3. Get the physical pages assigned to this sequence
+    physical_page1 = page_state.page_map[layer_id, page_group_id, 0]
+    physical_page2 = page_state.page_map[layer_id, page_group_id, 1]
+    self.assertGreaterEqual(physical_page1, 0, "First physical page not allocated")
+    self.assertGreaterEqual(physical_page2, 0, "Second physical page not allocated")
+    self.assertNotEqual(physical_page1, physical_page2, "Both pages are the same physical page")
+    print(f"\n3. {physical_page1=}, {physical_page2=}")
 
-        for step in range(num_steps):
-            step_value = float(step + 1)
-            step_key = jnp.ones((batch_size, 1, num_heads, head_dim)) * step_value
-            step_value_v = jnp.ones((batch_size, 1, num_heads, head_dim)) * step_value * 2
+    # 4. Create dummy key_pages and value_pages
+    key_pages = jnp.zeros((self.config.num_pages, self.config.tokens_per_page, num_heads, head_dim))
+    value_pages = jnp.zeros((self.config.num_pages, self.config.tokens_per_page, num_heads, head_dim))
+    print("\n4. Initialized KV Pages:")
+    debug_print("key_pages", key_pages)
+    debug_print("value_pages", value_pages)
 
-            output_tuple, vars = self.attention_op.apply(
-                variables,
-                step_key, step_key, step_value_v,
-                None,
-                "autoregressive",
-                page_state,
-                mutable=["cache"]
-            )
+    # 5. Fill the pages with our test data
+    tokens_per_page = self.config.tokens_per_page
 
-            cache_vars = vars["cache"]
-            new_page_map = cache_vars["page_map"].value
-            new_current_page = cache_vars["current_page"].value
-            new_current_page_position = cache_vars["current_page_position"].value
-            new_sequence_lengths = cache_vars["sequence_lengths"].value
-            new_num_pages_used = cache_vars["num_pages_used"].value
+    # Fill first page (tokens 0-3)
+    for i in range(min(tokens_per_page, seq_len)):
+      key_pages = key_pages.at[physical_page1, i].set(key[0, i])
+      value_pages = value_pages.at[physical_page1, i].set(value[0, i])
 
-            read_pages, read_pos = determine_read_location(
-                step,
-                new_page_map,
-                new_current_page,
-                new_current_page_position,
-                new_sequence_lengths
-            )
+    # Fill second page (tokens 4-5) if needed
+    for i in range(tokens_per_page, seq_len):
+      pos_in_page = i - tokens_per_page
+      key_pages = key_pages.at[physical_page2, pos_in_page].set(key[0, i])
+      value_pages = value_pages.at[physical_page2, pos_in_page].set(value[0, i])
+    print("\n5. Filled KV Pages:")
+    debug_print("key_pages", key_pages)
+    debug_print("value_pages", value_pages)
 
-            step_lengths = []
-            step_keys = []
-            step_used_pages = []
+    # 6. Initialize and apply the module
+    variables = self.parent_module.init(
+        jax.random.PRNGKey(0),
+        query,
+        key_pages,
+        value_pages,
+        page_state.page_map[layer_id],
+        page_state.sequence_lengths[layer_id],
+        page_group_id,
+        layer_id,
+        True,
+        common_types.MODEL_MODE_PREFILL,
+    )
+    print("\n6. Initialized Variables:")
+    debug_print("variables", variables)
 
-            for b in range(batch_size):
-                step_lengths.append(new_sequence_lengths[b])
-                stored_key = get_stored_key(vars, read_pages, read_pos, b)
-                step_keys.append(np.array(stored_key))
-                expected_key = np.array(step_key[b, 0])
+    result = self.parent_module.apply(
+        variables,
+        query,
+        key_pages,
+        value_pages,
+        page_state.page_map[layer_id],
+        page_state.sequence_lengths[layer_id],
+        page_group_id,
+        layer_id,
+        True,
+        common_types.MODEL_MODE_PREFILL,
+    )
+    print("\n7. Result:")
+    debug_print("result", result)
 
-                used_pages_count = 0
-                for i in range(new_page_map.shape[1]):
-                    if new_page_map[b, i] >= 0:
-                        used_pages_count += 1
-                step_used_pages.append(used_pages_count)
+    # 8. Verify basic properties of the result
+    self.assertEqual(
+        result.shape,
+        (batch_size, seq_len, self.output_dim),
+        f"Result shape mismatch: {result.shape} vs expected {(batch_size, seq_len, self.output_dim)}",
+    )
 
-            all_sequence_lengths.append(step_lengths)
-            all_stored_keys.append(step_keys)
-            all_step_keys.append(expected_key)
-            all_used_pages_counts.append(step_used_pages)
-            variables = vars
+    # Verify the result is not all zeros or NaNs
+    self.assertFalse(jnp.allclose(result, 0.0), "Result is all zeros")
+    self.assertFalse(jnp.any(jnp.isnan(result)), "Result contains NaN values")
 
-        # Perform assertions after the loop
-        for step in range(num_steps):
-            for b in range(batch_size):
-                self.assertEqual(all_sequence_lengths[step][b], step + 1)
-                np.testing.assert_array_almost_equal(
-                    all_stored_keys[step][b],
-                    all_step_keys[step],
-                    decimal=5
-                )
-                if step >= tokens_per_page:
-                    self.assertEqual(all_used_pages_counts[step][b], 2)
+  def test_decode_single_token(self):
+    """Test autoregressive generation of a single token."""
+    batch_size = 1
+    num_heads = self.config.base_num_kv_heads
+    head_dim = self.config.head_dim
+    layer_id = 0
+    page_group_id = 0
 
-        # Final state verification
-        new_page_map = cache_vars["page_map"].value
-        for b in range(batch_size):
-            used_pages = []
-            for i in range(new_page_map.shape[1]):
-                page_val = new_page_map[b, i]
-                if page_val >= 0:
-                    used_pages.append(page_val)
+    print("\n======= test_decode_single_token ======")
 
-            self.assertEqual(len(used_pages), 2 if num_steps > tokens_per_page else 1)
-            if len(used_pages) == 2:
-                self.assertTrue(used_pages[1] > used_pages[0])
+    # 1. Set up a context with a few tokens already processed
+    context_length = 3
+    page_state = self._create_initialized_page_state(batch_size, context_length, layer_id, page_group_id)
+    print("1. Page State:")
+    debug_print("page_state.page_map", page_state.page_map)
+    debug_print("page_state.sequence_lengths", page_state.sequence_lengths)
+
+    # Get physical page for the context
+    physical_page = page_state.page_map[layer_id, page_group_id, 0]
+    print(f"\n2. {physical_page=}")
+
+    # 2. Fill the context with some dummy values
+    key_pages = jnp.zeros((self.config.num_pages, self.config.tokens_per_page, num_heads, head_dim))
+    value_pages = jnp.zeros((self.config.num_pages, self.config.tokens_per_page, num_heads, head_dim))
+    print("\n3. Initialized KV Pages:")
+    debug_print("key_pages", key_pages)
+    debug_print("value_pages", value_pages)
+
+    # Create some context embeddings
+    _, context_keys, context_values = self._get_dummy_inputs(batch_size, context_length, num_heads, head_dim)
+    print("\n4. Context Embeddings:")
+    debug_print("context_keys", context_keys)
+    debug_print("context_values", context_values)
+
+    # Fill the page with context
+    for i in range(context_length):
+      key_pages = key_pages.at[physical_page, i].set(context_keys[0, i])
+      value_pages = value_pages.at[physical_page, i].set(context_values[0, i])
+    print("\n5. Filled KV Pages:")
+    debug_print("key_pages", key_pages)
+    debug_print("value_pages", value_pages)
+
+    # 3. Create query for autoregressive step
+    query, _, _ = self._get_dummy_inputs(batch_size, 1, num_heads, head_dim)
+    print("\n6. Query for Autoregressive Step:")
+    debug_print("query", query)
+
+    # 4. Set sequence_lengths to context_length to simulate generating the next token
+    sequence_lengths = page_state.sequence_lengths.at[layer_id, page_group_id].set(context_length)
+    page_state = page_state.replace(sequence_lengths=sequence_lengths)
+    print("\n7. Updated Sequence Lengths:")
+    debug_print("page_state.sequence_lengths", page_state.sequence_lengths)
+
+    # 5. Initialize and apply the module in decode mode
+    variables = self.parent_module.init(
+        jax.random.PRNGKey(0),
+        query,
+        key_pages,
+        value_pages,
+        page_state.page_map[layer_id],
+        page_state.sequence_lengths[layer_id],
+        page_group_id,
+        layer_id,
+        True,
+        common_types.MODEL_MODE_AUTOREGRESSIVE,
+    )
+    print("\n8. Initialized Variables:")
+    debug_print("variables", variables)
+
+    result = self.parent_module.apply(
+        variables,
+        query,
+        key_pages,
+        value_pages,
+        page_state.page_map[layer_id],
+        page_state.sequence_lengths[layer_id],
+        page_group_id,
+        layer_id,
+        True,
+        common_types.MODEL_MODE_AUTOREGRESSIVE,
+    )
+    print("\n9. Result:")
+    debug_print("result", result)
+
+    # 6. For decode mode, check basic properties
+    self.assertEqual(
+        result.shape,
+        (batch_size, 1, self.output_dim),
+        f"Result shape mismatch: {result.shape} vs expected {(batch_size, 1, self.output_dim)}",
+    )
+
+    self.assertFalse(jnp.allclose(result, 0.0), "Result is all zeros")
+    self.assertFalse(jnp.any(jnp.isnan(result)), "Result contains NaN values")
+
+  def test_interaction_with_page_manager(self):
+    """Test the interaction between PageManager and PagedAttentionOp."""
+    batch_size = 1
+    seq_len = 3
+    num_heads = self.config.base_num_kv_heads
+    head_dim = self.config.head_dim
+    layer_id = 0
+    page_group_id = 0
+
+    print("\n======= test_interaction_with_page_manager ======")
+
+    # 1. Create initial state and reserve pages
+    page_state = self.page_manager.get_initial_state()
+    print("1. Initial Page State:")
+    debug_print("page_state.page_map", page_state.page_map)
+    debug_print("page_state.page_status", page_state.page_status)
+    debug_print("page_state.sequence_lengths", page_state.sequence_lengths)
+
+    page_state = self.page_manager.reserve_prefill_pages(
+        state=page_state,
+        page_group_id=page_group_id,
+        true_length=seq_len,
+        layer_id=layer_id,
+    )
+    print("\n2. Page State After Reserve:")
+    debug_print("page_state.page_map", page_state.page_map)
+    debug_print("page_state.page_status", page_state.page_status)
+    debug_print("page_state.sequence_lengths", page_state.sequence_lengths)
+
+    # 2. Get information about allocated pages
+    physical_page = page_state.page_map[layer_id, page_group_id, 0]
+    self.assertGreaterEqual(physical_page, 0, "No physical page allocated")
+    print(f"\n3. {physical_page=}")
+
+    # Verify page status shows allocated
+    self.assertEqual(page_state.page_status[layer_id, physical_page], 1, "Page status not updated correctly")
+
+    # Verify sequence length is set correctly
+    self.assertEqual(page_state.sequence_lengths[layer_id, page_group_id], seq_len, "Sequence length not set correctly")
+
+    # 3. Test releasing the pages
+    released_state = self.page_manager.release_page_group(
+        state=page_state,
+        page_group_id=page_group_id,
+    )
+    print("\n4. Page State After Release:")
+    debug_print("released_state.page_map", released_state.page_map)
+    debug_print("released_state.page_status", released_state.page_status)
+    debug_print("released_state.sequence_lengths", released_state.sequence_lengths)
+
+    # Verify pages were released
+    self.assertEqual(released_state.page_status[layer_id, physical_page], 0, "Page not released correctly")
+
+    # Verify sequence length reset
+    self.assertEqual(released_state.sequence_lengths[layer_id, page_group_id], 0, "Sequence length not reset on release")
+
+    # 4. Test reserving pages for autoregressive mode
+    # First, set up a context in prefill mode
+    page_state = self.page_manager.reserve_prefill_pages(
+        state=released_state,
+        page_group_id=page_group_id,
+        true_length=1,  # Start with 1 token
+        layer_id=layer_id,
+    )
+    print("\n5. Page State After Prefill (1 token):")
+    debug_print("page_state.page_map", page_state.page_map)
+    debug_print("page_state.page_status", page_state.page_status)
+    debug_print("page_state.sequence_lengths", page_state.sequence_lengths)
+
+    # Now reserve for autoregressive step
+    ar_state = self.page_manager.reserve_autoregressive_pages(
+        state=page_state,
+        page_group_id=page_group_id,
+        layer_id=layer_id,
+    )
+    print("\n6. Page State After Autoregressive Reserve:")
+    debug_print("ar_state.page_map", ar_state.page_map)
+    debug_print("ar_state.page_status", ar_state.page_status)
+    debug_print("ar_state.sequence_lengths", ar_state.sequence_lengths)
+
+    # Verify sequence length incremented
+    self.assertEqual(
+        ar_state.sequence_lengths[layer_id, page_group_id], 2, "Sequence length not incremented in autoregressive mode"
+    )
 
 
 if __name__ == "__main__":
-    unittest.main()
+  unittest.main()

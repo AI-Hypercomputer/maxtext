@@ -62,7 +62,7 @@ Quant = quantizations.AqtQuantization
 
 
 class LlamaDecoderLayer(nn.Module):
-  """Transformer decoder layer that attends to the encoder."""
+  """ Transformer decoder layer for Llama2 models."""
 
   config: models.Config
   mesh: Mesh
@@ -76,12 +76,10 @@ class LlamaDecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      page_state_dict=None,
       slot: Optional[int] = None,
       true_length: Optional[int] = None,
       layer_id: Optional[int] = None,
-      page_state: Optional[PageState] = None,
-      key_pages: Optional[jnp.ndarray] = None,
-      value_pages: Optional[jnp.ndarray] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -98,7 +96,14 @@ class LlamaDecoderLayer(nn.Module):
     lnx = lnx_rms(inputs)
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
-    # Self-attention block
+    # Extract page state for attention if available
+    page_state = None
+    if page_state_dict is not None and "page_state" in page_state_dict:
+      page_state = page_state_dict["page_state"]
+      # Update the layer_id in page_state_dict for attention layer
+      page_state_dict["layer_id"] = layer_id
+
+    # Self-attention block with paged attention support
     attention_layer = Attention(
         config=cfg,
         num_query_heads=cfg.num_query_heads,
@@ -130,8 +135,6 @@ class LlamaDecoderLayer(nn.Module):
         page_group_id=slot,
         true_length=true_length,
         layer_id=layer_id,
-        key_pages=key_pages,
-        value_pages=value_pages,
         use_fused_qkv=cfg.fused_qkv if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE else None,
     )
 
@@ -139,7 +142,6 @@ class LlamaDecoderLayer(nn.Module):
         attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
     )
 
-    # Fully Connected
     hidden_states = models.RMSNorm(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
