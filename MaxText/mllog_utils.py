@@ -48,7 +48,7 @@ def init_print(config, start_step):
     mllogger.event(mllog.constants.SUBMISSION_PLATFORM, 'tpu-trillium')
     mllogger.event(mllog.constants.SUBMISSION_STATUS, mllog.constants.CLOUD)
     mllogger.event(mllog.constants.SUBMISSION_DIVISION, mllog.constants.CLOSED)
-    mllogger.event(mllog.constants.SUBMISSION_BENCHMARK, mllog.constants.GPT3)
+    mllogger.event(mllog.constants.SUBMISSION_BENCHMARK, mllog.constants.LLAMA31_405B)
     mllogger.event(mllog.constants.OPT_NAME, mllog.constants.ADAM)
     mllogger.event(mllog.constants.OPT_BASE_LR, config.learning_rate)
     mllogger.event(mllog.constants.OPT_END_LR, config.cosine_learning_rate_final_fraction)
