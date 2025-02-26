@@ -74,6 +74,21 @@ def load_hf_model(model_size):
     raise NotImplementedError
   return model
 
+def print_nested_keys_directory(data, prefix=""):
+    """
+    Prints nested keys of a dictionary-like structure in a directory-like format.
+
+    Args:
+        data: The dictionary-like structure to traverse.
+        prefix: The current path prefix.
+    """
+    if isinstance(data, dict):
+      for key, value in data.items():
+          current_path = f"{prefix}{key}."
+          print_nested_keys_directory(value, current_path)
+    else:
+      print(prefix)
+
 
 def load_model_state(config):
   """
@@ -93,6 +108,8 @@ def load_model_state(config):
   # Read training state from config.load_paramaters_path
   max_logging.log(f"Read training checkpoint from: {config.load_full_state_path}")
   training_state, _ = _read_train_checkpoint(config, checkpoint_manager, mesh)
+  print_nested_keys_directory(training_state.params)
+  breakpoint()
   return training_state
 
 
@@ -239,8 +256,9 @@ def convert_orbax_hf(hf_model_path, config):
   """
   Landing function to convert MaxText model's checkpoint to HuggingFace format
   """
-  hf_model = load_hf_model(config.model_name)
   training_state = load_model_state(config)
+  hf_model = load_hf_model(config.model_name)
+#   training_state = load_model_state(config)
   new_hf_model_params = convert_state_to_hf(training_state, config.model_name)
   print(f"Saving HuggingFace model to path = {hf_model_path}")
   hf_model.save_pretrained(hf_model_path, state_dict=new_hf_model_params)
