@@ -24,7 +24,8 @@ import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
-from jax.experimental.pallas.ops.gpu import decode_attention as pallas_decode_attention
+from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
+from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
@@ -243,17 +244,27 @@ class AttentionOp(nn.Module):
     ):
       return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
     elif self.attention_kernel == "flash" or self.attention_kernel == "autoselected":
-      if isinstance(key, KVTensor):
-        key = key.dequant()
-      if isinstance(value, KVTensor):
-        value = value.dequant()
+      if jax.devices()[0].platform == "tpu":
+        if isinstance(key, KVTensor):
+          key = key.dequant()
+        if isinstance(value, KVTensor):
+          value = value.dequant()
 
-      if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-        raise ValueError(
-            """Decode not supported with flash attention.
-                            Use `dot_product` instead."""
-        )
-      return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap), None, None
+        if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+          raise ValueError(
+              """Decode not supported with flash attention.
+                              Use `dot_product` instead."""
+          )
+        return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap), None, None
+      else:
+        if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+          # fallback to dot_product as pallas gpu flash attention doesn't support decode stage
+          return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
+        else:
+          key = jnp.repeat(key, self.num_query_heads // self.num_kv_heads, axis=2)
+          value = jnp.repeat(value, self.num_query_heads // self.num_kv_heads, axis=2)
+          out = gpu_pallas_attention.mha(query, key, value, decoder_segment_ids, sm_scale=1.0, causal=True)
+          return out, None, None
     elif self.attention_kernel == "cudnn_flash_te":
       if isinstance(key, KVTensor):
         key = key.dequant()
@@ -275,7 +286,7 @@ class AttentionOp(nn.Module):
     q_for_gqa = q.squeeze(axis=1)
 
     # Use the original gqa function to get the attention output
-    local_out, (local_sum, local_max) = pallas_decode_attention.gqa(
+    local_out, (local_sum, local_max) = gpu_pallas_decode_attention.gqa(
         q=q_for_gqa,
         k=k,
         v=v,
