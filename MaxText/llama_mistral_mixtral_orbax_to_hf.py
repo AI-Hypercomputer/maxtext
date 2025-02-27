@@ -74,20 +74,22 @@ def load_hf_model(model_size):
     raise NotImplementedError
   return model
 
-def print_nested_keys_directory(data, prefix=""):
-    """
-    Prints nested keys of a dictionary-like structure in a directory-like format.
 
-    Args:
-        data: The dictionary-like structure to traverse.
-        prefix: The current path prefix.
-    """
-    if isinstance(data, dict):
-      for key, value in data.items():
-          current_path = f"{prefix}{key}."
-          print_nested_keys_directory(value, current_path)
-    else:
-      print(prefix)
+def print_nested_keys_directory(data, prefix=""):
+  """
+  Prints nested keys of a dictionary-like structure in a directory-like format.
+
+  Args:
+      data: The dictionary-like structure to traverse.
+      prefix: The current path prefix.
+  """
+  if isinstance(data, dict):
+    for key, value in data.items():
+      current_path = f"{prefix}{key}."
+      print_nested_keys_directory(value, current_path)
+  else:
+    print(f"key: {prefix}")
+    print(f"value shape: {data.shape}")
 
 
 def load_model_state(config):
@@ -258,7 +260,7 @@ def convert_orbax_hf(hf_model_path, config):
   """
   training_state = load_model_state(config)
   hf_model = load_hf_model(config.model_name)
-#   training_state = load_model_state(config)
+  #   training_state = load_model_state(config)
   new_hf_model_params = convert_state_to_hf(training_state, config.model_name)
   print(f"Saving HuggingFace model to path = {hf_model_path}")
   hf_model.save_pretrained(hf_model_path, state_dict=new_hf_model_params)
