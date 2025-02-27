@@ -1613,18 +1613,19 @@ deepseek_big = _add_to_model_dictionary(
   )
 )
 
-# 40GB OOM https://cloudlogging.app.goo.gl/4xYbHKv18uubzjNa9
+#docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-pp-remat-again"'
+#commit 729864ce4a17a4affee0de14d4917f7e2c75065d (HEAD -> mattdavidow-pp-100k, origin/mattdavidow-pp-100k)
 mattbar_a1 = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
     model_name="llama3-1-405b-explicit",
     model_type="default",
     tuning_params={
-        "per_device_batch_size": 0.5,
+        "per_device_batch_size": 0.125,
         "max_target_length": 8192,
         "ici_fsdp_parallelism": 16,
         "ici_tensor_parallelism": 16,
-        "dcn_fsdp_parallelism": 1,
+        "dcn_fsdp_parallelism": 4,
         "base_emb_dim": 16384,
         "base_mlp_dim": 131072,
         "base_num_query_heads": 64,
@@ -1636,8 +1637,8 @@ mattbar_a1 = _add_to_model_dictionary(
         "normalization_layer_epsilon": 1.0e-5,
         "rope_max_timescale": 500_000,
         "allow_split_physical_axes": True,
-        "remat_policy": "custom",
-        "decoder_layer_input": "offload",
+        "remat_policy": "full",
+        # "decoder_layer_input": "offload",
         # "query_proj": "offload",
         # "key_proj": "offload",
         # "value_proj": "offload",
@@ -1653,11 +1654,11 @@ mattbar_a1 = _add_to_model_dictionary(
         "sa_block_q": 1024,
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
-        "base_num_decoder_layers": 32,
+        "base_num_decoder_layers": 128, #PP * 8
         "dcn_pipeline_parallelism": 1,
         "pipeline_fsdp_ag_once": True,
-        "num_pipeline_microbatches": 84, # PP * 2
-        "num_layers_per_pipeline_stage": 3,
+        "num_pipeline_microbatches": 32, # PP * 2
+        "num_layers_per_pipeline_stage": 2,
         "scan_layers": True,
         "skip_first_n_steps_for_profiler": 14,
         "dump_hlo": True
@@ -1666,7 +1667,7 @@ mattbar_a1 = _add_to_model_dictionary(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
         + xla_flags_library.CF_FOR_ALL_GATHER
         + xla_flags_library.HOST_OFFLOAD_FLAGS
-        + xla_flags_library.BLAKE_CM # performs poorly =(
+        #+ xla_flags_library.BLAKE_CM # performs poorly =(
     ),
   )
 )
