@@ -528,7 +528,7 @@ class MoeBlock(nn.Module):
         ((batch_size, cp, sub_seq, self.num_experts_per_tok, self.num_experts)),
     )
     expert_token_count = nn.with_logical_constraint(
-        expert_token_count, ("activation_batch", None, "activation_length", None, None)
+        expert_token_count, ("activation_batch", "activation_length", None, None, None)
     )
     trunc_expert_mask = expert_mask * jnp.less_equal(expert_token_count, expert_capacity_per_batch)
     combined_expert_mask = jnp.sum(trunc_expert_mask, axis=3)
