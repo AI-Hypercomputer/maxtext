@@ -68,6 +68,7 @@ BATCH = common_types.BATCH
 PREFILL_KV_BATCH = common_types.PREFILL_KV_BATCH
 KV_BATCH = common_types.KV_BATCH
 LENGTH = common_types.LENGTH
+KV_LENGTH = common_types.KV_LENGTH
 HEAD = common_types.HEAD
 EMBED = common_types.EMBED
 KV_HEAD = common_types.KV_HEAD
