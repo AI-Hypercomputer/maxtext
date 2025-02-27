@@ -1005,6 +1005,59 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   state_logical_annotations = nn.get_partition_spec(abstract_state)
 
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
+
+  def add_data_sharding(state):
+      """Adds 'data' sharding to all PartitionSpecs in a ScaleByAdamState."""
+      def map_sharding(sharding):
+          if isinstance(sharding, jax.sharding.NamedSharding):
+              if sharding.mesh.axis_names == mesh.axis_names: #Check if the sharding belongs to our mesh
+                  new_spec = jax.sharding.PartitionSpec('data', *sharding.spec)
+                  return jax.sharding.NamedSharding(sharding.mesh, new_spec, memory_kind=sharding.memory_kind)
+              else:
+                  return sharding #Don't change shardings from other meshes.
+          else:
+              return sharding
+
+      return jax.tree_map(map_sharding, state)
+
+  def add_data_sharding_at_fsdp_level(state):
+    """Adds 'data' sharding to the same level as 'fsdp' in PartitionSpecs."""
+    def map_sharding(sharding):
+        if isinstance(sharding, jax.sharding.NamedSharding):
+            if sharding.mesh.axis_names == mesh.axis_names: #Check if the sharding belongs to our mesh
+                new_spec = []
+                for spec_tuple in sharding.spec:
+                    if 'fsdp' in spec_tuple:
+                        # Find the index of 'fsdp' in the tuple
+                        fsdp_index = spec_tuple.index('fsdp')
+                        # Insert 'data' at the same index
+                        new_tuple = spec_tuple[:fsdp_index] + ('data',) + spec_tuple[fsdp_index:]
+                        new_spec.append(new_tuple)
+                    else:
+                        new_spec.append(spec_tuple)
+
+                return jax.sharding.NamedSharding(sharding.mesh, jax.sharding.PartitionSpec(*new_spec), memory_kind=sharding.memory_kind)
+            else:
+                return sharding #Don't change shardings from other meshes.
+        else:
+            return sharding
+
+    return jax.tree_map(map_sharding, state)
+
+  print("Before Adding data sharding", flush=True)
+  print(state_mesh_shardings.opt_state)
+  #state_mesh_shardings.opt_state = add_data_sharding(state_mesh_shardings.opt_state)
+  #breakpoint()
+  #state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state, params=params)
+  # state_mesh_shardings = state_mesh_shardings.replace(opt_state=add_data_sharding(state_mesh_shardings.opt_state))
+  state_mesh_shardings = state_mesh_shardings.replace(opt_state=add_data_sharding_at_fsdp_level(state_mesh_shardings.opt_state))
+  print("After adding data sharding", flush=True)
+  print(state_mesh_shardings.opt_state)
+
+  #breakpoint()
+  
+
+
   if is_training and config.optimizer_memory_host_offload:
     opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)
     params = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.params)
