@@ -138,7 +138,10 @@ class MaxEngine(engine_api.Engine):
         state.params,
     )
 
-    self.prefill_kv_cache_annotations = max_utils.get_prefill_kv_cache_annotations(self.model, self.config, rng2, self._mesh)
+    page_state = None
+    if self.config.attention == "paged":
+      page_state = self.page_manager.get_dummy_page_state().snapshot()
+    self.prefill_kv_cache_annotations = max_utils.get_prefill_kv_cache_annotations(self.model, self.config, rng2, self._mesh, page_state)
     self.prefill_kv_cache_shardings = jax.tree_util.tree_map(
         lambda x: jax.sharding.NamedSharding(self._mesh, x),
         self.prefill_kv_cache_annotations,

@@ -650,7 +650,7 @@ def init_training_state(apply_fn, params, tx):
   return state
 
 
-def init_initial_state(model, tx, config, is_training, key):
+def init_initial_state(model, tx, config, is_training, key, page_state: page_managers.PageStateSnapshot = None):
   """
   We pass in "static" objects like model, tx, config as JAX compares them by
   object hash, and instantiating them inside causes pjit top-level annotations
@@ -663,6 +663,7 @@ def init_initial_state(model, tx, config, is_training, key):
       {"params": key, "dropout": key, "aqt": key},
       np.ones(input_shape, dtype=jnp.int32),
       np.ones(input_shape, dtype=jnp.int32),
+      page_state=page_state,
   )
   if is_training:
     return init_training_state(model.apply, model_vars, tx)
@@ -951,7 +952,7 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   )
 
 
-def get_prefill_kv_cache_annotations(model, config, rng, mesh):
+def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: page_managers.PageStateSnapshot = None):
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_prefill_kv_cache(model, config):
@@ -962,6 +963,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh):
         jnp.ones(input_shape),
         jnp.ones(input_shape),
         model_mode=common_types.MODEL_MODE_PREFILL,
+        page_state=page_state,
     )
     return model_vars["cache"]
 
@@ -974,7 +976,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh):
   return state_mesh_annotations
 
 
-def get_kv_cache_annotations(model, config, rng, mesh, page_state: page_managers.PageStateSnapshot):
+def get_kv_cache_annotations(model, config, rng, mesh, page_state: page_managers.PageStateSnapshot = None):
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_ar_kv_cache(model, config):

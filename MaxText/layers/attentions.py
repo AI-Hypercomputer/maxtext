@@ -386,6 +386,7 @@ class PagedAttentionOp(nn.Module):
 
     jax.debug.print("current_page {}, current_page_position {}", page_state.current_page, page_state.current_page_position)
 
+    #key_pages_updated = jax.lax.dynamic_update_slice_in_dim
     key_pages_updated = key_pages.at[kv_indices, broadcast_pages, broadcast_pos].set(new_key)
     value_pages_updated = value_pages.at[kv_indices, broadcast_pages, broadcast_pos].set(new_value)
 
