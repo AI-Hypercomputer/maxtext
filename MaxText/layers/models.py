@@ -456,8 +456,8 @@ class Decoder(nn.Module):
           layer_prefix = ["dense_layers", "moe_layers"]
           num_layers = [cfg.first_num_dense_layers, num_moe_layers]
           for index in range(len(layers)):
-              for index_j in range(num_layers[index]):
-                  y = layers[index](config=cfg, mesh=mesh, name=f"{layer_prefix[index]}_{index_j}", quant=self.quant)(
+              for lyr in range(num_layers[index]):
+                  y = layers[index](config=cfg, mesh=mesh, name=f"{layer_prefix[index]}_{lyr}", quant=self.quant)(
                       y,
                       decoder_segment_ids,
                       decoder_positions,
