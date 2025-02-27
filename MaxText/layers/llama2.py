@@ -71,16 +71,16 @@ class LlamaDecoderLayer(nn.Module):
 
   @nn.compact
   def __call__(
-      self,
-      inputs,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic,
-      model_mode,
-      slot: Optional[int] = None,
-      true_length: Optional[int] = None,
-      layer_id: Optional[int] = None,
-      page_manager=None,
+    self,
+    inputs,
+    decoder_segment_ids,
+    decoder_positions,
+    deterministic,
+    model_mode,
+    slot: Optional[int] = None,
+    true_length: Optional[int] = None,
+    page_state=None,
+    layer_id: Optional[int] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -126,9 +126,9 @@ class LlamaDecoderLayer(nn.Module):
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         model_mode=model_mode,
+        page_state=page_state,  # Pass page_state instead of page_manager
         page_group_id=slot,
         true_length=true_length,
-        page_manager=page_manager,
         layer_id=layer_id,
         use_fused_qkv=cfg.fused_qkv if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE else None,
     )

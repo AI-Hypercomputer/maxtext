@@ -451,13 +451,13 @@ class PageManager:
       self.current_page = self.current_page.at[layer_id, page_group_id].set(-1)
       self.current_page_position = self.current_page_position.at[layer_id, page_group_id].set(0)
 
-  def get_page_state(self) -> PageState:
-    """
-    Returns the current state of all page-related information.
-
+  def get_page_state(self):
+    """Get the current page state without any updates.
+    
     Returns:
-        PageState: Current state of the page manager, including all tracking arrays
+        PageState: Current state of the page manager
     """
+    # Simply return the current state
     return PageState(
         page_status=self.page_status,
         page_map=self.page_map,
@@ -465,4 +465,29 @@ class PageManager:
         num_pages_used=self.num_pages_used,
         current_page=self.current_page,
         current_page_position=self.current_page_position,
+    )
+
+  def get_page_state_for_layer(self, model_mode, page_group_id, true_length, layer_id):
+    """Get page state for a layer in a JAX-compatible way.
+    
+    This method provides a JAX-compatible alternative to the __call__ method.
+    Instead of dynamically updating state, it returns the current state for a layer.
+    
+    Args:
+        model_mode: Operation mode ('prefill' or 'autoregressive')
+        page_group_id: ID of the page group to operate on
+        true_length: Target sequence length 
+        layer_id: ID of the layer to operate on
+        
+    Returns:
+        PageState: Current state for the layer
+    """
+    # Get the page state directly without dynamic updates
+    return PageState(
+        page_status=self.page_status[layer_id],
+        page_map=self.page_map[layer_id],
+        sequence_lengths=self.sequence_lengths[layer_id],
+        num_pages_used=self.num_pages_used[layer_id],
+        current_page=self.current_page[layer_id],
+        current_page_position=self.current_page_position[layer_id],
     )

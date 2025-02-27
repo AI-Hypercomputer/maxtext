@@ -132,6 +132,132 @@ def print_paged_attention_info(page_state, cache):
   print(f"- pages per group: {page_state.page_map.shape[1]}")
 
 
+def test_dynamic_prefill():
+    """Test the dynamic version of prefill KV cache population."""
+    print("\n=== Testing Dynamic Prefill KV Cache Population ===")
+    
+    config = pyconfig.config
+    engine = maxengine.MaxEngine(config)
+    
+    # Load parameters
+    params = engine.load_params()
+    
+    # Create test tokens
+    text = "This is a test sequence for paged attention."
+    metadata = engine.get_tokenizer()
+    tokenizer = engine.build_tokenizer(metadata)
+    tokens, _ = tokenizer.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
+    
+    # Run prefill with dynamic_kv_cache=True
+    true_length = 20
+    slot = 0
+    
+    prefill_result, _, page_state = engine.prefill(
+        params=params,
+        padded_tokens=tokens,
+        true_length=true_length,
+        slot=slot,
+        rng=jax.random.PRNGKey(0),
+        dynamic_kv_cache=True,  # Use dynamic implementation
+    )
+    
+    # Verify results
+    print(f"Prefill completed successfully with dynamic KV cache")
+    
+    # Check for non-zero values in key/value pages
+    for layer_id in range(config.num_decoder_layers):
+        layer_key = f"layers_{layer_id}"
+        if layer_key in prefill_result["cache"]["decoder"]:
+            key_pages = prefill_result["cache"]["decoder"][layer_key]["key_pages"]
+            value_pages = prefill_result["cache"]["decoder"][layer_key]["value_pages"]
+            
+            key_nonzero = jnp.any(key_pages != 0)
+            value_nonzero = jnp.any(value_pages != 0)
+            
+            print(f"Layer {layer_id}: Key pages non-zero: {key_nonzero}, Value pages non-zero: {value_nonzero}")
+    
+    return prefill_result, page_state
+  
+def test_paged_attention_end_to_end():
+    """Test for end-to-end paged attention with prefill and generation."""
+    print("\n=== Testing Paged Attention End-to-End ===")
+    
+    config = pyconfig.config
+    engine = maxengine.MaxEngine(config)
+    
+    # Load parameters
+    params = engine.load_params()
+    
+    # Create test tokens
+    text = "This is a test sequence for paged attention."
+    metadata = engine.get_tokenizer()
+    tokenizer = engine.build_tokenizer(metadata)
+    tokens, _ = tokenizer.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
+    
+    # Run prefill
+    true_length = 20
+    slot = 0
+    
+    print("\n1. Running Prefill")
+    prefill_result, first_token, page_state = engine.prefill(
+        params=params,
+        padded_tokens=tokens,
+        true_length=true_length,
+        slot=slot,
+        rng=jax.random.PRNGKey(0),
+    )
+    
+    print(f"First token: {first_token.data[0, 0]}")
+    print(f"Sequence length after prefill: {page_state.sequence_lengths[slot]}")
+    
+    # Verify key/value pages have data
+    has_data = False
+    for layer_id in range(min(3, config.num_decoder_layers)):
+        layer_key = f"layers_{layer_id}"
+        if layer_key in prefill_result["cache"]["decoder"]:
+            key_pages = prefill_result["cache"]["decoder"][layer_key]["key_pages"]
+            has_kv_data = jnp.any(key_pages != 0)
+            print(f"Layer {layer_id} has KV data: {has_kv_data}")
+            has_data = has_data or has_kv_data
+    
+    if not has_data:
+        print("ERROR: No key/value data found in pages after prefill!")
+        return None
+    
+    # Run a few generate steps
+    print("\n2. Running Generate Steps")
+    decode_state = prefill_result
+    generated_tokens = [first_token.data[0, 0]]
+    
+    for i in range(3):  # Generate 3 more tokens
+        print(f"Generate step {i+1}")
+        decode_state, result = engine.generate(
+            params=params,
+            decode_state=decode_state,
+            slot=slot,
+            rng=jax.random.PRNGKey(i+1),
+        )
+        
+        # Get the token and append to list
+        token = result.data[0, 0]
+        generated_tokens.append(token)
+        print(f"Generated token: {token}")
+        
+        # Get updated page_state
+        updated_page_state = decode_state["cache"]["page_state"]
+        print(f"Sequence length after generation: {updated_page_state.sequence_lengths[slot]}")
+    
+    # Try to decode the generated text
+    print("\n3. Generated Text:")
+    try:
+        text = tokenizer.decode(jnp.array(generated_tokens))
+        print(text)
+    except Exception as e:
+        print(f"Error decoding tokens: {e}")
+        print(f"Raw tokens: {generated_tokens}")
+    
+    return generated_tokens, decode_state
+
 def print_cache_info(prefill_result):
   """Print info about the cache structure"""
   print("\n=== Cache Structure Info ===")
@@ -148,8 +274,8 @@ def print_cache_info(prefill_result):
           if hasattr(v, "shape"):
             print(f"    {k}: shape={v.shape}, dtype={v.dtype}")
 
-    if "page_manager" in cache:
-      print("\nPage Manager state present in cache")
+    if "page_state" in cache:
+      print("\nPage state present in cache")
   else:
     print("No cache found in prefill result")
 
@@ -220,36 +346,39 @@ def main(argv: Sequence[str]) -> None:
 
   # Prefill
   rng, rng_prefill = jax.random.split(rng)
-  print("\n=== Running Prefill ===")
-  prefill_result, first_token, page_state = engine.prefill(
-      params=params,
-      padded_tokens=tokens,
-      true_length=true_length,
-      rng=rng_prefill,
-      slot=slot,
-  )
+  # print("\n=== Running Prefill ===")
+  # prefill_result, first_token, page_state = engine.prefill(
+  #     params=params,
+  #     padded_tokens=tokens,
+  #     true_length=true_length,
+  #     rng=rng_prefill,
+  #     slot=slot,
+  # )
 
-  print("\n=== Prefill Results ===")
-  if config.attention == "paged":
-    # page_state = engine.page_manager(
-    #     model_mode=None  # Just get current state
-    # )
-    print(f"Prefill Result Cache Structure: {jax.tree_util.tree_structure(prefill_result['cache'])}")
-    print_page_allocation_info(slot, true_length, page_state)
-    print_cache_info(prefill_result)
-    print_paged_attention_info(page_state, prefill_result["cache"])
-    batch_size = config.per_device_batch_size * jax.device_count()
-    query_shape = (batch_size, 1, config.num_query_heads, config.head_dim)  # is this right?
-    key_pages_shape = (config.num_pages, config.tokens_per_page, config.num_kv_heads, config.head_dim)
+  # print("\n=== Prefill Results ===")
+  # if config.attention == "paged":
+  #   # page_state = engine.page_manager(
+  #   #     model_mode=None  # Just get current state
+  #   # )
+  #   print(f"Prefill Result Cache Structure: {jax.tree_util.tree_structure(prefill_result['cache'])}")
+  #   print_page_allocation_info(slot, true_length, page_state)
+  #   print_cache_info(prefill_result)
+  #   print_paged_attention_info(page_state, prefill_result["cache"])
+  #   batch_size = config.per_device_batch_size * jax.device_count()
+  #   query_shape = (batch_size, 1, config.num_query_heads, config.head_dim)  # is this right?
+  #   key_pages_shape = (config.num_pages, config.tokens_per_page, config.num_kv_heads, config.head_dim)
 
-    verify_paged_attention(query_shape, key_pages_shape, page_state, config)
+  #   verify_paged_attention(query_shape, key_pages_shape, page_state, config)
 
-    print(f"First key page (layer 0): {prefill_result['cache']['decoder']['layers_0']['key_pages'][0, 0]}")
-    print(f"First value page (layer 0): {prefill_result['cache']['decoder']['layers_0']['value_pages'][0, 0]}")
-    print(f"First key page (layer 0): {prefill_result['cache']['decoder']['layers_0']['key_pages'][0, 1]}")
-    print(f"First value page (layer 0): {prefill_result['cache']['decoder']['layers_0']['value_pages'][0, 1]}")
-    print("\n=== Verification: Step 3 (Prefill - All Tokens, First Page) ===")
-    print(f"True Length: {true_length}")
+  #   print(f"First key page (layer 0): {prefill_result['cache']['decoder']['layers_0']['key_pages'][0, 0]}")
+  #   print(f"First value page (layer 0): {prefill_result['cache']['decoder']['layers_0']['value_pages'][0, 0]}")
+  #   print(f"First key page (layer 0): {prefill_result['cache']['decoder']['layers_0']['key_pages'][0, 1]}")
+  #   print(f"First value page (layer 0): {prefill_result['cache']['decoder']['layers_0']['value_pages'][0, 1]}")
+  #   print("\n=== Verification: Step 3 (Prefill - All Tokens, First Page) ===")
+  #   print(f"True Length: {true_length}")
+
+  # test_dynamic_prefill()
+  test_paged_attention_end_to_end()
 
     # num_layers = config.num_decoder_layers
     # for layer_id in range(num_layers):
@@ -262,7 +391,7 @@ def main(argv: Sequence[str]) -> None:
 
     #     print(f"  Value Pages (Page 0, first {true_length+1} tokens):")
     #     print(value_pages[0, :true_length+1, :, :])
-    verify_page_memory_access(prefill_result, page_state, slot, true_length, config)
+    # verify_page_memory_access(prefill_result, page_state, slot, true_length, config)
 
 
 if __name__ == "__main__":

@@ -448,7 +448,7 @@ class _HyperParameters:
     raw_keys = create_parallelisms_list(raw_keys)
     raw_keys = set_and_validate_pipeline_config(raw_keys)
     if raw_keys["attention"] == "paged":
-      raw_keys["max_pages_per_slot"] = raw_keys["max_target_length"] // raw_keys["tokens_per_page"]
+      raw_keys["max_pages_per_group"] = raw_keys["max_target_length"] // raw_keys["tokens_per_page"]
 
     if raw_keys["dataset_type"] == "c4_mlperf":
       raw_keys["add_bos"] = False

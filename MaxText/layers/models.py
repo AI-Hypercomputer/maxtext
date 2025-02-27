@@ -30,7 +30,7 @@ from layers import embeddings
 from layers import linears
 from layers import normalizations, quantizations
 from layers import pipeline
-from page_manager import PageManager
+from page_manager import PageManager, PageState
 
 Array = common_types.Array
 Config = common_types.Config
@@ -390,14 +390,16 @@ class Decoder(nn.Module):
 
   @nn.compact
   def __call__(
-      self,
-      decoder_input_tokens,
-      decoder_positions,
-      decoder_segment_ids=None,
-      deterministic=False,
-      model_mode=common_types.MODEL_MODE_TRAIN,
-      slot=None,
-      true_length=None,
+    self,
+    decoder_input_tokens,
+    decoder_positions,
+    decoder_segment_ids=None,
+    deterministic=False,
+    model_mode=common_types.MODEL_MODE_TRAIN,
+    slot=None,
+    true_length=None,
+    page_state=None,
+    layer_id=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -408,56 +410,56 @@ class Decoder(nn.Module):
     y = y.astype(cfg.dtype)
 
     if cfg.use_untrainable_positional_embedding:
-      y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
+        y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
 
     if cfg.trainable_position_size > 0:
-      y += Embed(
-          num_embeddings=cfg.trainable_position_size,
-          features=cfg.emb_dim,
-          dtype=cfg.dtype,
-          embedding_init=nn.initializers.normal(stddev=1.0),
-          name="position_embedder",
-          config=cfg,
-      )(decoder_positions)
+        y += Embed(
+            num_embeddings=cfg.trainable_position_size,
+            features=cfg.emb_dim,
+            dtype=cfg.dtype,
+            embedding_init=nn.initializers.normal(stddev=1.0),
+            name="position_embedder",
+            config=cfg,
+        )(decoder_positions)
 
     if cfg.using_pipeline_parallelism:
-      if cfg.pipeline_fsdp_ag_once:
-        partition_spec = self.pipeline_module.get_weight_sharding(
+        if cfg.pipeline_fsdp_ag_once:
+            partition_spec = self.pipeline_module.get_weight_sharding(
+                y,
+                decoder_segment_ids,
+                decoder_positions,
+                deterministic,
+                model_mode,
+            )
+        else:
+            partition_spec = None
+        y = self.pipeline_module(
             y,
             decoder_segment_ids,
             decoder_positions,
             deterministic,
             model_mode,
+            partition_spec=partition_spec,
         )
-      else:
-        partition_spec = None
-      y = self.pipeline_module(
-          y,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          partition_spec=partition_spec,
-      )
     else:
-      # Iterate through layers
-      for lyr in range(cfg.num_decoder_layers):
-        RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, self.get_remat_policy())
+        # Iterate through layers
+        for lyr in range(cfg.num_decoder_layers):
+            RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, self.get_remat_policy())
 
-        current_layer_class = RemattedBlockLayers[lyr % len(RemattedBlockLayers)]
-        layer_instance = current_layer_class(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)
+            current_layer_class = RemattedBlockLayers[lyr % len(RemattedBlockLayers)]
+            layer_instance = current_layer_class(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)
 
-        y, _ = layer_instance(
-            y,
-            decoder_segment_ids,
-            decoder_positions,
-            deterministic,
-            model_mode,
-            slot=slot,
-            true_length=true_length,
-            page_manager=self.page_manager,
-            layer_id=lyr,
-        )
+            y, _ = layer_instance(
+                y,
+                decoder_segment_ids,
+                decoder_positions,
+                deterministic,
+                model_mode,
+                slot=slot,
+                true_length=true_length,
+                page_state=page_state,
+                layer_id=lyr,
+            )
 
     y = self.get_norm_layer()(
         dtype=cfg.dtype,
@@ -470,31 +472,31 @@ class Decoder(nn.Module):
 
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
-      # Use the transpose of embedding matrix for logit transform.
-      logits = self.shared_embedding.attend(y)
-      if self.config.normalize_embedding_logits:
-        # Correctly normalize pre-softmax logits for this shared case.
-        logits = logits / jnp.sqrt(y.shape[-1])
-      if cfg.final_logits_soft_cap:  # handle the case of a soft cap on final logits
-        logits = logits / cfg.final_logits_soft_cap
-        logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
+        # Use the transpose of embedding matrix for logit transform.
+        logits = self.shared_embedding.attend(y)
+        if self.config.normalize_embedding_logits:
+            # Correctly normalize pre-softmax logits for this shared case.
+            logits = logits / jnp.sqrt(y.shape[-1])
+        if cfg.final_logits_soft_cap:  # handle the case of a soft cap on final logits
+            logits = logits / cfg.final_logits_soft_cap
+            logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
     else:
-      logits = linears.DenseGeneral(
-          cfg.vocab_size,
-          weight_dtype=cfg.weight_dtype,
-          dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
-          kernel_axes=("embed", "vocab"),
-          name="logits_dense",
-          matmul_precision=self.config.matmul_precision,
-      )(
-          y
-      )  # We do not quantize the logits matmul.
+        logits = linears.DenseGeneral(
+            cfg.vocab_size,
+            weight_dtype=cfg.weight_dtype,
+            dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
+            kernel_axes=("embed", "vocab"),
+            name="logits_dense",
+            matmul_precision=self.config.matmul_precision,
+        )(
+            y
+        )  # We do not quantize the logits matmul.
     logits = nn.with_logical_constraint(
         logits,
         ("activation_embed_and_logits_batch", "activation_length", "activation_vocab"),
     )
     if self.config.cast_logits_to_fp32:
-      logits = logits.astype(jnp.float32)
+        logits = logits.astype(jnp.float32)
     return logits
 
 
@@ -509,59 +511,88 @@ class Transformer(nn.Module):
 
   def setup(self):
     """Initialize shared_embedding & decoder layers."""
-
     cfg = self.config
     mesh = self.mesh
+    
     self.shared_embedding = Embed(
         num_embeddings=cfg.vocab_size,
         features=cfg.emb_dim,
         dtype=cfg.dtype,
-        attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
+        attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,
         embedding_init=nn.initializers.normal(stddev=1.0),
         name="token_embedder",
         config=cfg,
     )
 
+    # Create fixed shape page state during initialization
     if cfg.attention == "paged":
-      self.page_manager = self.make_rng("page_manager")
-    # page_manager = self.variable("page_manager", "manager", lambda: self.parent.page_manager).value
+        # Initialize page state once in setup, not dynamically in __call__
+        self.page_state = {
+            "decoder": {
+                f"layers_{i}": {
+                    "key_pages": jnp.zeros(
+                        (cfg.num_pages, cfg.tokens_per_page, cfg.num_kv_heads, cfg.head_dim),
+                        dtype=cfg.dtype
+                    ),
+                    "value_pages": jnp.zeros(
+                        (cfg.num_pages, cfg.tokens_per_page, cfg.num_kv_heads, cfg.head_dim),
+                        dtype=cfg.dtype
+                    ),
+                }
+                for i in range(cfg.num_decoder_layers)
+            },
+            "page_manager": PageState(
+                page_status=jnp.zeros((cfg.num_decoder_layers, cfg.num_pages), dtype=jnp.int32),
+                page_map=jnp.full(
+                    (cfg.num_decoder_layers, int(cfg.per_device_batch_size * jax.device_count()), 
+                     cfg.max_pages_per_group), -1, dtype=jnp.int32
+                ),
+                sequence_lengths=jnp.zeros(
+                    (cfg.num_decoder_layers, int(cfg.per_device_batch_size * jax.device_count())), 
+                    dtype=jnp.int32
+                ),
+                num_pages_used=jnp.zeros(
+                    (cfg.num_decoder_layers, int(cfg.per_device_batch_size * jax.device_count())), 
+                    dtype=jnp.int32
+                ),
+                current_page=jnp.full(
+                    (cfg.num_decoder_layers, int(cfg.per_device_batch_size * jax.device_count())), 
+                    -1, dtype=jnp.int32
+                ),
+                current_page_position=jnp.zeros(
+                    (cfg.num_decoder_layers, int(cfg.per_device_batch_size * jax.device_count())), 
+                    dtype=jnp.int32
+                ),
+            )
+        }
     else:
-      self.page_manager = None
+        self.page_state = None
 
     self.decoder = Decoder(
         config=cfg,
         shared_embedding=self.shared_embedding,
         mesh=mesh,
         quant=self.quant,
-        page_manager=self.page_manager,
     )
 
   def __call__(
-      self,
-      decoder_input_tokens,
-      decoder_positions,
-      decoder_segment_ids=None,
-      enable_dropout=True,
-      model_mode=common_types.MODEL_MODE_TRAIN,
-      slot=None,
-      true_length=None,
-      layer_id: Optional[int] = None,
+    self,
+    decoder_input_tokens,
+    decoder_positions,
+    decoder_segment_ids=None,
+    enable_dropout=True,
+    model_mode=common_types.MODEL_MODE_TRAIN,
+    slot=None,
+    true_length=None,
+    page_state=None,
+    layer_id=None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target."""
-    print("\n=== Transformer.__call__() ENTRY ===")
-    print(f"Input shapes:")
-    print(f"  decoder_input_tokens: {decoder_input_tokens.shape}")
-    print(f"  decoder_positions: {decoder_positions.shape}")
-    print(f"  decoder_segment_ids: {decoder_segment_ids.shape if decoder_segment_ids is not None else None}")
-    print(f"  model_mode: {model_mode}")
-    print(f"  slot: {slot}")
-    print(f"  true_length: {true_length}")
-
     if decoder_segment_ids is not None and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-      raise ValueError(
-          f"During autoregressive decoding we assume the tokens are in the active sequence"
-          f" which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}."
-      )
+        raise ValueError(
+            f"During autoregressive decoding we assume the tokens are in the active sequence"
+            f" which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}."
+        )
 
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
@@ -571,5 +602,7 @@ class Transformer(nn.Module):
         model_mode=model_mode,
         slot=slot,
         true_length=true_length,
+        page_state=page_state,
+        layer_id=layer_id,
     )
     return logits
