@@ -504,32 +504,27 @@ class MaxEngine(engine_api.Engine):
                 self.config  # Pass config object directly
             )
             
-            # Initialize key and value pages for each layer
-            # This will be populated by the model during the forward pass
             decoder_cache = {}
             for layer_id in range(self.config.num_decoder_layers):
-                key_pages = jnp.zeros(
-                    (self.config.num_pages, self.config.tokens_per_page, 
-                     self.config.num_kv_heads, self.config.head_dim),
-                    dtype=self.config.dtype
-                )
-                value_pages = jnp.zeros(
-                    (self.config.num_pages, self.config.tokens_per_page, 
-                     self.config.num_kv_heads, self.config.head_dim),
-                    dtype=self.config.dtype
-                )
-                
+                # Full path: cache -> decoder -> layers_N -> self_attention -> attention_op -> {key_pages, value_pages}
                 decoder_cache[f"layers_{layer_id}"] = {
-                    "key_pages": key_pages,
-                    "value_pages": value_pages
+                    "self_attention": {
+                        "attention_op": {}  # PagedAttentionOp will create key_pages and value_pages here
+                    }
                 }
-            
-            # Apply model (which will calculate projections and populate the key/value cache)
+
+            # Print the structure for debugging
+            print(f"\nDEBUG - Created decoder_cache structure:")
+            print(f"  First layer path: decoder_cache['layers_0']['self_attention']['attention_op']")
+            print(f"  Total layers: {len(decoder_cache)}")
+
+            # Unbox the logically partitioned parameters
             unboxed_params = max_utils.unbox_logicallypartioned(params)
-            
-            # Create variables dict with cache for key/value pages
+
+            # Create variables dict with structured cache
             variables = {"params": unboxed_params, "cache": {"decoder": decoder_cache}}
-            
+
+            # Apply model with prefill mode
             flat_logits, new_vars = self.model.apply(
                 variables,
                 input_tokens,
@@ -543,16 +538,31 @@ class MaxEngine(engine_api.Engine):
                 true_length=true_length,
                 page_state=updated_page_state,
             )
-            
-            # Get the updated cache which should now contain populated key/value pages
+            print("\nDEBUG - After model.apply:")
+            print(f"new_vars keys: {new_vars.keys() if new_vars else 'None'}")
+            if 'cache' in new_vars:
+                cache_dict = new_vars['cache']
+                print(f"Cache dict keys: {cache_dict.keys() if cache_dict else 'None'}")
+                if 'decoder' in cache_dict:
+                    decoder_dict = cache_dict['decoder']
+                    print(f"Decoder dict keys: {decoder_dict.keys() if decoder_dict else 'None'}")
+                    
+                    # Check first layer
+                    if f'layers_0' in decoder_dict:
+                        layer_dict = decoder_dict['layers_0']
+                        print(f"Layer 0 dict keys: {layer_dict.keys() if layer_dict else 'None'}")
+            else:
+                print("No 'cache' key in new_vars!")
+
+            # Get the updated cache from new_vars
             updated_cache = new_vars.get("cache", {})
-            
+
             # Build the final cache structure with the page state
             cache = {
                 "page_manager": updated_page_state,
-                "decoder": updated_cache.get("decoder", decoder_cache)
+                "decoder": updated_cache.get("decoder", {})
             }
-            
+                                    
         else:
             # Non-paged attention path
             flat_logits, new_vars = self.model.apply(
@@ -616,192 +626,121 @@ class MaxEngine(engine_api.Engine):
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
   def generate(
-    self,
-    params: Params,
-    decode_state: DecodeState,
-    sampler: Optional[Callable[[Any], Any]] = None,
-    rng: Optional[PRNGKeyType] = None,
-    slot: Optional[int] = None,
+      self,
+      params: Params,
+      decode_state: DecodeState,
+      sampler: Optional[Callable[[Any], Any]] = None,
+      rng: Optional[PRNGKeyType] = None,
+      slot: Optional[int] = None,
   ):
-    """Run one generate step with paged attention."""
-    if rng is None:
-        rng = jax.random.PRNGKey(0)
+      """Run one generate step with paged attention."""
+      if rng is None:
+          rng = jax.random.PRNGKey(0)
 
-    # Get the previous token
-    previous_token = jnp.array([[decode_state["tokens"][slot, 0]]], dtype=jnp.int32)
-    
-    # Split RNG
-    rng, new_rng = jax.random.split(rng)
-    
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        if self.config.attention == "paged":
-            # Get current page state from the cache
-            page_state = decode_state["cache"]["page_manager"]
-            
-            # Extract current values
-            updated_page_status = page_state.page_status
-            updated_page_map = page_state.page_map
-            updated_sequence_lengths = page_state.sequence_lengths
-            updated_num_pages_used = page_state.num_pages_used
-            updated_current_page = page_state.current_page
-            updated_current_page_position = page_state.current_page_position
-            
-            # Update sequence lengths and positions for all layers
-            def update_layer_state(layer_id, state):
-                (seq_lengths, curr_page_pos, curr_page, num_pages, status, page_map) = state
-                
-                # Increment sequence length at this slot
-                new_seq_len = seq_lengths.at[layer_id, slot].add(1)
-                
-                # Calculate new page position
-                new_seq_len_value = new_seq_len[layer_id, slot]
-                new_pos = (new_seq_len_value - 1) % self.config.tokens_per_page
-                new_page_pos = curr_page_pos.at[layer_id, slot].set(new_pos)
-                
-                # Calculate page index for this position
-                new_page_idx = (new_seq_len_value - 1) // self.config.tokens_per_page
-                
-                # Check if we need a new page
-                old_pages_used = num_pages[layer_id, slot]
-                need_new_page = new_page_idx >= old_pages_used
-                
-                def allocate_new_page(_):
-                    # Find next free page with a deterministic formula
-                    # In practice, you would use a more sophisticated allocation strategy
-                    next_page = (old_pages_used + slot) % self.config.num_pages
-                    
-                    # Update page status, mapping and tracking info
-                    new_status = status.at[layer_id, next_page].set(1)
-                    new_map = page_map.at[layer_id, slot, new_page_idx].set(next_page)
-                    new_pages_used = num_pages.at[layer_id, slot].set(old_pages_used + 1)
-                    new_curr_page = curr_page.at[layer_id, slot].set(next_page)
-                    
-                    return (new_seq_len, new_page_pos, new_curr_page, new_pages_used, new_status, new_map)
-                
-                def use_existing_page(_):
-                    # No new page needed, just update the current page
-                    # based on the logical page index
-                    existing_page = page_map[layer_id, slot, new_page_idx]
-                    new_curr_page = curr_page.at[layer_id, slot].set(existing_page)
-                    
-                    return (new_seq_len, new_page_pos, new_curr_page, num_pages, status, page_map)
-                
-                # Conditionally allocate a new page if needed
-                return jax.lax.cond(need_new_page, allocate_new_page, use_existing_page, None)
-            
-            # Update state for each layer using fori_loop
-            state_tuple = (
-                updated_sequence_lengths,
-                updated_current_page_position,
-                updated_current_page,
-                updated_num_pages_used,
-                updated_page_status,
-                updated_page_map
-            )
-            
-            state_tuple = jax.lax.fori_loop(
-                0, self.config.num_decoder_layers, update_layer_state, state_tuple
-            )
-            
-            # Unpack updated state
-            (
-                updated_sequence_lengths,
-                updated_current_page_position,
-                updated_current_page,
-                updated_num_pages_used,
-                updated_page_status,
-                updated_page_map
-            ) = state_tuple
-            
-            # Create updated page state
-            updated_page_state = PageState(
-                page_status=updated_page_status,
-                page_map=updated_page_map,
-                sequence_lengths=updated_sequence_lengths,
-                num_pages_used=updated_num_pages_used,
-                current_page=updated_current_page,
-                current_page_position=updated_current_page_position
-            )
-            
-            # Get existing decoder cache
-            decoder_cache = decode_state["cache"]["decoder"]
-            
-            # Apply model with updated page state and existing cache
-            unboxed_params = max_utils.unbox_logicallypartioned(params)
-            variables = {"params": unboxed_params, "cache": {"decoder": decoder_cache}}
-            
-            flat_logits, new_vars = self.model.apply(
-                variables,
-                previous_token,
-                decode_state["next_pos"],
-                enable_dropout=False,
-                model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-                rngs={"params": new_rng},
-                mutable=["cache"],
-                slot=slot,
-                page_state=updated_page_state,
-            )
-            
-            # Get updated cache
-            updated_decoder_cache = new_vars.get("cache", {}).get("decoder", decoder_cache)
-            
-            # Update the cache with new page state and decoder cache
-            updated_cache = {
-                "page_manager": updated_page_state,
-                "decoder": updated_decoder_cache
-            }
-            
-        else:
-            # Non-paged attention path
-            out_logits, new_vars = self.model.apply(
-                params | {"cache": decode_state["cache"]},
-                previous_token,
-                decode_state["next_pos"],
-                enable_dropout=False,
-                model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-                rngs={"params": new_rng},
-                mutable=["cache"],
-            )
-            
-            # Update cache with new KV data
-            updated_cache = new_vars["cache"]
+      # Get the previous token
+      previous_token = jnp.array([[decode_state["tokens"][slot, 0]]], dtype=jnp.int32)
+      
+      # Split RNG
+      rng, new_rng = jax.random.split(rng)
+      
+      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+          if self.config.attention == "paged":
+              # Get current page state from the cache
+              page_state = decode_state["cache"]["page_manager"]
+              
+              # Extract updated KV cache
+              decoder_cache = decode_state["cache"]["decoder"]
+              
+              # Unbox parameters
+              unboxed_params = max_utils.unbox_logicallypartioned(params)
+              
+              # Apply model with autoregressive mode
+              variables = {"params": unboxed_params, "cache": {"decoder": decoder_cache}}
+              
+              flat_logits, new_vars = self.model.apply(
+                  variables,
+                  previous_token,
+                  decode_state["next_pos"],
+                  enable_dropout=False,
+                  model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+                  rngs={"params": new_rng},
+                  mutable=["cache"],
+                  slot=slot,
+                  page_state=page_state,
+              )
+              
+              # Get updated cache
+              updated_cache = new_vars.get("cache", {})
+              
+              # Check if we have an updated page state from PagedAttentionOp
+              # This is the key change - we now check for updated_page_state in the first layer
+              if "decoder" in updated_cache and f"layers_0" in updated_cache["decoder"] and \
+                "self_attention" in updated_cache["decoder"][f"layers_0"] and \
+                "attention_op" in updated_cache["decoder"][f"layers_0"]["self_attention"] and \
+                "updated_page_state" in updated_cache["decoder"][f"layers_0"]["self_attention"]["attention_op"]:
+                  # Get the updated page state from PagedAttentionOp
+                  updated_page_state = updated_cache["decoder"][f"layers_0"]["self_attention"]["attention_op"]["updated_page_state"]
+                  print(f"  Using updated page state with seq len: {updated_page_state.sequence_lengths[0, slot]}")
+              else:
+                  # If not found, use original (shouldn't happen with our fix)
+                  updated_page_state = page_state
+                  print("  WARNING: No updated page state found, using original")
+              
+              # Update the cache
+              cache = {
+                  "page_manager": updated_page_state,
+                  "decoder": updated_cache.get("decoder", decoder_cache)
+              }
+              
+          else:
+              # Non-paged attention path
+              out_logits, new_vars = self.model.apply(
+                  params | {"cache": decode_state["cache"]},
+                  previous_token,
+                  decode_state["next_pos"],
+                  enable_dropout=False,
+                  model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+                  rngs={"params": new_rng},
+                  mutable=["cache"],
+              )
+              
+              # Update cache with new KV data
+              cache = new_vars["cache"]
+              flat_logits = out_logits
 
-    # Apply sharding constraint
-    if self.config.attention == "paged":
-        out_logits = jax.lax.with_sharding_constraint(flat_logits, self.replicated_sharding)
-    else:
-        out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
+      # Apply sharding constraint
+      out_logits = jax.lax.with_sharding_constraint(flat_logits, self.replicated_sharding)
 
-    # Sample next token
-    new_token = inference_utils.sampling(
-        out_logits,
-        rng,
-        self.config.decode_sampling_strategy,
-        topk=self.config.decode_sampling_top_k,
-        nucleus_topp=self.config.decode_sampling_nucleus_p,
-        temperature=self.config.decode_sampling_temperature,
-    )
-    
-    # Create result
-    all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
-    result = engine_api.ResultTokens(
-        data=jnp.concatenate((new_token, all_valid, decode_state["generated_tokens"]), axis=1),
-        tokens_idx=(0, 1),
-        valid_idx=(1, 2),
-        length_idx=(2, 3),
-        samples_per_slot=1,
-    )
+      # Sample next token
+      new_token = inference_utils.sampling(
+          out_logits,
+          rng,
+          self.config.decode_sampling_strategy,
+          topk=self.config.decode_sampling_top_k,
+          nucleus_topp=self.config.decode_sampling_nucleus_p,
+          temperature=self.config.decode_sampling_temperature,
+      )
+      
+      # Create result
+      all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
+      result = engine_api.ResultTokens(
+          data=jnp.concatenate((new_token, all_valid, decode_state["generated_tokens"]), axis=1),
+          tokens_idx=(0, 1),
+          valid_idx=(1, 2),
+          length_idx=(2, 3),
+          samples_per_slot=1,
+      )
 
-    # Update decode state
-    updated_decode_state = {
-        "logits": out_logits,
-        "cache": updated_cache,
-        "next_pos": decode_state["next_pos"] + 1,
-        "generated_tokens": decode_state["generated_tokens"] + 1,
-        "tokens": new_token,
-    }
+      # Update decode state
+      updated_decode_state = {
+          "logits": out_logits,
+          "cache": cache,
+          "next_pos": decode_state["next_pos"] + 1,
+          "generated_tokens": decode_state["generated_tokens"] + 1,
+          "tokens": new_token,
+      }
 
-    return updated_decode_state, result
+      return updated_decode_state, result
 
   @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_prompts",))
   def prefill_concat(

@@ -245,7 +245,7 @@ def get_initial_paged_kv_cache(model, config, batch_size, abstract=False):
 
 
 class PagedAttentionOp(nn.Module):
-    """Paged Attention Operator - Simple Implementation."""
+    """Simplified Paged Attention Operator for debugging."""
 
     mesh: any
     num_kv_heads: int
@@ -255,10 +255,6 @@ class PagedAttentionOp(nn.Module):
     output_dim: int
     dtype: any = jnp.bfloat16
     quant: Optional[Quant] = None
-
-    def setup(self):
-        """Initialize all parameters and variables that will be needed."""
-        pass
 
     @nn.compact
     def __call__(
@@ -277,70 +273,75 @@ class PagedAttentionOp(nn.Module):
         """Apply paged attention and return output."""
         # For initialization or when page_state is None, return zeros
         if page_state is None:
-            # Return query directly to maintain shape
             return query
         
-        # Get cache variables with proper naming
-        key_pages_name = f"key_pages_{layer_id}"
-        value_pages_name = f"value_pages_{layer_id}"
-        
-        # Initialize cache variables if needed with static shape
+        # Define cache variables with the exact variable names we expect
         key_pages = self.variable(
-            "cache",
-            key_pages_name,
+            "cache", 
+            "key_pages", 
             lambda: jnp.zeros(
-                (self.config.num_pages, self.config.tokens_per_page, self.num_kv_heads, self.kv_head_dim_size),
+                (self.config.num_pages, self.config.tokens_per_page, 
+                 self.num_kv_heads, self.kv_head_dim_size),
                 dtype=self.dtype,
             )
         )
         value_pages = self.variable(
-            "cache",
-            value_pages_name,
+            "cache", 
+            "value_pages", 
             lambda: jnp.zeros(
-                (self.config.num_pages, self.config.tokens_per_page, self.num_kv_heads, self.kv_head_dim_size),
+                (self.config.num_pages, self.config.tokens_per_page, 
+                 self.num_kv_heads, self.kv_head_dim_size),
                 dtype=self.dtype,
             )
         )
         
-        # In autoregressive mode, update KV cache with the new token
-        if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-            # Calculate token position for this slot and layer using page_state
-            seq_len = page_state.sequence_lengths[layer_id, page_group_id]
-            page_idx = (seq_len - 1) // self.config.tokens_per_page
-            pos_in_page = (seq_len - 1) % self.config.tokens_per_page
-            
-            # Get the physical page from the page map
-            physical_page = page_state.page_map[layer_id, page_group_id, page_idx]
-            
-            # Handle invalid page index (shouldn't happen in normal operation)
-            valid_page = physical_page >= 0
-            
-            # Ensure physical_page is non-negative for indexing
-            physical_page = jnp.maximum(0, physical_page)
-            
-            # Extract key/value for the new token
-            # Note: key and value are [batch, 1, heads, dim]
-            new_key = jnp.squeeze(key[page_group_id:page_group_id+1], axis=1)  # Make [1, heads, dim]
-            new_value = jnp.squeeze(value[page_group_id:page_group_id+1], axis=1)  # Make [1, heads, dim]
-            
-            # Only update if valid page
-            def update_cache(_):
-                # Update the cache
-                new_key_pages = key_pages.value.at[physical_page, pos_in_page].set(new_key[0])
-                new_value_pages = value_pages.value.at[physical_page, pos_in_page].set(new_value[0])
-                key_pages.value = new_key_pages
-                value_pages.value = new_value_pages
-                return None
-                
-            def skip_update(_):
-                return None
-            
-            # Conditionally update cache only if valid page
-            jax.lax.cond(valid_page, update_cache, skip_update, None)
+        # Print debug info about the variable creation
+        print(f"\nDEBUG - PagedAttentionOp creating variables:")
+        print(f"  key_pages shape: {key_pages.value.shape}")
+        print(f"  value_pages shape: {value_pages.value.shape}")
         
-        # This simplified implementation just returns query as-is
-        # In a more complete implementation, we would compute attention across pages
-        # But for development/debugging, this is enough to verify the cache updates work
+        # For debugging - always populate with non-zero data
+        if model_mode == common_types.MODEL_MODE_PREFILL:
+            # Fill with ones to verify it's working
+            print(f"  Setting key_pages/value_pages to ones for prefill mode")
+            key_pages.value = jnp.ones_like(key_pages.value)
+            value_pages.value = jnp.ones_like(value_pages.value)
+            
+        elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+            # Fill with twos for autoregressive mode
+            print(f"  Setting key_pages/value_pages to twos for autoregressive mode")
+            key_pages.value = jnp.ones_like(key_pages.value) * 2.0
+            value_pages.value = jnp.ones_like(value_pages.value) * 2.0
+            
+            # Update sequence length for this layer and slot
+            # We need a variable to store updated page_state
+            # Note: In a real implementation, the PageManager would handle this
+            updated_page_state = self.variable(
+                "cache",
+                "updated_page_state",
+                lambda: page_state
+            )
+            
+            # Increment sequence length
+            current_seq_len = page_state.sequence_lengths[layer_id, page_group_id]
+            new_seq_len = current_seq_len + 1
+            
+            # Update the state (only for the current layer to avoid conflicts)
+            new_sequence_lengths = page_state.sequence_lengths.at[layer_id, page_group_id].set(new_seq_len)
+            
+            # Create updated page state
+            updated_page_state.value = PageState(
+                page_status=page_state.page_status,
+                page_map=page_state.page_map,
+                sequence_lengths=new_sequence_lengths,
+                num_pages_used=page_state.num_pages_used,
+                current_page=page_state.current_page,
+                current_page_position=page_state.current_page_position,
+            )
+            
+            print(f"  Updated sequence length: {new_seq_len}")
+        
+        # Return query as-is for now
         return query
 
 class AttentionOp(nn.Module):
@@ -1349,16 +1350,17 @@ class Attention(nn.Module):
   reshape_q: bool = False
 
   def setup(self):
-    # cfg = self.config
-    # self.use_fused_qkv = cfg.fused_qkv
+    cfg = self.config
+    print(f"\nAttention.setup() - Initializing with attention={cfg.attention}")
 
-    if self.config.attention == "paged":
+
+    if cfg.attention == "paged":
         self.attention_op = PagedAttentionOp(
+            config=self.config, 
             mesh=self.mesh,
             num_kv_heads=self.num_kv_heads,
             num_query_heads=self.num_query_heads,  # Make sure to pass this
             kv_head_dim_size=self.head_dim,
-            config=self.config, 
             output_dim=self.config.base_emb_dim,  # This is still needed for shape info
             dtype=self.dtype,
             quant=self.quant,

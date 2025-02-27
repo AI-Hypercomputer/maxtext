@@ -8,6 +8,70 @@ from typing import Sequence
 from absl import app
 
 
+def verify_cache_contents(prefill_result):
+    """Verify that the KV cache contains non-zero elements after prefill."""
+    print("\nVerifying KV cache contents:")
+    print(f"Prefill result keys: {prefill_result.keys()}")
+    
+    if "cache" not in prefill_result:
+        print("ERROR: No cache found in prefill result")
+        return False
+    
+    cache = prefill_result["cache"]
+    print(f"Cache keys: {cache.keys()}")
+    
+    if "decoder" not in cache:
+        print("ERROR: No decoder found in cache")
+        return False
+    
+    decoder_cache = cache["decoder"]
+    print(f"Decoder cache keys: {decoder_cache.keys()}")
+    
+    has_data = False
+    
+    for layer_id in range(3):  # Check first 3 layers
+        layer_key = f"layers_{layer_id}"
+        if layer_key in decoder_cache:
+            layer_cache = decoder_cache[layer_key]
+            print(f"Layer {layer_id} cache keys: {layer_cache.keys()}")
+            
+            # Navigate through the nested structure
+            if "self_attention" in layer_cache:
+                attn_cache = layer_cache["self_attention"]
+                print(f"  self_attention keys: {attn_cache.keys()}")
+                
+                if "attention_op" in attn_cache:
+                    op_cache = attn_cache["attention_op"]
+                    print(f"    attention_op keys: {op_cache.keys()}")
+                    
+                    # Check for key_pages and value_pages
+                    if "key_pages" in op_cache:
+                        key_pages = op_cache["key_pages"]
+                        print(f"      key_pages shape: {key_pages.shape}")
+                        print(f"      key_pages dtype: {key_pages.dtype}")
+                        
+                        # Count non-zero elements
+                        num_nonzero = jnp.sum(jnp.any(key_pages != 0, axis=(2, 3)))
+                        print(f"      Layer {layer_id}: {num_nonzero} pages contain non-zero key data")
+                        has_data = has_data or (num_nonzero > 0)
+                        
+                        # Also print a sample value
+                        print(f"      Sample value: {key_pages[0, 0, 0, 0]}")
+                    else:
+                        print(f"      ERROR: No key_pages found in attention_op")
+                else:
+                    print(f"    ERROR: No attention_op found in self_attention")
+            else:
+                print(f"  ERROR: No self_attention found in layer {layer_id}")
+    
+    if not has_data:
+        print("ERROR: No key/value data found in any pages after prefill!")
+    else:
+        print("SUCCESS: Found non-zero key/value data in cache")
+    
+    return has_data
+
+
 def verify_page_content_bounds(key_pages, page_idx, expected_tokens):
   """Verify only expected positions contain non-zero values"""
   nonzero_positions = jnp.sum(jnp.any(key_pages[page_idx] != 0, axis=(1, 2)))
@@ -210,18 +274,10 @@ def test_paged_attention_end_to_end():
     print(f"First token: {first_token.data[0, 0]}")
     print(f"Sequence length after prefill: {page_state.sequence_lengths[slot]}")
     
-    # Verify key/value pages have data
-    has_data = False
-    for layer_id in range(min(3, config.num_decoder_layers)):
-        layer_key = f"layers_{layer_id}"
-        if layer_key in prefill_result["cache"]["decoder"]:
-            key_pages = prefill_result["cache"]["decoder"][layer_key]["key_pages"]
-            has_kv_data = jnp.any(key_pages != 0)
-            print(f"Layer {layer_id} has KV data: {has_kv_data}")
-            has_data = has_data or has_kv_data
+    # Verify cache contents outside of JIT-compiled function
+    has_kv_data = verify_cache_contents(prefill_result)
     
-    if not has_data:
-        print("ERROR: No key/value data found in pages after prefill!")
+    if not has_kv_data:
         return None
     
     # Run a few generate steps
@@ -243,8 +299,8 @@ def test_paged_attention_end_to_end():
         generated_tokens.append(token)
         print(f"Generated token: {token}")
         
-        # Get updated page_state
-        updated_page_state = decode_state["cache"]["page_state"]
+        # Get updated page_state - FIX: Use "page_manager" key instead of "page_state"
+        updated_page_state = decode_state["cache"]["page_manager"]
         print(f"Sequence length after generation: {updated_page_state.sequence_lengths[slot]}")
     
     # Try to decode the generated text
@@ -257,27 +313,6 @@ def test_paged_attention_end_to_end():
         print(f"Raw tokens: {generated_tokens}")
     
     return generated_tokens, decode_state
-
-def print_cache_info(prefill_result):
-  """Print info about the cache structure"""
-  print("\n=== Cache Structure Info ===")
-  if "cache" in prefill_result:
-    cache = prefill_result["cache"]
-    print(f"Cache keys: {cache.keys()}")
-
-    if "decoder" in cache:
-      decoder = cache["decoder"]
-      print("\nDecoder layers:")
-      for layer_name, layer_data in decoder.items():
-        print(f"\n  {layer_name}:")
-        for k, v in layer_data.items():
-          if hasattr(v, "shape"):
-            print(f"    {k}: shape={v.shape}, dtype={v.dtype}")
-
-    if "page_state" in cache:
-      print("\nPage state present in cache")
-  else:
-    print("No cache found in prefill result")
 
 
 def print_page_allocation_info(slot, true_length, page_state):
