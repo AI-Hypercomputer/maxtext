@@ -263,8 +263,11 @@ logical_axis_rules: [
                       ['activation_length', ['sequence']],
                       ['activation_norm_length', ['tensor_sequence', 'sequence']],
                       ['activation_embed', ['tensor', 'tensor_transpose']],
-                      ['activation_mlp', ['tensor', 'tensor_transpose', 'tensor_sequence']],
+                      ['activation_mlp', ['context''tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_kv', ['tensor', 'tensor_transpose', 'tensor_sequence']],
+                      ['activation_length', ['context']],
+                      ['activation_length_q', ['context']],
+                      ['activation_kv_length', ['context']]
                       ['activation_prefill_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_kv_head_dim', ['tensor', 'tensor_transpose', 'tensor_sequence']],
