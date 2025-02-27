@@ -1006,44 +1006,38 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
 
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
 
-  def add_data_sharding_at_fsdp_level(state):
-    """Adds 'data' sharding to the same level as 'fsdp' in PartitionSpecs."""
-    def map_sharding(sharding):
-        if isinstance(sharding, jax.sharding.NamedSharding):
-            if sharding.mesh.axis_names == mesh.axis_names: #Check if the sharding belongs to our mesh
-                new_spec = []
-                for spec_tuple in sharding.spec:
-                    if 'fsdp' in spec_tuple:
-                        # Find the index of 'fsdp' in the tuple
-                        fsdp_index = spec_tuple.index('fsdp')
-                        # Insert 'data' at the same index
-                        new_tuple = spec_tuple[:fsdp_index] + ('data',) + spec_tuple[fsdp_index:]
-                        new_spec.append(new_tuple)
-                    else:
-                        new_spec.append(spec_tuple)
-
-                return jax.sharding.NamedSharding(sharding.mesh, jax.sharding.PartitionSpec(*new_spec), memory_kind=sharding.memory_kind)
+  def remove_fsdp_sharding(sharding_tree):
+    def _remove_fsdp_from_partition_spec(named_sharding):
+      if isinstance(named_sharding, jax.sharding.NamedSharding):
+        new_spec = []
+        for axis in named_sharding.spec:
+          if axis is None:
+            new_spec.append(None)
+          elif isinstance(axis, str):
+            if axis != "fsdp" and axis != "fsdp_transpose":
+              new_spec.append(axis)
             else:
-                return sharding #Don't change shardings from other meshes.
-        else:
-            return sharding
-
-    return jax.tree_map(map_sharding, state)
+              new_spec.append(None)
+          elif isinstance(axis, (list, tuple)):
+            new_axis = [a for a in axis if (a != "fsdp" and a != "fsdp_transpose")]
+            new_spec.append(tuple(new_axis))
+          else:
+            raise ValueError(f"Unsupported axis type: {type(axis)}")
+        return jax.sharding.NamedSharding(named_sharding.mesh, jax.sharding.PartitionSpec(*new_spec))
+      return named_sharding
+    return jax.tree.map(_remove_fsdp_from_partition_spec, sharding_tree)
 
   # Debug statements:
   # print("Before Adding zero-1 data sharding", flush=True)
-  # print(state_mesh_shardings.opt_state)
+  # print(state_mesh_shardings.params)
 
-  sharded_opt_state = add_data_sharding_at_fsdp_level(state_mesh_shardings.opt_state)
-  state_mesh_shardings = state_mesh_shardings.replace(opt_state=sharded_opt_state)
 
-  # If we also do the same trick for params, we are just doing regular FSDP sharding
-  # sharded_params = add_data_sharding_at_fsdp_level(state_mesh_shardings.params) 
-  # state_mesh_shardings = state_mesh_shardings.replace(opt_state=sharded_opt_state, params=sharded_params)
+  no_fsdp_params = remove_fsdp_sharding(state_mesh_shardings.params) 
+  state_mesh_shardings = state_mesh_shardings.replace(params=no_fsdp_params)
 
   # Debug statements:
   # print("After adding zero-1 data sharding", flush=True)
-  # print(state_mesh_shardings.opt_state)
+  # print(state_mesh_shardings.params)
 
   if is_training and config.optimizer_memory_host_offload:
     opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)
