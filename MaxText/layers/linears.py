@@ -508,8 +508,12 @@ class MoeBlock(nn.Module):
     # Currently, we only support data and tensor parallelism with Megablox.
     # We all gather the input activations over tensor parallelism to follow strategy
     # in https://parsa.epfl.ch/course-info/cs723/papers/Megatron.pdf.
-    input_partition_spec = nn.logical_to_mesh_axes(("activation_batch", None, None))
-    gate_logits_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
+    # input_partition_spec = nn.logical_to_mesh_axes(("activation_batch", None, None))
+    from jax.sharding import PartitionSpec, NamedSharding
+    P = PartitionSpec
+    input_partition_spec = P('expert', None, None)
+    # gate_logits_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
+    gate_logits_pspec = P('expert', None, None)
     w0_pspec = nn.logical_to_mesh_axes((None, None, "mlp"))
     w1_pspec = nn.logical_to_mesh_axes((None, None, "mlp"))
     wo_pspec = nn.logical_to_mesh_axes((None, "mlp", None))
@@ -531,7 +535,6 @@ class MoeBlock(nn.Module):
     def wrapper(x, logits, w0, w1, wo):
       batch_size, sequence_length, _ = x.shape
       x, sorted_selected_experts, weights, group_sizes = self.permute(x, logits)
-
       if self.get_expert_parallelism() > 1:
         # get group sizes for each shard and all gather
         axis_name = "expert"
