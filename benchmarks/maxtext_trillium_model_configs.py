@@ -856,6 +856,7 @@ llama3_1_405b_8192_fsdp_dcn_mlperf = _add_to_model_dictionary(
         "sa_block_q_dq": 2048,
         "sa_block_kv_dq": 2048,
         "opt_type": "adam_pax",
+        "adam_eps": 1e-5,
         "enable_checkpointing": True,
         "load_parameters_path": "gs://trillium-scale-tests-q1-25-west/mlperf50_llama405b_checkpoints/scanned_sharded/0/items",
         "tokenizer_type": "huggingface",

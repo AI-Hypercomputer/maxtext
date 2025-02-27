@@ -39,7 +39,8 @@ import maxtext_viperfish_model_configs as v5p_model_configs
 
 # Assumes you built maxtext dep image.
 # Assumes you have xpk installed in a git clone repo of ~/{wl_config.xpk_path}/xpk.py
-_DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME = 'maxtext_base_image_latest'
+#_DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME = 'maxtext_base_image_latest'
+_DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME = 'gcr.io/tpu-prod-env-multipod/maxtext_base_image_mlperf_0113'
 
 class LibTpuType(enum.Enum):
   NIGHTLY = 'nightly-libtpu'
@@ -418,6 +419,8 @@ def generate_xpk_workload_cmd(
           # ' --use-vertex-tensorboard'
           # f' --experiment-name={test_purpose_name}'
           f' {additional_flags}'
+          f' 2>&1 | tee /tmp/maxtext_log'
+          f' && gsutil cp /tmp/maxtext_log {wl_config.base_output_directory}/result_log'
       ),
       name,
   )
@@ -635,7 +638,7 @@ def run_llama3():
       # another_config,
     ]:
       # Run workloads in the following slice configurations
-      for num_slices in [2, ]:
+      for num_slices in [4, ]:
         # Use the libtpu dependencies from:
         for libtpu_type in [
             # LibTpuType.CUSTOM
@@ -761,7 +764,7 @@ def run_llama3_v5():
       print('Unable to run xpk workload: {xpk_workload_name}')
 
 def main() -> int:
-  run_llama3_v5()
+  run_llama3()
 
 
 
