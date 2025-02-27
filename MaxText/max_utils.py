@@ -1050,7 +1050,9 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   #breakpoint()
   #state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state, params=params)
   # state_mesh_shardings = state_mesh_shardings.replace(opt_state=add_data_sharding(state_mesh_shardings.opt_state))
-  state_mesh_shardings = state_mesh_shardings.replace(opt_state=add_data_sharding_at_fsdp_level(state_mesh_shardings.opt_state))
+  sharded_opt_state = add_data_sharding_at_fsdp_level(state_mesh_shardings.opt_state)
+  sharded_params = add_data_sharding_at_fsdp_level(state_mesh_shardings.params) # This is not exactly what we want
+  state_mesh_shardings = state_mesh_shardings.replace(opt_state=sharded_opt_state, params=sharded_params)
   print("After adding data sharding", flush=True)
   print(state_mesh_shardings.opt_state)
 
