@@ -1006,20 +1006,6 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
 
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
 
-  def add_data_sharding(state):
-      """Adds 'data' sharding to all PartitionSpecs in a ScaleByAdamState."""
-      def map_sharding(sharding):
-          if isinstance(sharding, jax.sharding.NamedSharding):
-              if sharding.mesh.axis_names == mesh.axis_names: #Check if the sharding belongs to our mesh
-                  new_spec = jax.sharding.PartitionSpec('data', *sharding.spec)
-                  return jax.sharding.NamedSharding(sharding.mesh, new_spec, memory_kind=sharding.memory_kind)
-              else:
-                  return sharding #Don't change shardings from other meshes.
-          else:
-              return sharding
-
-      return jax.tree_map(map_sharding, state)
-
   def add_data_sharding_at_fsdp_level(state):
     """Adds 'data' sharding to the same level as 'fsdp' in PartitionSpecs."""
     def map_sharding(sharding):
@@ -1044,21 +1030,20 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
 
     return jax.tree_map(map_sharding, state)
 
-  print("Before Adding data sharding", flush=True)
-  print(state_mesh_shardings.opt_state)
-  #state_mesh_shardings.opt_state = add_data_sharding(state_mesh_shardings.opt_state)
-  #breakpoint()
-  #state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state, params=params)
-  # state_mesh_shardings = state_mesh_shardings.replace(opt_state=add_data_sharding(state_mesh_shardings.opt_state))
+  # Debug statements:
+  # print("Before Adding zero-1 data sharding", flush=True)
+  # print(state_mesh_shardings.opt_state)
+
   sharded_opt_state = add_data_sharding_at_fsdp_level(state_mesh_shardings.opt_state)
-  sharded_params = add_data_sharding_at_fsdp_level(state_mesh_shardings.params) # This is not exactly what we want
-  state_mesh_shardings = state_mesh_shardings.replace(opt_state=sharded_opt_state, params=sharded_params)
-  print("After adding data sharding", flush=True)
-  print(state_mesh_shardings.opt_state)
+  state_mesh_shardings = state_mesh_shardings.replace(opt_state=sharded_opt_state)
 
-  #breakpoint()
-  
+  # If we also do the same trick for params, we are just doing regular FSDP sharding
+  # sharded_params = add_data_sharding_at_fsdp_level(state_mesh_shardings.params) 
+  # state_mesh_shardings = state_mesh_shardings.replace(opt_state=sharded_opt_state, params=sharded_params)
 
+  # Debug statements:
+  # print("After adding zero-1 data sharding", flush=True)
+  # print(state_mesh_shardings.opt_state)
 
   if is_training and config.optimizer_memory_host_offload:
     opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)
