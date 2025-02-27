@@ -162,7 +162,7 @@ def kill_existing_processes_str():
   return """#!/bin/bash
 _TPU_VERSION_NAME="${1}"
 device_name="accel"
-if [[ "${_TPU_VERSION_NAME}" =~ ^v5.* ]]; then
+if [[ "${_TPU_VERSION_NAME}" =~ ^v[56].* ]]; then
   device_name="vfio/"
 fi
 echo "Searching for existing processes on device ${device_name}..."
