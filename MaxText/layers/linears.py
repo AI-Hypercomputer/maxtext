@@ -19,6 +19,7 @@ import operator
 from typing import Any, Callable, Iterable, Sequence, Tuple, Union, Optional
 
 import flax
+from flax.linen import partitioning
 import flax.linen as nn
 import jax
 from jax import lax
@@ -499,6 +500,9 @@ class MoeBlock(nn.Module):
             self.config.capacity_factor,
         )
     )
+    cp = self.config.ici_context_parallelism
+    if seq_len % cp == 0:
+      expert_capacity_per_batch = max(math.ceil(expert_capacity_per_batch / cp), self.config.capacity_factor)
     max_logging.log(f"Applying potential token dropping with a batch expert_capacity of {expert_capacity_per_batch}")
 
     # calculate expert mask and drop tokens if needed
@@ -546,6 +550,12 @@ class MoeBlock(nn.Module):
     combine_mask = softmax_probs[..., None] * expert_token_position_in_capacity
     combine_mask = combine_mask[..., 1:]
     dispatch_mask = combine_mask.astype(bool)
+
+    #ici_context_parallelism
+    if seq_len % cp == 0:
+      dispatch_mask = jnp.reshape(dispatch_mask, (batch_size, cp, seq_len//cp, self.num_experts, expert_capacity_per_batch))
+      combine_mask = jnp.reshape(combine_mask, (batch_size, cp, seq_len//cp, self.num_experts, expert_capacity_per_batch))
+
     return dispatch_mask, combine_mask
 
   # See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details.
@@ -598,49 +608,91 @@ class MoeBlock(nn.Module):
     top_k_weights, top_k_indices = jax.lax.top_k(softmax_probs, self.num_experts_per_tok)
     matmul_precision = lax.Precision(self.config.matmul_precision)
 
+    cp = self.config.ici_context_parallelism
+    batch_size = inputs.shape[0]
+    seq_len = inputs.shape[1]
+
+    do_cp =  seq_len % cp == 0
     if self.config.capacity_factor > 0:
       # token dropping if needed
       dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs)
-      mask_axes = ("activation_batch", "activation_length", None, None)
-      # dispatch_mask = nn.with_logical_constraint(dispatch_mask, mask_axes)
-      # combine_mask = nn.with_logical_constraint(combine_mask, mask_axes)
+      mask_axes = ("activation_batch", "activation_length", None, None, None)
+      if do_cp:
+        mask_axes = ("activation_batch", "activation_length", None, None, None)
+        input_axis = ("activation_batch", "activation_length", None, "activation_embed")
+        dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_embed")
+        mlp_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_mlp")
+      else:
+        mask_axes = ("activation_batch", "activation_length", None, None)
+        input_axis = ("activation_batch", "activation_length", "activation_embed")
+        dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, "activation_embed")
+        mlp_axis = ("activation_exp", "activation_batch_no_exp", None, "activation_mlp")
+
+      dispatch_mask = nn.with_logical_constraint(dispatch_mask, mask_axes)
+      combine_mask = nn.with_logical_constraint(combine_mask, mask_axes)
       if self.config.model_call_mode != "inference":
         loss = self.load_balance_loss(top_k_indices, softmax_probs)
       else:
         loss = 0
-      inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
+
+      if do_cp:
+        inputs = jnp.reshape(inputs,(batch_size, cp, seq_len//cp, inputs.shape[2]))
+
+      inputs = nn.with_logical_constraint(inputs, input_axis)     
+
       with jax.named_scope("dispatch"):
-        dispatch = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=DISPATCH)(
-            "BSM,BSEC -> EBCM", inputs, dispatch_mask, precision=matmul_precision
-        )
-        dispatch = nn.with_logical_constraint(
+        if do_cp:
+          dispatch = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=DISPATCH)(
+              "BNSM,BNSEC -> EBNCM", inputs, dispatch_mask, precision=matmul_precision
+          )
+          dispatch = nn.with_logical_constraint(
             dispatch,
-            ("activation_exp", "activation_batch_no_exp", None, "activation_embed"),
-        )
+            (None, "activation_batch_no_exp", "activation_length", None, "activation_embed"),
+          )
+        else:
+          dispatch = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=DISPATCH)(
+              "BSM,BSEC -> EBCM", inputs, dispatch_mask, precision=matmul_precision 
+           )
+        dispatch = nn.with_logical_constraint(
+              dispatch,
+             dispatch_axis,
+          )
+        #print("dispatch", dispatch.shape)
       with jax.named_scope("wi_0"):
         w0_kernel_axes = ("exp", None, "mlp")
         w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
-        layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
-            "EBCM,EMH -> EBCH", dispatch, w0_kernel, precision=matmul_precision
-        )
+        if do_cp:
+          layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
+              "EBNCM,EMH -> EBNCH", dispatch, w0_kernel, precision=matmul_precision
+          )
+        else:
+          layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
+              "EBCM,EMH -> EBCH", dispatch, w0_kernel, precision=matmul_precision
+          )
+
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
         layer_w0 = nn.with_logical_constraint(
             layer_w0,
-            ("activation_exp", "activation_batch_no_exp", None, "activation_mlp"),
+           mlp_axis,
         )
         layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
       with jax.named_scope("wi_1"):
         w1_kernel_axes = ("exp", None, "mlp")
         w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
-        layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
-            "EBCM,EMH -> EBCH", dispatch, w1_kernel, precision=matmul_precision
-        )
+        if do_cp:
+          layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
+              "EBNCM,EMH -> EBNCH", dispatch, w1_kernel, precision=matmul_precision
+          )
+        else:
+          layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
+              "EBCM,EMH -> EBCH", dispatch, w1_kernel, precision=matmul_precision
+          )             
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
         layer_w1 = nn.with_logical_constraint(
             layer_w1,
-            ("activation_exp", "activation_batch_no_exp", None, "activation_mlp"),
+            mlp_axis,
         )
         layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
       layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
@@ -648,9 +700,14 @@ class MoeBlock(nn.Module):
       with jax.named_scope("wo"):
         wo_kernel_axes = ("exp", "mlp", None)
         wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
-        intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
-            "EBCH,EHM -> EBCM", layer_multiply, wo_kernel, precision=matmul_precision
-        )
+        if do_cp:
+          intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
+              "EBNCH,EHM -> EBNCM", layer_multiply, wo_kernel, precision=matmul_precision
+          )
+        else:
+          intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
+              "EBCH,EHM -> EBCM", layer_multiply, wo_kernel, precision=matmul_precision
+          )
         # intermediate_layer = nn.with_logical_constraint(
         #     intermediate_layer,
         #     ("activation_exp", "activation_batch_no_exp", None, "activation_embed"),
@@ -658,16 +715,26 @@ class MoeBlock(nn.Module):
         intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("combine"):
         # Matmul & element wise operation
-        output = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=COMBINE)(
-            "EBCM,BSEC -> BSM",
-            intermediate_layer,
-            combine_mask,
-            precision=matmul_precision,
-        )
+        if do_cp:
+          output = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=COMBINE)(
+              "EBNCM,BNSEC -> BNSM",
+              intermediate_layer,
+              combine_mask,
+              precision=matmul_precision,
+          )
+          output = jnp.reshape(output, (output.shape[0], output.shape[1]*output.shape[2], output.shape[3]))
+        else:
+          output = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=COMBINE)(
+          "EBCM,BSEC -> BSM",
+          intermediate_layer,
+          combine_mask,
+          precision=matmul_precision,
+        )    
       return output, loss
     else:
       top_k_weights /= top_k_weights.sum(-1, keepdims=True)
       weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
+
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
       with jax.named_scope("wi_0"):
         layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
