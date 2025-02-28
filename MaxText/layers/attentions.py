@@ -522,6 +522,14 @@ class PagedAttentionOp(nn.Module):
         model_mode
     ):
         """Compute attention using the cached values."""
+        print("\n=== _compute_attention (START) ===")
+        print(f"  layer_id: {layer_id}, page_group_id: {page_group_id}")
+        print(f"  query.shape: {query.shape}")
+        print(f"  key_pages_value.shape: {key_pages_value.shape}")
+        print(f"  value_pages_value.shape: {value_pages_value.shape}")
+        print(f"  page_state.page_map: {page_state.page_map}")
+        print(f"  page_state.sequence_lengths: {page_state.sequence_lengths}")
+        print(f"  true_length: {true_length}")
         batch_size, seq_len, num_heads, head_dim = query.shape
 
         # Gather key and value data based on page_map
@@ -537,10 +545,13 @@ class PagedAttentionOp(nn.Module):
         # Process each page
         for logical_page_idx in range(max_pages_to_process):
             physical_page = page_map[logical_page_idx]
+            print(f"    logical_page_idx: {logical_page_idx}, physical_page: {physical_page}")
             
             # Get tokens for this page - no dynamic slice to avoid tracing issues
             page_k = key_pages_value[physical_page]
             page_v = value_pages_value[physical_page]
+            print(f"      page_k.shape: {page_k.shape}")
+            print(f"      page_v.shape: {page_v.shape}")
             
             # Include the whole page
             gathered_k.append(page_k)
@@ -549,10 +560,14 @@ class PagedAttentionOp(nn.Module):
         # Concatenate along sequence dimension
         gathered_k = jnp.concatenate(gathered_k, axis=0)
         gathered_v = jnp.concatenate(gathered_v, axis=0)
+        print(f"  gathered_k.shape (after concat): {gathered_k.shape}")
+        print(f"  gathered_v.shape (after concat): {gathered_v.shape}")
         
         # Reshape to batch dimensions
         gathered_k = gathered_k.reshape(1, -1, self.num_kv_heads, head_dim)
         gathered_v = gathered_v.reshape(1, -1, self.num_kv_heads, head_dim)
+        print(f"  gathered_k.shape (after reshape): {gathered_k.shape}")
+        print(f"  gathered_v.shape (after reshape): {gathered_v.shape}")
 
         # Handle grouped-query attention
         if self.num_query_heads > self.num_kv_heads:
@@ -582,6 +597,7 @@ class PagedAttentionOp(nn.Module):
         # Apply attention weights to values
         attn_output = jnp.einsum('bhst,bthd->bshd', attn_weights, gathered_v)
 
+        print("=== _compute_attention (END) ===\n")
         return attn_output
 
 
