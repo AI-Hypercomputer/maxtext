@@ -202,3 +202,8 @@ DEBUG_LOGS = {
     "TPU_MIN_LOG_LEVEL": "0",
     "TPU_VMODULE": "tpu_configuration_ops_impl=3",  # Enable TPU logging
 }
+
+# Disables collective matmul operations.
+DISABLE_COLLECTIVE_MATMUL = (
+    " --xla_jf_spmd_threshold_for_windowed_einsum_mib=1000000"
+)
