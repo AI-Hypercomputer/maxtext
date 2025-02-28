@@ -6,6 +6,9 @@ import os
 import pyconfig
 from typing import Sequence
 from absl import app
+import common_types
+from page_manager import PageState
+from layers.attentions import PagedAttentionOp
 
 
 def verify_cache_contents(prefill_result):
@@ -137,6 +140,269 @@ def verify_page_memory_access(prefill_result, page_state, slot, true_length, con
       print(f"    Values (first row): {value_pages[first_page][0][0]}")
 
 
+def verify_paged_attention_correctness():
+    """Test to verify that paged attention produces the same results as standard attention."""
+    print("\n=== Testing Paged Attention Correctness ===")
+    
+    # Setup test parameters
+    batch_size = 1
+    seq_len = 16
+    num_query_heads = 8
+    num_kv_heads = 4
+    head_dim = 32
+    num_pages = 4
+    tokens_per_page = 4
+    
+    # Create random test data with a fixed seed for reproducibility
+    rng = jax.random.PRNGKey(42)
+    rng, q_rng, k_rng, v_rng = jax.random.split(rng, 4)
+    
+    query = jax.random.normal(q_rng, (batch_size, seq_len, num_query_heads, head_dim))
+    key = jax.random.normal(k_rng, (batch_size, seq_len, num_kv_heads, head_dim))
+    value = jax.random.normal(v_rng, (batch_size, seq_len, num_kv_heads, head_dim))
+    
+    # Create mock config
+    class MockConfig:
+        def __init__(self):
+            self.dtype = jnp.float32
+            self.num_pages = num_pages
+            self.tokens_per_page = tokens_per_page
+            self.num_kv_heads = num_kv_heads
+            self.head_dim = head_dim
+            self.num_query_heads = num_query_heads
+            self.num_decoder_layers = 1
+            self.max_pages_per_group = 10
+            self.attention = "paged"
+            self.max_prefill_predict_length = 128
+            self.max_target_length = 256
+    
+    config = MockConfig()
+    
+    # Create page state for a batch_size=1 scenario with seq_len tokens
+    # Configure a simple linear page map (page 0->0, 1->1, etc.)
+    num_logical_pages = (seq_len + tokens_per_page - 1) // tokens_per_page
+    
+    # Create page state
+    page_status = jnp.zeros((1, num_pages), dtype=jnp.int32)
+    page_map = jnp.zeros((1, 2, 10), dtype=jnp.int32) - 1  # Initialize with -1
+    
+    # Set up page mapping (physical pages for the sequence)
+    for i in range(min(num_logical_pages, 10)):
+        page_map = page_map.at[0, 0, i].set(i % num_pages)
+    
+    sequence_lengths = jnp.array([[seq_len, 0]], dtype=jnp.int32)
+    num_pages_used = jnp.array([[num_logical_pages, 0]], dtype=jnp.int32)
+    current_page = jnp.array([[num_logical_pages - 1, -1]], dtype=jnp.int32)
+    current_page_position = jnp.array([[(seq_len - 1) % tokens_per_page, 0]], dtype=jnp.int32)
+    
+    page_state = PageState(
+        page_status=page_status,
+        page_map=page_map,
+        sequence_lengths=sequence_lengths,
+        num_pages_used=num_pages_used,
+        current_page=current_page,
+        current_page_position=current_page_position,
+    )
+    
+    print(f"Page State configuration:")
+    print(f"  Sequence length: {seq_len}")
+    print(f"  Tokens per page: {tokens_per_page}")
+    print(f"  Logical pages needed: {num_logical_pages}")
+    print(f"  Page map for first few pages: {page_map[0, 0, :num_logical_pages]}")
+    
+    # Initialize paged attention op
+    paged_op = PagedAttentionOp(
+        mesh=None,
+        num_kv_heads=num_kv_heads,
+        num_query_heads=num_query_heads,
+        kv_head_dim_size=head_dim,
+        config=config,
+        output_dim=num_query_heads * head_dim,
+        dtype=jnp.float32,
+    )
+    
+    # Create cache with pre-populated key/value pages
+    key_pages = jnp.zeros((num_pages, tokens_per_page, num_kv_heads, head_dim))
+    value_pages = jnp.zeros((num_pages, tokens_per_page, num_kv_heads, head_dim))
+    
+    # Fill pages with key/value data
+    for page_idx in range(min(num_pages, num_logical_pages)):
+        start_idx = page_idx * tokens_per_page
+        end_idx = min(start_idx + tokens_per_page, seq_len)
+        tokens_in_page = end_idx - start_idx
+        
+        if tokens_in_page > 0:
+            key_pages = key_pages.at[page_idx, :tokens_in_page].set(key[0, start_idx:end_idx])
+            value_pages = value_pages.at[page_idx, :tokens_in_page].set(value[0, start_idx:end_idx])
+    
+    print(f"Initialized {num_pages} key/value pages")
+    for p in range(num_pages):
+        key_nonzero = jnp.any(key_pages[p] != 0)
+        print(f"  Page {p}: contains data = {key_nonzero}")
+    
+    # Define variables for PagedAttentionOp
+    variables = {
+        "cache": {
+            "key_pages": key_pages,
+            "value_pages": value_pages,
+        },
+        "params": {}
+    }
+    
+    # Create reference attention function (standard MHA)
+    def compute_reference_attention(q, k, v):
+        # q: [batch, seq, heads, dim]
+        # k, v: [batch, seq, kv_heads, dim]
+        
+        # Handle grouped-query attention
+        if num_query_heads > num_kv_heads:
+            heads_ratio = num_query_heads // num_kv_heads
+            # Repeat k and v for each query group
+            k = jnp.repeat(k, heads_ratio, axis=2)
+            v = jnp.repeat(v, heads_ratio, axis=2)
+        
+        # Compute attention scores
+        scale = 1.0 / jnp.sqrt(head_dim)
+        
+        # Reshape for batch matrix multiply
+        batch, seq, heads, dim = q.shape
+        q_reshaped = q.reshape(batch * heads, seq, dim)
+        k_reshaped = k.reshape(batch * heads, seq, dim)
+        v_reshaped = v.reshape(batch * heads, seq, dim)
+        
+        # Compute attention scores
+        scores = jnp.matmul(q_reshaped, jnp.transpose(k_reshaped, (0, 2, 1))) * scale
+        
+        # Apply causal mask
+        mask = jnp.triu(jnp.ones((seq, seq)) * (-1e10), k=1)
+        scores = scores + mask
+        
+        # Apply softmax
+        attn_weights = jax.nn.softmax(scores, axis=-1)
+        
+        # Apply attention weights
+        attn_output = jnp.matmul(attn_weights, v_reshaped)
+        
+        # Reshape back
+        return attn_output.reshape(batch, seq, heads, dim)
+    
+    # Compute reference output using standard attention
+    reference_output = compute_reference_attention(query, key, value)
+    
+    print("\nComputing paged attention output...")
+    
+    # Run paged attention with the initialized pages
+    paged_output, updated_vars = paged_op.apply(
+        variables,
+        query,
+        key,
+        value,
+        None,  # decoder_segment_ids
+        common_types.MODEL_MODE_PREFILL,
+        page_state=page_state,
+        page_group_id=0,
+        true_length=seq_len,
+        layer_id=0,
+        mutable=["cache"]
+    )
+    
+    # Check that output shape matches
+    print(f"Reference output shape: {reference_output.shape}")
+    print(f"Paged output shape: {paged_output.shape}")
+    
+    if reference_output.shape != paged_output.shape:
+        print("ERROR: Output shapes don't match!")
+        return False
+    
+    # Compare outputs
+    max_abs_diff = jnp.max(jnp.abs(reference_output - paged_output))
+    mean_abs_diff = jnp.mean(jnp.abs(reference_output - paged_output))
+    print(f"Maximum absolute difference: {max_abs_diff}")
+    print(f"Mean absolute difference: {mean_abs_diff}")
+    
+    # Check if outputs are close enough (allow some floating point precision differences)
+    is_close = max_abs_diff < 1e-3
+    print(f"Outputs match: {is_close}")
+    
+    # Now test autoregressive generation
+    print("\nTesting autoregressive generation...")
+    
+    # Get a single token query for the next position
+    ar_query = jnp.zeros((batch_size, 1, num_query_heads, head_dim))
+    ar_key = jnp.zeros((batch_size, 1, num_kv_heads, head_dim))
+    ar_value = jnp.zeros((batch_size, 1, num_kv_heads, head_dim))
+    
+    # Fill with random data
+    ar_query = ar_query.at[0, 0].set(jax.random.normal(jax.random.PRNGKey(100), (num_query_heads, head_dim)))
+    ar_key = ar_key.at[0, 0].set(jax.random.normal(jax.random.PRNGKey(101), (num_kv_heads, head_dim)))
+    ar_value = ar_value.at[0, 0].set(jax.random.normal(jax.random.PRNGKey(102), (num_kv_heads, head_dim)))
+    
+    # Update page state for autoregressive step
+    ar_page_state = PageState(
+        page_status=page_state.page_status,
+        page_map=page_state.page_map,
+        sequence_lengths=page_state.sequence_lengths,
+        num_pages_used=page_state.num_pages_used,
+        current_page=page_state.current_page,
+        current_page_position=page_state.current_page_position,
+    )
+    
+    # Run autoregressive step
+    ar_paged_output, ar_updated_vars = paged_op.apply(
+        variables,
+        ar_query,
+        ar_key,
+        ar_value,
+        None,  # decoder_segment_ids
+        common_types.MODEL_MODE_AUTOREGRESSIVE,
+        page_state=ar_page_state,
+        page_group_id=0,
+        layer_id=0,
+        mutable=["cache"]
+    )
+    
+    # Check that the page state was updated
+    if "updated_page_state" in ar_updated_vars["cache"]:
+        updated_page_state = ar_updated_vars["cache"]["updated_page_state"]
+        new_seq_len = updated_page_state.sequence_lengths[0, 0]
+        print(f"Sequence length after autoregressive step: {new_seq_len}")
+        seq_len_increased = new_seq_len > seq_len
+        print(f"Sequence length increased: {seq_len_increased}")
+    else:
+        print("WARNING: No updated page state found in autoregressive output")
+        seq_len_increased = False
+    
+    # Check that key/value pages were updated
+    if "key_pages" in ar_updated_vars["cache"]:
+        new_key_pages = ar_updated_vars["cache"]["key_pages"]
+        
+        # Get the expected physical page and position
+        expected_page = (seq_len // tokens_per_page) % num_pages
+        expected_pos = seq_len % tokens_per_page
+        
+        # Check if the new token was stored
+        token_stored = jnp.any(new_key_pages[expected_page, expected_pos] != 0)
+        print(f"New token stored in key_pages at page {expected_page}, position {expected_pos}: {token_stored}")
+    else:
+        print("WARNING: No updated key_pages found in autoregressive output")
+        token_stored = False
+    
+    # Overall test success
+    test_success = is_close and seq_len_increased and token_stored
+    if test_success:
+        print("\nPaged attention implementation is working correctly!")
+    else:
+        print("\nPaged attention implementation has issues that need to be fixed:")
+        if not is_close:
+            print("- Attention outputs don't match reference implementation")
+        if not seq_len_increased:
+            print("- Sequence length not properly updated in autoregressive mode")
+        if not token_stored:
+            print("- New token not properly stored in key/value pages")
+    
+    return test_success
+
+
 def verify_paged_attention(query_shape, key_pages_shape, page_state, config):
   """Verify paged attention shapes and parameters."""
   print("\n=== Paged Attention Verification ===")
@@ -253,13 +519,12 @@ def test_paged_attention_end_to_end():
     params = engine.load_params()
     
     # Create test tokens
-    text = "This is a test sequence for paged attention."
+    text = "I love to"
     metadata = engine.get_tokenizer()
     tokenizer = engine.build_tokenizer(metadata)
-    tokens, _ = tokenizer.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
+    tokens, true_length = tokenizer.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
     
     # Run prefill
-    true_length = 20
     slot = 0
     
     print("\n1. Running Prefill")
@@ -272,12 +537,14 @@ def test_paged_attention_end_to_end():
     )
     
     print(f"First token: {first_token.data[0, 0]}")
-    print(f"Sequence length after prefill: {page_state.sequence_lengths[slot]}")
+    if page_state is not None:
+        print(f"Sequence length after prefill: {page_state.sequence_lengths[0, slot]}")
     
     # Verify cache contents outside of JIT-compiled function
     has_kv_data = verify_cache_contents(prefill_result)
     
     if not has_kv_data:
+        print("No KV data found in cache - aborting test")
         return None
     
     # Run a few generate steps
@@ -286,7 +553,7 @@ def test_paged_attention_end_to_end():
     generated_tokens = [first_token.data[0, 0]]
     
     for i in range(3):  # Generate 3 more tokens
-        print(f"Generate step {i+1}")
+        print(f"\nGenerate step {i+1}")
         decode_state, result = engine.generate(
             params=params,
             decode_state=decode_state,
@@ -299,19 +566,40 @@ def test_paged_attention_end_to_end():
         generated_tokens.append(token)
         print(f"Generated token: {token}")
         
-        # Get updated page_state - FIX: Use "page_manager" key instead of "page_state"
-        updated_page_state = decode_state["cache"]["page_manager"]
-        print(f"Sequence length after generation: {updated_page_state.sequence_lengths[slot]}")
+        # Check updated page state
+        if "page_manager" in decode_state["cache"]:
+            updated_page_state = decode_state["cache"]["page_manager"]
+            current_seq_len = updated_page_state.sequence_lengths[0, slot]
+            print(f"Sequence length after generation: {current_seq_len}")
+            
+            # Verify sequence length is increasing
+            expected_length = true_length + i + 1
+            if current_seq_len != expected_length:
+                print(f"WARNING: Sequence length {current_seq_len} doesn't match expected {expected_length}")
+        else:
+            print("WARNING: No page_manager found in decode_state")
     
     # Try to decode the generated text
     print("\n3. Generated Text:")
     try:
         text = tokenizer.decode(jnp.array(generated_tokens))
-        print(text)
+        print(f"Decoded text: {text}")
     except Exception as e:
         print(f"Error decoding tokens: {e}")
         print(f"Raw tokens: {generated_tokens}")
     
+    # Verify that the sequence of tokens makes sense
+    print("\n4. Verifying token sequence:")
+    are_all_tokens_reasonable = all(0 < token < config.vocab_size for token in generated_tokens)
+    print(f"All tokens within vocabulary range: {are_all_tokens_reasonable}")
+    
+    print("\n5. End-to-End Summary:")
+    success = has_kv_data and are_all_tokens_reasonable
+    if success:
+        print("✅ Paged attention end-to-end test PASSED")
+    else:
+        print("❌ Paged attention end-to-end test FAILED")
+        
     return generated_tokens, decode_state
 
 
@@ -413,6 +701,7 @@ def main(argv: Sequence[str]) -> None:
   #   print(f"True Length: {true_length}")
 
   # test_dynamic_prefill()
+  # verify_paged_attention_correctness()
   test_paged_attention_end_to_end()
 
     # num_layers = config.num_decoder_layers

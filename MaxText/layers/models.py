@@ -61,29 +61,41 @@ class DecoderLayer(nn.Module):
     self.is_paged_attention = cfg.attention == "paged"
     self.use_fused_qkv = cfg.fused_qkv
 
-    # Create the Attention instance.
-    self.attention_layer = Attention(
-        config=self.config,
-        num_query_heads=cfg.num_query_heads,
-        num_kv_heads=cfg.num_kv_heads,
-        head_dim=cfg.head_dim,
-        max_target_length=cfg.max_target_length,
-        max_prefill_predict_length=cfg.max_prefill_predict_length,
-        attention_kernel=cfg.attention,
-        mesh=cfg.mesh,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        dropout_rate=cfg.dropout_rate,
-        name="self_attention",
-        float32_qk_product=cfg.float32_qk_product,
-        float32_logits=cfg.float32_logits,
-        quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(cfg),
-        prefill_cache_axis_order=tuple([int(i) for i in cfg.prefill_cache_axis_order.split(",")]),
-        ar_cache_axis_order=tuple([int(i) for i in cfg.ar_cache_axis_order.split(",")]),
-        compute_axis_order=tuple([int(i) for i in cfg.compute_axis_order.split(",")]),
-        reshape_q=cfg.reshape_q,
-    )
+    print(f"\nDecoderLayer.setup() - Initializing layer with attention={cfg.attention}")
+    
+    # Configure attention parameters based on attention type
+    attention_params = {
+        "config": self.config,
+        "num_query_heads": cfg.num_query_heads,
+        "num_kv_heads": cfg.num_kv_heads,
+        "head_dim": cfg.head_dim,
+        "max_target_length": cfg.max_target_length,
+        "max_prefill_predict_length": cfg.max_prefill_predict_length,
+        "attention_kernel": cfg.attention,
+        "mesh": cfg.mesh,
+        "dtype": cfg.dtype,
+        "weight_dtype": cfg.weight_dtype,
+        "dropout_rate": cfg.dropout_rate,
+        "name": "self_attention",
+        "float32_qk_product": cfg.float32_qk_product,
+        "float32_logits": cfg.float32_logits,
+        "quant": self.quant,
+        "kv_quant": quantizations.configure_kv_quant(cfg),
+    }
+    
+    # Add parameters specific to standard attention
+    if not self.is_paged_attention:
+        attention_params.update({
+            "prefill_cache_axis_order": tuple([int(i) for i in cfg.prefill_cache_axis_order.split(",")]),
+            "ar_cache_axis_order": tuple([int(i) for i in cfg.ar_cache_axis_order.split(",")]),
+            "compute_axis_order": tuple([int(i) for i in cfg.compute_axis_order.split(",")]),
+            "reshape_q": cfg.reshape_q,
+            "use_ragged_attention": cfg.use_ragged_attention,
+            "ragged_block_size": cfg.ragged_block_size,
+        })
+    
+    # Create the Attention instance
+    self.attention_layer = Attention(**attention_params)
 
   @nn.compact
   def __call__(
@@ -95,7 +107,7 @@ class DecoderLayer(nn.Module):
       model_mode,
       slot=None,
       true_length=None,
-      page_manager=None,
+      page_state=None,
       layer_id: Optional[int] = None,
   ):
     cfg = self.config
@@ -112,13 +124,24 @@ class DecoderLayer(nn.Module):
     )(inputs)
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
 
+    # Verify parameters for paged attention
+    if self.is_paged_attention and layer_id is not None and model_mode != common_types.MODEL_MODE_TRAIN:
+        print(f"DecoderLayer calling attention_layer - layer_id={layer_id}, mode={model_mode}")
+        print(f"  page_state.sequence_lengths shape: {page_state.sequence_lengths.shape if page_state else 'None'}")
+        
+        if slot is not None:
+            print(f"  slot: {slot}")
+            if page_state is not None:
+                seq_len = page_state.sequence_lengths[layer_id, slot]
+                print(f"  Current sequence length: {seq_len}")
+    
     attention_lnx = self.attention_layer(
         lnx,
         lnx,
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         model_mode=model_mode,
-        page_manager=page_manager,  # Pass page_manager only in autoregressive mode
+        page_state=page_state,
         page_group_id=slot,
         true_length=true_length,
         use_fused_qkv=self.use_fused_qkv,
@@ -594,6 +617,11 @@ class Transformer(nn.Module):
             f" which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}."
         )
 
+    if self.config.attention == "paged" and page_state is None and model_mode != common_types.MODEL_MODE_TRAIN:
+        # Create a dummy page state for debugging
+        page_state = self.page_state["page_manager"]
+        print(f"Using default page state with shape: {page_state.sequence_lengths.shape}")
+        
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
