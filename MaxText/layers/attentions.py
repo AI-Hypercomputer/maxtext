@@ -486,7 +486,8 @@ class PagedAttentionOp(nn.Module):
             k_token = key[0, 0]  # [num_kv_heads, head_dim]
             v_token = value[0, 0]  # [num_kv_heads, head_dim]
 
-            # Update the pages
+            # Update the pages - the fix is in these indexing operations
+            # Make sure we're using the correct indices for storage
             new_k_pages = k_pages.value.at[physical_page, pos_in_page].set(k_token)
             new_v_pages = v_pages.value.at[physical_page, pos_in_page].set(v_token)
 
@@ -500,6 +501,9 @@ class PagedAttentionOp(nn.Module):
             (key_pages, value_pages)
         )
 
+        # Debug what we're storing
+        print(f"  Token stored at page {physical_page}, position {pos_in_page}")
+        
         # Update the cache variables
         key_pages.value = new_k_pages
         value_pages.value = new_v_pages
@@ -524,55 +528,30 @@ class PagedAttentionOp(nn.Module):
         gathered_k = []
         gathered_v = []
 
-        num_pages_needed = (true_length + self.config.tokens_per_page - 1) // self.config.tokens_per_page
         page_map = page_state.page_map[layer_id, page_group_id]
-
-        # Loop over *all possible* page indices within a group.
-        for page_idx in range(self.config.max_pages_per_group):
-            physical_page = page_map[page_idx]
-
-            start_token_idx = page_idx * self.config.tokens_per_page
-            # Determine a static upper bound for end_token_idx
-            if model_mode == common_types.MODEL_MODE_PREFILL:
-                max_len = self.config.max_prefill_predict_length
-            else:  # Autoregressive or other modes
-                max_len = self.config.max_target_length
-
-            end_token_idx = min((page_idx + 1) * self.config.tokens_per_page, max_len) # Removed true_length
-            num_tokens_in_page = end_token_idx - start_token_idx
-
-
-            def gather_page_data(args):
-                #Use dynamic slice to handle out-of-bound indices
-                page_k = jax.lax.dynamic_slice(
-                  key_pages_value,
-                  (physical_page, 0, 0, 0),
-                  (1, self.config.tokens_per_page, self.num_kv_heads, head_dim)
-                )
-                page_v = jax.lax.dynamic_slice(
-                    value_pages_value,
-                    (physical_page, 0, 0, 0),
-                    (1, self.config.tokens_per_page, self.num_kv_heads, head_dim)
-                )
-                return page_k.squeeze(axis=0), page_v.squeeze(axis=0)
-
-            def skip_gather(args):
-                return (jnp.zeros((self.config.tokens_per_page, self.num_kv_heads, head_dim),dtype=self.dtype),
-                        jnp.zeros((self.config.tokens_per_page, self.num_kv_heads, head_dim),dtype=self.dtype))
-
-            should_gather = (page_idx < num_pages_needed) & (physical_page >=0) & (num_tokens_in_page > 0)
-            page_k, page_v = jax.lax.cond(should_gather, gather_page_data, skip_gather, None)
+        tokens_per_page = self.config.tokens_per_page
+        
+        # Use fixed max pages to avoid tracing errors
+        max_pages_to_process = 8  # Keep this fixed to avoid tracing issues
+        
+        # Process each page
+        for logical_page_idx in range(max_pages_to_process):
+            physical_page = page_map[logical_page_idx]
+            
+            # Get tokens for this page - no dynamic slice to avoid tracing issues
+            page_k = key_pages_value[physical_page]
+            page_v = value_pages_value[physical_page]
+            
+            # Include the whole page
             gathered_k.append(page_k)
             gathered_v.append(page_v)
 
-        if not gathered_k:  # Handle empty case (e.g., zero-length sequence)
-            gathered_k = jnp.zeros((1, self.num_kv_heads, head_dim), dtype=self.dtype)
-            gathered_v = jnp.zeros((1, self.num_kv_heads, head_dim), dtype=self.dtype)
-        else:
-            gathered_k = jnp.concatenate(gathered_k, axis=0)  # Concat along sequence length
-            gathered_v = jnp.concatenate(gathered_v, axis=0)
-
-        gathered_k = gathered_k.reshape(1, -1, self.num_kv_heads, head_dim) # batch, seq, heads, dim
+        # Concatenate along sequence dimension
+        gathered_k = jnp.concatenate(gathered_k, axis=0)
+        gathered_v = jnp.concatenate(gathered_v, axis=0)
+        
+        # Reshape to batch dimensions
+        gathered_k = gathered_k.reshape(1, -1, self.num_kv_heads, head_dim)
         gathered_v = gathered_v.reshape(1, -1, self.num_kv_heads, head_dim)
 
         # Handle grouped-query attention
@@ -581,27 +560,27 @@ class PagedAttentionOp(nn.Module):
             gathered_k = jnp.repeat(gathered_k, heads_ratio, axis=2)
             gathered_v = jnp.repeat(gathered_v, heads_ratio, axis=2)
 
-        # Calculate attention scores.  Shape: (batch, num_query_heads, q_seq, kv_seq)
+        # Calculate attention scores
         scale = 1.0 / jnp.sqrt(float(head_dim))
-        attn_scores = jnp.einsum('bshd,bthd->bhst', query, gathered_k) * scale  # Corrected: bhst
-
-        # Create a causal mask.  Shapes: (1, 1, q_seq, kv_seq)
+        attn_scores = jnp.einsum('bshd,bthd->bhst', query, gathered_k) * scale
+        
+        # Create a causal mask (this can be static)
         q_seq = seq_len
-        kv_seq_len = gathered_k.shape[1]  # Use actual gathered length
+        kv_seq_len = gathered_k.shape[1]
         mask_shape = (q_seq, kv_seq_len)
-        row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
-        col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
-        causal_mask = (col_ids <= row_ids)  # (q_seq, kv_seq)
-        causal_mask = causal_mask[None, None, :, :]  # (1, 1, q_seq, kv_seq)  Correct: keep this shape
+        row_ids = jnp.arange(q_seq)[:, None]
+        col_ids = jnp.arange(kv_seq_len)[None, :]
+        causal_mask = col_ids <= row_ids
+        causal_mask = causal_mask[None, None, :, :]
 
-        # Apply mask.
+        # Apply mask
         attn_scores = jnp.where(causal_mask, attn_scores, -1e10)
 
         # Apply softmax
         attn_weights = jax.nn.softmax(attn_scores, axis=-1)
 
         # Apply attention weights to values
-        attn_output = jnp.einsum('bhst,bthd->bshd', attn_weights, gathered_v)  # Corrected: bshd
+        attn_output = jnp.einsum('bhst,bthd->bshd', attn_weights, gathered_v)
 
         return attn_output
 
@@ -1613,8 +1592,7 @@ class Attention(nn.Module):
 
   def setup(self):
     cfg = self.config
-    print(f"\nAttention.setup() - Initializing with attention={cfg.attention}")
-
+    # print(f"\nAttention.setup() - Initializing with attention={cfg.attention}")
 
     if cfg.attention == "paged":
         self.attention_op = PagedAttentionOp(

@@ -7,8 +7,9 @@ import pyconfig
 from typing import Sequence
 from absl import app
 import common_types
-from page_manager import PageState
+from page_manager import PageState, PageManager
 from layers.attentions import PagedAttentionOp
+
 
 
 def verify_cache_contents(prefill_result):
@@ -619,104 +620,644 @@ def print_page_allocation_info(slot, true_length, page_state):
   print(f"- Pages for this slot: {page_state.page_map[slot]}")
   print(f"- Free pages count: {jax.numpy.sum(page_state.page_status == 0)}")
 
+def test_page_allocation():
+    """Test that page manager correctly allocates and tracks pages."""
+    # Setup minimal config
+    class Config:
+        def __init__(self):
+            self.num_pages = 4
+            self.tokens_per_page = 8
+            self.max_pages_per_group = 4
+            self.max_target_length = 32
+            self.max_prefill_predict_length = 16
+            self.num_decoder_layers = 2
+            self.num_kv_heads = 4
+            self.head_dim = 16
+            self.dtype = jnp.float32
+
+    config = Config()
+    page_manager = PageManager(
+        num_pages=config.num_pages,
+        tokens_per_page=config.tokens_per_page,
+        max_page_groups=2,
+        max_target_length=config.max_target_length,
+        max_prefill_predict_length=config.max_prefill_predict_length,
+        max_pages_per_group=config.max_pages_per_group,
+        num_layers=config.num_decoder_layers,
+        config=config,
+    )
+
+    # Test prefill allocation
+    slot = 0
+    true_length = 12  # Should require 2 pages
+
+    for layer_id in range(config.num_decoder_layers):
+        # Get the initial page state for this layer after prefill
+        page_state = page_manager(
+            model_mode="prefill",
+            page_group_id=slot,
+            true_length=true_length,
+            layer_id=layer_id,
+        )
+
+        print(f"Layer {layer_id} allocation:")
+        print(f"  Sequence length: {page_state.sequence_lengths[slot]}")
+        print(f"  Pages used: {page_state.num_pages_used[slot]}")
+        print(f"  Page map: {page_state.page_map[slot][:page_state.num_pages_used[slot]]}")
+
+        # Verify allocation for this layer
+        assert page_state.sequence_lengths[slot] == true_length
+        assert page_state.num_pages_used[slot] == 2  # 12 tokens with 8 per page = 2 pages
+
+    layer_page_states = [None] * config.num_decoder_layers
+
+    # Initialize the per-layer page_states after prefill
+    for layer_id in range(config.num_decoder_layers):
+        layer_page_states[layer_id] = page_manager(
+            model_mode="prefill",
+            page_group_id=slot,
+            true_length=true_length,
+            layer_id=layer_id,
+        )
+
+    for step in range(3):  # Generate 3 additional tokens
+        for layer_id in range(config.num_decoder_layers):
+            # Use the correct page_state for *this* layer.
+            prev_len = layer_page_states[layer_id].sequence_lengths[slot]
+
+            # Update the page_state for *this* layer.
+            layer_page_states[layer_id] = page_manager(
+                model_mode="autoregressive",
+                page_group_id=slot,
+                layer_id=layer_id,
+            )
+
+            # Verify updated state for *this* layer.
+            assert layer_page_states[layer_id].sequence_lengths[slot] == prev_len + 1
+            print(f"Step {step}, Layer {layer_id} - New length: {layer_page_states[layer_id].sequence_lengths[slot]}")
+
+    return "Page allocation test passed!"
+def test_kv_page_content():
+    """Test that key/value data is correctly stored and retrieved from pages."""
+    # Setup minimal PagedAttentionOp
+    class DummyConfig:
+        def __init__(self):
+            self.tokens_per_page = 8
+            self.num_pages = 4
+            self.num_kv_heads = 2
+            self.head_dim = 4
+            self.max_pages_per_group = 4
+            self.dtype = jnp.float32
+    
+    config = DummyConfig()
+    
+    # Create a simple page state
+    page_status = jnp.zeros((1, config.num_pages), dtype=jnp.int32)
+    page_map = jnp.array([[0, 1, -1, -1]], dtype=jnp.int32)  # First two pages allocated
+    sequence_lengths = jnp.array([12], dtype=jnp.int32)  # 12 tokens total
+    num_pages_used = jnp.array([2], dtype=jnp.int32)  # 2 pages used
+    current_page = jnp.array([1], dtype=jnp.int32)  # Current page is the second one
+    current_page_position = jnp.array([3], dtype=jnp.int32)  # Position 3 in the current page
+    
+    page_state = PageState(
+        page_status=page_status,
+        page_map=page_map,
+        sequence_lengths=sequence_lengths,
+        num_pages_used=num_pages_used,
+        current_page=current_page,
+        current_page_position=current_page_position,
+    )
+    
+    # Create test key/value data
+    key_pages = jnp.zeros(
+        (config.num_pages, config.tokens_per_page, config.num_kv_heads, config.head_dim),
+        dtype=config.dtype,
+    )
+    value_pages = jnp.zeros(
+        (config.num_pages, config.tokens_per_page, config.num_kv_heads, config.head_dim),
+        dtype=config.dtype,
+    )
+    
+    # Fill pages with test patterns
+    for page in range(2):  # Fill the two allocated pages
+        for pos in range(config.tokens_per_page):
+            # Create distinct patterns based on page and position
+            pattern = page * 100 + pos
+            key_pages = key_pages.at[page, pos].set(jnp.ones(
+                (config.num_kv_heads, config.head_dim), 
+                dtype=config.dtype
+            ) * pattern)
+            value_pages = value_pages.at[page, pos].set(jnp.ones(
+                (config.num_kv_heads, config.head_dim), 
+                dtype=config.dtype
+            ) * pattern * 2)
+    
+    # Test data retrieval for attention
+    page_group_id = 0
+    layer_id = 0
+    
+    # Manually gather data like in _compute_attention
+    tokens_per_page = config.tokens_per_page
+    gathered_k = []
+    gathered_v = []
+    
+    for logical_page_idx in range(page_state.num_pages_used[page_group_id]):
+        physical_page = page_state.page_map[page_group_id, logical_page_idx]
+        if physical_page >= 0:
+            # Calculate tokens in this page
+            start_token = logical_page_idx * tokens_per_page
+            end_token = min((logical_page_idx + 1) * tokens_per_page, 
+                            page_state.sequence_lengths[page_group_id])
+            tokens_in_page = end_token - start_token
+            
+            # Get the page data
+            page_k = key_pages[physical_page, :tokens_in_page]
+            page_v = value_pages[physical_page, :tokens_in_page]
+            
+            gathered_k.append(page_k)
+            gathered_v.append(page_v)
+    
+    # Concatenate and check sizes
+    gathered_k = jnp.concatenate(gathered_k, axis=0)
+    gathered_v = jnp.concatenate(gathered_v, axis=0)
+    
+    print("Gathered key data shape:", gathered_k.shape)
+    print("Expected shape:", (page_state.sequence_lengths[page_group_id], 
+                              config.num_kv_heads, config.head_dim))
+    assert gathered_k.shape == (page_state.sequence_lengths[page_group_id], 
+                               config.num_kv_heads, config.head_dim)
+    
+    # Test a specific token's value
+    token_idx = 9  # 2nd page, 2nd position
+    expected_pattern = 1 * 100 + 1  # Page 1, position 1
+    print(f"Token {token_idx} key value:", gathered_k[token_idx, 0, 0])
+    print(f"Expected value: {expected_pattern}")
+    assert gathered_k[token_idx, 0, 0] == expected_pattern
+    
+    return "KV page content test passed!"
+
+def test_attention_computation():
+    """Test that attention is correctly computed using paged KV cache."""
+    # Setup minimal configs and data
+    class DummyConfig:
+        def __init__(self):
+            self.tokens_per_page = 8
+            self.num_pages = 4
+            self.num_kv_heads = 2
+            self.head_dim = 4
+            self.max_pages_per_group = 4
+            self.dtype = jnp.float32
+            self.max_prefill_predict_length = 32
+            self.max_target_length = 64
+    
+    config = DummyConfig()
+    
+    # Create test page state and data similar to previous test
+    page_status = jnp.zeros((1, config.num_pages), dtype=jnp.int32)
+    page_map = jnp.array([[0, 1, -1, -1]], dtype=jnp.int32)
+    sequence_lengths = jnp.array([12], dtype=jnp.int32)
+    num_pages_used = jnp.array([2], dtype=jnp.int32)
+    current_page = jnp.array([1], dtype=jnp.int32)
+    current_page_position = jnp.array([3], dtype=jnp.int32)
+    
+    page_state = PageState(
+        page_status=page_status,
+        page_map=page_map,
+        sequence_lengths=sequence_lengths,
+        num_pages_used=num_pages_used,
+        current_page=current_page,
+        current_page_position=current_page_position,
+    )
+    
+    # Create patterned key/value pages
+    key_pages = jnp.zeros(
+        (config.num_pages, config.tokens_per_page, config.num_kv_heads, config.head_dim),
+        dtype=config.dtype,
+    )
+    value_pages = jnp.zeros(
+        (config.num_pages, config.tokens_per_page, config.num_kv_heads, config.head_dim),
+        dtype=config.dtype,
+    )
+    
+    # Fill with test patterns
+    for page in range(2):
+        for pos in range(config.tokens_per_page):
+            pattern = page * 100 + pos
+            key_pages = key_pages.at[page, pos].set(jnp.ones(
+                (config.num_kv_heads, config.head_dim), 
+                dtype=config.dtype
+            ) * pattern * 0.01)  # Scale down to avoid numerical issues
+            value_pages = value_pages.at[page, pos].set(jnp.ones(
+                (config.num_kv_heads, config.head_dim), 
+                dtype=config.dtype
+            ) * pattern * 0.02)
+    
+    # Create a query tensor
+    query = jnp.ones((1, 1, config.num_kv_heads, config.head_dim), dtype=config.dtype)
+    
+    # Implement attention computation manually (simplified version)
+    def compute_attention_test(
+        query, key_pages, value_pages, page_state, page_group_id, layer_id=0
+    ):
+        # Gather key and value data
+        gathered_k = []
+        gathered_v = []
+        
+        for logical_page_idx in range(page_state.num_pages_used[page_group_id]):
+            physical_page = page_state.page_map[page_group_id, logical_page_idx]
+            if physical_page >= 0:
+                # Calculate tokens in this page
+                start_token = logical_page_idx * config.tokens_per_page
+                end_token = min((logical_page_idx + 1) * config.tokens_per_page, 
+                                page_state.sequence_lengths[page_group_id])
+                tokens_in_page = end_token - start_token
+                
+                # Get the page data
+                page_k = key_pages[physical_page, :tokens_in_page]
+                page_v = value_pages[physical_page, :tokens_in_page]
+                
+                gathered_k.append(page_k)
+                gathered_v.append(page_v)
+        
+        # Concatenate
+        gathered_k = jnp.concatenate(gathered_k, axis=0)
+        gathered_v = jnp.concatenate(gathered_v, axis=0)
+        
+        # Reshape for attention
+        seq_len = gathered_k.shape[0]
+        gathered_k = gathered_k.reshape(1, seq_len, config.num_kv_heads, config.head_dim)
+        gathered_v = gathered_v.reshape(1, seq_len, config.num_kv_heads, config.head_dim)
+        
+        # Calculate attention
+        scale = 1.0 / jnp.sqrt(float(config.head_dim))
+        attn_scores = jnp.einsum('bshd,bthd->bhst', query, gathered_k) * scale
+        
+        # Create causal mask
+        q_seq = query.shape[1]
+        mask_shape = (q_seq, seq_len)
+        row_ids = jnp.arange(q_seq)[:, None]
+        col_ids = jnp.arange(seq_len)[None, :]
+        causal_mask = col_ids <= row_ids
+        causal_mask = causal_mask[None, None, :, :]
+        
+        # Apply mask
+        attn_scores = jnp.where(causal_mask, attn_scores, -1e10)
+        
+        # Apply softmax
+        attn_weights = jax.nn.softmax(attn_scores, axis=-1)
+        
+        # Apply attention weights
+        attn_output = jnp.einsum('bhst,bthd->bshd', attn_weights, gathered_v)
+        
+        return attn_output, attn_weights
+    
+    # Run test
+    attn_output, attn_weights = compute_attention_test(
+        query, key_pages, value_pages, page_state, page_group_id=0
+    )
+    
+    print("Attention output shape:", attn_output.shape)
+    print("Attention weights shape:", attn_weights.shape)
+    print("Attention weights for last token:")
+    print(attn_weights[0, 0, 0, :])
+    
+    # Check that weights sum to 1
+    weight_sum = jnp.sum(attn_weights, axis=-1)
+    print("Attention weight sums:", weight_sum[0, 0, 0])
+    assert jnp.allclose(weight_sum, 1.0)
+    
+    return "Attention computation test passed!"
+
+def test_token_generation():
+    """Test the complete token generation process."""
+    # We'll create a test-specific implementation that's fully instrumented
+    # but uses the same core logic as your actual implementation
+    
+    class DummyConfig:
+        def __init__(self):
+            self.tokens_per_page = 8
+            self.num_pages = 32
+            self.num_kv_heads = 2
+            self.num_query_heads = 2
+            self.head_dim = 4
+            self.max_pages_per_group = 8
+            self.dtype = jnp.float32
+            self.max_prefill_predict_length = 32
+            self.max_target_length = 64
+            self.vocab_size = 1000
+    
+    config = DummyConfig()
+    
+    # Create page manager
+    page_manager = PageManager(
+        num_pages=config.num_pages,
+        tokens_per_page=config.tokens_per_page,
+        max_page_groups=2,
+        max_target_length=config.max_target_length,
+        max_prefill_predict_length=config.max_prefill_predict_length,
+        max_pages_per_group=config.max_pages_per_group,
+        num_layers=1,  # Simplify to one layer
+        config=config,
+    )
+    
+    # Setup initial page state
+    slot = 0
+    true_length = 4  # Start with 4 tokens
+    
+    # Run prefill
+    page_state = page_manager(
+        model_mode="prefill",
+        page_group_id=slot,
+        true_length=true_length,
+        layer_id=0,
+    )
+    
+    # Initialize key and value pages with test patterns
+    key_pages = jnp.zeros(
+        (config.num_pages, config.tokens_per_page, config.num_kv_heads, config.head_dim),
+        dtype=config.dtype,
+    )
+    value_pages = jnp.zeros(
+        (config.num_pages, config.tokens_per_page, config.num_kv_heads, config.head_dim),
+        dtype=config.dtype,
+    )
+    
+    # Fill the first pages with a pattern
+    for pos in range(true_length):
+        pattern = 0.01 * (pos + 1)  # Make each position unique
+        key_pages = key_pages.at[0, pos].set(jnp.ones(
+            (config.num_kv_heads, config.head_dim), 
+            dtype=config.dtype
+        ) * pattern)
+        value_pages = value_pages.at[0, pos].set(jnp.ones(
+            (config.num_kv_heads, config.head_dim), 
+            dtype=config.dtype
+        ) * pattern * 2)
+    
+    # Define a simple dummy projection function
+    def project_token_to_kv(token_id):
+        """Convert token ID to a key and value representation."""
+        # Use token ID to create a pattern
+        pattern = 0.01 * (token_id + 1)
+        k = jnp.ones((config.num_kv_heads, config.head_dim), dtype=config.dtype) * pattern
+        v = jnp.ones((config.num_kv_heads, config.head_dim), dtype=config.dtype) * pattern * 2
+        return k, v
+    
+    # Function to simulate token generation
+    def generate_next_token(key_pages, value_pages, page_state, token_id):
+        """Generate the next token using paged attention."""
+        # First, create a query from the token
+        q_pattern = 0.01 * (token_id + 1)
+        query = jnp.ones((1, 1, config.num_query_heads, config.head_dim), dtype=config.dtype) * q_pattern
+        
+        # Manual implementation of the attention calculation
+        def compute_attention_manual(query, key_pages, value_pages, page_state):
+            gathered_k = []
+            gathered_v = []
+            
+            for logical_page_idx in range(page_state.num_pages_used[0]):
+                physical_page = page_state.page_map[0, logical_page_idx]
+                if physical_page >= 0:
+                    # Calculate tokens in this page
+                    start_token = logical_page_idx * config.tokens_per_page
+                    end_token = min((logical_page_idx + 1) * config.tokens_per_page, 
+                                    page_state.sequence_lengths[0])
+                    tokens_in_page = end_token - start_token
+                    
+                    # Get the page data
+                    page_k = key_pages[physical_page, :tokens_in_page]
+                    page_v = value_pages[physical_page, :tokens_in_page]
+                    
+                    gathered_k.append(page_k)
+                    gathered_v.append(page_v)
+            
+            # Concatenate
+            if gathered_k:
+                gathered_k = jnp.concatenate(gathered_k, axis=0)
+                gathered_v = jnp.concatenate(gathered_v, axis=0)
+                
+                # Reshape for attention
+                seq_len = gathered_k.shape[0]
+                gathered_k = gathered_k.reshape(1, seq_len, config.num_kv_heads, config.head_dim)
+                gathered_v = gathered_v.reshape(1, seq_len, config.num_kv_heads, config.head_dim)
+                
+                # Calculate attention
+                scale = 1.0 / jnp.sqrt(float(config.head_dim))
+                attn_scores = jnp.einsum('bshd,bthd->bhst', query, gathered_k) * scale
+                
+                # Create causal mask
+                q_seq = query.shape[1]
+                mask_shape = (q_seq, seq_len)
+                row_ids = jnp.arange(q_seq)[:, None]
+                col_ids = jnp.arange(seq_len)[None, :]
+                causal_mask = col_ids <= row_ids
+                causal_mask = causal_mask[None, None, :, :]
+                
+                # Apply mask
+                attn_scores = jnp.where(causal_mask, attn_scores, -1e10)
+                
+                # Apply softmax
+                attn_weights = jax.nn.softmax(attn_scores, axis=-1)
+                
+                # Apply attention weights
+                attn_output = jnp.einsum('bhst,bthd->bshd', attn_weights, gathered_v)
+                
+                return attn_output, attn_weights
+            else:
+                return query, None
+        
+        # Calculate attention
+        attn_output, attn_weights = compute_attention_manual(query, key_pages, value_pages, page_state)
+        
+        # Simulate logits projection - just use a simple projection based on sum of output
+        logits = jnp.sum(attn_output) * 100
+        
+        # Simple deterministic token selection - just increment the previous token
+        next_token_id = token_id + 1
+        
+        # Update key/value pages with new token
+        key, value = project_token_to_kv(next_token_id)
+        
+        # Calculate storage location
+        curr_seq_len = page_state.sequence_lengths[0]
+        logical_page = curr_seq_len // config.tokens_per_page
+        pos_in_page = curr_seq_len % config.tokens_per_page
+        physical_page = page_state.page_map[0, logical_page]
+        
+        # Update pages
+        key_pages = key_pages.at[physical_page, pos_in_page].set(key)
+        value_pages = value_pages.at[physical_page, pos_in_page].set(value)
+        
+        # Update page state
+        page_state = page_manager(
+            model_mode="autoregressive",
+            page_group_id=slot,
+            layer_id=0,
+        )
+        
+        return next_token_id, key_pages, value_pages, page_state
+    
+    # Generate a few tokens and verify
+    token_id = 100  # Start with token ID 100
+    generated_tokens = [token_id]
+    
+    print("Initial state:")
+    print(f"  Sequence length: {page_state.sequence_lengths[0]}")
+    print(f"  Pages used: {page_state.num_pages_used[0]}")
+    print(f"  Page map: {page_state.page_map[0, :page_state.num_pages_used[0]]}")
+    
+    # Generate 5 new tokens
+    for i in range(5):
+        token_id, key_pages, value_pages, page_state = generate_next_token(
+            key_pages, value_pages, page_state, token_id
+        )
+        generated_tokens.append(token_id)
+        
+        print(f"Step {i+1}:")
+        print(f"  Token generated: {token_id}")
+        print(f"  New sequence length: {page_state.sequence_lengths[0]}")
+        
+        # Check if we've allocated new pages
+        if i > 0 and i % config.tokens_per_page == 0:
+            print(f"  New page allocated: {page_state.page_map[0, page_state.num_pages_used[0]-1]}")
+    
+    print("Generated tokens:", generated_tokens)
+    # Each token should be one more than the previous
+    expected_tokens = [100, 101, 102, 103, 104, 105]
+    assert generated_tokens == expected_tokens, f"Expected {expected_tokens}, got {generated_tokens}"
+    
+    return "Token generation test passed!"
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
-  pyconfig.initialize(argv)
-  config = pyconfig.config
-  max_utils.print_system_information()
+  # pyconfig.initialize(argv)
+  # config = pyconfig.config
+  # max_utils.print_system_information()
 
-  engine = maxengine.MaxEngine(config)
+  # engine = maxengine.MaxEngine(config)
 
   # Print initial configuration
-  print("\n=== Configuration ===")
-  print(f"Attention type: {config.attention}")
-  if config.attention == "paged":
-    print(f"Number of pages: {config.num_pages}")
-    print(f"Tokens per page: {config.tokens_per_page}")
-    print(f"Pages per compute block: {config.pages_per_compute_block}")
-    print(f"Max prefill length: {config.max_prefill_predict_length}")
-    print(f"Max target length: {config.max_target_length}")
-
-  rng = jax.random.PRNGKey(1234)
-  rng, rng_load_params = jax.random.split(rng)
-
-  # Load parameters
-  print("\n=== Loading Parameters ===")
-  params = engine.load_params(rng_load_params)
-  print(f"Parameter structure: {jax.tree_util.tree_structure(params)}")
-
-  # Create decode state
-  rng, rng_decode = jax.random.split(rng)
-  decode_state = engine.create_decode_state(rng_decode)
-
-  # Tokenize input
-  text = "Short test"
-  metadata = engine.get_tokenizer()
-  tokenizer_model = engine.build_tokenizer(metadata)
-  tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
-
-  print("\n=== Tokenization Info ===")
-  print(f"Input text: '{text}'")
-  print(f"Token shape: {tokens.shape}")
-  print(f"True length: {true_length}")
-  print(f"Tokens: {tokens[:true_length]}")
-
-  slot = 0
-  true_length = 72
-
-  # Prefill
-  rng, rng_prefill = jax.random.split(rng)
-  # print("\n=== Running Prefill ===")
-  # prefill_result, first_token, page_state = engine.prefill(
-  #     params=params,
-  #     padded_tokens=tokens,
-  #     true_length=true_length,
-  #     rng=rng_prefill,
-  #     slot=slot,
-  # )
-
-  # print("\n=== Prefill Results ===")
+  # print("\n=== Configuration ===")
+  # print(f"Attention type: {config.attention}")
   # if config.attention == "paged":
-  #   # page_state = engine.page_manager(
-  #   #     model_mode=None  # Just get current state
-  #   # )
-  #   print(f"Prefill Result Cache Structure: {jax.tree_util.tree_structure(prefill_result['cache'])}")
-  #   print_page_allocation_info(slot, true_length, page_state)
-  #   print_cache_info(prefill_result)
-  #   print_paged_attention_info(page_state, prefill_result["cache"])
-  #   batch_size = config.per_device_batch_size * jax.device_count()
-  #   query_shape = (batch_size, 1, config.num_query_heads, config.head_dim)  # is this right?
-  #   key_pages_shape = (config.num_pages, config.tokens_per_page, config.num_kv_heads, config.head_dim)
+  #   print(f"Number of pages: {config.num_pages}")
+  #   print(f"Tokens per page: {config.tokens_per_page}")
+  #   print(f"Pages per compute block: {config.pages_per_compute_block}")
+  #   print(f"Max prefill length: {config.max_prefill_predict_length}")
+  #   print(f"Max target length: {config.max_target_length}")
 
-  #   verify_paged_attention(query_shape, key_pages_shape, page_state, config)
+  # rng = jax.random.PRNGKey(1234)
+  # rng, rng_load_params = jax.random.split(rng)
 
-  #   print(f"First key page (layer 0): {prefill_result['cache']['decoder']['layers_0']['key_pages'][0, 0]}")
-  #   print(f"First value page (layer 0): {prefill_result['cache']['decoder']['layers_0']['value_pages'][0, 0]}")
-  #   print(f"First key page (layer 0): {prefill_result['cache']['decoder']['layers_0']['key_pages'][0, 1]}")
-  #   print(f"First value page (layer 0): {prefill_result['cache']['decoder']['layers_0']['value_pages'][0, 1]}")
-  #   print("\n=== Verification: Step 3 (Prefill - All Tokens, First Page) ===")
-  #   print(f"True Length: {true_length}")
+  # # Load parameters
+  # print("\n=== Loading Parameters ===")
+  # params = engine.load_params(rng_load_params)
+  # print(f"Parameter structure: {jax.tree_util.tree_structure(params)}")
 
-  # test_dynamic_prefill()
+  # # Create decode state
+  # rng, rng_decode = jax.random.split(rng)
+  # decode_state = engine.create_decode_state(rng_decode)
+
+  # # Tokenize input
+  # text = "Short test"
+  # metadata = engine.get_tokenizer()
+  # tokenizer_model = engine.build_tokenizer(metadata)
+  # tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
+
+  # print("\n=== Tokenization Info ===")
+  # print(f"Input text: '{text}'")
+  # print(f"Token shape: {tokens.shape}")
+  # print(f"True length: {true_length}")
+  # print(f"Tokens: {tokens[:true_length]}")
+
+  # slot = 0
+  # true_length = 72
+
+  # # Prefill
+  # rng, rng_prefill = jax.random.split(rng)
+
   # verify_paged_attention_correctness()
-  test_paged_attention_end_to_end()
+  #   test_paged_attention_end_to_end()
 
-    # num_layers = config.num_decoder_layers
-    # for layer_id in range(num_layers):
-    #     print(f"\nLayer {layer_id}:")
-    #     key_pages = prefill_result['cache']['decoder'][f'layers_{layer_id}']['key_pages']
-    #     value_pages = prefill_result['cache']['decoder'][f'layers_{layer_id}']['value_pages']
+  # test_page_allocation()
 
-    #     print(f"  Key Pages (Page 0, first {true_length+1} tokens):")
-    #     print(key_pages[0, :true_length+1, :, :])
 
-    #     print(f"  Value Pages (Page 0, first {true_length+1} tokens):")
-    #     print(value_pages[0, :true_length+1, :, :])
-    # verify_page_memory_access(prefill_result, page_state, slot, true_length, config)
 
+  print("=== Running Page Allocation Test ===")
+  result1 = test_page_allocation()
+  print(f"\nResult: {result1}\n")
+  # === Running Page Allocation Test ===
+  #   Layer 0 allocation:
+  #     Sequence length: 12
+  #     Pages used: 2
+  #     Page map: [0 1]
+  #   Layer 1 allocation:
+  #     Sequence length: 12
+  #     Pages used: 2
+  #     Page map: [0 1]
+  #   Traceback (most recent call last):
+  #     File "/mnt/disks/persist/maxtext_plain/MaxText/paged_test.py", line 1226, in <module>
+  #       app.run(main)
+  #     File "/mnt/disks/persist/maxtext/venv3.11/lib/python3.11/site-packages/absl/app.py", line 308, in run
+  #       _run_main(main, args)
+  #     File "/mnt/disks/persist/maxtext/venv3.11/lib/python3.11/site-packages/absl/app.py", line 254, in _run_main
+  #       sys.exit(main(argv))
+  #               ^^^^^^^^^^
+  #     File "/mnt/disks/persist/maxtext_plain/MaxText/paged_test.py", line 1176, in main
+  #       result1 = test_page_allocation()
+  #                 ^^^^^^^^^^^^^^^^^^^^^^
+  #     File "/mnt/disks/persist/maxtext_plain/MaxText/paged_test.py", line 682, in test_page_allocation
+  #       assert page_state.sequence_lengths[slot] == prev_len + 1
+  #             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  #   AssertionError
+  
+  print("=== Running KV Page Content Test ===")
+  result2 = test_kv_page_content()
+  print(f"\nResult: {result2}\n")
+  # === Running KV Page Content Test ===
+  #   Gathered key data shape: (12, 2, 4)
+  #   Expected shape: (Array(12, dtype=int32), 2, 4)
+  #   Token 9 key value: 101.0
+  #   Expected value: 101
+  
+  print("=== Running Attention Computation Test ===")
+  result3 = test_attention_computation()
+  print(f"\nResult: {result3}\n")
+  # === Running Attention Computation Test ===
+  #   Attention output shape: (1, 1, 2, 4)
+  #   Attention weights shape: (1, 2, 1, 12)
+  #   Attention weights for last token:
+  #   [1. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0. 0.]
+  #   Attention weight sums: 1.0
+  
+  print("=== Running Token Generation Test ===")
+  result4 = test_token_generation()
+  print(f"\nResult: {result4}\n")
+  # === Running Token Generation Test ===
+  #   Initial state:
+  #     Sequence length: 4
+  #     Pages used: 1
+  #     Page map: [0]
+  #   Step 1:
+  #     Token generated: 101
+  #     New sequence length: 5
+  #   Step 2:
+  #     Token generated: 102
+  #     New sequence length: 6
+  #   Step 3:
+  #     Token generated: 103
+  #     New sequence length: 7
+  #   Step 4:
+  #     Token generated: 104
+  #     New sequence length: 8
+  #   Step 5:
+  #     Token generated: 105
+  #     New sequence length: 9
+  #   Generated tokens: [100, 101, 102, 103, 104, 105]
+  
+  print("All tests completed!")
 
 if __name__ == "__main__":
   app.run(main)

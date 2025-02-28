@@ -594,12 +594,12 @@ class MaxEngine(engine_api.Engine):
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
   def generate(
-    self,
-    params: Params,
-    decode_state: DecodeState,
-    sampler: Optional[Callable[[Any], Any]] = None,
-    rng: Optional[PRNGKeyType] = None,
-    slot: Optional[int] = None,
+      self,
+      params: Params,
+      decode_state: DecodeState,
+      sampler: Optional[Callable[[Any], Any]] = None,
+      rng: Optional[PRNGKeyType] = None,
+      slot: Optional[int] = None,
   ):
       """Run one generate step with paged attention."""
       if rng is None:
@@ -628,7 +628,6 @@ class MaxEngine(engine_api.Engine):
               new_current_page = page_state.current_page.copy()
               new_current_page_position = page_state.current_page_position.copy()
 
-
               for layer_id in range(self.config.num_decoder_layers):
                   # Get layer-specific states
                   layer_page_status = page_state.page_status[layer_id]
@@ -638,11 +637,10 @@ class MaxEngine(engine_api.Engine):
                   layer_current_page = page_state.current_page[layer_id]
                   layer_current_position = page_state.current_page_position[layer_id]
 
-
-                # Get layer specific cache.
+                  # Get layer specific cache
                   layer_cache = decode_state["cache"]["decoder"].get(f"layers_{layer_id}", {})
 
-                  # Apply model with autoregressive mode for the specific layer.
+                  # Apply model with autoregressive mode for the specific layer
                   variables = {"params": unboxed_params, "cache": {"decoder": {f"layers_{layer_id}": layer_cache}}}
                   layer_flat_logits, layer_new_vars = self.model.apply(
                       variables,
@@ -653,23 +651,23 @@ class MaxEngine(engine_api.Engine):
                       rngs={"params": new_rng},
                       mutable=["cache"],
                       slot=slot,
-                      page_state=page_state, # passing the *old* page_state to the model
+                      page_state=page_state,  # passing the *old* page_state to the model
                       layer_id=layer_id,
                   )
 
                   # Add the updated layer cache
                   updated_decoder_cache[f"layers_{layer_id}"] = layer_new_vars["cache"]["decoder"].get(f"layers_{layer_id}", {})
-                  # Use the logits from last layer.
+                  # Use the logits from last layer
                   flat_logits = layer_flat_logits
 
-                  # Call reserve_decode_step_pages and unpack *all* its return values:
+                  # Call reserve_decode_step_pages and use the returned sequence lengths
                   (
                       layer_page_status,
                       layer_page_map,
-                      layer_sequence_lengths,  # This is 1D: [max_page_groups] after the for loop
-                      layer_pages_used,        # This is 1D: [max_page_groups] after the for loop
+                      layer_sequence_lengths,  # This already has updated sequence lengths
+                      layer_pages_used,
                       layer_current_page,
-                      layer_current_page_position,  # Correctly unpacking all return values
+                      layer_current_page_position,
                   ) = self.page_manager.reserve_decode_step_pages(
                       layer_page_status,
                       layer_page_map,
@@ -679,25 +677,29 @@ class MaxEngine(engine_api.Engine):
                       layer_current_position,
                   )
 
-                  # Correctly update sequence lengths and positions using the 1D arrays:
-                  new_sequence_lengths = new_sequence_lengths.at[layer_id, slot].set(layer_sequence_lengths[slot] + 1) # NOW CORRECT
-                  new_current_page_position = new_current_page_position.at[layer_id, slot].set((new_sequence_lengths[layer_id, slot] - 1) % self.config.tokens_per_page)
+                  # *** FIX 1: Use sequence lengths returned by reserve_decode_step_pages ***
+                  # The function already updated the sequence lengths correctly
+                  new_sequence_lengths = new_sequence_lengths.at[layer_id, slot].set(layer_sequence_lengths[slot])
+                  
+                  print(f"    generate (layer {layer_id}): Updated sequence length to {layer_sequence_lengths[slot]}")
+                  
+                  # *** FIX 2: Calculate page position based on the updated sequence length ***
+                  current_pos_in_page = (layer_sequence_lengths[slot] - 1) % self.config.tokens_per_page
+                  new_current_page_position = new_current_page_position.at[layer_id, slot].set(layer_current_page_position[slot])
 
-                  new_pages_used = layer_pages_used.at[slot].set(
-                  (new_sequence_lengths[layer_id, slot] + self.config.tokens_per_page -1) // self.config.tokens_per_page
-                  )
+                  # Update pages_used based on the updated sequence length
+                  pages_needed = (layer_sequence_lengths[slot] + self.config.tokens_per_page - 1) // self.config.tokens_per_page
+                  new_num_pages_used = new_num_pages_used.at[layer_id, slot].set(pages_needed)
+                  
+                  # Set current page to the page containing the last token
                   new_current_page = new_current_page.at[layer_id, slot].set(layer_current_page[slot])
 
-                  # *In-place* update the mutable copies:
+                  # *In-place* update the mutable copies
                   new_page_status = new_page_status.at[layer_id].set(layer_page_status)
                   new_page_map = new_page_map.at[layer_id].set(layer_page_map)
-                  #new_sequence_lengths = new_sequence_lengths.at[layer_id].set(layer_sequence_lengths) # No longer do this.
-                  new_num_pages_used = new_num_pages_used.at[layer_id].set(layer_pages_used)
-                  new_current_page = new_current_page.at[layer_id].set(layer_current_page)
                   new_current_page_position = new_current_page_position.at[layer_id].set(layer_current_position)
 
-
-              # Construct the *updated* PageState using the modified arrays:
+              # Construct the *updated* PageState using the modified arrays
               updated_page_state = PageState(
                   page_status=new_page_status,
                   page_map=new_page_map,
@@ -708,8 +710,8 @@ class MaxEngine(engine_api.Engine):
               )
 
               cache = {
-                "page_manager": updated_page_state,  # USE THE UPDATED STATE
-                "decoder": updated_decoder_cache,
+                  "page_manager": updated_page_state,  # USE THE UPDATED STATE
+                  "decoder": updated_decoder_cache,
               }
 
           else:
@@ -761,6 +763,7 @@ class MaxEngine(engine_api.Engine):
       }
 
       return updated_decode_state, result
+
 
   @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_prompts",))
   def prefill_concat(
