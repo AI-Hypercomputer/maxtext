@@ -624,11 +624,16 @@ class MoeBlock(nn.Module):
     if self.config.capacity_factor > 0:
       # token dropping if needed
       dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs)
-      mask_axes = ("activation_batch", "activation_length", None, None, None)
-      input_axis = ("activation_batch", "activation_length", None, "activation_embed")
-      dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_embed")
-      mlp_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_mlp")
-
+      if self.config.ici_context_parallelism > 0 and cp == 1:
+        mask_axes = ( "activation_length", "activation_batch", None, None, None)
+        input_axis = ("activation_length", "activation_batch",  None, "activation_embed")
+        dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_embed")
+        mlp_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_mlp")
+      else:
+        mask_axes = ("activation_batch", "activation_length", None, None, None)
+        input_axis = ("activation_batch", "activation_length", None, "activation_embed")
+        dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_embed")
+        mlp_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_mlp")
       dispatch_mask = nn.with_logical_constraint(dispatch_mask, mask_axes)
       combine_mask = nn.with_logical_constraint(combine_mask, mask_axes)
       if self.config.model_call_mode != "inference":
