@@ -527,8 +527,8 @@ def main() -> int:
     #model_configs.llama3_1_405b_8192_explicit_matt_pp,
     #model_configs.llama3_1_405b_8192_explicit_matt_pp_overlapped
     #model_configs.matt_simple
-    #model_configs.deepseek_big
-    model_configs.mattbar_a1
+    model_configs.deepseek_big
+    #model_configs.mattbar_a1
   ]
 
   # Loop possibilities:
@@ -558,7 +558,7 @@ def main() -> int:
       # another_config,
     ]:
       # Run workloads in the following slice configurations
-      for num_slices in [16,]:
+      for num_slices in [4,]:
         # Use the libtpu dependencies from:
         for libtpu_type in [
             # LibTpuType.CUSTOM

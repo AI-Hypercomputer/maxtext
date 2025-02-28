@@ -1576,7 +1576,7 @@ deepseek_big = _add_to_model_dictionary(
     tuning_params={
         "steps": 20,
         "per_device_batch_size": 1,
-        "max_target_length": 2048,
+        "max_target_length": 512,
         "enable_checkpointing": False,
         "dataset_type": "synthetic",
         "base_output_directory": "gs://maxtext-experiments-multipod",
@@ -1603,12 +1603,15 @@ deepseek_big = _add_to_model_dictionary(
         "num_pipeline_microbatches": 2, # PP * 2 or since we are sad PP * 1
         "num_layers_per_pipeline_stage": 2,
         "scan_layers": False,
+        "dump_hlo": True
     },
     xla_flags=(
         xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(81920)
         + xla_flags_library.REDUCE_SCATTER_FUSION
         + xla_flags_library.CF_FOR_ALL_GATHER
         + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + xla_flags_library.PIPELINING_FLAGS
+        + xla_flags_library.PP_MORE_FLAGS
     ),
   )
 )
