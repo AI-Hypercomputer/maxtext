@@ -33,6 +33,7 @@ import common_types
 from kernels.ragged_attention import ragged_gqa
 from kernels.ragged_attention import ragged_mha
 import page_managers
+from layers import pagedAttentionV2
 from layers import embeddings
 from layers import initializers
 from layers import linears
@@ -269,7 +270,21 @@ class PagedAttentionOp(nn.Module):
           pages_per_compute_block=pages_per_compute_block,
       )
       return jnp.expand_dims(result, axis=1)
-
+    """
+    def wrap_paged_attention_v2(q, k_pages, v_pages, lengths, page_indices, pages_per_compute_block):
+      q = jnp.squeeze(q, axis=1)
+      k_p = jnp.transpose(k_pages, (1,2,0,3))
+      v_p = jnp.transpose(v_pages, (1,2,0,3))
+      result = pagedAttentionV2.ragged_paged_attention(
+          q=q,
+          k_pages=k_p,
+          v_pages=v_p,
+          lengths=lengths,
+          page_indices=page_indices,
+          pages_per_compute_block=pages_per_compute_block,
+      )
+      return jnp.expand_dims(result, axis=1)
+    """
     return wrap_paged_attention(
         query,
         key_pages_var.value,
@@ -321,6 +336,7 @@ class PagedAttentionOp(nn.Module):
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       #jax.debug.print("update: page status: {}, page map: {}, sequence length: {}, num pages: {}, current_page: {}, current_page_position: {}", page_state.page_status, page_state.page_map, page_state.sequence_lengths, page_state.num_pages_used, page_state.current_page, page_state.current_page_position)
       #jax.debug.print("update, page_state.page_map: {}", page_state.num_pages_used)
+      jax.debug.print("kv_len: {} and {}", key.shape, value.shape)
       self.update_decode_step_pages(key_pages_var, value_pages_var, key, value, page_state)
 
   def update_prefill_step_pages(
