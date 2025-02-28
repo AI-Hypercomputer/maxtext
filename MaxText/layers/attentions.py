@@ -245,7 +245,7 @@ def get_initial_paged_kv_cache(model, config, batch_size, abstract=False):
 
 
 class PagedAttentionOp(nn.Module):
-    """Simplified Paged Attention Operator for debugging."""
+    """Very basic Paged Attention Operator that avoids conditionals."""
 
     mesh: any
     num_kv_heads: int
@@ -271,11 +271,11 @@ class PagedAttentionOp(nn.Module):
         layer_id=None,
     ) -> Array:
         """Apply paged attention and return output."""
-        # For initialization or when page_state is None, return zeros
+        # For initialization or when page_state is None, return the query
         if page_state is None:
             return query
-        
-        # Define cache variables with the exact variable names we expect
+            
+        # Setup cache variables
         key_pages = self.variable(
             "cache", 
             "key_pages", 
@@ -295,54 +295,76 @@ class PagedAttentionOp(nn.Module):
             )
         )
         
-        # Print debug info about the variable creation
-        print(f"\nDEBUG - PagedAttentionOp creating variables:")
-        print(f"  key_pages shape: {key_pages.value.shape}")
-        print(f"  value_pages shape: {value_pages.value.shape}")
-        
-        # For debugging - always populate with non-zero data
+        # For PREFILL mode, store random values for now
         if model_mode == common_types.MODEL_MODE_PREFILL:
-            # Fill with ones to verify it's working
-            print(f"  Setting key_pages/value_pages to ones for prefill mode")
+            # Just initialize with ones to verify the pages are being used
             key_pages.value = jnp.ones_like(key_pages.value)
             value_pages.value = jnp.ones_like(value_pages.value)
-            
+        
+        # For AUTOREGRESSIVE mode, update page state
         elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-            # Fill with twos for autoregressive mode
-            print(f"  Setting key_pages/value_pages to twos for autoregressive mode")
+            # Use twos for autoregressive mode (just to distinguish)
             key_pages.value = jnp.ones_like(key_pages.value) * 2.0
             value_pages.value = jnp.ones_like(value_pages.value) * 2.0
             
-            # Update sequence length for this layer and slot
-            # We need a variable to store updated page_state
-            # Note: In a real implementation, the PageManager would handle this
+            # Update sequence lengths - no conditionals, just direct updates
+            current_seq_len = page_state.sequence_lengths[layer_id, page_group_id]
+            new_seq_len = current_seq_len + 1
+            new_seq_lengths = page_state.sequence_lengths.at[layer_id, page_group_id].set(new_seq_len)
+            
+            # Update position within page
+            new_pos_in_page = new_seq_len % self.config.tokens_per_page
+            new_page_position = page_state.current_page_position.at[layer_id, page_group_id].set(new_pos_in_page)
+            
+            # Store the updated page state
             updated_page_state = self.variable(
                 "cache",
                 "updated_page_state",
                 lambda: page_state
             )
-            
-            # Increment sequence length
-            current_seq_len = page_state.sequence_lengths[layer_id, page_group_id]
-            new_seq_len = current_seq_len + 1
-            
-            # Update the state (only for the current layer to avoid conflicts)
-            new_sequence_lengths = page_state.sequence_lengths.at[layer_id, page_group_id].set(new_seq_len)
-            
-            # Create updated page state
             updated_page_state.value = PageState(
                 page_status=page_state.page_status,
                 page_map=page_state.page_map,
-                sequence_lengths=new_sequence_lengths,
+                sequence_lengths=new_seq_lengths,
                 num_pages_used=page_state.num_pages_used,
                 current_page=page_state.current_page,
-                current_page_position=page_state.current_page_position,
+                current_page_position=new_page_position,
             )
-            
-            print(f"  Updated sequence length: {new_seq_len}")
         
-        # Return query as-is for now
-        return query
+        # For TRAIN mode, just return the query as-is
+        elif model_mode == common_types.MODEL_MODE_TRAIN:
+            return query
+        
+        # Simple attention calculation
+        batch_size, seq_len, num_heads, head_dim = query.shape
+        
+        # Always use the first page for now
+        # No conditionals, just direct indexing
+        page_keys = key_pages.value[0]  # [tokens_per_page, num_kv_heads, head_dim]
+        page_values = value_pages.value[0]  # [tokens_per_page, num_kv_heads, head_dim]
+        
+        # Reshape for attention
+        page_keys = jnp.reshape(page_keys, (1, self.config.tokens_per_page, self.num_kv_heads, head_dim))
+        page_values = jnp.reshape(page_values, (1, self.config.tokens_per_page, self.num_kv_heads, head_dim))
+        
+        # Handle grouped query attention if needed
+        if self.num_query_heads > self.num_kv_heads:
+            heads_ratio = self.num_query_heads // self.num_kv_heads
+            page_keys = jnp.repeat(page_keys, heads_ratio, axis=2)
+            page_values = jnp.repeat(page_values, heads_ratio, axis=2)
+        
+        # Calculate attention scores
+        scale = 1.0 / jnp.sqrt(float(head_dim))
+        attn_scores = jnp.einsum('bshd,bthd->bsht', query, page_keys) * scale
+        
+        # Apply softmax
+        attn_weights = jax.nn.softmax(attn_scores, axis=-1)
+        
+        # Apply attention weights to values
+        attn_output = jnp.einsum('bsht,bthd->bshd', attn_weights, page_values)
+        
+        return attn_output
+
 
 class AttentionOp(nn.Module):
   config: Config
