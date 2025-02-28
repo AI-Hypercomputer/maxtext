@@ -550,7 +550,7 @@ class MoeBlock(nn.Module):
     # trunc_expert_mask becomes [[[[1, 0, 0, 0],[0, 1, 0, 0]], [[0, 0, 0, 0],[0, 0, 0, 1]]]],
     # so the 2nd token for expert #1 ([0, 1] & [1, 3]) is dropped, output of updated_expert_mask is [[[1, 1],[0, 1]]].
     expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
-    expert_mask_fused = expert_mask
+    expert_mask_fused = jnp.reshape(expert_mask, (batch_size, cp, sub_seq * self.num_experts_per_tok, self.num_experts))
     expert_mask_fused = nn.with_logical_constraint(expert_mask_fused, ("activation_batch", None, None, None))
     expert_token_count_fused = jnp.cumsum(expert_mask_fused, axis=2)
     expert_token_count = jnp.reshape(
