@@ -333,7 +333,9 @@ def build_user_command(
       f'model_name={wl_config.model.model_type}',
       f'base_output_directory={wl_config.base_output_directory}',
       f'{vertex_tensorboard}',
-      f'{run_name_command}'
+      f'{run_name_command}',
+      f' 2>&1 | tee /tmp/large_scale_multislice_test_log',
+      f' && bash upload_logs_to_gcs.sh BASE_OUTPUT_DIRECTORY={wl_config.base_output_directory}'
   ])
   return command
 
@@ -419,8 +421,6 @@ def generate_xpk_workload_cmd(
           # ' --use-vertex-tensorboard'
           # f' --experiment-name={test_purpose_name}'
           f' {additional_flags}'
-          f' 2>&1 | tee /tmp/maxtext_log'
-          f' && gsutil cp /tmp/maxtext_log {wl_config.base_output_directory}/result_log'
       ),
       name,
   )
