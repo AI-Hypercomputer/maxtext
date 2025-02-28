@@ -389,12 +389,11 @@ class PageManager:
     Returns:
         Tuple containing updated versions of all input state arrays
     """
-    new_sequence_lengths = sequence_lengths + jnp.where(current_page >= 0, 1, 0)
-    new_current_position = (new_sequence_lengths - 1) % self.tokens_per_page
-    new_pages_needed = (new_sequence_lengths + self.tokens_per_page - 1) // self.tokens_per_page
+    new_current_position = (sequence_lengths) % self.tokens_per_page  # Just compute the position
+    new_pages_needed = (sequence_lengths + self.tokens_per_page) // self.tokens_per_page # Based on *current* length
 
     def update_page_group(group_index, state):
-      current_status, current_map, current_pages, pages_used = state
+      current_status, current_map, current_pages, pages_used, sequence_lengths = state # unpack sequence_lengths
       needs_new_page = jnp.logical_and(
           new_pages_needed[group_index] > pages_used[group_index], current_pages[group_index] >= 0
       )
@@ -407,13 +406,13 @@ class PageManager:
       )
       updated_pages = jnp.where(next_free_page >= 0, current_pages.at[group_index].set(next_free_page), current_pages)
       updated_used = jnp.where(next_free_page >= 0, pages_used.at[group_index].set(pages_used[group_index] + 1), pages_used)
-      return (updated_status, updated_map, updated_pages, updated_used)
+      return (updated_status, updated_map, updated_pages, updated_used, sequence_lengths) # return sequence lengths
 
-    page_status, page_map, current_page, num_pages_used = jax.lax.fori_loop(
-        0, self.max_page_groups, update_page_group, (page_status, page_map, current_page, num_pages_used)
+    page_status, page_map, current_page, num_pages_used, sequence_lengths = jax.lax.fori_loop( # unpack the new sequence_lengths
+        0, self.max_page_groups, update_page_group, (page_status, page_map, current_page, num_pages_used, sequence_lengths)
     )
 
-    return (page_status, page_map, new_sequence_lengths, num_pages_used, current_page, new_current_position)
+    return (page_status, page_map, sequence_lengths, num_pages_used, current_page, new_current_position)
 
   def release_page_group(self, page_group_id: int):
     """

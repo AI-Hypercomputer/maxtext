@@ -569,7 +569,7 @@ def test_paged_attention_end_to_end():
         # Check updated page state
         if "page_manager" in decode_state["cache"]:
             updated_page_state = decode_state["cache"]["page_manager"]
-            current_seq_len = updated_page_state.sequence_lengths[0, slot]
+            current_seq_len = updated_page_state.sequence_lengths[0][slot]
             print(f"Sequence length after generation: {current_seq_len}")
             
             # Verify sequence length is increasing

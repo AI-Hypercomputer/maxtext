@@ -348,50 +348,97 @@ class PagedAttentionOp(nn.Module):
         true_length
     ):
         """Handle prefill mode by storing KV data in pages."""
-        max_seq_len = min(self.config.max_prefill_predict_length, key.shape[1])  # Still needed for overall slicing
+        print("\n=== _handle_prefill (START) ===")
+        print(f"  layer_id: {layer_id}")
+        print(f"  page_group_id: {page_group_id}")
+        print(f"  true_length: {true_length}")
+        print(f"  key.shape: {key.shape}")
+        print(f"  value.shape: {value.shape}")
+
+        max_seq_len = self.config.max_prefill_predict_length  # Use the *fixed* max length
+        tokens_per_page = self.config.tokens_per_page
+        max_pages = self.config.max_pages_per_group
+
+        # Get page mapping for this group
         page_map = page_state.page_map[layer_id, page_group_id]
-        num_pages_needed = (true_length + self.config.tokens_per_page - 1) // self.config.tokens_per_page
+        print(f"  page_map (before update): {page_map}")
 
-        # Loop over *all possible* page indices within a group.
-        for page_idx in range(self.config.max_pages_per_group):
-            physical_page = page_map[page_idx]
-            start_idx = page_idx * self.config.tokens_per_page
-            # Use max_seq_len as a static upper bound.  This is safe because
-            # dynamic_slice will handle out-of-bounds indices gracefully.
-            end_idx = min(start_idx + self.config.tokens_per_page, max_seq_len)  # Removed true_length
-            tokens_in_page = end_idx - start_idx
+        # Initialize with current key_pages and value_pages values
+        new_key_pages = key_pages.value
+        new_value_pages = value_pages.value
 
-            # Use jax.lax.cond to *conditionally* fill the page.
-            def fill_page(args):
-                _, page_k, page_v = args
-                key_pages_val, value_pages_val = key_pages.value, value_pages.value  # Unpack to make lines cleaner
-                key_pages_val = key_pages_val.at[physical_page, :tokens_in_page].set(page_k)
-                value_pages_val = value_pages_val.at[physical_page, :tokens_in_page].set(page_v)
 
-                # Zero out unused portion of the page
-                key_pages_val = key_pages_val.at[physical_page, tokens_in_page:].set(0)
-                value_pages_val = value_pages_val.at[physical_page, tokens_in_page:].set(0)
-                return key_pages_val, value_pages_val
+        def update_single_token(global_token_idx, current_pages):
+            # Unpack the carry
+            new_key_pages, new_value_pages = current_pages
 
-            def skip_page(args):
-                key_pages_val, value_pages_val = key_pages.value, value_pages.value  # Just return current values
-                return key_pages_val, value_pages_val
+            logical_page_idx = global_token_idx // tokens_per_page
+            token_offset = global_token_idx % tokens_per_page
 
-            # Only proceed if page is in range AND we have tokens to fill AND the physical page is valid
-            should_fill = (page_idx < num_pages_needed) & (tokens_in_page > 0) & (physical_page >= 0)
+            is_valid_token = global_token_idx < true_length
+            physical_page_idx = jnp.where(logical_page_idx < max_pages, page_map[logical_page_idx], -1)
+            is_valid_page = physical_page_idx >= 0
 
-            if tokens_in_page > 0:  # Only get slices if we have tokens to get.
-                #Crucially, use end_idx here, now that it no longer depends on true_length
-                page_k = jax.lax.dynamic_slice(key, (0, start_idx, 0, 0), (1, tokens_in_page, self.num_kv_heads, self.kv_head_dim_size))
-                page_v = jax.lax.dynamic_slice(value, (0, start_idx, 0, 0), (1, tokens_in_page, self.num_kv_heads, self.kv_head_dim_size))
+            token_k = jax.lax.dynamic_slice(
+                key,
+                (0, jnp.minimum(global_token_idx, key.shape[1] - 1), 0, 0),
+                (1, 1, self.num_kv_heads, self.kv_head_dim_size)
+            )
+            token_v = jax.lax.dynamic_slice(
+                value,
+                (0, jnp.minimum(global_token_idx, value.shape[1] - 1), 0, 0),
+                (1, 1, self.num_kv_heads, self.kv_head_dim_size)
+            )
 
-                page_k = jnp.reshape(page_k, (tokens_in_page, self.num_kv_heads, self.kv_head_dim_size))
-                page_v = jnp.reshape(page_v, (tokens_in_page, self.num_kv_heads, self.kv_head_dim_size))
-            else:  # Make dummy data to pass, since we will skip page if needed
-                page_k = jnp.zeros((1, self.num_kv_heads, self.kv_head_dim_size))
-                page_v = jnp.zeros((1, self.num_kv_heads, self.kv_head_dim_size))
-            
-            key_pages.value, value_pages.value = jax.lax.cond(should_fill, fill_page, skip_page, (None, page_k, page_v))
+            token_k = jnp.reshape(token_k, (self.num_kv_heads, self.kv_head_dim_size))
+            token_v = jnp.reshape(token_v, (self.num_kv_heads, self.kv_head_dim_size))
+
+
+            def update_page(args):
+                page, token_data, token_offset = args
+                return page.at[token_offset].set(token_data)
+
+            def identity_page(args):
+                page, token_data, token_offset = args
+                return page
+
+            # Apply the conditional update using jnp.where and jax.lax.cond
+            updated_key_page = jax.lax.cond(
+                jnp.logical_and(is_valid_page, is_valid_token),
+                update_page,
+                identity_page,
+                (new_key_pages[physical_page_idx], token_k, token_offset)  # Pass necessary data
+            )
+            updated_value_page = jax.lax.cond(
+                jnp.logical_and(is_valid_page, is_valid_token),
+                update_page,
+                identity_page,
+                (new_value_pages[physical_page_idx], token_v, token_offset) # Pass necessary data
+            )
+
+            # Crucial: Update the *entire* key_pages and value_pages arrays
+            new_key_pages = new_key_pages.at[physical_page_idx].set(updated_key_page)
+            new_value_pages = new_value_pages.at[physical_page_idx].set(updated_value_page)
+
+            # Return the updated full arrays
+            return (new_key_pages, new_value_pages)
+
+        # Use jax.lax.fori_loop
+        def fori_body(global_token_idx, current_pages):
+            return update_single_token(global_token_idx, current_pages)
+
+        new_key_pages, new_value_pages = jax.lax.fori_loop(
+            0, max_seq_len, fori_body, (new_key_pages, new_value_pages)
+        )
+
+
+        # Update the pages in the cache
+        key_pages.value = new_key_pages
+        value_pages.value = new_value_pages
+
+        print(f"  page_map (after update): {page_map}")
+        print("=== _handle_prefill (END) ===\n")
+        return
 
 
     def _handle_autoregressive(
@@ -403,48 +450,61 @@ class PagedAttentionOp(nn.Module):
         page_state,
         page_group_id,
         layer_id
-    ): #Correct code from last turn
-
+    ):
         """Handle autoregressive mode by updating the cache with the new token."""
+        print("\n=== _handle_autoregressive (START) ===")
+        print(f"  layer_id: {layer_id}")
+        print(f"  page_group_id: {page_group_id}")
+        print(f"  key.shape: {key.shape}")
+        print(f"  value.shape: {value.shape}")
+
         # Get the current sequence length
         curr_seq_len = page_state.sequence_lengths[layer_id, page_group_id]
+        print(f"  curr_seq_len: {curr_seq_len}")
 
         # Calculate logical page and position
         logical_page = curr_seq_len // self.config.tokens_per_page
         pos_in_page = curr_seq_len % self.config.tokens_per_page
+        print(f"  logical_page: {logical_page}, pos_in_page: {pos_in_page}")
 
         # Get the physical page for this logical page
-        physical_page = jnp.take(
-            page_state.page_map[layer_id, page_group_id],
-            jnp.minimum(logical_page, self.config.max_pages_per_group - 1)
+        # Safe indexing to avoid tracer errors
+        page_map = page_state.page_map[layer_id, page_group_id]
+
+        def get_physical_page(logical_page, page_map):
+            # Use min to ensure we don't go out of bounds
+            safe_idx = jnp.minimum(logical_page, self.config.max_pages_per_group - 1)
+            return page_map[safe_idx]
+
+        physical_page = get_physical_page(logical_page, page_map)
+        print(f"  physical_page: {physical_page}")
+
+        # Store the new token data safely using a conditional update
+        def update_pages(args):
+            k_pages, v_pages = args
+            # Extract the token values and reshape if needed
+            k_token = key[0, 0]  # [num_kv_heads, head_dim]
+            v_token = value[0, 0]  # [num_kv_heads, head_dim]
+
+            # Update the pages
+            new_k_pages = k_pages.value.at[physical_page, pos_in_page].set(k_token)
+            new_v_pages = v_pages.value.at[physical_page, pos_in_page].set(v_token)
+
+            return new_k_pages, new_v_pages
+
+        # Only update if physical_page is valid
+        new_k_pages, new_v_pages = jax.lax.cond(
+            physical_page >= 0,
+            update_pages,
+            lambda args: (args[0].value, args[1].value),
+            (key_pages, value_pages)
         )
 
-        # Store the new token data
-        key_pages.value = key_pages.value.at[physical_page, pos_in_page].set(key[0, 0])
-        value_pages.value = value_pages.value.at[physical_page, pos_in_page].set(value[0, 0])
+        # Update the cache variables
+        key_pages.value = new_k_pages
+        value_pages.value = new_v_pages
 
-        # Update page state
-        new_seq_len = curr_seq_len + 1
-        updated_page_state = self.variable(
-            "cache",
-            "updated_page_state",
-            lambda: page_state
-        )
-
-        # Create updated page state
-        new_seq_lengths = page_state.sequence_lengths.at[layer_id, page_group_id].set(new_seq_len)
-        new_page_position = page_state.current_page_position.at[layer_id, page_group_id].set(
-            new_seq_len % self.config.tokens_per_page
-        )
-
-        updated_page_state.value = PageState(
-            page_status=page_state.page_status,
-            page_map=page_state.page_map,
-            sequence_lengths=new_seq_lengths,
-            num_pages_used=page_state.num_pages_used,
-            current_page=page_state.current_page,
-            current_page_position=new_page_position,
-        )
+        print("=== _handle_autoregressive (END) ===\n")
 
     def _compute_attention(
         self,

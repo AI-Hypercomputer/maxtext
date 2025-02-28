@@ -594,12 +594,12 @@ class MaxEngine(engine_api.Engine):
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
   def generate(
-      self,
-      params: Params,
-      decode_state: DecodeState,
-      sampler: Optional[Callable[[Any], Any]] = None,
-      rng: Optional[PRNGKeyType] = None,
-      slot: Optional[int] = None,
+    self,
+    params: Params,
+    decode_state: DecodeState,
+    sampler: Optional[Callable[[Any], Any]] = None,
+    rng: Optional[PRNGKeyType] = None,
+    slot: Optional[int] = None,
   ):
       """Run one generate step with paged attention."""
       if rng is None:
@@ -608,55 +608,110 @@ class MaxEngine(engine_api.Engine):
       # Get the previous token
       previous_token = jnp.array([[decode_state["tokens"][0, 0]]], dtype=jnp.int32) if slot is None else \
                       jnp.array([[decode_state["tokens"][slot, 0]]], dtype=jnp.int32)
-      
+
       # Split RNG
       rng, new_rng = jax.random.split(rng)
-      
+
       with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
           if self.config.attention == "paged":
               # Get current page state from the cache
               page_state = decode_state["cache"]["page_manager"]
-              
-              # Extract updated KV cache
-              decoder_cache = decode_state["cache"]["decoder"]
-              
               # Unbox parameters
               unboxed_params = max_utils.unbox_logicallypartioned(params)
-              
-              # Apply model with autoregressive mode
-              variables = {"params": unboxed_params, "cache": {"decoder": decoder_cache}}
-              
-              flat_logits, new_vars = self.model.apply(
-                  variables,
-                  previous_token,
-                  decode_state["next_pos"],
-                  enable_dropout=False,
-                  model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-                  rngs={"params": new_rng},
-                  mutable=["cache"],
-                  slot=slot,
-                  page_state=page_state,
+              updated_decoder_cache = {}
+
+              # Create mutable *copies* of the page_state arrays
+              new_page_status = page_state.page_status.copy()
+              new_page_map = page_state.page_map.copy()
+              new_sequence_lengths = page_state.sequence_lengths.copy()
+              new_num_pages_used = page_state.num_pages_used.copy()
+              new_current_page = page_state.current_page.copy()
+              new_current_page_position = page_state.current_page_position.copy()
+
+
+              for layer_id in range(self.config.num_decoder_layers):
+                  # Get layer-specific states
+                  layer_page_status = page_state.page_status[layer_id]
+                  layer_page_map = page_state.page_map[layer_id]
+                  layer_sequence_lengths = page_state.sequence_lengths[layer_id]
+                  layer_pages_used = page_state.num_pages_used[layer_id]
+                  layer_current_page = page_state.current_page[layer_id]
+                  layer_current_position = page_state.current_page_position[layer_id]
+
+
+                # Get layer specific cache.
+                  layer_cache = decode_state["cache"]["decoder"].get(f"layers_{layer_id}", {})
+
+                  # Apply model with autoregressive mode for the specific layer.
+                  variables = {"params": unboxed_params, "cache": {"decoder": {f"layers_{layer_id}": layer_cache}}}
+                  layer_flat_logits, layer_new_vars = self.model.apply(
+                      variables,
+                      previous_token,
+                      decode_state["next_pos"],
+                      enable_dropout=False,
+                      model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+                      rngs={"params": new_rng},
+                      mutable=["cache"],
+                      slot=slot,
+                      page_state=page_state, # passing the *old* page_state to the model
+                      layer_id=layer_id,
+                  )
+
+                  # Add the updated layer cache
+                  updated_decoder_cache[f"layers_{layer_id}"] = layer_new_vars["cache"]["decoder"].get(f"layers_{layer_id}", {})
+                  # Use the logits from last layer.
+                  flat_logits = layer_flat_logits
+
+                  # Call reserve_decode_step_pages and unpack *all* its return values:
+                  (
+                      layer_page_status,
+                      layer_page_map,
+                      layer_sequence_lengths,  # This is 1D: [max_page_groups] after the for loop
+                      layer_pages_used,        # This is 1D: [max_page_groups] after the for loop
+                      layer_current_page,
+                      layer_current_page_position,  # Correctly unpacking all return values
+                  ) = self.page_manager.reserve_decode_step_pages(
+                      layer_page_status,
+                      layer_page_map,
+                      layer_sequence_lengths,
+                      layer_pages_used,
+                      layer_current_page,
+                      layer_current_position,
+                  )
+
+                  # Correctly update sequence lengths and positions using the 1D arrays:
+                  new_sequence_lengths = new_sequence_lengths.at[layer_id, slot].set(layer_sequence_lengths[slot] + 1) # NOW CORRECT
+                  new_current_page_position = new_current_page_position.at[layer_id, slot].set((new_sequence_lengths[layer_id, slot] - 1) % self.config.tokens_per_page)
+
+                  new_pages_used = layer_pages_used.at[slot].set(
+                  (new_sequence_lengths[layer_id, slot] + self.config.tokens_per_page -1) // self.config.tokens_per_page
+                  )
+                  new_current_page = new_current_page.at[layer_id, slot].set(layer_current_page[slot])
+
+                  # *In-place* update the mutable copies:
+                  new_page_status = new_page_status.at[layer_id].set(layer_page_status)
+                  new_page_map = new_page_map.at[layer_id].set(layer_page_map)
+                  #new_sequence_lengths = new_sequence_lengths.at[layer_id].set(layer_sequence_lengths) # No longer do this.
+                  new_num_pages_used = new_num_pages_used.at[layer_id].set(layer_pages_used)
+                  new_current_page = new_current_page.at[layer_id].set(layer_current_page)
+                  new_current_page_position = new_current_page_position.at[layer_id].set(layer_current_position)
+
+
+              # Construct the *updated* PageState using the modified arrays:
+              updated_page_state = PageState(
+                  page_status=new_page_status,
+                  page_map=new_page_map,
+                  sequence_lengths=new_sequence_lengths,
+                  num_pages_used=new_num_pages_used,
+                  current_page=new_current_page,
+                  current_page_position=new_current_page_position,
               )
-              
-              # Get updated cache
-              updated_cache = new_vars.get("cache", {})
-              
-              # Look for updated page state in each layer
-              updated_page_state = page_state
-              
-              # First check for the updated_page_state in the first layer's attention_op
-              if "decoder" in updated_cache and f"layers_0" in updated_cache["decoder"] and \
-                "self_attention" in updated_cache["decoder"][f"layers_0"] and \
-                "attention_op" in updated_cache["decoder"][f"layers_0"]["self_attention"] and \
-                "updated_page_state" in updated_cache["decoder"][f"layers_0"]["self_attention"]["attention_op"]:
-                  updated_page_state = updated_cache["decoder"][f"layers_0"]["self_attention"]["attention_op"]["updated_page_state"]
-              
-              # Update the cache
+
               cache = {
-                  "page_manager": updated_page_state,
-                  "decoder": updated_cache.get("decoder", decoder_cache)
+                "page_manager": updated_page_state,  # USE THE UPDATED STATE
+                "decoder": updated_decoder_cache,
               }
-              
+
           else:
               # Non-paged attention path
               out_logits, new_vars = self.model.apply(
@@ -668,7 +723,7 @@ class MaxEngine(engine_api.Engine):
                   rngs={"params": new_rng},
                   mutable=["cache"],
               )
-              
+
               # Update cache with new KV data
               cache = new_vars["cache"]
               flat_logits = out_logits
@@ -685,7 +740,7 @@ class MaxEngine(engine_api.Engine):
           nucleus_topp=self.config.decode_sampling_nucleus_p,
           temperature=self.config.decode_sampling_temperature,
       )
-      
+
       # Create result
       all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
       result = engine_api.ResultTokens(
