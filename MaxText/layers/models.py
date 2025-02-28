@@ -406,7 +406,7 @@ class Decoder(nn.Module):
     RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, policy)
 
     if cfg.using_pipeline_parallelism:
-      if cfg.pipeline_fsdp_ag_once:
+      if cfg.pipeline_fsdp_ag_once or True:
         partition_spec = self.pipeline_module.get_weight_sharding(
             y, decoder_segment_ids, decoder_positions, deterministic, model_mode
         )

@@ -205,7 +205,7 @@ class Pipeline(nn.Module):
     repeat_ids = microbatches_processed // self.config.num_pipeline_microbatches
     return microbatch_ids, repeat_ids
 
-  def vmap_parallel_gather(self, weights, repeat_ids, repeat_dim_in_weights, stages_dim_in_weights):
+  def vmap_parallel_gather(self, weights, repeat_ids, repeat_dim_in_weights, stages_dim_in_weights, partition_spec=None):
     """Use vmap to implement a sharded parallel gather.
     Parallel gather means each stage has its own weights, and gets one slice from it.
     Args:
@@ -228,7 +228,9 @@ class Pipeline(nn.Module):
     stage_weights = jax.vmap(_gather_one, in_axes=(stages_dim_in_weights, 0), out_axes=gathered_weights_stage_dim)(
         weights, repeat_ids
     )
+    # TODO: Instead of shard_dim_by_stages, use partition_spec
     stage_weights = self.shard_dim_by_stages(stage_weights, gathered_weights_stage_dim)
+
     return stage_weights
 
   def vmap_gather(self, xs, ids, ids_dim):
@@ -353,7 +355,7 @@ class Pipeline(nn.Module):
     output = output[:, permutation]
     return output
 
-  def get_current_stage_weights(self, pipeline_weights, loop_iteration):
+  def get_current_stage_weights(self, pipeline_weights, loop_iteration, partition_spec=None):
     """
     Gets the current weights used for one iteration. Outputs a pytree whose arrays have leading dimension of stages, e.g.
     {'mlp': 'wo': [stages, mlp, embed]}. Stage 0 will use the 0th index of this pytree, Stage 1 the 1st index, etc.
@@ -361,17 +363,17 @@ class Pipeline(nn.Module):
     for ciruclar pipelines each stage grabs only the weights correpsonding to the current repeat.
     """
     if self.config.num_pipeline_repeats > 1:
-      return self.get_current_repeat_from_stages(pipeline_weights, loop_iteration)
+      return self.get_current_repeat_from_stages(pipeline_weights, loop_iteration, partition_spec=partition_spec)
     else:
       return pipeline_weights
 
-  def get_current_repeat_from_stages(self, weights, loop_iteration):
+  def get_current_repeat_from_stages(self, weights, loop_iteration, partition_spec=None):
     _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
 
-    def gather_weights_for_stages_in(weights):
+    def gather_weights_for_stages_in(weights, partition_spec=None):
       return jax.tree.map(
           functools.partial(
-              self.vmap_parallel_gather, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1
+              self.vmap_parallel_gather, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1, partition_spec=partition_spec
           ),
           weights,
       )
@@ -386,7 +388,7 @@ class Pipeline(nn.Module):
     weights = meta.remove_axis(
         weights, 0, circular_metadata_params
     )  # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
-    weights = gather_weights_for_stages_in(weights)
+    weights = gather_weights_for_stages_in(weights, partition_spec=partition_spec)
     return weights
 
   def get_vmap_func_for_init(self):
@@ -433,7 +435,7 @@ class Pipeline(nn.Module):
     return vmap_func
 
   def run_one_iteration(
-      self, loop_state, pipeline_weights, positions, segment_ids, deterministic, model_mode, decoder_layer_instance
+      self, loop_state, pipeline_weights, positions, segment_ids, deterministic, model_mode, decoder_layer_instance, partition_spec=None
   ):
     """Run one loop iteration - gets weights and inputs for each stage, run the stages in parallel, and update the loop state."""
     state_io = loop_state["state_io"]
@@ -454,13 +456,13 @@ class Pipeline(nn.Module):
     if self.config.num_pipeline_repeats > 1:
       _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
 
-      def prepare_vars_for_main_vmap(weights):
-        def gather_weights_for_stages_in(weights):
+      def prepare_vars_for_main_vmap(weights, partition_spec=None):
+        def gather_weights_for_stages_in(weights, partition_spec=None):
           return jax.tree.map(
               functools.partial(
-                  self.vmap_parallel_gather, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1
+                  self.vmap_parallel_gather, repeat_ids=repeat_ids, repeat_dim_in_weights=0, stages_dim_in_weights=1, partition_spec=partition_spec
               ),
-              weights,
+              weights, # TODO: Probably tree map over both weights and partition spec
           )
 
         circular_metadata_params = {
@@ -473,17 +475,22 @@ class Pipeline(nn.Module):
         weights = meta.remove_axis(
             weights, 0, circular_metadata_params
         )  # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
+        breakpoint()
+        print("rawr before gather", flush=True)
         weights = gather_weights_for_stages_in(weights)
+        print("rawr after gather", flush=True)
+        breakpoint()
         return weights
 
+      prepare_vars_for_main_vmap_partial = functools.partial(prepare_vars_for_main_vmap, partition_spec=partition_spec)
       vmap_func = nn.map_variables(
           vmap_func,
           mapped_collections=["params", "_overwrite_with_gradient", "non_trainable", "summaries", "intermediates"],
           mutable=True,
-          trans_in_fn=prepare_vars_for_main_vmap,
+          trans_in_fn=prepare_vars_for_main_vmap_partial,
       )
 
-    stage_weights = self.get_current_stage_weights(pipeline_weights, loop_iteration)
+    stage_weights = self.get_current_stage_weights(pipeline_weights, loop_iteration, partition_spec=partition_spec)
     stages_output = vmap_func(
         decoder_layer_instance, stage_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode
     )
@@ -562,6 +569,11 @@ class Pipeline(nn.Module):
     physical_constraint_no_fsdp = self.get_physical_spec_no_fsdp(sharding_info)
     return jax.lax.with_sharding_constraint(self.layers.variables, physical_constraint_no_fsdp)
 
+  def get_logical_spec_repeats_removed(self, full_logical):
+    def _remove_from_spec(spec):
+      return jax.sharding.PartitionSpec(*[dim for dim in spec if dim != 'circular_repeats'])
+    return jax.tree.map(_remove_from_spec, full_logical)
+    
   @nn.compact
   def __call__(
       self,
@@ -681,12 +693,15 @@ class Pipeline(nn.Module):
     else:
       all_pipeline_weights = self.layers.variables
 
+    if partition_spec is not None:
+      partition_spec_stages = self.get_logical_spec_repeats_removed(partition_spec)
+
     def run_iteration_scannable(model, loop_state, xs):
       # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we explicitly wrap
       # the run_one_iteration in this method - the first argument model (i.e. self) is a nn.module instance.
       return (
           model.run_one_iteration(
-              loop_state, all_pipeline_weights, positions, segment_ids, deterministic, model_mode, model.layers
+              loop_state, all_pipeline_weights, positions, segment_ids, deterministic, model_mode, model.layers, partition_spec=partition_spec_stages
           ),
           None,
       )
