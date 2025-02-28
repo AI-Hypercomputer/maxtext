@@ -475,11 +475,8 @@ class Pipeline(nn.Module):
         weights = meta.remove_axis(
             weights, 0, circular_metadata_params
         )  # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
-        breakpoint()
-        print("rawr before gather", flush=True)
         weights = gather_weights_for_stages_in(weights)
-        print("rawr after gather", flush=True)
-        breakpoint()
+        weights = nn.with_logical_constraint(weights, partition_spec, rules=self.config.logical_axis_rules, mesh=self.mesh)
         return weights
 
       prepare_vars_for_main_vmap_partial = functools.partial(prepare_vars_for_main_vmap, partition_spec=partition_spec)
