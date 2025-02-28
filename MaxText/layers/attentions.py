@@ -491,14 +491,21 @@ class AttentionOp(nn.Module):
       key = key.astype(jnp.float32)
 
     q_seq_len = query.shape[1]
-    
-    query = partitioning.with_sharding_constraint(query, (BATCH, LENGTH, HEAD, D_KV))
-    key = partitioning.with_sharding_constraint(key, (BATCH, KV_LENGTH, HEAD, D_KV))
-    value = partitioning.with_sharding_constraint(value, (BATCH, KV_LENGTH, HEAD, D_KV))
+    # special sharding for decode
+    if self.config.ici_context_parallelism > 0 and q_seq_len == 1:
+      query = partitioning.with_sharding_constraint(query, (KV_LENGTH, None, HEAD, D_KV))
+      key = partitioning.with_sharding_constraint(key, (KV_LENGTH, None, HEAD, D_KV))
+      value = partitioning.with_sharding_constraint(value, (KV_LENGTH, None, HEAD, D_KV))
+    else:
+      query = partitioning.with_sharding_constraint(query, (BATCH, LENGTH, HEAD, D_KV))
+      key = partitioning.with_sharding_constraint(key, (BATCH, KV_LENGTH, HEAD, D_KV))
+      value = partitioning.with_sharding_constraint(value, (BATCH, KV_LENGTH, HEAD, D_KV))
 
     attn_weights = self.qk_product(query, key, q_seq_len, model_mode)
-
-    attn_weights = partitioning.with_sharding_constraint(attn_weights, (BATCH, HEAD, None, LENGTH, KV_LENGTH))
+    if self.config.ici_context_parallelism > 0 and q_seq_len == 1:
+      attn_weights = partitioning.with_sharding_constraint(attn_weights, (KV_LENGTH, HEAD, None, None, None))
+    else:
+      attn_weights = partitioning.with_sharding_constraint(attn_weights, (BATCH, HEAD, None, LENGTH, KV_LENGTH))
 
     if self.attn_logits_soft_cap:
       attn_weights = jnp.tanh(attn_weights / self.attn_logits_soft_cap)
@@ -506,7 +513,10 @@ class AttentionOp(nn.Module):
     if model_mode == common_types.MODEL_MODE_TRAIN and self.float32_logits:
       attn_weights = attn_weights.astype(jnp.float32)
     attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
-    attn_mask = partitioning.with_sharding_constraint(attn_mask, (BATCH, HEAD, None, LENGTH, KV_LENGTH))
+    if self.config.ici_context_parallelism > 0 and q_seq_len == 1:
+      attn_mask = partitioning.with_sharding_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
+    else:
+      attn_mask = partitioning.with_sharding_constraint(attn_mask, (BATCH, HEAD, None, LENGTH, KV_LENGTH))
     if attn_mask is not None:
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
     return self.compute_local_attention(attn_weights, value, q_seq_len, model_mode)
