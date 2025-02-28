@@ -142,7 +142,6 @@ def update_page_state(state, slot, true_length, config):
         current_page_position=updated_current_position
     )
 
-
 class MaxEngineConfig:
   """Engine specific config class to allow using multiple MaxEngine instances in an inference run.
   The default pyconfig.config is a global param shared across multiple instances and doesn't
@@ -438,191 +437,160 @@ class MaxEngine(engine_api.Engine):
 
   @functools.partial(jax.jit, static_argnums=(0,))
   def prefill(
-    self,
-    *,
-    params: Params,
-    padded_tokens: jax.Array,
-    true_length: int,
-    rng: Optional[PRNGKeyType] = None,
-    slot: Optional[int] = None,
-    dynamic_kv_cache: bool = False,
-):
-    """Computes prefill for a new generate request with paged attention."""
-    print("\n=== MaxEngine.prefill() ENTRY ===")
-    print(f"Input shapes:")
-    print(f"  padded_tokens: {padded_tokens.shape}")
-    
-    if rng is None:
-        rng = jax.random.PRNGKey(0)
+      self,
+      *,
+      params: Params,
+      padded_tokens: jax.Array,
+      true_length: int,
+      rng: Optional[PRNGKeyType] = None,
+      slot: Optional[int] = None,
+      dynamic_kv_cache: bool = False,
+  ):
+      """Computes prefill for a new generate request with paged attention."""
+      if rng is None:
+          rng = jax.random.PRNGKey(0)
 
-    input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
-    positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
+      input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
+      positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
 
-    # Create active sequence mask
-    zero_to_n = jnp.arange(0, padded_tokens.shape[0])
-    ones_to_keep = zero_to_n < true_length
-    one_d_output = jnp.where(ones_to_keep, common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR, 0)
-    sequence_indicator = jnp.expand_dims(one_d_output, 0)
+      # Create active sequence mask
+      zero_to_n = jnp.arange(0, padded_tokens.shape[0])
+      ones_to_keep = zero_to_n < true_length
+      one_d_output = jnp.where(ones_to_keep, common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR, 0)
+      sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
-    rng, new_rng = jax.random.split(rng)
+      rng, new_rng = jax.random.split(rng)
 
-    # Initialize page state directly
-    cache = {}
-    
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        if self.config.attention == "paged":
-            # Create an initial PageState for this prefill operation
-            initial_page_state = PageState(
-                page_status=jnp.zeros((self.config.num_decoder_layers, self.config.num_pages), dtype=jnp.int32),
-                page_map=jnp.full(
-                    (self.config.num_decoder_layers, self.config.global_batch_size_to_load, 
-                    self.config.max_pages_per_group), -1, dtype=jnp.int32
-                ),
-                sequence_lengths=jnp.zeros(
-                    (self.config.num_decoder_layers, self.config.global_batch_size_to_load), 
-                    dtype=jnp.int32
-                ),
-                num_pages_used=jnp.zeros(
-                    (self.config.num_decoder_layers, self.config.global_batch_size_to_load), 
-                    dtype=jnp.int32
-                ),
-                current_page=jnp.full(
-                    (self.config.num_decoder_layers, self.config.global_batch_size_to_load), -1, 
-                    dtype=jnp.int32
-                ),
-                current_page_position=jnp.zeros(
-                    (self.config.num_decoder_layers, self.config.global_batch_size_to_load), 
-                    dtype=jnp.int32
-                ),
-            )
+      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+          if self.config.attention == "paged":
+              # Create an initial page state for this prefill
+              initial_page_state = PageState(
+                  page_status=jnp.zeros((self.config.num_decoder_layers, self.config.num_pages), dtype=jnp.int32),
+                  page_map=jnp.full(
+                      (self.config.num_decoder_layers, self.config.global_batch_size_to_load, 
+                      self.config.max_pages_per_group), -1, dtype=jnp.int32
+                  ),
+                  sequence_lengths=jnp.zeros(
+                      (self.config.num_decoder_layers, self.config.global_batch_size_to_load), 
+                      dtype=jnp.int32
+                  ),
+                  num_pages_used=jnp.zeros(
+                      (self.config.num_decoder_layers, self.config.global_batch_size_to_load), 
+                      dtype=jnp.int32
+                  ),
+                  current_page=jnp.full(
+                      (self.config.num_decoder_layers, self.config.global_batch_size_to_load), -1, 
+                      dtype=jnp.int32
+                  ),
+                  current_page_position=jnp.zeros(
+                      (self.config.num_decoder_layers, self.config.global_batch_size_to_load), 
+                      dtype=jnp.int32
+                  ),
+              )
 
-            # Call the module-level function (no self reference)
-            updated_page_state = update_page_state(
-                initial_page_state, 
-                slot, 
-                true_length,
-                self.config  # Pass config object directly
-            )
-            
-            decoder_cache = {}
-            for layer_id in range(self.config.num_decoder_layers):
-                # Full path: cache -> decoder -> layers_N -> self_attention -> attention_op -> {key_pages, value_pages}
-                decoder_cache[f"layers_{layer_id}"] = {
-                    "self_attention": {
-                        "attention_op": {}  # PagedAttentionOp will create key_pages and value_pages here
-                    }
-                }
+              # Update page state with allocations
+              updated_page_state = update_page_state(
+                  initial_page_state, 
+                  slot, 
+                  true_length,
+                  self.config
+              )
+              
+              # Unbox the logically partitioned parameters
+              unboxed_params = max_utils.unbox_logicallypartioned(params)
+              
+              # Initialize decoder cache structure
+              decoder_cache = {}
+              for layer_id in range(self.config.num_decoder_layers):
+                  decoder_cache[f"layers_{layer_id}"] = {}
+              
+              # Create variables dict with cache
+              variables = {"params": unboxed_params, "cache": {"decoder": decoder_cache}}
+              
+              # Apply model with prefill mode
+              flat_logits, new_vars = self.model.apply(
+                  variables,
+                  input_tokens,
+                  positions,
+                  decoder_segment_ids=sequence_indicator,
+                  enable_dropout=False,
+                  model_mode=common_types.MODEL_MODE_PREFILL,
+                  rngs={"params": new_rng},
+                  mutable=["cache"],
+                  slot=slot,
+                  true_length=true_length,
+                  page_state=updated_page_state,
+              )
+              
+              # Get the updated cache from new_vars
+              updated_cache = new_vars.get("cache", {})
+              
+              # Build the final cache structure with the page state
+              cache = {
+                  "page_manager": updated_page_state,
+                  "decoder": updated_cache.get("decoder", {})
+              }
+              
+          else:
+              # Non-paged attention path (unchanged)
+              flat_logits, new_vars = self.model.apply(
+                  params | {"cache": {}},
+                  input_tokens,
+                  positions,
+                  decoder_segment_ids=sequence_indicator,
+                  enable_dropout=False,
+                  model_mode=common_types.MODEL_MODE_PREFILL,
+                  rngs={"params": new_rng},
+                  mutable=["cache"],
+              )
+              
+              # Use the cache returned by the model
+              cache = new_vars.get("cache", {})
 
-            # Print the structure for debugging
-            print(f"\nDEBUG - Created decoder_cache structure:")
-            print(f"  First layer path: decoder_cache['layers_0']['self_attention']['attention_op']")
-            print(f"  Total layers: {len(decoder_cache)}")
+      # Get logits for the last position
+      next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
+      generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
+      selected_logits = jax.lax.dynamic_slice(
+          flat_logits,
+          (0, true_length - 1, 0),
+          (flat_logits.shape[0], 1, flat_logits.shape[2]),
+      )
+      selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
 
-            # Unbox the logically partitioned parameters
-            unboxed_params = max_utils.unbox_logicallypartioned(params)
+      # Sample first token
+      first_generated_token = inference_utils.sampling(
+          selected_logits,
+          rng,
+          self.config.decode_sampling_strategy,
+          topk=self.config.decode_sampling_top_k,
+          nucleus_topp=self.config.decode_sampling_nucleus_p,
+          temperature=self.config.decode_sampling_temperature,
+      )
 
-            # Create variables dict with structured cache
-            variables = {"params": unboxed_params, "cache": {"decoder": decoder_cache}}
+      # Create result structure
+      all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
+      result = engine_api.ResultTokens(
+          data=jnp.concatenate((first_generated_token, all_valid, generated_tokens), axis=1),
+          tokens_idx=(0, 1),
+          valid_idx=(1, 2),
+          length_idx=(2, 3),
+          samples_per_slot=1,
+      )
 
-            # Apply model with prefill mode
-            flat_logits, new_vars = self.model.apply(
-                variables,
-                input_tokens,
-                positions,
-                decoder_segment_ids=sequence_indicator,
-                enable_dropout=False,
-                model_mode=common_types.MODEL_MODE_PREFILL,
-                rngs={"params": new_rng},
-                mutable=["cache"],
-                slot=slot,
-                true_length=true_length,
-                page_state=updated_page_state,
-            )
-            print("\nDEBUG - After model.apply:")
-            print(f"new_vars keys: {new_vars.keys() if new_vars else 'None'}")
-            if 'cache' in new_vars:
-                cache_dict = new_vars['cache']
-                print(f"Cache dict keys: {cache_dict.keys() if cache_dict else 'None'}")
-                if 'decoder' in cache_dict:
-                    decoder_dict = cache_dict['decoder']
-                    print(f"Decoder dict keys: {decoder_dict.keys() if decoder_dict else 'None'}")
-                    
-                    # Check first layer
-                    if f'layers_0' in decoder_dict:
-                        layer_dict = decoder_dict['layers_0']
-                        print(f"Layer 0 dict keys: {layer_dict.keys() if layer_dict else 'None'}")
-            else:
-                print("No 'cache' key in new_vars!")
+      if self.config.attention != "paged":
+          cache = self._maybe_stack_prefill_result_cache(cache)
 
-            # Get the updated cache from new_vars
-            updated_cache = new_vars.get("cache", {})
-
-            # Build the final cache structure with the page state
-            cache = {
-                "page_manager": updated_page_state,
-                "decoder": updated_cache.get("decoder", {})
-            }
-                                    
-        else:
-            # Non-paged attention path
-            flat_logits, new_vars = self.model.apply(
-                params | {"cache": {}},
-                input_tokens,
-                positions,
-                decoder_segment_ids=sequence_indicator,
-                enable_dropout=False,
-                model_mode=common_types.MODEL_MODE_PREFILL,
-                rngs={"params": new_rng},
-                mutable=["cache"],
-            )
-            
-            # Use the cache returned by the model
-            cache = new_vars.get("cache", {})
-
-    # Get logits for the last position
-    next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
-    generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
-    selected_logits = jax.lax.dynamic_slice(
-        flat_logits,
-        (0, true_length - 1, 0),
-        (flat_logits.shape[0], 1, flat_logits.shape[2]),
-    )
-    selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
-
-    # Sample first token
-    first_generated_token = inference_utils.sampling(
-        selected_logits,
-        rng,
-        self.config.decode_sampling_strategy,
-        topk=self.config.decode_sampling_top_k,
-        nucleus_topp=self.config.decode_sampling_nucleus_p,
-        temperature=self.config.decode_sampling_temperature,
-    )
-
-    # Create result structure
-    all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
-    result = engine_api.ResultTokens(
-        data=jnp.concatenate((first_generated_token, all_valid, generated_tokens), axis=1),
-        tokens_idx=(0, 1),
-        valid_idx=(1, 2),
-        length_idx=(2, 3),
-        samples_per_slot=1,
-    )
-
-    if self.config.attention != "paged":
-        cache = self._maybe_stack_prefill_result_cache(cache)
-
-    return (
-        {
-            "logits": selected_logits,
-            "cache": cache,
-            "next_pos": next_pos,
-            "generated_tokens": generated_tokens,
-            "tokens": first_generated_token,
-        },
-        result,
-        updated_page_state if self.config.attention == "paged" else None
-    )
+      return (
+          {
+              "logits": selected_logits,
+              "cache": cache,
+              "next_pos": next_pos,
+              "generated_tokens": generated_tokens,
+              "tokens": first_generated_token,
+          },
+          result,
+          updated_page_state if self.config.attention == "paged" else None
+      )
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
   def generate(
@@ -638,7 +606,8 @@ class MaxEngine(engine_api.Engine):
           rng = jax.random.PRNGKey(0)
 
       # Get the previous token
-      previous_token = jnp.array([[decode_state["tokens"][slot, 0]]], dtype=jnp.int32)
+      previous_token = jnp.array([[decode_state["tokens"][0, 0]]], dtype=jnp.int32) if slot is None else \
+                      jnp.array([[decode_state["tokens"][slot, 0]]], dtype=jnp.int32)
       
       # Split RNG
       rng, new_rng = jax.random.split(rng)
@@ -672,19 +641,15 @@ class MaxEngine(engine_api.Engine):
               # Get updated cache
               updated_cache = new_vars.get("cache", {})
               
-              # Check if we have an updated page state from PagedAttentionOp
-              # This is the key change - we now check for updated_page_state in the first layer
+              # Look for updated page state in each layer
+              updated_page_state = page_state
+              
+              # First check for the updated_page_state in the first layer's attention_op
               if "decoder" in updated_cache and f"layers_0" in updated_cache["decoder"] and \
                 "self_attention" in updated_cache["decoder"][f"layers_0"] and \
                 "attention_op" in updated_cache["decoder"][f"layers_0"]["self_attention"] and \
                 "updated_page_state" in updated_cache["decoder"][f"layers_0"]["self_attention"]["attention_op"]:
-                  # Get the updated page state from PagedAttentionOp
                   updated_page_state = updated_cache["decoder"][f"layers_0"]["self_attention"]["attention_op"]["updated_page_state"]
-                  print(f"  Using updated page state with seq len: {updated_page_state.sequence_lengths[0, slot]}")
-              else:
-                  # If not found, use original (shouldn't happen with our fix)
-                  updated_page_state = page_state
-                  print("  WARNING: No updated page state found, using original")
               
               # Update the cache
               cache = {
