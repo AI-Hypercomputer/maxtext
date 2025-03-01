@@ -393,10 +393,8 @@ def generate_xpk_workload_cmd(
     )
   else:
     #docker_image_flag = f'--docker-image="{wl_config.base_docker_image}"'
-    docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ds_a1_2_28"'
-    #docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-bin-02-28"' # Try this one bin
-
-
+    #docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ds_a1_2_28"'
+    docker_image_flag = f'--base-docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ds_a1_2_28"'
 
   print(f'User command: {user_command}')
   return (
@@ -522,8 +520,8 @@ def main() -> int:
 
   list_of_models = [
     #model_configs.matt_simple
-    #model_configs.deepseek_matt_a1
-    model_configs.deepseek_manual_matt_a1
+    model_configs.deepseek_matt_a1
+    #model_configs.deepseek_manual_matt_a1
     #deepseek_matt_a1
   ]
 

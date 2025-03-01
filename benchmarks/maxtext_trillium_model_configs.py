@@ -1265,11 +1265,12 @@ deepseek_matt_a1 = _add_to_model_dictionary(
     model_type="deepseek3-671b",
     tuning_params={
         "per_device_batch_size": 1,
-        "max_target_length": 2048,
+        "max_target_length": 1024,
         "ici_fsdp_parallelism": 64,
         "ici_expert_parallelism": 4,
-        "remat_policy": "custom",
-        "decoder_layer_input": "offload",
+        "dcn_fsdp_parallelism": 2,
+        "remat_policy": "full",
+        #"decoder_layer_input": "offload",
         # "out_proj": "offload",
         # "query_proj": "offload",
         # "key_proj": "offload",
@@ -1294,7 +1295,7 @@ deepseek_matt_a1 = _add_to_model_dictionary(
         "allow_split_physical_axes": True,
         "custom_mesh": "hybrid_ring_64x4",
         "attention": "dot_product",
-        "sharding_tolerance": 2, # This should never be more than 1
+        "sharding_tolerance": 1337, # This should never be more than 1
     },
     xla_flags=(
         xla_flags_library.MOE_VMEM_LIMIT_FLAG
@@ -1304,7 +1305,7 @@ deepseek_matt_a1 = _add_to_model_dictionary(
   )
 )
 
-
+#commit 188221915a3a74aa0b4e6fca2315b977747d1ae3 (HEAD -> mattdavidow-run-deepseek, origin/mattdavidow-run-deepseek)
 #docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ds_a1_2_28"'
 deepseek_manual_matt_a1 = _add_to_model_dictionary(
   trillium_model_dict,

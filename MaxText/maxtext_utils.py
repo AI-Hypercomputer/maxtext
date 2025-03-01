@@ -322,6 +322,7 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
       f"Number of unsharded parameters exceeds tolerance {tolerance * 100}% "
       f"of total parameters with a value of {unsharded_param_perc}%."
   )
+  print(f"Unsharded param percentage: {unsharded_param_perc * 100}", flush=True)
 
 
 def apply_gradient_clipping(raw_grads, state, clipping_threshold):
