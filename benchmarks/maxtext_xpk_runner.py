@@ -509,14 +509,14 @@ def _get_pathways_specific_flags(wl_config: WorkloadConfig):
   server_flags = _get_pathways_server_flags(wl_config)
 
   # restart on all exit codes.
-  restart_codes = f"\"{','.join(str(code) for code in list(range(1, 256)))}\""
+  # restart_codes = f"\"{','.join(str(code) for code in list(range(1, 256)))}\""
 
   pathways_specific_flags = (
       f' {server_image_flag} '
       f' {proxy_server_image_flag} '
       f' {remote_python_sidecar_image_flag} '
       f' --termination-grace-period-seconds=300 '
-      f' --restart-on-exit-codes={restart_codes} '
+      # f' --restart-on-exit-codes={restart_codes} '
       f' --pathways-gcs-location={wl_config.base_output_directory} '
       f' --custom-pathways-server-args="{server_flags}" '
       f' --custom-pathways-proxy-server-args="{proxy_flags}" '

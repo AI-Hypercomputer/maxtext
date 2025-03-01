@@ -68,7 +68,8 @@ def main() -> int:
   model_list = [
       # model_configs.llama3_1_70b_8192_pw_lr_real_data,
       # model_configs.llama3_1_8b_8192,
-      model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
+      # model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
+      model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds,
   ]
   pathways_config = mxr.PathwaysConfig(
       server_image=SERVER_IMAGE,
@@ -76,12 +77,16 @@ def main() -> int:
       runner_image=RUNNER,
 
       # User can add additional flags here.
-      server_flags="--enable_metrics_collection=false",
-      proxy_flags="--enable_metrics_collection=false",
-      worker_flags="--enable_metrics_collection=false",
+      server_flags="--enable_metrics_collection=true",
+      proxy_flags="--enable_metrics_collection=true",
+      worker_flags="--enable_metrics_collection=true",
+
+      # server_flags="--enable_metrics_collection=false",
+      # proxy_flags="--enable_metrics_collection=false",
+      # worker_flags="--enable_metrics_collection=false",
   )
   num_slices_list = [
-      2
+      40
   ]
 
   xpk_workload_cmds = []
@@ -97,7 +102,7 @@ def main() -> int:
       # flags or changes to the model config.
       model.tuning_params["use_vertex_tensorboard"] = True
       model.tuning_params["vertex_tensorboard_project"] = PROJECT
-      model.tuning_params["vertex_tensorboard_location"] = REGION
+      model.tuning_params["vertex_tensorboard_region"] = REGION
 
       # Run workloads in the following slice configurations
       for num_slices in num_slices_list:
