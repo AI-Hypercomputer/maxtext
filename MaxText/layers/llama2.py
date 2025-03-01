@@ -31,7 +31,6 @@ from layers import models
 from layers import quantizations
 
 import common_types
-from inference import page_manager
 from typing import Optional
 
 Array = common_types.Array
@@ -75,7 +74,6 @@ class LlamaDecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
-      page_state: Optional[page_manager.PageState] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -126,7 +124,6 @@ class LlamaDecoderLayer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
-        page_state=page_state,
     )
 
     attention_lnx = nn.with_logical_constraint(
