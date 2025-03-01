@@ -135,17 +135,20 @@ class MoeBlockTest(unittest.TestCase):
         per_device_batch_size=1,
         ici_expert_parallelism=4,
         ici_fsdp_parallelism=1,
-        max_target_length=64,
+        max_target_length=16,
     )
     devices_array = max_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
 
     rng = jax.random.PRNGKey(1234)
     rng, rng_origin = jax.random.split(rng)
-    original = jax.random.uniform(rng_origin, (4 * int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype)
+    original = jax.random.uniform(
+        rng_origin, (4 * int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
+    )
     from jax.sharding import PartitionSpec, NamedSharding
+
     P = PartitionSpec
-    hidden_states = jax.device_put(original, NamedSharding(mesh, P('expert', None, None)))
+    hidden_states = jax.device_put(original, NamedSharding(mesh, P("expert", None, None)))
     rng, rng_model = jax.random.split(rng)
     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
     actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
