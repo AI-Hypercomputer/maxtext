@@ -188,7 +188,23 @@ class TrainTests(unittest.TestCase):
         r"tokenizer_path=../assets/tokenizer.llama2",
     ]
     train_main(cudnn_flash_te)
-
+  
+  @pytest.mark.gpu_only
+  def test_gpu_context_parallelism(self):
+    context_parallel = [  # tests base config on GPU with context parallelism and flash attention"""
+        None,
+        "configs/base.yml",
+        r"base_output_directory=gs://runner-maxtext-logs",
+        "run_name=runner_test",
+        r"dataset_path=gs://maxtext-dataset",
+        "steps=10",
+        "enable_checkpointing=False",
+        "attention=cudnn_flash_te",
+        "ici_fsdp_parallelism=2",
+        "ici_context_parallelism=2",
+        r"tokenizer_path=../assets/tokenizer.llama2",
+    ]
+    train_main(context_parallel)
 
 if __name__ == "__main__":
   absltest.main()
