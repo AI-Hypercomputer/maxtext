@@ -77,7 +77,6 @@ def main(argv: Sequence[str]) -> None:
       config.autoregressive_decode_assert
   ), f"generated text mismatch {output=}, {config.autoregressive_decode_assert=}"
 
-p
 def validate_config(config):
   assert config.load_full_state_path == "", (
       "Decode doesn't operate on full states! Convert to parameter checkpoint first." "Using generate_param_only_checkpoint."
