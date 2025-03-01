@@ -1257,21 +1257,21 @@ gemma2_27b_8192 = _add_to_model_dictionary(
   )
 )
 
-#docker_image_flag = f'--base-docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ds_a1_2_28"'
-# commit 30fc273fef936112c241f0364e986d34f4cb76ce (HEAD -> mattdavidow-run-deepseek, origin/mattdavidow-run-deepseek)
+#docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-ds-mla-shard"'
+# commit e508839d1c878dc70d77c76709f7747ae443e2a3 (HEAD -> mattdavidow-run-deepseek, origin/mattdavidow-run-deepseek)
 deepseek_matt_a1 = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
     model_name="deepseek_a1",
     model_type="deepseek3-671b",
     tuning_params={
-        "per_device_batch_size": 1,
+        "per_device_batch_size": 16,
         "max_target_length": 1024,
         "ici_fsdp_parallelism": 64,
         "ici_expert_parallelism": 4,
         "dcn_fsdp_parallelism": 2,
-        "remat_policy": "full",
-        #"decoder_layer_input": "offload",
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
         # "out_proj": "offload",
         # "query_proj": "offload",
         # "key_proj": "offload",
