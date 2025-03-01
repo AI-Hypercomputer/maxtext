@@ -296,6 +296,7 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_size, model_param
     jax_weights["decoder"][f"{layer_key}"]["pre_self_attention_layer_norm"] = pre_self_attention_layer_norm
     jax_weights["decoder"][f"{layer_key}"]["post_self_attention_layer_norm"] = post_self_attention_layer_norm
     logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+    breakpoint()
 
   # layer weights ################################################
   max_logging.log("Processing layer weights")
