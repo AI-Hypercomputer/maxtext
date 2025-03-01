@@ -514,9 +514,9 @@ class MoeBlock(nn.Module):
     input_partition_spec = P('expert', None, None)
     # gate_logits_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
     gate_logits_pspec = P('expert', None, None)
-    w0_pspec = nn.logical_to_mesh_axes((None, None, "mlp"))
-    w1_pspec = nn.logical_to_mesh_axes((None, None, "mlp"))
-    wo_pspec = nn.logical_to_mesh_axes((None, "mlp", None))
+    w0_pspec = P('expert', None, None)
+    w1_pspec = P('expert', None, None)
+    wo_pspec = P('expert', None, None)
 
     if isinstance(w0_kernel, QTensor):
       w0_pspec = aqt_tensor.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
@@ -535,6 +535,7 @@ class MoeBlock(nn.Module):
     def wrapper(x, logits, w0, w1, wo):
       batch_size, sequence_length, _ = x.shape
       x, sorted_selected_experts, weights, group_sizes = self.permute(x, logits)
+      # breakpoint()
       if self.get_expert_parallelism() > 1:
         # get group sizes for each shard and all gather
         axis_name = "expert"
@@ -553,9 +554,7 @@ class MoeBlock(nn.Module):
             * self.config.max_target_length
             * self.config.num_experts_per_tok
         )
-        output_shape = jnp.zeros(buffer_size, dtype=x.dtype)
-        breakpoint()
-        # TODO: Check failed: input_shape.rank() == output_shape.rank() (2 vs. 1)
+        output_shape = jnp.zeros((buffer_size, self.config.emb_dim), dtype=x.dtype)
         x = jax.lax.ragged_all_to_all(
             x,
             output_shape,
@@ -566,7 +565,6 @@ class MoeBlock(nn.Module):
             axis_name=axis_name,
         )
         x, local_sorted_indices, group_sizes = local_permute(x, global_group_sizes, local_expert_size)
-        breakpoint()
 
       layer_w0 = gmm(x, w0, group_sizes)
       layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
@@ -580,8 +578,21 @@ class MoeBlock(nn.Module):
       if tensor_parallelism > 1:
         intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
 
-      # TODO: unsort + ragged_all_to_all
-
+      if self.get_expert_parallelism() > 1:
+        axis_name = "expert"
+        local_output = jnp.take(intermediate_output, indices=jnp.argsort(local_sorted_indices), axis=0)
+        original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
+        output_shape = jnp.zeros((original_inputs_first_dim, self.config.emb_dim), dtype=local_output.dtype)
+        
+        intermediate_output = jax.lax.ragged_all_to_all(
+            local_output,
+            output_shape,
+            output_offsets,
+            recv_sizes,
+            input_offsets,
+            send_sizes,
+            axis_name=axis_name,
+        )
       output = self.unpermute(
           intermediate_output, sorted_selected_experts, weights, batch_size=batch_size, sequence_length=sequence_length
       )

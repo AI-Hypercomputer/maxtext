@@ -286,13 +286,38 @@ class MoeBlockTest(unittest.TestCase):
     self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
   @pytest.mark.tpu_only
+  def test_ragged_dot(self):
+    cfg = pyconfig.initialize(
+        [None, "configs/base.yml"],
+        run_name="moe_block_ragged_dot_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        megablox=False,
+        sparse_matmul=True,
+        per_device_batch_size=4,
+    )
+
+    rng = jax.random.PRNGKey(1234)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    hidden_states = jax.random.uniform(
+        rng_hidden_states, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
+    )
+
+    devices_array = max_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
+    actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
+    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+
+  @pytest.mark.tpu_only
   def test_dense(self):
     cfg = pyconfig.initialize(
         [None, "configs/base.yml"],
         run_name="moe_block_dense_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
-        dtype="bfloat16",
+        dtype="float32",
         megablox=False,
         sparse_matmul=False,
         per_device_batch_size=4,
@@ -308,7 +333,35 @@ class MoeBlockTest(unittest.TestCase):
     mesh = Mesh(devices_array, cfg.mesh_axes)
     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
     actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
-    # suspect numeric issues in the dense matmul
+    self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-05, atol=1e-05, equal_nan=False))
+
+  @pytest.mark.tpu_only
+  # TODO: check correctness
+  def test_megablox_expert_parallelism(self):
+    cfg = pyconfig.initialize(
+        [None, "configs/base.yml"],
+        run_name="moe_block_megablox_ep_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        megablox=True,
+        sparse_matmul=True,
+        per_device_batch_size=4,
+        ici_expert_parallelism=4,
+        max_target_length=64,
+    )
+
+    rng = jax.random.PRNGKey(2345)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    hidden_states = jax.random.uniform(
+        rng_hidden_states, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
+    )
+
+    devices_array = max_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
+    actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
+    breakpoint()
     self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=5e-01, atol=5e-01, equal_nan=False))
 
 
