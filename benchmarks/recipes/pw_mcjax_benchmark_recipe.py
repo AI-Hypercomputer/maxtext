@@ -107,7 +107,7 @@ def main() -> int:
         # flags or changes to the model config.
         model.tuning_params["use_vertex_tensorboard"] = True
         model.tuning_params["vertex_tensorboard_project"] = PROJECT
-        model.tuning_params["vertex_tensorboard_location"] = REGION
+        model.tuning_params["vertex_tensorboard_region"] = REGION
 
         # Run workloads in the following slice configurations
         for num_slices in num_slices_list:
