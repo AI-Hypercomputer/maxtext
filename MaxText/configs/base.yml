@@ -298,6 +298,10 @@ logical_axis_rules: [
                       ['cache_kv', []],
                       ['cache_sequence', []],
                       ['exp', 'expert'],
+                      ['paged_kv_heads', []],
+                      ['num_pages', ['tensor']],
+                      ['tokens_per_page', []],
+                      ['paged_kv_head_dim_size', []],
                     ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
 data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']]
