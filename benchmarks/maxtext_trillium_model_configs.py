@@ -1255,8 +1255,10 @@ gemma2_27b_8192 = _add_to_model_dictionary(
         + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
     ),
   )
-  
-  deepseek_matt_a1 = _add_to_model_dictionary(
+)
+
+#docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ds_a1_2_28"'
+deepseek_matt_a1 = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
     model_name="deepseek_a1",
@@ -1288,6 +1290,7 @@ gemma2_27b_8192 = _add_to_model_dictionary(
         "capacity_factor": 1.0,
         "tokenizer_path": "assets/tokenizer.mistral-v3",
         "dtype": "bfloat16",
+        "opt_type": "sgd",
         "weight_dtype": "bfloat16",
         "allow_split_physical_axes": True,
         "custom_mesh": "hybrid_ring_64x4",
