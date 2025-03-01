@@ -56,5 +56,5 @@ The following configuration will not upload any log data collected in `config.te
 ```
 use_vertex_tensorboard: False
 vertex_tensorboard_project: ""
-vertex_tensorboard_location: ""
+vertex_tensorboard_region: ""
 ```
