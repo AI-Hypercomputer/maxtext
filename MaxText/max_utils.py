@@ -41,6 +41,7 @@ import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_c
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
 
+import json
 import yaml
 import flax
 from flax.training import train_state
@@ -119,6 +120,28 @@ def close_summary_writer(summary_writer):
     summary_writer.close()
 
 
+def _prepare_metrics_for_json(metrics, step, run_name):
+  """Converts metric dictionary into json supported types (e.g. float)"""
+  metrics_dict = {}
+  for val in metrics["scalar"]:
+    metrics_dict[val] = float(metrics["scalar"][val])
+  metrics_dict["step"] = float(step)
+  metrics_dict["run_name"] = run_name
+  return metrics_dict
+
+
+def write_metrics_locally(metrics, step, config, file, is_training=True):
+  """Writes metrics locally for testing"""
+  if step == 0:
+    file.truncate(0)
+
+  metrics_dict = _prepare_metrics_for_json(metrics, step, config.run_name)
+  file.write(str(json.dumps(metrics_dict)) + "\n")
+
+  if is_training and step == config.steps - 1:
+    file.close()
+
+
 def add_config_to_summary_writer(config, summary_writer):
   """Writes config params to tensorboard"""
   if jax.process_index() == 0:
@@ -130,6 +153,26 @@ def add_text_to_summary_writer(key, value, summary_writer):
   """Writes given key-value pair to tensorboard as text/summary"""
   if jax.process_index() == 0:
     summary_writer.add_text(key, value)
+
+
+def write_metrics_for_gcs(metrics, step, config, running_metrics, is_training=True):
+  """Writes metrics to gcs"""
+  metrics_dict_step = _prepare_metrics_for_json(metrics, step, config.run_name)
+  running_metrics.append(metrics_dict_step)
+  if is_training and (step + 1) % config.log_period == 0 or step == config.steps - 1:
+    start_step = (step // config.log_period) * config.log_period
+    metrics_filename = f"metrics_step_{start_step:06}_to_step_{step:06}.txt"
+    with open(metrics_filename, "w", encoding="utf8") as metrics_for_gcs:
+      for metrics_step in running_metrics:
+        metrics_for_gcs.write(str(json.dumps(metrics_step)) + "\n")
+
+    metrics_for_gcs.close()
+    gcs_filename = os.path.join(config.metrics_dir, metrics_filename)
+    max_logging.log(f"Moving file {metrics_filename} to GCS...")
+    upload_blob(gcs_filename, metrics_filename)
+    max_logging.log(f"File {metrics_filename} moved successfully!")
+    running_metrics = []  # reset running_metrics to empty list
+  return running_metrics
 
 
 def write_config_raw_keys_for_gcs(raw_keys):
@@ -983,11 +1026,8 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
 def get_prefill_kv_cache_annotations(model, config, rng, mesh):
   """Get a shaped abstraction of the state (including optimizer)"""
 
-  def init_kv_cache(model, config):
-    input_shape = (
-        config.global_batch_size_to_load,
-        config.max_prefill_predict_length,
-    )
+  def init_prefill_kv_cache(model, config):
+    input_shape = (config.global_batch_size_to_load, config.max_prefill_predict_length)
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
@@ -998,8 +1038,8 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh):
     return model_vars["cache"]
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
-    abstract_state = jax.eval_shape(init_kv_cache_partial)
+    init_prefill_kv_cache_partial = functools.partial(init_prefill_kv_cache, model, config)
+    abstract_state = jax.eval_shape(init_prefill_kv_cache_partial)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
@@ -1009,7 +1049,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh):
 def get_kv_cache_annotations(model, config, rng, mesh):
   """Get a shaped abstraction of the state (including optimizer)"""
 
-  def init_kv_cache(model, config):
+  def init_ar_kv_cache(model, config):
     input_shape = (
         config.global_batch_size_to_load,
         1,
@@ -1024,8 +1064,8 @@ def get_kv_cache_annotations(model, config, rng, mesh):
     return model_vars["cache"]
 
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
-    abstract_state = jax.eval_shape(init_kv_cache_partial)
+    init_ar_kv_cache_partial = functools.partial(init_ar_kv_cache, model, config)
+    abstract_state = jax.eval_shape(init_ar_kv_cache_partial)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
@@ -1132,3 +1172,26 @@ def unpermute_from_match_maxtext_rope(arr, model_size):
   evens = arr[..., ::2]
   odds = arr[..., 1::2]
   return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
+
+
+def debug_array(array, array_name):
+  """Debug array sizing and sharding across chips."""
+  print(f"\t{array_name}:")
+  if isinstance(array, flax.linen.spmd.LogicallyPartitioned):
+    array = array.value
+  single_shard = array.addressable_shards[0]
+  n_shards = len(array.addressable_shards)
+  total_size_across_n_shards = single_shard.data.size * n_shards
+  total_nbytes_across_n_shards = single_shard.data.nbytes * n_shards
+  print(f"\t\tdtype: {array.dtype}")
+  print(f"\t\tshape: {array.shape}")
+  print(f"\t\tsharding spec: {array.sharding.spec}")
+  print(f"\t\tdevice local layouer: {array.layout.device_local_layout}")
+  print(f"\t\tsize (across n shards): {array.size} ({total_size_across_n_shards})")
+  print(f"\t\tbytes (across n shards): {array.nbytes} ({total_nbytes_across_n_shards})")
+
+
+def debug_qtensor(qtensor, qtensor_name):
+  """Debug qtensor sizing and sharding across chips."""
+  debug_array(qtensor.qvalue, f"{qtensor_name} qvalue")
+  debug_array(qtensor.scale[0], f"{qtensor_name} scale")
