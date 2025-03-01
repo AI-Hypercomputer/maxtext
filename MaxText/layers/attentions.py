@@ -1405,11 +1405,11 @@ class Attention(nn.Module):
     if self.attention_kernel == "paged" and model_mode != common_types.MODEL_MODE_TRAIN:
       attention_op = paged_attention.PagedAttentionOp(
           mesh=self.mesh,
-          num_pages=self.config.num_pages,
-          tokens_per_page=self.config.tokens_per_page,
-          max_pages_per_slot=self.config.max_target_length // self.config.tokens_per_page,
-          max_pages_per_prefill=self.config.max_prefill_predict_length // self.config.tokens_per_page,
-          pages_per_compute_block=self.config.pages_per_compute_block,
+          num_pages=self.config.pa_num_pages,
+          tokens_per_page=self.config.pa_tokens_per_page,
+          max_pages_per_slot=self.config.max_target_length // self.config.pa_tokens_per_page,
+          max_pages_per_prefill=self.config.max_prefill_predict_length // self.config.pa_tokens_per_page,
+          pages_per_compute_block=self.config.pa_pages_per_compute_block,
           num_kv_heads=self.num_kv_heads,
           kv_head_dim_size=self.head_dim,
           dtype=self.dtype,

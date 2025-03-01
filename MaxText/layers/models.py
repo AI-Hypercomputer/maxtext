@@ -532,8 +532,8 @@ class Transformer(nn.Module):
     cfg = self.config
     mesh = self.mesh
     if self.config.attention == "paged":
-      assert self.config.max_target_length % self.config.tokens_per_page == 0
-      assert self.config.max_prefill_predict_length % self.config.tokens_per_page == 0
+      assert self.config.max_target_length % self.config.pa_tokens_per_page == 0
+      assert self.config.max_prefill_predict_length % self.config.pa_tokens_per_page == 0
 
     self.shared_embedding = Embed(
         num_embeddings=cfg.vocab_size,
@@ -549,12 +549,12 @@ class Transformer(nn.Module):
 
     if self.config.attention == "paged":
       self.page_manager = page_manager.PageManager(
-          num_pages=self.config.num_pages,
-          tokens_per_page=self.config.tokens_per_page,
+          num_pages=self.config.pa_num_pages,
+          tokens_per_page=self.config.pa_tokens_per_page,
           slots=int(self.config.per_device_batch_size * jax.device_count()),
           max_target_length=self.config.max_target_length,
           max_prefill_predict_length=self.config.max_prefill_predict_length,
-          max_pages_per_slot=self.config.max_target_length // self.config.tokens_per_page,
+          max_pages_per_slot=self.config.max_target_length // self.config.pa_tokens_per_page,
       )
 
   def __call__(
