@@ -25,11 +25,11 @@ pytest
 pyink
 pre-commit
 pytype
-sentencepiece==0.1.97
+sentencepiece
 tensorflow-text>=2.13.0
 tensorflow>=2.13.0
 tensorflow-datasets
-tensorboardx
+tensorboardx>=2.6.2.2
 tensorboard-plugin-profile
 tiktoken
 transformers
