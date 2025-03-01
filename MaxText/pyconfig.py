@@ -22,6 +22,8 @@ import os
 import sys
 from typing import Any, Union
 
+# from elastic.simulator import ElasticUtilsSimulator as ElasticUtils
+from elastic.utils import ElasticUtils
 import jax
 from jax.experimental.compilation_cache import compilation_cache
 from layers.attentions import AttentionType
@@ -473,6 +475,14 @@ class _HyperParameters:
       raw_keys["add_eos"] = False
       max_logging.log("Override add_bos and add_eos to False when dataset_type=c4_mlperf")
 
+    raw_keys["eu"] = ElasticUtils(
+        jax.devices(),
+        raw_keys["num_slices"],
+        save_period=3,
+        reshard_check_period=5,
+        max_failure_count=10,
+        max_reshard_retry_count=3,
+    )
     # Write raw_keys to GCS before type conversions
     max_utils.write_config_raw_keys_for_gcs(raw_keys)
 
@@ -868,6 +878,22 @@ class HyperParameters:
 
   def __init__(self, config):
     object.__setattr__(self, "_config", config)
+
+  @property
+  def global_batch_size_to_train_on(self):
+    return self.eu.scale_by_good_slices(self._config.keys["global_batch_size_to_train_on"])
+
+  @property
+  def global_batch_size_to_load(self):
+    return self.eu.scale_by_good_slices(self._config.keys["global_batch_size_to_load"])
+
+  @property
+  def micro_batch_size_to_train_on(self):
+    return self.eu.scale_by_good_slices(self._config.keys["micro_batch_size_to_train_on"])
+
+  @property
+  def num_slices(self):
+    return self.eu.good_slice_count
 
   def __getattr__(self, attr):
     try:
