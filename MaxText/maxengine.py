@@ -17,6 +17,7 @@ import copy as cp
 import functools
 from typing import Any, List, Optional, Tuple, Callable
 from collections import defaultdict
+import uuid
 
 import flax
 from flax import linen as nn
@@ -26,6 +27,7 @@ from layers import models, quantizations
 
 import jax
 import jax.numpy as jnp
+from jax.experimental import host_callback
 from jax.sharding import PartitionSpec as P
 from jax.experimental import layout as jax_layout
 
@@ -39,6 +41,12 @@ from jetstream.engine import token_utils
 import max_utils
 import inference_utils
 import pyconfig
+
+
+import logging
+
+# Configure logging at the beginning of your main script or globally
+logging.basicConfig(filename="maxengine_debug.log", level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 import warnings
 
@@ -308,6 +316,8 @@ class MaxEngine(engine_api.Engine):
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
+      slot: Optional[int] = None,
+      request_id: Optional[uuid.UUID] = None,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -318,6 +328,8 @@ class MaxEngine(engine_api.Engine):
       padded_tokens: Logically appended tokens to any existing prefix, this is
         what we compute prefill on.
       true_length: The real length of the tokens, pre-pad.
+      slot: An integer from [0, n) representing an index into the batch.
+      request_id: UUID for a given request.
     Returns:
       kv_cache: For the resulting text.
     """
@@ -346,6 +358,9 @@ class MaxEngine(engine_api.Engine):
           model_mode=common_types.MODEL_MODE_PREFILL,
           rngs={"params": new_rng},
           mutable=["cache"],
+          true_length=true_length,
+          slot=slot,
+          request_id=request_id,
       )
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
@@ -366,6 +381,7 @@ class MaxEngine(engine_api.Engine):
         nucleus_topp=self.config.decode_sampling_nucleus_p,
         temperature=self.config.decode_sampling_temperature,
     )
+    jax.debug.print("first_generated_token: {}", first_generated_token[0])
 
     all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
     result = engine_api.ResultTokens(
@@ -383,7 +399,7 @@ class MaxEngine(engine_api.Engine):
 
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
-
+    jax.debug.print("prefill request shape next_pos {}, tokens: {}", next_pos, first_generated_token)
     return {
         "logits": selected_logits,
         "cache": cache,
@@ -525,7 +541,7 @@ class MaxEngine(engine_api.Engine):
       rng = jax.random.PRNGKey(0)
 
     previous_token = decode_state["tokens"]
-
+    jax.debug.print("generate call next_pos: {}, tokens: {}", decode_state["next_pos"], decode_state["tokens"])
     rng, new_rng = jax.random.split(rng)
     # run one step generation
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -538,10 +554,9 @@ class MaxEngine(engine_api.Engine):
           rngs={"params": new_rng},
           mutable=["cache"],
       )
-
+    # jax.debug.print("out logits: {}", out_logits)
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
-
     # sampling tokens
     new_token = inference_utils.sampling(
         out_logits,
@@ -551,7 +566,7 @@ class MaxEngine(engine_api.Engine):
         nucleus_topp=self.config.decode_sampling_nucleus_p,
         temperature=self.config.decode_sampling_temperature,
     )
-
+    # jax.debug.print("new_token: {}", new_token)
     all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
     result = engine_api.ResultTokens(
         data=jnp.concatenate((new_token, all_valid, decode_state["generated_tokens"]), axis=1),
@@ -592,9 +607,24 @@ class MaxEngine(engine_api.Engine):
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
 
     unboxed_prefix["cache"] = self._maybe_unstack_prefill_result_cache(unboxed_prefix["cache"])
+    # jax.debug.print("prefix_logits: {}", unboxed_prefix["logits"][0][0])
+    # jax.debug.print("logits: {}, next_pos: {}, generated_tokens: {}, tokens: {}", decode_state["logits"][0][0], decode_state["next_pos"][0], decode_state["generated_tokens"][0], decode_state["tokens"][0])
+    """
+    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      self.model.apply(
+          None,
+          None,
+          None,
+          enable_dropout=False,
+          model_mode=common_types.MODEL_MODE_INSERT,
+          slot=slot,
+          true_length=16,
+      )
+    """
 
     def copy(path, partial_cache, full_cache, annotations):
       path_key = path[-1].key
+      # print(f"Path key: {path_key}")
       if path_key in [
           "cache_ar_index",
           "cached_ar_key",
@@ -640,13 +670,46 @@ class MaxEngine(engine_api.Engine):
       else:
         raise ValueError(f"We don't have a strategy for inserting {path_key}")
 
-    inserted_cache = jax.tree_util.tree_map_with_path(
-        copy,
-        unboxed_prefix["cache"],
-        decode_state["cache"],
-        self.kv_cache_annotations_named,
-    )
+    if self.config.attention == "paged":
+
+      def copy_paged(path, prefix_cache, decode_state_cache):
+        if path[-2].key == "page_manager":
+          return prefix_cache
+        path_key = path[-1].key
+        if path_key in ["key_pages", "value_pages"]:
+
+          def _update_pages(prefix_page_idx, state):
+            decode_state_pages, prefix_pages, page_map = state
+            prefix_page = jax.lax.dynamic_index_in_dim(prefix_pages, prefix_page_idx, axis=1)
+            decode_state_pages = jax.lax.dynamic_update_slice_in_dim(
+                decode_state_pages, prefix_page, page_map[prefix_page_idx], axis=1
+            )
+            return decode_state_pages, prefix_pages, page_map
+
+          decode_state_cache, _, _ = jax.lax.fori_loop(
+              0,
+              prefix["cache"]["page_manager"]["num_pages_used"].value[slot],
+              _update_pages,
+              (decode_state_cache, prefix_cache, prefix["cache"]["page_manager"]["page_map"].value[slot]),
+          )
+          return decode_state_cache
+        else:
+          raise ValueError(f"We don't have a strategy for inserting {path_key} for paged attention.")
+
+      inserted_cache = jax.tree_util.tree_map_with_path(
+          copy_paged,
+          unboxed_prefix["cache"],
+          decode_state["cache"],
+      )
+    else:
+      inserted_cache = jax.tree_util.tree_map_with_path(
+          copy,
+          unboxed_prefix["cache"],
+          decode_state["cache"],
+          self.kv_cache_annotations_named,
+      )
     inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state["logits"], unboxed_prefix["logits"], slot, 0)
+    # jax.debug.print("logit1: {}, logit2: {}, slot: {}, dim: {}", decode_state["logits"][slot][0], unboxed_prefix["logits"][0][0], slot, decode_state["logits"].shape)
     inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state["next_pos"], unboxed_prefix["next_pos"], slot, 0)
     inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(
         decode_state["generated_tokens"],
@@ -662,13 +725,17 @@ class MaxEngine(engine_api.Engine):
     inserted_tokens = jax.lax.with_sharding_constraint(inserted_tokens, self.replicated_sharding)
     inserted_cache = jax.lax.with_sharding_constraint(inserted_cache, self.kv_cache_shardings)
 
-    return {
+    decode_s = {
         "logits": inserted_logits,
         "cache": inserted_cache,
         "next_pos": inserted_next_pos,
         "generated_tokens": inserted_generated_tokens,
         "tokens": inserted_tokens,
     }
+
+    # jax.debug.print("decode_state")
+    # jax.debug.print("logits: {}, next_pos: {}, generated_tokens: {}, tokens: {}", decode_s["logits"][slot][0], decode_s["next_pos"][slot], decode_s["generated_tokens"][slot], decode_s["tokens"][slot])
+    return decode_s
 
   @functools.partial(
       jax.jit,
@@ -895,6 +962,38 @@ class MaxEngine(engine_api.Engine):
     zeroed = max_utils.unbox_logicallypartioned(init_state)
     return zeroed
 
+  def free_slot(self, decode_state: dict, slot: int) -> None:
+    """Release all pages and cached KV data for the given slot."""
+    with self._mesh:
+      cache = decode_state["cache"]
+      if all(k in cache for k in ["page_status", "page_map"]):
+        # Create temporary vars to match PageManager's expected interface
+        page_status_var = nn.Variable({}, "page_status", lambda: cache["page_status"].value)
+        page_map_var = nn.Variable({}, "page_map", lambda: cache["page_map"].value)
+        sequence_lengths_var = nn.Variable({}, "sequence_lengths", lambda: cache["sequence_lengths"].value)
+        num_pages_used_var = nn.Variable({}, "num_pages_used", lambda: cache["num_pages_used"].value)
+        current_page_var = nn.Variable({}, "current_page", lambda: cache["current_page"].value)
+        current_page_position_var = nn.Variable({}, "current_page_position", lambda: cache["current_page_position"].value)
+
+        # Use PageManager's release logic to ensure consistent cleanup
+        self.page_manager.release_slot_pages(
+            slot,
+            page_status_var,
+            page_map_var,
+            sequence_lengths_var,
+            num_pages_used_var,
+            current_page_var,
+            current_page_position_var,
+        )
+
+        # Update cache with cleaned state
+        cache["page_status"].value = page_status_var.value
+        cache["page_map"].value = page_map_var.value
+        cache["sequence_lengths"].value = sequence_lengths_var.value
+        cache["num_pages_used"].value = num_pages_used_var.value
+        cache["current_page"].value = current_page_var.value
+        cache["current_page_position"].value = current_page_position_var.value
+
   @property
   def max_concurrent_decodes(self) -> int:
     """Free slots."""
@@ -961,7 +1060,7 @@ def create_engine_from_config_flags(batch_size, max_prefill_predict_length, max_
     k, v = cmd_arg.split("=")
     args[k.strip()] = v.strip()
   assert "load_parameters_path" in args, "load_parameters_path must be defined"
-  updated_args = ["MaxText/maxengine_server.py", "../configs/base.yml"]
+  updated_args = ["MaxText/maxengine_server.py", "/mnt/disks/persist/maxtext/MaxText/configs/base.yml"]
   for k, v in args.items():
     option = f"{k}={v}"
     updated_args.append(option)

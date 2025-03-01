@@ -70,7 +70,7 @@ def validate_kv_quant_axis(s: str, quantize_kvcache: bool) -> None:
 
 
 def validate_attention_kernel(s: str) -> None:
-  valid_attention_kernels = ("autoselected", "dot_product", "flash", "cudnn_flash_te")
+  valid_attention_kernels = ("autoselected", "dot_product", "flash", "cudnn_flash_te", "paged")
   if s not in valid_attention_kernels:  # currently supported attention
     raise ValueError("Invalid attention kernel was passed. Valid options ", valid_attention_kernels)
 
