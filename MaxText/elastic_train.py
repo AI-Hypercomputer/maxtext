@@ -436,7 +436,8 @@ def train_loop(config, state=None):
         reshard_flag = True
 
       if reshard_flag:
-        checkpoint_manager.close()
+        if checkpoint_manager is not None:
+          checkpoint_manager.close()
         (step,
          state,
          mesh,

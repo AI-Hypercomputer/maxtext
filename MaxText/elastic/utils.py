@@ -193,8 +193,6 @@ class ElasticUtils:
       return False
     if self.good_slice_count >= self.total_slice_count:
       return False
-    # if step < 10:
-    #   return False
 
     good_slice_indices = self.get_slice_availability()
 
