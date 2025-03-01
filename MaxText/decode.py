@@ -48,8 +48,10 @@ def main(argv: Sequence[str]) -> None:
 
   # Split RNG before calling prefill
   rng, rng_prefill = jax.random.split(rng)
-  prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
   slot = 0
+  prefill_result, first_token = engine.prefill(
+      params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill, slot=slot
+  )
 
   rng, rng_init_decode = jax.random.split(rng)
   decode_state = engine.init_decode_state(rng_init_decode)
