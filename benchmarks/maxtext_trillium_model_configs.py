@@ -1257,7 +1257,8 @@ gemma2_27b_8192 = _add_to_model_dictionary(
   )
 )
 
-#docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ds_a1_2_28"'
+#docker_image_flag = f'--base-docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ds_a1_2_28"'
+# commit 30fc273fef936112c241f0364e986d34f4cb76ce (HEAD -> mattdavidow-run-deepseek, origin/mattdavidow-run-deepseek)
 deepseek_matt_a1 = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
