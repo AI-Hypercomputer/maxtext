@@ -103,6 +103,10 @@ class MaxEngine(engine_api.Engine):
     self.decode_state_layouts = None
     self.param_layouts = None
 
+  def print_stats(self, label: str):
+    max_utils.print_mem_stats(label)
+    max_utils.print_cpu_ram_stats(label)
+
   def generate_aot(
       self, params: Params, decode_state: DecodeState, rng: Optional[PRNGKeyType] = None
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
@@ -224,8 +228,34 @@ class MaxEngine(engine_api.Engine):
       params = self.quantize_params(state, rng3)
     else:
       params = state.params
-    max_utils.print_mem_stats("After load_params")
+
+    self.print_stats("After load_params")
+
     return params
+
+  def load_single_adapter(self, adapter_path):
+    """
+    Load Single adapter from adapter_path.
+    Expect adapter_config.json and LoRA adapter weights at this path within subdirectory `/0/items`.
+    """
+
+    adapter_config_path = adapter_path + "/adapter_config.json"
+    adapter_weights_path = adapter_path + "/0/items"
+
+    params, config = max_utils.load_adapter(self.config, self.abstract_params, adapter_config_path, adapter_weights_path)
+
+    config["adapter_path"] = adapter_weights_path
+
+    self.print_stats("After load_single_adapter.")
+
+    return params, config
+
+  def apply_adapter(self, base_params, adapter_config, adapter_params):
+    """Apply the adapter params on the base params."""
+
+    lora_rank = int(adapter_config["r"])
+    lora_scale_factor = float(adapter_config["lora_alpha"]) / lora_rank
+    max_utils.apply_lora_on_base_params(base_params, adapter_params, lora_scale_factor)
 
   def quantize_params(self, state, rng: Optional[PRNGKeyType] = None):
     """Forward pass to quantize decode params."""

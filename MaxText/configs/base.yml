@@ -31,6 +31,13 @@ normalization_layer_epsilon: 1.e-05
 # Loads a just parameters from a specific directory
 # e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/items/NUMBER or NUMBER/items
 load_parameters_path: ""
+
+# LoRA adapter support configs
+lora_adapters_path: ""
+lora_dir: "LoRAs/"
+lora_config_file_name: "adapter_config.json"
+base_dir: "base/"
+
 # Loads a full checkpoint including optimizer state and step count from a specific directory
 # e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/items/NUMBER or NUMBER/items
 load_full_state_path: ""
@@ -533,6 +540,7 @@ inference_metadata_file: "" # path to a json file
 inference_server: "MaxtextInterleavedServer"  # inference server to start
 inference_benchmark_test: False
 enable_model_warmup: False
+enable_llm_inference_pool: False
 
 # Stack prefill cache across the layer to reduce the
 # Python layer latency.
