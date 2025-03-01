@@ -783,6 +783,15 @@ def train_loop(config, state=None):
     else:
       p_eval_step = None
 
+  if config.num_diloco_replicas > 1:
+    from diloco import build_diloco_train_step
+    state, diloco_train_step = build_diloco_train_step(config, p_train_step, state)
+    p_train_step = jax.jit(
+      diloco_train_step,
+      static_argnums=static_argnums_train,
+      donate_argnums=donate_argnums_train,
+    )
+
   running_gcs_metrics = [] if config.gcs_metrics else None
 
   start_step = get_first_step(state)  # this is the start_step for training
