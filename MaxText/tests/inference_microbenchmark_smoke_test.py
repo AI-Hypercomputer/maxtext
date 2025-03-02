@@ -18,7 +18,7 @@ import pyconfig
 import pytest
 import unittest
 from absl.testing import absltest
-from inference_microbenchmark import run_benchmarks
+from MaxText.inference_microbenchmark import run_benchmarks
 
 
 class Inference_Microbenchmark(unittest.TestCase):

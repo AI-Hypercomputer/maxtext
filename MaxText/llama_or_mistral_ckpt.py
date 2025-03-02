@@ -49,10 +49,10 @@ import psutil
 from tqdm import tqdm
 
 import max_logging
-from train import save_checkpoint
+from MaxText.train import save_checkpoint
 import checkpointing
 from safetensors import safe_open
-import max_utils
+from MaxText import max_utils
 
 MODEL_PARAMS_DICT = {
     "llama2-70b": {

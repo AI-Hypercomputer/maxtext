@@ -25,9 +25,7 @@ limitations under the License.
 
 import checkpointing
 import jax
-import max_logging
-import max_utils
-import optimizers
+from MaxText import max_logging, max_utils, optimizers
 import pyconfig
 
 from absl import app
@@ -36,7 +34,7 @@ from jax.sharding import Mesh
 from jax import random
 from typing import Sequence
 from layers import models, quantizations
-from train import save_checkpoint
+from MaxText.train import save_checkpoint
 
 Transformer = models.Transformer
 

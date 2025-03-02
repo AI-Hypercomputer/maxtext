@@ -20,10 +20,9 @@ from absl.testing import absltest
 
 import pyconfig
 
-import optimizers
-from layers import models
-from layers import quantizations
-import max_utils
+from MaxText import optimizers
+from MaxText.layers import models, quantizations
+from MaxText import max_utils
 import jax
 from jax.sharding import Mesh
 import jax.numpy as jnp

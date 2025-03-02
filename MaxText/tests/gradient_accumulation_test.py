@@ -18,7 +18,7 @@ import unittest
 import pytest
 import string
 import random
-from train import main as train_main
+from MaxText.train import main as train_main
 
 
 def generate_random_string(length=10):

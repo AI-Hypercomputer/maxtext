@@ -16,7 +16,7 @@ limitations under the License.
 
 """ Tests for the common Max Utils """
 import jax
-import max_utils
+from MaxText import max_utils
 from flax import linen as nn
 from flax.training import train_state
 from jax import numpy as jnp
@@ -25,8 +25,8 @@ from jax.sharding import Mesh
 import optax
 import pyconfig
 import unittest
-from layers import models
-from layers import quantizations
+from MaxText.layers import models
+from MaxText.layers import quantizations
 
 Transformer = models.Transformer
 

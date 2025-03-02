@@ -15,12 +15,12 @@
 import sys
 import unittest
 
-import common_types
+from MaxText import common_types
 
 from flax.core import freeze
 import jax
 import jax.numpy as jnp
-import max_utils
+from MaxText import max_utils
 import numpy as np
 import pytest
 

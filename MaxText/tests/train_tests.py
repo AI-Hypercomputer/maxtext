@@ -18,7 +18,7 @@ limitations under the License.
 import os
 import unittest
 import pytest
-from train import main as train_main
+from MaxText.train import main as train_main
 from absl.testing import absltest
 
 
