@@ -486,6 +486,7 @@ class Pipeline(nn.Module):
           physical = nn.logical_to_mesh_sharding(partition_spec, mesh=self.mesh, rules=self.config.logical_axis_rules)
           physical_no_fsdp = self.remove_fsdp_sharding(physical)
           weights = jax.lax.with_sharding_constraint(weights, physical_no_fsdp)
+          # TODO: If fsdp_ag_once not enabled, just do below?
           #weights = nn.with_logical_constraint(weights, partition_spec, rules=self.config.logical_axis_rules, mesh=self.mesh)
         return weights
 
