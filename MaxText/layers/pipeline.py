@@ -389,6 +389,8 @@ class Pipeline(nn.Module):
         weights, 0, circular_metadata_params
     )  # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
     weights = gather_weights_for_stages_in(weights, partition_spec=partition_spec)
+    if self.config.pipeline_weights_sharding_constraint:
+      weights = nn.with_logical_constraint(weights, partition_spec, rules=self.config.logical_axis_rules, mesh=self.mesh)
     return weights
 
   def get_vmap_func_for_init(self):
@@ -434,6 +436,7 @@ class Pipeline(nn.Module):
     )
     return vmap_func
 
+  # TODO: Rename partition_spec to spec_without_repeats?
   def run_one_iteration(
       self, loop_state, pipeline_weights, positions, segment_ids, deterministic, model_mode, decoder_layer_instance, partition_spec=None
   ):
@@ -476,7 +479,8 @@ class Pipeline(nn.Module):
             weights, 0, circular_metadata_params
         )  # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
         weights = gather_weights_for_stages_in(weights)
-        weights = nn.with_logical_constraint(weights, partition_spec, rules=self.config.logical_axis_rules, mesh=self.mesh)
+        if self.config.pipeline_weights_sharding_constraint:
+          weights = nn.with_logical_constraint(weights, partition_spec, rules=self.config.logical_axis_rules, mesh=self.mesh)
         return weights
 
       prepare_vars_for_main_vmap_partial = functools.partial(prepare_vars_for_main_vmap, partition_spec=partition_spec)

@@ -64,6 +64,10 @@ CF_FOR_ALL_REDUCE_AND_ALL_GATHER = (
     " --xla_tpu_enable_async_collective_fusion_multiple_steps=true"
 )
 
+BLAKE_CM = (
+  " --xla_tpu_decompose_all_gather_einsum"
+  " --xla_tpu_decompose_einsum_reduce_scatter"
+)
 
 # Base Flags needed when enabling sparsecore offloading
 ENABLE_SPARSECORE_OFFLOADING_BASE_FLAGS = (
@@ -72,14 +76,6 @@ ENABLE_SPARSECORE_OFFLOADING_BASE_FLAGS = (
     " --xla_sc_disjoint_spmem=false"
     " --xla_sc_disable_megacore_partitioning=true"
     " --2a886c8_chip_config_name=megachip_tccontrol"
-)
-
-ENABLE_SPARSECORE_OFFLOADING_BASE_FLAGS_PW = (
-    " --xla_tpu_use_tc_device_shape_on_sc=true"
-    " --xla_sc_enable_instruction_fusion=false"
-    " --xla_sc_disjoint_spmem=false"
-    " --xla_sc_disable_megacore_partitioning=true"
-    # " --2a886c8_chip_config_name=megachip_tccontrol"  # Flag has issues in PW.
 )
 
 # Enable SparseCore All Gather (1D), Reduce Scatter (1D) and All Reduce (ND)
@@ -123,12 +119,6 @@ ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE = (
     " --xla_tpu_enable_all_reduce_offload_tracing=true"
 ) + ENABLE_SPARSECORE_OFFLOADING_BASE_FLAGS
 
-ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE_PW = (
-    " --xla_tpu_enable_async_collective_fusion_fuse_all_reduce=false"
-    " --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true"
-    " --xla_tpu_enable_all_reduce_offload_tracing=true"
-) + ENABLE_SPARSECORE_OFFLOADING_BASE_FLAGS_PW
-
 # Better memory layout for all-reduce (AR).
 LAYOUT_FOR_ALL_REDUCE_SCATTER = (
     " --xla_tpu_use_minor_sharding_for_major_trivial_input=true"
@@ -171,6 +161,10 @@ HOST_OFFLOAD_FLAGS = (
 # Flags to optimize pipeline parallelism over DCN with large host offloading.
 PIPELINING_FLAGS = (
     " --xla_tpu_iova_dma_chunk_size_bytes=16777216" # breaks DMA to/from host into 16M chunks
+)
+
+PP_MORE_FLAGS = (
+" --megascale_grpc_premap_memory_bytes=17179869184"
 )
 
 # Disable bundle-aware CostModel which was causing worse perf b/357103386.

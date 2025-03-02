@@ -166,6 +166,8 @@ pipeline_fsdp_ag_once: False # If set to true then all gather all of the weights
 # A more optimal behavior is to all-gather at the start of each repeat, which would ideally get the best of both worlds -
 # a small amount of memory and time, however this has proven hard to implement in SPMD, see b/364386697 for more.
 
+pipeline_weights_sharding_constraint: True
+
 # There are two loops for PP:
 #  1)  Outer loop over microbatches (pipeline iterations)
 #  2)  Inner loop over layers (layers per stage)

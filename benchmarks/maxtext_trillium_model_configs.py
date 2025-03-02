@@ -1071,49 +1071,6 @@ mixtral_8x7b_dropped_int8 = _add_to_model_dictionary(
   )
 )
 
-mixtral_8x22b_dropped = _add_to_model_dictionary(
-  trillium_model_dict,
-  MaxTextModel(
-    model_name="mixtral_8x22b_dropped",
-    model_type="mixtral-8x22b",
-    tuning_params={
-        "per_device_batch_size": 8,
-        "max_target_length": 4096,
-        "ici_fsdp_parallelism": 64,
-        "ici_expert_parallelism": 4,
-        "remat_policy": "custom",
-        "decoder_layer_input": "offload",
-        "out_proj": "offload",
-        "query_proj": "offload",
-        "key_proj": "offload",
-        "value_proj": "offload",
-        "attention": "flash",
-        "gcs_metrics": True,
-        "use_iota_embed": True,
-        "dataset_path": "gs://max-datasets-rogue",
-        "dataset_type": "synthetic",
-        "reuse_example_batch": 1,
-        "enable_checkpointing": False,
-        "profiler": "xplane",
-        "sa_block_q": 2048,
-        "sa_block_q_dkv": 2048,
-        "sa_block_q_dq": 2048,
-        "megablox": False,
-        "sparse_matmul": False,
-        "capacity_factor": 1.25,
-        "tokenizer_path": "assets/tokenizer.mistral-v3",
-        "dtype": "bfloat16",
-        "weight_dtype": "bfloat16",
-        "allow_split_physical_axes": True,
-        "custom_mesh": "hybrid_ring_64x4",
-    },
-    xla_flags=(
-        xla_flags_library.MOE_VMEM_LIMIT_FLAG
-        + xla_flags_library.CF_FOR_ALL_GATHER
-        + xla_flags_library.DATA_PARALLEL_OVERLAP
-    ),
-  )
-)
 
 gemma2_9b_8192 = _add_to_model_dictionary(
   trillium_model_dict,
@@ -1176,6 +1133,595 @@ gemma2_27b_8192 = _add_to_model_dictionary(
         + xla_flags_library.REDUCE_SCATTER_FUSION
         + xla_flags_library.CF_FOR_ALL_GATHER
         + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+    ),
+  )
+)
+
+deepseek_a1 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="deepseek_a1",
+    model_type="default",
+    tuning_params={
+        "steps": 10,
+        "per_device_batch_size": 6,
+        "max_target_length": 4096,
+        "enable_checkpointing": False,
+        "dataset_type": "synthetic",
+        "base_output_directory": "gs://maxtext-experiments-multipod",
+        "decoder_block": "mistral",
+        "num_experts": 256, # 256
+        "num_experts_per_tok": 8,
+        "base_emb_dim": 4096, #7168
+        "base_mlp_dim": 2048,
+        "sparse_matmul": True, # False
+        "megablox": True, # True
+        "capacity_factor": 1,
+        "profiler": "xplane",
+        "base_num_decoder_layers": 20,
+        "opt_type": "sgd",
+        "weight_dtype": "bfloat16",
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+    },
+    xla_flags=(
+        xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(81920)
+        + xla_flags_library.REDUCE_SCATTER_FUSION
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+    ),
+  )
+)
+
+deepseek_a1_frozen = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="deepseek_a1",
+    model_type="default",
+    tuning_params={
+        "steps": 10,
+        "per_device_batch_size": 6,
+        "max_target_length": 4096,
+        "enable_checkpointing": False,
+        "dataset_type": "synthetic",
+        "base_output_directory": "gs://maxtext-experiments-multipod",
+        "decoder_block": "mistral",
+        "num_experts": 256, # 256
+        "num_experts_per_tok": 8,
+        "base_emb_dim": 7168, #7168
+        "base_mlp_dim": 2048,
+        "sparse_matmul": False, # False
+        "megablox": False, # True
+        "capacity_factor": 1,
+        "profiler": "xplane",
+        "base_num_decoder_layers": 50,
+        "ici_expert_parallelism": 4,
+        "opt_type": "sgd",
+        "weight_dtype": "bfloat16",
+        "allow_split_physical_axes": True,
+        "custom_mesh": "hybrid_ring_64x4",
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+    },
+    xla_flags=(
+        xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(81920)
+        + xla_flags_library.REDUCE_SCATTER_FUSION
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+    ),
+  )
+)
+
+deepseek_v5p_dp_a1 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="deepseek_a1",
+    model_type="default",
+    tuning_params={
+        "steps": 10,
+        "per_device_batch_size": 24,
+        "max_target_length": 4096,
+        "enable_checkpointing": False,
+        "dataset_type": "synthetic",
+        "base_output_directory": "gs://maxtext-experiments-multipod",
+        "decoder_block": "mistral",
+        "num_experts": 256, # 256
+        "num_experts_per_tok": 8,
+        "base_emb_dim": 7168, #7168
+        "base_mlp_dim": 2048,
+        "sparse_matmul": False, # False
+        "megablox": False, # True
+        "capacity_factor": 1,
+        "profiler": "xplane",
+        "base_num_decoder_layers": 30,
+        "ici_expert_parallelism": 1,
+        "opt_type": "sgd",
+        "weight_dtype": "bfloat16",
+        "allow_split_physical_axes": True,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+    },
+    xla_flags=(
+        xla_flags_library.REDUCE_SCATTER_FUSION
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+    ),
+  )
+)
+
+llama3_1_405b_8192_fsdp_dcn_matt = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama3-1-405b-8192-fsdp-dcn",
+    model_type="llama3.1-405b",
+    tuning_params={
+        "per_device_batch_size": 0.25,
+        "ici_fsdp_parallelism": 64,
+        "ici_tensor_parallelism": 4,
+        "dcn_fsdp_parallelism": 2,
+        "allow_split_physical_axes": True,
+        "custom_mesh": "hybrid_ring_64x4",
+        "remat_policy": "full",
+        # "decoder_layer_input": "offload",
+        # "query_proj": "offload",
+        # "key_proj": "offload",
+        # "value_proj": "offload",
+        # "out_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+  )
+)
+
+llama3_1_405b_8192_explicit_matt = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama3-1-405b-explicit",
+    model_type="default",
+    tuning_params={
+        "per_device_batch_size": 0.25,
+        "ici_fsdp_parallelism": 64,
+        "ici_tensor_parallelism": 4,
+        "dcn_fsdp_parallelism": 2,
+        "base_emb_dim": 16384,
+        "base_num_query_heads": 128,
+        "base_num_kv_heads": 8,
+        "base_num_decoder_layers": 126,
+        "base_mlp_dim": 53248,
+        "head_dim": 128,
+        "vocab_size": 128256,
+        "enable_dropout": False,
+        "logits_via_embedding": False,
+        "normalization_layer_epsilon": 1.0e-5,
+        "rope_max_timescale": 500_000,
+        "allow_split_physical_axes": True,
+        "custom_mesh": "hybrid_ring_64x4",
+        "remat_policy": "full",
+        # "decoder_layer_input": "offload",
+        # "query_proj": "offload",
+        # "key_proj": "offload",
+        # "value_proj": "offload",
+        # "out_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+  )
+)
+
+# 40GB OOM https://cloudlogging.app.goo.gl/4xYbHKv18uubzjNa9
+llama3_1_405b_8192_explicit_matt_pp = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama3-1-405b-explicit",
+    model_type="default",
+    tuning_params={
+        "per_device_batch_size": 0.25,
+        "ici_fsdp_parallelism": 32,
+        "ici_tensor_parallelism": 8,
+        "dcn_pipeline_parallelism": 2,
+        "base_emb_dim": 16384,
+        "base_num_query_heads": 128,
+        "base_num_kv_heads": 8,
+        "base_num_decoder_layers": 12,
+        "base_mlp_dim": 53248,
+        "head_dim": 128,
+        "vocab_size": 128256,
+        "enable_dropout": False,
+        "logits_via_embedding": False,
+        "normalization_layer_epsilon": 1.0e-5,
+        "rope_max_timescale": 500_000,
+        "allow_split_physical_axes": True,
+        "custom_mesh": "hybrid_ring_32x8",
+        "remat_policy": "full",
+        # "decoder_layer_input": "offload",
+        # "query_proj": "offload",
+        # "key_proj": "offload",
+        # "value_proj": "offload",
+        # "out_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+        "pipeline_fsdp_ag_once": True,
+        "num_pipeline_microbatches": 4,
+        "num_layers_per_pipeline_stage": 2,
+        "scan_layers": False
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+  )
+)
+
+# 40GB OOM https://cloudlogging.app.goo.gl/4xYbHKv18uubzjNa9
+llama3_1_405b_8192_explicit_matt_pp = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama3-1-405b-explicit",
+    model_type="default",
+    tuning_params={
+        "per_device_batch_size": 1.0,
+        "ici_fsdp_parallelism": 64,
+        "ici_tensor_parallelism": 4,
+        "dcn_pipeline_parallelism": 21,
+        "base_emb_dim": 16384,
+        "base_num_query_heads": 128,
+        "base_num_kv_heads": 8,
+        "base_num_decoder_layers": 63, # 6 * PP
+        "base_mlp_dim": 53248,
+        "head_dim": 128,
+        "vocab_size": 128256,
+        "enable_dropout": False,
+        "logits_via_embedding": False,
+        "normalization_layer_epsilon": 1.0e-5,
+        "rope_max_timescale": 500_000,
+        "allow_split_physical_axes": True,
+        "custom_mesh": "hybrid_ring_64x4",
+        "remat_policy": "full",
+        # "decoder_layer_input": "offload",
+        # "query_proj": "offload",
+        # "key_proj": "offload",
+        # "value_proj": "offload",
+        # "out_proj": "offload",
+        "max_target_length": 2048,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+        "pipeline_fsdp_ag_once": True,
+        "num_pipeline_microbatches": 84, # PP * 2
+        "num_layers_per_pipeline_stage": 3,
+        "scan_layers": False,
+        "opt_type": "sgd",
+        "weight_dtype": "float32",
+        "skip_first_n_steps_for_profiler": 14,
+        "dump_hlo": True
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+  )
+)
+
+llama3_1_405b_8192_explicit_matt_pp_overlapped = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama3-1-405b-explicit",
+    model_type="default",
+    tuning_params={
+        "per_device_batch_size": 0.5,
+        "ici_fsdp_parallelism": 64,
+        "ici_tensor_parallelism": 4,
+        "dcn_pipeline_parallelism": 2,
+        "base_emb_dim": 16384,
+        "base_num_query_heads": 128,
+        "base_num_kv_heads": 8,
+        "base_num_decoder_layers": 4,
+        "base_mlp_dim": 53248,
+        "head_dim": 128,
+        "vocab_size": 128256,
+        "enable_dropout": False,
+        "logits_via_embedding": False,
+        "normalization_layer_epsilon": 1.0e-5,
+        "rope_max_timescale": 500_000,
+        "allow_split_physical_axes": True,
+        "custom_mesh": "hybrid_ring_64x4",
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        # "query_proj": "offload",
+        # "key_proj": "offload",
+        # "value_proj": "offload",
+        # "out_proj": "offload",
+        "max_target_length": 4096,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+        "pipeline_fsdp_ag_once": True,
+        "num_pipeline_microbatches": 4
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+  )
+)
+
+matt_smoke_train = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="matt-smoke-train",
+    model_type="default",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+  )
+)
+
+# 40GB OOM https://cloudlogging.app.goo.gl/4xYbHKv18uubzjNa9
+matt_simple = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="matt-simple",
+    model_type="default",
+    tuning_params={
+        "per_device_batch_size": 1,
+        "ici_data_parallelism": 256,
+        "dcn_pipeline_parallelism": 2,
+        "base_emb_dim": 8192,
+        "base_num_decoder_layers": 8, # 6 * PP
+        "vocab_size": 32000,
+        "enable_dropout": False,
+        "logits_via_embedding": False,
+        "normalization_layer_epsilon": 1.0e-5,
+        "rope_max_timescale": 500_000,
+        "decoder_block": "simple",
+        "remat_policy": "full",
+        "max_target_length": 2048,
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "num_pipeline_microbatches": 2, # PP * 2
+        "num_layers_per_pipeline_stage": 1,
+        "scan_layers": False,
+        "opt_type": "sgd",
+        "weight_dtype": "float32",
+        "dump_hlo": True
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+  )
+)
+
+
+#docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-pp-remat-again"'
+#commit 083a2aee891ae4ef99b4bb8746110b0809886b36 (HEAD -> mattdavidow-pp-100k, origin/mattdavidow-pp-100k)
+deepseek_big_experimental = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="deepseek_big",
+    model_type="default",
+    tuning_params={
+        "steps": 20,
+        "per_device_batch_size": 1,
+        "max_target_length": 2048,
+        "enable_checkpointing": False,
+        "dataset_type": "synthetic",
+        "base_output_directory": "gs://maxtext-experiments-multipod",
+        "decoder_block": "mistral",
+        "ici_expert_parallelism": 256,
+        "num_experts": 256, # 256
+        "num_experts_per_tok": 8,
+        "base_emb_dim": 4096, #7168
+        "base_mlp_dim": 24576,
+        "base_num_query_heads": 32,
+        "base_num_kv_heads": 8,
+        "head_dim": 128,
+        "skip_first_n_steps_for_profiler": 12,
+        "allow_split_physical_axes": False,
+        "sparse_matmul": False, # False
+        "megablox": False, # True
+        "capacity_factor": 1,
+        "profiler": "xplane",
+        "opt_type": "sgd",
+        "weight_dtype": "bfloat16",
+        "remat_policy": "full",
+        "base_num_decoder_layers": 8, # PP * 8
+        # "dcn_pipeline_parallelism": 2,
+        # "num_pipeline_microbatches": 4, # PP * 2
+        # "num_layers_per_pipeline_stage": 2,
+        "scan_layers": True,
+    },
+    xla_flags=(
+        xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(81920)
+        + xla_flags_library.REDUCE_SCATTER_FUSION
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+    ),
+  )
+)
+
+#docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-pp-remat-again"'
+#commit 083a2aee891ae4ef99b4bb8746110b0809886b36 (HEAD -> mattdavidow-pp-100k, origin/mattdavidow-pp-100k)
+deepseek_big = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="deepseek_big",
+    model_type="default",
+    tuning_params={
+        "steps": 20,
+        "per_device_batch_size": 1,
+        "max_target_length": 512,
+        "enable_checkpointing": False,
+        "dataset_type": "synthetic",
+        "base_output_directory": "gs://maxtext-experiments-multipod",
+        "decoder_block": "mistral",
+        "ici_expert_parallelism": 256,
+        "num_experts": 256, # 256
+        "num_experts_per_tok": 8,
+        "base_emb_dim": 4096, #7168
+        "base_mlp_dim": 24576,
+        "base_num_query_heads": 32,
+        "base_num_kv_heads": 16,
+        "head_dim": 128,
+        "skip_first_n_steps_for_profiler": 12,
+        "allow_split_physical_axes": False,
+        "sparse_matmul": False, # False
+        "megablox": False, # True
+        "capacity_factor": 1,
+        "profiler": "xplane",
+        "opt_type": "sgd",
+        "weight_dtype": "bfloat16",
+        "remat_policy": "full",
+        "base_num_decoder_layers": 16, # PP * 8
+        "dcn_pipeline_parallelism": 2,
+        "num_pipeline_microbatches": 2, # PP * 2 or since we are sad PP * 1
+        "num_layers_per_pipeline_stage": 2,
+        "scan_layers": False,
+        "dump_hlo": True
+    },
+    xla_flags=(
+        xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(81920)
+        + xla_flags_library.REDUCE_SCATTER_FUSION
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + xla_flags_library.PIPELINING_FLAGS
+        + xla_flags_library.PP_MORE_FLAGS
+    ),
+  )
+)
+
+#docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-pp-remat-again"'
+#commit 083a2aee891ae4ef99b4bb8746110b0809886b36 (HEAD -> mattdavidow-pp-100k, origin/mattdavidow-pp-100k)
+mattbar_a1 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama3-1-405b-explicit",
+    model_type="default",
+    tuning_params={
+        "per_device_batch_size": 0.125,
+        "max_target_length": 2048,
+        "ici_fsdp_parallelism": 16,
+        "ici_tensor_parallelism": 16,
+        "dcn_fsdp_parallelism": 1,
+        "base_emb_dim": 16384,
+        "base_mlp_dim": 131072,
+        "base_num_query_heads": 64,
+        "base_num_kv_heads": 16,
+        "head_dim": 256,
+        "vocab_size": 128256,
+        "enable_dropout": False,
+        "logits_via_embedding": False,
+        "normalization_layer_epsilon": 1.0e-5,
+        "rope_max_timescale": 500_000,
+        "allow_split_physical_axes": True,
+        "remat_policy": "full",
+        # "decoder_layer_input": "offload",
+        # "query_proj": "offload",
+        # "key_proj": "offload",
+        # "value_proj": "offload",
+        # "out_proj": "offload",
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 1024,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+        "base_num_decoder_layers": 16, #PP * 8
+        "dcn_pipeline_parallelism": 2,
+        "pipeline_fsdp_ag_once": True,
+        "num_pipeline_microbatches": 4, # PP * 2
+        "num_layers_per_pipeline_stage": 2,
+        "scan_layers": False,
+        "skip_first_n_steps_for_profiler": 14,
+        "dump_hlo": True
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+        #+ xla_flags_library.BLAKE_CM # performs poorly =(
+        + xla_flags_library.PIPELINING_FLAGS
+        + xla_flags_library.PP_MORE_FLAGS
     ),
   )
 )
