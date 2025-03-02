@@ -25,9 +25,7 @@ limitations under the License.
 
 import checkpointing
 import jax
-import max_logging
-import max_utils
-import optimizers
+from MaxText import max_logging, max_utils, optimizers
 import pyconfig
 
 from absl import app

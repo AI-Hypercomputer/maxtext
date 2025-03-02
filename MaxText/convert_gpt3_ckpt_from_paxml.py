@@ -32,7 +32,7 @@ python MaxText/convert_gpt3_ckpt_from_paxml.py \
   --run-name=$RUN_NAME \
   --base-output-directory=$BASE_OUTPUT_DIR
 """
-import max_utils
+from MaxText import max_utils
 import optimizers
 import pyconfig
 import os

@@ -36,8 +36,7 @@ from jetstream.engine import tokenizer_pb2
 from jetstream.engine import tokenizer_api
 from jetstream.engine import token_utils
 
-import max_utils
-import inference_utils
+from MaxText import max_utils, inference_utils
 import pyconfig
 
 import warnings

@@ -47,7 +47,7 @@ import jax.numpy as jnp
 import numpy as np
 import pyconfig
 import jsonlines
-import max_utils
+from MaxText import max_utils
 from layers import models
 from layers import quantizations
 

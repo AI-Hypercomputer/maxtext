@@ -22,8 +22,7 @@ import json
 import os
 import numpy as np
 
-import max_logging
-import max_utils
+from MaxText import max_utils, max_logging
 
 
 def _prepare_metrics_for_json(metrics, step, run_name):

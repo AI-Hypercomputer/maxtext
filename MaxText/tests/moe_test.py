@@ -20,7 +20,7 @@ from layers import initializers
 import jax.numpy as jnp
 
 import pyconfig
-import max_utils
+from MaxText import max_utils
 from jax.sharding import Mesh
 import flax.linen as nn
 from typing import Tuple

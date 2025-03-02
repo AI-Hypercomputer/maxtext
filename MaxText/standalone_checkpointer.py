@@ -31,8 +31,7 @@ from jax import numpy as jnp
 import numpy as np
 
 from MaxText import checkpointing
-import max_utils
-import max_logging
+from MaxText import max_utils, max_logging
 import pyconfig
 from MaxText.train import setup_mesh_and_model, get_first_step, validate_train_config, save_checkpoint
 

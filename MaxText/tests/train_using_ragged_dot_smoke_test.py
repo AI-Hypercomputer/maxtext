@@ -18,7 +18,7 @@ import os
 import unittest
 
 from absl.testing import absltest
-from train import main as train_main
+from MaxText.train import main as train_main
 
 
 class Train(unittest.TestCase):
