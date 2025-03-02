@@ -54,11 +54,11 @@ class PagedAttentionTest(unittest.TestCase):
       self.mesh = jax.sharding.Mesh(devices, axis_names=())
     self.attention_op = PagedAttentionOp(
         mesh=self.mesh,
-        num_pages=self.cfg["num_pages"],
-        tokens_per_page=self.cfg["tokens_per_page"],
-        max_pages_per_slot=self.cfg["max_target_length"] // self.cfg["tokens_per_page"],
-        max_pages_per_prefill=self.cfg["max_prefill_predict_length"] // self.cfg["tokens_per_page"],
-        pages_per_compute_block=self.cfg["pages_per_compute_block"],
+        num_pages=self.cfg["pagedattn_num_pages"],
+        tokens_per_page=self.cfg["pagedattn_tokens_per_page"],
+        max_pages_per_slot=self.cfg["max_target_length"] // self.cfg["pagedattn_tokens_per_page"],
+        max_pages_per_prefill=self.cfg["max_prefill_predict_length"] // self.cfg["pagedattn_tokens_per_page"],
+        pages_per_compute_block=self.cfg["pagedattn_pages_per_compute_block"],
         num_kv_heads=self.cfg["num_kv_heads"],
         kv_head_dim_size=self.cfg["head_dim"],
         dtype=self.cfg["dtype"],
