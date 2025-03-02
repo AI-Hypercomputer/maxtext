@@ -590,3 +590,11 @@ sa_use_fused_bwd_kernel: False
 sa_q_layout: "HEAD_DIM_MINOR"
 sa_k_layout: "HEAD_DIM_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"
+
+#######################
+### Paged Attention ###
+#######################
+# These settings take effect only when `attention=paged`.
+pagedattn_num_pages: 64
+pagedattn_tokens_per_page: 32
+pagedattn_pages_per_compute_block: 8
