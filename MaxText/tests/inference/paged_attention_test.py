@@ -40,12 +40,12 @@ class PagedAttentionTest(unittest.TestCase):
     self._max_prefill_predict_length = 512
     self._max_target_length = 1024
     self._dtype = jnp.float32
-    
+
     # PagedAttention settings
     self._num_pages = 64
     self._tokens_per_page = 32
     self._pages_per_compute_block = 16
-    
+
     self.rng = jax.random.PRNGKey(42)
     devices = jax.devices()
     if len(devices) > 1:
@@ -76,7 +76,7 @@ class PagedAttentionTest(unittest.TestCase):
         pages_per_compute_block=self._pages_per_compute_block,
         num_kv_heads=self._num_kv_heads,
         kv_head_dim_size=self._head_dim,
-        dtype=self._dtype
+        dtype=self._dtype,
     )
 
     query = jnp.ones((1, self._max_prefill_predict_length, self._num_query_heads, self._head_dim))
@@ -98,9 +98,7 @@ class PagedAttentionTest(unittest.TestCase):
     )
 
     output, _, _ = output_tuple  # Unpack the tuple
-    self.assertEqual(
-        output.shape, (1, self._max_prefill_predict_length, self._num_query_heads, self._head_dim)
-    )
+    self.assertEqual(output.shape, (1, self._max_prefill_predict_length, self._num_query_heads, self._head_dim))
 
   @pytest.mark.tpu_only
   def test_paged_dot_product_attention_with_max_and_sum(self):
@@ -109,9 +107,7 @@ class PagedAttentionTest(unittest.TestCase):
     value = jnp.ones((1, self._max_prefill_predict_length, self._num_kv_heads, self._head_dim))
 
     output, max_vals, sum_vals = self.attention_op.paged_dot_product_attention_with_max_and_sum(query, key, value)
-    self.assertEqual(
-        output.shape, (1, self._max_prefill_predict_length, self._num_query_heads, self._head_dim)
-    )
+    self.assertEqual(output.shape, (1, self._max_prefill_predict_length, self._num_query_heads, self._head_dim))
     self.assertEqual(max_vals.shape[-1], 1)
     self.assertEqual(sum_vals.shape[-1], 1)
 
@@ -616,7 +612,7 @@ class PagedAttentionTest(unittest.TestCase):
         pages_per_compute_block=self._pages_per_compute_block,
         num_kv_heads=self._num_kv_heads,
         kv_head_dim_size=self._head_dim,
-        dtype=self._dtype
+        dtype=self._dtype,
     )
 
     # Create distinct patterns for each page

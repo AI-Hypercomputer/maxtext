@@ -46,15 +46,20 @@ def main(argv: Sequence[str]) -> None:
   assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
   assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
 
-  # Split RNG before calling prefill
-  rng, rng_prefill = jax.random.split(rng)
-  prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
-  slot = 0
+  slot = 0  # Always use decode batch slot 0.
 
+  # Prefill
+  rng, rng_prefill = jax.random.split(rng)  # Split RNG before calling prefill
+  prefill_result, first_token = engine.prefill(
+      params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill, slot=slot
+  )
+
+  # Insert
   rng, rng_init_decode = jax.random.split(rng)
   decode_state = engine.init_decode_state(rng_init_decode)
   decode_state = engine.insert(prefill_result, decode_state, slot=slot)
 
+  # Generate
   steps = range(config.max_prefill_predict_length, config.max_target_length)
   sampled_tokens_list = []
   sampled_tokens_list.append(first_token)
@@ -63,6 +68,7 @@ def main(argv: Sequence[str]) -> None:
     decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
     sampled_tokens_list.append(sampled_tokens)
 
+  # Get results
   results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
   output = tokenizer_model.decode(results)
   print(f"Input `{text}` -> `{output}`")

@@ -308,6 +308,7 @@ class MaxEngine(engine_api.Engine):
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
+      slot: Optional[int] = None,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -317,7 +318,9 @@ class MaxEngine(engine_api.Engine):
         processed by the underlying model.
       padded_tokens: Logically appended tokens to any existing prefix, this is
         what we compute prefill on.
-      true_length: The real length of the tokens, pre-pad.
+      true_length: Prompt length before padding.
+      slot: (Optional) An integer representing the decode batch index selected
+        for this request.
     Returns:
       kv_cache: For the resulting text.
     """
@@ -346,6 +349,8 @@ class MaxEngine(engine_api.Engine):
           model_mode=common_types.MODEL_MODE_PREFILL,
           rngs={"params": new_rng},
           mutable=["cache"],
+          true_length=true_length,
+          slot=slot,
       )
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
@@ -383,7 +388,6 @@ class MaxEngine(engine_api.Engine):
 
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
-
     return {
         "logits": selected_logits,
         "cache": cache,
@@ -525,7 +529,6 @@ class MaxEngine(engine_api.Engine):
       rng = jax.random.PRNGKey(0)
 
     previous_token = decode_state["tokens"]
-
     rng, new_rng = jax.random.split(rng)
     # run one step generation
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -538,10 +541,8 @@ class MaxEngine(engine_api.Engine):
           rngs={"params": new_rng},
           mutable=["cache"],
       )
-
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
-
     # sampling tokens
     new_token = inference_utils.sampling(
         out_logits,
@@ -551,7 +552,6 @@ class MaxEngine(engine_api.Engine):
         nucleus_topp=self.config.decode_sampling_nucleus_p,
         temperature=self.config.decode_sampling_temperature,
     )
-
     all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
     result = engine_api.ResultTokens(
         data=jnp.concatenate((new_token, all_valid, decode_state["generated_tokens"]), axis=1),
@@ -640,12 +640,44 @@ class MaxEngine(engine_api.Engine):
       else:
         raise ValueError(f"We don't have a strategy for inserting {path_key}")
 
-    inserted_cache = jax.tree_util.tree_map_with_path(
-        copy,
-        unboxed_prefix["cache"],
-        decode_state["cache"],
-        self.kv_cache_annotations_named,
-    )
+    if self.config.attention == "paged":
+
+      def _copy_paged(path, prefix_cache, decode_state_cache):
+        if path[-2].key == "page_manager":
+          return prefix_cache
+        path_key = path[-1].key
+        if path_key in ["key_pages", "value_pages"]:
+
+          def _update_pages(prefix_page_idx, state):
+            decode_state_pages, prefix_pages, page_map = state
+            prefix_page = jax.lax.dynamic_index_in_dim(prefix_pages, prefix_page_idx, axis=1)
+            decode_state_pages = jax.lax.dynamic_update_slice_in_dim(
+                decode_state_pages, prefix_page, page_map[prefix_page_idx], axis=1
+            )
+            return decode_state_pages, prefix_pages, page_map
+
+          decode_state_cache, _, _ = jax.lax.fori_loop(
+              0,
+              prefix["cache"]["page_manager"]["num_pages_used"].value[slot],
+              _update_pages,
+              (decode_state_cache, prefix_cache, prefix["cache"]["page_manager"]["page_map"].value[slot]),
+          )
+          return decode_state_cache
+        else:
+          raise ValueError(f"We don't have a strategy for inserting {path_key} for paged attention.")
+
+      inserted_cache = jax.tree_util.tree_map_with_path(
+          _copy_paged,
+          unboxed_prefix["cache"],
+          decode_state["cache"],
+      )
+    else:
+      inserted_cache = jax.tree_util.tree_map_with_path(
+          copy,
+          unboxed_prefix["cache"],
+          decode_state["cache"],
+          self.kv_cache_annotations_named,
+      )
     inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state["logits"], unboxed_prefix["logits"], slot, 0)
     inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state["next_pos"], unboxed_prefix["next_pos"], slot, 0)
     inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(

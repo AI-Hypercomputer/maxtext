@@ -25,6 +25,8 @@ import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 import common_types
+from inference import page_manager
+import pyconfig
 from layers import attentions
 from layers import embeddings
 from layers import linears
@@ -379,6 +381,7 @@ class Decoder(nn.Module):
       decoder_segment_ids=None,
       deterministic=False,
       model_mode=common_types.MODEL_MODE_TRAIN,
+      page_state: Optional[page_manager.PageState] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -427,6 +430,7 @@ class Decoder(nn.Module):
               decoder_positions,
               deterministic,
               model_mode,
+              page_state=page_state,
           )
           num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
           y, _ = self.scan_decoder_layers(cfg, moe_layer, num_moe_layers, "moe_layers", mesh)(
@@ -435,6 +439,7 @@ class Decoder(nn.Module):
               decoder_positions,
               deterministic,
               model_mode,
+              page_state=page_state,
           )
         else:
           RemattedBlockLayer = RemattedBlockLayers[0]
@@ -444,6 +449,7 @@ class Decoder(nn.Module):
               decoder_positions,
               deterministic,
               model_mode,
+              page_state=page_state,
           )
       else:
         if cfg.decoder_block == "deepseek":
@@ -472,8 +478,8 @@ class Decoder(nn.Module):
                 decoder_positions,
                 deterministic,
                 model_mode,
+                page_state=page_state,
             )
-
     y = self.get_norm_layer()(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -538,15 +544,58 @@ class Transformer(nn.Module):
 
     self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant)
 
+    if cfg.attention == "paged":
+      self.page_manager = self._create_page_manager(cfg)
+
+  def _create_page_manager(self, config: pyconfig.HyperParameters) -> Optional[page_manager.PageManager]:
+    """Creates page manager for managing pages in the paged attention mechanism"""
+    assert config.max_target_length % config.pagedattn_tokens_per_page == 0
+    assert config.max_prefill_predict_length % config.pagedattn_tokens_per_page == 0
+    return page_manager.PageManager(
+        num_pages=self.config.pagedattn_num_pages,
+        tokens_per_page=self.config.pagedattn_tokens_per_page,
+        slots=int(self.config.per_device_batch_size * jax.device_count()),
+        max_target_length=self.config.max_target_length,
+        max_prefill_predict_length=self.config.max_prefill_predict_length,
+        max_pages_per_slot=self.config.max_target_length // self.config.pagedattn_tokens_per_page,
+    )
+
+  def _create_page_state(
+      self, model_mode: str, true_length: Optional[int] = None, slot: Optional[int] = None
+  ) -> Optional[page_manager.PageState]:
+    """Creates page state for tracking page status in the paged attention mechanism."""
+    if self.config.attention != "paged" or model_mode == common_types.MODEL_MODE_TRAIN:
+      return None
+    page_state = None
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      page_state = self.page_manager(
+          model_mode=model_mode,
+          slot=slot,
+          true_length=true_length,
+      )
+    elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+      page_state = self.page_manager(model_mode)
+    else:
+      raise ValueError(f"Unsupported model_mode {model_mode} by paged attention")
+    return page_state
+
   def __call__(
       self,
       decoder_input_tokens,
       decoder_positions,
       decoder_segment_ids=None,
       enable_dropout=True,
-      model_mode=common_types.MODEL_MODE_TRAIN,
+      model_mode: str = common_types.MODEL_MODE_TRAIN,
+      true_length: Optional[int] = None,
+      slot: Optional[int] = None,
   ):
-    """Applies Transformer decoder-branch on encoded-input and target."""
+    """Applies Transformer decoder-branch on encoded-input and target.
+
+    Args:
+      true_length: (Optional) Prompt length before padding
+      slot: (Optional) An integer representing the decode batch index selected
+        for this request.
+    """
 
     if decoder_segment_ids is not None and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       raise ValueError(
@@ -560,5 +609,6 @@ class Transformer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=not enable_dropout,
         model_mode=model_mode,
+        page_state=self._create_page_state(model_mode=model_mode, true_length=true_length, slot=slot),
     )
     return logits
