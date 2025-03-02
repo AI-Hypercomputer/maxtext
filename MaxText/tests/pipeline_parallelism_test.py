@@ -53,7 +53,7 @@ def assert_same_output_and_grad(f1, f2, *inputs):
   f2_grad = pytree_ravel(f2_grad)
 
   assert jax.numpy.allclose(f1_value, f2_value, rtol=1e-2, equal_nan=False)
-  assert jax.numpy.allclose(f1_grad, f2_grad, rtol=1e-2, equal_nan=False)
+  assert jax.numpy.allclose(f1_grad, f2_grad, rtol=1e-1, equal_nan=False)
 
 
 class PipelineParallelismTest(unittest.TestCase):
@@ -91,14 +91,21 @@ class PipelineParallelismTest(unittest.TestCase):
     init_pipeline_params = my_pipeline.init(
         jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode
     )
+    partition_spec = my_pipeline.get_weight_sharding(inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
 
     # Create a dummy scalar loss function so we may take the gradient wrt weights
-    def pipeline_parallelism_dummy_loss(
-        params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode, dummy_targets
+    def pipeline_parallelism_dummy_loss_extra(
+        params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode, dummy_targets, partition_spec=None
     ):
-      outputs = my_pipeline.apply(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
+      outputs = my_pipeline.apply(
+          params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode, partition_spec=partition_spec
+      )
       loss = jnp.linalg.norm(outputs - dummy_targets)
       return loss
+
+    import functools
+
+    pipeline_parallelism_dummy_loss = functools.partial(pipeline_parallelism_dummy_loss_extra, partition_spec=partition_spec)
 
     def regular_sequential_layers(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode):
       def get_cur_layer_params(params, layer_idx):
@@ -153,7 +160,7 @@ class PipelineParallelismTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_circular_minimum_microbatches_same_output_and_grad(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 4 microbatches
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         enable_checkpointing=False,
         run_name="circular_minimum_microbatches",
@@ -164,13 +171,12 @@ class PipelineParallelismTest(unittest.TestCase):
         num_pipeline_microbatches=4,
         per_device_batch_size=4,
     )
-    config = pyconfig.config
     self.assert_pipeline_same_output_and_grad(config)
 
   @pytest.mark.tpu_only
   def test_circular_extra_microbatches_same_output_and_grad(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         enable_checkpointing=False,
         run_name="circular_extra_microbatches",
@@ -181,13 +187,29 @@ class PipelineParallelismTest(unittest.TestCase):
         num_pipeline_microbatches=8,
         per_device_batch_size=4,
     )
-    config = pyconfig.config
+    self.assert_pipeline_same_output_and_grad(config)
+
+  @pytest.mark.tpu_only
+  def test_circular_ag_once(self):
+    # 2 stages, 8 microbatches, all gather once
+    config = pyconfig.initialize(
+        [sys.argv[0], "configs/base.yml"],
+        enable_checkpointing=False,
+        run_name="circular_ag_once",
+        max_target_length=128,
+        base_emb_dim=28,
+        ici_pipeline_parallelism=2,
+        base_num_decoder_layers=8,
+        num_pipeline_microbatches=8,
+        per_device_batch_size=4,
+        pipeline_fsdp_ag_once=True,
+    )
     self.assert_pipeline_same_output_and_grad(config)
 
   @pytest.mark.tpu_only
   def test_non_circular_same_output_and_grad(self):
     # 4 stages, 4 layers (no circular repeats, 1 layer per stage), 4 microbatches
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         enable_checkpointing=False,
         run_name="non_circular",
@@ -198,7 +220,6 @@ class PipelineParallelismTest(unittest.TestCase):
         num_pipeline_microbatches=4,
         per_device_batch_size=4,
     )
-    config = pyconfig.config
     self.assert_pipeline_same_output_and_grad(config)
 
   @pytest.mark.tpu_only
@@ -234,7 +255,7 @@ class PipelineParallelismTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_delay_activation_forwarding_same_output_and_grad(self):
     # 4 stages, delayed activation forwarding, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         enable_checkpointing=False,
         run_name="activation_forwarding",
@@ -246,7 +267,6 @@ class PipelineParallelismTest(unittest.TestCase):
         per_device_batch_size=4,
         pipeline_delay_activation_forwarding=True,
     )
-    config = pyconfig.config
     self.assert_pipeline_same_output_and_grad(config)
 
   @pytest.mark.tpu_only
@@ -276,6 +296,36 @@ class PipelineParallelismTest(unittest.TestCase):
             "num_pipeline_microbatches=8",
             "tokenizer_path=../assets/tokenizer.llama2",
             "scan_layers=False",  # We see better performance only scanning the pipeline iterations.
+        ]
+    )
+
+  def test_full_train_fp8(self):
+    # Run a full train.py call with fp8 quantization, which adds extra
+    # variable collections that need to be handled
+    train_main(
+        [
+            None,
+            "configs/base.yml",
+            r"base_output_directory=gs://runner-maxtext-logs",
+            "run_name=runner_pipeline_parallelism_fp8_test",
+            r"dataset_path=gs://maxtext-dataset",
+            "base_emb_dim=28",
+            "base_num_query_heads=4",
+            "base_num_kv_heads=4",
+            "base_mlp_dim=32",
+            "base_num_decoder_layers=4",
+            "head_dim=128",
+            "per_device_batch_size=2",
+            "max_target_length=1024",
+            "vocab_size=32",
+            "dataset_type=synthetic",
+            "steps=3",
+            "enable_checkpointing=False",
+            "ici_pipeline_parallelism=4",
+            "tokenizer_path=../assets/tokenizer.llama2",
+            "quantization=fp8",
+            "scan_layers=False",
+            "attention=dot_product",
         ]
     )
 

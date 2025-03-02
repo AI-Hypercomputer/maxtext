@@ -7,12 +7,8 @@
 run_name="trillium_llama2-70b"
 dry_run=false
 enable_profiler=false
-enable_batch_prefill=false
-enable_xla_flags=false
-single_bucket=false
-token_multiplier=3.0
 test_mode=false
-benchmark_type="all"
+benchmark_type="performance"
 
 helpFunction()
 {
@@ -21,10 +17,7 @@ helpFunction()
    echo -e "\t-n Dry run mode"
    echo -e "\t-p Enable profiler"
    echo -e "\t-t Test mode"
-   echo -e "\t-s Single bucket mode"
-   echo -e "\t-x Enable XLA flags"
    echo -e "\t-r Specify run name"
-   echo -e "\t-m Specify token multiplier"
    echo -e "\t-b Specify benchmark type (performance|audit|accuracy|all)"
    exit 1
 }
@@ -35,13 +28,8 @@ for arg in "$@"; do
         -n) dry_run=true ;;
         -p) enable_profiler=true ;;
         -t) test_mode=true ;;
-        -s) single_bucket=true ;;
-        -x) enable_xla_flags=true ;;
-        -c) enable_batch_prefill=true ;;
         -r=*|--run=*) run_name="${arg#*=}" ;;
         -r|--run) shift; run_name="$1" ;;
-        -m=*|--multiplier=*) token_multiplier="${arg#*=}" ;;
-        -m|--multiplier) shift; token_multiplier="$1" ;;
         -b=*|--benchmark=*) benchmark_type="${arg#*=}" ;;
         -b|--benchmark) shift; benchmark_type="$1" ;;
         -h|--help) helpFunction ;;
@@ -55,54 +43,66 @@ case "$benchmark_type" in
     *) echo "Invalid benchmark type. Must be: performance, audit, accuracy, or all"; exit 1 ;;
 esac
 
+
+cmd=''
+RUN_OPTIONS=" -c " # Enable prefill packing by default
 if "$dry_run"; then
-    cmd=echo
-else
-    cmd=''
+    RUN_OPTIONS="${RUN_OPTIONS} -n "
 fi
 
-RUN_OPTIONS=""
 if "$enable_profiler"; then
-    RUN_OPTIONS=" -p "
+    RUN_OPTIONS="${RUN_OPTIONS} -p "
 fi
+
 
 if "$test_mode"; then
     RUN_OPTIONS="${RUN_OPTIONS} -t "
 fi
 
-if "$enable_batch_prefill"; then
-    RUN_OPTIONS="${RUN_OPTIONS} -c "
-fi
-
-if "$single_bucket"; then
-    export BATCH_AND_PREFILL_LEN="1024,54"
-else
-    export BATCH_AND_PREFILL_LEN="256,216|512,108|1024,54"
-fi
-batch_and_prefill_str=$(echo $BATCH_AND_PREFILL_LEN |tr \|,  _) 
-
+enable_xla_flags=true
 export LIBTPU_INIT_ARGS=""
 if "$enable_xla_flags"; then
     TEST_FLAGS=$(python3 select_xla_flags.py)
     export LIBTPU_INIT_ARGS=${TEST_FLAGS}
 fi
+echo XLA_FLAGS: $LIBTPU_INIT_ARGS
 
-export TOK_OUTLEN_MULTIPLIER=${token_multiplier}
+if [[ -z ${QUANTIZATION} ]] ; then
+  export QUANTIZATION="int8"
+  export QUANT_PATH=""
+#   export QUANTIZATION="intmp"
+#   export QUANT_MP="qkv_subchannel_512"
+#   export QUANT_PATH="/home/${USER}/maxtext/MaxText/configs/quantization/${QUANT_MP}.json"
+fi
+
+if [[ -z ${KV_QUANT_DTYPE} ]] ; then
+  export KV_QUANT_DTYPE="int4"
+fi
 
 if [[ -z ${CHECKPOINT} ]] ; then
-  export CHECKPOINT="gs://inference-benchmarks/models/llama2-70b-chat/quant/int8_"
+  export CHECKPOINT="gs://inference-benchmarks/models/llama2-70b-chat/quant/${QUANTIZATION}_${QUANT_MP}"
 fi
 
 if [[ -z ${TOKENIZER_PATH} ]] ; then
   export TOKENIZER_PATH="/home/${USER}/maxtext/assets/tokenizer.llama2"
 fi
 
-BASE_CFG="model_name=llama2-70b tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT}"
-QUANT_CFG="quantization=int8 quantize_kvcache=True checkpoint_is_quantized=True"
-LAYOUT_CFG="compute_axis_order=0,2,1,3 ar_cache_axis_order=0,2,1,3"
-export MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${LAYOUT_CFG}"
+if [ -z "$PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES" ];
+then
+    PREFILL_LEN="1024"
+    BATCH_SIZE_PER_DEVICE="64" 
+    export PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES="${PREFILL_LEN},${BATCH_SIZE_PER_DEVICE}"
+fi
 
-RUN_DESC=int8_kv_${batch_and_prefill_str}_${token_multiplier}_flags_${enable_xla_flags}
+
+BASE_CFG="model_name=llama2-70b tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT}"
+QUANT_CFG="quantization=${QUANTIZATION} quant_cfg_path=${QUANT_PATH} checkpoint_is_quantized=True"
+KV_QUANT_CFG="quantize_kvcache=True kv_quant_dtype=${KV_QUANT_DTYPE}"
+export MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${KV_QUANT_CFG} optimize_mesh_for_tpu_v6e=True"
+echo
+echo $MAXENGINE_ARGS
+echo
+RUN_DESC=${run_name}_${PREFILL_LEN}_${BATCH_SIZE_PER_DEVICE}_quant_${QUANTIZATION}_${QUANT_MP}_kv_${KV_QUANT_DTYPE}_opt
 
 $cmd cd ..
 
@@ -110,13 +110,14 @@ run_benchmark() {
     local type=$1
     case "$type" in
         "performance")
-            $cmd bash llama_offline_run.sh ${RUN_OPTIONS} -r benchmarks_performance_${RUN_DESC}
+            $cmd bash llama_offline_run.sh ${RUN_OPTIONS} -r -benchmarks_performance_${RUN_DESC}
             ;;
         "audit")
-            $cmd bash llama_offline_run.sh -r benchmarks_audit_${RUN_DESC} -d
+            $cmd bash llama_offline_run.sh ${RUN_OPTIONS} -r -benchmarks_audit_${RUN_DESC} -d
             ;;
         "accuracy")
-            $cmd bash llama_offline_run.sh -r benchmarks_accuracy_${RUN_DESC} -a  
+            export HF_CKPT="meta-llama/Llama-2-70b-chat-hf"
+            $cmd bash llama_offline_run.sh ${RUN_OPTIONS} -r benchmarks_accuracy_${RUN_DESC} -a  
             ;;
     esac
 }
@@ -128,3 +129,4 @@ if [ "$benchmark_type" = "all" ]; then
 else
     run_benchmark "$benchmark_type"
 fi
+

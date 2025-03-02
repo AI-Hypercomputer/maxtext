@@ -56,9 +56,9 @@ if [ -z "$TOKENIZER_PATH" ]; then
 fi
 
 BATCH_STR=""
-if [ -z "$BATCH_AND_PREFILL_LEN" ];
+if [ -z "$PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES" ];
 then
-  BATCH_AND_PREFILL_LEN="256,144|512,72|2048,18"
+  PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES="256,144|512,72|2048,18"
 fi
 
 if [ -z "$TOK_OUTLEN_MULTIPLIER" ];
@@ -117,7 +117,7 @@ run_loadgen() {
   echo "TOTAL_SAMPLE_COUNT: ${TOTAL_SAMPLE_COUNT}"
   echo "OUTPUT_LOG_DIR: ${OUTPUT_LOG_DIR}"
   echo "USER_CONFIG: ${USER_CONFIG}"
-  echo "BATCH_AND_PREFILL_LEN: ${BATCH_AND_PREFILL_LEN}"
+  echo "PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES: ${PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES}"
   echo "MAXENGINE_ARGS: ${MAXENGINE_ARGS}"
 
   ${cmd} python -m offline_mode \
@@ -129,7 +129,7 @@ run_loadgen() {
     --audit_conf ${AUDIT_CONF}  \
     --total_sample_count ${TOTAL_SAMPLE_COUNT} \
     --dataset_path ${DATASET_PATH} \
-    --prefill_lengths_and_batch_sizes ${BATCH_AND_PREFILL_LEN} \
+    --prefill_lengths_and_batch_sizes ${PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES} \
     --maxengine_args "${MAXENGINE_ARGS}" \
     --output_log_dir ${OUTPUT_LOG_DIR} \
     --tok_outlen_multiplier ${TOK_OUTLEN_MULTIPLIER} \

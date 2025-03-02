@@ -42,7 +42,7 @@ class TestModel(unittest.TestCase):
     self.rng = jax.random.PRNGKey(0)
 
   def init_pyconfig(self, **kwargs):
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         per_device_batch_size=1.0,
         run_name="test",
@@ -56,7 +56,7 @@ class TestModel(unittest.TestCase):
         max_prefill_predict_length=4,
         **kwargs,
     )
-    return pyconfig.config
+    return config
 
   def get_data(self):
     s = (self.cfg.global_batch_size_to_train_on, self.cfg.max_target_length)

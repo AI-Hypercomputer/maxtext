@@ -62,7 +62,7 @@ flags.DEFINE_string(
     "performance",
     "performance, accuracy, submission",
 )
-flags.DEFINE_string("api_url", None, "SAX published model path.", required=False)
+flags.DEFINE_string("api_url", None, "published model path.", required=False)
 flags.DEFINE_string("dataset_path", None, "", required=False)
 flags.DEFINE_bool("is_stream", False, "", required=False)
 flags.DEFINE_string(
@@ -119,7 +119,7 @@ flags.DEFINE_bool(
     required=False,
 )
 flags.DEFINE_string(
-    "prefill_lengths_and_batch_sizes",
+    "prefill_lengths_and_per_device_batch_sizes",
     "256,80|512,40|1024,20",
     "List of prefill lengths and batch sizes to use for each engine. Format len_1,bs_1|len_2,bs_2|..",
     required=False,
@@ -191,14 +191,14 @@ scenario_map = {
 
 def pad_tokens(tokens):
   true_length = len(tokens)
-  target_length = max(int(2 ** math.ceil(math.log2(true_length))), 32)
+  target_length = max(int(2 ** math.ceil(math.log2(true_length))), 128)
   padded = tokens + [0] * (target_length - true_length)
   return padded, true_length
 
 
 def _init_query_batches():
   query_batches = {}
-  len_batch_str = FLAGS.prefill_lengths_and_batch_sizes.split("|")
+  len_batch_str = FLAGS.prefill_lengths_and_per_device_batch_sizes.split("|")
   len_batch = []
   for lb in len_batch_str:
     l, b = lb.split(",")
@@ -347,7 +347,6 @@ class SUT:
       self.offline_inf_instances[group_idx].init_decode_state()
       result = self.offline_inf_instances[group_idx].batch_inference(group, desc=f"batch-{group_idx}")
       self.offline_inf_instances[group_idx].decode_state = None
-      gc.collect()
       for key, val in result.items():
         if not val:
           log.info(f"Value empty for key {key}")
@@ -359,6 +358,7 @@ class SUT:
 
     log.info("Flush queries end")
     end = time.perf_counter()
+    gc.collect()
 
   def LoadSamplesToRam(self, sample_list):
     """Pads the data, move them to jax array on device"""
@@ -449,7 +449,7 @@ def main(argv):
   log.info(f"Dataset len {len(dataset)}, estimated counts by bucket {estimated_counts_by_bucket}")
 
   rows = list(dataset.iterrows())
-  len_batch_str = FLAGS.prefill_lengths_and_batch_sizes
+  len_batch_str = FLAGS.prefill_lengths_and_per_device_batch_sizes
   log.info(f"Prefill lengths and Batch sizes: {len_batch_str}")
   log.info(f"Maxengine args: {FLAGS.maxengine_args}")
 
@@ -481,7 +481,6 @@ def main(argv):
       for group_idx in offline_inf_instances:
         (length, batch) = group_idx
         log.info(f"warm up for {length}")
-        offline_inf_instances[group_idx].init_decode_state()
         offline_inf_instances[group_idx].warmup(length, warmup_samples[group_idx])
         offline_inf_instances[group_idx].decode_state = None  # drop state
         gc.collect()

@@ -3,7 +3,6 @@ base_config: "base.yml"
 hardware: "gpu"
 attention: "dot_product"
 base_emb_dim: 8
-base_emb_dim: 8
 base_num_query_heads: 4
 base_num_kv_heads: 4
 base_mlp_dim: 32

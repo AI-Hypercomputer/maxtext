@@ -51,13 +51,16 @@ jobs:
               process.exit(1)
             }
 
-            // This list should match with CODEOWNERS
+            // This list should match with CODEOWNERS.
             let requiredReviewers = {
               gobbleturk: "",
               khatwanimohit: "",
               bvandermoon: "",
               vipannalla: "",
               RissyRan: "",
+              richjames0: "",
+              rni418: "",
+              gagika: "",
             }
             const reviews = await github.rest.pulls.listReviews({
               owner,

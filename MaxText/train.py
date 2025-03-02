@@ -25,8 +25,9 @@ import os
 import sys
 import functools
 import time
+import queue
 
-from typing import Sequence, Optional
+from typing import Sequence
 from absl import app
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
@@ -35,6 +36,7 @@ import jax
 import numpy as np
 import orbax.checkpoint
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
+import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
 import checkpointing
 import max_utils
@@ -46,11 +48,15 @@ import pyconfig
 import pathwaysutils  # pylint: disable=unused-import
 import tensorflow as tf
 
+from metric_logger import MetricLogger
+
 from vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
 from input_pipeline.input_pipeline_interface import create_data_iterator
 from layers import models
+
+from gcp_workload_monitor import GCPWorkloadMonitor
 
 import jax.numpy as jnp
 from jax import random
@@ -115,86 +121,13 @@ def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr, per_d
   metrics["scalar"].update({"learning/current_learning_rate": lr})
 
 
-_buffered_step = None
-_buffered_metrics = None
-
-
-def write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config, is_training=True):
-  """Entry point for all metrics writing in Train's Main.
-  TODO: would be better as a Class in the future (that initialized all state!)
-
-  To avoid introducing an unnecessary dependency, we "double buffer" -- we hold
-  onto the last metrics and step and only publish when we receive a new metrics and step.
-  The logic is that this ensures that Jax is able to queues train_steps and we
-  don't block when turning "lazy" Jax arrays into real Python numbers.
-  """
-  metrics_to_write, steps_to_write = None, None
-  if is_training:
-    global _buffered_step, _buffered_metrics
-    if _buffered_metrics is not None:
-      if _buffered_step is None:
-        raise ValueError(f"When writing metrics, {_buffered_step=} was none")
-      metrics_to_write = _buffered_metrics
-      steps_to_write = _buffered_step
-  else:
-    metrics_to_write = metrics
-    steps_to_write = step
-
-  if metrics_to_write:
-    write_metrics_to_tensorboard(writer, metrics_to_write, steps_to_write, config, is_training)
-
-    if config.metrics_file:
-      max_utils.write_metrics_locally(metrics_to_write, steps_to_write, config, local_metrics_file, is_training)
-
-    if config.gcs_metrics and jax.process_index() == 0:
-      running_gcs_metrics = max_utils.write_metrics_for_gcs(
-          metrics_to_write, steps_to_write, config, running_gcs_metrics, is_training
-      )
-
-  if is_training:
-    _buffered_step = step
-    _buffered_metrics = metrics
-
-
-def write_metrics_to_tensorboard(writer, metrics, step, config, is_training=True):
-  """Writes metrics to tensorboard"""
-  with jax.spmd_mode("allow_all"):
-    if jax.process_index() == 0:
-      for metric_name in metrics.get("scalar", []):
-        writer.add_scalar(metric_name, np.array(metrics["scalar"][metric_name]), step)
-      for metric_name in metrics.get("scalars", []):
-        writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
-
-    if is_training:
-      full_log = step % config.log_period == 0
-
-      max_logging.log(
-          f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
-          f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
-          f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
-          f"total_weights: {metrics['scalar']['learning/total_weights']}, "
-          f"loss: {metrics['scalar']['learning/loss']:.3f}"
-      )
-
-      if full_log and jax.process_index() == 0:
-        max_logging.log(f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'")
-        writer.flush()
-
-
-def clear_buffered_metrics():
-  global _buffered_step
-  global _buffered_metrics
-  _buffered_step = None
-  _buffered_metrics = None
-
-
 def save_checkpoint(
     checkpoint_manager,
     step,
     state,
     dataset_type="c4",
     data_iterator=None,
-    config: Optional[pyconfig.config] = None,
+    config=None,
 ) -> bool:
   """Wrapper for saving checkpoint."""
   if config and config.enable_checkpointing:
@@ -217,7 +150,13 @@ def save_checkpoint(
     chunk_byte_size = config.checkpoint_storage_target_data_file_size_bytes
   save_args = jax.tree.map(lambda _: orbax.checkpoint.SaveArgs(chunk_byte_size=chunk_byte_size), state)
 
-  if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
+  if isinstance(
+      checkpoint_manager,
+      (
+          emergency_checkpoint_manager.CheckpointManager,
+          emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
+      ),
+  ):
     return checkpoint_manager.save(
         step,
         args=orbax.checkpoint.args.PyTreeSave(item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size),
@@ -511,11 +450,9 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   else:
     if config.optimizer_memory_host_offload:
       cast_params = jax.device_put(state.params, max_utils.with_memory_kind(state_mesh_shardings.params, "device"))
-      cast_params = max_utils.cast_to_bf16(cast_params)
       state = state.replace(params=cast_params)
       if config.use_dpo:
         reference_params = jax.device_put(reference_params, max_utils.with_memory_kind(reference_params_sharding, "device"))
-        reference_params = max_utils.cast_to_bf16(reference_params)
         extra_dpo_args = [reference_params]
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
@@ -846,7 +783,6 @@ def train_loop(config, state=None):
     else:
       p_eval_step = None
 
-  local_metrics_file = open(config.metrics_file, "a", encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
 
   start_step = get_first_step(state)  # this is the start_step for training
@@ -859,6 +795,16 @@ def train_loop(config, state=None):
   example_batch = None
   last_step_completion = datetime.datetime.now()
 
+  performance_metric_queue = None
+  if config.report_heartbeat_metric_for_gcp_monitoring or config.report_performance_metric_for_gcp_monitoring:
+    gcp_workload_monitor = GCPWorkloadMonitor(config.run_name)
+    if config.report_heartbeat_metric_for_gcp_monitoring:
+      gcp_workload_monitor.start_heartbeat_reporting_thread(config.heartbeat_reporting_interval_in_seconds)
+    if config.report_performance_metric_for_gcp_monitoring:
+      performance_metric_queue = queue.Queue()
+      gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
+
+  metric_logger = MetricLogger(writer, config)
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step or prof.should_activate_periodic_profile(step):
       optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
@@ -875,11 +821,11 @@ def train_loop(config, state=None):
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, nextrng)
 
-    new_time = datetime.datetime.now()
-    record_scalar_metrics(
-        metrics, new_time - last_step_completion, per_device_tflops, learning_rate_schedule(step), per_device_tokens
-    )
-    last_step_completion = new_time
+    step_time_delta = datetime.datetime.now() - last_step_completion
+    last_step_completion = datetime.datetime.now()
+    record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
+    if performance_metric_queue:
+      performance_metric_queue.put(step_time_delta.total_seconds())
 
     if checkpoint_manager is not None:
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
@@ -891,7 +837,7 @@ def train_loop(config, state=None):
         checkpoint_manager.wait_until_finished()
         sys.exit()
 
-    write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config)
+    metric_logger.write_metrics(running_gcs_metrics, metrics, step)
 
     if config.dump_hlo and step == start_step:
       jax.block_until_ready(state)  # Ensure compilation has finished.
@@ -927,17 +873,16 @@ def train_loop(config, state=None):
         eval_dpo_reward_accuracy += float(eval_metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0))  # for dpo only
         max_logging.log(f"Completed eval step {eval_step_count}")
         eval_step_count += 1
-      eval_loss = (
-          cumulative_eval_metrics["scalar"]["eval/total_loss"]
-          / (cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS)
-          + cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
+      eval_loss = cumulative_eval_metrics["scalar"]["eval/total_loss"] / (
+          cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS
       )
       cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
+      cumulative_eval_metrics["scalar"]["eval/avg_moe_lb_loss"] = (
+          cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
+      )
       if config.use_dpo:
         cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = eval_dpo_reward_accuracy / eval_step_count
-      write_metrics(
-          writer, local_metrics_file, running_gcs_metrics, cumulative_eval_metrics, step, config, is_training=False
-      )
+      metric_logger.write_metrics(running_gcs_metrics, cumulative_eval_metrics, step, is_training=False)
       max_logging.log(
           f"average loss after {step=}: {eval_step_count=}, {eval_loss=},"
           f" total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}"
@@ -955,10 +900,9 @@ def train_loop(config, state=None):
 
   if checkpoint_manager is not None:
     checkpoint_manager.wait_until_finished()
-  write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config)  # final step metrics
+  metric_logger.write_metrics(running_gcs_metrics, metrics, config.steps - 1)  # final step metrics
   max_utils.close_summary_writer(writer)
   record_goodput(recorder, config, recorder.record_job_end_time if recorder else None)
-  clear_buffered_metrics()
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     # pytype: disable=attribute-error
     compiled = p_train_step.lower(state, example_batch, nextrng).compile()
@@ -981,8 +925,7 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-  pyconfig.initialize(argv)
-  config = pyconfig.config
+  config = pyconfig.initialize(argv)
   max_utils.print_system_information()
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
@@ -1000,9 +943,14 @@ def main(argv: Sequence[str]) -> None:
         monitoring_enabled=True,
         pathway_enabled=config.enable_pathways_goodput,
         include_badput_breakdown=True,
+        include_step_deviation=config.monitor_step_time_deviation,
+        step_deviation_interval_seconds=config.step_deviation_interval_seconds,
     )
     goodput_monitor.start_goodput_uploader()
     max_logging.log("Started Goodput upload to Tensorboard in the background!")
+    if config.monitor_step_time_deviation:
+      goodput_monitor.start_step_deviation_uploader()
+      max_logging.log("Started step time deviation upload to Tensorboard in the background!")
   debug_config = debug_configuration.DebugConfig(
       stack_trace_config=stack_trace_configuration.StackTraceConfig(
           collect_stack_trace=config.collect_stack_trace,

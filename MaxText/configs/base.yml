@@ -59,6 +59,7 @@ checkpoint_storage_use_zarr3: True
 
 reuse_example_batch: 0 # for testing TPU performance, this options repeated uses the same batch.
 
+
 metrics_file: "" # for testing, local file that stores scalar metrics. If empty, no metrics are written.
 # If true save metrics such as loss and TFLOPS to GCS in {base_output_directory}/{run_name}/metrics/
 gcs_metrics: False
@@ -120,6 +121,8 @@ logits_via_embedding: False
 normalize_embedding_logits: True  # whether to normlize pre-softmax logits if logits_via_embedding is true
 logits_dot_in_fp32: False  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
 cast_logits_to_fp32: True # whether to cast the logits to fp32. The higher precision is generally beneficial, but it can vary slightly.
+float32_qk_product: False # in dot_product attention, whether to cast to fp32 the inputs to qk product
+float32_logits: False # in dot_product attention, whether to cast to fp32 the inputs to softmax
 
 # mixture of experts (moe)
 num_experts: 1
@@ -128,6 +131,14 @@ megablox: True
 sparse_matmul: True
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
 load_balance_loss_weight: 0.01 # weight for the load balance loss
+
+# deepseek moe
+base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer (use base_mlp_dim if not DeepSeek style)
+first_num_dense_layers: 0 # number of initial dense layers in the model
+shared_experts: 1
+routed_scaling_factor: 1.0 # scaling factor for routing scores
+routed_score_func: "" # scoring function for routing
+routed_bias: False # a flag if a bias term is added for routing
 
 # pipeline parallelism
 # The number of decoder layers is equal to the product of num_stages, num_layers_per_pipeline_stage and num_pipeline_repeats.
@@ -146,6 +157,14 @@ num_pipeline_microbatches: -1
 pipeline_delay_activation_forwarding: False # This delays the activation forwarding one loop iteration simplifying XLA's task of overlapping since
 # the communication and compute in each iteration are now independent. However this comes at the cost of doubling the pipeline bubble,
 # and you must set the number of microbatches to at least 2 * num_stages (the minimum 2 * num_stages is set by default with this delay).
+
+pipeline_fsdp_ag_once: False # If set to true then all gather all of the weights over FSDP before the first pipeline iteration.
+# This is a memory/time tradeoff - we now have to store the FSDP gathered weights and gradients (typically in bf16), as opposed
+# to only one stage's worth, however we only execute one all-gather and reduce across per repeat, as opposed
+# to every microbatch. This is similar to zero-1 sharding, since we also don't need to all gather the FSDP weights in the backward pass.
+# An alternative to setting this to true may be to replace any FSDP with DP and use optimizer offloading if necessary.
+# A more optimal behavior is to all-gather at the start of each repeat, which would ideally get the best of both worlds -
+# a small amount of memory and time, however this has proven hard to implement in SPMD, see b/364386697 for more.
 
 # There are two loops for PP:
 #  1)  Outer loop over microbatches (pipeline iterations)
@@ -185,13 +204,19 @@ param_scan_axis: 1
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
-attention_type: 'global' # Supported attention_type: global, local_sliding
+attention_type: 'global' # Supported attention_type: global, local_sliding, mla
 sliding_window_size: 0
 attn_logits_soft_cap: 0.0
 final_logits_soft_cap: 0.0
 use_post_attn_norm: False
 use_post_ffw_norm: False
 
+# MLA parameters
+q_lora_rank: 0
+kv_lora_rank: 512
+qk_nope_head_dim: 128
+qk_rope_head_dim: 64
+v_head_dim: 128
 
 # Combine matmuls for QKV and MLP
 fused_qkv: False
@@ -228,49 +253,54 @@ jax_cache_dir: "~/jax_cache"
 hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
 
 # Parallelism
-mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'tensor_sequence', 'expert', 'autoregressive']
+mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_heads', ['tensor','sequence','tensor_sequence']],
-                      ['activation_kv_heads', ['tensor','sequence','tensor_sequence']],
+                      ['activation_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
+                      ['activation_kv_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
                       ['activation_length', ['sequence']],
                       ['activation_norm_length', ['tensor_sequence', 'sequence']],
-                      ['activation_embed', 'tensor'],
-                      ['activation_mlp', ['tensor', 'tensor_sequence']],
-                      ['activation_kv', ['tensor', 'tensor_sequence']],
+                      ['activation_embed', ['tensor', 'tensor_transpose']],
+                      ['activation_mlp', ['tensor', 'tensor_transpose', 'tensor_sequence']],
+                      ['activation_kv', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_prefill_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_kv_head_dim', ['tensor', 'tensor_sequence']],
-                      ['activation_vocab', ['tensor', 'sequence', 'tensor_sequence']],
-                      ['activation_vocab', 'tensor'],
+                      ['activation_kv_head_dim', ['tensor', 'tensor_transpose', 'tensor_sequence']],
+                      ['activation_vocab', ['tensor', 'tensor_transpose', 'sequence', 'tensor_sequence']],
+                      ['activation_vocab', ['tensor', 'tensor_transpose']],
                       ['activation_vocab', 'tensor_sequence'],
                       ['activation_vocab', 'sequence'],
                       ['activation_stage', 'stage'],
                       ['activation_exp', 'expert'],
                       ['mlp', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
-                      ['vocab', ['tensor', 'tensor_sequence', 'autoregressive']],
+                      ['vocab', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
+                      ['heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
+                      ['q_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
+                      ['kv_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
+                      ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'expert']],
+                      ['embed', ['fsdp', 'sequence', 'tensor_transpose', 'expert']],
                       ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'expert']],
                       ['embed', ['fsdp', 'sequence', 'expert']],
+                      ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose']],
+                      ['embed_no_exp', ['fsdp', 'sequence', 'tensor_transpose']],
                       ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence']],
                       ['embed_no_exp', ['fsdp', 'sequence']],
-                      ['norm', ['tensor', 'tensor_sequence']],
-                      ['q_heads', ['tensor', 'tensor_sequence', 'autoregressive']],
-                      ['heads', ['tensor', 'tensor_sequence', 'autoregressive']],
+                      ['norm', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['layers', 'stage'],
                       ['kv', []],
-                      ['kv_heads', ['tensor', 'tensor_sequence', 'autoregressive']],
                       ['kv_head_dim', []],
                       ['cache_batch_prefill', []],
                       ['cache_batch', []],
+                      ['cache_heads', ['autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['cache_heads', ['autoregressive', 'tensor', 'tensor_sequence']],
                       ['cache_kv', []],
                       ['cache_sequence', []],
                       ['exp', 'expert'],
                     ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
-data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'tensor_sequence', 'expert', 'autoregressive']]
+data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']]
 
 # sharding tolerance: float between 0.0 and 1.0 representing the allowed percentage of non-sharded parameters.
 sharding_tolerance: 0.02
@@ -284,6 +314,7 @@ dcn_fsdp_parallelism: 1
 dcn_fsdp_transpose_parallelism: 1
 dcn_sequence_parallelism: 1  # never recommended
 dcn_tensor_parallelism: 1 # never recommended
+dcn_tensor_transpose_parallelism: 1
 dcn_tensor_sequence_parallelism: 1 # never recommended
 dcn_pipeline_parallelism: 1
 dcn_expert_parallelism: 1
@@ -293,6 +324,7 @@ ici_fsdp_parallelism: -1 # recommended ICI axis to be auto-sharded
 ici_fsdp_transpose_parallelism: 1
 ici_sequence_parallelism: 1
 ici_tensor_parallelism: 1
+ici_tensor_transpose_parallelism: 1
 ici_tensor_sequence_parallelism: 1
 ici_autoregressive_parallelism: 1
 ici_pipeline_parallelism: 1
@@ -305,6 +337,7 @@ num_slices: -1
 # Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding
 tokenizer_path: "assets/tokenizer.llama2"
+tokenizer_type: "sentencepiece"
 tokenize_train_data: True  # False if the dataset is pre-tokenized
 tokenize_eval_data: True  # False if the dataset is pre-tokenized
 add_bos: True
@@ -435,9 +468,18 @@ use_iota_embed: False
 # use positional embedding
 use_untrainable_positional_embedding: False
 trainable_position_size: -1  # enable gpt3 position embedding with a positive trainable_position_size
-# Rope parameters
+# RoPE parameters
+rope_type: "default" # one of "default", "llama3.1" or "yarn"
 rope_min_timescale: 1
 rope_max_timescale: 10_000
+
+# yarn RoPE parameters
+original_seq_len: 4096
+rope_theta: 10000.0
+rope_factor: 40
+beta_fast: 32
+beta_slow: 1
+mscale: 1.0
 
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.
@@ -457,8 +499,17 @@ target_eval_loss: 0.  # early stop once reaching target eval_loss
 # Goodput parameters
 enable_goodput_recording: True
 monitor_goodput: True
-goodput_upload_interval_seconds: 60
+goodput_upload_interval_seconds: 30
 enable_pathways_goodput: False
+monitor_step_time_deviation: True
+step_deviation_interval_seconds: 30
+
+# GCP workload monitoring
+report_heartbeat_metric_for_gcp_monitoring: False
+heartbeat_reporting_interval_in_seconds: 5
+report_performance_metric_for_gcp_monitoring: False
+
+enable_tensorboard: True
 
 # Vertex AI Tensorboard Configurations - https://github.com/google/maxtext/tree/main/getting_started/Use_Vertex_AI_Tensorboard.md
 # Set to True for GCE, False if running via XPK
@@ -518,6 +569,8 @@ enable_single_controller: False
 custom_mesh: "" # Available options: ['hybrid_ring_64x4', 'hybrid_ring_32x8']
 # Split physical axes for https://jax.readthedocs.io/en/latest/_autosummary/jax.experimental.mesh_utils.create_device_mesh.html
 allow_split_physical_axes: False
+# Apply transformations to the mesh to optimize for TPU v6e
+optimize_mesh_for_tpu_v6e: False
 
 use_ragged_attention: False
 ragged_block_size: 256

@@ -52,11 +52,17 @@ def permute_to_match_maxtext_rope(arr):
   return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
 
 
+# Model params can be found in the config.json on HuggingFace of these models
+# num_layers -> num_hidden_layers
+# num_heads -> num_attention_heads
+# num_kv_heads -> num_key_value_heads
+# dims_per_head -> hidden_size / num_attention_heads
+# vocab -> vocab_size
 MODEL_PARAMS_DICT = {
-    "llama2-70b": {
-        "num_layers": 80,
-        "num_heads": 64,
-        "num_kv_heads": 8,
+    "llama2-7b": {
+        "num_layers": 32,
+        "num_heads": 32,
+        "num_kv_heads": 32,
         "dims_per_head": 128,
         "vocab": 32000,
     },
@@ -67,10 +73,10 @@ MODEL_PARAMS_DICT = {
         "dims_per_head": 128,
         "vocab": 32000,
     },
-    "llama2-7b": {
-        "num_layers": 32,
-        "num_heads": 32,
-        "num_kv_heads": 32,
+    "llama2-70b": {
+        "num_layers": 80,
+        "num_heads": 64,
+        "num_kv_heads": 8,
         "dims_per_head": 128,
         "vocab": 32000,
     },
@@ -88,9 +94,30 @@ MODEL_PARAMS_DICT = {
         "dims_per_head": 128,
         "vocab": 128256,
     },
-    "llama3-405b": {
+    "llama3.1-8b": {
+        "num_layers": 32,
+        "num_heads": 32,
+        "num_kv_heads": 8,
+        "dims_per_head": 128,
+        "vocab": 128256,
+    },
+    "llama3.1-70b": {
+        "num_layers": 80,
+        "num_heads": 64,
+        "num_kv_heads": 8,
+        "dims_per_head": 128,
+        "vocab": 128256,
+    },
+    "llama3.1-405b": {
         "num_layers": 126,
         "num_heads": 128,
+        "num_kv_heads": 8,
+        "dims_per_head": 128,
+        "vocab": 128256,
+    },
+    "llama3.3-70b": {
+        "num_layers": 80,
+        "num_heads": 64,
         "num_kv_heads": 8,
         "dims_per_head": 128,
         "vocab": 128256,
@@ -170,8 +197,8 @@ def convert(base_model_path, maxtext_model_path, model_size):
         },
     }
 
-  # llama3-405b kv weight is replicated within every two files.
-  wkv_step = 1 if model_size != "llama3-405b" else 2
+  # llama3.1-405b kv weight is replicated within every two files.
+  wkv_step = 1 if model_size != "llama3.1-405b" else 2
 
   for layer_idx in range(base_num_decoder_layers):
     print("layer idx: ", layer_idx)
