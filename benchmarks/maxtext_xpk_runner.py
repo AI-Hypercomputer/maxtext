@@ -394,7 +394,8 @@ def generate_xpk_workload_cmd(
   else:
     #docker_image_flag = f'--docker-image="{wl_config.base_docker_image}"'
     #docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-pp-remat-again"'
-    docker_image_flag = '--docker-image=gcr.io/tpu-prod-env-multipod/mattdavidow-pp-weight-spec-bi-2025-03-02'
+    #docker_image_flag = '--docker-image=gcr.io/tpu-prod-env-multipod/mattdavidow-pp-weight-spec-bi-2025-03-02'
+    docker_image_flag = '--docker-image=gcr.io/tpu-prod-env-multipod/mattdavidow-pp-weight-no-fsdp-bi-2025-03-02'
 
 
 
