@@ -1267,8 +1267,8 @@ deepseek_matt_a1 = _add_to_model_dictionary(
     tuning_params={
         "per_device_batch_size": 1,
         "max_target_length": 8192,
-        "ici_fsdp_parallelism": 16,
-        "ici_expert_parallelism": 16,
+        "ici_fsdp_parallelism": 64,
+        "ici_expert_parallelism": 4,
         "dcn_fsdp_parallelism": 2,
         "remat_policy": "custom",
         "decoder_layer_input": "offload",
@@ -1293,8 +1293,8 @@ deepseek_matt_a1 = _add_to_model_dictionary(
         "dtype": "bfloat16",
         "opt_type": "sgd",
         "weight_dtype": "bfloat16",
-        #"allow_split_physical_axes": True,
-        #"custom_mesh": "hybrid_ring_64x4",
+        "allow_split_physical_axes": True,
+        "custom_mesh": "hybrid_ring_64x4",
         "attention": "flash", #dot_product
         "sharding_tolerance": 1337, # This should never be more than 1
     },
