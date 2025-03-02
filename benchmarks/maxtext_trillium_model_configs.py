@@ -1257,7 +1257,7 @@ gemma2_27b_8192 = _add_to_model_dictionary(
   )
 )
 
-#docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-ds-mla-shard"'
+#docker_image_flag = '--docker-image=gcr.io/tpu-prod-env-multipod/mattdavidow-bin-2025-03-02'
 # commit e508839d1c878dc70d77c76709f7747ae443e2a3 (HEAD -> mattdavidow-run-deepseek, origin/mattdavidow-run-deepseek)
 deepseek_matt_a1 = _add_to_model_dictionary(
   trillium_model_dict,
@@ -1265,7 +1265,7 @@ deepseek_matt_a1 = _add_to_model_dictionary(
     model_name="deepseek_a1",
     model_type="deepseek3-671b",
     tuning_params={
-        "per_device_batch_size": 16,
+        "per_device_batch_size": 8,
         "max_target_length": 1024,
         "ici_fsdp_parallelism": 64,
         "ici_expert_parallelism": 4,
@@ -1295,7 +1295,7 @@ deepseek_matt_a1 = _add_to_model_dictionary(
         "weight_dtype": "bfloat16",
         "allow_split_physical_axes": True,
         "custom_mesh": "hybrid_ring_64x4",
-        "attention": "dot_product",
+        "attention": "flash", #dot_product
         "sharding_tolerance": 1337, # This should never be more than 1
     },
     xla_flags=(

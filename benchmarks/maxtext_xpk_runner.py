@@ -395,7 +395,9 @@ def generate_xpk_workload_cmd(
     #docker_image_flag = f'--docker-image="{wl_config.base_docker_image}"'
     #docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ds_a1_2_28"'
     #docker_image_flag = f'--base-docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ds_a1_2_28"'
-    docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-ds-mla-shard"'
+    #docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-ds-mla-shard"'
+    #docker_image_flag = '--base-docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_nightly_dependencies:2025-03-02"'
+    docker_image_flag = '--docker-image=gcr.io/tpu-prod-env-multipod/mattdavidow-bin-2025-03-02'
 
   print(f'User command: {user_command}')
   return (
