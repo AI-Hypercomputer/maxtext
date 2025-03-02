@@ -410,7 +410,7 @@ def generate_xpk_workload_cmd(
           f' --num-slices={wl_config.num_slices}'
           f' --command="{user_command}"'
           f' {docker_image_flag}'
-          #' --enable-debug-logs'
+          ' --enable-debug-logs'
           f' --workload={name}'
           f' --priority={wl_config.priority}'
           f' --max-restarts={wl_config.max_restarts}'

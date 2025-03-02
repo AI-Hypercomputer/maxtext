@@ -1665,8 +1665,8 @@ deepseek_big = _add_to_model_dictionary(
   )
 )
 
-#docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-pp-remat-again"'
-#commit 083a2aee891ae4ef99b4bb8746110b0809886b36 (HEAD -> mattdavidow-pp-100k, origin/mattdavidow-pp-100k)
+#docker_image_flag = '--docker-image=gcr.io/tpu-prod-env-multipod/mattdavidow-pp-weight-spec-bi-2025-03-02'
+#commit 83bb73b713ddff479b4bbada8e4d5ce020ad5827 (HEAD -> mattdavidow-pp-weight-specs, origin/mattdavidow-pp-weight-specs)
 mattbar_a1 = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
@@ -1710,10 +1710,11 @@ mattbar_a1 = _add_to_model_dictionary(
         "dcn_pipeline_parallelism": 2,
         "pipeline_fsdp_ag_once": True,
         "num_pipeline_microbatches": 4, # PP * 2
-        "num_layers_per_pipeline_stage": 2,
+        "num_layers_per_pipeline_stage": 1,
         "scan_layers": False,
         "skip_first_n_steps_for_profiler": 14,
-        "dump_hlo": True
+        "dump_hlo": True,
+        "pipeline_weights_sharding_constraint": True
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -1722,6 +1723,7 @@ mattbar_a1 = _add_to_model_dictionary(
         #+ xla_flags_library.BLAKE_CM # performs poorly =(
         + xla_flags_library.PIPELINING_FLAGS
         + xla_flags_library.PP_MORE_FLAGS
+        + xla_flags_library.DISABLE_CM
     ),
   )
 )

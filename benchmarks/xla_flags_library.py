@@ -69,6 +69,14 @@ BLAKE_CM = (
   " --xla_tpu_decompose_einsum_reduce_scatter"
 )
 
+DISABLE_CM = (
+" --xla_jf_spmd_threshold_for_windowed_einsum_mib=1000000"
+" --xla_tpu_enable_windowed_einsum_for_all_gather=false" # disables AG CMV1
+" --xla_tpu_enable_windowed_einsum_for_reduce_scatter=false" # disables RS CMV1
+" --xla_tpu_decompose_all_gather_einsum=false" # disables AG CMV2
+" --xla_tpu_decompose_einsum_reduce_scatter=false" # disables AG CMV2
+)
+
 # Base Flags needed when enabling sparsecore offloading
 ENABLE_SPARSECORE_OFFLOADING_BASE_FLAGS = (
     " --xla_tpu_use_tc_device_shape_on_sc=true"

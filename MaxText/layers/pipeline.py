@@ -390,7 +390,10 @@ class Pipeline(nn.Module):
     )  # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
     weights = gather_weights_for_stages_in(weights, partition_spec=partition_spec)
     if self.config.pipeline_weights_sharding_constraint:
-      weights = nn.with_logical_constraint(weights, partition_spec, rules=self.config.logical_axis_rules, mesh=self.mesh)
+      physical = nn.logical_to_mesh_sharding(partition_spec, mesh=self.mesh, rules=self.config.logical_axis_rules)
+      physical_no_fsdp = self.remove_fsdp_sharding(physical)
+      weights = jax.lax.with_sharding_constraint(weights, physical_no_fsdp)
+      #weights = nn.with_logical_constraint(weights, partition_spec, rules=self.config.logical_axis_rules, mesh=self.mesh)
     return weights
 
   def get_vmap_func_for_init(self):
@@ -480,7 +483,10 @@ class Pipeline(nn.Module):
         )  # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
         weights = gather_weights_for_stages_in(weights)
         if self.config.pipeline_weights_sharding_constraint:
-          weights = nn.with_logical_constraint(weights, partition_spec, rules=self.config.logical_axis_rules, mesh=self.mesh)
+          physical = nn.logical_to_mesh_sharding(partition_spec, mesh=self.mesh, rules=self.config.logical_axis_rules)
+          physical_no_fsdp = self.remove_fsdp_sharding(physical)
+          weights = jax.lax.with_sharding_constraint(weights, physical_no_fsdp)
+          #weights = nn.with_logical_constraint(weights, partition_spec, rules=self.config.logical_axis_rules, mesh=self.mesh)
         return weights
 
       prepare_vars_for_main_vmap_partial = functools.partial(prepare_vars_for_main_vmap, partition_spec=partition_spec)
@@ -535,13 +541,8 @@ class Pipeline(nn.Module):
     partition_spec["params"] = partition_spec_with_extra_layer["params"]["layers"]
     return partition_spec
 
-  def get_physical_spec_no_fsdp(self, full_logical):
-    # Inputs: original logical partition specs of all weights
-    # Outputs: Modified physical spec with "fsdp" and "fsdp_transpose" removed
-    # We may want to remove the expert sharding on attention weights as well, since
-    # those act like FSDP
-    def remove_fsdp_sharding(sharding_tree):
-      def _remove_fsdp_from_partition_spec(named_sharding):
+  def remove_fsdp_sharding(self, sharding_tree):
+    def _remove_fsdp_from_partition_spec(named_sharding):
         if isinstance(named_sharding, jax.sharding.NamedSharding):
           new_spec = []
           for axis in named_sharding.spec:
@@ -559,11 +560,17 @@ class Pipeline(nn.Module):
               raise ValueError(f"Unsupported axis type: {type(axis)}")
           return jax.sharding.NamedSharding(named_sharding.mesh, jax.sharding.PartitionSpec(*new_spec))
         return named_sharding
+    return jax.tree.map(_remove_fsdp_from_partition_spec, sharding_tree)
 
-      return jax.tree.map(_remove_fsdp_from_partition_spec, sharding_tree)
+  def get_physical_spec_no_fsdp(self, full_logical):
+    # Inputs: original logical partition specs of all weights
+    # Outputs: Modified physical spec with "fsdp" and "fsdp_transpose" removed
+    # We may want to remove the expert sharding on attention weights as well, since
+    # those act like FSDP
+
 
     physical = nn.logical_to_mesh_sharding(full_logical, mesh=self.mesh, rules=self.config.logical_axis_rules)
-    physical_no_fsdp = remove_fsdp_sharding(physical)
+    physical_no_fsdp = self.remove_fsdp_sharding(physical)
     return physical_no_fsdp
 
   def all_gather_over_fsdp(self, sharding_info):
