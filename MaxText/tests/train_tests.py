@@ -191,6 +191,7 @@ class TrainTests(unittest.TestCase):
   
   @pytest.mark.gpu_only
   def test_gpu_context_parallelism(self):
+    os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention for better performance
     context_parallel = [  # tests base config on GPU with context parallelism and flash attention"""
         None,
         "configs/base.yml",
@@ -202,6 +203,8 @@ class TrainTests(unittest.TestCase):
         "attention=cudnn_flash_te",
         "ici_fsdp_parallelism=2",
         "ici_context_parallelism=2",
+        "context_parallel_load_balance=True",
+        "enable_packing=False",
         r"tokenizer_path=../assets/tokenizer.llama2",
     ]
     train_main(context_parallel)
