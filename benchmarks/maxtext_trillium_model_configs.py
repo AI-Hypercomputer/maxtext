@@ -1674,7 +1674,7 @@ mattbar_a1 = _add_to_model_dictionary(
     model_type="default",
     tuning_params={
         "per_device_batch_size": 0.125,
-        "max_target_length": 2048,
+        "max_target_length": 8192,
         "ici_fsdp_parallelism": 16,
         "ici_tensor_parallelism": 16,
         "dcn_fsdp_parallelism": 1,
