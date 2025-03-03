@@ -134,6 +134,7 @@ def make_grain_train_iterator(
       tokenize=config.tokenize_train_data,
       add_bos=config.add_bos,
       add_eos=config.add_eos,
+      packing=config.enable_packing,
       use_dpo=config.use_dpo,
   )
   return train_iter
@@ -161,6 +162,7 @@ def make_grain_eval_iterator(
       tokenize=config.tokenize_eval_data,
       add_bos=config.add_bos,
       add_eos=config.add_eos,
+      packing=config.enable_packing,
       use_dpo=config.use_dpo,
   )
   return eval_iter

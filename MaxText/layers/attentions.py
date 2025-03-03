@@ -477,7 +477,7 @@ class AttentionOp(nn.Module):
         scale_factor=1.0 / math.sqrt(head_dim),
         transpose_batch_sequence=False,
         window_size=sliding_window_size,
-        context_parallel_causal_load_balanced=True,
+        context_parallel_causal_load_balanced=self.config.context_parallel_load_balance,
         context_parallel_axis='context',
     )
     return dpa_layer(query, key, value, mask=attn_mask)

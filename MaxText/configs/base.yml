@@ -262,7 +262,7 @@ logical_axis_rules: [
                       ['activation_kv_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
                       ['activation_length', ['context']],
                       ['activation_length', ['sequence']],
-                      ['activation_norm_length', ['tensor_sequence', 'sequence']],
+                      ['activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
                       ['activation_embed', ['tensor', 'tensor_transpose']],
                       ['activation_mlp', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_kv', ['tensor', 'tensor_transpose', 'tensor_sequence']],
@@ -593,3 +593,9 @@ sa_use_fused_bwd_kernel: False
 sa_q_layout: "HEAD_DIM_MINOR"
 sa_k_layout: "HEAD_DIM_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"
+
+### Determine if we want to use load balance for context parallelism
+context_parallel_load_balance: True
+
+# Whether to enable sequence packing during data processing
+enable_packing: True
