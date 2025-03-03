@@ -95,7 +95,8 @@ if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
         export BASEIMAGE=ghcr.io/nvidia/jax:base-2024-12-04
       else
         # export BASEIMAGE=ghcr.io/nvidia/jax:base
-        export BASEIMAGE=ghcr.io/nvidia/jax:maxtext-2025-02-12
+        # export BASEIMAGE=ghcr.io/nvidia/jax:maxtext-2025-02-20
+        export BASEIMAGE=$LOCAL_IMAGE_NAME
       fi
       docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg DEVICE=$DEVICE --build-arg BASEIMAGE=$BASEIMAGE -f ./maxtext_gpu_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
     fi
