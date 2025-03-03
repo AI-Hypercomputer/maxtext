@@ -613,6 +613,7 @@ def setup_mesh_and_model(config):
         config.enable_checkpointing,
         config.async_checkpointing,
         config.checkpoint_period,
+        config.num_checkpoints_to_keep,
         config.dataset_type,
         logger,
         use_ocdbt,
