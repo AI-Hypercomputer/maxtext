@@ -34,7 +34,7 @@ export JAX_PGLE_PROFILING_RUNS=3
 # JAX_PGLE_AGGREGATION_PERCENTILE=$JAX_PGLE_AGGREGATION_PERCENTILE
 # JAX_SHARE_AUTOTUNE_CONFIG_BETWEEN_HOSTS=$JAX_SHARE_AUTOTUNE_CONFIG_BETWEEN_HOSTS
 # JAX_PGLE_PROFILING_RUNS=$JAX_PGLE_PROFILING_RUNS
-# TF_CPP_VMODULE=profile_guided_latency_estimator=10
+#
 # XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
 # CUDA_DEVICE_MAX_CONNECTIONS=1
 
@@ -42,9 +42,10 @@ export JAX_PGLE_PROFILING_RUNS=3
 
 cat <<EOF > env.txt
 
-# NCCL_DEBUG=INFO
-# NCCL_DEBUG_SUBSYS=INIT,NET,ENV,TUNING,COLL
-# NCCL_DEBUG_FILE=/var/log/yy/nccl_log.%h.%p
+TF_CPP_VMODULE=gpu_executable=8,nccl_collectives=8,nccl_all_gather_thunk=8,nccl_all_reduce_thunk=8,nccl_all_to_all_thunk=8,nccl_api=8,nccl_api_stub=8,nccl_clique=8,nccl_collective_broadcast_thunk=8,nccl_collective_permute_thunk=8,nccl_collective_thunk=8,nccl_group_thunk=8,nccl_p2p_thunk_common=8,nccl_recv_thunk=8,nccl_send_thunk=8
+NCCL_DEBUG=INFO
+NCCL_DEBUG_SUBSYS=INIT,NET,ENV,TUNING,COLL
+NCCL_DEBUG_FILE=/var/log/yy/nccl_log.%h.%p
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.92
 NCCL_SHIMNET_GUEST_CONFIG_CHECKER_CONFIG_FILE=/usr/local/nvidia/lib64/a3plus_guest_config.textproto
 NCCL_FASTRAK_PLUGIN_ACCEPT_TIMEOUT_MS=600000
@@ -108,6 +109,12 @@ EOF
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1119-dev-rebased # pgle has issue
 
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1124 # still flash attention not working
+
+
+
+# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1124-tp-fix2 # with fix2
+export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-1124-tp-fix2-mantaray-te2
+
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-0106-pinned
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-0206-nightly
 # export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/maxtext_gpu_jax_pinned
@@ -126,11 +133,13 @@ EOF
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-nv-0212:latest # This version has fix 1 and 2
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-nv-0212-no-fix # This version reverts all the fix
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-0201-stable-stack
-export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-0215-stable-stack
+# export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-0215-stable-stack
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-nv-0212-no-local-maxtext
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-nv-1204-no-local-maxtext # No PTX compiliation provider is available
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-nv-0110-no-local-maxtext # No PTX
-gcr.io/supercomputer-testing/lance-nv-0110-jsts
+# export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-nv-0220-nosetup
+# export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-nv-0220-original-script
+# export LOCAL_IMAGE_NAME=us-central1-docker.pkg.dev/supercomputer-testing/yangyuwei-maxtext/maxtext-stable:latest
 
 call_config() {
 
@@ -192,9 +201,9 @@ call_config() {
 # submit 126
 
 # Test run with 2 nodes, cuda kernel fails
-export NODES=16
-# call_config --NUM_LAYERS 126  --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 1 --T_SEQ 1 --ICI_TP 8 --ICI_FSDP 1 --DCN_FSDP $NODES --DCN_PP 1 --REMAT_POLICY full --ATTENTION cudnn_flash_te --NUM_LAYERS_PER_PP_STAGE 0
-call_config --NUM_LAYERS 126  --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 1 --T_SEQ 1 --ICI_TP 1 --ICI_FSDP 8 --DCN_FSDP $NODES --DCN_PP 1 --REMAT_POLICY save_qkv_proj --ATTENTION cudnn_flash_te --NUM_LAYERS_PER_PP_STAGE 0
+export NODES=128
+call_config --NUM_LAYERS 126  --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 1 --T_SEQ 1 --ICI_TP 8 --ICI_FSDP 1 --DCN_FSDP $NODES --DCN_PP 1 --REMAT_POLICY save_qkv_proj --ATTENTION cudnn_flash_te --NUM_LAYERS_PER_PP_STAGE 0
+# call_config --NUM_LAYERS 126  --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 1 --T_SEQ 1 --ICI_TP 1 --ICI_FSDP 8 --DCN_FSDP $NODES --DCN_PP 1 --REMAT_POLICY save_qkv_proj --ATTENTION cudnn_flash_te --NUM_LAYERS_PER_PP_STAGE 0
 
 
 # call_config --NUM_LAYERS 126  --NUM_NODES 2 --PER_DEVICE_BATCH_SIZE 1 --T_SEQ 8 --ICI_TP 1 --ICI_FSDP 1 --DCN_FSDP 2 --DCN_PP 1 --REMAT_POLICY save_qkv_proj --ATTENTION cudnn_flash_te --NUM_LAYERS_PER_PP_STAGE 0
