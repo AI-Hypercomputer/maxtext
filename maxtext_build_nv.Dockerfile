@@ -35,11 +35,11 @@ WORKDIR /deps
 # # Copy all files except assets from local workspace into docker container
 # COPY --exclude=assets --exclude=MaxText/test_assets . .
 
-COPY setup_nv_additional.sh ./
-COPY requirements_maxtext_nv_image.txt ./
-RUN echo "Running command: bash setup_stable_stack_additional.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE}"
-RUN --mount=type=cache,target=/root/.cache/pip bash setup_nv_additional.sh
+# COPY setup_nv_additional.sh ./
+# COPY requirements_maxtext_nv_image.txt ./
+# RUN echo "Running command: bash setup_stable_stack_additional.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE}"
+# RUN --mount=type=cache,target=/root/.cache/pip bash setup_nv_additional.sh
 
-# COPY . .
+# # COPY . .
 
-WORKDIR /deps
+# WORKDIR /deps
