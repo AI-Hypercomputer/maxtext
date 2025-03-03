@@ -526,12 +526,12 @@ def main() -> int:
     #model_configs.deepseek_v5p_dp_a1,
     # model_configs.default_128
     # model_configs.llama3_1_405b_8192_fsdp_dcn_matt
-    #model_configs.llama3_1_405b_8192_explicit_matt_pp,
+    model_configs.llama3_1_405b_8192_explicit_matt_pp,
     #model_configs.llama3_1_405b_8192_explicit_matt_pp_overlapped
     #model_configs.matt_simple
     #model_configs.deepseek_big_experimental
     #model_configs.deepseek_big
-    model_configs.mattbar_a1
+    #model_configs.mattbar_a1
   ]
 
   # Loop possibilities:
@@ -573,7 +573,7 @@ def main() -> int:
             num_slices=num_slices,
             device_type=cluster_config.device_type,
             base_output_directory=base_output_dir,
-            priority="medium",
+            priority="low",
             max_restarts=0,
             libtpu_type=libtpu_type,
             libtpu_nightly_version="",

@@ -1338,76 +1338,21 @@ llama3_1_405b_8192_explicit_matt = _add_to_model_dictionary(
   )
 )
 
-# 40GB OOM https://cloudlogging.app.goo.gl/4xYbHKv18uubzjNa9
+# docker_image_flag = '--docker-image=gcr.io/tpu-prod-env-multipod/mattdavidow-pp-weight-no-fsdp-bi-2025-03-02'
+# commit 80e2da792686d9ba36691d0a71979f48e35a16a0 (HEAD -> mattdavidow-pp-weight-specs, origin/mattdavidow-pp-weight-specs)
 llama3_1_405b_8192_explicit_matt_pp = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
     model_name="llama3-1-405b-explicit",
     model_type="default",
     tuning_params={
-        "per_device_batch_size": 0.25,
-        "ici_fsdp_parallelism": 32,
-        "ici_tensor_parallelism": 8,
-        "dcn_pipeline_parallelism": 2,
-        "base_emb_dim": 16384,
-        "base_num_query_heads": 128,
-        "base_num_kv_heads": 8,
-        "base_num_decoder_layers": 12,
-        "base_mlp_dim": 53248,
-        "head_dim": 128,
-        "vocab_size": 128256,
-        "enable_dropout": False,
-        "logits_via_embedding": False,
-        "normalization_layer_epsilon": 1.0e-5,
-        "rope_max_timescale": 500_000,
-        "allow_split_physical_axes": True,
-        "custom_mesh": "hybrid_ring_32x8",
-        "remat_policy": "full",
-        # "decoder_layer_input": "offload",
-        # "query_proj": "offload",
-        # "key_proj": "offload",
-        # "value_proj": "offload",
-        # "out_proj": "offload",
-        "max_target_length": 8192,
-        "attention": "flash",
-        "gcs_metrics": True,
-        "use_iota_embed": True,
-        "dataset_path": "gs://max-datasets-rogue",
-        "dataset_type": "synthetic",
-        "reuse_example_batch": 1,
-        "enable_checkpointing": False,
-        "profiler": "xplane",
-        "sa_block_q": 1024,
-        "sa_block_q_dkv": 2048,
-        "sa_block_q_dq": 2048,
-        "pipeline_fsdp_ag_once": True,
-        "num_pipeline_microbatches": 4,
-        "num_layers_per_pipeline_stage": 2,
-        "scan_layers": False
-    },
-    xla_flags=(
-        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.CF_FOR_ALL_GATHER
-        + xla_flags_library.HOST_OFFLOAD_FLAGS
-    ),
-  )
-)
-
-# 40GB OOM https://cloudlogging.app.goo.gl/4xYbHKv18uubzjNa9
-llama3_1_405b_8192_explicit_matt_pp = _add_to_model_dictionary(
-  trillium_model_dict,
-  MaxTextModel(
-    model_name="llama3-1-405b-explicit",
-    model_type="default",
-    tuning_params={
-        "per_device_batch_size": 1.0,
+        "per_device_batch_size": 0.5,
+        "max_target_length": 2048,
         "ici_fsdp_parallelism": 64,
         "ici_tensor_parallelism": 4,
-        "dcn_pipeline_parallelism": 21,
         "base_emb_dim": 16384,
         "base_num_query_heads": 128,
-        "base_num_kv_heads": 8,
-        "base_num_decoder_layers": 63, # 6 * PP
+        "base_num_kv_heads": 8,      
         "base_mlp_dim": 53248,
         "head_dim": 128,
         "vocab_size": 128256,
@@ -1423,7 +1368,6 @@ llama3_1_405b_8192_explicit_matt_pp = _add_to_model_dictionary(
         # "key_proj": "offload",
         # "value_proj": "offload",
         # "out_proj": "offload",
-        "max_target_length": 2048,
         "attention": "flash",
         "gcs_metrics": True,
         "use_iota_embed": True,
@@ -1436,8 +1380,10 @@ llama3_1_405b_8192_explicit_matt_pp = _add_to_model_dictionary(
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
         "pipeline_fsdp_ag_once": True,
-        "num_pipeline_microbatches": 84, # PP * 2
-        "num_layers_per_pipeline_stage": 3,
+        "dcn_pipeline_parallelism": 21, # PP
+        "num_pipeline_microbatches": 42, # PP * 2
+        "base_num_decoder_layers": 126, # 6 * PP
+        "num_layers_per_pipeline_stage": 2,
         "scan_layers": False,
         "opt_type": "sgd",
         "weight_dtype": "float32",
@@ -1624,8 +1570,8 @@ deepseek_big = _add_to_model_dictionary(
     model_type="default",
     tuning_params={
         "steps": 20,
-        "per_device_batch_size": 1,
-        "max_target_length": 512,
+        "per_device_batch_size": 2,
+        "max_target_length": 2048,
         "enable_checkpointing": False,
         "dataset_type": "synthetic",
         "base_output_directory": "gs://maxtext-experiments-multipod",
@@ -1647,12 +1593,11 @@ deepseek_big = _add_to_model_dictionary(
         "opt_type": "sgd",
         "weight_dtype": "bfloat16",
         "remat_policy": "full",
-        "base_num_decoder_layers": 16, # PP * 8
-        "dcn_pipeline_parallelism": 2,
-        "num_pipeline_microbatches": 2, # PP * 2 or since we are sad PP * 1
+        "base_num_decoder_layers": 64, # PP * 8
+        "dcn_pipeline_parallelism": 8,
+        "num_pipeline_microbatches": 16, # PP * 2 or since we are sad PP * 1
         "num_layers_per_pipeline_stage": 2,
         "scan_layers": False,
-        "dump_hlo": True
     },
     xla_flags=(
         xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(81920)
@@ -1666,7 +1611,7 @@ deepseek_big = _add_to_model_dictionary(
 )
 
 #docker_image_flag = '--docker-image=gcr.io/tpu-prod-env-multipod/mattdavidow-pp-weight-no-fsdp-bi-2025-03-02'
-#commit 7adbc2194039ab4134a135bf5cbbd24246ffaaa5 (HEAD -> mattdavidow-pp-weight-specs, origin/mattdavidow-pp-weight-specs)
+#commit 80e2da792686d9ba36691d0a71979f48e35a16a0 (HEAD -> mattdavidow-pp-weight-specs, origin/mattdavidow-pp-weight-specs)
 mattbar_a1 = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
@@ -1706,15 +1651,16 @@ mattbar_a1 = _add_to_model_dictionary(
         "sa_block_q": 1024,
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
-        "base_num_decoder_layers": 16, #PP * 8
-        "dcn_pipeline_parallelism": 2,
+        "base_num_decoder_layers": 128, #PP * 8
+        "dcn_pipeline_parallelism": 16, # PP
         "pipeline_fsdp_ag_once": True,
-        "num_pipeline_microbatches": 4, # PP * 2
+        "num_pipeline_microbatches": 32, # PP * 2
         "num_layers_per_pipeline_stage": 2,
         "scan_layers": False,
         "skip_first_n_steps_for_profiler": 14,
         "dump_hlo": True,
-        "pipeline_weights_sharding_constraint": True
+        "pipeline_weights_sharding_constraint": True,
+        "pipeline_fsdp_ag_once": True
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
