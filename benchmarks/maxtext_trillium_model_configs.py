@@ -1190,7 +1190,7 @@ mixtral_8x22b_dropped_half = _add_to_model_dictionary(
   )
 )
 
-
+# commit 9fed647fc63b05952a2e19d3fc06d5b31f40b1bf (HEAD -> mattdavidow-xprof-cases, origin/mattdavidow-xprof-cases)
 # docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-pp-remat-again"'
 mixtral_8x22b_dropped_matt_fsdp_pdb_1 = _add_to_model_dictionary(
   trillium_model_dict,
@@ -1199,6 +1199,53 @@ mixtral_8x22b_dropped_matt_fsdp_pdb_1 = _add_to_model_dictionary(
     model_type="mixtral-8x22b",
     tuning_params={
         "per_device_batch_size": 1,
+        "max_target_length": 4096,
+        "ici_fsdp_parallelism": 256,
+        #"ici_expert_parallelism": 4,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "out_proj": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+        "megablox": False,
+        "sparse_matmul": False,
+        "capacity_factor": 1.25,
+        "tokenizer_path": "assets/tokenizer.mistral-v3",
+        "dtype": "bfloat16",
+        "weight_dtype": "bfloat16",
+        "dump_hlo": True
+        #"allow_split_physical_axes": True,
+        #"custom_mesh": "hybrid_ring_64x4",
+    },
+    xla_flags=(
+        xla_flags_library.MOE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+    ),
+  )
+)
+
+# commit 9fed647fc63b05952a2e19d3fc06d5b31f40b1bf (HEAD -> mattdavidow-xprof-cases, origin/mattdavidow-xprof-cases)
+# docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-pp-remat-again"'
+mixtral_8x22b_dropped_matt_fsdp_pdb_8 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="mixtral_8x22b_dropped",
+    model_type="mixtral-8x22b",
+    tuning_params={
+        "per_device_batch_size": 8,
         "max_target_length": 4096,
         "ici_fsdp_parallelism": 256,
         #"ici_expert_parallelism": 4,
