@@ -1191,13 +1191,14 @@ mixtral_8x22b_dropped_half = _add_to_model_dictionary(
 )
 
 
-mixtral_8x22b_dropped_matt_fsdp = _add_to_model_dictionary(
+# docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-pp-remat-again"'
+mixtral_8x22b_dropped_matt_fsdp_pdb_1 = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
     model_name="mixtral_8x22b_dropped",
     model_type="mixtral-8x22b",
     tuning_params={
-        "per_device_batch_size": 2,
+        "per_device_batch_size": 1,
         "max_target_length": 4096,
         "ici_fsdp_parallelism": 256,
         #"ici_expert_parallelism": 4,
@@ -1224,6 +1225,7 @@ mixtral_8x22b_dropped_matt_fsdp = _add_to_model_dictionary(
         "tokenizer_path": "assets/tokenizer.mistral-v3",
         "dtype": "bfloat16",
         "weight_dtype": "bfloat16",
+        "dump_hlo": True
         #"allow_split_physical_axes": True,
         #"custom_mesh": "hybrid_ring_64x4",
     },

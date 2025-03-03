@@ -531,8 +531,9 @@ def main() -> int:
     #model_configs.llama_oom
     #model_configs.llama_matt_improvement,
     #model_configs.llama_seq_small
-    model_configs.mixtral_8x22b_dropped_half,
+    #model_configs.mixtral_8x22b_dropped_half,
     #model_configs.mixtral_8x22b_dropped_matt_fsdp,
+    model_configs.mixtral_8x22b_dropped_matt_fsdp_pdb_1
   ]
 
   # Loop possibilities:
