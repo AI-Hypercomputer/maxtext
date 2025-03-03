@@ -188,7 +188,7 @@ class TrainTests(unittest.TestCase):
         r"tokenizer_path=../assets/tokenizer.llama2",
     ]
     train_main(cudnn_flash_te)
-  
+
   @pytest.mark.gpu_only
   def test_gpu_context_parallelism(self):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention for better performance
@@ -208,6 +208,7 @@ class TrainTests(unittest.TestCase):
         r"tokenizer_path=../assets/tokenizer.llama2",
     ]
     train_main(context_parallel)
+
 
 if __name__ == "__main__":
   absltest.main()

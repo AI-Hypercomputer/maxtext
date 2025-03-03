@@ -260,7 +260,7 @@ def preprocess_train_dataset(
   train_ds = reduce_concat_tokens(train_ds, feature_key="targets", batch_size=4096)
   train_ds = split_tokens_to_targets_length(train_ds, max_target_length)
   train_ds = train_ds.shuffle(shuffle_buffer_size, seed=data_shuffle_seed)
-  
+
   if enable_packing:
     train_ds = sequence_packing.pack_dataset(train_ds, max_target_length)
   else:

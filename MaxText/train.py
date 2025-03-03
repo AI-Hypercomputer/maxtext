@@ -113,6 +113,7 @@ def validate_train_config(config):
         "Context parallelism with packing support will be added soon."
     )
 
+
 def get_first_step(state):
   with jax.spmd_mode("allow_all"):
     return int(state.step)

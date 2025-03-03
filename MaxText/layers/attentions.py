@@ -453,11 +453,11 @@ class AttentionOp(nn.Module):
 
     sliding_window_size = self.sliding_window_size
     if self.attention_type == AttentionType.LOCAL_SLIDING:
-      sliding_window_size = [self.sliding_window_size, 0]    
-    
+      sliding_window_size = [self.sliding_window_size, 0]
+
     if self.attention_type == AttentionType.LOCAL_SLIDING or using_context_parallelism:
       mask_type = "causal"  # SWA and Context Parallelism only work with causal masking
-      attn_mask = None      
+      attn_mask = None
     else:
       # generate attn_mask
       mask_type = "padding_causal"  # only padding_causal mask type can take a created mask
@@ -478,7 +478,7 @@ class AttentionOp(nn.Module):
         transpose_batch_sequence=False,
         window_size=sliding_window_size,
         context_parallel_causal_load_balanced=self.config.context_parallel_load_balance,
-        context_parallel_axis='context',
+        context_parallel_axis="context",
     )
     return dpa_layer(query, key, value, mask=attn_mask)
 
