@@ -38,14 +38,14 @@ from tqdm import tqdm
 from absl import app
 import numpy as np
 import pyconfig
-import max_utils
+from MaxText import max_utils
 from jax.sharding import Mesh
 import max_logging
 import checkpointing
 from generate_param_only_checkpoint import _read_train_checkpoint
 import llama_or_mistral_ckpt
 from transformers import LlamaForCausalLM, MistralForCausalLM, AutoModelForCausalLM, AutoConfig
-from max_utils import unpermute_from_match_maxtext_rope
+from MaxText.max_utils import unpermute_from_match_maxtext_rope
 
 
 def reverse_scale(arr, scale):

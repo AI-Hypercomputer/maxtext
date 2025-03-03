@@ -24,6 +24,7 @@ from jax import numpy as jnp
 import numpy as np
 import unittest
 import pyconfig
+from MaxText.maxengine import MaxEngine
 import max_utils
 from maxengine import MaxEngine
 from layers import quantizations
