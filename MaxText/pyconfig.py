@@ -28,7 +28,9 @@ from layers.attentions import AttentionType
 import accelerator_to_spec_map
 import max_logging
 import max_utils
-import yaml
+import omegaconf
+
+OmegaConf = omegaconf.OmegaConf
 
 # pylint: disable=line-too-long
 
@@ -64,7 +66,7 @@ def validate_kv_quant_axis(s: str, quantize_kvcache: bool) -> None:
   if s not in valid_kv_quant_axis:  # currently supported kv_quant_axis
     raise ValueError("Invalid kv_quant_axis was passed. Valid options ", valid_kv_quant_axis)
   if quantize_kvcache and s == "":
-    raise ValueError("kv_quant_axis can not be '' when quantize_kvcache is True")
+    raise ValueError("kv_quant_axis cannot be '' when quantize_kvcache is True")
 
 
 def validate_attention_kernel(s: str) -> None:
@@ -92,7 +94,7 @@ def validate_periodic_profiler(profiler, profile_periodically_period, profiler_s
     raise ValueError("Periodic profiler requested but no profiler was set, set it via profiler=xplane or profiler=nsys")
   if profile_periodically_period < profiler_steps:
     raise ValueError(
-        f"You must set the profile_periodically_period {profile_periodically_period} at least as long profiler_steps {profiler_steps}."
+        f"You must set the profile_periodically_period {profile_periodically_period} at least as long as profiler_steps {profiler_steps}."
     )
 
 
@@ -108,9 +110,15 @@ def validate_prefill_and_target_lengths(max_prefill_length: int, max_target_leng
   if max_target_length < max_prefill_length:
     # valid max_target_length = max_prefill_length for existing logit checks
     raise ValueError(
-        f"Invalid max_target_length {max_target_length}, this should be sum of "
-        f"max_prefill_predict_length ({max_prefill_length}) and max output length expected."
+        f"Invalid max_target_length {max_target_length}, this should be the sum of "
+        f"max_prefill_predict_length ({max_prefill_length}) and the expected max output length."
     )
+
+
+def validate_rope_type(rope_type: str) -> None:
+  valid_rope_types = ("default", "yarn", "llama3.1")
+  if rope_type not in valid_rope_types:
+    raise ValueError(f"Invalid RoPE type was passed. Got: {rope_type}. Valid options: {valid_rope_types}")
 
 
 def validate_keys(keys):
@@ -122,6 +130,7 @@ def validate_keys(keys):
   validate_kv_quant_axis(keys["kv_quant_axis"], keys["quantize_kvcache"])
   validate_model_call_mode(keys["model_call_mode"])
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
+  validate_rope_type(keys["rope_type"])
 
   assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys[
       "enable_checkpointing"
@@ -149,6 +158,7 @@ def validate_keys(keys):
   validate_multiple_slices(keys)
   if keys["num_experts"] > 1:
     validate_megablox_parallelism(keys)
+    validate_deepseek_moe(keys)
 
 
 def validate_data_input(keys):
@@ -158,6 +168,8 @@ def validate_data_input(keys):
         f"dataset_type set to hf, will use {keys['hf_path']=}, {keys['hf_data_dir']=} and {keys['hf_train_files']=} to read data"
     )
     assert keys["hf_path"] != "", "hf_path can't be empty when dataset_type=hf"
+    if not keys["hf_access_token"]:
+      keys["hf_access_token"] = None
     if not keys["hf_train_files"]:
       keys["hf_train_files"] = None
     if not keys["hf_eval_files"]:
@@ -199,9 +211,13 @@ def validate_model_name(s: str) -> bool:
       "llama3.1-8b",
       "llama3.1-70b",
       "llama3.1-405b",
+      "llama3.3-70b",
       "mistral-7b",
       "mixtral-8x7b",
       "mixtral-8x22b",
+      "deepseek2-16b",
+      "deepseek2-236b",
+      "deepseek3-671b",
       "gemma-7b",
       "gemma-2b",
       "gemma2-2b",
@@ -254,16 +270,14 @@ def validate_and_assign_remat_tensors(keys):
   return keys
 
 
-_config = None
-config = None
-
-
 def _lists_to_tuples(l: list[Any]) -> Union[tuple[Any], list[Any]]:
   return tuple(_lists_to_tuples(x) for x in l) if isinstance(l, list) else l
 
 
 class _HyperParameters:
   # pylint: disable=missing-class-docstring
+  # This class is responsible for loading, merging, and overriding the configuration.
+
   def _validate_env_variables(self, raw_data_from_yaml: dict[str, Any]):
     for environment_var in os.environ:
       if environment_var[: len(_MAX_PREFIX)] == _MAX_PREFIX:
@@ -273,14 +287,16 @@ class _HyperParameters:
         if not environment_var[len(_MAX_PREFIX) :].isupper():
           raise ValueError(f"We received env `{environment_var}` but it isn't all uppercase.")
 
-  def _load_kwargs(self, argv: list[str], **kwargs):
-    args_dict = dict(a.split("=", 1) for a in argv[2:])
-    args_dict.update(kwargs)
-    return args_dict
-
   def _update_from_env_and_command_line(self, raw_keys, raw_data_from_yaml, argv, **kwargs) -> list[str]:
-    """Update model config from environment and command line"""
-    raw_data_from_cmd_line = self._load_kwargs(argv, **kwargs)
+    """Update model config from environment and command line using OmegaConf overrides."""
+    # Use OmegaConf.from_cli to capture CLI arguments.
+    cli_cfg = OmegaConf.from_cli(argv[2:])
+    # Also create a configuration from any extra keyword arguments.
+    kwargs_cfg = OmegaConf.create(kwargs)
+    # Merge command-line and keyword arguments.
+    cmdline_cfg = OmegaConf.merge(cli_cfg, kwargs_cfg)
+    raw_data_from_cmd_line = OmegaConf.to_container(cmdline_cfg, resolve=True)
+
     updated_keys = []
 
     for k in raw_data_from_cmd_line:
@@ -291,7 +307,7 @@ class _HyperParameters:
       if k in raw_data_from_cmd_line and yaml_key_to_env_key(k) in os.environ:
         raise ValueError(f"You are passing overrides by both CLI and ENV for `{k}`. This isn't allowed.")
 
-      if not k in raw_data_from_cmd_line and not yaml_key_to_env_key(k) in os.environ:
+      if k not in raw_data_from_cmd_line and yaml_key_to_env_key(k) not in os.environ:
         raw_keys[k] = raw_data_from_yaml[k]
         continue
 
@@ -322,9 +338,9 @@ class _HyperParameters:
     return updated_keys
 
   def _load_config(self, config_name: str) -> dict[str, Any]:
-    """Loads the YAML config from a file with a given name."""
-    with open(config_name, "r", encoding="utf-8") as yaml_file:
-      raw_data_from_yaml = yaml.safe_load(yaml_file)
+    """Loads the YAML config from a file using OmegaConf, and resolves inheritance."""
+    base_cfg = OmegaConf.load(config_name)
+    raw_data_from_yaml = OmegaConf.to_container(base_cfg, resolve=True)
 
     # Load data from parent config. Note that inheritance has override
     # semantics, and the path is relative to the current config.
@@ -339,6 +355,7 @@ class _HyperParameters:
         loaded_parent_config_filename = parent_config_filename
 
       base_config = self._load_config(loaded_parent_config_filename)
+      # Override base_config with values from raw_data_from_yaml.
       for key, value in raw_data_from_yaml.items():
         base_config[key] = value
       return base_config
@@ -388,7 +405,8 @@ class _HyperParameters:
 
     if raw_keys["log_config"]:
       for k in keys:
-        max_logging.log(f"Config param {k}: {raw_keys[k]}")
+        if k != "hf_access_token":
+          max_logging.log(f"Config param {k}: {raw_keys[k]}")
 
   @staticmethod
   def user_init(raw_keys):
@@ -417,6 +435,7 @@ class _HyperParameters:
     raw_keys["num_query_heads"] = 2**num_head_scale * raw_keys["base_num_query_heads"]
     raw_keys["num_kv_heads"] = 2**num_head_scale * raw_keys["base_num_kv_heads"]
     raw_keys["mlp_dim"] = 2**mlp_dim_scale * raw_keys["base_mlp_dim"]
+    raw_keys["moe_mlp_dim"] = 2**mlp_dim_scale * raw_keys["base_moe_mlp_dim"]
     raw_keys["num_decoder_layers"] = 2**layer_scale * raw_keys["base_num_decoder_layers"]
 
     # This is the first command that initializes the backend - it calls
@@ -440,7 +459,10 @@ class _HyperParameters:
         raw_keys["global_batch_size_to_eval_on"],
         raw_keys["micro_batch_size_to_eval_on"],
     ) = calculate_global_batch_sizes(
-        raw_keys["eval_per_device_batch_size"], raw_keys["expansion_factor_real_data"], get_num_target_devices(raw_keys), 1
+        raw_keys["eval_per_device_batch_size"],
+        raw_keys["expansion_factor_real_data"],
+        get_num_target_devices(raw_keys),
+        1,
     )
 
     raw_keys["num_slices"] = max_utils.get_num_slices(raw_keys)
@@ -497,9 +519,10 @@ class _HyperParameters:
       if not os.path.isfile(file_path):
         dir_path = os.path.dirname(os.path.realpath(__file__))
         file_path = os.path.join(dir_path, f"configs/models/{model_name}.yml")
-      with open(file_path, "r", encoding="utf-8") as file:
-        model_vars = yaml.safe_load(file)
-        updated_keys = list(model_vars.keys())
+      # Use OmegaConf to load the model-specific configuration.
+      model_vars = OmegaConf.load(file_path)
+      model_vars = OmegaConf.to_container(model_vars, resolve=True)
+      updated_keys = list(model_vars.keys())
       raw_keys = validate_and_update_keys(raw_keys, model_vars, config_name)
     return updated_keys
 
@@ -512,6 +535,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["ici_fsdp_transpose_parallelism"],
       raw_keys["ici_sequence_parallelism"],
       raw_keys["ici_tensor_parallelism"],
+      raw_keys["ici_tensor_transpose_parallelism"],
       raw_keys["ici_tensor_sequence_parallelism"],
       raw_keys["ici_expert_parallelism"],
       raw_keys["ici_autoregressive_parallelism"],
@@ -523,6 +547,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["dcn_fsdp_transpose_parallelism"],
       raw_keys["dcn_sequence_parallelism"],
       raw_keys["dcn_tensor_parallelism"],
+      raw_keys["dcn_tensor_transpose_parallelism"],
       raw_keys["dcn_tensor_sequence_parallelism"],
       raw_keys["dcn_expert_parallelism"],
       raw_keys["dcn_autoregressive_parallelism"],
@@ -599,6 +624,7 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["ici_fsdp_transpose_parallelism"],
           raw_keys["ici_sequence_parallelism"],
           raw_keys["ici_tensor_parallelism"],
+          raw_keys["ici_tensor_transpose_parallelism"],
           raw_keys["ici_tensor_sequence_parallelism"],
           raw_keys["ici_expert_parallelism"],
           raw_keys["ici_autoregressive_parallelism"],
@@ -610,6 +636,7 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["dcn_fsdp_transpose_parallelism"],
           raw_keys["dcn_sequence_parallelism"],
           raw_keys["dcn_tensor_parallelism"],
+          raw_keys["dcn_tensor_transpose_parallelism"],
           raw_keys["dcn_tensor_sequence_parallelism"],
           raw_keys["dcn_expert_parallelism"],
           raw_keys["dcn_autoregressive_parallelism"],
@@ -621,12 +648,24 @@ def set_and_validate_pipeline_config(raw_keys):
           "fsdp_transpose",
           "sequence",
           "tensor",
+          "tensor_transpose",
           "tensor_sequence",
           "expert",
           "autoregressive",
       ]
       data_sharding = [
-          ["stage", "data", "fsdp", "fsdp_transpose", "sequence", "tensor", "tensor_sequence", "expert", "autoregressive"]
+          [
+              "stage",
+              "data",
+              "fsdp",
+              "fsdp_transpose",
+              "sequence",
+              "tensor",
+              "tensor_transpose",
+              "tensor_sequence",
+              "expert",
+              "autoregressive",
+          ]
       ]
 
       raw_keys["ici_parallelism"] = ici_parallelism
@@ -671,6 +710,11 @@ def set_and_validate_pipeline_config(raw_keys):
   return raw_keys
 
 
+def validate_deepseek_moe(raw_keys):
+  if raw_keys["decoder_block"] == "deepseek" and using_pipeline_parallelism(raw_keys):
+    raise ValueError("Currently we do not support DeepSeek MoE with pipeline parallelism.")
+
+
 def validate_megablox_parallelism(raw_keys):
   if (
       raw_keys["sparse_matmul"]
@@ -685,6 +729,8 @@ def validate_megablox_parallelism(raw_keys):
       * raw_keys["dcn_tensor_parallelism"]
       * raw_keys["ici_tensor_sequence_parallelism"]
       * raw_keys["dcn_tensor_sequence_parallelism"]
+      * raw_keys["ici_tensor_transpose_parallelism"]
+      * raw_keys["dcn_tensor_transpose_parallelism"]
   )
   if raw_keys["megablox"] and using_tensor_parallelism(raw_keys) and (raw_keys["emb_dim"] % tensor_parallelism):
     raise ValueError(
@@ -819,30 +865,33 @@ def using_expert_parallelism(raw_keys) -> bool:
   return int(raw_keys["ici_expert_parallelism"]) > 1 or int(raw_keys["dcn_expert_parallelism"]) > 1
 
 
-class HyperParameters:  # pylint: disable=missing-class-docstring
+class HyperParameters:
+  """Wrapper class to expose the configuration in a read-only manner."""
 
-  def __init__(self):
-    pass
+  def __init__(self, config):
+    object.__setattr__(self, "_config", config)
 
   def __getattr__(self, attr):
-    if attr not in _config.keys:
-      raise ValueError(f"Requested key {attr}, not in config")
-    return _config.keys[attr]
+    try:
+      # Attempt to perform the normal lookup
+      return object.__getattribute__(self, "_config").keys[attr]
+    except AttributeError as exc:
+      raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{attr}'") from exc
 
   def __setattr__(self, attr, value):
-    raise ValueError
+    raise ValueError("Reinitialization of config is not allowed")
 
   def get_keys(self):
-    return _config.keys
+    return self._config.keys
 
 
 def initialize(argv, **kwargs):
-  global _config, config
   _config = _HyperParameters(argv, **kwargs)
-  config = HyperParameters()
+  config = HyperParameters(_config)
+  return config
 
 
 if __name__ == "__main__":
-  initialize(sys.argv)
-  print(config.steps)
-  r = range(config.steps)
+  main_config = initialize(sys.argv)
+  print(main_config.steps)
+  r = range(main_config.steps)

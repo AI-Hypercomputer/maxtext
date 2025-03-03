@@ -59,6 +59,16 @@ class TrainTests(unittest.TestCase):
           "ici_tensor_parallelism=4",
           r"tokenizer_path=../assets/tokenizer.llama2",
       ],
+      "tp_transpose": [  # tests base config with ici_tensor_transpose_parallelism=4
+          None,
+          "configs/base.yml",
+          r"base_output_directory=gs://runner-maxtext-logs",
+          "run_name=runner_test",
+          r"dataset_path=gs://maxtext-dataset",
+          "steps=2",
+          "ici_tensor_transpose_parallelism=4",
+          r"tokenizer_path=../assets/tokenizer.llama2",
+      ],
       "int8": [  # tests base config with int8
           None,
           "configs/base.yml",

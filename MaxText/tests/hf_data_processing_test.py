@@ -31,7 +31,7 @@ class HfDataProcessingTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         per_device_batch_size=1,
         run_name="test",
@@ -39,13 +39,14 @@ class HfDataProcessingTest(unittest.TestCase):
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
         base_output_directory="gs://max-experiments/",
+        dataset_type="hf",
         hf_path="parquet",
         hf_data_dir="",
         hf_train_files="gs://maxtext-dataset/hf/c4/c4-train-00000-of-01637.parquet",
         tokenizer_path="google-t5/t5-large",
         enable_checkpointing=False,
     )
-    self.config = pyconfig.config
+    self.config = config
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
     self.process_indices = input_pipeline_interface.get_process_loading_real_data(
@@ -58,8 +59,6 @@ class HfDataProcessingTest(unittest.TestCase):
 
     self.train_iter = _hf_data_processing.make_hf_train_iterator(self.config, self.mesh, self.process_indices)
 
-  # TODO (b/393393501) : MaxText build failure in hf_data_processing_test.py
-  @pytest.mark.skip(reason="Tests are currently flaking / failing due to HF token issues")
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
     # For training we pack multiple short examples in one example.
@@ -77,8 +76,6 @@ class HfDataProcessingTest(unittest.TestCase):
         },
     )
 
-  # TODO (b/393393501) : MaxText build failure in hf_data_processing_test.py
-  @pytest.mark.skip(reason="Tests are currently flaking / failing due to HF token issues")
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
     train_iter = _hf_data_processing.make_hf_train_iterator(self.config, self.mesh, self.process_indices)
@@ -90,8 +87,6 @@ class HfDataProcessingTest(unittest.TestCase):
     self.assertTrue((batch1["inputs_position"] == batch2["inputs_position"]).all())
     self.assertTrue((batch1["targets_position"] == batch2["targets_position"]).all())
 
-  # TODO (b/393393501) : MaxText build failure in hf_data_processing_test.py
-  @pytest.mark.skip(reason="Tests are currently flaking / failing due to HF token issues")
   def test_for_loop_repeatable(self):
     def get_first_batch(iterator):
       batch = None

@@ -18,6 +18,7 @@ import itertools
 import random
 import sys
 import unittest
+from absl.testing import parameterized
 
 import common_types
 
@@ -25,7 +26,6 @@ from flax.core import freeze
 import jax
 import jax.numpy as jnp
 import max_utils
-import numpy as np
 import pytest
 
 import pyconfig
@@ -34,6 +34,7 @@ from layers import attentions
 
 Mesh = jax.sharding.Mesh
 Attention = attentions.Attention
+MLA = attentions.MLA
 
 
 class AttentionTest(unittest.TestCase):
@@ -41,7 +42,7 @@ class AttentionTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         per_device_batch_size=1.0,
         run_name="test",
@@ -49,7 +50,7 @@ class AttentionTest(unittest.TestCase):
         max_target_length=128,
         max_prefill_predict_length=16,
     )
-    self.cfg = pyconfig.config
+    self.cfg = config
     self.rng = jax.random.PRNGKey(0)
 
     devices_array = max_utils.create_device_mesh(self.cfg)
@@ -335,7 +336,7 @@ class AttentionTest(unittest.TestCase):
 
     rtol, atol = 1e-02, 1e-02
 
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         per_device_batch_size=1.0,
         run_name="test",
@@ -344,7 +345,6 @@ class AttentionTest(unittest.TestCase):
         max_prefill_predict_length=16,
         attention="dot_product",
     )
-    config = pyconfig.config
 
     prefill_length = config.max_prefill_predict_length
     decode_total_length = config.max_target_length
@@ -436,7 +436,7 @@ class AttentionTest(unittest.TestCase):
 
     rtol, atol = 1e-02, 1e-02
 
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         per_device_batch_size=1.0,
         run_name="test",
@@ -445,7 +445,6 @@ class AttentionTest(unittest.TestCase):
         max_prefill_predict_length=16,
         attention="dot_product",
     )
-    config = pyconfig.config
 
     prefill_length = config.max_prefill_predict_length
     decode_total_length = config.max_target_length
@@ -719,6 +718,164 @@ class AttentionTest(unittest.TestCase):
             sliding_window_output.astype(jnp.bfloat16), global_attn_output.astype(jnp.bfloat16), rtol=1e-04, atol=1e-04
         )
     )
+
+
+class MLATest(parameterized.TestCase):
+  """Test for the Multi-Headed Latent Attention"""
+
+  def init_mla(self, rope_type):
+    """Helper function to initialize MLA with different model names."""
+    cfg = pyconfig.initialize(
+        [sys.argv[0], "configs/base.yml"],
+        per_device_batch_size=1.0,
+        run_name="test",
+        enable_checkpointing=False,
+        max_target_length=128,
+        max_prefill_predict_length=16,
+        attention_type=attentions.AttentionType.MLA.value,
+        rope_type=rope_type,
+    )
+    rng = jax.random.PRNGKey(0)
+
+    devices_array = max_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+
+    global_batch_size = cfg.global_batch_size_to_train_on
+    num_kv_heads = cfg.num_kv_heads
+    num_query_heads = cfg.num_query_heads
+    max_target_length = cfg.max_target_length
+    max_prefill_predict_length = cfg.max_prefill_predict_length
+    head_dim = cfg.head_dim
+    embed_dim = cfg.base_emb_dim
+    dtype = cfg.dtype
+    attention_type = cfg.attention_type
+
+    mla = MLA(
+        config=cfg,
+        num_query_heads=num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        max_target_length=max_target_length,
+        max_prefill_predict_length=max_prefill_predict_length,
+        mesh=mesh,
+        attention_kernel="dot_product",
+        dtype=dtype,
+        dropout_rate=cfg.dropout_rate,
+        name="self_attention",
+        attention_type=attention_type,
+        q_lora_rank=10,
+        kv_lora_rank=20,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=192,
+    )
+
+    mla_variable = mla.init(
+        {"params": rng, "aqt": rng},
+        jnp.ones((global_batch_size, max_target_length, embed_dim)),
+        jnp.ones((global_batch_size, max_target_length, embed_dim)),
+        jnp.ones((global_batch_size, max_target_length)),
+    )
+
+    return cfg, mla, mla_variable, rng
+
+  def get_data(self, cfg, rng, dtype):
+    lnx = jax.random.normal(
+        rng,
+        shape=(cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.base_emb_dim),
+        dtype=dtype,
+    )
+
+    decoder_segment_ids = jax.random.randint(rng, (cfg.global_batch_size_to_train_on, cfg.max_target_length), 0, 4)
+    decoder_positions = jax.random.randint(
+        rng, (cfg.global_batch_size_to_train_on, cfg.max_target_length), 0, cfg.max_target_length
+    )
+
+    return lnx, decoder_segment_ids, decoder_positions
+
+  def get_structured_data(self, cfg, rng, dtype):
+    lnx = jax.random.normal(
+        rng,
+        shape=(
+            cfg.global_batch_size_to_train_on,
+            cfg.max_target_length,
+            cfg.base_emb_dim,
+        ),
+        dtype=dtype,
+    )
+
+    decoder_positions = jnp.stack(
+        [jnp.arange(cfg.max_target_length, dtype=jnp.int32) for _ in range(cfg.global_batch_size_to_train_on)]
+    )
+
+    decoder_segment_ids = (
+        jax.numpy.zeros((cfg.global_batch_size_to_train_on, cfg.max_target_length))
+        + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+    )
+
+    return lnx, decoder_segment_ids, decoder_positions
+
+  @parameterized.named_parameters(
+      {"testcase_name": "RoPE_Yarn_Autoregression", "rope_type": "yarn"},
+      {"testcase_name": "Default_Autoregression", "rope_type": "default"},
+  )
+  @pytest.mark.tpu_only
+  def test_autoregression(self, rope_type):
+    cfg, mla, mla_variable, rng = self.init_mla(rope_type)
+    prefill_length = cfg.max_prefill_predict_length
+    decode_total_length = cfg.max_target_length
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, rng, cfg.dtype)
+
+    mla_full = mla.apply(
+        mla_variable,
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_TRAIN,
+        rngs={"aqt": rng},
+    )
+
+    lnx_prefill = lnx[:, 0:prefill_length, :]
+    decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
+    decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
+
+    mla_prefill, output_cache = mla.apply(
+        mla_variable,
+        lnx_prefill,
+        lnx_prefill,
+        decoder_segment_ids=decoder_segment_ids_prefill,
+        inputs_positions=decoder_positions_prefill,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_PREFILL,
+        rngs={"aqt": rng},
+        mutable=["cache"],
+    )
+
+    self.assertTrue(
+        jax.numpy.allclose(mla_prefill, mla_full[:, :prefill_length, :], rtol=1e-02, atol=1e-02, equal_nan=False)
+    )
+
+    for idx in range(prefill_length, decode_total_length):
+      lnx_idx = lnx[:, idx : idx + 1, :]
+      decoder_positions_idx = decoder_positions[:, idx : idx + 1]
+      mla_variable.update(output_cache)
+      mla_idx, output_cache = mla.apply(
+          mla_variable,
+          lnx_idx,
+          lnx_idx,
+          inputs_positions=decoder_positions_idx,
+          deterministic=True,
+          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          rngs={"aqt": rng},
+          mutable=["cache"],
+      )
+
+      mla_full_this_idx = mla_full[:, idx : idx + 1, :]
+      self.assertEqual(mla_full_this_idx.shape, mla_idx.shape)
+      # TODO (b/394626702) uncomment last check when decode and kv_cache are implemented for MLA
+      # self.assertTrue(jax.numpy.allclose(mla_full_this_idx, mla_idx, rtol=1e-02, atol=1e-02, equal_nan=False))
 
 
 if __name__ == "__main__":

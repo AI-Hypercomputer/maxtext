@@ -304,6 +304,7 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
+  @pytest.mark.skip(reason="b/399968784 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
   @pytest.mark.tpu_only
   def test_moe_dropping_int8(self):
     compiled_trainstep_file = "/tmp/test_moe_dropping_int8.pickle"
@@ -390,6 +391,7 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
+  @pytest.mark.skip(reason="b/399968784 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
   @pytest.mark.tpu_only
   def test_moe_dense_int8(self):
     compiled_trainstep_file = "/tmp/test_moe_dense_int8.pickle"
@@ -432,5 +434,51 @@ class TrainCompile(unittest.TestCase):
             "dtype=bfloat16",
             "dcn_pipeline_parallelism=2",
             "num_layers_per_pipeline_stage=1",
+        )
+    )
+
+  @pytest.mark.tpu_only
+  def test_moe_deepseek_scanned_bf16(self):
+    compiled_trainstep_file = "/tmp/test_moe_deepseek_scanned_bf16.pickle"
+    train_compile_main(
+        (
+            None,
+            "configs/base.yml",
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek3-671b",
+            "sparse_matmul=True",
+            "megablox=False",
+            "per_device_batch_size=2",
+            "max_target_length=1024",
+            "attention=dot_product",  # Change to flush attention once it works for MLA
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "scan_layers=True",
+        )
+    )
+
+  @pytest.mark.tpu_only
+  def test_moe_deepseek_unscanned_bf16(self):
+    compiled_trainstep_file = "/tmp/test_moe_deepseek_unscanned_bf16.pickle"
+    train_compile_main(
+        (
+            None,
+            "configs/base.yml",
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek3-671b",
+            "sparse_matmul=True",
+            "megablox=False",
+            "per_device_batch_size=2",
+            "max_target_length=1024",
+            "attention=dot_product",  # Change to flush attention once it works for MLA
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "scan_layers=False",
         )
     )

@@ -124,51 +124,121 @@ def calculate_gemma2_tflops_training_per_device(config, total_ffn_flops, qkv_flo
   return attention_tflops, learnable_weight_tflops
 
 
+def calculate_mla_tflops_per_device(config):
+  """Calculate Multi-Head Latent Attention TFLOP"""
+  batch_len = config.per_device_batch_size * config.max_target_length
+  qk_head_dim_sum = config.qk_nope_head_dim + config.qk_rope_head_dim
+  # calculate mla query projection
+  if config.q_lora_rank == 0:
+    q_flops = 2 * batch_len * config.emb_dim * config.num_query_heads * qk_head_dim_sum
+  else:
+    # calculate query down and up flops
+    q_flops = (
+        2 * batch_len * (config.emb_dim * config.q_lora_rank + config.q_lora_rank * config.num_query_heads * qk_head_dim_sum)
+    )
+  # calculate mla kv projection with down and up flops
+  kv_flops = (
+      2
+      * batch_len
+      * (
+          config.emb_dim * (config.kv_lora_rank + config.qk_rope_head_dim)
+          + config.kv_lora_rank * config.num_query_heads * (config.qk_nope_head_dim + config.v_head_dim)
+      )
+  )
+  qkv_flops = q_flops + kv_flops
+
+  attention_flops = 2 * batch_len * config.max_target_length * config.num_query_heads * (qk_head_dim_sum + config.v_head_dim)
+  projection_flops = 2 * batch_len * config.emb_dim * config.num_query_heads * config.v_head_dim
+  return qkv_flops, attention_flops, projection_flops
+
+
+def calculate_ffn_mamtul_tflops_per_device(config, mlp_dim):
+  """Helper function to calculate matmul TFLOP in ffn based on MLP dimension.
+
+  Applies to:
+    - Dense FFN layers (mlp_dim = config.mlp_dim).
+    - MoE FFN layers (mlp_dim = config.moe_mlp_dim),
+      need to scale by shared_experts or num_experts_per_tok.
+  """
+  ffn1_flops = (
+      2 * config.per_device_batch_size * config.max_target_length * mlp_dim * config.emb_dim * len(config.mlp_activations)
+  )
+  ffn2_flops = 2 * config.per_device_batch_size * config.max_target_length * mlp_dim * config.emb_dim
+  return ffn1_flops + ffn2_flops
+
+
+def calculate_deepseek_ffn_tflops_per_device(config):
+  """Helper function to calculate DeepSeek-style ffn TFLOP"""
+  gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
+  # Due to the mixed decoder layers, the flops is multiplied by num of layers for both dense and moe
+  dense_ffn_flops = calculate_ffn_mamtul_tflops_per_device(config, config.mlp_dim) * config.first_num_dense_layers
+  shared_experts_flops = calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim) * config.shared_experts
+  routed_experts_flops = calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim) * config.num_experts_per_tok
+  moe_layers = config.num_decoder_layers - config.first_num_dense_layers
+  moe_ffn_flops = (gate_flops + shared_experts_flops + routed_experts_flops) * moe_layers
+  total_ffn_flops = dense_ffn_flops + moe_ffn_flops
+  return total_ffn_flops
+
+
 def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
-  ffn1_flops = (
-      2
-      * config.per_device_batch_size
-      * config.max_target_length
-      * config.mlp_dim
-      * config.emb_dim
-      * len(config.mlp_activations)
-  )
-  ffn2_flops = 2 * config.per_device_batch_size * config.max_target_length * config.mlp_dim * config.emb_dim
-  total_ffn_flops = ffn1_flops + ffn2_flops
-
+  # MLP flops
   if config.num_experts > 1:
-    # MoE: brute force implementation
-    gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
-    total_ffn_flops = gate_flops + config.num_experts_per_tok * total_ffn_flops
+    # calculation based on dropless implementation
+    if config.decoder_block == "deepseek":
+      total_ffn_flops = calculate_deepseek_ffn_tflops_per_device(config)
+    else:
+      gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
+      total_ffn_flops = (
+          gate_flops + calculate_ffn_mamtul_tflops_per_device(config, config.mlp_dim) * config.num_experts_per_tok
+      )
+  else:
+    total_ffn_flops = calculate_ffn_mamtul_tflops_per_device(config, config.mlp_dim)
 
-  qkv_flops = (
-      2
-      * config.per_device_batch_size
-      * config.max_target_length
-      * config.emb_dim
-      * (config.num_query_heads + 2 * config.num_kv_heads)
-      * config.head_dim
-  )
-  attention_flops = 4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
-  projection_flops = (
-      2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_query_heads * config.head_dim
-  )
+  # Attention flops
+  if config.attention_type == "mla":
+    qkv_flops, attention_flops, projection_flops = calculate_mla_tflops_per_device(config)
+  else:
+    qkv_flops = (
+        2
+        * config.per_device_batch_size
+        * config.max_target_length
+        * config.emb_dim
+        * (config.num_query_heads + 2 * config.num_kv_heads)
+        * config.head_dim
+    )
+    attention_flops = (
+        4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
+    )
+    projection_flops = (
+        2
+        * config.per_device_batch_size
+        * config.max_target_length
+        * config.emb_dim
+        * config.num_query_heads
+        * config.head_dim
+    )
+
+  # Embedding flops
   embedding_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.vocab_size
 
-  # multiply by 3 for both feed forward and back propagation flops
-  learnable_weight_tflops = (
-      ((total_ffn_flops + qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
-  )
-
-  # megatron tflops calculation does not account for causality in attention
-  attention_tflops = attention_flops * config.num_decoder_layers * 3 / 10**12
-
-  # override for gemma2 decoder tflop calculation
+  # Combine flops with number of decoder layers
   if config.decoder_block == "gemma2":
     attention_tflops, learnable_weight_tflops = calculate_gemma2_tflops_training_per_device(
         config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops
     )
+  elif config.decoder_block == "deepseek":
+    learnable_weight_tflops = (
+        (total_ffn_flops + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
+    )
+    attention_tflops = attention_flops * config.num_decoder_layers * 3 / 10**12
+  else:
+    # multiply by 3 for both feed forward and back propagation flops
+    learnable_weight_tflops = (
+        ((total_ffn_flops + qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
+    )
+    # megatron tflops calculation does not account for causality in attention
+    attention_tflops = attention_flops * config.num_decoder_layers * 3 / 10**12
 
   learnable_weight_tflops = learnable_weight_tflops * config.gradient_accumulation_steps
   attention_tflops = attention_tflops * config.gradient_accumulation_steps
@@ -239,13 +309,13 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
   """
   total_num_params = max_utils.calculate_num_params_from_pytree(params)
   product_num_devices_for_weight_sharding = 1
-  for axis in ["fsdp", "fsdp_transpose", "sequence", "tensor", "tensor_sequence", "stage", "expert"]:
+  for axis in ["fsdp", "fsdp_transpose", "sequence", "tensor", "tensor_transpose", "tensor_sequence", "stage", "expert"]:
     product_num_devices_for_weight_sharding *= mesh.shape[axis]
   total_num_params_per_chip = max_utils.calculate_total_params_per_chip(params)
   perfectly_sharded_params_per_chip = total_num_params / product_num_devices_for_weight_sharding
   assert total_num_params_per_chip >= perfectly_sharded_params_per_chip, (
       "Number of parameters per chip must not be less than in the ideal sharded "
-      "scenario across `fsdp`, `fsdp_transpose`,`sequence`, `tensor`, `tensor_sequence`, `expert` axes."
+      "scenario across `fsdp`, `fsdp_transpose`,`sequence`, `tensor`, `tensor_transpose`, `tensor_sequence`, `expert` axes."
   )
   unsharded_param_perc = total_num_params_per_chip / perfectly_sharded_params_per_chip - 1
   assert unsharded_param_perc < tolerance, (

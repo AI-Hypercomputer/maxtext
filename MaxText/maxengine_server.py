@@ -56,6 +56,7 @@ def main(config):
       enable_jax_profiler=config.enable_jax_profiler if config.enable_jax_profiler else False,
       jax_profiler_port=config.jax_profiler_port if config.jax_profiler_port else 9999,
       enable_model_warmup=config.enable_model_warmup if config.enable_model_warmup else False,
+      multi_sampling=config.multi_sampling if config.multi_sampling else False,
   )
   jetstream_server.wait_for_termination()
 
@@ -63,6 +64,5 @@ def main(config):
 if __name__ == "__main__":
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-  pyconfig.initialize(sys.argv)
-  cfg = pyconfig.config
+  cfg = pyconfig.initialize(sys.argv)
   main(cfg)

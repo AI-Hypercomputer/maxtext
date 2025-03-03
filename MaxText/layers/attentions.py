@@ -17,13 +17,15 @@
 import enum
 import functools
 import math
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 from flax import linen as nn
 import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
+from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
+from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
@@ -43,6 +45,7 @@ from layers import quantizations
 class AttentionType(enum.Enum):
   GLOBAL = "global"
   LOCAL_SLIDING = "local_sliding"
+  MLA = "mla"
 
 
 Array = common_types.Array
@@ -52,7 +55,9 @@ Mesh = common_types.Mesh
 PRNGKey = common_types.PRNGKey
 
 DenseGeneral = linears.DenseGeneral
+RMSNorm = linears.RMSNorm
 RotaryEmbedding = embeddings.RotaryEmbedding
+YarnRotaryEmbedding = embeddings.YarnRotaryEmbedding
 NdInitializer = initializers.NdInitializer
 Quant = quantizations.AqtQuantization
 KVQuant = quantizations.KVQuant
@@ -226,7 +231,12 @@ class AttentionOp(nn.Module):
       if lengths is None:
         lengths = jnp.sum(decoder_segment_ids, axis=-1)
 
-      return self.ragged_attention(query, key, value, lengths, self.ragged_block_size)
+      if jax.devices()[0].platform == "tpu":
+        impl = self.tpu_ragged_attention
+      elif jax.devices()[0].platform == "gpu":
+        impl = self.gpu_ragged_attention
+      return impl(query, key, value, lengths, self.ragged_block_size)
+
     elif (
         self.attention_kernel == "dot_product"
         or (self.attention_kernel == "autoselected" and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE)
@@ -234,17 +244,27 @@ class AttentionOp(nn.Module):
     ):
       return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
     elif self.attention_kernel == "flash" or self.attention_kernel == "autoselected":
-      if isinstance(key, KVTensor):
-        key = key.dequant()
-      if isinstance(value, KVTensor):
-        value = value.dequant()
+      if jax.devices()[0].platform == "tpu":
+        if isinstance(key, KVTensor):
+          key = key.dequant()
+        if isinstance(value, KVTensor):
+          value = value.dequant()
 
-      if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-        raise ValueError(
-            """Decode not supported with flash attention.
-                            Use `dot_product` instead."""
-        )
-      return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap), None, None
+        if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+          raise ValueError(
+              """Decode not supported with flash attention.
+                              Use `dot_product` instead."""
+          )
+        return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap), None, None
+      else:
+        if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+          # fallback to dot_product as pallas gpu flash attention doesn't support decode stage
+          return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
+        else:
+          key = jnp.repeat(key, self.num_query_heads // self.num_kv_heads, axis=2)
+          value = jnp.repeat(value, self.num_query_heads // self.num_kv_heads, axis=2)
+          out = gpu_pallas_attention.mha(query, key, value, decoder_segment_ids, sm_scale=1.0, causal=True)
+          return out, None, None
     elif self.attention_kernel == "cudnn_flash_te":
       if isinstance(key, KVTensor):
         key = key.dequant()
@@ -259,7 +279,31 @@ class AttentionOp(nn.Module):
     else:
       raise ValueError(f"Unexpected attention kernel {self.attention_kernel=}.")
 
-  def ragged_attention(
+  def gpu_ragged_attention(self, q: Array, k: Array | KVTensor, v: Array | KVTensor, lengths: Array, block_size: int):
+    batch_size, q_length, q_heads, head_dim = q.shape
+
+    # Reshape q to match gqa's expected shape
+    q_for_gqa = q.squeeze(axis=1)
+
+    # Use the original gqa function to get the attention output
+    local_out, (local_sum, local_max) = gpu_pallas_decode_attention.gqa(
+        q=q_for_gqa,
+        k=k,
+        v=v,
+        kv_seq_len=lengths,
+        block_k=block_size,
+        sm_scale=1.0,
+        return_residuals=True,
+        normalize_output=False,
+    )
+
+    # Reshape local_out, local_max and local_sum to match Maxtext requirements
+    local_out = local_out.reshape(batch_size, q_length, q_heads, head_dim)
+    local_max = local_max.reshape(batch_size, q_length, q_heads, 1)
+    local_sum = local_sum.reshape(batch_size, q_length, q_heads, 1)
+    return local_out, local_max, local_sum
+
+  def tpu_ragged_attention(
       self, query: Array, key: Array | KVTensor, value: Array | KVTensor, lengths: Array, block_size: int
   ) -> tuple[Array, Array, Array]:
     """Ragged Attention."""
@@ -559,6 +603,9 @@ class AttentionOp(nn.Module):
 
     einsum = jnp.einsum
     if self.kv_quant:
+      # manually cast to bf16 to avoid the fp32 XLA ops for speedup
+      if isinstance(value, KVTensor) and self.kv_quant.dtype == jnp.float8_e4m3fn:
+        value.qvalue = value.qvalue.astype(jnp.bfloat16)
       einsum = self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(value)
     if model_mode == common_types.MODEL_MODE_TRAIN or self.compute_axis_order == (0, 1, 2, 3):
       out = einsum("bkgts,bskd->btkgd", attn_weights, value)
@@ -896,6 +943,8 @@ class AttentionOp(nn.Module):
         scale_value /= quantizations.MAX_INT8
       elif dtype == jnp.int4:
         scale_value /= quantizations.MAX_INT4
+      elif dtype == jnp.float8_e4m3fn:
+        scale_value /= quantizations.E4M3_MAX
 
       cache_value = KVTensor(qvalue=cache_value, scale=[scale_value], scale_t=None, dequant_dtype=target_dtype, bias=[])
     cache_value_in_logical_shape = jax.tree.map(lambda x: self.reverse_transepose(x, cache_axis_order), cache_value)
@@ -985,7 +1034,7 @@ class AttentionOp(nn.Module):
       two tuples of (k, v, decoder_segments) -- either can be Nones
 
     """
-    if key.shape != value.shape:
+    if key.shape != value.shape and self.config.attention_type != AttentionType.MLA.value:
       raise ValueError(f"Can't KV cache with mismatched shapes {key.shape=}, {value.shape=}")
 
     if model_mode == common_types.MODEL_MODE_TRAIN:
@@ -1125,6 +1174,32 @@ class Attention(nn.Module):
   compute_axis_order: AxisIdxes = (0, 1, 2, 3)
   reshape_q: bool = False
 
+  def setup(self):
+    self.attention_op = AttentionOp(
+        config=self.config,
+        mesh=self.mesh,
+        attention_kernel=self.attention_kernel,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.max_prefill_predict_length,
+        float32_qk_product=self.float32_qk_product,
+        float32_logits=self.float32_logits,
+        quant=self.quant,
+        kv_quant=self.kv_quant,
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
+        dropout_rate=self.dropout_rate,
+        dtype=self.dtype,
+        prefill_cache_axis_order=self.prefill_cache_axis_order,
+        ar_cache_axis_order=self.ar_cache_axis_order,
+        compute_axis_order=self.compute_axis_order,
+        reshape_q=self.reshape_q,
+        attention_type=self.attention_type,
+        attn_logits_soft_cap=self.attn_logits_soft_cap,
+        sliding_window_size=self.sliding_window_size,
+        use_ragged_attention=self.use_ragged_attention,
+        ragged_block_size=self.ragged_block_size,
+    )
+
   def query_projection(self, inputs_q: Array) -> Array:
     """Query projection."""
 
@@ -1215,11 +1290,40 @@ class Attention(nn.Module):
     return out_proj
 
   def apply_rotary_embedding(self, inputs: Array, inputs_positions: Array, name: str):
-    if self.config.model_name.startswith("llama3.1"):
+    """Applies rotary embeddings, handling different model types.
+
+    Args:
+      inputs: The input tensor to apply rotary embeddings to.
+      inputs_positions: The positions of the inputs.
+      name: A name for the embedding layer.
+
+    Returns:
+      The input tensor with rotary embeddings applied.
+    """
+    if self.config.attention_type == AttentionType.MLA.value:
+      # For MLA attention RoPE is applied to only `self.qk_rope_head_dim` portion the heads.
+      rope_embedding_dims = self.qk_rope_head_dim
+    else:
+      rope_embedding_dims = self.head_dim
+
+    rope_type = self.config.rope_type.lower()
+    if self.config.model_name.startswith("llama3.1") or rope_type.startswith("llama3.1"):
       rotary_embedding = embeddings.LLaMARotaryEmbedding(
           min_timescale=self.config.rope_min_timescale,
           max_timescale=self.config.rope_max_timescale,
-          embedding_dims=self.head_dim,
+          embedding_dims=rope_embedding_dims,
+          fprop_dtype=self.dtype,
+          name=name,
+      )
+    elif rope_type.startswith("yarn"):
+      rotary_embedding = YarnRotaryEmbedding(
+          max_seq_len=self.config.max_target_length,
+          original_seq_len=self.config.original_seq_len,
+          beta_fast=self.config.beta_fast,
+          beta_slow=self.config.beta_slow,
+          rope_theta=self.config.rope_theta,
+          rope_factor=self.config.rope_factor,
+          embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
           name=name,
       )
@@ -1227,7 +1331,7 @@ class Attention(nn.Module):
       rotary_embedding = RotaryEmbedding(
           min_timescale=self.config.rope_min_timescale,
           max_timescale=self.config.rope_max_timescale,
-          embedding_dims=self.head_dim,
+          embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
           name=name,
       )
@@ -1295,36 +1399,212 @@ class Attention(nn.Module):
     value = checkpoint_name(value, "value_proj")
 
     assert not self.config.quantize_kvcache or self.kv_quant
-    attention_op = AttentionOp(
-        config=self.config,
-        mesh=self.mesh,
-        attention_kernel=self.attention_kernel,
-        max_target_length=self.max_target_length,
-        max_prefill_predict_length=self.max_prefill_predict_length,
-        float32_qk_product=self.float32_qk_product,
-        float32_logits=self.float32_logits,
-        quant=self.quant,
-        kv_quant=self.kv_quant,
-        num_query_heads=self.num_query_heads,
-        num_kv_heads=self.num_kv_heads,
-        dropout_rate=self.dropout_rate,
-        dtype=self.dtype,
-        prefill_cache_axis_order=self.prefill_cache_axis_order,
-        ar_cache_axis_order=self.ar_cache_axis_order,
-        compute_axis_order=self.compute_axis_order,
-        reshape_q=self.reshape_q,
-        attention_type=self.attention_type,
-        attn_logits_soft_cap=self.attn_logits_soft_cap,
-        sliding_window_size=self.sliding_window_size,
-        use_ragged_attention=self.use_ragged_attention,
-        ragged_block_size=self.ragged_block_size,
-    )
 
-    out = attention_op(query, key, value, decoder_segment_ids, model_mode)
+    out = self.attention_op(query, key, value, decoder_segment_ids, model_mode)
 
     out = nn.with_logical_constraint(out, self.out_axis_names)
 
     # apply output projection,  output dim is set to the input dim.
     out = self.out_projection(inputs_q.shape[-1], out)
     out = checkpoint_name(out, "out_proj")
+    return out
+
+
+class MLA(Attention):
+  """Multi-Head Latent Attention (MLA) layer."""
+
+  q_lora_rank: int = 0
+  kv_lora_rank: int = 512
+  qk_nope_head_dim: int = 128
+  qk_rope_head_dim: int = 64
+  v_head_dim: int = 128
+  max_seq_len: int = 4096 * 4
+  original_seq_len: int = 4096
+  mscale: float = 1.0  # scaling factor for softmax
+  rope_factor: float = 40.0  # rotary embedding factor
+
+  @property
+  def qk_head_dim(self) -> int:
+    return self.qk_nope_head_dim + self.qk_rope_head_dim
+
+  def setup(self):
+    """Initialize MLA-specific parameters."""
+    super().setup()
+
+    # Assert required configuration parameters for MLA attention.
+    assert (
+        self.config.attention_type == AttentionType.MLA.value
+    ), f"MLA requires MLA attention type {AttentionType.MLA.value}"
+    assert self.kv_lora_rank > 0, "KV LoRA rank must be > 0"
+    assert self.qk_nope_head_dim > 0, "QK NoPe head dim must be > 0"
+    assert self.qk_rope_head_dim > 0, "QK RoPE head dim must be > 0"
+    assert self.v_head_dim > 0, "V head dim must be > 0"
+    assert self.num_query_heads == self.num_kv_heads, "MLA requires equal number of query and kv heads"
+    assert not self.config.fused_qkv, "Fused QKV is not supported for MLA"
+
+    if self.q_lora_rank == 0:
+      # Standard Q projection (without LoRA).
+      self.query_proj = DenseGeneral(
+          features=(self.num_query_heads, self.qk_head_dim),
+          axis=-1,
+          kernel_init=self.kernel_init,
+          kernel_axes=("embed", "q_heads", "kv"),
+          dtype=self.dtype,
+          weight_dtype=self.weight_dtype,
+          name="query",
+          quant=self.quant,
+          matmul_precision=self.config.matmul_precision,
+      )
+    else:
+      # LoRA path for Q.
+      self.wq_a = DenseGeneral(
+          features=self.q_lora_rank,
+          axis=-1,
+          kernel_init=self.kernel_init,
+          kernel_axes=("embed", "q_lora"),
+          dtype=self.dtype,
+          weight_dtype=self.weight_dtype,
+          name="wq_a",
+          quant=self.quant,
+          matmul_precision=self.config.matmul_precision,
+      )
+      self.q_norm = RMSNorm(
+          dtype=self.config.dtype,
+          weight_dtype=self.config.weight_dtype,
+          name="q_norm",
+          epsilon=self.config.normalization_layer_epsilon,
+          kernel_axes=("norm",),
+      )
+      self.wq_b = DenseGeneral(
+          features=(self.num_query_heads, self.qk_head_dim),
+          axis=-1,
+          kernel_init=self.kernel_init,
+          kernel_axes=("q_lora", "q_heads", "kv"),
+          dtype=self.dtype,
+          weight_dtype=self.weight_dtype,
+          name="wq_b",
+          quant=self.quant,
+          matmul_precision=self.config.matmul_precision,
+      )
+
+    # KV LoRA path.
+    self.wkv_a = DenseGeneral(
+        features=self.kv_lora_rank + self.qk_rope_head_dim,
+        axis=-1,
+        kernel_init=self.kernel_init,
+        kernel_axes=("embed", "kv_lora"),
+        dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
+        name="wkv_a",
+        quant=self.quant,
+        matmul_precision=self.config.matmul_precision,
+    )
+    self.kv_norm = RMSNorm(
+        dtype=self.config.dtype,
+        weight_dtype=self.config.weight_dtype,
+        name="kv_norm",
+        epsilon=self.config.normalization_layer_epsilon,
+        kernel_axes=("norm",),
+    )
+    self.wkv_b = DenseGeneral(
+        features=(self.num_query_heads, (self.qk_nope_head_dim + self.v_head_dim)),
+        axis=-1,
+        kernel_init=self.kernel_init,
+        kernel_axes=("kv_lora", "kv_heads", "kv_head_dim"),
+        dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
+        name="wkv_b",
+        quant=self.quant,
+        matmul_precision=self.config.matmul_precision,
+    )
+
+    # Set softmax scaling.
+    self.softmax_scale = self.qk_head_dim**-0.5
+    if self.max_seq_len > self.original_seq_len:
+      mscale = 0.1 * self.mscale * jnp.log(self.rope_factor) + 1.0
+      self.softmax_scale = self.softmax_scale * mscale * mscale
+
+  def mla_query_projection(self, inputs_q: Array, inputs_positions: Array) -> Array:
+    """Query projection for MLA, e.g. includes LoRA if q_lora_rank > 0."""
+    if self.q_lora_rank == 0:
+      q = self.query_proj(inputs_q)
+    else:
+      # LoRA path
+      low_rank_q = self.wq_a(inputs_q)  # [B, L, q_lora_rank]
+      low_rank_q = self.q_norm(low_rank_q)  # RMSNorm on low rank
+      q = self.wq_b(low_rank_q)  # [B, L, n_heads * qk_head_dim]
+
+    # Split into non-positional and rotary parts.
+    q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=-1)
+    q_pe = self.apply_rotary_embedding(q_pe, inputs_positions, name="query_rope")
+    # Query projection is scaled by  1 / self.softmax_scale to be consistent MaxText implementation.
+    # DeepSeek v3 was doing it in attention score computation.
+    return jnp.concatenate([q_nope, q_pe], axis=-1) / self.softmax_scale
+
+  def mla_kv_projection(self, inputs: Array, inputs_positions: Array) -> Tuple[Array, Array]:
+    """MLA key/value projection with integrated rotary embedding."""
+    low_rank = self.wkv_a(inputs)
+    low_rank_main, low_rank_rope = jnp.split(low_rank, [self.kv_lora_rank], axis=-1)
+    low_rank_main = self.kv_norm(low_rank_main)
+    # Note: cache `low_rank_main` and `low_rank_rope` for inference.
+    kv_out = self.wkv_b(low_rank_main)
+
+    # Split kv_out into key_nope and value parts.
+    key_nope, value = jnp.split(kv_out, [self.qk_nope_head_dim], axis=-1)
+
+    # Apply rotary embedding to key_rope.
+    key_rope = jnp.expand_dims(low_rank_rope, axis=2)
+    key_rope = self.apply_rotary_embedding(key_rope, inputs_positions, name="key_rope")
+    key_rope = jnp.broadcast_to(key_rope, (key_nope.shape[0], key_nope.shape[1], self.num_query_heads, key_rope.shape[3]))
+
+    key = jnp.concatenate([key_nope, key_rope], axis=-1)
+    return key, value
+
+  @nn.compact
+  def __call__(
+      self,
+      inputs_q: Array,
+      inputs_kv: Array,
+      inputs_positions: Array,
+      decoder_segment_ids: Array | None = None,
+      *,
+      model_mode: str = common_types.MODEL_MODE_TRAIN,
+      deterministic: bool = False,
+  ) -> Array:
+    """Forward pass for MLA, reusing `AttentionOp` for the actual attention.
+
+    Args:
+      inputs_q: Query input [batch, q_length, embed_dim].
+      inputs_kv: KV input   [batch, kv_length, embed_dim].
+      inputs_positions: Positions for rotary embeddings or similar.
+      decoder_segment_ids: Segment IDs for masking, if any.
+      model_mode: "train", "prefill", or "autoregressive".
+      deterministic: Disables dropout if set to True.
+
+    Returns:
+      A tensor of shape [batch, length, embed_dim] containing the
+      MLA-attended outputs.
+    """
+    inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
+    inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+
+    query = self.mla_query_projection(inputs_q, inputs_positions)
+    key, value = self.mla_kv_projection(inputs_kv, inputs_positions)
+
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
+      key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
+      value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
+    else:
+      query = nn.with_logical_constraint(query, self.query_axis_names)
+      key = nn.with_logical_constraint(key, self.key_axis_names)
+      value = nn.with_logical_constraint(value, self.value_axis_names)
+
+    query = checkpoint_name(query, "query_proj")
+    key = checkpoint_name(key, "key_proj")
+    value = checkpoint_name(value, "value_proj")
+
+    out = self.attention_op(query, key, value, decoder_segment_ids, model_mode)
+    out = nn.with_logical_constraint(out, self.out_axis_names)
+    out = self.out_projection(inputs_q.shape[-1], out)
     return out

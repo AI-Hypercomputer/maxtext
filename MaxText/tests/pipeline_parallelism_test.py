@@ -160,7 +160,7 @@ class PipelineParallelismTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_circular_minimum_microbatches_same_output_and_grad(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 4 microbatches
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         enable_checkpointing=False,
         run_name="circular_minimum_microbatches",
@@ -171,13 +171,12 @@ class PipelineParallelismTest(unittest.TestCase):
         num_pipeline_microbatches=4,
         per_device_batch_size=4,
     )
-    config = pyconfig.config
     self.assert_pipeline_same_output_and_grad(config)
 
   @pytest.mark.tpu_only
   def test_circular_extra_microbatches_same_output_and_grad(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         enable_checkpointing=False,
         run_name="circular_extra_microbatches",
@@ -188,13 +187,12 @@ class PipelineParallelismTest(unittest.TestCase):
         num_pipeline_microbatches=8,
         per_device_batch_size=4,
     )
-    config = pyconfig.config
     self.assert_pipeline_same_output_and_grad(config)
 
   @pytest.mark.tpu_only
   def test_circular_ag_once(self):
     # 2 stages, 8 microbatches, all gather once
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         enable_checkpointing=False,
         run_name="circular_ag_once",
@@ -206,13 +204,12 @@ class PipelineParallelismTest(unittest.TestCase):
         per_device_batch_size=4,
         pipeline_fsdp_ag_once=True,
     )
-    config = pyconfig.config
     self.assert_pipeline_same_output_and_grad(config)
 
   @pytest.mark.tpu_only
   def test_non_circular_same_output_and_grad(self):
     # 4 stages, 4 layers (no circular repeats, 1 layer per stage), 4 microbatches
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         enable_checkpointing=False,
         run_name="non_circular",
@@ -223,7 +220,6 @@ class PipelineParallelismTest(unittest.TestCase):
         num_pipeline_microbatches=4,
         per_device_batch_size=4,
     )
-    config = pyconfig.config
     self.assert_pipeline_same_output_and_grad(config)
 
   @pytest.mark.tpu_only
@@ -259,7 +255,7 @@ class PipelineParallelismTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_delay_activation_forwarding_same_output_and_grad(self):
     # 4 stages, delayed activation forwarding, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         enable_checkpointing=False,
         run_name="activation_forwarding",
@@ -271,7 +267,6 @@ class PipelineParallelismTest(unittest.TestCase):
         per_device_batch_size=4,
         pipeline_delay_activation_forwarding=True,
     )
-    config = pyconfig.config
     self.assert_pipeline_same_output_and_grad(config)
 
   @pytest.mark.tpu_only

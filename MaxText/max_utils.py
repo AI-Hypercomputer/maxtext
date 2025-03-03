@@ -38,9 +38,9 @@ import max_logging
 
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
+import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
 
-import json
 import yaml
 import flax
 from flax.training import train_state
@@ -119,28 +119,6 @@ def close_summary_writer(summary_writer):
     summary_writer.close()
 
 
-def _prepare_metrics_for_json(metrics, step, run_name):
-  """Converts metric dictionary into json supported types (e.g. float)"""
-  metrics_dict = {}
-  for val in metrics["scalar"]:
-    metrics_dict[val] = float(metrics["scalar"][val])
-  metrics_dict["step"] = float(step)
-  metrics_dict["run_name"] = run_name
-  return metrics_dict
-
-
-def write_metrics_locally(metrics, step, config, file, is_training=True):
-  """Writes metrics locally for testing"""
-  if step == 0:
-    file.truncate(0)
-
-  metrics_dict = _prepare_metrics_for_json(metrics, step, config.run_name)
-  file.write(str(json.dumps(metrics_dict)) + "\n")
-
-  if is_training and step == config.steps - 1:
-    file.close()
-
-
 def add_config_to_summary_writer(config, summary_writer):
   """Writes config params to tensorboard"""
   if jax.process_index() == 0:
@@ -152,26 +130,6 @@ def add_text_to_summary_writer(key, value, summary_writer):
   """Writes given key-value pair to tensorboard as text/summary"""
   if jax.process_index() == 0:
     summary_writer.add_text(key, value)
-
-
-def write_metrics_for_gcs(metrics, step, config, running_metrics, is_training=True):
-  """Writes metrics to gcs"""
-  metrics_dict_step = _prepare_metrics_for_json(metrics, step, config.run_name)
-  running_metrics.append(metrics_dict_step)
-  if is_training and (step + 1) % config.log_period == 0 or step == config.steps - 1:
-    start_step = (step // config.log_period) * config.log_period
-    metrics_filename = f"metrics_step_{start_step:06}_to_step_{step:06}.txt"
-    with open(metrics_filename, "w", encoding="utf8") as metrics_for_gcs:
-      for metrics_step in running_metrics:
-        metrics_for_gcs.write(str(json.dumps(metrics_step)) + "\n")
-
-    metrics_for_gcs.close()
-    gcs_filename = os.path.join(config.metrics_dir, metrics_filename)
-    max_logging.log(f"Moving file {metrics_filename} to GCS...")
-    upload_blob(gcs_filename, metrics_filename)
-    max_logging.log(f"File {metrics_filename} moved successfully!")
-    running_metrics = []  # reset running_metrics to empty list
-  return running_metrics
 
 
 def write_config_raw_keys_for_gcs(raw_keys):
@@ -314,6 +272,39 @@ def initialize_jax_for_cpu(raw_keys):
   )
 
 
+def _wait_for_file_to_disappear(f, timeout=300):
+  for _ in range(timeout):
+    if not f.exists():
+      return True
+    time.sleep(1)
+  return False
+
+
+def _extract_step(f):
+  # The base file name is formatted as {job_name}-s{step}-n{node_rank}-g{gpu_rank}
+  return f.rsplit("-", 3)[1][1:]
+
+
+def _block_and_proces_restore_dir(directory, timeout=300):
+  """Block until a file ending with `.restore` appears, then extract the step number and rename
+  the directory using the step number.
+  """
+  WORD = ".restore"
+  for _ in range(timeout):
+    files = os.listdir(directory)
+    for f in files:
+      if f.endswith(WORD):
+        step = _extract_step(f)
+        if step != "0":
+          os.rename(epath.Path(directory) / f, epath.Path(directory) / step)
+          max_logging.log(f"Found a restore directory at step {step} and renamed it to {epath.Path(directory) / step}.")
+        else:
+          max_logging.log("Found a restore directory at step 0, skipping renaming.")
+        return
+    time.sleep(1)
+  max_logging.log(f"{timeout} seconds have passed but no .restore file was found.")
+
+
 def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
   """Initialize JAX distributed runtime for TPUs when emergency checkpointing is used.
   The information required to initialize JAX distributed runtime will be written by GKE to
@@ -336,6 +327,11 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
       REPLICATOR_FILE = "replicator.yaml"
       TEMP_FILE = REPLICATOR_FILE + ".tmp"
       replicator_file = epath.Path(raw_keys["local_checkpoint_directory"]) / REPLICATOR_FILE
+      if not _wait_for_file_to_disappear(replicator_file):
+        max_logging.log("There is existing replicator.yaml which did not disappear in time.")
+      else:
+        max_logging.log("replicator.yaml no longer exists, creating new replicator.yaml.")
+      TEMP_FILE = REPLICATOR_FILE + ".tmp"
       temp_file = epath.Path(raw_keys["local_checkpoint_directory"]) / TEMP_FILE
       num_slices = get_num_slices(raw_keys)
       num_nodes = jax.process_count()
@@ -362,6 +358,11 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
 
       temp_file.write_text("\n".join([l.strip() for l in replicator_yaml.split("\n")]))
       os.rename(temp_file, replicator_file)
+      if not _wait_for_file_to_disappear(replicator_file):
+        max_logging.log("The newly created replicator.yaml was not deleted in time.")
+      else:
+        max_logging.log("The newly created replicator.yaml was deleted, moving forward.")
+      _block_and_proces_restore_dir(raw_keys["local_checkpoint_directory"])
   else:
     max_logging.log(
         "Initializing JAX distributed runtime without args when emergency checkpointing is"
@@ -780,7 +781,13 @@ def setup_initial_state(
     )
 
     if restored:
-      if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
+      if isinstance(
+          checkpoint_manager,
+          (
+              emergency_checkpoint_manager.CheckpointManager,
+              emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
+          ),
+      ):
         state = restored
       else:
         if "iter" in restored and restored["iter"] is not None:
@@ -1104,3 +1111,24 @@ def print_system_information():
   max_logging.log(f"System Information: Jax Version: {jax.__version__}")
   max_logging.log(f"System Information: Jaxlib Version: {jax.lib.__version__}")
   max_logging.log(f"System Information: Jax Backend: {jax.lib.xla_bridge.get_backend().platform_version}")
+
+
+def permute_to_match_maxtext_rope(arr):
+  """Permutes the Huggingface Rope to match the MaxText logic."""
+  assert arr.shape[-1] % 2 == 0, "The last dimension for rope has to be even."
+  evens, odds = np.split(arr, 2, axis=arr.ndim - 1)  # pylint: disable=W0632
+  x = np.empty_like(arr)
+  x[..., ::2] = evens
+  x[..., 1::2] = odds
+  return x
+
+
+def unpermute_from_match_maxtext_rope(arr, model_size):
+  """
+  Function to get the RoPE values in correct ordering
+  """
+  if model_size[:8] != "llama3.1":
+    return arr
+  evens = arr[..., ::2]
+  odds = arr[..., 1::2]
+  return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)

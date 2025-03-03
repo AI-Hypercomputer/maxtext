@@ -207,10 +207,10 @@ def load_state_if_possible(
       max_logging.log(f"restoring from this run's directory step {step}")
 
       def map_to_pspec(data):
+        if not enable_single_replica_ckpt_restoring:
+          return ocp.type_handlers.ArrayRestoreArgs(sharding=data.sharding)
         pspec = data.sharding.spec
         mesh = data.sharding.mesh
-        if not enable_single_replica_ckpt_restoring:
-          return ocp.type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec)
         replica_axis_index = 0
         replica_devices = _replica_devices(mesh.devices, replica_axis_index)
         replica_mesh = jax.sharding.Mesh(replica_devices, mesh.axis_names)
@@ -235,7 +235,13 @@ def load_state_if_possible(
           abstract_unboxed_pre_state,
       )
 
-      if isinstance(checkpoint_manager, emergency_checkpoint_manager.CheckpointManager):
+      if isinstance(
+          checkpoint_manager,
+          (
+              emergency_checkpoint_manager.CheckpointManager,
+              emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
+          ),
+      ):
         return (
             checkpoint_manager.restore(
                 step,
