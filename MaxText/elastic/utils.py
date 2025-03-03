@@ -122,7 +122,14 @@ class ElasticUtils:
 
     self.failure_count = 0
     self.reshard_retry_count = 0
+    # Wait until all slices are ready before starting
+    # Temporary for scale test
     self.good_slice_indices = self.get_slice_availability()
+    while len(self.good_slice_indices) < self.total_slice_count:
+      logger.info(f"Sleeping for 5 seconds because only {len(self.good_slice_indices)} "
+                  f"out of {self.total_slice_count} slices are available.")
+      time.sleep(5)
+      self.good_slice_indices = self.get_slice_availability()
     self.data = {}
 
   def slice_down(self, reshard_retry: bool = False):

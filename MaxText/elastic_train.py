@@ -181,6 +181,7 @@ def reshard_fn(config: pyconfig.HyperParameters):
       p_train_step,
       example_batch,
       learning_rate_schedule,
+      metric_logger,
       writer,
   )
 
@@ -446,7 +447,7 @@ def train_loop(config, state=None):
          p_train_step,
          example_batch,
          learning_rate_schedule,
-         metrics_logger,
+         metric_logger,
          writer) = reshard_fn(config)
         max_logging.log("Resharding complete. Continuing")
         reshard_flag = False
