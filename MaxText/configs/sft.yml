@@ -2,12 +2,14 @@ base_config: "base.yml"
 
 use_sft: True
 sft_train_on_completion: True
+packing: True
 
 per_device_batch_size: 1.0
-steps: 10
+max_prefill_predict_length: 512
 max_target_length: 1024
 eval_interval: 5  # test eval once, in the middle of 10 training steps
 eval_steps: 2
+learning_rate: 2.e-5
 
 # HF pipeline
 dataset_type: hf
