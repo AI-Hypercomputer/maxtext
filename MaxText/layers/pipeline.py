@@ -496,10 +496,10 @@ class Pipeline(nn.Module):
   def get_pipeline_remat_policy(self):
     # We ensure that the decoder layer inputs are saved, although we leave it to a custom
     # policy if they should be saved to device or offloaded.
-    if self.remat_policy != "custom":
-      save_input_policy = jax.checkpoint_policies.save_only_these_names("iteration_input", "decoder_layer_input")
-    else:
-      save_input_policy = jax.checkpoint_policies.save_only_these_names("iteration_input")
+    if self.config.remat_policy == "custom":
+      return self.remat_policy
+
+    save_input_policy = jax.checkpoint_policies.save_only_these_names("iteration_input", "decoder_layer_input")
     if self.remat_policy is not None:
       remat_policy = jax.checkpoint_policies.save_from_both_policies(self.remat_policy, save_input_policy)
     else:
@@ -586,7 +586,11 @@ class Pipeline(nn.Module):
         )
     )
     example_inputs = jax.lax.broadcast(inputs[0], [self.num_stages])  # dummy inputs fed to initialize the module weights.
+    ag_sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(None, None))
     if positions is not None:
+      # AG positions
+      positions = jax.lax.with_sharding_constraint(positions, ag_sharding)
+
       positions = positions.reshape(
           (self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length)
       )
@@ -596,6 +600,7 @@ class Pipeline(nn.Module):
       example_position = None
       position_idx = None
     if segment_ids is not None:
+      segment_ids = jax.lax.with_sharding_constraint(segment_ids, ag_sharding)
       segment_ids = segment_ids.reshape(
           (self.config.num_pipeline_microbatches, self.pipeline_microbatch_size, self.config.max_target_length)
       )

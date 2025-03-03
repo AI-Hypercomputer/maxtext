@@ -375,7 +375,8 @@ class MoeBlock(nn.Module):
     """Scales weights according to DeepSeek's v3 reference implementation.
     https://github.com/deepseek-ai/DeepSeek-V3/blob/2f7b80eecebf3d1c84da5a0d465f6639ea175012/inference/model.py#L592-L594
     """
-    weights /= weights.sum(-1, keepdims=True)
+    if self.config.routed_score_func == "sigmoid":
+      weights /= weights.sum(-1, keepdims=True)
     weights *= self.config.routed_scaling_factor
     return weights
 
@@ -387,7 +388,7 @@ class MoeBlock(nn.Module):
     inputs_2d = jnp.reshape(inputs, (inputs_shape[0] * inputs_shape[1], inputs_shape[2]))
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
     if self.config.decoder_block == "deepseek":
-      wegihts = self.deepseek_scale_weights(weights)
+      weights = self.deepseek_scale_weights(weights)
     else:
       weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.dtype)
     flatten_selected_experts = jnp.ravel(selected_experts)
@@ -599,7 +600,9 @@ class MoeBlock(nn.Module):
 
       def aqt_einsum(*args, **kwargs):
         # simply skip kwargs, since aqt einsum doesn't support any kwargs like precision
-        return self.quant.einsum(rhs_mesh_axes)(*args)
+        is_aqt = not isinstance(self.quant, quantizations.Fp8Quantization)
+        kw = {"mesh_axes": rhs_mesh_axes} if is_aqt else {"dtype": self.dtype}
+        return self.quant.einsum(**kw)(*args)
 
       einsum_op = aqt_einsum
     else:

@@ -63,3 +63,45 @@ class PyconfigTest(unittest.TestCase):
             "logical_axis_rules": [("activation", ("data", "fsdp")), ("norm", "fsdp")],
         },
     )
+
+  def test_multiple_unmodifiable_configs(self):
+    config_train = pyconfig.initialize(
+        ["train.py", "configs/base.yml"],
+        per_device_batch_size=1.0,
+        run_name="test",
+        enable_checkpointing=False,
+        base_num_decoder_layers=2,
+        attention="dot_product",
+        max_target_length=16,
+        base_emb_dim=256,
+        base_num_query_heads=2,
+        base_num_kv_heads=2,
+        max_prefill_predict_length=4,
+        ici_tensor_parallelism=-1,
+        ici_fsdp_parallelism=4,
+    )
+    config_inference = pyconfig.initialize(
+        ["decode.py", "configs/base.yml"],
+        per_device_batch_size=1.0,
+        run_name="test",
+        enable_checkpointing=False,
+        base_num_decoder_layers=2,
+        attention="dot_product",
+        max_target_length=16,
+        base_emb_dim=256,
+        base_num_query_heads=2,
+        base_num_kv_heads=2,
+        max_prefill_predict_length=4,
+        ici_tensor_parallelism=4,
+        ici_fsdp_parallelism=-1,
+    )
+    self.assertNotEqual(
+        config_train.ici_tensor_parallelism,
+        config_inference.ici_tensor_parallelism,
+    )
+    with self.assertRaises(ValueError):
+      config_inference.__setattr__("ici_fsdp_parallelism", 4)
+
+
+if __name__ == "__main__":
+  unittest.main()

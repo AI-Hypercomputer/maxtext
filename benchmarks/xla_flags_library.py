@@ -21,6 +21,11 @@
 # but provide a recommendation for potential grouping of xla flags and their
 # usage. Please refer to their usage for examples.
 
+REMOVE = "remove"
+ADD_SERVER = "add_server"
+ADD_PROXY = "add_proxy"
+ADD_WORKER = "add_worker"
+
 # xla tpu scoped vmem defines the amount of vmem used for the current hlo op.
 # The remaining vmem is used for prefetching latter op needs.
 # These limits are experimentally recommended values for compute bound models.
@@ -74,13 +79,6 @@ ENABLE_SPARSECORE_OFFLOADING_BASE_FLAGS = (
     " --2a886c8_chip_config_name=megachip_tccontrol"
 )
 
-ENABLE_SPARSECORE_OFFLOADING_BASE_FLAGS_PW = (
-    " --xla_tpu_use_tc_device_shape_on_sc=true"
-    " --xla_sc_enable_instruction_fusion=false"
-    " --xla_sc_disjoint_spmem=false"
-    " --xla_sc_disable_megacore_partitioning=true"
-    # " --2a886c8_chip_config_name=megachip_tccontrol"  # Flag has issues in PW.
-)
 
 # Enable SparseCore All Gather (1D), Reduce Scatter (1D) and All Reduce (ND)
 ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR = (
@@ -123,12 +121,6 @@ ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE = (
     " --xla_tpu_enable_all_reduce_offload_tracing=true"
 ) + ENABLE_SPARSECORE_OFFLOADING_BASE_FLAGS
 
-ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE_PW = (
-    " --xla_tpu_enable_async_collective_fusion_fuse_all_reduce=false"
-    " --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true"
-    " --xla_tpu_enable_all_reduce_offload_tracing=true"
-) + ENABLE_SPARSECORE_OFFLOADING_BASE_FLAGS_PW
-
 # Better memory layout for all-reduce (AR).
 LAYOUT_FOR_ALL_REDUCE_SCATTER = (
     " --xla_tpu_use_minor_sharding_for_major_trivial_input=true"
@@ -150,6 +142,13 @@ REDUCE_SCATTER_FUSION = (
 DATA_PARALLEL_OVERLAP = (
     " --xla_tpu_enable_data_parallel_all_reduce_opt=true"
     " --xla_tpu_data_parallel_opt_different_sized_ops=true"
+)
+
+# Enable Enhanced Launch Barrier.
+# Gracefully handle dispatch failures on TPU workers. For Pathways is required
+# for error propagation and out-of-order execution detection.
+ENHANCED_LAUNCH_BARRIER = (
+    " --xla_tpu_use_enhanced_launch_barrier=true"
 )
 
 # Host offloading Flags. These are optimizations recommended when using host
@@ -202,3 +201,8 @@ DEBUG_LOGS = {
     "TPU_MIN_LOG_LEVEL": "0",
     "TPU_VMODULE": "tpu_configuration_ops_impl=3",  # Enable TPU logging
 }
+
+# Disables collective matmul operations.
+DISABLE_COLLECTIVE_MATMUL = (
+    " --xla_jf_spmd_threshold_for_windowed_einsum_mib=1000000"
+)

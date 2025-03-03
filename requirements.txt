@@ -37,3 +37,4 @@ mlperf-logging@git+https://github.com/mlperf/logging.git
 google-jetstream
 jsonlines
 pathwaysutils@git+https://github.com/google/pathways-utils.git
+omegaconf

@@ -77,7 +77,7 @@ def get_data(golden_data, golden_data_index, config):
   return ids, decoder_segment_ids, decoder_positions, logits
 
 
-def main(config, test_args):
+def main(config, test_args):  # pylint: disable=W0621
   """Test the Whole Model of model_name"""
 
   # initialize the model with weights from reference ckpt
@@ -118,9 +118,10 @@ def main(config, test_args):
     max_logging.log(f"{golden_logits[2]=}")
     max_logging.log(f"{full_train_logits[0, 2, :]=}")
     token_size = int(test_args.token_size) if test_args.token_size else golden_logits.shape[0]
-    # The ellipsis is used to currently support jax nightly versions newer than 1/9/2025 and stable tests. This can be simplified later
+    # The ellipsis is used to currently support jax nightly versions newer than
+    # 1/9/2025 and stable tests. This can be simplified later
     max_logging.log(
-        f"Max Numerical Difference {np.max(np.subtract(full_train_logits[..., 0, :token_size, :], golden_logits[:token_size, :]))}"
+        f"Max Numerical Difference {np.max(np.subtract(full_train_logits[..., 0, :token_size, :], golden_logits[:token_size, :]))}"  # pylint: disable=C0301
     )
 
     model_probabilities = jax.nn.softmax(full_train_logits[..., 0, :token_size, :], axis=-1)
@@ -133,19 +134,17 @@ def main(config, test_args):
     max_logging.log(f"KL divergence = {kl_div}, max KL divergence = {jax.numpy.max(kl_div)}")
 
     if test_args.max_kl_div is not None:
-      max_logging.log("Checking KL Divergence between train distribution and golden distribution")
-      assert jax.numpy.all(
-          kl_div < test_args.max_kl_div
-      ), f"KL divergence values exceed the specified threshold of {test_args.max_kl_div}. Max divergence: {jax.numpy.max(kl_div)}"
+      max_logging.log("Checking KL Divergence between train distribution and " "golden distribution")
+      assert jax.numpy.all(kl_div < test_args.max_kl_div), f"KL divergence values exceed the specified threshold of {test_args.max_kl_div}. Max divergence: {jax.numpy.max(kl_div)}"  # pylint: disable=C0301
     else:
-      max_logging.log("Checking Numerical Differences between train logits and golden logits")
+      max_logging.log("Checking Numerical Differences between train logits and golden logits")  # pylint: disable=C0301
       assert jax.numpy.allclose(
           full_train_logits[..., 0, :token_size, :],
           golden_logits[:token_size, :],
           rtol=float(test_args.rtol),
           atol=float(test_args.atol),
           equal_nan=False,
-      ), f"Logits do not match closely enough. Required rtol={test_args.rtol}, atol={test_args.atol}."
+      ), f"Logits do not match closely enough. Required rtol={test_args.rtol}, atol={test_args.atol}."  # pylint: disable=C0301
 
 
 if __name__ == "__main__":
@@ -167,6 +166,5 @@ if __name__ == "__main__":
   for arg in to_remove_args:
     model_args = [s for s in model_args if not s.startswith(arg)]
 
-  pyconfig.initialize(model_args)
-  cfg = pyconfig.config
+  cfg = pyconfig.initialize(model_args)
   main(cfg, test_args)

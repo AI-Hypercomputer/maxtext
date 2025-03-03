@@ -24,6 +24,8 @@ import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
+from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
+from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
@@ -229,7 +231,12 @@ class AttentionOp(nn.Module):
       if lengths is None:
         lengths = jnp.sum(decoder_segment_ids, axis=-1)
 
-      return self.ragged_attention(query, key, value, lengths, self.ragged_block_size)
+      if jax.devices()[0].platform == "tpu":
+        impl = self.tpu_ragged_attention
+      elif jax.devices()[0].platform == "gpu":
+        impl = self.gpu_ragged_attention
+      return impl(query, key, value, lengths, self.ragged_block_size)
+
     elif (
         self.attention_kernel == "dot_product"
         or (self.attention_kernel == "autoselected" and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE)
@@ -237,17 +244,27 @@ class AttentionOp(nn.Module):
     ):
       return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
     elif self.attention_kernel == "flash" or self.attention_kernel == "autoselected":
-      if isinstance(key, KVTensor):
-        key = key.dequant()
-      if isinstance(value, KVTensor):
-        value = value.dequant()
+      if jax.devices()[0].platform == "tpu":
+        if isinstance(key, KVTensor):
+          key = key.dequant()
+        if isinstance(value, KVTensor):
+          value = value.dequant()
 
-      if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-        raise ValueError(
-            """Decode not supported with flash attention.
-                            Use `dot_product` instead."""
-        )
-      return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap), None, None
+        if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+          raise ValueError(
+              """Decode not supported with flash attention.
+                              Use `dot_product` instead."""
+          )
+        return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap), None, None
+      else:
+        if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+          # fallback to dot_product as pallas gpu flash attention doesn't support decode stage
+          return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
+        else:
+          key = jnp.repeat(key, self.num_query_heads // self.num_kv_heads, axis=2)
+          value = jnp.repeat(value, self.num_query_heads // self.num_kv_heads, axis=2)
+          out = gpu_pallas_attention.mha(query, key, value, decoder_segment_ids, sm_scale=1.0, causal=True)
+          return out, None, None
     elif self.attention_kernel == "cudnn_flash_te":
       if isinstance(key, KVTensor):
         key = key.dequant()
@@ -262,7 +279,31 @@ class AttentionOp(nn.Module):
     else:
       raise ValueError(f"Unexpected attention kernel {self.attention_kernel=}.")
 
-  def ragged_attention(
+  def gpu_ragged_attention(self, q: Array, k: Array | KVTensor, v: Array | KVTensor, lengths: Array, block_size: int):
+    batch_size, q_length, q_heads, head_dim = q.shape
+
+    # Reshape q to match gqa's expected shape
+    q_for_gqa = q.squeeze(axis=1)
+
+    # Use the original gqa function to get the attention output
+    local_out, (local_sum, local_max) = gpu_pallas_decode_attention.gqa(
+        q=q_for_gqa,
+        k=k,
+        v=v,
+        kv_seq_len=lengths,
+        block_k=block_size,
+        sm_scale=1.0,
+        return_residuals=True,
+        normalize_output=False,
+    )
+
+    # Reshape local_out, local_max and local_sum to match Maxtext requirements
+    local_out = local_out.reshape(batch_size, q_length, q_heads, head_dim)
+    local_max = local_max.reshape(batch_size, q_length, q_heads, 1)
+    local_sum = local_sum.reshape(batch_size, q_length, q_heads, 1)
+    return local_out, local_max, local_sum
+
+  def tpu_ragged_attention(
       self, query: Array, key: Array | KVTensor, value: Array | KVTensor, lengths: Array, block_size: int
   ) -> tuple[Array, Array, Array]:
     """Ragged Attention."""
@@ -571,6 +612,9 @@ class AttentionOp(nn.Module):
 
     einsum = jnp.einsum
     if self.kv_quant:
+      # manually cast to bf16 to avoid the fp32 XLA ops for speedup
+      if isinstance(value, KVTensor) and self.kv_quant.dtype == jnp.float8_e4m3fn:
+        value.qvalue = value.qvalue.astype(jnp.bfloat16)
       einsum = self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(value)
     if model_mode == common_types.MODEL_MODE_TRAIN or self.compute_axis_order == (0, 1, 2, 3):
       out = einsum("bkgts,bskd->btkgd", attn_weights, value)
@@ -908,6 +952,8 @@ class AttentionOp(nn.Module):
         scale_value /= quantizations.MAX_INT8
       elif dtype == jnp.int4:
         scale_value /= quantizations.MAX_INT4
+      elif dtype == jnp.float8_e4m3fn:
+        scale_value /= quantizations.E4M3_MAX
 
       cache_value = KVTensor(qvalue=cache_value, scale=[scale_value], scale_t=None, dequant_dtype=target_dtype, bias=[])
     cache_value_in_logical_shape = jax.tree.map(lambda x: self.reverse_transepose(x, cache_axis_order), cache_value)
@@ -997,7 +1043,7 @@ class AttentionOp(nn.Module):
       two tuples of (k, v, decoder_segments) -- either can be Nones
 
     """
-    if key.shape != value.shape:
+    if key.shape != value.shape and self.config.attention_type != AttentionType.MLA.value:
       raise ValueError(f"Can't KV cache with mismatched shapes {key.shape=}, {value.shape=}")
 
     if model_mode == common_types.MODEL_MODE_TRAIN:
@@ -1281,6 +1327,11 @@ class Attention(nn.Module):
     elif rope_type.startswith("yarn"):
       rotary_embedding = YarnRotaryEmbedding(
           max_seq_len=self.config.max_target_length,
+          original_seq_len=self.config.original_seq_len,
+          beta_fast=self.config.beta_fast,
+          beta_slow=self.config.beta_slow,
+          rope_theta=self.config.rope_theta,
+          rope_factor=self.config.rope_factor,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
           name=name,
@@ -1379,7 +1430,7 @@ class MLA(Attention):
   max_seq_len: int = 4096 * 4
   original_seq_len: int = 4096
   mscale: float = 1.0  # scaling factor for softmax
-  rope_factor: float = 10000.0  # rotary embedding factor
+  rope_factor: float = 40.0  # rotary embedding factor
 
   @property
   def qk_head_dim(self) -> int:
@@ -1390,7 +1441,9 @@ class MLA(Attention):
     super().setup()
 
     # Assert required configuration parameters for MLA attention.
-    assert self.config.attention_type == AttentionType.MLA.value, "MLA requires MLA attention type"
+    assert (
+        self.config.attention_type == AttentionType.MLA.value
+    ), f"MLA requires MLA attention type {AttentionType.MLA.value}"
     assert self.kv_lora_rank > 0, "KV LoRA rank must be > 0"
     assert self.qk_nope_head_dim > 0, "QK NoPe head dim must be > 0"
     assert self.qk_rope_head_dim > 0, "QK RoPE head dim must be > 0"
@@ -1401,7 +1454,7 @@ class MLA(Attention):
     if self.q_lora_rank == 0:
       # Standard Q projection (without LoRA).
       self.query_proj = DenseGeneral(
-          features=(self.num_query_heads, self.head_dim),
+          features=(self.num_query_heads, self.qk_head_dim),
           axis=-1,
           kernel_init=self.kernel_init,
           kernel_axes=("embed", "q_heads", "kv"),

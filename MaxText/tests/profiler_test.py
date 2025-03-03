@@ -29,7 +29,7 @@ class ProfilerTest(unittest.TestCase):
   # These periodic proilfer tests can run on any platform (cpu, gpu or tpu)
   @pytest.mark.tpu_only
   def test_periodic_profiler_third_period_starts(self):
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         enable_checkpointing=False,
         run_name="test_periodic_profiler_starts_after_regular_profile",
@@ -38,7 +38,6 @@ class ProfilerTest(unittest.TestCase):
         profiler_steps=4,
         profile_periodically_period=5,
     )
-    config = pyconfig.config
     prof = profiler.Profiler(config, offset_step=2)
 
     step = 24  # 3 * 5 + 7 + 2: 3 periods of 5 after skipping initial 7 skip + 2 offset.
@@ -46,7 +45,7 @@ class ProfilerTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_periodic_profiler_not_start_middle_period(self):
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         enable_checkpointing=False,
         run_name="test_periodic_profiler_starts_after_regular_profile",
@@ -55,7 +54,6 @@ class ProfilerTest(unittest.TestCase):
         profiler_steps=4,
         profile_periodically_period=5,
     )
-    config = pyconfig.config
     prof = profiler.Profiler(config, offset_step=2)
 
     step = 25  # This corresponds to the middle of period 3 which started at step 24.
@@ -63,7 +61,7 @@ class ProfilerTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_periodic_profiler_third_period_ends(self):
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         enable_checkpointing=False,
         run_name="test_periodic_profiler_starts_after_regular_profile",
@@ -72,7 +70,6 @@ class ProfilerTest(unittest.TestCase):
         profiler_steps=4,
         profile_periodically_period=5,
     )
-    config = pyconfig.config
     prof = profiler.Profiler(config, offset_step=2)
 
     step = 27  # 3 * 5 + 4 + 7 + 2: 3 periods of 5, profile takes 4 steps + skipping initial 7 skip + 2 offset
@@ -80,7 +77,7 @@ class ProfilerTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_periodic_profiler_third_period_middle_not_end(self):
-    pyconfig.initialize(
+    config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
         enable_checkpointing=False,
         run_name="test_periodic_profiler_starts_after_regular_profile",
@@ -89,7 +86,6 @@ class ProfilerTest(unittest.TestCase):
         profiler_steps=4,
         profile_periodically_period=5,
     )
-    config = pyconfig.config
     prof = profiler.Profiler(config, offset_step=2)
 
     step = 28  # Corresponds to 1 after the third period ended.

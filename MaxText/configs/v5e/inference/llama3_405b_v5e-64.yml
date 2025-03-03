@@ -5,7 +5,7 @@ base_config: "inference_jetstream.yml"
 # per_device_batch_size=1
 # weight bf16, kv cache bf16
 
-model_name: "llama3-405b"
+model_name: "llama3.1-405b"
 sharding_strategy: "experimental"
 attention: 'dot_product'
 allow_split_physical_axes: True
