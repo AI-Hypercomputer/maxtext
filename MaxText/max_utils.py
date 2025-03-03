@@ -663,7 +663,7 @@ def create_device_mesh(config, devices=None):
       if config.optimize_mesh_for_tpu_v6e:
         mesh = optimize_mesh_for_tpu_v6e(mesh, devices)
 
-  max_logging.log(f"Num_devices: {num_devices}, shape {mesh.shape}")
+  max_logging.log(f"Num_devices: {num_devices}, shape: {mesh.shape}")
 
   return mesh
 

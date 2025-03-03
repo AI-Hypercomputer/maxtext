@@ -106,9 +106,19 @@ def load_next_batch(train_iter, example_batch, config):
   """Loads the next batch. Can keep reusing the same batch for performance reasons"""
 
   if config.reuse_example_batch and example_batch is not None:
-    return example_batch
+    next_batch = example_batch
   else:
-    return next(train_iter)
+    next_batch = next(train_iter)
+
+  if config.num_diloco_replicas <= 1:
+    return next_batch
+
+  # Reshape the batch to include the DiLoCo dimension.
+  def diloco_reshape(arr, num_diloco_replicas=config.num_diloco_replicas):
+    example_shape = arr.shape[1:]
+    return jnp.reshape(arr, shape=(num_diloco_replicas, -1, *example_shape))
+
+  return jax.tree.map(diloco_reshape, next_batch)
 
 
 def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr, per_device_tokens):
@@ -785,12 +795,13 @@ def train_loop(config, state=None):
       p_eval_step = None
 
   if config.num_diloco_replicas > 1:
-    from diloco import build_diloco_train_step
+    from diloco import build_diloco_train_step  # pylint: disable=import-outside-toplevel
+
     state, diloco_train_step = build_diloco_train_step(config, p_train_step, state)
     p_train_step = jax.jit(
-      diloco_train_step,
-      static_argnums=static_argnums_train,
-      donate_argnums=donate_argnums_train,
+        diloco_train_step,
+        static_argnums=static_argnums_train,
+        donate_argnums=donate_argnums_train,
     )
 
   running_gcs_metrics = [] if config.gcs_metrics else None
