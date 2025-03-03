@@ -1666,7 +1666,7 @@ deepseek_big = _add_to_model_dictionary(
 )
 
 #docker_image_flag = '--docker-image=gcr.io/tpu-prod-env-multipod/mattdavidow-pp-weight-no-fsdp-bi-2025-03-02'
-#commit 83bb73b713ddff479b4bbada8e4d5ce020ad5827 (HEAD -> mattdavidow-pp-weight-specs, origin/mattdavidow-pp-weight-specs)
+#commit 7adbc2194039ab4134a135bf5cbbd24246ffaaa5 (HEAD -> mattdavidow-pp-weight-specs, origin/mattdavidow-pp-weight-specs)
 mattbar_a1 = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
