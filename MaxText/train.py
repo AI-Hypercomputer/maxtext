@@ -96,6 +96,23 @@ def validate_train_config(config):
         config.gradient_accumulation_steps == 1
     ), "fp8 can't be used with gradient_accumulation_steps right now. Please use other quantization or set gradient_accumulation_steps to 1"
 
+  # Check if GPU Flash Attention is being used with sequence packing
+  if config.attention == "cudnn_flash_te" and config.enable_packing and config.dataset_type != "synthetic":
+    raise ValueError(
+        "cudnn_flash_te only supports BSHD format. The THD (seq packing) support is going to be available in Transformer Engine 2.0 release. "
+        "Please disable sequence packing (set enable_packing=False) or use a different attention mechanism. "
+        "With synthetic data, the format is not important as packing is not applied."
+    )
+
+  # Check if context parallelism is being used with sequence packing
+  using_context_parallel = config.ici_context_parallelism > 1 or config.dcn_context_parallelism > 1
+  if using_context_parallel and config.enable_packing and config.dataset_type != "synthetic":
+    raise ValueError(
+        "Context parallelism cannot be used with sequence packing except for synthetic data where packing is not applied. "
+        "Either disable sequence packing (set enable_packing=False) or disable context parallelism. "
+        "Context parallelism with packing support will be added soon."
+    )
+
 
 def get_first_step(state):
   with jax.spmd_mode("allow_all"):
@@ -647,6 +664,12 @@ def setup_train_loop(config):
   record_goodput(recorder, config, recorder.record_tpu_init_end_time if recorder else None)
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
+
+  # Apply reordering wrapper to data iterators if context parallelism is enabled
+  if (config.ici_context_parallelism > 1 or config.dcn_context_parallelism > 1) and config.context_parallel_load_balance:
+    data_iterator = map(max_utils.get_reorder_callable(config), data_iterator)
+    if eval_data_iterator:
+      eval_data_iterator = map(max_utils.get_reorder_callable(config), eval_data_iterator)
 
   state, _, state_mesh_shardings, data_iterator = max_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
