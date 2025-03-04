@@ -815,12 +815,11 @@ def train_loop(config):
   slice_ipv6_addresses = []
   for slice_trans_address in slice_trans_address_list:
     slice_ipv6_addresses.append(
-        pychubbyutil.ResolveBNSName(slice_trans_address)[0]
+        get_ipv6_address(slice_trans_address)[0]
     )
 
   trans_ctrl_port = os.getenv("TRANS_CTRL_PORT")
   transfer_server = transfer.start_transfer_server(
-      # hardcode -- encounter a weird error when using jax.local_devices()[0].client
       jax.local_devices()[0].client,
       f"[{slice_ipv6_addresses[my_slice_id]}]:{trans_ctrl_port}",
       [f"[{slice_ipv6_addresses[my_slice_id]}]:0"],
@@ -836,25 +835,21 @@ def train_loop(config):
   if my_slice_id == 0:
     mesh_0 = jax.make_mesh((4, 2), ("x", "y"), devices=jax.local_devices())
     sharding_0 = NamedSharding(mesh_0, P("x", "y"))
-    logging.info("line %s" % repr(sharding_0))
     a = jax.device_put(jnp.ones((16384, 2048)), sharding_0)
 
-    logging.info("push to peer....")
+    print("push to peer....")
     transfer_server.await_pull(1, [a])
   else:
     mesh_1 = jax.make_mesh((4, 2), ("x", "y"), devices=jax.local_devices())
     sharding_1 = NamedSharding(mesh_1, P("x", "y"))
     d = jax.device_put(jnp.ones((16384, 2048)), sharding_1)
-    logging.info(
-        "### d shape %s, dtype %s, d.sharding %s", d.shape, d.dtype, d.sharding
-    )
     b_from_peer_spec = jax.ShapeDtypeStruct(
         d.shape, d.dtype, sharding=sharding_1
     )
-    logging.info("pull from peer....")
+    print("pull from peer....")
     b = transfer_connection.pull(1, [b_from_peer_spec])
     jax.block_until_ready(b)
-    logging.info("### b ready")
+    print("b ready")
   jax.experimental.multihost_utils.sync_global_devices(
       "Barrier after test ends"
   )
