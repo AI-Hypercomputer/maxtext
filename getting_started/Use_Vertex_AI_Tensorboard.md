@@ -46,7 +46,7 @@ Set `use_vertex_tensorboard=True` to upload logs in `config.tensorboard_dir` to 
 run_name: "test-run"
 use_vertex_tensorboard: True
 vertex_tensorboard_project: "test-project" # or vertex_tensorboard_project: ""
-vertex_tensorboard_location: "us-central1"
+vertex_tensorboard_region: "us-central1"
 ```
 The above configuration will try to create a Vertex AI Tensorboard instance named `test-project-tb-instance` and a Vertex AI Experiment named `test-run` in the `us-central1` region of `test-project`. If you set `vertex_tensorboard_project=""`, then the default project (`gcloud config get project`) set on the VM will be used to create the Vertex AI resources. It will only create these resources if they do not already exist. Also, the logs in `config.tensorboard_dir` will be uploaded to `test-project-tb-instance` Tensorboard instance and `test-run` Experiment in Vertex AI.
 
@@ -56,5 +56,5 @@ The following configuration will not upload any log data collected in `config.te
 ```
 use_vertex_tensorboard: False
 vertex_tensorboard_project: ""
-vertex_tensorboard_location: ""
+vertex_tensorboard_region: ""
 ```
