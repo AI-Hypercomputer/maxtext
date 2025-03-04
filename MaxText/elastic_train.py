@@ -299,6 +299,13 @@ def train_loop(config, state=None):
   metric_logger = MetricLogger(writer, config)
   step = start_step
 
+  config.eu.maybe_save(
+      step,
+      force=True
+      params=state.params,
+      opt_state=state.opt_state,
+  )
+
   # step_down = {10, 30, 44}
   # step_up = {14, 16, 40, 45}
   while True:
