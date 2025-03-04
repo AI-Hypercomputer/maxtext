@@ -132,7 +132,36 @@ class ElasticUtils:
       self.good_slice_indices = self.get_slice_availability()
     self.data = {}
 
-  def slice_down(self, reshard_retry: bool = False):
+  @timeit
+  def maybe_save(self, save_step: int, blocking: bool = False,
+                 force: bool = False, **kwargs):
+    """Save step and state."""
+    if not force and save_step % self.save_period:
+      return
+
+    total_nbytes = 0
+    for k, v in kwargs.items():
+      nbytes = jax.tree.map(lambda x: x.nbytes, v)
+      total_nbytes += jax.tree.reduce(operator.add, nbytes)
+
+    logger.info(f"Saving {total_nbytes} bytes")
+
+    self.data = {
+        k: jax.device_put(
+            v,
+            jax.tree.map(
+                lambda x: x.sharding.with_memory_kind(kind="pinned_host"), v
+            ),
+        )
+        for k, v in kwargs.items()
+    }
+    self.data["save_step"] = save_step
+
+    if blocking:
+      for v in self.data.values():
+        jax.block_until_ready(v)
+
+  def _slice_down(self, reshard_retry: bool = False):
     """Slice down."""
     logger.info("Slice down")
     self.good_slice_indices = self.get_slice_availability()
@@ -160,32 +189,63 @@ class ElasticUtils:
           f"Max reshard retry count reached {self.max_reshard_retry_count}"
       )
 
-  @timeit
-  def save(self, save_step: int, blocking: bool = False, **kwargs):
-    """Save step and state."""
-    total_nbytes = 0
-    for k, v in kwargs.items():
-      nbytes = jax.tree.map(lambda x: x.nbytes, v)
-      total_nbytes += jax.tree.reduce(operator.add, nbytes)
+  @staticmethod
+  def _is_error_due_to_slice_down(error: Exception):
+    if "DATA_LOSS" in str(error):
+      logger.info("Caught JaxRuntimeError DATA_LOSS exception during resharding!")
+      logger.info(traceback.format_exc())
+    elif "INTERNAL" in str(error):
+      logger.info("Caught JaxRuntimeError INTERNAL exception during resharding!")
+      logger.info(traceback.format_exc())
 
-    logger.info(f"Saving {total_nbytes} bytes")
+    else:
+      logger.info("Unknown JaxRuntimeError during resharding!")
+      return False
 
-    self.data = {
-        k: jax.device_put(
-            v,
-            jax.tree.map(
-                lambda x: x.sharding.with_memory_kind(kind="pinned_host"), v
-            ),
-        )
-        for k, v in kwargs.items()
-    }
-    self.data["save_step"] = save_step
+    return True
 
-    if blocking:
-      for v in self.data.values():
-        jax.block_until_ready(v)
+  def maybe_reshard_down(
+      self,
+      error: Exception,
+      reshard_handler: Callable,
+      handler_args: tuple[Any, ...] | None= None,
+      reshard_retry: bool = False
+  ):
+    if handler_args is None:
+      handler_args = ()
 
-  def is_ready_to_reshard(self, step: int):
+    while True:
+      if not self._is_error_due_to_slice_down(error)
+        raise error from error.__cause__
+
+      self._slice_down(reshard_retry)
+
+      try:
+        return reshard_handler(*handler_args)
+      except jax.error.JaxRuntimeError as error:
+        reshard_retry = True
+
+  def maybe_reshard_up(
+      self,
+      reshard_handler: Callable,
+      handler_args: tuple[Any, ...] | None = None):
+    if handler_args is None:
+      handler_args = ()
+
+    if not self._is_ready_to_reshard(step):
+      return *handler_args
+
+    try:
+      return reshard_handler(*handler_args)
+    except jax.error.JaxRuntimeError as error
+      return self.maybe_reshard_down(
+          error,
+          reshard_handler,
+          handler_args,
+          reshard_retry=True,
+      )
+
+  def _is_ready_to_reshard(self, step: int):
     """Indicates if it is time to reshard.
 
     May update `good_slice_indices`.

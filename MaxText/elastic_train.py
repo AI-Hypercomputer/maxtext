@@ -70,109 +70,109 @@ from train import (
 
 
 @utils.timeit
-def reshard_fn(config: pyconfig.HyperParameters):
+def reshard_fn(
+    config: pyconfig.HyperParameters,
+    step: step,
+    state: TrainState,
+    mesh: jax.sharding.Mesh,
+    checkpoint_manager: CheckpointManager,
+    data_iterator: DataIterator,
+    p_train_step: Callable,
+    example_batch: False,
+    learning_rate_schedule: Callable,
+    metric_logger: MetricLogger,
+    writer: Writer,
+):
   """Reshard function."""
-  while True:
-    try:
-      init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = (
-          setup_mesh_and_model(config)
+  if checkpoint_manager is not None:
+    checkpoint_manager.close()
+
+  init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = (
+      setup_mesh_and_model(config)
+  )
+
+  data_iterator, _ = create_data_iterator(config, mesh)
+
+  restore_step = config.eu.data["save_step"]
+
+  if checkpoint_manager is not None:
+    # Confirm this is the right thing to do
+    latest_step = checkpoint_manager.latest_step()
+    max_logging.log(f"{latest_step=}")
+    if latest_step is not None and latest_step >= restore_step:
+      max_logging.log(
+          f"Deleting checkpoint from step {latest_step} since we are "
+          f"rewinding to step {restore_step}."
       )
+      checkpoint_manager.delete(latest_step)
 
-      data_iterator, _ = create_data_iterator(config, mesh)
+  state, _, state_mesh_shardings, data_iterator = max_utils.setup_training_state(
+      model,
+      data_iterator,
+      tx,
+      config,
+      jax.random.fold_in(init_rng, restore_step),
+      mesh,
+      checkpoint_manager,
+  )
 
-      restore_step = config.eu.data["save_step"]
+  def reshard(arr):
+    sharding_pinned_host = jax.tree.map(
+        lambda x: jax.sharding.NamedSharding(mesh, x.sharding.spec, memory_kind="pinned_host"),
+        arr,
+    )
+    resharded_pinned_host = config.eu.reshard(
+        arr,
+        sharding_pinned_host,
+        put_array=config.eu.put_array_device_put2,
+        donate_input=True,
+    )
 
-      if checkpoint_manager is not None:
-        # Confirm this is the right thing to do
-        latest_step = checkpoint_manager.latest_step()
-        max_logging.log(f"{latest_step=}")
-        if latest_step is not None and latest_step >= restore_step:
-          max_logging.log(
-              f"Deleting checkpoint from step {latest_step} since we are "
-              f"rewinding to step {restore_step}."
-          )
-          checkpoint_manager.delete(latest_step)
+    sharding_device = jax.tree.map(
+        lambda x: jax.sharding.NamedSharding(mesh, x.sharding.spec, memory_kind="device"),
+        resharded_pinned_host,
+    )
 
-      state, _, state_mesh_shardings, data_iterator = max_utils.setup_training_state(
-          model,
-          data_iterator,
-          tx,
-          config,
-          jax.random.fold_in(init_rng, restore_step),
-          mesh,
-          checkpoint_manager,
-      )
+    resharded_device = config.eu.reshard(
+        resharded_pinned_host,
+        sharding_device,
+        put_array=config.eu.put_array_device_put0,
+        donate_input=False,
+    )
 
-      def reshard(arr):
-        sharding_pinned_host = jax.tree.map(
-            lambda x: jax.sharding.NamedSharding(mesh, x.sharding.spec, memory_kind="pinned_host"),
-            arr,
-        )
-        resharded_pinned_host = config.eu.reshard(
-            arr,
-            sharding_pinned_host,
-            put_array=config.eu.put_array_device_put2,
-            donate_input=True,
-        )
+    return resharded_pinned_host, resharded_device
 
-        sharding_device = jax.tree.map(
-            lambda x: jax.sharding.NamedSharding(mesh, x.sharding.spec, memory_kind="device"),
-            resharded_pinned_host,
-        )
+  config.eu.data["params"], params = reshard(config.eu.data["params"])
+  config.eu.data["opt_state"], opt_state = reshard(config.eu.data["opt_state"])
 
-        resharded_device = config.eu.reshard(
-            resharded_pinned_host,
-            sharding_device,
-            put_array=config.eu.put_array_device_put0,
-            donate_input=False,
-        )
+  state = state.replace(step=restore_step, params=params, opt_state=opt_state)
+  jax.block_until_ready(state)
 
-        return resharded_pinned_host, resharded_device
+  (
+      functional_train,
+      in_shard_train,
+      out_shard_train,
+      static_argnums_train,
+      donate_argnums_train,
+  ) = maxtext_utils.get_functional_train_with_signature(
+      train_step, mesh, state_mesh_shardings, model, config
+  )
 
-      config.eu.data["params"], params = reshard(config.eu.data["params"])
-      config.eu.data["opt_state"], opt_state = reshard(config.eu.data["opt_state"])
+  p_train_step = jax.jit(
+      functional_train,
+      in_shardings=in_shard_train,
+      out_shardings=out_shard_train,
+      static_argnums=static_argnums_train,
+      donate_argnums=donate_argnums_train,
+  )
 
-      state = state.replace(step=restore_step, params=params, opt_state=opt_state)
-      jax.block_until_ready(state)
+  example_batch = None
+  metric_logger = MetricLogger(writer, config)
 
-      (
-          functional_train,
-          in_shard_train,
-          out_shard_train,
-          static_argnums_train,
-          donate_argnums_train,
-      ) = maxtext_utils.get_functional_train_with_signature(
-          train_step, mesh, state_mesh_shardings, model, config
-      )
-
-      p_train_step = jax.jit(
-          functional_train,
-          in_shardings=in_shard_train,
-          out_shardings=out_shard_train,
-          static_argnums=static_argnums_train,
-          donate_argnums=donate_argnums_train,
-      )
-
-      example_batch = None
-      metric_logger = MetricLogger(writer, config)
-
-      jax.block_until_ready(state)
-      break
-    except jax.errors.JaxRuntimeError as e:
-      if "DATA_LOSS" in str(e):
-        max_logging.log("Caught JaxRuntimeError DATA_LOSS exception during resharding!")
-        max_logging.log(traceback.format_exc())
-      elif "INTERNAL" in str(e):
-        max_logging.log("Caught JaxRuntimeError INTERNAL exception during resharding!")
-        max_logging.log(traceback.format_exc())
-
-      else:
-        max_logging.log("Unknown JaxRuntimeError during resharding!")
-        raise
-
-      config.eu.slice_down(reshard_retry=True)
+  jax.block_until_ready(state)
 
   return (
+      config,
       restore_step,
       state,
       mesh,
@@ -408,38 +408,49 @@ def train_loop(config, state=None):
           if step == last_profiling_step or prof.should_deactivate_periodic_profile(step):
             prof.deactivate(blocking_object=state)
 
-          reshard_flag = config.eu.is_ready_to_reshard(step)
-          if reshard_flag or step % config.eu.save_period == 0:
-            config.eu.save(
-                step,
-                params=state.params,
-                opt_state=state.opt_state,
-            )
+          config.eu.maybe_save(
+              step,
+              force=reshard_flag
+              params=state.params,
+              opt_state=state.opt_state,
+          )
+
+          (config,
+           step,
+           state,
+           mesh,
+           checkpoint_manager,
+           data_iterator,
+           p_train_step,
+           example_batch,
+           learning_rate_schedule,
+           metric_logger,
+           writer) = config.eu.maybe_reshard_up(
+               step,
+               reshard_fn,
+               handler_args=(
+                   config,
+                   step,
+                   state,
+                   mesh,
+                   checkpoint_manager,
+                   data_iterator,
+                   p_train_step,
+                   example_batch,
+                   learning_rate_schedule,
+                   metric_logger,
+                   writer,
+               ),
+           )
 
           if step == start_step:
             max_utils.print_mem_stats("After params initialized")
 
           step += 1
 
-      except jax.errors.JaxRuntimeError as e:
-        if "DATA_LOSS" in str(e):
-          max_logging.log("Caught JaxRuntimeError DATA_LOSS exception")
-          max_logging.log(traceback.format_exc())
-        elif "INTERNAL" in str(e):
-          max_logging.log("Caught JaxRuntimeError INTERNAL exception")
-          max_logging.log(traceback.format_exc())
-
-        else:
-          max_logging.log("Unknown JaxRuntimeError")
-          raise
-
-        config.eu.slice_down()
-        reshard_flag = True
-
-      if reshard_flag:
-        if checkpoint_manager is not None:
-          checkpoint_manager.close()
-        (step,
+      except jax.errors.JaxRuntimeError as error:
+        (config,
+         step,
          state,
          mesh,
          checkpoint_manager,
@@ -448,12 +459,22 @@ def train_loop(config, state=None):
          example_batch,
          learning_rate_schedule,
          metric_logger,
-         writer) = reshard_fn(config)
-        max_logging.log("Resharding complete. Continuing")
-        reshard_flag = False
-
-      if step == start_step:
-        max_utils.print_mem_stats("After params initialized")
+         writer) = config.eu.maybe_reshard_down(
+             error,
+             reshard_fn,
+             handler_args=(
+                 step,
+                 state,
+                 mesh,
+                 checkpoint_manager,
+                 data_iterator,
+                 p_train_step,
+                 example_batch,
+                 learning_rate_schedule,
+                 metric_logger,
+                 writer,
+             ),
+         )
 
   if checkpoint_manager is not None:
     checkpoint_manager.wait_until_finished()
