@@ -45,14 +45,28 @@ def main(argv: Sequence[str]) -> None:
   import jax.numpy as jnp
   tokens = jnp.array(tokenizer_model.encode(text), dtype=jnp.int32)
   true_length = len(tokens)
+  breakpoint()
   # tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
   assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
   assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
 
   # Split RNG before calling prefill
   rng, rng_prefill = jax.random.split(rng)
-  prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
-  slot = 0
+  steps = range(config.max_prefill_predict_length, config.max_target_length)
+  for i in range(50):
+    tokens = jnp.array(tokenizer_model.encode(text), dtype=jnp.int32)
+    true_length = len(tokens)
+    prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
+    slot = 0
+    output = tokenizer_model.decode([first_token.get_result_at_slot(slot).tokens.item()])
+    print(f"Input `{text}` -> first token output `{output}`")
+    text += output
+    # breakpoint()
+  breakpoint()
+  # Split RNG before calling prefill
+  # rng, rng_prefill = jax.random.split(rng)
+  # prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
+  # slot = 0
 
   rng, rng_init_decode = jax.random.split(rng)
   decode_state = engine.init_decode_state(rng_init_decode)
