@@ -32,11 +32,11 @@ import jax.numpy as jnp
 import common_types
 from kernels.ragged_attention import ragged_gqa
 from kernels.ragged_attention import ragged_mha
+from inference import page_manager, paged_attention
 from layers import embeddings
 from layers import initializers
 from layers import linears
 from layers import quantizations
-
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -241,6 +241,7 @@ class AttentionOp(nn.Module):
         self.attention_kernel == "dot_product"
         or (self.attention_kernel == "autoselected" and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE)
         or (self.attention_kernel == "autoselected" and length < 128)
+        or (self.attention_kernel == "paged")
     ):
       return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
     elif self.attention_kernel == "flash" or self.attention_kernel == "autoselected":
@@ -1070,7 +1071,9 @@ class AttentionOp(nn.Module):
     return attn_out
 
   @nn.compact
-  def __call__(self, query, key, value, decoder_segment_ids, model_mode):
+  def __call__(
+      self, query, key, value, decoder_segment_ids, model_mode, page_state: Optional[page_manager.PageState] = None
+  ):
     prefill_kv_cache, ar_kv_cache = self.kv_cache(
         key, value, decoder_segment_ids, model_mode, use_ragged_attention=self.use_ragged_attention
     )
@@ -1199,6 +1202,21 @@ class Attention(nn.Module):
         use_ragged_attention=self.use_ragged_attention,
         ragged_block_size=self.ragged_block_size,
     )
+    # When paged attention is enabled, paged attention op is used for all model modes except TRAIN,
+    # which uses default attention op.
+    if self.config.attention == "paged":
+      self.paged_attention_op = paged_attention.PagedAttentionOp(
+          mesh=self.mesh,
+          num_pages=self.config.pagedattn_num_pages,
+          tokens_per_page=self.config.pagedattn_tokens_per_page,
+          max_pages_per_slot=self.config.max_target_length // self.config.pagedattn_tokens_per_page,
+          max_pages_per_prefill=self.config.max_prefill_predict_length // self.config.pagedattn_tokens_per_page,
+          pages_per_compute_block=self.config.pagedattn_pages_per_compute_block,
+          num_kv_heads=self.num_kv_heads,
+          kv_head_dim_size=self.head_dim,
+          dtype=self.dtype,
+          attn_logits_soft_cap=self.attn_logits_soft_cap,
+      )
 
   def query_projection(self, inputs_q: Array) -> Array:
     """Query projection."""
@@ -1348,6 +1366,7 @@ class Attention(nn.Module):
       *,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
       deterministic: bool = False,
+      page_state: Optional[page_manager.PageState] = None,
   ):
     """Applies Attention on the input data.
 
@@ -1400,11 +1419,15 @@ class Attention(nn.Module):
 
     assert not self.config.quantize_kvcache or self.kv_quant
 
-    out = self.attention_op(query, key, value, decoder_segment_ids, model_mode)
+    if self.config.attention == "paged" and model_mode != common_types.MODEL_MODE_TRAIN:
+      unnormalized_out, _, exp_sum = self.paged_attention_op(
+          query, key, value, decoder_segment_ids, model_mode, page_state=page_state
+      )
+      out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
+    else:
+      out = self.attention_op(query, key, value, decoder_segment_ids, model_mode)
 
     out = nn.with_logical_constraint(out, self.out_axis_names)
-
-    # apply output projection,  output dim is set to the input dim.
     out = self.out_projection(inputs_q.shape[-1], out)
     out = checkpoint_name(out, "out_proj")
     return out
