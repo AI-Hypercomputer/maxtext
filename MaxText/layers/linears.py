@@ -506,23 +506,27 @@ class MoeBlock(nn.Module):
 
     return wrapper(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
 
+  # WEIGTHS = SCORES
   def reshape_and_update_weights(self, weights, indices):
     # input of weights & indices: (batch_size, seq_len, num_experts_per_tok)
-    # output of updated weights: (batch_size, seq_len, num_experts)
+    # output of updated weights / scores: (batch_size, seq_len, num_experts)
     update_weights = jnp.zeros((weights.shape[0], weights.shape[1], self.num_experts), dtype=self.dtype)
     index_update = (
         jnp.arange(weights.shape[0])[:, None, None],
         jnp.arange(weights.shape[1])[:, None],
         indices,
     )
+    # zeros out everything but topk
     update_weights = update_weights.at[index_update].set(weights)
     return update_weights
-
+  # softmax_probs was weights, weighted average 
   def generate_masks(self, top_k_indices, softmax_probs):
-    # calculate expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
+    
     batch_size, seq_len, _ = top_k_indices.shape
+    # calculate expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
     tokens_per_batch = seq_len * self.num_experts_per_tok
     # this is to avoid expert_capacity_per_batch = 0
+    # divide them equally 
     expert_capacity_per_batch = int(
         max(
             math.ceil(tokens_per_batch / self.num_experts) * self.config.capacity_factor,
@@ -531,12 +535,18 @@ class MoeBlock(nn.Module):
     )
     max_logging.log(f"Applying potential token dropping with a batch expert_capacity of {expert_capacity_per_batch}")
 
+    # we are in batch seq length and going to group land 
+    
     # calculate expert mask and drop tokens if needed
     # shape of output expert mask: (batch, sequence, num_experts_per_tok)
     #
     # A small example:
     # give num_experts=4 & num_experts_per_tok=2, and two tokens are routed to expert [0, 1] & [1, 3],
+    # 3 dimenisions: 1: number of experts, 2: which token
     # then expert_mask becomes [[[[1, 0, 0, 0],[0, 1, 0, 0]], [[0, 1, 0, 0],[0, 0, 0, 1]]]],
+
+    # (@vbarr) Try deleting ignoring order???
+    
     # after cumsum, expert_token_count becomes [[[[1, 0, 0, 0],[1, 1, 0, 0]], [[1, 2, 0, 0],[1, 2, 0, 1]]]],
     # if we set expert_capacity=1,
     # trunc_expert_mask becomes [[[[1, 0, 0, 0],[0, 1, 0, 0]], [[0, 0, 0, 0],[0, 0, 0, 1]]]],
@@ -621,20 +631,29 @@ class MoeBlock(nn.Module):
       kernel = nn.with_logical_constraint(kernel, kernel_axes)
     return kernel
 
+  # 1. dropping path for MOE
+  # 2. jax's ragged dot api
   def dense_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
     # gate_logits: batch, length, expert
+    # look at base.yml for names of logical constraints
     gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", None))
     # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
+
+    # (tokens x num_experts)
     top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+    # top_k_weights / scores
+    # top_k_indices / expert
+    
 
     if self.config.decoder_block == "deepseek":
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
     else:
       top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
-
+    # zero out non-top ks
     weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
     matmul_precision = lax.Precision(self.config.matmul_precision)
 
+    # dropping!!
     if self.config.capacity_factor > 0:
       # token dropping if needed
       dispatch_mask, combine_mask = self.generate_masks(top_k_indices, weights)
@@ -757,6 +776,10 @@ class MoeBlock(nn.Module):
   def __call__(self, inputs):
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
+    # 1. compute gate logics one linear operation with DxE matmul to give a score for each expert
+    # expert 1 likes token x this amount...
+    # FLOPS: B T D X
+    # Gate logics are so small then you could do it some other way? D > 256
     gate_logits = DenseGeneral(
         self.num_experts,
         dtype=self.dtype,
@@ -769,8 +792,11 @@ class MoeBlock(nn.Module):
         bias_norm=self.config.routed_score_func,
         matmul_precision=self.config.matmul_precision,
     )(inputs)
-
+    # w0_kernel and w1_kernel [E, D, FF] (linear transform) , [E, D, FF] silu something (nonlinear transform), element wise product
+    # gating is this topic 
+    
     w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts, cfg.emb_dim, self.intermediate_dim)
+    # Ignore
     if cfg.sparse_matmul:
       max_logging.log("Running MoE sparse matmul implementation.")
       if quantizations.in_serve_mode(self.quant):
