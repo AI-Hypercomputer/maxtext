@@ -40,12 +40,10 @@ class PagedAttentionTest(unittest.TestCase):
     self._max_prefill_predict_length = 512
     self._max_target_length = 1024
     self._dtype = jnp.float32
-
     # PagedAttention settings
     self._num_pages = 64
     self._tokens_per_page = 32
     self._pages_per_compute_block = 16
-
     self.rng = jax.random.PRNGKey(42)
     devices = jax.devices()
     if len(devices) > 1:
