@@ -453,7 +453,7 @@ class AttentionOp(nn.Module):
       attn_mask = None
     else:
       # generate attn_mask
-      mask_type = "padding_causal"  # only padding_causal mask type can take a created mask
+      mask_type = "causal"  # only padding_causal mask type can take a created mask
       attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
 
     dpa_layer = DotProductAttention(
