@@ -108,6 +108,8 @@ class DecoderLayer(nn.Module):
       slot=None,
       true_length=None,
       page_state=None,
+      key_pages=None,
+      value_pages=None,
       layer_id: Optional[int] = None,
   ):
     cfg = self.config
@@ -142,10 +144,12 @@ class DecoderLayer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         model_mode=model_mode,
         page_state=page_state,
+        key_pages=key_pages,  # PASS key_pages
+        value_pages=value_pages, # PASS value_pages
         page_group_id=slot,
         true_length=true_length,
-        use_fused_qkv=self.use_fused_qkv,
         layer_id=layer_id,
+        use_fused_qkv=self.use_fused_qkv,
     )
 
     attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
@@ -184,7 +188,7 @@ class DecoderLayer(nn.Module):
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
-    return layer_output, None if cfg.scan_layers else layer_output
+    return layer_output, attention_cache if self.is_paged_attention else None
 
 
 class SequentialBlockDecoderLayers(nn.Module):
@@ -445,6 +449,16 @@ class Decoder(nn.Module):
             config=cfg,
         )(decoder_positions)
 
+    # ONLY try to get variables from cache if they are available.
+    key_pages = None
+    value_pages = None
+    if cfg.attention == 'paged' and model_mode != common_types.MODEL_MODE_TRAIN and 'cache' in self.variables:
+      key_pages = self.variable("cache", "key_pages", lambda: None).value
+      value_pages = self.variable("cache", "value_pages", lambda: None).value
+      if page_state is None:  # Get from cache if function arg is None
+          page_state = self.variable("cache", "page_state", lambda: None).value
+
+
     if cfg.using_pipeline_parallelism:
         if cfg.pipeline_fsdp_ag_once:
             partition_spec = self.pipeline_module.get_weight_sharding(
@@ -471,8 +485,8 @@ class Decoder(nn.Module):
 
             current_layer_class = RemattedBlockLayers[lyr % len(RemattedBlockLayers)]
             layer_instance = current_layer_class(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)
-
-            y, _ = layer_instance(
+            # Always pass lyr
+            y, layer_cache = layer_instance(
                 y,
                 decoder_segment_ids,
                 decoder_positions,
@@ -481,8 +495,15 @@ class Decoder(nn.Module):
                 slot=slot,
                 true_length=true_length,
                 page_state=page_state,
+                key_pages=key_pages,
+                value_pages=value_pages,
                 layer_id=lyr,
             )
+            if cfg.attention == "paged" and layer_cache is not None and model_mode != common_types.MODEL_MODE_TRAIN:
+              key_pages = layer_cache['key_pages']
+              value_pages = layer_cache['value_pages']
+              page_state = layer_cache['page_state']
+
 
     y = self.get_norm_layer()(
         dtype=cfg.dtype,
@@ -493,35 +514,38 @@ class Decoder(nn.Module):
     )(y)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
 
-    # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
-        # Use the transpose of embedding matrix for logit transform.
         logits = self.shared_embedding.attend(y)
         if self.config.normalize_embedding_logits:
-            # Correctly normalize pre-softmax logits for this shared case.
             logits = logits / jnp.sqrt(y.shape[-1])
-        if cfg.final_logits_soft_cap:  # handle the case of a soft cap on final logits
+        if cfg.final_logits_soft_cap:
             logits = logits / cfg.final_logits_soft_cap
             logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
     else:
         logits = linears.DenseGeneral(
             cfg.vocab_size,
             weight_dtype=cfg.weight_dtype,
-            dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
+            dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,
             kernel_axes=("embed", "vocab"),
             name="logits_dense",
             matmul_precision=self.config.matmul_precision,
         )(
             y
-        )  # We do not quantize the logits matmul.
+        )
     logits = nn.with_logical_constraint(
         logits,
         ("activation_embed_and_logits_batch", "activation_length", "activation_vocab"),
     )
     if self.config.cast_logits_to_fp32:
         logits = logits.astype(jnp.float32)
-    return logits
 
+    # Sow ONLY if it is paged attention, NOT training, AND we are not in eval shape.
+    if cfg.attention == 'paged' and model_mode != common_types.MODEL_MODE_TRAIN and 'cache' in self.variables:
+      self.sow('cache', 'page_state', page_state)
+      self.sow('cache', 'key_pages', key_pages)
+      self.sow('cache', 'value_pages', value_pages)
+
+    return logits
 
 class Transformer(nn.Module):
   """An decoder-only Transformer model."""

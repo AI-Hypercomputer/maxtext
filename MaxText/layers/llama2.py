@@ -80,6 +80,8 @@ class LlamaDecoderLayer(nn.Module):
     slot: Optional[int] = None,
     true_length: Optional[int] = None,
     page_state=None,
+    key_pages=None,
+    value_pages=None,
     layer_id: Optional[int] = None,
   ):
     cfg = self.config
@@ -103,7 +105,7 @@ class LlamaDecoderLayer(nn.Module):
         config=cfg,
         num_query_heads=cfg.num_query_heads,
         num_kv_heads=cfg.num_kv_heads,
-        head_dim=cfg.head_dim,
+        head_dim=cfg.head_dim,  # PASS head_dim HERE
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
         attention_kernel=cfg.attention,
@@ -120,19 +122,21 @@ class LlamaDecoderLayer(nn.Module):
         ragged_block_size=cfg.ragged_block_size,
     )
 
-    attention_lnx = attention_layer(
+    attention_lnx, attention_cache = attention_layer(
         lnx,
         lnx,
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         model_mode=model_mode,
-        page_state=page_state,  # Pass page_state instead of page_manager
+        page_state=page_state,  # Pass page_state
+        key_pages=key_pages,    # Pass key_pages
+        value_pages=value_pages,  # Pass value_pages
         page_group_id=slot,
         true_length=true_length,
         layer_id=layer_id,
         use_fused_qkv=cfg.fused_qkv if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE else None,
     )
-
+    jax.debug.print("LlamaDecoderLayer, attention_lnx.shape: {}", attention_lnx.shape)
     attention_lnx = nn.with_logical_constraint(
         attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
     )
@@ -176,6 +180,6 @@ class LlamaDecoderLayer(nn.Module):
       )
 
     if cfg.scan_layers:
-      return layer_output, None
+      return layer_output, attention_cache
     else:
-      return layer_output, None
+      return layer_output, attention_cache

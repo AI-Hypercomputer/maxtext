@@ -374,40 +374,93 @@ class PageManager:
   ) -> Tuple[jnp.ndarray, ...]:
       """
       Reserves pages for autoregressive decoding steps.
-      """
-      # CRITICAL FIX: Increment sequence lengths for all groups
-      incremented_sequence_lengths = sequence_lengths + 1
       
-      # Calculate new positions based on INCREMENTED lengths
-      new_current_position = (incremented_sequence_lengths - 1) % self.tokens_per_page
-      new_pages_needed = (incremented_sequence_lengths + self.tokens_per_page - 1) // self.tokens_per_page
-
-      def update_page_group(group_index, state):
-          current_status, current_map, current_pages, pages_used, seq_lengths = state
-          needs_new_page = jnp.logical_and(
-              new_pages_needed[group_index] > pages_used[group_index], 
-              current_pages[group_index] >= 0
-          )
-          next_free_page = jnp.where(needs_new_page, self.find_next_free_page(current_status), -1)
-
-          # Update states conditionally
-          updated_status = jnp.where(next_free_page >= 0, current_status.at[next_free_page].set(1), current_status)
-          updated_map = jnp.where(
-              next_free_page >= 0, current_map.at[group_index, pages_used[group_index]].set(next_free_page), current_map
-          )
-          updated_pages = jnp.where(next_free_page >= 0, current_pages.at[group_index].set(next_free_page), current_pages)
-          updated_used = jnp.where(next_free_page >= 0, pages_used.at[group_index].set(pages_used[group_index] + 1), pages_used)
+      This method handles incrementing sequence lengths and allocating new pages
+      when needed for autoregressive token generation.
+      
+      Args:
+          page_status: Current page allocation status
+          page_map: Current page group to page mappings
+          sequence_lengths: Current sequence lengths
+          num_pages_used: Current page usage counts
+          current_page: Current active pages
+          current_page_position: Current positions within active pages
           
-          # Pass through the already incremented sequence_lengths
-          return (updated_status, updated_map, updated_pages, updated_used, seq_lengths)
+      Returns:
+          Tuple containing updated versions of all input state arrays
+      """
+      # CRITICAL FIX: Instead of incrementing all sequence lengths, we need to be selective.
+      # Start with the existing sequence lengths and only modify active groups
+      new_sequence_lengths = sequence_lengths.copy()
+      
+      def update_page_group(group_index, state):
+          current_status, current_map, current_pages, pages_used, seq_lengths, current_positions = state
+          
+          # Only increment and allocate pages for active groups
+          # A group is active if it has already been used (pages_used > 0)
+          is_active_group = pages_used[group_index] > 0
+          
+          # Increment sequence length only for active groups
+          updated_seq_length = jnp.where(
+              is_active_group,
+              seq_lengths[group_index] + 1,
+              seq_lengths[group_index]
+          )
+          seq_lengths = seq_lengths.at[group_index].set(updated_seq_length)
+          
+          # Calculate new position within page
+          new_position = (updated_seq_length - 1) % self.tokens_per_page
+          current_positions = current_positions.at[group_index].set(new_position)
+          
+          # Calculate pages needed for this potentially incremented length
+          pages_needed = (updated_seq_length + self.tokens_per_page - 1) // self.tokens_per_page
+          
+          # Check if we need a new page
+          needs_new_page = jnp.logical_and(
+              is_active_group,
+              pages_needed > pages_used[group_index]
+          )
+          
+          # Find next free page if needed
+          next_free_page = jnp.where(needs_new_page, self.find_next_free_page(current_status), -1)
+          
+          # Update page status (mark as allocated if needed)
+          updated_status = jnp.where(
+              next_free_page >= 0,
+              current_status.at[next_free_page].set(1),
+              current_status
+          )
+          
+          # Update page map with new page
+          updated_map = jnp.where(
+              next_free_page >= 0,
+              current_map.at[group_index, pages_used[group_index]].set(next_free_page),
+              current_map
+          )
+          
+          # Update current page to point to the new page
+          updated_pages = jnp.where(
+              next_free_page >= 0,
+              current_pages.at[group_index].set(next_free_page),
+              current_pages
+          )
+          
+          # Update pages used count
+          updated_used = jnp.where(
+              next_free_page >= 0,
+              pages_used.at[group_index].set(pages_used[group_index] + 1),
+              pages_used
+          )
+          
+          return (updated_status, updated_map, updated_pages, updated_used, seq_lengths, current_positions)
 
-      page_status, page_map, current_page, num_pages_used, _ = jax.lax.fori_loop(
-          0, self.max_page_groups, update_page_group, 
-          (page_status, page_map, current_page, num_pages_used, incremented_sequence_lengths)
+      # Process all page groups
+      initial_state = (page_status, page_map, current_page, num_pages_used, new_sequence_lengths, current_page_position)
+      page_status, page_map, current_page, num_pages_used, new_sequence_lengths, new_current_position = jax.lax.fori_loop(
+          0, self.max_page_groups, update_page_group, initial_state
       )
 
-      # Return the INCREMENTED sequence lengths
-      return (page_status, page_map, incremented_sequence_lengths, num_pages_used, current_page, new_current_position)
+      return (page_status, page_map, new_sequence_lengths, num_pages_used, current_page, new_current_position)
 
   def release_page_group(self, page_group_id: int):
     """
