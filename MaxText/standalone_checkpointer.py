@@ -58,7 +58,12 @@ def checkpoint_loop(config, state=None):
   checkpoint_load_start = datetime.datetime.now()
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     state, _ = checkpointing.load_state_if_possible(
-        checkpoint_manager, None, config.load_parameters_path, config.load_full_state_path, unboxed_abstract_state
+        checkpoint_manager,
+        None,
+        config.load_parameters_path,
+        config.load_full_state_path,
+        config.model_name,
+        unboxed_abstract_state,
     )
     if state:
       state = state["items"]

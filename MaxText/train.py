@@ -665,6 +665,7 @@ def setup_train_loop(config):
           data_iterator,
           load_parameters_from_path="",
           load_full_state_from_path="",
+          model_name=config.model_name,
           abstract_unboxed_pre_state=abstract_state,
           enable_single_replica_ckpt_restoring=False,
           dataset_type=config.dataset_type,

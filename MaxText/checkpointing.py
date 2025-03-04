@@ -173,6 +173,7 @@ def load_state_if_possible(
     data_iterator: Union[MultiHostDataLoadIterator, None],
     load_parameters_from_path: str,
     load_full_state_from_path: str,
+    model_name: str,
     abstract_unboxed_pre_state: train_state.TrainState,
     enable_single_replica_ckpt_restoring: Optional[bool] = False,
     dataset_type: Optional[str] = "tfds",
@@ -191,6 +192,7 @@ def load_state_if_possible(
       matches type against.
     enable_single_replica_ckpt_restoring: bool flag for restoring checkpoitn
       with SingleReplicaArrayHandler
+    model_name: the name of the model.
 
   Returns:
     A tuple of (train_state, train_state_params) where full_train_state captures
@@ -282,7 +284,7 @@ def load_state_if_possible(
         )
 
   if load_parameters_from_path != "":
-    restored_params = load_params_from_path(load_parameters_from_path, abstract_unboxed_pre_state.params)
+    restored_params = load_params_from_path(load_parameters_from_path, abstract_unboxed_pre_state.params, model_name)
     return None, restored_params
   elif load_full_state_from_path != "":
     max_logging.log(f"restoring full state from {load_full_state_from_path=}")
@@ -315,12 +317,21 @@ def setup_checkpoint_logger(config) -> cloud_logger.CloudLogger | None:
   return orbax_cloud_logger
 
 
-def load_params_from_path(load_parameters_from_path, abstract_unboxed_params):
+def load_params_from_path(load_parameters_from_path, abstract_unboxed_params, model_name):
   """Load decode params from checkpoint at specified path."""
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
   max_logging.log(f"restoring params from {load_parameters_from_path}")
   ckpt = epath.Path(load_parameters_from_path)
-  ckptr = ocp.PyTreeCheckpointer()
+
+  # The model name will determine if we need to set the concurrent_gb
+  concurrent_gb = 500 if model_name == "llama3.1-405b" else 96
+  if concurrent_gb > 96:
+    ckptr = ocp.Checkpointer(
+        ocp.PyTreeCheckpointHandler(restore_concurrent_gb=concurrent_gb, save_concurrent_gb=concurrent_gb)
+    )
+  else:
+    ckptr = ocp.PyTreeCheckpointer()
+
   # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
   # Rather than pass the entire abstract state, which could unnecessarily restore opt_state and such and waste
   # memory, we instead specify here that we are just restoring the params field of the checkpoint
