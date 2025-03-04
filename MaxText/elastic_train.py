@@ -113,7 +113,7 @@ def reshard_fn(
       config,
       jax.random.fold_in(init_rng, restore_step),
       mesh,
-      checkpoint_manager,
+      checkpoint_manager=None,
   )
 
   def reshard(arr):
