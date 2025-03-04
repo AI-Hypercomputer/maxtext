@@ -19,6 +19,8 @@ from abc import abstractmethod
 from typing import Any, Dict, List, Optional, Tuple
 
 import jax
+from jax import numpy as jnp
+from jax.experimental import transfer
 from jax.sharding import Mesh
 from maxtext import common_types
 from maxtext import profiler
@@ -30,10 +32,12 @@ import numpy as np
 class PipelineGPipeCircular(ABC):
   """Pipeline for GPipe."""
 
-  def __init__(self, config: common_types.Config, stage_index: int):
+  def __init__(self, config: common_types.Config, stage_index: int, local_transfer_server: transfer.TransferServer, transfer_connection: transfer.TransferConnection,):
     # Initialize the pipeline hyperparameters
     self.stage_index = stage_index
     self.config = config
+    self.local_transfer_server = local_transfer_server
+    self.transfer_connection = transfer_connection
 
     self.num_stages = (
         self.config.ici_pipeline_parallelism
@@ -46,7 +50,7 @@ class PipelineGPipeCircular(ABC):
     )
     # TODO(linchai): hard coded for now.
     # The batch size needs to be sharded on fsdp dimension.
-    self.microbatches_per_stage = 4
+    self.microbatches_per_stage = 8
     self.num_microbatches = (
         self.config.micro_batch_size_to_train_on // self.microbatches_per_stage
     )
@@ -61,7 +65,7 @@ class PipelineGPipeCircular(ABC):
   def targets_cache(self):
     return self._targets_cache
 
-  def step_forward(self, data_iterator, pipelines_indexed, step):
+  def step_forward(self, data_iterator, step_index):
     """Run one iteration of the pipeline schedule with *whole-batch* input.
 
     Will chunk the input into microbatches automatically, and go through the
@@ -74,45 +78,74 @@ class PipelineGPipeCircular(ABC):
     """
     # Clean per iteration runtime states
     self.stage.reset_runtime_states()
+    self._internal_losses = []
 
     example_batch = None
     if self.stage.is_first:
       example_batch = max_utils.load_next_batch(
           data_iterator, example_batch, self.config
       )
+      uuid = max_utils.generate_transfer_uuid(
+          self.stage_index,
+          self.num_stage_layers - 1,
+          step_index,
+          step_index,
+          is_fwd=True,
+      )
       # Example_batch has the targets to be transferred to the last stage.
-      self._targets_cache = {
-          "targets": example_batch["targets"],
-          "targets_position": example_batch["targets_position"],
-          "targets_segmentation": example_batch["targets_segmentation"],
-      }
+      self.local_transfer_server.await_pull(
+          uuid,
+          [
+              example_batch["targets"],
+              example_batch["targets_position"],
+              example_batch["targets_segmentation"],
+          ],
+      )
+    elif self.stage.is_last:
+      self._recv_targets_from_first_stage(step_index)
     elif self.stage.is_last:
       self._targets_cache = pipelines_indexed[0].targets_cache()
     # Run microbatches
-    self._step_microbatches_fwd(
-        example_batch, self._targets_cache, pipelines_indexed
-    )
+    self._step_microbatches_fwd(step_index, example_batch, self._targets_cache)
 
-  def step_backward(self, pipelines_indexed):
+  def step_backward(self, step_index):
     """Run one iteration of the pipeline schedule with *whole-batch* input.
 
     Will chunk the input into microbatches automatically, and go through the
     microbatches according to the schedule implementation.
 
     Args:
-      pipelines_indexed: a dictionary of all the pipeline stages, used to
-        facilitate/emulate communication between stages.
+      step_index: the current step index used to generate transfer uuid.
     """
 
     # Run microbatches
-    self._step_microbatches_bwd(pipelines_indexed)
+    self._step_microbatches_bwd(step_index)
+
+  def _fwd_send(
+      self,
+      outputs_mb,
+      inputs_position_mb,
+      inputs_segmentation_mb,
+      microbatch_id,
+      step_index,
+  ):
+    if self.stage.is_last:
+      return
+
+    uuid = max_utils.generate_transfer_uuid(
+        self.stage_index, self._fwd_next_stage(), microbatch_id, step_index, is_fwd=True
+        )
+    self.local_transfer_server.await_pull(
+        uuid,
+        [outputs_mb, inputs_position_mb, inputs_segmentation_mb],
+    )
 
   def _fwd_recv(
       self,
       inputs_wb: Any = None,
       microbatch_id: int = 0,
       microbatch_size: int = 0,
-      pipeline_indexed: Optional[Dict[int, Any]] = None,
+      step_index: int = 0,
   ):
     """Prepare inputs for a microbatch.
 
@@ -173,18 +206,37 @@ class PipelineGPipeCircular(ABC):
           "inputs_segmentation": inputs_segmentation_mb_hdl,
       }
     else:
-      fwd_previous_stage_index = (self.stage_index - 1) % self.num_stage_layers
-      (inputs_mb, previous_inputs_mb) = (
-          pipeline_indexed[fwd_previous_stage_index].stage.fwd_cache[
-              microbatch_id
-          ]
+      inputs_mb_spec = jax.ShapeDtypeStruct(
+          [
+              self.microbatches_per_stage,
+              self.config.max_target_length,
+              self.config.emb_dim,
+          ],
+          jnp.bfloat16,
+          sharding=self.stage.input_sharding(),
       )
-      inputs_mb_hdl = jax.device_put(inputs_mb, self.stage.input_sharding())
-      inputs_position_mb_hdl = jax.device_put(
-          previous_inputs_mb["inputs_position"], self.stage.input_sharding()
+      inputs_position_mb_spec = jax.ShapeDtypeStruct(
+          [self.microbatches_per_stage, self.config.max_target_length],
+          jnp.int32,
+          sharding=self.stage.input_sharding(),
       )
-      inputs_segmentation_mb_hdl = jax.device_put(
-          previous_inputs_mb["inputs_segmentation"], self.stage.input_sharding()
+      inputs_segmentation_mb_spec = jax.ShapeDtypeStruct(
+          [self.microbatches_per_stage, self.config.max_target_length],
+          jnp.int32,
+          sharding=self.stage.input_sharding(),
+      )
+      uuid = max_utils.generate_transfer_uuid(
+          self._fwd_prev_stage(), self.stage_index, microbatch_id, step_index, is_fwd=True
+      )
+      inputs_mb_hdl, inputs_position_mb_hdl, inputs_segmentation_mb_hdl = (
+          self.transfer_connection.pull(
+              uuid,
+              [
+                  inputs_mb_spec,
+                  inputs_position_mb_spec,
+                  inputs_segmentation_mb_spec,
+              ],
+          )
       )
       return {
           "inputs": inputs_mb_hdl,
@@ -192,49 +244,137 @@ class PipelineGPipeCircular(ABC):
           "inputs_segmentation": inputs_segmentation_mb_hdl,
       }
 
-  def _bwd_recv(self, microbatch_id: int, pipeline_indexed: Dict[int, Any]):
+  def _fwd_next_stage(self):
+    return (self.stage_index + 1) % self.num_stage_layers
+
+  def _fwd_prev_stage(self):
+    return (self.stage_index - 1) % self.num_stage_layers
+
+  def _bwd_next_stage(self):
+    return (self.stage_index - 1) % self.num_stage_layers
+
+  def _bwd_prev_stage(self):
+    return (self.stage_index + 1) % self.num_stage_layers
+
+  def _bwd_recv(
+      self,
+      microbatch_id: int,
+      step_index: int,
+  ):
     """Receive backward inputs(aka current stage outputs grads) from dependencies."""
     if self.stage.is_last:
       # last stage doesn't have backward inputs, use loss instead.
       return None
     else:
-      bwd_previous_stage_index = (self.stage_index + 1) % self.num_stage_layers
-      received_from_previous_stage = pipeline_indexed[
-          bwd_previous_stage_index
-      ].stage.bwd_cache[microbatch_id]
-      return jax.device_put(
-          received_from_previous_stage, self.stage.input_sharding()
+      input_grads_spec = jax.ShapeDtypeStruct(
+          [
+              self.microbatches_per_stage,
+              self.config.max_target_length,
+              self.config.emb_dim,
+          ],
+          jnp.bfloat16,
+          sharding=self.stage.input_sharding(),
       )
+      uuid = max_utils.generate_transfer_uuid(
+          self._bwd_prev_stage(), self.stage_index, microbatch_id, step_index, is_fwd=False
+      )
+      logging.info(
+          "### uuid for inputs grads bwd: %s, sender stage: %s, recv stage: %s,"
+          " input_grads_spec: %s",
+          uuid,
+          self._bwd_prev_stage(),
+          self.stage_index,
+          input_grads_spec,
+      )
+      input_grads = self.transfer_connection.pull(
+          uuid,
+          [input_grads_spec],
+      )[0]
+      return input_grads
 
-  def _maybe_compute_loss(self, logits, target_mbs, mb_index, loss_func):
+  def _bwd_send(
+      self,
+      input_grads,
+      microbatch_id,
+      step_index,
+  ):
+    if self.stage.is_first:
+      return
+    uuid = max_utils.generate_transfer_uuid(
+        self.stage_index, self._bwd_next_stage(), microbatch_id, step_index, is_fwd=False
+    )
+    logging.info(
+        "#### input grads shape: %s, input grads dtype: %s, input grads"
+        " sharding: %s",
+        input_grads.shape,
+        input_grads.dtype,
+        input_grads.sharding,
+    )
+    logging.info(
+        "### uuid for inputs grads bwd: %s, sender stage: %s, recv stage: %s",
+        uuid,
+        self.stage_index,
+        self._bwd_next_stage(),
+    )
+    self.local_transfer_server.await_pull(
+        uuid,
+        [input_grads],
+    )
+
+  def _recv_targets_from_first_stage(self, wb_index):
+    assert self.stage.is_last
+    # receive 'targets'
+    targets_spec = jax.ShapeDtypeStruct(
+        [32, self.config.max_target_length],
+        jnp.int32,
+        sharding=self.stage.input_sharding(),
+    )
+    targets_position_spec = jax.ShapeDtypeStruct(
+        [32, self.config.max_target_length],
+        jnp.int32,
+        sharding=self.stage.input_sharding(),
+    )
+    targets_segmentation_spec = jax.ShapeDtypeStruct(
+        [32, self.config.max_target_length],
+        jnp.int32,
+        sharding=self.stage.input_sharding(),
+    )
+    uuid = max_utils.generate_transfer_uuid(
+        0, self.num_stage_layers - 1, wb_index, wb_index, is_fwd=True
+    )
+    targets, targets_position, targets_segmentation = (
+        self.transfer_connection.pull(
+            uuid,
+            [targets_spec, targets_position_spec, targets_segmentation_spec],
+        )
+    )
+    self._targets_cache = {
+        "targets": targets,
+        "targets_position": targets_position,
+        "targets_segmentation": targets_segmentation,
+        }
+
+  def _maybe_compute_loss(self, logits, target_wb, mb_index, loss_func):
     if self.stage.is_last and self.stage.has_backward:
-      assert target_mbs is not None
+      assert target_wb is not None
       # split the targets into microbatches
       targets_microbatch_size = np.prod([
           self.microbatches_per_stage,
           self.config.max_target_length,
       ])
       num_microbatches = (
-          targets_microbatch_size // target_mbs["targets"].shape[1]
+          targets_microbatch_size // target_wb["targets"].shape[1]
       )
-      targets_mb = target_mbs["targets"][
+      targets_mb = target_wb["targets"][
           mb_index * num_microbatches : (mb_index + 1) * num_microbatches
       ]
-      targets_mb_hdl = jax.device_put(
-          targets_mb,
-          self.stage.input_sharding(),
-      )
-      targets_mb_segmentation = target_mbs["targets_segmentation"][
+      targets_mb_segmentation = target_wb["targets_segmentation"][
           mb_index * num_microbatches : (mb_index + 1) * num_microbatches
       ]
-      targets_mb_segmentation_hdl = jax.device_put(
-          targets_mb_segmentation,
-          self.stage.input_sharding(),
-      )
       loss = loss_func(
           logits,
-          targets_mb_hdl,
-          targets_mb_segmentation_hdl,
+          targets_mb,
+          targets_mb_segmentation,
       )
       self._internal_losses.append(loss)
 
@@ -252,9 +392,9 @@ class PipelineGPipeCircular(ABC):
 
   def _step_microbatches_fwd(
       self,
+      step_index: int,
       example_batch: Optional[Any] = None,
       targets: Optional[Any] = None,
-      pipeline_indexed: Optional[Dict[int, Any]] = None,
   ):
     """Run one iteration of the pipeline schedule with list of microbatches.
 
@@ -282,17 +422,24 @@ class PipelineGPipeCircular(ABC):
             self.config.emb_dim,
         ])
       input_mb = self._fwd_recv(
-          inputs_wb, i, input_microbatch_size, pipeline_indexed
+          inputs_wb, i, input_microbatch_size, step_index
       )
       with jax.named_scope(f"Forward_stage_{self.stage.stage_index}_mb_{i}"):
         outputs = self.stage.forward_step(self.stage.get_jitted_forward_func(), i, input_mb)  # type: ignore[index]
+        self._fwd_send(
+            outputs,
+            input_mb["inputs_position"],
+            input_mb["inputs_segmentation"],
+            i,
+            step_index,
+        )
         self._maybe_compute_loss(
             outputs, targets, i, self.stage.get_loss_func()
         )
 
   def _step_microbatches_bwd(
       self,
-      pipeline_indexed: Optional[Dict[int, Any]] = None,
+      step_index: int,
       ):
     """Run one iteration of the pipeline schedule with list of microbatches.
 
@@ -306,6 +453,16 @@ class PipelineGPipeCircular(ABC):
     for i in range(self.num_microbatches):
       with jax.named_scope(f"Backward_stage_{self.stage.stage_index}_mb_{i}"):
         # receive inputs for backward pass.
-        output_grads = self._bwd_recv(i, pipeline_indexed)
+        # TODO(linchai) -- need to implement this
+        output_grads = self._bwd_recv(i, step_index)
         loss = self._maybe_get_loss(i)
-        self.stage.backward_step(i, loss=loss, output_grads=output_grads)
+        input_grads = self.stage.backward_step(
+            i, loss=loss, output_grads=output_grads
+        )
+        self._bwd_send(input_grads, i, step_index)
+
+        # wait until the whole batch is done.
+        if (
+            self.stage.is_first or self.stage_index == 1
+        ) and i == self.num_microbatches - 1:
+          self.stage.block_until_ready_train_state()

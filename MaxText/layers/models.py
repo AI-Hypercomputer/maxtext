@@ -251,7 +251,7 @@ class Decoder(nn.Module):
         length=length,
         metadata_params={nn.PARTITION_NAME: metdata_axis_name},
     )
-    return scan_fn(config=cfg, mesh=mesh, name="layers", quant=self.quant)
+    return scan_fn(config=cfg, mesh=mesh, name="layers" + f"{self.stage_index}", quant=self.quant)
 
   def get_pipeline_stage_module(self, base_stage, cfg, mesh):
     if cfg.num_layers_per_pipeline_stage == 1:
@@ -390,15 +390,25 @@ class Decoder(nn.Module):
 
     base_stage = RemattedBlockLayer
 
-    y = base_stage(
-        config=cfg, mesh=mesh, name=f"layers_{stage_index}", quant=self.quant
-    )(
-        y,
-        decoder_segment_ids,
-        decoder_positions,
-        deterministic,
-        model_mode,
+    pipeline_stage_module = self.get_pipeline_stage_module(
+        base_stage, cfg, mesh
     )
+    if cfg.scan_layers:
+      y, _ = pipeline_stage_module(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+      )
+    else:
+      y = pipeline_stage_module(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+      )
 
     y = self.get_norm_layer()(
         dtype=cfg.dtype,

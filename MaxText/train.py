@@ -35,6 +35,8 @@ import jax
 import numpy as np
 import orbax.checkpoint
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
+from jax.experimental import transfer
+from jax.sharding import NamedSharding, PartitionSpec as P
 
 import checkpointing
 import max_utils
@@ -767,13 +769,18 @@ def train_loop(config):
   Returns:
     state: the train state after training
   """
+  # get peer server and connections
+  my_slice_id = jax.local_devices()[0].id // len(jax.local_devices())
 
-  # Mesh definition
-  devices = jax.devices()
-  devices_array_stage_0 = max_utils.create_device_mesh(config, devices[:4])
-  # TODO(linchai): do not hardcode the mesh shape; infer from the config.
-  mesh_stage_0 = Mesh(devices_array_stage_0, config.mesh_axes)
-  data_iterator, _ = create_data_iterator(config, mesh_stage_0)
+  if my_slice_id == 0:
+    devices_array_stage_0 = max_utils.create_device_mesh(
+        config, jax.local_devices()
+    )
+    # TODO(linchai): do not hardcode the mesh shape; infer from the config.
+    mesh_stage_0 = Mesh(devices_array_stage_0, config.mesh_axes)
+    data_iterator, _ = create_data_iterator(config, mesh_stage_0)
+  else:
+    data_iterator = None
 
   assert (
       config.using_pipeline_parallelism
@@ -792,6 +799,80 @@ def train_loop(config):
         config, stage_index
     )
 
+  num_stage_layers = num_stages * config.num_pipeline_repeats
+  logging.info(
+      "num_stage_layers: %s, num_stages: %s, num_pipeline_repeats: %s",
+      num_stage_layers,
+      num_stages,
+      config.num_pipeline_repeats,
+  )
+
+  slice_trans_address = os.getenv("SLICE_TRANS_ADDRESS")
+  if slice_trans_address:
+    slice_trans_address_list = slice_trans_address.split(",")
+  else:
+    slice_trans_address_list = []
+  slice_ipv6_addresses = []
+  for slice_trans_address in slice_trans_address_list:
+    slice_ipv6_addresses.append(
+        pychubbyutil.ResolveBNSName(slice_trans_address)[0]
+    )
+
+  trans_ctrl_port = os.getenv("TRANS_CTRL_PORT")
+  transfer_server = transfer.start_transfer_server(
+      # hardcode -- encounter a weird error when using jax.local_devices()[0].client
+      jax.local_devices()[0].client,
+      f"[{slice_ipv6_addresses[my_slice_id]}]:{trans_ctrl_port}",
+      [f"[{slice_ipv6_addresses[my_slice_id]}]:0"],
+  )
+  # TODO(linchai): heuristic sleep duration to sync with the other slices for starting the transfer server.
+  time.sleep(30)
+  transfer_connection = transfer_server.connect(
+      f"[{slice_ipv6_addresses[(my_slice_id + 1) % len(slice_ipv6_addresses)]}]:{trans_ctrl_port}"
+  )
+
+
+  ## transfer testing
+  if my_slice_id == 0:
+    mesh_0 = jax.make_mesh((4, 2), ("x", "y"), devices=jax.local_devices())
+    sharding_0 = NamedSharding(mesh_0, P("x", "y"))
+    logging.info("line %s" % repr(sharding_0))
+    a = jax.device_put(jnp.ones((16384, 2048)), sharding_0)
+
+    logging.info("push to peer....")
+    transfer_server.await_pull(1, [a])
+  else:
+    mesh_1 = jax.make_mesh((4, 2), ("x", "y"), devices=jax.local_devices())
+    sharding_1 = NamedSharding(mesh_1, P("x", "y"))
+    d = jax.device_put(jnp.ones((16384, 2048)), sharding_1)
+    logging.info(
+        "### d shape %s, dtype %s, d.sharding %s", d.shape, d.dtype, d.sharding
+    )
+    b_from_peer_spec = jax.ShapeDtypeStruct(
+        d.shape, d.dtype, sharding=sharding_1
+    )
+    logging.info("pull from peer....")
+    b = transfer_connection.pull(1, [b_from_peer_spec])
+    jax.block_until_ready(b)
+    logging.info("### b ready")
+  jax.experimental.multihost_utils.sync_global_devices(
+      "Barrier after test ends"
+  )
+  ### transfer test ends
+
+  if my_slice_id == 0:
+    for stage_index in range(num_stage_layers):
+      if stage_index % 2 == 0:
+        pipelines_indexed[stage_index] = schedule.PipelineGPipeCircular(
+            config, stage_index, transfer_server, transfer_connection
+        )
+  else:
+    for stage_index in range(num_stage_layers):
+      if stage_index % 2 == 1:
+        pipelines_indexed[stage_index] = schedule.PipelineGPipeCircular(
+            config, stage_index, transfer_server, transfer_connection
+        )
+
   start_step = 0
   end_step = config.steps
   for step in np.arange(start_step, end_step):
@@ -801,15 +882,23 @@ def train_loop(config):
         with jax.profiler.StepTraceAnnotation(
             "stage_forward", step_num=step, extra={"stage_index": stage_index}
         ):
-          pipelines_indexed[stage_index].step_forward(
-              data_iterator, pipelines_indexed, step
-          )
+          if jax.process_index() == 0 and stage_index % 2 == 0:
+            pipelines_indexed[stage_index].step_forward(data_iterator, step)
+          elif jax.process_index() == 1 and stage_index % 2 == 1:
+            pipelines_indexed[stage_index].step_forward(data_iterator, step)
       for stage_index in reversed(range(num_stage_layers)):
         with jax.profiler.StepTraceAnnotation(
             "stage_backward", step_num=step, extra={"stage_index": stage_index}
         ):
-          pipelines_indexed[stage_index].step_backward(pipelines_indexed)
-
+          if jax.process_index() == 0 and stage_index % 2 == 0:
+            pipelines_indexed[stage_index].step_backward(step)
+          elif jax.process_index() == 1 and stage_index % 2 == 1:
+            pipelines_indexed[stage_index].step_backward(step)
+  
+  time.sleep(120)
+  jax.experimental.multihost_utils.sync_global_devices(
+      "Barrier after training ends"
+  )
 
 
 def main(argv: Sequence[str]) -> None:

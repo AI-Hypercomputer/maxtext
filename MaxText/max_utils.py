@@ -403,6 +403,8 @@ def get_num_slices(raw_keys):
   else:
     devices = jax.devices()
     try:
+      if raw_keys["hardware"] == "gpu":
+        return len(jax.devices()) // len(jax.local_devices())
       return 1 + max(d.slice_index for d in devices)
     except (ValueError, AttributeError):
       return 1
@@ -568,12 +570,9 @@ def create_device_mesh(config, devices=None):
   if devices is None:
     devices = jax.devices()
   num_devices = len(devices)
-  num_slices = 1 if config.inference_benchmark_test else config.num_slices
-  # num_devices_per_slice = num_devices // num_slices
-
-  # TODO(lc5211): hack here for two stages (emulating two slices,
-  # each slice has 4 devices for the prototype on H100X8)
-  num_devices_per_slice = 4
+  # num_slices = 1 if config.inference_benchmark_test else config.num_slices
+  num_slices = 1
+  num_devices_per_slice = num_devices // num_slices
 
   multi_slice_env = num_slices > 1
 
@@ -659,22 +658,24 @@ def init_initial_state(model, tx, config, is_training, stage_index, key):
   Args: model, tx, config, is_training, key
   """
    # stage 0 has follow input shape:
-  # TODO(linchai): hard coded micro_batch size to 4 for now.
+  # TODO(lc5211): hard coded micro_batch size to 8 for now.
   if stage_index == 0:
-    input_shape = (4, config.max_target_length)  # 4 = micro_batch_size
+    input_shape = (8, config.max_target_length)  # 8 = micro_batch_size
   else:
     input_shape = (
-        4,  # micro_batch_size
+        8,  # micro_batch_size
         config.max_target_length,
         config.emb_dim,
     )
   decoder_pos_shape = (
-      4,  # micro_batch_size
+      8,  # micro_batch_size
       config.max_target_length,
   )
   model_vars = model.init(
       {"params": key, "dropout": key, "aqt": key},
-      np.ones(input_shape, dtype=jnp.int32),
+      np.ones(
+          input_shape, dtype=jnp.int32 if stage_index == 0 else jnp.bfloat16
+      ),
       np.ones(decoder_pos_shape, dtype=jnp.int32),
   )
   if is_training:
@@ -1094,3 +1095,15 @@ def load_next_batch(train_iter, example_batch, config):
     return example_batch
   else:
     return next(train_iter)
+
+
+def generate_transfer_uuid(
+    send_layer_id, recv_layer_id, mb_id, wb_id, is_fwd
+) -> int:
+  result = ""
+  result += str(send_layer_id)
+  result += str(recv_layer_id)
+  result += str(mb_id)
+  result += str(wb_id)
+  result += str(0) if is_fwd else str(1)
+  return int(result)

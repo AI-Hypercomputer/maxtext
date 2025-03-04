@@ -73,11 +73,7 @@ class PipelineStage:
     self.init_rng = random.PRNGKey(config.init_weights_seed)
 
     # Mesh definition
-    devices = jax.devices()
-    if self.stage_index % 2 == 0:
-      devices_array = max_utils.create_device_mesh(config, devices[:4])
-    else:
-      devices_array = max_utils.create_device_mesh(config, devices[4:])
+    devices_array = max_utils.create_device_mesh(config, jax.local_devices())
     self.mesh = Mesh(devices_array, config.mesh_axes)
 
     # Model and Optimizer definition
@@ -140,7 +136,8 @@ class PipelineStage:
     self.bwd_cache: Dict[int, Any] = {}
     # Since the grad_func is input dependent, we need to cache it for each
     # microbatch. The logic in this file only prototypes with remat enabled.
-    self.grad_func: Dict[int, Any] = {}
+    self.grad_func:  Any = None
+    self.grad_and_update_func: Any = None
     self._set_jitted_forward_func()
     self._set_jit_update_train_state()
     self._set_jitted_loss_func()
@@ -311,6 +308,10 @@ class PipelineStage:
     self.fwd_cache = {}
     self.bwd_cache = {}
 
+  def block_until_ready_train_state(self) -> None:
+    """Block until the train state is ready."""
+    jax.block_until_ready(self.train_state)
+
   def forward_step(
       self,
       fwd_jitted,
@@ -330,13 +331,26 @@ class PipelineStage:
     # TODO(linchai): should we use the same rng for all microbatches and all stages.
     nextrng = jax.jit(jax.random.fold_in)(self.init_rng, fwd_microbatch_id)
     if not self.grad_func:
-      outputs, grad_func = fwd_jitted(
+      outputs, *_, grad_func = fwd_jitted(
           self.train_state, args, nextrng
           )
       grad_func.__name__ = "grad_func"
-      self.grad_func[0] = jax.jit(grad_func)
+      # self.grad_func[0] = jax.jit(grad_func)
+      self.grad_func = grad_func
+
+      def grad_and_update(state, output_grads):
+        raw_grads = self.grad_func(output_grads)
+        state = state.apply_gradients(grads=raw_grads[0].params)
+        return state, raw_grads[1]["inputs"]
+      grad_and_update.__name__ = "grad_and_update"
+      self.grad_and_update_func = jax.jit(
+          grad_and_update,
+          donate_argnums=0,
+          in_shardings=(self.state_mesh_shardings, self.input_sharding()),
+          out_shardings=(self.state_mesh_shardings, self.input_sharding()),
+      )
     else:
-      outputs, _ = fwd_jitted(self.train_state, args, nextrng)
+      outputs, *_ = fwd_jitted(self.train_state, args, nextrng)
 
     # Save activations and inputs for backward
     self.fwd_cache[fwd_microbatch_id] = (
@@ -376,15 +390,11 @@ class PipelineStage:
         loss = jnp.broadcast_to(
             loss, self.fwd_cache[bwd_microbatch_id][0].shape
         )
-        raw_grads = self.grad_func[0](loss)
+        output_grads = jax.device_put(loss, self.input_sharding())
       else:
         assert output_grads is not None
-        raw_grads = self.grad_func[0](output_grads)
 
-    # update the params
-    self.train_state = self.update_train_state_jitted(
-        self.train_state, raw_grads[0].params
-    )
-
-    # grads of inputs
-    self.bwd_cache[bwd_microbatch_id] = raw_grads[1]["inputs"]
+      self.train_state, self.bwd_cache[bwd_microbatch_id] = (
+          self.grad_and_update_func(self.train_state, output_grads)
+      )
+    return self.bwd_cache[bwd_microbatch_id]

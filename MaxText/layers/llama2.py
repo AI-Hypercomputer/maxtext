@@ -185,6 +185,60 @@ class LlamaDecoderLayerStage(nn.Module):
   mesh: Mesh
   quant: Optional[Quant] = None
 
+  def scan_decoder_layers(self, cfg, decoder_layer, length, metdata_axis_name, mesh):
+    initializing = self.is_mutable_collection("params")
+    params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
+    cache_spec = 0
+    scan_fn = nn.scan(
+        decoder_layer,
+        variable_axes={
+            "params": params_spec,
+            "cache": cache_spec,
+            "intermediates": 0,
+            "aqt": 0,
+            "_overwrite_with_gradient": 0,
+        },
+        split_rngs={
+            "params": True,
+            "dropout": cfg.enable_dropout,
+        },
+        in_axes=(
+            nn.broadcast,
+            nn.broadcast,
+            nn.broadcast,
+            nn.broadcast,
+        ),
+        length=length,
+        metadata_params={nn.PARTITION_NAME: metdata_axis_name},
+    )
+    return scan_fn(
+        config=cfg,
+        mesh=mesh,
+        name="layers_stage" + f"{self.stage_index}",
+        quant=self.quant,
+    )
+
+  def get_pipeline_stage_module(self, base_stage, cfg, mesh):
+    if cfg.num_layers_per_pipeline_stage == 1:
+      stage_module = base_stage(config=cfg, mesh=mesh, quant=self.quant)
+    elif cfg.scan_layers:
+      stage_module = self.scan_decoder_layers(
+          cfg,
+          base_stage,
+          cfg.num_layers_per_pipeline_stage,
+          "layers_per_stage",
+          mesh,
+      )
+    else:
+      stage_module = SequentialBlockLlamaDecoderLayers(
+          decoder_layer=base_stage,
+          num_decoder_layers=cfg.num_layers_per_pipeline_stage,
+          config=cfg,
+          mesh=mesh,
+          quant=self.quant,
+      )
+    return stage_module
+
   @nn.compact
   def __call__(
       self,
@@ -264,15 +318,24 @@ class LlamaDecoderLayerStage(nn.Module):
             5,
         ),  # Deterministic and model mode are static arguments.
     )
-    y = RemattedBlockLayer(
-        config=cfg,
-        mesh=self.mesh,
-        quant=self.quant,
-    )(
-        inputs,
-        decoder_positions,
-        decoder_segment_ids,
-        deterministic,
-        model_mode,
+    base_stage = RemattedBlockLayer
+    pipeline_stage_module = self.get_pipeline_stage_module(
+        base_stage, cfg, self.mesh
     )
+    if cfg.scan_layers:
+      y, _ = pipeline_stage_module(
+          inputs,
+          decoder_positions,
+          decoder_segment_ids,
+          deterministic,
+          model_mode,
+      )
+    else:
+      y = pipeline_stage_module(
+          inputs,
+          decoder_positions,
+          decoder_segment_ids,
+          deterministic,
+          model_mode,
+      )
     return y
