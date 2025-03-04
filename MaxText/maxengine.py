@@ -1166,7 +1166,6 @@ def create_engine_from_config_flags(batch_size, max_prefill_predict_length, max_
     option = f"{k}={v}"
     updated_args.append(option)
   print(f"Invoking maxengine with args:\n \t{updated_args}")
-  pyconfig.initialize(updated_args)
-  cfg = MaxEngineConfig(cp.deepcopy(pyconfig._config.keys))  # pylint: disable=protected-access
+  cfg = pyconfig.initialize(updated_args)
   engine = MaxEngine(cfg)
   return engine
