@@ -39,19 +39,19 @@ RUNNER = "gcr.io/cloud-tpu-multipod-dev/lukebaumann_runner:latest"
 # COUNTRY = "us"
 # DEVICE_TYPE = "v6e-256"
 
-# # 4 slices
-# CLUSTER = "bodaborg-v6e-16-debug"
-# PROJECT = "tpu-prod-env-one-vm"
-# ZONE = "us-east5-b"
-# COUNTRY = "us"
-# DEVICE_TYPE = "v6e-16"
-
-# 3 slices
-CLUSTER = "bodaborg-v6e-256-dnd-yucmhab"
+# 4 slices
+CLUSTER = "bodaborg-v6e-16-debug"
 PROJECT = "tpu-prod-env-one-vm"
 ZONE = "us-east5-b"
 COUNTRY = "us"
-DEVICE_TYPE = "v6e-256"
+DEVICE_TYPE = "v6e-16"
+
+# # 3 slices
+# CLUSTER = "bodaborg-v6e-256-dnd-yucmhab"
+# PROJECT = "tpu-prod-env-one-vm"
+# ZONE = "us-east5-b"
+# COUNTRY = "us"
+# DEVICE_TYPE = "v6e-256"
 
 # # Many slices
 # CLUSTER = "bodaborg-v6e-256-ts"
@@ -88,8 +88,8 @@ def main() -> int:
     return 0
 
   model_list = [
-      model_configs.llama3_1_70b_8192_lr_real_data,
-      # model_configs.llama3_1_8b_8192,
+      # model_configs.llama3_1_70b_8192_lr_real_data,
+      model_configs.llama3_1_8b_8192,
   ]
   num_slices_list = [
       2
