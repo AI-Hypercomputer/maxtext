@@ -419,7 +419,7 @@ class MaxEngine(engine_api.Engine):
       complete_padded_prompt: Optional[jax.Array] = None,
       positions: Optional[jax.Array] = None,
       previous_chunk: Optional[Any] = None,
-      request_id: Optional[uuid.UUID] = None,
+      request_id: Optional[uuid.UUID] = None, # pylint: disable=unused-argument
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -847,7 +847,7 @@ class MaxEngine(engine_api.Engine):
       prefix: Prefix,
       decode_state: DecodeState,
       slot: int,
-      request_id: Optional[uuid.UUID] = None,
+      request_id: Optional[uuid.UUID] = None, # pylint: disable=unused-argument
   ) -> DecodeState:
     """Insert a single computed prefill cache into KV cache."""
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
