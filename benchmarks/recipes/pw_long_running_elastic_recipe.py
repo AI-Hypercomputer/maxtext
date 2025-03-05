@@ -29,7 +29,8 @@ import maxtext_xpk_runner as mxr
 PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_proxy_server:latest"
 # SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_server:laitest"
 SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_server:latest"
-RUNNER = "gcr.io/cloud-tpu-v2-images-dev/shauryag_latest:elastic"
+RUNNER = "gcr.io/cloud-tpu-v2-images-dev/shauryag_latest@sha256:09798f57fe24af9b901c881dbb01f59fd5e9a8df90cea4b093278478e416d7e7"
+# RUNNER = "gcr.io/cloud-tpu-v2-images-dev/shauryag_latest:elastic"
 # RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest"
 # RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable@sha256:82b49e1e6a735702321c18378621f9362e9adebf99cf6ebb84fa6f16362b4626"
 
@@ -50,8 +51,8 @@ BASE_OUTPUT_DIRECTORY = (
 )
 
 MAX_RESTARTS = 10_000
-BENCHMARK_STEPS=2000
-
+# BENCHMARK_STEPS=2000
+BENCHMARK_STEPS=21
 
 def main() -> int:
   # V6e cluster config
@@ -78,7 +79,8 @@ def main() -> int:
       model_configs.llama3_1_70b_8192_iter_real_data_and_sync_checkpointing_tfds
   ]
   num_slices_list = [
-      48
+#      48
+      2
   ]
   pathways_config = mxr.PathwaysConfig(
       server_image=SERVER_IMAGE,
@@ -102,7 +104,7 @@ def main() -> int:
 
       # Make modifications to the model config here to add in any additional
       # flags or changes to the model config.
-      model.tuning_params["use_vertex_tensorboard"] = True
+      model.tuning_params["use_vertex_tensorboard"] = False
       model.tuning_params["vertex_tensorboard_project"] = PROJECT
       model.tuning_params["vertex_tensorboard_region"] = REGION
 
@@ -121,7 +123,7 @@ def main() -> int:
             pathways_config=pathways_config,
             xpk_path=XPK_PATH,
             num_steps=BENCHMARK_STEPS,
-            priority="high",
+            priority="medium",
         )
         command, name = mxr.generate_xpk_workload_cmd(
             cluster_config=cluster_config, wl_config=wl_config

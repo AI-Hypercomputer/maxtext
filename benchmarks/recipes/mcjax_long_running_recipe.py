@@ -25,7 +25,10 @@ sys.path.append(parent_dir)
 import maxtext_trillium_model_configs as model_configs
 import maxtext_xpk_runner as mxr
 
-RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable@sha256:82b49e1e6a735702321c18378621f9362e9adebf99cf6ebb84fa6f16362b4626"
+# RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable@sha256:82b49e1e6a735702321c18378621f9362e9adebf99cf6ebb84fa6f16362b4626"
+# RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest" 
+RUNNER = "gcr.io/cloud-tpu-v2-images-dev/shauryag_latest:jax_distributed"
+# RUNNER = "gcr.io/cloud-tpu-v2-images-dev/shauryag_latest@sha256:09798f57fe24af9b901c881dbb01f59fd5e9a8df90cea4b093278478e416d7e7"
 
 # Cluster Params
 CLUSTER = "bodaborg-v6e-256-ts"
@@ -38,12 +41,12 @@ DEVICE_TYPE = "v6e-256"
 XPK_PATH = "../xpk"  # We're running this script from the maxtext directory
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = (
-    f"gs://trillium-scale-tests-q1-25-west/shauryag/pw_mcjax_benchmarking/"
-#    f"/tmp/gcsfuse/shauryag/pw_mcjax_benchmarking/"
+#    f"gs://trillium-scale-tests-q1-25-west/shauryag/pw_mcjax_benchmarking/"
+    f"/tmp/gcsfuse/shauryag/pw_mcjax_benchmarking/"
 )
 
 BENCHMARK_STEPS=21
-
+MAX_RESTARTS = 10_000
 
 def main() -> int:
   # V6e cluster config
@@ -66,10 +69,11 @@ def main() -> int:
       # model_configs.llama3_1_70b_8192_pw_lr_real_data,
       # model_configs.llama3_1_8b_8192_pw,
       # model_configs.llama2_70b_4096_sc_long_run
-      model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds
+      # model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds
+      model_configs.llama3_1_70b_8192_iter_real_data_and_sync_checkpointing_tfds
   ]
   num_slices_list = [
-      30
+      2
   ]
 
   xpk_workload_cmds = []
@@ -87,7 +91,7 @@ def main() -> int:
             num_slices=num_slices,
             device_type=cluster_config.device_type,
             base_output_directory=BASE_OUTPUT_DIRECTORY,
-            max_restarts=10_000,
+            max_restarts=MAX_RESTARTS,
             libtpu_type=None,
             libtpu_nightly_version="",
             base_docker_image=RUNNER,
