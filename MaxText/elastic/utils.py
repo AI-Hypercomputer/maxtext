@@ -234,7 +234,7 @@ class ElasticUtils:
 
       try:
         ret = elastic_handler(*handler_args)
-      except jax.errorss.JaxRuntimeError as error:
+      except jax.errors.JaxRuntimeError as error:
         logger.info("Elastic handler raised an error.")
         reshard_retry = True
 
