@@ -38,6 +38,7 @@ from typing import Sequence
 from layers import models, quantizations
 from train import save_checkpoint
 from utils import gcs_utils
+from utils import lora_utils
 
 Transformer = models.Transformer
 
@@ -113,7 +114,7 @@ def _generate_lora_decode_checkpoints(config, mesh):
         config.checkpoint_period,
     )
 
-    lora_config, lora_state, lora_state_annotations = max_utils.setup_initial_lora_state(
+    lora_config, lora_state, lora_state_annotations = lora_utils.setup_initial_lora_state(
         model, None, tx, config, rng, mesh, checkpoint_manager, lora_adapter_path
     )
 

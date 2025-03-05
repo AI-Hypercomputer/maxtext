@@ -150,7 +150,7 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
         raise NotImplementedError("This codepath is not implemented for LoRA adapters yet.")
       else:
         lora_state = lora_state.replace(params=raw_lora_params)
-        lora_state = unbox_logicallypartioned(lora_state)
+        lora_state = max_utils.unbox_logicallypartioned(lora_state)
 
   return lora_config, lora_state, lora_state_annotations
 
