@@ -41,11 +41,67 @@ DEVICE_TYPE = "v6e-256"
 # Other parameters (MUST BE SET BY USER)
 XPK_PATH = "../xpk"  # We're running this script from the maxtext directory
 USER = os.environ["USER"]
+
+MAX_RESTARTS = 2
+BENCHMARK_STEPS = 20
+USE_GCSFUSE = True
+# USE_GCSFUSE = False
+
+num_slices_list = [
+    24
+]
+
 BASE_OUTPUT_DIRECTORY = (
     f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
 )
+GCSFUSE_BASE_OUTPUT_DIRECTORY = ""
 
-BENCHMARK_STEPS = 20
+if USE_GCSFUSE:
+  GCSFUSE_BASE_OUTPUT_DIRECTORY = BASE_OUTPUT_DIRECTORY
+  BASE_OUTPUT_DIRECTORY = (
+      f"/tmp/gscfuse/pw_mcjax_benchmarking/"
+  )
+
+################################################################################
+
+PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/sujinesh/unsanitized_proxy_server:latest"
+SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/sujinesh/unsanitized_server:latest"
+RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest"
+RUNNER = "gcr.io/cloud-tpu-multipod-dev/sujinesh_latest:latest"
+
+# Sustained Capacity Cluster
+CLUSTER = "bodaborg-v6e-256-dnd-yucmhab"
+PROJECT = "tpu-prod-env-one-vm"
+ZONE = "us-east5-b"
+COUNTRY = "us"
+DEVICE_TYPE = "v6e-256"
+
+# Debug Cluster
+CLUSTER = "bodaborg-v6e-16-debug"
+PROJECT = "tpu-prod-env-one-vm"
+ZONE = "us-east5-b"
+COUNTRY = "us"
+DEVICE_TYPE = "v6e-16"
+
+# High scale cluster
+CLUSTER = "bodaborg-v6e-256-ts"
+PROJECT = "tpu-prod-env-multipod"
+ZONE = "us-west1-c"
+COUNTRY = "us"
+DEVICE_TYPE = "v6e-256"
+
+BASE_OUTPUT_DIRECTORY = (
+    f"gs://trillium-scale-tests-q1-25-west/pw_mcjax_benchmarking/{USER}/suspend_resume_test/"
+)
+GCSFUSE_BASE_OUTPUT_DIRECTORY = ""
+
+if USE_GCSFUSE:
+  GCSFUSE_BASE_OUTPUT_DIRECTORY = BASE_OUTPUT_DIRECTORY
+  BASE_OUTPUT_DIRECTORY = (
+      f"/tmp/gscfuse/pw_mcjax_benchmarking/"
+  )
+
+################################################################################
 
 
 def main() -> int:
@@ -71,12 +127,17 @@ def main() -> int:
           # model_configs.llama3_1_70b_8192,
           # model_configs.llama3_1_405b_8192_fsdp_dcn,
           # model_configs.llama2_70b_4096_real_data_long_run,
+          # model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds,
+          model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_grain,
+          # model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
       ],
       "pathways": [
-          model_configs.llama3_1_8b_8192,
+          # model_configs.llama3_1_8b_8192,
           # model_configs.llama3_1_70b_8192,
           # model_configs.llama3_1_405b_8192_fsdp_dcn,
           # model_configs.llama2_70b_4096_real_data_long_run,
+          # model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds,
+          # model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
       ]
   }
   pathways_config = mxr.PathwaysConfig(
@@ -85,13 +146,14 @@ def main() -> int:
       runner_image=RUNNER,
 
       # User can add additional flags here.
-      server_flags="",
-      proxy_flags="",
-      worker_flags="",
+      server_flags="--enable_metrics_collection=true",
+      proxy_flags="--enable_metrics_collection=true",
+      worker_flags="--enable_metrics_collection=true",
+
+      pathways_gcs_location=(
+          GCSFUSE_BASE_OUTPUT_DIRECTORY if USE_GCSFUSE else None
+      ),
   )
-  num_slices_list = [
-      2
-  ]
 
   xpk_workload_cmds = []
   xpk_workload_names = []
@@ -109,6 +171,13 @@ def main() -> int:
         model.tuning_params["vertex_tensorboard_project"] = PROJECT
         model.tuning_params["vertex_tensorboard_region"] = REGION
 
+        # model.tuning_params["monitor_goodput"] = False
+        # model.tuning_params["enable_tensorboard"] = False
+        # model.tuning_params["use_vertex_tensorboard"] = False
+
+        if USE_GCSFUSE:
+          model.tuning_params["dataset_path"] = "/tmp/dataset"
+
         # Run workloads in the following slice configurations
         for num_slices in num_slices_list:
           wl_config = mxr.WorkloadConfig(
@@ -117,14 +186,15 @@ def main() -> int:
               device_type=cluster_config.device_type,
               base_output_directory=BASE_OUTPUT_DIRECTORY
               + f"{infra}_{num_slices}_slice_{DEVICE_TYPE}_{model.model_name}/",
-              max_restarts=0,
+              max_restarts=MAX_RESTARTS,
               libtpu_type=None,
               libtpu_nightly_version="",
               base_docker_image=RUNNER if infra == "mcjax" else None,
               pathways_config=pathways_config if infra == "pathways" else None,
               xpk_path=XPK_PATH,
               num_steps=BENCHMARK_STEPS,
-              priority="low",
+              priority="high",
+              use_gcsfuse=USE_GCSFUSE,
           )
           command, name = mxr.generate_xpk_workload_cmd(
               cluster_config=cluster_config, wl_config=wl_config
@@ -140,7 +210,10 @@ def main() -> int:
       xpk_workload_names, xpk_workload_cmds
   ):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] Running workload: {xpk_workload_name} with command: {xpk_workload_cmd}")
+    print(
+        f"[{timestamp}] Running workload: {xpk_workload_name} with command:"
+        f" {xpk_workload_cmd}"
+    )
     return_code = mxr.run_command_with_updates(
         xpk_workload_cmd, xpk_workload_name
     )

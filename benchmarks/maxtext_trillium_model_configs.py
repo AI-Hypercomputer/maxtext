@@ -15,6 +15,8 @@
  """
 """Shared Benchmark config for v6e orchestrations."""
 
+import tokenize
+
 import dataclasses
 import typing
 import xla_flags_library
@@ -31,7 +33,7 @@ BASE_PATHWAYS_TUNING_PARAMS = {
     "checkpoint_storage_use_zarr3": False,
     "enable_pathways_goodput": True,
     "enable_single_controller": True,
-    "metrics_file": "metrics.txt",
+    # "metrics_file": "metrics.txt",
     "goodput_upload_interval_seconds": 30,
 }
 
@@ -1001,6 +1003,70 @@ llama3_1_70b_8192_lr_real_data = _add_to_model_dictionary(
     ),
 )
 
+
+llama3_1_70b_8192_iter_real_data_and_checkpointing_grain = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama3_1-70b-8192",
+    model_type="llama3.1-70b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": -1,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "use_iota_embed": True,
+        "dataset_path": "/tmp/dataset",
+        "dataset_type": "grain",
+        "grain_train_files": "/tmp/dataset/array-record/c4/en/3.0.1/c4-train.array_record*",
+        "grain_worker_count": 24,
+        "enable_checkpointing": True,
+        "async_checkpointing": True,
+        "checkpoint_period": 20,
+        "sa_block_q": 2048,
+        "sa_block_kv": 2048,
+        "sa_block_kv_compute": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_kv_dkv": 2048,
+        "sa_block_kv_dkv_compute": 2048,
+        "sa_block_q_dq": 2048,
+        "sa_block_kv_dq": 2048,
+        "sa_use_fused_bwd_kernel": True,
+        "gcs_metrics": True,
+        "profiler": "xplane",
+        "skip_first_n_steps_for_profiler": 10,
+        "profiler_steps": 5,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE 
+        +  " --xla_tpu_iova_dma_chunk_size_bytes=104857"
+    ),
+    pathways_xla_flag_options={
+        xla_flags_library.REMOVE: [
+            "--2a886c8_chip_config_name=megachip_tccontrol"
+        ],
+        xla_flags_library.ADD_SERVER: (
+            xla_flags_library.ENHANCED_LAUNCH_BARRIER
+        ),
+        xla_flags_library.ADD_PROXY: (
+            xla_flags_library.ENHANCED_LAUNCH_BARRIER
+        ),
+        xla_flags_library.ADD_WORKER: (
+            xla_flags_library.ENHANCED_LAUNCH_BARRIER
+        ),
+    }
+  )
+)
+
 llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
@@ -1018,11 +1084,18 @@ llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds = _add_to_model_dictiona
             "attention": "flash",
             "use_iota_embed": True,
             "dataset_path": "gs://trillium-scale-datasets-q1-25-west",
-            "dataset_type": "tfds",
+            # "dataset_type": "tfds",
+            "dataset_type": "grain",
+            "grain_train_files": (
+                "/tmp/dataset/array-record/c4/en/3.0.1/c4-train.array_record*"
+            ),
+            "grain_worker_count": 24,
+            # "tokenizer_path": "assets/tokenizer.llama2",
             "enable_checkpointing": True,
             "async_checkpointing": True,
             "checkpoint_period": 20,
-            "enable_checkpoint_cloud_logger": True,
+            # "enable_checkpoint_cloud_logger": True,
+            "enable_checkpoint_cloud_logger": False,
             "sa_block_q": 2048,
             "sa_block_kv": 2048,
             "sa_block_kv_compute": 2048,
@@ -1036,6 +1109,7 @@ llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds = _add_to_model_dictiona
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
+            # "tokenizer_path": "assets/tokenizer_llama3.tiktoken",
         },
         xla_flags=(
             xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -1081,10 +1155,12 @@ llama3_1_70b_8192_iter_synth_data_and_checkpointing = _add_to_model_dictionary(
             "use_iota_embed": True,
             "dataset_path": "gs://max-datasets-rogue",
             "dataset_type": "synthetic",
-            "enable_checkpointing": True,
+            # "enable_checkpointing": True,
+            "enable_checkpointing": False,
             "async_checkpointing": True,
             "checkpoint_period": 20,
-            "enable_checkpoint_cloud_logger": True,
+            # "enable_checkpoint_cloud_logger": True,
+            "enable_checkpoint_cloud_logger": False,
             "sa_block_q": 2048,
             "sa_block_kv": 2048,
             "sa_block_kv_compute": 2048,
@@ -1098,6 +1174,14 @@ llama3_1_70b_8192_iter_synth_data_and_checkpointing = _add_to_model_dictionary(
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
+            "tokenizer_path": "assets/tokenizer_llama3.tiktoken",
+        },
+        pathways_tuning_params={
+            "enable_pathways_goodput": False,
+            "monitor_goodput": False,
+            "enable_tensorboard": False,
+            "use_vertex_tensorboard": False,
+            "enable_checkpoint_cloud_logger": False,
         },
         xla_flags=(
             xla_flags_library.DENSE_VMEM_LIMIT_FLAG

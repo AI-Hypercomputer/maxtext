@@ -70,8 +70,8 @@ class MetricLogger:
       if self.config.enable_tensorboard:
         self.write_metrics_to_tensorboard(metrics_to_write, steps_to_write, is_training)
 
-      if self.config.metrics_file:
-        self.write_metrics_locally(metrics_to_write, steps_to_write)
+      # if self.config.metrics_file:
+      #   self.write_metrics_locally(metrics_to_write, steps_to_write)
 
       if self.config.gcs_metrics and jax.process_index() == 0:
         running_gcs_metrics = self.write_metrics_for_gcs(metrics_to_write, steps_to_write, running_gcs_metrics, is_training)
