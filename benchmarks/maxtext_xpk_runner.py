@@ -1,18 +1,17 @@
+"""Copyright 2024 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+     https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 """
- Copyright 2024 Google LLC
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-      https://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- """
 
 """  This file contains data classes and runner logic to execute the XPK runs triggered by benchmarks/benchmark_runner.py"
 
@@ -39,6 +38,7 @@ import maxtext_trillium_model_configs as model_configs
 # Assumes you built maxtext dep image.
 # Assumes you have xpk installed in a git clone repo of ~/{wl_config.xpk_path}/xpk.py
 _DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME = 'maxtext_base_image'
+
 
 class LibTpuType(enum.Enum):
   NIGHTLY = 'nightly-libtpu'
@@ -67,10 +67,10 @@ class WorkloadConfig:
   base_output_directory: str
   base_docker_image: str
   libtpu_type: LibTpuType
-  libtpu_nightly_version: str = None # A date in %Y%M%D format, 20241201
+  libtpu_nightly_version: str = None  # A date in %Y%M%D format, 20241201
   num_steps: int = 20
   max_restarts: int = 0
-  priority: str = "medium"
+  priority: str = 'medium'
   xpk_path: str = '~/xpk'
   pathways_config: PathwaysConfig = None
   run_name: str = None
@@ -291,7 +291,8 @@ def build_user_command(
   else:
     if wl_config.libtpu_type == LibTpuType.NIGHTLY:
       install_libtpu_cmd += (
-          f' pip install libtpu-nightly==0.1.dev{wl_config.libtpu_nightly_version} -f'
+          ' pip install'
+          f' libtpu-nightly==0.1.dev{wl_config.libtpu_nightly_version} -f'
           ' https://storage.googleapis.com/libtpu-releases/index.html &&'
       )
     elif wl_config.libtpu_type == LibTpuType.CUSTOM:
@@ -303,27 +304,39 @@ def build_user_command(
       install_libtpu_cmd += ''
 
     jax_platforms = 'tpu,cpu'
-    vertex_tensorboard = 'use_vertex_tensorboard=false vertex_tensorboard_project="" vertex_tensorboard_region=""'
+    vertex_tensorboard = (
+        'use_vertex_tensorboard=false vertex_tensorboard_project=""'
+        ' vertex_tensorboard_region=""'
+    )
 
   assert jax_platforms is not None, 'Error in setting jax_platforms'
 
-  libtpu_flags = f'LIBTPU_INIT_ARGS=\'{wl_config.model.xla_flags}\''
+  libtpu_flags = f"LIBTPU_INIT_ARGS='{wl_config.model.xla_flags}'"
 
   # Construct the command string with proper formatting and line continuations
   command = ' '.join([
-      f'{install_libtpu_cmd}',
+      # f'{install_libtpu_cmd}',
       f'echo {libtpu_flags} &&' if not is_pw_enabled else '',
       f'export {libtpu_flags} &&' if not is_pw_enabled else '',
-      'export ENABLE_PATHWAYS_PERSISTENCE=1 &&',
+      # 'export ENABLE_PATHWAYS_PERSISTENCE=1 &&',
       f'export JAX_PLATFORMS={jax_platforms} &&',
       'export ENABLE_PJRT_COMPATIBILITY=true &&',
-      'python3 MaxText/train.py MaxText/configs/base.yml',
-      f'{config_tuning_params}',
-      f'steps={wl_config.num_steps}',
-      f'model_name={wl_config.model.model_type}',
-      f'base_output_directory={wl_config.base_output_directory}',
-      f'{vertex_tensorboard}',
-      f'run_name={name}'
+      # 'python3 MaxText/train.py MaxText/configs/base.yml',
+      # OSS python user code
+      # 'python3 /app/sidecar_user_code.py',
+      # .par user code
+      # '/usr/pathways/run/sidecar_user_code.par --logtostderr --stderrthreshold=0 -v 1',
+      # .par maxtext
+      (
+          '/usr/pathways/run/train.par'
+          ' google3/third_party/py/maxtext/configs/remote_python.yml'
+      ),
+      # f'{config_tuning_params}',
+      # f'steps={wl_config.num_steps}',
+      # f'model_name={wl_config.model.model_type}',
+      # f'base_output_directory={wl_config.base_output_directory}',
+      # f'{vertex_tensorboard}',
+      # f'run_name={name}'
   ])
   return command
 
@@ -339,14 +352,17 @@ def generate_xpk_workload_cmd(
   time.localtime()
   length_of_random_str = 3
   temp_post_fix = ''.join(
-      random.choice(string.ascii_lowercase + string.digits) for _ in range(length_of_random_str)
+      random.choice(string.ascii_lowercase + string.digits)
+      for _ in range(length_of_random_str)
   )
 
   truncate_model_name = 12
   truncate_prefix = 5
-  common_post_fix = f"-{wl_config.num_slices}-{time.strftime('%m%d%H', time.localtime())}-{temp_post_fix}"
+  common_post_fix = (
+      f"-{wl_config.num_slices}-{time.strftime('%m%d%H', time.localtime())}-{temp_post_fix}"
+  )
   common_prefix = os.environ['USER']
-  pw_prefix = "pw-"
+  pw_prefix = 'pw-'
 
   if is_pathways_enabled:
     name = (
@@ -354,14 +370,11 @@ def generate_xpk_workload_cmd(
     )
   else:
     name = (
-      f"{wl_config.model.model_name.replace('_', '-')[:truncate_model_name]}"
+        f"{wl_config.model.model_name.replace('_', '-')[:truncate_model_name]}"
     )
-  name = f"{common_prefix[:truncate_prefix]}-{name}{common_post_fix}"
+  name = f'{common_prefix[:truncate_prefix]}-{name}{common_post_fix}'
 
-  user_command = build_user_command(
-      name=name,
-      wl_config=wl_config
-  )
+  user_command = build_user_command(name=name, wl_config=wl_config)
 
   additional_flags = ''
   if not is_pathways_enabled and wl_config.libtpu_type == LibTpuType.CUSTOM:
@@ -377,18 +390,18 @@ def generate_xpk_workload_cmd(
         f' --server-image={pw_config.server_image}'
         f' --proxy-server-image={pw_config.proxy_image}'
         f' --remote-python-sidecar-image={pw_config.remote_python_sidecar_image}'
-        if pw_config.remote_python_sidecar_image is not None else ''
-        ' --termination-grace-period-seconds=300'
-        f' --pathways-gcs-location={wl_config.base_output_directory}'
-        f' --restart-on-user-code-failure'
-        f' --debug-dump-gcs={wl_config.base_output_directory}'
+        if pw_config.remote_python_sidecar_image is not None
+        else (
+            ''
+            ' --termination-grace-period-seconds=300'
+            f' --pathways-gcs-location={wl_config.base_output_directory}'
+            ' --restart-on-user-code-failure'
+            f' --debug-dump-gcs={wl_config.base_output_directory}'
+        )
     )
-    docker_image_flag = (
-        f'--docker-image={pw_config.runner_image}'
-    )
+    docker_image_flag = f'--docker-image={pw_config.runner_image}'
   else:
     docker_image_flag = f'--base-docker-image="{wl_config.base_docker_image}"'
-
 
   print(f'User command: {user_command}')
   return (
@@ -426,10 +439,12 @@ def run_xpk_workload(
 
   Returns:
   """
-  assert cluster_config.device_type == wl_config.device_type, f"The workload device size {wl_config.device_type}, and cluster device size {cluster_config.device_type} don't match."
+  assert cluster_config.device_type == wl_config.device_type, (
+      f'The workload device size {wl_config.device_type}, and cluster device'
+      f" size {cluster_config.device_type} don't match."
+  )
   command, _ = generate_xpk_workload_cmd(
-      cluster_config=cluster_config,
-      wl_config=wl_config
+      cluster_config=cluster_config, wl_config=wl_config
   )
   return run_command_with_updates(command, 'Run XPK workload')
 
@@ -442,32 +457,34 @@ def xpk_benchmark_runner(
   xpk_workload_cmds = []
   for wl_config in workload_configs:
     command, name = generate_xpk_workload_cmd(
-      cluster_config=cluster_config,
-      wl_config=wl_config
+        cluster_config=cluster_config, wl_config=wl_config
     )
 
-    print(f"Name of the workload is: {name} \n")
+    print(f'Name of the workload is: {name} \n')
     xpk_workload_names.append(name)
 
-    print(f"XPK command to be used is: {command} \n")
+    print(f'XPK command to be used is: {command} \n')
     xpk_workload_cmds.append(command)
 
   # TODO(@vbarr) Support batch workloads.
-  for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
+  for xpk_workload_name, xpk_workload_cmd in zip(
+      xpk_workload_names, xpk_workload_cmds
+  ):
     return_code = run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
     if return_code != 0:
       print('Unable to run xpk workload: {xpk_workload_name}')
+
 
 def on_device_benchmark_runner(
     workload_configs: list[WorkloadConfig],
 ):
   for wl_config in workload_configs:
     user_command = build_user_command(
-      name=wl_config.run_name,
-      wl_config=wl_config
+        name=wl_config.run_name, wl_config=wl_config
     )
     print(f'User command: {user_command}')
     subprocess.run(user_command, shell=True, text=True)
+
 
 # Run maxtext_xpk_runner.py as a script for executing multiple workloads pythonically!
 def main() -> int:
@@ -494,8 +511,8 @@ def main() -> int:
   xpk_workload_names = []
 
   list_of_models = [
-    model_configs.llama2_70b_4096_sc,
-    # model_configs.default_128
+      model_configs.llama2_70b_4096_sc,
+      # model_configs.default_128
   ]
 
   # Loop possibilities:
@@ -513,18 +530,20 @@ def main() -> int:
   # 3. See other examples below
 
   user = os.environ['USER']
-  base_output_dir = os.path.join(output_bucket,user)
+  base_output_dir = os.path.join(output_bucket, user)
 
   for model in list_of_models:
     # Run workloads on the below clusters
     for cluster_config in [
-      # v5e_cluster_config,
-      # v6e_cluster_config,
-      v6e_cluster_config_yucmhab,
-      # another_config,
+        # v5e_cluster_config,
+        # v6e_cluster_config,
+        v6e_cluster_config_yucmhab,
+        # another_config,
     ]:
       # Run workloads in the following slice configurations
-      for num_slices in [1,]:
+      for num_slices in [
+          1,
+      ]:
         # Use the libtpu dependencies from:
         for libtpu_type in [
             # LibTpuType.CUSTOM
@@ -532,29 +551,30 @@ def main() -> int:
             # LibTpuType.NIGHTLY
         ]:
           wl_config = WorkloadConfig(
-            model=model,
-            num_slices=num_slices,
-            device_type=cluster_config.device_type,
-            base_output_directory=base_output_dir,
-            priority="medium",
-            max_restarts=0,
-            libtpu_type=libtpu_type,
-            libtpu_nightly_version="",
-            base_docker_image=base_docker_image,
-            pathways_config=None
+              model=model,
+              num_slices=num_slices,
+              device_type=cluster_config.device_type,
+              base_output_directory=base_output_dir,
+              priority='medium',
+              max_restarts=0,
+              libtpu_type=libtpu_type,
+              libtpu_nightly_version='',
+              base_docker_image=base_docker_image,
+              pathways_config=None,
           )
           command, name = generate_xpk_workload_cmd(
-            cluster_config=cluster_config,
-            wl_config=wl_config
+              cluster_config=cluster_config, wl_config=wl_config
           )
 
-          print(f"Name of the workload is: {name} \n")
+          print(f'Name of the workload is: {name} \n')
           xpk_workload_names.append(name)
 
-          print(f"XPK command to be used is: {command} \n")
+          print(f'XPK command to be used is: {command} \n')
           xpk_workload_cmds.append(command)
 
-  for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
+  for xpk_workload_name, xpk_workload_cmd in zip(
+      xpk_workload_names, xpk_workload_cmds
+  ):
     return_code = run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
     if return_code != 0:
       print('Unable to run xpk workload: {xpk_workload_name}')
@@ -568,8 +588,9 @@ def main() -> int:
   #     batch=1,  # Parallel execution of workloads is not supported in XPK yet.
   #     dry_run=False,
   # )
- # print(f'Return_codes: {return_codes}')
 
+
+# print(f'Return_codes: {return_codes}')
 
 
 if __name__ == '__main__':
