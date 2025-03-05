@@ -351,7 +351,7 @@ class ElasticUtils:
     return len(self.slice_to_devices[slice_index])
 
   def _simple_execution(
-      self, devices: Sequence[jax.Device], block: bool = True
+      self, devices: Sequence[jax.Device], block: bool = False
   ) -> jax.Array:
     """Simple execution to test if a slice is available."""
     x = np.zeros(len(devices), dtype=float) + (self.TEST_VALUE - 1)
@@ -366,7 +366,7 @@ class ElasticUtils:
     good_slice_indices = set()
 
     results = {
-        slice_index: self._simple_execution(devices, block=False)
+        slice_index: self._simple_execution(devices)
         for slice_index, devices in self.slice_to_devices.items()
     }
 

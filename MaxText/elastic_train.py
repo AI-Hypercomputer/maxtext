@@ -137,7 +137,6 @@ def elastic_handler(
   config.eu.data["opt_state"], opt_state = reshard(config.eu.data["opt_state"])
 
   state = state.replace(step=restore_step, params=params, opt_state=opt_state)
-  jax.block_until_ready(state)
 
   (
       functional_train,
@@ -161,7 +160,7 @@ def elastic_handler(
   metric_logger = MetricLogger(writer, config)
   max_logging.log(f"{metric_logger.buffered_metrics is None=}")
 
-  jax.block_until_ready(state)
+  # jax.block_until_ready(state)
 
   return (
       config,
