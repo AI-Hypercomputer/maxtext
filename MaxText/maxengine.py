@@ -35,6 +35,7 @@ from jetstream.engine import engine_api
 from jetstream.engine import tokenizer_pb2
 from jetstream.engine import tokenizer_api
 from jetstream.engine import token_utils
+from utils import lora_utils
 
 import max_utils
 import inference_utils
@@ -238,11 +239,10 @@ class MaxEngine(engine_api.Engine):
     Load Single adapter from adapter_path.
     Expect adapter_config.json and LoRA adapter weights at this path within subdirectory `/0/items`.
     """
+    adapter_config_path = f"{adapter_path}/adapter_config.json"
+    adapter_weights_path = f"{adapter_path}/0/items"
 
-    adapter_config_path = adapter_path + "/adapter_config.json"
-    adapter_weights_path = adapter_path + "/0/items"
-
-    params, config = max_utils.load_adapter(self.config, self.abstract_params, adapter_config_path, adapter_weights_path)
+    params, config = lora_utils.load_adapter(self.config, self.abstract_params, adapter_config_path, adapter_weights_path)
 
     config["adapter_path"] = adapter_weights_path
 
@@ -255,7 +255,7 @@ class MaxEngine(engine_api.Engine):
 
     lora_rank = int(adapter_config["r"])
     lora_scale_factor = float(adapter_config["lora_alpha"]) / lora_rank
-    max_utils.apply_lora_on_base_params(base_params, adapter_params, lora_scale_factor)
+    lora_utils.apply_lora_on_base_params(base_params, adapter_params, lora_scale_factor)
 
   def quantize_params(self, state, rng: Optional[PRNGKeyType] = None):
     """Forward pass to quantize decode params."""

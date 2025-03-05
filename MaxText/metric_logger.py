@@ -23,7 +23,7 @@ import os
 import numpy as np
 
 import max_logging
-import max_utils
+from utils import gcs_utils
 
 
 def _prepare_metrics_for_json(metrics, step, run_name):
@@ -98,7 +98,7 @@ class MetricLogger:
 
       gcs_filename = os.path.join(self.config.metrics_dir, metrics_filename)
       max_logging.log(f"Moving file {metrics_filename} to GCS...")
-      max_utils.upload_blob(gcs_filename, metrics_filename)
+      gcs_utils.upload_blob(gcs_filename, metrics_filename)
       max_logging.log(f"File {metrics_filename} moved successfully!")
       running_metrics = []  # reset running_metrics to empty list
     return running_metrics

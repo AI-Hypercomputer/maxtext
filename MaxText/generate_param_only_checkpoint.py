@@ -37,6 +37,7 @@ from jax import random
 from typing import Sequence
 from layers import models, quantizations
 from train import save_checkpoint
+from utils import gcs_utils
 
 Transformer = models.Transformer
 
@@ -90,7 +91,7 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
   return state, state_mesh_notations
 
 
-def _read_load_save_lora_checkpoints(config, mesh):
+def _generate_lora_decode_checkpoints(config, mesh):
   """Read lora checkpoints checkpoint at path defined by load_full_state_path."""
   # Model and Optimizer definition
   quant = quantizations.configure_quantization(config)
@@ -99,7 +100,7 @@ def _read_load_save_lora_checkpoints(config, mesh):
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
 
-  lora_adapters = max_utils.gcs_list_directories(config.lora_adapters_path)
+  lora_adapters = gcs_utils.gcs_list_directories(config.lora_adapters_path)
   for lora_id in lora_adapters:
     lora_checkpoint_dir = f"{config.checkpoint_dir}{config.lora_dir}{lora_id}/"
     lora_adapter_path = f"{config.lora_adapters_path}/{lora_id}/"
@@ -118,7 +119,7 @@ def _read_load_save_lora_checkpoints(config, mesh):
 
     _possibly_unroll_params(config, lora_state, lora_state_annotations, mesh)
 
-    max_utils.write_dict_to_gcs_json(lora_config, lora_checkpoint_dir + config.lora_config_file_name)
+    gcs_utils.write_dict_to_gcs_json(lora_config, lora_checkpoint_dir + config.lora_config_file_name)
 
     # Save decode state to config's checkpoint directory at step 0
     _save_decode_checkpoint(config, lora_state, checkpoint_manager)
@@ -179,7 +180,7 @@ def generate_decode_checkpoint(config):
   max_logging.log(f"Successfully generated decode checkpoint at: {base_checkpoint_dir}0/items")
 
   if config.lora_adapters_path:
-    _read_load_save_lora_checkpoints(config, mesh)
+    _generate_lora_decode_checkpoints(config, mesh)
 
   return True
 

@@ -54,7 +54,7 @@ import max_utils
 from train import save_checkpoint
 import checkpointing
 from safetensors import safe_open
-import max_utils
+from utils import gcs_utils
 
 MODEL_PARAMS_DICT = {
     "llama2-70b": {
@@ -253,9 +253,6 @@ def convert_lora_weights_to_jax_weights(lora_config, model_size):
   base_num_decoder_layers = model_params["num_layers"]
   base_num_query_heads = model_params["num_heads"]
   head_dim = model_params["dims_per_head"]
-  base_num_kv_heads = model_params["num_kv_heads"]
-  vocab_size = model_params["vocab"]
-  num_experts = model_params["num_experts"] if "num_experts" in model_params else None
   mem_info = psutil.Process()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
@@ -327,8 +324,8 @@ def convert_lora_weights_to_jax_weights(lora_config, model_size):
           self_attention_lora["query"]["lora_a.kernel"] = np.zeros(stack_shape + lora_A_q.shape, dtype=np.float16)
           self_attention_lora["query"]["lora_b.kernel"] = np.zeros(stack_shape + lora_B_q.shape, dtype=np.float16)
 
-        self_attention_lora["query"]["lora_a.kernel"][layer_idx, ...] = lora_A_q
-        self_attention_lora["query"]["lora_b.kernel"][layer_idx, ...] = lora_B_q
+        self_attention_lora["query"]["lora_a.kernel"][layer_idx, ...] = lora_A_q  # pylint: disable=E1137
+        self_attention_lora["query"]["lora_b.kernel"][layer_idx, ...] = lora_B_q  # pylint: disable=E1137
 
       if "k_proj" in target_module:
         lora_A_k = lora_chkpt_vars[f"layers.{layer_idx}.attention.wk.lora_A.weights"].type(torch.float16).numpy().transpose()
@@ -340,8 +337,8 @@ def convert_lora_weights_to_jax_weights(lora_config, model_size):
           self_attention_lora["key"]["lora_a.kernel"] = np.zeros(stack_shape + lora_A_k.shape, dtype=np.float16)
           self_attention_lora["key"]["lora_b.kernel"] = np.zeros(stack_shape + lora_B_k.shape, dtype=np.float16)
 
-        self_attention_lora["key"]["lora_a.kernel"][layer_idx, ...] = lora_A_k
-        self_attention_lora["key"]["lora_b.kernel"][layer_idx, ...] = lora_B_k
+        self_attention_lora["key"]["lora_a.kernel"][layer_idx, ...] = lora_A_k  # pylint: disable=E1137
+        self_attention_lora["key"]["lora_b.kernel"][layer_idx, ...] = lora_B_k  # pylint: disable=E1137
 
       if "v_proj" in target_module:
         lora_A_v = lora_chkpt_vars[f"layers.{layer_idx}.attention.wv.lora_A.weights"].type(torch.float16).numpy().transpose()
@@ -353,22 +350,23 @@ def convert_lora_weights_to_jax_weights(lora_config, model_size):
           self_attention_lora["value"]["lora_a.kernel"] = np.zeros(stack_shape + lora_A_v.shape, dtype=np.float16)
           self_attention_lora["value"]["lora_b.kernel"] = np.zeros(stack_shape + lora_B_v.shape, dtype=np.float16)
 
-        self_attention_lora["value"]["lora_a.kernel"][layer_idx, ...] = lora_A_v
-        self_attention_lora["value"]["lora_b.kernel"][layer_idx, ...] = lora_B_v
+        self_attention_lora["value"]["lora_a.kernel"][layer_idx, ...] = lora_A_v  # pylint: disable=E1137
+        self_attention_lora["value"]["lora_b.kernel"][layer_idx, ...] = lora_B_v  # pylint: disable=E1137
 
       if "o_proj" in target_module:
         lora_A_o = lora_chkpt_vars[f"layers.{layer_idx}.attention.wo.lora_A.weights"].type(torch.float16).numpy()
         lora_B_o = lora_chkpt_vars[f"layers.{layer_idx}.attention.wo.lora_B.weights"].type(torch.float16).numpy()
 
-        # This is for "out" matrix. So we don't transpose it above as well as here we have to reshape the lora_A_o instead of lora_B_o.
+        # This is for "out" matrix. So we don't transpose it above as well as here
+        # we have to reshape the lora_A_o instead of lora_B_o.
         lora_A_o = np.reshape(lora_A_o, [lora_rank, base_num_query_heads, head_dim])
 
         if self_attention_lora["out"]["lora_a.kernel"] is None:
           self_attention_lora["out"]["lora_a.kernel"] = np.zeros(stack_shape + lora_A_o.shape, dtype=np.float16)
           self_attention_lora["out"]["lora_b.kernel"] = np.zeros(stack_shape + lora_B_o.shape, dtype=np.float16)
 
-        self_attention_lora["out"]["lora_a.kernel"][layer_idx, ...] = lora_A_o
-        self_attention_lora["out"]["lora_b.kernel"][layer_idx, ...] = lora_B_o
+        self_attention_lora["out"]["lora_a.kernel"][layer_idx, ...] = lora_A_o  # pylint: disable=E1137
+        self_attention_lora["out"]["lora_b.kernel"][layer_idx, ...] = lora_B_o  # pylint: disable=E1137# pylint: disable=E1137
 
   if self_attention_lora["query"]["lora_a.kernel"] is not None:
     self_attention_lora["query"]["lora_a.kernel"] = np.transpose(
@@ -1037,32 +1035,31 @@ if __name__ == "__main__":
   )
   max_logging.log(f"Successfully saved base_weights to {base_weights_path}.")
 
-  lora_config = None
   if args.lora_adapters_path:
     max_logging.log(f"LoRA Adapters Path = {args.lora_adapters_path}")
     if args.lora_adapters_path.startswith("gs://"):
-      max_logging.log(f"GCS Source path for the LoRA adapters is not supported as of now.")
+      max_logging.log("GCS Source path for the LoRA adapters is not supported as of now.")
       raise NotImplementedError
 
     lora_ids = list_folders_pathlib(args.lora_adapters_path)
 
     for lora_id in lora_ids:
-      lora_path = args.lora_adapters_path + "/" + lora_id
-      lora_config_path = lora_path + "/adapter_config.json"
-      with open(lora_config_path, "r") as f:
-        lora_config = json.load(f)
+      lora_path = f"{args.lora_adapters_path}/{lora_id}"
+      lora_config_path = f"{lora_path}/adapter_config.json"
+      with open(lora_config_path, "r", encoding="utf8") as file:
+        lora_config_dict = json.load(file)
 
-        if lora_config is not None:
-          lora_model_path = lora_path + "/adapter_model.bin"
-          lora_config["lora_model_path"] = lora_model_path
+        if lora_config_dict is not None:
+          lora_model_path = f"{lora_path}/adapter_model.bin"
+          lora_config_dict["lora_model_path"] = lora_model_path
 
-          jax_lora_weights = convert_lora_weights_to_jax_weights(lora_config, args.model_size)
+          jax_lora_weights = convert_lora_weights_to_jax_weights(lora_config_dict, args.model_size)
 
-          del lora_config["lora_model_path"]
+          del lora_config_dict["lora_model_path"]
 
-          lora_output_gcs_path = args.maxtext_model_path + "/LoRAs/" + lora_id
+          lora_output_gcs_path = f"{args.maxtext_model_path}/LoRAs/{lora_id}"
 
           save_jax_weights_to_checkpoint(lora_output_gcs_path, jax_lora_weights)
-          max_utils.write_dict_to_gcs_json(lora_config, lora_output_gcs_path + "/adapter_config.json")
+          gcs_utils.write_dict_to_gcs_json(lora_config_dict, f"{lora_output_gcs_path}/adapter_config.json")
 
           max_logging.log(f"Successfully saved lora_weights to {lora_output_gcs_path}.")
