@@ -20,6 +20,7 @@ import jax
 import json
 import os
 import socket
+import yaml
 from pathlib import Path
 
 import max_logging
