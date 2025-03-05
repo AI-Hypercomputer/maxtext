@@ -972,9 +972,9 @@ llama3_1_70b_8192_lr_real_data = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
             "sa_block_kv_dq": 2048,
             "sa_use_fused_bwd_kernel": True,
-            "profiler": "xplane",
-            "skip_first_n_steps_for_profiler": 10,
-            "profiler_steps": 5,
+            # "profiler": "xplane",
+            # "skip_first_n_steps_for_profiler": 10,
+            # "profiler_steps": 5,
         },
         pathways_tuning_params=PATHWAYS_LONG_RUN_CHECKPOINTING_TUNING_PARAMS,
         xla_flags=(
