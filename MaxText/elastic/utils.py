@@ -136,11 +136,12 @@ class ElasticUtils:
   def maybe_snapshot(
       self,
       save_step: int,
-      blocking: bool = True,
+      blocking: bool = False,
       force: bool = False,
       **kwargs):
     """Save step and state."""
     if not force and save_step % self.save_period:
+      logger.info("Not saving a snapshot")
       return
 
     total_nbytes = 0
@@ -161,9 +162,11 @@ class ElasticUtils:
     }
     data["save_step"] = save_step
 
+    logger.info("Snapshot dispatched")
     if blocking:
       for v in self.data.values():
         jax.block_until_ready(v)
+      logger.info("Snapshot completed")
 
     self.data = data
 
@@ -210,6 +213,7 @@ class ElasticUtils:
 
     return True
 
+  @timeit
   def maybe_reshard_down(
       self,
       error: Exception,
@@ -222,15 +226,22 @@ class ElasticUtils:
 
     while True:
       if not self._is_error_due_to_slice_down(error):
+        logger.info("Not resharding down")
         raise error from error.__cause__
 
+      logger.info("Resharding down")
       self._slice_down(reshard_retry)
 
       try:
-        return elastic_handler(*handler_args)
-      except jax.error.JaxRuntimeError as error:
+        ret = elastic_handler(*handler_args)
+      except jax.errorss.JaxRuntimeError as error:
+        logger.info("Elastic handler raised an error.")
         reshard_retry = True
 
+      logger.info("Successfully resharded down")
+      return ret
+
+  @timeit
   def maybe_reshard_up(
       self,
       step: int,
@@ -241,20 +252,27 @@ class ElasticUtils:
       handler_args = ()
 
     if not self._is_ready_to_reshard(step):
-      return handler_args
+      logger.info("Not resharding up")
+      return
 
+    logger.info("Taking snapshot")
     if self.data["save_step"] < step:
       self.maybe_snapshot(step, force=True, **save_args)
 
     try:
-      return elastic_handler(*handler_args)
-    except jax.error.JaxRuntimeError as error:
-      return self.maybe_reshard_down(
+      ret = elastic_handler(*handler_args)
+    except jax.errors.JaxRuntimeError as error:
+      logger.info("elastic handler failed. Trying again")
+      ret = self.maybe_reshard_down(
           error,
           elastic_handler,
           handler_args,
           reshard_retry=True,
       )
+
+      logger.info("Finished resharding up")
+
+      return ret
 
   def _is_ready_to_reshard(self, step: int):
     """Indicates if it is time to reshard.

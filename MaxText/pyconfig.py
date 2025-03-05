@@ -22,8 +22,8 @@ import os
 import sys
 from typing import Any, Union
 
-# from elastic.simulator import ElasticUtilsSimulator as ElasticUtils
-from elastic.utils import ElasticUtils
+from elastic.simulator import ElasticUtilsSimulator as ElasticUtils
+# from elastic.utils import ElasticUtils
 import jax
 from jax.experimental.compilation_cache import compilation_cache
 from layers.attentions import AttentionType

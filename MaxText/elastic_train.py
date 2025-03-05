@@ -72,16 +72,7 @@ from train import (
 @utils.timeit
 def elastic_handler(
     config: pyconfig.HyperParameters,
-    step: int,
-    state,
-    mesh: jax.sharding.Mesh,
     checkpoint_manager,
-    data_iterator,
-    p_train_step,
-    example_batch,
-    learning_rate_schedule,
-    metric_logger,
-    writer,
 ):
   """Reshard function."""
   if checkpoint_manager is not None:
@@ -168,6 +159,7 @@ def elastic_handler(
 
   example_batch = None
   metric_logger = MetricLogger(writer, config)
+  max_logging.log(f"{metric_logger.buffered_metrics is None=}")
 
   jax.block_until_ready(state)
 
@@ -306,20 +298,20 @@ def train_loop(config, state=None):
       opt_state=state.opt_state,
   )
 
-  # step_down = {10, 30, 44}
-  # step_up = {14, 16, 40, 45}
+  step_down = {10, 30, 44}
+  step_up = {14, 16, 40, 45}
   while True:
     with utils.watchdog(120):
       try:
-        # if step in step_down:
-        #   step_down.remove(step)
-        #   # Remove a slice
-        #   config.eu.update_good_slice_indices(set(range(config.eu.total_slice_count)) - {step % config.eu.total_slice_count})
-        #   raise jax.errors.JaxRuntimeError("DATA_LOSS: Fake")
-        # elif step in step_up:
-        #   step_up.remove(step)
+        if step in step_down:
+          step_down.remove(step)
+          # Remove a slice
+          config.eu.update_good_slice_indices(set(range(config.eu.total_slice_count)) - {step % config.eu.total_slice_count})
+          raise jax.errors.JaxRuntimeError("DATA_LOSS: Fake")
+        elif step in step_up:
+          step_up.remove(step)
 
-        #   config.eu.update_good_slice_indices(set(range(config.eu.total_slice_count)))
+          config.eu.update_good_slice_indices(set(range(config.eu.total_slice_count)))
 
 
         if step == first_profiling_step or prof.should_activate_periodic_profile(step):
@@ -421,6 +413,46 @@ def train_loop(config, state=None):
               opt_state=state.opt_state,
           )
 
+          ret = config.eu.maybe_reshard_up(
+              step,
+              elastic_handler,
+              save_args=dict(
+                  params=state.params,
+                  opt_state=state.opt_state,
+              ),
+              handler_args=(
+                  config,
+                  checkpoint_manager,
+              ),
+          )
+          if ret is not None:
+            (config,
+             step,
+             state,
+             mesh,
+             checkpoint_manager,
+             data_iterator,
+             p_train_step,
+             example_batch,
+             learning_rate_schedule,
+             metric_logger,
+             writer) = ret
+
+          if step == start_step:
+            max_utils.print_mem_stats("After params initialized")
+
+          step += 1
+
+      except jax.errors.JaxRuntimeError as error:
+         ret = config.eu.maybe_reshard_down(
+             error,
+             elastic_handler,
+             handler_args=(
+                 config,
+                 checkpoint_manager,
+             ),
+         )
+         if ret is not None:
           (config,
            step,
            state,
@@ -431,61 +463,7 @@ def train_loop(config, state=None):
            example_batch,
            learning_rate_schedule,
            metric_logger,
-           writer) = config.eu.maybe_reshard_up(
-               step,
-               elastic_handler,
-               save_args=dict(
-                   params=state.params,
-                   opt_state=state.opt_state,
-               ),
-               handler_args=(
-                   config,
-                   step,
-                   state,
-                   mesh,
-                   checkpoint_manager,
-                   data_iterator,
-                   p_train_step,
-                   example_batch,
-                   learning_rate_schedule,
-                   metric_logger,
-                   writer,
-               ),
-           )
-
-          if step == start_step:
-            max_utils.print_mem_stats("After params initialized")
-
-          step += 1
-
-      except jax.errors.JaxRuntimeError as error:
-        (config,
-         step,
-         state,
-         mesh,
-         checkpoint_manager,
-         data_iterator,
-         p_train_step,
-         example_batch,
-         learning_rate_schedule,
-         metric_logger,
-         writer) = config.eu.maybe_reshard_down(
-             error,
-             elastic_handler,
-             handler_args=(
-                 config,
-                 step,
-                 state,
-                 mesh,
-                 checkpoint_manager,
-                 data_iterator,
-                 p_train_step,
-                 example_batch,
-                 learning_rate_schedule,
-                 metric_logger,
-                 writer,
-             ),
-         )
+           writer) = ret
 
   if checkpoint_manager is not None:
     checkpoint_manager.wait_until_finished()
