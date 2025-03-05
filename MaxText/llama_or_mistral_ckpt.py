@@ -111,6 +111,13 @@ MODEL_PARAMS_DICT = {
         "dims_per_head": 128,
         "vocab": 128256,
     },
+    "llama3.3-70b": {
+        "num_layers": 80,
+        "num_heads": 64,
+        "num_kv_heads": 8,
+        "dims_per_head": 128,
+        "vocab": 128256,
+    },
     "mistral-7b": {
         "num_layers": 32,
         "num_heads": 32,
@@ -141,6 +148,8 @@ MODEL_PARAMS_DICT = {
         "num_experts": 8,
     },
 }
+
+llama3_variants = {"llama3.1", "llama3.3"}
 
 SIMULATED_CPU_DEVICES_COUNT = 16
 
@@ -527,21 +536,28 @@ def _convert_pytorch_to_jax_weights(base_model_path, model_size, model_params, m
       "value": {"kernel": None},
       "out": {"kernel": None},
   }
+
+  # llama3.1-405b kv weight is replicated within every two files.
+  wkv_step = 1 if model_size != "llama3.1-405b" else 2
+
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
     wq = np.concatenate(
         [var[f"layers.{layer_idx}.attention.wq.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0
     ).transpose()
     wk = np.concatenate(
-        [var[f"layers.{layer_idx}.attention.wk.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0
+        [var[f"layers.{layer_idx}.attention.wk.weight"].type(torch.float16).numpy() for var in chkpt_vars[::wkv_step]],
+        axis=0,
     ).transpose()
     wv = np.concatenate(
-        [var[f"layers.{layer_idx}.attention.wv.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0
+        [var[f"layers.{layer_idx}.attention.wv.weight"].type(torch.float16).numpy() for var in chkpt_vars[::wkv_step]],
+        axis=0,
     ).transpose()
 
     wq = np.reshape(wq, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
     wk = np.reshape(wk, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
     wv = np.reshape(wv, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
-    if model_size[:8] != "llama3.1":
+
+    if model_size[:8] not in llama3_variants:
       wq = permute_to_match_maxtext_rope(wq)
       wk = permute_to_match_maxtext_rope(wk)
 
@@ -707,6 +723,7 @@ def _convert_pytorch_to_jax_weights(base_model_path, model_size, model_params, m
   del chkpt_vars
   gc.collect()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+  return jax_weights
 
 
 def convert_to_jax_weights(base_model_path, model_size, huggingface_ckpt):

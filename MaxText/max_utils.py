@@ -759,7 +759,9 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
     max_logging.log(f"Loading decode params from {config.load_parameters_path}")
     unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(model, None, config, rng, mesh, False)
     with nn_partitioning.axis_rules(config.logical_axis_rules):
-      params = checkpointing.load_params_from_path(config.load_parameters_path, unboxed_abstract_state.params)
+      params = checkpointing.load_params_from_path(
+          config.load_parameters_path, unboxed_abstract_state.params, config.checkpoint_storage_concurrent_gb
+      )
     state = init_decode_state(None, params)
 
   state = unbox_logicallypartioned(state)
@@ -818,6 +820,7 @@ def setup_initial_state(
         data_iterator,
         config.load_parameters_path,
         config.load_full_state_path,
+        config.checkpoint_storage_concurrent_gb,
         unboxed_abstract_state,
         config.enable_single_replica_ckpt_restoring,
         config.dataset_type,
