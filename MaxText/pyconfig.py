@@ -480,7 +480,7 @@ class _HyperParameters:
         raw_keys["num_slices"],
         save_period=3,
         reshard_check_period=5,
-        max_failure_count=10,
+        max_failure_count=100,
         max_reshard_retry_count=3,
     )
     # Write raw_keys to GCS before type conversions
