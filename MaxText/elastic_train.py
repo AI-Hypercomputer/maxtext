@@ -298,20 +298,20 @@ def train_loop(config, state=None):
       opt_state=state.opt_state,
   )
 
-  step_down = {10, 30, 44}
-  step_up = {14, 40, 45}
+  # step_down = {10, 30, 44}
+  # step_up = {14, 40, 45}
   while True:
     with utils.watchdog(120):
       try:
-        if step in step_down:
-          step_down.remove(step)
-          # Remove a slice
-          config.eu.update_good_slice_indices(set(range(config.eu.total_slice_count)) - {step % config.eu.total_slice_count})
-          raise jax.errors.JaxRuntimeError("DATA_LOSS: Fake")
-        elif step in step_up:
-          step_up.remove(step)
+        # if step in step_down:
+        #   step_down.remove(step)
+        #   # Remove a slice
+        #   config.eu.update_good_slice_indices(set(range(config.eu.total_slice_count)) - {step % config.eu.total_slice_count})
+        #   raise jax.errors.JaxRuntimeError("DATA_LOSS: Fake")
+        # elif step in step_up:
+        #   step_up.remove(step)
 
-          config.eu.update_good_slice_indices(set(range(config.eu.total_slice_count)))
+        #   config.eu.update_good_slice_indices(set(range(config.eu.total_slice_count)))
 
 
         if step == first_profiling_step or prof.should_activate_periodic_profile(step):
