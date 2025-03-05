@@ -15,8 +15,6 @@ hf_path: 'json'
 hf_data_dir: '' 
 
 #prefixed TRL
-# max_prefill_predict_length: 550
-# max_target_length: 678 #
 max_prefill_predict_length: 512
 max_target_length: 768
 hf_train_files: 'gs://mazumdera-test-bucket-europe-west4/rl-datasets/prefixed_tldr_dataset.jsonl' 

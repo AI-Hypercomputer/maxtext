@@ -25,24 +25,16 @@ import os
 import sys
 import functools
 from collections import defaultdict
-import time
 import queue
 
-from typing import Sequence, Optional
+from typing import Sequence
 from absl import app
 import tensorflow as tf
-from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
-import grain.python as grain
 import jax
 import jax.numpy as jnp
 from jax import random
-from jax.sharding import Mesh
-from jax.experimental import checkify
 import numpy as np
-import orbax.checkpoint
-import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
-
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 maxtext_parent_dir = os.path.dirname(os.path.dirname(current_dir))
@@ -52,16 +44,15 @@ import checkpointing
 import max_utils
 import maxtext_utils
 import max_logging
-import optimizers
 import profiler
 import pyconfig
-import pathwaysutils  # pylint: disable=unused-import
+
+from metric_logger import MetricLogger
 
 from vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
-# from input_pipeline.input_pipeline_interface import create_data_iterator
-from grpo_input_pipeline import create_data_iterator
+import grpo_input_pipeline
 from layers import models
 
 from gcp_workload_monitor import GCPWorkloadMonitor
@@ -70,16 +61,14 @@ from train import (validate_train_config,
                    get_first_step, load_next_batch,
                    record_scalar_metrics, save_checkpoint,
                    record_goodput, create_goodput_recorder,
-                   check_example_batch, )
+                   check_example_batch, setup_mesh_and_model,
+                   record_activation_metrics)
 
 from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
-from layers import quantizations
-
-from ml_goodput_measurement import goodput
 from ml_goodput_measurement import monitoring
 
 import maxengine
@@ -89,114 +78,6 @@ import transformers
 
 Transformer = models.Transformer
 EPS = 1e-8
-_DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE = 2 * 1024**3
-
-
-
-
-
-_buffered_step = None
-_buffered_metrics = None
-
-
-def write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config, is_training=True):
-  """Entry point for all metrics writing in Train's Main.
-  TODO: would be better as a Class in the future (that initialized all state!)
-
-  To avoid introducing an unnecessary dependency, we "double buffer" -- we hold
-  onto the last metrics and step and only publish when we receive a new metrics and step.
-  The logic is that this ensures that Jax is able to queues train_steps and we
-  don't block when turning "lazy" Jax arrays into real Python numbers.
-  """
-  metrics_to_write, steps_to_write = None, None
-  if is_training:
-    global _buffered_step, _buffered_metrics
-    if _buffered_metrics is not None:
-      if _buffered_step is None:
-        raise ValueError(f"When writing metrics, {_buffered_step=} was none")
-      metrics_to_write = _buffered_metrics
-      steps_to_write = _buffered_step
-  else:
-    metrics_to_write = metrics
-    steps_to_write = step
-
-  if metrics_to_write:
-    write_metrics_to_tensorboard(writer, metrics_to_write, steps_to_write, config, is_training)
-
-    if config.metrics_file:
-      max_utils.write_metrics_locally(metrics_to_write, steps_to_write, config, local_metrics_file, is_training)
-
-    if config.gcs_metrics and jax.process_index() == 0:
-      running_gcs_metrics = max_utils.write_metrics_for_gcs(
-          metrics_to_write, steps_to_write, config, running_gcs_metrics, is_training
-      )
-
-  if is_training:
-    _buffered_step = step
-    _buffered_metrics = metrics
-
-
-def write_metrics_to_tensorboard(writer, metrics, step, config, is_training=True):
-  """Writes metrics to tensorboard"""
-  with jax.spmd_mode("allow_all"):
-    if jax.process_index() == 0:
-      for metric_name in metrics.get("scalar", []):
-        writer.add_scalar(metric_name, np.array(metrics["scalar"][metric_name]), step)
-      for metric_name in metrics.get("scalars", []):
-        writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
-
-    if is_training:
-      full_log = step % config.log_period == 0
-
-      max_logging.log(
-          f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
-          f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
-          f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
-          #TODO: Do we need this?
-          # f"total_weights: {metrics['scalar']['learning/total_weights']}, "
-          f"loss: {metrics['scalar']['learning/loss']:.3f}, "
-          f"learning/avg_reward: {metrics['scalar']['learning/avg_reward']:.3f}, "
-          f"learning/avg_reward_std: {metrics['scalar']['learning/avg_reward_std']:.3f}, "
-          f"learning/avg_advantage: {metrics['scalar']['learning/avg_advantage']:.3f}, "
-          f"learning/avg_kl: {metrics['scalar']['learning/avg_kl']:.3f}, "
-      )
-
-      if full_log and jax.process_index() == 0:
-        max_logging.log(f"To see full metrics 'tensorboard --logdir={config.tensorboard_dir}'")
-        writer.flush()
-
-
-def clear_buffered_metrics():
-  global _buffered_step
-  global _buffered_metrics
-  _buffered_step = None
-  _buffered_metrics = None
-
-
-
-# -----------------------------------------------------------------------------
-# Top-level Functions
-# -----------------------------------------------------------------------------
-
-
-def record_activation_metrics(output_metrics, intermediate_outputs, config):
-  """Adds the activation metrics to the metrics dict"""
-
-  if config.scan_layers:
-    metrics_dict = intermediate_outputs["intermediates"]["decoder"]["decoder"]
-
-    for layer_num in range(config.num_decoder_layers):
-      output_metrics["scalar"][f"activ_fraction_zero/layer_{layer_num:03d}"] = metrics_dict["activation_fraction_zero"][0][
-          layer_num
-      ]
-      output_metrics["scalar"][f"activ_mean/layer_{layer_num:03d}"] = metrics_dict["activation_mean"][0][layer_num]
-      output_metrics["scalar"][f"activ_stdev/layer_{layer_num:03d}"] = metrics_dict["activation_stdev"][0][layer_num]
-  else:
-    for layer_num in range(config.num_decoder_layers):
-      layer = intermediate_outputs["intermediates"]["decoder"][f"layers_{layer_num}"]
-      output_metrics["scalar"][f"activ_fraction_zero/layer_{layer_num:03d}"] = layer["activation_fraction_zero"][0]
-      output_metrics["scalar"][f"activ_mean/layer_{layer_num:03d}"] = layer["activation_mean"][0]
-      output_metrics["scalar"][f"activ_stdev/layer_{layer_num:03d}"] = layer["activation_stdev"][0]
 
 
 # -----------------------------------------------------------------------------
@@ -259,9 +140,6 @@ def compute_comp_logps_policy(token_logps_policy: jnp.ndarray, L_prompt: int) ->
 
     return comp_logps_policy
 
-
-
-
 def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_train=True):
   """
   GRPO loss function for training.
@@ -269,7 +147,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   This function performs the following steps:
  
     1. From the batch (data["prompt+completion"]) extract BxG prompts.
-    -----2. For each prompt, generate `config.num_generations` completions using autoregressive sampling.
+    2. For each prompt, generate `config.num_generations` completions using autoregressive sampling.
     3. Compute the per-token log-probabilities for the full sequence (prompt + completion) both with the
        current model (policy) and the reference model.
     4. Restrict the log-probabilities to the generated completion tokens.
@@ -298,35 +176,11 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
     loss: A scalar loss.
     aux: A dictionary with auxiliary metrics.
   """
-
-  """
-  # Split the dropout key.
-  rng1, rng_gen = random.split(dropout_rng)
-  
-  # --- (1) Prepare prompts and tokenizer
-  # Calling it prompts, because currently it only has left padded prompts such that all the prompts are aligned
-  # at the right index, and then there is padding to the right till max_target_length
-  # prompts = data["prompt"]
-  if is_train:
-    # restrict batch size when per_device_batch_size<1
-    prompts = prompts[: config.micro_batch_size_to_train_on, :]
-  """
-
-  # # tokenizer_model = tokenizer.build_tokenizer(config.tokenizer_path, config.add_bos, config.add_eos)
-  tokenizer_model = transformers.AutoTokenizer.from_pretrained(
-    config.tokenizer_path,
-    add_bos_token=config.add_bos,
-    add_eos_token=config.add_eos,
-    model_max_length=config.max_target_length,
-    legacy=False,
-    token=config.hf_access_token,
-  )
   
   # completions shape: [B x G, max_target_length - max_prefill_length]
   # this includes the completion tokens + padding (upto max_target_length - max_prefill_length))
   # data["ar_completions"] contains tokens only upto the eos, no tokens thereafter other than pad_tokens
-  ar_completions = data["ar_completions"] 
-  L_total = ar_completions.shape[1] # max_target_length - max_prefill_length
+  ar_completions = data["ar_completions"]
 
   # --- (3) Compute per-token log probabilities.
   ar_completions_position = data["ar_completions_position"] 
@@ -336,7 +190,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   # We compute the log-probabilities for the entire generated sequence, then shift as usual.
   # 'completions' contains only the AR generated tokens, so token_logps_ref and token_logps_policy only contain the logprob for the ar tokens and not the prompts
   rng1, rng_fwd = random.split(dropout_rng)
-  token_logps_policy = compute_log_probs(model, 
+  token_logps_policy, intermediate_outputs = compute_log_probs(model,
                                         params, 
                                         ar_completions, 
                                         ar_completions_position, 
@@ -346,8 +200,8 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   # jax.debug.print("token_logps_policy={token_logps_policy}",token_logps_policy=token_logps_policy)
   # token_logps_policy_has_negative = jnp.any(token_logps_policy<0)
   # jax.debug.print("token_logps_policy_has_negative={token_logps_policy_has_negative}",token_logps_policy_has_negative=token_logps_policy_has_negative)
-  token_logps_ref = compute_log_probs(model, 
-                                      {"params": reference_params}, 
+  token_logps_ref, _ = compute_log_probs(model, 
+                                      {"params": reference_params},
                                         ar_completions, 
                                         ar_completions_position, 
                                         ar_completions_segmentation,
@@ -391,7 +245,6 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   # jax.debug.print("ar_completions.shape={tokens1}",tokens1=ar_completions.shape)
   # jax.debug.print("golden_completions.shape={tokens2}",tokens2=golden_completions.shape)  
   rewards = dummy_reward_len(valid_seq_mask)
-  # rewards = jaccard_reward_fn(ar_completions, golden_completions, config.vocab_size)
   rewards = jnp.array(rewards)  # shape [BxG]
 
   # --- (7) Group rewards and compute normalized advantage.
@@ -423,13 +276,20 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 
   # jax.debug.print("loss_per_example={loss_per_example}",loss_per_example=loss_per_example)
   loss = jnp.mean(loss_per_example)
+  total_weights = jnp.sum(valid_seq_mask)
+
+  moe_lb_loss = 0.0
+  if config.num_experts > 1:
+    nested_key = ("intermediates", "decoder", "layers", "moe_lb_loss")
+    total_moe_lb_loss = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, 0.0)
+    moe_lb_loss = jnp.mean(jnp.array(total_moe_lb_loss))
+    loss += moe_lb_loss
 
   # --- (9) Compute auxiliary metrics.
   avg_kl = jnp.mean((per_token_kl * valid_seq_mask) / (jnp.sum(valid_seq_mask, axis=1, keepdims=True) + EPS))
   avg_reward = jnp.mean(rewards)
   avg_advantage = jnp.mean(advantages)
   avg_completion_length = jnp.mean(jnp.sum(data["ar_completions_segmentation"]!=0, axis=1))
- 
   aux = {
       "total_loss": loss,
       "avg_reward": avg_reward,
@@ -437,6 +297,8 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
       "avg_advantage": avg_advantage,
       "avg_kl": avg_kl,
       "completion_length": avg_completion_length,
+      "moe_lb_loss": moe_lb_loss,
+      "total_weights": total_weights,
   }
 
   return loss, aux
@@ -465,17 +327,13 @@ def generate_completions(params, data, config, rng, tokenizer_model, engine, tru
   prompts = data['prompt']
   rng, rng_load_params = jax.random.split(rng)
   G = config.num_generations
-  # Repeat each prompt G times.
-  # prompts = jnp.repeat(prompts, repeats=G, axis=0)  # shape [BxG, L_prompt]
 
-  #TODO: Improve the token generation by using batch inference
   rng, rng_init_decode = jax.random.split(rng_load_params)
   decode_state = engine.init_decode_state(rng_init_decode)
   slot = 0
   for i in range(prompts.shape[0]):
     tokens = prompts[i]
     current_token_true_length = true_length[i]
-
     # Split RNG before calling prefill
     rng, rng_prefill = jax.random.split(rng)
     # generate the KV cache by prefilling the prompt tokens
@@ -512,7 +370,6 @@ def prompt_completions(config, engine, tokenizer_model, data, params, rng):
       data[k] = v[:config.micro_batch_size_to_train_on]
 
   rng, rng_gen = random.split(rng)
-  # engine.load_params(params)
   L_prompt = data['prompt_true_length']
   data = generate_completions(
                               params=params, #TODO: this needs to be \theta_old, but for now we are using \theta_old = \theta
@@ -531,6 +388,7 @@ def dummy_reward_len(valid_seq_mask):
   reward = -abs(20-(1+jnp.sum(valid_seq_mask,axis=-1))) # [BxG]
   jax.debug.print("reward={reward}",reward=reward)
   return reward
+
 def jaccard_reward_fn(tokens1, tokens2, vocab_size):
   """
     A simple Jaccard similarity for now
@@ -568,13 +426,14 @@ def compute_log_probs(model,
   """
   #TODO: Ensure attention mask takes into account the left paading
   
-  logits = model.apply(
+  logits, intermediate_outputs = model.apply(
       params,
       completions,
       completions_position,
       decoder_segment_ids = completions_segmentation,
       enable_dropout=(config.enable_dropout if is_train else False),
       rngs=rngs,
+      mutable="intermediates",
   ) # [B, S, E] - [batch, sequence, embedding/vocab]
   if not is_train:
     logits = jax.lax.stop_gradient(logits)
@@ -584,10 +443,7 @@ def compute_log_probs(model,
   log_probs = jax.nn.log_softmax(logits, axis=-1)
   # Gather the log probabilities corresponding to each target token.
   token_log_probs = jnp.take_along_axis(log_probs, targets[..., None], axis=-1)[..., 0]
-  return token_log_probs
-
-
-
+  return token_log_probs, intermediate_outputs
 
 
 # -----------------------------------------------------------------------------
@@ -654,15 +510,16 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
       cast_params = jax.device_put(state.params, max_utils.with_memory_kind(state_mesh_shardings.params, "device"))
       cast_params = max_utils.cast_to_bf16(cast_params)
       state = state.replace(params=cast_params)
-      if config.use_dpo:
+      if config.use_grpo:
         reference_params = jax.device_put(reference_params, max_utils.with_memory_kind(reference_params_sharding, "device"))
         reference_params = max_utils.cast_to_bf16(reference_params)
         extra_dpo_args = [reference_params]
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
+  # TODO: add these aux in loss function
   # intermediate_outputs = aux["intermediate_outputs"]
-  # total_weights = aux["total_weights"]
-  # moe_lb_loss = aux["moe_lb_loss"]
+  total_weights = aux["total_weights"]
+  moe_lb_loss = aux["moe_lb_loss"]
 
   if config.gradient_clipping_threshold > 0:
     grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
@@ -683,27 +540,23 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
       "learning/avg_reward_std": aux['avg_reward_std'],
       "learning/avg_advantage": aux['avg_advantage'],
       "learning/avg_kl": aux['avg_kl'],
-      # TODO: Do we need these?
-      # "learning/moe_lb_loss": moe_lb_loss,
-      # "learning/total_weights": total_weights,
+      "learning/moe_lb_loss": moe_lb_loss,
+      "learning/total_weights": total_weights,
   }
   if not config.optimizer_memory_host_offload:
     scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
     scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
     scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(new_state.params)
-  if config.use_grpo:
     scalar_metrics["learning/avg_reward"] = aux["avg_reward"]
   metrics = {
       "scalar": scalar_metrics,
       "scalars": {},
   }
 
-  # TODO: how to record intermediate_outputs
   # if config.record_internal_nn_metrics:
   #   record_activation_metrics(metrics, intermediate_outputs, config)
 
-  if config.use_dpo or config.use_grpo:
-    new_state = _merge_grpo_state(new_state, reference_params)
+  new_state = _merge_grpo_state(new_state, reference_params)
 
   return new_state, metrics
 
@@ -712,6 +565,9 @@ def eval_step(model, config, state, data, dropout_rng):
   """eval_step no backprop and new state compared with train_step."""
 
   reference_params, extra_dpo_args, _loss_fn = [], [], grpo_loss_fn
+  state, reference_params = _split_grpo_state(state)
+  extra_dpo_args = [reference_params]
+  _loss_fn = grpo_loss_fn
   # TODO: Add support for eval dataset in GRPO 
 
   eval_loss_fn = functools.partial(_loss_fn, model, config, data, dropout_rng, is_train=False)
@@ -731,76 +587,6 @@ def eval_step(model, config, state, data, dropout_rng):
     metrics["scalar"]["evaluation/dpo_reward_accuracy"] = aux["reward_accuracy"]
 
   return metrics
-
-
-
-
-def setup_mesh_and_model(config):
-  """Set up the mesh and the model for training
-
-  Args:
-    config
-
-  Returns:
-    init_rng: RNG key
-    writer: Summary writer for tensorboard
-    checkpoint_manager: Orbax checkpointer
-    state_mesh_annotations: the mesh annotations for the train state
-    model:
-    mesh:
-    learning_rate_schedule:
-    tx:
-  """
-
-  init_rng = random.PRNGKey(config.init_weights_seed)
-  writer = max_utils.initialize_summary_writer(config)
-
-  # Mesh definition
-  devices_array = max_utils.create_device_mesh(config)
-  mesh = Mesh(devices_array, config.mesh_axes)
-
-  # Model and Optimizer definition
-  quant = quantizations.configure_quantization(config)
-  model = Transformer(config, mesh, quant=quant)
-  learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
-  tx = optimizers.get_optimizer(config, learning_rate_schedule)
-  logger = checkpointing.setup_checkpoint_logger(config)
-  if config.enable_emergency_checkpoint:
-    if config.use_replicator_service:
-      checkpoint_manager = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
-          config.local_checkpoint_directory,
-          config.local_checkpoint_period,
-          mesh,
-      )
-    else:
-      abstract_state, _, _ = max_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
-      checkpoint_manager = checkpointing.create_orbax_emergency_checkpoint_manager(
-          config.local_checkpoint_directory,
-          config.checkpoint_dir,
-          mesh,
-          abstract_state,
-          config.local_checkpoint_period,
-          config.checkpoint_period,
-          logger,
-      )
-  else:
-    # TODO(b/368121306): Remove this once zarr3 support is plumbed on the backend
-    use_ocdbt = config.checkpoint_storage_use_ocdbt
-    use_zarr3 = config.checkpoint_storage_use_zarr3
-    if config.enable_single_controller:
-      use_ocdbt, use_zarr3 = False, False
-    checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-        config.checkpoint_dir,
-        config.enable_checkpointing,
-        config.async_checkpointing,
-        config.checkpoint_period,
-        config.dataset_type,
-        logger,
-        use_ocdbt,
-        use_zarr3,
-    )
-
-  return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
 
 
 def setup_train_loop(config):
@@ -828,8 +614,7 @@ def setup_train_loop(config):
 
   record_goodput(recorder, config, recorder.record_tpu_init_end_time if recorder else None)
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
-  # data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
-  data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
+  data_iterator, eval_data_iterator = grpo_input_pipeline.create_data_iterator(config, mesh)
   state, _, state_mesh_shardings, data_iterator = max_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
@@ -837,30 +622,6 @@ def setup_train_loop(config):
   if not config.using_pipeline_parallelism:
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
     maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
-
-  if config.use_dpo or config.use_grpo:
-    abstract_state, _, _ = max_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
-    max_logging.log(f"Restoring reference parameters for DPO from '{os.path.join(str(config.checkpoint_dir), str(0))}'")
-    try:
-      step0_restored, _ = checkpointing.load_state_if_possible(
-          checkpoint_manager,
-          data_iterator,
-          load_parameters_from_path="",
-          load_full_state_from_path="",
-          abstract_unboxed_pre_state=abstract_state,
-          enable_single_replica_ckpt_restoring=False,
-          dataset_type=config.dataset_type,
-          step=0,
-      )
-    except FileNotFoundError:
-      step0_restored = None
-    if step0_restored is not None:
-      reference_params = step0_restored["items"].params["params"]
-      state = _merge_grpo_state(state, reference_params)
-    else:
-      max_logging.log(
-          f"Could not restore reference parameters for DPO from '{os.path.join(str(config.checkpoint_dir), str(0))}'"
-      )
 
   record_goodput(recorder, config, recorder.record_training_preparation_end_time if recorder else None)
   return (
@@ -910,13 +671,10 @@ def train_loop(config, config_inference, state=None):
         token=config.hf_access_token,
     )
 
-  if config.use_grpo:
-    if "reference_params" not in state.params:
-      reference_params = jax.tree.map(jnp.copy, state.params["params"])
-      state = _merge_grpo_state(state, reference_params)
-    state_mesh_shardings = _merge_grpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
-  else:
-    raise TypeError("Non grpo code calling grpo_trainer")
+  if "reference_params" not in state.params:
+    reference_params = jax.tree.map(jnp.copy, state.params["params"])
+    state = _merge_grpo_state(state, reference_params)
+  state_mesh_shardings = _merge_grpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
 
   # pylint: disable=line-too-long
   (
@@ -928,9 +686,10 @@ def train_loop(config, config_inference, state=None):
   ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config)
 
   # Initializing maxengine and everything related from decode.py
-  # Creating an engine here but might have two model compilation, need to initialize engine while passing model object
+  # TODO: Creating an engine here but might have two model compilation, need to initialize engine while passing model object
   engine = maxengine.MaxEngine(config_inference)
   init_rng, rng_load_params = jax.random.split(init_rng)
+  # TODO: loading parameters from GCS here, need to pass in the same params to engine which already loaded 
   _ = engine.load_params(rng_load_params)
 
   if eval_data_iterator:
@@ -982,7 +741,6 @@ def train_loop(config, config_inference, state=None):
     else:
       p_eval_step = None
 
-  local_metrics_file = open(config.metrics_file, "a", encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
 
   start_step = get_first_step(state)  # this is the start_step for training
@@ -1004,6 +762,7 @@ def train_loop(config, config_inference, state=None):
       performance_metric_queue = queue.Queue()
       gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
 
+  metric_logger = MetricLogger(writer, config)
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step or prof.should_activate_periodic_profile(step):
       optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
@@ -1017,9 +776,6 @@ def train_loop(config, config_inference, state=None):
       # pylint: disable=not-callable
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
-      # do AR decoding here
-      assert config.use_grpo, "Non grpo setting calling grpo_trainer"
-      # engine_params = engine.load_params(engine_rng)      
       example_batch = prompt_completions(config_inference, engine, tokenizer_model, example_batch, state.params, init_rng)
       # jax.debug.print("golden completion {x}",x=example_batch['completion'][0])
       jax.debug.print("ar_completion[0] {x}",x=tokenizer_model.decode(example_batch['ar_completions'][0]))
@@ -1045,7 +801,7 @@ def train_loop(config, config_inference, state=None):
         checkpoint_manager.wait_until_finished()
         sys.exit()
 
-    write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config)
+    metric_logger.write_metrics(running_gcs_metrics, metrics, step)
 
     if config.dump_hlo and step == start_step:
       jax.block_until_ready(state)  # Ensure compilation has finished.
@@ -1090,9 +846,7 @@ def train_loop(config, config_inference, state=None):
       )
       if config.use_dpo:
         cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = eval_dpo_reward_accuracy / eval_step_count
-      write_metrics(
-          writer, local_metrics_file, running_gcs_metrics, cumulative_eval_metrics, step, config, is_training=False
-      )
+      metric_logger.write_metrics(running_gcs_metrics, cumulative_eval_metrics, step, is_training=False)
       max_logging.log(
           f"average loss after {step=}: {eval_step_count=}, {eval_loss=},"
           f" total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}"
@@ -1110,10 +864,9 @@ def train_loop(config, config_inference, state=None):
 
   if checkpoint_manager is not None:
     checkpoint_manager.wait_until_finished()
-  write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, config.steps - 1, config)  # final step metrics
+  metric_logger.write_metrics(running_gcs_metrics, metrics, config.steps - 1)  # final step metrics
   max_utils.close_summary_writer(writer)
   record_goodput(recorder, config, recorder.record_job_end_time if recorder else None)
-  clear_buffered_metrics()
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     # pytype: disable=attribute-error
     compiled = p_train_step.lower(state, example_batch, nextrng).compile()
@@ -1137,6 +890,7 @@ def main(argv: Sequence[str]) -> None:
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   config = pyconfig.initialize(argv)
+  assert config.use_grpo, "Please set the value of use_grpo to True"
   config_inference = pyconfig.initialize(argv + ['ici_tensor_parallelism=4', 'per_device_batch_size='+str(config.per_device_batch_size * config.num_generations)])
   max_utils.print_system_information()
   validate_train_config(config)
@@ -1166,11 +920,6 @@ def main(argv: Sequence[str]) -> None:
       )
   )
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
-  # TODO: ensure that we have same configs as decode.py
-  # TODO: we probably don't need everything in pyconfig.py to be present in pyconfig_inference.py
-  # TODO: modify argv with sharding (e.g.,no fsdp) and attention_type (ideally prefill flash attention and AR with dot_product)
-  
-  # TODO: ensure we can run decode with full_state_path 
   with diagnostic.diagnose(diagnostic_config):
     train_loop(config, config_inference)
 
