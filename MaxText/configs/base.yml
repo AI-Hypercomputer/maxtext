@@ -607,3 +607,7 @@ sa_v_layout: "HEAD_DIM_MINOR"
 pagedattn_num_pages: 64
 pagedattn_tokens_per_page: 32
 pagedattn_pages_per_compute_block: 8
+
+# Chunked Prefill Parameters
+prefill_chunk_size: 256
+use_chunked_prefill: False
