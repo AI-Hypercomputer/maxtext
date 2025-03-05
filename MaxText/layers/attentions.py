@@ -244,7 +244,9 @@ class PagedAttentionOp(nn.Module):
     num_heads_kv, num_pages, tokens_per_page, head_dim = key_pages_var.value.shape
 
     no_shard = P(None, None, None, None)
-
+    c_q_l = jnp.cumsum(page_state.sequence_lengths)
+    c_q_l = jnp.concatenate((jnp.array([0]), c_q_l))
+    jax.debug.print("q {}, kv_lens {}, cu_q_lens {}, page_indices {}, num_seqs 1", query, page_state.sequence_lengths, c_q_l, page_state.page_map)
     @functools.partial(
         shard_map,
         mesh=self.mesh,
@@ -270,22 +272,23 @@ class PagedAttentionOp(nn.Module):
           pages_per_compute_block=pages_per_compute_block,
       )
       return jnp.expand_dims(result, axis=1)
-    """
     def wrap_paged_attention_v2(q, k_pages, v_pages, lengths, page_indices, pages_per_compute_block):
       q = jnp.squeeze(q, axis=1)
       k_p = jnp.transpose(k_pages, (1,2,0,3))
       v_p = jnp.transpose(v_pages, (1,2,0,3))
+      c_q_l = jnp.cumsum(lengths)
+      c_q_l = jnp.concatenate((jnp.array([0]), c_q_l))
       result = pagedAttentionV2.ragged_paged_attention(
           q=q,
           k_pages=k_p,
           v_pages=v_p,
-          lengths=lengths,
+          kv_lens=lengths,
+          cu_q_lens=c_q_l,
           page_indices=page_indices,
-          pages_per_compute_block=pages_per_compute_block,
+          num_seqs=1,
       )
       return jnp.expand_dims(result, axis=1)
-    """
-    return wrap_paged_attention(
+    return wrap_paged_attention_v2(
         query,
         key_pages_var.value,
         value_pages_var.value,
