@@ -25,17 +25,19 @@ import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
+from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
+from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
 import common_types
 from kernels.ragged_attention import ragged_gqa
 from kernels.ragged_attention import ragged_mha
+from inference import page_manager, paged_attention
 from layers import embeddings
 from layers import initializers
 from layers import linears
 from layers import quantizations
-
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -157,6 +159,8 @@ class AttentionOp(nn.Module):
   prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
   ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
   compute_axis_order: AxisIdxes = (0, 1, 2, 3)
+  key_axis_order: AxisIdxes = (2, 0, 1, 3)
+
   reshape_q: bool = False
   dropout_rate: float = 0.0
   dtype: DType = jnp.float32
@@ -177,10 +181,43 @@ class AttentionOp(nn.Module):
     assert key.shape[-3] == value.shape[-3], "k, v lengths must match."
     assert query.shape[-1] == key.shape[-1], "q, k depths must match."
 
+  # Attention mask is generated in the same way
+  # as mentioned in SARATHI - https://arxiv.org/abs/2308.16369
+  def generate_attention_mask_for_chunk(self, query, key, previous_chunk: Any = None) -> Array | None:
+    _, q_seq_len, _, _ = query.shape
+    _, kv_seq_len, _, _ = key.shape
+    mask_shape = (q_seq_len, q_seq_len)
+    row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
+    col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
+    # causal mask represents causality within query sequence
+    causal_mask = (col_ids <= row_ids).astype(jnp.int32)
+
+    next_pos = 0
+    if previous_chunk != None:
+      # shape[1] of ['true_length_array'] gives the length of previously processed chunk
+      next_pos = previous_chunk["true_length_array"].shape[1]
+      overall_mask = jnp.zeros((q_seq_len, kv_seq_len), jnp.int32)
+      # mask wrt to previous chunk is all ones as the current seq depends on all tokens from before
+      previous_mask = jnp.ones((q_seq_len, next_pos), jnp.int32)
+
+      # update current mask at next position
+      output_mask = jax.lax.dynamic_update_slice(overall_mask, causal_mask, (0, next_pos))
+      # update previous mask at the start of output mask
+      output_mask = jax.lax.dynamic_update_slice(output_mask, previous_mask, (0, 0))
+    else:
+      # if no previous chunk is processed, entire mask is just the causal mask within query seq
+      output_mask = jnp.zeros((q_seq_len, kv_seq_len), jnp.int32)
+      output_mask = jax.lax.dynamic_update_slice(output_mask, causal_mask, (0, next_pos))
+
+    output_mask = output_mask[None, None, None, :, :]
+    return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
+
   # Following Pallas MHA Flash Attention Reference.
   # https://github.com/jax-ml/jax/blob/main/jax/experimental/pallas/ops/tpu/flash_attention.py
   # This mask models (1) separate sequences (decoder_segment_ids) and (2) causality
-  def generate_attention_mask(self, query, key, decoder_segment_ids: Array | None, model_mode: str) -> Array | None:
+  def generate_attention_mask(
+      self, query, key, decoder_segment_ids: Array | None, model_mode: str, previous_chunk: Any = None
+  ) -> Array | None:
     mask = None
     if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       mask = decoder_segment_ids[:, None, None, None, :] == common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
@@ -200,7 +237,9 @@ class AttentionOp(nn.Module):
 
     output_mask = None
 
-    if (mask is not None) and (causal_mask is not None):
+    if self.config.use_chunked_prefill and model_mode == common_types.MODEL_MODE_PREFILL:
+      return self.generate_attention_mask_for_chunk(query, key, previous_chunk)
+    elif (mask is not None) and (causal_mask is not None):
       output_mask = jnp.logical_and(mask, causal_mask)
     elif mask is not None:
       output_mask = mask
@@ -226,6 +265,7 @@ class AttentionOp(nn.Module):
       lengths: Array | None,
       model_mode: str,
       use_ragged_attention: bool = False,
+      previous_chunk: Any = None,
   ):
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
@@ -233,25 +273,41 @@ class AttentionOp(nn.Module):
       if lengths is None:
         lengths = jnp.sum(decoder_segment_ids, axis=-1)
 
-      return self.ragged_attention(query, key, value, lengths, self.ragged_block_size)
+      if jax.devices()[0].platform == "tpu":
+        impl = self.tpu_ragged_attention
+      elif jax.devices()[0].platform == "gpu":
+        impl = self.gpu_ragged_attention
+      return impl(query, key, value, lengths, self.ragged_block_size)
+
     elif (
         self.attention_kernel == "dot_product"
         or (self.attention_kernel == "autoselected" and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE)
         or (self.attention_kernel == "autoselected" and length < 128)
+        or (self.attention_kernel == "paged")
     ):
-      return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
+      return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode, previous_chunk)
     elif self.attention_kernel == "flash" or self.attention_kernel == "autoselected":
-      if isinstance(key, KVTensor):
-        key = key.dequant()
-      if isinstance(value, KVTensor):
-        value = value.dequant()
+      if jax.devices()[0].platform == "tpu":
+        if isinstance(key, KVTensor):
+          key = key.dequant()
+        if isinstance(value, KVTensor):
+          value = value.dequant()
 
-      if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-        raise ValueError(
-            """Decode not supported with flash attention.
-                            Use `dot_product` instead."""
-        )
-      return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap), None, None
+        if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+          raise ValueError(
+              """Decode not supported with flash attention.
+                              Use `dot_product` instead."""
+          )
+        return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap), None, None
+      else:
+        if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+          # fallback to dot_product as pallas gpu flash attention doesn't support decode stage
+          return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
+        else:
+          key = jnp.repeat(key, self.num_query_heads // self.num_kv_heads, axis=2)
+          value = jnp.repeat(value, self.num_query_heads // self.num_kv_heads, axis=2)
+          out = gpu_pallas_attention.mha(query, key, value, decoder_segment_ids, sm_scale=1.0, causal=True)
+          return out, None, None
     elif self.attention_kernel == "cudnn_flash_te":
       if isinstance(key, KVTensor):
         key = key.dequant()
@@ -266,7 +322,31 @@ class AttentionOp(nn.Module):
     else:
       raise ValueError(f"Unexpected attention kernel {self.attention_kernel=}.")
 
-  def ragged_attention(
+  def gpu_ragged_attention(self, q: Array, k: Array | KVTensor, v: Array | KVTensor, lengths: Array, block_size: int):
+    batch_size, q_length, q_heads, head_dim = q.shape
+
+    # Reshape q to match gqa's expected shape
+    q_for_gqa = q.squeeze(axis=1)
+
+    # Use the original gqa function to get the attention output
+    local_out, (local_sum, local_max) = gpu_pallas_decode_attention.gqa(
+        q=q_for_gqa,
+        k=k,
+        v=v,
+        kv_seq_len=lengths,
+        block_k=block_size,
+        sm_scale=1.0,
+        return_residuals=True,
+        normalize_output=False,
+    )
+
+    # Reshape local_out, local_max and local_sum to match Maxtext requirements
+    local_out = local_out.reshape(batch_size, q_length, q_heads, head_dim)
+    local_max = local_max.reshape(batch_size, q_length, q_heads, 1)
+    local_sum = local_sum.reshape(batch_size, q_length, q_heads, 1)
+    return local_out, local_max, local_sum
+
+  def tpu_ragged_attention(
       self, query: Array, key: Array | KVTensor, value: Array | KVTensor, lengths: Array, block_size: int
   ) -> tuple[Array, Array, Array]:
     """Ragged Attention."""
@@ -490,6 +570,7 @@ class AttentionOp(nn.Module):
       value: Array | KVTensor,
       decoder_segment_ids: Array | None,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
+      previous_chunk: Any = None,
   ):
     """Apply Attention."""
     validate_compute_axis_order(self.compute_axis_order)
@@ -522,7 +603,7 @@ class AttentionOp(nn.Module):
       attn_weights = attn_weights * self.attn_logits_soft_cap
     if model_mode == common_types.MODEL_MODE_TRAIN and self.float32_logits:
       attn_weights = attn_weights.astype(jnp.float32)
-    attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
+    attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode, previous_chunk)
     if self.config.ici_context_parallelism > 0 and q_seq_len == 1:
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
     else:
@@ -592,6 +673,9 @@ class AttentionOp(nn.Module):
 
     einsum = jnp.einsum
     if self.kv_quant:
+      # manually cast to bf16 to avoid the fp32 XLA ops for speedup
+      if isinstance(value, KVTensor) and self.kv_quant.dtype == jnp.float8_e4m3fn:
+        value.qvalue = value.qvalue.astype(jnp.bfloat16)
       einsum = self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(value)
     if model_mode == common_types.MODEL_MODE_TRAIN or self.compute_axis_order == (0, 1, 2, 3):
       out = einsum("bkgts,bskd->btkgd", attn_weights, value)
@@ -777,11 +861,82 @@ class AttentionOp(nn.Module):
     value_vars = (cached_value_var, cached_value_scale_var)
     return key_vars, value_vars, cached_segment_id_var, cache_index_var, cached_lengths_var
 
+  def chunked_prefill_kv_cache(self, key: Array, value: Array, decoder_segment_ids: Array, previous_chunk: Any = None):
+    """
+    function returns appropriate prefill_cache if there is previous_chunk already processed
+    if no pervious chunk is processed,
+    function returns a cache that has non zero first chunk part of key and value
+
+    else
+    function updates current key and value at the desired location and returns entire key and value
+
+    """
+    batch, _, heads, kv_head_size = key.shape
+    assert key.dtype == value.dtype, "Key and Value Dtypes should match."
+
+    cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
+        batch, heads, kv_head_size, common_types.MODEL_MODE_PREFILL
+    )
+    # TODO: Find a way to not enable the ar cache for prefill mode.
+    _ = self._get_ar_cache_vars(batch, heads, kv_head_size, common_types.MODEL_MODE_PREFILL)  # initialize it now
+
+    key_shaped_for_cache = jnp.transpose(key, self.prefill_cache_axis_order)
+    value_shaped_for_cache = jnp.transpose(value, self.prefill_cache_axis_order)
+
+    next_pos = 0
+    if previous_chunk != None:
+      """
+      if there is previous chunk information present,
+        1. Fetch the cached key, value
+        2. Update current key value at the desired position.
+        3. take transpose before returning as that is how the attention op expects the key and value
+      """
+      next_pos = previous_chunk["true_length_array"].shape[1]
+      cached_key = self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order)
+      cached_value = self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order)
+      cached_key_value = jnp.transpose(cached_key, self.prefill_cache_axis_order)
+      cached_value_value = jnp.transpose(cached_value, self.prefill_cache_axis_order)
+
+      cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice(
+          cached_key_value, key_shaped_for_cache, (next_pos, 0, 0, 0)
+      )
+
+      cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(
+          cached_value_value, value_shaped_for_cache, (next_pos, 0, 0, 0)
+      )
+      cached_prefill_segment_id_var.value = decoder_segment_ids
+      return (
+          jnp.transpose(cached_prefill_key_vars[0].value, self.key_axis_order),
+          jnp.transpose(cached_prefill_value_vars[0].value, self.key_axis_order),
+          cached_prefill_segment_id_var.value,
+      )
+    else:
+      """
+      if there is previous chunk information present,
+        1. Fetch the cached key, value
+        2. Update current key value at the desired position. (beginning - (0,0,0,0))
+        3. take transpose before returning as that is how the attention op expects the key and value
+
+      """
+      cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice(
+          cached_prefill_key_vars[0].value, key_shaped_for_cache, (next_pos, 0, 0, 0)
+      )
+      cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(
+          cached_prefill_value_vars[0].value, value_shaped_for_cache, (next_pos, 0, 0, 0)
+      )
+      cached_prefill_segment_id_var.value = decoder_segment_ids
+      return (
+          jnp.transpose(cached_prefill_key_vars[0].value, self.key_axis_order),
+          jnp.transpose(cached_prefill_value_vars[0].value, self.key_axis_order),
+          cached_prefill_segment_id_var.value,
+      )
+
   def kv_cache_prefill(
       self,
       key: Array,
       value: Array,
       decoder_segment_ids: Array,
+      previous_chunk: Any = None,
   ):
     """In prefill mode, we zero out the existing cache, run the computation and
     prepare the cache as necessary.
@@ -795,6 +950,9 @@ class AttentionOp(nn.Module):
       key, value, decoder_segment_id.
 
     """
+    if self.config.use_chunked_prefill:
+      return self.chunked_prefill_kv_cache(key, value, decoder_segment_ids, previous_chunk)
+
     batch, _, heads, kv_head_size = key.shape
     assert key.dtype == value.dtype, "Key and Value Dtypes should match."
 
@@ -821,7 +979,6 @@ class AttentionOp(nn.Module):
 
     if decoder_segment_ids is not None:
       cached_prefill_segment_id_var.value = decoder_segment_ids
-
     return key, value, decoder_segment_ids
 
   def update_ar_key_value(
@@ -928,6 +1085,8 @@ class AttentionOp(nn.Module):
         scale_value /= quantizations.MAX_INT8
       elif dtype == jnp.int4:
         scale_value /= quantizations.MAX_INT4
+      elif dtype == jnp.float8_e4m3fn:
+        scale_value /= quantizations.E4M3_MAX
 
       cache_value = KVTensor(qvalue=cache_value, scale=[scale_value], scale_t=None, dequant_dtype=target_dtype, bias=[])
     cache_value_in_logical_shape = jax.tree.map(lambda x: self.reverse_transepose(x, cache_axis_order), cache_value)
@@ -998,7 +1157,13 @@ class AttentionOp(nn.Module):
     return cached_prefill, cached_ar
 
   def kv_cache(
-      self, key: Array, value: Array, decoder_segment_ids: Array, model_mode: str, use_ragged_attention: bool = False
+      self,
+      key: Array,
+      value: Array,
+      decoder_segment_ids: Array,
+      model_mode: str,
+      use_ragged_attention: bool = False,
+      previous_chunk: Any = None,
   ) -> tuple:
     """KV cache takes the current state and updates the state accordingly.
 
@@ -1023,7 +1188,7 @@ class AttentionOp(nn.Module):
     if model_mode == common_types.MODEL_MODE_TRAIN:
       return (key, value, decoder_segment_ids), None
     elif model_mode == common_types.MODEL_MODE_PREFILL:
-      return self.kv_cache_prefill(key, value, decoder_segment_ids), None
+      return self.kv_cache_prefill(key, value, decoder_segment_ids, previous_chunk), None
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       return self.kv_cache_autoregressive(key, value, use_ragged_attention)
     else:
@@ -1053,7 +1218,16 @@ class AttentionOp(nn.Module):
     return attn_out
 
   @nn.compact
-  def __call__(self, query, key, value, decoder_segment_ids, model_mode):
+  def __call__(
+      self,
+      query,
+      key,
+      value,
+      decoder_segment_ids,
+      model_mode,
+      previous_chunk=None,
+      page_state: Optional[page_manager.PageState] = None,
+  ):
     prefill_kv_cache, ar_kv_cache = self.kv_cache(
         key, value, decoder_segment_ids, model_mode, use_ragged_attention=self.use_ragged_attention
     )
@@ -1066,6 +1240,7 @@ class AttentionOp(nn.Module):
         lengths=None,
         model_mode=model_mode,
         use_ragged_attention=self.use_ragged_attention,
+        previous_chunk=previous_chunk,
     )
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
@@ -1184,6 +1359,21 @@ class Attention(nn.Module):
         use_ragged_attention=self.use_ragged_attention,
         ragged_block_size=self.ragged_block_size,
     )
+    # When paged attention is enabled, paged attention op is used for all model modes except TRAIN,
+    # which uses default attention op.
+    if self.config.attention == "paged":
+      self.paged_attention_op = paged_attention.PagedAttentionOp(
+          mesh=self.mesh,
+          num_pages=self.config.pagedattn_num_pages,
+          tokens_per_page=self.config.pagedattn_tokens_per_page,
+          max_pages_per_slot=self.config.max_target_length // self.config.pagedattn_tokens_per_page,
+          max_pages_per_prefill=self.config.max_prefill_predict_length // self.config.pagedattn_tokens_per_page,
+          pages_per_compute_block=self.config.pagedattn_pages_per_compute_block,
+          num_kv_heads=self.num_kv_heads,
+          kv_head_dim_size=self.head_dim,
+          dtype=self.dtype,
+          attn_logits_soft_cap=self.attn_logits_soft_cap,
+      )
 
   def query_projection(self, inputs_q: Array) -> Array:
     """Query projection."""
@@ -1335,6 +1525,8 @@ class Attention(nn.Module):
       *,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
       deterministic: bool = False,
+      previous_chunk: Any = None,
+      page_state: Optional[page_manager.PageState] = None,
   ):
     """Applies Attention on the input data.
 
@@ -1395,14 +1587,18 @@ class Attention(nn.Module):
 
     assert not self.config.quantize_kvcache or self.kv_quant
 
-    out = self.attention_op(query, key, value, decoder_segment_ids, model_mode)
+    if self.config.attention == "paged" and model_mode != common_types.MODEL_MODE_TRAIN:
+      unnormalized_out, _, exp_sum = self.paged_attention_op(
+          query, key, value, decoder_segment_ids, model_mode, previous_chunk, page_state=page_state
+      )
+      out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
+    else:
+      out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, previous_chunk)
 
     if model_mode == common_types.MODEL_MODE_PREFILL:
       out = nn.with_logical_constraint(out, self.out_axis_names)
     else:
       out = nn.with_logical_constraint(out, self.decode_out_axis_names)
-
-    # apply output projection,  output dim is set to the input dim.
     out = self.out_projection(inputs_q.shape[-1], out)
     out = checkpoint_name(out, "out_proj")
     return out
@@ -1568,6 +1764,8 @@ class MLA(Attention):
       *,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
       deterministic: bool = False,
+      previous_chunk: Any = None,
+      page_state: Optional[page_manager.PageState] = None,
   ) -> Array:
     """Forward pass for MLA, reusing `AttentionOp` for the actual attention.
 

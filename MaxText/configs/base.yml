@@ -74,6 +74,7 @@ dtype: "bfloat16"
 # 'int8' for dynamic range quantization using 8-bits
 # 'intmp' for mixed precision quantization for inference as described here: MaxText/configs/quantization/README.md
 # 'fp8' for 8-bit floating-point GeMMs on NVIDIA GPUs.
+# 'nanoo_fp8' for 8-bit floating-point GeMMs on AMD MI300/MI325 GPUs.
 quantization: ""
 # Choose one of default, high, and highest.
 # https://kolonist26-jax-kr.readthedocs.io/en/latest/jax.lax.html#jax.lax.Precision
@@ -302,7 +303,11 @@ logical_axis_rules: [
                       ['cache_heads', ['autoregressive', 'tensor', 'tensor_sequence']],
                       ['cache_kv', []],
                       ['cache_sequence', ['context']],
-                      ['exp', ['expert', 'context']],
+                      ['exp', ['expert', 'context'],
+                      ['paged_kv_heads', []],
+                      ['num_pages', ['tensor']],
+                      ['tokens_per_page', []],
+                      ['paged_kv_head_dim_size', []],
                     ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
 data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'conext', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']]
@@ -532,6 +537,8 @@ vertex_tensorboard_region: ""
 max_checkify: False
 
 # Inference
+inference_microbenchmark_prefix_cache_entries_num: 100
+inference_microbenchmark_prefix_cache_common_prefix_proportion: 0.5
 inference_microbenchmark_prefill_lengths: "64,128,256,512,1024"
 inference_microbenchmark_stages: "prefill,generate"
 inference_microbenchmark_loop_iters: 10
@@ -540,6 +547,7 @@ inference_metadata_file: "" # path to a json file
 inference_server: "MaxtextInterleavedServer"  # inference server to start
 inference_benchmark_test: False
 enable_model_warmup: False
+multi_sampling: False
 
 # Stack prefill cache across the layer to reduce the
 # Python layer latency.
@@ -597,3 +605,16 @@ sa_use_fused_bwd_kernel: False
 sa_q_layout: "HEAD_DIM_MINOR"
 sa_k_layout: "HEAD_DIM_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"
+
+#######################
+### Paged Attention ###
+#######################
+# These settings take effect only when `attention=paged`.
+# They should be adjusted based on the available HBM and model config.
+pagedattn_num_pages: 64
+pagedattn_tokens_per_page: 32
+pagedattn_pages_per_compute_block: 8
+
+# Chunked Prefill Parameters
+prefill_chunk_size: 256
+use_chunked_prefill: False

@@ -78,6 +78,7 @@ build_stable_stack() {
     docker build --no-cache \
         --build-arg JAX_STABLE_STACK_BASEIMAGE=${BASEIMAGE} \
         --build-arg COMMIT_HASH=${COMMIT_HASH} \
+        --build-arg DEVICE="$DEVICE" \
         --network=host \
         -t ${LOCAL_IMAGE_NAME} \
         -f ./maxtext_jax_stable_stack.Dockerfile .
