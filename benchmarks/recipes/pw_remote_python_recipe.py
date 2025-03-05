@@ -94,7 +94,7 @@ def main() -> int:
   base_output_directory = f"gs://{user}-{region}/{user}"
 
   list_of_models = [
-      model_configs.default_basic_1_pw,
+      model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds,
   ]
   pathways_config = mxr.PathwaysConfig(
       server_image=server_image,
