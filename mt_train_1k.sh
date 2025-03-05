@@ -1,12 +1,12 @@
 #!/bin/bash
 
-export MODEL_NAME=llama2-7b
+# export MODEL_NAME=llama2-7b
 
 # Launch llama2 70b
 # export MODEL_NAME=llama2-70b
 
 # Launch llama3.1 405b
-# export MODEL_NAME=llama3.1-405b
+export MODEL_NAME=llama3.1-405b
 
 MODEL_SIZE=$(echo $MODEL_NAME | grep -o '[0-9]\+b')
 
@@ -40,12 +40,14 @@ export JAX_PGLE_PROFILING_RUNS=3
 
 # YY: temp add JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES=none to bypass the PGLE issue
 
+# For debugging
+# TF_CPP_VMODULE=gpu_executable=8,nccl_collectives=8,nccl_all_gather_thunk=8,nccl_all_reduce_thunk=8,nccl_all_to_all_thunk=8,nccl_api=8,nccl_api_stub=8,nccl_clique=8,nccl_collective_broadcast_thunk=8,nccl_collective_permute_thunk=8,nccl_collective_thunk=8,nccl_group_thunk=8,nccl_p2p_thunk_common=8,nccl_recv_thunk=8,nccl_send_thunk=8
+# NCCL_DEBUG=INFO
+# NCCL_DEBUG_SUBSYS=INIT,NET,ENV,TUNING,COLL
+# NCCL_DEBUG_FILE=/var/log/yy/nccl_log.%h.%p
+
 cat <<EOF > env.txt
 
-TF_CPP_VMODULE=gpu_executable=8,nccl_collectives=8,nccl_all_gather_thunk=8,nccl_all_reduce_thunk=8,nccl_all_to_all_thunk=8,nccl_api=8,nccl_api_stub=8,nccl_clique=8,nccl_collective_broadcast_thunk=8,nccl_collective_permute_thunk=8,nccl_collective_thunk=8,nccl_group_thunk=8,nccl_p2p_thunk_common=8,nccl_recv_thunk=8,nccl_send_thunk=8
-NCCL_DEBUG=INFO
-NCCL_DEBUG_SUBSYS=INIT,NET,ENV,TUNING,COLL
-NCCL_DEBUG_FILE=/var/log/yy/nccl_log.%h.%p
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.92
 NCCL_SHIMNET_GUEST_CONFIG_CHECKER_CONFIG_FILE=/usr/local/nvidia/lib64/a3plus_guest_config.textproto
 NCCL_FASTRAK_PLUGIN_ACCEPT_TIMEOUT_MS=600000
@@ -140,7 +142,8 @@ EOF
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-nv-0220-original-script
 # export LOCAL_IMAGE_NAME=us-central1-docker.pkg.dev/supercomputer-testing/yangyuwei-maxtext/maxtext-stable:latest
 
-export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-1124-tp-fix2-mantaray-te2
+# export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-1124-tp-fix2-mantaray-te2
+export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/maxtext_stable_stack_0305
 
 call_config() {
 
@@ -155,15 +158,16 @@ call_config() {
         shift # Move to the next argument
     done
 
-    local NUM_LAYERS=${args[NUM_LAYERS]}
+    local QUANT=${args[QUANT]:-''}
+    local NUM_LAYERS=${args[NUM_LAYERS]:-126}
     local NUM_NODES=${args[NUM_NODES]}
     local PER_DEVICE_BATCH_SIZE=${args[PER_DEVICE_BATCH_SIZE]}
-    local ICI_TP=${args[ICI_TP]}
-    local T_SEQ=${args[T_SEQ]}
+    local ICI_TP=${args[ICI_TP]:-1}
+    local T_SEQ=${args[T_SEQ]:-1}
 
     local DCN_FSDP=${args[DCN_FSDP]}
-    local DCN_PP=${args[DCN_PP]}
-    local NUM_LAYERS_PER_PP_STAGE=${args[NUM_LAYERS_PER_PP_STAGE]} # Layers are modified to 128 for short term solution
+    local DCN_PP=${args[DCN_PP]:-1}
+    local NUM_LAYERS_PER_PP_STAGE=${args[NUM_LAYERS_PER_PP_STAGE]:-1} # Layers are modified to 128 for short term solution
     # export NUM_LAYERS_PER_PP_STAGE=$(expr 126 / $DCN_PP)
 
     local REMAT_POLICY=${args[REMAT_POLICY]}
@@ -178,7 +182,7 @@ call_config() {
 
     echo 'NUM_NODES' ${NUM_NODES} 'PER_DEVICE_BATCH_SIZE' ${PER_DEVICE_BATCH_SIZE} 'ICI_TP' ${ICI_TP} 'DCN_FSDP' ${DCN_FSDP} 'DCN_PP' ${DCN_PP} 'NUM_LAYERS_PER_PP_STAGE' ${NUM_LAYERS_PER_PP_STAGE} 'REMAT_POLICY' ${REMAT_POLICY} 'ATTENTION' ${ATTENTION} WORKLOAD_NAME ${WORKLOAD_NAME}
 
-    COMMAND="python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml hardware=gpu run_name=$RUN_NAME steps=10 max_target_length=4096 model_name=$MODEL_NAME enable_checkpointing=false attention=$ATTENTION dataset_type=synthetic async_checkpointing=false base_output_directory=$OUTPUT_BUCKET logits_dot_in_fp32=false use_iota_embed=true scan_layers=true ici_tensor_parallelism=$ICI_TP dcn_fsdp_parallelism=$DCN_FSDP dcn_pipeline_parallelism=$DCN_PP per_device_batch_size=$PER_DEVICE_BATCH_SIZE num_layers_per_pipeline_stage=$NUM_LAYERS_PER_PP_STAGE weight_dtype=bfloat16 remat_policy=$REMAT_POLICY profiler=xplane skip_first_n_steps_for_profiler=5";
+    COMMAND="python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml hardware=gpu run_name=$RUN_NAME steps=10 max_target_length=4096 model_name=$MODEL_NAME enable_checkpointing=false attention=$ATTENTION dataset_type=synthetic async_checkpointing=false base_output_directory=$OUTPUT_BUCKET logits_dot_in_fp32=false use_iota_embed=true scan_layers=true ici_tensor_parallelism=$ICI_TP dcn_fsdp_parallelism=$DCN_FSDP dcn_pipeline_parallelism=$DCN_PP per_device_batch_size=$PER_DEVICE_BATCH_SIZE num_layers_per_pipeline_stage=$NUM_LAYERS_PER_PP_STAGE weight_dtype=bfloat16 remat_policy=$REMAT_POLICY profiler=xplane skip_first_n_steps_for_profiler=5 quantization=$QUANT";
     # ici_tensor_sequence_parallelism=$T_SEQ
     # quantization=fp8
 
@@ -203,7 +207,7 @@ call_config() {
 
 # Test run with 2 nodes, cuda kernel fails
 export NODES=64
-call_config --NUM_LAYERS 126  --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 0.5 --T_SEQ 1 --ICI_TP 8 --ICI_FSDP 1 --DCN_FSDP $NODES --DCN_PP 1 --REMAT_POLICY save_qkv_proj --ATTENTION cudnn_flash_te --NUM_LAYERS_PER_PP_STAGE 0
+call_config --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 1 --ICI_TP 8 --DCN_FSDP $NODES --REMAT_POLICY save_qkv_proj --ATTENTION cudnn_flash_te --QUANT fp8
 # call_config --NUM_LAYERS 126  --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 1 --T_SEQ 1 --ICI_TP 1 --ICI_FSDP 8 --DCN_FSDP $NODES --DCN_PP 1 --REMAT_POLICY save_qkv_proj --ATTENTION cudnn_flash_te --NUM_LAYERS_PER_PP_STAGE 0
 
 
