@@ -45,7 +45,7 @@ if [[ ! -v CLOUD_IMAGE_NAME ]]; then
   exit 1
 fi
 
-docker build --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} -f ./maxtext_build_jax_stable_stack.Dockerfile -t ${LOCAL_IMAGE_NAME_RUNNER} .
+docker build --no-cache --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} -f ./maxtext_build_jax_stable_stack.Dockerfile -t ${LOCAL_IMAGE_NAME_RUNNER} .
 
 docker tag ${LOCAL_IMAGE_NAME_RUNNER} gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:latest
 docker push gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:latest
