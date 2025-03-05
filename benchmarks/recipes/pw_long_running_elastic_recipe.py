@@ -29,7 +29,8 @@ import maxtext_xpk_runner as mxr
 PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_proxy_server:latest"
 # SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_server:laitest"
 SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_server:latest"
-RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest"
+RUNNER = "gcr.io/cloud-tpu-v2-images-dev/shauryag_latest:elastic"
+# RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest"
 # RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable@sha256:82b49e1e6a735702321c18378621f9362e9adebf99cf6ebb84fa6f16362b4626"
 
 # Cluster Params
@@ -49,7 +50,7 @@ BASE_OUTPUT_DIRECTORY = (
 )
 
 MAX_RESTARTS = 10_000
-BENCHMARK_STEPS=21
+BENCHMARK_STEPS=2000
 
 
 def main() -> int:
@@ -73,7 +74,11 @@ def main() -> int:
       # model_configs.llama3_1_70b_8192_pw_lr_real_data,
       # model_configs.llama3_1_8b_8192,
       # model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
-      model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds,
+      # model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds,
+      model_configs.llama3_1_70b_8192_iter_real_data_and_sync_checkpointing_tfds
+  ]
+  num_slices_list = [
+      48
   ]
   pathways_config = mxr.PathwaysConfig(
       server_image=SERVER_IMAGE,
@@ -81,13 +86,10 @@ def main() -> int:
       runner_image=RUNNER,
 
       # User can add additional flags here.
-      server_flags="--enable_metrics_collection=true",
-      proxy_flags="--enable_metrics_collection=true",
+      server_flags="--temporary_flags_for_debugging=temporary_flag_for_debugging_enable_late_binding=false --enable_metrics_collection=true",
+      proxy_flags=f"--temporary_flags_for_debugging=temporary_flag_for_debugging_experimental_elastic_slices=true;;;temporary_flag_for_debugging_experimental_num_ok_missing_slices={num_slices_list[0]} --enable_metrics_collection=true",
       worker_flags="--enable_metrics_collection=true",
   )
-  num_slices_list = [
-      2
-  ]
 
   xpk_workload_cmds = []
   xpk_workload_names = []
@@ -111,7 +113,7 @@ def main() -> int:
             num_slices=num_slices,
             device_type=cluster_config.device_type,
             base_output_directory=BASE_OUTPUT_DIRECTORY,
-            executable="MaxText/train.py",
+            executable="MaxText/elastic_train.py",
             max_restarts=MAX_RESTARTS,
             libtpu_type=None,
             libtpu_nightly_version="",

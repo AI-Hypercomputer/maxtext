@@ -66,17 +66,18 @@ class PathwaysConfig:
 class WorkloadConfig:
   """Class representing for passing general workload parameters"""
 
-  model: model_configs.MaxTextModel
   num_slices: str
   device_type: str
   base_output_directory: str
   base_docker_image: str
+  model: model_configs.MaxTextModel
   libtpu_type: LibTpuType
   libtpu_nightly_version: str = None # A date in %Y%M%D format, 20241201
   num_steps: int = 20
   max_restarts: int = 0
   priority: str = "medium"
   xpk_path: str = '~/xpk'
+  executable: str = 'MaxText/train.py'
   pathways_config: PathwaysConfig = None
   run_name: str = None
 
@@ -277,10 +278,11 @@ def run_command_with_updates(command, task, verbose=True) -> int:
     return 0
 
 
-def _get_config_tuning_params(wl_config: WorkloadConfig):
+def _get_config_tuning_params(run_name, wl_config: WorkloadConfig):
   """Get config tuning parameters for the workload.
 
   Args:
+    run_name: workload name.
     wl_config: Workload configuration.
 
   Returns:
@@ -342,7 +344,7 @@ def build_user_command(
 ):
   is_pw_enabled = wl_config.pathways_config is not None
 
-  config_tuning_params = _get_config_tuning_params(wl_config)
+  config_tuning_params = _get_config_tuning_params(name, wl_config)
 
   install_libtpu_cmd = ''
   jax_platforms = None
@@ -384,7 +386,10 @@ def build_user_command(
       'export ENABLE_PATHWAYS_PERSISTENCE=1 &&',
       f'export JAX_PLATFORMS={jax_platforms} &&',
       'export ENABLE_PJRT_COMPATIBILITY=true &&',
-      'python3 MaxText/train.py MaxText/configs/base.yml',
+      'python3',
+      f'{wl_config.executable}',
+      'MaxText/configs/base.yml',
+      f'metrics_file={wl_config.base_output_directory}/{name}/metrics.txt'
       f'{config_tuning_params}',
       f'steps={wl_config.num_steps}',
       f'model_name={wl_config.model.model_type}',
@@ -723,6 +728,7 @@ def main() -> int:
             num_slices=num_slices,
             device_type=cluster_config.device_type,
             base_output_directory=base_output_dir,
+            executable="MaxText/train.py",
             priority="medium",
             max_restarts=0,
             libtpu_type=libtpu_type,

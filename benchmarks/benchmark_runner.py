@@ -102,6 +102,12 @@ def add_xpk_runner_arguments(custom_parser: argparse.ArgumentParser):
       help='cluster name The name of the cluster to run the job on. command.',
   )
   custom_parser.add_argument(
+      '--executable',
+      type=str,
+      default='MaxText/train.py',
+      help='Executable python script for the workload',
+  )
+  custom_parser.add_argument(
       '--base_output_directory',
       type=str,
       default=None, required=True,
@@ -178,6 +184,12 @@ def add_on_device_runner_arguments(custom_parser: argparse.ArgumentParser):
   Args:
     custom_parser: parser to add shared arguments to.
   """
+  custom_parser.add_argument(
+      '--executable',
+      type=str,
+      default='MaxText/train.py',
+      help='Executable python script for the workload',
+  )
   custom_parser.add_argument(
       '--base_output_directory',
       type=str,
@@ -272,6 +284,7 @@ def main() -> None:
       num_steps=options.num_steps,
       device_type=options.device_type,
       base_output_directory=options.base_output_directory,
+      executable=options.executable,
       priority=options.priority,
       max_restarts=options.max_restarts,
       libtpu_type=libtpu_type,
@@ -299,6 +312,7 @@ def main() -> None:
       base_docker_image=None,
       num_steps=options.num_steps,
       base_output_directory=options.base_output_directory,
+      executable=options.executable,
       libtpu_type=libtpu_type,
       libtpu_nightly_version=options.libtpu_version,
       run_name=options.run_name,
