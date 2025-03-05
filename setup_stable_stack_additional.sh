@@ -42,7 +42,7 @@ fi
 run_name_folder_path=$(pwd)
 
 # Install dependencies from requirements.txt
-cd $run_name_folder_path && pip install --upgrade pip
+cd $run_name_folder_path
 pip3 install --no-cache-dir -U -r requirements_stable_stack_additional.txt
 
 
