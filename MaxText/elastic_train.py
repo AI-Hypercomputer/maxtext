@@ -160,7 +160,7 @@ def elastic_handler(
   metric_logger = MetricLogger(writer, config)
   max_logging.log(f"{metric_logger.buffered_metrics is None=}")
 
-  # jax.block_until_ready(state)
+  jax.block_until_ready(state)
 
   return (
       config,
