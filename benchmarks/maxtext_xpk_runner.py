@@ -518,7 +518,7 @@ def _get_pathways_specific_flags(wl_config: WorkloadConfig):
       f' {proxy_server_image_flag} '
       f' {remote_python_sidecar_image_flag} '
       f' --termination-grace-period-seconds=300 '
-      f' --pathways-gcs-location={wl_config.base_output_directory} '
+      f' --pathways-gcs-location=gs://trillium-scale-tests-q1-25-west/shauryag/{wl_config.run_name} '
       f' --custom-pathways-server-args="{server_flags}" '
       f' --custom-pathways-proxy-server-args="{proxy_flags}" '
       f' --custom-pathways-worker-args="{worker_flags}" '
