@@ -42,7 +42,8 @@ class ElasticUtilsSimulator(utils.ElasticUtils):
       total_slice_count: int,
       save_period: int | None = None,
       reshard_check_period: int | None = None,
-      max_failures: int | None = None,
+      max_failure_count: int | None = None,
+      max_reshard_retry_count: int | None = None,
   ):
     self.simulated_good_slice_indices = set(d.slice_index for d in devices)
 
@@ -51,7 +52,8 @@ class ElasticUtilsSimulator(utils.ElasticUtils):
         total_slice_count,
         save_period,
         reshard_check_period,
-        max_failures,
+        max_failure_count,
+        max_reshard_retry_count,
     )
 
   def update_good_slice_indices(self, good_slice_indices: set[int]):
