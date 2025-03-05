@@ -113,7 +113,6 @@ EOF
 
 
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1124-tp-fix2 # with fix2
-export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-1124-tp-fix2-mantaray-te2
 
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-0106-pinned
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-0206-nightly
@@ -140,6 +139,8 @@ export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-1124-tp-fix2-mantaray
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-nv-0220-nosetup
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-nv-0220-original-script
 # export LOCAL_IMAGE_NAME=us-central1-docker.pkg.dev/supercomputer-testing/yangyuwei-maxtext/maxtext-stable:latest
+
+export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-1124-tp-fix2-mantaray-te2
 
 call_config() {
 
@@ -201,8 +202,8 @@ call_config() {
 # submit 126
 
 # Test run with 2 nodes, cuda kernel fails
-export NODES=128
-call_config --NUM_LAYERS 126  --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 1 --T_SEQ 1 --ICI_TP 8 --ICI_FSDP 1 --DCN_FSDP $NODES --DCN_PP 1 --REMAT_POLICY save_qkv_proj --ATTENTION cudnn_flash_te --NUM_LAYERS_PER_PP_STAGE 0
+export NODES=64
+call_config --NUM_LAYERS 126  --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 0.5 --T_SEQ 1 --ICI_TP 8 --ICI_FSDP 1 --DCN_FSDP $NODES --DCN_PP 1 --REMAT_POLICY save_qkv_proj --ATTENTION cudnn_flash_te --NUM_LAYERS_PER_PP_STAGE 0
 # call_config --NUM_LAYERS 126  --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 1 --T_SEQ 1 --ICI_TP 1 --ICI_FSDP 8 --DCN_FSDP $NODES --DCN_PP 1 --REMAT_POLICY save_qkv_proj --ATTENTION cudnn_flash_te --NUM_LAYERS_PER_PP_STAGE 0
 
 
