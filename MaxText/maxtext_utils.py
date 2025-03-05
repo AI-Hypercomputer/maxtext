@@ -241,7 +241,6 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
   product_num_devices_for_weight_sharding = 1
   for axis in ["fsdp", "fsdp_transpose", "sequence", "context", "tensor", "tensor_transpose", "tensor_sequence", "stage", "expert"]:
     product_num_devices_for_weight_sharding *= mesh.shape[axis]
-    print(product_num_devices_for_weight_sharding)
   total_num_params_per_chip = max_utils.calculate_total_params_per_chip(params)
   perfectly_sharded_params_per_chip = total_num_params / product_num_devices_for_weight_sharding
   assert total_num_params_per_chip >= perfectly_sharded_params_per_chip, (

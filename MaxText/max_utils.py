@@ -640,6 +640,7 @@ def create_device_mesh(config, devices=None):
   num_devices_per_slice = num_devices // num_slices
 
   multi_slice_env = num_slices > 1
+
   # Find possible unspecified parallelisms
   ici_parallelism = fill_unspecified_mesh_axes(config.ici_parallelism.copy(), num_devices_per_slice, "ICI")
 

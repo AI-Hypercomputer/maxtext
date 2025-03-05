@@ -465,14 +465,9 @@ class AttentionOp(nn.Module):
     local_sum = jnp.reshape(local_sum, (local_sum.shape[0], local_sum.shape[1], local_sum.shape[2] * local_sum.shape[3], 1))
 
     local_out = self.wv_product(local_exps, value, model_mode)
-    if model_mode == common_types.MODEL_MODE_PREFILL:
-      print("prefill")
-      print(local_out.shape)
-      local_out = partitioning.with_sharding_constraint(local_out, (BATCH, KV_LENGTH, HEAD, D_KV))
-      #local_out = partitioning.with_sharding_constraint(local_out, DECODE_BATCH, HEAD, D_KV)   
+    if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE:
+      local_out = partitioning.with_sharding_constraint(local_out, (BATCH, KV_LENGTH, HEAD, D_KV)) 
     else:
-      print("decode")
-      print(local_out.shape)
       local_out = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, None, HEAD, D_KV))
 
 
@@ -481,13 +476,11 @@ class AttentionOp(nn.Module):
       local_sum = local_sum[:, 0:1, :, :]
       local_out = local_out[:, 0:1, :, :]
 
-    if model_mode != common_types.MODEL_MODE_PREFILL:
+    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       local_max = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, None, HEAD, D_KV))
       local_sum = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, None, HEAD, D_KV))
       local_out = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, None, HEAD, D_KV))
 
-    print(local_sum.shape)
-    print(local_max.shape)
     return local_out, local_max, local_sum
 
   def apply_attention_dot(
@@ -563,9 +556,6 @@ class AttentionOp(nn.Module):
     b, t, n, d = query.shape
     n_kv = key.shape[-2]
     assert n_kv == self.num_kv_heads
-    print(query.shape)
-    print(key.shape)
-    print(self.compute_axis_order)
     if model_mode == common_types.MODEL_MODE_TRAIN or self.compute_axis_order == (0, 1, 2, 3):
       query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
       if self.reshape_q and q_seq_len == 1:
@@ -866,7 +856,6 @@ class AttentionOp(nn.Module):
     one_token_value_shaped_for_cache = jnp.transpose(one_token_value, self.ar_cache_axis_order)
 
     ar_cache_axis_names = self.transpose_tuple(self.cache_logical_axis_names, self.ar_cache_axis_order)
-    print(ar_cache_axis_names)
     if self.kv_quant:
       one_token_key_shaped_for_cache, one_token_key_scale_shaped_for_cache = self.kv_quant.quantize(
           one_token_key_shaped_for_cache, ar_cache_axis_names
@@ -911,7 +900,6 @@ class AttentionOp(nn.Module):
       cached_value_var.value = jax.lax.dynamic_update_index_in_dim(
           cached_value_var.value, one_token_value_shaped_for_cache, ar_cache_update_idx, ar_cache_update_axis
       )
-    print("cv", cached_value_var.value.shape)
     cached_key_var.value = nn.with_logical_constraint(cached_key_var.value, ar_cache_axis_names)
     cached_value_var.value = nn.with_logical_constraint(cached_value_var.value, ar_cache_axis_names)
 
