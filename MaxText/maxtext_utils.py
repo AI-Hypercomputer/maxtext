@@ -37,8 +37,8 @@ def get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, 
   functional_train.__name__ = "train_step"
   data_pspec = P(*config.data_sharding)
   data_sharding = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
-  in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
-  out_shardings = (state_mesh_shardings, None)  # State, metrics
+  in_shardings = (state_mesh_shardings, data_sharding, jax.sharding.NamedSharding(mesh, P()))  # State, batch, rng
+  out_shardings = (state_mesh_shardings, jax.sharding.NamedSharding(mesh, P()))  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
   donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
   return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums
@@ -54,8 +54,8 @@ def get_functional_eval_with_signature(eval_step, mesh, state_mesh_shardings, mo
   functional_eval.__name__ = "eval_step"
   data_pspec = P(*config.data_sharding)
   data_sharding = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
-  in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
-  out_shardings = None  # metrics
+  in_shardings = (state_mesh_shardings, data_sharding, jax.sharding.NamedSharding(mesh, P()))  # State, batch, rng
+  out_shardings = jax.sharding.NamedSharding(mesh, P())  # metrics
   static_argnums = ()  # We partial out the static argnums of model, config
   donate_argnums = ()  # state will be kept instead of being donated in eval_step
   return functional_eval, in_shardings, out_shardings, static_argnums, donate_argnums

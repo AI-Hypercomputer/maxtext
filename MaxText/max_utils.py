@@ -815,30 +815,41 @@ def merge_pytrees(tree1, tree2):
 
 
 def move_state(state, sharding, scan_over):
-  def body_fn(carry, xs):
-    del carry
-    params, mu, nu = xs
-    params = jax.device_put(params, sharding)
-    mu = jax.device_put(mu, sharding)
-    nu = jax.device_put(nu, sharding)
-    return (None, (params, mu, nu))
-  is_stacked = lambda shape: shape[0] == scan_over
+  def my_scan(xs):
+    def body(i, data):
+      def put(arr):
+        start_indices = (i,) + (0,) * (arr.ndim - 1)
+        slice_sizes = (1,) + arr.shape[1:]
+        if not arr.shape or arr.shape[0] != scan_over:
+          return jax.device_put(arr, sharding)
+        y = jax.device_put(jax.lax.dynamic_slice(arr, start_indices, slice_sizes), sharding)
+        return jax.lax.dynamic_update_slice(arr, y, start_indices)
+    
+      return jax.tree_map(put, data) 
+    return jax.lax.fori_loop(0, scan_over, body, xs, unroll=False)
   
-  stacked_params, unstacked_params = partition_pytree_by_shape(state.params, is_stacked)
-  stacked_mu, unstacked_mu = partition_pytree_by_shape(state.opt_state[0].mu, is_stacked)
-  stacked_nu, unstacked_nu = partition_pytree_by_shape(state.opt_state[0].nu, is_stacked)
+  # stacked_params, unstacked_params = partition_pytree_by_shape(state.params, is_stacked)
+  # stacked_mu, unstacked_mu = partition_pytree_by_shape(state.opt_state[0].mu, is_stacked)
+  # stacked_nu, unstacked_nu = partition_pytree_by_shape(state.opt_state[0].nu, is_stacked)
 
   # device_put unstacked opt_state and params
-  unstacked_params = jax.device_put(unstacked_params, sharding)
-  unstacked_mu = jax.device_put(unstacked_mu, sharding)
-  unstacked_nu = jax.device_put(unstacked_nu, sharding)
+  # unstacked_params = jax.device_put(unstacked_params, sharding)
+  # unstacked_mu = jax.device_put(unstacked_mu, sharding)
+  # unstacked_nu = jax.device_put(unstacked_nu, sharding)
   
-  _, (stacked_params, stacked_mu, stacked_nu) = jax.lax.scan(body_fn, None, (stacked_params, stacked_mu, stacked_nu))
+  # _, (stacked_params, stacked_mu, stacked_nu) = jax.lax.scan(body_fn, None, (stacked_params, stacked_mu, stacked_nu))
+  # stacked_params, stacked_mu, stacked_nu = my_scan((stacked_params, stacked_mu, stacked_nu))
 
-  params = merge_pytrees(stacked_params, unstacked_params)
-  opt_state = state.opt_state[0]._replace(mu = merge_pytrees(stacked_mu, unstacked_mu), nu = merge_pytrees(stacked_nu, unstacked_nu))
+  # params = merge_pytrees(stacked_params, unstacked_params)
+  # opt_state = state.opt_state[0]._replace(mu = merge_pytrees(stacked_mu, unstacked_mu), nu = merge_pytrees(stacked_nu, unstacked_nu))
   
-  state = state.replace(params=params, opt_state=(opt_state,state.opt_state[1],state.opt_state[2]))
+  # state = state.replace(params=params, opt_state=(opt_state,state.opt_state[1],state.opt_state[2]))
+
+  # trial
+
+  params, opt_state = my_scan((state.params, state.opt_state))
+  state = state.replace(params = params, opt_state = opt_state)
+
   return state
 
 
@@ -894,7 +905,7 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
 
 def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager):
   is_training = True
-  return setup_initial_state(
+  state, state_mesh_annotations, state_mesh_shardings, data_iterator = setup_initial_state(
       model,
       data_iterator,
       tx,
@@ -904,6 +915,12 @@ def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint
       checkpoint_manager,
       is_training,
   )
+  state = state.replace(params = jax.device_put(state.params, state_mesh_shardings.params),
+                        opt_state = jax.device_put(state.opt_state, state_mesh_shardings.opt_state))
+
+  return state, state_mesh_annotations, state_mesh_shardings, data_iterator
+
+
 
 
 def setup_initial_state(
@@ -975,6 +992,7 @@ def setup_initial_state(
         state = state.replace(params=raw_params)
 
   state = unbox_logicallypartioned(state)
+  jax.debug.inspect_array_sharding(state.params['params']['decoder']['layers']['mlp']['wi_0']['kernel'], callback=print)
 
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator
 

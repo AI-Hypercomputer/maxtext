@@ -26,6 +26,7 @@ import sys
 import functools
 import time
 import queue
+from collections import defaultdict
 
 from typing import Sequence, Optional
 from absl import app
@@ -485,7 +486,6 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     state_mesh_shardings, reference_params_sharding = _split_dpo_state(state_mesh_shardings)
     extra_dpo_args = [reference_params]
     _loss_fn = dpo_loss_fn
-
   if config.gradient_accumulation_steps > 1:
 
     def accumulate_gradient(acc_grad_and_loss, data):
@@ -564,6 +564,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     new_state = _merge_dpo_state(new_state, reference_params)
 
   return new_state, metrics
+
 
 
 def eval_step(model, config, state, data, dropout_rng):
@@ -888,7 +889,6 @@ def train_loop(config, state=None):
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, nextrng)
-
     step_time_delta = datetime.datetime.now() - last_step_completion
     last_step_completion = datetime.datetime.now()
     record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
