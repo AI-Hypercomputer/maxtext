@@ -1016,7 +1016,7 @@ if __name__ == "__main__":
   parser.add_argument("--base-model-path", type=str, required=True)
   parser.add_argument("--maxtext-model-path", type=str, required=True)
   parser.add_argument("--model-size", type=str, required=True)
-  parser.add_argument("--lora-adapters-path", type=str, required=False)
+  parser.add_argument("--lora-input-adapters-path", type=str, required=False)
   parser.add_argument("--huggingface-checkpoint", type=bool, required=False, default=False)
   args = parser.parse_args()
 
@@ -1027,7 +1027,7 @@ if __name__ == "__main__":
 
   base_weights_path = args.maxtext_model_path
 
-  if args.lora_adapters_path:
+  if args.lora_input_adapters_path:
     base_weights_path += "/base"
 
   save_jax_weights_to_checkpoint(
@@ -1035,16 +1035,16 @@ if __name__ == "__main__":
   )
   max_logging.log(f"Successfully saved base_weights to {base_weights_path}.")
 
-  if args.lora_adapters_path:
-    max_logging.log(f"LoRA Adapters Path = {args.lora_adapters_path}")
-    if args.lora_adapters_path.startswith("gs://"):
+  if args.lora_input_adapters_path:
+    max_logging.log(f"LoRA Adapters Path = {args.lora_input_adapters_path}")
+    if args.lora_input_adapters_path.startswith("gs://"):
       max_logging.log("GCS Source path for the LoRA adapters is not supported as of now.")
       raise NotImplementedError
 
-    lora_ids = list_folders_pathlib(args.lora_adapters_path)
+    lora_ids = list_folders_pathlib(args.lora_input_adapters_path)
 
     for lora_id in lora_ids:
-      lora_path = f"{args.lora_adapters_path}/{lora_id}"
+      lora_path = f"{args.lora_input_adapters_path}/{lora_id}"
       lora_config_path = f"{lora_path}/adapter_config.json"
 
       if not os.path.exists(lora_config_path):

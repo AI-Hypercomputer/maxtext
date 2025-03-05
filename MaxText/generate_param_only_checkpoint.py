@@ -101,12 +101,12 @@ def _generate_lora_decode_checkpoints(config, mesh):
   learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
 
-  lora_adapters = gcs_utils.gcs_list_directories(config.lora_adapters_path)
+  lora_adapters = gcs_utils.gcs_list_directories(config.lora_input_adapters_path)
   for lora_id in lora_adapters:
     # Expected lora_checkpoint_dir = <checkpoint_dir>/LoRA/<lora_id>
-    lora_checkpoint_dir = f"{config.checkpoint_dir}{config.lora_dir}{lora_id}/"
+    lora_checkpoint_dir = f"{config.checkpoint_dir}{config.lora_checkpoint_dir}{lora_id}/"
 
-    lora_adapter_path = f"{config.lora_adapters_path}/{lora_id}/"
+    lora_adapter_path = f"{config.lora_input_adapters_path}/{lora_id}/"
 
     # Create a checkpoint manager to save decode checkpoint at lora_checkpoint_dir
     checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
@@ -161,7 +161,7 @@ def generate_decode_checkpoint(config):
   # Create a checkpoint manager to save decode checkpoint at config.checkpoint_dir
   base_checkpoint_dir = config.checkpoint_dir
 
-  if config.lora_adapters_path:
+  if config.lora_input_adapters_path:
     base_checkpoint_dir += config.base_dir
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
@@ -182,7 +182,7 @@ def generate_decode_checkpoint(config):
   _save_decode_checkpoint(config, training_state, checkpoint_manager)
   max_logging.log(f"Successfully generated decode checkpoint at: {base_checkpoint_dir}0/items")
 
-  if config.lora_adapters_path:
+  if config.lora_input_adapters_path:
     _generate_lora_decode_checkpoints(config, mesh)
 
   return True

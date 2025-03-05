@@ -33,8 +33,8 @@ normalization_layer_epsilon: 1.e-05
 load_parameters_path: ""
 
 # LoRA adapter support configs
-lora_adapters_path: ""        # GCS path for a parent directory which has all the LoRA adapters (lora_id as subdir)
-lora_dir: "LoRAs/"            # GCS directory for saving all the converted checkpoints of all the LoRA adapters. 
+lora_input_adapters_path: ""    # Input GCS path for a parent directory which has all the LoRA adapters (lora_id as subdir)
+lora_checkpoint_dir: "LoRAs/"   # GCS directory for saving all the converted checkpoints of all the LoRA adapters. 
 lora_config_file_name: "adapter_config.json"    # Name of the LoRA config file expected in each LoRA directory
 base_dir: "base/"             # GCS directory for saving checkpoints of base model if exists along with LoRA checkpoints
 
