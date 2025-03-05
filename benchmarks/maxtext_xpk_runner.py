@@ -35,10 +35,12 @@ import tempfile
 import time
 
 import maxtext_trillium_model_configs as model_configs
+import xla_flags_library as xla_flags
 
 # Assumes you built maxtext dep image.
 # Assumes you have xpk installed in a git clone repo of ~/{wl_config.xpk_path}/xpk.py
 _DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME = 'maxtext_base_image'
+
 
 class LibTpuType(enum.Enum):
   NIGHTLY = 'nightly-libtpu'
@@ -275,15 +277,72 @@ def run_command_with_updates(command, task, verbose=True) -> int:
     return 0
 
 
+def _get_config_tuning_params(wl_config: WorkloadConfig):
+  """Get config tuning parameters for the workload.
+
+  Args:
+    wl_config: Workload configuration.
+
+  Returns:
+    A string of config tuning parameters.
+  """
+  is_pw_enabled = wl_config.pathways_config is not None
+
+  config_tuning_params = ''
+  unified_tuning_params = wl_config.model.tuning_params.copy()  # Create a copy
+
+  # Overwrite the tuning params with pathways specific tuning params if present.
+  # otherwise add them to the dictionary. If pathays tuning params are not
+  # present, add the default pathways tuning params.
+  if is_pw_enabled:
+    if wl_config.model.pathways_tuning_params is None:
+      print(
+          'WARNING: Pathways tuning params are not present for model:'
+          f' {wl_config.model.model_name}, Adding the following base params to'
+          f' support pathways: {model_configs.BASE_PATHWAYS_TUNING_PARAMS}'
+      )
+      wl_config.model.pathways_tuning_params = (
+          model_configs.BASE_PATHWAYS_TUNING_PARAMS
+      )
+
+    # Automatically inject Base Pathways tuning params if not present. The user
+    # can override these values if they want, but if not present, we will add
+    # them to the dictionary.
+    for key, value in model_configs.BASE_PATHWAYS_TUNING_PARAMS.items():
+      if key not in wl_config.model.pathways_tuning_params:
+        wl_config.model.pathways_tuning_params[key] = value
+
+      print(
+          f'WARNING: {key} is not present in pathways tuning'
+          f' params for model: {wl_config.model.model_name}, Adding the'
+          f' param {key}={value} to support pathways.'
+      )
+
+    print(
+        f'Pathways tuning params for model: {wl_config.model.model_name} are:'
+        f' {wl_config.model.pathways_tuning_params}'
+    )
+    for key, value in wl_config.model.pathways_tuning_params.items():
+      unified_tuning_params[key] = value
+
+  print(
+      f'Unified tuning params for model are:'
+      f' {unified_tuning_params}'
+  )
+
+  for key, value in unified_tuning_params.items():
+    config_tuning_params += f'{key}={value} '
+
+  return config_tuning_params
+
+
 def build_user_command(
     name: str,
     wl_config: WorkloadConfig,
 ):
   is_pw_enabled = wl_config.pathways_config is not None
 
-  config_tuning_params = ''
-  for key, value in wl_config.model.tuning_params.items():
-    config_tuning_params += f'{key}={value} '
+  config_tuning_params = _get_config_tuning_params(wl_config)
 
   install_libtpu_cmd = ''
   jax_platforms = None
@@ -336,6 +395,94 @@ def build_user_command(
   return command
 
 
+def _get_pathways_proxy_flags(wl_config: WorkloadConfig):
+  """Get the pathways proxy flags for the workload and removes any extras."""
+  # Add in the xla flags alongside the proxy flags from the pathways config.
+  pw_config = wl_config.pathways_config
+
+  # Get proxy and xla flag string from model config
+  proxy_flags_string = pw_config.proxy_flags
+  xla_flags_string = wl_config.model.xla_flags
+
+  # Split both proxy_flags_string and xla_flags_string into lists of flags
+  proxy_flags_list = proxy_flags_string.strip().split()
+  xla_flags_list = xla_flags_string.strip().split()
+
+  # Combine the two lists of flags into a single list
+  proxy_flags = proxy_flags_list + xla_flags_list
+
+  # Remove the flags that are specified to be removed.
+  if (
+      wl_config.model.pathways_xla_flag_options
+      and xla_flags.REMOVE in wl_config.model.pathways_xla_flag_options
+  ):
+    flags_to_remove = wl_config.model.pathways_xla_flag_options[
+        xla_flags.REMOVE
+    ]
+    updated_proxy_flags = []
+    for flag in proxy_flags:
+      if flag not in flags_to_remove:
+        updated_proxy_flags.append(flag)
+    proxy_flags = updated_proxy_flags
+
+  # Add the flags that are specified to be added.
+  if (
+      wl_config.model.pathways_xla_flag_options
+      and xla_flags.ADD_PROXY in wl_config.model.pathways_xla_flag_options
+  ):
+    flags_to_add = wl_config.model.pathways_xla_flag_options[
+        xla_flags.ADD_PROXY
+    ]
+    proxy_flags.append(flags_to_add)
+
+  # Join the list of flags back into a single string, space-separated
+  return ' '.join(proxy_flags)
+
+
+def _get_pathways_worker_flags(wl_config: WorkloadConfig):
+  """Get the pathways worker flags for the workload and removes any extras."""
+  # Add in the xla flags alongside the worker flags from the pathways config.
+  pw_config = wl_config.pathways_config
+
+  # Get worker and xla flag string from model config
+  worker_flags = pw_config.worker_flags
+
+  # Add the flags that are specified to be added.
+  if (
+      wl_config.model.pathways_xla_flag_options
+      and xla_flags.ADD_WORKER in wl_config.model.pathways_xla_flag_options
+  ):
+    flags_to_add = wl_config.model.pathways_xla_flag_options[
+        xla_flags.ADD_WORKER
+    ]
+    worker_flags += flags_to_add
+
+  # Join the list of flags back into a single string, space-separated
+  return worker_flags
+
+
+def _get_pathways_server_flags(wl_config: WorkloadConfig):
+  """Get the pathways server flags for the workload and removes any extras."""
+  # Add in the xla flags alongside the server flags from the pathways config.
+  pw_config = wl_config.pathways_config
+
+  # Get server and xla flag string from model config
+  server_flags = pw_config.server_flags
+
+  # Add the flags that are specified to be added.
+  if (
+      wl_config.model.pathways_xla_flag_options
+      and xla_flags.ADD_SERVER in wl_config.model.pathways_xla_flag_options
+  ):
+    flags_to_add = wl_config.model.pathways_xla_flag_options[
+        xla_flags.ADD_SERVER
+    ]
+    server_flags += flags_to_add
+
+  # Join the list of flags back into a single string, space-separated
+  return server_flags
+
+
 def _get_pathways_specific_flags(wl_config: WorkloadConfig):
   pw_config = wl_config.pathways_config
   if pw_config is None:
@@ -357,7 +504,9 @@ def _get_pathways_specific_flags(wl_config: WorkloadConfig):
       else ''
   )
 
-  proxy_flags = pw_config.proxy_flags + wl_config.model.xla_flags
+  proxy_flags = _get_pathways_proxy_flags(wl_config)
+  worker_flags = _get_pathways_worker_flags(wl_config)
+  server_flags = _get_pathways_server_flags(wl_config)
 
   pathways_specific_flags = (
       f' {server_image_flag} '
@@ -365,10 +514,9 @@ def _get_pathways_specific_flags(wl_config: WorkloadConfig):
       f' {remote_python_sidecar_image_flag} '
       f' --termination-grace-period-seconds=300 '
       f' --pathways-gcs-location={wl_config.base_output_directory} '
-      f' --restart-on-user-code-failure'
-      f' --custom-pathways-server-args="{pw_config.server_flags}" '
+      f' --custom-pathways-server-args="{server_flags}" '
       f' --custom-pathways-proxy-server-args="{proxy_flags}" '
-      f' --custom-pathways-worker-args="{pw_config.worker_flags}" '
+      f' --custom-pathways-worker-args="{worker_flags}" '
   )
   return pathways_specific_flags
 

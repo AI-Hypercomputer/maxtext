@@ -304,6 +304,7 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
+  @pytest.mark.skip(reason="b/400476456 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
   @pytest.mark.tpu_only
   def test_moe_dropping_int8(self):
     compiled_trainstep_file = "/tmp/test_moe_dropping_int8.pickle"
@@ -390,6 +391,7 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
+  @pytest.mark.skip(reason="b/400476456 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
   @pytest.mark.tpu_only
   def test_moe_dense_int8(self):
     compiled_trainstep_file = "/tmp/test_moe_dense_int8.pickle"

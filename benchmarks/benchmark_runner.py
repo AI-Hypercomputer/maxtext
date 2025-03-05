@@ -34,6 +34,45 @@ from maxtext_xpk_runner import on_device_benchmark_runner
 from maxtext_xpk_runner import XpkClusterConfig
 from maxtext_xpk_runner import LibTpuType
 
+def add_pathways_arguments(parser: argparse.ArgumentParser):
+  """Add pathways arguments to arg parsers that need it.
+
+  Args:
+    parser:  parser to add shared arguments to.
+  """
+  # Add the arguments for each parser.
+  parser.add_argument(
+      '--pathways_server_image',
+      type=str,
+      default=(
+          'us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/server:latest'
+      ),
+      help='version of pathways server image to be benchmarked command.',
+  )
+  parser.add_argument(
+      '--pathways_proxy_server_image',
+      type=str,
+      default='us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/proxy_server:latest',
+      help='version of pathways proxy image to be benchmarked command.',
+  )
+  parser.add_argument(
+      '--pathways_runner_image',
+      type=str,
+      default='us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest',
+      help='version of pathways runner image to be benchmarked command.',
+  )
+  parser.add_argument(
+      '--remote_python_sidecar_image',
+      type=str,
+      help='version of remote python sidecar image to be benchmarked command.',
+  )
+  parser.add_argument(
+      '--use_pathways',
+      type=bool,
+      default=False,
+      help='whether to use pathways or not.',
+  )
+
 def add_xpk_runner_arguments(custom_parser: argparse.ArgumentParser):
   """Add arguments to the xpk runner parser.
 
@@ -107,37 +146,6 @@ def add_xpk_runner_arguments(custom_parser: argparse.ArgumentParser):
       type=str,
       default='maxtext_base_image',
       help='version of base docker image to be benchmarked command.',
-  )
-  custom_parser.add_argument(
-      '--pathways_server_image',
-      type=str,
-      default=(
-          'us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/server:latest'
-      ),
-      help='version of pathways server image to be benchmarked command.',
-  )
-  custom_parser.add_argument(
-      '--pathways_proxy_server_image',
-      type=str,
-      default='us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/proxy_server:latest',
-      help='version of pathways proxy image to be benchmarked command.',
-  )
-  custom_parser.add_argument(
-      '--pathways_runner_image',
-      type=str,
-      default='us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest',
-      help='version of pathways runner image to be benchmarked command.',
-  )
-  custom_parser.add_argument(
-      '--remote_python_sidecar_image',
-      type=str,
-      help='version of remote python sidecar image to be benchmarked command.',
-  )
-  custom_parser.add_argument(
-      '--use_pathways',
-      type=bool,
-      default=False,
-      help='whether to use pathways or not.',
   )
   custom_parser.add_argument(
       '--xpk_path',
@@ -220,6 +228,7 @@ def main() -> None:
   on_device_runner_parser = subparsers.add_parser("on-device")
   add_xpk_runner_arguments(xpk_runner_parser)
   add_on_device_runner_arguments(on_device_runner_parser)
+  add_pathways_arguments(parser)
   options = parser.parse_args()
 
   # Check that there are no duplicate model configs
@@ -238,6 +247,16 @@ def main() -> None:
       libtpu_type = LibTpuType.CUSTOM
     case LibTpuType.MAXTEXT.value:
       libtpu_type = LibTpuType.MAXTEXT
+      
+  # Set up pathways configs
+  pw_config = None
+  if options.use_pathways:
+    pw_config = PathwaysConfig(
+      server_image=options.pathways_server_image,
+      proxy_server_image=options.pathways_proxy_server_image,
+      runner_image=options.pathways_runner_image,
+      remote_python_sidecar_image=options.remote_python_sidecar_image,
+    )
 
   if options.runner == "xpk":
     cluster_config = XpkClusterConfig(
@@ -246,15 +265,6 @@ def main() -> None:
       zone=options.zone,
       device_type=options.device_type
     )
-
-    pw_config = None
-    if options.use_pathways:
-      pw_config = PathwaysConfig(
-        server_image=options.pathways_server_image,
-        proxy_server_image=options.pathways_proxy_server_image,
-        runner_image=options.pathways_runner_image,
-        remote_python_sidecar_image=options.remote_python_sidecar_image,
-      )
 
     workload_config = WorkloadConfig(
       model=model,
@@ -291,7 +301,8 @@ def main() -> None:
       base_output_directory=options.base_output_directory,
       libtpu_type=libtpu_type,
       libtpu_nightly_version=options.libtpu_version,
-      run_name=options.run_name
+      run_name=options.run_name,
+      pathways_config=pw_config
     )
     on_device_benchmark_runner(workload_configs=[workload_config])
 

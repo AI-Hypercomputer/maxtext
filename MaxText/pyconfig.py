@@ -70,7 +70,7 @@ def validate_kv_quant_axis(s: str, quantize_kvcache: bool) -> None:
 
 
 def validate_attention_kernel(s: str) -> None:
-  valid_attention_kernels = ("autoselected", "dot_product", "flash", "cudnn_flash_te")
+  valid_attention_kernels = ("autoselected", "dot_product", "flash", "cudnn_flash_te", "paged")
   if s not in valid_attention_kernels:  # currently supported attention
     raise ValueError("Invalid attention kernel was passed. Valid options ", valid_attention_kernels)
 
@@ -168,6 +168,8 @@ def validate_data_input(keys):
         f"dataset_type set to hf, will use {keys['hf_path']=}, {keys['hf_data_dir']=} and {keys['hf_train_files']=} to read data"
     )
     assert keys["hf_path"] != "", "hf_path can't be empty when dataset_type=hf"
+    if not keys["hf_access_token"]:
+      keys["hf_access_token"] = None
     if not keys["hf_train_files"]:
       keys["hf_train_files"] = None
     if not keys["hf_eval_files"]:
