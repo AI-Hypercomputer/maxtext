@@ -405,11 +405,7 @@ class MaxEngine(engine_api.Engine):
         "tokens": first_generated_tokens,
     }, result
 
-  @functools.partial(
-      jax.jit,
-      static_argnums=(0,),
-      static_argnames=("request_id",)
-  )
+  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("request_id",))
   def prefill(
       self,
       *,
