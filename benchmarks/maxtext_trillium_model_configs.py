@@ -33,7 +33,6 @@ BASE_PATHWAYS_TUNING_PARAMS = {
     "enable_single_controller": True,
     "metrics_file": "metrics.txt",
     "goodput_upload_interval_seconds": 30,
-    "profiler": "",
 }
 
 # The set of tuning params required for long-running pathways jobs.

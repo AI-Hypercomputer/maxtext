@@ -299,7 +299,7 @@ def train_loop(config, state=None):
   )
 
   step_down = {10, 30, 44}
-  step_up = {14, 16, 40, 45}
+  step_up = {14, 40, 45}
   while True:
     with utils.watchdog(120):
       try:
@@ -407,41 +407,41 @@ def train_loop(config, state=None):
           if step == last_profiling_step or prof.should_deactivate_periodic_profile(step):
             prof.deactivate(blocking_object=state)
 
-          config.eu.maybe_snapshot(
-              step,
-              params=state.params,
-              opt_state=state.opt_state,
-          )
+        config.eu.maybe_snapshot(
+            step,
+            params=state.params,
+            opt_state=state.opt_state,
+        )
 
-          ret = config.eu.maybe_reshard_up(
-              step,
-              elastic_handler,
-              save_args=dict(
-                  params=state.params,
-                  opt_state=state.opt_state,
-              ),
-              handler_args=(
-                  config,
-                  checkpoint_manager,
-              ),
-          )
-          if ret is not None:
-            (config,
-             step,
-             state,
-             mesh,
-             checkpoint_manager,
-             data_iterator,
-             p_train_step,
-             example_batch,
-             learning_rate_schedule,
-             metric_logger,
-             writer) = ret
+        ret = config.eu.maybe_reshard_up(
+            step,
+            elastic_handler,
+            save_args=dict(
+                params=state.params,
+                opt_state=state.opt_state,
+            ),
+            handler_args=(
+                config,
+                checkpoint_manager,
+            ),
+        )
+        if ret is not None:
+          (config,
+           step,
+           state,
+           mesh,
+           checkpoint_manager,
+           data_iterator,
+           p_train_step,
+           example_batch,
+           learning_rate_schedule,
+           metric_logger,
+           writer) = ret
 
-          if step == start_step:
-            max_utils.print_mem_stats("After params initialized")
+        if step == start_step:
+          max_utils.print_mem_stats("After params initialized")
 
-          step += 1
+        step += 1
 
       except jax.errors.JaxRuntimeError as error:
          ret = config.eu.maybe_reshard_down(
