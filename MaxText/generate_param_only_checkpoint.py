@@ -103,7 +103,9 @@ def _generate_lora_decode_checkpoints(config, mesh):
 
   lora_adapters = gcs_utils.gcs_list_directories(config.lora_adapters_path)
   for lora_id in lora_adapters:
+    # Expected lora_checkpoint_dir = <checkpoint_dir>/LoRA/<lora_id>
     lora_checkpoint_dir = f"{config.checkpoint_dir}{config.lora_dir}{lora_id}/"
+
     lora_adapter_path = f"{config.lora_adapters_path}/{lora_id}/"
 
     # Create a checkpoint manager to save decode checkpoint at lora_checkpoint_dir

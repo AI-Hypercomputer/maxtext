@@ -33,10 +33,10 @@ normalization_layer_epsilon: 1.e-05
 load_parameters_path: ""
 
 # LoRA adapter support configs
-lora_adapters_path: ""
-lora_dir: "LoRAs/"
-lora_config_file_name: "adapter_config.json"
-base_dir: "base/"
+lora_adapters_path: ""        # GCS path for a parent directory which has all the LoRA adapters (lora_id as subdir)
+lora_dir: "LoRAs/"            # GCS directory for saving all the converted checkpoints of all the LoRA adapters. 
+lora_config_file_name: "adapter_config.json"    # Name of the LoRA config file expected in each LoRA directory
+base_dir: "base/"             # GCS directory for saving checkpoints of base model if exists along with LoRA checkpoints
 
 # Loads a full checkpoint including optimizer state and step count from a specific directory
 # e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/items/NUMBER or NUMBER/items
@@ -547,7 +547,7 @@ inference_metadata_file: "" # path to a json file
 inference_server: "MaxtextInterleavedServer"  # inference server to start
 inference_benchmark_test: False
 enable_model_warmup: False
-enable_llm_inference_pool: False
+enable_llm_inference_pool: False          # Bool to launch inference server for llm_inference_gateway with their specified APIs
 multi_sampling: False
 
 # Stack prefill cache across the layer to reduce the

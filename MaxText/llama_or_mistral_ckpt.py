@@ -1046,6 +1046,11 @@ if __name__ == "__main__":
     for lora_id in lora_ids:
       lora_path = f"{args.lora_adapters_path}/{lora_id}"
       lora_config_path = f"{lora_path}/adapter_config.json"
+
+      if not os.path.exists(lora_config_path):
+        max_logging.log(f"Ignoring {lora_id} adapter because its directory doesn't have adapter_config.json.")
+        continue
+
       with open(lora_config_path, "r", encoding="utf8") as file:
         lora_config_dict = json.load(file)
 
