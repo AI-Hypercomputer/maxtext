@@ -80,12 +80,17 @@ def combine_columns(example, columns):
 def extract_messages_and_mask(example, data_column_name):
   """For sft training, we will have a column containing all the message contents,
   and the 'is_prompt' column indicating whether each message is prompt or not."""
-  example["is_prompt"] = [x["role"] == "user" for x in example[data_column_name]]
+  messages = []
+  is_prompt = []
   for x in example[data_column_name]:
     if x["role"] == "user":
-      example[data_column_name] = ["<user>" + x["content"] + "</user>"]
-    else:
-      example[data_column_name] = ["<assistant>" + x["content"] + "</assistant>"]
+      messages.append("<user>" + x["content"] + "</user>")
+      is_prompt.append(True)
+    elif x["role"] == "assistant":
+      messages.append("<assistant>" + x["content"] + "</assistant>")
+      is_prompt.append(False)
+  example["is_prompt"] = is_prompt
+  example[data_column_name] = messages
   return example
 
 
