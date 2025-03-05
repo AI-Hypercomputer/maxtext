@@ -70,18 +70,18 @@ from train import (
 
 
 @utils.timeit
-def reshard_fn(
+def elastic_handler(
     config: pyconfig.HyperParameters,
-    step: step,
-    state: TrainState,
+    step: int,
+    state,
     mesh: jax.sharding.Mesh,
-    checkpoint_manager: CheckpointManager,
-    data_iterator: DataIterator,
-    p_train_step: Callable,
-    example_batch: False,
-    learning_rate_schedule: Callable,
-    metric_logger: MetricLogger,
-    writer: Writer,
+    checkpoint_manager,
+    data_iterator,
+    p_train_step,
+    example_batch,
+    learning_rate_schedule,
+    metric_logger,
+    writer,
 ):
   """Reshard function."""
   if checkpoint_manager is not None:
@@ -299,9 +299,9 @@ def train_loop(config, state=None):
   metric_logger = MetricLogger(writer, config)
   step = start_step
 
-  config.eu.maybe_save(
+  config.eu.maybe_snapshot(
       step,
-      force=True
+      force=True,
       params=state.params,
       opt_state=state.opt_state,
   )
@@ -415,9 +415,8 @@ def train_loop(config, state=None):
           if step == last_profiling_step or prof.should_deactivate_periodic_profile(step):
             prof.deactivate(blocking_object=state)
 
-          config.eu.maybe_save(
+          config.eu.maybe_snapshot(
               step,
-              force=reshard_flag
               params=state.params,
               opt_state=state.opt_state,
           )
@@ -434,7 +433,11 @@ def train_loop(config, state=None):
            metric_logger,
            writer) = config.eu.maybe_reshard_up(
                step,
-               reshard_fn,
+               elastic_handler,
+               save_args=dict(
+                   params=state.params,
+                   opt_state=state.opt_state,
+               ),
                handler_args=(
                    config,
                    step,
@@ -468,8 +471,9 @@ def train_loop(config, state=None):
          metric_logger,
          writer) = config.eu.maybe_reshard_down(
              error,
-             reshard_fn,
+             elastic_handler,
              handler_args=(
+                 config,
                  step,
                  state,
                  mesh,

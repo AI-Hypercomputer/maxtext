@@ -133,8 +133,12 @@ class ElasticUtils:
     self.data = {}
 
   @timeit
-  def maybe_save(self, save_step: int, blocking: bool = False,
-                 force: bool = False, **kwargs):
+  def maybe_snapshot(
+      self,
+      save_step: int,
+      blocking: bool = True,
+      force: bool = False,
+      **kwargs):
     """Save step and state."""
     if not force and save_step % self.save_period:
       return
@@ -146,7 +150,7 @@ class ElasticUtils:
 
     logger.info(f"Saving {total_nbytes} bytes")
 
-    self.data = {
+    data = {
         k: jax.device_put(
             v,
             jax.tree.map(
@@ -155,11 +159,13 @@ class ElasticUtils:
         )
         for k, v in kwargs.items()
     }
-    self.data["save_step"] = save_step
+    data["save_step"] = save_step
 
     if blocking:
       for v in self.data.values():
         jax.block_until_ready(v)
+
+    self.data = data
 
   def _slice_down(self, reshard_retry: bool = False):
     """Slice down."""
@@ -192,14 +198,14 @@ class ElasticUtils:
   @staticmethod
   def _is_error_due_to_slice_down(error: Exception):
     if "DATA_LOSS" in str(error):
-      logger.info("Caught JaxRuntimeError DATA_LOSS exception during resharding!")
+      logger.info("Caught JaxRuntimeError DATA_LOSS exception")
       logger.info(traceback.format_exc())
     elif "INTERNAL" in str(error):
-      logger.info("Caught JaxRuntimeError INTERNAL exception during resharding!")
+      logger.info("Caught JaxRuntimeError INTERNAL exception")
       logger.info(traceback.format_exc())
 
     else:
-      logger.info("Unknown JaxRuntimeError during resharding!")
+      logger.info("Unknown JaxRuntimeError")
       return False
 
     return True
@@ -207,7 +213,7 @@ class ElasticUtils:
   def maybe_reshard_down(
       self,
       error: Exception,
-      reshard_handler: Callable,
+      elastic_handler: Callable,
       handler_args: tuple[Any, ...] | None= None,
       reshard_retry: bool = False
   ):
@@ -215,32 +221,37 @@ class ElasticUtils:
       handler_args = ()
 
     while True:
-      if not self._is_error_due_to_slice_down(error)
+      if not self._is_error_due_to_slice_down(error):
         raise error from error.__cause__
 
       self._slice_down(reshard_retry)
 
       try:
-        return reshard_handler(*handler_args)
+        return elastic_handler(*handler_args)
       except jax.error.JaxRuntimeError as error:
         reshard_retry = True
 
   def maybe_reshard_up(
       self,
-      reshard_handler: Callable,
+      step: int,
+      elastic_handler: Callable,
+      save_args: Mapping[str, Any],
       handler_args: tuple[Any, ...] | None = None):
     if handler_args is None:
       handler_args = ()
 
     if not self._is_ready_to_reshard(step):
-      return *handler_args
+      return handler_args
+
+    if self.data["save_step"] < step:
+      self.maybe_snapshot(step, force=True, **save_args)
 
     try:
-      return reshard_handler(*handler_args)
-    except jax.error.JaxRuntimeError as error
+      return elastic_handler(*handler_args)
+    except jax.error.JaxRuntimeError as error:
       return self.maybe_reshard_down(
           error,
-          reshard_handler,
+          elastic_handler,
           handler_args,
           reshard_retry=True,
       )
