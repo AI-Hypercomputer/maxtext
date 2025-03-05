@@ -78,7 +78,12 @@ class MetricLogger:
 
   def write_metrics_locally(self, metrics, step):
     """Writes metrics locally for testing"""
-    with open(self.config.metrics_file, "a", encoding="utf8") as local_metrics_file:
+    filepath = self.config.metrics_file
+    directory = os.path.splitext(filepath)[0]
+    if not os.path.exists(directory):
+      os.makedirs(directory)
+
+    with open(filepath, "a", encoding="utf8") as local_metrics_file:
       if step == 0:
         local_metrics_file.truncate(0)
 
