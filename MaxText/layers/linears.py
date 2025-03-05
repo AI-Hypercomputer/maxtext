@@ -684,13 +684,15 @@ class MoeBlock(nn.Module):
       inputs = nn.with_logical_constraint(inputs, input_axis)     
 
       with jax.named_scope("dispatch"):
+        # only cp during prefill
         dispatch = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=DISPATCH)(
               "BNSM,BNSEC -> EBNCM", inputs, dispatch_mask, precision=matmul_precision
           )
-        dispatch = nn.with_logical_constraint(
-          dispatch,
-          (None, "activation_batch_no_exp", "activation_length", None, "activation_embed"),
-        )
+        if cp > 1:
+          dispatch = nn.with_logical_constraint(
+            dispatch,
+            (None, "activation_batch_no_exp", "activation_length", None, "activation_embed"),
+          )
         dispatch = nn.with_logical_constraint(
               dispatch,
              dispatch_axis,

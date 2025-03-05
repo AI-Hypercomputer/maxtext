@@ -67,6 +67,8 @@ AxisIdxes = common_types.AxisIdxes
 BATCH = common_types.BATCH
 PREFILL_KV_BATCH = common_types.PREFILL_KV_BATCH
 KV_BATCH = common_types.KV_BATCH
+DECODE_BATCH = common_types.DECODE_BATCH
+DECODE_LENGTH = common_types.DECODE_LENGTH
 LENGTH = common_types.LENGTH
 KV_LENGTH = common_types.KV_LENGTH
 HEAD = common_types.HEAD
@@ -463,14 +465,29 @@ class AttentionOp(nn.Module):
     local_sum = jnp.reshape(local_sum, (local_sum.shape[0], local_sum.shape[1], local_sum.shape[2] * local_sum.shape[3], 1))
 
     local_out = self.wv_product(local_exps, value, model_mode)
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      print("prefill")
+      print(local_out.shape)
+      local_out = partitioning.with_sharding_constraint(local_out, (BATCH, KV_LENGTH, HEAD, D_KV))
+      #local_out = partitioning.with_sharding_constraint(local_out, DECODE_BATCH, HEAD, D_KV)   
+    else:
+      print("decode")
+      print(local_out.shape)
+      local_out = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, None, HEAD, D_KV))
 
-    local_out = partitioning.with_sharding_constraint(local_out, (BATCH, KV_LENGTH, HEAD, D_KV))
 
     if self.reshape_q and q_seq_len == 1:
       local_max = local_max[:, 0:1, :, :]
       local_sum = local_sum[:, 0:1, :, :]
       local_out = local_out[:, 0:1, :, :]
 
+    if model_mode != common_types.MODEL_MODE_PREFILL:
+      local_max = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, None, HEAD, D_KV))
+      local_sum = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, None, HEAD, D_KV))
+      local_out = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, None, HEAD, D_KV))
+
+    print(local_sum.shape)
+    print(local_max.shape)
     return local_out, local_max, local_sum
 
   def apply_attention_dot(
@@ -493,9 +510,9 @@ class AttentionOp(nn.Module):
     q_seq_len = query.shape[1]
     # special sharding for decode
     if self.config.ici_context_parallelism > 0 and q_seq_len == 1:
-      query = partitioning.with_sharding_constraint(query, (KV_LENGTH, None, HEAD, D_KV))
-      key = partitioning.with_sharding_constraint(key, (KV_LENGTH, None, HEAD, D_KV))
-      value = partitioning.with_sharding_constraint(value, (KV_LENGTH, None, HEAD, D_KV))
+      query = partitioning.with_sharding_constraint(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+      key = partitioning.with_sharding_constraint(key, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+      value = partitioning.with_sharding_constraint(value, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
     else:
       query = partitioning.with_sharding_constraint(query, (BATCH, LENGTH, HEAD, D_KV))
       key = partitioning.with_sharding_constraint(key, (BATCH, KV_LENGTH, HEAD, D_KV))
@@ -546,6 +563,9 @@ class AttentionOp(nn.Module):
     b, t, n, d = query.shape
     n_kv = key.shape[-2]
     assert n_kv == self.num_kv_heads
+    print(query.shape)
+    print(key.shape)
+    print(self.compute_axis_order)
     if model_mode == common_types.MODEL_MODE_TRAIN or self.compute_axis_order == (0, 1, 2, 3):
       query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
       if self.reshape_q and q_seq_len == 1:
@@ -846,6 +866,7 @@ class AttentionOp(nn.Module):
     one_token_value_shaped_for_cache = jnp.transpose(one_token_value, self.ar_cache_axis_order)
 
     ar_cache_axis_names = self.transpose_tuple(self.cache_logical_axis_names, self.ar_cache_axis_order)
+    print(ar_cache_axis_names)
     if self.kv_quant:
       one_token_key_shaped_for_cache, one_token_key_scale_shaped_for_cache = self.kv_quant.quantize(
           one_token_key_shaped_for_cache, ar_cache_axis_names
@@ -890,7 +911,7 @@ class AttentionOp(nn.Module):
       cached_value_var.value = jax.lax.dynamic_update_index_in_dim(
           cached_value_var.value, one_token_value_shaped_for_cache, ar_cache_update_idx, ar_cache_update_axis
       )
-
+    print("cv", cached_value_var.value.shape)
     cached_key_var.value = nn.with_logical_constraint(cached_key_var.value, ar_cache_axis_names)
     cached_value_var.value = nn.with_logical_constraint(cached_value_var.value, ar_cache_axis_names)
 
@@ -1139,9 +1160,11 @@ class Attention(nn.Module):
   prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   input_axis_names: AxisNames = (BATCH, LENGTH, EMBED)
+  decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED)
   key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+  decode_out_axis_names = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV)
 
   prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
   ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
@@ -1347,8 +1370,12 @@ class Attention(nn.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
-    inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
-    inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)   
+    else:
+      inputs_q = nn.with_logical_constraint(inputs_q, self.decode_input_axis_names)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.decode_input_axis_names)
 
     # apply projection.
     if self.config.fused_qkv:
@@ -1366,6 +1393,10 @@ class Attention(nn.Module):
       query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
       key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
       value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
+    elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+      query = nn.with_logical_constraint(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+      key = nn.with_logical_constraint(key,(DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
+      value = nn.with_logical_constraint(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))      
     else:
       query = nn.with_logical_constraint(query, self.query_axis_names)
       key = nn.with_logical_constraint(key, self.key_axis_names)
@@ -1378,7 +1409,10 @@ class Attention(nn.Module):
 
     out = self.attention_op(query, key, value, decoder_segment_ids, model_mode)
 
-    out = nn.with_logical_constraint(out, self.out_axis_names)
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      out = nn.with_logical_constraint(out, self.out_axis_names)
+    else:
+      out = nn.with_logical_constraint(out, self.decode_out_axis_names)
 
     # apply output projection,  output dim is set to the input dim.
     out = self.out_projection(inputs_q.shape[-1], out)
