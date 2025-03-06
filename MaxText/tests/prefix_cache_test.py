@@ -248,25 +248,25 @@ class PrefixCacheTrieTest(unittest.TestCase):
     assert trie.get_longest_common_prefix_key((4, 5, 6)) == (4, 5, 6)
 
 
-class HBMCacheTest(unittest.TestCase):
+class BasicCacheTest(unittest.TestCase):
 
   def test_is_enough_space_remain(self):
     value = create_default_value()
-    hbm_cache = prefix_cache.HBMCache(max_size_bytes=value.prefix_size_bytes)
+    hbm_cache = prefix_cache.BasicCache(max_size_bytes=value.prefix_size_bytes)
     assert hbm_cache.has_enough_space(value) is True
-    hbm_cache = prefix_cache.HBMCache(max_size_bytes=value.prefix_size_bytes - 1)
+    hbm_cache = prefix_cache.BasicCache(max_size_bytes=value.prefix_size_bytes - 1)
     assert hbm_cache.has_enough_space(value) is False
 
   def test_add_to_cache_and_fetch_with_key_exactly_matched(self):
     key = (1, 2, 3)
     value = create_default_value()
-    hbm_cache = prefix_cache.HBMCache(max_size_bytes=value.prefix_size_bytes)
+    hbm_cache = prefix_cache.BasicCache(max_size_bytes=value.prefix_size_bytes)
     assert hbm_cache.add_to_cache(key, value) is True
     assert hbm_cache.retrieve_from_cache(key) == value
 
   def test_add_to_cache_fail_if_not_enough_space(self):
     value = create_default_value()
-    hbm_cache = prefix_cache.HBMCache(max_size_bytes=value.prefix_size_bytes * 2 - 1)
+    hbm_cache = prefix_cache.BasicCache(max_size_bytes=value.prefix_size_bytes * 2 - 1)
     assert hbm_cache.add_to_cache((1,), value) is True
     # The second one will exceed 1 bytes
     assert hbm_cache.add_to_cache((2,), value) is False
@@ -275,13 +275,13 @@ class HBMCacheTest(unittest.TestCase):
   def test_cannot_retrieve_not_exactly_matched_key(self):
     key = (1, 2, 3)
     value = create_default_value()
-    hbm_cache = prefix_cache.HBMCache(max_size_bytes=value.prefix_size_bytes)
+    hbm_cache = prefix_cache.BasicCache(max_size_bytes=value.prefix_size_bytes)
     assert hbm_cache.add_to_cache(key, value) is True
     assert hbm_cache.retrieve_from_cache((1, 2, 4)) is None
     assert hbm_cache.retrieve_from_cache((1, 2)) is None
 
   def test_add_and_retrieve_multiple_keys(self):
-    hbm_cache = prefix_cache.HBMCache(max_size_bytes=1_000_000)
+    hbm_cache = prefix_cache.BasicCache(max_size_bytes=1_000_000)
     value1 = create_default_value(tokens=[1])
     hbm_cache.add_to_cache((1,), value1)
     value2 = create_default_value(tokens=[2])
@@ -291,14 +291,14 @@ class HBMCacheTest(unittest.TestCase):
 
   def test_evict_cache_return_evicted_value(self):
     value = create_default_value()
-    hbm_cache = prefix_cache.HBMCache(max_size_bytes=value.prefix_size_bytes)
+    hbm_cache = prefix_cache.BasicCache(max_size_bytes=value.prefix_size_bytes)
     hbm_cache.add_to_cache((1,), value)
     evict_value = hbm_cache.evict_cache((1,))
     assert evict_value == value
 
   def test_evict_cache_will_release_the_memory_usage_and_cannot_retrieve_and_evict_after_evict(self):
     value = create_default_value()
-    hbm_cache = prefix_cache.HBMCache(max_size_bytes=value.prefix_size_bytes)
+    hbm_cache = prefix_cache.BasicCache(max_size_bytes=value.prefix_size_bytes)
     hbm_cache.add_to_cache((1,), value)
     # memory is not enough
     assert hbm_cache.add_to_cache((2,), create_default_value()) is False
@@ -318,7 +318,7 @@ class HBMCacheTest(unittest.TestCase):
         2,
     )
     value2 = create_default_value(tokens=key2)
-    hbm_cache = prefix_cache.HBMCache(max_size_bytes=value1.prefix_size_bytes * 2)
+    hbm_cache = prefix_cache.BasicCache(max_size_bytes=value1.prefix_size_bytes * 2)
     hbm_cache.add_to_cache(key1, value1)
     hbm_cache.add_to_cache(key2, value2)
     evict_value = hbm_cache.evict_cache(key2)
@@ -327,6 +327,26 @@ class HBMCacheTest(unittest.TestCase):
     assert hbm_cache.retrieve_from_cache(key1) is not None
     evict_value = hbm_cache.evict_cache(key1)
     assert hbm_cache.retrieve_from_cache(key1) is None
+
+
+class HBMCacheTest(unittest.TestCase):
+  """Test roughly for HBMCache while HBMCache is a wrapper of BasicCache."""
+
+  def test_basic_usage(self):
+    """Test basic usage of HBMCache checking all functions work."""
+    value = create_default_value()
+    hbm_cache = prefix_cache.HBMCache(max_size_bytes=value.prefix_size_bytes)
+    assert hbm_cache.has_enough_space(value) is True
+    assert hbm_cache.add_to_cache((1,), value) is True
+    assert hbm_cache.retrieve_from_cache((1,)) == value
+    # Only have one value size, and cannot afford the second.
+    assert hbm_cache.has_enough_space(value) is False
+    assert hbm_cache.evict_cache((1,)) == value
+    assert hbm_cache.retrieve_from_cache((1,)) is None
+    assert hbm_cache.evict_cache((1,)) is None
+    # After evict, it should have enough space
+    assert hbm_cache.has_enough_space(value) is True
+    assert hbm_cache.add_to_cache((1,), value) is True
 
 
 class LRUStrategyTest(unittest.TestCase):

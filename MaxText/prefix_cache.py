@@ -268,16 +268,13 @@ class PrefixCacheTrie:
       node = parent
 
 
-class HBMCache:
-  """Stores kv cache values in HBM.
-
-  Cache is remain the sharding status before save.
-  """
+class BasicCache:
+  """Basic cache implement calculating size and save value into dict without modify."""
 
   def __init__(self, max_size_bytes: int):
     """
     Args:
-      max_size_bytes: Maximum bytes of HBM to use for cache
+      max_size_bytes: Maximum bytes use for cache
     """
     self._remain_size_bytes = max_size_bytes
     self._saved_values: dict[Key, Value] = {}
@@ -287,14 +284,16 @@ class HBMCache:
     return self._remain_size_bytes >= value.prefix_size_bytes
 
   def add_to_cache(self, key: Key, value: Value) -> bool:
-    """
-    Value will be moved to the cache, which means cannot used the same value reference after add_to_cache.
-
-    The jax may modified the value even stored in another python reference.
-    If the value need to be used after add_to_cache, make sure copy them before add_to_cache.
-    Return False if cache is full.
+    """Add value to cache and return False if cache is full.
+    The value will not copied. Be aware not to modify the value after add to cache.
+    Cache is expected to have enough space.
     """
     if not self.has_enough_space(value):
+      logger.warning(
+          "should check enough space before add to cache, but remain=%d not enough for value=%d",
+          self._remain_size_bytes,
+          value.prefix_size_bytes,
+      )
       return False
 
     self._saved_values[key] = value
@@ -303,19 +302,63 @@ class HBMCache:
 
   def retrieve_from_cache(self, key: Key) -> Optional[Value]:
     """Return value from cache or None if not found.
-    Be aware the cache is not return a copy. If additional modified needed, clone the Value first.
+    Be aware the cache is not return a copy. Clone the Value first if additional modification needed,
+    Key is expected to be found.
     """
-    if key in self._saved_values:
-      return self._saved_values[key]
-    return None
+    if key not in self._saved_values:
+      logger.warning("key=%r should exist in cache before retrieve, but not found", key)
+      return None
+    return self._saved_values[key]
 
   def evict_cache(self, key: Key) -> Optional[Value]:
-    """Evict and return value, or None if key is not in cache."""
+    """Evict and return value, or None if key is not in cache.
+    Key is expected to be found.
+    """
     if key not in self._saved_values:
+      logger.warning("key=%r should exist in cache before evict, but not found", key)
       return None
     value = self._saved_values.pop(key)
     self._remain_size_bytes += value.prefix_size_bytes
     return value
+
+
+class HBMCache:
+  """Stores kv cache values in HBM.
+
+  Cache is remain the sharding status before save.
+  It is wrapper for BasicCache which do not modify the value.
+  If the Value is not in HBM, it will still not in HBM after saved.
+  """
+
+  def __init__(self, max_size_bytes: int):
+    """
+    Args:
+      max_size_bytes: Maximum bytes of HBM to use for cache
+    """
+    self._cache = BasicCache(max_size_bytes)
+
+  def has_enough_space(self, value: Value) -> bool:
+    """Calculate if value size can add to cache."""
+    return self._cache.has_enough_space(value)
+
+  def add_to_cache(self, key: Key, value: Value) -> bool:
+    """Value will be moved to the cache, which means cannot used the same value reference after add_to_cache.
+    Cache is expected to have enough space.
+    """
+    return self._cache.add_to_cache(key, value)
+
+  def retrieve_from_cache(self, key: Key) -> Optional[Value]:
+    """Return value from cache or None if not found.
+    Be aware the cache is not return a copy. Clone the Value first if additional modification needed,
+    Key is expected to be found.
+    """
+    return self._cache.retrieve_from_cache(key)
+
+  def evict_cache(self, key: Key) -> Optional[Value]:
+    """Evict and return value, or None if key is not in cache.
+    Key is expected to be found.
+    """
+    return self._cache.evict_cache(key)
 
 
 class LRUStrategy:
