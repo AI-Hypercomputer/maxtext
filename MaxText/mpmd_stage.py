@@ -349,7 +349,7 @@ class PipelineStage:
       self.grad_and_update_func = jax.jit(
           grad_and_update,
           donate_argnums=0,
-          in_shardings=(self.state_mesh_shardings, self.input_sharding()),
+          in_shardings=(self.state_mesh_shardings, self.input_sharding(), self.input_sharding()),
           out_shardings=(self.state_mesh_shardings, self.input_sharding()),
       )
     else:
