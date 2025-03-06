@@ -435,6 +435,7 @@ llama2_70b_4096_sc = _add_to_model_dictionary(
         "sa_block_q": 1024,
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
+        "dump_hlo": True
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -444,7 +445,7 @@ llama2_70b_4096_sc = _add_to_model_dictionary(
   )
 )
 
-# Enable SparseCore Offloading of AR in an optimized model.
+# docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-pp-remat-again"'
 llama2_70b_4096_no_sc = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
@@ -467,6 +468,7 @@ llama2_70b_4096_no_sc = _add_to_model_dictionary(
         "sa_block_q": 1024,
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
+        "dump_hlo": True
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG

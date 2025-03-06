@@ -561,12 +561,12 @@ def main() -> int:
     for cluster_config in [
       # v5e_cluster_config,
       #v5p_cluster_config,
-      v6e_cluster_config, #yucmhab
-      #v6e_cluster_config_big
+      v6e_cluster_config, #yucmhab 3 slice cluster
+      #v6e_cluster_config_big # 48 slice cluster
       # another_config,
     ]:
       # Run workloads in the following slice configurations
-      for num_slices in [1,]:
+      for num_slices in [2,]:
         # Use the libtpu dependencies from:
         for libtpu_type in [
             # LibTpuType.CUSTOM
