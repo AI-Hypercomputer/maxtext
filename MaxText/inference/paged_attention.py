@@ -24,10 +24,12 @@ import common_types
 import jax.numpy as jnp
 from flax import linen as nn
 from jax.experimental import shard_map
-from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention
+from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention_kernel
 from jax.sharding import PartitionSpec as P
 
 from inference import page_manager
+
+# pytype: disable=attribute-error
 
 Mesh = common_types.Mesh
 
@@ -166,7 +168,7 @@ class PagedAttentionOp(nn.Module):
     )
     def wrap_paged_attention(q, k_pages, v_pages, lengths, page_indices, pages_per_compute_block):
       q = jnp.squeeze(q, axis=1)
-      result = paged_attention(
+      result = paged_attention_kernel.paged_attention(
           q=q,
           k_pages=k_pages,
           v_pages=v_pages,
@@ -193,8 +195,9 @@ class PagedAttentionOp(nn.Module):
       value: Array,
       decoder_segment_ids: Array,
       model_mode: str,
-      page_state: page_manager.PageState,
-  ) -> Array:
+      previous_chunk=None,
+      page_state: Optional[page_manager.PageState] = None,
+  ):
     """Apply paged attention mechanism.
 
     Returns:
