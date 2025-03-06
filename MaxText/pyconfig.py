@@ -449,6 +449,7 @@ class _HyperParameters:
     raw_keys = set_and_validate_pipeline_config(raw_keys)
     if raw_keys["attention"] == "paged":
       raw_keys["max_pages_per_slot"] = raw_keys["max_target_length"] // raw_keys["tokens_per_page"]
+      raw_keys["max_page_groups"] = int(raw_keys["per_device_batch_size"] * get_num_target_devices(raw_keys))
 
     if raw_keys["dataset_type"] == "c4_mlperf":
       raw_keys["add_bos"] = False

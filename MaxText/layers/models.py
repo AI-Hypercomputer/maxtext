@@ -30,7 +30,7 @@ from layers import embeddings
 from layers import linears
 from layers import normalizations, quantizations
 from layers import pipeline
-from page_manager import PageManager
+from page_manager import PageManager, PageState
 
 Array = common_types.Array
 Config = common_types.Config
@@ -93,7 +93,7 @@ class DecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
-      page_state_dict=None,
+      page_state=None,
       slot=None,
       true_length=None,
       layer_id=None,
@@ -112,34 +112,17 @@ class DecoderLayer(nn.Module):
     )(inputs)
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
 
-    is_initialized = False
-    key_pages = None
-    value_pages = None
-    page_map = None
-    sequence_lengths = None
-
-    if page_state_dict is not None:
-      page_state = page_state_dict["page_state"]  # Still get PageState
-      is_initialized = True
-      key_pages = page_state.key_pages[layer_id]
-      value_pages = page_state.value_pages[layer_id]
-      page_map = page_state.page_map[layer_id]
-      sequence_lengths = page_state.sequence_lengths[layer_id]
-
-    attention_lnx = self.attention_layer(
+    # Pass the page state info correctly to the attention layer
+    attention_lnx, updated_page_state, updated_cache = self.attention_layer(
         lnx,
         lnx,
         decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         model_mode=model_mode,
-        page_group_id=slot,
+        page_state=page_state,  # Use page_state
+        slot=slot,
         true_length=true_length,
         layer_id=layer_id,
-        key_pages=key_pages,
-        value_pages=value_pages,
-        page_map=page_map,
-        sequence_lengths=sequence_lengths,
-        is_initialized=is_initialized,
         use_fused_qkv=self.use_fused_qkv if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE else None,
     )
 
@@ -179,8 +162,7 @@ class DecoderLayer(nn.Module):
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
-    return layer_output, None if cfg.scan_layers else layer_output
-
+    return layer_output, updated_page_state, updated_cache
 
 class SequentialBlockDecoderLayers(nn.Module):
   """Sequential unscanned series of decoder layers."""
@@ -192,14 +174,18 @@ class SequentialBlockDecoderLayers(nn.Module):
   quant: Quant
 
   @nn.compact
-  def __call__(self, inputs: jnp.ndarray, decoder_segment_ids, decoder_positions, deterministic, model_mode) -> jnp.ndarray:
+  def __call__(self, inputs: jnp.ndarray, decoder_segment_ids, decoder_positions, deterministic, model_mode, page_state=None, slot=None, true_length=None) -> jnp.ndarray:
     for lyr in range(self.num_decoder_layers):
-      inputs = self.decoder_layer(config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant)(
+      inputs, _, _ = self.decoder_layer(config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant)(
           inputs,
           decoder_segment_ids,
           decoder_positions,
           deterministic,
           model_mode,
+          page_state,
+          slot,
+          true_length,
+          lyr
       )
     return inputs
 
@@ -211,7 +197,7 @@ class Decoder(nn.Module):
   shared_embedding: nn.Module
   mesh: Mesh
   quant: Optional[Quant] = None
-  page_manager: Optional[PageManager] = None
+  page_manager: Optional[PageManager] = None # This should not be needed.
 
   def setup(self):
     """Initialize decoder layer."""
@@ -416,7 +402,7 @@ class Decoder(nn.Module):
       model_mode=common_types.MODEL_MODE_TRAIN,
       slot=None,
       true_length=None,
-      page_state_dict=None,
+      page_state=None, # Keep this!
   ):
     cfg = self.config
     mesh = self.mesh
@@ -440,6 +426,7 @@ class Decoder(nn.Module):
       )(decoder_positions)
 
     if cfg.using_pipeline_parallelism:
+      # ... (pipeline logic unchanged) ...
       if cfg.pipeline_fsdp_ag_once:
         partition_spec = self.pipeline_module.get_weight_sharding(
             y,
@@ -458,25 +445,38 @@ class Decoder(nn.Module):
             model_mode,
             partition_spec=partition_spec,
         )
-    else:
-      # Process all layers
-      for layer_id in range(cfg.num_decoder_layers):
-        RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, self.get_remat_policy())
-        current_layer_class = RemattedBlockLayers[layer_id % len(RemattedBlockLayers)]
-        layer_instance = current_layer_class(config=cfg, mesh=mesh, name=f"layers_{layer_id}", quant=self.quant)
 
-        # Call layer with page state
-        y, _ = layer_instance(
-            y,
-            decoder_segment_ids,
-            decoder_positions,
-            deterministic,
-            model_mode,
-            page_state_dict=page_state_dict,
-            slot=slot,
-            true_length=true_length,
-            layer_id=layer_id,
-        )
+    else:
+        # Initialize page_state to the input, and it will be updated each layer.
+        current_page_state = page_state
+
+        # Process all layers
+        for layer_id in range(cfg.num_decoder_layers):
+            RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, self.get_remat_policy())
+            current_layer_class = RemattedBlockLayers[layer_id % len(RemattedBlockLayers)]
+            layer_instance = current_layer_class(config=cfg, mesh=mesh, name=f"layers_{layer_id}", quant=self.quant)
+
+            # Call layer with page state
+            y, updated_page_state, updated_cache = layer_instance(
+                y,
+                decoder_segment_ids,
+                decoder_positions,
+                deterministic,
+                model_mode,
+                page_state=current_page_state,  # Pass current state
+                slot=slot,
+                true_length=true_length,
+                layer_id=layer_id,
+            )
+
+            # Update page_state for the next layer
+            current_page_state = updated_page_state
+
+            # If in PREFILL mode, update mutable cache.
+            # REMOVE THESE LINES:
+            # if model_mode == common_types.MODEL_MODE_PREFILL and cfg.attention == "paged":
+            #     self.at["cache", "decoder", f"layers_{layer_id}", "key_pages"].set(updated_cache["decoder"][f"layers_{layer_id}"]["key_pages"])
+            #     self.at["cache", "decoder", f"layers_{layer_id}", "value_pages"].set(updated_cache["decoder"][f"layers_{layer_id}"]["value_pages"])
 
     y = self.get_norm_layer()(
         dtype=cfg.dtype,
@@ -514,8 +514,8 @@ class Decoder(nn.Module):
     )
     if self.config.cast_logits_to_fp32:
       logits = logits.astype(jnp.float32)
-    return logits
 
+    return logits, current_page_state  # Return updated page_state
 
 class Transformer(nn.Module):
   """A decoder-only Transformer model."""
@@ -554,11 +554,11 @@ class Transformer(nn.Module):
       model_mode=common_types.MODEL_MODE_TRAIN,
       slot=None,
       true_length=None,
-      page_state_dict=None,
+      page_state=None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target."""
 
-    logits = self.decoder(
+    logits, updated_page_state = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
@@ -566,6 +566,6 @@ class Transformer(nn.Module):
         model_mode=model_mode,
         slot=slot,
         true_length=true_length,
-        page_state_dict=page_state_dict,
+        page_state=page_state,
     )
-    return logits
+    return logits, updated_page_state # Also return updated page state here!

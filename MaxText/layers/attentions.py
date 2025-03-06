@@ -166,7 +166,7 @@ def get_initial_contiguous_kv_cache(model, config, batch_size, abstract=False):
   """Creates the initial (all zeros) KV cache."""
   if abstract:
     input_shape = (batch_size, 1)
-    key = jax.random.PRNGKey(0)
+    key = jax.random.PRNGKey(0)  # Need a key for jax.eval_shape
     cache = jax.eval_shape(
         lambda: model.init(
             {"params": key, "dropout": key, "aqt": key},
@@ -187,23 +187,21 @@ def get_initial_contiguous_kv_cache(model, config, batch_size, abstract=False):
 def get_prefill_paged_kv_cache_annotations(model, config, rng, mesh):
   if config.attention == "paged":
     with nn_partitioning.axis_rules(config.logical_axis_rules):
-      input_shape = (config.global_batch_size_to_load, config.max_prefill_predict_length)
-
-      # Use jax.eval_shape to get the shapes and dtypes *without* allocating memory.
-      def init_fn():
-        return model.init(
-            {"params": rng, "dropout": rng, "cache": rng, "page_manager": rng},
-            jnp.ones(input_shape, dtype=jnp.int32),
-            jnp.ones(input_shape, dtype=jnp.int32),
-            decoder_segment_ids=None,
-            enable_dropout=False,
-            model_mode=common_types.MODEL_MODE_PREFILL,  # Ensure PREFILL mode
+        # Return an initialized PageState
+        page_manager = PageManager(
+            num_pages=config.num_pages,
+            tokens_per_page=config.tokens_per_page,
+            max_page_groups=int(config.per_device_batch_size * jax.device_count()),
+            max_target_length=config.max_target_length,
+            max_prefill_predict_length=config.max_prefill_predict_length,
+            max_pages_per_group=(config.max_target_length + config.tokens_per_page - 1) // config.tokens_per_page,
+            num_layers=config.num_decoder_layers,
+            config=config,
         )
-
-      variables = jax.eval_shape(init_fn)  # Use eval_shape
-      return variables.get("cache", {})
+        return page_manager.get_page_state()
 
   raise ValueError("Incorrect config.attention. Expected paged")
+
 
 
 def get_initial_paged_kv_cache(model, config, batch_size, abstract=False):
@@ -224,14 +222,14 @@ def get_initial_paged_kv_cache(model, config, batch_size, abstract=False):
     )
     initial_page_state = page_manager.get_page_state()
 
-    cache = {}
-    cache["page_manager"] = initial_page_state
-
     # Create the per-layer structure for key_pages and value_pages
     key_pages_shape = (config.num_pages, config.tokens_per_page, config.num_kv_heads, config.head_dim)
     value_pages_shape = (config.num_pages, config.tokens_per_page, config.num_kv_heads, config.head_dim)
     key_pages_struct = jax.ShapeDtypeStruct(shape=key_pages_shape, dtype=config.dtype)
     value_pages_struct = jax.ShapeDtypeStruct(shape=value_pages_shape, dtype=config.dtype)
+    
+    cache = {}
+    cache["page_manager"] = initial_page_state
 
     decoder_cache = {}
     for i in range(config.num_decoder_layers):
@@ -240,323 +238,315 @@ def get_initial_paged_kv_cache(model, config, batch_size, abstract=False):
           "value_pages": value_pages_struct,
       }
     cache["decoder"] = decoder_cache
+
     return cache
   return {}
 
 
+# In attentions.py
+
 class PagedAttentionOp(nn.Module):
-  """Paged Attention Operator."""
+    """Paged Attention Operator that handles KV caching using a page-based approach."""
 
-  mesh: Any
-  num_kv_heads: int
-  kv_head_dim_size: int
-  config: Config
-  output_dim: int
-  dtype: Any = jnp.bfloat16
-  quant: Optional[Any] = None
+    mesh: Any
+    num_kv_heads: int
+    num_query_heads: int
+    kv_head_dim_size: int
+    config: Config
+    output_dim: int
+    dtype: Any = jnp.bfloat16
+    quant: Optional[Quant] = None
 
-  def out_projection(self, output_dim: int, out: Array) -> Array:
-    """Project attention output to model dimension."""
-    out_proj = DenseGeneral(
-        features=output_dim,
-        axis=(-2, -1),
-        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
-        kernel_axes=("heads", "kv", "embed"),
-        dtype=self.dtype,
-        weight_dtype=self.config.weight_dtype,
-        name="out",
-        quant=self.quant,
-        matmul_precision=self.config.matmul_precision,
-    )(out)
-    return out_proj
+    @nn.compact
+    def __call__(
+        self,
+        query: Array,
+        key: Array,
+        value: Array,
+        decoder_segment_ids: Array,
+        model_mode: str,
+        *,
+        page_state: Optional[PageState] = None,  # Optional, defaults to None
+        slot: Optional[int] = None,
+        true_length: Optional[int] = None,
+        layer_id: Optional[int] = None,
+    ) -> Tuple[jnp.ndarray, PageState, jnp.ndarray, jnp.ndarray]:  # Return updated PageState
+        """Apply paged attention and return output and updated states."""
 
-  def _paged_attention_for_prefill(
-      self,
-      query: Array,
-      key_pages: Array,
-      value_pages: Array,
-      page_map: Array,
-      sequence_lengths: Array,
-      page_group_id: int,
-  ) -> Array:
-    """Compute paged attention for prefill mode."""
-    batch_size, seq_len, num_heads, head_dim = query.shape
-    tokens_per_page = self.config.tokens_per_page
+        # Handle initialization (page_state is None).  Create a default state.
+        if page_state is None:
+            page_state = PageState(
+                page_status=jnp.zeros((self.config.num_decoder_layers, self.config.num_pages), dtype=jnp.int32),
+                page_map=jnp.full(
+                    (self.config.num_decoder_layers, self.config.max_page_groups, self.config.max_pages_per_group),
+                    -1,
+                    dtype=jnp.int32,
+                ),
+                sequence_lengths=jnp.zeros((self.config.num_decoder_layers, self.config.max_page_groups), dtype=jnp.int32),
+                num_pages_used=jnp.zeros((self.config.num_decoder_layers, self.config.max_page_groups), dtype=jnp.int32),
+                current_page=jnp.full((self.config.num_decoder_layers, self.config.max_page_groups), -1, dtype=jnp.int32),
+                current_page_position=jnp.zeros((self.config.num_decoder_layers, self.config.max_page_groups), dtype=jnp.int32),
+            )
 
-    true_length = sequence_lengths[page_group_id]
-    # Handle edge case where true_length is 0
-    if true_length == 0:
-      return jnp.zeros_like(query)
 
-    # Extract the page map for this page group
-    page_group_slice = jax.lax.dynamic_slice(page_map, (page_group_id, 0), (1, page_map.shape[1]))
-    group_page_map = jnp.squeeze(page_group_slice, axis=0)
+        # Initialize key_pages and value_pages with zeros.  These are *local* to this function.
+        key_pages = jnp.zeros(
+            (self.config.num_pages, self.config.tokens_per_page, self.num_kv_heads, self.kv_head_dim_size),
+            dtype=self.dtype,
+        )
+        value_pages = jnp.zeros(
+            (self.config.num_pages, self.config.tokens_per_page, self.num_kv_heads, self.kv_head_dim_size),
+            dtype=self.dtype,
+        )
 
-    # Initialize result array
-    result = jnp.zeros((batch_size, seq_len, num_heads, head_dim), dtype=query.dtype)
 
-    # Calculate number of pages needed
-    num_pages = (true_length + tokens_per_page - 1) // tokens_per_page
+        if model_mode == common_types.MODEL_MODE_PREFILL:
+            key_pages, value_pages, page_state = self._handle_prefill(  # Get updated page_state
+                key_pages, value_pages, key, value, page_state, slot, layer_id, true_length
+            )
+        elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+            key_pages, value_pages, page_state = self._handle_autoregressive(
+                key_pages, value_pages, key, value, page_state, slot, layer_id
+            )
 
-    for page_idx in range(num_pages):
-      physical_page = group_page_map[page_idx]
+        attention_output = self._compute_attention(
+            query, key_pages, value_pages, page_state, slot, layer_id, true_length, model_mode
+        )
 
-      # Skip invalid pages
-      if physical_page < 0:
-        continue
+        # Always return the updated page_state.
+        return attention_output, page_state, key_pages, value_pages
 
-      # Calculate token range for this page
-      start_token = page_idx * tokens_per_page
-      end_token = jnp.minimum((page_idx + 1) * tokens_per_page, true_length)
-      tokens_in_page = end_token - start_token
+    def _handle_prefill(
+        self,
+        key_pages: jnp.ndarray,
+        value_pages: jnp.ndarray,
+        key: jnp.ndarray,
+        value: jnp.ndarray,
+        page_state: PageState,
+        slot: int,
+        layer_id: int,
+        true_length: Optional[int],
+    ) -> Tuple[jnp.ndarray, jnp.ndarray, PageState]:
+        """Handle prefill mode by storing KV data in pages."""
 
-      # Slice query to match tokens in page
-      query_slice = jax.lax.dynamic_slice(query, (0, start_token, 0, 0), (batch_size, tokens_in_page, num_heads, head_dim))
+        if true_length is None:
+            true_length = 0
 
-      # Extract key/value data for this page
-      page_key_data = jax.lax.dynamic_slice(
-          key_pages, (physical_page, 0, 0, 0), (1, tokens_per_page, self.num_kv_heads, head_dim)
-      )
-      page_value_data = jax.lax.dynamic_slice(
-          value_pages, (physical_page, 0, 0, 0), (1, tokens_per_page, self.num_kv_heads, head_dim)
-      )
+        max_seq_len = jnp.minimum(self.config.max_prefill_predict_length, key.shape[1])
+        if layer_id is None:
+            layer_id = 0
+        page_map = page_state.page_map[layer_id, slot]
 
-      # Remove the first dimension
-      page_key_data = jnp.squeeze(page_key_data, axis=0)
-      page_value_data = jnp.squeeze(page_value_data, axis=0)
+        for page_idx in range(self.config.max_pages_per_group):
+            physical_page = page_map[page_idx]
+            start_idx = page_idx * self.config.tokens_per_page
 
-      # Use only the valid tokens in this page
-      page_key_data = page_key_data[:tokens_in_page]
-      page_value_data = page_value_data[:tokens_in_page]
+            def fill_page(args):
+                key_pages, value_pages, key, value, physical_page, start_idx, true_length, page_idx = args
 
-      # Compute attention with basic operations to avoid einsum issues
-      qk_product = jnp.zeros((batch_size, tokens_in_page, num_heads, tokens_in_page), dtype=query.dtype)
+                num_pages_needed = (true_length + self.config.tokens_per_page - 1) // self.config.tokens_per_page
+                end_idx = jnp.minimum(start_idx + self.config.tokens_per_page, jnp.minimum(max_seq_len, true_length))
+                tokens_in_page = jnp.maximum(0, end_idx - start_idx)
 
-      # Manual implementation of attention
-      for b in range(batch_size):
-        for t1 in range(tokens_in_page):
-          for h in range(num_heads):
-            # Map query head to corresponding kv head in GQA setup
-            kv_head = h % self.num_kv_heads
-            for t2 in range(tokens_in_page):
-              # Dot product for each token pair
-              dot_product = 0.0
-              for d in range(head_dim):
-                dot_product += query_slice[b, t1, h, d] * page_key_data[t2, kv_head, d]
-              # Scale and store
-              qk_product = qk_product.at[b, t1, h, t2].set(dot_product / jnp.sqrt(head_dim))
+                # CRITICAL: Slice out the *maximum* possible size.  This makes the shape static.
+                page_k = jax.lax.dynamic_slice(
+                    key,
+                    (0, start_idx, 0, 0),
+                    (1, self.config.tokens_per_page, self.num_kv_heads, self.kv_head_dim_size),  # Fixed size!
+                )
+                page_v = jax.lax.dynamic_slice(
+                    value,
+                    (0, start_idx, 0, 0),
+                    (1, self.config.tokens_per_page, self.num_kv_heads, self.kv_head_dim_size),  # Fixed size!
+                )
 
-      # Create and apply causal mask
-      mask = jnp.tril(jnp.ones((tokens_in_page, tokens_in_page), dtype=jnp.bool_))
-      mask = jnp.reshape(mask, (1, tokens_in_page, 1, tokens_in_page))
-      masked_qk_product = jnp.where(mask, qk_product, jnp.full_like(qk_product, -1e10))
+                page_k = jnp.reshape(page_k, (self.config.tokens_per_page, self.num_kv_heads, self.kv_head_dim_size))
+                page_v = jnp.reshape(page_v, (self.config.tokens_per_page, self.num_kv_heads, self.kv_head_dim_size))
 
-      # Apply softmax along the last dimension
-      attn_weights = jax.nn.softmax(masked_qk_product, axis=-1)
 
-      # Compute attention output
-      attn_output = jnp.zeros((batch_size, tokens_in_page, num_heads, head_dim), dtype=query.dtype)
+                # Use jnp.where (or jax.lax.select) for conditional updates
+                should_fill = (page_idx < num_pages_needed) & (tokens_in_page > 0) & (physical_page >= 0)
 
-      # Manual implementation of attention output
-      for b in range(batch_size):
-        for t1 in range(tokens_in_page):
-          for h in range(num_heads):
-            # Map query head to corresponding kv head in GQA setup
-            kv_head = h % self.num_kv_heads
-            for d in range(head_dim):
-              # Weighted sum for each output dimension
-              weighted_sum = 0.0
-              for t2 in range(tokens_in_page):
-                weighted_sum += attn_weights[b, t1, h, t2] * page_value_data[t2, kv_head, d]
-              attn_output = attn_output.at[b, t1, h, d].set(weighted_sum)
+                # Create a mask for the valid tokens within the page
+                valid_token_mask = jnp.arange(self.config.tokens_per_page) < tokens_in_page # shape (tokens_per_page)
+                # Expand the mask to be compatible with key_pages and value_pages.
+                mask = valid_token_mask[:, None, None] # shape (tokens_per_page, 1, 1)
 
-      # Update the result with the attention output for this page
-      result = jax.lax.dynamic_update_slice(result, attn_output, (0, start_token, 0, 0))
+                # Use jnp.where to select between updated page and existing page.
+                updated_key_page = jnp.where(mask, page_k, 0) # Zero out invalid parts
+                updated_value_page = jnp.where(mask, page_v, 0)
 
-    return result
+                # We can now set the WHOLE page, and the mask ensures only valid parts are changed
+                key_pages = jnp.where(should_fill, key_pages.at[physical_page].set(updated_key_page), key_pages)
+                value_pages = jnp.where(should_fill, value_pages.at[physical_page].set(updated_value_page), value_pages)
 
-  def _paged_attention_for_decode(
-      self,
-      query: Array,
-      key_pages: Array,
-      value_pages: Array,
-      page_map: Array,
-      sequence_lengths: Array,
-      page_group_id: int,
-  ) -> Array:
-    """Compute paged attention for autoregressive decode mode."""
-    batch_size, seq_len, num_heads, head_dim = query.shape
-    assert seq_len == 1, "Decode mode expects sequence length of 1"
-    tokens_per_page = self.config.tokens_per_page
+                return key_pages, value_pages, should_fill  # Return should_fill
 
-    # Get the current sequence length (before adding new token)
-    current_seq_len = sequence_lengths[page_group_id]
 
-    # Early return if sequence is empty
-    if current_seq_len == 0:
-      return jnp.zeros_like(query)
+            def skip_page(args):
+                key_pages, value_pages, key, value, physical_page, start_idx, true_length, page_idx = args
+                num_pages_needed = (true_length + self.config.tokens_per_page - 1) // self.config.tokens_per_page
+                end_idx = jnp.minimum(start_idx + self.config.tokens_per_page, jnp.minimum(max_seq_len, true_length))
+                tokens_in_page = jnp.maximum(0, end_idx - start_idx)
+                should_fill = (page_idx < num_pages_needed) & (tokens_in_page > 0) & (physical_page >= 0)
+                return key_pages, value_pages, should_fill
 
-    # Calculate which page the current token is in
-    page_idx = current_seq_len // tokens_per_page
-    position_in_page = current_seq_len % tokens_per_page
+            args = (key_pages, value_pages, key, value, physical_page, start_idx, true_length, page_idx)
+            key_pages, value_pages, should_fill = jax.lax.cond(True, fill_page, skip_page, args)
 
-    # Get the page map for this page group
-    page_group_slice = jax.lax.dynamic_slice(page_map, (page_group_id, 0), (1, page_map.shape[1]))
-    group_page_map = jnp.squeeze(page_group_slice, axis=0)
+        layer_id = layer_id if layer_id is not None else 0
+        return key_pages, value_pages, page_state
 
-    # Initialize the attention output
-    result = jnp.zeros((batch_size, 1, num_heads, head_dim), dtype=query.dtype)
+    def _handle_autoregressive(
+        self,
+        key_pages: jnp.ndarray,
+        value_pages: jnp.ndarray,
+        key: jnp.ndarray,
+        value: jnp.ndarray,
+        page_state: PageState,
+        slot: int,
+        layer_id: Optional[int],  # layer_id can be optional
+    ) -> Tuple[jnp.ndarray, jnp.ndarray, PageState]:
+        """Handle autoregressive mode by updating the cache with the new token."""
+        if slot is None: # Handle None slot.
+              slot = 0
+        if layer_id is None:  # Handle potential None layer_id
+              layer_id = 0
 
-    # We'll accumulate attention scores and then normalize at the end
-    all_scores = []
-    all_values = []
+        # Get the current sequence length, handling potential None page_state.
+        curr_seq_len = page_state.sequence_lengths[layer_id, slot]
 
-    # Process each page
-    for idx in range(page_idx + 1):
-      physical_page = group_page_map[idx]
+        # Calculate logical page and position
+        logical_page = curr_seq_len // self.config.tokens_per_page
+        pos_in_page = curr_seq_len % self.config.tokens_per_page
 
-      # Skip invalid pages
-      if physical_page < 0:
-        continue
 
-      # Determine number of tokens to attend to in this page
-      if idx < page_idx:
-        # For previous pages, attend to all tokens
-        tokens_to_attend = tokens_per_page
-      else:
-        # For current page, attend only up to current position
-        tokens_to_attend = position_in_page
+        physical_page = jnp.take(
+            page_state.page_map[layer_id, slot],
+            jnp.minimum(logical_page, self.config.max_pages_per_group - 1),
+        )
 
-      # Skip if no tokens to attend
-      if tokens_to_attend <= 0:
-        continue
+        # Store the new token data
+        key_pages = key_pages.at[physical_page, pos_in_page].set(key[0, 0])
+        value_pages = value_pages.at[physical_page, pos_in_page].set(value[0, 0])
 
-      # Extract key/value data for this page
-      page_key_data = jax.lax.dynamic_slice(
-          key_pages, (physical_page, 0, 0, 0), (1, tokens_per_page, self.num_kv_heads, head_dim)
-      )
-      page_value_data = jax.lax.dynamic_slice(
-          value_pages, (physical_page, 0, 0, 0), (1, tokens_per_page, self.num_kv_heads, head_dim)
-      )
+        # Update page state
+        new_seq_len = curr_seq_len + 1
+        new_seq_lengths = page_state.sequence_lengths.at[layer_id, slot].set(new_seq_len)
+        new_page_position = page_state.current_page_position.at[layer_id, slot].set(new_seq_len % self.config.tokens_per_page)
 
-      # Remove the first dimension
-      page_key_data = jnp.squeeze(page_key_data, axis=0)
-      page_value_data = jnp.squeeze(page_value_data, axis=0)
+        # Update only if physical_page is valid
+        updated_page_state = jax.lax.cond(
+            physical_page >= 0,
+            lambda ps: ps.replace(sequence_lengths=new_seq_lengths, current_page_position=new_page_position),
+            lambda ps: ps,  # Return original if invalid,
+            page_state
+        )
 
-      # Use only valid tokens
-      page_key_data = page_key_data[:tokens_to_attend]
-      page_value_data = page_value_data[:tokens_to_attend]
+        return key_pages, value_pages, updated_page_state
 
-      # Store for later processing
-      all_scores.append((page_key_data, tokens_to_attend))
-      all_values.append((page_value_data, tokens_to_attend))
 
-    # Now compute attention over all collected tokens
-    if not all_scores:  # No valid pages
-      return result
 
-    # Compute attention
-    # First, prepare a single attention operation over all tokens
-    total_tokens = sum(tokens for _, tokens in all_scores)
 
-    # Prepare flattened key and value tensors
-    flat_keys = jnp.zeros((total_tokens, self.num_kv_heads, head_dim), dtype=query.dtype)
-    flat_values = jnp.zeros((total_tokens, self.num_kv_heads, head_dim), dtype=query.dtype)
+    def _compute_attention(
+        self,
+        query: jnp.ndarray,
+        key_pages: jnp.ndarray,
+        value_pages: jnp.ndarray,
+        page_state: PageState,
+        slot: int,
+        layer_id: int,
+        true_length: int,
+        model_mode: str,
+    ) -> jnp.ndarray:
+        """Compute attention using the cached values."""
 
-    # Fill the flattened tensors
-    pos = 0
-    for (keys, token_count), (values, _) in zip(all_scores, all_values):
-      flat_keys = flat_keys.at[pos : pos + token_count].set(keys)
-      flat_values = flat_values.at[pos : pos + token_count].set(values)
-      pos += token_count
+        batch_size, seq_len, num_heads, head_dim = query.shape
+        if slot is None:
+              slot = 0
+        if layer_id is None: # Handle layer id
+              layer_id = 0
+        if true_length is None: # Handle None
+              true_length = 0
 
-    # Compute scores using dot product
-    scores = jnp.zeros((batch_size, num_heads, total_tokens), dtype=query.dtype)
+        # Gather key and value data based on page_map
+        gathered_k = []
+        gathered_v = []
+        num_pages_needed = (true_length + self.config.tokens_per_page - 1) // self.config.tokens_per_page
+        page_map = page_state.page_map[layer_id, slot]
 
-    # Manual dot product to avoid einsum issues
-    for b in range(batch_size):
-      for h in range(num_heads):
-        kv_head = h % self.num_kv_heads
-        for t in range(total_tokens):
-          dot_product = 0.0
-          for d in range(head_dim):
-            dot_product += query[b, 0, h, d] * flat_keys[t, kv_head, d]
-          scores = scores.at[b, h, t].set(dot_product)
+        # Loop over *all possible* page indices within a group.
+        for page_idx in range(self.config.max_pages_per_group):
+            physical_page = page_map[page_idx]
+            start_token_idx = page_idx * self.config.tokens_per_page
+            if model_mode == common_types.MODEL_MODE_PREFILL:
+                max_len = self.config.max_prefill_predict_length
+            else:
+                max_len = self.config.max_target_length
 
-    # Scale and apply softmax
-    scores = scores / jnp.sqrt(head_dim)
-    attention_weights = jax.nn.softmax(scores, axis=-1)
+            end_token_idx = jnp.minimum((page_idx + 1) * self.config.tokens_per_page, max_len)
+            num_tokens_in_page = jnp.maximum(0, end_token_idx - start_token_idx) # Ensure not negative
 
-    # Apply attention weights to values
-    for b in range(batch_size):
-      for h in range(num_heads):
-        kv_head = h % self.num_kv_heads
-        for d in range(head_dim):
-          weighted_sum = 0.0
-          for t in range(total_tokens):
-            weighted_sum += attention_weights[b, h, t] * flat_values[t, kv_head, d]
-          result = result.at[b, 0, h, d].set(weighted_sum)
+            def gather_page_data(args):
+                physical_page, = args
+                page_k = jax.lax.dynamic_slice(
+                    key_pages, (physical_page, 0, 0, 0), (1, self.config.tokens_per_page, self.num_kv_heads, head_dim)
+                )
+                page_v = jax.lax.dynamic_slice(
+                    value_pages, (physical_page, 0, 0, 0), (1, self.config.tokens_per_page, self.num_kv_heads, head_dim)
+                )
+                return page_k.squeeze(axis=0), page_v.squeeze(axis=0)
 
-    return result
+            def skip_gather(args):
+                return (
+                    jnp.zeros((self.config.tokens_per_page, self.num_kv_heads, head_dim), dtype=self.dtype),
+                    jnp.zeros((self.config.tokens_per_page, self.num_kv_heads, head_dim), dtype=self.dtype),
+                )
 
-  @nn.compact
-  def __call__(
-      self,
-      query: Array,
-      key: Array,
-      value: Array,
-      decoder_segment_ids: Array,
-      model_mode: str,
-      *,
-      page_state: Optional[PageState] = None,
-      page_group_id: Optional[int] = None,
-      true_length: Optional[int] = None,
-      layer_id: Optional[int] = None,
-      key_pages: Optional[jnp.ndarray] = None,
-      value_pages: Optional[jnp.ndarray] = None,
-      page_map: Optional[jnp.ndarray] = None,
-      sequence_lengths: Optional[jnp.ndarray] = None,
-      is_initialized: bool = False,
-      current_page: Optional[jnp.ndarray] = None,
-      current_page_position: Optional[jnp.ndarray] = None,
-  ) -> Union[Array, Tuple[Array, Array, Array]]:
-    """Paged attention implementation."""
-    # Handle uninitialized case
-    if not is_initialized:
-      batch_size = query.shape[0]
-      seq_len = query.shape[1]
-      return jnp.zeros((batch_size, seq_len, self.output_dim), dtype=query.dtype)
+            should_gather = (page_idx < num_pages_needed) & (physical_page >= 0) & (num_tokens_in_page > 0)
+            page_k, page_v = jax.lax.cond(should_gather, gather_page_data, skip_gather, (physical_page,)) # Pass physical page
+            gathered_k.append(page_k)
+            gathered_v.append(page_v)
+        if not gathered_k:
+            gathered_k = jnp.zeros((1, self.num_kv_heads, head_dim), dtype=self.dtype)
+            gathered_v = jnp.zeros((1, self.num_kv_heads, head_dim), dtype=self.dtype)
+        else:
+              gathered_k = jnp.concatenate(gathered_k, axis=0)
+              gathered_v = jnp.concatenate(gathered_v, axis=0)
 
-    # Choose the appropriate attention implementation based on model mode
-    if model_mode == common_types.MODEL_MODE_PREFILL:
-      # Prefill mode - allow any sequence length
-      attn_out = self._paged_attention_for_prefill(
-          query=query,
-          key_pages=key_pages,
-          value_pages=value_pages,
-          page_map=page_map,
-          sequence_lengths=sequence_lengths,
-          page_group_id=page_group_id,
-      )
-    elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-      # Autoregressive mode - enforce seq_len == 1
-      batch_size, seq_len, num_heads, head_dim = query.shape
-      if seq_len != 1:
-        raise ValueError(f"Decode mode expects sequence length of 1, got {seq_len}")
 
-      attn_out = self._paged_attention_for_decode(
-          query=query,
-          key_pages=key_pages,
-          value_pages=value_pages,
-          page_map=page_map,
-          sequence_lengths=sequence_lengths,
-          page_group_id=page_group_id,
-      )
-    else:
-      raise ValueError(f"Unsupported model mode: {model_mode}")
+        gathered_k = gathered_k.reshape(1, -1, self.num_kv_heads, head_dim)
+        gathered_v = gathered_v.reshape(1, -1, self.num_kv_heads, head_dim)
 
-    # Project attention output to model dimension
-    return self.out_projection(self.output_dim, attn_out)
+        # Handle grouped-query attention
+        if self.num_query_heads > self.num_kv_heads:
+            heads_ratio = self.num_query_heads // self.num_kv_heads
+            gathered_k = jnp.repeat(gathered_k, heads_ratio, axis=2)
+            gathered_v = jnp.repeat(gathered_v, heads_ratio, axis=2)
+
+        # Calculate attention scores.  Shape: (batch, num_heads, q_seq, kv_seq)
+        scale = 1.0 / jnp.sqrt(float(head_dim))
+        attn_scores = jnp.einsum("bshd,bthd->bhst", query, gathered_k) * scale
+
+        # Create a causal mask.  Shapes: (1, 1, q_seq, kv_seq)
+        q_seq = seq_len
+        kv_seq_len = gathered_k.shape[1]  # Use actual gathered length
+        mask_shape = (q_seq, kv_seq_len)
+        row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
+        col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
+        causal_mask = col_ids <= row_ids  # (q_seq, kv_seq)
+        causal_mask = causal_mask[None, None, :, :]  # (1, 1, q_seq, kv_seq)
+
+        # Apply mask.
+        attn_scores = jnp.where(causal_mask, attn_scores, -1e10)
+
+        # Apply softmax
+        attn_weights = jax.nn.softmax(attn_scores, axis=-1)
+
+        # Apply attention weights to values
+        attn_output = jnp.einsum("bhst,bthd->bshd", attn_weights, gathered_v)
+
+        return attn_output
 
 
 class AttentionOp(nn.Module):
@@ -1452,52 +1442,120 @@ class AttentionOp(nn.Module):
     return attn_out
 
   @nn.compact
-  def __call__(self, query, key, value, decoder_segment_ids, model_mode):
-    prefill_kv_cache, ar_kv_cache = self.kv_cache(
-        key, value, decoder_segment_ids, model_mode, use_ragged_attention=self.use_ragged_attention
-    )
-    print(f"\nAttentionOp.__call__() called")
-    print(f"  model_mode: {model_mode}")
-    print(f"  is_mutable_collection('params'): {self.is_mutable_collection('params')}")
-    print(f"  input shapes:")
-    print(f"    query: {query.shape}")
-    print(f"    key: {key.shape}")
-    print(f"    value: {value.shape}")
+  def __call__(
+      self,
+      inputs_q: Array,
+      inputs_kv: Array,
+      inputs_positions: Array,
+      decoder_segment_ids: Array | None = None,
+      *,
+      model_mode: str = common_types.MODEL_MODE_TRAIN,
+      page_state: Optional[PageState] = None,
+      key_pages_value: Optional[jnp.ndarray] = None,
+      value_pages_value: Optional[jnp.ndarray] = None,
+      slot: Optional[int] = None,
+      true_length: Optional[int] = None,
+      use_fused_qkv: Optional[bool] = False,
+      layer_id: Optional[int] = None,
+  ):
+      deterministic = model_mode != common_types.MODEL_MODE_TRAIN
 
-    prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
-        query=query,
-        key=prefill_kv_cache[0],
-        value=prefill_kv_cache[1],
-        decoder_segment_ids=prefill_kv_cache[2],
-        lengths=None,
-        model_mode=model_mode,
-        use_ragged_attention=self.use_ragged_attention,
-    )
+      if use_fused_qkv:
+          query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
+      else:
+          query = self.query_projection(inputs_q)
+          key = self.kv_projection(inputs_kv, proj_name="key")
+          value = self.kv_projection(inputs_kv, proj_name="value")
 
-    # Return the "prefill" cache if it actually the combined prefill+ar kv cache
-    if ar_kv_cache is None:
-      if prefill_exponentials_sum is not None:
-        return prefill_unnormalized_output / prefill_exponentials_sum
-      return prefill_unnormalized_output
+      query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
+      key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
 
-    ar_unnormalized_output, ar_exponentials_max, ar_exponentials_sum = self.apply_attention(
-        query=query,
-        key=ar_kv_cache[0],
-        value=ar_kv_cache[1],
-        decoder_segment_ids=ar_kv_cache[2],
-        lengths=ar_kv_cache[3],
-        model_mode=model_mode,
-        use_ragged_attention=self.use_ragged_attention,
-    )
+      if model_mode == common_types.MODEL_MODE_PREFILL:
+          query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
+          key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
+          value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
+      else:
+          query = nn.with_logical_constraint(query, self.query_axis_names)
+          key = nn.with_logical_constraint(key, self.key_axis_names)
+          value = nn.with_logical_constraint(value, self.value_axis_names)
 
-    if ar_unnormalized_output is not None:
-      unnormalized_outputs = [prefill_unnormalized_output, ar_unnormalized_output]
-      exponentials_maxes = [prefill_exponentials_max, ar_exponentials_max]
-      exponentials_sums = [prefill_exponentials_sum, ar_exponentials_sum]
-      return self.normalize_attention(unnormalized_outputs, exponentials_maxes, exponentials_sums)
-    else:
-      return prefill_unnormalized_output / prefill_exponentials_sum
+      query = checkpoint_name(query, "query_proj")
+      key = checkpoint_name(key, "key_proj")
+      value = checkpoint_name(value, "value_proj")
 
+      # Switch between attention ops based on config.
+      if self.config.attention == "paged":
+          attention_output, updated_page_state, updated_key_pages_value, updated_value_pages_value = self.attention_op(
+              query=query,
+              key=key,
+              value=value,
+              decoder_segment_ids=decoder_segment_ids,
+              model_mode=model_mode,
+              page_state=page_state,
+              key_pages_value=key_pages_value,
+              value_pages_value=value_pages_value,
+              slot=slot,
+              true_length=true_length,
+              layer_id=layer_id,
+          )
+          updated_cache = {
+              "decoder": {
+                  f"layers_{layer_id}": {
+                    "key_pages": updated_key_pages_value,
+                    "value_pages": updated_value_pages_value
+                  }
+              }
+          }
+          out = self.out_projection(inputs_q.shape[-1], attention_output)
+          return out, updated_page_state, updated_cache
+
+      else:  # Not Paged Attention
+          prefill_kv_cache, ar_kv_cache = self.kv_cache(
+              key, value, decoder_segment_ids, model_mode, use_ragged_attention=self.use_ragged_attention
+          )
+          prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
+              query=query,
+              key=prefill_kv_cache[0],
+              value=prefill_kv_cache[1],
+              decoder_segment_ids=prefill_kv_cache[2],
+              lengths=None,
+              model_mode=model_mode,
+              use_ragged_attention=self.use_ragged_attention,
+          )
+
+          # Return the "prefill" cache if it actually the combined prefill+ar kv cache
+          if ar_kv_cache is None:
+              if prefill_exponentials_sum is not None:
+                  out = prefill_unnormalized_output / prefill_exponentials_sum
+              else:
+                  out = prefill_unnormalized_output
+              out = self.out_projection(inputs_q.shape[-1], out)
+              out = nn.with_logical_constraint(out, self.out_axis_names)
+              out = checkpoint_name(out, "out_proj")
+              return out, None, None  # No state updates
+
+          ar_unnormalized_output, ar_exponentials_max, ar_exponentials_sum = self.apply_attention(
+              query=query,
+              key=ar_kv_cache[0],
+              value=ar_kv_cache[1],
+              decoder_segment_ids=ar_kv_cache[2],
+              lengths=ar_kv_cache[3],
+              model_mode=model_mode,
+              use_ragged_attention=self.use_ragged_attention,
+          )
+
+          if ar_unnormalized_output is not None:
+              unnormalized_outputs = [prefill_unnormalized_output, ar_unnormalized_output]
+              exponentials_maxes = [prefill_exponentials_max, ar_exponentials_max]
+              exponentials_sums = [prefill_exponentials_sum, ar_exponentials_sum]
+              out = self.normalize_attention(unnormalized_outputs, exponentials_maxes, exponentials_sums)
+          else:
+              out = prefill_unnormalized_output / prefill_exponentials_sum
+
+          out = self.out_projection(inputs_q.shape[-1], out)
+          out = nn.with_logical_constraint(out, self.out_axis_names)
+          out = checkpoint_name(out, "out_proj")
+          return out, None, None  # No state updates for non-paged attention
 
 class Attention(nn.Module):
   """Generic Attention.
@@ -1545,7 +1603,6 @@ class Attention(nn.Module):
   sliding_window_size: int | None = None
   use_ragged_attention: bool = False
   ragged_block_size: int = 256
-  page_manager: Optional[PageManager] = None
 
   # Shard the query activation as the same as the key and value.
   # TODO: Find a better sharding axis name.
@@ -1565,19 +1622,18 @@ class Attention(nn.Module):
   reshape_q: bool = False
 
   def setup(self):
-    # cfg = self.config
-    # self.use_fused_qkv = cfg.fused_qkv
-
-    if self.config.attention == "paged":
-      self.attention_op = PagedAttentionOp(
-          mesh=self.mesh,
-          num_kv_heads=self.num_kv_heads,
-          kv_head_dim_size=self.head_dim,
-          config=self.config,
-          dtype=self.dtype,
-          output_dim=self.config.base_emb_dim,
-          quant=self.quant,
-      )
+    cfg = self.config
+    if cfg.attention == "paged":
+        self.attention_op = PagedAttentionOp(
+            config=self.config,
+            mesh=self.mesh,
+            num_kv_heads=self.num_kv_heads,
+            num_query_heads=self.num_query_heads,
+            kv_head_dim_size=self.head_dim,
+            output_dim=self.config.base_emb_dim,
+            dtype=self.dtype,
+            quant=self.quant,
+        )
     else:
       self.attention_op = AttentionOp(
           config=self.config,
@@ -1713,7 +1769,6 @@ class Attention(nn.Module):
     inputs = rotary_embedding(inputs, inputs_positions)
     return inputs
 
-  # @functools.partial(jax.jit, static_argnames=['model_mode', 'page_manager', 'page_group_id', 'true_length', 'use_fused_qkv'])
   @nn.compact
   def __call__(
       self,
@@ -1723,56 +1778,105 @@ class Attention(nn.Module):
       decoder_segment_ids: Array | None = None,
       *,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
-      page_state: Optional[PageState] = None,
-      page_group_id: Optional[int] = None,
+      page_state: Optional[PageState] = None,  # Now optional
+      slot: Optional[int] = None,
       true_length: Optional[int] = None,
       use_fused_qkv: Optional[bool] = False,
       layer_id: Optional[int] = None,
-      key_pages: Optional[jnp.ndarray] = None,
-      value_pages: Optional[jnp.ndarray] = None,
   ):
+      deterministic = model_mode != common_types.MODEL_MODE_TRAIN
 
-    deterministic = model_mode != common_types.MODEL_MODE_TRAIN
+      if use_fused_qkv:
+          query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
+      else:
+          query = self.query_projection(inputs_q)
+          key = self.kv_projection(inputs_kv, proj_name="key")
+          value = self.kv_projection(inputs_kv, proj_name="value")
 
-    if use_fused_qkv:
-      query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
-    else:
-      query = self.query_projection(inputs_q)
-      key = self.kv_projection(inputs_kv, proj_name="key")
-      value = self.kv_projection(inputs_kv, proj_name="value")
+      query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
+      key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
 
-    query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
-    key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
+      if model_mode == common_types.MODEL_MODE_PREFILL:
+          query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
+          key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
+          value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
+      else:
+          query = nn.with_logical_constraint(query, self.query_axis_names)
+          key = nn.with_logical_constraint(key, self.key_axis_names)
+          value = nn.with_logical_constraint(value, self.value_axis_names)
 
-    if model_mode == common_types.MODEL_MODE_PREFILL:
-      query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
-      key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
-      value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
-    else:
-      query = nn.with_logical_constraint(query, self.query_axis_names)
-      key = nn.with_logical_constraint(key, self.key_axis_names)
-      value = nn.with_logical_constraint(value, self.value_axis_names)
+      query = checkpoint_name(query, "query_proj")
+      key = checkpoint_name(key, "key_proj")
+      value = checkpoint_name(value, "value_proj")
 
-    query = checkpoint_name(query, "query_proj")
-    key = checkpoint_name(key, "key_proj")
-    value = checkpoint_name(value, "value_proj")
+      # Switch between attention ops based on config.
+      if self.config.attention == "paged":
+          attention_output, updated_page_state, updated_key_pages_value, updated_value_pages_value = self.attention_op(
+              query=query,
+              key=key,
+              value=value,
+              decoder_segment_ids=decoder_segment_ids,
+              model_mode=model_mode,
+              page_state=page_state,
+              slot=slot,
+              true_length=true_length,
+              layer_id=layer_id,
+          )
+          updated_cache = {
+              "decoder": {
+                  f"layers_{layer_id}": {
+                    "key_pages": updated_key_pages_value,
+                    "value_pages": updated_value_pages_value
+                  }
+              }
+          }
+          out = self.out_projection(inputs_q.shape[-1], attention_output)
+          return out, updated_page_state, updated_cache
 
-    out = self.attention_op(
-        query=query,
-        key=key,
-        value=value,
-        decoder_segment_ids=decoder_segment_ids,
-        model_mode=model_mode,
-        page_state=page_state,
-        page_group_id=page_group_id,
-        true_length=true_length,
-        layer_id=layer_id,
-        key_pages=key_pages,
-        value_pages=value_pages,
-    )
-    if not isinstance(self.attention_op, PagedAttentionOp):
-      out = nn.with_logical_constraint(out, self.out_axis_names)
-      out = self.attention_op.out_projection(out)
-      out = checkpoint_name(out, "out_proj")
+      else:  # Not Paged Attention – unchanged
+          prefill_kv_cache, ar_kv_cache = self.kv_cache(
+              key, value, decoder_segment_ids, model_mode, use_ragged_attention=self.use_ragged_attention
+          )
+          prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
+              query=query,
+              key=prefill_kv_cache[0],
+              value=prefill_kv_cache[1],
+              decoder_segment_ids=prefill_kv_cache[2],
+              lengths=None,
+              model_mode=model_mode,
+              use_ragged_attention=self.use_ragged_attention,
+          )
 
-    return out
+          # Return the "prefill" cache if it actually the combined prefill+ar kv cache
+          if ar_kv_cache is None:
+              if prefill_exponentials_sum is not None:
+                  out = prefill_unnormalized_output / prefill_exponentials_sum
+              else:
+                  out = prefill_unnormalized_output
+              out = self.out_projection(inputs_q.shape[-1], out)
+              out = nn.with_logical_constraint(out, self.out_axis_names)
+              out = checkpoint_name(out, "out_proj")
+              return out, None, None  # No state updates
+
+          ar_unnormalized_output, ar_exponentials_max, ar_exponentials_sum = self.apply_attention(
+              query=query,
+              key=ar_kv_cache[0],
+              value=ar_kv_cache[1],
+              decoder_segment_ids=ar_kv_cache[2],
+              lengths=ar_kv_cache[3],
+              model_mode=model_mode,
+              use_ragged_attention=self.use_ragged_attention,
+          )
+
+          if ar_unnormalized_output is not None:
+              unnormalized_outputs = [prefill_unnormalized_output, ar_unnormalized_output]
+              exponentials_maxes = [prefill_exponentials_max, ar_exponentials_max]
+              exponentials_sums = [prefill_exponentials_sum, ar_exponentials_sum]
+              out = self.normalize_attention(unnormalized_outputs, exponentials_maxes, exponentials_sums)
+          else:
+              out = prefill_unnormalized_output / prefill_exponentials_sum
+
+          out = self.out_projection(inputs_q.shape[-1], out)
+          out = nn.with_logical_constraint(out, self.out_axis_names)
+          out = checkpoint_name(out, "out_proj")
+          return out, None, None  # No state updates for non-paged attention

@@ -557,3 +557,4 @@ sa_v_layout: "HEAD_DIM_MINOR"
 num_pages: 64
 tokens_per_page: 32
 pages_per_compute_block: 8
+max_pages_per_group: 8
