@@ -523,8 +523,8 @@ def main() -> int:
 
   list_of_models = [
     #model_configs.matt_simple
-    model_configs.deepseek_matt_a1
-    #model_configs.deepseek_manual_matt_a1
+    #model_configs.deepseek_matt_a1
+    model_configs.deepseek_manual_matt_a1
     #deepseek_matt_a1
   ]
 
@@ -555,7 +555,7 @@ def main() -> int:
       # another_config,
     ]:
       # Run workloads in the following slice configurations
-      for num_slices in [2,]:
+      for num_slices in [1,]:
         # Use the libtpu dependencies from:
         for libtpu_type in [
             # LibTpuType.CUSTOM
