@@ -101,20 +101,7 @@ def reserve_prefill_page_group_pages(
     max_pages_per_group: int,
     num_pages: int,
 ) -> PageState:
-    """
-    Reserves pages for prefill operations for a specific page group.
 
-    Args:
-        page_state:  The current PageState.
-        page_group_id: ID of the page group to allocate pages for.
-        true_length: Target sequence length.
-        layer_id: The layer ID.
-        tokens_per_page:  Tokens per page.
-        max_pages_per_group: Maximum pages per group.
-
-    Returns:
-        PageState: Updated PageState.
-    """
     layer_page_status = page_state.page_status[layer_id]
     layer_page_map = page_state.page_map[layer_id]
     layer_sequence_lengths = page_state.sequence_lengths[layer_id]
@@ -125,32 +112,29 @@ def reserve_prefill_page_group_pages(
     num_pages_needed = (true_length + tokens_per_page - 1) // tokens_per_page
     last_page_position = (true_length - 1) % tokens_per_page
 
-    # Check if we have enough free pages.  This is now done on the *layer* status.
+    # Check if we have enough free pages.
     num_free_pages = jnp.sum(layer_page_status == 0)
     has_enough_pages = num_free_pages >= num_pages_needed
 
-    # Release existing pages (functional style).
+    # Release existing pages (functional style).  Crucially, update page_map too.
     def release_existing_pages(index, state):
       current_status, current_map = state
       page_index = current_map[page_group_id, index]
-      # Only clear the status if the page_index is valid.
       updated_status = jnp.where(page_index >= 0, current_status.at[page_index].set(0), current_status)
-      return (updated_status, current_map)
+      updated_map = jnp.where(page_index >= 0, current_map.at[page_group_id, index].set(-1), current_map)  # RESET HERE
+      return (updated_status, updated_map)
 
     layer_page_status, layer_page_map = jax.lax.fori_loop(
         0, max_pages_per_group, release_existing_pages, (layer_page_status, layer_page_map)
     )
-    # Reset the entire page map for this group.  No traced values involved.
-    layer_page_map = layer_page_map.at[page_group_id].set(jnp.full(max_pages_per_group, -1, dtype=jnp.int32))
+    # DO NOT reset the entire map here:
+    # layer_page_map = layer_page_map.at[page_group_id].set(jnp.full(max_pages_per_group, -1, dtype=jnp.int32))
 
-
-    def do_allocation(_):  # Helper for lax.cond
+    def do_allocation(_):
         def allocate_new_page(index, state):
             current_status, current_map = state
             next_free_page = find_next_free_page(current_status)
-            # Only allocate if needed and a page is free.
             should_allocate = jnp.logical_and(index < num_pages_needed, next_free_page >= 0)
-
             updated_status = jnp.where(should_allocate, current_status.at[next_free_page].set(1), current_status)
             updated_map = jnp.where(
                 should_allocate, current_map.at[page_group_id, index].set(next_free_page), current_map
@@ -160,18 +144,14 @@ def reserve_prefill_page_group_pages(
         new_page_status, new_page_map = jax.lax.fori_loop(
             0, max_pages_per_group, allocate_new_page, (layer_page_status, layer_page_map)
         )
-
         new_sequence_lengths = layer_sequence_lengths.at[page_group_id].set(true_length)
-        new_pages_used = layer_pages_used.at[page_group_id].set(num_pages_needed)
-
-        # Determine the last page index, handling the case where no pages are needed.
-        last_page_index = jnp.where(num_pages_needed > 0, new_page_map[page_group_id, num_pages_needed - 1], -1)
+        new_pages_used = layer_pages_used.at[page_group_id].set(jnp.minimum(num_pages_needed, max_pages_per_group))  # Cap at max_pages_per_group
+        last_page_index = jnp.where(num_pages_needed > 0, new_page_map[page_group_id, jnp.minimum(num_pages_needed, max_pages_per_group) - 1], -1) # Cap at max pages
         new_current_page = layer_current_page.at[page_group_id].set(last_page_index)
         new_current_position = layer_current_position.at[page_group_id].set(last_page_position)
-
         return (new_page_status, new_page_map, new_sequence_lengths, new_pages_used, new_current_page, new_current_position)
 
-    def keep_current_state(_):  # Helper for lax.cond
+    def keep_current_state(_):
         return (
             layer_page_status,
             layer_page_map,
@@ -180,8 +160,7 @@ def reserve_prefill_page_group_pages(
             layer_current_page,
             layer_current_position,
         )
-    
-    # Allocate new pages *only* if we have enough.
+
     (
         layer_page_status,
         layer_page_map,
@@ -191,8 +170,12 @@ def reserve_prefill_page_group_pages(
         layer_current_position,
     ) = jax.lax.cond(has_enough_pages, do_allocation, keep_current_state, None)
 
+    # DEBUG: Print the key variables *after* allocation.
+    jax.debug.print("reserve_prefill: layer_id={}, page_group_id={}, true_length={}", layer_id, page_group_id, true_length)
+    jax.debug.print("reserve_prefill: num_pages_needed={}", num_pages_needed)
+    jax.debug.print("reserve_prefill: layer_page_status (after)={}", layer_page_status)
+    jax.debug.print("reserve_prefill: layer_page_map (after)={}", layer_page_map)
 
-    # Return updated *layer* state.
     return page_state.replace(
         page_status=page_state.page_status.at[layer_id].set(layer_page_status),
         page_map=page_state.page_map.at[layer_id].set(layer_page_map),
@@ -201,7 +184,6 @@ def reserve_prefill_page_group_pages(
         current_page=page_state.current_page.at[layer_id].set(layer_current_page),
         current_page_position=page_state.current_page_position.at[layer_id].set(layer_current_position),
     )
-
 
 
 def reserve_decode_step_pages(

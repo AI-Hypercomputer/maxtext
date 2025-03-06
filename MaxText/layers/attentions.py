@@ -102,6 +102,14 @@ shard_map = shard_map.shard_map
 
 dynamic_vector_slice_in_dim = jax.vmap(lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
 
+def check_array(x, name):
+    is_nan = jnp.isnan(x).any()
+    is_inf = jnp.isinf(x).any()
+    jax.debug.print("Checking {}: shape={}, any_nan={}, any_inf={}", name, x.shape, is_nan, is_inf)
+    # You can optionally add a breakpoint if NaNs/Infs are found:
+    # jax.debug.breakpoint(predicate=is_nan or is_inf)
+    return x
+
 
 def validate_compute_axis_order(s: AxisIdxes) -> None:
   valid_compute_axis_order = ((0, 1, 2, 3), (0, 2, 1, 3))
@@ -243,8 +251,6 @@ def get_initial_paged_kv_cache(model, config, batch_size, abstract=False):
   return {}
 
 
-# In attentions.py
-
 class PagedAttentionOp(nn.Module):
     """Paged Attention Operator that handles KV caching using a page-based approach."""
 
@@ -337,6 +343,11 @@ class PagedAttentionOp(nn.Module):
             layer_id = 0
         page_map = page_state.page_map[layer_id, slot]
 
+        #DEBUG
+        jax.debug.print("_handle_prefill - layer_id: {}, slot: {}, true_length: {}", layer_id, slot, true_length)
+        jax.debug.print("_handle_prefill - page_map: {}", page_map)
+        jax.debug.print("_handle_prefill - key.shape: {}, value.shape: {}", key.shape, value.shape)
+
         for page_idx in range(self.config.max_pages_per_group):
             physical_page = page_map[page_idx]
             start_idx = page_idx * self.config.tokens_per_page
@@ -363,10 +374,6 @@ class PagedAttentionOp(nn.Module):
                 page_k = jnp.reshape(page_k, (self.config.tokens_per_page, self.num_kv_heads, self.kv_head_dim_size))
                 page_v = jnp.reshape(page_v, (self.config.tokens_per_page, self.num_kv_heads, self.kv_head_dim_size))
 
-
-                # Use jnp.where (or jax.lax.select) for conditional updates
-                should_fill = (page_idx < num_pages_needed) & (tokens_in_page > 0) & (physical_page >= 0)
-
                 # Create a mask for the valid tokens within the page
                 valid_token_mask = jnp.arange(self.config.tokens_per_page) < tokens_in_page # shape (tokens_per_page)
                 # Expand the mask to be compatible with key_pages and value_pages.
@@ -376,27 +383,26 @@ class PagedAttentionOp(nn.Module):
                 updated_key_page = jnp.where(mask, page_k, 0) # Zero out invalid parts
                 updated_value_page = jnp.where(mask, page_v, 0)
 
-                # We can now set the WHOLE page, and the mask ensures only valid parts are changed
-                key_pages = jnp.where(should_fill, key_pages.at[physical_page].set(updated_key_page), key_pages)
-                value_pages = jnp.where(should_fill, value_pages.at[physical_page].set(updated_value_page), value_pages)
+                key_pages = key_pages.at[physical_page].set(updated_key_page) #ADD
+                value_pages = value_pages.at[physical_page].set(updated_value_page) #ADD
 
-                return key_pages, value_pages, should_fill  # Return should_fill
-
+                #DEBUG
+                jax.debug.print("  _handle_prefill - page_idx: {}, physical_page: {}, start_idx: {}, end_idx: {}, tokens_in_page: {}", page_idx, physical_page, start_idx, end_idx, tokens_in_page)
+                jax.debug.print("  _handle_prefill - page_k.shape: {}, page_v.shape: {}", page_k.shape, page_v.shape)
+                jax.debug.print("  _handle_prefill - mask: {}", mask)
+                return key_pages, value_pages # Should fill is no longer needed
 
             def skip_page(args):
                 key_pages, value_pages, key, value, physical_page, start_idx, true_length, page_idx = args
-                num_pages_needed = (true_length + self.config.tokens_per_page - 1) // self.config.tokens_per_page
-                end_idx = jnp.minimum(start_idx + self.config.tokens_per_page, jnp.minimum(max_seq_len, true_length))
-                tokens_in_page = jnp.maximum(0, end_idx - start_idx)
-                should_fill = (page_idx < num_pages_needed) & (tokens_in_page > 0) & (physical_page >= 0)
-                return key_pages, value_pages, should_fill
+                return key_pages, value_pages # Should fill no longer needed
 
             args = (key_pages, value_pages, key, value, physical_page, start_idx, true_length, page_idx)
-            key_pages, value_pages, should_fill = jax.lax.cond(True, fill_page, skip_page, args)
+            num_pages_needed = (true_length + self.config.tokens_per_page - 1) // self.config.tokens_per_page
+            key_pages, value_pages = jax.lax.cond((page_idx < num_pages_needed) & (physical_page >= 0), fill_page, skip_page, args)
 
         layer_id = layer_id if layer_id is not None else 0
         return key_pages, value_pages, page_state
-
+  
     def _handle_autoregressive(
         self,
         key_pages: jnp.ndarray,
@@ -442,11 +448,14 @@ class PagedAttentionOp(nn.Module):
             lambda ps: ps,  # Return original if invalid,
             page_state
         )
+        #DEBUG
+        jax.debug.print("_handle_autoregressive - layer_id: {}, slot: {}", layer_id, slot)
+        jax.debug.print("_handle_autoregressive - curr_seq_len: {}", curr_seq_len)
+        jax.debug.print("_handle_autoregressive - logical_page: {}, pos_in_page: {}", logical_page, pos_in_page)
+        jax.debug.print("_handle_autoregressive - physical_page: {}", physical_page)
+        jax.debug.print("_handle_autoregressive - key.shape: {}, value.shape: {}", key.shape, value.shape)
 
         return key_pages, value_pages, updated_page_state
-
-
-
 
     def _compute_attention(
         self,
@@ -464,9 +473,9 @@ class PagedAttentionOp(nn.Module):
         batch_size, seq_len, num_heads, head_dim = query.shape
         if slot is None:
               slot = 0
-        if layer_id is None: # Handle layer id
+        if layer_id is None:
               layer_id = 0
-        if true_length is None: # Handle None
+        if true_length is None:
               true_length = 0
 
         # Gather key and value data based on page_map
@@ -475,17 +484,24 @@ class PagedAttentionOp(nn.Module):
         num_pages_needed = (true_length + self.config.tokens_per_page - 1) // self.config.tokens_per_page
         page_map = page_state.page_map[layer_id, slot]
 
+        #DEBUG
+        jax.debug.print("_compute_attention: model_mode {}, layer_id: {}, slot: {}, true_length: {}", model_mode, layer_id, slot, true_length)
+        jax.debug.print("_compute_attention: page_map {}", page_map)
+
+
         # Loop over *all possible* page indices within a group.
         for page_idx in range(self.config.max_pages_per_group):
             physical_page = page_map[page_idx]
             start_token_idx = page_idx * self.config.tokens_per_page
-            if model_mode == common_types.MODEL_MODE_PREFILL:
-                max_len = self.config.max_prefill_predict_length
-            else:
-                max_len = self.config.max_target_length
+            # We use max_seq_len in dynamic_slice, so prefill and decode lengths are handled correctly
+            # without needing separate logic.
+            max_len = self.config.max_prefill_predict_length if model_mode == common_types.MODEL_MODE_PREFILL else self.config.max_target_length
 
-            end_token_idx = jnp.minimum((page_idx + 1) * self.config.tokens_per_page, max_len)
-            num_tokens_in_page = jnp.maximum(0, end_token_idx - start_token_idx) # Ensure not negative
+            end_token_idx = jnp.minimum((page_idx + 1) * self.config.tokens_per_page, max_len) # Limit to maximum length
+
+            # Only gather if it's a valid page
+            num_tokens_in_page = jnp.maximum(0, end_token_idx - start_token_idx) # Ensure not negative. This is used for masking.
+            #jax.debug.print("page_idx {}, physical_page {}, start {}, end {}, num_tokens_in_page {}", page_idx, physical_page, start_token_idx, end_token_idx, num_tokens_in_page)
 
             def gather_page_data(args):
                 physical_page, = args
@@ -495,28 +511,39 @@ class PagedAttentionOp(nn.Module):
                 page_v = jax.lax.dynamic_slice(
                     value_pages, (physical_page, 0, 0, 0), (1, self.config.tokens_per_page, self.num_kv_heads, head_dim)
                 )
-                return page_k.squeeze(axis=0), page_v.squeeze(axis=0)
+                # Apply mask *before* squeezing.
+                valid_token_mask = jnp.arange(self.config.tokens_per_page) < num_tokens_in_page
+                mask = valid_token_mask[None, :, None, None]  # (1, tokens_per_page, 1, 1)
+                page_k = jnp.where(mask, page_k, 0) # Mask out the extra tokens
+                page_v = jnp.where(mask, page_v, 0)
+
+                return page_k.squeeze(axis=0), page_v.squeeze(axis=0)  # Remove batch dim
 
             def skip_gather(args):
+                # Return zeros with the correct shape for the *entire* page.
                 return (
                     jnp.zeros((self.config.tokens_per_page, self.num_kv_heads, head_dim), dtype=self.dtype),
                     jnp.zeros((self.config.tokens_per_page, self.num_kv_heads, head_dim), dtype=self.dtype),
                 )
 
-            should_gather = (page_idx < num_pages_needed) & (physical_page >= 0) & (num_tokens_in_page > 0)
+            # Only gather if it's a valid page
+            should_gather = (page_idx < num_pages_needed) & (physical_page >= 0)
             page_k, page_v = jax.lax.cond(should_gather, gather_page_data, skip_gather, (physical_page,)) # Pass physical page
             gathered_k.append(page_k)
             gathered_v.append(page_v)
-        if not gathered_k:
-            gathered_k = jnp.zeros((1, self.num_kv_heads, head_dim), dtype=self.dtype)
-            gathered_v = jnp.zeros((1, self.num_kv_heads, head_dim), dtype=self.dtype)
-        else:
-              gathered_k = jnp.concatenate(gathered_k, axis=0)
-              gathered_v = jnp.concatenate(gathered_v, axis=0)
 
+        # Stack, then reshape. This handles empty lists correctly.
+        gathered_k = jnp.array(gathered_k)  # [num_pages_needed, tokens_per_page, num_kv_heads, head_dim]
+        gathered_v = jnp.array(gathered_v)  # [num_pages_needed, tokens_per_page, num_kv_heads, head_dim]
 
-        gathered_k = gathered_k.reshape(1, -1, self.num_kv_heads, head_dim)
-        gathered_v = gathered_v.reshape(1, -1, self.num_kv_heads, head_dim)
+        #DEBUG
+        jax.debug.print("_compute_attention - gathered_k.shape (before reshape): {}, gathered_v.shape: {}", gathered_k.shape, gathered_v.shape)
+
+        gathered_k = gathered_k.reshape(1, -1, self.num_kv_heads, head_dim)  # [1, num_pages_needed * tokens_per_page, num_kv_heads, head_dim]
+        gathered_v = gathered_v.reshape(1, -1, self.num_kv_heads, head_dim)  # [1, num_pages_needed * tokens_per_page, num_kv_heads, head_dim]
+
+        #DEBUG
+        jax.debug.print("_compute_attention - gathered_k.shape: {}, gathered_v.shape: {}", gathered_k.shape, gathered_v.shape)
 
         # Handle grouped-query attention
         if self.num_query_heads > self.num_kv_heads:
@@ -529,16 +556,23 @@ class PagedAttentionOp(nn.Module):
         attn_scores = jnp.einsum("bshd,bthd->bhst", query, gathered_k) * scale
 
         # Create a causal mask.  Shapes: (1, 1, q_seq, kv_seq)
-        q_seq = seq_len
+        q_seq = seq_len  # Length of the query.  Should be 1 in autoregressive, and prompt length in prefill.
         kv_seq_len = gathered_k.shape[1]  # Use actual gathered length
+
         mask_shape = (q_seq, kv_seq_len)
         row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
         col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
         causal_mask = col_ids <= row_ids  # (q_seq, kv_seq)
         causal_mask = causal_mask[None, None, :, :]  # (1, 1, q_seq, kv_seq)
 
+        #DEBUG
+        jax.debug.print("_compute_attention: causal_mask shape: {}, causal_mask: {}", causal_mask.shape, causal_mask)
+
+        if model_mode == common_types.MODEL_MODE_PREFILL:
+          causal_mask = jnp.ones(causal_mask.shape, dtype=bool)
         # Apply mask.
         attn_scores = jnp.where(causal_mask, attn_scores, -1e10)
+
 
         # Apply softmax
         attn_weights = jax.nn.softmax(attn_scores, axis=-1)

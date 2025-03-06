@@ -477,6 +477,10 @@ class MaxEngine(engine_api.Engine):
               decoder_cache = {}
               for layer_id in range(self.config.num_decoder_layers):
                   decoder_cache[f"layers_{layer_id}"] = {}
+                  # THIS IS THE KEY LINE. Call page_manager.prefill for EACH layer.
+                  updated_page_state = self.page_manager.prefill(
+                      updated_page_state, slot, true_length, layer_id
+                  )
 
               # Create variables dict with cache and page_state
               variables = {"params": unboxed_params, "cache": {"decoder": decoder_cache}}
@@ -493,24 +497,23 @@ class MaxEngine(engine_api.Engine):
                   mutable=["cache"],
                   slot=slot,
                   true_length=true_length,
-                  page_state=page_state,
+                  page_state=updated_page_state, # Use updated not initial page state
               )
               flat_logits, updated_page_state = model_output
-               # Get the updated page_state and cache from new_vars
+
+              # Get the updated page_state and cache from new_vars
               updated_cache = variables.get("cache", {}) # get updated cache from variables
-              if updated_page_state is None:
-                updated_page_state = page_state
-              # Check for updated page state (it should be in the first layer)
-              if "decoder" in updated_cache and f"layers_0" in updated_cache["decoder"] and \
-                "self_attention" in updated_cache["decoder"][f"layers_0"] and \
-                "attention_op" in updated_cache["decoder"][f"layers_0"]["self_attention"]:
-                  updated_page_state = updated_cache["decoder"][f"layers_0"]["self_attention"]["attention_op"].get("page_state") # .get is safer
+
+              # Check for updated page state (it should be in the first layer) -- Not Needed with state passing
+              #if "decoder" in updated_cache and f"layers_0" in updated_cache["decoder"] and \
+              #  "self_attention" in updated_cache["decoder"][f"layers_0"] and \
+              # "attention_op" in updated_cache["decoder"][f"layers_0"]["self_attention"]:
+              #    updated_page_state = updated_cache["decoder"][f"layers_0"]["self_attention"]["attention_op"].get("page_state") # .get is safer
 
               cache = {
                   "page_manager": updated_page_state,  # Use updated page state
                   "decoder": updated_cache.get("decoder", {})  # And updated decoder cache
               }
-
 
           else: # non-paged
               # Non-paged attention path (unchanged)
@@ -579,7 +582,7 @@ class MaxEngine(engine_api.Engine):
       )
       if self.config.attention != "paged":
         cache = self._maybe_stack_prefill_result_cache(cache)
-
+      jax.debug.print("Prefill Page State {}", updated_page_state)
       # Return a DICTIONARY:
       return {
           "logits": selected_logits,
