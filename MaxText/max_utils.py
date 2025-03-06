@@ -547,6 +547,7 @@ def create_device_mesh(config, devices=None):
   else:
     if allow_split_physical_axes:
       if is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
+        print("is_valid_custom_mesh")
         mesh = mesh_utils.create_device_mesh(
             [16, 16],
             devices,
@@ -555,13 +556,16 @@ def create_device_mesh(config, devices=None):
         )
         mesh = reshape_mesh_to_rings(mesh, config.custom_mesh)
         mesh = np.reshape(mesh, ici_parallelism)
+        print(f"{mesh=}")
       else:
+        print("is_not_valid_custom_mesh")
         mesh = mesh_utils.create_device_mesh(
             ici_parallelism,
             devices,
             contiguous_submeshes=False,
             allow_split_physical_axes=allow_split_physical_axes,
         )
+        print(f"{mesh=}")
     else:
       mesh = mesh_utils.create_device_mesh(
           ici_parallelism,

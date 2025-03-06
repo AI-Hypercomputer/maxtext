@@ -341,99 +341,6 @@ class MaxEngine(engine_api.Engine):
         previous_chunk=previous_chunk,
     )
 
-  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_samples",))
-  def prefill_multisampling(
-      self,
-      *,
-      params: Params,
-      existing_prefix: Optional[jax.Array] = None,
-      padded_tokens: jax.Array,
-      true_length: int,
-      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
-      rng: Optional[PRNGKeyType] = None,
-      num_samples: int = 1,
-  ) -> Tuple[Prefix, engine_api.ResultTokens]:
-    """Computes a kv-cache for a new generate request.
-
-    With multi-sampling, the engine will generate multiple first tokens in the
-    prefilling stage. The number of tokens is specified by num_samples.
-    """
-    if existing_prefix:
-      raise ValueError("We don't know what to do with existing_prefix")
-
-    if rng is None:
-      rng = jax.random.PRNGKey(0)
-
-    input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
-    positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
-
-    zero_to_n = jnp.arange(0, padded_tokens.shape[0])
-    ones_to_keep = zero_to_n < true_length
-    one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
-    sequence_indicator = jnp.expand_dims(one_d_output, 0)
-
-    rng, new_rng = jax.random.split(rng)
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      flat_logits, new_vars = self.model.apply(
-          params,
-          input_tokens,
-          positions,
-          decoder_segment_ids=sequence_indicator,
-          enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_PREFILL,
-          rngs={"params": new_rng},
-          mutable=["cache"],
-      )
-
-    next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
-    selected_logits = jax.lax.dynamic_slice(
-        flat_logits,
-        (0, true_length - 1, 0),
-        (flat_logits.shape[0], 1, flat_logits.shape[2]),
-    )
-    selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
-
-    # sampling first tokens
-    first_generated_tokens = []
-    for _ in range(num_samples):
-      rng, new_rng = jax.random.split(rng)
-      first_generated_token = inference_utils.sampling(
-          selected_logits,
-          new_rng,
-          self.config.decode_sampling_strategy,
-          topk=self.config.decode_sampling_top_k,
-          nucleus_topp=self.config.decode_sampling_nucleus_p,
-          temperature=self.config.decode_sampling_temperature,
-      )
-      first_generated_tokens.append(first_generated_token)
-    first_generated_tokens = jnp.concatenate(first_generated_tokens, axis=0)
-
-    all_valid = jnp.ones((num_samples, 1), dtype=jnp.int8)
-    generated_tokens = jnp.zeros((num_samples, 1), dtype=jnp.int32)
-    result = engine_api.ResultTokens(
-        data=jnp.concatenate((first_generated_tokens, all_valid, generated_tokens), axis=1),
-        # Tokens are shape [batch, speculations], so when we concatenate
-        # tokens, validity and length along their index 1 dimension then they
-        # occupy 0:speculations.
-        tokens_idx=(0, 1),
-        # Validity occupies the same amount of space, but next in line.
-        valid_idx=(1, 2),
-        # And lengths is rank 1.
-        length_idx=(2, 3),
-        samples_per_slot=num_samples,
-    )
-
-    cache = new_vars["cache"]
-    cache = self._maybe_stack_prefill_result_cache(cache)
-
-    return {
-        "logits": selected_logits,
-        "cache": cache,
-        "next_pos": next_pos,
-        "generated_tokens": generated_tokens,
-        "tokens": first_generated_tokens,
-    }, result
-
   @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("request_id",))
   def prefill(
       self,
@@ -574,6 +481,115 @@ class MaxEngine(engine_api.Engine):
         "next_pos": next_pos,
         "generated_tokens": generated_tokens,
         "tokens": first_generated_token,
+    }, result
+
+  def prefill_multisampling_aot(  # pylint: disable=too-many-positional-arguments
+      self,
+      params: Params,
+      padded_tokens: jax.Array,
+      true_length: int,
+      rng: Optional[PRNGKeyType] = None,
+      num_samples: int = 1,
+      sampler: Optional[Callable[[Any], Any]] = None,
+  ) -> Tuple[Prefix, engine_api.ResultTokens]:
+    """Wrapper for multi-sampling prefill for ahead-of-time compilation."""
+    return self.prefill_multisampling(
+        params=params,
+        padded_tokens=padded_tokens,
+        true_length=true_length,
+        sampler=sampler,
+        rng=rng,
+        num_samples=num_samples,
+    )
+
+  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_samples",))
+  def prefill_multisampling(
+      self,
+      *,
+      params: Params,
+      padded_tokens: jax.Array,
+      true_length: int,
+      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
+      rng: Optional[PRNGKeyType] = None,
+      num_samples: int = 1,
+  ) -> Tuple[Prefix, engine_api.ResultTokens]:
+    """Computes a kv-cache for a new generate request.
+
+    With multi-sampling, the engine will generate multiple first tokens in the
+    prefilling stage. The number of tokens is specified by num_samples.
+    """
+
+    if rng is None:
+      rng = jax.random.PRNGKey(0)
+
+    input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
+    positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
+
+    zero_to_n = jnp.arange(0, padded_tokens.shape[0])
+    ones_to_keep = zero_to_n < true_length
+    one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+    sequence_indicator = jnp.expand_dims(one_d_output, 0)
+
+    rng, new_rng = jax.random.split(rng)
+    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      flat_logits, new_vars = self.model.apply(
+          params,
+          input_tokens,
+          positions,
+          decoder_segment_ids=sequence_indicator,
+          enable_dropout=False,
+          model_mode=common_types.MODEL_MODE_PREFILL,
+          rngs={"params": new_rng},
+          mutable=["cache"],
+      )
+
+    next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
+    selected_logits = jax.lax.dynamic_slice(
+        flat_logits,
+        (0, true_length - 1, 0),
+        (flat_logits.shape[0], 1, flat_logits.shape[2]),
+    )
+    selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
+
+    # sampling first tokens
+    first_generated_tokens = []
+    for _ in range(num_samples):
+      rng, new_rng = jax.random.split(rng)
+      first_generated_token = inference_utils.sampling(
+          selected_logits,
+          new_rng,
+          self.config.decode_sampling_strategy,
+          topk=self.config.decode_sampling_top_k,
+          nucleus_topp=self.config.decode_sampling_nucleus_p,
+          temperature=self.config.decode_sampling_temperature,
+      )
+      first_generated_tokens.append(first_generated_token)
+    first_generated_tokens = jnp.concatenate(first_generated_tokens, axis=0)
+
+    all_valid = jnp.ones((num_samples, 1), dtype=jnp.int8)
+    generated_tokens = jnp.zeros((num_samples, 1), dtype=jnp.int32)
+    result = engine_api.ResultTokens(
+        data=jnp.concatenate((first_generated_tokens, all_valid, generated_tokens), axis=1),
+        # Tokens are shape [batch, speculations], so when we concatenate
+        # tokens, validity and length along their index 1 dimension then they
+        # occupy 0:speculations.
+        tokens_idx=(0, 1),
+        # Validity occupies the same amount of space, but next in line.
+        valid_idx=(1, 2),
+        # And lengths is rank 1.
+        length_idx=(2, 3),
+        samples_per_slot=num_samples,
+    )
+
+    cache = new_vars["cache"]
+    cache = self._maybe_stack_prefill_result_cache(cache)
+
+    return {
+        "logits": selected_logits,
+        "cache": cache,
+        "next_pos": next_pos,
+        "generated_tokens": generated_tokens,
+        "tokens": first_generated_tokens,
     }, result
 
   @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_prompts",))

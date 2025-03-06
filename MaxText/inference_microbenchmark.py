@@ -137,14 +137,17 @@ def prefix_cache_benchmark(
   del prefix_cache_inst
 
 
-def prefill_benchmark_loop(engine_prefill, params, tokens, true_length, iters):
+def prefill_benchmark_loop(engine_prefill, params, tokens, true_length, iters, num_samples: int | None = None):
   """Inner loop for benchmarking prefill step."""
   start = datetime.datetime.now()
   rng = jax.random.PRNGKey(1234)
   prefill_result = None
   for _ in range(iters):
     rng, rng_prefill = jax.random.split(rng)
-    prefill_result, _ = engine_prefill(params, tokens, true_length, rng_prefill)
+    if num_samples is None:
+      prefill_result, _ = engine_prefill(params, tokens, true_length, rng_prefill)
+    else:
+      prefill_result, _ = engine_prefill[num_samples](params, tokens, true_length, rng_prefill, None)
   jax.block_until_ready(prefill_result)
   end = datetime.datetime.now()
   del prefill_result
@@ -176,6 +179,31 @@ def prefill_benchmark(config, engine_prefill, params, tokens, true_length, num_m
       "total_tflops_per_device": prefill_tflops_per_device,
       "tflops_per_sec_per_device": tflops_per_sec_per_device,
   }
+  return result_dict
+
+
+def prefill_multisampling_benchmark(config, engine_prefill_multisampling, params, tokens, true_length, iters):
+  """Handles warmup, running prefill benchmark, and printing results."""
+  rng = jax.random.PRNGKey(1234)
+  prefill_result = None
+  for _ in range(_WARMUP_ITERS):
+    rng, rng_prefill = jax.random.split(rng)
+    for num_samples in config.inference_microbenchmark_num_samples:
+      prefill_result, _ = engine_prefill_multisampling[num_samples](params, tokens, true_length, rng_prefill, None)
+  jax.block_until_ready(prefill_result)
+  del prefill_result
+
+  print(f"Multi-sampling prefill benchmark results for length {tokens.size}:\n")
+  result_dict = {}
+  for num_samples in config.inference_microbenchmark_num_samples:
+    time_in_s = prefill_benchmark_loop(engine_prefill_multisampling, params, tokens, true_length, iters, num_samples)
+    multisampling_prefill_average_ms = 1000 * time_in_s / iters
+    print(
+        f"\nNum samples: {num_samples}\n" f"\tPrefill step average time: {multisampling_prefill_average_ms:.3f} ms\n\n\n\n"
+    )
+    result_dict[num_samples] = {
+        "time_in_ms": multisampling_prefill_average_ms,
+    }
   return result_dict
 
 
@@ -310,6 +338,14 @@ def print_results_for_analyze(results):
       prefill_bucket_size_to_ms[int(k)] = round(v["time_in_ms"], 3)
     print(f"PREFILL_BUCKET_SIZE_TO_MS = {prefill_bucket_size_to_ms}")
 
+  if "prefill-multisampling" in results:
+    multi_sampling_prefill_bucket_size_to_ms = {}
+    for prefill_length, result_dict in results["prefill-multisampling"].items():
+      multi_sampling_prefill_bucket_size_to_ms[int(prefill_length)] = {}
+      for num_samples, v in result_dict.items():
+        multi_sampling_prefill_bucket_size_to_ms[int(prefill_length)][num_samples] = round(v["time_in_ms"], 3)
+    print(f"MULTISAMPLING_PREFILL_BUCKET_SIZE_TO_MS = {multi_sampling_prefill_bucket_size_to_ms}")
+
   if "insert" in results:
     insert_bucket_size_to_ms = {}
     for k, v in results["insert"].items():
@@ -366,7 +402,6 @@ def run_benchmarks(config):
 
   benchmark_results = {}
   if "prefill" in stages_to_benchmark:
-
     benchmark_results["prefill-result-sizes"] = {}
     benchmark_results["prefill"] = {}
     benchmark_results["insert"] = {}
@@ -443,6 +478,34 @@ def run_benchmarks(config):
       benchmark_results["insert"][prefill_length] = {}
       benchmark_results["insert"][prefill_length]["time_in_ms"] = (
           prefill_insert_time["time_in_ms"] - benchmark_results["prefill"][prefill_length]["time_in_ms"]
+      )
+
+  if "prefill-multisampling" in stages_to_benchmark:
+    benchmark_results["prefill-multisampling"] = {}
+    multisampling_prefill_executable = {}
+    i32_scalar = jax.ShapeDtypeStruct((), int)
+    rng_shape = jax.ShapeDtypeStruct([4], jax.numpy.dtype("uint32"))
+    # Compile the program in advance.
+    for prefill_length in prefill_lengths:
+      key_shape = jax.ShapeDtypeStruct([prefill_length], jax.numpy.dtype("int32"))
+      multisampling_prefill_executable[prefill_length] = {}
+      for num_samples in config.inference_microbenchmark_num_samples:
+        multisampling_prefill_executable[prefill_length][num_samples] = (
+            jax.jit(
+                engine.prefill_multisampling_aot,
+                in_shardings=(engine.param_layouts, None, None, None, None),
+                static_argnames=("num_samples",),
+            ).lower(params, key_shape, i32_scalar, rng_shape, num_samples, None)
+        ).compile(compiler_options=None)
+
+    for prefill_length in prefill_lengths:
+      benchmark_results["prefill-multisampling"][prefill_length] = prefill_multisampling_benchmark(
+          config,
+          multisampling_prefill_executable[prefill_length],
+          params,
+          prefill_tokens[prefill_length],
+          prefill_true_lengths[prefill_length],
+          benchmark_loop_iters,
       )
 
   if "generate" in stages_to_benchmark:
