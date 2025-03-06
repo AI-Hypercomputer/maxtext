@@ -1386,12 +1386,13 @@ class Attention(nn.Module):
     def query_init(*args):
       # pylint: disable=no-value-for-parameter
       return self.kernel_init(*args) / depth_scaling
-
+ 
+    kernel_axes = (None, None, None) if self.config.ici_context_parallelism > 1 else ("embed", "q_heads", "kv")
     query_proj = DenseGeneral(
         features=(self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=query_init,
-        kernel_axes=(None, None, None),  # attn_q_weight_ndh=(None, zero_axes, None),
+        kernel_axes=kernel_axes,
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name="query",
@@ -1418,8 +1419,7 @@ class Attention(nn.Module):
       raise ValueError("Invalid num_kv_heads for GQA.")
 
     # attn_k_weight_kdh=(None, zero_axes, None),
-    # kernel_axes = ("embed", "kv_heads", "kv_head_dim")
-    kernel_axes = (None, None, None)
+    kernel_axes = (None, None, None) if self.config.ici_context_parallelism > 1 else ("embed", "kv_heads", "kv_head_dim")
 
     kv_proj = DenseGeneral(
         features=(self.num_kv_heads, self.head_dim),
@@ -1453,11 +1453,12 @@ class Attention(nn.Module):
     return query, key, value
 
   def out_projection(self, output_dim: int, out: Array) -> Array:
+    out_kernel_axis = (None, None, None) if self.config.ici_context_parallelism > 1 else ("heads", "kv", "embed")    
     out_proj = DenseGeneral(
         features=output_dim,
         axis=(-2, -1),
         kernel_init=self.kernel_init,
-        kernel_axes=(None, None, None), # trade speed with memory
+        kernel_axes=out_kernel_axis, # trade speed with memory
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name="out",
