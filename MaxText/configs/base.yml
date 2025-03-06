@@ -168,6 +168,8 @@ pipeline_fsdp_ag_once: False # If set to true then all gather all of the weights
 
 pipeline_weights_sharding_constraint: True
 
+pipeline_weight_buffer_set_dtype: False
+
 # There are two loops for PP:
 #  1)  Outer loop over microbatches (pipeline iterations)
 #  2)  Inner loop over layers (layers per stage)

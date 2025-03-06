@@ -575,9 +575,12 @@ class Pipeline(nn.Module):
     return physical_no_fsdp
 
   def all_gather_over_fsdp(self, sharding_info):
-    weights_in_activation_dtype = jax.tree.map(lambda x: x.astype(self.config.dtype), self.layers.variables)
+    if self.config.pipeline_weight_buffer_set_dtype:
+      weight_buffer = jax.tree.map(lambda x: x.astype(self.config.dtype), self.layers.variables)
+    else:
+      weight_buffer = self.layers.variables
     physical_constraint_no_fsdp = self.get_physical_spec_no_fsdp(sharding_info)
-    return jax.lax.with_sharding_constraint(weights_in_activation_dtype, physical_constraint_no_fsdp)
+    return jax.lax.with_sharding_constraint(weight_buffer, physical_constraint_no_fsdp)
 
   def get_logical_spec_repeats_removed(self, full_logical):
     def _remove_from_spec(spec):
@@ -701,7 +704,11 @@ class Pipeline(nn.Module):
     if self.config.pipeline_fsdp_ag_once:
       all_pipeline_weights = self.all_gather_over_fsdp(partition_spec)
     else:
-      all_pipeline_weights = jax.tree.map(lambda x: x.astype(self.config.dtype), self.layers.variables)
+      if self.config.pipeline_weight_buffer_set_dtype:
+        all_pipeline_weights = jax.tree.map(lambda x: x.astype(self.config.dtype), self.layers.variables)
+      else:
+        all_pipeline_weights = self.layers.variables
+
 
     if partition_spec is not None:
       partition_spec_stages = self.get_logical_spec_repeats_removed(partition_spec)
