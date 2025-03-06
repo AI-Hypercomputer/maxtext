@@ -85,9 +85,7 @@ def main(argv):
 
   config = pyconfig.initialize(argv)
   # run forward pass on hf llama2 model add hf token
-  ids, decoder_segment_ids, decoder_positions, logits_hf = get_data_hf(
-      config, prompt_text, hf_token=""
-  )
+  ids, decoder_segment_ids, decoder_positions, logits_hf = get_data_hf(config, prompt_text, hf_token="")
 
   # initialize the model with weights from reference ckpt
   (

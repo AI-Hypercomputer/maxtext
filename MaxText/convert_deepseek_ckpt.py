@@ -37,7 +37,6 @@ import max_logging
 from train import save_checkpoint
 import checkpointing
 from safetensors import safe_open
-import max_utils
 
 
 MODEL_PARAMS_DICT = {
@@ -68,6 +67,35 @@ MODEL_PARAMS_DICT = {
 }
 
 
+# skip to convert fp8 and MTP part for now
+SKIPPED_KEYS_SUFFIX = [
+    "_scale_inv",
+    "enorm.weight",
+    "hnorm.weight",
+    "eh_proj.weight",
+    "shared_head.norm.weight",
+    "shared_head.head.weight",
+    "model.layers.61.embed_tokens.weight",
+]
+
+
+def _is_key_ending_allowed(key, banned_endings):
+  """
+  Checks if a key's ending is NOT in a list of banned endings.
+
+  Args:
+      text: The string to check.
+      banned_endings: A list of strings representing banned endings.
+
+  Returns:
+      True if the string's ending is not in the banned list, False otherwise.
+  """
+  for ending in banned_endings:
+    if key.endswith(ending):
+      return False
+  return True
+
+
 def _hf_to_maxtext_mapping(layer_idx, num_experts, first_num_dense_layers) -> dict:
   """
   Generates a mapping between Hugging Face (HF) and MaxText model weight names.
@@ -95,7 +123,7 @@ def _hf_to_maxtext_mapping(layer_idx, num_experts, first_num_dense_layers) -> di
             f"model.layers.{layer_idx}.post_attention_layernorm.weight": f"dense_layers.{layer_idx}.post_self_attention_layer_norm.scale",
             f"model.layers.{layer_idx}.self_attn.q_proj.weight": f"dense_layers.{layer_idx}.self_attention.query.kernel",
             f"model.layers.{layer_idx}.self_attn.q_a_proj.weight": f"dense_layers.{layer_idx}.self_attention.wq_a.kernel",
-            f"model.layers.{layer_idx}.self_attn.q_a_layernorm.weight": f"dense_layers.{layer_idx}.self_attention.q_norm.kernel",
+            f"model.layers.{layer_idx}.self_attn.q_a_layernorm.weight": f"dense_layers.{layer_idx}.self_attention.q_norm.scale",
             f"model.layers.{layer_idx}.self_attn.q_b_proj.weight": f"dense_layers.{layer_idx}.self_attention.wq_b.kernel",
             f"model.layers.{layer_idx}.self_attn.kv_a_proj_with_mqa.weight": f"dense_layers.{layer_idx}.self_attention.wkv_a.kernel",
             f"model.layers.{layer_idx}.self_attn.kv_b_proj.weight": f"dense_layers.{layer_idx}.self_attention.wkv_b.kernel",
@@ -124,9 +152,9 @@ def _hf_to_maxtext_mapping(layer_idx, num_experts, first_num_dense_layers) -> di
             f"model.layers.{layer_idx}.mlp.shared_experts.down_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.DeepSeekMoeBlock_0.shared_experts.wo.kernel",
             f"model.layers.{layer_idx}.mlp.shared_experts.gate_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.DeepSeekMoeBlock_0.shared_experts.wi_0.kernel",
             f"model.layers.{layer_idx}.mlp.shared_experts.up_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.DeepSeekMoeBlock_0.shared_experts.wi_1.kernel",
-            f"model.layers.{layer_idx}.self_attn.q_a_proj.weight": f"dense_layers.{moe_layer_idx_in_maxtext}.self_attention.wq_a.kernel",
-            f"model.layers.{layer_idx}.self_attn.q_a_layernorm.weight": f"dense_layers.{moe_layer_idx_in_maxtext}.self_attention.q_norm.kernel",
-            f"model.layers.{layer_idx}.self_attn.q_b_proj.weight": f"dense_layers.{moe_layer_idx_in_maxtext}.self_attention.wq_b.kernel",
+            f"model.layers.{layer_idx}.self_attn.q_a_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.wq_a.kernel",
+            f"model.layers.{layer_idx}.self_attn.q_a_layernorm.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.q_norm.scale",
+            f"model.layers.{layer_idx}.self_attn.q_b_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.wq_b.kernel",
             f"model.layers.{layer_idx}.self_attn.kv_a_layernorm.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.kv_norm.scale",
             f"model.layers.{layer_idx}.self_attn.kv_a_proj_with_mqa.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.wkv_a.kernel",
             f"model.layers.{layer_idx}.self_attn.kv_b_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.wkv_b.kernel",
@@ -166,8 +194,7 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
       for key in f.keys():
         parts = key.split(".")
         layer = int(parts[2]) if "layers" in key else 0
-        # TODO: skip the fp8 scaling for now, need to handle it with fp8 -> bf16 conversion
-        if not key.endswith("_scale_inv"):
+        if _is_key_ending_allowed(key, SKIPPED_KEYS_SUFFIX):
           mapped_key = _hf_to_maxtext_mapping(layer, num_experts, first_num_dense_layers)[key]
           chkpt_vars[mapped_key] = f.get_tensor(key)
 
@@ -269,7 +296,7 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
       wkv_b = np.reshape(wkv_b, [kv_lora_rank, base_num_query_heads, (qk_nope_head_dim + v_head_dim)])
       out = np.reshape(out, [base_num_query_heads, v_head_dim, base_emb_dim])
       if q_lora_rank != 0:
-        wq_b = np.reshape(wq_b, [kv_lora_rank, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)])
+        wq_b = np.reshape(wq_b, [q_lora_rank, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)])
       else:
         query = np.reshape(query, [base_emb_dim, base_num_query_heads, (qk_nope_head_dim + qk_rope_head_dim)])
 
@@ -445,7 +472,6 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
       jax_weights["decoder"][f"{layer_key}"]["DeepSeekMoeBlock_0"] = moe
       logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
-  breakpoint()
   del chkpt_vars
   gc.collect()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
@@ -478,8 +504,7 @@ def _convert_to_jax_weights(base_model_path, model_size, mem_info):
   return _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
 
 
-# TODO: move this helper function to Maxtext_util
-def save_jax_weights_to_checkpoint(maxtext_model_path, jax_weights, device_count, mem_info):
+def save_weights_to_checkpoint(maxtext_model_path, jax_weights, device_count, mem_info):
   """
   Function to save jax_weights ready for MaxText to a parameters checkpoint.
 
@@ -556,7 +581,7 @@ def main() -> None:
   os.environ["JAX_PLATFORMS"] = "cpu"
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={args.simulated_cpu_devices_count}"
   mem_info = psutil.Process()
-  save_jax_weights_to_checkpoint(
+  save_weights_to_checkpoint(
       args.maxtext_model_path,
       _convert_to_jax_weights(args.base_model_path, args.model_size, mem_info),
       args.simulated_cpu_devices_count,
