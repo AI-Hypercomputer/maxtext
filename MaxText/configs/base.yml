@@ -54,6 +54,9 @@ force_unroll: False # during generate_param_only_checkpoint should we unroll the
 checkpoint_storage_target_data_file_size_bytes: 2147483648
 checkpoint_storage_use_ocdbt: True
 checkpoint_storage_use_zarr3: True
+# larger models requires higher concurrent GB for I/O
+# default concurrent gb for PytreeCheckpointHandler is 96GB
+checkpoint_storage_concurrent_gb: 96
 ############################### END CHECKPOINTING ##################################
 
 
