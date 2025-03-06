@@ -349,6 +349,75 @@ class HBMCacheTest(unittest.TestCase):
     assert hbm_cache.add_to_cache((1,), value) is True
 
 
+class HostCacheTest(unittest.TestCase):
+  """Test basic usage of HostCache only since HostCache is wrapper of BasicCache with device_get and device_put."""
+
+  def test_basic_usage(self):
+    """Test basic usage of HostCache checking all functions work."""
+    value = create_default_value()
+    host_cache = prefix_cache.HostCache(max_size_bytes=value.prefix_size_bytes)
+    assert host_cache.has_enough_space(value) is True
+    assert host_cache.add_to_cache((1,), value) is True
+    assert host_cache.retrieve_from_cache((1,)) == value
+    # Only have one value size, and cannot afford the second.
+    assert host_cache.has_enough_space(value) is False
+    assert host_cache.evict_cache((1,)) == value
+    assert host_cache.retrieve_from_cache((1,)) is None
+    assert host_cache.evict_cache((1,)) is None
+    # After evict, it should have enough space
+    assert host_cache.has_enough_space(value) is True
+    assert host_cache.add_to_cache((1,), value) is True
+
+  @pytest.mark.tpu_only
+  def test_move_value_between_device_and_host(self):
+    device = jax.local_devices()[0]
+    memory_stats = device.memory_stats()
+    assert memory_stats is not None, "Cannot get device memory stats. Does the test run with TPU?"
+
+    def get_byte_in_use():
+      jax.clear_caches()
+      return memory_stats["bytes_in_use"]
+
+    origin_hbm_byte = get_byte_in_use()
+    key = (1,)
+    value = create_default_value()
+    host_cache = prefix_cache.HostCache(max_size_bytes=value.prefix_size_bytes)
+    value_on_device_hbm_byte = get_byte_in_use()
+    assert host_cache.add_to_cache(key, value) is True
+    # add to cache will not copy another in HBM
+    assert value_on_device_hbm_byte == get_byte_in_use()
+    del value
+    value_on_host_hbm_byte = get_byte_in_use()
+    # after del the value on device, hbm memory should release
+    assert value_on_host_hbm_byte == origin_hbm_byte
+    device_value = host_cache.retrieve_from_cache(key)
+    # copy the value back to device
+    assert value_on_device_hbm_byte == get_byte_in_use()
+    del device_value
+
+  @pytest.mark.tpu_only
+  def test_value_retrieve_back_to_the_same_device_sharding(self):
+    local_devices = jax.local_devices()
+    num_devices = jax.local_device_count()
+    mesh_shape = (num_devices,)
+    device_mesh = mesh_utils.create_device_mesh(mesh_shape, devices=local_devices)
+    mesh = Mesh(device_mesh, axis_names=("x",))
+    partition_spec = PartitionSpec("x", None)
+    sharding = NamedSharding(mesh, partition_spec)
+
+    key = (1,)
+    prefix = {
+        "cache": jnp.ones((mesh_shape[0], 512, 512), device=sharding),
+    }
+    value = create_default_value(prefix=prefix)
+    host_cache = prefix_cache.HostCache(max_size_bytes=value.prefix_size_bytes)
+    assert host_cache.add_to_cache(key, value)
+    del value
+    retrieved_value = host_cache.retrieve_from_cache(key)
+    assert retrieved_value is not None
+    assert retrieved_value.prefix["cache"].device == sharding
+
+
 class LRUStrategyTest(unittest.TestCase):
 
   def test_evict_none_if_no_use(self):
@@ -491,7 +560,7 @@ class PrefixCacheTest(unittest.TestCase):
     """
     device = jax.local_devices()[0]
     memory_stats = device.memory_stats()
-    assert memory_stats is not None
+    assert memory_stats is not None, "Cannot get device memory stats. Does the test run with TPU?"
 
     def get_byte_in_use():
       jax.clear_caches()
