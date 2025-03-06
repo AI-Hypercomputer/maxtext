@@ -93,7 +93,9 @@ def load_adapter(config, base_abstract_state_params, adapter_config_path, adapte
     lora_state, _ = get_lora_abstract_state(base_abstract_state_params, lora_config)
 
     with nn_partitioning.axis_rules(config.logical_axis_rules):
-      lora_params = checkpointing.load_params_from_path(adapter_weights_path, lora_state.params, config.checkpoint_storage_concurrent_gb)
+      lora_params = checkpointing.load_params_from_path(
+          adapter_weights_path, lora_state.params, config.checkpoint_storage_concurrent_gb
+      )
 
   return lora_params, lora_config
 
