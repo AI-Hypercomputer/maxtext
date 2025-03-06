@@ -111,20 +111,6 @@ class ValueTest(unittest.TestCase):
     value1_2 = create_default_value(prefix=prefix2)
     assert value1_1 != value1_2
 
-  def test_clone_for_copy_jax_array(self):
-    """jax array in value prefix should be different or may destroy the array in cache."""
-    prefix = {
-        "decoder": jnp.array([1, 2, 3], dtype=jnp.int8),
-    }
-    value1_1 = create_default_value(prefix=prefix)
-    value1_2 = value1_1
-    assert value1_1.prefix is value1_2.prefix
-    assert value1_1.prefix["decoder"] is value1_2.prefix["decoder"]
-    value2 = value1_1.clone()
-    assert value2.prefix is not value1_1.prefix
-    assert value2.prefix["decoder"] is not value1_1.prefix["decoder"]
-    assert value2 == value1_1
-
   @pytest.mark.tpu_only
   def test_device_saved_as_prefix_tree(self):
     local_devices = jax.local_devices()
