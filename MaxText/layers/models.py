@@ -450,19 +450,21 @@ class Decoder(nn.Module):
           assert len(RemattedBlockLayers) == 2, f"Unscanned layers must have a length of 2 using deepseek."
           dense_layer = RemattedBlockLayers[0]
           moe_layer = RemattedBlockLayers[1]
-          num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
 
           layers = [dense_layer, moe_layer]
-          layer_prefix = ["dense_layers", "moe_layers"]
-          num_layers = [cfg.first_num_dense_layers, num_moe_layers]
-          for index in range(len(layers)):
-            y = layers[index](config=cfg, mesh=mesh, name=f"{layer_prefix[index]}_{index}", quant=self.quant)(
-                y,
-                decoder_segment_ids,
-                decoder_positions,
-                deterministic,
-                model_mode,
-            )
+          layer_prefixes = ["dense_layers", "moe_layers"]
+          num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
+          num_layers_list = [cfg.first_num_dense_layers, num_moe_layers]
+          # Iterate over the two layer groups (dense and MoE) and apply layer transformation
+          for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
+            for index in range(num_layers):
+              y = layer(config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant)(
+                  y,
+                  decoder_segment_ids,
+                  decoder_positions,
+                  deterministic,
+                  model_mode,
+              )
         else:
           for lyr in range(cfg.num_decoder_layers):
             RemattedBlockLayer = RemattedBlockLayers[0]

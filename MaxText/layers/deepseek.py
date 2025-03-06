@@ -62,6 +62,7 @@ def self_attention_with_norm(inputs, cfg, mesh, quant, decoder_segment_ids, deco
       epsilon=cfg.normalization_layer_epsilon,
   )
   lnx = lnx_rms(inputs)
+  # jax.debug.print("deepseek after norm lnx {lnx}", lnx=lnx)
   lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
   attention_layer = attentions.MLA(
@@ -102,6 +103,7 @@ def self_attention_with_norm(inputs, cfg, mesh, quant, decoder_segment_ids, deco
   attention_lnx = nn.with_logical_constraint(
       attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
   )
+  # jax.debug.print("deepseek attention {attention_lnx}", attention_lnx=attention_lnx)
   intermediate_inputs = inputs + attention_lnx
 
   # Normalization
@@ -115,6 +117,7 @@ def self_attention_with_norm(inputs, cfg, mesh, quant, decoder_segment_ids, deco
   hidden_states = nn.with_logical_constraint(
       hidden_states, ("activation_batch", "activation_norm_length", "activation_embed")
   )
+  # jax.debug.print("deepseek after post_norm {hidden_states}", hidden_states=hidden_states)
   return hidden_states, intermediate_inputs
 
 
@@ -153,6 +156,7 @@ class DeepSeekDenseLayer(nn.Module):
     cfg = self.config
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
+    # jax.debug.print("deepseek inputs {inputs}", inputs=inputs)
 
     hidden_states, intermediate_inputs = self_attention_with_norm(
         inputs, cfg, self.mesh, self.quant, decoder_segment_ids, decoder_positions, deterministic, model_mode

@@ -43,6 +43,7 @@ def main(argv: Sequence[str]) -> None:
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
   import jax.numpy as jnp
+
   tokens = jnp.array(tokenizer_model.encode(text), dtype=jnp.int32)
   true_length = len(tokens)
   breakpoint()
@@ -56,7 +57,9 @@ def main(argv: Sequence[str]) -> None:
   for i in range(50):
     tokens = jnp.array(tokenizer_model.encode(text), dtype=jnp.int32)
     true_length = len(tokens)
-    prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill)
+    prefill_result, first_token = engine.prefill(
+        params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill
+    )
     slot = 0
     output = tokenizer_model.decode([first_token.get_result_at_slot(slot).tokens.item()])
     print(f"Input `{text}` -> first token output `{output}`")

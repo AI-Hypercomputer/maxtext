@@ -155,6 +155,9 @@ class DenseGeneral(nn.Module):
     contract_ind = tuple(range(0, len(axis)))
     output = compute_dot_general(inputs, kernel, axis, contract_ind)
 
+    if self.bias_norm:
+      output = _convert_to_activation_function(self.bias_norm)(output)
+
     if self.use_bias:
       bias_axes, bias_shape = (
           self.kernel_axes[-len(features) :],
@@ -167,9 +170,6 @@ class DenseGeneral(nn.Module):
           self.weight_dtype,
       )
       bias = jnp.asarray(bias, self.dtype)
-
-      if self.bias_norm:
-        output = _convert_to_activation_function(self.bias_norm)(output)
       output += bias
     return output
 
@@ -624,13 +624,19 @@ class MoeBlock(nn.Module):
     gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", None))
     # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
     top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+    # jax.debug.print("dense_matmul inputs {inputs}", inputs=inputs)
+    # jax.debug.print("dense_matmul gate_logits {gate_logits}", gate_logits=gate_logits)
+    # jax.debug.print("dense_matmul top_k_weights {top_k_weights}", top_k_weights=top_k_weights)
+    # jax.debug.print("dense_matmul top_k_indices {top_k_indices}", top_k_indices=top_k_indices)
 
     if self.config.decoder_block == "deepseek":
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
+      # jax.debug.print("dense_matmul top_k_weights scaled {top_k_weights}", top_k_weights=top_k_weights)
     else:
       top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
 
     weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
+    # jax.debug.print("dense_matmul weights {weights}", weights=weights)
     matmul_precision = lax.Precision(self.config.matmul_precision)
 
     if self.config.capacity_factor > 0:
@@ -733,6 +739,9 @@ class MoeBlock(nn.Module):
             intermediate_layer,
             weights,
         ).astype(self.dtype)
+      # jax.debug.print("dense_matmul intermediate_layer {intermediate_layer}", intermediate_layer=intermediate_layer)
+      # jax.debug.print("dense_matmul weights {weights}", weights=weights)
+      # jax.debug.print("dense_matmul output {output}", output=output)
       return output, None
 
   def retrieve_quantized_weight(
@@ -817,6 +826,7 @@ class DeepSeekMoeBlock(nn.Module):
         weight_dtype=cfg.weight_dtype,
         quant=self.quant,
     )(inputs)
+    # jax.debug.print("dense_matmul routed_experts {routed_experts}", routed_experts=routed_experts)
 
     shared_experts = MlpBlock(
         intermediate_dim=cfg.shared_experts * cfg.moe_mlp_dim,
@@ -828,5 +838,6 @@ class DeepSeekMoeBlock(nn.Module):
         config=cfg,
         quant=self.quant,
     )(inputs)
+    # jax.debug.print("dense_matmul shared_experts {shared_experts}", shared_experts=shared_experts)
 
     return routed_experts + shared_experts
