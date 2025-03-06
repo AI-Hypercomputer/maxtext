@@ -361,6 +361,66 @@ class HBMCache:
     return self._cache.evict_cache(key)
 
 
+class HostCache:
+  """Stores KV Cache values in host DRAM."""
+
+  def __init__(self, max_size_bytes: int):
+    """
+    Args:
+      max_size_bytes: Maximum bytes of host DRAM to use for cache
+    """
+    self._cache = BasicCache(max_size_bytes)
+
+  def has_enough_space(self, value: Value) -> bool:
+    """Calculate if value size can add to cache."""
+    return self._cache.has_enough_space(value)
+
+  def add_to_cache(self, key: Key, value: Value) -> bool:
+    """Add value into host DRAM.
+
+    Return false if cache does not have enough space.
+    Do not use this function to check if has enough space.
+    This function will first move to host DRAM before check the space.
+    The cache will copy to the host DRAM if originally on device,
+    or with the same reference to the value if originally on host.
+    Do not use the value after this function if originally on host since the value will not copy.
+    """
+    host_value = Value(
+        prefix=jax.device_get(value.prefix),
+        true_length=value.true_length,
+        padded_length=value.padded_length,
+        tokens=value.tokens,
+        prefix_size_bytes=value.prefix_size_bytes,
+        device=value.device,
+    )
+
+    return self._cache.add_to_cache(key, host_value)
+
+  def retrieve_from_cache(self, key: Key) -> Optional[Value]:
+    """Return value from cache to the original device or None if not found.
+
+    If the original device save in the cache is cpu, the cache will not copied.
+    Do not modify the cache prefix retrieved.
+    """
+    host_value = self._cache.retrieve_from_cache(key)
+    if host_value is None:
+      return None
+
+    hbm_value = Value(
+        prefix=jax.device_put(host_value.prefix, host_value.device),
+        true_length=host_value.true_length,
+        padded_length=host_value.padded_length,
+        tokens=host_value.tokens,
+        prefix_size_bytes=host_value.prefix_size_bytes,
+        device=host_value.device,
+    )
+    return hbm_value
+
+  def evict_cache(self, key: Key) -> Optional[Value]:
+    """Evict and return value, or None if key is not in cache."""
+    return self._cache.evict_cache(key)
+
+
 class LRUStrategy:
   """Least recently used cache strategy manage key."""
 
