@@ -339,7 +339,8 @@ class PipelineStage:
       self.grad_func = grad_func
 
       def grad_and_update(state, output_grads):
-        raw_grads = self.grad_func(output_grads)
+        _, grad_func = self.fwd_jitted(state, args, nextrng)
+        raw_grads = grad_func(output_grads)
         state = state.apply_gradients(grads=raw_grads[0].params)
         return state, raw_grads[1]["inputs"]
       grad_and_update.__name__ = "grad_and_update"
