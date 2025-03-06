@@ -138,6 +138,7 @@ class PipelineStage:
     # microbatch. The logic in this file only prototypes with remat enabled.
     self.grad_func:  Any = None
     self.grad_and_update_func: Any = None
+    self.input_caches: Dict[int, Any] = {}
     self._set_jitted_forward_func()
     self._set_jit_update_train_state()
     self._set_jitted_loss_func()
@@ -330,6 +331,7 @@ class PipelineStage:
     """
     # TODO(linchai): should we use the same rng for all microbatches and all stages.
     nextrng = jax.jit(jax.random.fold_in)(self.init_rng, fwd_microbatch_id)
+    self.input_caches[fwd_microbatch_id] = args
     if not self.grad_func:
       outputs, *_, grad_func = fwd_jitted(
           self.train_state, args, nextrng
@@ -338,7 +340,7 @@ class PipelineStage:
       # self.grad_func[0] = jax.jit(grad_func)
       self.grad_func = grad_func
 
-      def grad_and_update(state, output_grads):
+      def grad_and_update(state, args, output_grads):
         _, grad_func = self.fwd_jitted(state, args, nextrng)
         raw_grads = grad_func(output_grads)
         state = state.apply_gradients(grads=raw_grads[0].params)
@@ -396,6 +398,6 @@ class PipelineStage:
         assert output_grads is not None
 
       self.train_state, self.bwd_cache[bwd_microbatch_id] = (
-          self.grad_and_update_func(self.train_state, output_grads)
+          self.grad_and_update_func(self.train_state, self.input_caches[bwd_microbatch_id], output_grads)
       )
     return self.bwd_cache[bwd_microbatch_id]
