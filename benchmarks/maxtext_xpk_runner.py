@@ -578,7 +578,9 @@ def generate_xpk_workload_cmd(
     docker_image_flag = f'--base-docker-image="{wl_config.base_docker_image}"'
 
   print(f'User command: {user_command}')
-  HLO_FOLDER='gs://DIR/vbarr_hlos'
+  HLO_FOLDER='gs://DIR/hlos' # Replace DIR with the GCS directory you want the HLOs in
+  now = datetime.datetime.now()
+  timestamp = now.strftime("%Y-%m-%d-%H:%M")
 
   return (
       (
@@ -595,7 +597,7 @@ def generate_xpk_workload_cmd(
           f' --workload={name}'
           f' --priority={wl_config.priority}'
           f' --max-restarts={wl_config.max_restarts}'
-          f' --debug-dump-gcs={HLO_FOLDER}/{model.model_name}_{date}_{num_slices}_{temp_post_fix}',
+          f' --debug-dump-gcs={HLO_FOLDER}/{wl_config.model.model_name}_{timestamp}_{wl_config.num_slices}_{temp_post_fix}',
           # ' --use-vertex-tensorboard'
           # f' --experiment-name={test_purpose_name}'
           f' {additional_flags}'
