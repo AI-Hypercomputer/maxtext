@@ -890,7 +890,8 @@ llama3_1_405b_8192_fsdp_dcn_mlperf_2 = _add_to_model_dictionary(
     model_name="llama3-1-405b-8192-fsdp-dcn-mlperf-2",
     model_type="llama3.1-405b",
     tuning_params={
-        "per_device_batch_size": 1,
+        "per_device_batch_size": 0.5,
+        "eval_per_device_batch_size": 1,
         "ici_fsdp_parallelism": 64,
         "ici_tensor_parallelism": 4,
         "dcn_fsdp_parallelism": 2,
