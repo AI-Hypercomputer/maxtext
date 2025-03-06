@@ -534,7 +534,9 @@ def main() -> int:
     #model_configs.mixtral_8x22b_dropped_half,
     #model_configs.mixtral_8x22b_dropped_matt_fsdp,
     #model_configs.mixtral_8x22b_dropped_matt_fsdp_pdb_1
-    model_configs.mixtral_8x22b_dropped_matt_fsdp_pdb_8
+    #model_configs.mixtral_8x22b_dropped_matt_fsdp_pdb_8
+    #model_configs.llama2_70b_4096_sc,
+    model_configs.llama2_70b_4096_no_sc
   ]
 
   # Loop possibilities:
@@ -559,8 +561,8 @@ def main() -> int:
     for cluster_config in [
       # v5e_cluster_config,
       #v5p_cluster_config,
-      #v6e_cluster_config, #yucmhab
-      v6e_cluster_config_big
+      v6e_cluster_config, #yucmhab
+      #v6e_cluster_config_big
       # another_config,
     ]:
       # Run workloads in the following slice configurations
