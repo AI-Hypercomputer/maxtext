@@ -393,7 +393,7 @@ def generate_xpk_workload_cmd(
     )
   else:
     #docker_image_flag = f'--docker-image="{wl_config.base_docker_image}"'
-    docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-pp-remat-again"'
+    docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-pp-weight-specs-optional-bf16-2025-03-02"'
 
 
 
@@ -524,10 +524,10 @@ def main() -> int:
     #model_configs.deepseek_v5p_dp_a1,
     # model_configs.default_128
     # model_configs.llama3_1_405b_8192_fsdp_dcn_matt
-    #model_configs.llama3_1_405b_8192_explicit_matt_pp,
+    model_configs.llama3_1_405b_8192_explicit_matt_pp,
     #model_configs.llama3_1_405b_8192_explicit_matt_pp_overlapped
     #model_configs.matt_simple
-    model_configs.deepseek_big_experimental
+    #model_configs.deepseek_big_experimental
     #model_configs.deepseek_big
     #model_configs.mattbar_a1
   ]
@@ -559,7 +559,7 @@ def main() -> int:
       # another_config,
     ]:
       # Run workloads in the following slice configurations
-      for num_slices in [1,]:
+      for num_slices in [2,]:
         # Use the libtpu dependencies from:
         for libtpu_type in [
             # LibTpuType.CUSTOM

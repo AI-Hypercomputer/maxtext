@@ -1338,76 +1338,20 @@ llama3_1_405b_8192_explicit_matt = _add_to_model_dictionary(
   )
 )
 
-# 40GB OOM https://cloudlogging.app.goo.gl/4xYbHKv18uubzjNa9
+# docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-pp-weight-specs-optional-bf16-2025-03-02"'
 llama3_1_405b_8192_explicit_matt_pp = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
     model_name="llama3-1-405b-explicit",
     model_type="default",
     tuning_params={
-        "per_device_batch_size": 0.25,
-        "ici_fsdp_parallelism": 32,
-        "ici_tensor_parallelism": 8,
-        "dcn_pipeline_parallelism": 2,
-        "base_emb_dim": 16384,
-        "base_num_query_heads": 128,
-        "base_num_kv_heads": 8,
-        "base_num_decoder_layers": 12,
-        "base_mlp_dim": 53248,
-        "head_dim": 128,
-        "vocab_size": 128256,
-        "enable_dropout": False,
-        "logits_via_embedding": False,
-        "normalization_layer_epsilon": 1.0e-5,
-        "rope_max_timescale": 500_000,
-        "allow_split_physical_axes": True,
-        "custom_mesh": "hybrid_ring_32x8",
-        "remat_policy": "full",
-        # "decoder_layer_input": "offload",
-        # "query_proj": "offload",
-        # "key_proj": "offload",
-        # "value_proj": "offload",
-        # "out_proj": "offload",
-        "max_target_length": 8192,
-        "attention": "flash",
-        "gcs_metrics": True,
-        "use_iota_embed": True,
-        "dataset_path": "gs://max-datasets-rogue",
-        "dataset_type": "synthetic",
-        "reuse_example_batch": 1,
-        "enable_checkpointing": False,
-        "profiler": "xplane",
-        "sa_block_q": 1024,
-        "sa_block_q_dkv": 2048,
-        "sa_block_q_dq": 2048,
-        "pipeline_fsdp_ag_once": True,
-        "num_pipeline_microbatches": 4,
-        "num_layers_per_pipeline_stage": 2,
-        "scan_layers": False
-    },
-    xla_flags=(
-        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.CF_FOR_ALL_GATHER
-        + xla_flags_library.HOST_OFFLOAD_FLAGS
-    ),
-  )
-)
-
-# 40GB OOM https://cloudlogging.app.goo.gl/4xYbHKv18uubzjNa9
-llama3_1_405b_8192_explicit_matt_pp = _add_to_model_dictionary(
-  trillium_model_dict,
-  MaxTextModel(
-    model_name="llama3-1-405b-explicit",
-    model_type="default",
-    tuning_params={
-        "per_device_batch_size": 1.0,
+        "per_device_batch_size": 0.5,
+        "max_target_length": 4096,
         "ici_fsdp_parallelism": 64,
         "ici_tensor_parallelism": 4,
-        "dcn_pipeline_parallelism": 21,
         "base_emb_dim": 16384,
         "base_num_query_heads": 128,
         "base_num_kv_heads": 8,
-        "base_num_decoder_layers": 63, # 6 * PP
         "base_mlp_dim": 53248,
         "head_dim": 128,
         "vocab_size": 128256,
@@ -1423,7 +1367,6 @@ llama3_1_405b_8192_explicit_matt_pp = _add_to_model_dictionary(
         # "key_proj": "offload",
         # "value_proj": "offload",
         # "out_proj": "offload",
-        "max_target_length": 2048,
         "attention": "flash",
         "gcs_metrics": True,
         "use_iota_embed": True,
@@ -1435,14 +1378,15 @@ llama3_1_405b_8192_explicit_matt_pp = _add_to_model_dictionary(
         "sa_block_q": 1024,
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
-        "pipeline_fsdp_ag_once": True,
-        "num_pipeline_microbatches": 84, # PP * 2
-        "num_layers_per_pipeline_stage": 3,
-        "scan_layers": False,
-        "opt_type": "sgd",
-        "weight_dtype": "float32",
         "skip_first_n_steps_for_profiler": 14,
         "dump_hlo": True
+        "pipeline_fsdp_ag_once": True,
+        "pipeline_weight_buffer_set_dtype": True,
+        "scan_layers": False,
+        "dcn_pipeline_parallelism": 2, # PP
+        "base_num_decoder_layers": 12, # PP * 6
+        "num_pipeline_microbatches": 4, # PP * 2
+        "num_layers_per_pipeline_stage": 2,
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -1451,6 +1395,7 @@ llama3_1_405b_8192_explicit_matt_pp = _add_to_model_dictionary(
     ),
   )
 )
+
 
 llama3_1_405b_8192_explicit_matt_pp_overlapped = _add_to_model_dictionary(
   trillium_model_dict,
