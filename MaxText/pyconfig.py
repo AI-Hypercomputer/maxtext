@@ -639,7 +639,7 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["dcn_fsdp_parallelism"],
           raw_keys["dcn_fsdp_transpose_parallelism"],
           raw_keys["dcn_sequence_parallelism"],
-          raw_keys["dnc_context_parallelism"],
+          raw_keys["dcn_context_parallelism"],
           raw_keys["dcn_tensor_parallelism"],
           raw_keys["dcn_tensor_transpose_parallelism"],
           raw_keys["dcn_tensor_sequence_parallelism"],
