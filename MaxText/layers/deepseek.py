@@ -149,6 +149,7 @@ class DeepSeekDenseLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      page_state=None,
   ):
     cfg = self.config
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
@@ -196,6 +197,7 @@ class DeepSeekMoELayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      page_state=None,
   ):
     cfg = self.config
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
