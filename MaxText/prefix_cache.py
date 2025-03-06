@@ -77,11 +77,6 @@ Key = Tuple[Token, ...]
 Prefix = Any  # KVCache for one prompt
 
 
-@jax.jit
-def tree_copy(tree):
-  return jax.tree.map(lambda x: x.copy() if isinstance(x, jax.Array) else x, tree)
-
-
 class Value:
   """Object stored contains the actual KVcache
 
@@ -157,18 +152,6 @@ class Value:
   @property
   def device(self) -> int:
     return self._device
-
-  def clone(self) -> "Value":
-    """Clone to prevent using the same jax array."""
-    copied_prefix = tree_copy(self._prefix)
-    return Value(
-        prefix=copied_prefix,
-        true_length=self._true_length,
-        padded_length=self._padded_length,
-        tokens=self._tokens,
-        prefix_size_bytes=self._prefix_size_bytes,
-        device=self._device,
-    )
 
   def __eq__(self, other: Any) -> bool:
     if not isinstance(other, Value):
