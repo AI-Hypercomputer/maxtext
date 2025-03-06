@@ -202,7 +202,7 @@ class HFDataSource(grain.RandomAccessDataSource):
       self.data_iters[idx] = iter(self.datasets[idx])
     else:
       max_logging.log(
-          f"Run out of shards on host {self.dataloading_host_index}, shard {self.dataset_shards[idx]} is not available"
+          f"Run out of shards on host {self.dataloading_host_index}, shard {new_shard} is not available"
       )
       self.out_of_data = True
       if self.generate_padding_example:
@@ -228,11 +228,14 @@ class HFDataSource(grain.RandomAccessDataSource):
           if self.generate_padding_example:
             return {column_name: np.zeros(self.max_target_lenth, dtype=np.int32) for column_name in self.data_column_names}
           else:
-            return None
+            raise StopIteration("Running out of data")
         data = next(self.data_iters[idx])
         return data
-      except StopIteration:
-        self._update_shard(idx)
+      except StopIteration as e:
+        if not self.out_of_data:
+          self._update_shard(idx)
+        else:
+          raise e
 
 
 ########## Functions used by Grain pipeline

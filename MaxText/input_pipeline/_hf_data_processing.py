@@ -190,7 +190,7 @@ def make_hf_train_iterator(
       add_bos=config.add_bos,
       add_eos=config.add_eos,
       packing=config.packing,
-      generate_padding_example=True,
+      generate_padding_example=False,
       use_dpo=config.use_dpo,
       use_sft=config.use_sft,
   )
