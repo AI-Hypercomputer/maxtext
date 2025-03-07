@@ -735,7 +735,8 @@ class MoeBlock(nn.Module):
         intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
               "EBNCH,EHM -> EBNCM", layer_multiply, wo_kernel, precision=matmul_precision
           )
-
+        if self.config.activations_in_float32:
+          intermediate_layer = intermediate_layer.astype(jnp.float32)
         # intermediate_layer = nn.with_logical_constraint(
         #     intermediate_layer,
         #     ("activation_exp", "activation_batch_no_exp", None, "activation_embed"),
