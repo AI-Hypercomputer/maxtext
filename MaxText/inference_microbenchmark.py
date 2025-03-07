@@ -84,7 +84,9 @@ def prefix_cache_benchmark(
     )
 
   prefix_size_bytes_gb = value.prefix_size_bytes / 1024 / 1024 / 1024
-  prefix_cache_inst = prefix_cache.PrefixCache(prefix_cache_entries_num * value.prefix_size_bytes)
+  max_bytes = prefix_cache_entries_num * value.prefix_size_bytes
+  # TODO(yuyanpeng): test hierarchical cache
+  prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=max_bytes, dram_bytes=max_bytes)
   common_len = int(prefill_length * common_prefix_proportion)
   remain_len = prefill_length - common_len
   common_prefix_key = tuple(i for i in range(common_len))

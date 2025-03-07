@@ -504,7 +504,7 @@ class HierarchicalCache:
 
   def add(self, key: Key, value: Value) -> tuple[bool, dict[Key, Value]]:
     """Add to all layers and return (ok, dict[fully evicted from hierarchical cache key value pair]).
-    
+
     Beware in some error case, there may be not ok but have some evicted key value.
     """
     needed_bytes = value.prefix_size_bytes
@@ -589,20 +589,34 @@ class HierarchicalCache:
 class PrefixCache:
   """Store Prefix KV cache.
 
+  Use hierarchical cache of two layers the first in the HBM and the second in the host DRAM.
+  Assuming HBM is available, or the cache would degrade to two layers on DRAM.
   If cache is full, evict least-recently used entries (LRU).
+  LRU strategy is apply to all layers.
+  The cache in HBM will be subset of the cache in host DRAM.
+  For example:
+    For HBM can contain 2 values, and DRAM can contain 5 values,
+    [1, 2, 3, 4, 5] LRU history, the [1, 2] will in HBM, and [1, 2, 3, 4, 5] will in DRAM.
+  Always return cache after load into HBM.
+  The value need to be <= to the max size in HBM.
+  DRAM max size need to be >= than HBM max size.
   """
 
-  def __init__(self, hbm_bytes: int):
+  def __init__(self, hbm_bytes: int, dram_bytes: int):
     """
+    dram_bytes >= hbm_bytes
     Args:
       hbm_bytes: Total amount of HBM to use for cache.
+      dram_bytes: Total amount of DRAM to use for cache.
     """
-    self._hbm_bytes = hbm_bytes
+    # TODO(yuyanpeng): way to disable DRAM cache
+    assert dram_bytes >= hbm_bytes, "DRAM max size need to be >= than HBM max size."
     self._lock = threading.Lock()
+    self._hbm_bytes = hbm_bytes
+    self._dram_bytes = dram_bytes
     # init in clear()
-    self._hbm_storage: HBMStorage
     self._trie: PrefixCacheTrie
-    self._cache_strategy: LRUStrategy
+    self._cache: HierarchicalCache
     self.clear()
 
   def fetch_longest_common_prefix_key(self, key: Key) -> Optional[Key]:
@@ -617,50 +631,35 @@ class PrefixCache:
     """Save key/value to the cache."""
     logger.debug("save key=%r", key)
     with self._lock:
-      while not self._hbm_storage.has_enough_space(value.prefix_size_bytes):
-        if self._hbm_bytes < value.prefix_size_bytes:
-          logger.debug("hbm_bytes=%r < value.prefix_size_bytes=%r", self._hbm_bytes, value.prefix_size_bytes)
-          break
-        if self._evict_cache() is None:
-          logger.debug("cannot evict cache")
-          break
-      if not self._hbm_storage.add(key, value):
-        logger.debug("cannot add to cache even after evict")
+      ok, evicted = self._cache.add(key, value)
+      for evicted_key in evicted.keys():
+        self._trie.erase(evicted_key)
+      if not ok:
+        logger.warning("Cannot add to cache")
         return False
       self._trie.insert(key)
-      self._cache_strategy.use(key)
       return True
 
   def load(self, key: Key) -> Optional[Value]:
     """Returns Value stored with key or None if not found."""
     logger.debug("load key=%r", key)
     with self._lock:
-      value = self._hbm_storage.retrieve(key)
+      value = self._cache.retrieve(key)
       if value is None:
         logger.warning(
             "The key should fetched by fetch_longest_common_prefix_key, load key=%r should be valid but not.", key
         )
         return None
-      self._cache_strategy.use(key)
       return value
 
   def clear(self):
     """Clear entire cache."""
     logger.debug("clear cache")
-    self._hbm_storage = HBMStorage(max_size_bytes=self._hbm_bytes)
-    self._trie = PrefixCacheTrie()
-    self._cache_strategy = LRUStrategy()
-
-  def _evict_cache(self) -> Optional[Value]:
-    """Evict cache based on strategy."""
-    logger.debug("_evict_cache")
-    key = self._cache_strategy.evict()
-    if key is None:
-      logger.debug("no key to evict")
-      return None
-    logger.debug("evict key=%r", key)
-    value = self._hbm_storage.evict(key)
-    if value is None:
-      logger.warning("key=%r should exist in HBM cache.", key)
-    self._trie.erase(key)
-    return value
+    with self._lock:
+      self._trie = PrefixCacheTrie()
+      self._cache = HierarchicalCache(
+          layers=(
+              HBMStorage(self._hbm_bytes),
+              DRAMStorage(self._dram_bytes),
+          )
+      )
