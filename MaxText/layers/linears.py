@@ -520,12 +520,12 @@ class MoeBlock(nn.Module):
     return update_weights
 
   def get_context_partition_and_sub_seq(self, seq_len):
-      cp = self.config.ici_context_parallelism
-      if seq_len % cp != 0:
-        cp = 1
-      sub_seq = seq_len // cp
-      return cp, sub_seq
-  
+    cp = self.config.ici_context_parallelism
+    if seq_len % cp != 0:
+      cp = 1
+    sub_seq = seq_len // cp
+    return cp, sub_seq
+
   def generate_masks(self, top_k_indices, softmax_probs):
     # calculate expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
     batch_size, seq_len, _ = top_k_indices.shape
@@ -593,7 +593,7 @@ class MoeBlock(nn.Module):
     combine_mask = combine_mask[..., 1:]
     dispatch_mask = combine_mask.astype(bool)
 
-    #ici_context_parallelism
+    # ici_context_parallelism
     dispatch_mask = jnp.reshape(dispatch_mask, (batch_size, cp, sub_seq, self.num_experts, expert_capacity_per_batch))
     combine_mask = jnp.reshape(combine_mask, (batch_size, cp, sub_seq, self.num_experts, expert_capacity_per_batch))
 
@@ -667,8 +667,8 @@ class MoeBlock(nn.Module):
       # token dropping if needed
       dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs)
       if self.config.ici_context_parallelism > 0 and cp == 1:
-        mask_axes = ( "activation_length", "activation_batch", None, None, None)
-        input_axis = ("activation_length", "activation_batch",  None, "activation_embed")
+        mask_axes = ("activation_length", "activation_batch", None, None, None)
+        input_axis = ("activation_length", "activation_batch", None, "activation_embed")
         dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_embed")
         mlp_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_mlp")
       else:
@@ -682,44 +682,44 @@ class MoeBlock(nn.Module):
         loss = self.load_balance_loss(top_k_indices, weights)
       else:
         loss = None
-      inputs = jnp.reshape(inputs,(batch_size, cp, sub_seq, inputs.shape[2]))
+      inputs = jnp.reshape(inputs, (batch_size, cp, sub_seq, inputs.shape[2]))
 
-      inputs = nn.with_logical_constraint(inputs, input_axis)     
+      inputs = nn.with_logical_constraint(inputs, input_axis)
 
       with jax.named_scope("dispatch"):
         # only cp during prefill
         dispatch = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=DISPATCH)(
-              "BNSM,BNSEC -> EBNCM", inputs, dispatch_mask, precision=matmul_precision
-          )
+            "BNSM,BNSEC -> EBNCM", inputs, dispatch_mask, precision=matmul_precision
+        )
         if cp > 1:
           dispatch = nn.with_logical_constraint(
-            dispatch,
-            (None, "activation_batch_no_exp", "activation_length", None, "activation_embed"),
+              dispatch,
+              (None, "activation_batch_no_exp", "activation_length", None, "activation_embed"),
           )
         dispatch = nn.with_logical_constraint(
-              dispatch,
-             dispatch_axis,
-          )
+            dispatch,
+            dispatch_axis,
+        )
       with jax.named_scope("wi_0"):
         w0_kernel_axes = ("exp", None, "mlp")
         w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
         layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
-              "EBNCM,EMH -> EBNCH", dispatch, w0_kernel, precision=matmul_precision
-          )
+            "EBNCM,EMH -> EBNCH", dispatch, w0_kernel, precision=matmul_precision
+        )
 
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
         layer_w0 = nn.with_logical_constraint(
             layer_w0,
-           mlp_axis,
+            mlp_axis,
         )
         layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
       with jax.named_scope("wi_1"):
         w1_kernel_axes = ("exp", None, "mlp")
         w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
         layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
-              "EBNCM,EMH -> EBNCH", dispatch, w1_kernel, precision=matmul_precision
-          )
+            "EBNCM,EMH -> EBNCH", dispatch, w1_kernel, precision=matmul_precision
+        )
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
         layer_w1 = nn.with_logical_constraint(
@@ -733,8 +733,8 @@ class MoeBlock(nn.Module):
         wo_kernel_axes = ("exp", "mlp", None)
         wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
         intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
-              "EBNCH,EHM -> EBNCM", layer_multiply, wo_kernel, precision=matmul_precision
-          )
+            "EBNCH,EHM -> EBNCM", layer_multiply, wo_kernel, precision=matmul_precision
+        )
         if self.config.activations_in_float32:
           intermediate_layer = intermediate_layer.astype(jnp.float32)
         # intermediate_layer = nn.with_logical_constraint(
@@ -750,7 +750,7 @@ class MoeBlock(nn.Module):
             combine_mask,
             precision=matmul_precision,
         )
-        output = jnp.reshape(output, (output.shape[0], output.shape[1]*output.shape[2], output.shape[3]))  
+        output = jnp.reshape(output, (output.shape[0], output.shape[1] * output.shape[2], output.shape[3]))
       return output, loss
     else:
       top_k_weights /= top_k_weights.sum(-1, keepdims=True)

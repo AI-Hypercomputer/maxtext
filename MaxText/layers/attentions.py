@@ -180,6 +180,7 @@ class AttentionOp(nn.Module):
     assert key.shape[-2] == value.shape[-2], "k, v num_kv_heads must match."
     assert key.shape[-3] == value.shape[-3], "k, v lengths must match."
     assert query.shape[-1] == key.shape[-1], "q, k depths must match."
+
   # Attention mask is generated in the same way
   # as mentioned in SARATHI - https://arxiv.org/abs/2308.16369
   def generate_attention_mask_for_chunk(self, query, key, previous_chunk: Any = None) -> Array | None:
@@ -545,7 +546,7 @@ class AttentionOp(nn.Module):
 
     local_out = self.wv_product(local_exps, value, model_mode)
     if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE:
-      local_out = partitioning.with_sharding_constraint(local_out, (BATCH, KV_LENGTH, HEAD, D_KV)) 
+      local_out = partitioning.with_sharding_constraint(local_out, (BATCH, KV_LENGTH, HEAD, D_KV))
     else:
       local_out = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, None, HEAD, D_KV))
 
@@ -1390,6 +1391,7 @@ class Attention(nn.Module):
     def query_init(*args):
       # pylint: disable=no-value-for-parameter
       return self.kernel_init(*args) / depth_scaling
+
     kernel_axes = (None, None, None) if self.config.ici_context_parallelism > 1 else ("embed", "q_heads", "kv")
     query_proj = DenseGeneral(
         features=(self.num_query_heads, self.head_dim),
@@ -1455,12 +1457,12 @@ class Attention(nn.Module):
     return query, key, value
 
   def out_projection(self, output_dim: int, out: Array) -> Array:
-    out_kernel_axis = (None, None, None) if self.config.ici_context_parallelism > 1 else ("heads", "kv", "embed")    
+    out_kernel_axis = (None, None, None) if self.config.ici_context_parallelism > 1 else ("heads", "kv", "embed")
     out_proj = DenseGeneral(
         features=output_dim,
         axis=(-2, -1),
         kernel_init=self.kernel_init,
-        kernel_axes=out_kernel_axis, # trade speed with memory
+        kernel_axes=out_kernel_axis,  # trade speed with memory
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name="out",
@@ -1555,7 +1557,7 @@ class Attention(nn.Module):
     """
     if model_mode == common_types.MODEL_MODE_PREFILL:
       inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)   
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
     else:
       inputs_q = nn.with_logical_constraint(inputs_q, self.decode_input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.decode_input_axis_names)
@@ -1578,8 +1580,8 @@ class Attention(nn.Module):
       value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       query = nn.with_logical_constraint(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
-      key = nn.with_logical_constraint(key,(DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
-      value = nn.with_logical_constraint(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))      
+      key = nn.with_logical_constraint(key, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
+      value = nn.with_logical_constraint(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
     else:
       query = nn.with_logical_constraint(query, self.query_axis_names)
       key = nn.with_logical_constraint(key, self.key_axis_names)
