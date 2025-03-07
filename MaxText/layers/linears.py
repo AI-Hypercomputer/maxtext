@@ -531,6 +531,7 @@ class MoeBlock(nn.Module):
     batch_size, seq_len, _ = top_k_indices.shape
     cp, sub_seq = self.get_context_partition_and_sub_seq(seq_len)
 
+    #  breaking the sequence into sub sequences. It is effectively grouping the tokens in a sequence into groups, and route only within each group.
     top_k_indices = jnp.reshape(top_k_indices, (batch_size, cp, sub_seq, top_k_indices.shape[2]))
 
     tokens_per_batch = sub_seq * self.num_experts_per_tok
