@@ -700,6 +700,7 @@ class MaxEngine(engine_api.Engine):
       self,
       params: Params,
       decode_state: DecodeState,
+      lora_params: Params = None,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
@@ -717,6 +718,7 @@ class MaxEngine(engine_api.Engine):
           decode_state["next_pos"],
           enable_dropout=False,
           model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          lora_params=lora_params,
           rngs={"params": new_rng},
           mutable=["cache"],
       )

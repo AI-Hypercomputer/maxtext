@@ -1494,6 +1494,7 @@ class Attention(nn.Module):
       deterministic: bool = False,
       previous_chunk: Any = None,
       page_state: Optional[page_manager.PageState] = None,
+      lora_params: Optional[dict] = None,
   ):
     """Applies Attention on the input data.
 
@@ -1513,6 +1514,7 @@ class Attention(nn.Module):
       inputs_kv: key/values of shape `[batch, kv_length, kv_features]`.
       model_mode: corresponding to train, prefill and decode.
       deterministic: Disables dropout if set to True.
+      lora_params: A dictionry of unified LoRA params.
 
     Returns:
       output of shape `[batch, length, q_features]`.
@@ -1527,6 +1529,33 @@ class Attention(nn.Module):
       query = self.query_projection(inputs_q)
       key = self.kv_projection(inputs_kv, proj_name="key")
       value = self.kv_projection(inputs_kv, proj_name="value")
+
+    if lora_params:   # Non-empty LoRA Parameters
+      # TODO: Hardcoded the scale_factor. Pass it via call_stack
+      # scale_factor = lora_alpha / lora_rank
+      scale_factor = 4
+
+      # Unified batched matmul for query update:
+      # b: batch, s: sequence length, H: hidden_size (h * d), h: num_heads, d: head_dim, r: lora_rank
+      # query: [b, s, h, d]
+      # input_q: [b, s, H]
+      # lora_a_q: [b, H, r]
+      # lora_b_q: [b, r, h, d]
+
+      if "lora_a.kernel" in lora_params[self.name]["query"]:
+        lora_a_q = lora_params[self.name]["query"]["lora_a.kernel"]       # [batch, hidden_size, rank]
+        lora_b_q = lora_params[self.name]["query"]["lora_b.kernel"]       # [batch, rank, num_heads, head_dim]
+        query = query + jnp.einsum("bsH,bHr,brhd->bshd", inputs_q, lora_a_q, lora_b_q) * scale_factor
+
+      if "lora_a.kernel" in lora_params[self.name]["key"]:
+        lora_a_k = lora_params[self.name]["key"]["lora_a.kernel"]
+        lora_b_k = lora_params[self.name]["key"]["lora_b.kernel"]
+        key = key + jnp.einsum("bsH,bHr,brhd->bshd", inputs_kv, lora_a_k, lora_b_k) * scale_factor
+
+      if "lora_a.kernel" in lora_params[self.name]["query"]:
+        lora_a_v = lora_params[self.name]["value"]["lora_a.kernel"]
+        lora_b_v = lora_params[self.name]["value"]["lora_b.kernel"]
+        value = value + jnp.einsum("bsH,bHr,brhd->bshd", inputs_kv, lora_a_v, lora_b_v) * scale_factor
 
     # apply ROPE
     query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")

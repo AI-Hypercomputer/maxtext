@@ -75,6 +75,7 @@ class LlamaDecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      lora_params,
       page_state: Optional[page_manager.PageState] = None,
   ):
     cfg = self.config
@@ -119,6 +120,10 @@ class LlamaDecoderLayer(nn.Module):
         ragged_block_size=cfg.ragged_block_size,
     )
 
+    lora_params_layers = {}
+    if lora_params:
+      lora_params_layers = lora_params[self.name]   # Fetch the self-attention params of each `layers_{idx}`
+
     attention_lnx = attention_layer(
         lnx,
         lnx,
@@ -126,6 +131,7 @@ class LlamaDecoderLayer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        lora_params=lora_params_layers,
         page_state=page_state,
     )
 
