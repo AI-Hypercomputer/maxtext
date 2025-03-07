@@ -129,7 +129,7 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
         model, tx, config, rng, mesh, True
     )
 
-    lora_config_path = lora_adapter_path + config.lora_config_file_name
+    lora_config_path = lora_adapter_path + "adapter_config.json"
 
     lora_config = gcs_utils.read_json_from_gcs(lora_config_path)
 

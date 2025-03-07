@@ -1071,7 +1071,7 @@ if __name__ == "__main__":
 
           del lora_config_dict["lora_model_path"]
 
-          lora_output_gcs_path = f"{args.maxtext_model_path}/LoRAs/{lora_id}"
+          lora_output_gcs_path = f"{args.maxtext_model_path}/loras/{lora_id}"
 
           save_jax_weights_to_checkpoint(lora_output_gcs_path, jax_lora_weights)
           gcs_utils.write_dict_to_gcs_json(lora_config_dict, f"{lora_output_gcs_path}/adapter_config.json")

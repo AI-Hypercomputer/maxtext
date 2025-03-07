@@ -103,8 +103,8 @@ def _generate_lora_decode_checkpoints(config, mesh):
 
   lora_adapters = gcs_utils.gcs_list_directories(config.lora_input_adapters_path)
   for lora_id in lora_adapters:
-    # Expected lora_checkpoint_dir = <checkpoint_dir>/LoRA/<lora_id>
-    lora_checkpoint_dir = f"{config.checkpoint_dir}{config.lora_checkpoint_dir}{lora_id}/"
+    # Expected lora_checkpoint_dir = <checkpoint_dir>/loras/<lora_id>
+    lora_checkpoint_dir = f"{config.checkpoint_dir}loras/{lora_id}/"
 
     lora_adapter_path = f"{config.lora_input_adapters_path}/{lora_id}/"
 
@@ -122,7 +122,7 @@ def _generate_lora_decode_checkpoints(config, mesh):
 
     _possibly_unroll_params(config, lora_state, lora_state_annotations, mesh)
 
-    gcs_utils.write_dict_to_gcs_json(lora_config, lora_checkpoint_dir + config.lora_config_file_name)
+    gcs_utils.write_dict_to_gcs_json(lora_config, lora_checkpoint_dir + "adapter_config.json")
 
     # Save decode state to config's checkpoint directory at step 0
     _save_decode_checkpoint(config, lora_state, checkpoint_manager)
@@ -162,7 +162,7 @@ def generate_decode_checkpoint(config):
   base_checkpoint_dir = config.checkpoint_dir
 
   if config.lora_input_adapters_path:
-    base_checkpoint_dir += config.base_dir
+    base_checkpoint_dir += "base/"
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       base_checkpoint_dir,
