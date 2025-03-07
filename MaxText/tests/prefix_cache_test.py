@@ -281,9 +281,9 @@ class BasicStorageTest(unittest.TestCase):
 
   def test_add_and_retrieve_multiple_keys(self):
     storage = prefix_cache.BasicStorage(max_size_bytes=1_000_000)
-    value1 = create_default_value(tokens=[1])
+    value1 = create_default_value(tokens=(1,))
     storage.add((1,), value1)
-    value2 = create_default_value(tokens=[2])
+    value2 = create_default_value(tokens=(2,))
     storage.add((2,), value2)
     assert storage.retrieve((1,)) == value1
     assert storage.retrieve((2,)) == value2
