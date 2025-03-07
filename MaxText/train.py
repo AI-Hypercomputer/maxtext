@@ -73,6 +73,7 @@ from ml_goodput_measurement import monitoring
 
 # pylint: disable=too-many-positional-arguments
 jax.config.update("jax_debug_nans", False)
+jax.config.update("jax_explain_cache_misses", True)
 
 Transformer = models.Transformer
 EPS = 1e-8

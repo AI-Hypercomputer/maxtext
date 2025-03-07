@@ -582,8 +582,8 @@ def main() -> int:
       for num_slices in [1,]:
         # Use the libtpu dependencies from:
         for libtpu_type in [
-            # LibTpuType.CUSTOM
-            LibTpuType.MAXTEXT
+            LibTpuType.CUSTOM
+            # LibTpuType.MAXTEXT
             # LibTpuType.NIGHTLY
         ]:
           wl_config = WorkloadConfig(
