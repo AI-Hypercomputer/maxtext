@@ -239,8 +239,8 @@ class ElasticUtils:
         logger.info("Elastic handler raised an error.")
         reshard_retry = True
 
-      logger.info("Successfully resharded down")
-      return ret
+    logger.info("Successfully resharded down")
+    return ret
 
   @timeit
   def maybe_reshard_up(
