@@ -21,6 +21,7 @@ from flax import linen as nn
 import functools
 import numpy as np
 import pyconfig
+import pytest
 from layers import quantizations
 import unittest
 from aqt.jax.v2 import aqt_tensor
@@ -98,6 +99,7 @@ class QuantizationTest(unittest.TestCase):
       quant = _configure_quantization(quant_str="int8", mode_str=quant_mode)
       self.assertNotEqual(quant, None)
 
+  @pytest.mark.skip(reason="b/400476456 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
   def test_aqt_quantization(self):
     # Without quantization
     inputs, res_einsum, res_dg = _apply()

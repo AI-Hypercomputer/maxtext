@@ -90,7 +90,7 @@ def validate_train_config(config):
     max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
   assert config.steps > 0, "You must set steps or learning_rate_schedule_steps to a positive integer."
 
-  if config.quantization == "fp8":
+  if config.quantization in ("fp8", "nanoo_fp8"):
     # pylint: disable=line-too-long
     assert (
         config.gradient_accumulation_steps == 1
@@ -665,6 +665,7 @@ def setup_train_loop(config):
           data_iterator,
           load_parameters_from_path="",
           load_full_state_from_path="",
+          checkpoint_storage_concurrent_gb=config.checkpoint_storage_concurrent_gb,
           abstract_unboxed_pre_state=abstract_state,
           enable_single_replica_ckpt_restoring=False,
           dataset_type=config.dataset_type,
