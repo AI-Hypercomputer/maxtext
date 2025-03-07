@@ -180,9 +180,12 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   # completions shape: [B x G, max_target_length - max_prefill_length]
   # this includes the completion tokens + padding (upto max_target_length - max_prefill_length))
   # data["ar_completions"] contains tokens only upto the eos, no tokens thereafter other than pad_tokens
+  # prompt = data["prompt"]
   ar_completions = data["ar_completions"]
 
   # --- (3) Compute per-token log probabilities.
+  # prompt_position = data["prompt_position"]
+  # prompt_segmentation = data["prompt_segmentation"]
   ar_completions_position = data["ar_completions_position"] 
   ar_completions_segmentation = data["ar_completions_segmentation"]
 
@@ -339,7 +342,7 @@ def generate_completions(params, data, config, rng, tokenizer_model, engine, tru
     # generate the KV cache by prefilling the prompt tokens
     # Generate G completions for a prompt with different rng
     for _ in range(G):
-      prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=current_token_true_length[0], rng=rng_prefill)
+      prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=current_token_true_length, rng=rng_prefill)
       decode_state = engine.insert(prefill_result, decode_state, slot=slot)
       slot += 1
   steps = config.max_target_length - config.max_prefill_predict_length
@@ -350,14 +353,28 @@ def generate_completions(params, data, config, rng, tokenizer_model, engine, tru
     for i in range(slot):
       completions[i].append(result_tokens.get_result_at_slot(i).tokens.item())
   completions = jnp.array(list(completions.values()))
-  eos_positions = jnp.argmax(completions == tokenizer_model.eos_token_id, axis=1, keepdims=True)
-  eos_not_found = jnp.all(eos_positions == 0, axis=1, keepdims=True)
-  eos_positions = jnp.where(eos_not_found, steps, eos_positions)
-  row_indices = jnp.arange(completions.shape[1])
+  # eos_positions = jnp.argmax(completions == tokenizer_model.eos_token_id, axis=1, keepdims=True)
+  # eos_not_found = jnp.all(eos_positions == 0, axis=1, keepdims=True)
+  # eos_positions = jnp.where(eos_not_found, steps, eos_positions)
+  # row_indices = jnp.arange(completions.shape[1])
+  # mask = row_indices
+  # mask = row_indices <= eos_positions
+  prompt_with_completions = []
+  for i in range(prompts.shape[0]):
+    tokens = prompts[i]
+    current_token_true_length = true_length[i]
+    concatenated_prompts = jnp.concatenate(
+       [tokens[:current_token_true_length -1], # remove EOS token in input prompt
+        completions[i]], axis = 0)
+    prompt_with_completions.append(jnp.pad(concatenated_prompts, (0, config.max_target_length - concatenated_prompts.shape[0]) , constant_values=tokenizer_model.pad_token_id))
+  data['prompt_completions'] = jnp.array(prompt_with_completions)
+  row_indices = jnp.arange(data['prompt_completions'].shape[1])
+  eos_positions = jnp.argmax(data['prompt_completions'] == tokenizer_model.eos_token_id, axis=1, keepdims=True)
   mask = row_indices <= eos_positions
-  data['ar_completions'] = completions * mask
-  data['ar_completions_segmentation'] = mask.astype(jnp.int32)
-  data['ar_completions_position'] = jnp.where(mask, row_indices + 1, 0)
+  data['prompt_completions_segmentation'] = mask.astype(jnp.int32)
+  data['prompt_completions_position'] = jnp.where(mask, row_indices + 1, 0)
+  data['completion_segmentation'] = row_indices > 
+  breakpoint()
   return data
 
 def prompt_completions(config, engine, tokenizer_model, data, params, rng):
@@ -380,6 +397,7 @@ def prompt_completions(config, engine, tokenizer_model, data, params, rng):
                               engine=engine,
                               true_length=L_prompt,
                               )
+  breakpoint()
   return data
 
 
@@ -424,8 +442,6 @@ def compute_log_probs(model,
  
   Note: We assume that tokens have been already appropriately padded.
   """
-  #TODO: Ensure attention mask takes into account the left paading
-  
   logits, intermediate_outputs = model.apply(
       params,
       completions,
@@ -568,7 +584,6 @@ def eval_step(model, config, state, data, dropout_rng):
   state, reference_params = _split_grpo_state(state)
   extra_dpo_args = [reference_params]
   _loss_fn = grpo_loss_fn
-  # TODO: Add support for eval dataset in GRPO 
 
   eval_loss_fn = functools.partial(_loss_fn, model, config, data, dropout_rng, is_train=False)
   loss, aux = eval_loss_fn(state.params, *extra_dpo_args)
@@ -584,7 +599,7 @@ def eval_step(model, config, state, data, dropout_rng):
       },
   }
   if config.use_dpo:
-    metrics["scalar"]["evaluation/dpo_reward_accuracy"] = aux["reward_accuracy"]
+    metrics["scalar"]["evaluation/grpo_reward_accuracy"] = aux["reward_accuracy"]
 
   return metrics
 
@@ -777,6 +792,7 @@ def train_loop(config, config_inference, state=None):
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       example_batch = prompt_completions(config_inference, engine, tokenizer_model, example_batch, state.params, init_rng)
+      breakpoint()
       # jax.debug.print("golden completion {x}",x=example_batch['completion'][0])
       jax.debug.print("ar_completion[0] {x}",x=tokenizer_model.decode(example_batch['ar_completions'][0]))
       # jax.debug.print("ar_completion_segmentation {x}",x=example_batch['ar_completions_segmentation'][0])
