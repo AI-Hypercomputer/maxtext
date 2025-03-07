@@ -138,9 +138,7 @@ class PipelineStage:
     # microbatch. The logic in this file only prototypes with remat enabled.
     self.grad_func:  Any = None
     self.grad_and_update_func: Any = None
-    self.input_caches: Dict[int, Any] = {}
     self._set_jitted_forward_func()
-    self._set_jit_update_train_state()
     self._set_jitted_loss_func()
 
   def _set_jitted_forward_func(self):
@@ -244,9 +242,10 @@ class PipelineStage:
       total_loss = jnp.sum(xent)
       total_weights = jnp.sum(targets_segmentation != 0)
       loss = total_loss / (total_weights + EPS)
+      loss = jnp.broadcast_to(loss, logits.shape)
       return loss
     loss_func.__name__ = "loss_func"
-    self.loss_func = jax.jit(loss_func)
+    self.loss_func = jax.jit(loss_func, out_shardings=self.input_sharding())
 
   def get_loss_func(self):
     return self.loss_func
@@ -279,19 +278,6 @@ class PipelineStage:
   def is_last(self, is_last: bool):
     """Returns true if this stage is the last stage in the pipeline."""
     self._is_last = is_last
-
-  def _set_jit_update_train_state(self):
-    """Update the train state with the grads."""
-    def update_state(state, grads):
-      return state.apply_gradients(grads=grads)
-    with self.mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      self.update_train_state_jitted = jax.jit(
-          update_state,
-          donate_argnums=0,
-          in_shardings=(self.state_mesh_shardings, None),
-          out_shardings=self.state_mesh_shardings,
-      )
-    return self.update_train_state_jitted
 
   def input_sharding(self):
     """Return the sharding of the inputs of this stage."""
@@ -331,7 +317,6 @@ class PipelineStage:
     """
     # TODO(linchai): should we use the same rng for all microbatches and all stages.
     nextrng = jax.jit(jax.random.fold_in)(self.init_rng, fwd_microbatch_id)
-    self.input_caches[fwd_microbatch_id] = args
     if not self.grad_func:
       outputs, *_, grad_func = fwd_jitted(
           self.train_state, args, nextrng
@@ -340,16 +325,15 @@ class PipelineStage:
       # self.grad_func[0] = jax.jit(grad_func)
       self.grad_func = grad_func
 
-      def grad_and_update(state, args, output_grads):
-        _, grad_func = self.fwd_jitted(state, args, nextrng)
-        raw_grads = grad_func(output_grads)
+      def grad_and_update(state, output_grads):
+        raw_grads = self.grad_func(output_grads)
         state = state.apply_gradients(grads=raw_grads[0].params)
         return state, raw_grads[1]["inputs"]
       grad_and_update.__name__ = "grad_and_update"
       self.grad_and_update_func = jax.jit(
           grad_and_update,
           donate_argnums=0,
-          in_shardings=(self.state_mesh_shardings, self.input_sharding(), self.input_sharding()),
+          in_shardings=(self.state_mesh_shardings, self.input_sharding()),
           out_shardings=(self.state_mesh_shardings, self.input_sharding()),
       )
     else:
@@ -398,6 +382,6 @@ class PipelineStage:
         assert output_grads is not None
 
       self.train_state, self.bwd_cache[bwd_microbatch_id] = (
-          self.grad_and_update_func(self.train_state, self.input_caches[bwd_microbatch_id], output_grads)
+          self.grad_and_update_func(self.train_state, output_grads)
       )
     return self.bwd_cache[bwd_microbatch_id]

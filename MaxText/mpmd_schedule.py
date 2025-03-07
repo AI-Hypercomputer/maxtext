@@ -27,6 +27,7 @@ from maxtext import profiler
 from maxtext.mpmd.maxtext_pp import max_utils
 from maxtext.mpmd.maxtext_pp.stage import PipelineStage
 import numpy as np
+import functools
 
 
 class PipelineGPipeCircular(ABC):
@@ -144,7 +145,6 @@ class PipelineGPipeCircular(ABC):
       self,
       inputs_wb: Any = None,
       microbatch_id: int = 0,
-      microbatch_size: int = 0,
       step_index: int = 0,
   ):
     """Prepare inputs for a microbatch.
@@ -158,53 +158,33 @@ class PipelineGPipeCircular(ABC):
     Returns:
       inputs for a microbatch
     """
-    # TODO(linchai): need to optimize.
     # If this is the first stage, the inputs come from the data iterator.
     # Otherwise, the inputs com from the previous stage.
     if self.stage.is_first:
       assert inputs_wb is not None
-      inputs_wb_inputs = inputs_wb["inputs"]
-      num_microbatches = microbatch_size // inputs_wb_inputs.shape[1]
-      inputs_mb_inputs = inputs_wb_inputs[
-          microbatch_id
-          * num_microbatches : (microbatch_id + 1)
-          * num_microbatches
-      ]
-      inputs_mb_inputs_hdl = jax.device_put(
-          inputs_mb_inputs,
-          self.stage.input_sharding(),
+      microbatch_sizes = (
+          self.microbatches_per_stage,
+          1,
+          self.config.max_target_length,
       )
+      @functools.partial(jax.jit, static_argnums=(1, 2))
+      def retrieve_inputs_mb(inputs_wb, microbatch_id, microbatch_sizes):
+        return jax.tree_util.tree_map(
+            lambda x: jax.lax.dynamic_slice(
+                x,
+                (0, microbatch_id, 0),
+                microbatch_sizes,
+            ).reshape(
+                (
+                    self.microbatches_per_stage,
+                    self.config.max_target_length,
+                ),
+            ),
+            inputs_wb,
+        )
 
-      inputs_wb_inputs_position = inputs_wb["inputs_position"]
-      num_microbatches = microbatch_size // inputs_wb_inputs_position.shape[1]
-      inputs_position_mb = inputs_wb_inputs_position[
-          microbatch_id
-          * num_microbatches : (microbatch_id + 1)
-          * num_microbatches
-      ]
-      inputs_position_mb_hdl = jax.device_put(
-          inputs_position_mb,
-          self.stage.input_sharding(),
-      )
-
-      inputs_wb_inputs_segmentation = inputs_wb["inputs_segmentation"]
-      num_microbatches = (
-          microbatch_size // inputs_wb_inputs_segmentation.shape[1]
-      )
-      inputs_segmentation_mb = inputs_wb_inputs_segmentation[
-          microbatch_id
-          * num_microbatches : (microbatch_id + 1)
-          * num_microbatches
-      ]
-      inputs_segmentation_mb_hdl = jax.device_put(
-          inputs_segmentation_mb,
-          self.stage.input_sharding(),
-      )
-      return {
-          "inputs": inputs_mb_inputs_hdl,
-          "inputs_position": inputs_position_mb_hdl,
-          "inputs_segmentation": inputs_segmentation_mb_hdl,
-      }
+      retrieve_inputs_mb.__name__ = "retrieve_inputs_mb"
+      return retrieve_inputs_mb(inputs_wb, microbatch_id, microbatch_sizes)
     else:
       inputs_mb_spec = jax.ShapeDtypeStruct(
           [
@@ -215,12 +195,7 @@ class PipelineGPipeCircular(ABC):
           jnp.bfloat16,
           sharding=self.stage.input_sharding(),
       )
-      inputs_position_mb_spec = jax.ShapeDtypeStruct(
-          [self.microbatches_per_stage, self.config.max_target_length],
-          jnp.int32,
-          sharding=self.stage.input_sharding(),
-      )
-      inputs_segmentation_mb_spec = jax.ShapeDtypeStruct(
+      inputs_pos_seg_spec = jax.ShapeDtypeStruct(
           [self.microbatches_per_stage, self.config.max_target_length],
           jnp.int32,
           sharding=self.stage.input_sharding(),
@@ -233,8 +208,8 @@ class PipelineGPipeCircular(ABC):
               uuid,
               [
                   inputs_mb_spec,
-                  inputs_position_mb_spec,
-                  inputs_segmentation_mb_spec,
+                  inputs_pos_seg_spec,
+                  inputs_pos_seg_spec,
               ],
           )
       )
@@ -324,18 +299,13 @@ class PipelineGPipeCircular(ABC):
   def _recv_targets_from_first_stage(self, wb_index):
     assert self.stage.is_last
     # receive 'targets'
-    targets_spec = jax.ShapeDtypeStruct(
-        [32, self.config.max_target_length],
-        jnp.int32,
-        sharding=self.stage.input_sharding(),
-    )
-    targets_position_spec = jax.ShapeDtypeStruct(
-        [32, self.config.max_target_length],
-        jnp.int32,
-        sharding=self.stage.input_sharding(),
-    )
-    targets_segmentation_spec = jax.ShapeDtypeStruct(
-        [32, self.config.max_target_length],
+    targets_pos_seg_spec = jax.ShapeDtypeStruct(
+        [
+            self.microbatches_per_stage,
+            self.config.global_batch_size_to_load
+            // self.microbatches_per_stage,
+            self.config.max_target_length,
+        ],
         jnp.int32,
         sharding=self.stage.input_sharding(),
     )
@@ -345,7 +315,7 @@ class PipelineGPipeCircular(ABC):
     targets, targets_position, targets_segmentation = (
         self.transfer_connection.pull(
             uuid,
-            [targets_spec, targets_position_spec, targets_segmentation_spec],
+            [targets_pos_seg_spec, targets_pos_seg_spec, targets_pos_seg_spec],
         )
     )
     self._targets_cache = {
@@ -357,26 +327,22 @@ class PipelineGPipeCircular(ABC):
   def _maybe_compute_loss(self, logits, target_wb, mb_index, loss_func):
     if self.stage.is_last and self.stage.has_backward:
       assert target_wb is not None
-      # split the targets into microbatches
-      targets_microbatch_size = np.prod([
+      targets_mb_shape = (
           self.microbatches_per_stage,
           self.config.max_target_length,
-      ])
-      num_microbatches = (
-          targets_microbatch_size // target_wb["targets"].shape[1]
       )
-      targets_mb = target_wb["targets"][
-          mb_index * num_microbatches : (mb_index + 1) * num_microbatches
-      ]
-      targets_mb_segmentation = target_wb["targets_segmentation"][
-          mb_index * num_microbatches : (mb_index + 1) * num_microbatches
-      ]
-      loss = loss_func(
+      targets_mb = jax.tree_util.tree_map(
+          lambda x: x[:, mb_index : (mb_index + 1), :].reshape(
+              targets_mb_shape
+          ),
+          target_wb,
+      )
+      loss_broadcasted = loss_func(
           logits,
-          targets_mb,
-          targets_mb_segmentation,
+          targets_mb["targets"],
+          targets_mb["targets_segmentation"],
       )
-      self._internal_losses.append(loss)
+      self._internal_losses.append(loss_broadcasted)
 
   def _maybe_get_loss(self, mb_index):
     valid_index = 0 <= mb_index < len(self._internal_losses)
@@ -410,20 +376,7 @@ class PipelineGPipeCircular(ABC):
       inputs_wb = example_batch
     for i in range(self.num_microbatches):
       # receive inputs for forward pass.
-      if self.stage_index == 0:
-        input_microbatch_size = np.prod([
-            self.microbatches_per_stage,
-            self.config.max_target_length,
-        ])
-      else:
-        input_microbatch_size = np.prod([
-            self.microbatches_per_stage,
-            self.config.max_target_length,
-            self.config.emb_dim,
-        ])
-      input_mb = self._fwd_recv(
-          inputs_wb, i, input_microbatch_size, step_index
-      )
+      input_mb = self._fwd_recv(inputs_wb, i, step_index)
       with jax.named_scope(f"Forward_stage_{self.stage.stage_index}_mb_{i}"):
         outputs = self.stage.forward_step(self.stage.get_jitted_forward_func(), i, input_mb)  # type: ignore[index]
         self._fwd_send(
