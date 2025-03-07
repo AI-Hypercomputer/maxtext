@@ -289,10 +289,11 @@ class AttentionOp(nn.Module):
           value = value.dequant()
 
         if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-          raise ValueError(
-              """Decode not supported with flash attention.
-                              Use `dot_product` instead."""
-          )
+          # raise ValueError(
+          #     """Decode not supported with flash attention.
+          #                     Use `dot_product` instead."""
+          # )
+          return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
         return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap), None, None
       else:
         if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
