@@ -475,6 +475,117 @@ class LRUStrategy:
       self._order.move_to_end(key, last=True)
 
 
+@dataclasses.dataclass
+class StorageWithStrategy:
+  """Storage with corresponding strategy"""
+
+  storage: ValueStorageInterface
+  strategy: LRUStrategy
+
+
+class HierarchicalCache:
+  """Hierarchical Cache contains two layers of ValueStorageInterface.
+
+  The first layer contains subset fo key / value pairs of the second layer.
+  The second storage max size bytes should >= first storage max size bytes.
+  Use LRU for each layer.
+  Add the Value will save to all layers.
+  Retrieve the Value will retrieve to HBM and then saved to all layers.
+  The added value size should less than the first layer max size.
+  If the first layer max size cannot contains the added Value, add will failed.
+  """
+
+  def __init__(self, layers: Tuple[ValueStorageInterface, ValueStorageInterface]):
+    assert (
+        layers[0].get_max_size_bytes() <= layers[1].get_max_size_bytes()
+    ), "Bottom layer of storage need to be larger than top."
+
+    self._layers = [StorageWithStrategy(storage, LRUStrategy()) for storage in layers]
+
+  def add(self, key: Key, value: Value) -> tuple[bool, dict[Key, Value]]:
+    """Add to all layers and return (ok, dict[fully evicted from hierarchical cache key value pair]).
+    
+    Beware in some error case, there may be not ok but have some evicted key value.
+    """
+    needed_bytes = value.prefix_size_bytes
+    if self._layers[0].storage.get_max_size_bytes() < needed_bytes:
+      logging.warning(
+          "Trying to add value larger than top layer max size. need_bytes=%d, max_size_bytes=%d",
+          needed_bytes,
+          self._layers[0].storage.get_max_size_bytes(),
+      )
+      return False, {}
+
+    # Only return last layers evicted key value pair which is fully evicted from hierarchical cache.
+    all_ok = True
+    last_layer_evicted_key_values: dict[Key, Value] = {}
+    for layer in self._layers:
+      if layer.storage.contains(key):
+        last_layer_evicted_key_values = {}
+        continue
+
+      ok, last_layer_evicted_key_values = self._evict_to_enough_space(layer, needed_bytes)
+      all_ok = all_ok and ok
+
+    if not all_ok:
+      logging.error("Cannot evict enough space after checking max_size is enough for bytes=%d.", needed_bytes)
+      return False, last_layer_evicted_key_values
+
+    for layer in self._layers:
+      if not layer.storage.contains(key):
+        if not layer.storage.add(key, value):
+          logging.error("Cannot add to storage. key=%r, needed_bytes=%d", key, needed_bytes)
+          return False, last_layer_evicted_key_values
+
+      layer.strategy.use(key)
+
+    return True, last_layer_evicted_key_values
+
+  def retrieve(self, key: Key) -> Optional[Value]:
+    """Retrieve from all layers and add to all layers."""
+    value: Optional[Value] = None
+    for layer in self._layers:
+      if layer.storage.contains(key):
+        value = layer.storage.retrieve(key)
+        break
+
+    if value is None:
+      logging.warning("Should check key exist before retrieve, but fail for key=%r", key)
+      return None
+
+    for layer in self._layers:
+      if not layer.storage.contains(key):
+        if not self._evict_to_enough_space(layer, value.prefix_size_bytes):
+          logging.error("Cannot evict enough space for retrieved Value to other layers.")
+          continue
+
+        if not layer.storage.add(key, value):
+          logging.error("Cannot add retrieved Value to other layers.")
+          continue
+
+      layer.strategy.use(key)
+
+    return value
+
+  def _evict_to_enough_space(self, layer: StorageWithStrategy, needed_bytes: int) -> tuple[bool, dict[Key, Value]]:
+    """Evict layer to enough bytes for add and return (ok, dict[evicted key, evicted value])."""
+    evicted_key_values: dict[Key, Value] = {}
+    while not layer.storage.has_enough_space(needed_bytes):
+      evicted_key = layer.strategy.evict()
+      if evicted_key is None:
+        logging.error("Cannot evict enough space for bytes=%d.", needed_bytes)
+        return False, evicted_key_values
+
+      evicted_value = layer.storage.evict(evicted_key)
+      if evicted_value is None:
+        logging.error("Key should in storage before evict but not. key=%r", evicted_key)
+        continue
+
+      evicted_key_values[evicted_key] = evicted_value
+
+    return True, evicted_key_values
+
+
 class PrefixCache:
   """Store Prefix KV cache.
 

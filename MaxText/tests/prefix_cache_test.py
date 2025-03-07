@@ -454,6 +454,133 @@ class LRUStrategyTest(unittest.TestCase):
     assert strategy.evict() is None
 
 
+class HierarchicalCacheTest(unittest.TestCase):
+
+  def test_add_to_all_layers(self):
+    value = create_default_value()
+    layers = (
+        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes),
+        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes),
+    )
+    cache = prefix_cache.HierarchicalCache(layers)
+    key = (1,)
+    assert cache.add(key, value)[0] is True
+    assert layers[0].contains(key)
+    assert layers[1].contains(key)
+
+  def test_cannot_add_if_first_layer_max_size_is_not_enough(self):
+    value = create_default_value()
+    layers = (
+        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes - 1),
+        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes),
+    )
+    cache = prefix_cache.HierarchicalCache(layers)
+    key = (1,)
+    assert cache.add(key, value)[0] is False
+    assert not layers[0].contains(key)
+    assert not layers[1].contains(key)
+
+  def test_add_evict_to_enough_space_by_lru(self):
+    value = create_default_value()
+    layers = (
+        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes),
+        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes * 2),
+    )
+    cache = prefix_cache.HierarchicalCache(layers)
+    assert cache.add((1,), value)[0] is True
+    assert cache.add((2,), value)[0] is True
+    ok, evicted = cache.add((3,), value)
+    assert ok is True
+    assert len(evicted) == 1
+    assert (1,) in evicted
+    assert not layers[0].contains((1,))
+    assert not layers[0].contains((2,))
+    assert layers[0].contains((3,))
+    assert not layers[1].contains((1,))
+    assert layers[1].contains((2,))
+    assert layers[1].contains((3,))
+
+  def test_retrieve_will_from_all_layer_and_add_to_all_layer(self):
+    value = create_default_value()
+    layers = (
+        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes),
+        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes * 2),
+    )
+    cache = prefix_cache.HierarchicalCache(layers)
+    assert cache.add((1,), value)[0] is True
+    assert cache.add((2,), value)[0] is True
+    assert not layers[0].contains((1,))
+    assert layers[1].contains((1,))
+    assert cache.retrieve((1,)) == value
+    assert layers[0].contains((1,))
+    assert not layers[0].contains((2,))
+
+  def test_retrieve_not_exist_in_any_layers_return_none(self):
+    value = create_default_value()
+    layers = (
+        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes),
+        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes * 2),
+    )
+    cache = prefix_cache.HierarchicalCache(layers)
+    assert cache.add((1,), value)[0] is True
+    assert cache.add((2,), value)[0] is True
+    assert cache.add((3,), value)[0] is True
+    # Key (1,) is evicted since LRU
+    assert cache.retrieve((1,)) is None
+
+  def test_add_will_happen_to_all_layers_even_if_some_layers_already_contains_the_key(self):
+    value = create_default_value()
+    layers = (
+        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes),
+        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes * 2),
+    )
+    cache = prefix_cache.HierarchicalCache(layers)
+    assert cache.add((1,), value)[0] is True
+    assert cache.add((2,), value)[0] is True
+    # layers[0] do not have (1,) now since LRU
+    assert not layers[0].contains((1,))
+    assert layers[1].contains((1,))
+    ok, evicted = cache.add((1,), value)
+    assert ok is True
+    # (1,) is not evicted from the second layer
+    assert not evicted
+    assert layers[0].contains((1,))
+    assert not layers[0].contains((2,))
+    assert layers[1].contains((1,))
+    assert layers[1].contains((2,))
+
+  def test_lru_affect_all_layers_when_add_and_retrieve(self):
+    value = create_default_value()
+    layers = (
+        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes * 2),
+        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes * 5),
+    )
+    cache = prefix_cache.HierarchicalCache(layers)
+    # There is a LRU queue length of 5. The first 2 will also at the first layer
+    assert cache.add((1,), value)[0] is True
+    assert cache.add((2,), value)[0] is True
+    assert cache.retrieve((1,)) is not None
+    assert cache.add((3,), value)[0] is True
+    assert cache.add((4,), value)[0] is True
+    assert cache.add((5,), value)[0] is True
+    assert cache.retrieve((4,)) is not None
+    ok, evicted = cache.add((6,), value)
+    assert ok is True
+    assert len(evicted) == 1
+    assert (2,) in evicted
+    assert cache.retrieve((3,)) is not None
+    # Now [3, 6, 4, 5, 1] in LRU
+    assert layers[0].contains((3,))
+    assert layers[0].contains((6,))
+    assert layers[1].contains((3,))
+    assert layers[1].contains((6,))
+    assert layers[1].contains((4,))
+    assert layers[1].contains((5,))
+    assert layers[1].contains((1,))
+    # 2 is evicted
+    assert not layers[1].contains((2,))
+
+
 class PrefixCacheTest(unittest.TestCase):
 
   def test_cache_miss_save_hit_load(self):
