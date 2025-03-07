@@ -33,3 +33,4 @@ google-pasta==0.2.0
 google-resumable-media==2.7.2
 googleapis-common-protos==1.69.0
 grpc-google-iam-v1==0.14.1
+tfds_nightly==4.9.7.dev202503040044

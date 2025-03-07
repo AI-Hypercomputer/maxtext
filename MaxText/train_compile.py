@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-""" 
+"""
 Save a Cross Ahead of Time Compiled (XAOT) version of train.py's train step
 Generates shaped versions of state and data without ever constructing them, so its possible
 to compile with target hardware (e.g. hundreds/thousands of chips), without using the hardware.
@@ -42,6 +42,7 @@ import pickle
 import accelerator_to_spec_map
 import train
 from input_pipeline import input_pipeline_interface
+import profiler
 
 # pylint: disable=too-many-positional-arguments
 
@@ -173,6 +174,11 @@ def main(argv: Sequence[str]) -> None:
       nn_partitioning.axis_rules(config.logical_axis_rules),
   )
   print("Jitting and compilation complete!", flush=True)
+
+  prof = profiler.Profiler(config)
+  prof.activate()
+  prof.deactivate()
+  print(f"profile saved to {prof.output_path}")
 
   # Serialize and save the compiled object
   if config.compiled_trainstep_file != "":

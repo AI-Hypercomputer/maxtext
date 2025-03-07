@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y google-cloud-sdk
 ENV PATH="/usr/local/google-cloud-sdk/bin:${PATH}"
 
 # Upgrade libcusprase to work with Jax
-RUN apt-get update && apt-get install -y libcusparse-12-8
+RUN apt-get update && apt-get install -y libcusparse-12-6
 
 # Set the working directory in the container
 WORKDIR /deps
@@ -40,6 +40,6 @@ COPY requirements_stable_stack_additional.txt ./
 RUN echo "Running command: bash setup_stable_stack_additional.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE}"
 RUN --mount=type=cache,target=/root/.cache/pip bash setup_stable_stack_additional.sh MODE=${ENV_MODE} JAX_VERSION=${ENV_JAX_VERSION} DEVICE=${ENV_DEVICE}
 
-COPY . .
+# COPY . .
 
 WORKDIR /deps
