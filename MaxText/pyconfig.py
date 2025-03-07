@@ -593,6 +593,7 @@ def validate_multiple_slices(raw_keys):
                   raw_keys["dcn_tensor_parallelism"],
                   raw_keys["dcn_tensor_sequence_parallelism"],
                   raw_keys["dcn_expert_parallelism"],
+                  raw_keys["dcn_context_parallelism"],
                   raw_keys["dcn_autoregressive_parallelism"],
               ]
           )
@@ -652,6 +653,7 @@ def set_and_validate_pipeline_config(raw_keys):
           "fsdp",
           "fsdp_transpose",
           "sequence",
+          "context",
           "tensor",
           "tensor_transpose",
           "tensor_sequence",
@@ -665,6 +667,7 @@ def set_and_validate_pipeline_config(raw_keys):
               "fsdp",
               "fsdp_transpose",
               "sequence",
+              "context",
               "tensor",
               "tensor_transpose",
               "tensor_sequence",
