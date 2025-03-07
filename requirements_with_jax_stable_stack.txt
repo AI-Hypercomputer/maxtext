@@ -5,7 +5,7 @@ aqtp==0.8.2
 datasets
 grain-nightly>=0.0.10
 ml-goodput-measurement==0.0.5
-orbax-checkpoint>=0.10.3
+orbax-checkpoint>=0.11.7
 pylint
 pytest
 pyink
