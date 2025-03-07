@@ -445,7 +445,7 @@ class MaxEngine(engine_api.Engine):
       rng: Optional[PRNGKeyType] = None,
       slot: Optional[int] = None,
       dynamic_kv_cache: bool = False,
-      page_state: Optional[PageState] = None, # Add page_state as an argument
+      page_state: Optional[PageState] = None,
   ):
       """Computes prefill for a new generate request with paged attention."""
       if rng is None:
@@ -454,38 +454,24 @@ class MaxEngine(engine_api.Engine):
       input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
       positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
 
-      # Create active sequence mask
-      zero_to_n = jnp.arange(0, padded_tokens.shape[0])
-      ones_to_keep = zero_to_n < true_length
-      one_d_output = jnp.where(ones_to_keep, common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR, 0)
-      sequence_indicator = jnp.expand_dims(one_d_output, 0)
+      sequence_indicator = jnp.arange(padded_tokens.shape[0]) < true_length
+      sequence_indicator = sequence_indicator.astype(jnp.int32)  # CRITICAL: Cast to int32
+      sequence_indicator = jnp.expand_dims(sequence_indicator, 0)  # Add batch dimension
 
       rng, new_rng = jax.random.split(rng)
-
-      # Initialize updated_page_state to the input page_state
       updated_page_state = page_state
-      # Initialize cache to a default value.
       cache = {}
 
       with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
           if self.config.attention == "paged":
-
-              # Unbox the logically partitioned parameters
               unboxed_params = max_utils.unbox_logicallypartioned(params)
-
-              # Initialize decoder cache structure
               decoder_cache = {}
               for layer_id in range(self.config.num_decoder_layers):
                   decoder_cache[f"layers_{layer_id}"] = {}
-                  # THIS IS THE KEY LINE. Call page_manager.prefill for EACH layer.
                   updated_page_state = self.page_manager.prefill(
                       updated_page_state, slot, true_length, layer_id
                   )
-
-              # Create variables dict with cache and page_state
               variables = {"params": unboxed_params, "cache": {"decoder": decoder_cache}}
-
-              # Apply model with prefill mode, passing page_state
               model_output, new_vars = self.model.apply(
                   variables,
                   input_tokens,
@@ -497,27 +483,16 @@ class MaxEngine(engine_api.Engine):
                   mutable=["cache"],
                   slot=slot,
                   true_length=true_length,
-                  page_state=updated_page_state, # Use updated not initial page state
+                  page_state=updated_page_state,
               )
               flat_logits, updated_page_state = model_output
-
-              # Get the updated page_state and cache from new_vars
-              updated_cache = variables.get("cache", {}) # get updated cache from variables
-
-              # Check for updated page state (it should be in the first layer) -- Not Needed with state passing
-              #if "decoder" in updated_cache and f"layers_0" in updated_cache["decoder"] and \
-              #  "self_attention" in updated_cache["decoder"][f"layers_0"] and \
-              # "attention_op" in updated_cache["decoder"][f"layers_0"]["self_attention"]:
-              #    updated_page_state = updated_cache["decoder"][f"layers_0"]["self_attention"]["attention_op"].get("page_state") # .get is safer
-
+              updated_cache = variables.get("cache", {})
               cache = {
-                  "page_manager": updated_page_state,  # Use updated page state
-                  "decoder": updated_cache.get("decoder", {})  # And updated decoder cache
+                  "page_manager": updated_page_state,
+                  "decoder": updated_cache.get("decoder", {})
               }
-
-          else: # non-paged
-              # Non-paged attention path (unchanged)
-              flat_logits, updated_page_state = self.model.apply( # ALWAYS unpack two return values
+          else:
+              flat_logits, updated_page_state = self.model.apply(
                   params | {"cache": {}},
                   input_tokens,
                   positions,
@@ -527,8 +502,6 @@ class MaxEngine(engine_api.Engine):
                   rngs={"params": new_rng},
                   mutable=["cache"],
               )
-
-              # Use the cache returned by the model.  Get new_vars here.
               new_vars = self.model.apply(
                 params | {"cache":{}},
                 input_tokens,
@@ -538,30 +511,26 @@ class MaxEngine(engine_api.Engine):
                 model_mode = common_types.MODEL_MODE_PREFILL,
                 rngs = {"params": new_rng},
                 mutable=["cache"],
-              )[1] #getting new_vars
-              cache = new_vars["cache"] #getting from correct spot
+              )[1]
+              cache = new_vars["cache"]
 
-      # Get logits for the last position
       next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
       generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
 
-      # Check attention type *before* accessing .shape
       if self.config.attention == "paged":
           selected_logits = jax.lax.dynamic_slice(
               flat_logits,
               (0, true_length - 1, 0),
-              (flat_logits.shape[0], 1, flat_logits.shape[2]),  # Now safe
+              (flat_logits.shape[0], 1, flat_logits.shape[2]),
           )
-      else: # non-paged
+      else:
           selected_logits = jax.lax.dynamic_slice(
               flat_logits,
               (0, true_length - 1, 0),
-              (flat_logits.shape[0], 1, flat_logits.shape[2]), # Now safe
+              (flat_logits.shape[0], 1, flat_logits.shape[2]),
           )
       selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
 
-
-      # Sample first token
       first_generated_token = inference_utils.sampling(
           selected_logits,
           rng,
@@ -571,7 +540,6 @@ class MaxEngine(engine_api.Engine):
           temperature=self.config.decode_sampling_temperature,
       )
 
-      # Create result structure
       all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
       result = engine_api.ResultTokens(
           data=jnp.concatenate((first_generated_token, all_valid, generated_tokens), axis=1),
@@ -583,15 +551,14 @@ class MaxEngine(engine_api.Engine):
       if self.config.attention != "paged":
         cache = self._maybe_stack_prefill_result_cache(cache)
       jax.debug.print("Prefill Page State {}", updated_page_state)
-      # Return a DICTIONARY:
       return {
           "logits": selected_logits,
           "cache": cache,
           "next_pos": next_pos,
           "generated_tokens": generated_tokens,
           "tokens": first_generated_token,
-          "first_token": result,  # Include the result here
-          "page_state": updated_page_state,  # Include updated_page_state
+          "first_token": result,
+          "page_state": updated_page_state,
       }
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
