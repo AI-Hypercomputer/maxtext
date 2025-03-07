@@ -155,7 +155,7 @@ def validate_keys(keys):
         " use_replicator_service and replicator_backup_interval_minutes"
     )
   assert (
-      keys["ici_context_parallelism"] == 1 or keys["quantize_kvcache"] == False
+      keys["ici_context_parallelism"] == 1 or keys["quantize_kvcache"] is False
   ), "currently context parallelism doesn't support quantized kv cache"
 
   validate_multiple_slices(keys)
