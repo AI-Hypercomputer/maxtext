@@ -62,7 +62,8 @@ if cached_prefix is None or matched_len != orig_key_len:
 """
 
 from collections import OrderedDict
-from typing import Tuple, Any, Optional
+from typing import Any, Optional, Tuple
+import abc
 import dataclasses
 import jax
 import jax.numpy as jnp
@@ -251,29 +252,61 @@ class PrefixCacheTrie:
       node = parent
 
 
-class BasicCache:
-  """Basic cache implement calculating size and save value into dict without modify."""
+class ValueStorageInterface(abc.ABC):
+  """Interface for Value storage."""
+
+  @abc.abstractmethod
+  def get_max_size_bytes(self) -> int:
+    """Get the max size bytes in storage."""
+
+  @abc.abstractmethod
+  def has_enough_space(self, needed_bytes: int) -> bool:
+    """Calculate if needed_bytes size can add to storage."""
+
+  @abc.abstractmethod
+  def add(self, key: Key, value: Value) -> bool:
+    """Add value to storage and return False if failed."""
+
+  @abc.abstractmethod
+  def retrieve(self, key: Key) -> Optional[Value]:
+    """Return value from storage or None if not found."""
+
+  @abc.abstractmethod
+  def evict(self, key: Key) -> Optional[Value]:
+    """Evict and return value, or None if key is not in storage."""
+
+  @abc.abstractmethod
+  def contains(self, key: Key) -> bool:
+    """If there is key in storage."""
+
+
+class BasicStorage(ValueStorageInterface):
+  """Basic implement calculating size and save value into dict without modify."""
 
   def __init__(self, max_size_bytes: int):
     """
     Args:
-      max_size_bytes: Maximum bytes use for cache
+      max_size_bytes: Maximum bytes use
     """
+    self._max_size_bytes = max_size_bytes
     self._remain_size_bytes = max_size_bytes
     self._saved_values: dict[Key, Value] = {}
 
-  def has_enough_space(self, value: Value) -> bool:
-    """Calculate if value size can add to cache."""
-    return self._remain_size_bytes >= value.prefix_size_bytes
+  def get_max_size_bytes(self) -> int:
+    return self._max_size_bytes
 
-  def add_to_cache(self, key: Key, value: Value) -> bool:
-    """Add value to cache and return False if cache is full.
-    The value will not copied. Be aware not to modify the value after add to cache.
-    Cache is expected to have enough space.
+  def has_enough_space(self, needed_bytes: int) -> bool:
+    """Calculate if needed_bytes size can add to storage."""
+    return self._remain_size_bytes >= needed_bytes
+
+  def add(self, key: Key, value: Value) -> bool:
+    """Add value and return False if storage is full.
+    The value will not copied. Be aware not to modify the value after add to storage.
+    Storage is expected to have enough space.
     """
-    if not self.has_enough_space(value):
+    if not self.has_enough_space(value.prefix_size_bytes):
       logger.warning(
-          "should check enough space before add to cache, but remain=%d not enough for value=%d",
+          "should check enough space before add to storage, but remain=%d not enough for value=%d",
           self._remain_size_bytes,
           value.prefix_size_bytes,
       )
@@ -283,88 +316,102 @@ class BasicCache:
     self._remain_size_bytes -= value.prefix_size_bytes
     return True
 
-  def retrieve_from_cache(self, key: Key) -> Optional[Value]:
-    """Return value from cache or None if not found.
-    Be aware the cache is not return a copy. Clone the Value first if additional modification needed,
+  def retrieve(self, key: Key) -> Optional[Value]:
+    """Return value from storage or None if not found.
+    Be aware the storage is not return a copy. Clone the Value first if additional modification needed,
     Key is expected to be found.
     """
     if key not in self._saved_values:
-      logger.warning("key=%r should exist in cache before retrieve, but not found", key)
+      logger.warning("key=%r should exist in storage before retrieve, but not found", key)
       return None
     return self._saved_values[key]
 
-  def evict_cache(self, key: Key) -> Optional[Value]:
-    """Evict and return value, or None if key is not in cache.
+  def evict(self, key: Key) -> Optional[Value]:
+    """Evict and return value, or None if key is not in storage.
     Key is expected to be found.
     """
     if key not in self._saved_values:
-      logger.warning("key=%r should exist in cache before evict, but not found", key)
+      logger.warning("key=%r should exist in storage before evict, but not found", key)
       return None
     value = self._saved_values.pop(key)
     self._remain_size_bytes += value.prefix_size_bytes
     return value
 
+  def contains(self, key: Key) -> bool:
+    """If there is key in storage."""
+    return key in self._saved_values
 
-class HBMCache:
-  """Stores kv cache values in HBM.
 
-  Cache is remain the sharding status before save.
-  It is wrapper for BasicCache which do not modify the value.
+class HBMStorage(ValueStorageInterface):
+  """Stores kv storage values in HBM.
+
+  Storage is remain the sharding status before save.
+  It is wrapper for BasicStorage which do not modify the value.
   If the Value is not in HBM, it will still not in HBM after saved.
   """
 
   def __init__(self, max_size_bytes: int):
     """
     Args:
-      max_size_bytes: Maximum bytes of HBM to use for cache
+      max_size_bytes: Maximum bytes of HBM to use for storage
     """
-    self._cache = BasicCache(max_size_bytes)
+    self._storage = BasicStorage(max_size_bytes)
 
-  def has_enough_space(self, value: Value) -> bool:
-    """Calculate if value size can add to cache."""
-    return self._cache.has_enough_space(value)
+  def get_max_size_bytes(self) -> int:
+    return self._storage.get_max_size_bytes()
 
-  def add_to_cache(self, key: Key, value: Value) -> bool:
-    """Value will be moved to the cache, which means cannot used the same value reference after add_to_cache.
-    Cache is expected to have enough space.
+  def has_enough_space(self, needed_bytes: int) -> bool:
+    """Calculate if needed_bytes size can add to storage."""
+    return self._storage.has_enough_space(needed_bytes)
+
+  def add(self, key: Key, value: Value) -> bool:
+    """Value will be moved to the storage, which means cannot used the same value reference after this function.
+    Storage is expected to have enough space.
     """
-    return self._cache.add_to_cache(key, value)
+    return self._storage.add(key, value)
 
-  def retrieve_from_cache(self, key: Key) -> Optional[Value]:
-    """Return value from cache or None if not found.
-    Be aware the cache is not return a copy. Clone the Value first if additional modification needed,
+  def retrieve(self, key: Key) -> Optional[Value]:
+    """Return value from storage or None if not found.
+    Be aware the storage is not return a copy. Clone the Value first if additional modification needed,
     Key is expected to be found.
     """
-    return self._cache.retrieve_from_cache(key)
+    return self._storage.retrieve(key)
 
-  def evict_cache(self, key: Key) -> Optional[Value]:
-    """Evict and return value, or None if key is not in cache.
+  def evict(self, key: Key) -> Optional[Value]:
+    """Evict and return value, or None if key is not in storage.
     Key is expected to be found.
     """
-    return self._cache.evict_cache(key)
+    return self._storage.evict(key)
+
+  def contains(self, key: Key) -> bool:
+    """If there is key in storage."""
+    return self._storage.contains(key)
 
 
-class HostCache:
+class DRAMStorage(ValueStorageInterface):
   """Stores KV Cache values in host DRAM."""
 
   def __init__(self, max_size_bytes: int):
     """
     Args:
-      max_size_bytes: Maximum bytes of host DRAM to use for cache
+      max_size_bytes: Maximum bytes of host DRAM to use for storage
     """
-    self._cache = BasicCache(max_size_bytes)
+    self._storage = BasicStorage(max_size_bytes)
 
-  def has_enough_space(self, value: Value) -> bool:
-    """Calculate if value size can add to cache."""
-    return self._cache.has_enough_space(value)
+  def get_max_size_bytes(self) -> int:
+    return self._storage.get_max_size_bytes()
 
-  def add_to_cache(self, key: Key, value: Value) -> bool:
+  def has_enough_space(self, needed_bytes: int) -> bool:
+    """Calculate if needed_bytes size can add to storage."""
+    return self._storage.has_enough_space(needed_bytes)
+
+  def add(self, key: Key, value: Value) -> bool:
     """Add value into host DRAM.
 
-    Return false if cache does not have enough space.
+    Return false if storage does not have enough space.
     Do not use this function to check if has enough space.
     This function will first move to host DRAM before check the space.
-    The cache will copy to the host DRAM if originally on device,
+    The storage will copy to the host DRAM if originally on device,
     or with the same reference to the value if originally on host.
     Do not use the value after this function if originally on host since the value will not copy.
     """
@@ -377,15 +424,15 @@ class HostCache:
         device=value.device,
     )
 
-    return self._cache.add_to_cache(key, host_value)
+    return self._storage.add(key, host_value)
 
-  def retrieve_from_cache(self, key: Key) -> Optional[Value]:
-    """Return value from cache to the original device or None if not found.
+  def retrieve(self, key: Key) -> Optional[Value]:
+    """Return value from storage to the original device or None if not found.
 
-    If the original device save in the cache is cpu, the cache will not copied.
-    Do not modify the cache prefix retrieved.
+    If the original device save in the storage is cpu, the storage will not copied.
+    Do not modify the storage prefix retrieved.
     """
-    host_value = self._cache.retrieve_from_cache(key)
+    host_value = self._storage.retrieve(key)
     if host_value is None:
       return None
 
@@ -399,9 +446,13 @@ class HostCache:
     )
     return hbm_value
 
-  def evict_cache(self, key: Key) -> Optional[Value]:
-    """Evict and return value, or None if key is not in cache."""
-    return self._cache.evict_cache(key)
+  def evict(self, key: Key) -> Optional[Value]:
+    """Evict and return value, or None if key is not in storage."""
+    return self._storage.evict(key)
+
+  def contains(self, key: Key) -> bool:
+    """If there is key in storage."""
+    return self._storage.contains(key)
 
 
 class LRUStrategy:
@@ -438,7 +489,7 @@ class PrefixCache:
     self._hbm_bytes = hbm_bytes
     self._lock = threading.Lock()
     # init in clear()
-    self._hbm_cache: HBMCache
+    self._hbm_storage: HBMStorage
     self._trie: PrefixCacheTrie
     self._cache_strategy: LRUStrategy
     self.clear()
@@ -455,14 +506,14 @@ class PrefixCache:
     """Save key/value to the cache."""
     logger.debug("save key=%r", key)
     with self._lock:
-      while not self._hbm_cache.has_enough_space(value):
+      while not self._hbm_storage.has_enough_space(value.prefix_size_bytes):
         if self._hbm_bytes < value.prefix_size_bytes:
           logger.debug("hbm_bytes=%r < value.prefix_size_bytes=%r", self._hbm_bytes, value.prefix_size_bytes)
           break
         if self._evict_cache() is None:
           logger.debug("cannot evict cache")
           break
-      if not self._hbm_cache.add_to_cache(key, value):
+      if not self._hbm_storage.add(key, value):
         logger.debug("cannot add to cache even after evict")
         return False
       self._trie.insert(key)
@@ -473,7 +524,7 @@ class PrefixCache:
     """Returns Value stored with key or None if not found."""
     logger.debug("load key=%r", key)
     with self._lock:
-      value = self._hbm_cache.retrieve_from_cache(key)
+      value = self._hbm_storage.retrieve(key)
       if value is None:
         logger.warning(
             "The key should fetched by fetch_longest_common_prefix_key, load key=%r should be valid but not.", key
@@ -485,7 +536,7 @@ class PrefixCache:
   def clear(self):
     """Clear entire cache."""
     logger.debug("clear cache")
-    self._hbm_cache = HBMCache(max_size_bytes=self._hbm_bytes)
+    self._hbm_storage = HBMStorage(max_size_bytes=self._hbm_bytes)
     self._trie = PrefixCacheTrie()
     self._cache_strategy = LRUStrategy()
 
@@ -497,7 +548,7 @@ class PrefixCache:
       logger.debug("no key to evict")
       return None
     logger.debug("evict key=%r", key)
-    value = self._hbm_cache.evict_cache(key)
+    value = self._hbm_storage.evict(key)
     if value is None:
       logger.warning("key=%r should exist in HBM cache.", key)
     self._trie.erase(key)
