@@ -202,15 +202,16 @@ class ElasticUtils:
   def _is_error_due_to_slice_down(error: Exception):
     if "DATA_LOSS" in str(error):
       logger.info("Caught JaxRuntimeError DATA_LOSS exception")
-      logger.info(traceback.format_exc())
+    elif "NOT_FOUND" in str(error):
+      logger.info("Caught JaxRuntimeError NOT_FOUND exception")
     elif "INTERNAL" in str(error):
       logger.info("Caught JaxRuntimeError INTERNAL exception")
-      logger.info(traceback.format_exc())
 
     else:
       logger.info("Unknown JaxRuntimeError")
       return False
 
+    logger.info(traceback.format_exc())
     return True
 
   @timeit
