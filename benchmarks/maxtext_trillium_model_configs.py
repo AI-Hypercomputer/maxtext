@@ -1338,6 +1338,7 @@ llama3_1_405b_8192_explicit_matt = _add_to_model_dictionary(
   )
 )
 
+# commit 771396f5a2f8b6e7c9bf4bb8f064b37faedd5645 (HEAD -> mattdavidow-pp-100k, origin/mattdavidow-pp-100k)
 # docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-pp-weight-specs-optional-bf16-2025-03-02"'
 llama3_1_405b_8192_explicit_matt_pp = _add_to_model_dictionary(
   trillium_model_dict,
@@ -1379,13 +1380,13 @@ llama3_1_405b_8192_explicit_matt_pp = _add_to_model_dictionary(
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
         "skip_first_n_steps_for_profiler": 14,
-        "dump_hlo": True
+        "dump_hlo": True,
         "pipeline_fsdp_ag_once": True,
         "pipeline_weight_buffer_set_dtype": True,
         "scan_layers": False,
-        "dcn_pipeline_parallelism": 2, # PP
-        "base_num_decoder_layers": 12, # PP * 6
-        "num_pipeline_microbatches": 4, # PP * 2
+        "dcn_pipeline_parallelism": 7, # PP
+        "base_num_decoder_layers": 42, # PP * 6
+        "num_pipeline_microbatches": 14, # PP * 2
         "num_layers_per_pipeline_stage": 2,
     },
     xla_flags=(
@@ -1562,6 +1563,8 @@ deepseek_big_experimental = _add_to_model_dictionary(
 
 #docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-pp-remat-again"'
 #commit 083a2aee891ae4ef99b4bb8746110b0809886b36 (HEAD -> mattdavidow-pp-100k, origin/mattdavidow-pp-100k)
+#docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow-pp-remat-again"'
+#commit 083a2aee891ae4ef99b4bb8746110b0809886b36 (HEAD -> mattdavidow-pp-100k, origin/mattdavidow-pp-100k)
 deepseek_big = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
@@ -1570,7 +1573,7 @@ deepseek_big = _add_to_model_dictionary(
     tuning_params={
         "steps": 20,
         "per_device_batch_size": 1,
-        "max_target_length": 512,
+        "max_target_length": 2048,
         "enable_checkpointing": False,
         "dataset_type": "synthetic",
         "base_output_directory": "gs://maxtext-experiments-multipod",
@@ -1592,9 +1595,9 @@ deepseek_big = _add_to_model_dictionary(
         "opt_type": "sgd",
         "weight_dtype": "bfloat16",
         "remat_policy": "full",
-        "base_num_decoder_layers": 16, # PP * 8
-        "dcn_pipeline_parallelism": 2,
-        "num_pipeline_microbatches": 2, # PP * 2 or since we are sad PP * 1
+        "dcn_pipeline_parallelism": 8, # PP
+        "base_num_decoder_layers": 64, # PP * 8
+        "num_pipeline_microbatches": 8, # PP * 2 or since we are sad PP * 1
         "num_layers_per_pipeline_stage": 2,
         "scan_layers": False,
         "dump_hlo": True
