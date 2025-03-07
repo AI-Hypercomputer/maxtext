@@ -519,13 +519,17 @@ class MoeBlock(nn.Module):
     update_weights = update_weights.at[index_update].set(weights)
     return update_weights
 
+  def get_context_partition_and_sub_seq(self, seq_len):
+      cp = self.config.ici_context_parallelism
+      if seq_len % cp != 0:
+        cp = 1
+      sub_seq = seq_len // cp
+      return cp, sub_seq
+  
   def generate_masks(self, top_k_indices, softmax_probs):
     # calculate expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
     batch_size, seq_len, _ = top_k_indices.shape
-    cp = self.config.ici_context_parallelism
-    if seq_len % cp != 0:
-      cp = 1
-    sub_seq = seq_len // cp
+    cp, sub_seq = self.get_context_partition_and_sub_seq(seq_len)
 
     top_k_indices = jnp.reshape(top_k_indices, (batch_size, cp, sub_seq, top_k_indices.shape[2]))
 
@@ -654,12 +658,11 @@ class MoeBlock(nn.Module):
     weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
     matmul_precision = lax.Precision(self.config.matmul_precision)
 
-    cp = self.config.ici_context_parallelism
     batch_size = inputs.shape[0]
     seq_len = inputs.shape[1]
-    if seq_len % cp != 0:
-      cp = 1
-    sub_seq = seq_len // cp
+
+    cp, sub_seq = self.get_context_partition_and_sub_seq(seq_len)
+
     if self.config.capacity_factor > 0:
       # token dropping if needed
       dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs)
