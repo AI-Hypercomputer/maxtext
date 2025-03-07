@@ -180,7 +180,6 @@ class AttentionOp(nn.Module):
     assert key.shape[-2] == value.shape[-2], "k, v num_kv_heads must match."
     assert key.shape[-3] == value.shape[-3], "k, v lengths must match."
     assert query.shape[-1] == key.shape[-1], "q, k depths must match."
-  
   # Attention mask is generated in the same way
   # as mentioned in SARATHI - https://arxiv.org/abs/2308.16369
   def generate_attention_mask_for_chunk(self, query, key, previous_chunk: Any = None) -> Array | None:
@@ -554,6 +553,11 @@ class AttentionOp(nn.Module):
       local_max = local_max[:, 0:1, :, :]
       local_sum = local_sum[:, 0:1, :, :]
       local_out = local_out[:, 0:1, :, :]
+
+    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+      local_max = partitioning.with_sharding_constraint(local_max, (DECODE_BATCH, None, HEAD, D_KV))
+      local_sum = partitioning.with_sharding_constraint(local_sum, (DECODE_BATCH, None, HEAD, D_KV))
+      local_out = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, None, HEAD, D_KV))
 
     return local_out, local_max, local_sum
 
