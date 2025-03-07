@@ -234,69 +234,69 @@ class PrefixCacheTrieTest(unittest.TestCase):
     assert trie.get_longest_common_prefix_key((4, 5, 6)) == (4, 5, 6)
 
 
-class BasicCacheTest(unittest.TestCase):
+class BasicStorageTest(unittest.TestCase):
 
   def test_is_enough_space_remain(self):
     value = create_default_value()
-    hbm_cache = prefix_cache.BasicCache(max_size_bytes=value.prefix_size_bytes)
-    assert hbm_cache.has_enough_space(value) is True
-    hbm_cache = prefix_cache.BasicCache(max_size_bytes=value.prefix_size_bytes - 1)
-    assert hbm_cache.has_enough_space(value) is False
+    storage = prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes)
+    assert storage.has_enough_space(value.prefix_size_bytes) is True
+    storage = prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes - 1)
+    assert storage.has_enough_space(value.prefix_size_bytes) is False
 
-  def test_add_to_cache_and_fetch_with_key_exactly_matched(self):
+  def test_add_and_fetch_with_key_exactly_matched(self):
     key = (1, 2, 3)
     value = create_default_value()
-    hbm_cache = prefix_cache.BasicCache(max_size_bytes=value.prefix_size_bytes)
-    assert hbm_cache.add_to_cache(key, value) is True
-    assert hbm_cache.retrieve_from_cache(key) == value
+    storage = prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes)
+    assert storage.add(key, value) is True
+    assert storage.retrieve(key) == value
 
-  def test_add_to_cache_fail_if_not_enough_space(self):
+  def test_add_fail_if_not_enough_space(self):
     value = create_default_value()
-    hbm_cache = prefix_cache.BasicCache(max_size_bytes=value.prefix_size_bytes * 2 - 1)
-    assert hbm_cache.add_to_cache((1,), value) is True
+    storage = prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes * 2 - 1)
+    assert storage.add((1,), value) is True
     # The second one will exceed 1 bytes
-    assert hbm_cache.add_to_cache((2,), value) is False
-    assert hbm_cache.retrieve_from_cache((2,)) is None
+    assert storage.add((2,), value) is False
+    assert storage.retrieve((2,)) is None
 
   def test_cannot_retrieve_not_exactly_matched_key(self):
     key = (1, 2, 3)
     value = create_default_value()
-    hbm_cache = prefix_cache.BasicCache(max_size_bytes=value.prefix_size_bytes)
-    assert hbm_cache.add_to_cache(key, value) is True
-    assert hbm_cache.retrieve_from_cache((1, 2, 4)) is None
-    assert hbm_cache.retrieve_from_cache((1, 2)) is None
+    storage = prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes)
+    assert storage.add(key, value) is True
+    assert storage.retrieve((1, 2, 4)) is None
+    assert storage.retrieve((1, 2)) is None
 
   def test_add_and_retrieve_multiple_keys(self):
-    hbm_cache = prefix_cache.BasicCache(max_size_bytes=1_000_000)
+    storage = prefix_cache.BasicStorage(max_size_bytes=1_000_000)
     value1 = create_default_value(tokens=[1])
-    hbm_cache.add_to_cache((1,), value1)
+    storage.add((1,), value1)
     value2 = create_default_value(tokens=[2])
-    hbm_cache.add_to_cache((2,), value2)
-    assert hbm_cache.retrieve_from_cache((1,)) == value1
-    assert hbm_cache.retrieve_from_cache((2,)) == value2
+    storage.add((2,), value2)
+    assert storage.retrieve((1,)) == value1
+    assert storage.retrieve((2,)) == value2
 
-  def test_evict_cache_return_evicted_value(self):
+  def test_evict_return_evicted_value(self):
     value = create_default_value()
-    hbm_cache = prefix_cache.BasicCache(max_size_bytes=value.prefix_size_bytes)
-    hbm_cache.add_to_cache((1,), value)
-    evict_value = hbm_cache.evict_cache((1,))
+    storage = prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes)
+    storage.add((1,), value)
+    evict_value = storage.evict((1,))
     assert evict_value == value
 
-  def test_evict_cache_will_release_the_memory_usage_and_cannot_retrieve_and_evict_after_evict(self):
+  def test_evict_will_release_the_memory_usage_and_cannot_retrieve_and_evict_after_evict(self):
     value = create_default_value()
-    hbm_cache = prefix_cache.BasicCache(max_size_bytes=value.prefix_size_bytes)
-    hbm_cache.add_to_cache((1,), value)
+    storage = prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes)
+    storage.add((1,), value)
     # memory is not enough
-    assert hbm_cache.add_to_cache((2,), create_default_value()) is False
-    hbm_cache.evict_cache((1,))
-    assert hbm_cache.retrieve_from_cache((1,)) is None
-    assert hbm_cache.evict_cache((1,)) is None
+    assert storage.add((2,), create_default_value()) is False
+    storage.evict((1,))
+    assert storage.retrieve((1,)) is None
+    assert storage.evict((1,)) is None
     # should add another after evict
     value2 = create_default_value()
-    assert hbm_cache.add_to_cache((2,), value2) is True
-    assert hbm_cache.retrieve_from_cache((2,)) == value2
+    assert storage.add((2,), value2) is True
+    assert storage.retrieve((2,)) == value2
 
-  def test_evict_multiple_caches(self):
+  def test_evict_multiple_values(self):
     key1 = (1,)
     value1 = create_default_value(tokens=key1)
     key2 = (
@@ -304,55 +304,79 @@ class BasicCacheTest(unittest.TestCase):
         2,
     )
     value2 = create_default_value(tokens=key2)
-    hbm_cache = prefix_cache.BasicCache(max_size_bytes=value1.prefix_size_bytes * 2)
-    hbm_cache.add_to_cache(key1, value1)
-    hbm_cache.add_to_cache(key2, value2)
-    evict_value = hbm_cache.evict_cache(key2)
+    storage = prefix_cache.BasicStorage(max_size_bytes=value1.prefix_size_bytes * 2)
+    storage.add(key1, value1)
+    storage.add(key2, value2)
+    evict_value = storage.evict(key2)
     assert evict_value == value2
-    assert hbm_cache.retrieve_from_cache(key2) is None
-    assert hbm_cache.retrieve_from_cache(key1) is not None
-    evict_value = hbm_cache.evict_cache(key1)
-    assert hbm_cache.retrieve_from_cache(key1) is None
+    assert storage.retrieve(key2) is None
+    assert storage.retrieve(key1) is not None
+    evict_value = storage.evict(key1)
+    assert storage.retrieve(key1) is None
+
+  def test_get_max_size_bytes(self):
+    storage = prefix_cache.BasicStorage(max_size_bytes=100)
+    assert storage.get_max_size_bytes() == 100
+
+  def test_contains_key(self):
+    value = create_default_value()
+    storage = prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes)
+    key = (1,)
+    assert storage.contains(key) is False
+    storage.add(key, value)
+    assert storage.contains(key) is True
+    storage.evict(key)
+    assert storage.contains(key) is False
 
 
-class HBMCacheTest(unittest.TestCase):
-  """Test roughly for HBMCache while HBMCache is a wrapper of BasicCache."""
+class HBMStorageTest(unittest.TestCase):
+  """Test roughly for HBMStorage while HBMStorage is a wrapper of BasicStorage."""
 
   def test_basic_usage(self):
-    """Test basic usage of HBMCache checking all functions work."""
+    """Test basic usage of HBMStorage checking all functions work."""
+    key = (1,)
     value = create_default_value()
-    hbm_cache = prefix_cache.HBMCache(max_size_bytes=value.prefix_size_bytes)
-    assert hbm_cache.has_enough_space(value) is True
-    assert hbm_cache.add_to_cache((1,), value) is True
-    assert hbm_cache.retrieve_from_cache((1,)) == value
+    storage = prefix_cache.HBMStorage(max_size_bytes=value.prefix_size_bytes)
+    assert storage.get_max_size_bytes() == value.prefix_size_bytes
+    assert storage.contains(key) is False
+    assert storage.has_enough_space(value.prefix_size_bytes) is True
+    assert storage.add(key, value) is True
+    assert storage.contains(key) is True
+    assert storage.retrieve(key) == value
     # Only have one value size, and cannot afford the second.
-    assert hbm_cache.has_enough_space(value) is False
-    assert hbm_cache.evict_cache((1,)) == value
-    assert hbm_cache.retrieve_from_cache((1,)) is None
-    assert hbm_cache.evict_cache((1,)) is None
+    assert storage.has_enough_space(value.prefix_size_bytes) is False
+    assert storage.evict(key) == value
+    assert storage.contains(key) is False
+    assert storage.retrieve(key) is None
+    assert storage.evict(key) is None
     # After evict, it should have enough space
-    assert hbm_cache.has_enough_space(value) is True
-    assert hbm_cache.add_to_cache((1,), value) is True
+    assert storage.has_enough_space(value.prefix_size_bytes) is True
+    assert storage.add(key, value) is True
 
 
-class HostCacheTest(unittest.TestCase):
-  """Test basic usage of HostCache only since HostCache is wrapper of BasicCache with device_get and device_put."""
+class DRAMStorageTest(unittest.TestCase):
+  """Test basic usage of DRAMStorage only since DRAMStorage is wrapper of BasicStorage with device_get and device_put."""
 
   def test_basic_usage(self):
-    """Test basic usage of HostCache checking all functions work."""
+    """Test basic usage of DRAMStorage checking all functions work."""
+    key = (1,)
     value = create_default_value()
-    host_cache = prefix_cache.HostCache(max_size_bytes=value.prefix_size_bytes)
-    assert host_cache.has_enough_space(value) is True
-    assert host_cache.add_to_cache((1,), value) is True
-    assert host_cache.retrieve_from_cache((1,)) == value
+    storage = prefix_cache.DRAMStorage(max_size_bytes=value.prefix_size_bytes)
+    assert storage.get_max_size_bytes() == value.prefix_size_bytes
+    assert storage.has_enough_space(value.prefix_size_bytes) is True
+    assert storage.contains(key) is False
+    assert storage.add(key, value) is True
+    assert storage.contains(key) is True
+    assert storage.retrieve(key) == value
     # Only have one value size, and cannot afford the second.
-    assert host_cache.has_enough_space(value) is False
-    assert host_cache.evict_cache((1,)) == value
-    assert host_cache.retrieve_from_cache((1,)) is None
-    assert host_cache.evict_cache((1,)) is None
+    assert storage.has_enough_space(value.prefix_size_bytes) is False
+    assert storage.evict(key) == value
+    assert storage.contains(key) is False
+    assert storage.retrieve(key) is None
+    assert storage.evict(key) is None
     # After evict, it should have enough space
-    assert host_cache.has_enough_space(value) is True
-    assert host_cache.add_to_cache((1,), value) is True
+    assert storage.has_enough_space(value.prefix_size_bytes) is True
+    assert storage.add(key, value) is True
 
   @pytest.mark.tpu_only
   def test_move_value_between_device_and_host(self):
@@ -367,16 +391,16 @@ class HostCacheTest(unittest.TestCase):
     origin_hbm_byte = get_byte_in_use()
     key = (1,)
     value = create_default_value()
-    host_cache = prefix_cache.HostCache(max_size_bytes=value.prefix_size_bytes)
+    storage = prefix_cache.DRAMStorage(max_size_bytes=value.prefix_size_bytes)
     value_on_device_hbm_byte = get_byte_in_use()
-    assert host_cache.add_to_cache(key, value) is True
+    assert storage.add(key, value) is True
     # add to cache will not copy another in HBM
     assert value_on_device_hbm_byte == get_byte_in_use()
     del value
     value_on_host_hbm_byte = get_byte_in_use()
     # after del the value on device, hbm memory should release
     assert value_on_host_hbm_byte == origin_hbm_byte
-    device_value = host_cache.retrieve_from_cache(key)
+    device_value = storage.retrieve(key)
     # copy the value back to device
     assert value_on_device_hbm_byte == get_byte_in_use()
     del device_value
@@ -396,10 +420,10 @@ class HostCacheTest(unittest.TestCase):
         "cache": jnp.ones((mesh_shape[0], 512, 512), device=sharding),
     }
     value = create_default_value(prefix=prefix)
-    host_cache = prefix_cache.HostCache(max_size_bytes=value.prefix_size_bytes)
-    assert host_cache.add_to_cache(key, value)
+    storage = prefix_cache.DRAMStorage(max_size_bytes=value.prefix_size_bytes)
+    assert storage.add(key, value)
     del value
-    retrieved_value = host_cache.retrieve_from_cache(key)
+    retrieved_value = storage.retrieve(key)
     assert retrieved_value is not None
     assert retrieved_value.prefix["cache"].device == sharding
 
