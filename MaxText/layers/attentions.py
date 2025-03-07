@@ -557,8 +557,8 @@ class AttentionOp(nn.Module):
       local_out = local_out[:, 0:1, :, :]
 
     if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-      local_max = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, None, HEAD, D_KV))
-      local_sum = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, None, HEAD, D_KV))
+      local_max = partitioning.with_sharding_constraint(local_max, (DECODE_BATCH, None, HEAD, D_KV))
+      local_sum = partitioning.with_sharding_constraint(local_sum, (DECODE_BATCH, None, HEAD, D_KV))
       local_out = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, None, HEAD, D_KV))
 
     return local_out, local_max, local_sum
