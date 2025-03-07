@@ -23,6 +23,7 @@ import jax.numpy as jnp
 
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from typing import Callable
 
 
 def create_default_value(prefix=None, true_length=1, padded_length=1, tokens=None) -> prefix_cache.Value:
@@ -36,6 +37,18 @@ def create_default_value(prefix=None, true_length=1, padded_length=1, tokens=Non
       padded_length=padded_length,
       tokens=tokens,
   )
+
+
+def get_byte_in_use_function() -> Callable[[], int]:
+  device = jax.local_devices()[0]
+  memory_stats = device.memory_stats()
+  assert memory_stats is not None, "Cannot get device memory stats. Does the test run with TPU?"
+
+  def get_byte_in_use():
+    jax.clear_caches()
+    return memory_stats["bytes_in_use"]
+
+  return get_byte_in_use
 
 
 class ValueTest(unittest.TestCase):
@@ -380,13 +393,7 @@ class DRAMStorageTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_move_value_between_device_and_host(self):
-    device = jax.local_devices()[0]
-    memory_stats = device.memory_stats()
-    assert memory_stats is not None, "Cannot get device memory stats. Does the test run with TPU?"
-
-    def get_byte_in_use():
-      jax.clear_caches()
-      return memory_stats["bytes_in_use"]
+    get_byte_in_use = get_byte_in_use_function()
 
     origin_hbm_byte = get_byte_in_use()
     key = (1,)
@@ -584,8 +591,8 @@ class HierarchicalCacheTest(unittest.TestCase):
 class PrefixCacheTest(unittest.TestCase):
 
   def test_cache_miss_save_hit_load(self):
-    hbm_bytes = 64 * 1024 * 1024 * 1024  # 64 GB
-    prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=hbm_bytes)
+    max_bytes = 64 * 1024 * 1024 * 1024  # 64 GB
+    prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=max_bytes, dram_bytes=max_bytes)
     tokens = (1, 2, 3)
     no_matched_key = prefix_cache_inst.fetch_longest_common_prefix_key(tokens)
     # first seen prefix will not match any key
@@ -618,7 +625,8 @@ class PrefixCacheTest(unittest.TestCase):
   def test_clear_cache(self):
     tokens = (1, 2, 3)
     value = create_default_value(tokens=tokens)
-    prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=value.prefix_size_bytes)
+    max_bytes = value.prefix_size_bytes
+    prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=max_bytes, dram_bytes=max_bytes)
     assert prefix_cache_inst.save(tokens, value) is True
     assert prefix_cache_inst.load(tokens) == value
     prefix_cache_inst.clear()
@@ -632,7 +640,8 @@ class PrefixCacheTest(unittest.TestCase):
     tokens3 = (3,)
     value3 = create_default_value(tokens=tokens3)
     # cache with 2 values size, and will evict with LRU
-    prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=(value1.prefix_size_bytes) * 2)
+    max_bytes = value1.prefix_size_bytes * 2
+    prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=max_bytes, dram_bytes=max_bytes)
     assert prefix_cache_inst.save(tokens1, value1) is True
     assert prefix_cache_inst.save(tokens2, value2) is True
     assert prefix_cache_inst.load(tokens1) == value1
@@ -647,7 +656,8 @@ class PrefixCacheTest(unittest.TestCase):
     tokens3 = (3,)
     value3 = create_default_value(tokens=tokens3)
     # cache with 2 values size, and will evict with LRU
-    prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=(value1.prefix_size_bytes) * 2)
+    max_bytes = value1.prefix_size_bytes * 2
+    prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=max_bytes, dram_bytes=max_bytes)
     assert prefix_cache_inst.save(tokens1, value1) is True
     assert prefix_cache_inst.save(tokens2, value2) is True
     assert prefix_cache_inst.fetch_longest_common_prefix_key(tokens1) == tokens1
@@ -661,7 +671,8 @@ class PrefixCacheTest(unittest.TestCase):
     value2 = create_default_value(prefix=[jnp.array([1, 2, 3]) for _ in range(2)])
 
     # Only feasible for two value1 or one value2
-    prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=(value1.prefix_size_bytes) * 2)
+    max_bytes = value1.prefix_size_bytes * 2
+    prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=max_bytes, dram_bytes=max_bytes)
     assert prefix_cache_inst.save(key=(1,), value=value1) is True
     assert prefix_cache_inst.save(key=(2,), value=value1) is True
     assert prefix_cache_inst.load(key=(1,)) == value1
@@ -677,7 +688,8 @@ class PrefixCacheTest(unittest.TestCase):
     value2 = create_default_value(prefix=[jnp.array([1, 2, 3]) for _ in range(3)])
 
     # Only feasible for two value1 and never value2
-    prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=(value1.prefix_size_bytes) * 2)
+    max_bytes = value1.prefix_size_bytes * 2
+    prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=max_bytes, dram_bytes=max_bytes)
     assert prefix_cache_inst.save(key=(1,), value=value1) is True
     assert prefix_cache_inst.save(key=(2,), value=value1) is True
     assert prefix_cache_inst.load(key=(1,)) == value1
@@ -687,28 +699,47 @@ class PrefixCacheTest(unittest.TestCase):
     assert prefix_cache_inst.load(key=(2,)) == value1
     assert prefix_cache_inst.load(key=(3,)) is None
 
+  def test_cannot_fetch_longest_common_prefix_key_while_fully_evicted_from_dram(self):
+    value = create_default_value()
+    max_bytes = value.prefix_size_bytes
+    prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=max_bytes, dram_bytes=max_bytes * 2)
+    assert (
+        prefix_cache_inst.save(
+            (1, 2),
+            value,
+        )
+        is True
+    )
+    assert (
+        prefix_cache_inst.save(
+            (1, 3),
+            value,
+        )
+        is True
+    )
+    # (1,2,) is only in DRAM now
+    assert prefix_cache_inst.fetch_longest_common_prefix_key((1, 2, 3)) == (1, 2)
+    assert (
+        prefix_cache_inst.save(
+            (2, 3),
+            value,
+        )
+        is True
+    )
+    # (1,2,) is fully evicted now
+    assert prefix_cache_inst.fetch_longest_common_prefix_key((1, 2, 3)) == (1, 3)
+
   @pytest.mark.tpu_only
   def test_hbm_memory_usage(self):
-    """Test HBM memory change.
-    Create the class instance will not pre allocate memory.
-    Save the cache will move without copy.
-    Load the cache will copy from cache.
-    Clear the cache will clear the saved cache.
-    """
-    device = jax.local_devices()[0]
-    memory_stats = device.memory_stats()
-    assert memory_stats is not None, "Cannot get device memory stats. Does the test run with TPU?"
-
-    def get_byte_in_use():
-      jax.clear_caches()
-      return memory_stats["bytes_in_use"]
+    """Test HBM memory change."""
+    get_byte_in_use = get_byte_in_use_function()
 
     pre_bytes_in_use = get_byte_in_use()
     hbm_bytes = 1024
-    prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=hbm_bytes)
+    prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=hbm_bytes, dram_bytes=hbm_bytes)
     # prefix_cache will not pre allocate the memory
     assert pre_bytes_in_use == get_byte_in_use()
-    prefix = {"cached_prefill_key": jnp.array([1, 2, 3, 4], dtype=jnp.bfloat16, device=device)}
+    prefix = {"cached_prefill_key": jnp.array([1, 2, 3, 4], dtype=jnp.bfloat16)}
     prefix_create_bytes_in_use = get_byte_in_use()
     # memory would be allocated with chunked minimum size
     prefix_bytes = prefix_create_bytes_in_use - pre_bytes_in_use
@@ -729,9 +760,39 @@ class PrefixCacheTest(unittest.TestCase):
     del_loaded_bytes_in_use = get_byte_in_use()
     assert del_loaded_bytes_in_use == loaded_bytes_in_use
     prefix_cache_inst.clear()
+    # clear the cache will clear the saved cache.
     clear_bytes_in_use = get_byte_in_use()
     assert clear_bytes_in_use == del_loaded_bytes_in_use - prefix_bytes
     assert prefix_cache_inst.load(key) is None
+
+  @pytest.mark.tpu_only
+  def test_cache_move_between_device_and_host_with_hierarchical_cache(self):
+    get_byte_in_use = get_byte_in_use_function()
+    value1 = create_default_value()
+    value2 = create_default_value()
+    assert value1.prefix_size_bytes == value2.prefix_size_bytes
+    prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=value1.prefix_size_bytes, dram_bytes=value1.prefix_size_bytes * 2)
+    assert prefix_cache_inst.save((1,), value1)
+    del value1
+    first_save_bytes_in_use = get_byte_in_use()
+    assert prefix_cache_inst.save((2,), value2)
+    del value2
+    # the first saved cache (1,) is evicted since the size of HBM is one value.
+    assert first_save_bytes_in_use == get_byte_in_use()
+
+    # loaded value will move to HBM and (2,) in the HBM layer is evicted. The loaded value is the value in the HBM layer
+    loaded_value = prefix_cache_inst.load((1,))
+    assert loaded_value is not None
+    assert first_save_bytes_in_use == get_byte_in_use()
+    del loaded_value
+    assert first_save_bytes_in_use == get_byte_in_use()
+
+    # switch the cache again
+    loaded_value = prefix_cache_inst.load((2,))
+    assert loaded_value is not None
+    assert first_save_bytes_in_use == get_byte_in_use()
+    del loaded_value
+    assert first_save_bytes_in_use == get_byte_in_use()
 
 
 if __name__ == "__main__":
