@@ -1530,7 +1530,7 @@ class Attention(nn.Module):
       key = self.kv_projection(inputs_kv, proj_name="key")
       value = self.kv_projection(inputs_kv, proj_name="value")
 
-    if lora_params:   # Non-empty LoRA Parameters
+    if lora_params:  # Non-empty LoRA Parameters
       # TODO: Hardcoded the scale_factor. Pass it via call_stack
       # scale_factor = lora_alpha / lora_rank
       scale_factor = 4
@@ -1543,8 +1543,8 @@ class Attention(nn.Module):
       # lora_b_q: [b, r, h, d]
 
       if "lora_a.kernel" in lora_params[self.name]["query"]:
-        lora_a_q = lora_params[self.name]["query"]["lora_a.kernel"]       # [batch, hidden_size, rank]
-        lora_b_q = lora_params[self.name]["query"]["lora_b.kernel"]       # [batch, rank, num_heads, head_dim]
+        lora_a_q = lora_params[self.name]["query"]["lora_a.kernel"]  # [batch, hidden_size, rank]
+        lora_b_q = lora_params[self.name]["query"]["lora_b.kernel"]  # [batch, rank, num_heads, head_dim]
         query = query + jnp.einsum("bsH,bHr,brhd->bshd", inputs_q, lora_a_q, lora_b_q) * scale_factor
 
       if "lora_a.kernel" in lora_params[self.name]["key"]:

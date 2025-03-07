@@ -122,7 +122,7 @@ class LlamaDecoderLayer(nn.Module):
 
     lora_params_layers = {}
     if lora_params:
-      lora_params_layers = lora_params[self.name]   # Fetch the self-attention params of each `layers_{idx}`
+      lora_params_layers = lora_params[self.name]  # Fetch the self-attention params of each `layers_{idx}`
 
     attention_lnx = attention_layer(
         lnx,
