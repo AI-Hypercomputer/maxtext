@@ -60,7 +60,7 @@ The resulting Hugging Face checkpoint will be a flat state dict whose keys follo
 the HF Gemma2 model naming (for example, "model.embed_tokens.weight", "model.layers.0.self_attn.q_proj.weight", etc.).
 
 Usage:
-    python convert_maxtext_to_hf.py \
+    python gemma2_orbax_to_hf.py \
          --maxtext_checkpoint /path/to/maxtext/checkpoint \
          --hf_output /path/to/save/hf_model.bin \
          --model_size 9b
