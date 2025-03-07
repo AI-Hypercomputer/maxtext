@@ -19,6 +19,7 @@ import shutil
 import numpy as np
 import jax
 import jax.numpy as jnp
+from jax import tree
 from jax.experimental import mesh_utils
 import checkpointing
 import common_types
@@ -49,6 +50,12 @@ from flax.linen import partitioning as nn_partitioning
 
 from tensorboardX import writer
 from google.cloud import storage
+
+import gc
+import logging
+import psutil
+from train import save_checkpoint
+
 
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
 HYBRID_RING_32X8 = "hybrid_ring_32x8"
@@ -1135,3 +1142,65 @@ def unpermute_from_match_maxtext_rope(arr, model_size):
   evens = arr[..., ::2]
   odds = arr[..., 1::2]
   return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
+
+
+def save_weights_to_checkpoint(maxtext_model_path, jax_weights, device_count):
+  """
+  Function to save jax_weights ready for MaxText to a parameters checkpoint.
+
+  Args:
+      maxtext_model_path: Path to save the MaxText checkpoint.
+      jax_weights: The JAX model weights to be saved.
+      device_count: The number of simulated devices.
+  """
+  mem_info = psutil.Process()
+  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+  gc.collect()
+  mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
+  s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))  # shards first axis
+  s2 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "checkpoint_sharding_axis"))  # shards second axis
+  s3 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None))  # no sharding
+
+  def checkpoint_device_put(arr):
+    if arr.shape[0] % device_count == 0:
+      max_logging.log("sharding first axis")
+      return jax.device_put(arr, device=s1)
+    elif len(arr.shape) > 1 and arr.shape[1] % device_count == 0:
+      max_logging.log("sharding second axis")
+      return jax.device_put(arr, device=s2)
+    else:
+      max_logging.log("no sharding was possible, replicating")
+      return jax.device_put(arr, device=s3)
+
+  # convert all weights to jax.numpy with sharding if applicable
+  jax_weights_flat, jax_weights_struct = tree.flatten(jax_weights)
+  jax_weights_new = []
+  while len(jax_weights_flat) > 0:
+    jax_weight = jax_weights_flat.pop(0)
+    jax_weights_new.append(checkpoint_device_put(jax_weight))
+    del jax_weight
+    gc.collect()
+    logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+
+  jax_weights = tree.unflatten(jax_weights_struct, jax_weights_new)
+
+  # dummy configs for the checkpoint_manager
+  step_number_to_save_new_ckpt = 0
+  enable_checkpointing = True
+  async_checkpointing = False
+  save_interval_steps = 1
+
+  checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
+      maxtext_model_path, enable_checkpointing, async_checkpointing, save_interval_steps
+  )
+
+  state_new = train_state.TrainState(
+      step=0, apply_fn=None, params={"params": jax_weights}, tx=None, opt_state={}  # type: ignore
+  )
+
+  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+  if checkpoint_manager is not None:
+    if save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new):
+      max_logging.log(f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
+    # Upon preemption, exit when and only when all ongoing saves are complete.
+    checkpoint_manager.wait_until_finished()
