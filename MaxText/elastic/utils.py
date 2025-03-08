@@ -126,8 +126,10 @@ class ElasticUtils:
     # Temporary for scale test
     self.good_slice_indices = self.get_slice_availability()
     while len(self.good_slice_indices) < self.total_slice_count:
-      logger.info(f"Sleeping for 5 seconds because only {len(self.good_slice_indices)} "
-                  f"out of {self.total_slice_count} slices are available.")
+      logger.info(
+          f"Sleeping for 5 seconds because only {len(self.good_slice_indices)} "
+          f"out of {self.total_slice_count} slices are available."
+      )
       time.sleep(5)
       self.good_slice_indices = self.get_slice_availability()
     self.data = {}
@@ -138,14 +140,15 @@ class ElasticUtils:
       save_step: int,
       blocking: bool = False,
       force: bool = False,
-      **kwargs):
+      **kwargs,
+  ):
     """Save step and state."""
     if not force and save_step % self.save_period:
       logger.info("Not saving a snapshot")
       return
 
     total_nbytes = 0
-    for k, v in kwargs.items():
+    for v in kwargs.values():
       nbytes = jax.tree.map(lambda x: x.nbytes, v)
       total_nbytes += jax.tree.reduce(operator.add, nbytes)
 
@@ -200,6 +203,7 @@ class ElasticUtils:
 
   @staticmethod
   def _is_error_due_to_slice_down(error: Exception):
+    """Check if the error is due to slice down."""
     if "DATA_LOSS" in str(error):
       logger.info("Caught JaxRuntimeError DATA_LOSS exception")
     elif "NOT_FOUND" in str(error):
@@ -218,10 +222,11 @@ class ElasticUtils:
   def maybe_reshard_down(
       self,
       error: Exception,
-      elastic_handler: Callable,
-      handler_args: tuple[Any, ...] | None= None,
-      reshard_retry: bool = False
+      elastic_handler: Callable[..., Any],
+      handler_args: tuple[Any, ...] | None = None,
+      reshard_retry: bool = False,
   ):
+    """Reshards down if the error is due to slice down."""
     if handler_args is None:
       handler_args = ()
 
@@ -235,8 +240,9 @@ class ElasticUtils:
 
       try:
         ret = elastic_handler(*handler_args)
-      except jax.errorss.JaxRuntimeError as error:
+      except jax.errors.JaxRuntimeError as e:
         logger.info("Elastic handler raised an error.")
+        error = e
         reshard_retry = True
 
     logger.info("Successfully resharded down")
@@ -246,9 +252,11 @@ class ElasticUtils:
   def maybe_reshard_up(
       self,
       step: int,
-      elastic_handler: Callable,
+      elastic_handler: Callable[..., Any],
       save_args: Mapping[str, Any],
-      handler_args: tuple[Any, ...] | None = None):
+      handler_args: tuple[Any, ...] | None = None,
+  ):
+    """Reshards up if it is time to reshard."""
     if handler_args is None:
       handler_args = ()
 
@@ -271,9 +279,8 @@ class ElasticUtils:
           reshard_retry=True,
       )
 
-      logger.info("Finished resharding up")
-
-      return ret
+    logger.info("Finished resharding up")
+    return ret
 
   def _is_ready_to_reshard(self, step: int):
     """Indicates if it is time to reshard.

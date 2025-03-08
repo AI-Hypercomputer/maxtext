@@ -14,7 +14,7 @@
 """Resharding API for elastic training."""
 
 from typing import Any
-from typing import Callable, Optional, Sequence
+from typing import Callable, Sequence
 import jax
 
 
@@ -32,10 +32,11 @@ def reshard(
     x: Any,
     sharding: jax.sharding.Sharding | Any,
     *,
-    donate_input: bool = True,
-    put_array: Optional[
+    donate_input: bool = False,
+    put_array: (
         Callable[[jax.Array, Sequence[jax.sharding.Sharding], bool], jax.Array]
-    ] = None,
+        | None
+    ) = None,
 ) -> Any:
   """Reshards `x` to the specified `sharding`.
 
