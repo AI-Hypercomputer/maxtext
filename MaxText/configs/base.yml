@@ -265,7 +265,6 @@ logical_axis_rules: [
                       ['activation_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
                       ['activation_kv_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
                       ['activation_length', ['sequence', 'context']],
-                      ['activation_length', ['context']],
                       ['activation_length_q', ['context']],
                       ['activation_kv_length', ['context']],
                       ['activation_norm_length', ['tensor_sequence', 'sequence']],
