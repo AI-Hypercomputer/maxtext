@@ -428,7 +428,7 @@ llama2_70b_4096_sc = _add_to_model_dictionary(
 llama2_70b_4096_sc_real_data_tfds = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
-        model_name="llama2-70b-4096-sc",
+        model_name="llama2-70b-4096-sc-real-data-tfds",
         model_type="llama2-70b",
         tuning_params={
             "per_device_batch_size": 2,
@@ -473,7 +473,7 @@ llama2_70b_4096_sc_real_data_tfds = _add_to_model_dictionary(
 llama2_70b_4096_sc_real_data_grain = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
-        model_name="llama2-70b-4096",
+        model_name="llama2-70b-4096-sc-real-data-grain",
         model_type="llama2-70b",
         tuning_params={
             "per_device_batch_size": 2,
@@ -528,7 +528,7 @@ llama2_70b_4096_sc_real_data_grain = _add_to_model_dictionary(
 llama2_70b_4096_sc_real_data_grain_checkpoint = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
-        model_name="llama2-70b-4096",
+        model_name="llama2-70b-4096-sc-real-data-grain-checkpoint",
         model_type="llama2-70b",
         tuning_params={
             "per_device_batch_size": 2,
