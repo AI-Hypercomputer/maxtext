@@ -659,7 +659,9 @@ def on_device_benchmark_runner(
 # Run maxtext_xpk_runner.py as a script for executing multiple workloads pythonically!
 def main() -> int:
   # Variables to configure:
-  output_bucket = 'gs://DIR'
+  # For example: 'gs://DIR'
+  output_bucket = None
+  assert output_bucket is not None, f"Please set your output bucket which is current {output_bucket}"
   base_docker_image = _DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME
 
   # Set up the clusters to run workloads on!
