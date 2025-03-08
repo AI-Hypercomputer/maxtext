@@ -645,7 +645,7 @@ class MoeBlock(nn.Module):
 
   def dense_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
     # gate_logits: batch, length, expert
-    # follow router_logits = shd.shard(router_logits, (None, None, None))
+    # follow router_logits non-sharded kernel
     gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", None))
     softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
     # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
@@ -738,10 +738,11 @@ class MoeBlock(nn.Module):
         )
         if self.config.activations_in_float32:
           intermediate_layer = intermediate_layer.astype(jnp.float32)
-        # intermediate_layer = nn.with_logical_constraint(
-        #     intermediate_layer,
-        #     ("activation_exp", "activation_batch_no_exp", None, "activation_embed"),
-        # )
+        if self.config.model_call_mode != "inference":
+          intermediate_layer = nn.with_logical_constraint(
+              intermediate_layer,
+              ("activation_exp", "activation_batch_no_exp", None, "activation_embed"),
+          )
         intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("combine"):
         # Matmul & element wise operation
