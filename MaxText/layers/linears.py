@@ -93,7 +93,7 @@ class DenseGeneral(nn.Module):
     dtype: the dtype of the computation (default: float32).
     kernel_init: initializer function for the weight matrix.
     use_bias: whether to add bias in linear transformation.
-    bias_norm: whether to add normalization before adding bias.
+    score_func: scoring function for output normalization.
     quant: quantization config, defaults to None implying no quantization.
   """
 
@@ -105,7 +105,7 @@ class DenseGeneral(nn.Module):
   kernel_axes: Tuple[Optional[str], ...] = ()
   quant: Optional[Quant] = None
   use_bias: bool = False
-  bias_norm: str = ""
+  score_func: str = ""
   matmul_precision: str = "default"
 
   @nn.compact
@@ -156,6 +156,9 @@ class DenseGeneral(nn.Module):
     contract_ind = tuple(range(0, len(axis)))
     output = compute_dot_general(inputs, kernel, axis, contract_ind)
 
+    if self.score_func:
+      output = _convert_to_activation_function(self.score_func)(output)
+
     if self.use_bias:
       bias_axes, bias_shape = (
           self.kernel_axes[-len(features) :],
@@ -168,9 +171,6 @@ class DenseGeneral(nn.Module):
           self.weight_dtype,
       )
       bias = jnp.asarray(bias, self.dtype)
-
-      if self.bias_norm:
-        output = _convert_to_activation_function(self.bias_norm)(output)
       output += bias
     return output
 
@@ -819,7 +819,7 @@ class MoeBlock(nn.Module):
         kernel_axes=self.kernel_axes,
         name="gate",
         use_bias=self.config.routed_bias,
-        bias_norm=self.config.routed_score_func,
+        score_func=self.config.routed_score_func,
         matmul_precision=self.config.matmul_precision,
     )(inputs)
 
