@@ -16,7 +16,6 @@
 
 import enum
 import functools
-import math
 from typing import Any, Optional, Tuple
 
 from flax import linen as nn
@@ -506,7 +505,7 @@ class AttentionOp(nn.Module):
         dtype=self.dtype,
         float32_logits=self.float32_logits,
         qkv_layout="BSHD_BSHD_BSHD",  # 'BS3HD', 'BSHD_BS2HD' or 'BSHD_BSHD_BSHD'
-        scale_factor=1.0 / math.sqrt(head_dim),
+        scale_factor=1.0,  # handled elsewhere; see config.query_scaling
         transpose_batch_sequence=False,
         window_size=sliding_window_size,
     )
@@ -1347,14 +1346,14 @@ class Attention(nn.Module):
   def query_projection(self, inputs_q: Array) -> Array:
     """Query projection."""
 
-    # NOTE: T5 does not explicitly rescale the attention logits by
-    #       1/sqrt(depth_kq)!  This is folded into the initializers of the
-    #       linear transformations, which is equivalent under Adafactor.
     depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
 
     def query_init(*args):
       # pylint: disable=no-value-for-parameter
-      return self.kernel_init(*args) / depth_scaling
+      if self.config.query_scaling in ["init", "both"]:
+        return self.kernel_init(*args) / depth_scaling
+      else:
+        return self.kernel_init(*args)
 
     query_proj = DenseGeneral(
         features=(self.num_query_heads, self.head_dim),
@@ -1404,10 +1403,19 @@ class Attention(nn.Module):
   def qkv_projection(self, inputs: Array, proj_name: str):
     """Fused QKV projection"""
 
+    depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
+
+    def qkv_init(*args):
+      # pylint: disable=no-value-for-parameter
+      if self.config.query_scaling in ["init", "both"]:
+        return self.kernel_init(*args).at[:, 0, :, :].divide(depth_scaling)
+      else:
+        return self.kernel_init(*args)
+
     qkv_proj = DenseGeneral(
         features=(3, self.num_query_heads, self.head_dim),
         axis=-1,
-        kernel_init=self.kernel_init,
+        kernel_init=qkv_init,
         kernel_axes=("embed", "qkv", "heads", "kv"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
@@ -1545,6 +1553,9 @@ class Attention(nn.Module):
     value = checkpoint_name(value, "value_proj")
 
     assert not self.config.quantize_kvcache or self.kv_quant
+
+    if self.config.query_scaling in ["query", "both"]:
+      query /= jnp.sqrt(query.shape[-1])
 
     if self.config.attention == "paged" and model_mode != common_types.MODEL_MODE_TRAIN:
       unnormalized_out, _, exp_sum = self.paged_attention_op(
