@@ -1249,6 +1249,7 @@ deepseek_v5p_dp_a1 = _add_to_model_dictionary(
   )
 )
 
+# base_docker_image = "gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2025-02-04"
 llama3_1_405b_8192_fsdp_dcn_matt = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
@@ -1267,7 +1268,7 @@ llama3_1_405b_8192_fsdp_dcn_matt = _add_to_model_dictionary(
         # "key_proj": "offload",
         # "value_proj": "offload",
         # "out_proj": "offload",
-        "max_target_length": 8192,
+        "max_target_length": 1024,
         "attention": "flash",
         "gcs_metrics": True,
         "use_iota_embed": True,
@@ -1297,7 +1298,7 @@ llama3_1_405b_8192_explicit_matt_pp = _add_to_model_dictionary(
     model_type="default",
     tuning_params={
         "per_device_batch_size": 0.5,
-        "max_target_length": 2048,
+        "max_target_length": 4096,
         "ici_fsdp_parallelism": 64,
         "ici_tensor_parallelism": 4,
         "base_emb_dim": 16384,
@@ -1337,7 +1338,7 @@ llama3_1_405b_8192_explicit_matt_pp = _add_to_model_dictionary(
         "dcn_pipeline_parallelism": 7, # PP
         "base_num_decoder_layers": 42, # PP * 6
         "num_pipeline_microbatches": 14, # PP * 2
-        "num_layers_per_pipeline_stage": 6,
+        "num_layers_per_pipeline_stage": 2,
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
