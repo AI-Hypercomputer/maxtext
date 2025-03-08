@@ -163,13 +163,13 @@ def validate_keys(keys):
 
 def validate_data_input(keys):
   """validate provided parameters for data input"""
+  if not keys["hf_access_token"]:
+    keys["hf_access_token"] = None
   if keys["dataset_type"] == "hf":
     max_logging.log(
         f"dataset_type set to hf, will use {keys['hf_path']=}, {keys['hf_data_dir']=} and {keys['hf_train_files']=} to read data"
     )
     assert keys["hf_path"] != "", "hf_path can't be empty when dataset_type=hf"
-    if not keys["hf_access_token"]:
-      keys["hf_access_token"] = None
     if not keys["hf_train_files"]:
       keys["hf_train_files"] = None
     if not keys["hf_eval_files"]:
@@ -186,6 +186,10 @@ def validate_data_input(keys):
     assert keys["grain_train_files"] != "", "grain_train_files can't be empty when dataset_type=grain"
     if keys["eval_interval"] > 0:
       assert keys["grain_eval_files"], "Please specify grain_eval_files or set eval_interval to <=0."
+    assert keys["tokenizer_type"] in (
+        "sentencepiece",
+        "huggingface",
+    ), f"grain pipeline only supports tokenizer_type: sentencepiece, huggingface, but got {keys['tokenizer_type']}"
   elif keys["dataset_type"] == "tfds":
     max_logging.log(f"dataset_type set to tfds, will use {keys['dataset_path']=} and {keys['dataset_name']=}")
     assert keys["dataset_name"] != "", "dataset_name can't be empty when dataset_type=tfds"
