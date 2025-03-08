@@ -29,8 +29,10 @@ import maxtext_xpk_runner as mxr
 PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_proxy_server:latest"
 # SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_server:laitest"
 SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_server:latest"
-RUNNER = "gcr.io/cloud-tpu-v2-images-dev/shauryag_latest@sha256:09798f57fe24af9b901c881dbb01f59fd5e9a8df90cea4b093278478e416d7e7"
-# RUNNER = "gcr.io/cloud-tpu-v2-images-dev/shauryag_latest:elastic"
+# Used for the long running elastic job
+RUNNER = "gcr.io/cloud-tpu-v2-images-dev/shauryag_latest:elastic"
+# RUNNER = "gcr.io/cloud-tpu-v2-images-dev/shauryag_latest@sha256:09798f57fe24af9b901c881dbb01f59fd5e9a8df90cea4b093278478e416d7e7"
+# RUNNER = "gcr.io/cloud-tpu-v2-images-dev/shauryag_latest:latest"
 # RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest"
 # RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable@sha256:82b49e1e6a735702321c18378621f9362e9adebf99cf6ebb84fa6f16362b4626"
 
@@ -50,9 +52,9 @@ BASE_OUTPUT_DIRECTORY = (
     f"/tmp/gcsfuse/shauryag/pw_mcjax_benchmarking/"
 )
 
-MAX_RESTARTS = 10_000
+MAX_RESTARTS = 100
 # BENCHMARK_STEPS=2000
-BENCHMARK_STEPS=21
+BENCHMARK_STEPS=2000
 
 def main() -> int:
   # V6e cluster config
@@ -79,8 +81,8 @@ def main() -> int:
       model_configs.llama3_1_70b_8192_iter_real_data_and_sync_checkpointing_tfds
   ]
   num_slices_list = [
-#      48
-      2
+      56
+#      2
   ]
   pathways_config = mxr.PathwaysConfig(
       server_image=SERVER_IMAGE,
@@ -88,9 +90,9 @@ def main() -> int:
       runner_image=RUNNER,
 
       # User can add additional flags here.
-      server_flags="--temporary_flags_for_debugging=temporary_flag_for_debugging_enable_late_binding=false --enable_metrics_collection=true",
-      proxy_flags=f"--temporary_flags_for_debugging=temporary_flag_for_debugging_experimental_elastic_slices=true;;;temporary_flag_for_debugging_experimental_num_ok_missing_slices={num_slices_list[0]} --enable_metrics_collection=true",
-      worker_flags="--enable_metrics_collection=true",
+      server_flags="--temporary_flags_for_debugging=temporary_flag_for_debugging_enable_late_binding=false --enable_metrics_collection=false",
+      proxy_flags=f"--temporary_flags_for_debugging=temporary_flag_for_debugging_experimental_elastic_slices=true;;;temporary_flag_for_debugging_experimental_num_ok_missing_slices={num_slices_list[0]} --enable_metrics_collection=false",
+      worker_flags="--enable_metrics_collection=false",
   )
 
   xpk_workload_cmds = []
@@ -123,7 +125,7 @@ def main() -> int:
             pathways_config=pathways_config,
             xpk_path=XPK_PATH,
             num_steps=BENCHMARK_STEPS,
-            priority="medium",
+            priority="high",
         )
         command, name = mxr.generate_xpk_workload_cmd(
             cluster_config=cluster_config, wl_config=wl_config

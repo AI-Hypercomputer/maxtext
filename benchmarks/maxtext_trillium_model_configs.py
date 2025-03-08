@@ -29,9 +29,9 @@ import xla_flags_library
 BASE_PATHWAYS_TUNING_PARAMS = {
     "checkpoint_storage_use_ocdbt": False,
     "checkpoint_storage_use_zarr3": False,
-    "enable_pathways_goodput": True,
+#    "enable_pathways_goodput": True,
     "enable_single_controller": True,
-    "metrics_file": "metrics.txt",
+#    "metrics_file": "metrics.txt",
     "goodput_upload_interval_seconds": 30,
 }
 
@@ -1061,7 +1061,7 @@ llama3_1_70b_8192_iter_real_data_tfds = _add_to_model_dictionary(
     ),
 )
 
-
+# PW long running elasticity config (profiler is turned off)
 llama3_1_70b_8192_iter_real_data_and_sync_checkpointing_tfds = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
@@ -1094,10 +1094,10 @@ llama3_1_70b_8192_iter_real_data_and_sync_checkpointing_tfds = _add_to_model_dic
             "sa_block_kv_dq": 2048,
             "sa_use_fused_bwd_kernel": True,
             "gcs_metrics": False,
-            "profiler": "xplane",
-            "skip_first_n_steps_for_profiler": 10,
-            "profiler_steps": 3,
-            "tokenizer_path": "assets/tokenizer_llama3.tiktoken",
+            # "profiler": "xplane",
+            # "skip_first_n_steps_for_profiler": 10,
+            # "profiler_steps": 3,
+            # "tokenizer_path": "assets/tokenizer_llama3.tiktoken",
         },
         xla_flags=(
             xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -1124,7 +1124,6 @@ llama3_1_70b_8192_iter_real_data_and_sync_checkpointing_tfds = _add_to_model_dic
         }
     ),
 )
-
 
 llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds = _add_to_model_dictionary(
     trillium_model_dict,

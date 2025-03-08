@@ -389,7 +389,7 @@ def build_user_command(
       'python3',
       f'{wl_config.executable}',
       'MaxText/configs/base.yml',
-      f'metrics_file={wl_config.base_output_directory}/{name}/metrics.txt '
+      f'metrics_file={wl_config.base_output_directory}/{name}/metrics.txt',
       f'{config_tuning_params}',
       f'steps={wl_config.num_steps}',
       f'model_name={wl_config.model.model_type}',
