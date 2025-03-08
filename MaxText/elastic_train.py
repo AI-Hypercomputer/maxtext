@@ -340,6 +340,8 @@ def train_loop(config, state=None):
 
           if checkpoint_manager is not None:
             state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
+            print(step)
+            print(state_to_save)
             if save_checkpoint(checkpoint_manager, int(step), state_to_save, config.dataset_type, data_iterator, config):
               checkpointing.print_save_message(step, config.async_checkpointing)
 
@@ -443,7 +445,8 @@ def train_loop(config, state=None):
         step += 1
 
       except jax.errors.JaxRuntimeError as error:
-        max_logging.log(f"{mesh._flat_devices_set=}")
+        slice_indices = {d.slice_index for d in mesh._flat_devices_set}
+        max_logging.log(f"Error mesh slice set: {slice_indices=}")
         ret = config.eu.maybe_reshard_down(
             error,
             elastic_handler,
@@ -464,6 +467,11 @@ def train_loop(config, state=None):
            learning_rate_schedule,
            metric_logger,
            writer) = ret
+          slice_indices = {d.slice_index for d in mesh._flat_devices_set}
+          max_logging.log(f"Resharded mesh slice set: {slice_indices=}")
+          max_logging.log(f"{metric_logger.buffered_step=}")
+        else:
+          max_logging.log("ret is None")
 
   if checkpoint_manager is not None:
     checkpoint_manager.wait_until_finished()

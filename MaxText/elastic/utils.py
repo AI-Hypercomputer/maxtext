@@ -215,7 +215,7 @@ class ElasticUtils:
       logger.info("Unknown JaxRuntimeError")
       return False
 
-    logger.info(traceback.format_exc())
+    logger.info(traceback.print_exception(error))
     return True
 
   @timeit
