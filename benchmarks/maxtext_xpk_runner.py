@@ -68,7 +68,7 @@ class WorkloadConfig:
   base_docker_image: str
   libtpu_type: LibTpuType
   libtpu_nightly_version: str = None # A date in %Y%M%D format, 20241201
-  num_steps: int = 20
+  num_steps: int = 7
   max_restarts: int = 0
   priority: str = "medium"
   xpk_path: str = '~/xpk'
@@ -515,8 +515,12 @@ def main() -> int:
       device_type='v5p-128',
   )
 
-
-
+  v5p_256_cluster_config = XpkClusterConfig(
+      cluster_name='mlperf-v5p-256-1',
+      project='cloud-tpu-multipod-dev',
+      zone='europe-west4',
+      device_type='v5p-256',
+  )
 
   xpk_workload_cmds = []
   xpk_workload_names = []
@@ -524,7 +528,8 @@ def main() -> int:
   list_of_models = [
     #model_configs.matt_simple
     #model_configs.deepseek_matt_a1
-    model_configs.deepseek_manual_matt_a1
+    #model_configs.deepseek_manual_matt_a1
+    model_configs.deepseek_v5p_a1
     #deepseek_matt_a1
   ]
 
@@ -551,7 +556,8 @@ def main() -> int:
       # v5e_cluster_config,
       #v5p_cluster_config,
       #v6e_cluster_config, #yucmhab
-      v6e_cluster_config_big
+      #v6e_cluster_config_big
+      v5p_256_cluster_config
       # another_config,
     ]:
       # Run workloads in the following slice configurations

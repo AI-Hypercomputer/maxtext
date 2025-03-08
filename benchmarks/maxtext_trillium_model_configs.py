@@ -1306,6 +1306,56 @@ deepseek_matt_a1 = _add_to_model_dictionary(
   )
 )
 
+#docker_image_flag = '--docker-image=gcr.io/tpu-prod-env-multipod/mattdavidow-bin-2025-03-02'
+# commit 51b01ad5460ff197399abacfa67216b500f77198 (HEAD -> mattdavidow-run-deepseek, origin/mattdavidow-run-deepseek)
+deepseek_v5p_a1 = _add_to_model_dictionary(
+  trillium_model_dict,
+    MaxTextModel(
+      model_name="deepseek_v5p_a1",
+      model_type="deepseek3-671b",
+      tuning_params={
+          "per_device_batch_size": 7, # 8 OOMS by 1 GB
+          "max_target_length": 8192,
+          "ici_fsdp_parallelism": -1,
+          "ici_expert_parallelism": 1,
+          # "dcn_fsdp_parallelism": 1,
+          "remat_policy": "custom",
+          "decoder_layer_input": "offload",
+          # "out_proj": "offload",
+          # "query_proj": "offload",
+          # "key_proj": "offload",
+          # "value_proj": "offload",
+          "gcs_metrics": True,
+          "use_iota_embed": True,
+          "dataset_path": "gs://max-datasets-rogue",
+          "dataset_type": "synthetic",
+          "reuse_example_batch": 1,
+          "enable_checkpointing": False,
+          "profiler": "xplane",
+          # "skip_first_n_steps_for_profiler": 10,
+          # "sa_block_q": 2048,
+          # "sa_block_q_dkv": 2048,
+          # "sa_block_q_dq": 2048,
+          "megablox": True,
+          "sparse_matmul": True,
+          #"capacity_factor": 1.0,
+          "tokenizer_path": "assets/tokenizer.mistral-v3",
+          "dtype": "bfloat16",
+          "opt_type": "sgd",
+          "weight_dtype": "bfloat16",
+          #"allow_split_physical_axes": True,
+          #"custom_mesh": "hybrid_ring_64x4",
+          "attention": "flash", # dot_product
+          "sharding_tolerance": 1337, # This should never be more than 1
+      },
+      xla_flags=(
+          # xla_flags_library.MOE_VMEM_LIMIT_FLAG
+          xla_flags_library.CF_FOR_ALL_GATHER
+          + xla_flags_library.DATA_PARALLEL_OVERLAP
+      ),
+  )
+)
+
 #commit 188221915a3a74aa0b4e6fca2315b977747d1ae3 (HEAD -> mattdavidow-run-deepseek, origin/mattdavidow-run-deepseek)
 #docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ds_a1_2_28"'
 deepseek_manual_matt_a1 = _add_to_model_dictionary(
