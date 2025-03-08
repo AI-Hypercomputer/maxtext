@@ -240,6 +240,7 @@ class ElasticUtils:
 
       try:
         ret = elastic_handler(*handler_args)
+        break
       except jax.errors.JaxRuntimeError as e:
         logger.info("Elastic handler raised an error.")
         error = e

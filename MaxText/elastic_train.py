@@ -443,15 +443,16 @@ def train_loop(config, state=None):
         step += 1
 
       except jax.errors.JaxRuntimeError as error:
-         ret = config.eu.maybe_reshard_down(
-             error,
-             elastic_handler,
-             handler_args=(
-                 config,
-                 checkpoint_manager,
-             ),
-         )
-         if ret is not None:
+        max_logging.log(f"{mesh._flat_devices_set=}")
+        ret = config.eu.maybe_reshard_down(
+            error,
+            elastic_handler,
+            handler_args=(
+                config,
+                checkpoint_manager,
+            ),
+        )
+        if ret is not None:
           (config,
            step,
            state,
