@@ -93,14 +93,14 @@ class ElasticUtils:
   _devices: Sequence[jax.Device]
   slice_to_devices: Mapping[int, Sequence[jax.Device]]
   total_slice_count: int
-  save_period: int
+  snapshot_period: int
   reshard_check_period: int
   max_failure_count: int | None
   max_reshard_retry_count: int | None
   failure_count: int
   reshard_retry_count: int
   good_slice_indices: set[int]
-  data: Mapping[str, Any]
+  _snapshots: collections.deque[Mapping[str, Any]]
 
   TEST_VALUE = 100
 
@@ -108,14 +108,14 @@ class ElasticUtils:
       self,
       devices: Sequence[jax.Device],
       total_slice_count: int,
-      save_period: int = 1,
+      snapshot_period: int = 1,
       reshard_check_period: int = 1,
       max_failure_count: int | None = None,
       max_reshard_retry_count: int | None = None,
   ):
     self.devices = devices
     self.total_slice_count = total_slice_count
-    self.save_period = save_period
+    self.snapshot_period = snapshot_period
     self.reshard_check_period = reshard_check_period
     self.max_failure_count = max_failure_count
     self.max_reshard_retry_count = max_reshard_retry_count
@@ -132,18 +132,62 @@ class ElasticUtils:
       )
       time.sleep(5)
       self.good_slice_indices = self.get_slice_availability()
-    self.data = {}
+
+    self._snapshots = collections.deque(maxlen=2)
+
+  def _extend_snapshots(self):
+    fill_count = self._snapshots.maxlen - len(self._snapshots)
+    self._snapshots.extend([self._snapshots[-1]] * fill_count)
+
+  @timeit
+  def get_next_snapshot(self, mesh: jax.sharding.Mesh):
+    while True:
+      if not self._snapshots:
+        raise ValueError("No snapshots available")
+
+      snapshot = self._snapshots.popleft()
+      step = snapshot.pop("step")
+
+      resharded_snapshot_host = {"step": step}
+      resharded_snapshot_device = {"step": step}
+      for k, v in snapshot.items():
+        resharded_host, resharded_device = self._reshard_snapshot(v, mesh)
+        resharded_snapshot_host[k] = resharded_host
+        resharded_snapshot_device[k] = resharded_device
+
+      try:
+        jax.block_until_ready(resharded_snapshot_host)
+        jax.block_until_ready(resharded_snapshot_device)
+        break
+      except Exception as error:
+        if not self._is_error_due_to_slice_down(error):
+          raise
+
+    self._snapshots.clear()
+    self._snapshots.append(resharded_snapshot_host)
+    self._extend_snapshots()
+
+    return reshared_snapshot_device
+
+  @timeit
+  def initialize_snapshot(
+      self,
+      step: int,
+      **kwargs,
+  ):
+    self.maybe_snapshot(step, True, True, **kwargs)
+    self._extend_snapshots()
 
   @timeit
   def maybe_snapshot(
       self,
-      save_step: int,
+      step: int,
       blocking: bool = False,
       force: bool = False,
       **kwargs,
   ):
     """Save step and state."""
-    if not force and save_step % self.save_period:
+    if not force and step % self.snapshot_period:
       logger.info("Not saving a snapshot")
       return
 
@@ -154,7 +198,7 @@ class ElasticUtils:
 
     logger.info(f"Saving {total_nbytes} bytes")
 
-    data = {
+    snapshot = {
         k: jax.device_put(
             v,
             jax.tree.map(
@@ -163,15 +207,15 @@ class ElasticUtils:
         )
         for k, v in kwargs.items()
     }
-    data["save_step"] = save_step
+    snapshot["step"] = step
 
     logger.info("Snapshot dispatched")
     if blocking:
-      for v in self.data.values():
+      for v in snapshot.values():
         jax.block_until_ready(v)
       logger.info("Snapshot completed")
 
-    self.data = data
+    self._snapshots.appendleft(snapshot)
 
   def _slice_down(self, reshard_retry: bool = False):
     """Slice down."""
@@ -215,7 +259,7 @@ class ElasticUtils:
       logger.info("Unknown JaxRuntimeError")
       return False
 
-    logger.info(traceback.print_exception(error))
+    logger.info(traceback.format_exception(error))
     return True
 
   @timeit
@@ -266,7 +310,7 @@ class ElasticUtils:
       return
 
     logger.info("Taking snapshot")
-    if self.data["save_step"] < step:
+    if self.snapshot["step"] < step:
       self.maybe_snapshot(step, force=True, **save_args)
 
     try:
@@ -309,7 +353,7 @@ class ElasticUtils:
     logger.info(f"Current good slice indices: {good_slice_indices}")
 
     if not good_slice_indices & self.good_slice_indices:
-      raise ValueError("All copies of the data have been lost")
+      raise ValueError("All copies of the snapshot have been lost")
 
     self.good_slice_indices = good_slice_indices
 
@@ -424,42 +468,47 @@ class ElasticUtils:
     else:
       raise ValueError(f"Unsupported type: {type(x)}")
 
-  @classmethod
   @timeit
-  def reshard(
-      cls,
+  def _reshard_snapshot(
+      self,
       x: Any,
-      sharding: jax.sharding.Sharding | Any,
-      *,
-      donate_input: bool = True,
-      put_array: (
-          Callable[
-              [jax.Array, Sequence[jax.sharding.Sharding], bool], jax.Array
-          ]
-          | None
-      ) = None,
+      mesh: jax.sharding.Mesh,
   ) -> Any:
     """Reshards `x` to the specified `sharding`.
+    Donates `x`
 
     Args:
         x: An array, scalar, or a nested Python container thereof.
-        sharding: A `Sharding` or a nested `Sharding` in a Python container
-          (must match the structure of `x`), specifying the target sharding.
-        donate_input: If `True`, donates the input arrays to reduce memory
-          needed for resharding. Donated buffers should not be reused.
-        put_array: A function that takes an array, a sharding, and a boolean
-          indicating whether to donate the input, and returns a copy of the
-          array with the specified sharding.
 
     Returns:
-        A copy of `x` with the specified `sharding`.
+        A copy of `x` on host memory.
+        A copy of `x` on device memory.
     """
-    if put_array is None:
-      put_array = cls.default_put_array
-
-    return reshard.reshard(
-        x, sharding, donate_input=donate_input, put_array=put_array
+    sharding_pinned_host = jax.tree.map(
+        lambda x: jax.sharding.NamedSharding(mesh, x.sharding.spec, memory_kind="pinned_host"),
+        x,
     )
+    # Don't donate in case the snapshot is duplicated in _snapshots
+    resharded_pinned_host = reshard.reshard(
+        x,
+        sharding_pinned_host,
+        put_array=self.put_array_device_put2,
+        donate_input=False,
+    )
+
+    sharding_device = jax.tree.map(
+        lambda x: jax.sharding.NamedSharding(mesh, x.sharding.spec, memory_kind="device"),
+        resharded_pinned_host,
+    )
+
+    resharded_device = reshard.reshard(
+        resharded_pinned_host,
+        sharding_device,
+        put_array=self.put_array_device_put0,
+        donate_input=False,
+    )
+
+    return resharded_pinned_host, resharded_device
 
   @staticmethod
   def put_array_device_put0(

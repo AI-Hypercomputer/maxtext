@@ -478,7 +478,7 @@ class _HyperParameters:
     raw_keys["eu"] = ElasticUtils(
         jax.devices(),
         raw_keys["num_slices"],
-        save_period=3,
+        snapshot_period=3,
         reshard_check_period=15,
         max_failure_count=100,
         max_reshard_retry_count=3,

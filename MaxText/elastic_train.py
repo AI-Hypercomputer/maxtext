@@ -84,7 +84,8 @@ def elastic_handler(
 
   data_iterator, _ = create_data_iterator(config, mesh)
 
-  restore_step = config.eu.data["save_step"]
+  snapshot = config.eu.get_next_snapshot(mesh)
+  restore_step = snapshot["step"]
 
   if checkpoint_manager is not None:
     # Confirm this is the right thing to do
@@ -107,36 +108,7 @@ def elastic_handler(
       checkpoint_manager=None,
   )
 
-  def reshard(arr):
-    sharding_pinned_host = jax.tree.map(
-        lambda x: jax.sharding.NamedSharding(mesh, x.sharding.spec, memory_kind="pinned_host"),
-        arr,
-    )
-    resharded_pinned_host = config.eu.reshard(
-        arr,
-        sharding_pinned_host,
-        put_array=config.eu.put_array_device_put2,
-        donate_input=True,
-    )
-
-    sharding_device = jax.tree.map(
-        lambda x: jax.sharding.NamedSharding(mesh, x.sharding.spec, memory_kind="device"),
-        resharded_pinned_host,
-    )
-
-    resharded_device = config.eu.reshard(
-        resharded_pinned_host,
-        sharding_device,
-        put_array=config.eu.put_array_device_put0,
-        donate_input=False,
-    )
-
-    return resharded_pinned_host, resharded_device
-
-  config.eu.data["params"], params = reshard(config.eu.data["params"])
-  config.eu.data["opt_state"], opt_state = reshard(config.eu.data["opt_state"])
-
-  state = state.replace(step=restore_step, params=params, opt_state=opt_state)
+  state = state.replace(**snapshot)
 
   (
       functional_train,
@@ -290,9 +262,8 @@ def train_loop(config, state=None):
   metric_logger = MetricLogger(writer, config)
   step = start_step
 
-  config.eu.maybe_snapshot(
+  config.eu.initialize_snapshot(
       step,
-      force=True,
       params=state.params,
       opt_state=state.opt_state,
   )

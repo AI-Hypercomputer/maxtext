@@ -40,7 +40,7 @@ class ElasticUtilsSimulator(utils.ElasticUtils):
       self,
       devices: Sequence[jax.Device],
       total_slice_count: int,
-      save_period: int | None = None,
+      snapshot_period: int | None = None,
       reshard_check_period: int | None = None,
       max_failure_count: int | None = None,
       max_reshard_retry_count: int | None = None,
@@ -50,7 +50,7 @@ class ElasticUtilsSimulator(utils.ElasticUtils):
     super().__init__(
         devices,
         total_slice_count,
-        save_period,
+        snapshot_period,
         reshard_check_period,
         max_failure_count,
         max_reshard_retry_count,
