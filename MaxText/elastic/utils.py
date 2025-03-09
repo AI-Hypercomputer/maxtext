@@ -167,7 +167,7 @@ class ElasticUtils:
     self._snapshots.append(resharded_snapshot_host)
     self._extend_snapshots()
 
-    return reshared_snapshot_device
+    return resharded_snapshot_device
 
   @timeit
   def initialize_snapshot(
