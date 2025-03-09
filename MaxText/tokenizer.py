@@ -17,13 +17,23 @@ limitations under the License.
 """Provides op for tokenizing a dataset."""
 
 from typing import Dict, Iterable, Union, Literal, Sequence, Collection, List
+import warnings
 from pathlib import Path
 import tensorflow as tf
-import tensorflow_text as tftxt
+import sentencepiece as sp
 import max_logging
 import transformers
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
+
+try:
+  import tensorflow_text as tftxt
+except ImportError:
+  warnings.warn(
+      "tensorflow_text (an optional dependecy) is not installed. TFDS data-loading pipeline can be slow. "
+      "HuggingFace and Grain are not affected"
+  )
+  tftxt = None
 
 
 Features = Dict[str, tf.Tensor]
@@ -192,7 +202,11 @@ class SentencePieceTokenizer:
     max_logging.log(f"Tokenizer path: {model_path}")
     with tf.io.gfile.GFile(model_path, "rb") as model_fp:
       sp_model = model_fp.read()
-    self.sp_tokenizer = tftxt.SentencepieceTokenizer(model=sp_model, add_bos=add_bos, add_eos=add_eos, reverse=False)
+    if tftxt is not None:
+      self.sp_tokenizer = tftxt.SentencepieceTokenizer(model=sp_model, add_bos=add_bos, add_eos=add_eos, reverse=False)
+    else:
+      # this tokenizer is ONLY compatible with previous tftxt sp tokenizer if reverse=False
+      self.sp_tokenizer = sp.SentencePieceProcessor(model_proto=sp_model, add_bos=add_bos, add_eos=add_eos, reverse=False)
 
   def encode(self, s: str) -> List[int]:
     return self.sp_tokenizer.tokenize(s)
@@ -250,5 +264,8 @@ def TokenizeOp(tokenizer, features: Features, data_keys: Iterable[str] = ("input
     if isinstance(tokenizer, (TikTokenTokenizer, HFTokenizer)):
       features[k] = tf.py_function(_process_string, [features[k]], Tout=[tf.int32])[0]
     elif isinstance(tokenizer, SentencePieceTokenizer):
-      features[k] = tokenizer.encode(features[k])
+      if tftxt is not None:
+        features[k] = tokenizer.encode(features[k])
+      else:
+        features[k] = tf.py_function(_process_string, [features[k]], Tout=[tf.int32])[0]
   return features
