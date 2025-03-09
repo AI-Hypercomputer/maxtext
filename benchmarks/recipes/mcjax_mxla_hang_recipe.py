@@ -25,18 +25,12 @@ sys.path.append(parent_dir)
 import maxtext_trillium_model_configs as model_configs
 import maxtext_xpk_runner as mxr
 
-# PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_proxy_server:latest"
-PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_proxy_server:latest"
-# SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_server:laitest"
-SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_server:latest"
-RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest"
-# RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable@sha256:82b49e1e6a735702321c18378621f9362e9adebf99cf6ebb84fa6f16362b4626"
+RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable@sha256:82b49e1e6a735702321c18378621f9362e9adebf99cf6ebb84fa6f16362b4626"
 
 # Cluster Params
 CLUSTER = "bodaborg-v6e-256-ts"
 PROJECT = "tpu-prod-env-multipod"
 ZONE = "us-west1-c"
-REGION = "us-west1"
 COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
@@ -44,11 +38,10 @@ DEVICE_TYPE = "v6e-256"
 XPK_PATH = "../xpk"  # We're running this script from the maxtext directory
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = (
-#    f"gs://akshu-v6e-m/shauryag/pw_mcjax_benchmarking/"
-    f"/tmp/gcsfuse/shauryag/pw_mcjax_benchmarking/"
+    f"gs://trillium-scale-tests-q1-25-west/shauryag/pw_mcjax_benchmarking/"
+#    f"/tmp/gcsfuse/shauryag/pw_mcjax_benchmarking/"
 )
 
-MAX_RESTARTS = 10_000
 BENCHMARK_STEPS=21
 
 
@@ -71,22 +64,12 @@ def main() -> int:
 
   model_list = [
       # model_configs.llama3_1_70b_8192_pw_lr_real_data,
-      # model_configs.llama3_1_8b_8192,
-      # model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
-      model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds,
+      # model_configs.llama3_1_8b_8192_pw,
+      # model_configs.llama2_70b_4096_sc_long_run
+      model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds
   ]
-  pathways_config = mxr.PathwaysConfig(
-      server_image=SERVER_IMAGE,
-      proxy_server_image=PROXY_IMAGE,
-      runner_image=RUNNER,
-
-      # User can add additional flags here.
-      server_flags="--enable_metrics_collection=true",
-      proxy_flags="--enable_metrics_collection=true",
-      worker_flags="--enable_metrics_collection=true",
-  )
   num_slices_list = [
-      2
+      30
   ]
 
   xpk_workload_cmds = []
@@ -97,13 +80,6 @@ def main() -> int:
     for cluster_config in [
         cluster_config,
     ]:
-
-      # Make modifications to the model config here to add in any additional
-      # flags or changes to the model config.
-      model.tuning_params["use_vertex_tensorboard"] = True
-      model.tuning_params["vertex_tensorboard_project"] = PROJECT
-      model.tuning_params["vertex_tensorboard_region"] = REGION
-
       # Run workloads in the following slice configurations
       for num_slices in num_slices_list:
         wl_config = mxr.WorkloadConfig(
@@ -111,15 +87,13 @@ def main() -> int:
             num_slices=num_slices,
             device_type=cluster_config.device_type,
             base_output_directory=BASE_OUTPUT_DIRECTORY,
-            executable="MaxText/train.py",
-            max_restarts=MAX_RESTARTS,
+            max_restarts=10_000,
             libtpu_type=None,
             libtpu_nightly_version="",
-            base_docker_image=None,
-            pathways_config=pathways_config,
+            base_docker_image=RUNNER,
             xpk_path=XPK_PATH,
             num_steps=BENCHMARK_STEPS,
-            priority="high",
+            priority="medium"
         )
         command, name = mxr.generate_xpk_workload_cmd(
             cluster_config=cluster_config, wl_config=wl_config
@@ -135,10 +109,7 @@ def main() -> int:
       xpk_workload_names, xpk_workload_cmds
   ):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(
-        f"[{timestamp}] Running workload: {xpk_workload_name} with command:"
-        f" {xpk_workload_cmd}"
-    )
+    print(f"[{timestamp}] Running workload: {xpk_workload_name} with command: {xpk_workload_cmd}")
     return_code = mxr.run_command_with_updates(
         xpk_workload_cmd, xpk_workload_name
     )
