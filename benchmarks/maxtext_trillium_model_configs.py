@@ -15,6 +15,8 @@
  """
 """Shared Benchmark config for v6e orchestrations."""
 
+import tokenize
+
 import dataclasses
 import typing
 import xla_flags_library
@@ -31,7 +33,7 @@ BASE_PATHWAYS_TUNING_PARAMS = {
     "checkpoint_storage_use_zarr3": False,
     "enable_pathways_goodput": True,
     "enable_single_controller": True,
-    "metrics_file": "metrics.txt",
+    # "metrics_file": "metrics.txt",
     "goodput_upload_interval_seconds": 30,
 }
 
@@ -1018,11 +1020,18 @@ llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds = _add_to_model_dictiona
             "attention": "flash",
             "use_iota_embed": True,
             "dataset_path": "gs://trillium-scale-datasets-q1-25-west",
-            "dataset_type": "tfds",
+            # "dataset_type": "tfds",
+            "dataset_type": "grain",
+            "grain_train_files": (
+                "/tmp/dataset/array-record/c4/en/3.0.1/c4-train.array_record*"
+            ),
+            "grain_worker_count": 24,
+            # "tokenizer_path": "assets/tokenizer.llama2",
             "enable_checkpointing": True,
             "async_checkpointing": True,
             "checkpoint_period": 20,
-            "enable_checkpoint_cloud_logger": True,
+            # "enable_checkpoint_cloud_logger": True,
+            "enable_checkpoint_cloud_logger": False,
             "sa_block_q": 2048,
             "sa_block_kv": 2048,
             "sa_block_kv_compute": 2048,
@@ -1036,6 +1045,7 @@ llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds = _add_to_model_dictiona
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
+            # "tokenizer_path": "assets/tokenizer_llama3.tiktoken",
         },
         xla_flags=(
             xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -1081,10 +1091,12 @@ llama3_1_70b_8192_iter_synth_data_and_checkpointing = _add_to_model_dictionary(
             "use_iota_embed": True,
             "dataset_path": "gs://max-datasets-rogue",
             "dataset_type": "synthetic",
-            "enable_checkpointing": True,
+            # "enable_checkpointing": True,
+            "enable_checkpointing": False,
             "async_checkpointing": True,
             "checkpoint_period": 20,
-            "enable_checkpoint_cloud_logger": True,
+            # "enable_checkpoint_cloud_logger": True,
+            "enable_checkpoint_cloud_logger": False,
             "sa_block_q": 2048,
             "sa_block_kv": 2048,
             "sa_block_kv_compute": 2048,
@@ -1098,6 +1110,14 @@ llama3_1_70b_8192_iter_synth_data_and_checkpointing = _add_to_model_dictionary(
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
+            "tokenizer_path": "assets/tokenizer_llama3.tiktoken",
+        },
+        pathways_tuning_params={
+            "enable_pathways_goodput": False,
+            "monitor_goodput": False,
+            "enable_tensorboard": False,
+            "use_vertex_tensorboard": False,
+            "enable_checkpoint_cloud_logger": False,
         },
         xla_flags=(
             xla_flags_library.DENSE_VMEM_LIMIT_FLAG
