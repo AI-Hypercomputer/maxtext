@@ -437,6 +437,7 @@ profile_periodically_period: -1 # If set to a positive integer, profile every pr
 
 # Dump HLO options
 dump_hlo: False
+dump_step: -1 # Dump modules at the given step if set to a positive integer.
 dump_hlo_local_dir: "/tmp/xla_dump/"
 dump_hlo_delete_local_after: True # Cleans local directory after its uploaded
 dump_hlo_gcs_dir: "" # Defaults to {base_output_directory}/{run_name}/xla_dump
