@@ -613,6 +613,8 @@ sa_v_layout: "HEAD_DIM_MINOR"
 pagedattn_num_pages: 64
 pagedattn_tokens_per_page: 32
 pagedattn_pages_per_compute_block: 8
+pagedattn_max_page_groups: -1  # defaults to global batch size
+pagedattn_max_pages_per_group: -1  # defaults to (max_target_length + pa_tokens_per_page - 1) // pa_tokens_per_page
 
 # Chunked Prefill Parameters
 prefill_chunk_size: 256
