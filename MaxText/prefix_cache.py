@@ -16,13 +16,12 @@
 
 i) Initialize cache
 
-# HBM size with Trillium 8 core use about 17 / 31.25 GB per core after loading models.
-# To utilize HBM memory to 80%, about (30 * 0.8 - 16) * 8 = 64GB
 # Prefix return by prefill function of mixtral-8x22b model with max_prefill_length=1024,
 # int8 quantize_kvcache is 235_930_060 bytes, nearly 256 MB.
-# HBM cache can store about 64GB / 256 MB = 256 prompts.
-hbm_bytes = 64 * 1024 * 1024 * 1024  # 64 GB
-prefix_cache = PrefixCache(hbm_bytes)
+# It need about 256 * 256 MB = 64GB to caching 256 prompts prefill.
+hbm_bytes = 64_000_000_000  # 64 GB
+dram_bytes = 640_000_000_000  # 640 GB
+prefix_cache = PrefixCache(hbm_bytes=hbm_bytes, dram_bytes=dram_bytes)
 
 ii) Read from Cache:
 
