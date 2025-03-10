@@ -320,7 +320,7 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
   unsharded_param_perc = total_num_params_per_chip / perfectly_sharded_params_per_chip - 1
   assert unsharded_param_perc < tolerance, (
       f"Number of unsharded parameters exceeds tolerance {tolerance * 100}% "
-      f"of total parameters with a value of {unsharded_param_perc}%."
+      f"of total parameters with a value of {unsharded_param_perc * 100}%."
   )
 
 
