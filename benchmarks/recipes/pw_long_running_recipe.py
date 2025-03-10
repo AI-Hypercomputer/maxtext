@@ -37,11 +37,34 @@ REGION = "us-east5"
 COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
+################################################################################
+
+PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/sujinesh/unsanitized_proxy_server:latest"
+SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/sujinesh/unsanitized_server:latest"
+RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest"
+
+CLUSTER = "bodaborg-v6e-16-debug"
+PROJECT = "tpu-prod-env-one-vm"
+ZONE = "us-east5-b"
+COUNTRY = "us"
+DEVICE_TYPE = "v6e-16"
+
+CLUSTER = "bodaborg-v6e-256-ts"
+PROJECT = "tpu-prod-env-multipod"
+ZONE = "us-west1-c"
+COUNTRY = "us"
+DEVICE_TYPE = "v6e-256"
+
+################################################################################
+
 # Other parameters (MUST BE SET BY USER)
 XPK_PATH = "../xpk"  # We're running this script from the maxtext directory
 USER = os.environ["USER"]
+# BASE_OUTPUT_DIRECTORY = (
+#     f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
+# )
 BASE_OUTPUT_DIRECTORY = (
-    f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
+    f"gs://trillium-scale-tests-q1-25-west/pw_mcjax_benchmarking/{USER}/long_running_tests/"
 )
 
 MAX_RESTARTS = 10_000
@@ -86,7 +109,7 @@ def main() -> int:
       # worker_flags="--enable_metrics_collection=false",
   )
   num_slices_list = [
-      2
+      40
   ]
 
   xpk_workload_cmds = []
