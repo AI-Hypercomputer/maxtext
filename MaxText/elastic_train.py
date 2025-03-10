@@ -89,7 +89,6 @@ def elastic_handler(
   if checkpoint_manager is not None:
     # Confirm this is the right thing to do
     latest_step = checkpoint_manager.latest_step()
-    max_logging.log(f"{latest_step=}")
     if latest_step is not None and latest_step >= step:
       max_logging.log(
           f"Deleting checkpoint from step {latest_step} since we are "
@@ -130,7 +129,6 @@ def elastic_handler(
 
   example_batch = None
   metric_logger = MetricLogger(writer, config)
-  max_logging.log(f"{metric_logger.buffered_metrics is None=}")
 
   jax.block_until_ready(state)
 

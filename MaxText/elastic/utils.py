@@ -72,7 +72,7 @@ class Timer:
     logger.info(str(self))
 
   def __str__(self):
-    return f"{self.name} elaspsed {self.time}."
+    return f"{self.name} elapsed {self.time}."
 
 
 def timeit(
@@ -265,7 +265,7 @@ class ElasticUtils:
       logger.info("Unknown JaxRuntimeError")
       return False
 
-    logger.info(traceback.format_exception(error))
+    logger.info("\n".join(traceback.format_exception(error)))
     return True
 
   @timeit
@@ -324,7 +324,7 @@ class ElasticUtils:
     try:
       ret = elastic_handler(*handler_args)
     except jax.errors.JaxRuntimeError as error:
-      logger.info("elastic handler failed. Trying again")
+      logger.info("Elastic handler failed. Trying again")
       ret = self.maybe_reshard_down(
           error=error,
           elastic_handler=elastic_handler,
