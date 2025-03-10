@@ -25,6 +25,7 @@ from typing import Any, Union
 import jax
 from jax.experimental.compilation_cache import compilation_cache
 from layers.attentions import AttentionType
+from utils import gcs_utils
 import accelerator_to_spec_map
 import max_logging
 import max_utils
@@ -480,7 +481,7 @@ class _HyperParameters:
       max_logging.log("Override add_bos and add_eos to False when dataset_type=c4_mlperf")
 
     # Write raw_keys to GCS before type conversions
-    max_utils.write_config_raw_keys_for_gcs(raw_keys)
+    gcs_utils.write_config_raw_keys_for_gcs(raw_keys)
 
     # Type conversions
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
@@ -575,7 +576,7 @@ def validate_and_set_hlo_dump_defaults(raw_keys):
   if not raw_keys["dump_hlo_gcs_dir"]:
     raw_keys["dump_hlo_gcs_dir"] = os.path.join(raw_keys["base_output_directory"], raw_keys["run_name"], "xla_dump")
   else:
-    raw_keys["dump_hlo_gcs_dir"] = max_utils.add_trailing_slash(raw_keys["dump_hlo_gcs_dir"])
+    raw_keys["dump_hlo_gcs_dir"] = gcs_utils.add_trailing_slash(raw_keys["dump_hlo_gcs_dir"])
   if not os.environ.get("XLA_FLAGS"):
     os.environ["XLA_FLAGS"] = raw_keys["dump_hlo_xla_flags"]
   return raw_keys

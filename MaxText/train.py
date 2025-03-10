@@ -49,6 +49,7 @@ import pathwaysutils  # pylint: disable=unused-import
 import tensorflow as tf
 
 from metric_logger import MetricLogger
+from utils import gcs_utils
 
 from vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
@@ -842,7 +843,7 @@ def train_loop(config, state=None):
 
     if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
       jax.block_until_ready(state)  # Ensure compilation has finished.
-      max_utils.upload_dump(
+      gcs_utils.upload_dump(
           config.dump_hlo_local_dir,
           config.dump_hlo_gcs_dir,
           module_name=config.dump_hlo_module_name,
