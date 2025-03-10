@@ -215,6 +215,17 @@ final_logits_soft_cap: 0.0
 use_post_attn_norm: False
 use_post_ffw_norm: False
 
+# T5 does not explicitly rescale the attention logits by 1/sqrt(d).  This is
+# folded into the initializers of the linear transformations, which is
+# equivalent under Adafactor. Under Adam, these are not equivalent, so scaling
+# down the query activations may be more stable.  Supported options:
+#
+# init:  scale initialization of query weights by 1/sqrt(d)
+# query: scale query activations by 1/sqrt(d) (equivalent to scaling qk product)
+# both:  scale both init and query
+# none:  don't scale either
+query_scaling: init
+
 # MLA parameters
 q_lora_rank: 0
 kv_lora_rank: 512
