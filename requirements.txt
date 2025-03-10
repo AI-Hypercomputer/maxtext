@@ -7,6 +7,7 @@ aqtp
 cloud-accelerator-diagnostics
 cloud-tpu-diagnostics
 datasets
+drjax>=0.1.3
 gcsfs
 google-cloud-aiplatform==1.61.0
 google-cloud-storage
