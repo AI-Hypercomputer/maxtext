@@ -17,6 +17,7 @@ import copy as cp
 import functools
 from typing import Any, List, Optional, Tuple, Callable
 from collections import defaultdict
+import uuid
 
 import flax
 from flax import linen as nn
@@ -404,7 +405,7 @@ class MaxEngine(engine_api.Engine):
         "tokens": first_generated_tokens,
     }, result
 
-  @functools.partial(jax.jit, static_argnums=(0,))
+  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("request_id",))
   def prefill(
       self,
       *,
@@ -418,6 +419,7 @@ class MaxEngine(engine_api.Engine):
       complete_padded_prompt: Optional[jax.Array] = None,
       positions: Optional[jax.Array] = None,
       previous_chunk: Optional[Any] = None,
+      request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
       slot: Optional[int] = None,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
@@ -837,12 +839,14 @@ class MaxEngine(engine_api.Engine):
           1,
           2,
       ),
+      static_argnames=("request_id",),
   )
   def insert(
       self,
       prefix: Prefix,
       decode_state: DecodeState,
       slot: int,
+      request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
   ) -> DecodeState:
     """Insert a single computed prefill cache into KV cache."""
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
