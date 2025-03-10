@@ -1461,11 +1461,11 @@ class Attention(nn.Module):
       )
     elif rope_type.startswith("yarn"):
       rotary_embedding = YarnRotaryEmbedding(
-          max_seq_len=self.config.max_target_length,
-          original_seq_len=self.config.original_seq_len,
+          max_position_embeddings=self.config.max_position_embeddings,
+          original_max_position_embeddings=self.config.original_max_position_embeddings,
           beta_fast=self.config.beta_fast,
           beta_slow=self.config.beta_slow,
-          rope_theta=self.config.rope_theta,
+          rope_theta=self.config.rope_max_timescale,
           rope_factor=self.config.rope_factor,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
@@ -1568,8 +1568,8 @@ class MLA(Attention):
   qk_nope_head_dim: int = 128
   qk_rope_head_dim: int = 64
   v_head_dim: int = 128
-  max_seq_len: int = 4096 * 4
-  original_seq_len: int = 4096
+  max_position_embeddings: int = 4096 * 4
+  original_max_position_embeddings: int = 4096
   mscale: float = 1.0  # scaling factor for softmax
   rope_factor: float = 40.0  # rotary embedding factor
 
@@ -1670,7 +1670,7 @@ class MLA(Attention):
 
     # Set softmax scaling.
     self.softmax_scale = self.qk_head_dim**-0.5
-    if self.max_seq_len > self.original_seq_len:
+    if self.max_position_embeddings > self.original_max_position_embeddings:
       mscale = 0.1 * self.mscale * jnp.log(self.rope_factor) + 1.0
       self.softmax_scale = self.softmax_scale * mscale * mscale
 
