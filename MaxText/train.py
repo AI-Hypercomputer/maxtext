@@ -840,7 +840,7 @@ def train_loop(config, state=None):
 
     metric_logger.write_metrics(running_gcs_metrics, metrics, step)
 
-    if config.dump_hlo and step == start_step:
+    if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
       jax.block_until_ready(state)  # Ensure compilation has finished.
       max_utils.upload_dump(
           config.dump_hlo_local_dir,
