@@ -825,9 +825,9 @@ llama3_1_8b_8192 = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
             "sa_block_kv_dq": 2048,
             "sa_use_fused_bwd_kernel": True,
-            "profiler": "xplane",
-            "skip_first_n_steps_for_profiler": 10,
-            "profiler_steps": 5,
+            # "profiler": "xplane",
+            # "skip_first_n_steps_for_profiler": 10,
+            # "profiler_steps": 5,
         },
         xla_flags=(
             xla_flags_library.DENSE_VMEM_LIMIT_FLAG

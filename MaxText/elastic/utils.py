@@ -145,11 +145,12 @@ class ElasticUtils:
       if not self._snapshots:
         raise ValueError("No snapshots available")
 
-      snapshot = self._snapshots.popleft()
-      step = snapshot.pop("step")
+      snapshot_dict = self._snapshots.popleft()
+      step = snapshot_dict.pop("step")
+      snapshot = snapshot_dict.pop("snapshot")
 
-      resharded_snapshot_host = {"step": step}
-      resharded_snapshot_device = {"step": step}
+      resharded_snapshot_host = {}
+      resharded_snapshot_device = {}
       for k, v in snapshot.items():
         resharded_host, resharded_device = self._reshard_snapshot(v, mesh)
         resharded_snapshot_host[k] = resharded_host
@@ -163,28 +164,35 @@ class ElasticUtils:
         if not self._is_error_due_to_slice_down(error):
           raise
 
-    self._snapshots.clear()
-    self._snapshots.append(resharded_snapshot_host)
-    self._extend_snapshots()
+    self.initialize_snapshot(
+        step=step,
+        snapshot=resharded_snapshot_host,
+    )
 
-    return resharded_snapshot_device
+    return step, resharded_snapshot_device
 
   @timeit
   def initialize_snapshot(
       self,
       step: int,
-      **kwargs,
+      snapshot,
   ):
-    self.maybe_snapshot(step, True, True, **kwargs)
+    self._snapshots.clear()
+    self.maybe_snapshot(
+        step=step,
+        snapshot=snapshot,
+        blocking=True,
+        force=True,
+    )
     self._extend_snapshots()
 
   @timeit
   def maybe_snapshot(
       self,
       step: int,
+      snapshot: Mapping[str, Any],
       blocking: bool = False,
       force: bool = False,
-      **kwargs,
   ):
     """Save step and state."""
     if not force and step % self.snapshot_period:
@@ -192,30 +200,28 @@ class ElasticUtils:
       return
 
     total_nbytes = 0
-    for v in kwargs.values():
+    for v in snapshot.values():
       nbytes = jax.tree.map(lambda x: x.nbytes, v)
       total_nbytes += jax.tree.reduce(operator.add, nbytes)
 
     logger.info(f"Saving {total_nbytes} bytes")
 
-    snapshot = {
+    snapshot_host = {
         k: jax.device_put(
             v,
             jax.tree.map(
                 lambda x: x.sharding.with_memory_kind(kind="pinned_host"), v
             ),
         )
-        for k, v in kwargs.items()
+        for k, v in snapshot.items()
     }
-    snapshot["step"] = step
 
     logger.info("Snapshot dispatched")
     if blocking:
-      for v in snapshot.values():
-        jax.block_until_ready(v)
+      jax.block_until_ready(snapshot_host)
       logger.info("Snapshot completed")
 
-    self._snapshots.appendleft(snapshot)
+    self._snapshots.appendleft({"step": step, "snapshot": snapshot_host})
 
   def _slice_down(self, reshard_retry: bool = False):
     """Slice down."""
@@ -298,7 +304,7 @@ class ElasticUtils:
       self,
       step: int,
       elastic_handler: Callable[..., Any],
-      save_args: Mapping[str, Any],
+      snapshot: Mapping[str, Any],
       handler_args: tuple[Any, ...] | None = None,
   ):
     """Reshards up if it is time to reshard."""
@@ -309,18 +315,20 @@ class ElasticUtils:
       logger.info("Not resharding up")
       return
 
-    logger.info("Taking snapshot")
-    if self.snapshot["step"] < step:
-      self.maybe_snapshot(step, force=True, **save_args)
+    self.maybe_snapshot(
+        step=step,
+        snapshot=snapshot,
+        force=True,
+    )
 
     try:
       ret = elastic_handler(*handler_args)
     except jax.errors.JaxRuntimeError as error:
       logger.info("elastic handler failed. Trying again")
       ret = self.maybe_reshard_down(
-          error,
-          elastic_handler,
-          handler_args,
+          error=error,
+          elastic_handler=elastic_handler,
+          handler_args=handler_args,
           reshard_retry=True,
       )
 
@@ -762,4 +770,3 @@ def watchdog(timeout: float):
     event.set()
     watchdog_thread.join()
     logger.debug("Deregistering watchdog")
-

@@ -84,17 +84,16 @@ def elastic_handler(
 
   data_iterator, _ = create_data_iterator(config, mesh)
 
-  snapshot = config.eu.get_next_snapshot(mesh)
-  restore_step = snapshot["step"]
+  step, snapshot = config.eu.get_next_snapshot(mesh)
 
   if checkpoint_manager is not None:
     # Confirm this is the right thing to do
     latest_step = checkpoint_manager.latest_step()
     max_logging.log(f"{latest_step=}")
-    if latest_step is not None and latest_step >= restore_step:
+    if latest_step is not None and latest_step >= step:
       max_logging.log(
           f"Deleting checkpoint from step {latest_step} since we are "
-          f"rewinding to step {restore_step}."
+          f"rewinding to step {step}."
       )
       checkpoint_manager.delete(latest_step)
 
@@ -103,12 +102,13 @@ def elastic_handler(
       data_iterator,
       tx,
       config,
-      jax.random.fold_in(init_rng, restore_step),
+      jax.random.fold_in(init_rng, step),
       mesh,
       checkpoint_manager=None,
   )
 
   state = state.replace(**snapshot)
+  state = state.replace(step=state.step.at[None].set(step))
 
   (
       functional_train,
@@ -136,7 +136,7 @@ def elastic_handler(
 
   return (
       config,
-      restore_step,
+      step,
       state,
       mesh,
       checkpoint_manager,
@@ -264,8 +264,10 @@ def train_loop(config, state=None):
 
   config.eu.initialize_snapshot(
       step,
-      params=state.params,
-      opt_state=state.opt_state,
+      snapshot=dict(
+          params=state.params,
+          opt_state=state.opt_state,
+      ),
   )
 
   # step_down = {10, 30, 44}
@@ -378,15 +380,17 @@ def train_loop(config, state=None):
             prof.deactivate(blocking_object=state)
 
         config.eu.maybe_snapshot(
-            step,
-            params=state.params,
-            opt_state=state.opt_state,
+            step=step,
+            snapshot=dict(
+                params=state.params,
+                opt_state=state.opt_state,
+            ),
         )
 
         ret = config.eu.maybe_reshard_up(
-            step,
-            elastic_handler,
-            save_args=dict(
+            step=step,
+            elastic_handler=elastic_handler,
+            snapshot=dict(
                 params=state.params,
                 opt_state=state.opt_state,
             ),
@@ -415,8 +419,8 @@ def train_loop(config, state=None):
 
       except jax.errors.JaxRuntimeError as error:
         ret = config.eu.maybe_reshard_down(
-            error,
-            elastic_handler,
+            error=error,
+            elastic_handler=elastic_handler,
             handler_args=(
                 config,
                 checkpoint_manager,
