@@ -1461,7 +1461,7 @@ class Attention(nn.Module):
       )
     elif rope_type.startswith("yarn"):
       rotary_embedding = YarnRotaryEmbedding(
-          max_seq_len=self.config.max_target_length,
+          max_seq_len=163840,
           original_seq_len=self.config.original_seq_len,
           beta_fast=self.config.beta_fast,
           beta_slow=self.config.beta_slow,
@@ -1479,7 +1479,11 @@ class Attention(nn.Module):
           fprop_dtype=self.dtype,
           name=name,
       )
+    jax.debug.print("apply_rotary_embedding inputs {x} {shape}", x=inputs, shape=inputs.shape)
+    jax.debug.print("apply_rotary_embedding transpose inputs {x} {shape}", x=inputs.transpose((0,2,1,3)), shape=inputs.shape)
     inputs = rotary_embedding(inputs, inputs_positions)
+    jax.debug.print("\napply_rotary_embedding inputs after {x} {shape}", x=inputs, shape=inputs.shape)
+    jax.debug.print("apply_rotary_embedding transpose inputs after{x} {shape}", x=inputs.transpose((0,2,1,3)), shape=inputs.shape)
     return inputs
 
   @nn.compact
@@ -1687,9 +1691,10 @@ class MLA(Attention):
     # Split into non-positional and rotary parts.
     q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=-1)
     q_pe = self.apply_rotary_embedding(q_pe, inputs_positions, name="query_rope")
+    jax.debug.print("MLA q_pe {q_pe}", q_pe=q_pe)
     # Query projection is scaled by  1 / self.softmax_scale to be consistent MaxText implementation.
     # DeepSeek v3 was doing it in attention score computation.
-    return jnp.concatenate([q_nope, q_pe], axis=-1) / self.softmax_scale
+    return jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
 
   def mla_kv_projection(self, inputs: Array, inputs_positions: Array) -> Tuple[Array, Array]:
     """MLA key/value projection with integrated rotary embedding."""
@@ -1705,6 +1710,7 @@ class MLA(Attention):
     # Apply rotary embedding to key_rope.
     key_rope = jnp.expand_dims(low_rank_rope, axis=2)
     key_rope = self.apply_rotary_embedding(key_rope, inputs_positions, name="key_rope")
+    jax.debug.print("MLA key_rope {key_rope}", key_rope=key_rope)
     key_rope = jnp.broadcast_to(key_rope, (key_nope.shape[0], key_nope.shape[1], self.num_query_heads, key_rope.shape[3]))
 
     key = jnp.concatenate([key_nope, key_rope], axis=-1)
@@ -1739,6 +1745,8 @@ class MLA(Attention):
     """
     inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
     inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+    jax.debug.print("MLA inputs_q {inputs_q}", inputs_q=inputs_q)
+    jax.debug.print("MLA inputs_kv {inputs_kv}", inputs_kv=inputs_kv)
 
     query = self.mla_query_projection(inputs_q, inputs_positions)
     key, value = self.mla_kv_projection(inputs_kv, inputs_positions)
@@ -1756,7 +1764,11 @@ class MLA(Attention):
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
 
+    jax.debug.print("MLA query {query}", query=query)
+    jax.debug.print("MLA key {key}", key=key)
+    jax.debug.print("MLA value {value}", value=value)
     out = self.attention_op(query, key, value, decoder_segment_ids, model_mode)
+    jax.debug.print("MLA out {out}", out=out)
     out = nn.with_logical_constraint(out, self.out_axis_names)
     out = self.out_projection(inputs_q.shape[-1], out)
     return out

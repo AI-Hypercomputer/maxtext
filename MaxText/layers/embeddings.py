@@ -405,7 +405,8 @@ class YarnRotaryEmbedding(nn.Module):
 
     # Convert the complex result back to a real tensor.
     # Split the complex number into its real and imaginary parts.
-    rotated_real = jnp.stack([jnp.real(rotated), jnp.imag(rotated)], axis=-1)  # shape: [B, S, N, half_dim, 2]
+    # rotated_real = jnp.stack([jnp.real(rotated), jnp.imag(rotated)], axis=-1)  # shape: [B, S, N, half_dim, 2]
+    rotated_real = jnp.stack([jnp.real(rotated), jnp.imag(rotated)], axis=-2)
     output = rotated_real.reshape(B, S, N, H)
     if self.cast_as_fprop_dtype:
       output = output.astype(self.fprop_dtype)

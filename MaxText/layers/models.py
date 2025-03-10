@@ -473,6 +473,9 @@ class Decoder(nn.Module):
                   model_mode,
                   page_state,
               )
+              jax.debug.print("layer output y: {y}", y=y)
+            #   break
+            # break
         else:
           for lyr in range(cfg.num_decoder_layers):
             RemattedBlockLayer = RemattedBlockLayers[0]

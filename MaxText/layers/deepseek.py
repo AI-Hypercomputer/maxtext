@@ -84,12 +84,12 @@ def self_attention_with_norm(inputs, cfg, mesh, quant, decoder_segment_ids, deco
       qk_nope_head_dim=cfg.qk_nope_head_dim,
       qk_rope_head_dim=cfg.qk_rope_head_dim,
       v_head_dim=cfg.v_head_dim,
-      max_seq_len=cfg.max_target_length,
+      max_seq_len=163840,
       original_seq_len=cfg.original_seq_len,
       mscale=cfg.mscale,
       rope_factor=cfg.rope_factor,
   )
-
+  jax.debug.print("lnx {lnx}", lnx=lnx)
   attention_lnx = attention_layer(
       lnx,
       lnx,
@@ -98,6 +98,7 @@ def self_attention_with_norm(inputs, cfg, mesh, quant, decoder_segment_ids, deco
       deterministic=deterministic,
       model_mode=model_mode,
   )
+  jax.debug.print("attention_lnx {attention_lnx}", attention_lnx=attention_lnx)
 
   attention_lnx = nn.with_logical_constraint(
       attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
