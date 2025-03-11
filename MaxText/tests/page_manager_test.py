@@ -127,13 +127,11 @@ class TestPageManager(unittest.TestCase):
 
     initial_state = self.pm.get_initial_page_state()
 
-    updated_state = self.pm.update_prefill_pages(
-        page_state=initial_state, request_id=request_id, true_length=true_length
-    )
+    updated_state = self.pm.update_prefill_pages(page_state=initial_state, request_id=request_id, true_length=true_length)
 
     # Calculate the expected number of pages needed
     pages_needed = (true_length + self.tokens_per_page - 1) // self.tokens_per_page
-    
+
     # Check both layers have correct state
     for layer_id in range(self.num_layers):
       self.assertEqual(int(updated_state.sequence_lengths[layer_id, request_id]), true_length)
@@ -153,30 +151,24 @@ class TestPageManager(unittest.TestCase):
     """Tests update_prefill_pages when there's no space available in the layer."""
     request_id = 0
     true_length = 12
-    
+
     # Initialize and then set *all* pages in all layers to be used.
     initial_state = self.pm.get_initial_page_state()
-    initial_state = initial_state.replace(
-        page_status=jnp.ones((self.num_layers, self.num_pages), dtype=jnp.int32)
-    )
+    initial_state = initial_state.replace(page_status=jnp.ones((self.num_layers, self.num_pages), dtype=jnp.int32))
 
     # Call update_prefill_pages; since no pages are free, the state should be unchanged.
-    updated_state = self.pm.update_prefill_pages(
-        page_state=initial_state, request_id=request_id, true_length=true_length
-    )
+    updated_state = self.pm.update_prefill_pages(page_state=initial_state, request_id=request_id, true_length=true_length)
 
     # Verify the state is unchanged
     self.assertTrue(jnp.all(updated_state.sequence_lengths == 0))  # No sequences should be allocated
-    self.assertTrue(jnp.all(updated_state.num_pages_used == 0))    # No pages should be used
+    self.assertTrue(jnp.all(updated_state.num_pages_used == 0))  # No pages should be used
 
   def test_reserve_prefill_edge_cases(self):
     """Tests update_prefill_pages with edge cases: zero length, exact page multiple, partial page."""
     initial_state = self.pm.get_initial_page_state()
 
     # Test case 1: Zero length - no pages should be allocated.
-    updated_state = self.pm.update_prefill_pages(
-        page_state=initial_state, request_id=0, true_length=0
-    )
+    updated_state = self.pm.update_prefill_pages(page_state=initial_state, request_id=0, true_length=0)
     for layer_id in range(self.num_layers):
       self.assertEqual(int(updated_state.sequence_lengths[layer_id, 0]), 0)
       self.assertEqual(int(updated_state.num_pages_used[layer_id, 0]), 0)
@@ -192,9 +184,7 @@ class TestPageManager(unittest.TestCase):
       self.assertEqual(int(updated_state.num_pages_used[layer_id, 1]), 2)
 
     # Test case 3: Partial page - only one page should be allocated.
-    updated_state = self.pm.update_prefill_pages(
-        page_state=initial_state, request_id=3, true_length=5
-    )
+    updated_state = self.pm.update_prefill_pages(page_state=initial_state, request_id=3, true_length=5)
     for layer_id in range(self.num_layers):
       self.assertEqual(int(updated_state.sequence_lengths[layer_id, 3]), 5)
       self.assertEqual(int(updated_state.num_pages_used[layer_id, 3]), 1)
@@ -203,19 +193,17 @@ class TestPageManager(unittest.TestCase):
     """Tests the release_pages method of PageManager."""
     request_id = 1
     initial_length = 10
-    
+
     initial_state = self.pm.get_initial_page_state()
 
     # First, allocate some pages using update_prefill_pages.
-    updated_state = self.pm.update_prefill_pages(
-        page_state=initial_state, request_id=request_id, true_length=initial_length
-    )
+    updated_state = self.pm.update_prefill_pages(page_state=initial_state, request_id=request_id, true_length=initial_length)
 
     # Get allocated page indices for later verification
     allocated_pages = {}
     for layer_id in range(self.num_layers):
-        page_map = updated_state.page_map[layer_id, request_id]
-        allocated_pages[layer_id] = page_map[page_map >= 0]
+      page_map = updated_state.page_map[layer_id, request_id]
+      allocated_pages[layer_id] = page_map[page_map >= 0]
 
     # Now, release the pages
     released_state = self.pm.release_pages(page_state=updated_state, request_id=request_id)
@@ -238,9 +226,7 @@ class TestPageManager(unittest.TestCase):
     self.assertEqual(jnp.sum(updated_state.sequence_lengths), 0)  # No allocation should happen
 
     # Test case 2: After prefill - allocate one page, then another on the decode step.
-    new_state = self.pm.update_prefill_pages(
-        page_state=initial_state, request_id=0, true_length=self.tokens_per_page
-    )
+    new_state = self.pm.update_prefill_pages(page_state=initial_state, request_id=0, true_length=self.tokens_per_page)
 
     updated_state = self.pm.update_decode_pages(page_state=new_state)
 
@@ -252,11 +238,9 @@ class TestPageManager(unittest.TestCase):
       self.assertGreater(int(updated_state.current_page[layer_id, 0]), -1)  # Current page should be valid
 
     # Test case 3: Partial page allocation - pages allocated only when needed.
-    partial_state = self.pm.update_prefill_pages(
-        page_state=initial_state, request_id=2, true_length=5
-    )
+    partial_state = self.pm.update_prefill_pages(page_state=initial_state, request_id=2, true_length=5)
     partial_updated_state = self.pm.update_decode_pages(page_state=partial_state)
-    
+
     for layer_id in range(self.num_layers):
       self.assertEqual(int(partial_updated_state.sequence_lengths[layer_id, 2]), 6)  # Sequence length incremented
       self.assertEqual(int(partial_updated_state.num_pages_used[layer_id, 2]), 1)  # Still only one page used
@@ -270,11 +254,9 @@ class TestPageManager(unittest.TestCase):
 
     request_id = 0
     true_length = 12
-    
+
     # Perform a prefill.
-    state = self.pm.update_prefill_pages(
-        page_state=initial_state, request_id=request_id, true_length=true_length
-    )
+    state = self.pm.update_prefill_pages(page_state=initial_state, request_id=request_id, true_length=true_length)
 
     # Verify that the number of allocated pages (status 1) equals the number of mapped pages.
     for layer_id in range(self.num_layers):
@@ -291,18 +273,14 @@ class TestPageManager(unittest.TestCase):
     initial_state = self.pm.get_initial_page_state()
 
     # Test allocation at the maximum request_id.
-    state = self.pm.update_prefill_pages(
-        page_state=initial_state, request_id=self.max_page_groups - 1, true_length=1
-    )
+    state = self.pm.update_prefill_pages(page_state=initial_state, request_id=self.max_page_groups - 1, true_length=1)
     for layer_id in range(self.num_layers):
       self.assertEqual(int(state.sequence_lengths[layer_id, self.max_page_groups - 1]), 1)
 
     # Test allocation at the maximum length (within max_pages_per_group).
     request_id = 0
     max_length = self.tokens_per_page * self.max_pages_per_group
-    state = self.pm.update_prefill_pages(
-        page_state=initial_state, request_id=request_id, true_length=max_length
-    )
+    state = self.pm.update_prefill_pages(page_state=initial_state, request_id=request_id, true_length=max_length)
     for layer_id in range(self.num_layers):
       self.assertEqual(int(state.sequence_lengths[layer_id, request_id]), max_length)
 
@@ -313,10 +291,8 @@ class TestPageManager(unittest.TestCase):
     # Allocate pages in different requests with different lengths.
     for request_id in range(self.max_page_groups):
       true_length = 10 + request_id * 5
-      
-      updated_state = self.pm.update_prefill_pages(
-          page_state=initial_state, request_id=request_id, true_length=true_length
-      )
+
+      updated_state = self.pm.update_prefill_pages(page_state=initial_state, request_id=request_id, true_length=true_length)
 
       for layer_id in range(self.num_layers):
         self.assertEqual(
@@ -344,7 +320,7 @@ class TestPageManager(unittest.TestCase):
 
     # Test autoregressive steps for each layer, building on the previous state.
     updated_state = self.pm.update_decode_pages(page_state=initial_state)
-    
+
     for request_id in range(self.max_page_groups):
       for layer_id in range(self.num_layers):
         # Check that sequence length was incremented
@@ -357,17 +333,17 @@ class TestPageManager(unittest.TestCase):
   def test_invalid_request_id(self):
     """Tests that operations with invalid request_id have no effect."""
     initial_state = self.pm.get_initial_page_state()
-    
+
     # Try operations with invalid request_id
     updated_state = self.pm.update_prefill_pages(page_state=initial_state, request_id=-1, true_length=10)
     self._assert_page_state_equal(initial_state, updated_state)
-    
+
     updated_state = self.pm.update_prefill_pages(page_state=initial_state, request_id=self.max_page_groups, true_length=10)
     self._assert_page_state_equal(initial_state, updated_state)
-    
+
     # First allocate some pages to a valid request
     valid_state = self.pm.update_prefill_pages(page_state=initial_state, request_id=0, true_length=10)
-    
+
     # Then try to release an invalid request
     released_state = self.pm.release_pages(page_state=valid_state, request_id=-1)
     self._assert_page_state_equal(valid_state, released_state)
@@ -375,12 +351,14 @@ class TestPageManager(unittest.TestCase):
   def test_invalid_length(self):
     """Tests that operations with invalid length have no effect."""
     initial_state = self.pm.get_initial_page_state()
-    
+
     # Try operations with invalid length
     updated_state = self.pm.update_prefill_pages(page_state=initial_state, request_id=0, true_length=-1)
     self._assert_page_state_equal(initial_state, updated_state)
-    
-    updated_state = self.pm.update_prefill_pages(page_state=initial_state, request_id=0, true_length=self.max_target_length + 1)
+
+    updated_state = self.pm.update_prefill_pages(
+        page_state=initial_state, request_id=0, true_length=self.max_target_length + 1
+    )
     self._assert_page_state_equal(initial_state, updated_state)
 
   def test_page_boundary_crossing(self):
@@ -388,9 +366,7 @@ class TestPageManager(unittest.TestCase):
     initial_state = self.pm.get_initial_page_state()
 
     # Set up a sequence exactly at a page boundary
-    current_state = self.pm.update_prefill_pages(
-        page_state=initial_state, request_id=0, true_length=self.tokens_per_page
-    )
+    current_state = self.pm.update_prefill_pages(page_state=initial_state, request_id=0, true_length=self.tokens_per_page)
 
     # Record the initial number of pages used
     initial_pages_used = {}
@@ -411,8 +387,9 @@ class TestPageManager(unittest.TestCase):
 
       # Check the current page position was reset for the new page
       self.assertEqual(
-          int(updated_state.current_page_position[layer_id, 0]), 0, 
-          f"Layer {layer_id}: Current page position should be reset to 0 for the new page"
+          int(updated_state.current_page_position[layer_id, 0]),
+          0,
+          f"Layer {layer_id}: Current page position should be reset to 0 for the new page",
       )
 
   def test_repeated_allocation_deallocation(self):
@@ -425,9 +402,7 @@ class TestPageManager(unittest.TestCase):
       # Allocate to multiple requests
       for request_id in range(min(3, self.max_page_groups)):
         length = (request_id + 1) * 5  # Different lengths for each request
-        current_state = self.pm.update_prefill_pages(
-            page_state=current_state, request_id=request_id, true_length=length
-        )
+        current_state = self.pm.update_prefill_pages(page_state=current_state, request_id=request_id, true_length=length)
 
         # Verify allocation
         for layer_id in range(self.num_layers):
@@ -448,8 +423,7 @@ class TestPageManager(unittest.TestCase):
 
     # Verify final state is clean (all pages should be free)
     self.assertTrue(
-        jnp.all(current_state.page_status == 0), 
-        "After repeated allocation/deallocation, all pages should be free"
+        jnp.all(current_state.page_status == 0), "After repeated allocation/deallocation, all pages should be free"
     )
 
 

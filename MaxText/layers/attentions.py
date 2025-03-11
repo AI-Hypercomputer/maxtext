@@ -32,7 +32,8 @@ import jax.numpy as jnp
 import common_types
 from kernels.ragged_attention import ragged_gqa
 from kernels.ragged_attention import ragged_mha
-from inference import page_manager, paged_attention
+from inference.paged_attention import PagedAttentionOp
+from inference.page_manager import PageState
 from layers import embeddings
 from layers import initializers
 from layers import linears
@@ -1197,7 +1198,6 @@ class AttentionOp(nn.Module):
       decoder_segment_ids,
       model_mode,
       previous_chunk=None,
-      page_state: Optional[page_manager.PageState] = None,
   ):
     prefill_kv_cache, ar_kv_cache = self.kv_cache(
         key, value, decoder_segment_ids, model_mode, use_ragged_attention=self.use_ragged_attention
@@ -1331,7 +1331,7 @@ class Attention(nn.Module):
     # When paged attention is enabled, paged attention op is used for all model modes except TRAIN,
     # which uses default attention op.
     if self.config.attention == "paged":
-      self.paged_attention_op = paged_attention.PagedAttentionOp(
+      self.paged_attention_op = PagedAttentionOp(
           mesh=self.mesh,
           num_pages=self.config.pagedattn_num_pages,
           tokens_per_page=self.config.pagedattn_tokens_per_page,
@@ -1493,7 +1493,8 @@ class Attention(nn.Module):
       model_mode: str = common_types.MODEL_MODE_TRAIN,
       deterministic: bool = False,
       previous_chunk: Any = None,
-      page_state: Optional[page_manager.PageState] = None,
+      page_state: Optional[PageState] = None,
+      layer_idx: int = 0,
   ):
     """Applies Attention on the input data.
 
@@ -1513,6 +1514,7 @@ class Attention(nn.Module):
       inputs_kv: key/values of shape `[batch, kv_length, kv_features]`.
       model_mode: corresponding to train, prefill and decode.
       deterministic: Disables dropout if set to True.
+      layer_idx: Index of the layer (for paged attention with PageState)
 
     Returns:
       output of shape `[batch, length, q_features]`.
@@ -1548,7 +1550,9 @@ class Attention(nn.Module):
 
     if self.config.attention == "paged" and model_mode != common_types.MODEL_MODE_TRAIN:
       unnormalized_out, _, exp_sum = self.paged_attention_op(
-          query, key, value, decoder_segment_ids, model_mode, previous_chunk, page_state=page_state
+          query, key, value, decoder_segment_ids, model_mode, previous_chunk, 
+          page_state=page_state,
+          layer_idx=layer_idx  # Pass layer_idx to paged_attention_op
       )
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
     else:
@@ -1558,7 +1562,6 @@ class Attention(nn.Module):
     out = self.out_projection(inputs_q.shape[-1], out)
     out = checkpoint_name(out, "out_proj")
     return out
-
 
 class MLA(Attention):
   """Multi-Head Latent Attention (MLA) layer."""
@@ -1721,7 +1724,7 @@ class MLA(Attention):
       model_mode: str = common_types.MODEL_MODE_TRAIN,
       deterministic: bool = False,
       previous_chunk: Any = None,
-      page_state: Optional[page_manager.PageState] = None,
+      page_state: Optional[PageState] = None,
   ) -> Array:
     """Forward pass for MLA, reusing `AttentionOp` for the actual attention.
 

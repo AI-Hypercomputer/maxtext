@@ -22,6 +22,7 @@ import flax
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
+from inference.page_manager import PageManager, PageState
 from layers import models, quantizations
 
 import jax
@@ -102,6 +103,12 @@ class MaxEngine(engine_api.Engine):
     self.decode_state_shapes = None
     self.decode_state_layouts = None
     self.param_layouts = None
+
+    self.page_manager = None
+    self.page_state = None
+    if self.config.attention == "paged":
+      self.page_manager = PageManager(self.config)
+      self.page_state = self.page_manager.get_initial_page_state()
 
   def generate_aot(
       self, params: Params, decode_state: DecodeState, rng: Optional[PRNGKeyType] = None
@@ -485,6 +492,14 @@ class MaxEngine(engine_api.Engine):
       ones_to_keep = zero_to_n < complete_prompt_true_length
       next_pos = jnp.full((1, 1), complete_prompt_true_length, dtype=jnp.int32)
 
+    if self.page_manager is not None and slot is not None:
+      # Note: this updates the page state for all layers at once
+      self.page_state = self.page_manager.update_prefill_pages(
+          page_state=self.page_state,
+          request_id=slot,
+          true_length=true_length,
+      )
+
     one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
@@ -502,6 +517,7 @@ class MaxEngine(engine_api.Engine):
           previous_chunk=previous_chunk,
           true_length=true_length,
           slot=slot,
+          page_state=self.page_state,
       )
     generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
     selected_logits = jax.lax.dynamic_slice(
@@ -677,6 +693,9 @@ class MaxEngine(engine_api.Engine):
     if rng is None:
       rng = jax.random.PRNGKey(0)
 
+    if self.page_manager is not None:
+      self.page_state = self.page_manager.update_decode_pages(self.page_state)
+
     previous_token = decode_state["tokens"]
     rng, new_rng = jax.random.split(rng)
     # run one step generation
@@ -689,6 +708,7 @@ class MaxEngine(engine_api.Engine):
           model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
           rngs={"params": new_rng},
           mutable=["cache"],
+          page_state=self.page_state,
       )
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)

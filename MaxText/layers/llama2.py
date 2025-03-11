@@ -22,7 +22,7 @@ from flax import linen as nn
 from jax.sharding import Mesh
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-# from jax.experimental.pallas.ops.tpu import flash_attention
+
 from layers import attentions
 from layers import embeddings
 from layers import linears
@@ -31,7 +31,7 @@ from layers import models
 from layers import quantizations
 
 import common_types
-from inference import page_manager
+from inference.page_manager import PageState
 from typing import Optional
 
 Array = common_types.Array
@@ -75,10 +75,13 @@ class LlamaDecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
-      page_state: Optional[page_manager.PageState] = None,
+      page_state: Optional[PageState] = None,
   ):
     cfg = self.config
     mesh = self.mesh
+
+    # Extract layer index from name for PageState handling
+    layer_idx = int(self.name.split('_')[-1]) if 'layers_' in self.name else 0
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
@@ -127,6 +130,7 @@ class LlamaDecoderLayer(nn.Module):
         deterministic=deterministic,
         model_mode=model_mode,
         page_state=page_state,
+        layer_idx=layer_idx,  # Pass layer index to attention
     )
 
     attention_lnx = nn.with_logical_constraint(
