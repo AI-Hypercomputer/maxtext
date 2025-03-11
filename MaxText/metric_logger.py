@@ -40,41 +40,20 @@ class MetricLogger:
   """
 
   def __init__(self, writer, config):
-    self.buffered_step = None
-    self.buffered_metrics = None
     self.writer = writer
     self.config = config
 
   def write_metrics(self, running_gcs_metrics, metrics, step, is_training=True):
-    """Entry point for all metrics writing in Train's Main.
-
-    To avoid introducing an unnecessary dependency, we "double buffer" -- we hold
-    onto the last metrics and step and only publish when we receive a new metrics and step.
-    The logic is that this ensures that Jax is able to queues train_steps and we
-    don't block when turning "lazy" Jax arrays into real Python numbers.
-    """
-    metrics_to_write, steps_to_write = None, None
-    if is_training:
-      if self.buffered_metrics is not None:
-        if self.buffered_step is None:
-          raise ValueError(f"When writing metrics, {self.buffered_step=} was none")
-        metrics_to_write = self.buffered_metrics
-        steps_to_write = self.buffered_step
-      self.buffered_metrics = metrics
-      self.buffered_step = step
-    else:
-      metrics_to_write = metrics
-      steps_to_write = step
-
-    if metrics_to_write:
+    """Entry point for all metrics writing in Train's Main."""
+    if metrics:
       if self.config.enable_tensorboard:
-        self.write_metrics_to_tensorboard(metrics_to_write, steps_to_write, is_training)
+        self.write_metrics_to_tensorboard(metrics, step, is_training)
 
       if self.config.metrics_file:
-        self.write_metrics_locally(metrics_to_write, steps_to_write)
+        self.write_metrics_locally(metrics, step)
 
       if self.config.gcs_metrics and jax.process_index() == 0:
-        running_gcs_metrics = self.write_metrics_for_gcs(metrics_to_write, steps_to_write, running_gcs_metrics, is_training)
+        running_gcs_metrics = self.write_metrics_for_gcs(metrics, step, running_gcs_metrics, is_training)
 
   def write_metrics_locally(self, metrics, step):
     """Writes metrics locally for testing"""
@@ -107,9 +86,12 @@ class MetricLogger:
     """Writes metrics to TensorBoard"""
     with jax.spmd_mode("allow_all"):
       if jax.process_index() == 0:
+        max_logging.log(f"Writing step {step}")
         for metric_name in metrics.get("scalar", []):
+          max_logging.log(f"Writing scalar {metric_name}")
           self.writer.add_scalar(metric_name, np.array(metrics["scalar"][metric_name]), step)
         for metric_name in metrics.get("scalars", []):
+          max_logging.log(f"Writing scalars {metric_name}")
           self.writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
 
       if is_training:
