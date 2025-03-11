@@ -526,7 +526,8 @@ class MoeBlock(nn.Module):
     sub_seq = seq_len // cp
     return cp, sub_seq
 
-  def generate_masks(self, top_k_indices, softmax_probs):
+  # sub group mask generation for inference only
+  def generate_masks_subgroup(self, top_k_indices, softmax_probs):
     # calculate expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
     batch_size, seq_len, _ = top_k_indices.shape
     cp, sub_seq = self.get_context_partition_and_sub_seq(seq_len)
@@ -600,6 +601,71 @@ class MoeBlock(nn.Module):
 
     return dispatch_mask, combine_mask
 
+  def generate_masks(self, top_k_indices, softmax_probs):
+    # calculate expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
+    batch_size, seq_len, _ = top_k_indices.shape
+
+    tokens_per_batch = seq_len * self.num_experts_per_tok
+    # this is to avoid expert_capacity_per_batch = 0
+    expert_capacity_per_batch = int(
+        max(
+            math.ceil(tokens_per_batch / self.num_experts) * self.config.capacity_factor,
+            self.config.capacity_factor,
+        )
+    )
+    max_logging.log(f"Applying potential token dropping with a batch expert_capacity of {expert_capacity_per_batch}")
+
+    # calculate expert mask and drop tokens if needed
+    # shape of output expert mask: (batch, sequence, num_experts_per_tok)
+    #
+    # A small example:
+    # give num_experts=4 & num_experts_per_tok=2, and two tokens are routed to expert [0, 1] & [1, 3],
+    # then expert_mask becomes [[[[1, 0, 0, 0],[0, 1, 0, 0]], [[0, 1, 0, 0],[0, 0, 0, 1]]]],
+    # after cumsum, expert_token_count becomes [[[[1, 0, 0, 0],[1, 1, 0, 0]], [[1, 2, 0, 0],[1, 2, 0, 1]]]],
+    # if we set expert_capacity=1,
+    # trunc_expert_mask becomes [[[[1, 0, 0, 0],[0, 1, 0, 0]], [[0, 0, 0, 0],[0, 0, 0, 1]]]],
+    # so the 2nd token for expert #1 ([0, 1] & [1, 3]) is dropped, output of updated_expert_mask is [[[1, 1],[0, 1]]].
+    expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
+    expert_mask_fused = jnp.reshape(expert_mask, (batch_size, seq_len * self.num_experts_per_tok, self.num_experts))
+    expert_mask_fused = nn.with_logical_constraint(expert_mask_fused, ("activation_batch", None, None))
+    expert_token_count_fused = jnp.cumsum(expert_mask_fused, axis=1)
+    expert_token_count = jnp.reshape(
+        expert_token_count_fused,
+        ((batch_size, seq_len, self.num_experts_per_tok, self.num_experts)),
+    )
+    expert_token_count = nn.with_logical_constraint(
+        expert_token_count, ("activation_batch", "activation_length", None, None)
+    )
+    trunc_expert_mask = expert_mask * jnp.less_equal(expert_token_count, expert_capacity_per_batch)
+    combined_expert_mask = jnp.sum(trunc_expert_mask, axis=2)
+
+    # reshape & update weights
+    # softmax_probs = jnp.reshape(
+    #     softmax_probs,
+    #     ((batch_size, seq_len, self.num_experts)),
+    # )
+    softmax_probs *= combined_expert_mask
+
+    # calculate token position in expert capacity dimension
+    expert_token_position_fused = expert_mask_fused * expert_token_count_fused
+    expert_token_position = jnp.reshape(
+        expert_token_position_fused,
+        (batch_size, seq_len, self.num_experts_per_tok, self.num_experts),
+    )
+    combined_expert_token_position = jnp.sum(expert_token_position, axis=2) * combined_expert_mask
+    expert_token_position_in_capacity = jax.nn.one_hot(
+        combined_expert_token_position,
+        num_classes=expert_capacity_per_batch + 1,
+        dtype=jnp.int32,
+    )
+
+    # shape of combine_mask is (batch_size, seq_len, num_experts, expert_capacity_per_batch + 1),
+    # and cut 0-dimension which is always 0
+    combine_mask = softmax_probs[..., None] * expert_token_position_in_capacity
+    combine_mask = combine_mask[..., 1:]
+    dispatch_mask = combine_mask.astype(bool)
+
+    return dispatch_mask, combine_mask
   # See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details.
   def load_balance_loss(self, top_k_indices, logits):
     expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
@@ -659,6 +725,10 @@ class MoeBlock(nn.Module):
     weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
     matmul_precision = lax.Precision(self.config.matmul_precision)
 
+    if self.config.model_call_mode != "inference":
+      loss = self.load_balance_loss(top_k_indices, weights)
+    else:
+      loss = None
     batch_size = inputs.shape[0]
     seq_len = inputs.shape[1]
 
@@ -666,31 +736,41 @@ class MoeBlock(nn.Module):
 
     if self.config.capacity_factor > 0:
       # token dropping if needed
-      dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs)
-      if self.config.ici_context_parallelism > 0 and cp == 1:
-        mask_axes = ("activation_length", "activation_batch", None, None, None)
-        input_axis = ("activation_length", "activation_batch", None, "activation_embed")
-        dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_embed")
-        mlp_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_mlp")
+      if self.config.model_call_mode != "inference":
+        dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs)
+        mask_axes = ("activation_batch", "activation_length", None, None)
+        input_axis = ("activation_batch", "activation_length", "activation_embed")
+        dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, "activation_embed")
+        mlp_axis = ("activation_exp", "activation_batch_no_exp", None, "activation_mlp")
+        dispatch_eimsum = f"BSM,BSEC -> EBCM"
+        mlp_einsum = f"EBCM,EMH -> EBCH"
+        output_einsum = f"EBCM,BSEC -> BSM"
       else:
-        mask_axes = ("activation_batch", "activation_length", None, None, None)
-        input_axis = ("activation_batch", "activation_length", None, "activation_embed")
-        dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_embed")
-        mlp_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_mlp")
+        dispatch_mask, combine_mask = self.generate_masks_subgroup(top_k_indices, softmax_probs)
+        if self.config.ici_context_parallelism > 0 and cp == 1:
+          mask_axes = ("activation_length", "activation_batch", None, None, None)
+          input_axis = ("activation_length", "activation_batch", None, "activation_embed")
+          dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_embed")
+          mlp_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_mlp")
+        else:
+          mask_axes = ("activation_batch", "activation_length", None, None, None)
+          input_axis = ("activation_batch", "activation_length", None, "activation_embed")
+          dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_embed")
+          mlp_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_mlp")
+        dispatch_eimsum = f"BNSM,BNSEC -> EBNCM"
+        mlp_einsum = f"EBNCM,EMH -> EBNCH"
+        output_einsum = f"EBNCM,BNSEC -> BNSM"
+
+        inputs = jnp.reshape(inputs, (batch_size, cp, sub_seq, inputs.shape[2]))
+        inputs = nn.with_logical_constraint(inputs, input_axis)
+
       dispatch_mask = nn.with_logical_constraint(dispatch_mask, mask_axes)
       combine_mask = nn.with_logical_constraint(combine_mask, mask_axes)
-      if self.config.model_call_mode != "inference":
-        loss = self.load_balance_loss(top_k_indices, weights)
-      else:
-        loss = None
-      inputs = jnp.reshape(inputs, (batch_size, cp, sub_seq, inputs.shape[2]))
-
-      inputs = nn.with_logical_constraint(inputs, input_axis)
 
       with jax.named_scope("dispatch"):
         # only cp during prefill
         dispatch = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=DISPATCH)(
-            "BNSM,BNSEC -> EBNCM", inputs, dispatch_mask, precision=matmul_precision
+            dispatch_eimsum, inputs, dispatch_mask, precision=matmul_precision
         )
         if cp > 1:
           dispatch = nn.with_logical_constraint(
@@ -705,7 +785,7 @@ class MoeBlock(nn.Module):
         w0_kernel_axes = ("exp", None, "mlp")
         w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
         layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
-            "EBNCM,EMH -> EBNCH", dispatch, w0_kernel, precision=matmul_precision
+            mlp_einsum, dispatch, w0_kernel, precision=matmul_precision
         )
 
         if self.config.activations_in_float32:
@@ -719,7 +799,7 @@ class MoeBlock(nn.Module):
         w1_kernel_axes = ("exp", None, "mlp")
         w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
         layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
-            "EBNCM,EMH -> EBNCH", dispatch, w1_kernel, precision=matmul_precision
+            mlp_einsum, dispatch, w1_kernel, precision=matmul_precision
         )
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
@@ -734,7 +814,7 @@ class MoeBlock(nn.Module):
         wo_kernel_axes = ("exp", "mlp", None)
         wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
         intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
-            "EBNCH,EHM -> EBNCM", layer_multiply, wo_kernel, precision=matmul_precision
+            mlp_einsum, layer_multiply, wo_kernel, precision=matmul_precision
         )
         if self.config.activations_in_float32:
           intermediate_layer = intermediate_layer.astype(jnp.float32)
@@ -747,12 +827,13 @@ class MoeBlock(nn.Module):
       with jax.named_scope("combine"):
         # Matmul & element wise operation
         output = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=COMBINE)(
-            "EBNCM,BNSEC -> BNSM",
+            output_einsum,
             intermediate_layer,
             combine_mask,
             precision=matmul_precision,
         )
-        output = jnp.reshape(output, (output.shape[0], output.shape[1] * output.shape[2], output.shape[3]))
+        if output.ndim == 4:
+          output = jnp.reshape(output, (output.shape[0], output.shape[1] * output.shape[2], output.shape[3]))
       return output, loss
     else:
       top_k_weights /= top_k_weights.sum(-1, keepdims=True)
