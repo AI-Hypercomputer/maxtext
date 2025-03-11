@@ -37,6 +37,8 @@ from jax import random
 from typing import Sequence
 from layers import models, quantizations
 from train import save_checkpoint
+from utils import gcs_utils
+from utils import lora_utils
 
 Transformer = models.Transformer
 
@@ -99,6 +101,43 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
   return state, state_mesh_notations
 
 
+def _generate_lora_decode_checkpoints(config, mesh):
+  """Read lora checkpoints checkpoint at path defined by load_full_state_path."""
+  # Model and Optimizer definition
+  quant = quantizations.configure_quantization(config)
+  model = Transformer(config, mesh, quant)
+  rng = random.PRNGKey(0)
+  learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
+  tx = optimizers.get_optimizer(config, learning_rate_schedule)
+
+  lora_adapters = gcs_utils.gcs_list_directories(config.lora_input_adapters_path)
+  for lora_id in lora_adapters:
+    # Expected lora_checkpoint_dir = <checkpoint_dir>/loras/<lora_id>
+    lora_checkpoint_dir = f"{config.checkpoint_dir}loras/{lora_id}/"
+
+    lora_adapter_path = f"{config.lora_input_adapters_path}/{lora_id}/"
+
+    # Create a checkpoint manager to save decode checkpoint at lora_checkpoint_dir
+    checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
+        lora_checkpoint_dir,
+        config.enable_checkpointing,
+        config.async_checkpointing,
+        config.checkpoint_period,
+    )
+
+    lora_config, lora_state, lora_state_annotations = lora_utils.setup_initial_lora_state(
+        model, None, tx, config, rng, mesh, checkpoint_manager, lora_adapter_path
+    )
+
+    _possibly_unroll_params(config, lora_state, lora_state_annotations, mesh)
+
+    gcs_utils.write_dict_to_gcs_json(lora_config, lora_checkpoint_dir + "adapter_config.json")
+
+    # Save decode state to config's checkpoint directory at step 0
+    _save_decode_checkpoint(config, lora_state, checkpoint_manager)
+    max_logging.log(f"Successfully saved LoRA checkpoint at: {lora_checkpoint_dir}0/items")
+
+
 def _save_decode_checkpoint(config, state, checkpoint_manager):
   """Generate checkpoint for decode from the training_state."""
   with jax.spmd_mode("allow_all"):
@@ -129,8 +168,13 @@ def generate_decode_checkpoint(config):
       path.rmtree()
 
   # Create a checkpoint manager to save decode checkpoint at config.checkpoint_dir
+  base_checkpoint_dir = config.checkpoint_dir
+
+  if config.lora_input_adapters_path:
+    base_checkpoint_dir += "base/"
+
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      config.checkpoint_dir,
+      base_checkpoint_dir,
       config.enable_checkpointing,
       config.async_checkpointing,
       config.checkpoint_period,
@@ -143,9 +187,13 @@ def generate_decode_checkpoint(config):
   _possibly_unroll_params(config, training_state, training_state_annotations, mesh)
 
   # Save decode state to config's checkpoint directory at step 0
-  max_logging.log(f"Save decode checkpoint at: {config.checkpoint_dir}")
+  max_logging.log(f"Save decode checkpoint at: {base_checkpoint_dir}")
   _save_decode_checkpoint(config, training_state, checkpoint_manager)
-  max_logging.log(f"Successfully generated decode checkpoint at: {config.checkpoint_dir}0/items")
+  max_logging.log(f"Successfully generated decode checkpoint at: {base_checkpoint_dir}0/items")
+
+  if config.lora_input_adapters_path:
+    _generate_lora_decode_checkpoints(config, mesh)
+
   return True
 
 
