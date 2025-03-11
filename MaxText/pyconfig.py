@@ -25,6 +25,7 @@ from typing import Any, Union
 import jax
 from jax.experimental.compilation_cache import compilation_cache
 from layers.attentions import AttentionType
+from utils import gcs_utils
 import accelerator_to_spec_map
 import max_logging
 import max_utils
@@ -154,6 +155,9 @@ def validate_keys(keys):
         "Not using emergency checkpoint, ignoring local_checkpoint_directory, local_checkpoint_period,"
         " use_replicator_service and replicator_backup_interval_minutes"
     )
+  assert (
+      keys["ici_context_parallelism"] == 1 or keys["quantize_kvcache"] is False
+  ), "currently context parallelism doesn't support quantized kv cache"
 
   validate_multiple_slices(keys)
   if keys["num_experts"] > 1:
@@ -163,13 +167,13 @@ def validate_keys(keys):
 
 def validate_data_input(keys):
   """validate provided parameters for data input"""
+  if not keys["hf_access_token"]:
+    keys["hf_access_token"] = None
   if keys["dataset_type"] == "hf":
     max_logging.log(
         f"dataset_type set to hf, will use {keys['hf_path']=}, {keys['hf_data_dir']=} and {keys['hf_train_files']=} to read data"
     )
     assert keys["hf_path"] != "", "hf_path can't be empty when dataset_type=hf"
-    if not keys["hf_access_token"]:
-      keys["hf_access_token"] = None
     if not keys["hf_train_files"]:
       keys["hf_train_files"] = None
     if not keys["hf_eval_files"]:
@@ -186,6 +190,10 @@ def validate_data_input(keys):
     assert keys["grain_train_files"] != "", "grain_train_files can't be empty when dataset_type=grain"
     if keys["eval_interval"] > 0:
       assert keys["grain_eval_files"], "Please specify grain_eval_files or set eval_interval to <=0."
+    assert keys["tokenizer_type"] in (
+        "sentencepiece",
+        "huggingface",
+    ), f"grain pipeline only supports tokenizer_type: sentencepiece, huggingface, but got {keys['tokenizer_type']}"
   elif keys["dataset_type"] == "tfds":
     max_logging.log(f"dataset_type set to tfds, will use {keys['dataset_path']=} and {keys['dataset_name']=}")
     assert keys["dataset_name"] != "", "dataset_name can't be empty when dataset_type=tfds"
@@ -476,7 +484,7 @@ class _HyperParameters:
       max_logging.log("Override add_bos and add_eos to False when dataset_type=c4_mlperf")
 
     # Write raw_keys to GCS before type conversions
-    max_utils.write_config_raw_keys_for_gcs(raw_keys)
+    gcs_utils.write_config_raw_keys_for_gcs(raw_keys)
 
     # Type conversions
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
@@ -534,6 +542,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["ici_fsdp_parallelism"],
       raw_keys["ici_fsdp_transpose_parallelism"],
       raw_keys["ici_sequence_parallelism"],
+      raw_keys["ici_context_parallelism"],
       raw_keys["ici_tensor_parallelism"],
       raw_keys["ici_tensor_transpose_parallelism"],
       raw_keys["ici_tensor_sequence_parallelism"],
@@ -546,6 +555,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["dcn_fsdp_parallelism"],
       raw_keys["dcn_fsdp_transpose_parallelism"],
       raw_keys["dcn_sequence_parallelism"],
+      raw_keys["dcn_context_parallelism"],
       raw_keys["dcn_tensor_parallelism"],
       raw_keys["dcn_tensor_transpose_parallelism"],
       raw_keys["dcn_tensor_sequence_parallelism"],
@@ -571,7 +581,7 @@ def validate_and_set_hlo_dump_defaults(raw_keys):
   if not raw_keys["dump_hlo_gcs_dir"]:
     raw_keys["dump_hlo_gcs_dir"] = os.path.join(raw_keys["base_output_directory"], raw_keys["run_name"], "xla_dump")
   else:
-    raw_keys["dump_hlo_gcs_dir"] = max_utils.add_trailing_slash(raw_keys["dump_hlo_gcs_dir"])
+    raw_keys["dump_hlo_gcs_dir"] = gcs_utils.add_trailing_slash(raw_keys["dump_hlo_gcs_dir"])
   if not os.environ.get("XLA_FLAGS"):
     os.environ["XLA_FLAGS"] = raw_keys["dump_hlo_xla_flags"]
   return raw_keys
@@ -590,6 +600,7 @@ def validate_multiple_slices(raw_keys):
                   raw_keys["dcn_tensor_parallelism"],
                   raw_keys["dcn_tensor_sequence_parallelism"],
                   raw_keys["dcn_expert_parallelism"],
+                  raw_keys["dcn_context_parallelism"],
                   raw_keys["dcn_autoregressive_parallelism"],
               ]
           )
@@ -623,6 +634,7 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["ici_fsdp_parallelism"],
           raw_keys["ici_fsdp_transpose_parallelism"],
           raw_keys["ici_sequence_parallelism"],
+          raw_keys["ici_context_parallelism"],
           raw_keys["ici_tensor_parallelism"],
           raw_keys["ici_tensor_transpose_parallelism"],
           raw_keys["ici_tensor_sequence_parallelism"],
@@ -635,6 +647,7 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["dcn_fsdp_parallelism"],
           raw_keys["dcn_fsdp_transpose_parallelism"],
           raw_keys["dcn_sequence_parallelism"],
+          raw_keys["dcn_context_parallelism"],
           raw_keys["dcn_tensor_parallelism"],
           raw_keys["dcn_tensor_transpose_parallelism"],
           raw_keys["dcn_tensor_sequence_parallelism"],
@@ -647,6 +660,7 @@ def set_and_validate_pipeline_config(raw_keys):
           "fsdp",
           "fsdp_transpose",
           "sequence",
+          "context",
           "tensor",
           "tensor_transpose",
           "tensor_sequence",
@@ -660,6 +674,7 @@ def set_and_validate_pipeline_config(raw_keys):
               "fsdp",
               "fsdp_transpose",
               "sequence",
+              "context",
               "tensor",
               "tensor_transpose",
               "tensor_sequence",

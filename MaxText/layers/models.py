@@ -457,20 +457,22 @@ class Decoder(nn.Module):
           assert len(RemattedBlockLayers) == 2, f"Unscanned layers must have a length of 2 using deepseek."
           dense_layer = RemattedBlockLayers[0]
           moe_layer = RemattedBlockLayers[1]
-          num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
 
           layers = [dense_layer, moe_layer]
-          layer_prefix = ["dense_layers", "moe_layers"]
-          num_layers = [cfg.first_num_dense_layers, num_moe_layers]
-          for index in range(len(layers)):
-            y = layers[index](config=cfg, mesh=mesh, name=f"{layer_prefix[index]}_{index}", quant=self.quant)(
-                y,
-                decoder_segment_ids,
-                decoder_positions,
-                deterministic,
-                model_mode,
-                page_state,
-            )
+          layer_prefixes = ["dense_layers", "moe_layers"]
+          num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
+          num_layers_list = [cfg.first_num_dense_layers, num_moe_layers]
+          # Iterate over the two layer groups (dense and MoE) and apply layer transformation
+          for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
+            for index in range(num_layers):
+              y = layer(config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant)(
+                  y,
+                  decoder_segment_ids,
+                  decoder_positions,
+                  deterministic,
+                  model_mode,
+                  page_state,
+              )
         else:
           for lyr in range(cfg.num_decoder_layers):
             RemattedBlockLayer = RemattedBlockLayers[0]
@@ -512,9 +514,14 @@ class Decoder(nn.Module):
       )(
           y
       )  # We do not quantize the logits matmul.
-    logits = nn.with_logical_constraint(
-        logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
-    )
+
+    if model_mode in [common_types.MODEL_MODE_PREFILL, common_types.MODEL_MODE_AUTOREGRESSIVE]:
+      logits = nn.with_logical_constraint(logits, (None, None, "activation_vocab"))
+    else:
+      logits = nn.with_logical_constraint(
+          logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
+      )
+
     if self.config.cast_logits_to_fp32:
       logits = logits.astype(jnp.float32)
     return logits

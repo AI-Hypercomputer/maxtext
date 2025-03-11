@@ -13,10 +13,10 @@
 # limitations under the License.
 
 """Implementation of Engine API for MaxText"""
-import copy as cp
 import functools
 from typing import Any, List, Optional, Tuple, Callable
 from collections import defaultdict
+import uuid
 
 import flax
 from flax import linen as nn
@@ -35,6 +35,7 @@ from jetstream.engine import engine_api
 from jetstream.engine import tokenizer_pb2
 from jetstream.engine import tokenizer_api
 from jetstream.engine import token_utils
+from utils import lora_utils
 
 import max_utils
 import inference_utils
@@ -102,6 +103,10 @@ class MaxEngine(engine_api.Engine):
     self.decode_state_shapes = None
     self.decode_state_layouts = None
     self.param_layouts = None
+
+  def print_stats(self, label: str):
+    max_utils.print_mem_stats(label)
+    max_utils.print_cpu_ram_stats(label)
 
   def generate_aot(
       self, params: Params, decode_state: DecodeState, rng: Optional[PRNGKeyType] = None
@@ -224,8 +229,33 @@ class MaxEngine(engine_api.Engine):
       params = self.quantize_params(state, rng3)
     else:
       params = state.params
-    max_utils.print_mem_stats("After load_params")
+
+    self.print_stats("After load_params")
+
     return params
+
+  def load_single_adapter(self, adapter_path):
+    """
+    Load Single adapter from adapter_path.
+    Expect adapter_config.json and LoRA adapter weights at this path within subdirectory `/0/items`.
+    """
+    adapter_config_path = f"{adapter_path}/adapter_config.json"
+    adapter_weights_path = f"{adapter_path}/0/items"
+
+    params, config = lora_utils.load_adapter(self.config, self.abstract_params, adapter_config_path, adapter_weights_path)
+
+    config["adapter_path"] = adapter_weights_path
+
+    self.print_stats("After load_single_adapter.")
+
+    return params, config
+
+  def apply_adapter(self, base_params, adapter_config, adapter_params):
+    """Apply the adapter params on the base params."""
+
+    lora_rank = int(adapter_config["r"])
+    lora_scale_factor = float(adapter_config["lora_alpha"]) / lora_rank
+    lora_utils.apply_lora_on_base_params(base_params, adapter_params, lora_scale_factor)
 
   def quantize_params(self, state, rng: Optional[PRNGKeyType] = None):
     """Forward pass to quantize decode params."""
@@ -404,7 +434,7 @@ class MaxEngine(engine_api.Engine):
         "tokens": first_generated_tokens,
     }, result
 
-  @functools.partial(jax.jit, static_argnums=(0,))
+  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("request_id",))
   def prefill(
       self,
       *,
@@ -418,6 +448,7 @@ class MaxEngine(engine_api.Engine):
       complete_padded_prompt: Optional[jax.Array] = None,
       positions: Optional[jax.Array] = None,
       previous_chunk: Optional[Any] = None,
+      request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
       slot: Optional[int] = None,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
@@ -837,12 +868,14 @@ class MaxEngine(engine_api.Engine):
           1,
           2,
       ),
+      static_argnames=("request_id",),
   )
   def insert(
       self,
       prefix: Prefix,
       decode_state: DecodeState,
       slot: int,
+      request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
   ) -> DecodeState:
     """Insert a single computed prefill cache into KV cache."""
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
@@ -1264,7 +1297,6 @@ def create_engine_from_config_flags(batch_size, max_prefill_predict_length, max_
     option = f"{k}={v}"
     updated_args.append(option)
   print(f"Invoking maxengine with args:\n \t{updated_args}")
-  pyconfig.initialize(updated_args)
-  cfg = MaxEngineConfig(cp.deepcopy(pyconfig._config.keys))  # pylint: disable=protected-access
+  cfg = pyconfig.initialize(updated_args)
   engine = MaxEngine(cfg)
   return engine

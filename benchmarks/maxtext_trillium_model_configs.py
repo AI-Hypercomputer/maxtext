@@ -284,6 +284,34 @@ gpt_3_175b = _add_to_model_dictionary(
     ),
 )
 
+gpt_3_175b_bf16 = _add_to_model_dictionary(
+    trillium_model_dict,
+    MaxTextModel(
+        model_name="gpt-3-175b-bf16",
+        model_type="gpt3-175b",
+        tuning_params={
+            "per_device_batch_size": 3,
+            "ici_fsdp_parallelism": -1,
+            "remat_policy": "full",
+            "attention": "flash",
+            "gcs_metrics": True,
+            "dataset_type": "synthetic",
+            "reuse_example_batch": 1,
+            "enable_checkpointing": False,
+            "profiler": "xplane",
+            "sa_block_q": 1024,
+            "sa_block_q_dkv": 2048,
+            "sa_block_q_dq": 2048,
+        },
+        xla_flags=(
+            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+            + xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.DISABLE_BUNDLE_AWARE_COST_MODEL
+        ),
+    ),
+)
+
 
 llama2_7b_4096 = _add_to_model_dictionary(
     trillium_model_dict,
@@ -428,7 +456,7 @@ llama2_70b_4096_sc = _add_to_model_dictionary(
 llama2_70b_4096_sc_real_data_tfds = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
-        model_name="llama2-70b-4096-sc",
+        model_name="llama2-70b-4096-sc-real-data-tfds",
         model_type="llama2-70b",
         tuning_params={
             "per_device_batch_size": 2,
@@ -473,7 +501,7 @@ llama2_70b_4096_sc_real_data_tfds = _add_to_model_dictionary(
 llama2_70b_4096_sc_real_data_grain = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
-        model_name="llama2-70b-4096",
+        model_name="llama2-70b-4096-sc-real-data-grain",
         model_type="llama2-70b",
         tuning_params={
             "per_device_batch_size": 2,
@@ -528,7 +556,7 @@ llama2_70b_4096_sc_real_data_grain = _add_to_model_dictionary(
 llama2_70b_4096_sc_real_data_grain_checkpoint = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
-        model_name="llama2-70b-4096",
+        model_name="llama2-70b-4096-sc-real-data-grain-checkpoint",
         model_type="llama2-70b",
         tuning_params={
             "per_device_batch_size": 2,

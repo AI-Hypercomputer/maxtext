@@ -20,6 +20,7 @@ import math
 from typing import Any, Optional, Tuple
 
 from flax import linen as nn
+from flax.linen import partitioning
 import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
@@ -68,7 +69,10 @@ AxisIdxes = common_types.AxisIdxes
 BATCH = common_types.BATCH
 PREFILL_KV_BATCH = common_types.PREFILL_KV_BATCH
 KV_BATCH = common_types.KV_BATCH
+DECODE_BATCH = common_types.DECODE_BATCH
+DECODE_LENGTH = common_types.DECODE_LENGTH
 LENGTH = common_types.LENGTH
+KV_LENGTH = common_types.KV_LENGTH
 HEAD = common_types.HEAD
 EMBED = common_types.EMBED
 KV_HEAD = common_types.KV_HEAD
@@ -541,13 +545,25 @@ class AttentionOp(nn.Module):
     local_sum = jnp.reshape(local_sum, (local_sum.shape[0], local_sum.shape[1], local_sum.shape[2] * local_sum.shape[3], 1))
 
     local_out = self.wv_product(local_exps, value, model_mode)
+    if model_mode != common_types.MODEL_MODE_AUTOREGRESSIVE:
+      local_out = partitioning.with_sharding_constraint(local_out, (BATCH, KV_LENGTH, HEAD, D_KV))
+    else:
+      local_out = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, None, HEAD, D_KV))
 
     if self.reshape_q and q_seq_len == 1:
       local_max = local_max[:, 0:1, :, :]
       local_sum = local_sum[:, 0:1, :, :]
       local_out = local_out[:, 0:1, :, :]
 
+    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+      local_max = partitioning.with_sharding_constraint(local_max, (DECODE_BATCH, None, HEAD, D_KV))
+      local_sum = partitioning.with_sharding_constraint(local_sum, (DECODE_BATCH, None, HEAD, D_KV))
+      local_out = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, None, HEAD, D_KV))
+
     return local_out, local_max, local_sum
+
+  def is_partition_in_decode(self, seq_len):
+    return self.config.ici_context_parallelism > 0 and seq_len == 1
 
   def apply_attention_dot(
       self,
@@ -568,7 +584,22 @@ class AttentionOp(nn.Module):
       key = key.astype(jnp.float32)
 
     q_seq_len = query.shape[1]
+
+    # special sharding for decode
+    if self.is_partition_in_decode(q_seq_len):
+      query = partitioning.with_sharding_constraint(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+      key = partitioning.with_sharding_constraint(key, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+      value = partitioning.with_sharding_constraint(value, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+    else:
+      query = partitioning.with_sharding_constraint(query, (BATCH, LENGTH, HEAD, D_KV))
+      key = partitioning.with_sharding_constraint(key, (BATCH, KV_LENGTH, HEAD, D_KV))
+      value = partitioning.with_sharding_constraint(value, (BATCH, KV_LENGTH, HEAD, D_KV))
+
     attn_weights = self.qk_product(query, key, q_seq_len, model_mode)
+    if self.is_partition_in_decode(q_seq_len):
+      attn_weights = partitioning.with_sharding_constraint(attn_weights, (KV_LENGTH, HEAD, None, None, None))
+    else:
+      attn_weights = partitioning.with_sharding_constraint(attn_weights, (BATCH, HEAD, None, LENGTH, KV_LENGTH))
 
     if self.attn_logits_soft_cap:
       attn_weights = jnp.tanh(attn_weights / self.attn_logits_soft_cap)
@@ -578,6 +609,10 @@ class AttentionOp(nn.Module):
     if self.float32_logits:
       attn_weights = attn_weights.astype(jnp.float32)
     attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode, previous_chunk)
+    if self.is_partition_in_decode(q_seq_len):
+      attn_mask = partitioning.with_sharding_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
+    else:
+      attn_mask = partitioning.with_sharding_constraint(attn_mask, (BATCH, HEAD, None, LENGTH, KV_LENGTH))
     if attn_mask is not None:
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
     return self.compute_local_attention(attn_weights, value, q_seq_len, model_mode)
@@ -1027,7 +1062,6 @@ class AttentionOp(nn.Module):
       cached_value_var.value = jax.lax.dynamic_update_index_in_dim(
           cached_value_var.value, one_token_value_shaped_for_cache, ar_cache_update_idx, ar_cache_update_axis
       )
-
     cached_key_var.value = nn.with_logical_constraint(cached_key_var.value, ar_cache_axis_names)
     cached_value_var.value = nn.with_logical_constraint(cached_value_var.value, ar_cache_axis_names)
 
@@ -1294,9 +1328,11 @@ class Attention(nn.Module):
   prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   input_axis_names: AxisNames = (BATCH, LENGTH, EMBED)
+  decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED)
   key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+  decode_out_axis_names = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV)
 
   prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
   ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
@@ -1356,11 +1392,12 @@ class Attention(nn.Module):
       # pylint: disable=no-value-for-parameter
       return self.kernel_init(*args) / depth_scaling
 
+    kernel_axes = (None, None, None) if self.config.ici_context_parallelism > 1 else ("embed", "q_heads", "kv")
     query_proj = DenseGeneral(
         features=(self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=query_init,
-        kernel_axes=("embed", "q_heads", "kv"),
+        kernel_axes=kernel_axes,
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name="query",
@@ -1386,7 +1423,7 @@ class Attention(nn.Module):
     if self.num_query_heads % self.num_kv_heads != 0:
       raise ValueError("Invalid num_kv_heads for GQA.")
 
-    kernel_axes = ("embed", "kv_heads", "kv_head_dim")
+    kernel_axes = (None, None, None) if self.config.ici_context_parallelism > 1 else ("embed", "kv_heads", "kv_head_dim")
 
     kv_proj = DenseGeneral(
         features=(self.num_kv_heads, self.head_dim),
@@ -1420,11 +1457,12 @@ class Attention(nn.Module):
     return query, key, value
 
   def out_projection(self, output_dim: int, out: Array) -> Array:
+    out_kernel_axis = (None, None, None) if self.config.ici_context_parallelism > 1 else ("heads", "kv", "embed")
     out_proj = DenseGeneral(
         features=output_dim,
         axis=(-2, -1),
         kernel_init=self.kernel_init,
-        kernel_axes=("heads", "kv", "embed"),
+        kernel_axes=out_kernel_axis,  # trade speed with memory
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name="out",
@@ -1461,11 +1499,11 @@ class Attention(nn.Module):
       )
     elif rope_type.startswith("yarn"):
       rotary_embedding = YarnRotaryEmbedding(
-          max_seq_len=self.config.max_target_length,
-          original_seq_len=self.config.original_seq_len,
+          max_position_embeddings=self.config.max_position_embeddings,
+          original_max_position_embeddings=self.config.original_max_position_embeddings,
           beta_fast=self.config.beta_fast,
           beta_slow=self.config.beta_slow,
-          rope_theta=self.config.rope_theta,
+          rope_theta=self.config.rope_max_timescale,
           rope_factor=self.config.rope_factor,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
@@ -1517,8 +1555,12 @@ class Attention(nn.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
-    inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
-    inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+    else:
+      inputs_q = nn.with_logical_constraint(inputs_q, self.decode_input_axis_names)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.decode_input_axis_names)
 
     # apply projection.
     if self.config.fused_qkv:
@@ -1536,6 +1578,10 @@ class Attention(nn.Module):
       query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
       key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
       value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
+    elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+      query = nn.with_logical_constraint(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+      key = nn.with_logical_constraint(key, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
+      value = nn.with_logical_constraint(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
     else:
       query = nn.with_logical_constraint(query, self.query_axis_names)
       key = nn.with_logical_constraint(key, self.key_axis_names)
@@ -1554,7 +1600,10 @@ class Attention(nn.Module):
     else:
       out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, previous_chunk)
 
-    out = nn.with_logical_constraint(out, self.out_axis_names)
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      out = nn.with_logical_constraint(out, self.out_axis_names)
+    else:
+      out = nn.with_logical_constraint(out, self.decode_out_axis_names)
     out = self.out_projection(inputs_q.shape[-1], out)
     out = checkpoint_name(out, "out_proj")
     return out
@@ -1568,8 +1617,8 @@ class MLA(Attention):
   qk_nope_head_dim: int = 128
   qk_rope_head_dim: int = 64
   v_head_dim: int = 128
-  max_seq_len: int = 4096 * 4
-  original_seq_len: int = 4096
+  max_position_embeddings: int = 4096 * 4
+  original_max_position_embeddings: int = 4096
   mscale: float = 1.0  # scaling factor for softmax
   rope_factor: float = 40.0  # rotary embedding factor
 
@@ -1670,7 +1719,7 @@ class MLA(Attention):
 
     # Set softmax scaling.
     self.softmax_scale = self.qk_head_dim**-0.5
-    if self.max_seq_len > self.original_seq_len:
+    if self.max_position_embeddings > self.original_max_position_embeddings:
       mscale = 0.1 * self.mscale * jnp.log(self.rope_factor) + 1.0
       self.softmax_scale = self.softmax_scale * mscale * mscale
 
@@ -1687,9 +1736,9 @@ class MLA(Attention):
     # Split into non-positional and rotary parts.
     q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=-1)
     q_pe = self.apply_rotary_embedding(q_pe, inputs_positions, name="query_rope")
-    # Query projection is scaled by  1 / self.softmax_scale to be consistent MaxText implementation.
+    # Query projection is scaled by self.softmax_scale to be consistent MaxText implementation.
     # DeepSeek v3 was doing it in attention score computation.
-    return jnp.concatenate([q_nope, q_pe], axis=-1) / self.softmax_scale
+    return jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
 
   def mla_kv_projection(self, inputs: Array, inputs_positions: Array) -> Tuple[Array, Array]:
     """MLA key/value projection with integrated rotary embedding."""
