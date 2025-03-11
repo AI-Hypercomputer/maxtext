@@ -37,7 +37,7 @@ BASE_PATHWAYS_TUNING_PARAMS = {
 
 # The set of tuning params required for long-running pathways jobs.
 PATHWAYS_LONG_RUN_CHECKPOINTING_TUNING_PARAMS = {
-    "enable_checkpointing": True,
+    "enable_checkpointing": False,
     "async_checkpointing": False,
     "checkpoint_period": 20,
     "enable_checkpoint_cloud_logger": True,
@@ -802,7 +802,7 @@ llama3_1_8b_8192 = _add_to_model_dictionary(
         model_name="llama3_1-8b-8192",
         model_type="llama3.1-8b",
         tuning_params={
-            "per_device_batch_size": 4,
+            "per_device_batch_size": 2,
             "ici_fsdp_parallelism": -1,
             "remat_policy": "custom",
             "decoder_layer_input": "offload",

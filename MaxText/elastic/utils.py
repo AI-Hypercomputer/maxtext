@@ -163,6 +163,7 @@ class ElasticUtils:
       except Exception as error:
         if not self._is_error_due_to_slice_down(error):
           raise
+        logger.info("Retrying with the next snapshot")
 
     self.initialize_snapshot(
         step=step,
@@ -418,7 +419,7 @@ class ElasticUtils:
     x = np.zeros(len(devices), dtype=float) + (self.TEST_VALUE - 1)
     y = jax.pmap(lambda x: x + 1, devices=devices)(x)
     if block:
-      y.block_until_ready()
+      jax.block_until_ready(y)
     return y
 
   @timeit

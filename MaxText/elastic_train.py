@@ -109,6 +109,9 @@ def elastic_handler(
   state = state.replace(**snapshot)
   state = state.replace(step=state.step.at[None].set(step))
 
+  slice_indices = jax.tree.map(lambda x: {d.slice_index for d in x.sharding.device_set}, state.params)
+  max_logging.log(f"After reshard: {slice_indices=}")
+
   (
       functional_train,
       in_shard_train,
@@ -130,7 +133,7 @@ def elastic_handler(
   example_batch = None
   metric_logger = MetricLogger(writer, config)
 
-  jax.block_until_ready(state)
+  # jax.block_until_ready(state)
 
   return (
       config,
@@ -301,6 +304,15 @@ def train_loop(config, state=None):
             # pylint: disable=not-callable
             nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
             record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
+            # state = state.replace(step=state.step + 1, params=jax.tree.map(lambda x: x.copy(), state.params))
+            # metrics = {
+            #     "scalar": {
+            #         "perf/step_time_seconds": 0,
+            #         "perf/per_device_tflops_per_sec": 0,
+            #         "perf/per_device_tokens_per_sec": 0,
+            #         "learning/total_weights": 0,
+            #         "learning/loss": 0,
+            #     }, "scalars": {}}
             state, metrics = p_train_step(state, example_batch, nextrng)
 
           step_time_delta = datetime.datetime.now() - last_step_completion

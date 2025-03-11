@@ -46,19 +46,26 @@ RUNNER = "gcr.io/cloud-tpu-multipod-dev/lukebaumann_runner:latest"
 # COUNTRY = "us"
 # DEVICE_TYPE = "v6e-16"
 
-# 3 slices
-CLUSTER = "bodaborg-v6e-256-dnd-yucmhab"
-PROJECT = "tpu-prod-env-one-vm"
-ZONE = "us-east5-b"
+# # 3 slices
+# CLUSTER = "bodaborg-v6e-256-dnd-yucmhab"
+# PROJECT = "tpu-prod-env-one-vm"
+# ZONE = "us-east5-b"
+# COUNTRY = "us"
+# DEVICE_TYPE = "v6e-256"
+
+# Many slices
+CLUSTER = "bodaborg-v6e-256-ts"
+PROJECT = "tpu-prod-env-multipod"
+ZONE = "us-west1-c"
 COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
-# # Many slices
-# CLUSTER = "bodaborg-v6e-256-ts"
-# PROJECT = "tpu-prod-env-multipod"
-# ZONE = "us-west1-c"
+# CLUSTER = "pw-scale-test-v5e-32"
+# PROJECT = "cloud-tpu-multipod-dev"
+# ZONE = "us-south1-a"
 # COUNTRY = "us"
-# DEVICE_TYPE = "v6e-256"
+# DEVICE_TYPE = "v5litepod-32"
+
 
 # Other parameters (MUST BE SET BY USER)
 XPK_PATH = "../xpk"

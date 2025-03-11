@@ -86,9 +86,14 @@ class MetricLogger:
     """Writes metrics to TensorBoard"""
     with jax.spmd_mode("allow_all"):
       if jax.process_index() == 0:
-        max_logging.log(f"Writing step {step}")
+        max_logging.log(f"Writing {step=}, {type(step)=}")
         for metric_name in metrics.get("scalar", []):
           max_logging.log(f"Writing scalar {metric_name}")
+          try:
+            slice_indices = {d.slice_index for d in metrics["scalar"][metric_name].sharding.device_set}
+            max_logging.log(f"{slice_indices=}")
+          except AttributeError:
+            pass
           self.writer.add_scalar(metric_name, np.array(metrics["scalar"][metric_name]), step)
         for metric_name in metrics.get("scalars", []):
           max_logging.log(f"Writing scalars {metric_name}")
