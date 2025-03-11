@@ -46,6 +46,8 @@ def preprocessing_pipeline(
     dataloading_host_index,
     dataloading_host_count,
     data_columns,
+    tokenizer_type: str = "sentencepiece",
+    hf_access_token=None,
     shuffle: bool = False,
     data_shuffle_seed=0,
     tokenize=True,
@@ -69,7 +71,11 @@ def preprocessing_pipeline(
   operations.append(_input_pipeline_utils.NormalizeFeatures(data_columns, tokenize))
 
   if tokenize:
-    operations.append(_grain_tokenizer.TokenizeAndTrim(data_columns, max_target_length, tokenizer_path, add_bos, add_eos))
+    operations.append(
+        _grain_tokenizer.TokenizeAndTrim(
+            data_columns, max_target_length, tokenizer_path, add_bos, add_eos, tokenizer_type, hf_access_token
+        )
+    )
 
   # Pack and Batch examples.
   if packing and not use_dpo:
@@ -129,6 +135,8 @@ def make_grain_train_iterator(
       dataloading_host_index=process_indices.index(jax.process_index()),
       dataloading_host_count=len(process_indices),
       data_columns=config.train_data_columns,
+      tokenizer_type=config.tokenizer_type,
+      hf_access_token=config.hf_access_token,
       shuffle=config.enable_data_shuffling,
       data_shuffle_seed=config.data_shuffle_seed,
       tokenize=config.tokenize_train_data,
@@ -156,6 +164,8 @@ def make_grain_eval_iterator(
       dataloading_host_index=process_indices.index(jax.process_index()),
       dataloading_host_count=len(process_indices),
       data_columns=config.eval_data_columns,
+      tokenizer_type=config.tokenizer_type,
+      hf_access_token=config.hf_access_token,
       shuffle=False,
       data_shuffle_seed=config.data_shuffle_seed,
       tokenize=config.tokenize_eval_data,

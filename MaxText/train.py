@@ -665,6 +665,7 @@ def setup_train_loop(config):
           data_iterator,
           load_parameters_from_path="",
           load_full_state_from_path="",
+          checkpoint_storage_concurrent_gb=config.checkpoint_storage_concurrent_gb,
           abstract_unboxed_pre_state=abstract_state,
           enable_single_replica_ckpt_restoring=False,
           dataset_type=config.dataset_type,
@@ -839,7 +840,7 @@ def train_loop(config, state=None):
 
     metric_logger.write_metrics(running_gcs_metrics, metrics, step)
 
-    if config.dump_hlo and step == start_step:
+    if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
       jax.block_until_ready(state)  # Ensure compilation has finished.
       max_utils.upload_dump(
           config.dump_hlo_local_dir,

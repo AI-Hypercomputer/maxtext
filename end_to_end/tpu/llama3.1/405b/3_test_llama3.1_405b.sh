@@ -32,4 +32,4 @@ JAX_PLATFORMS=cpu python3 MaxText/load_and_quantize_checkpoint.py \
     attention=dot_product \
     quantization=${QUANTIZE_TYPE} \
     save_quantized_params_path=${SAVE_QUANT_PARAMS_PATH} \
-    async_checkpointing=false \
+    async_checkpointing=false

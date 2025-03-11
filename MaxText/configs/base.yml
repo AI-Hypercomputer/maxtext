@@ -54,6 +54,9 @@ force_unroll: False # during generate_param_only_checkpoint should we unroll the
 checkpoint_storage_target_data_file_size_bytes: 2147483648
 checkpoint_storage_use_ocdbt: True
 checkpoint_storage_use_zarr3: True
+# larger models requires higher concurrent GB for I/O
+# default concurrent gb for PytreeCheckpointHandler is 96GB
+checkpoint_storage_concurrent_gb: 96
 ############################### END CHECKPOINTING ##################################
 
 
@@ -342,6 +345,9 @@ num_slices: -1
 # Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding
 tokenizer_path: "assets/tokenizer.llama2"
+# tfds pipeline supports tokenizer_type: sentencepiece, huggingface, tiktoken
+# grain pipeline supports tokenizer_type: sentencepiece, huggingface
+# hf pipeline only supports huggingface type, and will ignore tokenizer_type flag
 tokenizer_type: "sentencepiece"
 tokenize_train_data: True  # False if the dataset is pre-tokenized
 tokenize_eval_data: True  # False if the dataset is pre-tokenized
@@ -431,6 +437,7 @@ profile_periodically_period: -1 # If set to a positive integer, profile every pr
 
 # Dump HLO options
 dump_hlo: False
+dump_step: -1 # Dump modules at the given step if set to a positive integer.
 dump_hlo_local_dir: "/tmp/xla_dump/"
 dump_hlo_delete_local_after: True # Cleans local directory after its uploaded
 dump_hlo_gcs_dir: "" # Defaults to {base_output_directory}/{run_name}/xla_dump
@@ -498,7 +505,7 @@ decode_sampling_top_k: 0 # set if you're doing top-k
 decode_sampling_temperature: 1.
 
 eval_interval: -1  # the specific number of train step between eval_step
-eval_steps: -1  # only run this number of batches for eval, for debugging use
+eval_steps: -1  # run this number of steps for eval, recommend setting this to prevent error due to running out of evel data
 target_eval_loss: 0.  # early stop once reaching target eval_loss
 
 # Goodput parameters
@@ -530,6 +537,8 @@ vertex_tensorboard_region: ""
 max_checkify: False
 
 # Inference
+inference_microbenchmark_prefix_cache_entries_num: 100
+inference_microbenchmark_prefix_cache_common_prefix_proportion: 0.5
 inference_microbenchmark_prefill_lengths: "64,128,256,512,1024"
 inference_microbenchmark_stages: "prefill,generate"
 inference_microbenchmark_loop_iters: 10
@@ -605,3 +614,7 @@ sa_v_layout: "HEAD_DIM_MINOR"
 pagedattn_num_pages: 64
 pagedattn_tokens_per_page: 32
 pagedattn_pages_per_compute_block: 8
+
+# Chunked Prefill Parameters
+prefill_chunk_size: 256
+use_chunked_prefill: False
