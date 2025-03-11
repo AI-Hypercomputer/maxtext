@@ -639,11 +639,6 @@ class MoeBlock(nn.Module):
     trunc_expert_mask = expert_mask * jnp.less_equal(expert_token_count, expert_capacity_per_batch)
     combined_expert_mask = jnp.sum(trunc_expert_mask, axis=2)
 
-    # reshape & update weights
-    softmax_probs = jnp.reshape(
-        softmax_probs,
-        ((batch_size, seq_len, self.num_experts)),
-    )
     softmax_probs *= combined_expert_mask
 
     # calculate token position in expert capacity dimension
