@@ -741,7 +741,7 @@ class MoeBlock(nn.Module):
         mlp_einsum = f"EBCM,EMH -> EBCH"
         output_einsum = f"EBCM,BSEC -> BSM"
       else:
-        # todo: try replace softmax_probs with padded weights and verify with decode acc tests 
+        # todo: try replace softmax_probs with padded weights and verify with decode acc tests
         softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
         dispatch_mask, combine_mask = self.generate_masks_subgroup(top_k_indices, softmax_probs)
         if self.config.ici_context_parallelism > 0 and cp == 1:
