@@ -709,7 +709,6 @@ class MoeBlock(nn.Module):
     # gate_logits: batch, length, expert
     # follow router_logits non-sharded kernel
     gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", None))
-    softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
     # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
     top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
@@ -733,7 +732,7 @@ class MoeBlock(nn.Module):
     if self.config.capacity_factor > 0:
       # token dropping if needed
       if self.config.model_call_mode != "inference":
-        dispatch_mask, combine_mask = self.generate_masks(top_k_indices, softmax_probs)
+        dispatch_mask, combine_mask = self.generate_masks(top_k_indices, weights)
         mask_axes = ("activation_batch", "activation_length", None, None)
         input_axis = ("activation_batch", "activation_length", "activation_embed")
         dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, "activation_embed")
@@ -742,6 +741,8 @@ class MoeBlock(nn.Module):
         mlp_einsum = f"EBCM,EMH -> EBCH"
         output_einsum = f"EBCM,BSEC -> BSM"
       else:
+        # todo: try replace softmax_probs with padded weights and verify with decode acc tests 
+        softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
         dispatch_mask, combine_mask = self.generate_masks_subgroup(top_k_indices, softmax_probs)
         if self.config.ici_context_parallelism > 0 and cp == 1:
           mask_axes = ("activation_length", "activation_batch", None, None, None)
