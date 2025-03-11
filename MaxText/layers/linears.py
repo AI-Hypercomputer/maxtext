@@ -666,6 +666,7 @@ class MoeBlock(nn.Module):
     dispatch_mask = combine_mask.astype(bool)
 
     return dispatch_mask, combine_mask
+
   # See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details.
   def load_balance_loss(self, top_k_indices, logits):
     expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
@@ -784,9 +785,7 @@ class MoeBlock(nn.Module):
       with jax.named_scope("wi_0"):
         w0_kernel_axes = ("exp", None, "mlp")
         w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
-        layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
-            mlp_einsum, dispatch, w0_kernel, precision=matmul_precision
-        )
+        layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(mlp_einsum, dispatch, w0_kernel, precision=matmul_precision)
 
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
@@ -798,9 +797,7 @@ class MoeBlock(nn.Module):
       with jax.named_scope("wi_1"):
         w1_kernel_axes = ("exp", None, "mlp")
         w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
-        layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
-            mlp_einsum, dispatch, w1_kernel, precision=matmul_precision
-        )
+        layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(mlp_einsum, dispatch, w1_kernel, precision=matmul_precision)
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
         layer_w1 = nn.with_logical_constraint(
