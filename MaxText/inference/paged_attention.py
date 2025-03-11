@@ -249,7 +249,8 @@ class PagedAttentionOp(nn.Module):
       model_mode: str,
       previous_chunk=None,
       page_state: Optional[page_manager.PageState] = None,
-      layer_idx: int = 0,  # Add layer_idx parameter
+      layer_idx: Optional[int] = None,
+      slot: Optional[int] = None,
   ):
     """Apply paged attention mechanism with layer-specific page state handling."""
 
@@ -260,22 +261,22 @@ class PagedAttentionOp(nn.Module):
     key_pages_var, value_pages_var = self.init_or_get_kv_pages(model_mode)
 
     if not self.is_initializing():  # Existing check
-        self.update(key_pages_var, value_pages_var, key, value, model_mode, page_state, layer_idx)
+      self.update(key_pages_var, value_pages_var, key, value, model_mode, page_state, layer_idx)
 
-    if not self.is_initializing(): # Add this check here too.
-        if model_mode == common_types.MODEL_MODE_PREFILL:
-            if use_kernel_v2:
-                # Use layer-specific page state
-                return self.paged_attention_v2_prefill(query, key_pages_var, value_pages_var, page_state, layer_idx), None, None
-            return self.paged_dot_product_attention_with_max_and_sum(query, key, value)
-        elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-            if use_kernel_v2:
-                # Use layer-specific page state
-                return self.paged_attention_v2_decode(query, key_pages_var, value_pages_var, page_state, layer_idx), None, None
-            # Use layer-specific page state
-            return self.paged_attention_v1_decode(query, key_pages_var, value_pages_var, page_state, layer_idx), None, None
-        else:
-            raise ValueError(f"Unsupported model_mode: {model_mode}")
+    if not self.is_initializing():  # Add this check here too.
+      if model_mode == common_types.MODEL_MODE_PREFILL:
+        if use_kernel_v2:
+          # Use layer-specific page state
+          return self.paged_attention_v2_prefill(query, key_pages_var, value_pages_var, page_state, layer_idx), None, None
+        return self.paged_dot_product_attention_with_max_and_sum(query, key, value)
+      elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+        if use_kernel_v2:
+          # Use layer-specific page state
+          return self.paged_attention_v2_decode(query, key_pages_var, value_pages_var, page_state, layer_idx), None, None
+        # Use layer-specific page state
+        return self.paged_attention_v1_decode(query, key_pages_var, value_pages_var, page_state, layer_idx), None, None
+      else:
+        raise ValueError(f"Unsupported model_mode: {model_mode}")
     else:
       # During initialization, return a dummy output with the correct shape.
       batch_size, seq_len, num_heads, head_dim = query.shape
@@ -293,9 +294,9 @@ class PagedAttentionOp(nn.Module):
   ) -> None:
     """Update KV Pages with layer-specific page state."""
     if model_mode == common_types.MODEL_MODE_PREFILL:
-        self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value)
+      self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value)
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-        self.update_decode_step_pages(key_pages_var, value_pages_var, key, value, page_state, layer_idx)
+      self.update_decode_step_pages(key_pages_var, value_pages_var, key, value, page_state, layer_idx)
 
   def update_prefill_step_pages(
       self,
@@ -319,7 +320,6 @@ class PagedAttentionOp(nn.Module):
     assert v_p == self.tokens_per_page, f"{v_p=} {self.tokens_per_page=}"
     assert v_d == d, f"{v_d=} {d=}"
     assert v_n_p == self.max_pages_per_prefill, f"{v_n_p=} {self.max_pages_per_prefill=}"
-
 
     key_pages_var.value = key
     value_pages_var.value = value
@@ -359,7 +359,7 @@ class PagedAttentionOp(nn.Module):
 
     key_pages_var.value = key_pages_updated
     value_pages_var.value = value_pages_updated
-    return key_pages_var, value_pages_var #Fixed
+    return key_pages_var, value_pages_var  # Fixed
 
   def release_slot(
       self,

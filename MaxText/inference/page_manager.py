@@ -143,12 +143,8 @@ def _update_prefill_pages_for_group(
   def release_existing_pages(index: int, state: Tuple[jnp.ndarray, jnp.ndarray]):
     current_status, current_map = state
     page_index = current_map[page_group_id, index]
-    updated_status = jax.lax.cond(
-        page_index >= 0, lambda: current_status.at[page_index].set(0), lambda: current_status
-    )
-    updated_map = jax.lax.cond(
-        page_index >= 0, lambda: current_map.at[page_group_id, index].set(-1), lambda: current_map
-    )
+    updated_status = jax.lax.cond(page_index >= 0, lambda: current_status.at[page_index].set(0), lambda: current_status)
+    updated_map = jax.lax.cond(page_index >= 0, lambda: current_map.at[page_group_id, index].set(-1), lambda: current_map)
     return (updated_status, updated_map)
 
   layer_page_status, layer_page_map = jax.lax.fori_loop(
@@ -156,7 +152,39 @@ def _update_prefill_pages_for_group(
   )
 
   # Handle zero length case (return NEW PageState)
-  def handle_zero_length(_):  # Add dummy argument
+  def handle_zero_length(_):
+    return PageState(
+        page_status=page_state.page_status.at[layer_id].set(layer_page_status),
+        page_map=page_state.page_map.at[layer_id].set(layer_page_map),
+        sequence_lengths=page_state.sequence_lengths.at[layer_id, page_group_id].set(0),
+        num_pages_used=page_state.num_pages_used.at[layer_id, page_group_id].set(0),
+        current_page=page_state.current_page.at[layer_id, page_group_id].set(-1),
+        current_page_position=page_state.current_page_position.at[layer_id, page_group_id].set(0),
+    )
+
+  # --- Define allocate_pages OUTSIDE of handle_normal_case ---
+  def allocate_pages(state, num_pages_needed):
+    current_status, current_map = state
+
+    def allocate_new_page(index: int, state: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]):
+      current_status, current_map, num_pages_needed = state
+      next_free_page = _find_next_free_page_index(current_status)
+      should_allocate = jnp.logical_and(index < num_pages_needed, next_free_page >= 0)
+      current_status = jax.lax.cond(
+          should_allocate, lambda: current_status.at[next_free_page].set(1), lambda: current_status
+      )
+      current_map = jax.lax.cond(
+          should_allocate, lambda: current_map.at[page_group_id, index].set(next_free_page), lambda: current_map
+      )
+      return (current_status, current_map, num_pages_needed)  # Return num_pages_needed
+
+    new_page_status, new_page_map, _ = jax.lax.fori_loop(
+        0, max_pages_per_group, allocate_new_page, (current_status, current_map, num_pages_needed)
+    )
+    return new_page_status, new_page_map
+
+  # If we don't have enough pages, just return a state with cleared resources
+  def return_cleared_state(_):
     return PageState(
         page_status=page_state.page_status.at[layer_id].set(layer_page_status),
         page_map=page_state.page_map.at[layer_id].set(layer_page_map),
@@ -167,7 +195,7 @@ def _update_prefill_pages_for_group(
     )
 
   # Handle normal case
-  def handle_normal_case(_):  # Add dummy argument
+  def handle_normal_case(_):
     # Calculate how many pages we need
     num_pages_needed = (true_length + tokens_per_page - 1) // tokens_per_page
     last_page_position = (true_length - 1) % tokens_per_page
@@ -176,32 +204,13 @@ def _update_prefill_pages_for_group(
     num_free_pages = jnp.sum(layer_page_status == 0)
     has_enough_pages = num_free_pages >= num_pages_needed
 
-    # Allocate new pages if we have enough free pages
-    def allocate_pages(_):
-      def allocate_new_page(index: int, state: Tuple[jnp.ndarray, jnp.ndarray]):
-        current_status, current_map = state
-        next_free_page = _find_next_free_page_index(current_status)
-        should_allocate = jnp.logical_and(index < num_pages_needed, next_free_page >= 0)
-        updated_status = jax.lax.cond(
-            should_allocate, lambda: current_status.at[next_free_page].set(1), lambda: current_status
-        )
-        updated_map = jax.lax.cond(
-            should_allocate, lambda: current_map.at[page_group_id, index].set(next_free_page), lambda: current_map
-        )
-        return (updated_status, updated_map)
-
-      new_page_status, new_page_map = jax.lax.fori_loop(
-          0, max_pages_per_group, allocate_new_page, (layer_page_status, layer_page_map)
-      )
-
+    def allocate_and_return_state(state):
+      new_page_status, new_page_map = allocate_pages(state, num_pages_needed)
       # For the current page, use the last allocated page
       last_page_idx = jnp.minimum(num_pages_needed, max_pages_per_group) - 1
       last_page_index = new_page_map[page_group_id, last_page_idx]
-      last_page_index = jax.lax.cond(
-          num_pages_needed > 0, lambda: last_page_index, lambda: jnp.array(-1, dtype=jnp.int32)
-      )
+      last_page_index = jax.lax.cond(num_pages_needed > 0, lambda: last_page_index, lambda: jnp.array(-1, dtype=jnp.int32))
 
-      # --- Return a NEW PageState object ---
       return PageState(
           page_status=page_state.page_status.at[layer_id].set(new_page_status),
           page_map=page_state.page_map.at[layer_id].set(new_page_map),
@@ -213,20 +222,14 @@ def _update_prefill_pages_for_group(
           current_page_position=page_state.current_page_position.at[layer_id, page_group_id].set(last_page_position),
       )
 
-    # If we don't have enough pages, just return a state with cleared resources
-    def return_cleared_state(_):
-      return PageState(  # Return a NEW PageState here too
-          page_status=page_state.page_status.at[layer_id].set(layer_page_status),
-          page_map=page_state.page_map.at[layer_id].set(layer_page_map),
-          sequence_lengths=page_state.sequence_lengths.at[layer_id, page_group_id].set(0),
-          num_pages_used=page_state.num_pages_used.at[layer_id, page_group_id].set(0),
-          current_page=page_state.current_page.at[layer_id, page_group_id].set(-1),
-          current_page_position=page_state.current_page_position.at[layer_id, page_group_id].set(0),
-      )
+    return jax.lax.cond(
+        has_enough_pages,
+        lambda x: allocate_and_return_state(x),
+        lambda x: return_cleared_state(x),
+        (layer_page_status, layer_page_map),
+    )
 
-    return jax.lax.cond(has_enough_pages, allocate_pages, return_cleared_state, None) # Pass None
-
-  return jax.lax.cond(true_length == 0, handle_zero_length, handle_normal_case, None) # Pass None
+  return jax.lax.cond(true_length == 0, handle_zero_length, handle_normal_case, None)
 
 
 def _update_decode_pages_for_layer(
@@ -281,9 +284,7 @@ def _update_decode_pages_for_layer(
         needs_new_page, lambda: _find_next_free_page_index(current_status), lambda: jnp.array(-1, dtype=jnp.int32)
     )
     should_allocate = next_free_page >= 0
-    updated_status = jax.lax.cond(
-        should_allocate, lambda: current_status.at[next_free_page].set(1), lambda: current_status
-    )
+    updated_status = jax.lax.cond(should_allocate, lambda: current_status.at[next_free_page].set(1), lambda: current_status)
     updated_map = jax.lax.cond(
         should_allocate,
         lambda: current_map.at[group_index, pages_used[group_index]].set(next_free_page),
@@ -331,8 +332,8 @@ def _release_page_group_in_layer(
   Returns:
     The updated `PageState` after releasing the specified page group's resources.
   """
-  layer_page_status = page_state.page_status[layer_id].copy() # create copy
-  layer_page_map = page_state.page_map[layer_id].copy() # create copy
+  layer_page_status = page_state.page_status[layer_id].copy()  # create copy
+  layer_page_map = page_state.page_map[layer_id].copy()  # create copy
   group_pages = layer_page_map[page_group_id]
 
   def release_page(i, page_status):
@@ -351,7 +352,6 @@ def _release_page_group_in_layer(
       current_page=page_state.current_page.at[layer_id, page_group_id].set(-1),
       current_page_position=page_state.current_page_position.at[layer_id, page_group_id].set(0),
   )
-
 
 
 class PageManager:
@@ -469,83 +469,86 @@ class PageManager:
     is_valid_length = jnp.logical_and(true_length >= 0, true_length <= self.max_target_length)
     is_valid = jnp.logical_and(is_valid_request, is_valid_length)
 
-    def process_valid_request(_):
-      def update_layer(layer_id, current_state):
+    def process_valid_request(page_state):
+      def update_layer(layer_id, page_state):
         return _update_prefill_pages_for_group(
-            current_state,
+            page_state,
             request_id,
             true_length,
             layer_id,
             self.tokens_per_page,
             self.max_pages_per_group,
         )
-      # Return the result of fori_loop
-      return jax.lax.fori_loop(0, self.num_layers, update_layer, page_state)
 
-    def return_original_state(_):
+      # Critically, the PageState is not updated in place
+      new_page_state = jax.lax.fori_loop(0, self.num_layers, update_layer, page_state)
+      return new_page_state  # Return the modified state
+
+    def return_original_state(page_state):
       return page_state
 
-    return jax.lax.cond(is_valid, process_valid_request, return_original_state, None)
-
-
+    return jax.lax.cond(is_valid, process_valid_request, return_original_state, page_state)
 
   def update_decode_pages(self, page_state: PageState) -> PageState:
-      """Updates pages for autoregressive decoding across all layers.
+    """Updates pages for autoregressive decoding across all layers.
 
-      This method increments the sequence length for all active requests and
-      allocates new pages as necessary when page boundaries are crossed.
+    This method increments the sequence length for all active requests and
+    allocates new pages as necessary when page boundaries are crossed.
 
-      Args:
-        page_state: The current `PageState`.
+    Args:
+      page_state: The current `PageState`.
 
-      Returns:
-        The updated `PageState` after the decode step.
+    Returns:
+      The updated `PageState` after the decode step.
 
-      Example:
-        ```python
-        # Update pages for the next decode step
-        state = page_manager.update_decode_pages(state)
-        ```
-      """
-      def update_layer(layer_id, current_state):
-          return _update_decode_pages_for_layer(current_state, layer_id, self.tokens_per_page)
+    Example:
+      ```python
+      # Update pages for the next decode step
+      state = page_manager.update_decode_pages(state)
+      ```
+    """
 
-      return jax.lax.fori_loop(0, self.num_layers, update_layer, page_state)
+    def update_layer(layer_id, page_state):
+      return _update_decode_pages_for_layer(page_state, layer_id, self.tokens_per_page)
 
+    # Critically, the PageState is not updated in place
+    return jax.lax.fori_loop(0, self.num_layers, update_layer, page_state)
 
   def release_pages(self, page_state: PageState, request_id: int) -> PageState:
-      """Releases all pages associated with a given request across all layers.
+    """Releases all pages associated with a given request across all layers.
 
-      This method frees all pages allocated to the specified request in all layers
-      and resets the corresponding state entries.
+    This method frees all pages allocated to the specified request in all layers
+    and resets the corresponding state entries.
 
-      Args:
-        page_state: The current `PageState`.
-        request_id: The ID of the request to release.
+    Args:
+      page_state: The current `PageState`.
+      request_id: The ID of the request to release.
 
-      Returns:
-        The updated `PageState` after releasing the pages.
+    Returns:
+      The updated `PageState` after releasing the pages.
 
-      Example:
-        ```python
-        # Release all pages for request 0
-        state = page_manager.release_pages(
-            page_state=state,
-            request_id=0
-        )
-        ```
-      """
-      is_valid = jnp.logical_and(request_id >= 0, request_id < self.max_page_groups)
-      def process_valid_request(_):
-          def release_layer(layer_id, current_state):
-              return _release_page_group_in_layer(current_state, request_id, layer_id)
-          # Return result of fori_loop
-          return jax.lax.fori_loop(0, self.num_layers, release_layer, page_state)
+    Example:
+      ```python
+      # Release all pages for request 0
+      state = page_manager.release_pages(
+          page_state=state,
+          request_id=0
+      )
+      ```
+    """
+    is_valid = jnp.logical_and(request_id >= 0, request_id < self.max_page_groups)
 
-      def return_original_state(_):
-          return page_state
+    def process_valid_request(page_state):
+      def release_layer(layer_id, page_state):
+        return _release_page_group_in_layer(page_state, request_id, layer_id)
 
-      return jax.lax.cond(is_valid, process_valid_request, return_original_state, None)
+      # Critically, the PageState is not updated in place
+      return jax.lax.fori_loop(0, self.num_layers, release_layer, page_state)
+
+    def return_original_state(page_state):
+      return page_state
+
+    return jax.lax.cond(is_valid, process_valid_request, return_original_state, page_state)  # Pass page_state
 
   def get_initial_page_state(self) -> PageState:
     """Creates and returns an initial `PageState`.

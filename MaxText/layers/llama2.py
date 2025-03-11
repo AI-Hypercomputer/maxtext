@@ -76,12 +76,12 @@ class LlamaDecoderLayer(nn.Module):
       deterministic,
       model_mode,
       page_state: Optional[PageState] = None,
+      layer_idx: Optional[int] = None,
+      slot: Optional[int] = None,
   ):
+    """Llama decoder layer forward pass."""
     cfg = self.config
     mesh = self.mesh
-
-    # Extract layer index from name for PageState handling
-    layer_idx = int(self.name.split('_')[-1]) if 'layers_' in self.name else 0
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
@@ -130,7 +130,8 @@ class LlamaDecoderLayer(nn.Module):
         deterministic=deterministic,
         model_mode=model_mode,
         page_state=page_state,
-        layer_idx=layer_idx,  # Pass layer index to attention
+        layer_idx=layer_idx,  # Pass explicit layer index
+        slot=slot,  # Pass slot
     )
 
     attention_lnx = nn.with_logical_constraint(

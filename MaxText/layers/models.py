@@ -65,6 +65,8 @@ class DecoderLayer(nn.Module):
       deterministic,
       model_mode,
       page_state: Optional[PageState] = None,
+      layer_idx: Optional[int] = None,
+      slot: Optional[int] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -112,6 +114,8 @@ class DecoderLayer(nn.Module):
         deterministic=deterministic,
         model_mode=model_mode,
         page_state=page_state,
+        layer_idx=layer_idx,
+        slot=slot,
     )
 
     attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
@@ -387,7 +391,9 @@ class Decoder(nn.Module):
       model_mode=common_types.MODEL_MODE_TRAIN,
       previous_chunk=None,
       page_state: Optional[PageState] = None,
+      slot: Optional[int] = None,
   ):
+    """Forward pass of the decoder."""
     cfg = self.config
     mesh = self.mesh
     assert decoder_input_tokens.ndim == 2  # [batch, len]
@@ -419,9 +425,16 @@ class Decoder(nn.Module):
             y, decoder_segment_ids, decoder_positions, deterministic, model_mode
         )
       else:
-        partition_spec = None  # This partition spec is only used for the fsdp_ag_once feature.
+        partition_spec = None
       y = self.pipeline_module(
-          y, decoder_segment_ids, decoder_positions, deterministic, model_mode, partition_spec=partition_spec
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          partition_spec=partition_spec,
+          page_state=page_state,
+          slot=slot,
       )
     else:
       if cfg.scan_layers:
@@ -435,6 +448,8 @@ class Decoder(nn.Module):
               decoder_positions,
               deterministic,
               model_mode,
+              page_state,
+              slot,
           )
           num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
           y, _ = self.scan_decoder_layers(cfg, moe_layer, num_moe_layers, "moe_layers", mesh)(
@@ -443,6 +458,8 @@ class Decoder(nn.Module):
               decoder_positions,
               deterministic,
               model_mode,
+              page_state,
+              slot,
           )
         else:
           RemattedBlockLayer = RemattedBlockLayers[0]
@@ -452,9 +469,12 @@ class Decoder(nn.Module):
               decoder_positions,
               deterministic,
               model_mode,
+              page_state,
+              slot,
           )
       else:
         if cfg.decoder_block == "deepseek":
+          # DeepSeek specific code
           assert len(RemattedBlockLayers) == 2, f"Unscanned layers must have a length of 2 using deepseek."
           dense_layer = RemattedBlockLayers[0]
           moe_layer = RemattedBlockLayers[1]
@@ -472,19 +492,24 @@ class Decoder(nn.Module):
                   decoder_positions,
                   deterministic,
                   model_mode,
-                  page_state,
+                  page_state=page_state,
+                  layer_idx=index,
+                  slot=slot,
               )
         else:
-          for lyr in range(cfg.num_decoder_layers):
+          for layer_idx in range(cfg.num_decoder_layers):
             RemattedBlockLayer = RemattedBlockLayers[0]
-            y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
+            y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{layer_idx}", quant=self.quant)(
                 y,
                 decoder_segment_ids,
                 decoder_positions,
                 deterministic,
                 model_mode,
-                page_state,
+                page_state=page_state,
+                layer_idx=layer_idx,  # Pass explicit layer index
+                slot=slot,  # Pass slot
             )
+
     y = self.get_norm_layer()(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -508,13 +533,11 @@ class Decoder(nn.Module):
       logits = linears.DenseGeneral(
           cfg.vocab_size,
           weight_dtype=cfg.weight_dtype,
-          dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
+          dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,
           kernel_axes=("embed", "vocab"),
           name="logits_dense",
           matmul_precision=self.config.matmul_precision,
-      )(
-          y
-      )  # We do not quantize the logits matmul.
+      )(y)
     logits = nn.with_logical_constraint(
         logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
     )
@@ -564,9 +587,15 @@ class Transformer(nn.Module):
     """Applies Transformer decoder-branch on encoded-input and target.
 
     Args:
-      true_length: (Optional) Prompt length before padding
-      slot: (Optional) An integer representing the decode batch index selected
-        for this request.
+      decoder_input_tokens: input tensor for decoder.
+      decoder_positions: positions for decoder.
+      decoder_segment_ids: segment ids for decoder.
+      enable_dropout: enables dropout when set to True.
+      model_mode: "train", "prefill", or "autoregressive"
+      previous_chunk: optional previous chunk data
+      true_length: prompt length before padding
+      slot: an integer representing the decode batch index.
+      page_state: optional page state for paged attention
     """
 
     if decoder_segment_ids is not None and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
@@ -591,5 +620,6 @@ class Transformer(nn.Module):
         model_mode=model_mode,
         previous_chunk=previous_chunk,
         page_state=page_state,
+        slot=slot,
     )
     return logits

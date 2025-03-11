@@ -1494,7 +1494,8 @@ class Attention(nn.Module):
       deterministic: bool = False,
       previous_chunk: Any = None,
       page_state: Optional[PageState] = None,
-      layer_idx: int = 0,
+      layer_idx: Optional[int] = None,
+      slot: Optional[int] = None,
   ):
     """Applies Attention on the input data.
 
@@ -1550,9 +1551,15 @@ class Attention(nn.Module):
 
     if self.config.attention == "paged" and model_mode != common_types.MODEL_MODE_TRAIN:
       unnormalized_out, _, exp_sum = self.paged_attention_op(
-          query, key, value, decoder_segment_ids, model_mode, previous_chunk, 
+          query,
+          key,
+          value,
+          decoder_segment_ids,
+          model_mode,
+          previous_chunk,
           page_state=page_state,
-          layer_idx=layer_idx  # Pass layer_idx to paged_attention_op
+          layer_idx=layer_idx,  # Pass layer_idx
+          slot=slot,  # Pass slot
       )
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
     else:

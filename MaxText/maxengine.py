@@ -104,11 +104,11 @@ class MaxEngine(engine_api.Engine):
     self.decode_state_layouts = None
     self.param_layouts = None
 
-    self.page_manager = None
-    self.page_state = None
-    if self.config.attention == "paged":
-      self.page_manager = PageManager(self.config)
-      self.page_state = self.page_manager.get_initial_page_state()
+    self.page_manager = PageManager(self.config) if self.config.attention == "paged" else None
+
+  def get_initial_page_state(self):
+    """Returns a fresh page state object."""
+    return self.page_manager.get_initial_page_state() if self.page_manager else None
 
   def generate_aot(
       self, params: Params, decode_state: DecodeState, rng: Optional[PRNGKeyType] = None
@@ -416,10 +416,8 @@ class MaxEngine(engine_api.Engine):
       self,
       *,
       params: Params,
-      existing_prefix: Optional[jax.Array] = None,
       padded_tokens: jax.Array,
       true_length: int,
-      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
       complete_prompt_true_length: Optional[int] = None,
       complete_padded_prompt: Optional[jax.Array] = None,
@@ -480,7 +478,7 @@ class MaxEngine(engine_api.Engine):
     if rng is None:
       rng = jax.random.PRNGKey(0)
 
-    input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
+    input_tokens = jnp.expand_dims(padded_tokens, 0)
     if positions is None:
       positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
     if not self.config.use_chunked_prefill:
@@ -488,17 +486,9 @@ class MaxEngine(engine_api.Engine):
       ones_to_keep = zero_to_n < true_length
       next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
     else:
-      zero_to_n = jnp.arange(0, complete_padded_prompt.shape[0])  # pytype: disable=attribute-error
+      zero_to_n = jnp.arange(0, complete_padded_prompt.shape[0])
       ones_to_keep = zero_to_n < complete_prompt_true_length
       next_pos = jnp.full((1, 1), complete_prompt_true_length, dtype=jnp.int32)
-
-    if self.page_manager is not None and slot is not None:
-      # Note: this updates the page state for all layers at once
-      self.page_state = self.page_manager.update_prefill_pages(
-          page_state=self.page_state,
-          request_id=slot,
-          true_length=true_length,
-      )
 
     one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
@@ -517,8 +507,9 @@ class MaxEngine(engine_api.Engine):
           previous_chunk=previous_chunk,
           true_length=true_length,
           slot=slot,
-          page_state=self.page_state,
+          page_state=self.page_state,  # Pass current page_state, but don't modify inside
       )
+
     generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
     selected_logits = jax.lax.dynamic_slice(
         flat_logits,
@@ -540,19 +531,15 @@ class MaxEngine(engine_api.Engine):
     all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
     result = engine_api.ResultTokens(
         data=jnp.concatenate((first_generated_token, all_valid, generated_tokens), axis=1),
-        # Tokens are shape [batch, speculations], so when we concatenate
-        # tokens, validity and length along their index 1 dimension then they
-        # occupy 0:speculations.
         tokens_idx=(0, 1),
-        # Validity occupies the same amount of space, but next in line.
         valid_idx=(1, 2),
-        # And lengths is rank 1.
         length_idx=(2, 3),
         samples_per_slot=1,
     )
 
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
+
     return {
         "logits": selected_logits,
         "cache": cache,
@@ -686,19 +673,17 @@ class MaxEngine(engine_api.Engine):
       self,
       params: Params,
       decode_state: DecodeState,
-      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
-  ) -> Tuple[DecodeState, engine_api.ResultTokens]:
+      slot: Optional[int] = None,
+  ):
     """Run one generate step"""
     if rng is None:
       rng = jax.random.PRNGKey(0)
 
-    if self.page_manager is not None:
-      self.page_state = self.page_manager.update_decode_pages(self.page_state)
-
     previous_token = decode_state["tokens"]
     rng, new_rng = jax.random.split(rng)
-    # run one step generation
+
+    # run one step generation (page_state is passed but not modified)
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       out_logits, new_vars = self.model.apply(
           params | {"cache": decode_state["cache"]},
@@ -708,10 +693,12 @@ class MaxEngine(engine_api.Engine):
           model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
           rngs={"params": new_rng},
           mutable=["cache"],
-          page_state=self.page_state,
+          page_state=self.page_state,  # Pass current page_state, but don't modify inside
+          slot=slot,
       )
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
+
     # sampling tokens
     new_token = inference_utils.sampling(
         out_logits,
@@ -724,13 +711,8 @@ class MaxEngine(engine_api.Engine):
     all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
     result = engine_api.ResultTokens(
         data=jnp.concatenate((new_token, all_valid, decode_state["generated_tokens"]), axis=1),
-        # Tokens are shape [batch, speculations], so when we concatenate
-        # tokens, validity and length along their index 1 dimension then they
-        # occupy 0:speculations.
         tokens_idx=(0, 1),
-        # Validity occupies the same amount of space, but next in line.
         valid_idx=(1, 2),
-        # And lengths is rank 1.
         length_idx=(2, 3),
         samples_per_slot=1,
     )
