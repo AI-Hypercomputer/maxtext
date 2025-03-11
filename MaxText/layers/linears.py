@@ -640,10 +640,10 @@ class MoeBlock(nn.Module):
     combined_expert_mask = jnp.sum(trunc_expert_mask, axis=2)
 
     # reshape & update weights
-    # softmax_probs = jnp.reshape(
-    #     softmax_probs,
-    #     ((batch_size, seq_len, self.num_experts)),
-    # )
+    softmax_probs = jnp.reshape(
+        softmax_probs,
+        ((batch_size, seq_len, self.num_experts)),
+    )
     softmax_probs *= combined_expert_mask
 
     # calculate token position in expert capacity dimension
@@ -833,9 +833,6 @@ class MoeBlock(nn.Module):
           output = jnp.reshape(output, (output.shape[0], output.shape[1] * output.shape[2], output.shape[3]))
       return output, loss
     else:
-      top_k_weights /= top_k_weights.sum(-1, keepdims=True)
-      weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
-
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
       with jax.named_scope("wi_0"):
         layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
