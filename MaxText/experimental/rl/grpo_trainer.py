@@ -52,7 +52,7 @@ from metric_logger import MetricLogger
 from vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
-import grpo_input_pipeline
+from experimental.rl import grpo_input_pipeline
 from layers import models
 
 from gcp_workload_monitor import GCPWorkloadMonitor
@@ -181,35 +181,37 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   # this includes the completion tokens + padding (upto max_target_length - max_prefill_length))
   # data["ar_completions"] contains tokens only upto the eos, no tokens thereafter other than pad_tokens
   # prompt = data["prompt"]
-  ar_completions = data["ar_completions"]
+  prompt_with_completions = data["prompt_completions"]
 
   # --- (3) Compute per-token log probabilities.
   # prompt_position = data["prompt_position"]
   # prompt_segmentation = data["prompt_segmentation"]
-  ar_completions_position = data["ar_completions_position"] 
-  ar_completions_segmentation = data["ar_completions_segmentation"]
+  prompt_completions_position = data["prompt_completions_position"] 
+  prompt_completions_segmentation = data["prompt_completions_segmentation"]
+  completions_segmentation = data["ar_completions_segmentation"]
 
   # compute_log_probs returns logits.
   # We compute the log-probabilities for the entire generated sequence, then shift as usual.
   # 'completions' contains only the AR generated tokens, so token_logps_ref and token_logps_policy only contain the logprob for the ar tokens and not the prompts
   rng1, rng_fwd = random.split(dropout_rng)
   token_logps_policy, intermediate_outputs = compute_log_probs(model,
-                                        params, 
-                                        ar_completions, 
-                                        ar_completions_position, 
-                                        ar_completions_segmentation,
+                                        params,
+                                        prompt_with_completions,
+                                        prompt_completions_position,
+                                        prompt_completions_segmentation,
                                         config,
                                         is_train=is_train, rngs={"dropout": rng1, "params": rng_fwd}) # [BxG,S-1,E]
+
   # jax.debug.print("token_logps_policy={token_logps_policy}",token_logps_policy=token_logps_policy)
   # token_logps_policy_has_negative = jnp.any(token_logps_policy<0)
   # jax.debug.print("token_logps_policy_has_negative={token_logps_policy_has_negative}",token_logps_policy_has_negative=token_logps_policy_has_negative)
-  token_logps_ref, _ = compute_log_probs(model, 
+  token_logps_ref, _ = compute_log_probs(model,
                                       {"params": reference_params},
-                                        ar_completions, 
-                                        ar_completions_position, 
-                                        ar_completions_segmentation,
+                                        prompt_with_completions,
+                                        prompt_completions_position,
+                                        prompt_completions_segmentation,
                                         config,
-                                        is_train=is_train, rngs={"dropout": rng1, "params": rng_fwd}) # [BxG,S-1,E]
+                                        is_train=False, rngs={"dropout": rng1, "params": rng_fwd}) # [BxG,S-1,E]
   # jax.debug.print("token_logps_ref={token_logps_ref}",token_logps_ref=token_logps_ref)
   # token_logps_ref_has_negative = jnp.any(token_logps_ref<0)
   # jax.debug.print("token_logps_ref_has_negative={token_logps_ref_has_negative}",token_logps_ref_has_negative=token_logps_ref_has_negative)
@@ -219,17 +221,17 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   # Create a mask to clear out the last token position in the ar_completions 
   # and to make sure loss is computed on non-padding tokens
   valid_seq_mask = (completion_target_segmentation != 0)  # [BxG, S-1]
-  valid_seq_mask_has_non_zero = jnp.sum(valid_seq_mask,axis=1) #[BxG]
-  jax.debug.print("valid_seq_mask_has_non_zero={valid_seq_mask_has_non_zero}",valid_seq_mask_has_non_zero=valid_seq_mask_has_non_zero)
+  # valid_seq_mask_has_non_zero = jnp.sum(valid_seq_mask,axis=1) #[BxG]
+  # jax.debug.print("valid_seq_mask_has_non_zero={valid_seq_mask_has_non_zero}",valid_seq_mask_has_non_zero=valid_seq_mask_has_non_zero)
       
   # --- (4) Compute per-token KL divergence for each token in the generated completion.
   token_diff_logps_ref_policy = token_logps_ref - token_logps_policy
-  token_diff_logps_ref_policy_mean = jnp.mean(token_diff_logps_ref_policy,axis=1)
-  token_diff_logps_ref_policy_max = jnp.max(token_diff_logps_ref_policy,axis=1)
-  token_diff_logps_ref_policy_min = jnp.min(token_diff_logps_ref_policy,axis=1)
-  jax.debug.print("token_diff_logps_ref_policy_mean={token_diff_logps_ref_policy_mean}",token_diff_logps_ref_policy_mean=token_diff_logps_ref_policy_mean)
-  jax.debug.print("token_diff_logps_ref_policy_max={token_diff_logps_ref_policy_max}",token_diff_logps_ref_policy_max=token_diff_logps_ref_policy_max)
-  jax.debug.print("token_diff_logps_ref_policy_min={token_diff_logps_ref_policy_min}",token_diff_logps_ref_policy_min=token_diff_logps_ref_policy_min)
+  # token_diff_logps_ref_policy_mean = jnp.mean(token_diff_logps_ref_policy,axis=1)
+  # token_diff_logps_ref_policy_max = jnp.max(token_diff_logps_ref_policy,axis=1)
+  # token_diff_logps_ref_policy_min = jnp.min(token_diff_logps_ref_policy,axis=1)
+  # jax.debug.print("token_diff_logps_ref_policy_mean={token_diff_logps_ref_policy_mean}",token_diff_logps_ref_policy_mean=token_diff_logps_ref_policy_mean)
+  # jax.debug.print("token_diff_logps_ref_policy_max={token_diff_logps_ref_policy_max}",token_diff_logps_ref_policy_max=token_diff_logps_ref_policy_max)
+  # jax.debug.print("token_diff_logps_ref_policy_min={token_diff_logps_ref_policy_min}",token_diff_logps_ref_policy_min=token_diff_logps_ref_policy_min)
 
 
   per_token_kl = jnp.exp(token_diff_logps_ref_policy) - (token_diff_logps_ref_policy) - 1
@@ -242,7 +244,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   
   # --- (6) Decode prompts and completions (as text) to compute rewards.
   # Golden completions for each generation provided to us in data["completion"].
-  golden_completions = jnp.repeat(data["completion"], config.num_generations, axis=0)  # shape: [BxG, ?]
+  # golden_completions = jnp.repeat(data["completion"], config.num_generations, axis=0)  # shape: [BxG, ?]
 
   # Compute rewards (a scalar per generated completion); assume reward_fn is pure python.
   # jax.debug.print("ar_completions.shape={tokens1}",tokens1=ar_completions.shape)
@@ -353,28 +355,22 @@ def generate_completions(params, data, config, rng, tokenizer_model, engine, tru
     for i in range(slot):
       completions[i].append(result_tokens.get_result_at_slot(i).tokens.item())
   completions = jnp.array(list(completions.values()))
-  # eos_positions = jnp.argmax(completions == tokenizer_model.eos_token_id, axis=1, keepdims=True)
-  # eos_not_found = jnp.all(eos_positions == 0, axis=1, keepdims=True)
-  # eos_positions = jnp.where(eos_not_found, steps, eos_positions)
-  # row_indices = jnp.arange(completions.shape[1])
-  # mask = row_indices
-  # mask = row_indices <= eos_positions
-  prompt_with_completions = []
+
+  prompt_with_completions, eos_positions = [], []
   for i in range(prompts.shape[0]):
     tokens = prompts[i]
     current_token_true_length = true_length[i]
     concatenated_prompts = jnp.concatenate(
        [tokens[:current_token_true_length -1], # remove EOS token in input prompt
         completions[i]], axis = 0)
+    eos_positions.append(jnp.where(jnp.any(concatenated_prompts == tokenizer_model.eos_token_id), jnp.argmax(concatenated_prompts == tokenizer_model.eos_token_id), concatenated_prompts.shape[0]))
     prompt_with_completions.append(jnp.pad(concatenated_prompts, (0, config.max_target_length - concatenated_prompts.shape[0]) , constant_values=tokenizer_model.pad_token_id))
   data['prompt_completions'] = jnp.array(prompt_with_completions)
-  row_indices = jnp.arange(data['prompt_completions'].shape[1])
-  eos_positions = jnp.argmax(data['prompt_completions'] == tokenizer_model.eos_token_id, axis=1, keepdims=True)
-  mask = row_indices <= eos_positions
-  data['prompt_completions_segmentation'] = mask.astype(jnp.int32)
-  data['prompt_completions_position'] = jnp.where(mask, row_indices + 1, 0)
-  data['completion_segmentation'] = row_indices > 
-  breakpoint()
+  eos_positions = jnp.stack(eos_positions)
+  data['prompt_completions_segmentation'] = jnp.arange(data['prompt_completions'].shape[1])[None, :] < eos_positions[:, None].astype(jnp.int32)
+  data['prompt_completions_position'] = jnp.where(data['prompt_completions_segmentation'], jnp.arange(data['prompt_completions'].shape[1])+1, 0)
+  completion_mask = data['prompt_completions_position'] >= true_length[:, None] - 1
+  data['ar_completions_segmentation'] = data['prompt_completions_segmentation'] * completion_mask.astype(jnp.int32)
   return data
 
 def prompt_completions(config, engine, tokenizer_model, data, params, rng):
@@ -397,7 +393,6 @@ def prompt_completions(config, engine, tokenizer_model, data, params, rng):
                               engine=engine,
                               true_length=L_prompt,
                               )
-  breakpoint()
   return data
 
 
@@ -430,11 +425,11 @@ def jaccard_reward_fn(tokens1, tokens2, vocab_size):
   # Avoid division by zero: if union is 0 (e.g. both rows are empty), return 1.0.
   return jnp.where(union == 0, 1.0, intersection / union)
 
-def compute_log_probs(model, 
-                      params, 
-                      completions, 
-                      completions_position, 
-                      completions_segmentation,
+def compute_log_probs(model,
+                      params,
+                      inputs,
+                      inputs_position,
+                      inputs_segmentation,
                       config, is_train=False, rngs=None):
   """
   Given a sequence of tokens (shape [B, L]), this helper calls model.apply (with dropout enabled
@@ -444,9 +439,9 @@ def compute_log_probs(model,
   """
   logits, intermediate_outputs = model.apply(
       params,
-      completions,
-      completions_position,
-      decoder_segment_ids = completions_segmentation,
+      inputs,
+      inputs_position,
+      decoder_segment_ids = inputs_segmentation,
       enable_dropout=(config.enable_dropout if is_train else False),
       rngs=rngs,
       mutable="intermediates",
@@ -454,12 +449,15 @@ def compute_log_probs(model,
   if not is_train:
     logits = jax.lax.stop_gradient(logits)
   # Remove last time step since there is no target for the final position.
-  logits = logits[:, :-1, :]
-  targets = completions[:, 1:]
+  # logits = logits[:, :-1, :]
+  # targets = inputs[:, 1:]
   log_probs = jax.nn.log_softmax(logits, axis=-1)
+  # jax.debug.print("log_probs {x}",x=log_probs[0,16,:16])
+  
   # Gather the log probabilities corresponding to each target token.
-  token_log_probs = jnp.take_along_axis(log_probs, targets[..., None], axis=-1)[..., 0]
-  return token_log_probs, intermediate_outputs
+  token_log_probs = jnp.take_along_axis(log_probs, inputs[..., None], axis=-1)[..., 0]
+  # jax.debug.print("completions {x}",x=inputs[0])
+  return token_log_probs, logits, intermediate_outputs
 
 
 # -----------------------------------------------------------------------------
@@ -792,9 +790,8 @@ def train_loop(config, config_inference, state=None):
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       example_batch = prompt_completions(config_inference, engine, tokenizer_model, example_batch, state.params, init_rng)
-      breakpoint()
       # jax.debug.print("golden completion {x}",x=example_batch['completion'][0])
-      jax.debug.print("ar_completion[0] {x}",x=tokenizer_model.decode(example_batch['ar_completions'][0]))
+      # jax.debug.print("ar_completion[0] {x}",x=tokenizer_model.decode(example_batch['prompt_completions'][0]))
       # jax.debug.print("ar_completion_segmentation {x}",x=example_batch['ar_completions_segmentation'][0])
       # jax.debug.print("ar_completion_position {x}",x=example_batch['ar_completions_position'][0])
       # TODO: ensure this partitioning is correct
