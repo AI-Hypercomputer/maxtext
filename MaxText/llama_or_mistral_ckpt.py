@@ -957,16 +957,15 @@ def convert_to_jax_weights(base_model_path, model_size, huggingface_ckpt):
   return _convert_pytorch_to_jax_weights(base_model_path, model_size, model_params, mem_info)
 
 
-def save_jax_weights_to_checkpoint(maxtext_model_path, jax_weights):
+def save_weights_to_checkpoint(maxtext_model_path, jax_weights, device_count):
   """
-  Function to save jax_weights ready for MaxText to a parameters checkpoint
+  Function to save jax_weights ready for MaxText to a parameters checkpoint.
 
-  Attributes:
-  maxtext_model_path: Path to save the MaxText checkpoint to
-  model_size: llama2-7b to 70b, mistral-7b, or mixtral-8x7b, mixtral-8x22b
+  Args:
+      maxtext_model_path: Path to save the MaxText checkpoint.
+      jax_weights: The JAX model weights to be saved.
+      device_count: The number of simulated devices.
   """
-  """Save maxtext parameter checkpoint."""
-
   mem_info = psutil.Process()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
   gc.collect()
@@ -976,10 +975,10 @@ def save_jax_weights_to_checkpoint(maxtext_model_path, jax_weights):
   s3 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None))  # no sharding
 
   def checkpoint_device_put(arr):
-    if arr.shape[0] % SIMULATED_CPU_DEVICES_COUNT == 0:
+    if arr.shape[0] % device_count == 0:
       max_logging.log("sharding first axis")
       return jax.device_put(arr, device=s1)
-    elif len(arr.shape) > 1 and arr.shape[1] % SIMULATED_CPU_DEVICES_COUNT == 0:
+    elif len(arr.shape) > 1 and arr.shape[1] % device_count == 0:
       max_logging.log("sharding second axis")
       return jax.device_put(arr, device=s2)
     else:
@@ -1056,14 +1055,15 @@ if __name__ == "__main__":
     raise NotImplementedError
 
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={SIMULATED_CPU_DEVICES_COUNT}"
-
   base_weights_path = args.maxtext_model_path
 
   if args.lora_input_adapters_path:
     base_weights_path += "/base"
 
-  save_jax_weights_to_checkpoint(
-      base_weights_path, convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint)
+  save_weights_to_checkpoint(
+      args.maxtext_model_path,
+      convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint),
+      SIMULATED_CPU_DEVICES_COUNT,
   )
   max_logging.log(f"Successfully saved base_weights to {base_weights_path}.")
 
@@ -1096,7 +1096,7 @@ if __name__ == "__main__":
 
           lora_output_gcs_path = f"{args.maxtext_model_path}/loras/{lora_id}"
 
-          save_jax_weights_to_checkpoint(lora_output_gcs_path, jax_lora_weights)
+          save_weights_to_checkpoint(lora_output_gcs_path, jax_lora_weights, SIMULATED_CPU_DEVICES_COUNT)
           gcs_utils.write_dict_to_gcs_json(lora_config_dict, f"{lora_output_gcs_path}/adapter_config.json")
 
           max_logging.log(f"Successfully saved lora_weights to {lora_output_gcs_path}.")
