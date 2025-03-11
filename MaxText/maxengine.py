@@ -13,7 +13,6 @@
 # limitations under the License.
 
 """Implementation of Engine API for MaxText"""
-import copy as cp
 import functools
 from typing import Any, List, Optional, Tuple, Callable
 from collections import defaultdict
