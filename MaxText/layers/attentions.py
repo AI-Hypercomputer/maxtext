@@ -190,7 +190,6 @@ class PagedAttentionOp(nn.Module):
     value_pages_var.value = nn.with_logical_constraint(value_pages_var.value, self.kv_pages_axis_names)
     return key_pages_var, value_pages_var
 
-#whats the difference with the dot product
   def paged_dot_product_attention_with_max_and_sum(self, query, key, value):
     b, t, n, d = query.shape
     _, s, n_kv, _ = key.shape
@@ -218,25 +217,67 @@ class PagedAttentionOp(nn.Module):
 
     return attn, local_max, local_sums
 
-  def paged_attention(
+  def paged_attention_v2_prefill(
       self,
       query: Array,
       key_pages_var: nn.Variable,
       value_pages_var: nn.Variable,
       page_state: page_managers.PageState,
   ) -> Array:
-    """Apply Paged Attention.
+    """ Apply ragged input Paged Attention in prefill only.
+    """
+    k_p = jnp.permute_dims(key_pages_var.value, (1,2,0,3))
+    v_p = jnp.permute_dims(value_pages_var.value, (1,2,0,3))
+    c_q_l = jnp.array([0, page_state.sequence_lengths[0]]) #the accumulative real length of sequences
+    num_seqs = jnp.array([1]) 
+    query=query[0] #reduce [batch_size, max_num_tokens, num_kv_heads, head_dim] to [max_num_tokens, num_kv_heads, head_dim] since batch_size is always 1
+    result = pagedAttentionV2.ragged_paged_attention(
+        q=query, 
+        k_pages=k_p, # [total_num_pages, page_size, num_kv_heads, head_dim]
+        v_pages=v_p,
+        kv_lens=jnp.array([query.shape[0]]), #max_prefill_length
+        cu_q_lens=c_q_l,
+        page_indices=page_state.page_map,
+        num_seqs=num_seqs,
+        #num_kv_pages_per_block=self.pages_per_compute_block, #I saw repeated response when enabled this
+    )
+    return jnp.expand_dims(result, axis=0)
 
-    Annotations:
-    b: batch_size
-    s: sequence length
-    n: query heads
+  def paged_attention_v2_decode(
+      self,
+      query: Array,
+      key_pages_var: nn.Variable,
+      value_pages_var: nn.Variable,
+      page_state: page_managers.PageState,
+  ) -> Array:
+    """ Apply ragged input Paged Attention in decode only.
+    """
+    batch_size = query.shape[0]
+    query = jnp.squeeze(query, axis=1) #reduce [batch_size, seq_len, n_kv_head, head_dim] to [batch_size, n_kv_head, head_dim]
+    k_p = jnp.permute_dims(key_pages_var.value, (1,2,0,3))
+    v_p = jnp.permute_dims(value_pages_var.value, (1,2,0,3))
+    c_q_l = jnp.arange(batch_size+1) #in decode, we expect one token per sequence
+    num_seqs = jnp.array([batch_size]) # real number of requests, set it to batch_size though it's not real_num_seq to avoid compilation
+    result = pagedAttentionV2.ragged_paged_attention(
+        q=query, #[max_batched_num_tokens, num_kv_heads, head_dim]
+        k_pages=k_p, #[total_num_pages, page_size, num_kv_heads, head_dim]
+        v_pages=v_p, #[total_num_pages, page_size, num_kv_heads, head_dim]
+        kv_lens=page_state.sequence_lengths, #[max_num_seqs]
+        cu_q_lens=c_q_l, #[max_num_seqs+1]
+        page_indices=page_state.page_map, 
+        num_seqs=num_seqs,
+        num_kv_pages_per_block=self.pages_per_compute_block,
+    )
+    return jnp.expand_dims(result, axis=1)
 
-    k: kv_heads
-    x: num_pages
-    p: tokens_per_page
-
-    d: kv_head_dim_size
+  def paged_attention_v1_decode(
+      self,
+      query: Array,
+      key_pages_var: nn.Variable,
+      value_pages_var: nn.Variable,
+      page_state: page_managers.PageState,
+  ) -> Array:
+    """ Apply Paged Attention v1 in decode only.
     """
     bsnd = nn.logical_to_mesh_axes(self.query_axis_names)
     kxpd = nn.logical_to_mesh_axes(self.kv_pages_axis_names)
@@ -244,9 +285,6 @@ class PagedAttentionOp(nn.Module):
     num_heads_kv, num_pages, tokens_per_page, head_dim = key_pages_var.value.shape
 
     no_shard = P(None, None, None, None)
-    c_q_l = jnp.cumsum(page_state.sequence_lengths)
-    c_q_l = jnp.concatenate((jnp.array([0]), c_q_l))
-    jax.debug.print("q {}, kv_lens {}, cu_q_lens {}, page_indices {}, num_seqs 1", query, page_state.sequence_lengths, c_q_l, page_state.page_map)
     @functools.partial(
         shard_map,
         mesh=self.mesh,
@@ -264,31 +302,15 @@ class PagedAttentionOp(nn.Module):
     def wrap_paged_attention(q, k_pages, v_pages, lengths, page_indices, pages_per_compute_block):
       q = jnp.squeeze(q, axis=1)
       result = paged_attention(
-          q=q,
+          q=q, #[batch_size, num_kv_heads, head_dim]
           k_pages=k_pages,
           v_pages=v_pages,
           lengths=lengths,
           page_indices=page_indices,
           pages_per_compute_block=pages_per_compute_block,
       )
-      return jnp.expand_dims(result, axis=1)
-    def wrap_paged_attention_v2(q, k_pages, v_pages, lengths, page_indices, pages_per_compute_block):
-      q = jnp.squeeze(q, axis=1)
-      k_p = jnp.transpose(k_pages, (1,2,0,3))
-      v_p = jnp.transpose(v_pages, (1,2,0,3))
-      c_q_l = jnp.cumsum(lengths)
-      c_q_l = jnp.concatenate((jnp.array([0]), c_q_l))
-      result = pagedAttentionV2.ragged_paged_attention(
-          q=q,
-          k_pages=k_p,
-          v_pages=v_p,
-          kv_lens=lengths,
-          cu_q_lens=c_q_l,
-          page_indices=page_indices,
-          num_seqs=1,
-      )
-      return jnp.expand_dims(result, axis=1)
-    return wrap_paged_attention_v2(
+      return jnp.expand_dims(result, axis=0)
+    return wrap_paged_attention(
         query,
         key_pages_var.value,
         value_pages_var.value,
@@ -317,11 +339,11 @@ class PagedAttentionOp(nn.Module):
     self.update(key_pages_var, value_pages_var, key, value, model_mode, page_state)
 
     if model_mode == common_types.MODEL_MODE_PREFILL:
-      # why use this
-      return self.paged_dot_product_attention_with_max_and_sum(query, key, value)
+      #return self.paged_dot_product_attention_with_max_and_sum(query, key, value)
+      return self.paged_attention_v2_prefill(query, key_pages_var, value_pages_var, page_state), None, None
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-      #jax.debug.print("call: page status: {}, page map: {}, sequence length: {}, num pages: {}, current_page: {}, current_page_position: {}", page_state.page_status, page_state.page_map, page_state.sequence_lengths, page_state.num_pages_used, page_state.current_page, page_state.current_page_position)
-      ar_output = self.paged_attention(query, key_pages_var, value_pages_var, page_state)
+      ar_output = self.paged_attention_v2_decode(query, key_pages_var, value_pages_var, page_state)
+      #ar_output = self.paged_attention_v1_decode(query, key_pages_var, value_pages_var, page_state)
       return ar_output, None, None
 
   def update(
@@ -337,9 +359,6 @@ class PagedAttentionOp(nn.Module):
     if model_mode == common_types.MODEL_MODE_PREFILL:
       self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value)
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-      #jax.debug.print("update: page status: {}, page map: {}, sequence length: {}, num pages: {}, current_page: {}, current_page_position: {}", page_state.page_status, page_state.page_map, page_state.sequence_lengths, page_state.num_pages_used, page_state.current_page, page_state.current_page_position)
-      #jax.debug.print("update, page_state.page_map: {}", page_state.num_pages_used)
-      jax.debug.print("kv_len: {} and {}", key.shape, value.shape)
       self.update_decode_step_pages(key_pages_var, value_pages_var, key, value, page_state)
 
   def update_prefill_step_pages(
@@ -383,8 +402,6 @@ class PagedAttentionOp(nn.Module):
 
     key_pages_var.value = nn.with_logical_constraint(key, self.kv_pages_axis_names)
     value_pages_var.value = nn.with_logical_constraint(value, self.kv_pages_axis_names)
-
-    #jax.debug.print("update_prefill_step_pages, key_pages_var: {}, value_pages_var: {}", key_pages_var, value_pages_var)
 
   def update_decode_step_pages(self, key_pages_var, value_pages_var, key, value, page_state):
     key_pages = key_pages_var.value

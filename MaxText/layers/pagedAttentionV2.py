@@ -38,7 +38,7 @@ class MultiPageAsyncCopyDescriptor:
       pages_hbm_ref,  # [total_num_pages, page_size, num_kv_heads_per_blk, head_dim]
       vmem_buf,  # [num_kv_pages_per_blk, page_size, num_kv_heads_per_blk, head_dim]
       sem,
-      page_indices_ref,  # i32[num_seqs, pages_per_seq]
+      page_indices_ref,  # i32[max_num_seqs, pages_per_seq]
       offset,  # [seq_idx, kv_pages_start]
   ):
     self._vmem_buf = vmem_buf
@@ -67,11 +67,12 @@ def ref_ragged_paged_attention(
     queries: jax.Array,  # [max_num_batched_tokens, num_q_heads, head_dim]
     k_pages: jax.Array,  # [total_num_pages, page_size, num_kv_heads, head_dim]
     v_pages: jax.Array,  # [total_num_pages, page_size, num_kv_heads, head_dim]
-    kv_lens: jax.Array,  # i32[num_seqs]
-    page_indices: jax.Array,  # i32[num_seqs, pages_per_seq]
-    cu_q_lens: jax.Array,  # i32[num_seqs + 1]
-    num_seqs: int,
+    kv_lens: jax.Array,  # i32[max_num_seqs]
+    page_indices: jax.Array,  # i32[max_num_seqs, pages_per_seq]
+    cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
+    num_seqs: jax.Array,  # i32[1],
     *,
+    sm_scale: float = 1.0,
     mask_value: float = DEFAULT_MASK_VALUE,
 ):
   _, _, num_kv_heads, head_dim = k_pages.shape
@@ -79,7 +80,7 @@ def ref_ragged_paged_attention(
   assert num_q_heads % num_kv_heads == 0
   num_query_per_kv = num_q_heads // num_kv_heads
   outputs = []
-  for i in range(num_seqs):
+  for i in range(num_seqs[0]):
     q_start = cu_q_lens[i]
     q_end = cu_q_lens[i + 1]
     q_len = q_end - q_start
@@ -91,6 +92,7 @@ def ref_ragged_paged_attention(
     k = jnp.repeat(k, num_query_per_kv, axis=1)
     v = jnp.repeat(v, num_query_per_kv, axis=1)
     attn = jnp.einsum("qhd,khd->hqk", q, k, preferred_element_type=jnp.float32)
+    attn *= sm_scale
     q_span = (kv_len - q_len) + jax.lax.broadcasted_iota(
         jnp.int32, attn.shape, 1
     )
@@ -111,14 +113,16 @@ def validate_inputs_on_runtime(
     kv_lens: jax.Array,  # i32[max_num_seqs]
     page_indices: jax.Array,  # i32[max_num_seqs, pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
-    num_seqs,  # i32
+    num_seqs,  # i32[1]
 ):
-  check_inputs_shapes(q, k_pages, v_pages, kv_lens, page_indices, cu_q_lens)
+  check_inputs_shapes(
+      q, k_pages, v_pages, kv_lens, page_indices, cu_q_lens, num_seqs
+  )
   max_num_batched_tokens = q.shape[0]
   page_size = k_pages.shape[1]
   max_num_seqs, pages_per_seq = page_indices.shape
-  if num_seqs > max_num_seqs:
-    raise ValueError(f"{num_seqs=} must be less or equal to {max_num_seqs=}")
+  if num_seqs[0] > max_num_seqs:
+    raise ValueError(f"{num_seqs[0]=} must be less or equal to {max_num_seqs=}")
   max_kv_len = jnp.max(kv_lens)
   min_pages_per_seq = ceil_div(max_kv_len, page_size)
   if pages_per_seq < min_pages_per_seq:
@@ -126,15 +130,13 @@ def validate_inputs_on_runtime(
         f"{pages_per_seq=} must be greater or equal to"
         f" {min_pages_per_seq=} given {max_kv_len=} and {page_size=}."
     )
-  if cu_q_lens[num_seqs] > max_num_batched_tokens:
+  if cu_q_lens[num_seqs[0]] > max_num_batched_tokens:
     raise ValueError(
-        f"Total q tokens {cu_q_lens[num_seqs]} must be less or equal to"
+        f"Total q tokens {cu_q_lens[num_seqs[0]]} must be less or equal to"
         f" {max_num_batched_tokens=}."
     )
-  for i in range(num_seqs):
-    q_start = cu_q_lens[i]
-    q_end = cu_q_lens[i + 1]
-    q_len = q_end - q_start
+  for i in range(num_seqs[0]):
+    q_len = cu_q_lens[i + 1] - cu_q_lens[i]
     kv_len = kv_lens[i]
     if q_len > kv_len:
       raise ValueError(
@@ -150,10 +152,13 @@ def check_inputs_shapes(
     kv_lens: jax.Array,  # i32[max_num_seqs]
     page_indices: jax.Array,  # i32[max_num_seqs, pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
+    num_seqs,  # i32[1]
 ):
-  max_num_batched_tokens, num_q_heads, head_dim = q.shape
+  _, num_q_heads, head_dim = q.shape
   _, _, num_kv_heads, head_dim_k = k_pages.shape
   max_num_seqs, _ = page_indices.shape
+  if num_seqs.shape != (1,):
+    raise ValueError(f"{num_seqs.shape=} must be (1,)")
   if k_pages.shape != v_pages.shape:
     raise ValueError(
         f"{k_pages.shape=} and {v_pages.shape=} must have the same shape."
@@ -165,16 +170,12 @@ def check_inputs_shapes(
   if kv_lens.shape != (max_num_seqs,):
     raise ValueError(
         f"Expected {kv_lens.shape=} to be ({max_num_seqs},) where"
-        " `max_num_seqs` comes from `page_indices`."
+        " `max_num_seqs` is `page_indices.shape[0]`."
     )
   if cu_q_lens.shape != (max_num_seqs + 1,):
     raise ValueError(
         f"Expected {cu_q_lens.shape=} to be ({max_num_seqs + 1},)  where"
-        " `max_num_seqs` comes from `page_indices`."
-    )
-  if max_num_seqs > max_num_batched_tokens:
-    raise ValueError(
-        f"{max_num_seqs=} must be less or equal to {max_num_batched_tokens=}."
+        " `max_num_seqs` is `page_indices.shape[0]`."
     )
   if (
       kv_lens.dtype != jnp.int32
@@ -183,7 +184,7 @@ def check_inputs_shapes(
   ):
     raise ValueError(
         "The dtype of `kv_lens`, `page_indices`, and `cu_q_lens` must be"
-        f" int32. Got {{kv_lens.dtype=}}, {page_indices.dtype=},"
+        f" int32. Got {kv_lens.dtype=}, {page_indices.dtype=},"
         f" {cu_q_lens.dtype=}."
     )
   if num_q_heads % num_kv_heads != 0:
@@ -268,6 +269,15 @@ def ragged_paged_attention_kernel(
     b = jnp.right_shift(b, bw * b_offset)
     b = jnp.left_shift(b, bw * (packing - 1))
     return pltpu.bitcast(b, jnp.float32).astype(jnp.bfloat16)
+
+  def fold_on_2nd_minor(vec):
+    assert vec.dtype == jnp.bfloat16 or vec.dtype == jnp.float32
+    assert len(vec.shape) >= 2
+    last_dim = vec.shape[-1]
+    packing = get_dtype_packing(vec.dtype)
+    if vec.shape[-2] % packing != 0:
+      vec = vec.astype(jnp.float32)
+    return vec.reshape(-1, last_dim)
 
   @pl.when(heads_blk_idx + q_blk_idx == 0)
   def prefetch_first_kv_blk():
@@ -494,9 +504,9 @@ def ragged_paged_attention_kernel(
         q_head_idx = kv_head_idx * num_q_heads_per_kv_head
         # TODO(jevinjiang): extra handlig for packed type that can start at
         # unaligned position!
-        q = q_ref[
-            :, q_head_idx : q_head_idx + num_q_heads_per_kv_head, :
-        ].reshape(-1, head_dim)
+        q = fold_on_2nd_minor(
+            q_ref[:, q_head_idx : q_head_idx + num_q_heads_per_kv_head, :]
+        )
         k = strided_load_kv(k_ref, kv_head_idx, num_kv_heads_per_blk)
         v = strided_load_kv(v_ref, kv_head_idx, num_kv_heads_per_blk)
         flash_attention(
@@ -513,7 +523,7 @@ def ragged_paged_attention_kernel(
     _, next_buf_idx = lax.while_loop(
         is_valid_kv_blk_in_cur_seq,
         compute_with_kv_blk_in_cur_seq,
-        (0, cur_buf_idx),
+        (0, cur_buf_idx),  # (kv_blk_idx, buf_idx)
     )
     next_seq_idx = lax.select(q_end <= q_len_end, cur_seq_idx + 1, cur_seq_idx)
     done = lax.select(q_end < q_len_end, done, 1)
@@ -522,7 +532,7 @@ def ragged_paged_attention_kernel(
   _, seq_idx, buf_idx = lax.while_loop(
       is_cur_q_blk_needed,
       compute_with_cur_q_blk,
-      (0, init_seq_idx, init_buf_idx),
+      (0, init_seq_idx, init_buf_idx),  # (done, seq_idx, buf_idx)
   )
   # Reset seq_idx for next kv_heads_blk if run out of seqs!
   seq_buf_idx_ref[0] = lax.select(seq_idx < num_seqs, seq_idx, 0)
@@ -578,9 +588,10 @@ def get_min_heads_per_blk(num_q_heads, num_kv_heads, q_dtype, kv_dtype):
 @functools.partial(
     jax.jit,
     static_argnames=[
+        "sm_scale",
+        "mask_value",
         "num_kv_pages_per_block",
         "num_queries_per_block",
-        "mask_value",
         "vmem_limit_bytes",
     ],
 )
@@ -592,13 +603,13 @@ def ragged_paged_attention(
     kv_lens: jax.Array,  # i32[max_num_seqs]
     page_indices: jax.Array,  # i32[max_num_seqs, pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
-    num_seqs,  # i32
+    num_seqs: jax.Array,  # i32[1]
     *,
     sm_scale: float = 1.0,
     mask_value: float = DEFAULT_MASK_VALUE,
     num_kv_pages_per_block: int = 16,
     num_queries_per_block: int = 128,
-    vmem_limit_bytes: int = 16 * 1024 * 1024,
+    vmem_limit_bytes: int | None = None,
 ):
   """Ragged paged attention that supports mixed prefill and decode.
 
@@ -623,13 +634,15 @@ def ragged_paged_attention(
   Returns:
     The output of the attention.
   """
-  check_inputs_shapes(q, k_pages, v_pages, kv_lens, page_indices, cu_q_lens)
-  num_q, num_q_heads, head_dim = q.shape
+  check_inputs_shapes(
+      q, k_pages, v_pages, kv_lens, page_indices, cu_q_lens, num_seqs
+  )
+  _, num_q_heads, head_dim = q.shape
   _, page_size, num_kv_heads, _ = k_pages.shape
   num_q_per_blk = num_queries_per_block
   num_kv_pages_per_blk = num_kv_pages_per_block
   num_q_heads_per_kv_head = num_q_heads // num_kv_heads
-  num_q_blks = ceil_div(num_q, num_q_per_blk)
+  num_q_blks = ceil_div(cu_q_lens[num_seqs[0]], num_q_per_blk)
   num_q_heads_per_blk, num_kv_heads_per_blk = get_min_heads_per_blk(
       num_q_heads, num_kv_heads, q.dtype, k_pages.dtype
   )
@@ -669,7 +682,7 @@ def ragged_paged_attention(
   scratch_shapes = [
       double_buf_scratch,  # k_bufs
       double_buf_scratch,  # v_bufs
-      pltpu.SemaphoreType.DMA((2, 2)),
+      pltpu.SemaphoreType.DMA((2, 2)),  # [double_buffers, k_sem/v_sem]
       lm_scratch,  # l_ref
       lm_scratch,  # m_ref
   ]
@@ -678,8 +691,7 @@ def ragged_paged_attention(
       page_indices,
       cu_q_lens,
       jnp.array((0, 0), jnp.int32),  # seq_idx, buf_idx
-      # Mosaic only takes dynamic scalar as ref, so we wrap it.
-      jnp.array([num_seqs], jnp.int32),  # num_seqs
+      num_seqs,
   )
   kernel = pl.pallas_call(
       functools.partial(
