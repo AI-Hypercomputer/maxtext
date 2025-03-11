@@ -304,8 +304,24 @@ class AttentionOp(nn.Module):
           # fallback to dot_product as pallas gpu flash attention doesn't support decode stage
           return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
         else:
-          key = jnp.repeat(key, self.num_query_heads // self.num_kv_heads, axis=2)
-          value = jnp.repeat(value, self.num_query_heads // self.num_kv_heads, axis=2)
+          head_axis = -2
+          num_query_heads = query.shape[head_axis]
+          num_kv_heads = key.shape[head_axis]
+          if num_query_heads != num_kv_heads:
+            # Handle cases where the number of query heads is different from the number of key/value heads.
+            if num_query_heads % num_kv_heads != 0:
+              raise ValueError(
+                  f"Number of query heads ({num_query_heads}) must be divisible by number of key/value heads ({num_kv_heads})."
+              )
+            # TODO Investigate if the KV copy can be eliminated. It's likely redundant.
+            q_heads_per_kv_head = num_query_heads // num_kv_heads
+
+            key = jnp.repeat(
+                key, q_heads_per_kv_head, axis=head_axis
+            )  # key shape [batch_size, kv_seq_len, num_kv_heads, head_dim]
+            value = jnp.repeat(
+                value, q_heads_per_kv_head, axis=head_axis
+            )  # value shape [batch_size, kv_seq_len, num_kv_heads, head_dim]
           out = gpu_pallas_attention.mha(query, key, value, decoder_segment_ids, sm_scale=1.0, causal=True)
           return out, None, None
     elif self.attention_kernel == "cudnn_flash_te":
