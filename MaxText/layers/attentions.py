@@ -1499,11 +1499,11 @@ class Attention(nn.Module):
       )
     elif rope_type.startswith("yarn"):
       rotary_embedding = YarnRotaryEmbedding(
-          max_seq_len=self.config.max_target_length,
-          original_seq_len=self.config.original_seq_len,
+          max_position_embeddings=self.config.max_position_embeddings,
+          original_max_position_embeddings=self.config.original_max_position_embeddings,
           beta_fast=self.config.beta_fast,
           beta_slow=self.config.beta_slow,
-          rope_theta=self.config.rope_theta,
+          rope_theta=self.config.rope_max_timescale,
           rope_factor=self.config.rope_factor,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
@@ -1617,8 +1617,8 @@ class MLA(Attention):
   qk_nope_head_dim: int = 128
   qk_rope_head_dim: int = 64
   v_head_dim: int = 128
-  max_seq_len: int = 4096 * 4
-  original_seq_len: int = 4096
+  max_position_embeddings: int = 4096 * 4
+  original_max_position_embeddings: int = 4096
   mscale: float = 1.0  # scaling factor for softmax
   rope_factor: float = 40.0  # rotary embedding factor
 
@@ -1719,7 +1719,7 @@ class MLA(Attention):
 
     # Set softmax scaling.
     self.softmax_scale = self.qk_head_dim**-0.5
-    if self.max_seq_len > self.original_seq_len:
+    if self.max_position_embeddings > self.original_max_position_embeddings:
       mscale = 0.1 * self.mscale * jnp.log(self.rope_factor) + 1.0
       self.softmax_scale = self.softmax_scale * mscale * mscale
 
@@ -1736,9 +1736,9 @@ class MLA(Attention):
     # Split into non-positional and rotary parts.
     q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=-1)
     q_pe = self.apply_rotary_embedding(q_pe, inputs_positions, name="query_rope")
-    # Query projection is scaled by  1 / self.softmax_scale to be consistent MaxText implementation.
+    # Query projection is scaled by self.softmax_scale to be consistent MaxText implementation.
     # DeepSeek v3 was doing it in attention score computation.
-    return jnp.concatenate([q_nope, q_pe], axis=-1) / self.softmax_scale
+    return jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
 
   def mla_kv_projection(self, inputs: Array, inputs_positions: Array) -> Tuple[Array, Array]:
     """MLA key/value projection with integrated rotary embedding."""
