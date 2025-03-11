@@ -514,9 +514,14 @@ class Decoder(nn.Module):
       )(
           y
       )  # We do not quantize the logits matmul.
-    logits = nn.with_logical_constraint(
-        logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
-    )
+
+    if model_mode in [common_types.MODEL_MODE_PREFILL, common_types.MODEL_MODE_AUTOREGRESSIVE]:
+      logits = nn.with_logical_constraint(logits, (None, None, "activation_vocab"))
+    else:
+      logits = nn.with_logical_constraint(
+          logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
+      )
+
     if self.config.cast_logits_to_fp32:
       logits = logits.astype(jnp.float32)
     return logits
