@@ -39,7 +39,7 @@ echo "Finished pre-training"
 python3 MaxText/train.py MaxText/configs/base.yml model_name=mixtral-8x7b hardware=gpu \
     load_parameters_path=${SCANNED_CHECKPOINT} \
     base_output_directory=${BASE_OUTPUT_PATH} dataset_path=${DATASET_PATH} \
-    run_name=dropping_pre_training async_checkpointing=false \
+    run_name=dropping_pre_training async_checkpointing=true \
     attention=cudnn_flash_te capacity_factor=1.25 dtype=bfloat16 \
     ici_expert_parallelism=-1 ici_fsdp_parallelism=1 \
     max_target_length=1024 megablox=False per_device_batch_size=1 \

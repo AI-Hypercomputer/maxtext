@@ -40,12 +40,10 @@ class PagedAttentionTest(unittest.TestCase):
     self._max_prefill_predict_length = 512
     self._max_target_length = 1024
     self._dtype = jnp.float32
-
     # PagedAttention settings
     self._num_pages = 64
     self._tokens_per_page = 32
     self._pages_per_compute_block = 16
-
     self.rng = jax.random.PRNGKey(42)
     devices = jax.devices()
     if len(devices) > 1:
@@ -92,7 +90,7 @@ class PagedAttentionTest(unittest.TestCase):
         current_page_position=jnp.zeros(1, dtype=jnp.int32),
     )
 
-    variables = attention_op.init(self.rng, query, key, value, None, common_types.MODEL_MODE_PREFILL, page_state)
+    variables = attention_op.init(self.rng, query, key, value, None, common_types.MODEL_MODE_PREFILL, None, page_state)
     output_tuple, mutated_variables = attention_op.apply(
         variables, query, key, value, None, common_types.MODEL_MODE_PREFILL, page_state, mutable=["cache"]
     )
@@ -130,6 +128,7 @@ class PagedAttentionTest(unittest.TestCase):
         value,
         None,
         common_types.MODEL_MODE_PREFILL,
+        None,
         page_state,
     )
 
@@ -142,6 +141,7 @@ class PagedAttentionTest(unittest.TestCase):
         decoder_segment_ids=None,
         # Provide a None or a suitable Array for decoder_segment_ids
         model_mode=common_types.MODEL_MODE_PREFILL,  # Provide the model mode
+        previous_chunk=None,
         page_state=page_state,  # Provide the page_state
         mutable=["cache"],
     )
@@ -199,6 +199,7 @@ class PagedAttentionTest(unittest.TestCase):
         value=value,
         decoder_segment_ids=None,
         model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+        previous_chunk=None,
         page_state=page_state,
     )
 
@@ -209,6 +210,7 @@ class PagedAttentionTest(unittest.TestCase):
         value=value,
         decoder_segment_ids=None,
         model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+        previous_chunk=None,
         page_state=page_state,
         mutable=["cache"],
     )
@@ -258,9 +260,9 @@ class PagedAttentionTest(unittest.TestCase):
         current_page_position=jnp.zeros(1, dtype=jnp.int32),
     )
 
-    variables = self.attention_op.init(self.rng, query, key, value, None, common_types.MODEL_MODE_PREFILL, page_state)
+    variables = self.attention_op.init(self.rng, query, key, value, None, common_types.MODEL_MODE_PREFILL, None, page_state)
     output_tuple, _ = self.attention_op.apply(
-        variables, query, key, value, None, common_types.MODEL_MODE_PREFILL, page_state, mutable=["cache"]
+        variables, query, key, value, None, common_types.MODEL_MODE_PREFILL, None, page_state, mutable=["cache"]
     )
     paged_output, max_vals, sum_vals = output_tuple
 
@@ -286,9 +288,11 @@ class PagedAttentionTest(unittest.TestCase):
         current_page_position=jnp.zeros(1, dtype=jnp.int32),
     )
 
-    variables = self.attention_op.init(self.rng, query, key, value, None, common_types.MODEL_MODE_AUTOREGRESSIVE, page_state)
+    variables = self.attention_op.init(
+        self.rng, query, key, value, None, common_types.MODEL_MODE_AUTOREGRESSIVE, None, page_state
+    )
     output_tuple, _ = self.attention_op.apply(
-        variables, query, key, value, None, common_types.MODEL_MODE_AUTOREGRESSIVE, page_state, mutable=["cache"]
+        variables, query, key, value, None, common_types.MODEL_MODE_AUTOREGRESSIVE, None, page_state, mutable=["cache"]
     )
 
     # In autoregressive mode, normalization is handled internally
@@ -319,7 +323,7 @@ class PagedAttentionTest(unittest.TestCase):
 
     # Initialize attention op
     variables = self.attention_op.init(
-        self.rng, prefill_tokens, prefill_tokens, prefill_tokens, None, common_types.MODEL_MODE_PREFILL, page_state
+        self.rng, prefill_tokens, prefill_tokens, prefill_tokens, None, common_types.MODEL_MODE_PREFILL, None, page_state
     )
 
     output_tuple, _ = self.attention_op.apply(
@@ -329,6 +333,7 @@ class PagedAttentionTest(unittest.TestCase):
         prefill_tokens,
         None,
         common_types.MODEL_MODE_PREFILL,
+        None,
         page_state,
         mutable=["cache"],
     )
@@ -366,7 +371,7 @@ class PagedAttentionTest(unittest.TestCase):
 
     # Initialize attention ops
     variables = self.attention_op.init(
-        self.rng, prefill_tokens, prefill_tokens, prefill_tokens, None, common_types.MODEL_MODE_PREFILL, page_state
+        self.rng, prefill_tokens, prefill_tokens, prefill_tokens, None, common_types.MODEL_MODE_PREFILL, None, page_state
     )
 
     output_tuple, mutated_vars = self.attention_op.apply(
@@ -376,6 +381,7 @@ class PagedAttentionTest(unittest.TestCase):
         prefill_tokens,
         None,
         common_types.MODEL_MODE_PREFILL,
+        None,
         page_state,
         mutable=["cache"],
     )
@@ -388,7 +394,15 @@ class PagedAttentionTest(unittest.TestCase):
     ar_token = jax.random.normal(rng2, (batch_size, 1, num_heads, head_dim))
 
     ar_output_tuple, _ = self.attention_op.apply(
-        variables, ar_token, ar_token, ar_token, None, common_types.MODEL_MODE_AUTOREGRESSIVE, page_state, mutable=["cache"]
+        variables,
+        ar_token,
+        ar_token,
+        ar_token,
+        None,
+        common_types.MODEL_MODE_AUTOREGRESSIVE,
+        None,
+        page_state,
+        mutable=["cache"],
     )
 
     ar_output, _, _ = ar_output_tuple
@@ -424,10 +438,12 @@ class PagedAttentionTest(unittest.TestCase):
     )
 
     # Initialize and apply attention
-    variables = self.attention_op.init(self.rng, query, key, value, None, common_types.MODEL_MODE_AUTOREGRESSIVE, page_state)
+    variables = self.attention_op.init(
+        self.rng, query, key, value, None, common_types.MODEL_MODE_AUTOREGRESSIVE, None, page_state
+    )
 
     output_tuple, _ = self.attention_op.apply(
-        variables, query, key, value, None, common_types.MODEL_MODE_AUTOREGRESSIVE, page_state, mutable=["cache"]
+        variables, query, key, value, None, common_types.MODEL_MODE_AUTOREGRESSIVE, None, page_state, mutable=["cache"]
     )
 
     # AR mode returns (output, None, None)
@@ -455,10 +471,10 @@ class PagedAttentionTest(unittest.TestCase):
         current_page_position=jnp.zeros(batch_size, dtype=jnp.int32),
     )
 
-    variables = self.attention_op.init(self.rng, query, key, value, None, common_types.MODEL_MODE_PREFILL, page_state)
+    variables = self.attention_op.init(self.rng, query, key, value, None, common_types.MODEL_MODE_PREFILL, None, page_state)
 
     output_tuple, _ = self.attention_op.apply(
-        variables, query, key, value, None, common_types.MODEL_MODE_PREFILL, page_state, mutable=["cache"]
+        variables, query, key, value, None, common_types.MODEL_MODE_PREFILL, None, page_state, mutable=["cache"]
     )
 
     paged_output, max_vals, sum_vals = output_tuple
@@ -490,9 +506,9 @@ class PagedAttentionTest(unittest.TestCase):
     )
 
     # Run prefill
-    variables = self.attention_op.init(self.rng, query, key, value, None, common_types.MODEL_MODE_PREFILL, page_state)
+    variables = self.attention_op.init(self.rng, query, key, value, None, common_types.MODEL_MODE_PREFILL, None, page_state)
     output_tuple, mutated_vars = self.attention_op.apply(
-        variables, query, key, value, None, common_types.MODEL_MODE_PREFILL, page_state, mutable=["cache"]
+        variables, query, key, value, None, common_types.MODEL_MODE_PREFILL, None, page_state, mutable=["cache"]
     )
 
     prefill_output, _, _ = output_tuple
@@ -505,7 +521,15 @@ class PagedAttentionTest(unittest.TestCase):
     ar_value = jax.random.normal(self.rng, (batch_size, 1, self._num_kv_heads, self._head_dim))
 
     ar_output_tuple, _ = self.attention_op.apply(
-        mutated_vars, ar_query, ar_key, ar_value, None, common_types.MODEL_MODE_AUTOREGRESSIVE, page_state, mutable=["cache"]
+        mutated_vars,
+        ar_query,
+        ar_key,
+        ar_value,
+        None,
+        common_types.MODEL_MODE_AUTOREGRESSIVE,
+        None,
+        page_state,
+        mutable=["cache"],
     )
 
     ar_output, _, _ = ar_output_tuple
@@ -542,7 +566,7 @@ class PagedAttentionTest(unittest.TestCase):
 
     # Initialize attention op
     variables = self.attention_op.init(
-        self.rng, key, key, value, None, common_types.MODEL_MODE_AUTOREGRESSIVE, page_state  # Use as query too
+        self.rng, key, key, value, None, common_types.MODEL_MODE_AUTOREGRESSIVE, None, page_state  # Use as query too
     )
 
     # Perform multiple sequential updates
@@ -558,7 +582,15 @@ class PagedAttentionTest(unittest.TestCase):
 
       # Update cache
       _, variables = self.attention_op.apply(
-          variables, new_key, new_key, new_value, None, common_types.MODEL_MODE_AUTOREGRESSIVE, page_state, mutable=["cache"]
+          variables,
+          new_key,
+          new_key,
+          new_value,
+          None,
+          common_types.MODEL_MODE_AUTOREGRESSIVE,
+          None,
+          page_state,
+          mutable=["cache"],
       )
 
       # Update page state
@@ -633,7 +665,7 @@ class PagedAttentionTest(unittest.TestCase):
         current_page_position=jnp.zeros(batch_size, dtype=jnp.int32),
     )
 
-    variables = attention_op.init(self.rng, query, key, value, None, common_types.MODEL_MODE_PREFILL, page_state)
+    variables = attention_op.init(self.rng, query, key, value, None, common_types.MODEL_MODE_PREFILL, None, page_state)
 
     output_tuple, _ = attention_op.apply(
         variables, query, key, value, None, common_types.MODEL_MODE_PREFILL, page_state, mutable=["cache"]
@@ -707,12 +739,12 @@ class PagedAttentionTest(unittest.TestCase):
     )
 
     variables = self.attention_op.init(
-        self.rng, key1, key1, value1, None, common_types.MODEL_MODE_AUTOREGRESSIVE, page_state
+        self.rng, key1, key1, value1, None, common_types.MODEL_MODE_AUTOREGRESSIVE, None, page_state
     )
 
     # Store first sequence
     _, mutated_vars = self.attention_op.apply(
-        variables, key1, key1, value1, None, common_types.MODEL_MODE_AUTOREGRESSIVE, page_state, mutable=["cache"]
+        variables, key1, key1, value1, None, common_types.MODEL_MODE_AUTOREGRESSIVE, None, page_state, mutable=["cache"]
     )
 
     # Create new sequence with different values
@@ -731,7 +763,7 @@ class PagedAttentionTest(unittest.TestCase):
 
     # Store second sequence in same location
     output_tuple, final_vars = self.attention_op.apply(
-        mutated_vars, key2, key2, value2, None, common_types.MODEL_MODE_AUTOREGRESSIVE, page_state, mutable=["cache"]
+        mutated_vars, key2, key2, value2, None, common_types.MODEL_MODE_AUTOREGRESSIVE, None, page_state, mutable=["cache"]
     )
 
     output, _, _ = output_tuple
@@ -774,10 +806,10 @@ class PagedAttentionTest(unittest.TestCase):
         current_page_position=jnp.zeros(batch_size, dtype=jnp.int32),
     )
 
-    variables = self.attention_op.init(self.rng, query, key, value, None, common_types.MODEL_MODE_PREFILL, page_state)
+    variables = self.attention_op.init(self.rng, query, key, value, None, common_types.MODEL_MODE_PREFILL, None, page_state)
 
     output_tuple, _ = self.attention_op.apply(
-        variables, query, key, value, None, common_types.MODEL_MODE_PREFILL, page_state, mutable=["cache"]
+        variables, query, key, value, None, common_types.MODEL_MODE_PREFILL, None, page_state, mutable=["cache"]
     )
 
     output, max_vals, sum_vals = output_tuple
@@ -816,10 +848,10 @@ class PagedAttentionTest(unittest.TestCase):
         current_page_position=jnp.zeros(batch_size, dtype=jnp.int32),
     )
 
-    variables = self.attention_op.init(self.rng, query, key, value, None, common_types.MODEL_MODE_PREFILL, page_state)
+    variables = self.attention_op.init(self.rng, query, key, value, None, common_types.MODEL_MODE_PREFILL, None, page_state)
 
     output_tuple, _ = self.attention_op.apply(
-        variables, query, key, value, None, common_types.MODEL_MODE_PREFILL, page_state, mutable=["cache"]
+        variables, query, key, value, None, common_types.MODEL_MODE_PREFILL, None, page_state, mutable=["cache"]
     )
 
     output, max_vals, sum_vals = output_tuple
@@ -865,11 +897,11 @@ class PagedAttentionTest(unittest.TestCase):
 
     # Initialize and run attention
     variables = self.attention_op.init(
-        self.rng, queries, queries, queries, None, common_types.MODEL_MODE_PREFILL, page_state
+        self.rng, queries, queries, queries, None, common_types.MODEL_MODE_PREFILL, None, page_state
     )
 
     output_tuple, _ = self.attention_op.apply(
-        variables, queries, queries, queries, None, common_types.MODEL_MODE_PREFILL, page_state, mutable=["cache"]
+        variables, queries, queries, queries, None, common_types.MODEL_MODE_PREFILL, None, page_state, mutable=["cache"]
     )
 
     # Verify outputs are different for each slot
@@ -907,7 +939,7 @@ class PagedAttentionTest(unittest.TestCase):
 
     # Do prefill for all slots
     variables = self.attention_op.init(
-        self.rng, prefill_inputs, prefill_inputs, prefill_inputs, None, common_types.MODEL_MODE_PREFILL, page_state
+        self.rng, prefill_inputs, prefill_inputs, prefill_inputs, None, common_types.MODEL_MODE_PREFILL, None, page_state
     )
 
     _, mutated_vars = self.attention_op.apply(
@@ -917,6 +949,7 @@ class PagedAttentionTest(unittest.TestCase):
         prefill_inputs,
         None,
         common_types.MODEL_MODE_PREFILL,
+        None,
         page_state,
         mutable=["cache"],
     )
@@ -947,6 +980,7 @@ class PagedAttentionTest(unittest.TestCase):
         ar_inputs,
         None,
         common_types.MODEL_MODE_AUTOREGRESSIVE,
+        None,
         ar_page_state,
         mutable=["cache"],
     )
@@ -991,7 +1025,7 @@ class PagedAttentionTest(unittest.TestCase):
 
     # Do prefill
     variables = self.attention_op.init(
-        self.rng, prefill_inputs, prefill_inputs, prefill_inputs, None, common_types.MODEL_MODE_PREFILL, page_state
+        self.rng, prefill_inputs, prefill_inputs, prefill_inputs, None, common_types.MODEL_MODE_PREFILL, None, page_state
     )
 
     _, current_vars = self.attention_op.apply(
@@ -1001,6 +1035,7 @@ class PagedAttentionTest(unittest.TestCase):
         prefill_inputs,
         None,
         common_types.MODEL_MODE_PREFILL,
+        None,
         page_state,
         mutable=["cache"],
     )
@@ -1071,6 +1106,7 @@ class PagedAttentionTest(unittest.TestCase):
           ar_inputs,
           None,
           common_types.MODEL_MODE_AUTOREGRESSIVE,
+          None,
           current_page_state,
           mutable=["cache"],
       )
@@ -1118,7 +1154,7 @@ class PagedAttentionTest(unittest.TestCase):
 
     # Initialize attention op
     variables = self.attention_op.init(
-        self.rng, prefill_input, prefill_input, prefill_input, None, common_types.MODEL_MODE_PREFILL, page_state
+        self.rng, prefill_input, prefill_input, prefill_input, None, common_types.MODEL_MODE_PREFILL, None, page_state
     )
 
     output_tuple, variables = self.attention_op.apply(
@@ -1128,6 +1164,7 @@ class PagedAttentionTest(unittest.TestCase):
         prefill_input,
         None,
         common_types.MODEL_MODE_PREFILL,
+        None,
         page_state,
         mutable=["cache"],
     )
@@ -1153,6 +1190,7 @@ class PagedAttentionTest(unittest.TestCase):
           ar_input,
           None,
           common_types.MODEL_MODE_AUTOREGRESSIVE,
+          None,
           page_state,
           mutable=["cache"],
       )
@@ -1188,9 +1226,9 @@ class PagedAttentionTest(unittest.TestCase):
     )
 
     # Store first sequence
-    variables = self.attention_op.init(self.rng, key1, key1, value1, None, common_types.MODEL_MODE_PREFILL, page_state)
+    variables = self.attention_op.init(self.rng, key1, key1, value1, None, common_types.MODEL_MODE_PREFILL, None, page_state)
     output_tuple1, vars1 = self.attention_op.apply(
-        variables, key1, key1, value1, None, common_types.MODEL_MODE_PREFILL, page_state, mutable=["cache"]
+        variables, key1, key1, value1, None, common_types.MODEL_MODE_PREFILL, None, page_state, mutable=["cache"]
     )
     first_output = output_tuple1[0]
 
@@ -1214,7 +1252,7 @@ class PagedAttentionTest(unittest.TestCase):
 
     # Store second sequence in same slot
     output_tuple2, vars2 = self.attention_op.apply(
-        vars1, key2, key2, value2, None, common_types.MODEL_MODE_PREFILL, page_state, mutable=["cache"]
+        vars1, key2, key2, value2, None, common_types.MODEL_MODE_PREFILL, None, page_state, mutable=["cache"]
     )
     second_output = output_tuple2[0]
 
@@ -1258,7 +1296,7 @@ class PagedAttentionTest(unittest.TestCase):
     x1 = jax.random.normal(self.rng, (batch_size, seq_len, num_heads, head_dim))
 
     # Initialize and store first sequence
-    variables = self.attention_op.init(self.rng, x1, x1, x1, None, common_types.MODEL_MODE_PREFILL, page_state)
+    variables = self.attention_op.init(self.rng, x1, x1, x1, None, common_types.MODEL_MODE_PREFILL, None, page_state)
 
     # Get initial KV cache state
     initial_cache = variables["cache"]
@@ -1310,14 +1348,14 @@ class PagedAttentionTest(unittest.TestCase):
     x1 = jax.random.normal(self.rng, (batch_size, seq_len, num_heads, head_dim))
 
     # Initialize
-    variables = self.attention_op.init(self.rng, x1, x1, x1, None, common_types.MODEL_MODE_PREFILL, page_state)
+    variables = self.attention_op.init(self.rng, x1, x1, x1, None, common_types.MODEL_MODE_PREFILL, None, page_state)
 
     # Store sequence of outputs for examination
     outputs = []
 
     # Do prefill
     output_tuple, vars = self.attention_op.apply(
-        variables, x1, x1, x1, None, common_types.MODEL_MODE_PREFILL, page_state, mutable=["cache"]
+        variables, x1, x1, x1, None, common_types.MODEL_MODE_PREFILL, None, page_state, mutable=["cache"]
     )
     outputs.append(output_tuple[0])
     variables = vars
@@ -1338,6 +1376,7 @@ class PagedAttentionTest(unittest.TestCase):
           gen_input,
           None,
           common_types.MODEL_MODE_AUTOREGRESSIVE,
+          None,
           page_state,
           mutable=["cache"],
       )
@@ -1378,14 +1417,14 @@ class PagedAttentionTest(unittest.TestCase):
         current_page_position=jnp.zeros(batch_size, dtype=jnp.int32),
     )
 
-    variables = self.attention_op.init(self.rng, x, x, x, None, common_types.MODEL_MODE_AUTOREGRESSIVE, page_state)
+    variables = self.attention_op.init(self.rng, x, x, x, None, common_types.MODEL_MODE_AUTOREGRESSIVE, None, page_state)
 
     # Store initial KV cache state
     initial_k_pages = variables["cache"]["key_pages"].value.copy()
 
     # Do generation
     output_tuple, variables = self.attention_op.apply(
-        variables, x, x, x, None, common_types.MODEL_MODE_AUTOREGRESSIVE, page_state, mutable=["cache"]
+        variables, x, x, x, None, common_types.MODEL_MODE_AUTOREGRESSIVE, None, page_state, mutable=["cache"]
     )
 
     # Verify initial content preserved in unused pages
@@ -1419,9 +1458,9 @@ class PagedAttentionTest(unittest.TestCase):
     )
 
     # Store first sequence
-    variables = self.attention_op.init(self.rng, key1, key1, value1, None, common_types.MODEL_MODE_PREFILL, page_state)
+    variables = self.attention_op.init(self.rng, key1, key1, value1, None, common_types.MODEL_MODE_PREFILL, None, page_state)
     output_tuple1, vars1 = self.attention_op.apply(
-        variables, key1, key1, value1, None, common_types.MODEL_MODE_PREFILL, page_state, mutable=["cache"]
+        variables, key1, key1, value1, None, common_types.MODEL_MODE_PREFILL, None, page_state, mutable=["cache"]
     )
     first_output = output_tuple1[0]
 
@@ -1435,7 +1474,7 @@ class PagedAttentionTest(unittest.TestCase):
 
     # Store second sequence in same slot
     output_tuple2, vars2 = self.attention_op.apply(
-        vars1, key2, key2, value2, None, common_types.MODEL_MODE_PREFILL, page_state, mutable=["cache"]
+        vars1, key2, key2, value2, None, common_types.MODEL_MODE_PREFILL, None, page_state, mutable=["cache"]
     )
     second_output = output_tuple2[0]
 

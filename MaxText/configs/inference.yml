@@ -31,10 +31,6 @@ normalization_layer_epsilon: 1.e-05
 # Loads a just parameters from a specific directory
 # e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/items/NUMBER or NUMBER/items
 load_parameters_path: ""
-
-# LoRA adapter support configs
-lora_input_adapters_path: ""    # Input GCS path for a parent directory which has all the LoRA adapters (lora_id as subdir)
-
 # Loads a full checkpoint including optimizer state and step count from a specific directory
 # e.g. gs://my-base-output-directory/my-previous-run-name/checkpoints/items/NUMBER or NUMBER/items
 load_full_state_path: ""
@@ -268,24 +264,27 @@ logical_axis_rules: [
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
                       ['activation_kv_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
-                      ['activation_length', ['sequence']],
+                      ['activation_length', ['context', 'sequence']],
+                      ['activation_length', ['context']],
+                      ['activation_length_q', ['context']],
+                      ['activation_kv_length', ['context']],
                       ['activation_norm_length', ['tensor_sequence', 'sequence']],
                       ['activation_embed', ['tensor', 'tensor_transpose']],
                       ['activation_mlp', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_kv', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_prefill_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
                       ['activation_kv_head_dim', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_vocab', ['tensor', 'tensor_transpose', 'sequence', 'tensor_sequence']],
                       ['activation_vocab', ['tensor', 'tensor_transpose']],
                       ['activation_vocab', 'tensor_sequence'],
-                      ['activation_vocab', ['sequence']],
+                      ['activation_vocab', ['sequence', 'context']],
                       ['activation_stage', 'stage'],
-                      ['activation_exp', ['expert']],
-                      ['decode_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_exp', ['expert', 'context']],
+                      ['decode_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
                       ['decode_length', []],
                       ['mlp', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
-                      ['vocab', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
+                      ['vocab', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive','context']],
                       ['heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['q_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['kv_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
@@ -293,21 +292,21 @@ logical_axis_rules: [
                       ['embed', ['fsdp', 'sequence', 'tensor_transpose', 'expert']],
                       ['embed', ['fsdp', 'fsdp_transpose', 'sequence', 'expert']],
                       ['embed', ['fsdp', 'sequence', 'expert']],
-                      ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose']],
-                      ['embed_no_exp', ['fsdp', 'sequence', 'tensor_transpose']],
-                      ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence']],
-                      ['embed_no_exp', ['fsdp', 'sequence']],
+                      ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_transpose']],
+                      ['embed_no_exp', ['fsdp', 'sequence', 'context', 'tensor_transpose']],
+                      ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'context']],
+                      ['embed_no_exp', ['fsdp', 'sequence', 'context']],
                       ['norm', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['layers', 'stage'],
                       ['kv', []],
                       ['kv_head_dim', []],
                       ['cache_batch_prefill', []],
-                      ['cache_batch', []],
+                      ['cache_batch', ['context']],
                       ['cache_heads', ['autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['cache_heads', ['autoregressive', 'tensor', 'tensor_sequence']],
                       ['cache_kv', []],
-                      ['cache_sequence', []],
-                      ['exp', 'expert'],
+                      ['cache_sequence', ['context']],
+                      ['exp', ['expert', 'context']],
                       ['paged_kv_heads', []],
                       ['num_pages', ['tensor']],
                       ['tokens_per_page', []],
@@ -445,7 +444,6 @@ profile_periodically_period: -1 # If set to a positive integer, profile every pr
 
 # Dump HLO options
 dump_hlo: False
-dump_step: -1 # Dump modules at the given step if set to a positive integer.
 dump_hlo_local_dir: "/tmp/xla_dump/"
 dump_hlo_delete_local_after: True # Cleans local directory after its uploaded
 dump_hlo_gcs_dir: "" # Defaults to {base_output_directory}/{run_name}/xla_dump
@@ -494,8 +492,8 @@ rope_min_timescale: 1
 rope_max_timescale: 10_000
 
 # yarn RoPE parameters
-max_position_embeddings: 163840
-original_max_position_embeddings: 4096
+original_seq_len: 4096
+rope_theta: 10000.0
 rope_factor: 40
 beta_fast: 32
 beta_slow: 1
@@ -555,7 +553,6 @@ inference_metadata_file: "" # path to a json file
 inference_server: "MaxtextInterleavedServer"  # inference server to start
 inference_benchmark_test: False
 enable_model_warmup: False
-enable_llm_inference_pool: False          # Bool to launch inference server for llm_inference_gateway with their specified APIs
 multi_sampling: False
 
 # Stack prefill cache across the layer to reduce the
