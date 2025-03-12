@@ -6,7 +6,7 @@ export MODEL_NAME=llama2-7b
 # export MODEL_NAME=llama2-70b
 
 # Launch llama3.1 405b
-# export MODEL_NAME=llama3.1-405b
+export MODEL_NAME=llama3.1-405b
 
 MODEL_SIZE=$(echo $MODEL_NAME | grep -o '[0-9]\+b')
 
@@ -114,7 +114,7 @@ EOF
 
 
 
-export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1124-tp-fix2 # with fix2
+# export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/lance-1124-tp-fix2 # with fix2
 
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-0106-pinned
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-0206-nightly
@@ -155,7 +155,10 @@ export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/maxtext_sts_jax_nightly_0221_pure # NCCL connection issue, cuda 12.6
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/maxtext_sts_jax_nightly_0206_pure
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/maxtext_sts_0305_pure
+# export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/maxtext_sts_jax_nightly_0305_pure:latest-ray
+export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-mantaray_maxtext_jsts_gpu_a4_02252025-nv-fix2:xpk
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/maxtext_sts_0206_pure
+# export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/maxtext_sts_jax_nightly_0311
 # tfds_nightly==4.9.7.dev202503040044
 # 4.9.2.dev202308090034
 
@@ -223,16 +226,20 @@ call_config() {
 # Test run with 2 nodes, cuda kernel fails
 
 # 7B
-# export NODES=16
-# call_config --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 1 --ICI_TP 1 --DCN_FSDP $NODES --REMAT_POLICY save_qkv_proj --ATTENTION dot_product
+export NODES=4
+call_config --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 1 --ICI_TP 1 --DCN_FSDP $NODES --REMAT_POLICY save_qkv_proj --ATTENTION dot_product
 
 # 405B FSDP
 # export NODES=64
 # call_config --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 0.125 --ICI_TP 8 --DCN_FSDP $NODES --REMAT_POLICY save_qkv_proj --ATTENTION cudnn_flash_te
 
 # 405B PP1
-export NODES=112
-call_config --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 1 --ICI_TP 1 --DCN_FSDP 16 --DCN_PP 7 --NUM_LAYERS_PER_PP_STAGE 6 --REMAT_POLICY full --ATTENTION cudnn_flash_te
+# export NODES=112
+# call_config --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 1 --ICI_TP 1 --DCN_FSDP 16 --DCN_PP 7 --NUM_LAYERS_PER_PP_STAGE 6 --REMAT_POLICY full --ATTENTION cudnn_flash_te
+
+# export NODES=96
+# call_config --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 1 --ICI_TP 1 --DCN_FSDP 32 --DCN_PP 3 --NUM_LAYERS_PER_PP_STAGE 6 --REMAT_POLICY full --ATTENTION cudnn_flash_te
+
 
 # 405B PP2
 # export NODES=96
