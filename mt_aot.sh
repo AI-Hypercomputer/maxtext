@@ -31,14 +31,14 @@ export NUM_NODES=1
 export WORKLOAD_NAME=$USER-$(echo $MODEL_NAME | sed 's/\.//g')-aot-${RANDOM:0:2}
 
 # Non PP setting
-# export PER_DEVICE_BATCH_SIZE=0.125
-# export ICI_TP=8
+# export TARGET_NUM_NODES=64
+# export PER_DEVICE_BATCH_SIZE=1
+# export ICI_TP=1
 # export DCN_PP=1
-# export DCN_FSDP=$TARGET_NUM_NODES
-# export DCN_DP=1
 # export NUM_LAYERS_PER_PP_STAGE=1
 
 # PP setting
+# Must turn on
 export PER_DEVICE_BATCH_SIZE=1
 export ICI_TP=1
 
@@ -58,9 +58,9 @@ export ICI_TP=1
 # export NUM_LAYERS_PER_PP_STAGE=14 # 126 layers, (2,3,7), so (2,3,7,6,14,21), 3 repeats
 
 # 70.6G, https://xprof.corp.google.com/memory_viewer/lancewang-13350260186473749094
-# export TARGET_NUM_NODES=96
-# export DCN_PP=3 # 126 layers, could be 2, 3, 6, 7, 9, 14, 18, 21
-# export NUM_LAYERS_PER_PP_STAGE=6 # 126 layers, (2,3,7), so (2,3,7,6,14,21), 7 repeats
+export TARGET_NUM_NODES=96
+export DCN_PP=3 # 126 layers, could be 2, 3, 6, 7, 9, 14, 18, 21
+export NUM_LAYERS_PER_PP_STAGE=6 # 126 layers, (2,3,7), so (2,3,7,6,14,21), 7 repeats
 
 # OOM, 77G, https://xprof.corp.google.com/memory_viewer/lancewang-14585151666080368961
 # export TARGET_NUM_NODES=96
@@ -74,9 +74,9 @@ export ICI_TP=1
 
 # 72G, https://xprof.corp.google.com/memory_viewer/lancewang-4215571770793819877
 # Errors out after changing remat_policy=custom decoder_layer_input=offload
-export TARGET_NUM_NODES=112
-export DCN_PP=7 # 126 layers
-export NUM_LAYERS_PER_PP_STAGE=6 # (2,3,3), 3 repeats
+# export TARGET_NUM_NODES=112
+# export DCN_PP=7 # 126 layers
+# export NUM_LAYERS_PER_PP_STAGE=6 # (2,3,3), 3 repeats
 
 # export TARGET_NUM_NODES=72
 # export DCN_PP=9 # 126 layers
@@ -102,19 +102,19 @@ export NUM_LAYERS_PER_PP_STAGE=6 # (2,3,3), 3 repeats
 # export DCN_DP=8
 # export NUM_LAYERS_PER_PP_STAGE=9 # 126 layers, (2,3,7), so (2,3,7,6,14,21), 7 repeats
 
+# Must turn on
 export DCN_FSDP=$(($TARGET_NUM_NODES / $DCN_PP))
-export PP_MBS=$DCN_PP
-# export PP_MBS=$(($DCN_PP * 2))
+export PP_MBS=$(($DCN_PP))
 
 
 # export REMAT_POLICY=save_qkv_proj
 export REMAT_POLICY=full
 
-#export ATTENTION=dot_product
+# export ATTENTION=dot_product
 export ATTENTION=cudnn_flash_te
 
 # export LOCAL_IMAGE_NAME=us-west1-docker.pkg.dev/supercomputer-testing/lancewang/llama2-xprof_1001_lance
-# export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-mantaray_maxtext_jsts_gpu_a4_02252025-nv-fix2
+# export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-mantaray_maxtext_jsts_gpu_a4_02252025-nv-fix2_xpk
 export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/maxtext_stable_stack_0305:working
 export JAX_ENABLE_PGLE=false
 
@@ -151,6 +151,8 @@ COMMAND="python MaxText/train_compile.py MaxText/configs/models/gpu/llama3.1_405
 # remat_policy=custom decoder_layer_input=offload
 
 COMMAND='export LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:$LD_LIBRARY_PATH;'"${COMMAND}";
+
+echo $COMMAND
 
 python3 ../xpk/xpk.py workload delete --cluster $CLUSTER_NAME --workload $WORKLOAD_NAME;
 python3 ../xpk/xpk.py workload create --cluster $CLUSTER_NAME --workload $WORKLOAD_NAME --command "${COMMAND}" --docker-image=$LOCAL_IMAGE_NAME --device-type=$DEVICE_TYPE --num-nodes=$NUM_NODES --scheduler=gke.io/topology-aware-auto --env-file=env.txt
