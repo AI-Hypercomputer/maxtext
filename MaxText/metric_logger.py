@@ -53,6 +53,15 @@ class MetricLogger:
     The logic is that this ensures that Jax is able to queues train_steps and we
     don't block when turning "lazy" Jax arrays into real Python numbers.
     """
+    if is_training:
+      max_logging.log(
+          f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
+          f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
+          f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
+          f"total_weights: {metrics['scalar']['learning/total_weights']}, "
+          f"loss: {metrics['scalar']['learning/loss']:.3f}"
+      )
+
     metrics_to_write, steps_to_write = None, None
     if is_training:
       if self.buffered_metrics is not None:
@@ -114,15 +123,6 @@ class MetricLogger:
 
       if is_training:
         full_log = step % self.config.log_period == 0
-
-        max_logging.log(
-            f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
-            f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
-            f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
-            f"total_weights: {metrics['scalar']['learning/total_weights']}, "
-            f"loss: {metrics['scalar']['learning/loss']:.3f}"
-        )
-
         if full_log and jax.process_index() == 0:
           max_logging.log(f"To see full metrics 'tensorboard --logdir={self.config.tensorboard_dir}'")
           self.writer.flush()
