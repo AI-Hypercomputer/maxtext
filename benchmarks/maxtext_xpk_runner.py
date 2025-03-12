@@ -41,6 +41,9 @@ from command_utils import run_command_with_updates
 from benchmark_db_utils import DEFAULT_TUNING_PARAMS_FILE
 
 import xla_flags_library as xla_flags
+from disruption_management.disruption_handler import DisruptionConfig
+from disruption_management.disruption_manager import DisruptionManager
+from xpk_configs import XpkClusterConfig
 
 # Assumes you built maxtext dep image.
 # Assumes you have xpk installed in a git clone repo of ~/{wl_config.xpk_path}/xpk.py
@@ -105,6 +108,7 @@ class WorkloadConfig:
   db_project: str = ""
   db_dataset: str = ""
   db_is_test: bool = True
+  disruption_configs: DisruptionConfig = None
 
   def __post_init__(self):
     """Initializes num_devices_per_slice and topology for recording the run into BigQuery"""
@@ -668,13 +672,13 @@ def run_xpk_workload(
 def xpk_benchmark_runner(
     cluster_config: XpkClusterConfig,
     workload_configs: list[WorkloadConfig],
+    disruption_manager: DisruptionManager = DisruptionManager(),
 ):
   xpk_workload_names = []
   xpk_workload_cmds = []
   for wl_config in workload_configs:
     command, name = generate_xpk_workload_cmd(
-      cluster_config=cluster_config,
-      wl_config=wl_config
+        cluster_config=cluster_config, wl_config=wl_config
     )
 
     print(f"Name of the workload is: {name} \n")
@@ -683,11 +687,27 @@ def xpk_benchmark_runner(
     print(f"XPK command to be used is: {command} \n")
     xpk_workload_cmds.append(command)
 
+    if wl_config.disruption_configs:
+      disruption_manager.add_workload(
+          workload_name=name,
+          cluster_config=cluster_config,
+          disruption_configs=wl_config.disruption_configs,
+      )
+
   # TODO(@vbarr) Support batch workloads.
-  for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
+  for xpk_workload_name, xpk_workload_cmd in zip(
+      xpk_workload_names, xpk_workload_cmds
+  ):
+    # Starts the workloads, but does not wait for the workloads to complete.
     return_code = run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
     if return_code != 0:
+      # If the workload fails to start, remove it from the disruption manager.
+      # No-op if disruption manager does not contain the workload name.
+      disruption_manager.remove_workload(xpk_workload_name)
       print('Unable to run xpk workload: {xpk_workload_name}')
+
+  return disruption_manager
+
 
 def on_device_benchmark_runner(
     workload_configs: list[WorkloadConfig],
