@@ -48,12 +48,12 @@ class PageState:
     current_page_position: Array tracking position within current pages
   """
 
-  page_status: Array
-  page_map: Array
-  sequence_lengths: Array
-  num_pages_used: Array
-  current_page: Array
-  current_page_position: Array
+  page_status: Array # Shape (num_pages,)
+  page_map: Array # Shape (slots, max_pages_per_slot)
+  sequence_lengths: Array # Shape (slots,)
+  num_pages_used: Array # Shape (slots,)
+  current_page: Array # Shape (slots,)
+  current_page_position: Array # Shape (slots,)
 
 
 class PageManager(nn.Module):
@@ -79,7 +79,7 @@ class PageManager(nn.Module):
   max_prefill_predict_length: int
   max_pages_per_slot: int
 
-  def init_or_get_vars(self):
+  def init_or_get_vars(self)->Tuple[nn.Variable, nn.Variable, nn.Variable, nn.Variable, nn.Variable, nn.Variable]:
     """Initializes or retrieves the state variables for the paging system.
 
     Returns:
@@ -132,7 +132,7 @@ class PageManager(nn.Module):
       num_pages_used_var: nn.Variable,
       current_page_var: nn.Variable,
       current_page_position_var: nn.Variable,
-  ) -> Tuple:
+  ) -> Tuple[nn.Variable, nn.Variable, nn.Variable, nn.Variable, nn.Variable, nn.Variable]:
     """Releases all pages assigned to a specific slot.
 
     This method frees up all pages currently assigned to the given slot,
@@ -157,7 +157,9 @@ class PageManager(nn.Module):
     current_page = current_page_var.value
     current_page_position = current_page_position_var.value
 
-    def _release_page(i, state):
+    def _release_page(
+      i: int, state: Tuple[Array, Array]
+    )->Tuple[nn.Variable, nn.Variable, nn.Variable, nn.Variable, nn.Variable, nn.Variable]:
       page_map, page_status = state
       page_idx = page_map[slot][i]
       page_status = page_status.at[page_idx].set(0)
@@ -197,7 +199,7 @@ class PageManager(nn.Module):
       num_pages_used_var: nn.Variable,
       current_page_var: nn.Variable,
       current_page_position_var: nn.Variable,
-  ) -> Tuple:
+  ) -> Tuple[nn.Variable, nn.Variable, nn.Variable, nn.Variable, nn.Variable, nn.Variable]:
     """Reserves pages for a prefix sequence in the specified slot.
 
     This method allocates the necessary pages for a prefix sequence of given length,
@@ -240,6 +242,7 @@ class PageManager(nn.Module):
     current_page = current_page_var.value
     current_page_position = current_page_position_var.value
 
+    jax.debug.callback(lambda true_length: print("wyzhang true_len: ", true_length), true_length)
     prefill_slot_num_pages = jnp.ceil(true_length / self.tokens_per_page).astype(jnp.int32)
     prefill_slot_page_slice_idx = jnp.where(true_length == 0, 0, (true_length - 1) % self.tokens_per_page)
 
@@ -321,7 +324,7 @@ class PageManager(nn.Module):
 
     updating_slots = jnp.where((seq_new_page > 0), size=self.slots)[0]
 
-    def _reserve_page(i, state):
+    def _reserve_page(i: int, state: Tuple[Array, Array, Array, Array])->Tuple[Array, Array, Array, Array]:
       page_map, page_status, current_page, updating_slots = state
       slot = jax.lax.dynamic_index_in_dim(updating_slots, i, axis=0, keepdims=False)
       page_idx = jnp.where((page_status[1:] == 0), size=1)[0][0] + 1
