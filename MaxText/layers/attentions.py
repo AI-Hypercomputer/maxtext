@@ -1570,6 +1570,7 @@ class Attention(nn.Module):
     out = checkpoint_name(out, "out_proj")
     return out
 
+
 class MLA(Attention):
   """Multi-Head Latent Attention (MLA) layer."""
 

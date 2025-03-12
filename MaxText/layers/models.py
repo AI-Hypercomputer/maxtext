@@ -584,19 +584,7 @@ class Transformer(nn.Module):
       slot: Optional[int] = None,
       page_state: Optional[PageState] = None,
   ):
-    """Applies Transformer decoder-branch on encoded-input and target.
-
-    Args:
-      decoder_input_tokens: input tensor for decoder.
-      decoder_positions: positions for decoder.
-      decoder_segment_ids: segment ids for decoder.
-      enable_dropout: enables dropout when set to True.
-      model_mode: "train", "prefill", or "autoregressive"
-      previous_chunk: optional previous chunk data
-      true_length: prompt length before padding
-      slot: an integer representing the decode batch index.
-      page_state: optional page state for paged attention
-    """
+    """Applies Transformer decoder-branch on encoded-input and target."""
 
     if decoder_segment_ids is not None and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       raise ValueError(
@@ -604,11 +592,13 @@ class Transformer(nn.Module):
           f" which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}."
       )
 
+    # Only enforce page_state requirement during normal execution, not initialization
+    is_initializing = self.is_initializing()
     if (
         self.config.attention == "paged"
         and model_mode != common_types.MODEL_MODE_TRAIN
+        and not is_initializing
         and page_state is None
-        and not self.is_initializing()
     ):
       raise ValueError(f"Paged attention requires a PageState when model_mode={model_mode}")
 

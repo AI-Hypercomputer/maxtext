@@ -132,6 +132,21 @@ def check_page_state_consistency(page_state, num_layers, step):
   return not issues_found
 
 
+def validate_config(config):
+  assert config.load_full_state_path == "", (
+      "Decode doesn't operate on full states! Convert to parameter checkpoint first." "Using generate_param_only_checkpoint."
+  )
+
+  # Additional validation for paged attention
+  if config.attention == "paged":
+    assert hasattr(config, "pagedattn_num_pages"), "Config must include pagedattn_num_pages for paged attention"
+    assert hasattr(config, "pagedattn_tokens_per_page"), "Config must include pagedattn_tokens_per_page for paged attention"
+    assert hasattr(
+        config, "pagedattn_max_pages_per_group"
+    ), "Config must include pagedattn_max_pages_per_group for paged attention"
+    assert hasattr(config, "pagedattn_max_page_groups"), "Config must include pagedattn_max_page_groups for paged attention"
+
+
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
@@ -147,87 +162,76 @@ def main(argv: Sequence[str]) -> None:
   validate_config(config)
   max_utils.print_system_information()
 
-  # Initialize the engine
+  # Create engine - it internally initializes page_state if using paged attention
   print("🔧 Initializing engine...")
   engine = maxengine.MaxEngine(config)
   rng = jax.random.PRNGKey(1234)
+  rng, rng_load_params = jax.random.split(rng)
 
   # Load model parameters
   print("📥 Loading parameters...")
-  params = engine.load_params(rng=rng)
+  params = engine.load_params(rng=rng_load_params)
 
   # Get tokenizer and encode input text
   text = config.prompt
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
   tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
+  assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
 
-  # Set up slot
-  slot = 0
+  print(f"🔤 Input text: '{text}'")
+  print(f"📊 Input tokens: {tokens[:true_length]}")
+  print(f"📏 True length: {true_length}")
 
-  # Initialize page state if using paged attention
-  page_state = None
-  if engine.page_manager is not None:
-    page_state = engine.get_initial_page_state()
+  slot = 0  # Always use decode batch slot 0.
 
   # Debug: Check initial page state
-  if is_using_paged and FLAGS.debug and page_state is not None:
+  if is_using_paged and FLAGS.debug:
     print("\n📝 INITIAL PAGE STATE:")
     if FLAGS.visualize:
-      visualize_page_allocation(page_state, config.num_decoder_layers, config.pagedattn_num_pages, "initial")
-    print(f"  Initial Page Status sum: {np.sum(page_state.page_status)}")
-    print(f"  Initial Pages Used (Layer 0): {page_state.num_pages_used[0, 0]}")
-    check_page_state_consistency(page_state, config.num_decoder_layers, "initial")
+      visualize_page_allocation(engine.page_state, config.num_decoder_layers, config.pagedattn_num_pages, step="initial")
+    print(f"  Initial Page Status sum: {np.sum(engine.page_state.page_status)}")
+    print(f"  Initial Pages Used (Layer 0): {engine.page_state.num_pages_used[0, 0]}")
+    check_page_state_consistency(engine.page_state, config.num_decoder_layers, "initial")
 
-  # Run prefill
+  # Prefill - page state update happens inside the prefill method
   print(f"\n💫 Running prefill...")
   prefill_start = time.time()
   rng, rng_prefill = jax.random.split(rng)
-
-  # Update page state BEFORE prefill call
-  if engine.page_manager is not None and engine.page_state is not None:
-    engine.page_state = engine.page_manager.update_prefill_pages(
-        page_state=engine.page_state,
-        request_id=slot,
-        true_length=true_length,
-    )
-
-  # Run prefill
   prefill_result, first_token = engine.prefill(
       params=params,
       padded_tokens=tokens,
       true_length=true_length,
       rng=rng_prefill,
-      slot=slot,
-      page_state=page_state,
+      slot=slot,  # Pass slot for page state management
   )
-
   prefill_time = time.time() - prefill_start
   print(f"  Prefill time: {prefill_time:.4f}s")
 
   # Debug: Check page state after prefill
-  if is_using_paged and FLAGS.debug and page_state is not None:
+  if is_using_paged and FLAGS.debug:
     print("\n📝 PAGE STATE AFTER PREFILL:")
     if FLAGS.visualize:
-      visualize_page_allocation(page_state, config.num_decoder_layers, config.pagedattn_num_pages, "after_prefill")
-
+      visualize_page_allocation(
+          engine.page_state, config.num_decoder_layers, config.pagedattn_num_pages, step="after_prefill"
+      )
     # Show allocations for first few layers
     for layer_idx in range(min(3, config.num_decoder_layers)):
-      pages_used = page_state.num_pages_used[layer_idx, slot]
+      pages_used = engine.page_state.num_pages_used[layer_idx, slot]
       print(f"  Layer {layer_idx}: {pages_used} pages allocated")
       if pages_used > 0:
-        page_indices = page_state.page_map[layer_idx, slot]
+        page_indices = engine.page_state.page_map[layer_idx, slot]
         valid_pages = [p for p in page_indices[:pages_used] if p >= 0]
         print(f"    Allocated pages: {valid_pages}")
 
-    check_page_state_consistency(page_state, config.num_decoder_layers, "after_prefill")
+    check_page_state_consistency(engine.page_state, config.num_decoder_layers, "after_prefill")
 
-  # Initialize decode state
+  # Insert prefill result into decode state
   rng, rng_init_decode = jax.random.split(rng)
-  decode_state = engine.init_decode_state(rng_init_decode)
+  decode_state = engine.init_decode_state(rng_init_decode, page_state=engine.page_state)  # Pass page_state
   decode_state = engine.insert(prefill_result, decode_state, slot=slot)
 
-  # Generate tokens
+  # Generate tokens - page state updates happen inside the generate method
   num_tokens = min(FLAGS.num_tokens_to_generate, config.max_target_length - config.max_prefill_predict_length)
   print(f"\n🚀 Generating {num_tokens} tokens...")
   sampled_tokens_list = []
@@ -237,14 +241,10 @@ def main(argv: Sequence[str]) -> None:
   for i in range(num_tokens):
     rng, rng_generate = jax.random.split(rng)
 
-    # Update page state BEFORE generate (outside JIT)
-    if engine.page_manager is not None and engine.page_state is not None:
-      engine.page_state = engine.page_manager.update_decode_pages(engine.page_state)
-
-    # Time the generation step
+    # Generate token - page state update happens inside the method
     generate_start = time.time()
     decode_state, sampled_tokens = engine.generate(
-        params, decode_state, rng=rng_generate, slot=slot  # Pass slot for page access
+        params, decode_state, rng=rng_generate, slot=slot  # Pass slot for page state management
     )
     generation_time = time.time() - generate_start
     generation_times.append(generation_time)
@@ -257,7 +257,7 @@ def main(argv: Sequence[str]) -> None:
     print(f"  Token {i+1}: '{token_text}' (id={token_id}) - {generation_time:.4f}s")
 
     # Debug: Check page state after token generation
-    if is_using_paged and FLAGS.debug and page_state is not None and (i == 0 or i == num_tokens - 1 or i % 3 == 0):
+    if is_using_paged and FLAGS.debug and (i == 0 or i == num_tokens - 1 or i % 3 == 0):
       print(f"\n📝 PAGE STATE AFTER GENERATING TOKEN {i+1}:")
 
       if FLAGS.visualize:
@@ -273,7 +273,7 @@ def main(argv: Sequence[str]) -> None:
 
       check_page_state_consistency(engine.page_state, config.num_decoder_layers, f"token_{i+1}")
 
-  # Get final results
+  # Process final results
   results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
   output = tokenizer_model.decode(results)
 
@@ -282,45 +282,6 @@ def main(argv: Sequence[str]) -> None:
   print(f"Input: '{text}'")
   print(f"Output: '{output}'")
   print(f"Average generation time: {sum(generation_times)/len(generation_times):.4f}s per token")
-
-  # Optional: Release pages for slot 0 and check state
-  if is_using_paged and FLAGS.debug:
-    if hasattr(engine, "page_manager") and engine.page_manager:
-      print("\n🔄 Releasing pages for slot 0...")
-      engine.page_state = engine.page_manager.release_pages(engine.page_state, slot)
-
-      if FLAGS.visualize:
-        visualize_page_allocation(
-            engine.page_state, config.num_decoder_layers, config.pagedattn_num_pages, step="after_release"
-        )
-
-      # Verify all pages for slot 0 are freed
-      all_freed = True
-      for layer_idx in range(config.num_decoder_layers):
-        pages_used = engine.page_state.num_pages_used[layer_idx, slot]
-        if pages_used > 0:
-          all_freed = False
-          print(f"  WARNING: Layer {layer_idx} still has {pages_used} pages allocated to slot {slot}")
-
-      if all_freed:
-        print("  ✓ All pages successfully released for slot 0")
-
-      check_page_state_consistency(engine.page_state, config.num_decoder_layers, "after_release")
-
-
-def validate_config(config):
-  assert config.load_full_state_path == "", (
-      "Decode doesn't operate on full states! Convert to parameter checkpoint first." "Using generate_param_only_checkpoint."
-  )
-
-  # Additional validation for paged attention
-  if config.attention == "paged":
-    assert hasattr(config, "pagedattn_num_pages"), "Config must include pagedattn_num_pages for paged attention"
-    assert hasattr(config, "pagedattn_tokens_per_page"), "Config must include pagedattn_tokens_per_page for paged attention"
-    assert hasattr(
-        config, "pagedattn_max_pages_per_group"
-    ), "Config must include pagedattn_max_pages_per_group for paged attention"
-    assert hasattr(config, "pagedattn_max_page_groups"), "Config must include pagedattn_max_page_groups for paged attention"
 
 
 if __name__ == "__main__":

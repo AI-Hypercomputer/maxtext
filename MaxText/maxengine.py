@@ -104,7 +104,30 @@ class MaxEngine(engine_api.Engine):
     self.decode_state_layouts = None
     self.param_layouts = None
 
-    self.page_manager = PageManager(self.config) if self.config.attention == "paged" else None
+    # Initialize page manager and page state
+    self.page_manager = None
+    self.page_state = None
+    if self.config.attention == "paged":
+      # Validate required config parameters
+      required_params = [
+          "pagedattn_num_pages",
+          "pagedattn_tokens_per_page",
+          "pagedattn_max_pages_per_group",
+          "pagedattn_max_page_groups"
+      ]
+      for param in required_params:
+          if not hasattr(self.config, param):
+              raise ValueError(f"Paged attention requires {param} to be set in config")
+          
+      # Ensure max_page_groups is large enough for the batch size
+      if self.config.pagedattn_max_page_groups < self.config.per_device_batch_size:
+          raise ValueError(
+              f"pagedattn_max_page_groups ({self.config.pagedattn_max_page_groups}) must be at least "
+              f"per_device_batch_size ({self.config.per_device_batch_size})"
+          )
+              
+      self.page_manager = PageManager(self.config)
+      self.page_state = self.page_manager.get_initial_page_state()
 
   def get_initial_page_state(self):
     """Returns a fresh page state object."""
@@ -411,19 +434,21 @@ class MaxEngine(engine_api.Engine):
         "tokens": first_generated_tokens,
     }, result
 
+  # JIT-compiled prefill implementation that doesn't modify state
   @functools.partial(jax.jit, static_argnums=(0,))
-  def prefill(
+  def _prefill_jit(
       self,
       *,
       params: Params,
       padded_tokens: jax.Array,
       true_length: int,
+      page_state: Optional[PageState],
+      slot: Optional[int],
       rng: Optional[PRNGKeyType] = None,
       complete_prompt_true_length: Optional[int] = None,
       complete_padded_prompt: Optional[jax.Array] = None,
       positions: Optional[jax.Array] = None,
       previous_chunk: Optional[Any] = None,
-      slot: Optional[int] = None,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -472,8 +497,6 @@ class MaxEngine(engine_api.Engine):
     Returns:
       kv_cache: For the resulting text.
     """
-    if existing_prefix:
-      raise ValueError("We don't know what to do with existing_prefix")
 
     if rng is None:
       rng = jax.random.PRNGKey(0)
@@ -507,7 +530,7 @@ class MaxEngine(engine_api.Engine):
           previous_chunk=previous_chunk,
           true_length=true_length,
           slot=slot,
-          page_state=self.page_state,  # Pass current page_state, but don't modify inside
+          page_state=page_state,  # Pass page_state to model
       )
 
     generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
@@ -547,6 +570,42 @@ class MaxEngine(engine_api.Engine):
         "generated_tokens": generated_tokens,
         "tokens": first_generated_token,
     }, result
+
+  # Public non-JIT prefill method that updates page state
+  def prefill(
+      self,
+      params: Params,
+      padded_tokens: jax.Array,
+      true_length: int,
+      slot: Optional[int] = None,
+      rng: Optional[PRNGKeyType] = None,
+      complete_prompt_true_length: Optional[int] = None,
+      complete_padded_prompt: Optional[jax.Array] = None,
+      positions: Optional[jax.Array] = None,
+      previous_chunk: Optional[Any] = None,
+  ) -> Tuple[Prefix, engine_api.ResultTokens]:
+    """Public API for prefill that updates page state outside JIT."""
+    # Update page state before JIT call
+    if self.page_manager is not None and self.page_state is not None and slot is not None:
+      self.page_state = self.page_manager.update_prefill_pages(
+          page_state=self.page_state,
+          request_id=slot,
+          true_length=true_length,
+      )
+
+    # Call JIT-compiled version with current state
+    return self._prefill_jit(
+        params=params,
+        padded_tokens=padded_tokens,
+        true_length=true_length,
+        page_state=self.page_state,  # Pass current page state
+        slot=slot,
+        rng=rng,
+        complete_prompt_true_length=complete_prompt_true_length,
+        complete_padded_prompt=complete_padded_prompt,
+        positions=positions,
+        previous_chunk=previous_chunk,
+    )
 
   @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_prompts",))
   def prefill_concat(
@@ -665,25 +724,33 @@ class MaxEngine(engine_api.Engine):
   ) -> DecodeState:
     """Prefill and insert a single computed prefill cache into KV cache."""
 
-    prefix, _ = self.prefill(params=params, padded_tokens=padded_tokens, true_length=true_length, rng=rng)
+    if self.page_manager is not None and self.page_state is not None:
+        self.page_state = self.page_manager.update_prefill_pages(
+            page_state=self.page_state,
+            request_id=slot,
+            true_length=true_length
+        )
+    prefix, _ = self.prefill(params=params, padded_tokens=padded_tokens, true_length=true_length, rng=rng, slot=slot)
     return self.insert(prefix, decode_state, slot)
 
+  # JIT-compiled generate implementation that doesn't modify state
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
-  def generate(
+  def _generate_jit(
       self,
       params: Params,
       decode_state: DecodeState,
+      page_state: Optional[PageState],
+      slot: Optional[int],
       rng: Optional[PRNGKeyType] = None,
-      slot: Optional[int] = None,
-  ):
-    """Run one generate step"""
+  ) -> Tuple[DecodeState, engine_api.ResultTokens]:
+    """JIT-compiled implementation of generate."""
     if rng is None:
       rng = jax.random.PRNGKey(0)
 
     previous_token = decode_state["tokens"]
     rng, new_rng = jax.random.split(rng)
 
-    # run one step generation (page_state is passed but not modified)
+    # run one step generation
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       out_logits, new_vars = self.model.apply(
           params | {"cache": decode_state["cache"]},
@@ -693,9 +760,10 @@ class MaxEngine(engine_api.Engine):
           model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
           rngs={"params": new_rng},
           mutable=["cache"],
-          page_state=self.page_state,  # Pass current page_state, but don't modify inside
+          page_state=page_state,  # Pass page state
           slot=slot,
       )
+
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
 
@@ -708,6 +776,7 @@ class MaxEngine(engine_api.Engine):
         nucleus_topp=self.config.decode_sampling_nucleus_p,
         temperature=self.config.decode_sampling_temperature,
     )
+
     all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
     result = engine_api.ResultTokens(
         data=jnp.concatenate((new_token, all_valid, decode_state["generated_tokens"]), axis=1),
@@ -724,6 +793,37 @@ class MaxEngine(engine_api.Engine):
         "generated_tokens": decode_state["generated_tokens"] + 1,
         "tokens": new_token,
     }, result
+
+  # Public non-JIT generate method that updates page state
+  def generate(
+      self,
+      params: Params,
+      decode_state: DecodeState,
+      slot: Optional[int] = None,
+      rng: Optional[PRNGKeyType] = None,
+  ) -> Tuple[DecodeState, engine_api.ResultTokens]:
+      """Public API for generate that updates page state outside JIT."""
+      # Update page state before JIT call
+      if self.page_manager is not None and self.page_state is not None:
+          # Update page state OUTSIDE JIT function
+          self.page_state = self.page_manager.update_decode_pages(self.page_state)
+          
+      # Call JIT-compiled version with current state
+      new_state, result = self._generate_jit(
+          params=params,
+          decode_state=decode_state,
+          page_state=self.page_state,
+          slot=slot,
+          rng=rng,
+      )
+      
+      # Extract key/value from new state for diagnostic purposes
+      if self.page_manager is not None and slot is not None:
+          # Get the token
+          token = result.get_result_at_slot(slot).tokens.item()
+          print(f"Generated token {token}")
+      
+      return new_state, result
 
   @functools.partial(
       jax.jit,
@@ -846,119 +946,98 @@ class MaxEngine(engine_api.Engine):
       decode_state: DecodeState,
       slot: int,
   ) -> DecodeState:
-    """Insert a single computed prefill cache into KV cache."""
-    unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
+      """Insert a single computed prefill cache into KV cache."""
+      unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
 
-    unboxed_prefix["cache"] = self._maybe_unstack_prefill_result_cache(unboxed_prefix["cache"])
+      unboxed_prefix["cache"] = self._maybe_unstack_prefill_result_cache(unboxed_prefix["cache"])
 
-    def copy(path, partial_cache, full_cache, annotations):
-      path_key = path[-1].key
-      if path_key in [
-          "cache_ar_index",
-          "cached_ar_key",
-          "cached_ar_value",
-          "cached_ar_key_scale",
-          "cached_ar_value_scale",
-      ]:
-        return full_cache  # we don't even zero these out because we can mask them out.
-
-      batch_idx = -1
-      if "cache_batch" in annotations:
-        batch_idx = annotations.index("cache_batch")
-      elif "cache_scale_batch" in annotations:
-        batch_idx = annotations.index("cache_scale_batch")
-
-      if batch_idx < 0:
-        raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
-
-      if path_key == "cache_ar_segment_id":
-        ### goal: zero this out in case there is existing data
-        s = list(full_cache.shape)
-        s[batch_idx] = 1
-        zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
-        return jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
-      elif path_key == "cache_prefill_segment_id":
-        s = list(full_cache.shape)
-        s[batch_idx] = 1
-        zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
-        ## zero out in case prefill cache is too small to cover
-        full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
-        ## copy prefill cachce
-        full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
-        return full_cache
-      elif path_key == "cached_ar_lengths":
-        return full_cache.at[slot].set(0)
-      elif path_key in [
-          "cached_prefill_key",
-          "cached_prefill_value",
-          "cached_prefill_key_scale",
-          "cached_prefill_value_scale",
-      ]:
-        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
-      else:
-        raise ValueError(f"We don't have a strategy for inserting {path_key}")
-
-    if self.config.attention == "paged":
-
-      def _copy_paged(path, prefix_cache, decode_state_cache):
-        if path[-2].key == "page_manager":
-          return prefix_cache
+      def copy(path, partial_cache, full_cache, annotations):
         path_key = path[-1].key
-        if path_key in ["key_pages", "value_pages"]:
+        if path_key in [
+            "cache_ar_index",
+            "cached_ar_key",
+            "cached_ar_value",
+            "cached_ar_key_scale",
+            "cached_ar_value_scale",
+        ]:
+          return full_cache  # we don't even zero these out because we can mask them out.
 
-          def _update_pages(prefix_page_idx, state):
-            decode_state_pages, prefix_pages, page_map = state
-            prefix_page = jax.lax.dynamic_index_in_dim(prefix_pages, prefix_page_idx, axis=1)
-            decode_state_pages = jax.lax.dynamic_update_slice_in_dim(
-                decode_state_pages, prefix_page, page_map[prefix_page_idx], axis=1
-            )
-            return decode_state_pages, prefix_pages, page_map
+        batch_idx = -1
+        if "cache_batch" in annotations:
+          batch_idx = annotations.index("cache_batch")
+        elif "cache_scale_batch" in annotations:
+          batch_idx = annotations.index("cache_scale_batch")
 
-          decode_state_cache, _, _ = jax.lax.fori_loop(
-              0,
-              prefix["cache"]["page_manager"]["num_pages_used"].value[slot],
-              _update_pages,
-              (decode_state_cache, prefix_cache, prefix["cache"]["page_manager"]["page_map"].value[slot]),
-          )
-          return decode_state_cache
+        if batch_idx < 0:
+          raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
+
+        if path_key == "cache_ar_segment_id":
+          ### goal: zero this out in case there is existing data
+          s = list(full_cache.shape)
+          s[batch_idx] = 1
+          zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
+          return jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
+        elif path_key == "cache_prefill_segment_id":
+          s = list(full_cache.shape)
+          s[batch_idx] = 1
+          zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
+          ## zero out in case prefill cache is too small to cover
+          full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
+          ## copy prefill cachce
+          full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+          return full_cache
+        elif path_key == "cached_ar_lengths":
+          return full_cache.at[slot].set(0)
+        elif path_key in [
+            "cached_prefill_key",
+            "cached_prefill_value",
+            "cached_prefill_key_scale",
+            "cached_prefill_value_scale",
+        ]:
+          return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
         else:
-          raise ValueError(f"We don't have a strategy for inserting {path_key} for paged attention.")
+          raise ValueError(f"We don't have a strategy for inserting {path_key}")
 
-      inserted_cache = jax.tree_util.tree_map_with_path(
-          _copy_paged,
-          unboxed_prefix["cache"],
-          decode_state["cache"],
+      # For paged attention, we don't copy any cache values
+      # The prefill operation has already updated the page_state and cache.
+      # We're using a separate page_state object that's not part of the cache.
+      if self.config.attention == "paged":
+          # Simply retain the existing cache - it's already been updated by prefill
+          inserted_cache = decode_state["cache"]
+      else:
+          # Original non-paged attention code
+          inserted_cache = jax.tree_util.tree_map_with_path(
+              copy,
+              unboxed_prefix["cache"],
+              decode_state["cache"],
+              self.kv_cache_annotations_named,
+          )
+
+      # Update the other decode state elements
+      inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state["logits"], unboxed_prefix["logits"], slot, 0)
+      inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state["next_pos"], unboxed_prefix["next_pos"], slot, 0)
+      inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(
+          decode_state["generated_tokens"],
+          unboxed_prefix["generated_tokens"],
+          slot,
+          0,
       )
-    else:
-      inserted_cache = jax.tree_util.tree_map_with_path(
-          copy,
-          unboxed_prefix["cache"],
-          decode_state["cache"],
-          self.kv_cache_annotations_named,
-      )
-    inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state["logits"], unboxed_prefix["logits"], slot, 0)
-    inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state["next_pos"], unboxed_prefix["next_pos"], slot, 0)
-    inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(
-        decode_state["generated_tokens"],
-        unboxed_prefix["generated_tokens"],
-        slot,
-        0,
-    )
-    inserted_tokens = jax.lax.dynamic_update_index_in_dim(decode_state["tokens"], unboxed_prefix["tokens"], slot, 0)
+      inserted_tokens = jax.lax.dynamic_update_index_in_dim(decode_state["tokens"], unboxed_prefix["tokens"], slot, 0)
 
-    inserted_logits = jax.lax.with_sharding_constraint(inserted_logits, self.replicated_sharding)
-    inserted_generated_tokens = jax.lax.with_sharding_constraint(inserted_generated_tokens, self.replicated_sharding)
-    inserted_next_pos = jax.lax.with_sharding_constraint(inserted_next_pos, self.replicated_sharding)
-    inserted_tokens = jax.lax.with_sharding_constraint(inserted_tokens, self.replicated_sharding)
-    inserted_cache = jax.lax.with_sharding_constraint(inserted_cache, self.kv_cache_shardings)
+      # Apply logical constraints
+      inserted_logits = jax.lax.with_sharding_constraint(inserted_logits, self.replicated_sharding)
+      inserted_generated_tokens = jax.lax.with_sharding_constraint(inserted_generated_tokens, self.replicated_sharding)
+      inserted_next_pos = jax.lax.with_sharding_constraint(inserted_next_pos, self.replicated_sharding)
+      inserted_tokens = jax.lax.with_sharding_constraint(inserted_tokens, self.replicated_sharding)
+      inserted_cache = jax.lax.with_sharding_constraint(inserted_cache, self.kv_cache_shardings)
 
-    return {
-        "logits": inserted_logits,
-        "cache": inserted_cache,
-        "next_pos": inserted_next_pos,
-        "generated_tokens": inserted_generated_tokens,
-        "tokens": inserted_tokens,
-    }
+      return {
+          "logits": inserted_logits,
+          "cache": inserted_cache,
+          "next_pos": inserted_next_pos,
+          "generated_tokens": inserted_generated_tokens,
+          "tokens": inserted_tokens,
+      }
 
   @functools.partial(
       jax.jit,
@@ -1105,20 +1184,73 @@ class MaxEngine(engine_api.Engine):
       return token_utils.TikToken(metadata)
     else:
       return token_utils.SentencePieceTokenizer(metadata)
+  
+  def update_key_value_pages(self, key, value, page_state, layer_idx, slot):
+    """Update key/value pages in page_state with new token data.
+    Returns new updated pages (doesn't modify originals).
+    """
+    # This function runs outside JIT in MaxEngine
+    if page_state is None:
+        return None
+        
+    # Get the current page and position for this slot
+    current_page = page_state.current_page[layer_idx, slot]
+    current_pos = page_state.current_page_position[layer_idx, slot]
+    
+    # Get the key/value arrays - don't modify them yet
+    key_last = key[0, -1] if key.shape[1] > 1 else key[0, 0]
+    value_last = value[0, -1] if value.shape[1] > 1 else value[0, 0]
+    
+    # For now, just print diagnostic info
+    print(f"Would update page {current_page} at position {current_pos} for layer {layer_idx}, slot {slot}")
+    print(f"Key shape: {key_last.shape}, Value shape: {value_last.shape}")
+    
+    # Return page_state unchanged for now
+    return page_state
+  
+  def release_pages(self, slot: int):
+    """Release pages for a completed request."""
+    if self.page_manager is not None and self.page_state is not None:
+        self.page_state = self.page_manager.release_pages(
+            page_state=self.page_state,
+            request_id=slot
+        )
+        return True
+    return False
+  
+  def get_page_usage_stats(self):
+    """Return statistics about page usage."""
+    if self.page_state is None:
+        return None
+        
+    stats = {}
+    for layer_idx in range(self.config.num_decoder_layers):
+        layer_stats = {
+            "total_pages": self.config.pagedattn_num_pages,
+            "used_pages": int(jnp.sum(self.page_state.page_status[layer_idx])),
+            "slots_with_pages": int(jnp.sum(self.page_state.num_pages_used[layer_idx] > 0)),
+            "pages_per_slot": [
+                int(self.page_state.num_pages_used[layer_idx, i]) 
+                for i in range(self.page_state.num_pages_used.shape[1])
+                if self.page_state.num_pages_used[layer_idx, i] > 0
+            ]
+        }
+        stats[f"layer_{layer_idx}"] = layer_stats
+    return stats
 
   def init_decode_state(
-      self,
-      *args,  # pylint: disable=unused-argument
-      rng: Optional[PRNGKeyType] = None,
-      **kwargs,  # pylint: disable=unused-argument
+    self, 
+    *args, 
+    rng: Optional[PRNGKeyType] = None, 
+    page_state: Optional[PageState] = None,
+    **kwargs,
   ) -> DecodeState:
     """Initialises any state which a generation step transforms."""
-
     if rng is None:
-      rng = jax.random.PRNGKey(0)
-
-    # pylint: disable=unused-argument
-    def init(abstract_params):
+        rng = jax.random.PRNGKey(0)
+    
+    # During eval_shape, we'll still pass page_state but won't enforce it
+    def init(abstract_params, page_state):
       x = jnp.ones(
           (int(self.config.per_device_batch_size * jax.device_count()), 1),
           dtype=jnp.int32,
@@ -1131,6 +1263,8 @@ class MaxEngine(engine_api.Engine):
           model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
           rngs={"params": rng},
           mutable=["cache"],
+          page_state=page_state,
+          slot=0,
       )
 
       next_pos = jnp.zeros(
@@ -1160,7 +1294,8 @@ class MaxEngine(engine_api.Engine):
       }
 
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      abstract_outputs = jax.eval_shape(init, self.abstract_params)
+      # Pass abstract_params and page_state SEPARATELY to jax.eval_shape
+      abstract_outputs = jax.eval_shape(init, self.abstract_params, page_state)
     logical_annotations = nn.get_partition_spec(abstract_outputs)
 
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
