@@ -51,13 +51,21 @@ jobs:
               process.exit(1)
             }
 
-            // This list should match with CODEOWNERS
+            // This list should match with CODEOWNERS.
             let requiredReviewers = {
               gobbleturk: "",
               khatwanimohit: "",
               bvandermoon: "",
               vipannalla: "",
               RissyRan: "",
+              richjames0: "",
+              rni418: "",
+              gagika: "",
+              shralex: "",
+              yangyuwei: "",
+              SurbhiJainUSC: "",
+              hengtaoguo: "",
+              A9isha: "",
             }
             const reviews = await github.rest.pulls.listReviews({
               owner,
@@ -76,15 +84,14 @@ jobs:
               console.log("Not adding pull ready because the PR is not approved yet.")
               process.exit()
             }
-            let is_approved=false
+            let num_approved = 0
             for (const review of reviews.data) {
-              if (review.state === "APPROVED" && (review.user.login in requiredReviewers || pullRequester in requiredReviewers)) {
-                is_approved=true
-                break;
+              if (review.state === "APPROVED" && review.user.login in requiredReviewers) {
+                num_approved = num_approved + 1
               }
             }
-            if (!is_approved) {
-              console.log("Not adding pull ready because the PR is not approved yet by a code owner.")
+            if (num_approved < 2) {
+              console.log("Not adding pull ready because the PR is not approved yet by 2 code owners.")
               process.exit()
             }
 

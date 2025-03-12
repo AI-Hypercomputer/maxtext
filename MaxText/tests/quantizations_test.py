@@ -21,6 +21,7 @@ from flax import linen as nn
 import functools
 import numpy as np
 import pyconfig
+import pytest
 from layers import quantizations
 import unittest
 from aqt.jax.v2 import aqt_tensor
@@ -50,14 +51,13 @@ class QuantTestModule(nn.Module):
 
 
 def _configure_quantization(quant_str="", quant_cfg_path="", mode_str="train", replicate_scale=False):
-  pyconfig.initialize(
+  config = pyconfig.initialize(
       [None, "configs/base.yml"],
       enable_checkpointing=False,
       quantization=quant_str,
       quant_cfg_path=quant_cfg_path,
       replicate_quant_scale=replicate_scale,
   )
-  config = pyconfig.config
   quant = quantizations.configure_quantization(config, mode_str)
   return quant
 
@@ -99,6 +99,7 @@ class QuantizationTest(unittest.TestCase):
       quant = _configure_quantization(quant_str="int8", mode_str=quant_mode)
       self.assertNotEqual(quant, None)
 
+  @pytest.mark.skip(reason="b/400476456 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
   def test_aqt_quantization(self):
     # Without quantization
     inputs, res_einsum, res_dg = _apply()

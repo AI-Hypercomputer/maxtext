@@ -58,7 +58,12 @@ def checkpoint_loop(config, state=None):
   checkpoint_load_start = datetime.datetime.now()
   with nn_partitioning.axis_rules(config.logical_axis_rules):
     state, _ = checkpointing.load_state_if_possible(
-        checkpoint_manager, None, config.load_parameters_path, config.load_full_state_path, unboxed_abstract_state
+        checkpoint_manager,
+        None,
+        config.load_parameters_path,
+        config.load_full_state_path,
+        config.checkpoint_storage_concurrent_gb,
+        unboxed_abstract_state,
     )
     if state:
       state = state["items"]
@@ -106,8 +111,7 @@ def add_entropy_to_checkpoint(state):
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_cpu_enable_gloo_collectives", True)
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-  pyconfig.initialize(argv)
-  config = pyconfig.config
+  config = pyconfig.initialize(argv)
   validate_train_config(config)
   print(f"Found {jax.device_count()} devices.")
   print(f"Found {jax.process_count()} processes.")

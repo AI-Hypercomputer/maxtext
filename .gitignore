@@ -137,3 +137,6 @@ dmypy.json
 
 # Wheel build
 *.whl
+
+# Intellij IDEA setting folder
+.idea

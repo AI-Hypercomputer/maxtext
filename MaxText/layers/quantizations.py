@@ -25,6 +25,8 @@ from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
 import common_types
 from dataclasses import dataclass
+from flax.linen import fp8_ops
+from flax.linen import initializers as flax_initializers
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
@@ -42,9 +44,11 @@ _TILE_SIZE = "tile_size"  # Tile size for subchannel
 
 MAX_INT8 = 127.5
 MAX_INT4 = 7.5
+E4M3_MAX = jnp.finfo(jnp.float8_e4m3fn).max.astype(jnp.float32)
 
 Array = common_types.Array
 Config = common_types.Config
+DType = common_types.DType
 AxisIdxes = common_types.AxisIdxes
 AxisNames = common_types.AxisNames
 CACHE_HEADS = common_types.CACHE_HEADS
@@ -58,6 +62,10 @@ class Quantization:
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Placeholder for dot_general implementation in subclasses."""
+    pass
+
+  def einsum(self, dtype: DType = jnp.float32):
+    """Placeholder for einsum implementation in subclasses."""
     pass
 
 
@@ -201,6 +209,82 @@ class Fp8Quantization(Quantization):
     """Returns dot_general configured with aqt params."""
     return nn.Fp8DotGeneralOp
 
+  def einsum(self, dtype: DType = jnp.float32):
+    return Fp8Einsum(dtype=dtype)
+
+
+class Fp8Einsum(nn.Module):
+  """An fp8 einsum op.
+
+  Attributes:
+    amax_history_length: size of the amax history.
+    e4m3_dtype: e4m3 variants, e.g., e4m3fn, e4m3fnuz.
+    e5m2_dtype: e5m2 variants, e.g., e5m2, e5m2fnuz.
+    dtype: computation dtype.
+  """
+
+  amax_history_length: int = 1024
+  e4m3_dtype: DType = jnp.float8_e4m3fn
+  e5m2_dtype: DType = jnp.float8_e5m2
+  dtype: DType = jnp.float32
+
+  def setup(self) -> None:
+    scale_args = (
+        flax_initializers.ones_init(),
+        jax.random.PRNGKey(0),
+        (1,),
+        jnp.float32,
+    )
+    amax_history_args = (
+        flax_initializers.zeros_init(),
+        jax.random.PRNGKey(0),
+        (self.amax_history_length,),
+        jnp.float32,
+    )
+
+    OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
+    self.input_amax_history = self.variable(OVERWRITE_WITH_GRADIENT, "input_amax_history", *amax_history_args)
+    self.kernel_amax_history = self.variable(OVERWRITE_WITH_GRADIENT, "kernel_amax_history", *amax_history_args)
+    self.output_grad_amax_history = self.variable(OVERWRITE_WITH_GRADIENT, "output_grad_amax_history", *amax_history_args)
+
+    self.input_scale = self.variable(OVERWRITE_WITH_GRADIENT, "input_scale", *scale_args)
+    self.kernel_scale = self.variable(OVERWRITE_WITH_GRADIENT, "kernel_scale", *scale_args)
+    self.output_grad_scale = self.variable(OVERWRITE_WITH_GRADIENT, "output_grad_scale", *scale_args)
+
+  def __call__(self, eqn, *args, **kwargs):
+    assert len(args) == 2
+    x = args[0]
+    k = args[1]
+
+    comp_dtype = self.dtype
+    k = jnp.asarray(k, comp_dtype)
+    x = jnp.asarray(x, comp_dtype)
+
+    x_qdq = fp8_ops.in_qdq(comp_dtype, self.e4m3_dtype, x, self.input_scale.value, self.input_amax_history.value)
+    k_qdq = fp8_ops.in_qdq(comp_dtype, self.e4m3_dtype, k, self.kernel_scale.value, self.kernel_amax_history.value)
+
+    y_qdq = jnp.einsum(eqn, x_qdq, k_qdq, _dot_general=fp8_ops.dot_general_with_precision)
+
+    y = fp8_ops.out_qdq(
+        comp_dtype,
+        self.e5m2_dtype,
+        y_qdq,
+        self.output_grad_scale.value,
+        self.output_grad_amax_history.value,
+    )
+    return y
+
+
+@dataclass
+class NANOOFp8Quantization(Quantization):
+  """Configures NANOO Fp8 quantization for AMD MI300/MI325 GPUs"""
+
+  quant_mode = "train"
+
+  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
+    """Returns dot_general configured with aqt params."""
+    return nn.NANOOFp8DotGeneralOp
+
 
 def _get_int8_quant_config(config):
   drhs_bits = None
@@ -221,6 +305,10 @@ def _get_int8_quant_config(config):
       dlhs_accumulator_dtype=jnp.int32,
       drhs_accumulator_dtype=drhs_accumulator_dtype,
   )
+
+
+def _get_aqt_fp8_quant_config(config):
+  return aqt_config.config_fwd_fp8()
 
 
 def _dot_general_make(quant_cfg):
@@ -272,6 +360,10 @@ def _get_quant_config(config):
     return _get_mixed_precision_quant_config(mixed_precision_config)
   if config.quantization == "fp8":
     return "fp8"
+  if config.quantization == "nanoo_fp8":
+    return "nanoo_fp8"
+  if config.quantization == "aqt_fp8":
+    return _get_aqt_fp8_quant_config(config)
   raise ValueError(f"Invalid value configured for quantization {config.quantization}.")
 
 
@@ -302,6 +394,8 @@ def configure_quantization(config: Config, quant_mode_str: str = "train"):
   if quant_cfg:
     if quant_cfg == "fp8":
       return Fp8Quantization()
+    elif quant_cfg == "nanoo_fp8":
+      return NANOOFp8Quantization()
     quant_mode = get_quant_mode(quant_mode_str)
     replicate_scale = config.replicate_quant_scale if config.replicate_quant_scale else False
     return AqtQuantization(quant_dg=quant_cfg, quant_mode=quant_mode, replicate_scale=replicate_scale)
@@ -368,6 +462,8 @@ class KVQuant:
       return jnp.int4
     if dtype_cfg == "int8":
       return jnp.int8
+    if dtype_cfg == "fp8":
+      return jnp.float8_e4m3fn
     raise ValueError(f"Invalid kv_quant_dtype: {dtype_cfg}")
 
   def _get_max_axis(self, axis_names: AxisNames):
@@ -388,6 +484,9 @@ class KVQuant:
     if self.dtype == jnp.int4:
       value = jnp.int4(jnp.rint(kv * (MAX_INT4 / scale)))
       return value, scale
+    if self.dtype == jnp.float8_e4m3fn:
+      value = jnp.float8_e4m3fn(kv * (E4M3_MAX / scale))
+      return value, scale
     raise ValueError(f"Invalid KV quant dtype:{self.dtype}.")
 
   def einsum_fn_with_rhs_qtensor(
@@ -395,23 +494,36 @@ class KVQuant:
       kv: Array | aqt_tensor.QTensor,
       rhs_dequant_mode=None,
       rhs_calibration_mode=None,
+      lhs_dequant_mode=None,
+      lhs_calibration_mode=None,
   ):
     # Assumes kv is already quantized.
     einsum = jnp.einsum
     if isinstance(kv, aqt_tensor.QTensor):
-      num_bits = 4 if kv.qvalue.dtype == jnp.int4 else 8
-      kv_cfg = aqt_config.dot_general_make(
-          lhs_bits=None,
-          rhs_bits=num_bits,
-          bwd_bits=None,
-          use_fwd_quant=False,
-      )
+      if kv.qvalue.dtype != jnp.float8_e4m3fn:
+        num_bits = 4 if kv.qvalue.dtype == jnp.int4 else 8
+        kv_cfg = aqt_config.dot_general_make(
+            lhs_bits=None,
+            rhs_bits=num_bits,
+            bwd_bits=None,
+            use_fwd_quant=False,
+        )
+      else:
+        kv_cfg = aqt_config.config_fwd_fp8()
+
       if rhs_dequant_mode:
         aqt_config.set_fwd_dequant_mode(kv_cfg, rhs_dequant_mode=rhs_dequant_mode)
       if rhs_calibration_mode:
         aqt_config.set_fwd_calibration_mode(
             kv_cfg,
             rhs_calibration_mode=rhs_calibration_mode,
+        )
+      if lhs_dequant_mode:
+        aqt_config.set_fwd_dequant_mode(kv_cfg, lhs_dequant_mode=lhs_dequant_mode)
+      if lhs_calibration_mode:
+        aqt_config.set_fwd_calibration_mode(
+            kv_cfg,
+            lhs_calibration_mode=lhs_calibration_mode,
         )
       einsum = aqt_flax.AqtEinsum(
           rhs_quant_mode=aqt_flax.QuantMode.TRAIN,
@@ -422,8 +534,17 @@ class KVQuant:
     return einsum
 
   def einsum_fn_with_rhs_qtensor_and_dequant(self, value):
-    return self.einsum_fn_with_rhs_qtensor(
-        value,
-        rhs_dequant_mode=aqt_config.DequantMode.OTHER_INPUT,
-        rhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
-    )
+    if self.dtype == jnp.float8_e4m3fn:
+      return self.einsum_fn_with_rhs_qtensor(
+          value,
+          lhs_dequant_mode=aqt_config.DequantMode.THIS_INPUT,
+          lhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
+          rhs_dequant_mode=aqt_config.DequantMode.OTHER_INPUT,
+          rhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
+      )
+    else:
+      return self.einsum_fn_with_rhs_qtensor(
+          value,
+          rhs_dequant_mode=aqt_config.DequantMode.OTHER_INPUT,
+          rhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
+      )

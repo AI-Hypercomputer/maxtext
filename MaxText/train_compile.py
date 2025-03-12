@@ -36,6 +36,7 @@ from layers import models
 from layers import quantizations
 from typing import Sequence
 from absl import app
+from utils import gcs_utils
 import os
 import pickle
 import accelerator_to_spec_map
@@ -140,8 +141,7 @@ def main(argv: Sequence[str]) -> None:
   print("Starting train_compile.py...", flush=True)
 
   # Parse and validate configuration
-  pyconfig.initialize(argv)
-  config = pyconfig.config
+  config = pyconfig.initialize(argv)
   validate_config(config)
 
   # Create target mesh
@@ -185,7 +185,7 @@ def main(argv: Sequence[str]) -> None:
 
   # Dump HLO if requested
   if config.dump_hlo:
-    max_utils.upload_dump(
+    gcs_utils.upload_dump(
         config.dump_hlo_local_dir,
         config.dump_hlo_gcs_dir,
         module_name=config.dump_hlo_module_name,

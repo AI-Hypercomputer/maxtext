@@ -37,8 +37,14 @@ PyTreeCheckpointHandler = ocp.PyTreeCheckpointHandler
 LocalCheckpointOptions = emergency_checkpoint_manager.LocalCheckpointOptions
 PersistentCheckpointOptions = emergency_checkpoint_manager.PersistentCheckpointOptions
 
-abstract_logger = ocp.logging.abstract_logger
-cloud_logger = ocp.logging.cloud_logger
+# Starting from Orbax 0.11.7, these must be refactored like commit ff1c3e8.
+# See b/401509894 for more details.
+try:
+  abstract_logger = ocp.logging.abstract_logger  # pytype: disable=module-attr
+  cloud_logger = ocp.logging.cloud_logger  # pytype: disable=module-attr
+except AttributeError:
+  abstract_logger = None  # pytype: disable=attribute-error
+  cloud_logger = None  # pytype: disable=attribute-error
 
 
 def create_orbax_checkpoint_manager(
@@ -48,7 +54,7 @@ def create_orbax_checkpoint_manager(
     save_interval_steps: int,
     max_to_keep: Optional[int] = None,
     dataset_type: Optional[str] = "tfds",
-    orbax_logger: Optional[abstract_logger.AbstractLogger] = None,
+    orbax_logger: Any = None,  # pytype: disable=attribute-error
     use_ocdbt: bool = True,
     use_zarr3: bool = True,
 ):
@@ -92,7 +98,7 @@ def create_orbax_emergency_checkpoint_manager(
     abstract_state: Any,
     local_save_interval_steps: int,
     persistent_save_interval_steps: int,
-    orbax_logger: Optional[abstract_logger.AbstractLogger] = None,
+    orbax_logger: Any = None,  # pytype: disable=attribute-error
 ):
   """Returns an emergency checkpoint manager."""
   flags.FLAGS.experimental_orbax_use_distributed_process_id = True
@@ -181,6 +187,7 @@ def load_state_if_possible(
     data_iterator: Union[MultiHostDataLoadIterator, None],
     load_parameters_from_path: str,
     load_full_state_from_path: str,
+    checkpoint_storage_concurrent_gb: int,
     abstract_unboxed_pre_state: train_state.TrainState,
     enable_single_replica_ckpt_restoring: Optional[bool] = False,
     dataset_type: Optional[str] = "tfds",
@@ -199,6 +206,7 @@ def load_state_if_possible(
       matches type against.
     enable_single_replica_ckpt_restoring: bool flag for restoring checkpoitn
       with SingleReplicaArrayHandler
+    checkpoint_storage_concurrent_gb: concurrent GB for checkpoint byte I/O.
 
   Returns:
     A tuple of (train_state, train_state_params) where full_train_state captures
@@ -290,7 +298,9 @@ def load_state_if_possible(
         )
 
   if load_parameters_from_path != "":
-    restored_params = load_params_from_path(load_parameters_from_path, abstract_unboxed_pre_state.params)
+    restored_params = load_params_from_path(
+        load_parameters_from_path, abstract_unboxed_pre_state.params, checkpoint_storage_concurrent_gb
+    )
     return None, restored_params
   elif load_full_state_from_path != "":
     max_logging.log(f"restoring full state from {load_full_state_from_path=}")
@@ -304,7 +314,7 @@ def load_state_if_possible(
     return None, None
 
 
-def setup_checkpoint_logger(config) -> cloud_logger.CloudLogger | None:
+def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-error
   """Setup checkpoint logger.
   Args:
     config
@@ -315,20 +325,29 @@ def setup_checkpoint_logger(config) -> cloud_logger.CloudLogger | None:
   max_logging.log("Setting up checkpoint logger...")
   if config.enable_checkpoint_cloud_logger:
     logger_name = f"goodput_{config.run_name}"
-    options = cloud_logger.CloudLoggerOptions(job_name=config.run_name, logger_name=logger_name)
-    orbax_cloud_logger = cloud_logger.CloudLogger(options=options)
+    options = cloud_logger.CloudLoggerOptions(
+        job_name=config.run_name, logger_name=logger_name
+    )  # pytype: disable=attribute-error
+    orbax_cloud_logger = cloud_logger.CloudLogger(options=options)  # pytype: disable=attribute-error
     max_logging.log("Successfully set up checkpoint cloud logger.")
     return orbax_cloud_logger
 
   return orbax_cloud_logger
 
 
-def load_params_from_path(load_parameters_from_path, abstract_unboxed_params):
+def load_params_from_path(load_parameters_from_path, abstract_unboxed_params, checkpoint_storage_concurrent_gb):
   """Load decode params from checkpoint at specified path."""
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
   max_logging.log(f"restoring params from {load_parameters_from_path}")
   ckpt = epath.Path(load_parameters_from_path)
-  ckptr = ocp.PyTreeCheckpointer()
+
+  # *_concurrent_gb should be set for large models, the default is 96.
+  ckptr = ocp.Checkpointer(
+      ocp.PyTreeCheckpointHandler(
+          restore_concurrent_gb=checkpoint_storage_concurrent_gb, save_concurrent_gb=checkpoint_storage_concurrent_gb
+      )
+  )
+
   # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
   # Rather than pass the entire abstract state, which could unnecessarily restore opt_state and such and waste
   # memory, we instead specify here that we are just restoring the params field of the checkpoint

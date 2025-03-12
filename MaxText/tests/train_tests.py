@@ -59,6 +59,16 @@ class TrainTests(unittest.TestCase):
           "ici_tensor_parallelism=4",
           r"tokenizer_path=../assets/tokenizer.llama2",
       ],
+      "tp_transpose": [  # tests base config with ici_tensor_transpose_parallelism=4
+          None,
+          "configs/base.yml",
+          r"base_output_directory=gs://runner-maxtext-logs",
+          "run_name=runner_test",
+          r"dataset_path=gs://maxtext-dataset",
+          "steps=2",
+          "ici_tensor_transpose_parallelism=4",
+          r"tokenizer_path=../assets/tokenizer.llama2",
+      ],
       "int8": [  # tests base config with int8
           None,
           "configs/base.yml",
@@ -77,6 +87,17 @@ class TrainTests(unittest.TestCase):
           "run_name=runner_test",
           r"dataset_path=gs://maxtext-dataset",
           "quantization=fp8",
+          "steps=2",
+          "enable_checkpointing=False",
+          r"tokenizer_path=../assets/tokenizer.llama2",
+      ],
+      "nanoo_fp8": [  # tests base config with nanoo_fp8
+          None,
+          "configs/base.yml",
+          r"base_output_directory=gs://runner-maxtext-logs",
+          "run_name=runner_test",
+          r"dataset_path=gs://maxtext-dataset",
+          "quantization=nanoo_fp8",
           "steps=2",
           "enable_checkpointing=False",
           r"tokenizer_path=../assets/tokenizer.llama2",
@@ -147,6 +168,10 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.gpu_only
   def test_gpu_fp8(self):
     train_main(TrainTests.CONFIGS["fp8"] + ["attention=dot_product"])
+
+  @pytest.mark.gpu_only
+  def test_gpu_nanoo_fp8(self):
+    train_main(TrainTests.CONFIGS["nanoo_fp8"] + ["attention=dot_product"])
 
   @pytest.mark.tpu_only
   def test_tpu_dropout(self):

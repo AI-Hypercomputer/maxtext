@@ -118,6 +118,7 @@ def main(config):
       tokens = tokens[:max_prefill_predict_length]
       true_length = max_prefill_predict_length
     assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
+    assert config.quantization != "nanoo_fp8", "NANOO fp8 on AMD MI300/MI325 GPUs is not supported in decode.py yet"
 
     # Perform prefill
     prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
@@ -217,8 +218,7 @@ def validate_config(config):
 if __name__ == "__main__":
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   flags.FLAGS(sys.argv)
-  pyconfig.initialize(sys.argv)
-  cfg = pyconfig.config
+  cfg = pyconfig.initialize(sys.argv)
   validate_config(cfg)
   max_utils.print_system_information()
   main(cfg)

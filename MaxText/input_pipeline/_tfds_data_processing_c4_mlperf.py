@@ -308,7 +308,9 @@ def make_c4_mlperf_train_iterator(
   )
   train_ds = rekey(train_ds, {"inputs": None, "targets": "text"})
 
-  sp_tokenizer = get_tokenizer(config.tokenizer_path, config.add_bos, config.add_eos)
+  sp_tokenizer = get_tokenizer(
+      config.tokenizer_path, config.tokenizer_type, config.add_bos, config.add_eos, config.hf_access_token
+  )
   train_ds = preprocess_train_dataset(
       train_ds,
       sp_tokenizer=sp_tokenizer,

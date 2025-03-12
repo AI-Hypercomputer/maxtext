@@ -14,6 +14,7 @@ pytype
 sentencepiece==0.1.97
 tensorflow-text>=2.13.0
 tensorflow-datasets
+tensorboardx>=2.6.2.2
 tiktoken
 transformers
 mlperf-logging@git+https://github.com/mlperf/logging.git
@@ -23,3 +24,4 @@ pathwaysutils@git+https://github.com/google/pathways-utils.git
 google-cloud-monitoring
 google-api-core
 google-api-python-client
+omegaconf

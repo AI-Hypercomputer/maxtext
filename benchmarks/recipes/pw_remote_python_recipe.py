@@ -59,11 +59,11 @@ def main() -> int:
   base_output_directory = f"gs://{user}-{region}/{user}"
 
   list_of_models = [
-      model_configs.default_basic_1_pw,
+      model_configs.default_basic_1,
   ]
   pathways_config = mxr.PathwaysConfig(
       server_image=server_image,
-      proxy_image=proxy_image,
+      proxy_server_image=proxy_image,
       runner_image=runner,
       remote_python_sidecar_image=remote_python_image,
   )

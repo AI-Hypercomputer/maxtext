@@ -64,8 +64,7 @@ def self_attention_with_norm(inputs, cfg, mesh, quant, decoder_segment_ids, deco
   lnx = lnx_rms(inputs)
   lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
-  # TODO: Update self-attention to MLA
-  attention_layer = Attention(
+  attention_layer = attentions.MLA(
       config=cfg,
       num_query_heads=cfg.num_query_heads,
       num_kv_heads=cfg.num_kv_heads,
@@ -80,6 +79,15 @@ def self_attention_with_norm(inputs, cfg, mesh, quant, decoder_segment_ids, deco
       name="self_attention",
       quant=quant,
       kv_quant=quantizations.configure_kv_quant(cfg),
+      q_lora_rank=cfg.q_lora_rank,
+      kv_lora_rank=cfg.kv_lora_rank,
+      qk_nope_head_dim=cfg.qk_nope_head_dim,
+      qk_rope_head_dim=cfg.qk_rope_head_dim,
+      v_head_dim=cfg.v_head_dim,
+      max_position_embeddings=cfg.max_position_embeddings,
+      original_max_position_embeddings=cfg.original_max_position_embeddings,
+      mscale=cfg.mscale,
+      rope_factor=cfg.rope_factor,
   )
 
   attention_lnx = attention_layer(
@@ -141,6 +149,7 @@ class DeepSeekDenseLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      page_state=None,
   ):
     cfg = self.config
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
@@ -188,6 +197,7 @@ class DeepSeekMoELayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      page_state=None,
   ):
     cfg = self.config
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
