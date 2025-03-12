@@ -39,8 +39,8 @@ export WORKLOAD_NAME=$USER-$(echo $MODEL_NAME | sed 's/\.//g')-aot-${RANDOM:0:2}
 # export NUM_LAYERS_PER_PP_STAGE=1
 
 # PP setting
-# export PER_DEVICE_BATCH_SIZE=1
-# export ICI_TP=1
+export PER_DEVICE_BATCH_SIZE=1
+export ICI_TP=1
 
 # OOM, 80G, TP should help here, but I'd like to isolate TP from FSDP for now https://xprof.corp.google.com/memory_viewer/lancewang-1849170665103313379
 # export TARGET_NUM_NODES=128
@@ -57,7 +57,7 @@ export WORKLOAD_NAME=$USER-$(echo $MODEL_NAME | sed 's/\.//g')-aot-${RANDOM:0:2}
 # export DCN_PP=3 # 126 layers, could be 2, 3, 6, 7, 9, 14, 18, 21
 # export NUM_LAYERS_PER_PP_STAGE=14 # 126 layers, (2,3,7), so (2,3,7,6,14,21), 3 repeats
 
-# 67G, https://xprof.corp.google.com/memory_viewer/lancewang-13350260186473749094
+# 70.6G, https://xprof.corp.google.com/memory_viewer/lancewang-13350260186473749094
 # export TARGET_NUM_NODES=96
 # export DCN_PP=3 # 126 layers, could be 2, 3, 6, 7, 9, 14, 18, 21
 # export NUM_LAYERS_PER_PP_STAGE=6 # 126 layers, (2,3,7), so (2,3,7,6,14,21), 7 repeats
@@ -72,11 +72,11 @@ export WORKLOAD_NAME=$USER-$(echo $MODEL_NAME | sed 's/\.//g')-aot-${RANDOM:0:2}
 # export DCN_PP=7 # 126 layers
 # export NUM_LAYERS_PER_PP_STAGE=9 # (2,3,3), 2 repeats
 
-# 69G, https://xprof.corp.google.com/memory_viewer/lancewang-4215571770793819877
+# 72G, https://xprof.corp.google.com/memory_viewer/lancewang-4215571770793819877
 # Errors out after changing remat_policy=custom decoder_layer_input=offload
-# export TARGET_NUM_NODES=112
-# export DCN_PP=7 # 126 layers
-# export NUM_LAYERS_PER_PP_STAGE=6 # (2,3,3), 3 repeats
+export TARGET_NUM_NODES=112
+export DCN_PP=7 # 126 layers
+export NUM_LAYERS_PER_PP_STAGE=6 # (2,3,3), 3 repeats
 
 # export TARGET_NUM_NODES=72
 # export DCN_PP=9 # 126 layers
@@ -86,24 +86,25 @@ export WORKLOAD_NAME=$USER-$(echo $MODEL_NAME | sed 's/\.//g')-aot-${RANDOM:0:2}
 # export DCN_PP=14 # 126 layers
 # export NUM_LAYERS_PER_PP_STAGE=9 # (3,3)
 
-# export DCN_FSDP=$(($TARGET_NUM_NODES / $DCN_PP))
-# export PP_MBS=$(($DCN_PP * 2))
+
 
 # DP + TP + PP
-export PER_DEVICE_BATCH_SIZE=2
-export ICI_TP=8
+# export PER_DEVICE_BATCH_SIZE=2
+# export ICI_TP=8
 
 # export TARGET_NUM_NODES=72
 # export DCN_PP=9 # 126 layers
 # export DCN_DP=8
 # export NUM_LAYERS_PER_PP_STAGE=7 # (2,7), 3 repeats
 
-export TARGET_NUM_NODES=112
-export DCN_PP=14 # 126 layers, could be 2, 3, 6, 7, 9, 14, 18, 21
-export DCN_DP=8
-export NUM_LAYERS_PER_PP_STAGE=9 # 126 layers, (2,3,7), so (2,3,7,6,14,21), 7 repeats
+# export TARGET_NUM_NODES=112
+# export DCN_PP=14 # 126 layers, could be 2, 3, 6, 7, 9, 14, 18, 21
+# export DCN_DP=8
+# export NUM_LAYERS_PER_PP_STAGE=9 # 126 layers, (2,3,7), so (2,3,7,6,14,21), 7 repeats
 
-export PP_MBS=$(($DCN_PP * 2))
+export DCN_FSDP=$(($TARGET_NUM_NODES / $DCN_PP))
+export PP_MBS=$DCN_PP
+# export PP_MBS=$(($DCN_PP * 2))
 
 
 # export REMAT_POLICY=save_qkv_proj
