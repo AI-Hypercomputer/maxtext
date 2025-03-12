@@ -29,8 +29,9 @@ import maxtext_xpk_runner as mxr
 PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_proxy_server:latest"
 # SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_server:laitest"
 SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_server:latest"
-RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest"
+# RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest"
 # RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable@sha256:82b49e1e6a735702321c18378621f9362e9adebf99cf6ebb84fa6f16362b4626"
+RUNNER = "gcr.io/cloud-tpu-v2-images-dev/shauryag_latest:watchdog"
 
 # Cluster Params
 CLUSTER = "bodaborg-v6e-256-ts"
@@ -83,7 +84,7 @@ def main() -> int:
       # User can add additional flags here.
       server_flags="--enable_metrics_collection=true",
       proxy_flags="--enable_metrics_collection=true",
-      worker_flags="--enable_metrics_collection=true",
+      worker_flags="--megascale_communication_impairments=delay_profile{{points{{percentile:99,drop:true}}}} --enable_metrics_collection=true",
   )
   num_slices_list = [
       2
@@ -100,7 +101,7 @@ def main() -> int:
 
       # Make modifications to the model config here to add in any additional
       # flags or changes to the model config.
-      model.tuning_params["use_vertex_tensorboard"] = True
+      model.tuning_params["use_vertex_tensorboard"] = False
       model.tuning_params["vertex_tensorboard_project"] = PROJECT
       model.tuning_params["vertex_tensorboard_region"] = REGION
 
@@ -111,7 +112,7 @@ def main() -> int:
             num_slices=num_slices,
             device_type=cluster_config.device_type,
             base_output_directory=BASE_OUTPUT_DIRECTORY,
-            executable="MaxText/train.py",
+            executable="MaxText/elastic_train.py",
             max_restarts=MAX_RESTARTS,
             libtpu_type=None,
             libtpu_nightly_version="",
@@ -119,7 +120,7 @@ def main() -> int:
             pathways_config=pathways_config,
             xpk_path=XPK_PATH,
             num_steps=BENCHMARK_STEPS,
-            priority="high",
+            priority="medium",
         )
         command, name = mxr.generate_xpk_workload_cmd(
             cluster_config=cluster_config, wl_config=wl_config
