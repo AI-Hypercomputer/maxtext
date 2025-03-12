@@ -430,6 +430,7 @@ def compute_log_probs(model,
                       inputs,
                       inputs_position,
                       inputs_segmentation,
+                      completion_segmentation,
                       config, is_train=False, rngs=None):
   """
   Given a sequence of tokens (shape [B, L]), this helper calls model.apply (with dropout enabled
@@ -449,15 +450,24 @@ def compute_log_probs(model,
   if not is_train:
     logits = jax.lax.stop_gradient(logits)
   # Remove last time step since there is no target for the final position.
-  # logits = logits[:, :-1, :]
-  # targets = inputs[:, 1:]
-  log_probs = jax.nn.log_softmax(logits, axis=-1)
-  # jax.debug.print("log_probs {x}",x=log_probs[0,16,:16])
-  
+  targets = inputs[:, 1:]
+  # Shift left using dynamic slice (skip first column)
+  shifted_completion_segmentation = jax.lax.dynamic_slice(completion_segmentation, (0, 1), (completion_segmentation.shape[0], completion_segmentation.shape[1] - 1))
+  # Pad with 0 at the end to maintain the original shape
+  shifted_completion_segmentation = jnp.pad(shifted_completion_segmentation, ((0, 0), (0, 1)), mode="constant", constant_values=0)
+
+  mask = shifted_completion_segmentation[..., None]
+  mask = jnp.broadcast_to(mask, logits.shape)
+
+  masked_logits = jnp.where(mask, logits, -jnp.inf)
+  log_probs = jax.nn.log_softmax(masked_logits, axis=-1)
+  log_probs = jnp.where(mask, log_probs, -0.0)
+  log_probs = log_probs[:,:-1,:]
   # Gather the log probabilities corresponding to each target token.
-  token_log_probs = jnp.take_along_axis(log_probs, inputs[..., None], axis=-1)[..., 0]
-  # jax.debug.print("completions {x}",x=inputs[0])
-  return token_log_probs, logits, intermediate_outputs
+  token_log_probs = jnp.take_along_axis(log_probs, targets[..., None], axis=-1)[..., 0]
+  token_log_probs = token_log_probs * shifted_completion_segmentation[:,:-1]
+
+  return token_log_probs, intermediate_outputs
 
 
 # -----------------------------------------------------------------------------
