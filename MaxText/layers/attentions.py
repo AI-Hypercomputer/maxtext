@@ -1319,6 +1319,8 @@ class Attention(nn.Module):
   sliding_window_size: int | None = None
   use_ragged_attention: bool = False
   ragged_block_size: int = 256
+  use_qk_norm: bool = False
+  query_pre_attn_scalar: float | None = None
 
   # Shard the query activation as the same as the key and value.
   # TODO: Find a better sharding axis name.
@@ -1510,9 +1512,13 @@ class Attention(nn.Module):
           name=name,
       )
     else:
+      max_timescale = self.config.rope_max_timescale
+      # For local attention use local_rope_max_timescale if it's is positive
+      if self.attention_type == AttentionType.LOCAL_SLIDING and self.config.local_rope_max_timescale > 0:
+        max_timescale = self.config.local_rope_max_timescale
       rotary_embedding = RotaryEmbedding(
           min_timescale=self.config.rope_min_timescale,
-          max_timescale=self.config.rope_max_timescale,
+          max_timescale=max_timescale,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
           name=name,
@@ -1570,9 +1576,29 @@ class Attention(nn.Module):
       key = self.kv_projection(inputs_kv, proj_name="key")
       value = self.kv_projection(inputs_kv, proj_name="value")
 
+      if self.use_qk_norm:
+        query = RMSNorm(
+            dtype=self.config.dtype,
+            weight_dtype=self.config.weight_dtype,
+            name="query_norm",
+            epsilon=self.config.normalization_layer_epsilon,
+            kernel_axes=("norm",),
+        )(query)
+
+        key = RMSNorm(
+            dtype=self.config.dtype,
+            weight_dtype=self.config.weight_dtype,
+            name="key_norm",
+            epsilon=self.config.normalization_layer_epsilon,
+            kernel_axes=("norm",),
+        )(key)
+
     # apply ROPE
     query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
     key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
+    # apply query_pre_attn_scalar if it's present.
+    if self.query_pre_attn_scalar and self.query_pre_attn_scalar != 1.0:
+      query = query * self.query_pre_attn_scalar
 
     if model_mode == common_types.MODEL_MODE_PREFILL:
       query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
