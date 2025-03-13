@@ -39,10 +39,11 @@ def create_default_value(prefix=None, true_length=1, padded_length=1, tokens=Non
   )
 
 
-def get_byte_in_use_function() -> Callable[[], int]:
-  device = jax.local_devices()[0]
+def get_byte_in_use_function(device_idx: int = 0) -> Callable[[], int]:
+  device = jax.local_devices()[device_idx]
   memory_stats = device.memory_stats()
-  assert memory_stats is not None, "Cannot get device memory stats. Does the test run with TPU?"
+  if memory_stats is None:
+    pytest.skip("Cannot get device memory stats. Does the test run with TPU?")
 
   def get_byte_in_use():
     jax.clear_caches()
@@ -136,10 +137,26 @@ class ValueTest(unittest.TestCase):
     sharding1_1 = NamedSharding(mesh1, partition_spec1_1)
     sharding1_2 = NamedSharding(mesh1, partition_spec1_2)
 
+    prefix = {
+        "a": jnp.ones((512, 512), device=local_devices[0]),
+        "b": jnp.ones((mesh_shape1[0], 512, 512), device=sharding1_1),
+        "c": jnp.ones((512, mesh_shape1[0], 512), device=sharding1_2),
+    }
+    expected_device = {
+        "a": local_devices[0],
+        "b": sharding1_1,
+        "c": sharding1_2,
+    }
+    value = create_default_value(prefix=prefix)
+    assert value.device == expected_device
+
+  @pytest.mark.tpu_only
+  def test_device_saved_as_prefix_tree_with_sharding_multiple_dimension(self):
+    local_devices = jax.local_devices()
+    num_devices = jax.local_device_count()
     # assume number of devices will be multiple of 2
-    assert (
-        num_devices % 2 == 0
-    ), "If there are not multiple of 2 devices on testing environment, consider removing mesh shape test part."
+    if num_devices % 2 != 0:
+      pytest.skip("Need multiple of 2 devices on testing environment.")
     mesh_shape2 = (num_devices // 2, 2)
     device_mesh2 = mesh_utils.create_device_mesh(mesh_shape2, devices=local_devices)
     mesh2 = Mesh(device_mesh2, axis_names=("x", "y"))
@@ -148,14 +165,10 @@ class ValueTest(unittest.TestCase):
 
     prefix = {
         "a": jnp.ones((512, 512), device=local_devices[0]),
-        "b": jnp.ones((mesh_shape1[0], 512, 512), device=sharding1_1),
-        "c": jnp.ones((512, mesh_shape1[0], 512), device=sharding1_2),
         "d": jnp.ones((mesh_shape2[0], mesh_shape2[1], 512), device=sharding2),
     }
     expected_device = {
         "a": local_devices[0],
-        "b": sharding1_1,
-        "c": sharding1_2,
         "d": sharding2,
     }
     value = create_default_value(prefix=prefix)
