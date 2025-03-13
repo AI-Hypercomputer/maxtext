@@ -563,7 +563,12 @@ def main() -> int:
     cluster_name='raymondzou-v6e-256-2',
   )
 
-
+  v6e_cluster_config_yuiadrs = XpkClusterConfig(
+      zone='us-east4-b',
+      project='tpu-prod-env-multipod',
+      device_type='v6e-256',
+      cluster_name='bodaborg-v6e-256-qual-yuiadrs-c',
+    )
 
   xpk_workload_cmds = []
   xpk_workload_names = []
@@ -603,7 +608,8 @@ def main() -> int:
       # v5e_cluster_config,
       # v6e_cluster_config,
       # v6e_cluster_config_yucmhab,
-      v6e_cluster_config_starfish,
+      v6e_cluster_config_yuiadrs,
+      # v6e_cluster_config_starfish,
       # v6e_cluster_config_ts,
       # v6e_cluster_config_xrc,
       # another_config,
