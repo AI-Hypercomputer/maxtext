@@ -328,17 +328,48 @@ class AttentionOp(nn.Module):
     # Reshape q to match gqa's expected shape
     q_for_gqa = q.squeeze(axis=1)
 
-    # Use the original gqa function to get the attention output
-    local_out, (local_sum, local_max) = gpu_pallas_decode_attention.gqa(
-        q=q_for_gqa,
-        k=k,
-        v=v,
-        kv_seq_len=lengths,
-        block_k=block_size,
-        sm_scale=1.0,
-        return_residuals=True,
-        normalize_output=False,
+    # Define logical axis names - clearer and avoids repeated calls.
+    b = nn.logical_to_mesh_axes(self.ragged_lengths_names)
+    bsnd = nn.logical_to_mesh_axes(self.cache_logical_axis_names)
+    bnd = nn.logical_to_mesh_axes((CACHE_BATCH, CACHE_HEADS, CACHE_KV))
+    bn = nn.logical_to_mesh_axes((CACHE_BATCH, CACHE_HEADS))
+
+    @functools.partial(
+        shard_map,
+        mesh=self.mesh,
+        in_specs=(bnd, bsnd, bsnd, b, None),
+        out_specs=(bnd, bn, bn),
+        check_rep=False,
     )
+    def wrap_ragged_attention(q: Array, k: Array, v: Array, lengths: Array, block_size: int) -> Tuple[Array, Array, Array]:
+      # Use the original gqa function to get the attention output
+      """
+      Wraps the GQA function with appropriate sharding.
+
+      Args:
+          q: Query tensor.
+          k: Key tensor.
+          v: Value tensor.
+          lengths: Sequence lengths.
+          block_size: Block size for attention.
+
+      Returns:
+          A tuple containing the output, max, and sum tensors.
+      """
+      # Use the original gqa function to get the attention output
+      local_out, (local_sum, local_max) = gpu_pallas_decode_attention.gqa(
+          q=q,
+          k=k,
+          v=v,
+          kv_seq_len=lengths,
+          block_k=block_size,
+          sm_scale=1.0,
+          return_residuals=True,
+          normalize_output=False,
+      )
+      return local_out, local_max, local_sum
+
+    local_out, local_max, local_sum = wrap_ragged_attention(q_for_gqa, k, v, lengths, block_size)
 
     # Reshape local_out, local_max and local_sum to match Maxtext requirements
     local_out = local_out.reshape(batch_size, q_length, q_heads, head_dim)
