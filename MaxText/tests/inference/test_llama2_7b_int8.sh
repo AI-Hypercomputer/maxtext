@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# Define the arguments in an array
 args=(
   "MaxText/decode.py"
   "MaxText/configs/base.yml"
@@ -23,5 +22,4 @@ args=(
   "pagedattn_pages_per_compute_block=4"
 )
 
-# Execute the Python script with the arguments
 python "${args[@]}"
