@@ -636,8 +636,8 @@ def main() -> int:
           )
           initial_block_size = 2048
           final_block_size = 8192
-          step_block_size = 1024
-          for curr_block_q in range(3072,final_block_size,step_block_size):
+          step_block_size = 512
+          for curr_block_q in range(2048,final_block_size,step_block_size):
             wl_config.model
             for curr_block_kv in range(initial_block_size,final_block_size,step_block_size):
               for curr_block_kv_compute in range(initial_block_size,curr_block_kv,step_block_size):
@@ -657,12 +657,13 @@ def main() -> int:
 
                 command_pieces = command.split(' ')
                 for command_piece in command_pieces:
-                  if 'max_target_length' in command_piece:
-                    max_target_length = int(command_piece.split('=')[1])
-                  if 'sa_block_q' in command_piece:
-                    sa_block_q = int(command_piece.split('=')[1])
-                  if 'sa_block_kv' in command_piece:
-                    sa_block_kv = int(command_piece.split('=')[1])
+                  splitted = command_piece.split('=')
+                  if 'max_target_length'==splitted[0]:
+                    max_target_length = int(splitted[1])
+                  if 'sa_block_q'==splitted[0]:
+                    sa_block_q = int(splitted[1])
+                  if 'sa_block_kv'==splitted[0]:
+                    sa_block_kv = int(splitted[1])
                 print(f"{max_target_length=}, {sa_block_q=},{sa_block_kv=}")
                 print(f"{max_target_length%curr_block_q=}")
                 print(f"{max_target_length%curr_block_kv=}")
