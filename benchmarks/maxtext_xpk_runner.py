@@ -27,17 +27,21 @@ import dataclasses
 import enum
 import json
 import omegaconf
+import json
+import omegaconf
 import os
 import queue
 import random
 import string
 import subprocess
-import sys
 import tempfile
 import threading
 import time
 
 import maxtext_trillium_model_configs as model_configs
+from command_utils import run_command_with_updates
+from benchmark_db_utils import DEFAULT_TUNING_PARAMS_FILE
+
 from command_utils import run_command_with_updates
 from benchmark_db_utils import DEFAULT_TUNING_PARAMS_FILE
 
@@ -86,6 +90,7 @@ class WorkloadConfig:
 
   model: model_configs.MaxTextModel
   num_slices: int
+  num_slices: int
   device_type: str
   base_output_directory: str
   base_docker_image: str
@@ -94,9 +99,38 @@ class WorkloadConfig:
   num_steps: int = 20
   max_restarts: int = 0
   priority: str = 'medium'
+  priority: str = 'medium'
   xpk_path: str = '~/xpk'
   pathways_config: PathwaysConfig = None
   run_name: str = None
+  generate_metrics_and_upload_to_big_query: bool = True
+  hardware_id: str = 'v6e'
+  metrics_gcs_file: str = ''
+  base_config: str = 'MaxText/configs/base.yml'
+  topology: str = dataclasses.field(init=False)
+  num_devices_per_slice: int = dataclasses.field(init=False)
+  db_project: str = ""
+  db_dataset:str = ""
+
+  def __post_init__(self):
+    if self.device_type.startswith("v6e"):
+      size = int(self.device_type.split("-")[-1])
+      if size == 256:
+        self.num_devices_per_slice = 256
+        self.topology = "16x16"
+      elif size == 64:
+        self.num_devices_per_slice = 64
+        self.topology = "8x8"
+      elif size == 16:
+        self.num_devices_per_slice = 16
+        self.topology = "4x4"
+      elif size == 4:
+        self.num_devices_per_slice = 4
+        self.topology = "2x2"
+      else:
+        raise ValueError(f"Unsupported v6e size: {size}")
+    else:
+      raise ValueError(f"topology and num_devices_per_slice must be inferred when device_type starts with v6e. device_type: {self.device_type}")
   generate_metrics_and_upload_to_big_query: bool = True
   hardware_id: str = 'v6e'
   metrics_gcs_file: str = ''
@@ -513,6 +547,58 @@ def _build_args_from_config(wl_config: WorkloadConfig) -> str:
   return args
 
 
+def _build_args_from_config(wl_config: WorkloadConfig) -> str:
+  base_config = omegaconf.OmegaConf.load(wl_config.base_config)
+
+  args = f'{wl_config.metrics_gcs_file} '
+  args += f'{wl_config.model.model_type} '
+  args += f'{wl_config.hardware_id} '
+  args += 'jax_maxtext '
+  args += f'{wl_config.num_devices_per_slice*wl_config.num_slices*hardware_id_to_num_chips_per_node[wl_config.hardware_id]} '
+  args += f'{wl_config.base_docker_image} '
+
+  if 'per_device_batch_size' not in wl_config.model.tuning_params:
+    per_device_batch_size = base_config.per_device_batch_size
+  else:
+    per_device_batch_size = wl_config.model.tuning_params['per_device_batch_size']
+  args += f'{per_device_batch_size * wl_config.num_devices_per_slice * wl_config.num_slices} '
+
+  if 'matmul_precision' not in wl_config.model.tuning_params:
+    precision = base_config.matmul_precision
+  else:
+    precision = wl_config.model.tuning_params['matmul_precision']
+  args += f'{precision} '
+
+  if 'opt_type' not in wl_config.model.tuning_params:
+    optimizer = base_config.opt_type
+  else:
+    optimizer = wl_config.model.tuning_params['opt_type']
+  args += f'{optimizer} '
+
+  if 'max_target_length' not in wl_config.model.tuning_params:
+    sequence_length = base_config.opt_type
+  else:
+    sequence_length = wl_config.model.tuning_params['max_target_length']
+  args += f'{sequence_length} '
+  args += f'{wl_config.num_steps} '
+  args += f'{wl_config.model.xla_flags.strip().replace(" ",",")} '
+  if 'dataset_type' not in wl_config.model.tuning_params:
+    dataset = base_config.opt_type
+  else:
+    dataset = wl_config.model.tuning_params['dataset_type']
+  args += f'{dataset} '
+
+  args += 'maxtext-xpk '
+  args += 'MaxText/configs/base.yml '
+  args += f'{wl_config.topology} '
+
+  tuning_params_str = json.dumps(wl_config.model.tuning_params)
+  args += f"'{tuning_params_str}' "
+  args += f'{wl_config.db_project} '
+  args += f'{wl_config.db_dataset} '
+  return args
+
+
 def build_user_command(
     name: str,
     wl_config: WorkloadConfig,
@@ -559,6 +645,12 @@ def build_user_command(
     # Save metrics to gcs bucket so that we can upload them to bq in post processing.
     enable_metrics_cmd = 'gcs_metrics=true'
 
+  enable_metrics_cmd=""
+  if wl_config.generate_metrics_and_upload_to_big_query:
+    # 'metrics_file=metrics.txt
+    # Save metrics to gcs bucket so that we can upload them to bq in post processing.
+    enable_metrics_cmd = 'gcs_metrics=true'
+
   # Construct the command string with proper formatting and line continuations
   command = ' '.join([
       f'{install_libtpu_cmd}',
@@ -573,6 +665,8 @@ def build_user_command(
       f'model_name={wl_config.model.model_type}',
       f'base_output_directory={wl_config.base_output_directory}',
       f'{vertex_tensorboard}',
+      f'{run_name_command}',
+      f'{enable_metrics_cmd}'
       f'{run_name_command}',
       f'{enable_metrics_cmd}'
   ])
@@ -771,6 +865,12 @@ def generate_xpk_workload_cmd(
     args = _build_args_from_config(wl_config)
     upload_metrics_to_bq_cmd = f"python3 benchmarks/upload_metrics_to_bq.py {args}"
 
+  upload_metrics_to_bq_cmd = ""
+  if wl_config.generate_metrics_and_upload_to_big_query:
+    # TODO (optionally) make it so that this upload step is done on local device instead of within the workload.
+    args = _build_args_from_config(wl_config)
+    upload_metrics_to_bq_cmd = f"python3 benchmarks/upload_metrics_to_bq.py {args}"
+
   print(f'User command: {user_command}')
   return (
       (
@@ -781,6 +881,8 @@ def generate_xpk_workload_cmd(
           f' --zone={cluster_config.zone}'
           f' {device_type}'
           f' --num-slices={wl_config.num_slices}'
+          f' --command="{user_command} && {upload_metrics_to_bq_cmd}"'
+          # f' --command="{upload_metrics_to_bq_cmd}"'
           f' --command="{user_command} && {upload_metrics_to_bq_cmd}"'
           # f' --command="{upload_metrics_to_bq_cmd}"'
           f' {docker_image_flag}'
@@ -863,6 +965,7 @@ def on_device_benchmark_runner(
 def main() -> int:
   # Variables to configure:
   output_bucket = 'gs://maxtext-experiments-temp/'
+  output_bucket = 'gs://maxtext-experiments-temp/'
   base_docker_image = _DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME
   # Configure these for writing to benchmark DB
   db_project = ""
@@ -880,6 +983,13 @@ def main() -> int:
       cluster_name='v6e-256',
       project='my-cool-project',
       zone='us-central2-b',
+      device_type='v6e-256',
+  )
+
+  v6e_cluster_config_yucmhab = XpkClusterConfig(
+      cluster_name='bodaborg-v6e-256-dnd-yucmhab',
+      project='tpu-prod-env-one-vm',
+      zone='us-east5',
       device_type='v6e-256',
   )
 
@@ -914,6 +1024,7 @@ def main() -> int:
 
   user = os.environ['USER']
   base_output_dir = os.path.join(output_bucket, user)
+  base_output_dir = os.path.join(output_bucket, user)
 
   for model in list_of_models:
     # Run workloads on the below clusters
@@ -934,6 +1045,8 @@ def main() -> int:
           wl_config = WorkloadConfig(
             db_project=db_project,
             db_dataset=db_dataset,
+            db_project=db_project,
+            db_dataset=db_dataset,
             model=model,
             num_slices=num_slices,
             device_type=cluster_config.device_type,
@@ -943,6 +1056,7 @@ def main() -> int:
             libtpu_type=libtpu_type,
             libtpu_nightly_version="",
             base_docker_image=base_docker_image,
+            pathways_config=None,
             pathways_config=None,
           )
           command, name = generate_xpk_workload_cmd(
