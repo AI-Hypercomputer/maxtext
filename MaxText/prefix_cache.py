@@ -299,7 +299,8 @@ class BasicStorage(ValueStorageInterface):
     return self._remain_size_bytes >= needed_bytes
 
   def add(self, key: Key, value: Value) -> bool:
-    """Add value and return False if storage is full.
+    """Add value and return True. If storage is full, return False.
+
     The value will not copied. Be aware not to modify the value after add to storage.
     Storage is expected to have enough space.
     """
@@ -317,8 +318,8 @@ class BasicStorage(ValueStorageInterface):
 
   def retrieve(self, key: Key) -> Optional[Value]:
     """Return value from storage or None if not found.
-    Be aware the storage is not return a copy. Clone the Value first if additional modification needed,
-    Key is expected to be found.
+
+    Be aware the storage is not return a copy. Clone the Value first if additional modification needed.
     """
     if key not in self._saved_values:
       logger.warning("key=%r should exist in storage before retrieve, but not found", key)
@@ -344,7 +345,7 @@ class BasicStorage(ValueStorageInterface):
 class HBMStorage(ValueStorageInterface):
   """Stores kv storage values in HBM.
 
-  Storage is remain the sharding status before save.
+  Storage value remains sharded when saved.
   It is wrapper for BasicStorage which do not modify the value.
   If the Value is not in HBM, it will still not in HBM after saved.
   """
@@ -365,6 +366,7 @@ class HBMStorage(ValueStorageInterface):
 
   def add(self, key: Key, value: Value) -> bool:
     """Value will be moved to the storage, which means cannot used the same value reference after this function.
+
     Storage is expected to have enough space.
     """
     return self._storage.add(key, value)
