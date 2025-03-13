@@ -95,51 +95,6 @@ def _merge_grpo_state(state, reference_params):
   return state.replace(params=dict(state.params, reference_params=reference_params))
 
 
-@jax.jit
-def compute_comp_logps_policy(token_logps_policy: jnp.ndarray, L_prompt: int) -> jnp.ndarray:
-    """
-    Computes comp_logps_policy using jax.lax.dynamic_slice.
-
-    Args:
-        token_logps_policy: A JAX array of shape [batch_size, sequence_length].
-        L_prompt: The dynamic starting index for the slice (an integer).
-
-    Returns:
-        The sliced array.
-    """
-    if not isinstance(token_logps_policy, jnp.ndarray):
-        raise TypeError("token_logps_policy must be a jnp.ndarray")
-    if token_logps_policy.ndim != 2:
-        raise ValueError("token_logps_policy must be a 2D array (batch_size, sequence_length)")
-    # if not isinstance(L_prompt, int): # L_prompt MUST be a Python int for dynamic_slice
-    #     raise TypeError("L_prompt must be a Python integer")
-
-    batch_size, sequence_length = token_logps_policy.shape
-
-    # Calculate the start index along the sequence dimension.
-    start_index = jnp.maximum(0, L_prompt - 1)  # Ensure start_index >= 0
-
-    # Calculate the slice size along the sequence dimension.
-    slice_size = jnp.maximum(0, sequence_length - start_index) # Ensure non-negative size
-
-    # Create a 1D array for start_indices.
-    start_indices = (0, start_index)
-
-    # Create a 1D array for slice_sizes using dynamic batch size.
-    slice_sizes = (batch_size, slice_size)
-    slice_sizes = jnp.array(slice_sizes, dtype=jnp.int32)  # Convert to int32
-
-    # Add explicit shape checks *before* dynamic_slice
-    if not isinstance(start_indices, tuple) or len(start_indices) != 2:
-      raise ValueError(f"start_indices must be a tuple of length 2, got {start_indices}")
-    
-    if not isinstance(slice_sizes, jnp.ndarray) or slice_sizes.ndim != 1 or slice_sizes.shape[0] != 2 or slice_sizes.dtype != jnp.int32:
-        raise ValueError(f"slice_sizes must be a 1D jnp.ndarray of shape (2,) and dtype int32, got {slice_sizes} with shape={slice_sizes.shape} and dtype={slice_sizes.dtype}")
-
-    comp_logps_policy = jax.lax.dynamic_slice(token_logps_policy, start_indices, slice_sizes)
-
-    return comp_logps_policy
-
 def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_train=True):
   """
   GRPO loss function for training.
@@ -199,6 +154,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
                                         prompt_with_completions,
                                         prompt_completions_position,
                                         prompt_completions_segmentation,
+                                        completions_segmentation,
                                         config,
                                         is_train=is_train, rngs={"dropout": rng1, "params": rng_fwd}) # [BxG,S-1,E]
 
@@ -210,6 +166,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
                                         prompt_with_completions,
                                         prompt_completions_position,
                                         prompt_completions_segmentation,
+                                        completions_segmentation,
                                         config,
                                         is_train=False, rngs={"dropout": rng1, "params": rng_fwd}) # [BxG,S-1,E]
   # jax.debug.print("token_logps_ref={token_logps_ref}",token_logps_ref=token_logps_ref)

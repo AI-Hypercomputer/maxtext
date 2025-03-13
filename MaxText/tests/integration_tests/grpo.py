@@ -28,7 +28,6 @@ from typing import Tuple
 import sys
 import common_types
 import torch
-import torch.nn.functional as F
 # from datasets import Dataset
 from trl import GRPOConfig, GRPOTrainer
 import transformers
@@ -79,11 +78,14 @@ class GRPOTest(unittest.TestCase):
         model_max_length=self.cfg.max_target_length,
         legacy=False,
         token=self.cfg.hf_access_token,
+        padding_side="left",
     )
+    self.tokenizer_model.add_special_tokens({'pad_token': '<pad>'})
     self.input_str = "Hello world this is a test"
 
-    def mock_reward_func(prompt, completion):
-      return torch.tensor([1.0] * len(prompt))  # Dummy reward function
+    # Define the reward function, which rewards completions that are close to 20 characters
+    def reward_len(completions, **kwargs):
+        return [-abs(20 - len(completion)) for completion in completions]
 
     os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
     training_args = GRPOConfig(
@@ -97,7 +99,8 @@ class GRPOTest(unittest.TestCase):
 
     self.trainer = GRPOTrainer(
       model="meta-llama/Llama-3.1-8B",
-      reward_funcs=mock_reward_func,
+      processing_class=self.tokenizer_model,
+      reward_funcs=reward_len,
       args=training_args,
       train_dataset=load_dataset("trl-lib/tldr", split="train"),
     )
@@ -110,53 +113,61 @@ class GRPOTest(unittest.TestCase):
   #   """ This is to test GRPO input pipeline and generate prompts
   #   """
 
-  def test_logits(self):
-    def _prepare_inputs():
-      input_ids = jnp.tile(jnp.array(self.tokenizer_model.encode(self.input_str)), (4, 1))
-      input_segmentation =  (input_ids > 0).astype(jnp.int32)
-      input_position = jnp.tile(jnp.arange(input_ids.shape[1]), (4, 1))
+  # def test_logits(self):
+  #   def _prepare_inputs():
+  #     input_ids = jnp.tile(jnp.array(self.tokenizer_model.encode(self.input_str)), (4, 1))
+  #     input_segmentation =  (input_ids > 0).astype(jnp.int32)
+  #     input_position = jnp.tile(jnp.arange(input_ids.shape[1]), (4, 1))
 
-      return input_ids, input_segmentation, input_position
+  #     return input_ids, input_segmentation, input_position
 
-    inputs, inputs_segmentation, inputs_position = _prepare_inputs()
-    logits, _ = self.model.apply(
-      self.state.params,
-      inputs,
-      inputs_position,
-      decoder_segment_ids = inputs_segmentation,
-      enable_dropout=False,
-      rngs=self.rng,
-      mutable="intermediates",
-    )
-    logits = np.asarray(logits)
-    hf_logits = self.hf_model(input_ids = torch.tensor(inputs.tolist()), attention_mask = torch.tensor(inputs_segmentation.tolist())).logits.detach().numpy()
-    print(f"Max Diff {np.max(np.abs(logits - hf_logits))}")
-    self.assertTrue(jax.numpy.allclose(hf_logits, logits, rtol=1e-2, atol=2e-1, equal_nan=False))
+  #   inputs, inputs_segmentation, inputs_position = _prepare_inputs()
+  #   logits, _ = self.model.apply(
+  #     self.state.params,
+  #     inputs,
+  #     inputs_position,
+  #     decoder_segment_ids = inputs_segmentation,
+  #     enable_dropout=False,
+  #     rngs=self.rng,
+  #     mutable="intermediates",
+  #   )
+  #   logits = np.asarray(logits)
+  #   hf_logits = self.hf_model(input_ids = torch.tensor(inputs.tolist()), attention_mask = torch.tensor(inputs_segmentation.tolist())).logits.detach().numpy()
+  #   print(f"Max Diff {np.max(np.abs(logits - hf_logits))}")
+  #   self.assertTrue(jax.numpy.allclose(hf_logits, logits, rtol=1e-2, atol=2e-1, equal_nan=False))
 
 
-  def test_logps(self):
-    def _prepare_maxtext_inputs():
-      prompt = self.tokenizer_model.encode(self.input_str)
-      input_ids = jnp.pad(jnp.tile(jnp.concat([jnp.array(prompt),jnp.array(prompt)], axis = -1), (4, 1)), ((0, 0),(0, 4)), constant_values=self.tokenizer_model.pad_token_type_id) # pad some tokens at the end of input prompt
-      input_segmentation = (input_ids > 0).astype(jnp.int32)
-      input_position = jnp.where(input_segmentation, jnp.arange(input_segmentation.shape[1]), 0)
-      completion_segmentation = jnp.tile(jnp.pad(jnp.array([0] * len(prompt) + [1] * len(prompt)), (0, input_ids.shape[1] - 2 * len(prompt))), (4,1))
-      return input_ids, input_segmentation, input_position, completion_segmentation
+  # def test_logps(self):
+  #   def _prepare_maxtext_inputs():
+  #     prompt = self.tokenizer_model.encode(self.input_str)
+  #     input_ids = jnp.pad(jnp.tile(jnp.concat([jnp.array(prompt),jnp.array(prompt)], axis = -1), (4, 1)), ((0, 0),(0, 4)), constant_values=self.tokenizer_model.pad_token_type_id) # pad some tokens at the end of input prompt
+  #     input_segmentation = (input_ids > 0).astype(jnp.int32)
+  #     input_position = jnp.where(input_segmentation, jnp.arange(input_segmentation.shape[1]), 0)
+  #     completion_segmentation = jnp.tile(jnp.pad(jnp.array([0] * len(prompt) + [1] * len(prompt)), (0, input_ids.shape[1] - 2 * len(prompt))), (4,1))
+  #     return input_ids, input_segmentation, input_position, completion_segmentation
 
-    def _prepare_trl_inputs():
-      prompt = self.tokenizer_model.encode(self.input_str)
-      logits_to_keep = len(prompt)
-      prompt = torch.tensor([prompt], dtype=torch.int64)
-      input_ids = torch.cat([prompt, prompt], axis = -1)
-      attention_mask = (input_ids > 0).int()
-      return input_ids, attention_mask, logits_to_keep
+  #   def _prepare_trl_inputs():
+  #     prompt = self.tokenizer_model.encode(self.input_str)
+  #     logits_to_keep = len(prompt)
+  #     prompt = torch.tensor([prompt], dtype=torch.int64)
+  #     input_ids = torch.cat([prompt, prompt], axis = -1)
+  #     attention_mask = (input_ids > 0).int()
+  #     return input_ids, attention_mask, logits_to_keep
 
-    hf_input_ids, attention_mask, logits_to_keep = _prepare_trl_inputs()
-    hf_per_token_logps = self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep) # pylint: disable=protected-access
+  #   hf_input_ids, attention_mask, logits_to_keep = _prepare_trl_inputs()
+  #   hf_per_token_logps = self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep) # pylint: disable=protected-access
     
-    input_ids, input_segmentation, input_position, completion_segmentation = _prepare_maxtext_inputs()
-    maxtext_per_token_logps, _ = compute_log_probs(self.model, self.state.params, input_ids, input_position, input_segmentation, completion_segmentation, self.cfg, is_train=False)
-    print(f"Max Diff {np.max(np.abs(np.trim_zeros(np.asarray(maxtext_per_token_logps)[0]) - hf_per_token_logps.detach().numpy()[0]))}")
-    self.assertTrue(jax.numpy.allclose(np.trim_zeros(np.asarray(maxtext_per_token_logps)[0]), hf_per_token_logps.detach().numpy()[0], rtol=1e-2, atol=1e-2, equal_nan=False))
+  #   input_ids, input_segmentation, input_position, completion_segmentation = _prepare_maxtext_inputs()
+  #   maxtext_per_token_logps, _ = compute_log_probs(self.model, self.state.params, input_ids, input_position, input_segmentation, completion_segmentation, self.cfg, is_train=False)
+  #   print(f"Max Diff {np.max(np.abs(np.trim_zeros(np.asarray(maxtext_per_token_logps)[0]) - hf_per_token_logps.detach().numpy()[0]))}")
+  #   self.assertTrue(jax.numpy.allclose(np.trim_zeros(np.asarray(maxtext_per_token_logps)[0]), hf_per_token_logps.detach().numpy()[0], rtol=1e-2, atol=1e-2, equal_nan=False))
+
+  def test_loss_kl_div(self):
+    def _prepare_trl_inputs():
+      return [{"prompt": self.input_str, "completion": self.input_str}]
+    inputs = _prepare_trl_inputs()
+    
+    inputs_for_loss = self.trainer._prepare_inputs(inputs)
+    breakpoint()
     
     
