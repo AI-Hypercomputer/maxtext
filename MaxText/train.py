@@ -527,7 +527,8 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
       # if config.use_dpo:
       #   reference_params = jax.device_put(reference_params, max_utils.with_memory_kind(reference_params_sharding, "device"))
       #   extra_dpo_args = [reference_params]
-      state = max_utils.move_state(state, TransferToMemoryKind('device'), scan_over = config.base_num_decoder_layers)
+      # state = max_utils.move_state(state, TransferToMemoryKind('device'), scan_over = config.base_num_decoder_layers)
+      state = max_utils.move_state_scan(state, state_mesh_shardings, TransferToMemoryKind('device'), scan_over = config.base_num_decoder_layers)
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
   intermediate_outputs = aux["intermediate_outputs"]
@@ -539,8 +540,9 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   else:
     grads = raw_grads
   new_state = state.apply_gradients(grads=grads)
-  if config.optimizer_memory_host_offload:
-    new_state = max_utils.move_state(new_state, TransferToMemoryKind('pinned_host'), scan_over = config.base_num_decoder_layers)
+  # if config.optimizer_memory_host_offload:
+  #   # new_state = max_utils.move_state(new_state, TransferToMemoryKind('pinned_host'), scan_over = config.base_num_decoder_layers)
+  #   new_state = max_utils.move_state_scan(new_state, state_mesh_shardings, TransferToMemoryKind('pinned_host'), scan_over = config.base_num_decoder_layers)
   scalar_metrics = {
       "learning/loss": loss,
       "learning/moe_lb_loss": moe_lb_loss,

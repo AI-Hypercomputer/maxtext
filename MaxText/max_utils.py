@@ -19,7 +19,9 @@ import shutil
 import numpy as np
 import jax
 import jax.numpy as jnp
+from jax.sharding import PartitionSpec as P
 from jax.experimental import mesh_utils
+from jax._src.sharding_impls import TransferToMemoryKind
 import checkpointing
 import common_types
 import functools
@@ -820,36 +822,52 @@ def move_state(state, sharding, scan_over):
       def put(arr):
         start_indices = (i,) + (0,) * (arr.ndim - 1)
         slice_sizes = (1,) + arr.shape[1:]
-        if not arr.shape or arr.shape[0] != scan_over:
+        if (arr.shape != () and arr.shape[0] != scan_over):
           return jax.device_put(arr, sharding)
-        y = jax.device_put(jax.lax.dynamic_slice(arr, start_indices, slice_sizes), sharding)
-        return jax.lax.dynamic_update_slice(arr, y, start_indices)
+        elif arr.shape != ():
+          y = jax.device_put(jax.lax.dynamic_slice(arr, start_indices, slice_sizes), sharding)
+          return jax.lax.dynamic_update_slice(arr, y, start_indices)
+        return arr
     
       return jax.tree_map(put, data) 
     return jax.lax.fori_loop(0, scan_over, body, xs, unroll=False)
   
-  # stacked_params, unstacked_params = partition_pytree_by_shape(state.params, is_stacked)
-  # stacked_mu, unstacked_mu = partition_pytree_by_shape(state.opt_state[0].mu, is_stacked)
-  # stacked_nu, unstacked_nu = partition_pytree_by_shape(state.opt_state[0].nu, is_stacked)
+  params = my_scan(state.params)
+  opt_state = my_scan(state.opt_state)
+  state = state.replace(opt_state = opt_state, params=params)
+  return state
+
+def move_state_scan(state, state_sharding, sharding, scan_over):
+  def put(arr):
+    def body_fn(carry, xs):
+      params, mu, nu = xs
+      params = jax.device_put(params, sharding)
+      mu = jax.device_put(mu, sharding)
+      nu = jax.device_put(nu, sharding)
+      return (carry, (params, mu, nu))
+    return jax.lax.scan(body_fn, 1.0, arr)[1]
+  is_stacked = lambda shape: shape[0] == scan_over
+  
+  stacked_params, unstacked_params = partition_pytree_by_shape(state.params, is_stacked)
+  stacked_mu, unstacked_mu = partition_pytree_by_shape(state.opt_state[0].mu, is_stacked)
+  stacked_nu, unstacked_nu = partition_pytree_by_shape(state.opt_state[0].nu, is_stacked)
+
+  stacked_params_sharding, unstacked_params_sharding = partition_pytree_by_shape(state_sharding.params, is_stacked)
+  stacked_mu_sharding, unstacked_mu_sharding = partition_pytree_by_shape(state_sharding.opt_state[0].mu, is_stacked)
+  stacked_nu_sharding, unstacked_nu_sharding = partition_pytree_by_shape(state_sharding.opt_state[0].nu, is_stacked)
 
   # device_put unstacked opt_state and params
-  # unstacked_params = jax.device_put(unstacked_params, sharding)
-  # unstacked_mu = jax.device_put(unstacked_mu, sharding)
-  # unstacked_nu = jax.device_put(unstacked_nu, sharding)
+  unstacked_params = jax.device_put(unstacked_params, sharding)
+  unstacked_mu = jax.device_put(unstacked_mu, sharding)
+  unstacked_nu = jax.device_put(unstacked_nu, sharding)
+  # if sharding == TransferToMemoryKind('pinned_host'):
+    
+  (stacked_params, stacked_mu, stacked_nu) = jax.jit(put, donate_argnums=(0,))((stacked_params, stacked_mu, stacked_nu))
+
+  params = merge_pytrees(stacked_params, unstacked_params)
+  opt_state = state.opt_state[0]._replace(mu = merge_pytrees(stacked_mu, unstacked_mu), nu = merge_pytrees(stacked_nu, unstacked_nu))
   
-  # _, (stacked_params, stacked_mu, stacked_nu) = jax.lax.scan(body_fn, None, (stacked_params, stacked_mu, stacked_nu))
-  # stacked_params, stacked_mu, stacked_nu = my_scan((stacked_params, stacked_mu, stacked_nu))
-
-  # params = merge_pytrees(stacked_params, unstacked_params)
-  # opt_state = state.opt_state[0]._replace(mu = merge_pytrees(stacked_mu, unstacked_mu), nu = merge_pytrees(stacked_nu, unstacked_nu))
-  
-  # state = state.replace(params=params, opt_state=(opt_state,state.opt_state[1],state.opt_state[2]))
-
-  # trial
-
-  params, opt_state = my_scan((state.params, state.opt_state))
-  state = state.replace(params = params, opt_state = opt_state)
-
+  state = state.replace(params=params, opt_state=(opt_state,state.opt_state[1],state.opt_state[2]))
   return state
 
 
@@ -915,8 +933,8 @@ def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint
       checkpoint_manager,
       is_training,
   )
-  state = state.replace(params = jax.device_put(state.params, state_mesh_shardings.params),
-                        opt_state = jax.device_put(state.opt_state, state_mesh_shardings.opt_state))
+  # state = state.replace(params = jax.device_put(state.params, state_mesh_shardings.params),
+  #                       opt_state = jax.device_put(state.opt_state, state_mesh_shardings.opt_state))
 
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator
 
@@ -985,15 +1003,18 @@ def setup_initial_state(
       # pylint: disable=not-callable
       state = jax.jit(
           init_state_partial,
-          in_shardings=None,
+          in_shardings=jax.sharding.NamedSharding(mesh, P()),
           out_shardings=state_mesh_shardings,
       )(rng)
       if raw_params:  # If we loaded a partial state, we need to merge it.
         state = state.replace(params=raw_params)
-
+  if config.optimizer_memory_host_offload:
+    state = state.replace(params = jax.device_put(state.params, with_memory_kind(state_mesh_shardings.params, "pinned_host")),
+                          opt_state = jax.device_put(state.opt_state, with_memory_kind(state_mesh_shardings.opt_state, "pinned_host")))
+    # state = state.replace(params = jax.device_put(state.params, with_memory_kind(state_mesh_shardings.params, "pinned_host")))
+    # state = jax.device_put(state, state_mesh_shardings)
+    # state = move_state(state, TransferToMemoryKind('pinned_host'), scan_over = config.base_num_decoder_layers)
   state = unbox_logicallypartioned(state)
-  jax.debug.inspect_array_sharding(state.params['params']['decoder']['layers']['mlp']['wi_0']['kernel'], callback=print)
-
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator
 
 
@@ -1151,10 +1172,11 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
   if is_training and config.optimizer_memory_host_offload:
     opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)
+    # state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state)
     params = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.params)
     state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state, params=params)
-
-  abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape()
+    # state_mesh_shardings = state_mesh_shardings.replace(params=params)
+  abstract_sharded_state = jax.jit(init_state_partial, in_shardings=jax.sharding.NamedSharding(mesh, P()), out_shardings=state_mesh_shardings).eval_shape()
 
   unboxed_abstract_sharded_state = unbox_logicallypartioned(abstract_sharded_state)
   # Initialization
