@@ -637,14 +637,25 @@ def main() -> int:
           initial_block_size = 2048
           final_block_size = 8192
           step_block_size = 512
-          for curr_block_q in range(2048,final_block_size,step_block_size):
-            wl_config.model
-            for curr_block_kv in range(initial_block_size,final_block_size,step_block_size):
-              for curr_block_kv_compute in range(initial_block_size,curr_block_kv,step_block_size):
+          
+          # for curr_block_q in range(2048,final_block_size,step_block_size):
+          #   wl_config.mdel
+          #   for curr_block_kv in range(initial_block_size,final_block_size,step_block_size):
+          #     for curr_block_kv_compute in range(initial_block_size,curr_block_kv,step_block_size):
+          #       new_tuning_params_dict = wl_config.model.tuning_params.copy()
+          #       replacements = {'sa_block_q': curr_block_q,
+          #                       'sa_block_kv': curr_block_kv,
+          #                       'sa_block_kv_compute': curr_block_kv_compute}
+          # block_q_dkv: int | None = None
+          # block_kv_dkv: int | None = None
+          # block_kv_dkv_compute: int | None = None
+          for curr_block_q_dkv in range(initial_block_size,final_block_size,step_block_size):
+            for curr_block_kv_dkv in range(initial_block_size,final_block_size,step_block_size):
+              for curr_block_kv_dkv_compute in range(initial_block_size,curr_block_kv_dkv,step_block_size):
                 new_tuning_params_dict = wl_config.model.tuning_params.copy()
-                replacements = {'sa_block_q': curr_block_q,
-                                'sa_block_kv': curr_block_kv,
-                                'sa_block_kv_compute': curr_block_kv_compute}
+                replacements = {'sa_block_q_dkv': curr_block_q_dkv,
+                                'sa_block_kv_dkv': curr_block_kv_dkv,
+                                'sa_block_kv_dkv_compute': curr_block_kv_dkv_compute}
                 new_tuning_params_dict.update(replacements)
                 curr_wl_config = dataclasses.replace(wl_config,model=dataclasses.replace(wl_config.model, tuning_params=new_tuning_params_dict))
 
@@ -652,28 +663,26 @@ def main() -> int:
                   cluster_config=cluster_config,
                   wl_config=curr_wl_config
                 )
-                # TODO: ValueError: q_block_size=3072 should divide q_seq_len=131072.
-                # TODO: ValueError: kv_block_size=6144 should divide kv_seq_len=131072.
+                # # TODO: ValueError: q_block_size=3072 should divide q_seq_len=131072.
+                # # TODO: ValueError: kv_block_size=6144 should divide kv_seq_len=131072.
 
-                command_pieces = command.split(' ')
-                for command_piece in command_pieces:
-                  splitted = command_piece.split('=')
-                  if 'max_target_length'==splitted[0]:
-                    max_target_length = int(splitted[1])
-                  if 'sa_block_q'==splitted[0]:
-                    sa_block_q = int(splitted[1])
-                  if 'sa_block_kv'==splitted[0]:
-                    sa_block_kv = int(splitted[1])
-                print(f"{max_target_length=}, {sa_block_q=},{sa_block_kv=}")
-                print(f"{max_target_length%curr_block_q=}")
-                print(f"{max_target_length%curr_block_kv=}")
-                if max_target_length%curr_block_q!=0 or max_target_length%curr_block_kv!=0:
-                  print("test failed")
-                  print(f"{max_target_length%sa_block_q=}")
-                  print(f"{max_target_length%sa_block_kv=}") 
-                  continue
-                else:
-                    print("test passed")
+                # command_pieces = command.split(' ')
+                # for command_piece in command_pieces:
+                #   splitted = command_piece.split('=')
+                #   if 'max_target_length'==splitted[0]:
+                #     max_target_length = int(splitted[1])
+                #   if 'sa_block_q'==splitted[0]:
+                #     sa_block_q = int(splitted[1])
+                #   if 'sa_block_kv'==splitted[0]:
+                #     sa_block_kv = int(splitted[1])
+                # print(f"{max_target_length=}, {sa_block_q=},{sa_block_kv=}")
+                # print(f"{max_target_length%curr_block_q=}")
+                # print(f"{max_target_length%curr_block_kv=}")
+                # if max_target_length%curr_block_q!=0 or max_target_length%curr_block_kv!=0:
+                #   print("test failed") 
+                #   continue
+                # else:
+                #     print("test passed")
                 
 
 
