@@ -443,6 +443,8 @@ class Decoder(nn.Module):
               deterministic,
               model_mode,
           )
+          # print(f'end of layer y: {y}')
+          # jax.debug.print("debug end of layer {y}", y=y)
         else:
           RemattedBlockLayer = RemattedBlockLayers[0]
           y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(

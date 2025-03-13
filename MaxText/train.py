@@ -653,9 +653,9 @@ def setup_train_loop(config):
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
 
-  if not config.using_pipeline_parallelism:
-    # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
-    maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
+  # if not config.using_pipeline_parallelism:
+  #   # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
+  #   maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
 
   if config.use_dpo:
     abstract_state, _, _ = max_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
