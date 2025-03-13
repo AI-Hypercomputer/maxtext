@@ -23,7 +23,6 @@ import jax.numpy as jnp
 
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from typing import Callable
 
 
 def create_default_value(prefix=None, true_length=1, padded_length=1, tokens=None) -> prefix_cache.Value:
@@ -39,17 +38,14 @@ def create_default_value(prefix=None, true_length=1, padded_length=1, tokens=Non
   )
 
 
-def get_byte_in_use_function(device_idx: int = 0) -> Callable[[], int]:
+def get_byte_in_use(device_idx: int = 0) -> int:
+  jax.clear_caches()
   device = jax.local_devices()[device_idx]
   memory_stats = device.memory_stats()
   if memory_stats is None:
     pytest.skip("Cannot get device memory stats. Does the test run with TPU?")
 
-  def get_byte_in_use():
-    jax.clear_caches()
-    return memory_stats["bytes_in_use"]
-
-  return get_byte_in_use
+  return memory_stats["bytes_in_use"]
 
 
 class ValueTest(unittest.TestCase):
@@ -406,8 +402,6 @@ class DRAMStorageTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_move_value_between_device_and_host(self):
-    get_byte_in_use = get_byte_in_use_function()
-
     origin_hbm_byte = get_byte_in_use()
     key = (1,)
     value = create_default_value()
@@ -745,8 +739,6 @@ class PrefixCacheTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_hbm_memory_usage(self):
     """Test HBM memory change."""
-    get_byte_in_use = get_byte_in_use_function()
-
     pre_bytes_in_use = get_byte_in_use()
     hbm_bytes = 1024
     prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=hbm_bytes, dram_bytes=hbm_bytes)
@@ -780,14 +772,14 @@ class PrefixCacheTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_cache_move_between_device_and_host_with_hierarchical_cache(self):
-    get_byte_in_use = get_byte_in_use_function()
     value1 = create_default_value()
-    value2 = create_default_value()
-    assert value1.prefix_size_bytes == value2.prefix_size_bytes
-    prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=value1.prefix_size_bytes, dram_bytes=value1.prefix_size_bytes * 2)
+    prefix_size_bytes = value1.prefix_size_bytes
+    prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=prefix_size_bytes, dram_bytes=prefix_size_bytes * 2)
     assert prefix_cache_inst.save((1,), value1)
     del value1
     first_save_bytes_in_use = get_byte_in_use()
+    value2 = create_default_value()
+    assert prefix_size_bytes == value2.prefix_size_bytes
     assert prefix_cache_inst.save((2,), value2)
     del value2
     # the first saved cache (1,) is evicted since the size of HBM is one value.
