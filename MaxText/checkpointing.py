@@ -184,6 +184,7 @@ def load_state_if_possible(
     enable_single_replica_ckpt_restoring: Optional[bool] = False,
     dataset_type: Optional[str] = "tfds",
     step: int = -1,  # -1 means latest
+    strict = False,
 ):
   """Loads TrainState as possible from the inputs.
 
@@ -219,6 +220,8 @@ def load_state_if_possible(
           return ocp.type_handlers.ArrayRestoreArgs(sharding=data.sharding)
         pspec = data.sharding.spec
         mesh = data.sharding.mesh
+        if not enable_single_replica_ckpt_restoring:
+          return ocp.type_handlers.ArrayRestoreArgs(mesh=mesh, mesh_axes=pspec, strict=False)
         replica_axis_index = 0
         replica_devices = _replica_devices(mesh.devices, replica_axis_index)
         replica_mesh = jax.sharding.Mesh(replica_devices, mesh.axis_names)
@@ -229,6 +232,7 @@ def load_state_if_possible(
             single_replica_sharding=single_replica_sharding,
             global_shape=data.shape,
             dtype=data.dtype,
+            strict=strict
         )
 
       if enable_single_replica_ckpt_restoring:
@@ -327,24 +331,25 @@ def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-
   return orbax_cloud_logger
 
 
-def load_params_from_path(load_parameters_from_path, abstract_unboxed_params, checkpoint_storage_concurrent_gb):
+def load_params_from_path(load_parameters_from_path, abstract_unboxed_params, strict=False):
   """Load decode params from checkpoint at specified path."""
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
   max_logging.log(f"restoring params from {load_parameters_from_path}")
   ckpt = epath.Path(load_parameters_from_path)
-
-  # *_concurrent_gb should be set for large models, the default is 96.
-  ckptr = ocp.Checkpointer(
-      ocp.PyTreeCheckpointHandler(
-          restore_concurrent_gb=checkpoint_storage_concurrent_gb, save_concurrent_gb=checkpoint_storage_concurrent_gb
-      )
-  )
-
+  ckptr = ocp.Checkpointer(ocp.PyTreeCheckpointHandler(restore_concurrent_gb=500, save_concurrent_gb=500))
   # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
   # Rather than pass the entire abstract state, which could unnecessarily restore opt_state and such and waste
   # memory, we instead specify here that we are just restoring the params field of the checkpoint
   # (which itself may be a dictionary containing a key named 'params').
   restore_args = ocp.checkpoint_utils.construct_restore_args(abstract_unboxed_params)
+  def update_restore_args(restore_args):
+    for value in restore_args.values():
+      if type(value) == ocp._src.serialization.type_handlers.ArrayRestoreArgs:
+        value.strict = strict
+      elif type(value) == dict:
+        update_restore_args(value)
+  
+  update_restore_args(restore_args)
   restored = ckptr.restore(
       ckpt, item={"params": abstract_unboxed_params}, transforms={}, restore_args={"params": restore_args}
   )

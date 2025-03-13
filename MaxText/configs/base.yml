@@ -629,6 +629,13 @@ optimize_mesh_for_tpu_v6e: False
 use_ragged_attention: False
 ragged_block_size: 256
 
+overwrite_ckpt_step: -1
+pre_compile: True
+# Whether or not to log the "completed step" logs, which have some overhead with syncing the loss across all workers
+enable_step_logging: True
+# Whether to save metric information to tensorboard.
+enable_metric_writing: True
+
 ### Splash attention block sizes
 # These can be tuned for specific hardware generations, and can be set up to
 # the model's sequence length.
