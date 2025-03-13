@@ -590,7 +590,7 @@ jax_profiler_port: 9999
 log_config: True # Prints the config (after defaults have been set by pyconfig logic)
 
 # Checkpoint Structured logging
-enable_checkpoint_cloud_logger: False
+enable_checkpoint_cloud_logger: True
 
 # Single-controller
 enable_single_controller: False
