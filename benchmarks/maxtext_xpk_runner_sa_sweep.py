@@ -577,8 +577,7 @@ def main() -> int:
     # model_configs.llama2_70b_4096_sc,
     # model_configs.default_128
     # model_configs.llama3_1_70b_131072,
-    model_configs.llama3_1_70b_131072_expt1,
-    model_configs.llama3_1_70b_131072_expt2,
+    model_configs.llama3_1_70b_131072_expt,
     # model_configs.llama3_1_70b_129024_context,
     # model_configs.llama3_1_70b_131072_device,
     # model_configs.llama3_1_70b_32768,
@@ -635,18 +634,66 @@ def main() -> int:
             base_docker_image=base_docker_image,
             pathways_config=None
           )
+          initial_block_size = 2048
+          final_block_size = 8192
+          step_block_size = 512
+          
+          # for curr_block_q in range(2048,final_block_size,step_block_size):
+          #   wl_config.mdel
+          #   for curr_block_kv in range(initial_block_size,final_block_size,step_block_size):
+          #     for curr_block_kv_compute in range(initial_block_size,curr_block_kv,step_block_size):
+          #       new_tuning_params_dict = wl_config.model.tuning_params.copy()
+          #       replacements = {'sa_block_q': curr_block_q,
+          #                       'sa_block_kv': curr_block_kv,
+          #                       'sa_block_kv_compute': curr_block_kv_compute}
+          # block_q_dkv: int | None = None
+          # block_kv_dkv: int | None = None
+          # block_kv_dkv_compute: int | None = None
 
-          command, name = generate_xpk_workload_cmd(
-            cluster_config=cluster_config,
-            wl_config=wl_config
-          )
+          #TODO: bkv=4096  must be a multiple of bkv_compute=3072
+          #TODO: kv_block_size=6144 aka sa_block_kv_dkv should divide kv_seq_len=131072
+          for curr_block_q_dkv in range(initial_block_size,final_block_size,step_block_size):
+            for curr_block_kv_dkv in range(initial_block_size,final_block_size,step_block_size):
+              for curr_block_kv_dkv_compute in range(initial_block_size,curr_block_kv_dkv,step_block_size):
+                new_tuning_params_dict = wl_config.model.tuning_params.copy()
+                replacements = {'sa_block_q_dkv': curr_block_q_dkv,
+                                'sa_block_kv_dkv': curr_block_kv_dkv,
+                                'sa_block_kv_dkv_compute': curr_block_kv_dkv_compute}
+                new_tuning_params_dict.update(replacements)
+                curr_wl_config = dataclasses.replace(wl_config,model=dataclasses.replace(wl_config.model, tuning_params=new_tuning_params_dict))
+
+                command, name = generate_xpk_workload_cmd(
+                  cluster_config=cluster_config,
+                  wl_config=curr_wl_config
+                )
+                # # TODO: ValueError: q_block_size=3072 should divide q_seq_len=131072.
+                # # TODO: ValueError: kv_block_size=6144 should divide kv_seq_len=131072.
+
+                # command_pieces = command.split(' ')
+                # for command_piece in command_pieces:
+                #   splitted = command_piece.split('=')
+                #   if 'max_target_length'==splitted[0]:
+                #     max_target_length = int(splitted[1])
+                #   if 'sa_block_q'==splitted[0]:
+                #     sa_block_q = int(splitted[1])
+                #   if 'sa_block_kv'==splitted[0]:
+                #     sa_block_kv = int(splitted[1])
+                # print(f"{max_target_length=}, {sa_block_q=},{sa_block_kv=}")
+                # print(f"{max_target_length%curr_block_q=}")
+                # print(f"{max_target_length%curr_block_kv=}")
+                # if max_target_length%curr_block_q!=0 or max_target_length%curr_block_kv!=0:
+                #   print("test failed") 
+                #   continue
+                # else:
+                #     print("test passed")
+                
 
 
-          print(f"Name of the workload is: {name} \n")
-          xpk_workload_names.append(name)
+                print(f"Name of the workload is: {name} \n")
+                xpk_workload_names.append(name)
 
-          print(f"XPK command to be used is: {command} \n")
-          xpk_workload_cmds.append(command)
+                print(f"XPK command to be used is: {command} \n")
+                xpk_workload_cmds.append(command)
 
   for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
     return_code = run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
