@@ -15,6 +15,7 @@
 """CLI utility for running inference on a single/multi stream(s)"""
 
 import os
+from time import perf_counter
 from typing import Sequence
 
 import jax
@@ -108,9 +109,13 @@ def main(argv: Sequence[str]) -> None:
   # Prefill
   rng, rng_prefill = jax.random.split(rng)  # Split RNG before calling prefill
   for i in range(_NUM_STREAMS):
+    pt0 = perf_counter()
     prefill_result, first_token = engine.prefill(
         params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill, slot=i
     )
+    pt1 = perf_counter()
+    msec = (pt1 - pt0) * 1000.0
+    print(f"prefill: stream={i}, #tokens={true_length}/{config.max_prefill_predict_length}, time={msec:.2f} ms")
     prefill_result_list.append(prefill_result)
     first_token_list.append(first_token)
 
@@ -123,9 +128,13 @@ def main(argv: Sequence[str]) -> None:
   # Generate
   steps = range(config.max_prefill_predict_length, config.max_target_length)
   sampled_tokens_list.append(_batch_first_result_token(first_token_list, batch_size))
-  for _ in steps:
+  for i in steps:
     rng, rng_generate = jax.random.split(rng)
+    gt0 = perf_counter()
     decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
+    gt1 = perf_counter()
+    msec = (gt1 - gt0) * 1000.0
+    print(f"generate: token=#{i+1}, time={msec:.2f} ms")
     sampled_tokens_list.append(sampled_tokens)
 
   # Get results
