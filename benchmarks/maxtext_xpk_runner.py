@@ -27,8 +27,6 @@ import dataclasses
 import enum
 import json
 import omegaconf
-import json
-import omegaconf
 import os
 import queue
 import random
@@ -39,9 +37,6 @@ import threading
 import time
 
 import maxtext_trillium_model_configs as model_configs
-from command_utils import run_command_with_updates
-from benchmark_db_utils import DEFAULT_TUNING_PARAMS_FILE
-
 from command_utils import run_command_with_updates
 from benchmark_db_utils import DEFAULT_TUNING_PARAMS_FILE
 
@@ -90,7 +85,6 @@ class WorkloadConfig:
 
   model: model_configs.MaxTextModel
   num_slices: int
-  num_slices: int
   device_type: str
   base_output_directory: str
   base_docker_image: str
@@ -99,38 +93,9 @@ class WorkloadConfig:
   num_steps: int = 20
   max_restarts: int = 0
   priority: str = 'medium'
-  priority: str = 'medium'
   xpk_path: str = '~/xpk'
   pathways_config: PathwaysConfig = None
   run_name: str = None
-  generate_metrics_and_upload_to_big_query: bool = True
-  hardware_id: str = 'v6e'
-  metrics_gcs_file: str = ''
-  base_config: str = 'MaxText/configs/base.yml'
-  topology: str = dataclasses.field(init=False)
-  num_devices_per_slice: int = dataclasses.field(init=False)
-  db_project: str = ""
-  db_dataset:str = ""
-
-  def __post_init__(self):
-    if self.device_type.startswith("v6e"):
-      size = int(self.device_type.split("-")[-1])
-      if size == 256:
-        self.num_devices_per_slice = 256
-        self.topology = "16x16"
-      elif size == 64:
-        self.num_devices_per_slice = 64
-        self.topology = "8x8"
-      elif size == 16:
-        self.num_devices_per_slice = 16
-        self.topology = "4x4"
-      elif size == 4:
-        self.num_devices_per_slice = 4
-        self.topology = "2x2"
-      else:
-        raise ValueError(f"Unsupported v6e size: {size}")
-    else:
-      raise ValueError(f"topology and num_devices_per_slice must be inferred when device_type starts with v6e. device_type: {self.device_type}")
   generate_metrics_and_upload_to_big_query: bool = True
   hardware_id: str = 'v6e'
   metrics_gcs_file: str = ''
@@ -171,197 +136,10 @@ class XpkClusterConfig:
   device_type: str
 
 
-def chunks(lst: list, n: int):
-  """Return a list of n-sized chunks from lst.
-
-  Args:
-    lst: input list to get chunks from.
-    n: size of each chunk.
-
-  Returns:
-    List of n-sized chunks for lst.
-  """
-  return [lst[i : i + n] for i in range(0, len(lst), n)]
-
-
-def make_tmp_files(per_command_name):
-  """Make temporary files for each command.
-
-  Args:
-    per_command_name: list of command names.
-
-  Returns:
-    A list of temporary files for each command.
-  """
-  # Supports removal of spaces from command names before converting to file name.
-  return [
-      tempfile.NamedTemporaryFile(
-          delete=False, prefix=command.replace(' ', '-') + '-'
-      )
-      for command in per_command_name
-  ]
-
-
-def run_commands(commands, jobname, per_command_name, batch=10, dry_run=False):
-  """Run commands in groups of `batch`.
-
-  Args:
-    commands: list of command.
-    jobname: the name of the job.
-    per_command_name: list of command names.
-    batch: number of commands to run in parallel.
-    dry_run: enables dry_run if set to true.
-
-  Returns:
-    0 if successful and 1 otherwise.
-  """
-  temporary_files_batches = chunks(make_tmp_files(per_command_name), batch)
-  commands_batched = chunks(commands, batch)
-  per_command_name_batches = chunks(per_command_name, batch)
-
-  print(
-      f'Breaking up a total of {len(commands)} commands into'
-      f' {len(commands_batched)} batches'
-  )
-  if dry_run:
-    print('Pretending all the jobs succeeded')
-    return 0
-
-  max_return_code = 0
-  for i, _ in enumerate(commands_batched):
-    print(f'Dispatching batch {i}/{len(commands_batched)}')
-    batch_max_return_code, _ = run_command_batch(
-        commands_batched[i],
-        jobname,
-        per_command_name_batches[i],
-        temporary_files_batches[i],
-    )
-    max_return_code = max(max_return_code, batch_max_return_code)
-    if max_return_code > 0:
-      return max_return_code
-  return max_return_code
-
-
-def run_command_batch(commands, jobname, per_command_name, output_logs):
-  """Runs commands in parallel.
-
-  Args:
-    commands: list of n commands, each command is a a list of strings
-    jobname: Useful debugging name for the group of commands
-    per_command_name: specific name per task
-    output_logs: list of n log paths, each command will output to each log.
-
-  Returns:
-    The max return code and a list of all the return codes.
-  """
-
-  children = []
-  start_time = datetime.datetime.now()
-  for i, command in enumerate(commands):
-    children.append(
-        # subprocess managed by list pylint: disable=consider-using-with
-        subprocess.Popen(
-            command, stdout=output_logs[i], stderr=output_logs[i], shell=True
-        )
-    )
-
-  while True:
-    returncodes = [child.poll() for child in children]
-    max_returncode = max([0] + [r for r in returncodes if r is not None])
-    completed = len([r for r in returncodes if r is not None])
-    total = len(returncodes)
-    seconds_elapsed = (datetime.datetime.now() - start_time).total_seconds()
-    if completed < total:
-      slow_worker_index = returncodes.index(None)
-      slow_worker_text = per_command_name[slow_worker_index]
-      slow_str = (
-          f', task {slow_worker_text} still working, logfile'
-          f' {output_logs[slow_worker_index].name}'
-      )
-    else:
-      slow_str = ''
-    print(
-        f'[t={seconds_elapsed:.2f}, {jobname}] Completed'
-        f' {completed}/{total}{slow_str}'
-    )
-    if max_returncode > 0:
-      failing_index = [
-          i for i, x in enumerate(returncodes) if x is not None and x > 0
-      ][0]
-      print(f'Terminating all {jobname} processes since at least one failed.')
-      print(
-          f'Failure is {per_command_name[failing_index]}'
-          f' and logfile {output_logs[failing_index].name}'
-      )
-      for child in children:
-        child.terminate()
-      break
-
-    if completed == total:
-      break
-
-    time.sleep(1)
-  return max_returncode, returncodes
-
-
-def run_command_with_updates(command, task, verbose=True) -> int:
-  """Generic run commands function with updates.
-
-  Args:
-    command: command to execute
-    task: user-facing name of the task
-    global_args: user provided arguments for running the command.
-    verbose: shows stdout and stderr if set to true. Set to True by default.
-
-  Returns:
-    0 if successful and 1 otherwise.
-  """
-
-  if verbose:
-    print(
-        f'Task: `{task}` is implemented by `{command}`, streaming output live.'
-    )
-    with subprocess.Popen(
-        command,
-        stdout=sys.stdout,
-        stderr=sys.stderr,
-        shell=True,
-    ) as child:
-      i = 0
-      while True:
-        return_code = child.poll()
-        if return_code is None:
-          print(f'Waiting for `{task}`, for {i} seconds')
-          time.sleep(1)
-          i += 1
-        else:
-          print(f'Task: `{task}` terminated with code `{return_code}`')
-          return return_code
-  else:
-    print(
-        f'Task: `{task}` is implemented by `{command}`, hiding output unless'
-        ' there is an error.'
-    )
-    try:
-      subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT)
-    except subprocess.CalledProcessError as e:
-      print(
-          f'Task: `{task}` terminated with ERROR `{e.returncode}`, printing'
-          ' logs'
-      )
-      print('*' * 80)
-      print(e.output)
-      print('*' * 80)
-      return e.returncode
-    print(f'Task: `{task}` succeeded.')
-    return 0
-
-
 def wait_for_xpk_workload_completion(
     cluster_config: XpkClusterConfig, workload_name, xpk_path
 ) -> int:
   """Waits for the given XPK workload to complete.
-
   Args:
     cluster_config: XPK cluster configuration.
     workload_name: Name of the workload to wait for.
@@ -395,12 +173,10 @@ def wait_for_xpk_workloads_completion_async(
     cluster_config: XpkClusterConfig, workload_names, xpk_path
 ):
   """Waits for a list of XPK workloads to complete in parallel and yields names and exit codes as they complete.
-
   Args:
     cluster_config: XPK cluster configuration.
     workload_names: List of workload names to wait for.
     xpk_path: Path to the xpk.py script.
-
   Yields:
     Tuple[workload_name, return_code]: The name of the workload that has just
       completed and its return code.
@@ -547,58 +323,6 @@ def _build_args_from_config(wl_config: WorkloadConfig) -> str:
   return args
 
 
-def _build_args_from_config(wl_config: WorkloadConfig) -> str:
-  base_config = omegaconf.OmegaConf.load(wl_config.base_config)
-
-  args = f'{wl_config.metrics_gcs_file} '
-  args += f'{wl_config.model.model_type} '
-  args += f'{wl_config.hardware_id} '
-  args += 'jax_maxtext '
-  args += f'{wl_config.num_devices_per_slice*wl_config.num_slices*hardware_id_to_num_chips_per_node[wl_config.hardware_id]} '
-  args += f'{wl_config.base_docker_image} '
-
-  if 'per_device_batch_size' not in wl_config.model.tuning_params:
-    per_device_batch_size = base_config.per_device_batch_size
-  else:
-    per_device_batch_size = wl_config.model.tuning_params['per_device_batch_size']
-  args += f'{per_device_batch_size * wl_config.num_devices_per_slice * wl_config.num_slices} '
-
-  if 'matmul_precision' not in wl_config.model.tuning_params:
-    precision = base_config.matmul_precision
-  else:
-    precision = wl_config.model.tuning_params['matmul_precision']
-  args += f'{precision} '
-
-  if 'opt_type' not in wl_config.model.tuning_params:
-    optimizer = base_config.opt_type
-  else:
-    optimizer = wl_config.model.tuning_params['opt_type']
-  args += f'{optimizer} '
-
-  if 'max_target_length' not in wl_config.model.tuning_params:
-    sequence_length = base_config.opt_type
-  else:
-    sequence_length = wl_config.model.tuning_params['max_target_length']
-  args += f'{sequence_length} '
-  args += f'{wl_config.num_steps} '
-  args += f'{wl_config.model.xla_flags.strip().replace(" ",",")} '
-  if 'dataset_type' not in wl_config.model.tuning_params:
-    dataset = base_config.opt_type
-  else:
-    dataset = wl_config.model.tuning_params['dataset_type']
-  args += f'{dataset} '
-
-  args += 'maxtext-xpk '
-  args += 'MaxText/configs/base.yml '
-  args += f'{wl_config.topology} '
-
-  tuning_params_str = json.dumps(wl_config.model.tuning_params)
-  args += f"'{tuning_params_str}' "
-  args += f'{wl_config.db_project} '
-  args += f'{wl_config.db_dataset} '
-  return args
-
-
 def build_user_command(
     name: str,
     wl_config: WorkloadConfig,
@@ -645,12 +369,6 @@ def build_user_command(
     # Save metrics to gcs bucket so that we can upload them to bq in post processing.
     enable_metrics_cmd = 'gcs_metrics=true'
 
-  enable_metrics_cmd=""
-  if wl_config.generate_metrics_and_upload_to_big_query:
-    # 'metrics_file=metrics.txt
-    # Save metrics to gcs bucket so that we can upload them to bq in post processing.
-    enable_metrics_cmd = 'gcs_metrics=true'
-
   # Construct the command string with proper formatting and line continuations
   command = ' '.join([
       f'{install_libtpu_cmd}',
@@ -665,8 +383,6 @@ def build_user_command(
       f'model_name={wl_config.model.model_type}',
       f'base_output_directory={wl_config.base_output_directory}',
       f'{vertex_tensorboard}',
-      f'{run_name_command}',
-      f'{enable_metrics_cmd}'
       f'{run_name_command}',
       f'{enable_metrics_cmd}'
   ])
@@ -833,6 +549,11 @@ def generate_xpk_workload_cmd(
   else:
     name = workload_name # Use provided name
 
+  wl_config.run_name = name
+  wl_config.metrics_gcs_file = os.path.join(wl_config.base_output_directory,
+                                            wl_config.run_name,
+                                            'metrics')
+
   user_command = build_user_command(
       name=name,
       wl_config=wl_config
@@ -865,12 +586,6 @@ def generate_xpk_workload_cmd(
     args = _build_args_from_config(wl_config)
     upload_metrics_to_bq_cmd = f"python3 benchmarks/upload_metrics_to_bq.py {args}"
 
-  upload_metrics_to_bq_cmd = ""
-  if wl_config.generate_metrics_and_upload_to_big_query:
-    # TODO (optionally) make it so that this upload step is done on local device instead of within the workload.
-    args = _build_args_from_config(wl_config)
-    upload_metrics_to_bq_cmd = f"python3 benchmarks/upload_metrics_to_bq.py {args}"
-
   print(f'User command: {user_command}')
   return (
       (
@@ -881,8 +596,6 @@ def generate_xpk_workload_cmd(
           f' --zone={cluster_config.zone}'
           f' {device_type}'
           f' --num-slices={wl_config.num_slices}'
-          f' --command="{user_command} && {upload_metrics_to_bq_cmd}"'
-          # f' --command="{upload_metrics_to_bq_cmd}"'
           f' --command="{user_command} && {upload_metrics_to_bq_cmd}"'
           # f' --command="{upload_metrics_to_bq_cmd}"'
           f' {docker_image_flag}'
@@ -965,11 +678,10 @@ def on_device_benchmark_runner(
 def main() -> int:
   # Variables to configure:
   output_bucket = 'gs://maxtext-experiments-temp/'
-  output_bucket = 'gs://maxtext-experiments-temp/'
   base_docker_image = _DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME
   # Configure these for writing to benchmark DB
-  db_project = ""
-  db_dataset = ""
+  db_project = "supercomputer-testing"
+  db_dataset = "mantaray_v2"
 
   # Set up the clusters to run workloads on!
   v5e_cluster_config = XpkClusterConfig(
@@ -980,16 +692,9 @@ def main() -> int:
   )
 
   v6e_cluster_config = XpkClusterConfig(
-      cluster_name='v6e-256',
-      project='my-cool-project',
-      zone='us-central2-b',
-      device_type='v6e-256',
-  )
-
-  v6e_cluster_config_yucmhab = XpkClusterConfig(
-      cluster_name='bodaborg-v6e-256-dnd-yucmhab',
-      project='tpu-prod-env-one-vm',
-      zone='us-east5',
+      cluster_name='bodaborg-v6e-256-ts',
+      project='tpu-prod-env-multipod',
+      zone='us-west1-c',
       device_type='v6e-256',
   )
 
@@ -1024,14 +729,13 @@ def main() -> int:
 
   user = os.environ['USER']
   base_output_dir = os.path.join(output_bucket, user)
-  base_output_dir = os.path.join(output_bucket, user)
 
   for model in list_of_models:
     # Run workloads on the below clusters
     for cluster_config in [
       # v5e_cluster_config,
-      # v6e_cluster_config,
-      v6e_cluster_config_yucmhab,
+      v6e_cluster_config,
+      # v6e_cluster_config_yucmhab,
       # another_config,
     ]:
       # Run workloads in the following slice configurations
@@ -1045,8 +749,6 @@ def main() -> int:
           wl_config = WorkloadConfig(
             db_project=db_project,
             db_dataset=db_dataset,
-            db_project=db_project,
-            db_dataset=db_dataset,
             model=model,
             num_slices=num_slices,
             device_type=cluster_config.device_type,
@@ -1056,7 +758,6 @@ def main() -> int:
             libtpu_type=libtpu_type,
             libtpu_nightly_version="",
             base_docker_image=base_docker_image,
-            pathways_config=None,
             pathways_config=None,
           )
           command, name = generate_xpk_workload_cmd(
