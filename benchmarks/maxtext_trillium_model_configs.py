@@ -1240,8 +1240,7 @@ llama3_1_70b_131072 = _add_to_model_dictionary(
     model_name="llama3_1_70b_131072",
     model_type="llama3.1-70b",
     tuning_params={
-        # "per_device_batch_size": 0.125,
-        "per_device_batch_size": 0.25,
+        "per_device_batch_size": 0.125,
         "ici_fsdp_parallelism": -1,
         "ici_context_parallelism": 16,
         "remat_policy": "custom",
@@ -1287,25 +1286,26 @@ llama3_1_70b_131072 = _add_to_model_dictionary(
   )
 )
 
-llama3_1_70b_131072_device = _add_to_model_dictionary(
+llama3_1_70b_131072_expt = _add_to_model_dictionary(
   trillium_model_dict,
     MaxTextModel(
     model_name="llama3_1_70b_131072",
     model_type="llama3.1-70b",
     tuning_params={
-        "per_device_batch_size": 0.0625,
+        # "per_device_batch_size": 0.125,
+        "per_device_batch_size": 0.125,
         "ici_fsdp_parallelism": -1,
         "ici_context_parallelism": 16,
         "remat_policy": "custom",
-        # "out_proj": "remat",
-        # "query_proj": "remat",
-        # "key_proj": "remat",
-        # "value_proj": "remat",
-        "decoder_layer_input": "device",
-        "out_proj": "offload",
-        "query_proj": "offload",
-        "key_proj": "offload",
-        "value_proj": "offload",
+        "out_proj": "remat",
+        "query_proj": "remat",
+        "key_proj": "remat",
+        "value_proj": "remat",
+        "decoder_layer_input": "offload",
+        # "out_proj": "offload",
+        # "query_proj": "offload",
+        # "key_proj": "offload",
+        # "value_proj": "offload",
         "max_target_length": 131072,
         "attention": "flash",
         "use_iota_embed": True,
@@ -1338,6 +1338,7 @@ llama3_1_70b_131072_device = _add_to_model_dictionary(
     ),
   )
 )
+
 
 llama3_1_70b_32768 = _add_to_model_dictionary(
   trillium_model_dict,
@@ -1391,100 +1392,6 @@ llama3_1_70b_32768 = _add_to_model_dictionary(
   )
 )
 
-llama3_1_70b_131072_1 = _add_to_model_dictionary(
-  trillium_model_dict,
-    MaxTextModel(
-    model_name="llama3_1_70b_131072_1",
-    model_type="llama3.1-70b",
-    tuning_params={
-        "per_device_batch_size": 0.0625,
-        "ici_fsdp_parallelism": -1,
-        "ici_context_parallelism": 16,
-        "remat_policy": "custom",
-        "decoder_layer_input": "offload",
-        "out_proj": "offload",
-        "query_proj": "offload",
-        "key_proj": "offload",
-        "value_proj": "offload",
-        "max_target_length": 131072,
-        "attention": "flash",
-        "use_iota_embed": True,
-        "dataset_path": "gs://max-datasets-rogue",
-        # "dataset_type": "synthetic",
-        "enable_checkpointing": False,
-        "sa_block_q": 6144,
-        "sa_block_kv": 6144,
-        "sa_block_kv_compute": 6144,
-        "sa_block_q_dkv": 6144,
-        "sa_block_kv_dkv": 6144,
-        "sa_block_kv_dkv_compute": 6144,
-        "sa_block_q_dq": 6144,
-        "sa_block_kv_dq": 6144,
-        "sa_use_fused_bwd_kernel": True,
-        "profiler": "xplane",
-        "skip_first_n_steps_for_profiler": 10,
-        "profiler_steps": 5,
-        # "allow_split_physical_axes": True,
-        # "custom_mesh": "hybrid_ring_32x8",
-        "tokenizer_path": "assets/tokenizer_llama3.tiktoken", 
-        "steps": 20,
-    },
-    xla_flags=(
-        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-        + xla_flags_library.DATA_PARALLEL_OVERLAP
-        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR
-        + xla_flags_library.HOST_OFFLOAD_FLAGS
-    ),
-  )
-)
-llama3_1_70b_131072_2 = _add_to_model_dictionary(
-  trillium_model_dict,
-  MaxTextModel(
-    model_name="llama3_1_70b_131072_2",
-    model_type="llama3.1-70b",
-    tuning_params={
-        "per_device_batch_size": 0.0625,
-        "ici_fsdp_parallelism": -1,
-        "ici_context_parallelism": 16,
-        "remat_policy": "custom",
-        "decoder_layer_input": "offload",
-        "out_proj": "offload",
-        "query_proj": "offload",
-        "key_proj": "offload",
-        "value_proj": "offload",
-        "max_target_length": 131072,
-        "attention": "flash",
-        "use_iota_embed": True,
-        "dataset_path": "gs://max-datasets-rogue",
-        # "dataset_type": "synthetic",
-        "enable_checkpointing": False,
-        "sa_block_q": 8192,
-        "sa_block_kv": 8192,
-        "sa_block_kv_compute": 8192,
-        "sa_block_q_dkv": 8192,
-        "sa_block_kv_dkv": 8192,
-        "sa_block_kv_dkv_compute": 8192,
-        "sa_block_q_dq": 8192,
-        "sa_block_kv_dq": 8192,
-        "sa_use_fused_bwd_kernel": True,
-        "profiler": "xplane",
-        "skip_first_n_steps_for_profiler": 10,
-        "profiler_steps": 5,
-        # "allow_split_physical_axes": True,
-        # "custom_mesh": "hybrid_ring_32x8",
-        "tokenizer_path": "assets/tokenizer_llama3.tiktoken", 
-        "steps": 20,
-    },
-    xla_flags=(
-        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-        + xla_flags_library.DATA_PARALLEL_OVERLAP
-        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR
-        + xla_flags_library.HOST_OFFLOAD_FLAGS
-    ),
-  )
-)
 
 # TODO(b/368441022) LLAMA3.1 8B, 70B, 405B
 # TODO(b/368441022) MaxDiffusion BEST

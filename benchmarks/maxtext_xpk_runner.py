@@ -449,7 +449,7 @@ def generate_xpk_workload_cmd(
           f' --workload={name}'
           f' --priority={wl_config.priority}'
           f' --max-restarts={wl_config.max_restarts}'
-          f' --debug-dump-gcs={HLO_FOLDER}/{wl_config.model.model_name}_{timestamp}_{wl_config.num_slices}_{temp_post_fix}',
+          f' --debug-dump-gcs={HLO_FOLDER}/{wl_config.model.model_name}_{timestamp}_{wl_config.num_slices}_{temp_post_fix}'
           # ' --use-vertex-tensorboard'
           # f' --experiment-name={test_purpose_name}'
           f' {additional_flags}'
@@ -542,13 +542,40 @@ def main() -> int:
       cluster_name='bodaborg-v6e-256-dnd-yucmhab'
   )
 
+  v6e_cluster_config_ts = XpkClusterConfig(
+  cluster_name='bodaborg-v6e-256-ts',
+  project='tpu-prod-env-multipod',
+  zone='us-west1-c',
+  device_type='v6e-256',
+  )
+
+  v6e_cluster_config_xrc = XpkClusterConfig(
+  cluster_name='bodaborg-v6e-256-rxc',
+  project='tpu-prod-env-one-vm',
+  zone='asia-northeast1-b',
+  device_type='v6e-256',
+  )
+
+  v6e_cluster_config_starfish = XpkClusterConfig(
+    zone='europe-west4-a',
+    project='cloud-tpu-prod-starfish',
+    device_type='v6e-256',
+    cluster_name='raymondzou-v6e-256-2',
+  )
+
+
+
   xpk_workload_cmds = []
   xpk_workload_names = []
 
   list_of_models = [
     # model_configs.llama2_70b_4096_sc,
     # model_configs.default_128
-    model_configs.llama3_1_70b_131072,
+    # model_configs.llama3_1_70b_131072,
+    model_configs.llama3_1_70b_131072_expt,
+    # model_configs.llama3_1_70b_129024_context,
+    # model_configs.llama3_1_70b_131072_device,
+    # model_configs.llama3_1_70b_32768,
     # model_configs.llama3_1_70b_131072_1,
     # model_configs.llama3_1_70b_131072_2
   ]
@@ -575,7 +602,10 @@ def main() -> int:
     for cluster_config in [
       # v5e_cluster_config,
       # v6e_cluster_config,
-      v6e_cluster_config_yucmhab,
+      # v6e_cluster_config_yucmhab,
+      v6e_cluster_config_starfish,
+      # v6e_cluster_config_ts,
+      # v6e_cluster_config_xrc,
       # another_config,
     ]:
       # Run workloads in the following slice configurations
@@ -598,16 +628,43 @@ def main() -> int:
             base_docker_image=base_docker_image,
             pathways_config=None
           )
-          command, name = generate_xpk_workload_cmd(
-            cluster_config=cluster_config,
-            wl_config=wl_config
-          )
+          initial_block_size = 2048
+          final_block_size = 8192
+          step_block_size = 1024
+          for curr_block_q in range(3072,final_block_size,step_block_size):
+            wl_config.model
+            for curr_block_kv in range(initial_block_size,final_block_size,step_block_size):
+              for curr_block_kv_compute in range(initial_block_size,curr_block_kv,step_block_size):
+                new_tuning_params_dict = wl_config.model.tuning_params.copy()
+                replacements = {'sa_block_q': curr_block_q,
+                                'sa_block_kv': curr_block_kv,
+                                'sa_block_kv_compute': curr_block_kv_compute}
+                new_tuning_params_dict.update(replacements)
+                curr_wl_config = dataclasses.replace(wl_config,model=dataclasses.replace(wl_config.model, tuning_params=new_tuning_params_dict))
 
-          print(f"Name of the workload is: {name} \n")
-          xpk_workload_names.append(name)
+                command, name = generate_xpk_workload_cmd(
+                  cluster_config=cluster_config,
+                  wl_config=curr_wl_config
+                )
+                # TODO: ValueError: q_block_size=3072 should divide q_seq_len=131072.
+                # TODO: ValueError: kv_block_size=6144 should divide kv_seq_len=131072.
 
-          print(f"XPK command to be used is: {command} \n")
-          xpk_workload_cmds.append(command)
+                command_pieces = command.split(' ')
+                for command_piece in command_pieces:
+                  if 'max_target_length' in command_piece:
+                    max_target_length = int(command_piece.split('=')[1])
+                  if 'sa_block_q' in command_piece:
+                    sa_block_q = int(command_piece.split('=')[1])
+                  if 'sa_block_kv' in command_piece:
+                    sa_block_kv = int(command_piece.split('=')[1])
+                if max_target_length%sa_block_q!=0 or max_target_length%sa_block_kv!=0:
+                  continue
+
+                print(f"Name of the workload is: {name} \n")
+                xpk_workload_names.append(name)
+
+                print(f"XPK command to be used is: {command} \n")
+                xpk_workload_cmds.append(command)
 
   for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
     return_code = run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
