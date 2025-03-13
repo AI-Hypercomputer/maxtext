@@ -663,8 +663,18 @@ def main() -> int:
                     sa_block_q = int(command_piece.split('=')[1])
                   if 'sa_block_kv' in command_piece:
                     sa_block_kv = int(command_piece.split('=')[1])
-                if max_target_length%sa_block_q!=0 or max_target_length%sa_block_kv!=0:
+                print(f"{max_target_length=}, {sa_block_q=},{sa_block_kv=}")
+                print(f"{max_target_length%curr_block_q=}")
+                print(f"{max_target_length%curr_block_kv=}")
+                if max_target_length%curr_block_q!=0 or max_target_length%curr_block_kv!=0:
+                  print("test failed")
+                  print(f"{max_target_length%sa_block_q=}")
+                  print(f"{max_target_length%sa_block_kv=}") 
                   continue
+                else:
+                    print("test passed")
+                
+
 
                 print(f"Name of the workload is: {name} \n")
                 xpk_workload_names.append(name)
