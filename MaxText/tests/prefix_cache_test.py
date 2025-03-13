@@ -375,6 +375,43 @@ class HBMStorageTest(unittest.TestCase):
     assert storage.has_enough_space(value.prefix_size_bytes) is True
     assert storage.add(key, value) is True
 
+  @pytest.mark.tpu_only
+  def test_move_value_to_and_from_different_device(self):
+    local_devices = jax.local_devices()
+    if len(local_devices) < 2:
+      pytest.skip("Need to test with multiple devices")
+
+    key = (1,)
+
+    device_0_bytes_before = get_byte_in_use(0)
+    value = create_default_value(prefix={"a": jnp.ones((512, 512), device=local_devices[0])})
+    device_0_bytes_create_value = get_byte_in_use(0)
+    del value
+    assert device_0_bytes_before == get_byte_in_use(0)
+
+    device_0_bytes_before = get_byte_in_use(0)
+    value = create_default_value(prefix={"a": jnp.ones((512, 512), device=local_devices[0])})
+    device_0_bytes_create_value = get_byte_in_use(0)
+    prefix_actually_used_byte = device_0_bytes_create_value - device_0_bytes_before
+    # Storage on device 1
+    storage = prefix_cache.HBMStorage(max_size_bytes=value.prefix_size_bytes, device=local_devices[1])
+    device_1_bytes_before = get_byte_in_use(1)
+    assert storage.add(key, value) is True
+    del value
+    device_1_byte_after_add = get_byte_in_use(1)
+    # The prefix value is saved in device 1, and delete in device 0
+    assert device_1_byte_after_add - device_1_bytes_before == prefix_actually_used_byte
+    print(f"{device_0_bytes_before=}, {device_0_bytes_create_value=}")
+    print(f"{device_1_bytes_before=}, {device_1_byte_after_add=}")
+    print(f"{get_byte_in_use(0)=}, {get_byte_in_use(1)=}")
+    ### WIP: clear cache may take times and causing the wrong size evaluate
+    assert device_0_bytes_before == get_byte_in_use(0)
+    # Retrieve back to the original device
+    value = storage.retrieve(key)
+    assert value is not None
+    assert device_0_bytes_create_value == get_byte_in_use(0)
+    assert False
+
 
 class DRAMStorageTest(unittest.TestCase):
   """Test basic usage of DRAMStorage only since DRAMStorage is wrapper of BasicStorage with device_get and device_put."""
