@@ -921,6 +921,7 @@ def train_loop(config, state=None):
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+  jax.config.update("jax_enable_compilation_cache", os.environ.get("JAX_ENABLE_COMPILATION_CACHE", True))
   # TF allocates extraneous GPU memory when using TFDS data
   # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
   tf.config.set_visible_devices([], "GPU")
