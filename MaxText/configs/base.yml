@@ -261,7 +261,7 @@ jax_cache_dir: "~/jax_cache"
 hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
 
 # Parallelism
-mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']
+mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
@@ -279,9 +279,11 @@ logical_axis_rules: [
                       ['activation_vocab', ['tensor', 'tensor_transpose', 'sequence', 'tensor_sequence']],
                       ['activation_vocab', ['tensor', 'tensor_transpose']],
                       ['activation_vocab', 'tensor_sequence'],
-                      ['activation_vocab', 'sequence'],
+                      ['activation_vocab', ['sequence']],
                       ['activation_stage', 'stage'],
-                      ['activation_exp', 'expert'],
+                      ['activation_exp', ['expert']],
+                      ['decode_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['decode_length', []],
                       ['mlp', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
                       ['vocab', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
@@ -312,7 +314,11 @@ logical_axis_rules: [
                       ['paged_kv_head_dim_size', []],
                     ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
-data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']]
+# All the axis except TP for data sharding
+data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_sequence', 'expert', 'autoregressive']]
+
+# All the axis for data sharding, used only for subset hosts data loading
+all_shardings: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']]
 
 # sharding tolerance: float between 0.0 and 1.0 representing the allowed percentage of non-sharded parameters.
 sharding_tolerance: 0.02
@@ -325,6 +331,7 @@ dcn_data_parallelism: -1  # recommended DCN axis to be auto-sharded
 dcn_fsdp_parallelism: 1
 dcn_fsdp_transpose_parallelism: 1
 dcn_sequence_parallelism: 1  # never recommended
+dcn_context_parallelism: 1
 dcn_tensor_parallelism: 1 # never recommended
 dcn_tensor_transpose_parallelism: 1
 dcn_tensor_sequence_parallelism: 1 # never recommended
@@ -335,6 +342,7 @@ ici_data_parallelism: 1
 ici_fsdp_parallelism: -1 # recommended ICI axis to be auto-sharded
 ici_fsdp_transpose_parallelism: 1
 ici_sequence_parallelism: 1
+ici_context_parallelism: 1
 ici_tensor_parallelism: 1
 ici_tensor_transpose_parallelism: 1
 ici_tensor_sequence_parallelism: 1
@@ -349,6 +357,9 @@ num_slices: -1
 # Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding
 tokenizer_path: "assets/tokenizer.llama2"
+# tfds pipeline supports tokenizer_type: sentencepiece, huggingface, tiktoken
+# grain pipeline supports tokenizer_type: sentencepiece, huggingface
+# hf pipeline only supports huggingface type, and will ignore tokenizer_type flag
 tokenizer_type: "sentencepiece"
 tokenize_train_data: True  # False if the dataset is pre-tokenized
 tokenize_eval_data: True  # False if the dataset is pre-tokenized
@@ -438,6 +449,7 @@ profile_periodically_period: -1 # If set to a positive integer, profile every pr
 
 # Dump HLO options
 dump_hlo: False
+dump_step: -1 # Dump modules at the given step if set to a positive integer.
 dump_hlo_local_dir: "/tmp/xla_dump/"
 dump_hlo_delete_local_after: True # Cleans local directory after its uploaded
 dump_hlo_gcs_dir: "" # Defaults to {base_output_directory}/{run_name}/xla_dump
@@ -483,11 +495,12 @@ trainable_position_size: -1  # enable gpt3 position embedding with a positive tr
 # RoPE parameters
 rope_type: "default" # one of "default", "llama3.1" or "yarn"
 rope_min_timescale: 1
-rope_max_timescale: 10_000
+rope_max_timescale: 10_000 # Timesclae For global Attention
+local_rope_max_timescale: -1 # If positive used for local window Attention, otherwise `rope_max_timescale` is used for both local and global
 
 # yarn RoPE parameters
-original_seq_len: 4096
-rope_theta: 10000.0
+max_position_embeddings: 163840
+original_max_position_embeddings: 4096
 rope_factor: 40
 beta_fast: 32
 beta_slow: 1
@@ -505,7 +518,7 @@ decode_sampling_top_k: 0 # set if you're doing top-k
 decode_sampling_temperature: 1.
 
 eval_interval: -1  # the specific number of train step between eval_step
-eval_steps: -1  # only run this number of batches for eval, for debugging use
+eval_steps: -1  # run this number of steps for eval, recommend setting this to prevent error due to running out of evel data
 target_eval_loss: 0.  # early stop once reaching target eval_loss
 
 # Goodput parameters
@@ -543,6 +556,7 @@ inference_microbenchmark_prefill_lengths: "64,128,256,512,1024"
 inference_microbenchmark_stages: "prefill,generate"
 inference_microbenchmark_loop_iters: 10
 inference_microbenchmark_log_file_path: ""
+inference_microbenchmark_num_samples: [1, 2, 3, 4, 5]
 inference_metadata_file: "" # path to a json file
 inference_server: "MaxtextInterleavedServer"  # inference server to start
 inference_benchmark_test: False
@@ -619,3 +633,6 @@ pagedattn_pages_per_compute_block: 8
 # Chunked Prefill Parameters
 prefill_chunk_size: 256
 use_chunked_prefill: False
+
+# This is a temporary flag that will removed soon after the fix lands in TE
+enable_padding_causal_mask: True

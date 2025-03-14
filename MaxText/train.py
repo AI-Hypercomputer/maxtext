@@ -841,7 +841,7 @@ def train_loop(config, state=None):
 
     metric_logger.write_metrics(running_gcs_metrics, metrics, step)
 
-    if config.dump_hlo and step == start_step:
+    if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
       jax.block_until_ready(state)  # Ensure compilation has finished.
       gcs_utils.upload_dump(
           config.dump_hlo_local_dir,
@@ -921,6 +921,7 @@ def train_loop(config, state=None):
 
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+  jax.config.update("jax_enable_compilation_cache", os.environ.get("JAX_ENABLE_COMPILATION_CACHE", True))
   # TF allocates extraneous GPU memory when using TFDS data
   # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
   tf.config.set_visible_devices([], "GPU")

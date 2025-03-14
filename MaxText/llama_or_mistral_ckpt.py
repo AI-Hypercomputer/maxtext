@@ -242,6 +242,37 @@ def permute_to_match_maxtext_rope(arr):
   return np.concatenate((evens, odds), axis=arr.ndim - 1)
 
 
+# pylint: disable=too-many-positional-arguments
+def initialize_self_attention_lora_kernels(
+    self_attention_lora,
+    lora_chkpt_vars,
+    key_prefix,
+    stack_shape,
+    module_name,
+    layer_idx,
+    reshape_a=False,
+    shape_a=None,
+    reshape_b=False,
+    shape_b=None,
+):
+  """Helper function to intialize LoRA kernels for given target module."""
+
+  lora_A = lora_chkpt_vars[f"{key_prefix}.lora_A.weights"].type(torch.float16).numpy().transpose()
+  lora_B = lora_chkpt_vars[f"{key_prefix}.lora_B.weights"].type(torch.float16).numpy().transpose()
+
+  if reshape_a:
+    lora_A = np.reshape(lora_A, shape_a)
+  if reshape_b:
+    lora_B = np.reshape(lora_B, shape_b)
+
+  if self_attention_lora[module_name]["lora_a.kernel"] is None:
+    self_attention_lora[module_name]["lora_a.kernel"] = np.zeros(stack_shape + lora_A.shape, dtype=np.float16)
+    self_attention_lora[module_name]["lora_b.kernel"] = np.zeros(stack_shape + lora_B.shape, dtype=np.float16)
+
+  self_attention_lora[module_name]["lora_a.kernel"][layer_idx, ...] = lora_A  # pylint: disable=E1137
+  self_attention_lora[module_name]["lora_b.kernel"][layer_idx, ...] = lora_B  # pylint: disable=E1137
+
+
 def convert_lora_weights_to_jax_weights(lora_config, model_size):
   """
   Function to convert the loRA checkpoints at lora_model_path into Orbax checkpoints
@@ -317,43 +348,40 @@ def convert_lora_weights_to_jax_weights(lora_config, model_size):
   for layer_idx in range(base_num_decoder_layers):
     for target_module in lora_target_modules:
       if "q_proj" in target_module:
-        lora_A_q = lora_chkpt_vars[f"layers.{layer_idx}.attention.wq.lora_A.weights"].type(torch.float16).numpy().transpose()
-        lora_B_q = lora_chkpt_vars[f"layers.{layer_idx}.attention.wq.lora_B.weights"].type(torch.float16).numpy().transpose()
-
-        lora_B_q = np.reshape(lora_B_q, [lora_rank, base_num_query_heads, head_dim])
-
-        if self_attention_lora["query"]["lora_a.kernel"] is None:
-          self_attention_lora["query"]["lora_a.kernel"] = np.zeros(stack_shape + lora_A_q.shape, dtype=np.float16)
-          self_attention_lora["query"]["lora_b.kernel"] = np.zeros(stack_shape + lora_B_q.shape, dtype=np.float16)
-
-        self_attention_lora["query"]["lora_a.kernel"][layer_idx, ...] = lora_A_q  # pylint: disable=E1137
-        self_attention_lora["query"]["lora_b.kernel"][layer_idx, ...] = lora_B_q  # pylint: disable=E1137
+        initialize_self_attention_lora_kernels(
+            self_attention_lora=self_attention_lora,
+            lora_chkpt_vars=lora_chkpt_vars,
+            key_prefix=f"layers.{layer_idx}.attention.wq",
+            stack_shape=stack_shape,
+            reshape_b=True,
+            shape_b=[lora_rank, base_num_query_heads, head_dim],
+            layer_idx=layer_idx,
+            module_name="query",
+        )
 
       if "k_proj" in target_module:
-        lora_A_k = lora_chkpt_vars[f"layers.{layer_idx}.attention.wk.lora_A.weights"].type(torch.float16).numpy().transpose()
-        lora_B_k = lora_chkpt_vars[f"layers.{layer_idx}.attention.wk.lora_B.weights"].type(torch.float16).numpy().transpose()
-
-        lora_B_k = np.reshape(lora_B_k, [lora_rank, base_num_query_heads, head_dim])
-
-        if self_attention_lora["key"]["lora_a.kernel"] is None:
-          self_attention_lora["key"]["lora_a.kernel"] = np.zeros(stack_shape + lora_A_k.shape, dtype=np.float16)
-          self_attention_lora["key"]["lora_b.kernel"] = np.zeros(stack_shape + lora_B_k.shape, dtype=np.float16)
-
-        self_attention_lora["key"]["lora_a.kernel"][layer_idx, ...] = lora_A_k  # pylint: disable=E1137
-        self_attention_lora["key"]["lora_b.kernel"][layer_idx, ...] = lora_B_k  # pylint: disable=E1137
+        initialize_self_attention_lora_kernels(
+            self_attention_lora=self_attention_lora,
+            lora_chkpt_vars=lora_chkpt_vars,
+            key_prefix=f"layers.{layer_idx}.attention.wk",
+            stack_shape=stack_shape,
+            reshape_b=True,
+            shape_b=[lora_rank, base_num_query_heads, head_dim],
+            layer_idx=layer_idx,
+            module_name="key",
+        )
 
       if "v_proj" in target_module:
-        lora_A_v = lora_chkpt_vars[f"layers.{layer_idx}.attention.wv.lora_A.weights"].type(torch.float16).numpy().transpose()
-        lora_B_v = lora_chkpt_vars[f"layers.{layer_idx}.attention.wv.lora_B.weights"].type(torch.float16).numpy().transpose()
-
-        lora_B_v = np.reshape(lora_B_v, [lora_rank, base_num_query_heads, head_dim])
-
-        if self_attention_lora["value"]["lora_a.kernel"] is None:
-          self_attention_lora["value"]["lora_a.kernel"] = np.zeros(stack_shape + lora_A_v.shape, dtype=np.float16)
-          self_attention_lora["value"]["lora_b.kernel"] = np.zeros(stack_shape + lora_B_v.shape, dtype=np.float16)
-
-        self_attention_lora["value"]["lora_a.kernel"][layer_idx, ...] = lora_A_v  # pylint: disable=E1137
-        self_attention_lora["value"]["lora_b.kernel"][layer_idx, ...] = lora_B_v  # pylint: disable=E1137
+        initialize_self_attention_lora_kernels(
+            self_attention_lora=self_attention_lora,
+            lora_chkpt_vars=lora_chkpt_vars,
+            key_prefix=f"layers.{layer_idx}.attention.wv",
+            stack_shape=stack_shape,
+            reshape_b=True,
+            shape_b=[lora_rank, base_num_query_heads, head_dim],
+            layer_idx=layer_idx,
+            module_name="value",
+        )
 
       if "o_proj" in target_module:
         lora_A_o = lora_chkpt_vars[f"layers.{layer_idx}.attention.wo.lora_A.weights"].type(torch.float16).numpy()
@@ -934,16 +962,15 @@ def convert_to_jax_weights(base_model_path, model_size, huggingface_ckpt):
   return _convert_pytorch_to_jax_weights(base_model_path, model_size, model_params, mem_info)
 
 
-def save_jax_weights_to_checkpoint(maxtext_model_path, jax_weights):
+def save_weights_to_checkpoint(maxtext_model_path, jax_weights, device_count):
   """
-  Function to save jax_weights ready for MaxText to a parameters checkpoint
+  Function to save jax_weights ready for MaxText to a parameters checkpoint.
 
-  Attributes:
-  maxtext_model_path: Path to save the MaxText checkpoint to
-  model_size: llama2-7b to 70b, mistral-7b, or mixtral-8x7b, mixtral-8x22b
+  Args:
+      maxtext_model_path: Path to save the MaxText checkpoint.
+      jax_weights: The JAX model weights to be saved.
+      device_count: The number of simulated devices.
   """
-  """Save maxtext parameter checkpoint."""
-
   mem_info = psutil.Process()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
   gc.collect()
@@ -953,10 +980,10 @@ def save_jax_weights_to_checkpoint(maxtext_model_path, jax_weights):
   s3 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None))  # no sharding
 
   def checkpoint_device_put(arr):
-    if arr.shape[0] % SIMULATED_CPU_DEVICES_COUNT == 0:
+    if arr.shape[0] % device_count == 0:
       max_logging.log("sharding first axis")
       return jax.device_put(arr, device=s1)
-    elif len(arr.shape) > 1 and arr.shape[1] % SIMULATED_CPU_DEVICES_COUNT == 0:
+    elif len(arr.shape) > 1 and arr.shape[1] % device_count == 0:
       max_logging.log("sharding second axis")
       return jax.device_put(arr, device=s2)
     else:
@@ -1033,14 +1060,15 @@ if __name__ == "__main__":
     raise NotImplementedError
 
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={SIMULATED_CPU_DEVICES_COUNT}"
-
   base_weights_path = args.maxtext_model_path
 
   if args.lora_input_adapters_path:
     base_weights_path += "/base"
 
-  save_jax_weights_to_checkpoint(
-      base_weights_path, convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint)
+  save_weights_to_checkpoint(
+      base_weights_path,
+      convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint),
+      SIMULATED_CPU_DEVICES_COUNT,
   )
   max_logging.log(f"Successfully saved base_weights to {base_weights_path}.")
 
@@ -1073,7 +1101,7 @@ if __name__ == "__main__":
 
           lora_output_gcs_path = f"{args.maxtext_model_path}/loras/{lora_id}"
 
-          save_jax_weights_to_checkpoint(lora_output_gcs_path, jax_lora_weights)
+          save_weights_to_checkpoint(lora_output_gcs_path, jax_lora_weights, SIMULATED_CPU_DEVICES_COUNT)
           gcs_utils.write_dict_to_gcs_json(lora_config_dict, f"{lora_output_gcs_path}/adapter_config.json")
 
           max_logging.log(f"Successfully saved lora_weights to {lora_output_gcs_path}.")
