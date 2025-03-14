@@ -4,7 +4,7 @@ set -ex
 RUN_NAME=${1}_$(date +%Y-%m-%d-%H)
 OUTPUT_PATH=${2}
 DATASET_PATH=${3}
-CHECKPOINT_PATH=gs://$OUTPUT_PATH/$RUN_NAME/checkpoints/
+CHECKPOINT_PATH=$OUTPUT_PATH/$RUN_NAME/checkpoints/
 
 export TPU_PREMAPPED_BUFFER_SIZE=20000014336
 export TPU_PREMAPPED_BUFFER_TRANSFER_THRESHOLD_BYTES=20000014336
@@ -17,7 +17,7 @@ else
     mkdir -p $RUN_NAME/checkpoints/
     touch $RUN_NAME/checkpoints/$RUN_NAME.txt
 
-    gsutil cp -r $RUN_NAME gs://$OUTPUT_PATH/
+    gsutil cp -r $RUN_NAME $OUTPUT_PATH
     rm -rf $RUN_NAME
 fi
 
@@ -33,5 +33,4 @@ steps=110 enable_emergency_checkpoint=true checkpoint_period=200 local_checkpoin
 python3 end_to_end/tpu/eval_assert.py checkpoint_save_restore metrics.txt learning/loss
 
 # Clean up ramdisk
-
 rm -rf /local/*
