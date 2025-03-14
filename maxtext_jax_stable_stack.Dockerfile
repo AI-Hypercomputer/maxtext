@@ -25,10 +25,6 @@ RUN ls .
 ARG DEVICE
 ENV DEVICE=$DEVICE
 
-RUN if [ $DEVICE = "tpu" ]; then \
-        pip install --no-cache-dir jax[tpu]==0.5.1; \
-    fi
-
 # Install Maxtext requirements with Jax Stable Stack
 RUN pip install -r /deps/requirements_with_jax_stable_stack.txt
 
