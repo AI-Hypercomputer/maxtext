@@ -86,6 +86,7 @@ class PathwaysConfig:
   server_flags: str = ''
   proxy_flags: str = ''
   worker_flags: str = ''
+  pathways_gcs_location: str = ''
 
 
 # TODO(@vbarr): Split out parameters related to XPK workload and a General workload
@@ -548,6 +549,7 @@ def _get_pathways_specific_flags(wl_config: WorkloadConfig):
       f' {proxy_server_image_flag} '
       f' {remote_python_sidecar_image_flag} '
       f' --termination-grace-period-seconds=300 '
+      f' --pathways-gcs-location={pw_config.pathways_gcs_location if pw_config.pathways_gcs_location is not None else wl_config.base_output_directory} '
       f' --pathways-gcs-location={wl_config.base_output_directory} '
       f' --custom-pathways-server-args="{server_flags}" '
       f' --custom-pathways-proxy-server-args="{proxy_flags}" '
