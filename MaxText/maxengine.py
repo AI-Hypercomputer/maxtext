@@ -244,6 +244,12 @@ class MaxEngine(engine_api.Engine):
 
     params, config = lora_utils.load_adapter(self.config, self.abstract_params, adapter_config_path, adapter_weights_path)
 
+    if config is None:
+      raise ValueError(f"Failed to read lora_config from {adapter_config_path}")
+
+    if params is None:
+      raise ValueError(f"Failed to read lora_config from {adapter_config_path}")
+
     config["adapter_path"] = adapter_weights_path
 
     self.print_stats("After load_single_adapter.")
@@ -256,6 +262,13 @@ class MaxEngine(engine_api.Engine):
     lora_rank = int(adapter_config["r"])
     lora_scale_factor = float(adapter_config["lora_alpha"]) / lora_rank
     lora_utils.apply_lora_on_base_params(base_params, adapter_params, lora_scale_factor)
+
+  def unapply_adapter(self, base_params, adapter_config, adapter_params):
+    """Unapply the adapter params from the merged params to get back the base params."""
+
+    lora_rank = int(adapter_config["r"])
+    lora_scale_factor = float(adapter_config["lora_alpha"]) / lora_rank
+    lora_utils.unapply_lora_from_base_params(base_params, adapter_params, lora_scale_factor)
 
   def quantize_params(self, state, rng: Optional[PRNGKeyType] = None):
     """Forward pass to quantize decode params."""
