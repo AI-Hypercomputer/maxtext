@@ -49,7 +49,7 @@ from benchmarks.xpk_configs import XpkClusterConfig
 from MaxText.globals import PKG_DIR
 import maxtext_trillium_model_configs as model_configs
 import xla_flags_library as xla_flags
-import maxtext_viperfish_model_configs as v5p_model_configs
+# import maxtext_viperfish_model_configs as v5p_model_configs
 
 # Assumes you built maxtext dep image.
 # Assumes you have xpk installed in a git clone repo of ~/{wl_config.xpk_path}/xpk.py
@@ -550,7 +550,6 @@ def _get_pathways_specific_flags(wl_config: WorkloadConfig):
       f' {remote_python_sidecar_image_flag} '
       f' --termination-grace-period-seconds=300 '
       f' --pathways-gcs-location={pw_config.pathways_gcs_location if pw_config.pathways_gcs_location is not None else wl_config.base_output_directory} '
-      f' --pathways-gcs-location={wl_config.base_output_directory} '
       f' --custom-pathways-server-args="{server_flags}" '
       f' --custom-pathways-proxy-server-args="{proxy_flags}" '
       f' --custom-pathways-worker-args="{worker_flags}" '
@@ -976,7 +975,7 @@ def run_llama3_v5():
 
   list_of_models = [
     #model_configs.llama3_1_405b_8192_fsdp_dcn_mlperf,
-    v5p_model_configs.llama3_1_405b_8192_fsdp_dcn_mlperf
+    # v5p_model_configs.llama3_1_405b_8192_fsdp_dcn_mlperf
     # model_configs.default_128
   ]
 
