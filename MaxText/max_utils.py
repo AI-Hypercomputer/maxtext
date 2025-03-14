@@ -837,7 +837,7 @@ def move_state(state, sharding, scan_over):
   state = state.replace(opt_state = opt_state, params=params)
   return state
 
-def move_state_scan(state, state_sharding, sharding, scan_over):
+def move_state_scan(state, sharding, state_sharding, scan_over):
   def put(arr):
     def body_fn(carry, xs):
       params, mu, nu = xs
@@ -862,14 +862,18 @@ def move_state_scan(state, state_sharding, sharding, scan_over):
   unstacked_nu = jax.device_put(unstacked_nu, sharding)
   # if sharding == TransferToMemoryKind('pinned_host'):
     
-  (stacked_params, stacked_mu, stacked_nu) = jax.jit(put, donate_argnums=(0,))((stacked_params, stacked_mu, stacked_nu))
+  # (stacked_params, stacked_mu, stacked_nu) = jax.jit(put, donate_argnums=(0,))((stacked_params, stacked_mu, stacked_nu))
+  (stacked_params, stacked_mu, stacked_nu) = put((stacked_params, stacked_mu, stacked_nu))
 
   params = merge_pytrees(stacked_params, unstacked_params)
   opt_state = state.opt_state[0]._replace(mu = merge_pytrees(stacked_mu, unstacked_mu), nu = merge_pytrees(stacked_nu, unstacked_nu))
   
   state = state.replace(params=params, opt_state=(opt_state,state.opt_state[1],state.opt_state[2]))
-  return state
+  return state, None
 
+def move_state_unscan(state, sharding):
+  return state.replace(params = jax.device_put(state.params, sharding), opt_state = jax.device_put(state.opt_state, sharding)), None
+  
 
 def init_initial_state(model, tx, config, is_training, key):
   """

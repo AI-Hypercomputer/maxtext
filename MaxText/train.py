@@ -34,6 +34,7 @@ from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 import grain.python as grain
 import jax
+from jax.sharding import PartitionSpec as P
 import numpy as np
 import orbax.checkpoint
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
@@ -465,7 +466,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   return loss, aux
 
 
-def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
+def train_step(model, mesh, config, state_mesh_shardings, state, data, dropout_rng):
   """
 
   Args:
@@ -480,6 +481,8 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     rng2: A new rng key that can be used in future calls.
 
   """
+  # f_move_state_scan = functools.partial(max_utils.move_state_scan, state_sharding=state_mesh_shardings, scan_over = config.base_num_decoder_layers)
+  f_move_state_scan = functools.partial(max_utils.move_state_unscan)
   reference_params, reference_params_sharding, extra_dpo_args, _loss_fn = [], [], [], loss_fn
   if config.use_dpo:
     state, reference_params = _split_dpo_state(state)
@@ -528,7 +531,12 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
       #   reference_params = jax.device_put(reference_params, max_utils.with_memory_kind(reference_params_sharding, "device"))
       #   extra_dpo_args = [reference_params]
       # state = max_utils.move_state(state, TransferToMemoryKind('device'), scan_over = config.base_num_decoder_layers)
-      state = max_utils.move_state_scan(state, state_mesh_shardings, TransferToMemoryKind('device'), scan_over = config.base_num_decoder_layers)
+      
+      state, _ = jax.jit(f_move_state_scan,
+                      in_shardings=(max_utils.with_memory_kind(state_mesh_shardings, 'pinned_host'),),
+                      out_shardings=(max_utils.with_memory_kind(state_mesh_shardings, 'device'), jax.sharding.NamedSharding(mesh, P())),
+                      static_argnums=1,
+                      donate_argnums=0)(state, TransferToMemoryKind('device'))
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
   intermediate_outputs = aux["intermediate_outputs"]
@@ -540,9 +548,17 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   else:
     grads = raw_grads
   new_state = state.apply_gradients(grads=grads)
-  # if config.optimizer_memory_host_offload:
-  #   # new_state = max_utils.move_state(new_state, TransferToMemoryKind('pinned_host'), scan_over = config.base_num_decoder_layers)
-  #   new_state = max_utils.move_state_scan(new_state, state_mesh_shardings, TransferToMemoryKind('pinned_host'), scan_over = config.base_num_decoder_layers)
+  if config.optimizer_memory_host_offload:
+    # new_state = max_utils.move_state(new_state, TransferToMemoryKind('pinned_host'), scan_over = config.base_num_decoder_layers)
+    # new_state = max_utils.move_state_scan(new_state, state_mesh_shardings, TransferToMemoryKind('pinned_host'), scan_over = config.base_num_decoder_layers)
+    # f_move_state_scan = functools.partial(max_utils.move_state_scan, state_sharding=state_mesh_shardings, 
+    #                                         sharding=TransferToMemoryKind('pinned_host'), 
+    #                                         scan_over = config.base_num_decoder_layers)
+    new_state, _ = jax.jit(f_move_state_scan,
+                    in_shardings=(max_utils.with_memory_kind(state_mesh_shardings, 'device'),),
+                    out_shardings=(max_utils.with_memory_kind(state_mesh_shardings, 'pinned_host'), jax.sharding.NamedSharding(mesh, P())),
+                    static_argnums=1,
+                    donate_argnums=0)(new_state, TransferToMemoryKind('pinned_host'))
   scalar_metrics = {
       "learning/loss": loss,
       "learning/moe_lb_loss": moe_lb_loss,
@@ -890,6 +906,9 @@ def train_loop(config, state=None):
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        train_step_hlo = p_train_step.lower(state, example_batch, nextrng).as_text()
+        with open("hlo_train_step.txt","w") as f:
+          f.write(train_step_hlo)
         state, metrics = p_train_step(state, example_batch, nextrng)
     step_time_delta = datetime.datetime.now() - last_step_completion
     last_step_completion = datetime.datetime.now()
