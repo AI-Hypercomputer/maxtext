@@ -27,4 +27,3 @@ logits_via_embedding: False
 normalization_layer_epsilon: 1.0e-5
 rope_max_timescale: 500_000
 decoder_block: "llama2" # Uses the same decoder block as llama2
-tokenizer_type: "tiktoken"
