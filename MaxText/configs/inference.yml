@@ -306,6 +306,7 @@ logical_axis_rules: [
                       ['cache_heads', ['autoregressive', 'tensor', 'tensor_sequence']],
                       ['cache_kv', []],
                       ['cache_sequence', ['context']],
+                      ['cache_scale_sequence', ['context']],
                       ['exp', ['expert', 'context']],
                       ['paged_kv_heads', []],
                       ['num_pages', ['tensor']],
