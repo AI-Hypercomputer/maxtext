@@ -345,17 +345,21 @@ class BasicStorage(ValueStorageInterface):
 class HBMStorage(ValueStorageInterface):
   """Stores kv storage values in HBM.
 
-  Storage value remains sharded when saved.
-  It is wrapper for BasicStorage which do not modify the value.
-  If the Value is not in HBM, it will still not in HBM after saved.
+  Store the Value into the specific HBM device, which is the same type as device in jax.device_put.
+  The Value would be jax.device_put to the HBM device after add, and retrieve back to the original device.
   """
 
-  def __init__(self, max_size_bytes: int):
-    """
+  def __init__(self, max_size_bytes: int, device: Any = None):
+    """Init the HBMStorage with max size limit and device to store the Value.
+
     Args:
       max_size_bytes: Maximum bytes of HBM to use for storage
+      device:
+        the same type as jax.device_put. It is used to store the cache Value.
+        If None, do not move the Value.
     """
     self._storage = BasicStorage(max_size_bytes)
+    self._device = device
 
   def get_max_size_bytes(self) -> int:
     return self._storage.get_max_size_bytes()
@@ -365,18 +369,54 @@ class HBMStorage(ValueStorageInterface):
     return self._storage.has_enough_space(needed_bytes)
 
   def add(self, key: Key, value: Value) -> bool:
-    """Value will be moved to the storage, which means cannot used the same value reference after this function.
+    """Add key/value pair into the cache.
 
+    Depend on jax.device_put,
+    the Value will not be copied if the device storing the cache is the same as the origin device of Value.
     Storage is expected to have enough space.
+
+    Args:
+      key: key of cache index.
+      value: Value to store.
+    Returns:
+      True if successful. False if failed due to not enough space.
     """
-    return self._storage.add(key, value)
+    if self._device is None:
+      return self._storage.add(key, value)
+
+    # If the self._device is the same as value.prefix, we expect no copy here in jax.device_put.
+    hbm_value = Value(
+        prefix=jax.device_put(value.prefix, self._device),
+        true_length=value.true_length,
+        padded_length=value.padded_length,
+        tokens=value.tokens,
+        prefix_size_bytes=value.prefix_size_bytes,
+        device=value.device,
+    )
+    return self._storage.add(key, hbm_value)
 
   def retrieve(self, key: Key) -> Optional[Value]:
-    """Return value from storage or None if not found.
-    Be aware the storage is not return a copy. Clone the Value first if additional modification needed,
+    """Retrieve value back to the original device or None if not found.
+
+    Be aware the storage may not return a copy if the original devices is the same as depend on jax.device_put.
     Key is expected to be found.
     """
-    return self._storage.retrieve(key)
+    if self._device is None:
+      return self._storage.retrieve(key)
+
+    hbm_value = self._storage.retrieve(key)
+    if hbm_value is None:
+      return None
+
+    # If the self._device is the same as hbm_value.prefix, we expect no copy here in jax.device_put.
+    return Value(
+        prefix=jax.device_put(hbm_value.prefix, hbm_value.device),
+        true_length=hbm_value.true_length,
+        padded_length=hbm_value.padded_length,
+        tokens=hbm_value.tokens,
+        prefix_size_bytes=hbm_value.prefix_size_bytes,
+        device=hbm_value.device,
+    )
 
   def evict(self, key: Key) -> Optional[Value]:
     """Evict and return value, or None if key is not in storage.
