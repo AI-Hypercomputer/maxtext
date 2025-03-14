@@ -226,41 +226,41 @@ def main(raw_args=None) -> None:
         params["transformer"][in_layer_name_global]["post_ffw_norm"]["scale"] + 1
     )
 
-  self_attention_local["query"]["kernel"] = np.array(self_attention_local["query"]["kernel"]).transpose((1, 0, 2, 3))
-  self_attention_local["key"]["kernel"] = np.array(self_attention_local["key"]["kernel"]).transpose((1, 0, 2, 3))
-  self_attention_local["value"]["kernel"] = np.array(self_attention_local["value"]["kernel"]).transpose((1, 0, 2, 3))
-  self_attention_local["out"]["kernel"] = np.array(self_attention_local["out"]["kernel"]).transpose((1, 0, 2, 3))
+  self_attention_local["query"]["kernel"] = np.array(self_attention_local["query"]["kernel"])
+  self_attention_local["key"]["kernel"] = np.array(self_attention_local["key"]["kernel"])
+  self_attention_local["value"]["kernel"] = np.array(self_attention_local["value"]["kernel"])
+  self_attention_local["out"]["kernel"] = np.array(self_attention_local["out"]["kernel"])
 
-  self_attention_global["query"]["kernel"] = np.array(self_attention_global["query"]["kernel"]).transpose((1, 0, 2, 3))
-  self_attention_global["key"]["kernel"] = np.array(self_attention_global["key"]["kernel"]).transpose((1, 0, 2, 3))
-  self_attention_global["value"]["kernel"] = np.array(self_attention_global["value"]["kernel"]).transpose((1, 0, 2, 3))
-  self_attention_global["out"]["kernel"] = np.array(self_attention_global["out"]["kernel"]).transpose((1, 0, 2, 3))
+  self_attention_global["query"]["kernel"] = np.array(self_attention_global["query"]["kernel"])
+  self_attention_global["key"]["kernel"] = np.array(self_attention_global["key"]["kernel"])
+  self_attention_global["value"]["kernel"] = np.array(self_attention_global["value"]["kernel"])
+  self_attention_global["out"]["kernel"] = np.array(self_attention_global["out"]["kernel"])
 
-  layer_weight["mlp_local"]["wi_0"]["kernel"] = np.array(layer_weight["mlp_local"]["wi_0"]["kernel"]).transpose((1, 0, 2))
-  layer_weight["mlp_local"]["wi_1"]["kernel"] = np.array(layer_weight["mlp_local"]["wi_1"]["kernel"]).transpose((1, 0, 2))
-  layer_weight["mlp_local"]["wo"]["kernel"] = np.array(layer_weight["mlp_local"]["wo"]["kernel"]).transpose((1, 0, 2))
+  layer_weight["mlp_local"]["wi_0"]["kernel"] = np.array(layer_weight["mlp_local"]["wi_0"]["kernel"])
+  layer_weight["mlp_local"]["wi_1"]["kernel"] = np.array(layer_weight["mlp_local"]["wi_1"]["kernel"])
+  layer_weight["mlp_local"]["wo"]["kernel"] = np.array(layer_weight["mlp_local"]["wo"]["kernel"])
 
-  layer_weight["mlp_global"]["wi_0"]["kernel"] = np.array(layer_weight["mlp_global"]["wi_0"]["kernel"]).transpose((1, 0, 2))
-  layer_weight["mlp_global"]["wi_1"]["kernel"] = np.array(layer_weight["mlp_global"]["wi_1"]["kernel"]).transpose((1, 0, 2))
-  layer_weight["mlp_global"]["wo"]["kernel"] = np.array(layer_weight["mlp_global"]["wo"]["kernel"]).transpose((1, 0, 2))
+  layer_weight["mlp_global"]["wi_0"]["kernel"] = np.array(layer_weight["mlp_global"]["wi_0"]["kernel"])
+  layer_weight["mlp_global"]["wi_1"]["kernel"] = np.array(layer_weight["mlp_global"]["wi_1"]["kernel"])
+  layer_weight["mlp_global"]["wo"]["kernel"] = np.array(layer_weight["mlp_global"]["wo"]["kernel"])
 
   layer_weight["pre_self_attention_norm_local"]["scale"] = np.array(
       layer_weight["pre_self_attention_norm_local"]["scale"]
-  ).transpose((1, 0))
-  layer_weight["pre_ffw_norm_local"]["scale"] = np.array(layer_weight["pre_ffw_norm_local"]["scale"]).transpose((1, 0))
+  )
+  layer_weight["pre_ffw_norm_local"]["scale"] = np.array(layer_weight["pre_ffw_norm_local"]["scale"])
   layer_weight["post_self_attention_norm_local"]["scale"] = np.array(
       layer_weight["post_self_attention_norm_local"]["scale"]
-  ).transpose((1, 0))
-  layer_weight["post_ffw_norm_local"]["scale"] = np.array(layer_weight["post_ffw_norm_local"]["scale"]).transpose((1, 0))
+  )
+  layer_weight["post_ffw_norm_local"]["scale"] = np.array(layer_weight["post_ffw_norm_local"]["scale"])
 
   layer_weight["pre_self_attention_norm_global"]["scale"] = np.array(
       layer_weight["pre_self_attention_norm_global"]["scale"]
-  ).transpose((1, 0))
-  layer_weight["pre_ffw_norm_global"]["scale"] = np.array(layer_weight["pre_ffw_norm_global"]["scale"]).transpose((1, 0))
+  )
+  layer_weight["pre_ffw_norm_global"]["scale"] = np.array(layer_weight["pre_ffw_norm_global"]["scale"])
   layer_weight["post_self_attention_norm_global"]["scale"] = np.array(
       layer_weight["post_self_attention_norm_global"]["scale"]
-  ).transpose((1, 0))
-  layer_weight["post_ffw_norm_global"]["scale"] = np.array(layer_weight["post_ffw_norm_global"]["scale"]).transpose((1, 0))
+  )
+  layer_weight["post_ffw_norm_global"]["scale"] = np.array(layer_weight["post_ffw_norm_global"]["scale"])
 
   layer_weight["self_attention_local"] = copy.deepcopy(self_attention_local)
   layer_weight["self_attention_global"] = copy.deepcopy(self_attention_global)

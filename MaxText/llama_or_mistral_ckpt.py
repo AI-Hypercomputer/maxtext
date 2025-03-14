@@ -543,19 +543,10 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_size, model_param
     self_attention["value"]["kernel"][layer_idx, ...] = wv  # pylint: disable=E1137
     self_attention["out"]["kernel"][layer_idx, ...] = w_post  # pylint: disable=E1137
 
-  self_attention["query"]["kernel"] = np.transpose(
-      self_attention["query"]["kernel"], axes=(1, 0, 2, 3)
-  )  # [embed, layer, q, head_dim]
-  self_attention["key"]["kernel"] = np.transpose(
-      self_attention["key"]["kernel"], axes=(1, 0, 2, 3)
-  )  # [embed, layer, kv, head_dim]
-  self_attention["value"]["kernel"] = np.transpose(
-      self_attention["value"]["kernel"], axes=(1, 0, 2, 3)
-  )  # [embed, layer, kv, head_dim]
   # layers, base_num_query_heads * head_dim, base_num_query_heads, head_dim =>
-  # base_num_query_heads, layers,head_dim, base_num_query_heads * head_dim
+  # layers, base_num_query_heads,head_dim, base_num_query_heads * head_dim
   self_attention["out"]["kernel"] = np.transpose(
-      self_attention["out"]["kernel"], axes=(2, 0, 3, 1)
+      self_attention["out"]["kernel"], axes=(0, 2, 3, 1)
   )  # [q, layer, head_dim, embed]
 
   # scale the query weights
@@ -583,12 +574,6 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_size, model_param
     layer_weight["pre_self_attention_layer_norm"]["scale"][layer_idx, ...] = pre_self_attention_layernorm  # pylint: disable=E1137
     layer_weight["post_self_attention_layer_norm"]["scale"][layer_idx, ...] = post_self_attention_layernorm  # pylint: disable=E1137
 
-  layer_weight["pre_self_attention_layer_norm"]["scale"] = np.transpose(
-      layer_weight["pre_self_attention_layer_norm"]["scale"], axes=(1, 0)
-  )
-  layer_weight["post_self_attention_layer_norm"]["scale"] = np.transpose(
-      layer_weight["post_self_attention_layer_norm"]["scale"], axes=(1, 0)
-  )
 
   jax_weights["decoder"]["layers"]["pre_self_attention_layer_norm"] = layer_weight["pre_self_attention_layer_norm"]
   jax_weights["decoder"]["layers"]["post_self_attention_layer_norm"] = layer_weight["post_self_attention_layer_norm"]
@@ -653,14 +638,9 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_size, model_param
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   if num_experts is None:
-    # swap the layer index
-    layer_weight["mlp"]["wi_0"]["kernel"] = np.transpose(layer_weight["mlp"]["wi_0"]["kernel"], axes=(1, 0, 2))
-    layer_weight["mlp"]["wi_1"]["kernel"] = np.transpose(layer_weight["mlp"]["wi_1"]["kernel"], axes=(1, 0, 2))
-    layer_weight["mlp"]["wo"]["kernel"] = np.transpose(layer_weight["mlp"]["wo"]["kernel"], axes=(1, 0, 2))
 
     jax_weights["decoder"]["layers"]["mlp"] = layer_weight["mlp"]
   else:
-    layer_weight["gate"]["kernel"] = np.transpose(layer_weight["gate"]["kernel"], axes=(1, 0, 2))
     jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["kernel"] = layer_weight["gate"]["kernel"]
 
     jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_0"] = layer_weight["mlp"]["wi_0"]["kernel"]
@@ -789,12 +769,9 @@ def _convert_pytorch_to_jax_weights(base_model_path, model_size, model_params, m
     self_attention["value"]["kernel"][layer_idx, ...] = wv  # pylint: disable=E1137
     self_attention["out"]["kernel"][layer_idx, ...] = w_post  # pylint: disable=E1137
 
-  self_attention["query"]["kernel"] = np.transpose(self_attention["query"]["kernel"], axes=(1, 0, 2, 3))
-  self_attention["key"]["kernel"] = np.transpose(self_attention["key"]["kernel"], axes=(1, 0, 2, 3))
-  self_attention["value"]["kernel"] = np.transpose(self_attention["value"]["kernel"], axes=(1, 0, 2, 3))
   # layers, base_num_query_heads * head_dim, base_num_query_heads, head_dim =>
-  # base_num_query_heads, layers,head_dim, base_num_query_heads * head_dim
-  self_attention["out"]["kernel"] = np.transpose(self_attention["out"]["kernel"], axes=(2, 0, 3, 1))
+  # layers, base_num_query_heads, head_dim, base_num_query_heads * head_dim
+  self_attention["out"]["kernel"] = np.transpose(self_attention["out"]["kernel"], axes=(0, 2, 3, 1)) 
 
   # scale the query weights
   self_attention["query"]["kernel"] = self_attention["query"]["kernel"] / np.sqrt(head_dim)
@@ -821,12 +798,6 @@ def _convert_pytorch_to_jax_weights(base_model_path, model_size, model_params, m
     layer_weight["pre_self_attention_layer_norm"]["scale"][layer_idx, ...] = pre_self_attention_layernorm  # pylint: disable=E1137
     layer_weight["post_self_attention_layer_norm"]["scale"][layer_idx, ...] = post_self_attention_layernorm  # pylint: disable=E1137
 
-  layer_weight["pre_self_attention_layer_norm"]["scale"] = np.transpose(
-      layer_weight["pre_self_attention_layer_norm"]["scale"], axes=(1, 0)
-  )
-  layer_weight["post_self_attention_layer_norm"]["scale"] = np.transpose(
-      layer_weight["post_self_attention_layer_norm"]["scale"], axes=(1, 0)
-  )
 
   jax_weights["decoder"]["layers"]["pre_self_attention_layer_norm"] = layer_weight["pre_self_attention_layer_norm"]
   jax_weights["decoder"]["layers"]["post_self_attention_layer_norm"] = layer_weight["post_self_attention_layer_norm"]
@@ -914,14 +885,8 @@ def _convert_pytorch_to_jax_weights(base_model_path, model_size, model_params, m
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   if num_experts is None:
-    # swap the layer index
-    layer_weight["mlp"]["wi_0"]["kernel"] = np.transpose(layer_weight["mlp"]["wi_0"]["kernel"], axes=(1, 0, 2))
-    layer_weight["mlp"]["wi_1"]["kernel"] = np.transpose(layer_weight["mlp"]["wi_1"]["kernel"], axes=(1, 0, 2))
-    layer_weight["mlp"]["wo"]["kernel"] = np.transpose(layer_weight["mlp"]["wo"]["kernel"], axes=(1, 0, 2))
-
     jax_weights["decoder"]["layers"]["mlp"] = layer_weight["mlp"]
   else:
-    layer_weight["gate"]["kernel"] = np.transpose(layer_weight["gate"]["kernel"], axes=(1, 0, 2))
     jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["kernel"] = layer_weight["gate"]["kernel"]
 
     jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_0"] = layer_weight["mlp"]["wi_0"]["kernel"]
