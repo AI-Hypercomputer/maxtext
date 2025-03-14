@@ -208,35 +208,6 @@ def main(argv: Sequence[str]) -> None:
   prefill_time = time.time() - prefill_start
   print(f"  Prefill time: {prefill_time:.4f}s")
 
-  print("Prefill complete - getting first token info...")
-
-  # Skip materialization completely - avoid jax.device_get
-  try:
-      # Check for ResultTokens type first
-      if hasattr(first_token, 'get_result_at_slot'):
-          # This is likely a ResultTokens object
-          token_id = first_token.get_result_at_slot(slot).tokens.item()
-          print(f"Prefill First Token (ID): {token_id}")
-          print(f"Prefill First Token (Text): {tokenizer_model.decode([token_id])}")
-      elif hasattr(first_token, 'tokens'):
-          # Another possible structure
-          token_id = first_token.tokens.item()
-          print(f"Prefill First Token (ID): {token_id}")
-          print(f"Prefill First Token (Text): {tokenizer_model.decode([token_id])}")
-      else:
-          # For debugging purposes only, print info about first_token
-          print(f"Cannot directly access token - type: {type(first_token)}")
-          if hasattr(first_token, 'shape'):
-              print(f"Token shape: {first_token.shape}")
-          elif hasattr(first_token, 'data') and hasattr(first_token.data, 'shape'):
-              print(f"Token data shape: {first_token.data.shape}")
-          
-          # Skip trying to display the token and continue
-          print("Skipping token display for debugging")
-  except Exception as e:
-      print(f"Error when accessing token: {e}")
-      print("Continuing without displaying token")
-
   # Debug: Check page state after prefill
   if is_using_paged and FLAGS.debug:
     print("\n📝 PAGE STATE AFTER PREFILL:")
@@ -252,28 +223,24 @@ def main(argv: Sequence[str]) -> None:
         page_indices = engine.page_state.page_map[layer_idx, slot]
         valid_pages = [p for p in page_indices[:pages_used] if p >= 0]
         print(f"    Allocated pages: {valid_pages}")
-
     check_page_state_consistency(engine.page_state, config.num_decoder_layers, "after_prefill")
+
+  print(f"First token: {first_token}")
 
   # Insert prefill result into decode state
   rng, rng_init_decode = jax.random.split(rng)
   decode_state = engine.init_decode_state(rng_init_decode, page_state=engine.page_state)  # Pass page_state
   decode_state = engine.insert(prefill_result, decode_state, slot=slot)
 
+  # Generate tokens - page state updates happen inside the generate method
   num_tokens = min(FLAGS.num_tokens_to_generate, config.max_target_length - config.max_prefill_predict_length)
   print(f"\n🚀 Generating {num_tokens} tokens...")
   sampled_tokens_list = []
-  sampled_tokens_list.append(first_token)  # Keep using first_token_result.data[0,0]
+  sampled_tokens_list.append(first_token)
   generation_times = []
 
+  rng, rng_generate = jax.random.split(rng)
   for i in range(num_tokens):
-    rng, rng_generate = jax.random.split(rng)
-
-    # --- CRITICAL: Print page_state BEFORE generate ---
-    print(f"--- Before generate (Token {i+1}) ---")
-    print(f"  Layer 0 - current_page: {engine.page_state.current_page[0, :8]}")  # Print for first 8 slots
-    print(f"  Layer 0 - current_page_position: {engine.page_state.current_page_position[0, :8]}")
-    print(f"  Layer 0 - num_pages_used: {engine.page_state.num_pages_used[0, :8]}")
 
     # Generate token - page state update happens inside the method
     generate_start = time.time()
@@ -284,13 +251,6 @@ def main(argv: Sequence[str]) -> None:
     generation_times.append(generation_time)
 
     sampled_tokens_list.append(sampled_tokens)
-
-    # --- CRITICAL: Print page_state AFTER generate ---
-    print(f"--- After generate (Token {i+1}) ---")
-    print(f"  Layer 0 - current_page: {engine.page_state.current_page[0, :8]}")
-    print(f"  Layer 0 - current_page_position: {engine.page_state.current_page_position[0, :8]}")
-    print(f"  Layer 0 - num_pages_used: {engine.page_state.num_pages_used[0, :8]}")
-
 
     # Token info
     token_id = sampled_tokens.get_result_at_slot(slot).tokens.item()

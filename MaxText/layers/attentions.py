@@ -1562,7 +1562,7 @@ class Attention(nn.Module):
           page_state=page_state,
           layer_idx=layer_idx,  # Pass layer_idx
           slot=slot,  # Pass slot
-          true_length=true_length,
+          # true_length=true_length,
       )
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
     else:
