@@ -16,6 +16,7 @@ limitations under the License.
 
 """Training loop for elastic training model."""
 import datetime
+import logging
 import os
 import sys
 import traceback
@@ -54,6 +55,7 @@ from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 from ml_goodput_measurement import monitoring
 
 from elastic import utils
+from elastic import common_utils
 
 from train import (
     check_example_batch,
@@ -68,8 +70,14 @@ from train import (
     EPS,
 )
 
+logging.basicConfig()
+logging.getLogger('elastic.utils').setLevel(logging.DEBUG)
+logging.getLogger('elastic.simulator').setLevel(logging.DEBUG)
+logging.getLogger('elastic.reshard').setLevel(logging.DEBUG)
+logging.getLogger('elastic.common_utils').setLevel(logging.DEBUG)
 
-@utils.timeit
+
+@common_utils.timeit
 def elastic_handler(
     config: pyconfig.HyperParameters,
     checkpoint_manager,
@@ -84,7 +92,7 @@ def elastic_handler(
 
   data_iterator, _ = create_data_iterator(config, mesh)
 
-  step, snapshot = config.eu.get_next_snapshot(mesh)
+  step, snapshot = config.eu.get_resharded_snapshot(mesh)
 
   if checkpoint_manager is not None:
     # Confirm this is the right thing to do
@@ -274,7 +282,7 @@ def train_loop(config, state=None):
   # step_down = {10, 30, 44}
   # step_up = {14, 40, 45}
   while True:
-    with utils.watchdog(120):
+    with common_utils.watchdog(120):
       try:
         # if step in step_down:
         #   step_down.remove(step)
@@ -399,11 +407,11 @@ def train_loop(config, state=None):
 
         ret = config.eu.maybe_reshard_up(
             step=step,
-            elastic_handler=elastic_handler,
             snapshot=dict(
                 params=state.params,
                 opt_state=state.opt_state,
             ),
+            elastic_handler=elastic_handler,
             handler_args=(
                 config,
                 checkpoint_manager,

@@ -479,6 +479,7 @@ class _HyperParameters:
         jax.devices(),
         raw_keys["num_slices"],
         snapshot_period=1,
+        snapshot_buffer_size=2,
         reshard_check_period=1,
         max_failure_count=100,
         max_reshard_retry_count=3,

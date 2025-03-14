@@ -14,19 +14,14 @@
 """Utilities for elastic training."""
 
 import logging
-from typing import Any, Sequence
+from typing import Sequence
 
 import jax
+from elastic import common_utils
 from elastic import utils
 
 
-PyTree = Any
-
 logger = logging.getLogger(__name__)
-
-logger.setLevel(logging.INFO)
-
-#  pylint: disable=logging-fstring-interpolation
 
 
 class ElasticUtilsSimulator(utils.ElasticUtils):
@@ -44,7 +39,7 @@ class ElasticUtilsSimulator(utils.ElasticUtils):
       reshard_check_period: int | None = None,
       max_failure_count: int | None = None,
       max_reshard_retry_count: int | None = None,
-  ):
+  ) -> None:
     self.simulated_good_slice_indices = set(d.slice_index for d in devices)
 
     super().__init__(
@@ -56,17 +51,20 @@ class ElasticUtilsSimulator(utils.ElasticUtils):
         max_reshard_retry_count,
     )
 
-  def update_good_slice_indices(self, good_slice_indices: set[int]):
+  def update_good_slice_indices(self, good_slice_indices: set[int]) -> None:
     """Start step handler."""
     self.simulated_good_slice_indices = good_slice_indices
-    logger.info(f"Updated: {self.simulated_good_slice_indices=}")
+    logger.debug(
+        "Updated: simumlated_good_slice_indices=%s",
+        self.simulated_good_slice_indices,
+    )
 
-  @utils.timeit
+  @common_utils.timeit
   def get_slice_availability(self) -> set[int]:
     """Returns the set of good and bad slices."""
     good_slice_indices = self.simulated_good_slice_indices
 
-    logger.info(f"{good_slice_indices=}")
+    logger.debug("good_slice_indices=%s", good_slice_indices)
 
     return good_slice_indices
 
