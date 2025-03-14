@@ -407,6 +407,30 @@ class HBMStorageTest(unittest.TestCase):
     assert retrieved_back_value is not None
     assert device_0_bytes_create_value == get_byte_in_use(0)
 
+  @pytest.mark.tpu_only
+  def test_retrieve_to_specific_device(self):
+    local_devices = jax.local_devices()
+    if len(local_devices) < 2:
+      pytest.skip("Need to test with multiple devices")
+
+    key = (1,)
+
+    device_0_bytes_before = get_byte_in_use(0)
+    value = create_default_value(prefix={"a": jnp.ones((4, 4), device=local_devices[0])})
+    device_0_bytes_create_value = get_byte_in_use(0)
+    prefix_actually_used_byte = device_0_bytes_create_value - device_0_bytes_before
+    # Storage without move device
+    storage = prefix_cache.HBMStorage(max_size_bytes=value.prefix_size_bytes)
+    assert storage.add(key, value) is True
+
+    device_1_byte_before = get_byte_in_use(1)
+    # Retrieve to device 1 from storage device 0
+    retrieved_back_value = storage.retrieve(key, device=local_devices[1])
+    assert retrieved_back_value is not None
+    device_1_byte_after = get_byte_in_use(1)
+    assert retrieved_back_value.prefix["a"].device == local_devices[1]
+    assert device_1_byte_after - device_1_byte_before == prefix_actually_used_byte
+
 
 class DRAMStorageTest(unittest.TestCase):
   """Test basic usage of DRAMStorage only since DRAMStorage is wrapper of BasicStorage with device_get and device_put."""
@@ -473,6 +497,29 @@ class DRAMStorageTest(unittest.TestCase):
     assert retrieved_value is not None
     assert retrieved_value.prefix["cache"].device == sharding
 
+  @pytest.mark.tpu_only
+  def test_retrieve_to_specific_device(self):
+    local_devices = jax.local_devices()
+    if len(local_devices) < 2:
+      pytest.skip("Need to test with multiple devices")
+
+    key = (1,)
+    device_0_bytes_before = get_byte_in_use(0)
+    value = create_default_value(prefix={"a": jnp.ones((4, 4), device=local_devices[0])})
+    device_0_bytes_create_value = get_byte_in_use(0)
+    prefix_actually_used_byte = device_0_bytes_create_value - device_0_bytes_before
+    # Storage without move device
+    storage = prefix_cache.DRAMStorage(max_size_bytes=value.prefix_size_bytes)
+    assert storage.add(key, value) is True
+
+    device_1_byte_before = get_byte_in_use(1)
+    # Retrieve to device 1 from storage device 0
+    retrieved_back_value = storage.retrieve(key, device=local_devices[1])
+    assert retrieved_back_value is not None
+    device_1_byte_after = get_byte_in_use(1)
+    assert retrieved_back_value.prefix["a"].device == local_devices[1]
+    assert device_1_byte_after - device_1_byte_before == prefix_actually_used_byte
+
 
 class LRUStrategyTest(unittest.TestCase):
 
@@ -505,8 +552,8 @@ class HierarchicalCacheTest(unittest.TestCase):
   def test_add_to_all_layers(self):
     value = create_default_value()
     layers = (
-        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes),
-        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes),
+        prefix_cache.HBMStorage(max_size_bytes=value.prefix_size_bytes),
+        prefix_cache.HBMStorage(max_size_bytes=value.prefix_size_bytes),
     )
     cache = prefix_cache.HierarchicalCache(layers)
     key = (1,)
@@ -517,8 +564,8 @@ class HierarchicalCacheTest(unittest.TestCase):
   def test_cannot_add_if_first_layer_max_size_is_not_enough(self):
     value = create_default_value()
     layers = (
-        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes - 1),
-        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes),
+        prefix_cache.HBMStorage(max_size_bytes=value.prefix_size_bytes - 1),
+        prefix_cache.HBMStorage(max_size_bytes=value.prefix_size_bytes),
     )
     cache = prefix_cache.HierarchicalCache(layers)
     key = (1,)
@@ -529,8 +576,8 @@ class HierarchicalCacheTest(unittest.TestCase):
   def test_add_evict_to_enough_space_by_lru(self):
     value = create_default_value()
     layers = (
-        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes),
-        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes * 2),
+        prefix_cache.HBMStorage(max_size_bytes=value.prefix_size_bytes),
+        prefix_cache.HBMStorage(max_size_bytes=value.prefix_size_bytes * 2),
     )
     cache = prefix_cache.HierarchicalCache(layers)
     assert cache.add((1,), value)[0] is True
@@ -549,8 +596,8 @@ class HierarchicalCacheTest(unittest.TestCase):
   def test_retrieve_will_from_all_layer_and_add_to_all_layer(self):
     value = create_default_value()
     layers = (
-        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes),
-        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes * 2),
+        prefix_cache.HBMStorage(max_size_bytes=value.prefix_size_bytes),
+        prefix_cache.HBMStorage(max_size_bytes=value.prefix_size_bytes * 2),
     )
     cache = prefix_cache.HierarchicalCache(layers)
     assert cache.add((1,), value)[0] is True
@@ -564,8 +611,8 @@ class HierarchicalCacheTest(unittest.TestCase):
   def test_retrieve_not_exist_in_any_layers_return_none(self):
     value = create_default_value()
     layers = (
-        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes),
-        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes * 2),
+        prefix_cache.HBMStorage(max_size_bytes=value.prefix_size_bytes),
+        prefix_cache.HBMStorage(max_size_bytes=value.prefix_size_bytes * 2),
     )
     cache = prefix_cache.HierarchicalCache(layers)
     assert cache.add((1,), value)[0] is True
@@ -577,8 +624,8 @@ class HierarchicalCacheTest(unittest.TestCase):
   def test_add_will_happen_to_all_layers_even_if_some_layers_already_contains_the_key(self):
     value = create_default_value()
     layers = (
-        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes),
-        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes * 2),
+        prefix_cache.HBMStorage(max_size_bytes=value.prefix_size_bytes),
+        prefix_cache.HBMStorage(max_size_bytes=value.prefix_size_bytes * 2),
     )
     cache = prefix_cache.HierarchicalCache(layers)
     assert cache.add((1,), value)[0] is True
@@ -598,8 +645,8 @@ class HierarchicalCacheTest(unittest.TestCase):
   def test_lru_affect_all_layers_when_add_and_retrieve(self):
     value = create_default_value()
     layers = (
-        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes * 2),
-        prefix_cache.BasicStorage(max_size_bytes=value.prefix_size_bytes * 5),
+        prefix_cache.HBMStorage(max_size_bytes=value.prefix_size_bytes * 2),
+        prefix_cache.HBMStorage(max_size_bytes=value.prefix_size_bytes * 5),
     )
     cache = prefix_cache.HierarchicalCache(layers)
     # There is a LRU queue length of 5. The first 2 will also at the first layer

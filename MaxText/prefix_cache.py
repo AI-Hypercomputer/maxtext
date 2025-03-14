@@ -94,6 +94,8 @@ class Value:
       Readonly. bytes of prefix.
     device:
       Readonly. Devices of prefix. The same structure of pytree to prefix.
+      The device may be different from actually prefix is in.
+      It used for retrieved back to original device.
   """
 
   def __init__(
@@ -106,10 +108,12 @@ class Value:
       prefix_size_bytes: Optional[int] = None,
       device=None,
   ):
-    """Attributes to store.
+    """Init Value with attributes.
+
     If true_length shorter than len(tokens), true_length will adjust to len(tokens).
     If prefix_size_bytes is not provided, calculate automatically.
     prefix should be pytree of all jax.Array. It may raise exception if there is anything not a jax.Array,
+    If either prefix_size_bytes and device is None, get from prefix.
     """
     self._prefix = prefix
     self._true_length = self._maybe_adjust_true_length(true_length, tokens)
@@ -170,19 +174,24 @@ class Value:
     return min(true_length, len(tokens))
 
 
-def device_put_value(value: Value, device: Any) -> Value:
+def device_put_value(value: Value, device: Any = None) -> Value:
   """Create a new value with prefix put to device.
 
   If the device is the same as value.prefix, we expect no copy here in jax.device_put.
 
   Args:
     value: Value to put.
-    device: The same as the jax.device_put device to put the value.prefix.
+    device:
+      The same as the jax.device_put device to put the value.prefix.
+      if None, put to the value.device.
   Returns:
     Values with prefix put to device.
   """
+  put_device = device
+  if put_device is None:
+    put_device = value.device
   return Value(
-      prefix=jax.device_put(value.prefix, device),
+      prefix=jax.device_put(value.prefix, put_device),
       true_length=value.true_length,
       padded_length=value.padded_length,
       tokens=value.tokens,
@@ -285,11 +294,20 @@ class ValueStorageInterface(abc.ABC):
 
   @abc.abstractmethod
   def add(self, key: Key, value: Value) -> bool:
-    """Add value to storage and return False if failed."""
+    """Add value and return True. If storage is full, return False."""
 
   @abc.abstractmethod
-  def retrieve(self, key: Key) -> Optional[Value]:
-    """Return value from storage or None if not found."""
+  def retrieve(self, key: Key, device: Any = None) -> Optional[Value]:
+    """Return value from storage or None if not found.
+
+    Args:
+      key: key to retrieve value.
+      device:
+        The same as device in jax.device_put. Retrieve the value to device.
+        If device is None, retrieve the value to it's original device while saved.
+    Returns:
+      Value retrieved from storage or None if not found.
+    """
 
   @abc.abstractmethod
   def evict(self, key: Key) -> Optional[Value]:
@@ -300,7 +318,7 @@ class ValueStorageInterface(abc.ABC):
     """If there is key in storage."""
 
 
-class BasicStorage(ValueStorageInterface):
+class BasicStorage:
   """Basic implement calculating size and save value into dict without modify."""
 
   def __init__(self, max_size_bytes: int):
@@ -402,26 +420,20 @@ class HBMStorage(ValueStorageInterface):
     Returns:
       True if successful. False if failed due to not enough space.
     """
-    if self._device is None:
-      return self._storage.add(key, value)
-
     hbm_value = device_put_value(value, self._device)
     return self._storage.add(key, hbm_value)
 
-  def retrieve(self, key: Key) -> Optional[Value]:
+  def retrieve(self, key: Key, device: Any = None) -> Optional[Value]:
     """Retrieve value back to the original device or None if not found.
 
     Be aware the storage may not return a copy if the original devices is the same as depend on jax.device_put.
     Key is expected to be found.
     """
-    if self._device is None:
-      return self._storage.retrieve(key)
-
     hbm_value = self._storage.retrieve(key)
     if hbm_value is None:
       return None
 
-    return device_put_value(hbm_value, hbm_value.device)
+    return device_put_value(hbm_value, device)
 
   def evict(self, key: Key) -> Optional[Value]:
     """Evict and return value, or None if key is not in storage.
@@ -472,7 +484,7 @@ class DRAMStorage(ValueStorageInterface):
 
     return self._storage.add(key, host_value)
 
-  def retrieve(self, key: Key) -> Optional[Value]:
+  def retrieve(self, key: Key, device: Any = None) -> Optional[Value]:
     """Return value from storage to the original device or None if not found.
 
     If the original device save in the storage is cpu, the storage will not copied.
@@ -482,7 +494,7 @@ class DRAMStorage(ValueStorageInterface):
     if host_value is None:
       return None
 
-    return device_put_value(host_value, host_value.device)
+    return device_put_value(host_value, device)
 
   def evict(self, key: Key) -> Optional[Value]:
     """Evict and return value, or None if key is not in storage."""
