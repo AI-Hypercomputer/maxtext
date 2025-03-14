@@ -170,6 +170,27 @@ class Value:
     return min(true_length, len(tokens))
 
 
+def device_put_value(value: Value, device: Any) -> Value:
+  """Create a new value with prefix put to device.
+
+  If the device is the same as value.prefix, we expect no copy here in jax.device_put.
+
+  Args:
+    value: Value to put.
+    device: The same as the jax.device_put device to put the value.prefix.
+  Returns:
+    Values with prefix put to device.
+  """
+  return Value(
+      prefix=jax.device_put(value.prefix, device),
+      true_length=value.true_length,
+      padded_length=value.padded_length,
+      tokens=value.tokens,
+      prefix_size_bytes=value.prefix_size_bytes,
+      device=value.device,
+  )
+
+
 class PrefixCacheTrie:
   """Stores prefix tokens as a trie for fast lookup index of PrefixCache store in cache.
 
@@ -384,15 +405,7 @@ class HBMStorage(ValueStorageInterface):
     if self._device is None:
       return self._storage.add(key, value)
 
-    # If the self._device is the same as value.prefix, we expect no copy here in jax.device_put.
-    hbm_value = Value(
-        prefix=jax.device_put(value.prefix, self._device),
-        true_length=value.true_length,
-        padded_length=value.padded_length,
-        tokens=value.tokens,
-        prefix_size_bytes=value.prefix_size_bytes,
-        device=value.device,
-    )
+    hbm_value = device_put_value(value, self._device)
     return self._storage.add(key, hbm_value)
 
   def retrieve(self, key: Key) -> Optional[Value]:
@@ -408,15 +421,7 @@ class HBMStorage(ValueStorageInterface):
     if hbm_value is None:
       return None
 
-    # If the self._device is the same as hbm_value.prefix, we expect no copy here in jax.device_put.
-    return Value(
-        prefix=jax.device_put(hbm_value.prefix, hbm_value.device),
-        true_length=hbm_value.true_length,
-        padded_length=hbm_value.padded_length,
-        tokens=hbm_value.tokens,
-        prefix_size_bytes=hbm_value.prefix_size_bytes,
-        device=hbm_value.device,
-    )
+    return device_put_value(hbm_value, hbm_value.device)
 
   def evict(self, key: Key) -> Optional[Value]:
     """Evict and return value, or None if key is not in storage.
@@ -477,15 +482,7 @@ class DRAMStorage(ValueStorageInterface):
     if host_value is None:
       return None
 
-    hbm_value = Value(
-        prefix=jax.device_put(host_value.prefix, host_value.device),
-        true_length=host_value.true_length,
-        padded_length=host_value.padded_length,
-        tokens=host_value.tokens,
-        prefix_size_bytes=host_value.prefix_size_bytes,
-        device=host_value.device,
-    )
-    return hbm_value
+    return device_put_value(host_value, host_value.device)
 
   def evict(self, key: Key) -> Optional[Value]:
     """Evict and return value, or None if key is not in storage."""
