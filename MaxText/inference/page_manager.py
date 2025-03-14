@@ -265,8 +265,8 @@ def _update_decode_pages_for_layer(
 
   # Update sequence length and position within the page.
   new_sequence_lengths = layer_sequence_lengths + jnp.where(layer_current_page >= 0, 1, 0)
-  new_current_position = (new_sequence_lengths - 1) % tokens_per_page
-  new_pages_needed = (new_sequence_lengths + tokens_per_page - 1) // tokens_per_page
+  new_current_position = jnp.where(layer_current_page >= 0, (new_sequence_lengths -1) % tokens_per_page, layer_current_position)
+  new_pages_needed = (new_sequence_lengths + tokens_per_page) // tokens_per_page
 
   new_page_status = layer_page_status
   new_page_map = layer_page_map

@@ -67,6 +67,7 @@ class DecoderLayer(nn.Module):
       page_state: Optional[PageState] = None,
       layer_idx: Optional[int] = None,
       slot: Optional[int] = None,
+      true_length: Optional[int] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -116,6 +117,7 @@ class DecoderLayer(nn.Module):
         page_state=page_state,
         layer_idx=layer_idx,
         slot=slot,
+        true_length=true_length,
     )
 
     attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
@@ -392,6 +394,7 @@ class Decoder(nn.Module):
       previous_chunk=None,
       page_state: Optional[PageState] = None,
       slot: Optional[int] = None,
+      true_length: Optional[int] = None,
   ):
     """Forward pass of the decoder."""
     cfg = self.config
@@ -508,6 +511,7 @@ class Decoder(nn.Module):
                 page_state=page_state,
                 layer_idx=layer_idx,  # Pass explicit layer index
                 slot=slot,  # Pass slot
+                true_length=true_length
             )
 
     y = self.get_norm_layer()(
@@ -611,5 +615,6 @@ class Transformer(nn.Module):
         previous_chunk=previous_chunk,
         page_state=page_state,
         slot=slot,
+        true_length=true_length,
     )
     return logits

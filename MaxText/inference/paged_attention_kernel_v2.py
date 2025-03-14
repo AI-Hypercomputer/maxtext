@@ -117,6 +117,7 @@ def validate_inputs_on_runtime(
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     num_seqs,  # i32[1]
 ):
+  print(f"ragged_paged_attention: q.shape={q.shape}, k_pages.shape={k_pages.shape}")
   check_inputs_shapes(q, k_pages, v_pages, kv_lens, page_indices, cu_q_lens, num_seqs)
   max_num_batched_tokens = q.shape[0]
   page_size = k_pages.shape[1]
@@ -522,8 +523,11 @@ def get_dtype_packing(dtype):
 
 
 def get_min_heads_per_blk(num_q_heads, num_kv_heads, q_dtype, kv_dtype):
-  q_packing = get_dtype_packing(q_dtype)
-  kv_packing = get_dtype_packing(kv_dtype)
+  # num_q_heads = 32, 
+  # num_kv_heads = 1
+  q_packing = get_dtype_packing(q_dtype)  # 2
+  kv_packing = get_dtype_packing(kv_dtype)  # 2
+  print(f"DEBUG - get_min_heads_per_blk: {num_kv_heads=}\n{num_q_heads=}\n{kv_packing=}\n{q_packing=}")
 
   def can_be_xla_fully_tiled(x, packing):
     if x % packing != 0:
@@ -533,7 +537,7 @@ def get_min_heads_per_blk(num_q_heads, num_kv_heads, q_dtype, kv_dtype):
 
   # TODO(jevinjiang): support unaligned number of heads!
   if not can_be_xla_fully_tiled(num_kv_heads, kv_packing):
-    raise ValueError(f"Not implemented: {num_kv_heads=} can not be XLA fully tiled.")
+    raise ValueError(f"Not implemented: {num_kv_heads=} can not be XLA fully tiled.\n{num_q_heads=}\n{kv_packing=}\n{q_packing=}")
   assert num_q_heads % num_kv_heads == 0
   ratio = num_q_heads // num_kv_heads
   # TODO(jevinjiang): we can choose smaller tiling for packed type if large
@@ -595,6 +599,7 @@ def ragged_paged_attention(
   Returns:
     The output of the attention.
   """
+  print(f"DEBUG - ragged_paged_attention: {q.shape=}\n{k_pages.shape=}\n{v_pages.shape}\n{kv_lens.shape=}\n{page_indices.shape=}\n{cu_q_lens.shape=}\n")
   check_inputs_shapes(q, k_pages, v_pages, kv_lens, page_indices, cu_q_lens, num_seqs)
   _, num_q_heads, head_dim = q.shape
   _, page_size, num_kv_heads, _ = k_pages.shape

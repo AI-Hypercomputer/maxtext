@@ -1496,6 +1496,7 @@ class Attention(nn.Module):
       page_state: Optional[PageState] = None,
       layer_idx: Optional[int] = None,
       slot: Optional[int] = None,
+      true_length: Optional[int] = None,
   ):
     """Applies Attention on the input data.
 
@@ -1520,6 +1521,7 @@ class Attention(nn.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
+    print(f"Attention.__call__: num_kv_heads={self.num_kv_heads}, num_query_heads={self.num_query_heads}")
     inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
     inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
 
@@ -1560,6 +1562,7 @@ class Attention(nn.Module):
           page_state=page_state,
           layer_idx=layer_idx,  # Pass layer_idx
           slot=slot,  # Pass slot
+          true_length=true_length,
       )
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
     else:

@@ -805,23 +805,25 @@ class MaxEngine(engine_api.Engine):
       """Public API for generate that updates page state outside JIT."""
       # Update page state before JIT call
       if self.page_manager is not None and self.page_state is not None:
-          # Update page state OUTSIDE JIT function
-          self.page_state = self.page_manager.update_decode_pages(self.page_state)
+          # Update page state OUTSIDE JIT function, and get the *new* state
+          updated_page_state = self.page_manager.update_decode_pages(self.page_state)
+      else:
+          updated_page_state = None
           
       # Call JIT-compiled version with current state
       new_state, result = self._generate_jit(
           params=params,
           decode_state=decode_state,
-          page_state=self.page_state,
+          page_state=updated_page_state,
           slot=slot,
           rng=rng,
       )
       
       # Extract key/value from new state for diagnostic purposes
       if self.page_manager is not None and slot is not None:
-          # Get the token
-          token = result.get_result_at_slot(slot).tokens.item()
-          print(f"Generated token {token}")
+        self.page_state = updated_page_state
+        token = result.get_result_at_slot(slot).tokens.item()
+        print(f"Generated token {token}")
       
       return new_state, result
 

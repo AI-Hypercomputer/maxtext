@@ -236,6 +236,7 @@ class TestPageManager(unittest.TestCase):
       )  # Sequence length should be incremented
       self.assertEqual(int(updated_state.num_pages_used[layer_id, 0]), 2)  # Another page allocated
       self.assertGreater(int(updated_state.current_page[layer_id, 0]), -1)  # Current page should be valid
+      self.assertEqual(int(updated_state.current_page_position[layer_id, 0]), 0)  # Check position!
 
     # Test case 3: Partial page allocation - pages allocated only when needed.
     partial_state = self.pm.update_prefill_pages(page_state=initial_state, request_id=2, true_length=5)
@@ -244,6 +245,8 @@ class TestPageManager(unittest.TestCase):
     for layer_id in range(self.num_layers):
       self.assertEqual(int(partial_updated_state.sequence_lengths[layer_id, 2]), 6)  # Sequence length incremented
       self.assertEqual(int(partial_updated_state.num_pages_used[layer_id, 2]), 1)  # Still only one page used
+      self.assertEqual(int(partial_updated_state.current_page_position[layer_id, 2]), 5)
+
 
   def test_state_consistency(self):
     """Checks internal consistency of PageState after allocation operations."""

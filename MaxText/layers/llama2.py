@@ -78,6 +78,7 @@ class LlamaDecoderLayer(nn.Module):
       page_state: Optional[PageState] = None,
       layer_idx: Optional[int] = None,
       slot: Optional[int] = None,
+      true_length: Optional[int] = None,
   ):
     """Llama decoder layer forward pass."""
     cfg = self.config
@@ -132,6 +133,7 @@ class LlamaDecoderLayer(nn.Module):
         page_state=page_state,
         layer_idx=layer_idx,  # Pass explicit layer index
         slot=slot,  # Pass slot
+        true_length=true_length,
     )
 
     attention_lnx = nn.with_logical_constraint(
