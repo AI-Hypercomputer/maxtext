@@ -39,6 +39,7 @@ import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_c
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
 import checkpointing
+import diloco
 import max_utils
 import maxtext_utils
 import max_logging
@@ -107,9 +108,13 @@ def load_next_batch(train_iter, example_batch, config):
   """Loads the next batch. Can keep reusing the same batch for performance reasons"""
 
   if config.reuse_example_batch and example_batch is not None:
-    return example_batch
+    next_batch = example_batch
   else:
-    return next(train_iter)
+    next_batch = next(train_iter)
+
+  if config.num_diloco_replicas <= 1:
+    return next_batch
+  return diloco.reshape_first_axis_with_diloco(config.num_diloco_replicas, next_batch)
 
 
 def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr, per_device_tokens):
@@ -593,7 +598,10 @@ def setup_mesh_and_model(config):
           mesh,
       )
     else:
-      abstract_state, _, _ = max_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
+      initialize_state = functools.partial(
+          max_utils.init_initial_state, model=model, tx=tx, config=config, is_training=True, key=init_rng
+      )
+      abstract_state, _, _ = max_utils.get_abstract_state(initialize_state, config, mesh, is_training=True)
       checkpoint_manager = checkpointing.create_orbax_emergency_checkpoint_manager(
           config.local_checkpoint_directory,
           config.checkpoint_dir,
@@ -655,10 +663,18 @@ def setup_train_loop(config):
 
   if not config.using_pipeline_parallelism:
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
-    maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
+    if isinstance(state, diloco.DiLoCoTrainState):
+      # TODO: assert that the inner state is sufficiently sharded within the DiLoCo replicas.
+      # maxtext_utils.assert_params_sufficiently_sharded(state.inner_state.params, mesh, config.sharding_tolerance)
+      maxtext_utils.assert_params_sufficiently_sharded(state.outer_params, mesh, config.sharding_tolerance)
+    else:
+      maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
 
   if config.use_dpo:
-    abstract_state, _, _ = max_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
+    initialize_state = functools.partial(
+        max_utils.init_initial_state, model=model, tx=tx, config=config, is_training=True, key=init_rng
+    )
+    abstract_state, _, _ = max_utils.get_abstract_state(initialize_state, config, mesh, is_training=True)
     max_logging.log(f"Restoring reference parameters for DPO from '{os.path.join(str(config.checkpoint_dir), str(0))}'")
     try:
       step0_restored, _ = checkpointing.load_state_if_possible(
@@ -747,7 +763,11 @@ def train_loop(config, state=None):
         donate_argnums_eval,
     ) = maxtext_utils.get_functional_eval_with_signature(eval_step, mesh, state_mesh_shardings, model, config)
 
-  num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
+  if isinstance(state, diloco.DiLoCoTrainState):
+    model_params = state.outer_params
+  else:
+    model_params = state.params
+  num_model_parameters = max_utils.calculate_num_params_from_pytree(model_params)
   max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
   per_device_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(config)
   per_device_tokens = maxtext_utils.calculate_tokens_training_per_device(config)

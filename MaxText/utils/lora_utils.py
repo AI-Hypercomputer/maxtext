@@ -17,6 +17,7 @@ limitations under the License.
 """ Common LoRA utils needed to support LoRA adapters."""
 
 import checkpointing
+import functools
 import os
 import json
 import jax
@@ -125,8 +126,11 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
 
   if lora_adapter_path:
     max_logging.log(f"Setting initial state of LoRA with lora_adapter_path = {lora_adapter_path}")
+    initialize_state = functools.partial(
+        max_utils.init_initial_state, model=model, tx=tx, config=config, is_training=True, key=rng
+    )
     unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = max_utils.get_abstract_state(
-        model, tx, config, rng, mesh, True
+        initialize_state, config, mesh, is_training=True
     )
 
     lora_config_path = lora_adapter_path + "adapter_config.json"

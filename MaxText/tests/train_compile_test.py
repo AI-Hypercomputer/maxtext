@@ -18,7 +18,6 @@ limitations under the License.
 import unittest
 import pytest
 from train_compile import main as train_compile_main
-from train import main as train_main
 
 
 class TrainCompile(unittest.TestCase):

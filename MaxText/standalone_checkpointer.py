@@ -20,6 +20,7 @@ limitations under the License.
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
 
+import functools
 import datetime
 import os
 
@@ -52,7 +53,10 @@ def checkpoint_loop(config, state=None):
   """
   init_rng, _, checkpoint_manager, mesh, model, _, tx = setup_mesh_and_model(config)
 
-  unboxed_abstract_state, _, _ = max_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
+  initialize_state = functools.partial(
+      max_utils.init_initial_state, model=model, tx=tx, config=config, key=init_rng, is_training=True
+  )
+  unboxed_abstract_state, _, _ = max_utils.get_abstract_state(initialize_state, config, mesh, is_training=True)
   # A barrier to sync all hosts before starting to restore checkpoint
   jax.experimental.multihost_utils.sync_global_devices("Barrier before load")
   checkpoint_load_start = datetime.datetime.now()

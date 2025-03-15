@@ -17,15 +17,16 @@ limitations under the License.
 # pylint: disable=bare-except, consider-using-generator
 """Utils that are only interesting to MaxText. """
 
+import pickle
+import functools
+
 import jax
 import optax
 import max_utils
 from jax.sharding import PartitionSpec as P
 from jax.experimental.serialize_executable import deserialize_and_load
 
-
-import pickle
-import functools
+import diloco
 from input_pipeline import input_pipeline_interface
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
@@ -37,6 +38,15 @@ def get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, 
   functional_train.__name__ = "train_step"
   data_pspec = P(*config.data_sharding)
   data_sharding = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
+
+  if config.num_diloco_replicas > 1:
+    functional_train = diloco.build_diloco_train_step(config, functional_train)
+    functional_train.__name__ = "diloco_train_step"
+    # Pull the DiLoCo axis out into its own, to shard the first (DiLoCo) axis of
+    # the the arrays.
+    data_pspec = P("diloco", config.data_sharding[0][1:])
+    data_sharding = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
+
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = (state_mesh_shardings, None)  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
@@ -326,6 +336,7 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
   assert total_num_params_per_chip >= perfectly_sharded_params_per_chip, (
       "Number of parameters per chip must not be less than in the ideal sharded "
       "scenario across `fsdp`, `fsdp_transpose`,`sequence`, `tensor`, `tensor_transpose`, `tensor_sequence`, `expert` axes."
+      f"Found {total_num_params_per_chip=} < {perfectly_sharded_params_per_chip=}."
   )
   unsharded_param_perc = total_num_params_per_chip / perfectly_sharded_params_per_chip - 1
   assert unsharded_param_perc < tolerance, (

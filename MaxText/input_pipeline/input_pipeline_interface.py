@@ -193,7 +193,14 @@ def create_data_iterator(config, mesh):
 def get_shaped_batch(config):
   """Return the shape of the batch - this is what eval_shape would return for the
   output of create_data_iterator, but eval_shape doesn't work, see b/306901078."""
-  batch_shape = (config.global_batch_size_to_load, config.max_target_length)
+  if config.num_diloco_replicas <= 1:
+    batch_shape = (config.global_batch_size_to_load, config.max_target_length)
+  else:
+    batch_shape = (
+        config.num_diloco_replicas,
+        config.global_batch_size_to_load // config.num_diloco_replicas,
+        config.max_target_length,
+    )
   shaped_batch = {}
   shaped_batch["inputs"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   shaped_batch["inputs_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
