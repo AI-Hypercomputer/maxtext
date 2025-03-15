@@ -280,6 +280,12 @@ def validate_and_assign_remat_tensors(keys):
   keys["tensors_to_offload"] = tensors_to_offload
   return keys
 
+def assign_data_sharding_spec(keys):
+  if keys["expansion_factor_real_data"] == -1 and keys["shard_data_except_tp"]:
+    return keys["data_sharding_except_tp"]
+  else:
+    return keys["data_sharding"]
+
 
 def _lists_to_tuples(l: list[Any]) -> Union[tuple[Any], list[Any]]:
   return tuple(_lists_to_tuples(x) for x in l) if isinstance(l, list) else l
@@ -493,6 +499,8 @@ class _HyperParameters:
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
+    raw_keys["data_sharding_except_tp"] = _lists_to_tuples(raw_keys["data_sharding_except_tp"])
+    raw_keys["data_sharding"] = assign_data_sharding_spec(raw_keys)
 
     if raw_keys["remat_policy"] == "custom":
       raw_keys = validate_and_assign_remat_tensors(raw_keys)
