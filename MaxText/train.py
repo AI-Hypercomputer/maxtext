@@ -126,14 +126,17 @@ def save_checkpoint(
     checkpoint_manager,
     step,
     state,
-    dataset_type="c4",
+    dataset_type="tfds",
     data_iterator=None,
     config=None,
+    force=False,
 ) -> bool:
   """Wrapper for saving checkpoint."""
   if config and config.enable_checkpointing:
-    if (step % config.checkpoint_period == 0) or (
-        config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0
+    if (
+        force
+        or (step % config.checkpoint_period == 0)
+        or (config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0)
     ):
       blocking_until_ready_start = time.time()
       max_logging.log(f"Waiting for step {step} to finish before checkpoint...")
@@ -161,6 +164,7 @@ def save_checkpoint(
     return checkpoint_manager.save(
         step,
         args=orbax.checkpoint.args.PyTreeSave(item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size),
+        force=force,
     )
 
   if dataset_type == "grain":
@@ -172,6 +176,7 @@ def save_checkpoint(
             ),
             iter=grain.PyGrainCheckpointSave(data_iterator.local_iterator),
         ),
+        force=force,
     )
   else:
     return checkpoint_manager.save(
@@ -181,6 +186,7 @@ def save_checkpoint(
                 item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size
             )
         ),
+        force=force,
     )
 
 
