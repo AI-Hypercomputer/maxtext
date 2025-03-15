@@ -17,26 +17,28 @@ import logging
 from typing import Sequence
 
 import jax
-from elastic import common_utils
-from elastic import utils
+from elastic.debug import timing
+from elastic import manager
 
 
 logger = logging.getLogger(__name__)
 
 
-class ElasticUtilsSimulator(utils.ElasticUtils):
+class SimulatedManager(manager.Manager):
   """Utility class for elastic training.
 
   This class will simulate slices going down and coming back up.
   """
+
   simulated_good_slice_indices: set[int]
 
   def __init__(
       self,
       devices: Sequence[jax.Device],
       total_slice_count: int,
-      snapshot_period: int | None = None,
-      reshard_check_period: int | None = None,
+      snapshot_period: int = 1,
+      snapshot_buffer_size: int = 1,
+      reshard_check_period: int = 1,
       max_failure_count: int | None = None,
       max_reshard_retry_count: int | None = None,
   ) -> None:
@@ -59,7 +61,7 @@ class ElasticUtilsSimulator(utils.ElasticUtils):
         self.simulated_good_slice_indices,
     )
 
-  @common_utils.timeit
+  @timing.timeit
   def get_slice_availability(self) -> set[int]:
     """Returns the set of good and bad slices."""
     good_slice_indices = self.simulated_good_slice_indices
@@ -67,4 +69,3 @@ class ElasticUtilsSimulator(utils.ElasticUtils):
     logger.debug("good_slice_indices=%s", good_slice_indices)
 
     return good_slice_indices
-

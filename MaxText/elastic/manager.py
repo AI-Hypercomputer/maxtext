@@ -11,7 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Utilities for elastic training."""
+"""Elasticity manager.
+
+This class is responsible for managing the elastic training.
+It is responsible for:
+- Tracking the availability of slices.
+- Tracking the number of failures and reshard retries.
+- Tracking the snapshots.
+- Resharding the snapshots.
+- Resharding down if the error is due to slice down.
+- Resharding up if it is time to reshard.
+- Resharding the snapshot.
+"""
 
 import collections
 from collections.abc import Callable, Mapping, Sequence
@@ -23,21 +34,21 @@ from typing import Any, TypeAlias
 
 import jax
 import numpy as np
-from elastic import common_utils
+from elastic.debug import timing
 from elastic import reshard
 
 jax._src.array.ArrayImpl._check_if_deleted = lambda _: False  # pylint: disable=protected-access
 
 PyTree: TypeAlias = Any
 
-logger = logging.getLogger(__name__)
+_logger = logging.getLogger(__name__)
 
 
-class ElasticUtils:
+class Manager:
   """Utility class for elastic training."""
   _devices: Sequence[jax.Device]
+  _total_slice_count: int | None = None
   slice_to_devices: Mapping[int, Sequence[jax.Device]]
-  total_slice_count: int
   snapshot_period: int
   reshard_check_period: int
   max_failure_count: int | None
@@ -45,22 +56,22 @@ class ElasticUtils:
   failure_count: int
   reshard_retry_count: int
   good_slice_indices: set[int]
-  _snapshots: collections.deque[Mapping[str, int | PyTree]]
+  _snapshots: collections.deque[Mapping[str, int | jax.Array | PyTree]]
 
   TEST_VALUE = 100
 
   def __init__(
       self,
-      devices: Sequence[jax.Device],
-      total_slice_count: int,
+      devices: Sequence[jax.Device] | None = None,
       snapshot_period: int = 1,
       snapshot_buffer_size: int = 1,
       reshard_check_period: int = 1,
       max_failure_count: int | None = None,
       max_reshard_retry_count: int | None = None,
   ) -> None:
+    if devices is None:
+      devices = jax.devices()
     self.devices = devices
-    self.total_slice_count = total_slice_count
     self.snapshot_period = snapshot_period
     self.reshard_check_period = reshard_check_period
     self.max_failure_count = max_failure_count
@@ -86,6 +97,13 @@ class ElasticUtils:
     for d in self._devices:
       self.slice_to_devices[d.slice_index].append(d)
     self.slice_to_devices = dict(self.slice_to_devices)
+
+  @property
+  def total_slice_count(self) -> int:
+    """Returns the total number of slices."""
+    if self._total_slice_count is None:
+      self._total_slice_count = len(self.slice_to_devices)
+    return self._total_slice_count
 
   @property
   def good_slice_to_devices(self) -> dict[int, Sequence[jax.Device]]:
@@ -139,7 +157,7 @@ class ElasticUtils:
     else:
       raise ValueError(f"Unsupported type: {type(x)=}")
 
-  @common_utils.timeit
+  @timing.timeit
   def initialize_snapshot(
       self,
       step: int,
@@ -181,7 +199,7 @@ class ElasticUtils:
 
   def _slice_down(self, reshard_retry: bool = False) -> None:
     """Slice down."""
-    logger.debug("Slice down")
+    _logger.debug("Slice down")
     self.good_slice_indices = self.get_slice_availability()
     self.failure_count += 1
     if reshard_retry:
@@ -189,7 +207,7 @@ class ElasticUtils:
     else:
       self.reshard_retry_count = 0
 
-    logger.debug(
+    _logger.debug(
         "self.failure_count=%s self.max_failure_count=%s",
         self.failure_count,
         self.max_failure_count,
@@ -198,9 +216,9 @@ class ElasticUtils:
         self.max_failure_count is not None
         and self.failure_count >= self.max_failure_count
     ):
-      raise RuntimeError(f"Max failure count reached {self.max_failure_count=}")
+      raise ValueError(f"Max failure count reached {self.max_failure_count=}")
 
-    logger.debug(
+    _logger.debug(
         "self.reshard_retry_count=%s self.max_reshard_retry_count=%s",
         self.reshard_retry_count,
         self.max_reshard_retry_count,
@@ -209,7 +227,7 @@ class ElasticUtils:
         self.max_reshard_retry_count is not None
         and self.reshard_retry_count > self.max_reshard_retry_count
     ):
-      raise RuntimeError(
+      raise ValueError(
           f"Max reshard retry count reached {self.max_reshard_retry_count=}"
       )
 
@@ -217,17 +235,17 @@ class ElasticUtils:
   def _is_error_due_to_slice_down(error: Exception) -> bool:
     """Check if the error is due to slice down."""
     if "DATA_LOSS" in str(error):
-      logger.debug("Caught JaxRuntimeError DATA_LOSS exception")
+      _logger.debug("Caught JaxRuntimeError DATA_LOSS exception")
     elif "NOT_FOUND" in str(error):
-      logger.debug("Caught JaxRuntimeError NOT_FOUND exception")
+      _logger.debug("Caught JaxRuntimeError NOT_FOUND exception")
     elif "INTERNAL" in str(error):
-      logger.debug("Caught JaxRuntimeError INTERNAL exception")
+      _logger.debug("Caught JaxRuntimeError INTERNAL exception")
 
     else:
-      logger.debug("Unknown JaxRuntimeError")
+      _logger.debug("Unknown JaxRuntimeError")
       return False
 
-    logger.debug("\n".join(traceback.format_exception(error)))
+    _logger.debug("\n".join(traceback.format_exception(error)))
     return True
 
   def _is_ready_to_reshard(self, step: int) -> bool:
@@ -254,12 +272,12 @@ class ElasticUtils:
     if len(good_slice_indices) <= self.good_slice_count:
       return False
 
-    logger.debug("New slice available.")
-    logger.debug(
+    _logger.debug("New slice available.")
+    _logger.debug(
         "Previous good slice indices: self.good_slice_indices=%s",
         self.good_slice_indices,
     )
-    logger.debug(
+    _logger.debug(
         "Current good slice indices: good_slice_indices=%s", good_slice_indices
     )
 
@@ -267,17 +285,21 @@ class ElasticUtils:
 
     return True
 
+  @classmethod
   def _simple_execution(
-      self, devices: Sequence[jax.Device], block: bool = False
+      cls, devices: Sequence[jax.Device], block: bool = False
   ) -> jax.Array:
     """Simple execution to test if a slice is available."""
-    x = np.zeros(len(devices), dtype=float) + (self.TEST_VALUE - 1)
+    if not devices:
+      raise ValueError("No devices")
+
+    x = np.zeros(len(devices), dtype=float) + (cls.TEST_VALUE - 1)
     y = jax.pmap(lambda x: x + 1, devices=devices)(x)
     if block:
       jax.block_until_ready(y)
     return y
 
-  @common_utils.timeit
+  @timing.timeit
   def get_slice_availability(self) -> set[int]:
     """Returns the set of good and bad slices."""
     good_slice_indices = set()
@@ -288,64 +310,85 @@ class ElasticUtils:
     }
 
     for slice_index, x in results.items():
-      logger.debug("Checking slice_index=%s", slice_index)
+      _logger.debug("Checking slice_index=%s", slice_index)
       expected = (
           np.zeros(self.slice_device_count(slice_index), dtype=float)
           + self.TEST_VALUE
       )
       try:
-        with common_utils.Timer(f"Checking {slice_index=}"):
+        with timing.Timer(f"Checking {slice_index=}"):
+          jax.block_until_ready(x)
           if np.allclose(x, expected):
             good_slice_indices.add(slice_index)
-            logger.debug("slice_index=%s good", slice_index)
+            _logger.debug("slice_index=%s good", slice_index)
           else:
-            logger.error(  # pylint: disable=logging-fstring-interpolation
+            _logger.error(
                 "Error with _simple_execution for slice_index=%s. "
-                "This should not happen.",
-                slice_index,
+                "This should never happen. Expected: %s, Actual: %s",
+                slice_index, expected, x
+            )
+            raise ValueError(
+                f"Error with _simple_execution for slice_index={slice_index}."
             )
       except jax.errors.JaxRuntimeError as error:
-        if "DATA_LOSS" in str(error):
-          logger.debug(  # pylint: disable=logging-fstring-interpolation
-              "Caught JaxRuntimeError DATA_LOSS exception for slice_index=%s",
-              slice_index,
-          )
-          logger.debug("error=%s", error)
-        else:
-          logger.exception(
-              "Unknown JaxRuntimeError for slice_index=%s", slice_index
-          )
-        logger.debug("slice_index=%s bad", slice_index)
+        if not self._is_error_due_to_slice_down(error):
+          raise
+        _logger.debug("slice_index=%s bad", slice_index)
 
-    logger.debug("good_slice_indices=%s", good_slice_indices)
+    _logger.debug("good_slice_indices=%s", good_slice_indices)
 
     return good_slice_indices
 
   @staticmethod
   def _get_snapshot_size(snapshot: Mapping[str, int | PyTree]) -> int:
-    """Returns the size of a snapshot."""
-    total_nbytes = 0
-    for v in snapshot.values():
-      nbytes = jax.tree.map(lambda x: x.nbytes, v)
-      total_nbytes += jax.tree.reduce(operator.add, nbytes)
-    return total_nbytes
+    """Returns the size of a snapshot.
+
+    Ingores leaves that do not have a `nbytes` attribute.
+
+    Args:
+      snapshot: The snapshot to get the size of.
+    """
+
+    def size_in_bytes(x: Any) -> int:
+      try:
+        return x.nbytes
+      except AttributeError:
+        return 0
+
+    nbytes_tree = jax.tree.map(size_in_bytes, snapshot)
+    return jax.tree.reduce(operator.add, nbytes_tree, initializer=0)
 
   @staticmethod
   def _put_snapshot_on_host(
       snapshot: Mapping[str, int | PyTree],
   ) -> Mapping[str, int | PyTree]:
-    """Returns the size of a snapshot."""
-    return {
-        k: jax.device_put(
-            v,
-            jax.tree.map(
-                lambda x: x.sharding.with_memory_kind(kind="pinned_host"), v
-            ),
-        )
-        for k, v in snapshot.items()
-    }
+    """Puts a copy of the snapshot on the host.
 
-  @common_utils.timeit
+    JAX arrays are copied to the host. Other leaves are copied if they have a
+    `copy` method. Otherwise, they are copied by reference (unless literals).
+
+    Args:
+      snapshot: The snapshot to move to the host.
+
+    Returns:
+      A copy of the snapshot on the host.
+    """
+    def copy(x: Any):
+      try:
+        return jax.device_put(x, x.sharding.with_memory_kind("pinned_host"))
+      except AttributeError:
+        pass
+
+      try:
+        return x.copy()
+      except AttributeError:
+        pass
+
+      return x
+
+    return jax.tree.map(copy, snapshot)
+
+  @timing.timeit
   def maybe_snapshot(
       self,
       step: int,
@@ -355,23 +398,23 @@ class ElasticUtils:
   ) -> None:
     """Save step and state."""
     if not force and step % self.snapshot_period:
-      logger.debug("Not saving a snapshot")
+      _logger.debug("Not saving a snapshot")
       return
 
     total_nbytes = self._get_snapshot_size(snapshot)
 
-    logger.debug("Saving a snapshot of %s bytes", total_nbytes)
+    _logger.debug("Saving a snapshot of %s bytes", total_nbytes)
 
     snapshot_host = self._put_snapshot_on_host(snapshot)
 
-    logger.debug("Snapshot dispatched")
+    _logger.debug("Snapshot dispatched")
     if blocking:
       jax.block_until_ready(snapshot_host)
-      logger.debug("Snapshot completed")
+      _logger.debug("Snapshot completed")
 
     self._snapshots.appendleft({"step": step, "snapshot": snapshot_host})
 
-  @common_utils.timeit
+  @timing.timeit
   def get_resharded_snapshot(
       self, mesh: jax.sharding.Mesh
   ) -> tuple[int, Mapping[str, int | PyTree]]:
@@ -400,7 +443,7 @@ class ElasticUtils:
       except Exception as error:  # pylint: disable=broad-except
         if not self._is_error_due_to_slice_down(error):
           raise
-        logger.debug("Retrying with the next snapshot")
+        _logger.debug("Retrying with the next snapshot")
 
     self.initialize_snapshot(
         step=step,
@@ -409,51 +452,59 @@ class ElasticUtils:
 
     return step, resharded_snapshot_device
 
-  @common_utils.timeit
+  @timing.timeit
   def maybe_reshard_down(
       self,
       error: Exception,
       elastic_handler: Callable[..., Any],
       handler_args: tuple[Any, ...] | None = None,
+      handler_kwargs: Mapping[str, Any] | None = None,
       reshard_retry: bool = False,
   ) -> Any:
     """Reshards down if the error is due to slice down."""
     if handler_args is None:
       handler_args = ()
 
+    if handler_kwargs is None:
+      handler_kwargs = {}
+
     while True:
       if not self._is_error_due_to_slice_down(error):
-        logger.debug("Not resharding down")
+        _logger.debug("Not resharding down")
         raise error from error.__cause__
 
-      logger.debug("Resharding down")
+      _logger.debug("Resharding down")
       self._slice_down(reshard_retry)
 
       try:
-        ret = elastic_handler(*handler_args)
+        ret = elastic_handler(*handler_args, **handler_kwargs)
         break
       except jax.errors.JaxRuntimeError as e:
-        logger.debug("Elastic handler raised an error.")
+        _logger.debug("Elastic handler raised an error.")
         error = e
         reshard_retry = True
 
-    logger.debug("Successfully resharded down")
+    _logger.debug("Successfully resharded down")
     return ret
 
-  @common_utils.timeit
+  @timing.timeit
   def maybe_reshard_up(
       self,
       step: int,
       snapshot: Mapping[str, int | PyTree],
       elastic_handler: Callable[..., Any],
       handler_args: tuple[Any, ...] | None = None,
+      handler_kwargs: Mapping[str, Any] | None = None,
   ) -> Any:
     """Reshards up if it is time to reshard."""
     if handler_args is None:
       handler_args = ()
 
+    if handler_kwargs is None:
+      handler_kwargs = {}
+
     if not self._is_ready_to_reshard(step):
-      logger.debug("Not resharding up")
+      _logger.debug("Not resharding up")
       return
 
     self.maybe_snapshot(
@@ -463,20 +514,21 @@ class ElasticUtils:
     )
 
     try:
-      ret = elastic_handler(*handler_args)
+      ret = elastic_handler(*handler_args, **handler_kwargs)
     except jax.errors.JaxRuntimeError as error:
-      logger.debug("Elastic handler failed. Trying again")
+      _logger.debug("Elastic handler failed. Trying again")
       ret = self.maybe_reshard_down(
           error=error,
           elastic_handler=elastic_handler,
           handler_args=handler_args,
+          handler_kwargs=handler_kwargs,
           reshard_retry=True,
       )
 
-    logger.debug("Finished resharding up")
+    _logger.debug("Finished resharding up")
     return ret
 
-  @common_utils.timeit
+  @timing.timeit
   def _reshard_snapshot(
       self,
       x: PyTree,
@@ -515,25 +567,13 @@ class ElasticUtils:
     resharded_device = reshard.reshard(
         resharded_pinned_host,
         sharding_device,
-        put_array=self.put_array_device_put0,
+        put_array=self.device_put_per_shard0,
         donate_input=False,
     )
 
     return resharded_pinned_host, resharded_device
 
-  @staticmethod
-  def put_array_device_put0(
-      arr: jax.Array | PyTree,
-      dst_sharding: jax.sharding.Sharding | PyTree,
-      donate_input: bool,
-  ) -> PyTree:
-    if not isinstance(dst_sharding, jax.sharding.Sharding):
-      raise ValueError("`sharding` must contain only `Sharding` instances.")
-    return jax.device_put(arr, dst_sharding, donate=donate_input)
-
-  default_put_array = put_array_device_put0
-
-  def put_array_device_put1(
+  def device_put_per_shard0(
       self,
       arr: jax.Array | PyTree,
       dst_sharding: jax.sharding.Sharding | PyTree,
@@ -597,7 +637,7 @@ class ElasticUtils:
         arr.shape, dst_sharding, arrays
     )
 
-  def put_array_device_put2(
+  def device_put_per_shard1(
       self,
       arr: jax.Array | PyTree,
       dst_sharding: jax.sharding.Sharding | PyTree,
@@ -658,7 +698,7 @@ class ElasticUtils:
     )
 
   # Not working yet
-  def put_array_device_put3(
+  def device_put_per_shard2(
       self,
       arr: jax.Array | PyTree,
       dst_sharding: jax.sharding.Sharding | PyTree,
@@ -722,4 +762,3 @@ class ElasticUtils:
     return jax.make_array_from_single_device_arrays(
         arr.shape, dst_sharding, arrays
     )
-

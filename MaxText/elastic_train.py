@@ -54,8 +54,8 @@ from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 from ml_goodput_measurement import monitoring
 
-from elastic import utils
-from elastic import common_utils
+from elastic.debug import timing
+from elastic.debug import watchdog
 
 from train import (
     check_example_batch,
@@ -71,13 +71,14 @@ from train import (
 )
 
 logging.basicConfig()
-logging.getLogger('elastic.utils').setLevel(logging.DEBUG)
-logging.getLogger('elastic.simulator').setLevel(logging.DEBUG)
+logging.getLogger('elastic.manager').setLevel(logging.DEBUG)
+logging.getLogger('elastic.simulated_manager').setLevel(logging.DEBUG)
 logging.getLogger('elastic.reshard').setLevel(logging.DEBUG)
-logging.getLogger('elastic.common_utils').setLevel(logging.DEBUG)
+logging.getLogger('elastic.debug.timing').setLevel(logging.DEBUG)
+logging.getLogger('elastic.debug.watchdog').setLevel(logging.DEBUG)
 
 
-@common_utils.timeit
+@timing.timeit
 def elastic_handler(
     config: pyconfig.HyperParameters,
     checkpoint_manager,
@@ -92,7 +93,7 @@ def elastic_handler(
 
   data_iterator, _ = create_data_iterator(config, mesh)
 
-  step, snapshot = config.eu.get_resharded_snapshot(mesh)
+  step, snapshot = config.em.get_resharded_snapshot(mesh)
 
   if checkpoint_manager is not None:
     # Confirm this is the right thing to do
@@ -271,7 +272,7 @@ def train_loop(config, state=None):
   metric_logger = MetricLogger(writer, config)
   step = start_step
 
-  config.eu.initialize_snapshot(
+  config.em.initialize_snapshot(
       step,
       snapshot=dict(
           params=state.params,
@@ -282,17 +283,18 @@ def train_loop(config, state=None):
   # step_down = {10, 30, 44}
   # step_up = {14, 40, 45}
   while True:
-    with common_utils.watchdog(120):
+    with watchdog.watchdog(120):
       try:
         # if step in step_down:
         #   step_down.remove(step)
         #   # Remove a slice
-        #   config.eu.update_good_slice_indices(set(range(config.eu.total_slice_count)) - {step % config.eu.total_slice_count})
+        #   config.em.update_good_slice_indices(set(range(config.em.total_slice_count))
+        #   - {step % config.em.total_slice_count})
         #   raise jax.errors.JaxRuntimeError("DATA_LOSS: Fake")
         # elif step in step_up:
         #   step_up.remove(step)
 
-        #   config.eu.update_good_slice_indices(set(range(config.eu.total_slice_count)))
+        #   config.em.update_good_slice_indices(set(range(config.em.total_slice_count)))
 
 
         if step == first_profiling_step or prof.should_activate_periodic_profile(step):
@@ -302,8 +304,8 @@ def train_loop(config, state=None):
         if step >= config.steps:
           break
 
-        max_logging.log(f"{step=} {config.eu.failure_count=} {config.eu.good_slice_count=}")
-        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules), jax.default_device(config.eu.default_device):
+        max_logging.log(f"{step=} {config.em.failure_count=} {config.em.good_slice_count=}")
+        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules), jax.default_device(config.em.default_device):
           with jax.profiler.StepTraceAnnotation("train", step_num=step):
             record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
             example_batch = load_next_batch(data_iterator, example_batch, config)
@@ -397,7 +399,7 @@ def train_loop(config, state=None):
           if step == last_profiling_step or prof.should_deactivate_periodic_profile(step):
             prof.deactivate(blocking_object=state)
 
-        config.eu.maybe_snapshot(
+        config.em.maybe_snapshot(
             step=step,
             snapshot=dict(
                 params=state.params,
@@ -405,16 +407,16 @@ def train_loop(config, state=None):
             ),
         )
 
-        ret = config.eu.maybe_reshard_up(
+        ret = config.em.maybe_reshard_up(
             step=step,
             snapshot=dict(
                 params=state.params,
                 opt_state=state.opt_state,
             ),
             elastic_handler=elastic_handler,
-            handler_args=(
-                config,
-                checkpoint_manager,
+            handler_kwargs=dict(
+                config=config,
+                checkpoint_manager=checkpoint_manager,
             ),
         )
         if ret is not None:
@@ -436,12 +438,12 @@ def train_loop(config, state=None):
         step += 1
 
       except jax.errors.JaxRuntimeError as error:
-        ret = config.eu.maybe_reshard_down(
+        ret = config.em.maybe_reshard_down(
             error=error,
             elastic_handler=elastic_handler,
-            handler_args=(
-                config,
-                checkpoint_manager,
+            handler_kwargs=dict(
+                config=config,
+                checkpoint_manager=checkpoint_manager,
             ),
         )
         if ret is not None:

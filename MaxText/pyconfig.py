@@ -22,8 +22,8 @@ import os
 import sys
 from typing import Any, Union
 
-# from elastic.simulator import ElasticUtilsSimulator as ElasticUtils
-from elastic.utils import ElasticUtils
+# from elastic.simulated_manager import SimulatedManager as Manager
+from elastic.manager import Manager
 import jax
 from jax.experimental.compilation_cache import compilation_cache
 from layers.attentions import AttentionType
@@ -475,9 +475,8 @@ class _HyperParameters:
       raw_keys["add_eos"] = False
       max_logging.log("Override add_bos and add_eos to False when dataset_type=c4_mlperf")
 
-    raw_keys["eu"] = ElasticUtils(
+    raw_keys["em"] = Manager(
         jax.devices(),
-        raw_keys["num_slices"],
         snapshot_period=1,
         snapshot_buffer_size=2,
         reshard_check_period=1,
@@ -882,19 +881,19 @@ class HyperParameters:
 
   @property
   def global_batch_size_to_train_on(self):
-    return self.eu.scale_by_good_slices(self._config.keys["global_batch_size_to_train_on"])
+    return self.em.scale_by_good_slices(self._config.keys["global_batch_size_to_train_on"])
 
   @property
   def global_batch_size_to_load(self):
-    return self.eu.scale_by_good_slices(self._config.keys["global_batch_size_to_load"])
+    return self.em.scale_by_good_slices(self._config.keys["global_batch_size_to_load"])
 
   @property
   def micro_batch_size_to_train_on(self):
-    return self.eu.scale_by_good_slices(self._config.keys["micro_batch_size_to_train_on"])
+    return self.em.scale_by_good_slices(self._config.keys["micro_batch_size_to_train_on"])
 
   @property
   def num_slices(self):
-    return self.eu.good_slice_count
+    return self.em.good_slice_count
 
   def __getattr__(self, attr):
     try:
