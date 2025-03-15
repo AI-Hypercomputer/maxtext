@@ -521,7 +521,6 @@ class MaxEngine(engine_api.Engine):
 
     if rng is None:
       rng = jax.random.PRNGKey(0)
-
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
 
@@ -1146,12 +1145,25 @@ class MaxEngine(engine_api.Engine):
     """Return a protobuf of tokenizer info, callable from Py or C++."""
     return tokenizer_pb2.TokenizerParameters(path=self.config.tokenizer_path, extra_ids=0)
 
+  # def build_tokenizer(self, metadata: tokenizer_pb2.TokenizerParameters) -> tokenizer_api.Tokenizer:
+  #   """Return a tokenizer"""
+  #   if "tiktoken" in metadata.path:
+  #     return token_utils.TikToken(metadata)
+  #   else:
+  #     return token_utils.SentencePieceTokenizer(metadata)
+    
+    
   def build_tokenizer(self, metadata: tokenizer_pb2.TokenizerParameters) -> tokenizer_api.Tokenizer:
     """Return a tokenizer"""
     if "tiktoken" in metadata.path:
       return token_utils.TikToken(metadata)
+    elif "deepseek" or "mistralai" in metadata.path:
+      import tokenizer
+      import os
+      return tokenizer.build_tokenizer(metadata.path, "huggingface", True, True, os.environ['HF_TOKEN_BUILD'])
     else:
       return token_utils.SentencePieceTokenizer(metadata)
+
 
   def init_decode_state(
       self,
