@@ -361,6 +361,8 @@ tokenizer_path: "assets/tokenizer.llama2"
 # grain pipeline supports tokenizer_type: sentencepiece, huggingface
 # hf pipeline only supports huggingface type, and will ignore tokenizer_type flag
 tokenizer_type: "sentencepiece"
+# Specify if the tokenizer API (e.g. HuggingFace) requires an access token.
+tokenizer_access_token: ""
 tokenize_train_data: True  # False if the dataset is pre-tokenized
 tokenize_eval_data: True  # False if the dataset is pre-tokenized
 add_bos: True
