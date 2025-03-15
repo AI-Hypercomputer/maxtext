@@ -196,7 +196,7 @@ def add_on_device_runner_arguments(custom_parser: argparse.ArgumentParser):
       choices=list(trillium_model_dict.keys()) + list(v5e_model_dict.keys()),
       default=list(trillium_model_dict.keys())[0],
       help=(
-        f'model to be benchmarked, supported models are the command choices.'
+        'model to be benchmarked, supported models are the command choices.'
       ),
   )
   custom_parser.add_argument(
@@ -278,7 +278,9 @@ def main() -> None:
       libtpu_nightly_version=options.libtpu_version,
       base_docker_image=options.base_docker_image,
       xpk_path=options.xpk_path,
-      pathways_config=pw_config
+      pathways_config=pw_config,
+      # Internal only support, not for customers
+      generate_metrics_and_upload_to_big_query=False,
     )
 
     xpk_benchmark_runner(cluster_config, [workload_config])
