@@ -16,13 +16,12 @@
 
 i) Initialize cache
 
-# HBM size with Trillium 8 core use about 17 / 31.25 GB per core after loading models.
-# To utilize HBM memory to 80%, about (30 * 0.8 - 16) * 8 = 64GB
 # Prefix return by prefill function of mixtral-8x22b model with max_prefill_length=1024,
 # int8 quantize_kvcache is 235_930_060 bytes, nearly 256 MB.
-# HBM cache can store about 64GB / 256 MB = 256 prompts.
-hbm_bytes = 64 * 1024 * 1024 * 1024  # 64 GB
-prefix_cache = PrefixCache(hbm_bytes)
+# It need about 256 * 256 MB = 64GB to caching 256 prompts prefill.
+hbm_bytes = 64_000_000_000  # 64 GB
+dram_bytes = 640_000_000_000  # 640 GB
+prefix_cache = PrefixCache(hbm_bytes=hbm_bytes, dram_bytes=dram_bytes)
 
 ii) Read from Cache:
 
@@ -62,7 +61,8 @@ if cached_prefix is None or matched_len != orig_key_len:
 """
 
 from collections import OrderedDict
-from typing import Tuple, Any, Optional
+from typing import Any, Optional, Tuple
+import abc
 import dataclasses
 import jax
 import jax.numpy as jnp
@@ -77,17 +77,12 @@ Key = Tuple[Token, ...]
 Prefix = Any  # KVCache for one prompt
 
 
-@jax.jit
-def tree_copy(tree):
-  return jax.tree.map(lambda x: x.copy() if isinstance(x, jax.Array) else x, tree)
-
-
 class Value:
   """Object stored contains the actual KVcache
 
   Attributes:
     prefix:
-      Readonly. Prefix Cache using in model. Should be dictionary of jnp.array.
+      Readonly. Prefix Cache using in model. Should be pytree of all jax.Array.
     true_length:
       Readonly. True length of tokens calculate prefix. Should be <= than len(tokens).
       true_length will be min(true_length, len(tokens))
@@ -97,6 +92,8 @@ class Value:
       Readonly. Tokens calculate prefix. may include partial of padding.
     prefix_size_bytes:
       Readonly. bytes of prefix.
+    device:
+      Readonly. Devices of prefix. The same structure of pytree to prefix.
   """
 
   def __init__(
@@ -107,19 +104,30 @@ class Value:
       padded_length: int,
       tokens: tuple[Token, ...],
       prefix_size_bytes: Optional[int] = None,
+      device=None,
   ):
     """Attributes to store.
     If true_length shorter than len(tokens), true_length will adjust to len(tokens).
     If prefix_size_bytes is not provided, calculate automatically.
+    prefix should be pytree of all jax.Array. It may raise exception if there is anything not a jax.Array,
     """
     self._prefix = prefix
     self._true_length = self._maybe_adjust_true_length(true_length, tokens)
     self._padded_length = padded_length
     self._tokens = tokens
     if prefix_size_bytes is None:
-      self._prefix_size_bytes: int = self._calculate_prefix_bytes(prefix)
+      self._prefix_size_bytes: int = jax.tree.reduce(
+          lambda acc, array: acc + array.nbytes,
+          prefix,
+          0,
+      )
     else:
       self._prefix_size_bytes = prefix_size_bytes
+
+    if device is None:
+      self._device = jax.tree.map(lambda x: x.device, prefix)
+    else:
+      self._device = device
 
   @property
   def prefix(self) -> Prefix:
@@ -141,16 +149,9 @@ class Value:
   def prefix_size_bytes(self) -> int:
     return self._prefix_size_bytes
 
-  def clone(self) -> "Value":
-    """Clone to prevent using the same jax array."""
-    copied_prefix = tree_copy(self._prefix)
-    return Value(
-        prefix=copied_prefix,
-        true_length=self._true_length,
-        padded_length=self._padded_length,
-        tokens=self._tokens,
-        prefix_size_bytes=self._prefix_size_bytes,
-    )
+  @property
+  def device(self) -> int:
+    return self._device
 
   def __eq__(self, other: Any) -> bool:
     if not isinstance(other, Value):
@@ -160,17 +161,6 @@ class Value:
         and other.tokens == self.tokens
         and jax.tree.all(jax.tree.map(jnp.array_equal, other.prefix, self.prefix))
         and other.prefix_size_bytes == self.prefix_size_bytes
-    )
-
-  def _calculate_prefix_bytes(self, prefix: Prefix) -> int:
-    def has_nbytes_int(obj) -> bool:
-      return hasattr(obj, "nbytes") and isinstance(obj.nbytes, int)
-
-    # calculate all bytes of jnp.array in the prefix
-    return jax.tree.reduce(
-        lambda acc, array: acc + (array.nbytes if has_nbytes_int(array) else 0),
-        prefix,
-        0,
     )
 
   def _maybe_adjust_true_length(self, true_length: int, tokens: tuple[Token, ...]) -> int:
@@ -261,54 +251,207 @@ class PrefixCacheTrie:
       node = parent
 
 
-class HBMCache:
-  """Stores kv cache values in HBM.
+class ValueStorageInterface(abc.ABC):
+  """Interface for Value storage."""
 
-  Cache is remain the sharding status before save.
-  """
+  @abc.abstractmethod
+  def get_max_size_bytes(self) -> int:
+    """Get the max size bytes in storage."""
+
+  @abc.abstractmethod
+  def has_enough_space(self, needed_bytes: int) -> bool:
+    """Calculate if needed_bytes size can add to storage."""
+
+  @abc.abstractmethod
+  def add(self, key: Key, value: Value) -> bool:
+    """Add value to storage and return False if failed."""
+
+  @abc.abstractmethod
+  def retrieve(self, key: Key) -> Optional[Value]:
+    """Return value from storage or None if not found."""
+
+  @abc.abstractmethod
+  def evict(self, key: Key) -> Optional[Value]:
+    """Evict and return value, or None if key is not in storage."""
+
+  @abc.abstractmethod
+  def contains(self, key: Key) -> bool:
+    """If there is key in storage."""
+
+
+class BasicStorage(ValueStorageInterface):
+  """Basic implement calculating size and save value into dict without modify."""
 
   def __init__(self, max_size_bytes: int):
     """
     Args:
-      max_size_bytes: Maximum bytes of HBM to use for cache
+      max_size_bytes: Maximum bytes use
     """
+    self._max_size_bytes = max_size_bytes
     self._remain_size_bytes = max_size_bytes
     self._saved_values: dict[Key, Value] = {}
 
-  def has_enough_space(self, value: Value) -> bool:
-    """Calculate if value size can add to cache."""
-    return self._remain_size_bytes >= value.prefix_size_bytes
+  def get_max_size_bytes(self) -> int:
+    return self._max_size_bytes
 
-  def add_to_cache(self, key: Key, value: Value) -> bool:
-    """
-    Value will be moved to the cache, which means cannot used the same value reference after add_to_cache.
+  def has_enough_space(self, needed_bytes: int) -> bool:
+    """Calculate if needed_bytes size can add to storage."""
+    return self._remain_size_bytes >= needed_bytes
 
-    The jax may modified the value even stored in another python reference.
-    If the value need to be used after add_to_cache, make sure copy them before add_to_cache.
-    Return False if cache is full.
+  def add(self, key: Key, value: Value) -> bool:
+    """Add value and return False if storage is full.
+    The value will not copied. Be aware not to modify the value after add to storage.
+    Storage is expected to have enough space.
     """
-    if not self.has_enough_space(value):
+    if not self.has_enough_space(value.prefix_size_bytes):
+      logger.warning(
+          "should check enough space before add to storage, but remain=%d not enough for value=%d",
+          self._remain_size_bytes,
+          value.prefix_size_bytes,
+      )
       return False
 
     self._saved_values[key] = value
     self._remain_size_bytes -= value.prefix_size_bytes
     return True
 
-  def retrieve_from_cache(self, key: Key) -> Optional[Value]:
-    """Return value from cache or None if not found.
-    Be aware the cache is not return a copy. If additional modified needed, clone the Value first.
+  def retrieve(self, key: Key) -> Optional[Value]:
+    """Return value from storage or None if not found.
+    Be aware the storage is not return a copy. Clone the Value first if additional modification needed,
+    Key is expected to be found.
     """
-    if key in self._saved_values:
-      return self._saved_values[key]
-    return None
-
-  def evict_cache(self, key: Key) -> Optional[Value]:
-    """Evict and return value, or None if key is not in cache."""
     if key not in self._saved_values:
+      logger.warning("key=%r should exist in storage before retrieve, but not found", key)
+      return None
+    return self._saved_values[key]
+
+  def evict(self, key: Key) -> Optional[Value]:
+    """Evict and return value, or None if key is not in storage.
+    Key is expected to be found.
+    """
+    if key not in self._saved_values:
+      logger.warning("key=%r should exist in storage before evict, but not found", key)
       return None
     value = self._saved_values.pop(key)
     self._remain_size_bytes += value.prefix_size_bytes
     return value
+
+  def contains(self, key: Key) -> bool:
+    """If there is key in storage."""
+    return key in self._saved_values
+
+
+class HBMStorage(ValueStorageInterface):
+  """Stores kv storage values in HBM.
+
+  Storage is remain the sharding status before save.
+  It is wrapper for BasicStorage which do not modify the value.
+  If the Value is not in HBM, it will still not in HBM after saved.
+  """
+
+  def __init__(self, max_size_bytes: int):
+    """
+    Args:
+      max_size_bytes: Maximum bytes of HBM to use for storage
+    """
+    self._storage = BasicStorage(max_size_bytes)
+
+  def get_max_size_bytes(self) -> int:
+    return self._storage.get_max_size_bytes()
+
+  def has_enough_space(self, needed_bytes: int) -> bool:
+    """Calculate if needed_bytes size can add to storage."""
+    return self._storage.has_enough_space(needed_bytes)
+
+  def add(self, key: Key, value: Value) -> bool:
+    """Value will be moved to the storage, which means cannot used the same value reference after this function.
+    Storage is expected to have enough space.
+    """
+    return self._storage.add(key, value)
+
+  def retrieve(self, key: Key) -> Optional[Value]:
+    """Return value from storage or None if not found.
+    Be aware the storage is not return a copy. Clone the Value first if additional modification needed,
+    Key is expected to be found.
+    """
+    return self._storage.retrieve(key)
+
+  def evict(self, key: Key) -> Optional[Value]:
+    """Evict and return value, or None if key is not in storage.
+    Key is expected to be found.
+    """
+    return self._storage.evict(key)
+
+  def contains(self, key: Key) -> bool:
+    """If there is key in storage."""
+    return self._storage.contains(key)
+
+
+class DRAMStorage(ValueStorageInterface):
+  """Stores KV Cache values in host DRAM."""
+
+  def __init__(self, max_size_bytes: int):
+    """
+    Args:
+      max_size_bytes: Maximum bytes of host DRAM to use for storage
+    """
+    self._storage = BasicStorage(max_size_bytes)
+
+  def get_max_size_bytes(self) -> int:
+    return self._storage.get_max_size_bytes()
+
+  def has_enough_space(self, needed_bytes: int) -> bool:
+    """Calculate if needed_bytes size can add to storage."""
+    return self._storage.has_enough_space(needed_bytes)
+
+  def add(self, key: Key, value: Value) -> bool:
+    """Add value into host DRAM.
+
+    Return false if storage does not have enough space.
+    Do not use this function to check if has enough space.
+    This function will first move to host DRAM before check the space.
+    The storage will copy to the host DRAM if originally on device,
+    or with the same reference to the value if originally on host.
+    Do not use the value after this function if originally on host since the value will not copy.
+    """
+    host_value = Value(
+        prefix=jax.device_get(value.prefix),
+        true_length=value.true_length,
+        padded_length=value.padded_length,
+        tokens=value.tokens,
+        prefix_size_bytes=value.prefix_size_bytes,
+        device=value.device,
+    )
+
+    return self._storage.add(key, host_value)
+
+  def retrieve(self, key: Key) -> Optional[Value]:
+    """Return value from storage to the original device or None if not found.
+
+    If the original device save in the storage is cpu, the storage will not copied.
+    Do not modify the storage prefix retrieved.
+    """
+    host_value = self._storage.retrieve(key)
+    if host_value is None:
+      return None
+
+    hbm_value = Value(
+        prefix=jax.device_put(host_value.prefix, host_value.device),
+        true_length=host_value.true_length,
+        padded_length=host_value.padded_length,
+        tokens=host_value.tokens,
+        prefix_size_bytes=host_value.prefix_size_bytes,
+        device=host_value.device,
+    )
+    return hbm_value
+
+  def evict(self, key: Key) -> Optional[Value]:
+    """Evict and return value, or None if key is not in storage."""
+    return self._storage.evict(key)
+
+  def contains(self, key: Key) -> bool:
+    """If there is key in storage."""
+    return self._storage.contains(key)
 
 
 class LRUStrategy:
@@ -331,23 +474,148 @@ class LRUStrategy:
       self._order.move_to_end(key, last=True)
 
 
+@dataclasses.dataclass
+class StorageWithStrategy:
+  """Storage with corresponding strategy"""
+
+  storage: ValueStorageInterface
+  strategy: LRUStrategy
+
+
+class HierarchicalCache:
+  """Hierarchical Cache contains two layers of ValueStorageInterface.
+
+  The first layer contains subset fo key / value pairs of the second layer.
+  The second storage max size bytes should >= first storage max size bytes.
+  Use LRU for each layer.
+  Add the Value will save to all layers.
+  Retrieve the Value will retrieve to HBM and then saved to all layers.
+  The added value size should less than the first layer max size.
+  If the first layer max size cannot contains the added Value, add will failed.
+  """
+
+  def __init__(self, layers: Tuple[ValueStorageInterface, ValueStorageInterface]):
+    assert (
+        layers[0].get_max_size_bytes() <= layers[1].get_max_size_bytes()
+    ), "Bottom layer of storage need to be larger than top."
+
+    self._layers = [StorageWithStrategy(storage, LRUStrategy()) for storage in layers]
+
+  def add(self, key: Key, value: Value) -> tuple[bool, dict[Key, Value]]:
+    """Add to all layers and return (ok, dict[fully evicted from hierarchical cache key value pair]).
+
+    Beware in some error case, there may be not ok but have some evicted key value.
+    """
+    needed_bytes = value.prefix_size_bytes
+    if self._layers[0].storage.get_max_size_bytes() < needed_bytes:
+      logging.warning(
+          "Trying to add value larger than top layer max size. need_bytes=%d, max_size_bytes=%d",
+          needed_bytes,
+          self._layers[0].storage.get_max_size_bytes(),
+      )
+      return False, {}
+
+    # Only return last layers evicted key value pair which is fully evicted from hierarchical cache.
+    all_ok = True
+    last_layer_evicted_key_values: dict[Key, Value] = {}
+    for layer in self._layers:
+      if layer.storage.contains(key):
+        last_layer_evicted_key_values = {}
+        continue
+
+      ok, last_layer_evicted_key_values = self._evict_to_enough_space(layer, needed_bytes)
+      all_ok = all_ok and ok
+
+    if not all_ok:
+      logging.error("Cannot evict enough space after checking max_size is enough for bytes=%d.", needed_bytes)
+      return False, last_layer_evicted_key_values
+
+    for layer in self._layers:
+      if not layer.storage.contains(key):
+        if not layer.storage.add(key, value):
+          logging.error("Cannot add to storage. key=%r, needed_bytes=%d", key, needed_bytes)
+          return False, last_layer_evicted_key_values
+
+      layer.strategy.use(key)
+
+    return True, last_layer_evicted_key_values
+
+  def retrieve(self, key: Key) -> Optional[Value]:
+    """Retrieve from all layers and add to all layers."""
+    value: Optional[Value] = None
+    for layer in self._layers:
+      if layer.storage.contains(key):
+        value = layer.storage.retrieve(key)
+        break
+
+    if value is None:
+      logging.warning("Should check key exist before retrieve, but fail for key=%r", key)
+      return None
+
+    for layer in self._layers:
+      if not layer.storage.contains(key):
+        if not self._evict_to_enough_space(layer, value.prefix_size_bytes):
+          logging.error("Cannot evict enough space for retrieved Value to other layers.")
+          continue
+
+        if not layer.storage.add(key, value):
+          logging.error("Cannot add retrieved Value to other layers.")
+          continue
+
+      layer.strategy.use(key)
+
+    return value
+
+  def _evict_to_enough_space(self, layer: StorageWithStrategy, needed_bytes: int) -> tuple[bool, dict[Key, Value]]:
+    """Evict layer to enough bytes for add and return (ok, dict[evicted key, evicted value])."""
+    evicted_key_values: dict[Key, Value] = {}
+    while not layer.storage.has_enough_space(needed_bytes):
+      evicted_key = layer.strategy.evict()
+      if evicted_key is None:
+        logging.error("Cannot evict enough space for bytes=%d.", needed_bytes)
+        return False, evicted_key_values
+
+      evicted_value = layer.storage.evict(evicted_key)
+      if evicted_value is None:
+        logging.error("Key should in storage before evict but not. key=%r", evicted_key)
+        continue
+
+      evicted_key_values[evicted_key] = evicted_value
+
+    return True, evicted_key_values
+
+
 class PrefixCache:
   """Store Prefix KV cache.
 
+  Use hierarchical cache of two layers the first in the HBM and the second in the host DRAM.
+  Assuming HBM is available, or the cache would degrade to two layers on DRAM.
   If cache is full, evict least-recently used entries (LRU).
+  LRU strategy is apply to all layers.
+  The cache in HBM will be subset of the cache in host DRAM.
+  For example:
+    For HBM can contain 2 values, and DRAM can contain 5 values,
+    [1, 2, 3, 4, 5] LRU history, the [1, 2] will in HBM, and [1, 2, 3, 4, 5] will in DRAM.
+  Always return cache after load into HBM.
+  The value need to be <= to the max size in HBM.
+  DRAM max size need to be >= than HBM max size.
   """
 
-  def __init__(self, hbm_bytes: int):
+  def __init__(self, hbm_bytes: int, dram_bytes: int):
     """
+    dram_bytes >= hbm_bytes
     Args:
       hbm_bytes: Total amount of HBM to use for cache.
+      dram_bytes: Total amount of DRAM to use for cache.
     """
-    self._hbm_bytes = hbm_bytes
+    # TODO(yuyanpeng): way to disable DRAM cache
+    assert dram_bytes >= hbm_bytes, "DRAM max size need to be >= than HBM max size."
     self._lock = threading.Lock()
+    self._hbm_bytes = hbm_bytes
+    self._dram_bytes = dram_bytes
     # init in clear()
-    self._hbm_cache: HBMCache
     self._trie: PrefixCacheTrie
-    self._cache_strategy: LRUStrategy
+    self._cache: HierarchicalCache
     self.clear()
 
   def fetch_longest_common_prefix_key(self, key: Key) -> Optional[Key]:
@@ -362,50 +630,35 @@ class PrefixCache:
     """Save key/value to the cache."""
     logger.debug("save key=%r", key)
     with self._lock:
-      while not self._hbm_cache.has_enough_space(value):
-        if self._hbm_bytes < value.prefix_size_bytes:
-          logger.debug("hbm_bytes=%r < value.prefix_size_bytes=%r", self._hbm_bytes, value.prefix_size_bytes)
-          break
-        if self._evict_cache() is None:
-          logger.debug("cannot evict cache")
-          break
-      if not self._hbm_cache.add_to_cache(key, value):
-        logger.debug("cannot add to cache even after evict")
+      ok, evicted = self._cache.add(key, value)
+      for evicted_key in evicted.keys():
+        self._trie.erase(evicted_key)
+      if not ok:
+        logger.warning("Cannot add to cache")
         return False
       self._trie.insert(key)
-      self._cache_strategy.use(key)
       return True
 
   def load(self, key: Key) -> Optional[Value]:
     """Returns Value stored with key or None if not found."""
     logger.debug("load key=%r", key)
     with self._lock:
-      value = self._hbm_cache.retrieve_from_cache(key)
+      value = self._cache.retrieve(key)
       if value is None:
         logger.warning(
             "The key should fetched by fetch_longest_common_prefix_key, load key=%r should be valid but not.", key
         )
         return None
-      self._cache_strategy.use(key)
       return value
 
   def clear(self):
     """Clear entire cache."""
     logger.debug("clear cache")
-    self._hbm_cache = HBMCache(max_size_bytes=self._hbm_bytes)
-    self._trie = PrefixCacheTrie()
-    self._cache_strategy = LRUStrategy()
-
-  def _evict_cache(self) -> Optional[Value]:
-    """Evict cache based on strategy."""
-    logger.debug("_evict_cache")
-    key = self._cache_strategy.evict()
-    if key is None:
-      logger.debug("no key to evict")
-      return None
-    logger.debug("evict key=%r", key)
-    value = self._hbm_cache.evict_cache(key)
-    if value is None:
-      logger.warning("key=%r should exist in HBM cache.", key)
-    self._trie.erase(key)
-    return value
+    with self._lock:
+      self._trie = PrefixCacheTrie()
+      self._cache = HierarchicalCache(
+          layers=(
+              HBMStorage(self._hbm_bytes),
+              DRAMStorage(self._dram_bytes),
+          )
+      )
