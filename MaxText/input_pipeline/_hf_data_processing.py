@@ -51,7 +51,7 @@ def preprocessing_pipeline(
     use_dpo=None,
     use_sft=None,
     sft_train_on_completion=True,
-    grain_worker_count=1, # only support 0 or 1
+    grain_worker_count=1,  # only support 0 or 1
 ):
   """pipeline for preprocessing HF dataset"""
 
@@ -68,8 +68,9 @@ def preprocessing_pipeline(
     assert _input_pipeline_utils.is_conversational(example), "Dataset is not in conversational format."
 
     if len(data_column_names) > 1:
-      dataset = dataset.map(_input_pipeline_utils.combine_columns,
-        fn_kwargs={"columns": data_column_names}, remove_columns=data_column_names)
+      dataset = dataset.map(
+          _input_pipeline_utils.combine_columns, fn_kwargs={"columns": data_column_names}, remove_columns=data_column_names
+      )
       data_column_names = dataset.column_names[:1]
     dataset = dataset.select_columns(data_column_names)
     dataset = dataset.map(
@@ -90,10 +91,10 @@ def preprocessing_pipeline(
         _input_pipeline_utils.tokenization,
         batched=True,
         fn_kwargs={
-          "hf_tokenizer": tokenizer,
-          "truncation": True if not use_sft else False,
-          "max_length": max_target_length,
-          "column_names": data_column_names
+            "hf_tokenizer": tokenizer,
+            "truncation": True if not use_sft else False,
+            "max_length": max_target_length,
+            "column_names": data_column_names,
         },
     )
 

@@ -78,26 +78,26 @@ def combine_columns(example, columns):
 
 
 def is_conversational(example):
-    """Check if data is in a conversational format.
-    Examples:
+  """Check if data is in a conversational format.
+  Examples:
 
-    example = {'prompt': [{'content': 'question', 'role': 'user'}], 'completion': [{'content': 'answer', 'role': 'assistant'}]}
-    is_conversational(example) return True.
+  example = {'prompt': [{'content': 'question', 'role': 'user'}], 'completion': [{'content': 'answer', 'role': 'assistant'}]}
+  is_conversational(example) return True.
 
-    example = {"prompt": "I love to"})
-    is_conversational(example) returns False.
-    """
-    supported_columns = ["prompt", "completion", "messages"]
-    data_columns = [column for column in example.keys() if column in supported_columns]
+  example = {"prompt": "I love to"})
+  is_conversational(example) returns False.
+  """
+  supported_columns = ["prompt", "completion", "messages"]
+  data_columns = [column for column in example.keys() if column in supported_columns]
 
-    if data_columns:
-        for column in data_columns:
-          messages = example[column]
-          if isinstance(messages, list):
-              if isinstance(messages[0], dict) and "role" in messages[0] and "content" in messages[0]:
-                  return True
+  if data_columns:
+    for column in data_columns:
+      messages = example[column]
+      if isinstance(messages, list):
+        if isinstance(messages[0], dict) and "role" in messages[0] and "content" in messages[0]:
+          return True
 
-    return False
+  return False
 
 
 def extract_messages_and_mask(example, data_column_name):
@@ -165,6 +165,7 @@ class SFTPromptMasking(grain.MapTransform):
         "targets": np.asarray(targets[: self.max_target_length], dtype=np.int32),
     }
 
+
 @dataclasses.dataclass
 class HFNormalizeFeatures(grain.MapTransform):
   """Normalize feature keys for HuggingFace input"""
@@ -227,9 +228,7 @@ class HFDataSource(grain.RandomAccessDataSource):
       self.datasets[idx] = split_dataset_by_node(self.dataset, world_size=self.n_shards, rank=self.dataset_shards[idx])
       self.data_iters[idx] = iter(self.datasets[idx])
     else:
-      max_logging.log(
-          f"Run out of shards on host {self.dataloading_host_index}, shard {new_shard} is not available"
-      )
+      max_logging.log(f"Run out of shards on host {self.dataloading_host_index}, shard {new_shard} is not available")
       self.out_of_data = True
       if self.generate_padding_example:
         max_logging.log(
