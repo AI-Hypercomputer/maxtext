@@ -35,13 +35,7 @@ import pyconfig
 import tensorflow as tf
 
 from input_pipeline.input_pipeline_interface import create_data_iterator
-<<<<<<< HEAD
-=======
-<<<<<<< HEAD
-=======
 from gcp_workload_monitor import GCPWorkloadMonitor
->>>>>>> 9def8a94 (support SFT for conversational dataset)
->>>>>>> f14ba582 (support SFT for conversational dataset)
 from metric_logger import MetricLogger
 from train import (
     check_example_batch, create_goodput_recorder,
