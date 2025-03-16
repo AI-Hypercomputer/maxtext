@@ -72,6 +72,8 @@ class DecoderLayer(nn.Module):
     cfg = self.config
     mesh = self.mesh
 
+    jax.debug.print("DecoderLayer: Input shape: {}", inputs.shape)  # INPUT SHAPE
+
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
@@ -82,6 +84,7 @@ class DecoderLayer(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
         kernel_axes=("norm",),
     )(inputs)
+    jax.debug.print("DecoderLayer: lnx shape: {}", lnx.shape)
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
 
     attention_layer = Attention(
@@ -107,6 +110,7 @@ class DecoderLayer(nn.Module):
         reshape_q=cfg.reshape_q,
     )
 
+    jax.debug.print("DecoderLayer: Before attention_lnx")
     attention_lnx = attention_layer(
         lnx,
         lnx,
@@ -119,10 +123,12 @@ class DecoderLayer(nn.Module):
         slot=slot,
         true_length=true_length,
     )
+    jax.debug.print("DecoderLayer: After attention_lnx, shape: {}", attention_lnx.shape)
 
     attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
 
     # MLP block.
+    jax.debug.print("DecoderLayer: Before mlp_lnx")
     mlp_lnx = linears.MlpBlock(
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
@@ -133,15 +139,21 @@ class DecoderLayer(nn.Module):
         config=cfg,
         quant=self.quant,
     )(lnx, deterministic=deterministic)
+    jax.debug.print("DecoderLayer: After mlp_lnx, shape: {}", mlp_lnx.shape)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
 
+    jax.debug.print("DecoderLayer: Before addition")
     next_layer_addition = mlp_lnx + attention_lnx
+    jax.debug.print("DecoderLayer: After addition, shape: {}", next_layer_addition.shape)
 
     next_layer_addition_dropped_out = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(
         next_layer_addition, deterministic=deterministic
     )
 
+    jax.debug.print("DecoderLayer: Before final addition")
     layer_output = next_layer_addition_dropped_out + inputs
+    jax.debug.print("DecoderLayer: After final addition, shape: {}", layer_output.shape)
+
     layer_output = nn.with_logical_constraint(
         layer_output,
         ("activation_batch", "activation_length", "activation_embed"),
@@ -501,6 +513,7 @@ class Decoder(nn.Module):
               )
         else:
           for layer_idx in range(cfg.num_decoder_layers):
+            print(f"Decoder layer index: {layer_idx}")
             RemattedBlockLayer = RemattedBlockLayers[0]
             y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{layer_idx}", quant=self.quant)(
                 y,
