@@ -113,10 +113,11 @@ class DisruptionManager:
   ) -> None:
     """Monitors workload progress, triggers disruptions, and recoveries."""
     target_pod_regex = f"{workload_name}{disruption_config.target_pod_regex}"
+    step_pod_regex = f"{workload_name}{disruption_config.step_pod_regex}"
 
     # Create Monitor based on trigger type
     monitor: Monitor = create_monitor(
-        workload_name, disruption_config, target_pod_regex
+        workload_name, disruption_config, step_pod_regex
     )
     disruption_handler: DisruptionHandler = create_disruption_handler(
         disruption_config
