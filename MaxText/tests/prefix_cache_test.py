@@ -673,6 +673,26 @@ class HierarchicalCacheTest(unittest.TestCase):
     # 2 is evicted
     assert not layers[1].contains((2,))
 
+  @pytest.mark.tpu_only
+  def test_retrieve_to_specific_device(self):
+    local_devices = jax.local_devices()
+    if len(local_devices) < 2:
+      pytest.skip("Need to test with multiple devices")
+
+    key = (1,)
+    value = create_default_value(prefix=jnp.ones((512, 512), device=local_devices[0]))
+    layers = (
+        prefix_cache.HBMStorage(max_size_bytes=value.prefix_size_bytes * 2),
+        prefix_cache.HBMStorage(max_size_bytes=value.prefix_size_bytes * 5),
+    )
+    cache = prefix_cache.HierarchicalCache(layers)
+    assert cache.add(key, value)[0]
+    retrieved_value = cache.retrieve(key, device=local_devices[1])
+    assert retrieved_value is not None
+    assert retrieved_value.prefix.device == local_devices[1]
+    # The device in the Value remain the original before saved
+    assert retrieved_value.device == local_devices[0]
+
 
 class PrefixCacheTest(unittest.TestCase):
 

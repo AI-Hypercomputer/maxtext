@@ -591,12 +591,22 @@ class HierarchicalCache:
 
     return True, last_layer_evicted_key_values
 
-  def retrieve(self, key: Key) -> Optional[Value]:
-    """Retrieve from all layers and add to all layers."""
+  def retrieve(self, key: Key, device: Any = None) -> Optional[Value]:
+    """Retrieve from all layers and add to all layers.
+
+    Args:
+      key: key to retrieve.
+      device:
+        The same type as the device in jax.device_put. Return the Value put on the device.
+        If None, the Value will be put on the Value.device.
+    Returns:
+      Value retrieved from all layers or None if not found.
+      The Value.device is not changed to device retrieved.
+    """
     value: Optional[Value] = None
     for layer in self._layers:
       if layer.storage.contains(key):
-        value = layer.storage.retrieve(key)
+        value = layer.storage.retrieve(key, device)
         break
 
     if value is None:
