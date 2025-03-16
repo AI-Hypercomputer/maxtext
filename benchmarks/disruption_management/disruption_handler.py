@@ -29,8 +29,6 @@ MCJAX_STANDARD_STEP_POD_REGEX_SUFFIX = ".*slice-job-0-0.*"
 PATHWAYS_STANDARD_TARGET_POD_REGEX_SUFFIX = ".*worker-0-0.*"
 PATHWAYS_STANDARD_STEP_POD_REGEX_SUFFIX = ".*main-0-0.*"
 
-STANDARD_STEP_LOG_REGEX = "completed step: (\\d+)"
-
 PATHWAYS_WORKER_CONTAINER_NAME = "pathways-worker"
 MCJAX_WORKER_CONTAINER_NAME = "jax-tpu"
 
@@ -67,6 +65,9 @@ class DisruptionConfig:
 
   # Target pod regex needed for triggering disruption.
   target_pod_regex: str = MCJAX_STANDARD_TARGET_POD_REGEX_SUFFIX
+
+  # Step pod regex needed for step-based disruption.
+  step_pod_regex: str = MCJAX_STANDARD_STEP_POD_REGEX_SUFFIX
 
 
 class DisruptionHandler(abc.ABC):
@@ -163,10 +164,85 @@ class SIGILLHandler(DisruptionHandler):
       print(f"error: {e}")
 
 
+class SIGTERMHandler(DisruptionHandler):
+  """Handles SIGTERM disruption by sending a SIGTERM signal to the pod."""
+
+  def trigger_disruption(
+      self, workload_name: str, cluster_config: XpkClusterConfig,
+      disruption_config, target_pod_regex: str
+  ) -> None:
+    """Triggers SIGTERM disruption by executing kill -s SIGTERM 1 in the pod."""
+    print(
+        f"🔥🔥🔥 Beginning SIGTERM for workload: {workload_name} with pod regex:"
+        f" {target_pod_regex} 🔥🔥🔥"
+    )
+    pod_name_command = [
+        "kubectl",
+        "get",
+        "pods",
+        "-o=name",
+        "--no-headers",
+        f"| grep -E '{target_pod_regex}'",
+    ]
+    pod_name_command_str = " ".join(pod_name_command)
+    container_name = disruption_config.worker_container_name
+
+    try:
+      pod_name_process = subprocess.run(
+          pod_name_command_str,
+          shell=True,
+          check=True,
+          capture_output=True,
+          text=True,
+      )
+      pod_name = pod_name_process.stdout.strip()
+      if not pod_name:
+        print(
+            f"Warning: No pod found matching regex: '{target_pod_regex}' for"
+            f" workload '{workload_name}'"
+        )
+        return
+
+      print(f"🔍 Found pod: {pod_name}")
+      kill_command = [
+          "kubectl",
+          "exec",
+          "-it",
+          pod_name,
+          "-c",
+          container_name,
+          "--",
+          "/bin/bash",
+          "-c",
+          "\"kill -s SIGTERM 1\"",
+      ]
+      kill_command_str = " ".join(kill_command)
+      print(f"🔥🔥🔥 Executing command in pod: {kill_command_str} 🔥🔥🔥")
+      subprocess.run(
+          kill_command_str,
+          shell=True,
+          check=True,
+          capture_output=True,
+          text=True,
+      )
+      print(
+          f"✅ Successfully sent SIGTERM to pod: {pod_name} in container:"
+          f" {container_name}"
+      )
+
+    except subprocess.CalledProcessError as e:
+      print(
+          "❌ Error sending SIGTERM to pod(s) matching regex"
+          f" '{target_pod_regex}' for workload '{workload_name}'"
+      )
+      print(f"Return code: {e.returncode}")
+      print(f"error: {e}")
+
+
 def create_disruption_handler(disruption_config):
   """Factory function to create the appropriate disruption handler."""
   if disruption_config.disruption_method == DisruptionMethod.SIGTERM:
-    raise NotImplementedError("SIGTERM Disruption Handler not implemented yet.")
+    return SIGTERMHandler()
   elif disruption_config.disruption_method == DisruptionMethod.SIGILL:
     return SIGILLHandler()
   else:
