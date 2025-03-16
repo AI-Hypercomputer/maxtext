@@ -314,13 +314,11 @@ def convert_maxtext_to_hf(config, model_size):
 
 
 def main(argv: Sequence[str]):
-    pyconfig.initialize(argv[:-2])
+    config = pyconfig.initialize(argv[:-2])
 
     hf_model_path = argv[-2].split("=")[1]
     model_size = argv[-1].split("=")[1]
     print(f"Will save converted HuggingFace checkpoint to path = {hf_model_path}")
-
-    config = pyconfig.config
 
     print("Load hf checkpoint")
     hf_model = load_hf_model(model_size)
