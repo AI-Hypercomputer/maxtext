@@ -250,7 +250,6 @@ def preprocess_train_dataset(
     max_target_length: int,
     shuffle_buffer_size: int,
     data_shuffle_seed: int,
-    enable_packing: bool = True,
 ) -> tf.data.Dataset:
   """Preprocess the training dataset."""
   train_ds = train_ds.map(
@@ -260,16 +259,7 @@ def preprocess_train_dataset(
   train_ds = reduce_concat_tokens(train_ds, feature_key="targets", batch_size=4096)
   train_ds = split_tokens_to_targets_length(train_ds, max_target_length)
   train_ds = train_ds.shuffle(shuffle_buffer_size, seed=data_shuffle_seed)
-
-  if enable_packing:
-    train_ds = sequence_packing.pack_dataset(train_ds, max_target_length)
-  else:
-    train_ds = train_ds.padded_batch(
-        train_global_batch_size_to_load // jax.process_count(),
-        padded_shapes={"targets": max_target_length},
-        padding_values={"targets": 0},
-        drop_remainder=True,
-    )
+  train_ds = sequence_packing.pack_dataset(train_ds, max_target_length)
 
   train_ds = train_ds.map(format_fn, num_parallel_calls=AUTOTUNE)
   train_ds = train_ds.batch(train_global_batch_size_to_load // jax.process_count(), drop_remainder=True)
@@ -281,19 +271,10 @@ def preprocess_eval_dataset(
     eval_ds: tf.data.Dataset,
     eval_global_batch_size_to_load: int,
     max_target_length: int,
-    enable_packing: bool = True,
     num_examples: Optional[int] = None,
 ) -> tf.data.Dataset:
   """Preprocess the evaluation dataset."""
-  if enable_packing:
-    eval_ds = sequence_packing.pack_dataset(eval_ds, max_target_length)
-  else:
-    eval_ds = eval_ds.padded_batch(
-        eval_global_batch_size_to_load // jax.process_count(),
-        padded_shapes={"targets": max_target_length},
-        padding_values={"targets": 0},
-        drop_remainder=False,
-    )
+  eval_ds = sequence_packing.pack_dataset(eval_ds, max_target_length)
 
   eval_ds = eval_ds.map(format_fn, num_parallel_calls=AUTOTUNE)
 
@@ -337,7 +318,6 @@ def make_c4_mlperf_train_iterator(
       max_target_length=config.max_target_length,
       shuffle_buffer_size=128,
       data_shuffle_seed=config.data_shuffle_seed,
-      enable_packing=config.enable_packing,
   )
   train_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(train_ds, global_mesh)
   return train_multihost_gen
@@ -364,7 +344,6 @@ def make_c4_mlperf_eval_iterator(
       eval_ds,
       eval_global_batch_size_to_load=config.global_batch_size_to_load_eval,
       max_target_length=config.max_target_length,
-      enable_packing=config.enable_packing,
   )
 
   eval_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(eval_ds, global_mesh)
