@@ -1,0 +1,1183 @@
+I0314 22:51:17.715588       1 init.cc:78] Remote crash gathering hook installed.
+W0314 22:51:17.715738       1 loader_impl.cc:479] Envelope is disabled by flags; skipping envelope load
+I0314 22:51:17.723877       1 python_stack_size.cc:45] EventManager thread stack size increased to 245760 for non-test Python use.
+I0314 22:51:17.728505       1 cpu-monitor.cc:52] Failed getting Machine CPU Usage through cgroup: Couldn't find mount for subsystem: cpu
+I0314 22:51:17.731899       1 census-init.cc:380] Census enabled
+W0314 22:51:17.734260       1 interfacelookup.cc:192] No IP address found in /etc/hosts of host 't1v-n-874661e8-w-0' with the following content:
+127.0.0.1 localhost
+
+# The following lines are desirable for IPv6 capable hosts
+::1 ip6-localhost ip6-loopback
+fe00::0 ip6-localnet
+ff00::0 ip6-mcastprefix
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters
+ff02::3 ip6-allhosts
+169.254.169.254 metadata.google.internal metadata
+I0314 22:51:17.734764       1 add_ptoken_logwriter.cc:81] Registering AddPTokenLogWriter factory
+I0314 22:51:17.734986       1 migration_state_tracking.cc:23] Migration not enabled - not starting notification watcher.
+I0314 22:51:17.735459       1 cp_file.cc:591] Not initializing /cp/ file factory because no user-run proxy flags have been specified.
+I0314 22:51:17.735473       1 factory_manager.h:105] Registering factory for implementation 'strong_chubby' for consensus::config::BasicConfigReader
+I0314 22:51:17.735476       1 factory_manager.h:105] Registering factory for implementation 'super_strong_chubby' for consensus::config::BasicConfigReader
+I0314 22:51:17.735478       1 factory_manager.h:105] Registering factory for implementation 'eventual_chubby' for consensus::config::BasicConfigReader
+I0314 22:51:17.735581       1 tpu_runtime_type_flags.cc:76] --tpu_use_tfrt not specified. Using default value: true
+I0314 22:51:17.735640       1 privacy_context_defaults.cc:2851] PrivacyContext default attribute configuration initialization.
+I0314 22:51:17.735704       1 hostname.cc:43] Note: we could not read a GMI proto at '/etc/googlemachineidentity/live/machine_identity.pb'. If this is a prod machine, it is probably broken. If it is a non-prod machine (corp, cloudtop etc), this is ok.
+I0314 22:51:17.741794       1 privacy_context_defaults.cc:1705] Processing default configuration for AI Lineage attributes.
+I0314 22:51:17.741812       1 privacy_context_defaults.cc:1742] Post initialization validating PrivacyContextDefaultConfig: go/debugonly   
+source: INTRINSIC
+ddt_context {
+  dataset_tags: DATASET_ML_WORKFLOW_DATA
+}
+borg_run_uid: 0
+I0314 22:51:17.742227       1 privacy_context_defaults.cc:2985] PrivacyContextDefaultConfig has no origin_product_id.
+I0314 22:51:17.742230       1 privacy_context_defaults.cc:2992] PrivacyContext default attribute configuration module initialization complete.
+I0314 22:51:17.742232       1 fireaxe_privacy_context_optout_listener_init.cc:12] FireaxePrivacyContextOptoutListener initialization.
+I0314 22:51:17.742241       1 init-domain.cc:126] Fiber init: default domain = futex, concurrency = 123, prefix = futex-default
+I0314 22:51:17.742260       1 fireaxe_privacy_context_optout_listener_init.cc:16] FireaxePrivacyContextOptoutListener initialization complete.
+I0314 22:51:17.742265       1 fireaxe_privacy_context_breakglass_watcher_init.cc:12] FireaxePrivacyContextBreakglassWatcher initialization.
+I0314 22:51:17.742267       1 fireaxe_privacy_context_breakglass_watcher_init.cc:16] FireaxePrivacyContextBreakglassWatcher initialization complete.
+I0314 22:51:17.743570       1 chubby_util.cc:217] LOCKSERVICE_LOCALITY env: 
+lockservice_locality flag: 
+machine locality: corp
+BORG_PHYSICAL_CELL env: 
+I0314 22:51:17.743638       1 lockservice_accurate_time.cc:36] Not using TrueTime, fall back to regular impl.
+I0314 22:51:17.743774       1 net_uid.cc:49] GOOGLE_BW_UID not available: Protocol not available [92]
+I0314 22:51:17.743788       1 lockservice_accurate_time.cc:59] AccurateTime was already initialized.
+I0314 22:51:17.743910       1 pmuprofiler.cc:382] Kernel supports perf_events
+W0314 22:51:17.743927       1 api.cc:105] Failed to read Network Predicates configuration from /etc/google/network_predicates.cfg (this is expected on non-NodeOS machines) with reason: No such file or directory
+I0314 22:51:17.746400       1 serializer_init.cc:10] Configuring serialization as V1 CT.
+I0314 22:51:17.747466       1 logwriter_uls_init.cc:57] No Envelope. Disabled initialization of LogWriterULS. LogWriter prefixes /sawmill{,-transitional,-dual-logging,-localhost,-dryrun,-devnull,-forwarding-proxy,-lite-test} will be interpreted as Google3 File paths instead of LogWriter implementations, so /sawmill will not use ULS.
+W0314 22:51:17.747835       1 zone_info_source.cc:122] RAW: Falling back to critical America/Los_Angeles zoneinfo data
+I0314 22:51:17.748989       1 app.py:369] C++ logging enabled; logging.debug will only be visible when --verbosity/-v are 1 or higher
+I0314 22:51:17.749127       1 app.py:279] Process id 1
+I0314 22:51:17.749208       1 app.py:281] Current working directory /
+I0314 22:51:17.749367       1 app.py:284] Built on Fri Mar 14 21:24:36 2025 (1741987476)
+Built by hengtaoguo@hengtaoguo.c.googlers.com:/google/src/cloud/hengtaoguo/benchmark/google3
+Built as //cloud/tpu/multipod/hybridsim:cloud_hybrid_sim_client_main
+Build ID: bce34e88-ccc9-498e-a0c8-3b83ce25d42e
+Built from changelist 736906849 possibly in a modified client in CitC workspace (Fig benchmark (hengtaoguo/5602)) at snapshot 25
+Build platform: gcc-4.X.Y-crosstool-v18-llvm-grtev4-k8.k8
+Build tool: Blaze, release blaze-2025.03.07-1 (mainline @734307892)
+Built with par options []
+Currently running under Python 3.11.8: embedded.
+I0314 22:51:17.749402       1 app.py:287] Command line arguments:
+I0314 22:51:17.749433       1 app.py:289] argv[0]: '/usr/hybridsim/run/cloud_hybrid_sim_client_main.par'
+I0314 22:51:17.749460       1 app.py:289] argv[1]: '--uid='
+I0314 22:51:17.749502       1 app.py:289] argv[2]: '--enforce_kernel_ipv6_support=false'
+I0314 22:51:17.749527       1 app.py:289] argv[3]: '--rpc_security_protocol='
+I0314 22:51:17.749551       1 app.py:289] argv[4]: '--rpc_default_rate_acl=INSECURE'
+I0314 22:51:17.749574       1 app.py:289] argv[5]: '--envelope_enabled=false'
+I0314 22:51:17.749595       1 app.py:289] argv[6]: '--deepsea_chips_per_host_bounds=1,1,1'
+I0314 22:51:17.749619       1 app.py:289] argv[7]: '--deepsea_host_bounds=1,1,1'
+I0314 22:51:17.749640       1 app.py:289] argv[8]: '--vmodule=hybrid_sim=2'
+I0314 22:51:17.749660       1 app.py:289] argv[9]: '--alsologtostderr'
+I0314 22:51:17.749681       1 app.py:289] argv[10]: '--deepsea_chip_config_name=megacore'
+I0314 22:51:17.749701       1 app.py:289] argv[11]: '--xla_dump_dir=/tmp/hlo/llama3.1-8b-v4-128'
+I0314 22:51:17.749721       1 app.py:289] argv[12]: '--module_name_pattern=jit_train_step'
+I0314 22:51:17.749741       1 app.py:289] argv[13]: '--deepsea_chip_config_name=megacore'
+I0314 22:51:18.139522       1 cloud_hybrid_sim_client_main.py:115] Found files: /tmp/hlo/llama3.1-8b-v4-128/module_0034.jit_train_step.after_optimizations_before_buffer_assignment.txt, /tmp/hlo/llama3.1-8b-v4-128/module_0034.jit_train_step.execution_options.txt, /tmp/hlo/llama3.1-8b-v4-128/module_0034.jit_train_step.target_arguments.txt, /tmp/hlo/llama3.1-8b-v4-128/module_0034.jit_train_step.flagfile, /tmp/hlo/llama3.1-8b-v4-128/module_0034.jit_train_step.tpu_comp_env.txt
+I0314 22:51:18.139738       1 cloud_hybrid_sim_client_main.py:255] use_megascale_xla: False
+I0314 22:51:18.154040       1 device_util.cc:124] Found 4 viperlite chips.
+I0314 22:51:18.154059       1 tpu_version_flag.cc:53] Using auto-detected TPU version viperlite
+I0314 22:51:18.155067       1 device_util.cc:124] Found 4 viperlite chips.
+I0314 22:51:18.156069       1 device_util.cc:124] Found 4 viperlite chips.
+W0314 22:51:18.156077       1 flags_util.cc:135] Applying legacy hack to override mesh topology to 2x2.
+I0314 22:51:18.157182       1 device_util.cc:124] Found 4 viperlite chips.
+I0314 22:51:18.157192       1 flags_util.cc:197] Using megacore chip configuration.
+E0314 22:51:18.157216       1 tpu_util.cc:19] Failed to get TPU topology: NOT_FOUND: File not found: /memfile/tpu_chip_config_memfile_megacore/viperfish_lite_chip_configs_megacore.binarypb; Failed to obtain chip config "megacore" for version viperfish, variant "lite"
+=== Source Location Trace: === 
+file/memfile/memfile.cc:927
+learning/brain/tpu/runtime/topology/tpu_chip_config.cc:184
+learning/brain/tpu/runtime/topology/tpu_topology_serdes.cc:113
+I0314 22:51:18.157468       1 flag.cc:153] Restore saved value of deepsea_chips_per_host_bounds to: 1,1,1
+I0314 22:51:18.157690       1 flag.cc:153] Restore saved value of xla_all_gather_combiner_threshold_count to: 256
+I0314 22:51:18.157694       1 flag.cc:153] Restore saved value of xla_all_gather_latency_bound_threshold_in_bytes to: -1
+I0314 22:51:18.157695       1 flag.cc:153] Restore saved value of xla_all_reduce_latency_bound_threshold_in_bytes to: -1
+I0314 22:51:18.157696       1 flag.cc:153] Restore saved value of xla_all_to_all_latency_bound_threshold_in_bytes to: -1
+I0314 22:51:18.157698       1 flag.cc:153] Restore saved value of xla_allow_hoisting_across_branch to: true
+I0314 22:51:18.157700       1 flag.cc:153] Restore saved value of xla_always_enable_all_gather_2d_asymmetric to: false
+I0314 22:51:18.157701       1 flag.cc:153] Restore saved value of xla_always_enable_all_gather_3d_asymmetric to: false
+I0314 22:51:18.157703       1 flag.cc:153] Restore saved value of xla_collective_optimize_constant_table to: auto
+I0314 22:51:18.157704       1 flag.cc:153] Restore saved value of xla_collective_permute_latency_bound_threshold_in_bytes to: -1
+I0314 22:51:18.157705       1 flag.cc:153] Restore saved value of xla_collective_static_info_table_device_threshold_count to: 256
+I0314 22:51:18.157707       1 flag.cc:153] Restore saved value of xla_deduplicate_loop_initialized_buffers to: auto
+I0314 22:51:18.157708       1 flag.cc:153] Restore saved value of xla_default_cross_program_prefetch_heuristic to: false
+I0314 22:51:18.157709       1 flag.cc:153] Restore saved value of xla_disable_all_gather_asymmetric_optimization_debug_only to: false
+I0314 22:51:18.157711       1 flag.cc:153] Restore saved value of xla_enable_all_gather_2d_emitter to: true
+I0314 22:51:18.157712       1 flag.cc:153] Restore saved value of xla_enable_all_gather_3d_emitter to: true
+I0314 22:51:18.157713       1 flag.cc:153] Restore saved value of xla_enable_all_gather_extra_barriers_debug_only to: false
+I0314 22:51:18.157715       1 flag.cc:153] Restore saved value of xla_enable_all_gather_inter_intra_phase_barriers_debug_only to: false
+I0314 22:51:18.157716       1 flag.cc:153] Restore saved value of xla_enable_async_all_gather to: auto
+I0314 22:51:18.157718       1 flag.cc:153] Restore saved value of xla_enable_async_all_reduce to: false
+I0314 22:51:18.157719       1 flag.cc:153] Restore saved value of xla_enable_async_collective_permute to: auto
+I0314 22:51:18.157720       1 flag.cc:153] Restore saved value of xla_enable_async_reduce_scatter_fusion to: false
+I0314 22:51:18.157722       1 flag.cc:153] Restore saved value of xla_enable_cross_program_prefetch to: true
+I0314 22:51:18.157723       1 flag.cc:153] Restore saved value of xla_enable_hlo_trace to: true
+I0314 22:51:18.157724       1 flag.cc:153] Restore saved value of xla_enable_hlo_unstacker to: false
+I0314 22:51:18.157726       1 flag.cc:153] Restore saved value of xla_enable_local_dma_trace to: false
+I0314 22:51:18.157727       1 flag.cc:153] Restore saved value of xla_enable_lru_free_reg_assignment to: true
+I0314 22:51:18.157728       1 flag.cc:153] Restore saved value of xla_enable_megacore_hbm_spill to: true
+I0314 22:51:18.157729       1 flag.cc:153] Restore saved value of xla_enable_module_trace to: true
+I0314 22:51:18.157738       1 flag.cc:153] Restore saved value of xla_enable_mxu_trace to: false
+I0314 22:51:18.157739       1 flag.cc:153] Restore saved value of xla_enable_post_msa_sync_slice_fusion to: auto
+I0314 22:51:18.157741       1 flag.cc:153] Restore saved value of xla_enable_profiler to: true
+I0314 22:51:18.157742       1 flag.cc:153] Restore saved value of xla_enable_scalar_multiply_reduction to: false
+I0314 22:51:18.157743       1 flag.cc:153] Restore saved value of xla_enable_trace to: false
+I0314 22:51:18.157744       1 flag.cc:153] Restore saved value of xla_enable_transpose_trace to: false
+I0314 22:51:18.157746       1 flag.cc:153] Restore saved value of xla_explicit_disable_passes to: auto
+I0314 22:51:18.157747       1 flag.cc:153] Restore saved value of xla_explicit_enable_passes to: auto
+I0314 22:51:18.157748       1 flag.cc:153] Restore saved value of xla_generate_llo_graph to: false
+I0314 22:51:18.157750       1 flag.cc:153] Restore saved value of xla_gf_max_vmem_used_by_memory_space_assignment to: -1
+I0314 22:51:18.157751       1 flag.cc:153] Restore saved value of xla_gf_vmem_default_cross_program_prefetch_heuristic to: false
+I0314 22:51:18.157752       1 flag.cc:153] Restore saved value of xla_gf_vmem_enable_cross_program_prefetch to: true
+I0314 22:51:18.157753       1 flag.cc:153] Restore saved value of xla_gf_vmem_enable_cross_program_prefetch_freeing to: true
+I0314 22:51:18.157755       1 flag.cc:153] Restore saved value of xla_gf_vmem_enable_while_redundant_eviction_elimination to: true
+I0314 22:51:18.157756       1 flag.cc:153] Restore saved value of xla_gf_vmem_max_outstanding_evictions to: 40
+I0314 22:51:18.157757       1 flag.cc:153] Restore saved value of xla_gf_vmem_max_outstanding_prefetches to: 40
+I0314 22:51:18.157761       1 flag.cc:153] Restore saved value of xla_gf_vmem_max_overlap_to_mem_size_async_copy_ratio to: 8
+I0314 22:51:18.157763       1 flag.cc:153] Restore saved value of xla_gf_vmem_max_repacks to: 4
+I0314 22:51:18.157764       1 flag.cc:153] Restore saved value of xla_gf_vmem_max_retries to: 2
+I0314 22:51:18.157766       1 flag.cc:153] Restore saved value of xla_gf_vmem_memory_space_assignment to: true
+I0314 22:51:18.157767       1 flag.cc:153] Restore saved value of xla_gf_vmem_min_overlap_to_async_copy_ratio to: 1
+I0314 22:51:18.157769       1 flag.cc:153] Restore saved value of xla_gf_vmem_preferred_overlap_to_async_copy_ratio to: 2
+I0314 22:51:18.157771       1 flag.cc:153] Restore saved value of xla_gf_vmem_use_ior_algorithm to: 
+I0314 22:51:18.157772       1 flag.cc:153] Restore saved value of xla_hbm_logging_buffer_size_bytes to: 1048576
+I0314 22:51:18.157773       1 flag.cc:153] Restore saved value of xla_hlo_scheduling_brkga_computation_limit to: 3
+I0314 22:51:18.157774       1 flag.cc:153] Restore saved value of xla_hlo_scheduling_brkga_compute_runtime_estimates to: false
+I0314 22:51:18.157776       1 flag.cc:153] Restore saved value of xla_hlo_scheduling_brkga_enable_as_fallback to: false
+I0314 22:51:18.157777       1 flag.cc:153] Restore saved value of xla_hlo_scheduling_brkga_generation_limit to: 1200
+I0314 22:51:18.157778       1 flag.cc:153] Restore saved value of xla_internal_thread_stack_size_bytes to: 1048576
+I0314 22:51:18.157780       1 flag.cc:153] Restore saved value of xla_ior_fast_mem_round_trip_production_msa to: false
+I0314 22:51:18.157781       1 flag.cc:153] Restore saved value of xla_ior_fast_mem_run_production_msa to: false
+I0314 22:51:18.157782       1 flag.cc:153] Restore saved value of xla_ior_stored_solution_path to: 
+I0314 22:51:18.157783       1 flag.cc:153] Restore saved value of xla_ior_use_stored_solution to: false
+I0314 22:51:18.157784       1 flag.cc:153] Restore saved value of xla_jf_accumulation_reassociation to: true
+I0314 22:51:18.157786       1 flag.cc:153] Restore saved value of xla_jf_all_to_all_shard_kib to: 32
+I0314 22:51:18.157787       1 flag.cc:153] Restore saved value of xla_jf_allow_cross_replica_sharding_on_batch_matmul to: true
+I0314 22:51:18.157788       1 flag.cc:153] Restore saved value of xla_jf_allow_cross_replica_sharding_on_certain_reduce to: true
+I0314 22:51:18.157789       1 flag.cc:153] Restore saved value of xla_jf_always_overlay to: true
+I0314 22:51:18.157791       1 flag.cc:153] Restore saved value of xla_jf_always_use_windowed_reduce to: false
+I0314 22:51:18.157792       1 flag.cc:153] Restore saved value of xla_jf_auto_assign_mxu to: true
+I0314 22:51:18.157793       1 flag.cc:153] Restore saved value of xla_jf_auto_assign_xlu to: true
+I0314 22:51:18.157794       1 flag.cc:153] Restore saved value of xla_jf_auto_cross_replica_sharding to: true
+I0314 22:51:18.157796       1 flag.cc:153] Restore saved value of xla_jf_auto_latch_lmr to: true
+I0314 22:51:18.157797       1 flag.cc:153] Restore saved value of xla_jf_avoid_cross_slot_vmem_bank_conflicts to: true
+I0314 22:51:18.157798       1 flag.cc:153] Restore saved value of xla_jf_bf16_inside_cross_replica_sum to: false
+I0314 22:51:18.157799       1 flag.cc:153] Restore saved value of xla_jf_bf16_propagation to: true
+I0314 22:51:18.157801       1 flag.cc:153] Restore saved value of xla_jf_bounds_check to: DMA
+I0314 22:51:18.157802       1 flag.cc:153] Restore saved value of xla_jf_bounds_check_annotate_only to: false
+I0314 22:51:18.157803       1 flag.cc:153] Restore saved value of xla_jf_bounds_check_stride to: false
+I0314 22:51:18.157804       1 flag.cc:153] Restore saved value of xla_jf_bounds_check_verbose to: false
+I0314 22:51:18.157807       1 flag.cc:153] Restore saved value of xla_jf_collect_llo_stack_trace to: false
+I0314 22:51:18.157808       1 flag.cc:153] Restore saved value of xla_jf_conditional_code_motion to: true
+I0314 22:51:18.157809       1 flag.cc:153] Restore saved value of xla_jf_conv_base_dilation_adversary to: false
+I0314 22:51:18.157811       1 flag.cc:153] Restore saved value of xla_jf_conv_full_precision to: false
+I0314 22:51:18.157812       1 flag.cc:153] Restore saved value of xla_jf_conv_increased_precision to: false
+I0314 22:51:18.157813       1 flag.cc:153] Restore saved value of xla_jf_conv_input_fusion to: true
+I0314 22:51:18.157816       1 flag.cc:153] Restore saved value of xla_jf_conv_min_limit_vmem_mib to: 0.5
+I0314 22:51:18.157817       1 flag.cc:153] Restore saved value of xla_jf_conv_output_fusion to: true
+I0314 22:51:18.157818       1 flag.cc:153] Restore saved value of xla_jf_conv_prefers_padding_input_feature to: false
+I0314 22:51:18.157820       1 flag.cc:153] Restore saved value of xla_jf_conv_reshape_fusion to: false
+I0314 22:51:18.157821       1 flag.cc:153] Restore saved value of xla_jf_convolution_performance_target to: 1
+I0314 22:51:18.157823       1 flag.cc:153] Restore saved value of xla_jf_cp_pass_enabled to: true
+I0314 22:51:18.157824       1 flag.cc:153] Restore saved value of xla_jf_critical_path_scheduler to: true
+I0314 22:51:18.157826       1 flag.cc:153] Restore saved value of xla_jf_cross_replica_sharding_also_try_reducing_min_span_by_factor to: 0
+I0314 22:51:18.157827       1 flag.cc:153] Restore saved value of xla_jf_crs_combiner_threshold_count to: 256
+I0314 22:51:18.157829       1 flag.cc:153] Restore saved value of xla_jf_crs_combiner_threshold_in_bytes to: 125829120
+I0314 22:51:18.157830       1 flag.cc:153] Restore saved value of xla_jf_debug_level to: 1
+I0314 22:51:18.157832       1 flag.cc:153] Restore saved value of xla_jf_dump_category_filter to: all,-misc,-llvm
+I0314 22:51:18.157833       1 flag.cc:153] Restore saved value of xla_jf_dump_debug_info to: false
+I0314 22:51:18.157835       1 flag.cc:153] Restore saved value of xla_jf_dump_extended_fingerprint to: false
+I0314 22:51:18.157836       1 flag.cc:153] Restore saved value of xla_jf_dump_fusion_computations to: false
+I0314 22:51:18.157837       1 flag.cc:153] Restore saved value of xla_jf_dump_hlo_text to: true
+I0314 22:51:18.157838       1 flag.cc:153] Restore saved value of xla_jf_dump_isa_program_proto to: false
+I0314 22:51:18.157840       1 flag.cc:153] Restore saved value of xla_jf_dump_limit_fingerprints to: false
+I0314 22:51:18.157841       1 flag.cc:153] Restore saved value of xla_jf_dump_llo_critical_paths_to to: 
+I0314 22:51:18.157842       1 flag.cc:153] Restore saved value of xla_jf_dump_llo_html to: false
+I0314 22:51:18.157844       1 flag.cc:153] Restore saved value of xla_jf_dump_llo_pass_label_regex to: 
+I0314 22:51:18.157846       1 flag.cc:153] Restore saved value of xla_jf_dump_llo_static_gaps to: false
+I0314 22:51:18.157847       1 flag.cc:153] Restore saved value of xla_jf_dump_llo_text to: true
+I0314 22:51:18.157848       1 flag.cc:153] Restore saved value of xla_jf_dump_only_matching_hlo to: true
+I0314 22:51:18.157850       1 flag.cc:153] Restore saved value of xla_jf_dump_to to: 
+I0314 22:51:18.157851       1 flag.cc:153] Restore saved value of xla_jf_emit_annotations to: false
+I0314 22:51:18.157852       1 flag.cc:153] Restore saved value of xla_jf_emit_global_barrier_at_start to: true
+I0314 22:51:18.157854       1 flag.cc:153] Restore saved value of xla_jf_enable_advanced_multi_output_fusion to: auto
+I0314 22:51:18.157855       1 flag.cc:153] Restore saved value of xla_jf_enable_buffer_alias to: false
+I0314 22:51:18.157856       1 flag.cc:153] Restore saved value of xla_jf_enable_final_priority_fusion to: true
+I0314 22:51:18.157857       1 flag.cc:153] Restore saved value of xla_jf_enable_hlo_pipeline to: true
+I0314 22:51:18.157858       1 flag.cc:153] Restore saved value of xla_jf_enable_multi_output_fusion to: true
+I0314 22:51:18.157860       1 flag.cc:153] Restore saved value of xla_jf_enable_pipelining to: true
+I0314 22:51:18.157861       1 flag.cc:153] Restore saved value of xla_jf_enable_producer_consumer_multi_output_fusion to: true
+I0314 22:51:18.157862       1 flag.cc:153] Restore saved value of xla_jf_exit_process_on_compilation_success to: false
+I0314 22:51:18.157863       1 flag.cc:153] Restore saved value of xla_jf_experimental_cmem_for_hlo_outputs to: 0
+I0314 22:51:18.157864       1 flag.cc:153] Restore saved value of xla_jf_experimental_vmem_for_hlo_outputs to: 0
+I0314 22:51:18.157866       1 flag.cc:153] Restore saved value of xla_jf_fusion_max_instruction_count_for_window_config to: 1000
+I0314 22:51:18.157868       1 flag.cc:153] Restore saved value of xla_jf_fusion_max_vmem_mib to: 15
+I0314 22:51:18.157869       1 flag.cc:153] Restore saved value of xla_jf_generate_alloc_profile_to to: 
+I0314 22:51:18.157870       1 flag.cc:153] Restore saved value of xla_jf_generate_cpu_profile_to to: 
+I0314 22:51:18.157871       1 flag.cc:153] Restore saved value of xla_jf_hlo_deduplicate_only to: true
+I0314 22:51:18.157873       1 flag.cc:153] Restore saved value of xla_jf_hlo_deduplication to: true
+I0314 22:51:18.157874       1 flag.cc:153] Restore saved value of xla_jf_hlo_deduplication_all_unique to: false
+I0314 22:51:18.157876       1 flag.cc:153] Restore saved value of xla_jf_hlo_deduplication_all_unique_filter to: auto
+I0314 22:51:18.157877       1 flag.cc:153] Restore saved value of xla_jf_internal_num_threads to: -1
+I0314 22:51:18.157878       1 flag.cc:153] Restore saved value of xla_jf_internal_prefetch_overlays to: true
+I0314 22:51:18.157879       1 flag.cc:153] Restore saved value of xla_jf_line_info_in_symbol_table to: false
+I0314 22:51:18.157881       1 flag.cc:153] Restore saved value of xla_jf_llo2llvm_timing_info to: false
+I0314 22:51:18.157882       1 flag.cc:153] Restore saved value of xla_jf_llo_level to: 1
+I0314 22:51:18.157884       1 flag.cc:153] Restore saved value of xla_jf_llo_rematerialization_parameter_threshold to: 1024
+I0314 22:51:18.157886       1 flag.cc:153] Restore saved value of xla_jf_llvm_flags to: 
+I0314 22:51:18.157887       1 flag.cc:153] Restore saved value of xla_jf_llvm_use_bitcode_dump to: false
+I0314 22:51:18.157888       1 flag.cc:153] Restore saved value of xla_jf_llvm_use_fast_opt to: true
+I0314 22:51:18.157889       1 flag.cc:153] Restore saved value of xla_jf_load_cse_and_s2l_forwarding to: true
+I0314 22:51:18.157891       1 flag.cc:153] Restore saved value of xla_jf_log_hlo_output to: false
+I0314 22:51:18.157892       1 flag.cc:153] Restore saved value of xla_jf_log_scopes to: false
+I0314 22:51:18.157893       1 flag.cc:153] Restore saved value of xla_jf_loop_trip_count to: 4
+I0314 22:51:18.157894       1 flag.cc:153] Restore saved value of xla_jf_lsra_log_timings to: false
+I0314 22:51:18.157896       1 flag.cc:153] Restore saved value of xla_jf_lsra_pregs to: true
+I0314 22:51:18.157897       1 flag.cc:153] Restore saved value of xla_jf_lsra_sregs to: true
+I0314 22:51:18.157898       1 flag.cc:153] Restore saved value of xla_jf_lsra_v2_alloc_only to: true
+I0314 22:51:18.157899       1 flag.cc:153] Restore saved value of xla_jf_lsra_v2_annotate to: false
+I0314 22:51:18.157900       1 flag.cc:153] Restore saved value of xla_jf_lsra_v2_reserved_smem to: 0
+I0314 22:51:18.157902       1 flag.cc:153] Restore saved value of xla_jf_lsra_v2_spill_reporter_threshold to: 0.25
+I0314 22:51:18.157904       1 flag.cc:153] Restore saved value of xla_jf_lsra_v2_verifier to: true
+I0314 22:51:18.157905       1 flag.cc:153] Restore saved value of xla_jf_lsra_vmregs to: true
+I0314 22:51:18.157906       1 flag.cc:153] Restore saved value of xla_jf_lsra_vregs to: true
+I0314 22:51:18.157907       1 flag.cc:153] Restore saved value of xla_jf_max_outfeed_size_kib to: 8192
+I0314 22:51:18.157909       1 flag.cc:153] Restore saved value of xla_jf_memory_allocator_include_backtrace to: false
+I0314 22:51:18.157910       1 flag.cc:153] Restore saved value of xla_jf_module_group_simplifier to: true
+I0314 22:51:18.157911       1 flag.cc:153] Restore saved value of xla_jf_module_tracemarks to: true
+I0314 22:51:18.157912       1 flag.cc:153] Restore saved value of xla_jf_naive_bundle_packer to: false
+I0314 22:51:18.157913       1 flag.cc:153] Restore saved value of xla_jf_order_barna_core_feed_overlap to: false
+I0314 22:51:18.157915       1 flag.cc:153] Restore saved value of xla_jf_order_barna_core_feed_serialize to: false
+I0314 22:51:18.157916       1 flag.cc:153] Restore saved value of xla_jf_overlay_compression_threshold to: 2044723200
+I0314 22:51:18.157917       1 flag.cc:153] Restore saved value of xla_jf_pack_latches to: true
+I0314 22:51:18.157918       1 flag.cc:153] Restore saved value of xla_jf_poison_operands_before_emitter to: false
+I0314 22:51:18.157920       1 flag.cc:153] Restore saved value of xla_jf_poison_vmem_allocations to: false
+I0314 22:51:18.157921       1 flag.cc:153] Restore saved value of xla_jf_print_compilation_stats to: false
+I0314 22:51:18.157922       1 flag.cc:153] Restore saved value of xla_jf_profile_cheap_ops to: false
+I0314 22:51:18.157923       1 flag.cc:153] Restore saved value of xla_jf_program_hbm_alignment_in_kib to: 16
+I0314 22:51:18.157925       1 flag.cc:153] Restore saved value of xla_jf_random_latency to: false
+I0314 22:51:18.157926       1 flag.cc:153] Restore saved value of xla_jf_reconstruct_hlo_from_proto to: false
+I0314 22:51:18.157927       1 flag.cc:153] Restore saved value of xla_jf_rematerialization_percent_shared_memory_limit to: 95
+I0314 22:51:18.157928       1 flag.cc:153] Restore saved value of xla_jf_run_verifier to: false
+I0314 22:51:18.157929       1 flag.cc:153] Restore saved value of xla_jf_shard_f32_weight_across_loop_iterations to: true
+I0314 22:51:18.157931       1 flag.cc:153] Restore saved value of xla_jf_simplifier_pass_enabled to: true
+I0314 22:51:18.157932       1 flag.cc:153] Restore saved value of xla_jf_single_phase_ring_max_kib to: 10
+I0314 22:51:18.157933       1 flag.cc:153] Restore saved value of xla_jf_single_phase_ring_threshold to: 256
+I0314 22:51:18.157934       1 flag.cc:153] Restore saved value of xla_jf_slot_tracker_hoist_limit to: 0
+I0314 22:51:18.157936       1 flag.cc:153] Restore saved value of xla_jf_span_size_in_kib to: 64
+I0314 22:51:18.157937       1 flag.cc:153] Restore saved value of xla_jf_spmd_conv_halo_exchange_always_on_lhs to: true
+I0314 22:51:18.157938       1 flag.cc:153] Restore saved value of xla_jf_spmd_report_instruction_count to: 5
+I0314 22:51:18.157940       1 flag.cc:153] Restore saved value of xla_jf_spmd_threshold_for_windowed_einsum_mib to: -1
+I0314 22:51:18.157941       1 flag.cc:153] Restore saved value of xla_jf_synchronous_channels to: false
+I0314 22:51:18.157942       1 flag.cc:153] Restore saved value of xla_jf_tanh_increased_precision to: false
+I0314 22:51:18.157943       1 flag.cc:153] Restore saved value of xla_jf_track_bundle_dependency_indices to: false
+I0314 22:51:18.157944       1 flag.cc:153] Restore saved value of xla_jf_trivial_traces to: false
+I0314 22:51:18.157946       1 flag.cc:153] Restore saved value of xla_jf_tune_large_vmem to: false
+I0314 22:51:18.157947       1 flag.cc:153] Restore saved value of xla_jf_use_cost_based_memory_coloring to: true
+I0314 22:51:18.157948       1 flag.cc:153] Restore saved value of xla_jf_use_hw_constants to: false
+I0314 22:51:18.157949       1 flag.cc:153] Restore saved value of xla_jf_use_multi_colors_in_all_reduce_if_supported to: true
+I0314 22:51:18.157950       1 flag.cc:153] Restore saved value of xla_jf_use_rng_bit_generator_emitter to: true
+I0314 22:51:18.157952       1 flag.cc:153] Restore saved value of xla_jf_use_rotated_pincer_emitter to: true
+I0314 22:51:18.157954       1 flag.cc:153] Restore saved value of xla_jf_use_rotated_pincer_ring_emitter to: true
+I0314 22:51:18.157955       1 flag.cc:153] Restore saved value of xla_jf_use_single_phase_ring_emitter to: true
+I0314 22:51:18.157956       1 flag.cc:153] Restore saved value of xla_jf_use_vdelay to: true
+I0314 22:51:18.157957       1 flag.cc:153] Restore saved value of xla_jf_verify_sync_flags to: false
+I0314 22:51:18.157958       1 flag.cc:153] Restore saved value of xla_jf_vliw_fuel to: 9223372036854775807
+I0314 22:51:18.157959       1 flag.cc:153] Restore saved value of xla_jf_vliw_scheduler to: true
+I0314 22:51:18.157961       1 flag.cc:153] Restore saved value of xla_jf_vmem_default_cross_program_prefetch_heuristic to: false
+I0314 22:51:18.157962       1 flag.cc:153] Restore saved value of xla_jf_vmem_enable_cross_program_prefetch to: false
+I0314 22:51:18.157965       1 flag.cc:153] Restore saved value of xla_jf_vmem_enable_while_redundant_eviction_elimination to: true
+I0314 22:51:18.157966       1 flag.cc:153] Restore saved value of xla_jf_vmem_max_outstanding_evictions to: 4
+I0314 22:51:18.157967       1 flag.cc:153] Restore saved value of xla_jf_vmem_max_outstanding_prefetches to: 4
+I0314 22:51:18.157969       1 flag.cc:153] Restore saved value of xla_jf_vmem_max_overlap_to_mem_size_async_copy_ratio to: 32
+I0314 22:51:18.157970       1 flag.cc:153] Restore saved value of xla_jf_vmem_max_repacks to: 4
+I0314 22:51:18.157971       1 flag.cc:153] Restore saved value of xla_jf_vmem_max_retries to: 2
+I0314 22:51:18.157973       1 flag.cc:153] Restore saved value of xla_jf_vmem_memory_space_assignment to: true
+I0314 22:51:18.157974       1 flag.cc:153] Restore saved value of xla_jf_vmem_min_overlap_to_async_copy_ratio to: 1
+I0314 22:51:18.157976       1 flag.cc:153] Restore saved value of xla_jf_vmem_preferred_overlap_to_async_copy_ratio to: 2
+I0314 22:51:18.157977       1 flag.cc:153] Restore saved value of xla_jf_vmem_use_ior_algorithm to: 
+I0314 22:51:18.157978       1 flag.cc:153] Restore saved value of xla_jf_xlu_optimizer to: true
+I0314 22:51:18.157979       1 flag.cc:153] Restore saved value of xla_latency_hiding_scheduler_enable_selective_resources to: false
+I0314 22:51:18.157981       1 flag.cc:153] Restore saved value of xla_latency_hiding_scheduler_rerun to: 1
+I0314 22:51:18.157982       1 flag.cc:153] Restore saved value of xla_latency_hiding_scheduler_resource_serializing to: false
+I0314 22:51:18.157983       1 flag.cc:153] Restore saved value of xla_latency_hiding_scheduler_resource_sharing to: false
+I0314 22:51:18.157984       1 flag.cc:153] Restore saved value of xla_lhs_enable_release_start_policy to: false
+I0314 22:51:18.157986       1 flag.cc:153] Restore saved value of xla_lhs_loop_fusion_latency_multiplier to: auto
+I0314 22:51:18.157987       1 flag.cc:153] Restore saved value of xla_lhs_make_all_gather_selective to: false
+I0314 22:51:18.157988       1 flag.cc:153] Restore saved value of xla_lhs_max_hops_to_closest_selective_overlap to: 3
+I0314 22:51:18.157989       1 flag.cc:153] Restore saved value of xla_lhs_output_fusion_latency_multiplier to: auto
+I0314 22:51:18.157991       1 flag.cc:153] Restore saved value of xla_lhs_prioritize_async_depth_over_stall to: false
+I0314 22:51:18.157992       1 flag.cc:153] Restore saved value of xla_limited_ici_routing_collective_permute_transfer_block_mib to: -1
+I0314 22:51:18.157993       1 flag.cc:153] Restore saved value of xla_llvm_generate_xla_compatible_dwg to: false
+I0314 22:51:18.157994       1 flag.cc:153] Restore saved value of xla_llvm_isa_emitter to: true
+I0314 22:51:18.157995       1 flag.cc:153] Restore saved value of xla_llvm_isa_emitter_bundles to: true
+I0314 22:51:18.157997       1 flag.cc:153] Restore saved value of xla_llvm_isa_emitter_force to: true
+I0314 22:51:18.157998       1 flag.cc:153] Restore saved value of xla_logging_instruction_threshold to: 0
+I0314 22:51:18.157999       1 flag.cc:153] Restore saved value of xla_lowering_vmem_limit_scaling_factor to: auto
+I0314 22:51:18.158001       1 flag.cc:153] Restore saved value of xla_max_concurrent_async_all_gathers to: 1
+I0314 22:51:18.158002       1 flag.cc:153] Restore saved value of xla_max_concurrent_async_all_reduces to: auto
+I0314 22:51:18.158003       1 flag.cc:153] Restore saved value of xla_max_concurrent_async_collective_permutes to: 5
+I0314 22:51:18.158005       1 flag.cc:153] Restore saved value of xla_max_concurrent_async_reduce_scatters to: auto
+I0314 22:51:18.158006       1 flag.cc:153] Restore saved value of xla_max_concurrent_host_copy to: 5
+I0314 22:51:18.158007       1 flag.cc:153] Restore saved value of xla_max_concurrent_host_send_recv to: -1
+I0314 22:51:18.158008       1 flag.cc:153] Restore saved value of xla_max_concurrent_send_recv to: 2147483647
+I0314 22:51:18.158010       1 flag.cc:153] Restore saved value of xla_max_cross_program_prefetches to: 1
+I0314 22:51:18.158012       1 flag.cc:153] Restore saved value of xla_max_decomposed_all_reduces to: -1
+I0314 22:51:18.158013       1 flag.cc:153] Restore saved value of xla_memory_scheduler to: default
+I0314 22:51:18.158015       1 flag.cc:153] Restore saved value of xla_mosaic_compat_mode to: auto
+I0314 22:51:18.158016       1 flag.cc:153] Restore saved value of xla_mosaic_dump_to to: 
+I0314 22:51:18.158018       1 flag.cc:153] Restore saved value of xla_mosaic_enable_dump_debug_info to: false
+I0314 22:51:18.158019       1 flag.cc:153] Restore saved value of xla_mosaic_enable_llo_source_annotations to: auto
+I0314 22:51:18.158020       1 flag.cc:153] Restore saved value of xla_mosaic_on_device_checks to: 
+I0314 22:51:18.158021       1 flag.cc:153] Restore saved value of xla_mosaic_unsafe_allow_multicore_remote_dma to: false
+I0314 22:51:18.158023       1 flag.cc:153] Restore saved value of xla_mosaic_use_strided_memcopy to: auto
+I0314 22:51:18.158024       1 flag.cc:153] Restore saved value of xla_msa_allocate_scoped_memory_at_same_offset to: true
+I0314 22:51:18.158026       1 flag.cc:153] Restore saved value of xla_msa_cost_model_options to: auto
+I0314 22:51:18.158027       1 flag.cc:153] Restore saved value of xla_msa_cross_program_prefetch_permissive_mode to: false
+I0314 22:51:18.158028       1 flag.cc:153] Restore saved value of xla_msa_default_cross_program_prefetch_heuristic to: false
+I0314 22:51:18.158029       1 flag.cc:153] Restore saved value of xla_msa_enable to: auto
+I0314 22:51:18.158031       1 flag.cc:153] Restore saved value of xla_msa_enable_cross_program_prefetch_freeing to: true
+I0314 22:51:18.158032       1 flag.cc:153] Restore saved value of xla_msa_enable_sync_copy_replacement to: auto
+I0314 22:51:18.158033       1 flag.cc:153] Restore saved value of xla_msa_enable_sync_slice_replacement to: auto
+I0314 22:51:18.158034       1 flag.cc:153] Restore saved value of xla_msa_enable_while_redundant_eviction_elimination to: true
+I0314 22:51:18.158036       1 flag.cc:153] Restore saved value of xla_msa_enable_window_prefetch to: auto
+I0314 22:51:18.158037       1 flag.cc:153] Restore saved value of xla_msa_experimental_ior_algorithm to: 
+I0314 22:51:18.158038       1 flag.cc:153] Restore saved value of xla_msa_experimental_use_telamalloc to: false
+I0314 22:51:18.158039       1 flag.cc:153] Restore saved value of xla_msa_max_cross_program_prefetches to: 1
+I0314 22:51:18.158040       1 flag.cc:153] Restore saved value of xla_msa_max_outstanding_evictions to: 40
+I0314 22:51:18.158042       1 flag.cc:153] Restore saved value of xla_msa_max_outstanding_prefetches to: 40
+I0314 22:51:18.158043       1 flag.cc:153] Restore saved value of xla_msa_max_overlap_to_mem_size_async_copy_ratio to: 8
+I0314 22:51:18.158044       1 flag.cc:153] Restore saved value of xla_msa_max_repacks to: 4
+I0314 22:51:18.158045       1 flag.cc:153] Restore saved value of xla_msa_max_retries to: 2
+I0314 22:51:18.158047       1 flag.cc:153] Restore saved value of xla_msa_min_overlap_to_async_copy_ratio to: 1
+I0314 22:51:18.158048       1 flag.cc:153] Restore saved value of xla_msa_preferred_overlap_to_async_copy_ratio to: 2
+I0314 22:51:18.158050       1 flag.cc:153] Restore saved value of xla_msa_use_bundle_aware_cost_model to: auto
+I0314 22:51:18.158051       1 flag.cc:153] Restore saved value of xla_optimize_llo_for_llvm to: false
+I0314 22:51:18.158052       1 flag.cc:153] Restore saved value of xla_pf_enable_nd_allreduce to: true
+I0314 22:51:18.158053       1 flag.cc:153] Restore saved value of xla_pgq_fetch_recipe_name to: 
+I0314 22:51:18.158054       1 flag.cc:153] Restore saved value of xla_pgq_instrument_quantizer to: auto
+I0314 22:51:18.158056       1 flag.cc:153] Restore saved value of xla_pgq_recipe_generation_options to: 
+I0314 22:51:18.158057       1 flag.cc:153] Restore saved value of xla_pgq_recipe_name_prefix to: 
+I0314 22:51:18.158058       1 flag.cc:153] Restore saved value of xla_pgq_recipe_text_proto to: 
+I0314 22:51:18.158059       1 flag.cc:153] Restore saved value of xla_pjrt_attach_heapz_on_oom to: false
+I0314 22:51:18.158061       1 flag.cc:153] Restore saved value of xla_ra_split to: true
+I0314 22:51:18.158062       1 flag.cc:153] Restore saved value of xla_run_scoped_memory_assignment to: true
+I0314 22:51:18.158063       1 flag.cc:153] Restore saved value of xla_sc_add_random_dma_delays to: false
+I0314 22:51:18.158065       1 flag.cc:153] Restore saved value of xla_sc_all_to_all_cost to: 1
+I0314 22:51:18.158066       1 flag.cc:153] Restore saved value of xla_sc_all_to_all_latency to: 3
+I0314 22:51:18.158068       1 flag.cc:153] Restore saved value of xla_sc_allocation_estimator_safety_factor to: 1
+I0314 22:51:18.158069       1 flag.cc:153] Restore saved value of xla_sc_allow_large_tensors to: true
+I0314 22:51:18.158071       1 flag.cc:153] Restore saved value of xla_sc_assert_level to: prod
+I0314 22:51:18.158073       1 flag.cc:153] Restore saved value of xla_sc_async_wrapper_fusion_type to: default
+I0314 22:51:18.158074       1 flag.cc:153] Restore saved value of xla_sc_compiler_backtrace_depth to: 10
+I0314 22:51:18.158076       1 flag.cc:153] Restore saved value of xla_sc_conservative_sflag_aliasing to: false
+I0314 22:51:18.158077       1 flag.cc:153] Restore saved value of xla_sc_convert_all_to_all_to_async to: true
+I0314 22:51:18.158078       1 flag.cc:153] Restore saved value of xla_sc_debug_llvm to: false
+I0314 22:51:18.158081       1 flag.cc:153] Restore saved value of xla_sc_debug_loops_llvm to: false
+I0314 22:51:18.158082       1 flag.cc:153] Restore saved value of xla_sc_debug_verbose_llvm to: false
+I0314 22:51:18.158083       1 flag.cc:153] Restore saved value of xla_sc_detect_nan to: false
+I0314 22:51:18.158084       1 flag.cc:153] Restore saved value of xla_sc_disable_fwpe_syncadds to: false
+I0314 22:51:18.158085       1 flag.cc:153] Restore saved value of xla_sc_disable_megacore_partitioning to: false
+I0314 22:51:18.158087       1 flag.cc:153] Restore saved value of xla_sc_disable_remainder_loop_pipelining to: true
+I0314 22:51:18.158088       1 flag.cc:153] Restore saved value of xla_sc_disable_while_minibatching to: false
+I0314 22:51:18.158089       1 flag.cc:153] Restore saved value of xla_sc_disjoint_spmem to: true
+I0314 22:51:18.158090       1 flag.cc:153] Restore saved value of xla_sc_dump_bundles_to to: 
+I0314 22:51:18.158091       1 flag.cc:153] Restore saved value of xla_sc_dump_candidate_fusion_to to: 
+I0314 22:51:18.158093       1 flag.cc:153] Restore saved value of xla_sc_dump_llvm_ir_to to: 
+I0314 22:51:18.158094       1 flag.cc:153] Restore saved value of xla_sc_dump_mlir_to to: 
+I0314 22:51:18.158095       1 flag.cc:153] Restore saved value of xla_sc_dump_mlir_with_debug_info to: false
+I0314 22:51:18.158096       1 flag.cc:153] Restore saved value of xla_sc_emulate_rotating_predicates to: false
+I0314 22:51:18.158098       1 flag.cc:153] Restore saved value of xla_sc_enable_hlo_tracing to: true
+I0314 22:51:18.158099       1 flag.cc:153] Restore saved value of xla_sc_enable_instruction_fusion to: auto
+I0314 22:51:18.158100       1 flag.cc:153] Restore saved value of xla_sc_enable_kalltoalldistance_heuristic to: false
+I0314 22:51:18.158101       1 flag.cc:153] Restore saved value of xla_sc_enable_kcalldonedistance_heuristic to: false
+I0314 22:51:18.158103       1 flag.cc:153] Restore saved value of xla_sc_enable_kdepth_heuristic to: false
+I0314 22:51:18.158104       1 flag.cc:153] Restore saved value of xla_sc_enable_latency_hiding_scheduler to: true
+I0314 22:51:18.158105       1 flag.cc:153] Restore saved value of xla_sc_enable_logging_tilespmem_high_water_mark to: false
+I0314 22:51:18.158106       1 flag.cc:153] Restore saved value of xla_sc_enable_schedule_by_resource_ratio_heuristic to: false
+I0314 22:51:18.158107       1 flag.cc:153] Restore saved value of xla_sc_enable_scheduler_memory_pressure_tracking to: true
+I0314 22:51:18.158108       1 flag.cc:153] Restore saved value of xla_sc_enable_scs_overlays to: true
+I0314 22:51:18.158110       1 flag.cc:153] Restore saved value of xla_sc_enable_tile_overlays to: on
+I0314 22:51:18.158111       1 flag.cc:153] Restore saved value of xla_sc_enable_tpu_abi_scs to: false
+I0314 22:51:18.158112       1 flag.cc:153] Restore saved value of xla_sc_enable_tpu_abi_tec to: false
+I0314 22:51:18.158113       1 flag.cc:153] Restore saved value of xla_sc_fuse_gather_and_scatter_with_compute to: false
+I0314 22:51:18.158116       1 flag.cc:153] Restore saved value of xla_sc_fuse_quantization_compute to: false
+I0314 22:51:18.158117       1 flag.cc:153] Restore saved value of xla_sc_fused_gather_in_compute_loop to: true
+I0314 22:51:18.158118       1 flag.cc:153] Restore saved value of xla_sc_fused_scatter_in_compute_loop to: true
+I0314 22:51:18.158120       1 flag.cc:153] Restore saved value of xla_sc_fusion_emitter_scratchpad_limit to: 1
+I0314 22:51:18.158121       1 flag.cc:153] Restore saved value of xla_sc_hbm_spill_stack to: 1024
+I0314 22:51:18.158122       1 flag.cc:153] Restore saved value of xla_sc_high_water_mark_protobuf_file to: 
+I0314 22:51:18.158124       1 flag.cc:153] Restore saved value of xla_sc_ignore_failure_to_tile_custom_kernel to: false
+I0314 22:51:18.158125       1 flag.cc:153] Restore saved value of xla_sc_include_debug_info to: false
+I0314 22:51:18.158126       1 flag.cc:153] Restore saved value of xla_sc_inject_trace_tile_n to: -1
+I0314 22:51:18.158127       1 flag.cc:153] Restore saved value of xla_sc_limit_scs_sreg_spill_range_test to: 1073741824
+I0314 22:51:18.158129       1 flag.cc:153] Restore saved value of xla_sc_log_hlo_outputs_scs_re to: 
+I0314 22:51:18.158130       1 flag.cc:153] Restore saved value of xla_sc_lowering_debug to: false
+I0314 22:51:18.158131       1 flag.cc:153] Restore saved value of xla_sc_max_pipelining_stages to: 30
+I0314 22:51:18.158132       1 flag.cc:153] Restore saved value of xla_sc_pack_quantization_compute to: false
+I0314 22:51:18.158134       1 flag.cc:153] Restore saved value of xla_sc_pack_unpack_cleaner to: true
+I0314 22:51:18.158135       1 flag.cc:153] Restore saved value of xla_sc_poison_buffers to: false
+I0314 22:51:18.158136       1 flag.cc:153] Restore saved value of xla_sc_print_after_all to: false
+I0314 22:51:18.158137       1 flag.cc:153] Restore saved value of xla_sc_print_after_pass to: 
+I0314 22:51:18.158138       1 flag.cc:153] Restore saved value of xla_sc_profile_graph to: false
+I0314 22:51:18.158140       1 flag.cc:153] Restore saved value of xla_sc_profile_hlo_num_runs to: 1
+I0314 22:51:18.158141       1 flag.cc:153] Restore saved value of xla_sc_profile_hlo_test to: false
+I0314 22:51:18.158142       1 flag.cc:153] Restore saved value of xla_sc_profile_mlo_num_runs to: 1
+I0314 22:51:18.158143       1 flag.cc:153] Restore saved value of xla_sc_profile_mlo_test to: false
+I0314 22:51:18.158145       1 flag.cc:153] Restore saved value of xla_sc_reserve_scs_trampoline_smem to: 32
+I0314 22:51:18.158146       1 flag.cc:153] Restore saved value of xla_sc_reserve_tile_overlay_handler_bundles to: 32
+I0314 22:51:18.158147       1 flag.cc:153] Restore saved value of xla_sc_reserve_tile_task_arg_handler_bundles to: 32
+I0314 22:51:18.158148       1 flag.cc:153] Restore saved value of xla_sc_reserve_trampoline_words to: 96
+I0314 22:51:18.158149       1 flag.cc:153] Restore saved value of xla_sc_rotating_predicates to: false
+I0314 22:51:18.158151       1 flag.cc:153] Restore saved value of xla_sc_scheduler_percent_shared_memory_limit to: 5
+I0314 22:51:18.158152       1 flag.cc:153] Restore saved value of xla_sc_scs_limit_simem_size_test to: 2147483647
+I0314 22:51:18.158155       1 flag.cc:153] Restore saved value of xla_sc_scs_overlay_region_size to: 4011
+I0314 22:51:18.158156       1 flag.cc:153] Restore saved value of xla_sc_scs_program_dump_file to: 
+I0314 22:51:18.158157       1 flag.cc:153] Restore saved value of xla_sc_software_pipeliner_strategy to: swingslack
+I0314 22:51:18.158158       1 flag.cc:153] Restore saved value of xla_sc_splitting_along_feature_dimension to: auto
+I0314 22:51:18.158160       1 flag.cc:153] Restore saved value of xla_sc_stop_process_after_compile to: false
+I0314 22:51:18.158161       1 flag.cc:153] Restore saved value of xla_sc_tile_overlays_size to: -1
+I0314 22:51:18.158162       1 flag.cc:153] Restore saved value of xla_sc_tile_task_cost to: 1
+I0314 22:51:18.158164       1 flag.cc:153] Restore saved value of xla_sc_tile_task_latency to: 12
+I0314 22:51:18.158165       1 flag.cc:153] Restore saved value of xla_sc_tile_tasks_prefetch_ahead to: 1
+I0314 22:51:18.158167       1 flag.cc:153] Restore saved value of xla_sc_tiles to: 16
+I0314 22:51:18.158168       1 flag.cc:153] Restore saved value of xla_sc_use_legacy_embeddings_loop_configs to: false
+I0314 22:51:18.158169       1 flag.cc:153] Restore saved value of xla_sc_use_sc_early_target_scheduling_rule to: false
+I0314 22:51:18.158170       1 flag.cc:153] Restore saved value of xla_set_split_input_output_dmas to: false
+I0314 22:51:18.158171       1 flag.cc:153] Restore saved value of xla_should_add_loop_invariant_op_in_chain to: false
+I0314 22:51:18.158173       1 flag.cc:153] Restore saved value of xla_should_allow_loop_variant_parameter_in_chain to: false
+I0314 22:51:18.158174       1 flag.cc:153] Restore saved value of xla_sink_broadcast_of_constant_into_while_loop to: auto
+I0314 22:51:18.158175       1 flag.cc:153] Restore saved value of xla_sparse_core_enable_hardware_tracing to: true
+I0314 22:51:18.158176       1 flag.cc:153] Restore saved value of xla_tcs_program_dump_file to: 
+I0314 22:51:18.158178       1 flag.cc:153] Restore saved value of xla_testing_inject_hbm_defragmentation_probability to: 0
+I0314 22:51:18.158179       1 flag.cc:153] Restore saved value of xla_tpu_1d_uni_direction_ring_min_input_size_chunks to: 256
+I0314 22:51:18.158180       1 flag.cc:153] Restore saved value of xla_tpu_accumulate_into_mrb to: true
+I0314 22:51:18.158181       1 flag.cc:153] Restore saved value of xla_tpu_accurate_exp to: false
+I0314 22:51:18.158183       1 flag.cc:153] Restore saved value of xla_tpu_accurate_exp2 to: false
+I0314 22:51:18.158184       1 flag.cc:153] Restore saved value of xla_tpu_accurate_expm1 to: false
+I0314 22:51:18.158185       1 flag.cc:153] Restore saved value of xla_tpu_accurate_log1p to: false
+I0314 22:51:18.158186       1 flag.cc:153] Restore saved value of xla_tpu_accurate_log2 to: false
+I0314 22:51:18.158187       1 flag.cc:153] Restore saved value of xla_tpu_accurate_logistic to: false
+I0314 22:51:18.158188       1 flag.cc:153] Restore saved value of xla_tpu_accurate_sigshift to: false
+I0314 22:51:18.158189       1 flag.cc:153] Restore saved value of xla_tpu_add_llo_regions_to_symbol_table to: false
+I0314 22:51:18.158190       1 flag.cc:153] Restore saved value of xla_tpu_agf_combiner_threshold_in_bytes to: 125829120
+I0314 22:51:18.158192       1 flag.cc:153] Restore saved value of xla_tpu_aggressive_opt_barrier_removal to: false
+I0314 22:51:18.158193       1 flag.cc:153] Restore saved value of xla_tpu_all_reduce_vmem_contingency_kib to: 1024
+I0314 22:51:18.158194       1 flag.cc:153] Restore saved value of xla_tpu_all_to_all_with_different_output_addresses to: false
+I0314 22:51:18.158195       1 flag.cc:153] Restore saved value of xla_tpu_alloc_buffer_vdelay to: 0
+I0314 22:51:18.158198       1 flag.cc:153] Restore saved value of xla_tpu_allocate_scoped_cmem_at_same_offset to: false
+I0314 22:51:18.158199       1 flag.cc:153] Restore saved value of xla_tpu_allocate_scoped_vmem_at_same_offset to: true
+I0314 22:51:18.158200       1 flag.cc:153] Restore saved value of xla_tpu_allow_deeply_nested_fusion_numerical_diff to: true
+I0314 22:51:18.158201       1 flag.cc:153] Restore saved value of xla_tpu_allow_in_cmem_copy to: false
+I0314 22:51:18.158202       1 flag.cc:153] Restore saved value of xla_tpu_allow_input_fusion_in_certain_reduce_ops to: true
+I0314 22:51:18.158203       1 flag.cc:153] Restore saved value of xla_tpu_allow_large_2nd_minor_layout_for_x16 to: false
+I0314 22:51:18.158205       1 flag.cc:153] Restore saved value of xla_tpu_allow_large_2nd_minor_layout_for_x4 to: true
+I0314 22:51:18.158206       1 flag.cc:153] Restore saved value of xla_tpu_allow_large_2nd_minor_layout_for_x8 to: false
+I0314 22:51:18.158207       1 flag.cc:153] Restore saved value of xla_tpu_allow_layout_negotiation to: false
+I0314 22:51:18.158208       1 flag.cc:153] Restore saved value of xla_tpu_allow_multi_dim_reduce_rwb to: false
+I0314 22:51:18.158209       1 flag.cc:153] Restore saved value of xla_tpu_allow_sharding_on_minor_dim to: true
+I0314 22:51:18.158211       1 flag.cc:153] Restore saved value of xla_tpu_alternate_memory_benefit_scaling_factor_for_large_buffers to: SQRT
+I0314 22:51:18.158212       1 flag.cc:153] Restore saved value of xla_tpu_always_crash to: false
+I0314 22:51:18.158213       1 flag.cc:153] Restore saved value of xla_tpu_always_spill_to_default_memory to: false
+I0314 22:51:18.158214       1 flag.cc:153] Restore saved value of xla_tpu_arf_combiner_threshold_in_bytes to: 125829120
+I0314 22:51:18.158215       1 flag.cc:153] Restore saved value of xla_tpu_ars_combiner_threshold_in_bytes to: 125829120
+I0314 22:51:18.158216       1 flag.cc:153] Restore saved value of xla_tpu_ars_halo_exchange_count to: 64
+I0314 22:51:18.158218       1 flag.cc:153] Restore saved value of xla_tpu_assign_all_reduce_scatter_layout to: false
+I0314 22:51:18.158219       1 flag.cc:153] Restore saved value of xla_tpu_associative_reordering_threshold to: 2
+I0314 22:51:18.158220       1 flag.cc:153] Restore saved value of xla_tpu_async_collective_fusion_fuse_multiple_collectives to: false
+I0314 22:51:18.158222       1 flag.cc:153] Restore saved value of xla_tpu_async_collective_fusion_with_start_done_only to: false
+I0314 22:51:18.158223       1 flag.cc:153] Restore saved value of xla_tpu_async_copy_bandwidth_scaling_factor to: 1
+I0314 22:51:18.158224       1 flag.cc:153] Restore saved value of xla_tpu_auto_reduce_precision to: false
+I0314 22:51:18.158226       1 flag.cc:153] Restore saved value of xla_tpu_auto_spmd_keep_all_user_shardings to: true
+I0314 22:51:18.158227       1 flag.cc:153] Restore saved value of xla_tpu_auto_spmd_partitioning_memory_budget_gb to: 0
+I0314 22:51:18.158228       1 flag.cc:153] Restore saved value of xla_tpu_auto_spmd_partitioning_memory_budget_ratio to: 1.1
+I0314 22:51:18.158230       1 flag.cc:153] Restore saved value of xla_tpu_auto_spmd_partitioning_solver_timeout_seconds to: 300
+I0314 22:51:18.158231       1 flag.cc:153] Restore saved value of xla_tpu_auto_spmd_remove_all_user_shardings to: false
+I0314 22:51:18.158232       1 flag.cc:153] Restore saved value of xla_tpu_autofdo to: true
+I0314 22:51:18.158233       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_customized to: false
+I0314 22:51:18.158235       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_enable_override_profile_dir to: true
+I0314 22:51:18.158236       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_enable_placer_mirror to: true
+I0314 22:51:18.158237       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_enable_recompilation to: false
+I0314 22:51:18.158238       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_flagnet to: false
+I0314 22:51:18.158239       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_flagnet_confidence_threshold to: auto
+I0314 22:51:18.158240       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_flagnet_hlo_module_size_upper_bound to: auto
+I0314 22:51:18.158242       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_hlo_module_size_threshold to: 15000000
+I0314 22:51:18.158243       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_load_module_flag_fingerprint to: auto
+I0314 22:51:18.158244       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_load_module_layout_fingerprint to: auto
+I0314 22:51:18.158245       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_load_module_sharding_fingerprint to: auto
+I0314 22:51:18.158246       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_module_flags to: true
+I0314 22:51:18.158248       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_module_layouts to: false
+I0314 22:51:18.158249       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_module_shardings to: auto
+I0314 22:51:18.158250       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_op_windows to: true
+I0314 22:51:18.158251       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_profile_dir to: /placer/prod/home/xla-autofdo/fdo_profiles
+I0314 22:51:18.158253       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_profile_file to: 
+I0314 22:51:18.158254       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_profile_file_module_flag to: 
+I0314 22:51:18.158255       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_profile_file_module_layout to: 
+I0314 22:51:18.158257       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_profile_file_module_sharding to: auto
+I0314 22:51:18.158258       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_profile_file_quantization to: 
+I0314 22:51:18.158260       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_profile_timeout to: 30s
+I0314 22:51:18.158262       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_skip_hlo_fingerprints to: 
+I0314 22:51:18.158263       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_skip_module_fingerprints to: 
+I0314 22:51:18.158264       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_start_profile_version to: 0
+I0314 22:51:18.158265       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_use_remote_repo to: true
+I0314 22:51:18.158266       1 flag.cc:153] Restore saved value of xla_tpu_autofdo_verbose to: false
+I0314 22:51:18.158268       1 flag.cc:153] Restore saved value of xla_tpu_autotune_cloud_tpu_version to: auto
+I0314 22:51:18.158269       1 flag.cc:153] Restore saved value of xla_tpu_autotune_database to: 
+I0314 22:51:18.158270       1 flag.cc:153] Restore saved value of xla_tpu_autotune_dots to: false
+I0314 22:51:18.158271       1 flag.cc:153] Restore saved value of xla_tpu_autotune_dump_fp_neighborhood to: 0
+I0314 22:51:18.158272       1 flag.cc:153] Restore saved value of xla_tpu_autotune_flags to: false
+I0314 22:51:18.158273       1 flag.cc:153] Restore saved value of xla_tpu_autotune_fusions to: false
+I0314 22:51:18.158274       1 flag.cc:153] Restore saved value of xla_tpu_autotune_layouts to: false
+I0314 22:51:18.158276       1 flag.cc:153] Restore saved value of xla_tpu_autotune_memory_space_assignment to: false
+I0314 22:51:18.158282       1 flag.cc:153] Restore saved value of xla_tpu_autotune_module_speedup_threshold to: 1.0099999904632568
+I0314 22:51:18.158284       1 flag.cc:153] Restore saved value of xla_tpu_autotune_phase_ordering to: false
+I0314 22:51:18.158285       1 flag.cc:153] Restore saved value of xla_tpu_autotune_shardings to: auto
+I0314 22:51:18.158286       1 flag.cc:153] Restore saved value of xla_tpu_autotune_windows to: false
+I0314 22:51:18.158288       1 flag.cc:153] Restore saved value of xla_tpu_autotune_windows_service to: 
+I0314 22:51:18.158289       1 flag.cc:153] Restore saved value of xla_tpu_backward_propagate_reduce to: false
+I0314 22:51:18.158290       1 flag.cc:153] Restore saved value of xla_tpu_binomial_all_reduce_use_physical_core_ids to: true
+I0314 22:51:18.158291       1 flag.cc:153] Restore saved value of xla_tpu_block_rematerialization_factor to: 1
+I0314 22:51:18.158292       1 flag.cc:153] Restore saved value of xla_tpu_block_rematerialization_record_stats to: false
+I0314 22:51:18.158294       1 flag.cc:153] Restore saved value of xla_tpu_break_of_accum_cost_heuristic to: false
+I0314 22:51:18.158295       1 flag.cc:153] Restore saved value of xla_tpu_buffer_assignment_randomization_salt to: 0
+I0314 22:51:18.158298       1 flag.cc:153] Restore saved value of xla_tpu_buffer_contents_sanitizer_config to: base64serialized:
+I0314 22:51:18.158302       1 flag.cc:153] Restore saved value of xla_tpu_buffer_isolation_config to: base64serialized:
+I0314 22:51:18.158303       1 flag.cc:153] Restore saved value of xla_tpu_check_llo_types to: true
+I0314 22:51:18.158305       1 flag.cc:153] Restore saved value of xla_tpu_check_nan_on_reduce to: false
+I0314 22:51:18.158306       1 flag.cc:153] Restore saved value of xla_tpu_checksum_all_reduce_transfers to: false
+I0314 22:51:18.158307       1 flag.cc:153] Restore saved value of xla_tpu_choose_faster_windowed_einsum_over_mem to: true
+I0314 22:51:18.158308       1 flag.cc:153] Restore saved value of xla_tpu_cmem_enable_while_redundant_eviction_elimination to: true
+I0314 22:51:18.158310       1 flag.cc:153] Restore saved value of xla_tpu_cmem_max_outstanding_evictions to: 40
+I0314 22:51:18.158311       1 flag.cc:153] Restore saved value of xla_tpu_cmem_max_outstanding_prefetches to: 40
+I0314 22:51:18.158312       1 flag.cc:153] Restore saved value of xla_tpu_cmem_max_overlap_to_mem_size_async_copy_ratio to: 8
+I0314 22:51:18.158314       1 flag.cc:153] Restore saved value of xla_tpu_cmem_max_repacks to: 4
+I0314 22:51:18.158315       1 flag.cc:153] Restore saved value of xla_tpu_cmem_max_retries to: 2
+I0314 22:51:18.158317       1 flag.cc:153] Restore saved value of xla_tpu_cmem_memory_space_assignment to: true
+I0314 22:51:18.158319       1 flag.cc:153] Restore saved value of xla_tpu_cmem_min_async_copy_to_overlap_ratio to: 1
+I0314 22:51:18.158321       1 flag.cc:153] Restore saved value of xla_tpu_cmem_min_overlap_to_async_copy_ratio to: 1
+I0314 22:51:18.158322       1 flag.cc:153] Restore saved value of xla_tpu_cmem_preferred_overlap_to_async_copy_ratio to: 2
+I0314 22:51:18.158323       1 flag.cc:153] Restore saved value of xla_tpu_cmem_use_telamalloc to: false
+I0314 22:51:18.158325       1 flag.cc:153] Restore saved value of xla_tpu_collect_sflag_wait_stats to: false
+I0314 22:51:18.158326       1 flag.cc:153] Restore saved value of xla_tpu_collect_sflag_wait_stats_filter to: all
+I0314 22:51:18.158328       1 flag.cc:153] Restore saved value of xla_tpu_collect_sflag_wait_stats_sf to: 0.001
+I0314 22:51:18.158329       1 flag.cc:153] Restore saved value of xla_tpu_collect_sflag_wait_stats_trace to: false
+I0314 22:51:18.158330       1 flag.cc:153] Restore saved value of xla_tpu_collective_cooldown_seconds to: auto
+I0314 22:51:18.158331       1 flag.cc:153] Restore saved value of xla_tpu_collective_fusion_pipeliner_all_gather to: false
+I0314 22:51:18.158332       1 flag.cc:153] Restore saved value of xla_tpu_collective_fusion_pipeliner_all_reduce to: false
+I0314 22:51:18.158334       1 flag.cc:153] Restore saved value of xla_tpu_collective_offload_assert_size_in_unit to: false
+I0314 22:51:18.158335       1 flag.cc:153] Restore saved value of xla_tpu_collectives_dma_send_delay_mask to: 0
+I0314 22:51:18.158336       1 flag.cc:153] Restore saved value of xla_tpu_collectives_dma_wait_delay_mask to: 0
+I0314 22:51:18.158337       1 flag.cc:153] Restore saved value of xla_tpu_combine_quantized_all_reduce_operands to: auto
+I0314 22:51:18.158339       1 flag.cc:153] Restore saved value of xla_tpu_communication_computation_optimization to: false
+I0314 22:51:18.158340       1 flag.cc:153] Restore saved value of xla_tpu_conditional_code_motion_allowance to: 5000
+I0314 22:51:18.158341       1 flag.cc:153] Restore saved value of xla_tpu_conditional_code_motion_config to: 
+I0314 22:51:18.158342       1 flag.cc:153] Restore saved value of xla_tpu_consider_lp_llo_scheduler to: false
+I0314 22:51:18.158344       1 flag.cc:153] Restore saved value of xla_tpu_convert_s4_to_fp8e4m3 to: auto
+I0314 22:51:18.158345       1 flag.cc:153] Restore saved value of xla_tpu_copy_elision_analysis_allowance to: 150000
+I0314 22:51:18.158346       1 flag.cc:153] Restore saved value of xla_tpu_copy_fusion_allow_split to: true
+I0314 22:51:18.158347       1 flag.cc:153] Restore saved value of xla_tpu_copy_fusion_minimum_copy_size_in_bytes to: 9223372036854775807
+I0314 22:51:18.158349       1 flag.cc:153] Restore saved value of xla_tpu_copy_fusion_pad_unpad_ratio to: 300
+I0314 22:51:18.158350       1 flag.cc:153] Restore saved value of xla_tpu_copy_fusion_threshold to: 16
+I0314 22:51:18.158351       1 flag.cc:153] Restore saved value of xla_tpu_copy_insertion_use_region_analysis to: false
+I0314 22:51:18.158353       1 flag.cc:153] Restore saved value of xla_tpu_copy_insertion_use_region_analysis_limit to: 1000
+I0314 22:51:18.158354       1 flag.cc:153] Restore saved value of xla_tpu_copy_start_vdelay to: 0
+I0314 22:51:18.158357       1 flag.cc:153] Restore saved value of xla_tpu_cross_module_net_router_ring_limit to: 8
+I0314 22:51:18.158358       1 flag.cc:153] Restore saved value of xla_tpu_cross_replica_net_router_ring_limit to: 16
+I0314 22:51:18.158360       1 flag.cc:153] Restore saved value of xla_tpu_crs_bounds_check_threshold_chips_count to: 16
+I0314 22:51:18.158361       1 flag.cc:153] Restore saved value of xla_tpu_custom_call_nop_return_token_vdelay to: 0
+I0314 22:51:18.158362       1 flag.cc:153] Restore saved value of xla_tpu_custom_fusion_no_global_unfusible to: false
+I0314 22:51:18.158363       1 flag.cc:153] Restore saved value of xla_tpu_custom_fusion_traverse_edges_twice to: false
+I0314 22:51:18.158364       1 flag.cc:153] Restore saved value of xla_tpu_data_parallel_dcn_ar_dual_pipelining to: false
+I0314 22:51:18.158365       1 flag.cc:153] Restore saved value of xla_tpu_data_parallel_opt_different_sized_ops to: true
+I0314 22:51:18.158367       1 flag.cc:153] Restore saved value of xla_tpu_dcn_all_reduce_combiner_threshold_bytes to: auto
+I0314 22:51:18.158368       1 flag.cc:153] Restore saved value of xla_tpu_dcn_max_overlap_estimation to: 8
+I0314 22:51:18.158369       1 flag.cc:153] Restore saved value of xla_tpu_dcn_overlap_limit to: 9223372036854775807
+I0314 22:51:18.158371       1 flag.cc:153] Restore saved value of xla_tpu_debug_disable_sparse_core_all_gather_spmem_bounce_buffer to: auto
+I0314 22:51:18.158372       1 flag.cc:153] Restore saved value of xla_tpu_debug_emitter_hlo_filter to: auto
+I0314 22:51:18.158373       1 flag.cc:153] Restore saved value of xla_tpu_debug_megacore_fusion_run_on_single_core to: false
+I0314 22:51:18.158374       1 flag.cc:153] Restore saved value of xla_tpu_debug_sflag_wait_shalt_on_detection to: false
+I0314 22:51:18.158376       1 flag.cc:153] Restore saved value of xla_tpu_debug_sflag_wait_timeout_ms to: 0
+I0314 22:51:18.158377       1 flag.cc:153] Restore saved value of xla_tpu_decompose_all_gather_einsum to: false
+I0314 22:51:18.158378       1 flag.cc:153] Restore saved value of xla_tpu_decompose_all_gather_fusion to: false
+I0314 22:51:18.158379       1 flag.cc:153] Restore saved value of xla_tpu_decompose_all_gather_with_multiple_einsums to: true
+I0314 22:51:18.158380       1 flag.cc:153] Restore saved value of xla_tpu_decompose_all_reduce_bidirectional_communication to: false
+I0314 22:51:18.158382       1 flag.cc:153] Restore saved value of xla_tpu_decompose_einsum_reduce_scatter to: false
+I0314 22:51:18.158383       1 flag.cc:153] Restore saved value of xla_tpu_decompose_reduce_scatter_fusion to: false
+I0314 22:51:18.158384       1 flag.cc:153] Restore saved value of xla_tpu_deduplicated_hlo_min_bundle_count to: 50
+I0314 22:51:18.158385       1 flag.cc:153] Restore saved value of xla_tpu_detect_inf to: false
+I0314 22:51:18.158387       1 flag.cc:153] Restore saved value of xla_tpu_detect_llo_nan to: false
+I0314 22:51:18.158388       1 flag.cc:153] Restore saved value of xla_tpu_detect_nan to: false
+I0314 22:51:18.158389       1 flag.cc:153] Restore saved value of xla_tpu_detect_only_on_fusion to: false
+I0314 22:51:18.158390       1 flag.cc:153] Restore saved value of xla_tpu_detect_special_fp to: false
+I0314 22:51:18.158391       1 flag.cc:153] Restore saved value of xla_tpu_disable_all_reduce_scatter_fusion_unblock_b333701937 to: false
+I0314 22:51:18.158392       1 flag.cc:153] Restore saved value of xla_tpu_disable_infeed to: false
+I0314 22:51:18.158393       1 flag.cc:153] Restore saved value of xla_tpu_disable_multi_sparsecore_gather_offloading to: false
+I0314 22:51:18.158395       1 flag.cc:153] Restore saved value of xla_tpu_disable_outfeed to: false
+I0314 22:51:18.158396       1 flag.cc:153] Restore saved value of xla_tpu_disable_sparse_core_collective_offload_remover to: auto
+I0314 22:51:18.158397       1 flag.cc:153] Restore saved value of xla_tpu_disallow_in_alt_mem to: 
+I0314 22:51:18.158398       1 flag.cc:153] Restore saved value of xla_tpu_dot_dot_fusion to: true
+I0314 22:51:18.158400       1 flag.cc:153] Restore saved value of xla_tpu_dot_dot_fusion_duplicated to: false
+I0314 22:51:18.158401       1 flag.cc:153] Restore saved value of xla_tpu_dot_dot_fusion_separable_convs_only to: false
+I0314 22:51:18.158402       1 flag.cc:153] Restore saved value of xla_tpu_double_count_fusion_cost_estimate to: false
+I0314 22:51:18.158403       1 flag.cc:153] Restore saved value of xla_tpu_dump_computations_hlo_profile to: false
+I0314 22:51:18.158404       1 flag.cc:153] Restore saved value of xla_tpu_dump_logs_to_dir to: 
+I0314 22:51:18.158406       1 flag.cc:153] Restore saved value of xla_tpu_dus_emitter_desired_update_window_chunk_count to: 64
+I0314 22:51:18.158407       1 flag.cc:153] Restore saved value of xla_tpu_dvfs_file to: 
+I0314 22:51:18.158409       1 flag.cc:153] Restore saved value of xla_tpu_dvfs_p_state to: -1
+I0314 22:51:18.158410       1 flag.cc:153] Restore saved value of xla_tpu_dynamic_quantizer_config to: 
+I0314 22:51:18.158411       1 flag.cc:153] Restore saved value of xla_tpu_embedding_table_oblongness_threshold to: 50
+I0314 22:51:18.158413       1 flag.cc:153] Restore saved value of xla_tpu_enable_2d_cross_module_reduce_scatter to: true
+I0314 22:51:18.158414       1 flag.cc:153] Restore saved value of xla_tpu_enable_advanced_while_initializer_removal to: auto
+I0314 22:51:18.158415       1 flag.cc:153] Restore saved value of xla_tpu_enable_ag_backward_pipelining to: false
+I0314 22:51:18.158417       1 flag.cc:153] Restore saved value of xla_tpu_enable_aggressive_broadcast_priority_update to: false
+I0314 22:51:18.158418       1 flag.cc:153] Restore saved value of xla_tpu_enable_aggressive_loop_fusion_layout_opt to: true
+I0314 22:51:18.158419       1 flag.cc:153] Restore saved value of xla_tpu_enable_all_experimental_scheduler_features to: false
+I0314 22:51:18.158420       1 flag.cc:153] Restore saved value of xla_tpu_enable_all_gather_offload_tracing to: false
+I0314 22:51:18.158421       1 flag.cc:153] Restore saved value of xla_tpu_enable_all_reduce_offload_tracing to: false
+I0314 22:51:18.158422       1 flag.cc:153] Restore saved value of xla_tpu_enable_all_reduce_scatter_fusion to: true
+I0314 22:51:18.158423       1 flag.cc:153] Restore saved value of xla_tpu_enable_all_reduce_scatter_fusion_debug_mode to: false
+I0314 22:51:18.158425       1 flag.cc:153] Restore saved value of xla_tpu_enable_all_reduce_tracing to: auto
+I0314 22:51:18.158426       1 flag.cc:153] Restore saved value of xla_tpu_enable_all_to_all_destination_info_caching to: true
+I0314 22:51:18.158427       1 flag.cc:153] Restore saved value of xla_tpu_enable_all_to_all_group_id_info_caching to: true
+I0314 22:51:18.158428       1 flag.cc:153] Restore saved value of xla_tpu_enable_asymmetric_max_colors to: true
+I0314 22:51:18.158429       1 flag.cc:153] Restore saved value of xla_tpu_enable_async_all_to_all to: false
+I0314 22:51:18.158431       1 flag.cc:153] Restore saved value of xla_tpu_enable_async_collective_fusion to: true
+I0314 22:51:18.158432       1 flag.cc:153] Restore saved value of xla_tpu_enable_async_collective_fusion_fuse_all_gather to: auto
+I0314 22:51:18.158433       1 flag.cc:153] Restore saved value of xla_tpu_enable_async_collective_fusion_fuse_all_reduce to: false
+I0314 22:51:18.158435       1 flag.cc:153] Restore saved value of xla_tpu_enable_async_collective_fusion_fuse_kloop_fusions to: false
+I0314 22:51:18.158436       1 flag.cc:153] Restore saved value of xla_tpu_enable_async_collective_fusion_fuse_reduce_scatter to: false
+I0314 22:51:18.158437       1 flag.cc:153] Restore saved value of xla_tpu_enable_async_collective_fusion_multiple_steps to: true
+I0314 22:51:18.158438       1 flag.cc:153] Restore saved value of xla_tpu_enable_async_collective_fusion_while_loops to: true
+I0314 22:51:18.158439       1 flag.cc:153] Restore saved value of xla_tpu_enable_async_collective_fusion_with_mosaic_custom_call to: false
+I0314 22:51:18.158441       1 flag.cc:153] Restore saved value of xla_tpu_enable_async_collective_merger to: true
+I0314 22:51:18.158442       1 flag.cc:153] Restore saved value of xla_tpu_enable_async_pincer_emitter to: false
+I0314 22:51:18.158443       1 flag.cc:153] Restore saved value of xla_tpu_enable_async_pincer_short_emitter_for_cf to: false
+I0314 22:51:18.158444       1 flag.cc:153] Restore saved value of xla_tpu_enable_async_ragged_all_to_all to: auto
+I0314 22:51:18.158446       1 flag.cc:153] Restore saved value of xla_tpu_enable_barrier_assignment_fuel to: false
+I0314 22:51:18.158447       1 flag.cc:153] Restore saved value of xla_tpu_enable_barrier_assignment_fuel_for_sc_collectives to: false
+I0314 22:51:18.158448       1 flag.cc:153] Restore saved value of xla_tpu_enable_concurrent_sparse_core_offloading to: auto
+I0314 22:51:18.158449       1 flag.cc:153] Restore saved value of xla_tpu_enable_copy_fusion to: true
+I0314 22:51:18.158451       1 flag.cc:153] Restore saved value of xla_tpu_enable_copy_permute_minor_fusion to: true
+I0314 22:51:18.158452       1 flag.cc:153] Restore saved value of xla_tpu_enable_cp_send_done_scheduling to: false
+I0314 22:51:18.158453       1 flag.cc:153] Restore saved value of xla_tpu_enable_cross_module_binomial_all_reduce to: false
+I0314 22:51:18.158454       1 flag.cc:153] Restore saved value of xla_tpu_enable_cross_program_prefetch_freeing to: true
+I0314 22:51:18.158455       1 flag.cc:153] Restore saved value of xla_tpu_enable_data_parallel_all_reduce_opt to: true
+I0314 22:51:18.158457       1 flag.cc:153] Restore saved value of xla_tpu_enable_deduplicated_calls to: auto
+I0314 22:51:18.158458       1 flag.cc:153] Restore saved value of xla_tpu_enable_degenerate_dimension_rewriter to: auto
+I0314 22:51:18.158459       1 flag.cc:153] Restore saved value of xla_tpu_enable_depth_memory_pressure_reduction to: true
+I0314 22:51:18.158460       1 flag.cc:153] Restore saved value of xla_tpu_enable_dma_count_checking to: false
+I0314 22:51:18.158461       1 flag.cc:153] Restore saved value of xla_tpu_enable_domain_passes to: false
+I0314 22:51:18.158463       1 flag.cc:153] Restore saved value of xla_tpu_enable_dot_strength_reduction to: true
+I0314 22:51:18.158464       1 flag.cc:153] Restore saved value of xla_tpu_enable_experimental_fusion_cost_model to: false
+I0314 22:51:18.158465       1 flag.cc:153] Restore saved value of xla_tpu_enable_expression_constant_splitter to: true
+I0314 22:51:18.158466       1 flag.cc:153] Restore saved value of xla_tpu_enable_flash_attention to: true
+I0314 22:51:18.158467       1 flag.cc:153] Restore saved value of xla_tpu_enable_fusion_debugger to: auto
+I0314 22:51:18.158469       1 flag.cc:153] Restore saved value of xla_tpu_enable_glp_ring_reordering to: true
+I0314 22:51:18.158470       1 flag.cc:153] Restore saved value of xla_tpu_enable_graph_splitting to: false
+I0314 22:51:18.158471       1 flag.cc:153] Restore saved value of xla_tpu_enable_hbm_test_buffer_for_sc_collective_offload to: auto
+I0314 22:51:18.158472       1 flag.cc:153] Restore saved value of xla_tpu_enable_hlo_value_tracking to: false
+I0314 22:51:18.158474       1 flag.cc:153] Restore saved value of xla_tpu_enable_host_assisted_instrumentation to: false
+I0314 22:51:18.158475       1 flag.cc:153] Restore saved value of xla_tpu_enable_host_aware_passes to: false
+I0314 22:51:18.158477       1 flag.cc:153] Restore saved value of xla_tpu_enable_ici_ag_pipelining to: auto
+I0314 22:51:18.158478       1 flag.cc:153] Restore saved value of xla_tpu_enable_indexing_optimizations to: true
+I0314 22:51:18.158479       1 flag.cc:153] Restore saved value of xla_tpu_enable_int4_rewrite to: false
+I0314 22:51:18.158480       1 flag.cc:153] Restore saved value of xla_tpu_enable_internal_shard_padding_for_1d_reduce_scatter to: false
+I0314 22:51:18.158481       1 flag.cc:153] Restore saved value of xla_tpu_enable_large_2nd_minor_layout to: true
+I0314 22:51:18.158482       1 flag.cc:153] Restore saved value of xla_tpu_enable_large_2nd_minor_layout_for_x16 to: false
+I0314 22:51:18.158484       1 flag.cc:153] Restore saved value of xla_tpu_enable_large_2nd_minor_layout_for_x4 to: true
+I0314 22:51:18.158485       1 flag.cc:153] Restore saved value of xla_tpu_enable_large_2nd_minor_layout_for_x8 to: auto
+I0314 22:51:18.158486       1 flag.cc:153] Restore saved value of xla_tpu_enable_latency_hiding_scheduler to: true
+I0314 22:51:18.158487       1 flag.cc:153] Restore saved value of xla_tpu_enable_llo_linter to: false
+I0314 22:51:18.158489       1 flag.cc:153] Restore saved value of xla_tpu_enable_local_dma_strict_order_verification to: false
+I0314 22:51:18.158490       1 flag.cc:153] Restore saved value of xla_tpu_enable_log_callback to: true
+I0314 22:51:18.158491       1 flag.cc:153] Restore saved value of xla_tpu_enable_log_recorder to: false
+I0314 22:51:18.158493       1 flag.cc:153] Restore saved value of xla_tpu_enable_log_recorder_partitioned_logging to: false
+I0314 22:51:18.158494       1 flag.cc:153] Restore saved value of xla_tpu_enable_megacore_fusion to: false
+I0314 22:51:18.158495       1 flag.cc:153] Restore saved value of xla_tpu_enable_megascale_barrier to: false
+I0314 22:51:18.158496       1 flag.cc:153] Restore saved value of xla_tpu_enable_minor_all_gather to: true
+I0314 22:51:18.158497       1 flag.cc:153] Restore saved value of xla_tpu_enable_multi_level_input_dot_dot_fusion to: false
+I0314 22:51:18.158498       1 flag.cc:153] Restore saved value of xla_tpu_enable_multi_level_nested_dot_fusion to: false
+I0314 22:51:18.158500       1 flag.cc:153] Restore saved value of xla_tpu_enable_multi_level_nested_loop_fusion to: false
+I0314 22:51:18.158501       1 flag.cc:153] Restore saved value of xla_tpu_enable_multi_level_output_dot_dot_fusion to: false
+I0314 22:51:18.158502       1 flag.cc:153] Restore saved value of xla_tpu_enable_multi_recv_for_dcn_all_reduce_sinking to: auto
+I0314 22:51:18.158503       1 flag.cc:153] Restore saved value of xla_tpu_enable_nd_wus_on_partial_active_dims to: false
+I0314 22:51:18.158504       1 flag.cc:153] Restore saved value of xla_tpu_enable_net_router_in_all_gather to: true
+I0314 22:51:18.158506       1 flag.cc:153] Restore saved value of xla_tpu_enable_offloading_gather_to_sparsecore to: false
+I0314 22:51:18.158507       1 flag.cc:153] Restore saved value of xla_tpu_enable_offloading_reduce_to_sparsecore to: false
+I0314 22:51:18.158508       1 flag.cc:153] Restore saved value of xla_tpu_enable_offloading_scatter_to_sparsecore to: false
+I0314 22:51:18.158509       1 flag.cc:153] Restore saved value of xla_tpu_enable_operand_span_exposure to: false
+I0314 22:51:18.158511       1 flag.cc:153] Restore saved value of xla_tpu_enable_outfeed_sanity to: auto
+I0314 22:51:18.158512       1 flag.cc:153] Restore saved value of xla_tpu_enable_pincer_short_emitter to: true
+I0314 22:51:18.158513       1 flag.cc:153] Restore saved value of xla_tpu_enable_pincer_short_fusion_emitter to: false
+I0314 22:51:18.158514       1 flag.cc:153] Restore saved value of xla_tpu_enable_pipelined_loop_unrolling to: auto
+I0314 22:51:18.158516       1 flag.cc:153] Restore saved value of xla_tpu_enable_propagation_visualization_logging to: false
+I0314 22:51:18.158517       1 flag.cc:153] Restore saved value of xla_tpu_enable_ragged_dot_kernel to: true
+I0314 22:51:18.158518       1 flag.cc:153] Restore saved value of xla_tpu_enable_reduce_scatter_offload_tracing to: false
+I0314 22:51:18.158519       1 flag.cc:153] Restore saved value of xla_tpu_enable_sc_log_recorder to: auto
+I0314 22:51:18.158520       1 flag.cc:153] Restore saved value of xla_tpu_enable_sc_sdc_checker to: auto
+I0314 22:51:18.158521       1 flag.cc:153] Restore saved value of xla_tpu_enable_sc_sdc_checker_loop_iteration_count to: auto
+I0314 22:51:18.158523       1 flag.cc:153] Restore saved value of xla_tpu_enable_scheduler_memory_pressure_tracking to: auto
+I0314 22:51:18.158524       1 flag.cc:153] Restore saved value of xla_tpu_enable_sdc_checker to: false
+I0314 22:51:18.158525       1 flag.cc:153] Restore saved value of xla_tpu_enable_send_recv_aggregation to: true
+I0314 22:51:18.158526       1 flag.cc:153] Restore saved value of xla_tpu_enable_send_recv_post_process_scheduling to: false
+I0314 22:51:18.158528       1 flag.cc:153] Restore saved value of xla_tpu_enable_slack_in_trough to: 
+I0314 22:51:18.158530       1 flag.cc:153] Restore saved value of xla_tpu_enable_sparse_core_collective_offload_2d_all_gather to: auto
+I0314 22:51:18.158532       1 flag.cc:153] Restore saved value of xla_tpu_enable_sparse_core_collective_offload_all_gather to: false
+I0314 22:51:18.158533       1 flag.cc:153] Restore saved value of xla_tpu_enable_sparse_core_collective_offload_all_reduce to: false
+I0314 22:51:18.158535       1 flag.cc:153] Restore saved value of xla_tpu_enable_sparse_core_collective_offload_reduce_scatter to: false
+I0314 22:51:18.158538       1 flag.cc:153] Restore saved value of xla_tpu_enable_sparse_core_compute_offload to: false
+I0314 22:51:18.158539       1 flag.cc:153] Restore saved value of xla_tpu_enable_sparse_core_mismatch_detector to: auto
+I0314 22:51:18.158541       1 flag.cc:153] Restore saved value of xla_tpu_enable_sparse_core_offloading_stats to: false
+I0314 22:51:18.158542       1 flag.cc:153] Restore saved value of xla_tpu_enable_sparse_gradient_rewrite to: false
+I0314 22:51:18.158543       1 flag.cc:153] Restore saved value of xla_tpu_enable_sunk_dcn_allreduce_done_with_host_reduction to: false
+I0314 22:51:18.158545       1 flag.cc:153] Restore saved value of xla_tpu_enable_tile_log_recorder to: false
+I0314 22:51:18.158546       1 flag.cc:153] Restore saved value of xla_tpu_enable_tree_use_collective_pipeliner to: true
+I0314 22:51:18.158548       1 flag.cc:153] Restore saved value of xla_tpu_enable_untiled_layout to: false
+I0314 22:51:18.158549       1 flag.cc:153] Restore saved value of xla_tpu_enable_vlp_small_topology_ring_reordering to: true
+I0314 22:51:18.158551       1 flag.cc:153] Restore saved value of xla_tpu_enable_vmem_to_vmem_dmas to: true
+I0314 22:51:18.158552       1 flag.cc:153] Restore saved value of xla_tpu_enable_windowed_einsum_for_all_gather to: true
+I0314 22:51:18.158553       1 flag.cc:153] Restore saved value of xla_tpu_enable_windowed_einsum_for_reduce_scatter to: true
+I0314 22:51:18.158554       1 flag.cc:153] Restore saved value of xla_tpu_enforce_limited_ici_routing to: false
+I0314 22:51:18.158555       1 flag.cc:153] Restore saved value of xla_tpu_enforce_prefetch_fifo_order to: false
+I0314 22:51:18.158557       1 flag.cc:153] Restore saved value of xla_tpu_enforce_two_phase_sharding_topology to: false
+I0314 22:51:18.158558       1 flag.cc:153] Restore saved value of xla_tpu_expand_rng_bit_generator to: true
+I0314 22:51:18.158559       1 flag.cc:153] Restore saved value of xla_tpu_experimental_allow_fast_quantization_conversions to: false
+I0314 22:51:18.158561       1 flag.cc:153] Restore saved value of xla_tpu_experimental_cmem_fraction_for_hlo_outputs to: 0.75
+I0314 22:51:18.158562       1 flag.cc:153] Restore saved value of xla_tpu_experimental_do_not_use_fusion_estimate_cost_changes to: auto
+I0314 22:51:18.158563       1 flag.cc:153] Restore saved value of xla_tpu_experimental_enable_dynamic_int8_quantization to: false
+I0314 22:51:18.158565       1 flag.cc:153] Restore saved value of xla_tpu_experimental_max_concat_padding_ratio to: 2
+I0314 22:51:18.158566       1 flag.cc:153] Restore saved value of xla_tpu_experimental_max_padding_gib to: 0.125
+I0314 22:51:18.158568       1 flag.cc:153] Restore saved value of xla_tpu_extra_hoisting_range_for_register_producers to: 128
+I0314 22:51:18.158569       1 flag.cc:153] Restore saved value of xla_tpu_flowdown_critical_nodes to: true
+I0314 22:51:18.158570       1 flag.cc:153] Restore saved value of xla_tpu_flush_all_logs to: false
+I0314 22:51:18.158572       1 flag.cc:153] Restore saved value of xla_tpu_force_1d_allreduce_at_chunk_count to: -1
+I0314 22:51:18.158573       1 flag.cc:153] Restore saved value of xla_tpu_force_async_pincer_short_emitter_test_only to: false
+I0314 22:51:18.158574       1 flag.cc:153] Restore saved value of xla_tpu_force_excess_precision_bf16 to: false
+I0314 22:51:18.158575       1 flag.cc:153] Restore saved value of xla_tpu_force_global_barrier_on_incomplete_collective_permutes to: false
+I0314 22:51:18.158576       1 flag.cc:153] Restore saved value of xla_tpu_force_global_barriers to: false
+I0314 22:51:18.158578       1 flag.cc:153] Restore saved value of xla_tpu_force_global_barriers_for_sc_collectives to: false
+I0314 22:51:18.158579       1 flag.cc:153] Restore saved value of xla_tpu_force_llo_software_pipelining to: false
+I0314 22:51:18.158580       1 flag.cc:153] Restore saved value of xla_tpu_force_megacore_barrier_at_hlos_start to: false
+I0314 22:51:18.158581       1 flag.cc:153] Restore saved value of xla_tpu_force_megacore_barrier_use_sflag to: false
+I0314 22:51:18.158583       1 flag.cc:153] Restore saved value of xla_tpu_force_non_queue_host_command to: false
+I0314 22:51:18.158584       1 flag.cc:153] Restore saved value of xla_tpu_force_send_recv_host_on_same_resource to: auto
+I0314 22:51:18.158585       1 flag.cc:153] Restore saved value of xla_tpu_force_startup_barrier_in_binomial_all_reduce to: false
+I0314 22:51:18.158586       1 flag.cc:153] Restore saved value of xla_tpu_force_vector_issue to: false
+I0314 22:51:18.158587       1 flag.cc:153] Restore saved value of xla_tpu_force_vmem_dma_and_spans to: false
+I0314 22:51:18.158589       1 flag.cc:153] Restore saved value of xla_tpu_fuse_non_trivial_x4_producers_into_conv_like to: false
+I0314 22:51:18.158590       1 flag.cc:153] Restore saved value of xla_tpu_fuse_non_trivial_x8_producers_into_conv_like to: true
+I0314 22:51:18.158591       1 flag.cc:153] Restore saved value of xla_tpu_fuse_only_phase0_in_2d_reduce_scatter to: false
+I0314 22:51:18.158592       1 flag.cc:153] Restore saved value of xla_tpu_fusion_config_collection to: 
+I0314 22:51:18.158594       1 flag.cc:153] Restore saved value of xla_tpu_fusion_cost_model_options to: auto
+I0314 22:51:18.158595       1 flag.cc:153] Restore saved value of xla_tpu_gather_padding_token to: -1
+I0314 22:51:18.158596       1 flag.cc:153] Restore saved value of xla_tpu_handle_reduce_window_as_convolution to: true
+I0314 22:51:18.158598       1 flag.cc:153] Restore saved value of xla_tpu_hbm_bw to: -1
+I0314 22:51:18.158599       1 flag.cc:153] Restore saved value of xla_tpu_hbm_initial_cycle_penalty to: -1
+I0314 22:51:18.158601       1 flag.cc:153] Restore saved value of xla_tpu_hlo_graph_host_verify to: false
+I0314 22:51:18.158602       1 flag.cc:153] Restore saved value of xla_tpu_host_dcn_reduce_max_sinking_limit to: 9223372036854775807
+I0314 22:51:18.158603       1 flag.cc:153] Restore saved value of xla_tpu_host_dcn_reduce_min_sinking_limit to: 0
+I0314 22:51:18.158604       1 flag.cc:153] Restore saved value of xla_tpu_host_transfer_overlap_limit to: 8
+I0314 22:51:18.158606       1 flag.cc:153] Restore saved value of xla_tpu_host_verify_max_elements_to_log to: 10
+I0314 22:51:18.158607       1 flag.cc:153] Restore saved value of xla_tpu_host_verify_max_output_size to: 536870912
+I0314 22:51:18.158609       1 flag.cc:153] Restore saved value of xla_tpu_host_verify_min_abs_diff_to_log to: 1e-06
+I0314 22:51:18.158610       1 flag.cc:153] Restore saved value of xla_tpu_host_verify_min_rel_diff_to_log to: 1e-06
+I0314 22:51:18.158612       1 flag.cc:153] Restore saved value of xla_tpu_ici_sdc_test_buffer_size_chunks to: 32
+I0314 22:51:18.158613       1 flag.cc:153] Restore saved value of xla_tpu_ici_sdc_test_delay_mask to: 0
+I0314 22:51:18.158614       1 flag.cc:153] Restore saved value of xla_tpu_ici_sdc_test_inject_mismatch_for_testing_only to: false
+I0314 22:51:18.158615       1 flag.cc:153] Restore saved value of xla_tpu_ici_sdc_test_iterations to: 10
+I0314 22:51:18.158617       1 flag.cc:153] Restore saved value of xla_tpu_ici_sdc_test_max_distance to: 1
+I0314 22:51:18.158618       1 flag.cc:153] Restore saved value of xla_tpu_ici_sdc_test_packet_size_chunks to: 4
+I0314 22:51:18.158619       1 flag.cc:153] Restore saved value of xla_tpu_ici_sdc_test_pipeline_depth to: 4
+I0314 22:51:18.158620       1 flag.cc:153] Restore saved value of xla_tpu_ici_sdc_test_run_on_program_start to: false
+I0314 22:51:18.158622       1 flag.cc:153] Restore saved value of xla_tpu_ici_sdc_test_sflag_wait_timeout_ms to: 0
+I0314 22:51:18.158623       1 flag.cc:153] Restore saved value of xla_tpu_impure_allow_flag_override_of_tpu_comp_env to: false
+I0314 22:51:18.158624       1 flag.cc:153] Restore saved value of xla_tpu_impure_coff_never_combine_colors_test_only to: false
+I0314 22:51:18.158625       1 flag.cc:153] Restore saved value of xla_tpu_impure_enable_vector_result_pop_pack to: auto
+I0314 22:51:18.158627       1 flag.cc:153] Restore saved value of xla_tpu_impure_latency_hiding_scheduler_profile_path to: 
+I0314 22:51:18.158628       1 flag.cc:153] Restore saved value of xla_tpu_impure_oom_fast_exit_threshold to: 10
+I0314 22:51:18.158629       1 flag.cc:153] Restore saved value of xla_tpu_impure_pack_preds_as_single_bit to: false
+I0314 22:51:18.158631       1 flag.cc:153] Restore saved value of xla_tpu_impure_probability_of_host_offloading to: 0
+I0314 22:51:18.158632       1 flag.cc:153] Restore saved value of xla_tpu_impure_sink_dma_done_blocking_insts to: false
+I0314 22:51:18.158634       1 flag.cc:153] Restore saved value of xla_tpu_impure_sink_dma_done_insts to: true
+I0314 22:51:18.158635       1 flag.cc:153] Restore saved value of xla_tpu_impure_test_only_disable_flatten_mismatch_detector_computation to: false
+I0314 22:51:18.158636       1 flag.cc:153] Restore saved value of xla_tpu_impure_test_only_logging_in_mismatch_detector to: false
+I0314 22:51:18.158637       1 flag.cc:153] Restore saved value of xla_tpu_impure_test_only_poison_inputs_to_tc_collective to: false
+I0314 22:51:18.158639       1 flag.cc:153] Restore saved value of xla_tpu_impure_test_only_poison_inputs_with_nans to: false
+I0314 22:51:18.158640       1 flag.cc:153] Restore saved value of xla_tpu_impure_test_only_poison_sc_sdc_buffers to: false
+I0314 22:51:18.158641       1 flag.cc:153] Restore saved value of xla_tpu_impure_test_only_poison_specific_hlo to: 
+I0314 22:51:18.158642       1 flag.cc:153] Restore saved value of xla_tpu_impure_track_debug_metadata to: false
+I0314 22:51:18.158643       1 flag.cc:153] Restore saved value of xla_tpu_impure_use_lmr_on_gxc to: false
+I0314 22:51:18.158645       1 flag.cc:153] Restore saved value of xla_tpu_impure_verify_allocations to: true
+I0314 22:51:18.158646       1 flag.cc:153] Restore saved value of xla_tpu_include_hlo_statistics_in_llo_dump to: false
+I0314 22:51:18.158647       1 flag.cc:153] Restore saved value of xla_tpu_inference_short_all_reduce_enable_tracing to: false
+I0314 22:51:18.158649       1 flag.cc:153] Restore saved value of xla_tpu_inference_short_all_reduce_max_tensor_chunks to: 0
+I0314 22:51:18.158650       1 flag.cc:153] Restore saved value of xla_tpu_input_conv_multi_users to: false
+I0314 22:51:18.158651       1 flag.cc:153] Restore saved value of xla_tpu_insert_dummy_fusions_on_conv_kernels to: true
+I0314 22:51:18.158652       1 flag.cc:153] Restore saved value of xla_tpu_instructions_on_separate_lines to: false
+I0314 22:51:18.158653       1 flag.cc:153] Restore saved value of xla_tpu_instrument_hlo_operations to: false
+I0314 22:51:18.158655       1 flag.cc:153] Restore saved value of xla_tpu_instrumentation_config to: 
+I0314 22:51:18.158656       1 flag.cc:153] Restore saved value of xla_tpu_internal_test_retry_compilation to: false
+I0314 22:51:18.158657       1 flag.cc:153] Restore saved value of xla_tpu_ior_cmem to: 
+I0314 22:51:18.158658       1 flag.cc:153] Restore saved value of xla_tpu_ior_remat to: false
+I0314 22:51:18.158660       1 flag.cc:153] Restore saved value of xla_tpu_iova_dma_chunk_size_bytes to: 0
+I0314 22:51:18.158661       1 flag.cc:153] Restore saved value of xla_tpu_join_mxu_result_add to: false
+I0314 22:51:18.158662       1 flag.cc:153] Restore saved value of xla_tpu_keep_hlo_proto_literals_up_to to: 1
+I0314 22:51:18.158663       1 flag.cc:153] Restore saved value of xla_tpu_last_overlay_prefetches_first to: true
+I0314 22:51:18.158665       1 flag.cc:153] Restore saved value of xla_tpu_latency_hiding_scheduler_cost_model_options to: auto
+I0314 22:51:18.158666       1 flag.cc:153] Restore saved value of xla_tpu_layout_use_dot_grouping to: false
+I0314 22:51:18.158667       1 flag.cc:153] Restore saved value of xla_tpu_licm_analysis_allowance to: 100000
+I0314 22:51:18.158668       1 flag.cc:153] Restore saved value of xla_tpu_licm_size_inflation_ratio to: 1
+I0314 22:51:18.158670       1 flag.cc:153] Restore saved value of xla_tpu_lift_allocs_into_vregs to: true
+I0314 22:51:18.158671       1 flag.cc:153] Restore saved value of xla_tpu_llo_check_abort to: false
+I0314 22:51:18.158672       1 flag.cc:153] Restore saved value of xla_tpu_llo_compilation_max_retries to: 15
+I0314 22:51:18.158674       1 flag.cc:153] Restore saved value of xla_tpu_llo_coverage to: false
+I0314 22:51:18.158675       1 flag.cc:153] Restore saved value of xla_tpu_llo_flatten_loops_with_small_tails to: false
+I0314 22:51:18.158676       1 flag.cc:153] Restore saved value of xla_tpu_llo_linter_crash_on_error to: auto
+I0314 22:51:18.158677       1 flag.cc:153] Restore saved value of xla_tpu_llo_log_hlo_filter to: auto
+I0314 22:51:18.158679       1 flag.cc:153] Restore saved value of xla_tpu_load_store_optimizations to: true
+I0314 22:51:18.158680       1 flag.cc:153] Restore saved value of xla_tpu_local_dma_pipe_dma_from_cmem_min_chunks to: 8
+I0314 22:51:18.158681       1 flag.cc:153] Restore saved value of xla_tpu_local_dma_pipe_dma_to_cmem_min_chunks to: 8
+I0314 22:51:18.158682       1 flag.cc:153] Restore saved value of xla_tpu_log_collective_metadata to: false
+I0314 22:51:18.158683       1 flag.cc:153] Restore saved value of xla_tpu_log_current_and_new_fusion_cost_models to: false
+I0314 22:51:18.158685       1 flag.cc:153] Restore saved value of xla_tpu_log_data_chunk_size to: 0
+I0314 22:51:18.158686       1 flag.cc:153] Restore saved value of xla_tpu_log_data_compression to: 
+I0314 22:51:18.158687       1 flag.cc:153] Restore saved value of xla_tpu_log_flags to: false
+I0314 22:51:18.158691       1 flag.cc:153] Restore saved value of xla_tpu_log_hlo_output_filter to: 
+I0314 22:51:18.158693       1 flag.cc:153] Restore saved value of xla_tpu_log_hlo_output_summaries to: false
+I0314 22:51:18.158694       1 flag.cc:153] Restore saved value of xla_tpu_log_post_opt_fingerprints to: false
+I0314 22:51:18.158696       1 flag.cc:153] Restore saved value of xla_tpu_log_preprocessing_fibers to: 4
+I0314 22:51:18.158697       1 flag.cc:153] Restore saved value of xla_tpu_log_scope_depth to: 8
+I0314 22:51:18.158698       1 flag.cc:153] Restore saved value of xla_tpu_log_write_queue_depth to: 4
+I0314 22:51:18.158699       1 flag.cc:153] Restore saved value of xla_tpu_max_ag_pipelining_per_loop to: 9223372036854775807
+I0314 22:51:18.158700       1 flag.cc:153] Restore saved value of xla_tpu_max_allocation_in_message_hbm to: 20
+I0314 22:51:18.158702       1 flag.cc:153] Restore saved value of xla_tpu_max_clustered_loads to: 10
+I0314 22:51:18.158703       1 flag.cc:153] Restore saved value of xla_tpu_max_cmem_used_by_memory_space_assignment to: -1
+I0314 22:51:18.158704       1 flag.cc:153] Restore saved value of xla_tpu_max_collective_permute_tree_core_location_devices to: 256
+I0314 22:51:18.158705       1 flag.cc:153] Restore saved value of xla_tpu_max_hbm_size_mib to: 0
+I0314 22:51:18.158706       1 flag.cc:153] Restore saved value of xla_tpu_max_kept_sublanes_for_reduce to: 128
+I0314 22:51:18.158708       1 flag.cc:153] Restore saved value of xla_tpu_max_logfile_size to: 30G
+I0314 22:51:18.158709       1 flag.cc:153] Restore saved value of xla_tpu_max_send_recv_aggregation to: -1
+I0314 22:51:18.158710       1 flag.cc:153] Restore saved value of xla_tpu_max_vld_live_range to: 2
+I0314 22:51:18.158712       1 flag.cc:153] Restore saved value of xla_tpu_max_vmreg_live_range to: 8
+I0314 22:51:18.158713       1 flag.cc:153] Restore saved value of xla_tpu_megacore_barrier_sanity_checker to: false
+I0314 22:51:18.158714       1 flag.cc:153] Restore saved value of xla_tpu_megacore_fusion_allow_ags to: false
+I0314 22:51:18.158715       1 flag.cc:153] Restore saved value of xla_tpu_megacore_fusion_disable_live_out_ags to: false
+I0314 22:51:18.158717       1 flag.cc:153] Restore saved value of xla_tpu_megacore_fusion_good_overload_margin to: 0.2
+I0314 22:51:18.158718       1 flag.cc:153] Restore saved value of xla_tpu_megacore_fusion_latency_bound_ar_fusion_size to: 0
+I0314 22:51:18.158719       1 flag.cc:153] Restore saved value of xla_tpu_megacore_fusion_orthogonal_ag to: true
+I0314 22:51:18.158720       1 flag.cc:153] Restore saved value of xla_tpu_megacore_fusion_orthogonal_ars to: true
+I0314 22:51:18.158722       1 flag.cc:153] Restore saved value of xla_tpu_megacore_fusion_orthogonal_ars_margin to: 0.2
+I0314 22:51:18.158723       1 flag.cc:153] Restore saved value of xla_tpu_megacore_fusion_scaling_factor to: 2
+I0314 22:51:18.158725       1 flag.cc:153] Restore saved value of xla_tpu_memory_bound_loop_optimizer_options to: base64serialized:
+I0314 22:51:18.158726       1 flag.cc:153] Restore saved value of xla_tpu_memory_space_assignment_while_execution_count to: 5
+I0314 22:51:18.158727       1 flag.cc:153] Restore saved value of xla_tpu_merge_small_overlays_into_big_neighbors to: true
+I0314 22:51:18.158729       1 flag.cc:153] Restore saved value of xla_tpu_metrics_filename_prefix to: 
+I0314 22:51:18.158730       1 flag.cc:153] Restore saved value of xla_tpu_min_elements_for_while_loop_concat_code_motion to: 9223372036854775807
+I0314 22:51:18.158731       1 flag.cc:153] Restore saved value of xla_tpu_min_elements_to_split_sunk_dcn_op to: 4096
+I0314 22:51:18.158732       1 flag.cc:153] Restore saved value of xla_tpu_mock_async_ag_ar to: false
+I0314 22:51:18.158734       1 flag.cc:153] Restore saved value of xla_tpu_mock_collective_default_vdelay to: 100
+I0314 22:51:18.158735       1 flag.cc:153] Restore saved value of xla_tpu_mock_collective_zeroed_output_buffers to: auto
+I0314 22:51:18.158737       1 flag.cc:153] Restore saved value of xla_tpu_mock_collectives to: false
+I0314 22:51:18.158739       1 flag.cc:153] Restore saved value of xla_tpu_mock_dynamic_while_loop_forced_iteration_count to: auto
+I0314 22:51:18.158740       1 flag.cc:153] Restore saved value of xla_tpu_mock_send_recv_host to: false
+I0314 22:51:18.158741       1 flag.cc:153] Restore saved value of xla_tpu_mock_static_while_loop_forced_iteration_count to: auto
+I0314 22:51:18.158742       1 flag.cc:153] Restore saved value of xla_tpu_mosaic_fusion to: true
+I0314 22:51:18.158745       1 flag.cc:153] Restore saved value of xla_tpu_move_dot_parameters_to_rhs to: auto
+I0314 22:51:18.158746       1 flag.cc:153] Restore saved value of xla_tpu_msa_inefficient_use_to_copy_ratio to: 0.5
+I0314 22:51:18.158748       1 flag.cc:153] Restore saved value of xla_tpu_msa_reduce_scoped_vmem_limit to: false
+I0314 22:51:18.158749       1 flag.cc:153] Restore saved value of xla_tpu_msa_sort_order_overrides to: base64serialized:
+I0314 22:51:18.158751       1 flag.cc:153] Restore saved value of xla_tpu_msa_use_minimalloc to: false
+I0314 22:51:18.158752       1 flag.cc:153] Restore saved value of xla_tpu_msa_use_tinymalloc to: false
+I0314 22:51:18.158753       1 flag.cc:153] Restore saved value of xla_tpu_multi_output_fusion_limit to: 2147483648
+I0314 22:51:18.158755       1 flag.cc:153] Restore saved value of xla_tpu_multioutput_fusion_max_operands to: 19
+I0314 22:51:18.158756       1 flag.cc:153] Restore saved value of xla_tpu_nd_short_transfer_max_chunks to: -1
+I0314 22:51:18.158757       1 flag.cc:153] Restore saved value of xla_tpu_nested_dot_fusion to: true
+I0314 22:51:18.158759       1 flag.cc:153] Restore saved value of xla_tpu_nested_dot_fusion_supported_custom_ops to: PartialReduce
+I0314 22:51:18.158760       1 flag.cc:153] Restore saved value of xla_tpu_nested_dot_fusion_vmem_fraction to: 0.6
+I0314 22:51:18.158761       1 flag.cc:153] Restore saved value of xla_tpu_net_router_trace_me_instrumentation to: false
+I0314 22:51:18.158763       1 flag.cc:153] Restore saved value of xla_tpu_no_crash_on_oom to: false
+I0314 22:51:18.158764       1 flag.cc:153] Restore saved value of xla_tpu_ns_before_running_synthetic_compute_in_sflag_wait to: 0
+I0314 22:51:18.158765       1 flag.cc:153] Restore saved value of xla_tpu_op_tracemarks to: false
+I0314 22:51:18.158767       1 flag.cc:153] Restore saved value of xla_tpu_op_tracemarks_roi_begin_op to: 
+I0314 22:51:18.158768       1 flag.cc:153] Restore saved value of xla_tpu_op_tracemarks_roi_end_op to: 
+I0314 22:51:18.158769       1 flag.cc:153] Restore saved value of xla_tpu_optimize_bf16_math to: false
+I0314 22:51:18.158771       1 flag.cc:153] Restore saved value of xla_tpu_order_dot_after_layout to: true
+I0314 22:51:18.158772       1 flag.cc:153] Restore saved value of xla_tpu_overlap_compute_collective_tc to: true
+I0314 22:51:18.158773       1 flag.cc:153] Restore saved value of xla_tpu_overlay_allocation_table_size to: -1
+I0314 22:51:18.158774       1 flag.cc:153] Restore saved value of xla_tpu_overlay_enable_hlo_function_packs to: true
+I0314 22:51:18.158776       1 flag.cc:153] Restore saved value of xla_tpu_override_rwb_tpu_limitation to: false
+I0314 22:51:18.158777       1 flag.cc:153] Restore saved value of xla_tpu_override_scavenge_vmem_for_fusions to: auto
+I0314 22:51:18.158778       1 flag.cc:153] Restore saved value of xla_tpu_override_vmem_size_kib to: 0
+I0314 22:51:18.158779       1 flag.cc:153] Restore saved value of xla_tpu_pack_cloads to: true
+I0314 22:51:18.158780       1 flag.cc:153] Restore saved value of xla_tpu_pack_vloads to: false
+I0314 22:51:18.158782       1 flag.cc:153] Restore saved value of xla_tpu_padding_overhead_threshold_with_copy_for_reduce_scatter to: 0.05
+I0314 22:51:18.158783       1 flag.cc:153] Restore saved value of xla_tpu_perform_spmd_cse_prevention to: false
+I0314 22:51:18.158785       1 flag.cc:153] Restore saved value of xla_tpu_permute_size4_cross_module_rings to: false
+I0314 22:51:18.158786       1 flag.cc:153] Restore saved value of xla_tpu_perturb_inputs to: false
+I0314 22:51:18.158787       1 flag.cc:153] Restore saved value of xla_tpu_pipeline_memory_host_transfers to: true
+I0314 22:51:18.158788       1 flag.cc:153] Restore saved value of xla_tpu_poison_padding to: false
+I0314 22:51:18.158789       1 flag.cc:153] Restore saved value of xla_tpu_poison_padding_value to: 2143289344
+I0314 22:51:18.158791       1 flag.cc:153] Restore saved value of xla_tpu_pre_fusion_remat to: true
+I0314 22:51:18.158792       1 flag.cc:153] Restore saved value of xla_tpu_precision_tracer_max_abs_error to: 1
+I0314 22:51:18.158794       1 flag.cc:153] Restore saved value of xla_tpu_precision_tracer_mode to: none
+I0314 22:51:18.158795       1 flag.cc:153] Restore saved value of xla_tpu_prefer_async_allgather_to_allreduce to: false
+I0314 22:51:18.158796       1 flag.cc:153] Restore saved value of xla_tpu_prefer_binomial_single_phase_ring_emitter to: true
+I0314 22:51:18.158797       1 flag.cc:153] Restore saved value of xla_tpu_prefer_dynamic_pad to: false
+I0314 22:51:18.158798       1 flag.cc:153] Restore saved value of xla_tpu_prefer_einsum_reduce_scatter to: false
+I0314 22:51:18.158800       1 flag.cc:153] Restore saved value of xla_tpu_prefer_hlo_module_to_hlo_string to: true
+I0314 22:51:18.158801       1 flag.cc:153] Restore saved value of xla_tpu_prefer_latch_optimized_rhs_layouts to: false
+I0314 22:51:18.158803       1 flag.cc:153] Restore saved value of xla_tpu_prefer_slice_with_dynamic_bounds to: false
+I0314 22:51:18.158804       1 flag.cc:153] Restore saved value of xla_tpu_preferred_prefetch_overrides to: base64serialized:
+I0314 22:51:18.158806       1 flag.cc:153] Restore saved value of xla_tpu_prefetch_interval_picker_size_override to: 6000000
+I0314 22:51:18.158808       1 flag.cc:153] Restore saved value of xla_tpu_prefuse_self_attention to: false
+I0314 22:51:18.158809       1 flag.cc:153] Restore saved value of xla_tpu_print_log_callback_args to: false
+I0314 22:51:18.158811       1 flag.cc:153] Restore saved value of xla_tpu_profile_traceme_level to: 10
+I0314 22:51:18.158812       1 flag.cc:153] Restore saved value of xla_tpu_propagation_visualization_log_at_frontier_level to: 
+I0314 22:51:18.158813       1 flag.cc:153] Restore saved value of xla_tpu_propagation_visualization_logging_summary_only to: false
+I0314 22:51:18.158815       1 flag.cc:153] Restore saved value of xla_tpu_put_trap_at_hlo_marker_index to: -1
+I0314 22:51:18.158816       1 flag.cc:153] Restore saved value of xla_tpu_quantized_all_reduce_level to: 0
+I0314 22:51:18.158817       1 flag.cc:153] Restore saved value of xla_tpu_quantized_all_reduce_size_threshold_mib to: 3
+I0314 22:51:18.158819       1 flag.cc:153] Restore saved value of xla_tpu_random_all_gather_delay_mask to: 0
+I0314 22:51:18.158820       1 flag.cc:153] Restore saved value of xla_tpu_random_all_reduce_delay_mask to: 0
+I0314 22:51:18.158821       1 flag.cc:153] Restore saved value of xla_tpu_random_all_to_all_delay_mask to: 0
+I0314 22:51:18.158822       1 flag.cc:153] Restore saved value of xla_tpu_random_collective_permute_delay_mask to: 0
+I0314 22:51:18.158824       1 flag.cc:153] Restore saved value of xla_tpu_reduce_loop_fusion_dup_with_unfusable_user to: false
+I0314 22:51:18.158825       1 flag.cc:153] Restore saved value of xla_tpu_reduce_window_reduction_dim_max to: 8192
+I0314 22:51:18.158826       1 flag.cc:153] Restore saved value of xla_tpu_region_expansion_limit to: 0
+I0314 22:51:18.158828       1 flag.cc:153] Restore saved value of xla_tpu_register_recently_used_instruction_threshold to: 20
+I0314 22:51:18.158829       1 flag.cc:153] Restore saved value of xla_tpu_register_selection_policy to: disregard_recently_used
+I0314 22:51:18.158831       1 flag.cc:153] Restore saved value of xla_tpu_relayout_group_size_threshold_for_reduce_scatter to: 9223372036854775807
+I0314 22:51:18.158832       1 flag.cc:153] Restore saved value of xla_tpu_rematerialization_block_effort_factor to: auto
+I0314 22:51:18.158833       1 flag.cc:153] Restore saved value of xla_tpu_rematerialization_max_block_size to: 0
+I0314 22:51:18.158834       1 flag.cc:153] Restore saved value of xla_tpu_rematerialization_max_block_size_limit to: auto
+I0314 22:51:18.158836       1 flag.cc:153] Restore saved value of xla_tpu_rematerialization_min_size_in_bytes to: 10485760
+I0314 22:51:18.158837       1 flag.cc:153] Restore saved value of xla_tpu_rematerialization_use_host_memory_offload to: false
+I0314 22:51:18.158838       1 flag.cc:153] Restore saved value of xla_tpu_remove_bf16_bitcast_converts_for_all to: false
+I0314 22:51:18.158839       1 flag.cc:153] Restore saved value of xla_tpu_reverse_layout_computation_order to: false
+I0314 22:51:18.158840       1 flag.cc:153] Restore saved value of xla_tpu_room_for_potential_register_dependency to: 2
+I0314 22:51:18.158841       1 flag.cc:153] Restore saved value of xla_tpu_rotated_pincer_pack_allgather_fusion to: true
+I0314 22:51:18.158843       1 flag.cc:153] Restore saved value of xla_tpu_run_all_reduce_simplifier to: true
+I0314 22:51:18.158844       1 flag.cc:153] Restore saved value of xla_tpu_run_backend_hlo_verifier to: true
+I0314 22:51:18.158845       1 flag.cc:153] Restore saved value of xla_tpu_run_space_to_batch to: true
+I0314 22:51:18.158846       1 flag.cc:153] Restore saved value of xla_tpu_run_space_to_batch_on_new_platforms to: true
+I0314 22:51:18.158847       1 flag.cc:153] Restore saved value of xla_tpu_rwb_fusion to: true
+I0314 22:51:18.158849       1 flag.cc:153] Restore saved value of xla_tpu_rwb_max_attention_hbm_footprint to: auto
+I0314 22:51:18.158850       1 flag.cc:153] Restore saved value of xla_tpu_s8_collective_rewriter to: false
+I0314 22:51:18.158851       1 flag.cc:153] Restore saved value of xla_tpu_sc_megachip_temporal_reuse to: false
+I0314 22:51:18.158852       1 flag.cc:153] Restore saved value of xla_tpu_scavenge_loop_fusion_cycles_slack to: 0
+I0314 22:51:18.158854       1 flag.cc:153] Restore saved value of xla_tpu_scavenge_output_fusion_cycles_slack to: 0
+I0314 22:51:18.158855       1 flag.cc:153] Restore saved value of xla_tpu_scavenge_vmem_for_fusions to: false
+I0314 22:51:18.158856       1 flag.cc:153] Restore saved value of xla_tpu_schedule_send_recvs to: auto
+I0314 22:51:18.158858       1 flag.cc:153] Restore saved value of xla_tpu_scheduler_percent_shared_memory_limit to: 95
+I0314 22:51:18.158859       1 flag.cc:153] Restore saved value of xla_tpu_scheduler_using_real_cost_model to: auto
+I0314 22:51:18.158860       1 flag.cc:153] Restore saved value of xla_tpu_scoped_cmem_for_all_reduce to: 0
+I0314 22:51:18.158862       1 flag.cc:153] Restore saved value of xla_tpu_scoped_hbm_for_all_reduce to: 65536
+I0314 22:51:18.158863       1 flag.cc:153] Restore saved value of xla_tpu_scoped_vmem_limit_kib to: -1
+I0314 22:51:18.158864       1 flag.cc:153] Restore saved value of xla_tpu_scoped_vmem_limit_sweep_profile_path to: 
+I0314 22:51:18.158865       1 flag.cc:153] Restore saved value of xla_tpu_sdc_check_fail_ratio_debug_only to: 0
+I0314 22:51:18.158866       1 flag.cc:153] Restore saved value of xla_tpu_sdc_check_halt_on_detection to: true
+I0314 22:51:18.158868       1 flag.cc:153] Restore saved value of xla_tpu_sdc_check_inputs to: false
+I0314 22:51:18.158869       1 flag.cc:153] Restore saved value of xla_tpu_sdc_check_log_full_hlo to: true
+I0314 22:51:18.158870       1 flag.cc:153] Restore saved value of xla_tpu_sdc_check_repeat_count to: 1
+I0314 22:51:18.158871       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_alternate_megacore_cores to: true
+I0314 22:51:18.158873       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_checksum_algo to: default
+I0314 22:51:18.158874       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_checksum_smem_buffer_size to: auto
+I0314 22:51:18.158875       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_checksum_trace_mode to: collectives
+I0314 22:51:18.158878       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_checksum_tracing_parameters to: true
+I0314 22:51:18.158879       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_delay_before_halt to: 0
+I0314 22:51:18.158880       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_enable_boh_pubsub_callbacks to: false
+I0314 22:51:18.158882       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_enable_coresweep_ng_callbacks to: auto
+I0314 22:51:18.158883       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_enable_sdc_event_callbacks to: false
+I0314 22:51:18.158884       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_enable_tpu_custom_calls to: true
+I0314 22:51:18.158885       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_explicit_checksum_buffer_size to: auto
+I0314 22:51:18.158886       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_explicit_checksum_tracing to: false
+I0314 22:51:18.158888       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_explicit_checksum_tracing_output to: auto
+I0314 22:51:18.158889       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_extra_filter to: auto
+I0314 22:51:18.158890       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_instrument_megacore_fusion to: true
+I0314 22:51:18.158891       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_log_inputs_on_sdc_event to: false
+I0314 22:51:18.158892       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_log_outputs_on_sdc_event to: false
+I0314 22:51:18.158894       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_no_logging_if_callbacks_are_present to: false
+I0314 22:51:18.158895       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_prefer_hlo_module_to_hlo_string to: true
+I0314 22:51:18.158896       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_prefer_internal_checksums to: auto
+I0314 22:51:18.158897       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_prof_tracing to: false
+I0314 22:51:18.158898       1 flag.cc:153] Restore saved value of xla_tpu_sdc_checker_streamz_metric to: 
+I0314 22:51:18.158900       1 flag.cc:153] Restore saved value of xla_tpu_sdc_detailed_llo_sdc_report to: false
+I0314 22:51:18.158901       1 flag.cc:153] Restore saved value of xla_tpu_sdc_duplicate_mxu_instructions to: true
+I0314 22:51:18.158902       1 flag.cc:153] Restore saved value of xla_tpu_sdc_duplicate_mxu_matmul_ratio to: 1
+I0314 22:51:18.158903       1 flag.cc:153] Restore saved value of xla_tpu_sdc_duplicate_vpu_instructions to: false
+I0314 22:51:18.158905       1 flag.cc:153] Restore saved value of xla_tpu_sdc_extra_llo_replica_count to: 1
+I0314 22:51:18.158906       1 flag.cc:153] Restore saved value of xla_tpu_sdc_inject_mxu_sequences to: false
+I0314 22:51:18.158907       1 flag.cc:153] Restore saved value of xla_tpu_sdc_inject_mxu_sequences_overhead to: 1.2
+I0314 22:51:18.158909       1 flag.cc:153] Restore saved value of xla_tpu_sdc_inject_mxu_sequences_scaling to: 0.2
+I0314 22:51:18.158910       1 flag.cc:153] Restore saved value of xla_tpu_sdc_replicate_llo to: false
+I0314 22:51:18.158911       1 flag.cc:153] Restore saved value of xla_tpu_sdc_replicate_llo_invert_predicate_test_only to: false
+I0314 22:51:18.158912       1 flag.cc:153] Restore saved value of xla_tpu_send_recv_aggregation_max_skipped_small_instructions to: 0
+I0314 22:51:18.158914       1 flag.cc:153] Restore saved value of xla_tpu_send_recv_aggregation_small_instruction_threshold to: 0
+I0314 22:51:18.158915       1 flag.cc:153] Restore saved value of xla_tpu_sg_force_sshfl_exclusively to: 0
+I0314 22:51:18.158916       1 flag.cc:153] Restore saved value of xla_tpu_sg_sshfl_ignore_bits to: 0
+I0314 22:51:18.158917       1 flag.cc:153] Restore saved value of xla_tpu_sharding_metadata to: false
+I0314 22:51:18.158918       1 flag.cc:153] Restore saved value of xla_tpu_short_pincer_single_step_max_chunks_per_chip to: 16
+I0314 22:51:18.158920       1 flag.cc:153] Restore saved value of xla_tpu_show_overlay_details_in_profiler to: false
+I0314 22:51:18.158921       1 flag.cc:153] Restore saved value of xla_tpu_show_overlay_overhead_in_profiler to: false
+I0314 22:51:18.158922       1 flag.cc:153] Restore saved value of xla_tpu_show_overlay_waits_in_profiler to: false
+I0314 22:51:18.158923       1 flag.cc:153] Restore saved value of xla_tpu_single_overlay_mode to: false
+I0314 22:51:18.158924       1 flag.cc:153] Restore saved value of xla_tpu_sink_dma_done to: true
+I0314 22:51:18.158925       1 flag.cc:153] Restore saved value of xla_tpu_skip_checking_windowed_einsum_users to: false
+I0314 22:51:18.158926       1 flag.cc:153] Restore saved value of xla_tpu_skip_llo_late_decomposer to: false
+I0314 22:51:18.158928       1 flag.cc:153] Restore saved value of xla_tpu_sliced_prefetch_fail_on_non_alignment_boundary_slice_proposal to: false
+I0314 22:51:18.158929       1 flag.cc:153] Restore saved value of xla_tpu_sliced_prefetch_max_slices to: -1
+I0314 22:51:18.158930       1 flag.cc:153] Restore saved value of xla_tpu_sliced_prefetch_min_bytes to: -1
+I0314 22:51:18.158931       1 flag.cc:153] Restore saved value of xla_tpu_sliced_prefetch_preferred_slice_size to: -1
+I0314 22:51:18.158932       1 flag.cc:153] Restore saved value of xla_tpu_small_operand_count_for_loop_fusion to: 13
+I0314 22:51:18.158934       1 flag.cc:153] Restore saved value of xla_tpu_sparse_core_all_gather_latency_multiplier to: 1
+I0314 22:51:18.158935       1 flag.cc:153] Restore saved value of xla_tpu_sparse_core_all_reduce_latency_multiplier to: 1
+I0314 22:51:18.158937       1 flag.cc:153] Restore saved value of xla_tpu_sparse_core_all_reduce_offload_max_num_operands to: 20
+I0314 22:51:18.158938       1 flag.cc:153] Restore saved value of xla_tpu_sparse_core_all_reduce_offload_min_size_in_bytes to: 65536
+I0314 22:51:18.158939       1 flag.cc:153] Restore saved value of xla_tpu_sparse_core_mismatch_detector_atol to: auto
+I0314 22:51:18.158940       1 flag.cc:153] Restore saved value of xla_tpu_sparse_core_mismatch_detector_crash_on_mismatch to: auto
+I0314 22:51:18.158942       1 flag.cc:153] Restore saved value of xla_tpu_sparse_core_mismatch_detector_on_specified_ops to: auto
+I0314 22:51:18.158943       1 flag.cc:153] Restore saved value of xla_tpu_sparse_core_mismatch_detector_rtol to: auto
+I0314 22:51:18.158944       1 flag.cc:153] Restore saved value of xla_tpu_sparse_core_offloading_options to: auto
+I0314 22:51:18.158946       1 flag.cc:153] Restore saved value of xla_tpu_sparse_core_scoped_allocations_reserved_hbm_fraction to: 0.01
+I0314 22:51:18.158948       1 flag.cc:153] Restore saved value of xla_tpu_sparse_dense_matmul_fdo_config to: base64serialized:
+I0314 22:51:18.158949       1 flag.cc:153] Restore saved value of xla_tpu_split_1d_reduce_scatter_phases_threshold to: 9223372036854775807
+I0314 22:51:18.158951       1 flag.cc:153] Restore saved value of xla_tpu_split_cluster_gap to: 1000
+I0314 22:51:18.158952       1 flag.cc:153] Restore saved value of xla_tpu_split_cluster_size to: 4
+I0314 22:51:18.158953       1 flag.cc:153] Restore saved value of xla_tpu_spmd_auto_partitioning to: false
+I0314 22:51:18.158954       1 flag.cc:153] Restore saved value of xla_tpu_spmd_auto_partitioning_search_mesh_shapes to: false
+I0314 22:51:18.158955       1 flag.cc:153] Restore saved value of xla_tpu_spmd_bidirectional_windowed_einsum to: true
+I0314 22:51:18.158956       1 flag.cc:153] Restore saved value of xla_tpu_spmd_decompose_sharded_concats to: true
+I0314 22:51:18.158958       1 flag.cc:153] Restore saved value of xla_tpu_spmd_f32_accum_for_bf16_ar to: false
+I0314 22:51:18.158959       1 flag.cc:153] Restore saved value of xla_tpu_spmd_f32_accum_for_bf16_ar_min_subgroup_size to: 0
+I0314 22:51:18.158960       1 flag.cc:153] Restore saved value of xla_tpu_spmd_rng_bit_generator_unsafe to: false
+I0314 22:51:18.158961       1 flag.cc:153] Restore saved value of xla_tpu_spmd_rng_unsafe_gen_per_replica to: false
+I0314 22:51:18.158962       1 flag.cc:153] Restore saved value of xla_tpu_spmd_run_partition_assignment to: false
+I0314 22:51:18.158963       1 flag.cc:153] Restore saved value of xla_tpu_spmd_skip_partitioning to: false
+I0314 22:51:18.158965       1 flag.cc:153] Restore saved value of xla_tpu_spmd_threshold_for_allgather_cse to: 100
+I0314 22:51:18.158966       1 flag.cc:153] Restore saved value of xla_tpu_spmd_unroll_windowed_einsum to: false
+I0314 22:51:18.158967       1 flag.cc:153] Restore saved value of xla_tpu_spmd_windowed_einsum_decompose_ag to: false
+I0314 22:51:18.158969       1 flag.cc:153] Restore saved value of xla_tpu_spmd_windowed_einsum_decompose_rs to: false
+I0314 22:51:18.158970       1 flag.cc:153] Restore saved value of xla_tpu_store_to_load_forwarding_window to: 512
+I0314 22:51:18.158971       1 flag.cc:153] Restore saved value of xla_tpu_strict_fp8_matmul_type_check to: false
+I0314 22:51:18.158972       1 flag.cc:153] Restore saved value of xla_tpu_sublane_shift_scratchpad_size to: 5
+I0314 22:51:18.158974       1 flag.cc:153] Restore saved value of xla_tpu_synthetic_compute_add_vmem to: false
+I0314 22:51:18.158975       1 flag.cc:153] Restore saved value of xla_tpu_synthetic_compute_add_vpu to: false
+I0314 22:51:18.158976       1 flag.cc:153] Restore saved value of xla_tpu_synthetic_compute_in_sflag_wait_filter to: all
+I0314 22:51:18.158977       1 flag.cc:153] Restore saved value of xla_tpu_synthetic_compute_intensity to: 100
+I0314 22:51:18.158978       1 flag.cc:153] Restore saved value of xla_tpu_synthetic_compute_matmul_count to: 100
+I0314 22:51:18.158980       1 flag.cc:153] Restore saved value of xla_tpu_synthetic_compute_mxu_count to: -1
+I0314 22:51:18.158981       1 flag.cc:153] Restore saved value of xla_tpu_synthetic_compute_trace to: false
+I0314 22:51:18.158982       1 flag.cc:153] Restore saved value of xla_tpu_test_only_corrupt_received_data_in_broadcast to: false
+I0314 22:51:18.158983       1 flag.cc:153] Restore saved value of xla_tpu_test_only_corrupt_received_data_in_reduce to: false
+I0314 22:51:18.158984       1 flag.cc:153] Restore saved value of xla_tpu_threshold_for_long_live_range_in_flowdown to: 64
+I0314 22:51:18.158986       1 flag.cc:153] Restore saved value of xla_tpu_trace_program_continuator to: false
+I0314 22:51:18.158987       1 flag.cc:153] Restore saved value of xla_tpu_trivial_mosaic_fusion to: auto
+I0314 22:51:18.158988       1 flag.cc:153] Restore saved value of xla_tpu_uni_direction_ring_max_size to: 8
+I0314 22:51:18.158989       1 flag.cc:153] Restore saved value of xla_tpu_uni_direction_ring_max_size_2d_plane to: 8
+I0314 22:51:18.158990       1 flag.cc:153] Restore saved value of xla_tpu_untiled_layout_for_1D_only to: true
+I0314 22:51:18.158992       1 flag.cc:153] Restore saved value of xla_tpu_use_aggressive_scheduling to: auto
+I0314 22:51:18.158993       1 flag.cc:153] Restore saved value of xla_tpu_use_associative_reordering to: false
+I0314 22:51:18.158994       1 flag.cc:153] Restore saved value of xla_tpu_use_bundle_aware_cost_model_for_fusions to: auto
+I0314 22:51:18.158995       1 flag.cc:153] Restore saved value of xla_tpu_use_custom_tree_barrier to: false
+I0314 22:51:18.158996       1 flag.cc:153] Restore saved value of xla_tpu_use_dma_for_custom_barrier to: false
+I0314 22:51:18.158997       1 flag.cc:153] Restore saved value of xla_tpu_use_enhanced_launch_barrier to: false
+I0314 22:51:18.158999       1 flag.cc:153] Restore saved value of xla_tpu_use_interleaving_lmr_transform to: true
+I0314 22:51:18.159000       1 flag.cc:153] Restore saved value of xla_tpu_use_lp_llo_scheduler_for_dot_dot_fusions to: false
+I0314 22:51:18.159001       1 flag.cc:153] Restore saved value of xla_tpu_use_megascale_host_reduction to: true
+I0314 22:51:18.159002       1 flag.cc:153] Restore saved value of xla_tpu_use_minor_sharding_for_major_trivial_input to: false
+I0314 22:51:18.159003       1 flag.cc:153] Restore saved value of xla_tpu_use_multiple_sflags_for_local_dma_pipe to: true
+I0314 22:51:18.159005       1 flag.cc:153] Restore saved value of xla_tpu_use_repeated_instance_for_preferred_prefetch_time to: false
+I0314 22:51:18.159006       1 flag.cc:153] Restore saved value of xla_tpu_use_resilient_collective_emitter to: false
+I0314 22:51:18.159007       1 flag.cc:153] Restore saved value of xla_tpu_use_routing_table_indices_in_all_gather to: true
+I0314 22:51:18.159008       1 flag.cc:153] Restore saved value of xla_tpu_use_routing_table_indices_in_all_reduce to: true
+I0314 22:51:18.159009       1 flag.cc:153] Restore saved value of xla_tpu_use_routing_table_indices_in_net_router to: true
+I0314 22:51:18.159011       1 flag.cc:153] Restore saved value of xla_tpu_use_routing_table_indices_in_tree_barrier to: true
+I0314 22:51:18.159012       1 flag.cc:153] Restore saved value of xla_tpu_use_separate_matmuls_in_collective_matmul_body to: false
+I0314 22:51:18.159013       1 flag.cc:153] Restore saved value of xla_tpu_use_slow_routing_table_lookup to: false
+I0314 22:51:18.159015       1 flag.cc:153] Restore saved value of xla_tpu_use_strided_strategy_nd to: false
+I0314 22:51:18.159016       1 flag.cc:153] Restore saved value of xla_tpu_use_strided_vmem_memcopy to: true
+I0314 22:51:18.159017       1 flag.cc:153] Restore saved value of xla_tpu_use_tc_device_shape_on_sc to: false
+I0314 22:51:18.159018       1 flag.cc:153] Restore saved value of xla_tpu_use_tree_reduce to: false
+I0314 22:51:18.159019       1 flag.cc:153] Restore saved value of xla_tpu_user_reserved_hbm_bytes to: -1
+I0314 22:51:18.159020       1 flag.cc:153] Restore saved value of xla_tpu_vector_load_fusion_window to: 256
+I0314 22:51:18.159022       1 flag.cc:153] Restore saved value of xla_tpu_vector_store_fusion_window to: 256
+I0314 22:51:18.159023       1 flag.cc:153] Restore saved value of xla_tpu_verify_buffer_assignment to: false
+I0314 22:51:18.159024       1 flag.cc:153] Restore saved value of xla_tpu_verify_device_assignment_in_runtime to: false
+I0314 22:51:18.159025       1 flag.cc:153] Restore saved value of xla_tpu_verify_launch_id_across_cores to: false
+I0314 22:51:18.159026       1 flag.cc:153] Restore saved value of xla_tpu_verify_matmul to: false
+I0314 22:51:18.159028       1 flag.cc:153] Restore saved value of xla_tpu_verify_or_assign_tiling_before_lowering to: verify
+I0314 22:51:18.159030       1 flag.cc:153] Restore saved value of xla_tpu_vmac_transform_strategy to: none
+I0314 22:51:18.159031       1 flag.cc:153] Restore saved value of xla_tpu_vmem_use_telamalloc to: false
+I0314 22:51:18.159032       1 flag.cc:153] Restore saved value of xla_tpu_wait_n_cycles_before_program_termination to: 0
+I0314 22:51:18.159033       1 flag.cc:153] Restore saved value of xla_tpu_wrap_fusion_lowerable_hlos_in_loop_fusion to: false
+I0314 22:51:18.159036       1 flag.cc:153] Restore saved value of xla_tpu_write_cmem_output_via_stores_on_megacore to: false
+I0314 22:51:18.159037       1 flag.cc:153] Restore saved value of xla_trace_only_stalling_hlo to: false
+I0314 22:51:18.159038       1 flag.cc:153] Restore saved value of xla_use_llvm_backend to: false
+I0314 22:51:18.159039       1 flag.cc:153] Restore saved value of xla_use_shardy to: false
+I0314 22:51:18.159041       1 flag.cc:153] Restore saved value of xla_vf_allow_replicated_vmem_writes to: true
+I0314 22:51:18.159042       1 flag.cc:153] Restore saved value of xla_vf_allow_split_vmem to: auto
+I0314 22:51:18.159043       1 flag.cc:153] Restore saved value of xla_vf_max_vmem_used_by_memory_space_assignment to: -1
+I0314 22:51:18.159044       1 flag.cc:153] Restore saved value of xla_vf_vmem_default_cross_program_prefetch_heuristic to: false
+I0314 22:51:18.159045       1 flag.cc:153] Restore saved value of xla_vf_vmem_enable_cross_program_prefetch to: true
+I0314 22:51:18.159047       1 flag.cc:153] Restore saved value of xla_vf_vmem_enable_cross_program_prefetch_freeing to: true
+I0314 22:51:18.159048       1 flag.cc:153] Restore saved value of xla_vf_vmem_enable_while_redundant_eviction_elimination to: true
+I0314 22:51:18.159049       1 flag.cc:153] Restore saved value of xla_vf_vmem_max_outstanding_evictions to: 40
+I0314 22:51:18.159050       1 flag.cc:153] Restore saved value of xla_vf_vmem_max_outstanding_prefetches to: 40
+I0314 22:51:18.159052       1 flag.cc:153] Restore saved value of xla_vf_vmem_max_overlap_to_mem_size_async_copy_ratio to: 8
+I0314 22:51:18.159053       1 flag.cc:153] Restore saved value of xla_vf_vmem_max_repacks to: 4
+I0314 22:51:18.159054       1 flag.cc:153] Restore saved value of xla_vf_vmem_max_retries to: 2
+I0314 22:51:18.159056       1 flag.cc:153] Restore saved value of xla_vf_vmem_memory_space_assignment to: true
+I0314 22:51:18.159057       1 flag.cc:153] Restore saved value of xla_vf_vmem_min_overlap_to_async_copy_ratio to: 1
+I0314 22:51:18.159058       1 flag.cc:153] Restore saved value of xla_vf_vmem_preferred_overlap_to_async_copy_ratio to: 2
+I0314 22:51:18.159060       1 flag.cc:153] Restore saved value of xla_vf_vmem_use_ior_algorithm to: 
+I0314 22:51:18.159061       1 flag.cc:153] Restore saved value of xla_while_loop_unroll_count to: 0
+I0314 22:51:18.159062       1 flag.cc:153] Restore saved value of xla_zf_vmem_max_outstanding_evictions to: 40
+I0314 22:51:18.159063       1 flag.cc:153] Restore saved value of xla_zf_vmem_max_outstanding_prefetches to: 40
+E0314 22:51:18.159680       1 app.py:679] Top-level exception: Failed to get global TPU topology. [INTERNAL]
+=== Source Location Trace: === 
+learning/brain/tfrt/tpu/tpu_util/tpu_util.cc:27
+learning/brain/research/pjrt/tfrt_tpu_system_state.cc:60
+learning/brain/research/pjrt/tfrt_tpu_pjrt_client.cc:3283
+platforms/xla/tools/multihost_hlo_runner/hybrid_sim/python/hybrid_sim_clif_aux.cc:47
+E0314 22:51:18.160380       1 app.py:680] Traceback (most recent call last):
+  File "/usr/hybridsim/run/cloud_hybrid_sim_client_main.par/google3/third_party/py/absl/app.py", line 484, in run
+    _run_main(main, args)
+  File "/usr/hybridsim/run/cloud_hybrid_sim_client_main.par/google3/third_party/py/absl/app.py", line 404, in _run_main
+    sys.exit(main(argv))
+             ^^^^^^^^^^
+  File "/usr/hybridsim/run/cloud_hybrid_sim_client_main.par/google3/cloud/tpu/multipod/hybridsim/cloud_hybrid_sim_client_main.py", line 260, in main
+    estimated_cost_ns, _, _ = hybrid_sim.RunSimulateFromFiles(
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+google3.util.task.python.error.StatusNotOk: Failed to get global TPU topology. [INTERNAL]
+=== Source Location Trace: === 
+learning/brain/tfrt/tpu/tpu_util/tpu_util.cc:27
+learning/brain/research/pjrt/tfrt_tpu_system_state.cc:60
+learning/brain/research/pjrt/tfrt_tpu_pjrt_client.cc:3283
+platforms/xla/tools/multihost_hlo_runner/hybrid_sim/python/hybrid_sim_clif_aux.cc:47
+
+Traceback (most recent call last):
+  File "<embedded module '_launcher'>", line 174, in run_filename_from_loader_as_main
+  File "<embedded module '_launcher'>", line 35, in _run_code_in_main
+  File "/usr/hybridsim/run/cloud_hybrid_sim_client_main.par/google3/cloud/tpu/multipod/hybridsim/cloud_hybrid_sim_client_main.py", line 293, in <module>
+    app.run(main)
+  File "/usr/hybridsim/run/cloud_hybrid_sim_client_main.par/google3/third_party/py/absl/app.py", line 484, in run
+    _run_main(main, args)
+  File "/usr/hybridsim/run/cloud_hybrid_sim_client_main.par/google3/third_party/py/absl/app.py", line 404, in _run_main
+    sys.exit(main(argv))
+             ^^^^^^^^^^
+  File "/usr/hybridsim/run/cloud_hybrid_sim_client_main.par/google3/cloud/tpu/multipod/hybridsim/cloud_hybrid_sim_client_main.py", line 260, in main
+    estimated_cost_ns, _, _ = hybrid_sim.RunSimulateFromFiles(
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+google3.util.task.python.error.StatusNotOk: Failed to get global TPU topology. [INTERNAL]
+=== Source Location Trace: === 
+learning/brain/tfrt/tpu/tpu_util/tpu_util.cc:27
+learning/brain/research/pjrt/tfrt_tpu_system_state.cc:60
+learning/brain/research/pjrt/tfrt_tpu_pjrt_client.cc:3283
+platforms/xla/tools/multihost_hlo_runner/hybrid_sim/python/hybrid_sim_clif_aux.cc:47
+
+I0314 22:51:18.258921       1 registerer_tracker.cc:42] 96 REGISTERed objects from 39 files were unreferenced, set --vmodule=registerer_tracker=n for more details.
+I0314 22:51:18.259140       1 metrics_exporter.cc:458] Metrics are flushed.
+W0314 22:51:18.259149       1 file_factory_tracker.cc:50] The following registered filefactories were not used: cfs-file, cfs2-file, cns-file, fastwrite-file, gzip-file, lock-server-file, namespace-file, readahead-file, zip-file
+W0314 22:51:18.259162       1 file_factory_tracker.cc:57] The following registered prefix filefactories were not used: /bufferedio/, /cdpushfile/, /ecfs/, /instrumented/, /svelte/ls/, /vas/
