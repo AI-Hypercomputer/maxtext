@@ -1,5 +1,5 @@
-jax>=0.4.30
-jaxlib>=0.4.30
+jax=0.5
+jaxlib=0.5
 orbax-checkpoint>=0.5.12
 absl-py
 array-record

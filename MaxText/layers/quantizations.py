@@ -349,7 +349,7 @@ def _get_mixed_precision_quant_config(mixed_precision_config):
 
 def _get_quant_config(config):
   """Set quantization params based on user configuration."""
-  if not config.quantization or config.quantization == "":
+  if not config.quantization or config.quantization == "" or config.quantization == "None":
     return None
   if config.quantization == "int8":
     return _get_int8_quant_config(config)
