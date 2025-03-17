@@ -22,7 +22,6 @@ from jax.experimental import mesh_utils
 import unittest
 
 import pyconfig
-import pytest
 from input_pipeline import _hf_data_processing
 from input_pipeline import input_pipeline_interface
 

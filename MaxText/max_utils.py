@@ -31,10 +31,10 @@ import subprocess
 from etils import epath
 from collections.abc import Sequence
 import collections
-from typing import Any, Tuple
+from typing import Any
 
 import max_logging
-
+import diloco
 
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
@@ -528,6 +528,29 @@ def create_device_mesh(config, devices=None):
 
   multi_slice_env = num_slices > 1
 
+  dcn_parallelism = [
+      config.dcn_diloco_parallelism,
+      config.dcn_data_parallelism,
+      config.dcn_pipeline_parallelism,
+      config.dcn_fsdp_parallelism,
+      config.dcn_fsdp_transpose_parallelism,
+      config.dcn_sequence_parallelism,
+      config.dcn_tensor_parallelism,
+      config.dcn_expert_parallelism,
+      config.dcn_autoregressive_parallelism,
+  ]
+  ici_parallelism = [
+      config.ici_diloco_parallelism,
+      config.ici_data_parallelism,
+      config.ici_pipeline_parallelism,
+      config.ici_fsdp_parallelism,
+      config.ici_fsdp_transpose_parallelism,
+      config.ici_sequence_parallelism,
+      config.ici_tensor_parallelism,
+      config.ici_expert_parallelism,
+      config.ici_autoregressive_parallelism,
+  ]
+
   # Find possible unspecified parallelisms
   ici_parallelism = fill_unspecified_mesh_axes(config.ici_parallelism.copy(), num_devices_per_slice, "ICI")
 
@@ -570,7 +593,7 @@ def create_device_mesh(config, devices=None):
       if config.optimize_mesh_for_tpu_v6e:
         mesh = optimize_mesh_for_tpu_v6e(mesh, devices)
 
-  max_logging.log(f"Num_devices: {num_devices}, shape {mesh.shape}")
+  max_logging.log(f"Num_devices: {num_devices}, shape: {mesh.shape}")
 
   return mesh
 
@@ -618,7 +641,10 @@ def init_initial_state(model, tx, config, is_training, key):
       np.ones(input_shape, dtype=jnp.int32),
   )
   if is_training:
-    return init_training_state(model.apply, model_vars, tx)
+    init_train_state = functools.partial(init_training_state, model.apply, model_vars, tx)
+    if config.num_diloco_replicas > 1:
+      return diloco.build_diloco_state(config, init_train_state)
+    return init_train_state()
   return init_decode_state(model.apply, model_vars)
 
 
@@ -644,7 +670,14 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   else:
     # Load params from checkpoint
     max_logging.log(f"Loading decode params from {config.load_parameters_path}")
-    unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(model, None, config, rng, mesh, False)
+    unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(
+        initialize_state=functools.partial(
+            init_initial_state, model=model, tx=None, config=config, key=rng, is_training=False
+        ),
+        config=config,
+        mesh=mesh,
+        is_training=False,
+    )
     with nn_partitioning.axis_rules(config.logical_axis_rules):
       params = checkpointing.load_params_from_path(
           config.load_parameters_path, unboxed_abstract_state.params, config.checkpoint_storage_concurrent_gb
@@ -690,15 +723,12 @@ def setup_initial_state(
     mesh: jax.devices() mesh
     checkpoint_manager: an Orbax checkpointing.CheckpointManager object
     is_training: True to initialize training state, False for decode state
-
-  Returns:
-    state: the initialized train state
-    state_mesh_annotations: the mesh annotations for the train state
   """
-
-  unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
-      model, tx, config, rng, mesh, is_training
+  init_state_partial = functools.partial(
+      init_initial_state, model=model, tx=tx, config=config, key=rng, is_training=is_training
   )
+  init_state_partial.__name__ = "initialize_state"
+  unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(init_state_partial, config, mesh)
 
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -727,14 +757,7 @@ def setup_initial_state(
           data_iterator.local_iterator = restored["iter"]
         state = restored["items"]
     else:
-      init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
-      init_state_partial.__name__ = "initialize_state"
-      # pylint: disable=not-callable
-      state = jax.jit(
-          init_state_partial,
-          in_shardings=None,
-          out_shardings=state_mesh_shardings,
-      )(rng)
+      state = jax.jit(init_state_partial, out_shardings=state_mesh_shardings)(key=rng)  # pylint: disable=not-callable
       if raw_params:  # If we loaded a partial state, we need to merge it.
         state = state.replace(params=raw_params)
 
@@ -793,7 +816,7 @@ def create_learning_rate_schedule(config):
 # Cross entropy implementation is taken from original T5X codebase:
 # https://github.com/google-research/t5x/blob/ace831eea1e2742b4299cd1a9af7e4f302038351/t5x/losses.py#L25-L101
 @jax.custom_vjp
-def cross_entropy_with_logits(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float) -> Tuple[jnp.ndarray, jnp.ndarray]:
+def cross_entropy_with_logits(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float) -> tuple[jnp.ndarray, jnp.ndarray]:
   """Computes cross entropy loss with stable custom gradient.
   Computes a stabilized-gradient version of:
     -jnp.sum(targets * nn.log_softmax(logits), axis=-1)
@@ -822,9 +845,9 @@ def cross_entropy_with_logits(logits: jnp.ndarray, targets: jnp.ndarray, z_loss:
   return loss, total_z_loss
 
 
-def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float = 0.0) -> Tuple[
-    Tuple[jnp.ndarray, jnp.ndarray],
-    Tuple[
+def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_loss: float = 0.0) -> tuple[
+    tuple[jnp.ndarray, jnp.ndarray],
+    tuple[
         jnp.ndarray,
         jnp.ndarray,
         jnp.ndarray,
@@ -857,7 +880,7 @@ def _cross_entropy_with_logits_fwd(logits: jnp.ndarray, targets: jnp.ndarray, z_
 
 
 def _cross_entropy_with_logits_bwd(
-    res: Tuple[
+    res: tuple[
         jnp.ndarray,
         jnp.ndarray,
         jnp.ndarray,
@@ -866,8 +889,8 @@ def _cross_entropy_with_logits_bwd(
         jnp.ndarray,
         jnp.ndarray,
     ],
-    g: Tuple[jnp.ndarray, jnp.ndarray],
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    g: tuple[jnp.ndarray, jnp.ndarray],
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
   """Backward-mode of `cross_entropy_with_logits`."""
   g = g[0]  # Ignore z_loss component as that is only used for logging.
   logits, targets, z_loss, exp_shifted, sum_exp, log_softmax, log_z = res
@@ -885,25 +908,32 @@ def _cross_entropy_with_logits_bwd(
 cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd, _cross_entropy_with_logits_bwd)
 
 
-def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
+def get_abstract_state(initialize_state, config, mesh, is_training=True):
   """Get a shaped abstraction of the state (including optimizer)"""
-  init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
-
   with nn_partitioning.axis_rules(config.logical_axis_rules):
-    abstract_state = jax.eval_shape(init_state_partial)
-
+    abstract_state = jax.eval_shape(initialize_state)
   state_logical_annotations = nn.get_partition_spec(abstract_state)
-
+  if is_training and config.num_diloco_replicas > 1:
+    # TODO: figure out if we can somehow "push" this into `initialize_state` via extending Flax parititiongs logical axes
+    # after the drjax.broadcast.
+    # Extend the PartitionSpec to include a leading DiLoCo axis in the PartitionSpec, otherwise the drjax.broadcast to the
+    # DiLoCo replicas will be fully replicated.
+    state_logical_annotations = state_logical_annotations.replace(
+        inner_state=jax.tree.map(
+            lambda s: jax.sharding.PartitionSpec("diloco", *s),
+            state_logical_annotations.inner_state,
+        )
+    )
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
+
   if is_training and config.optimizer_memory_host_offload:
     opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)
     params = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.params)
     state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state, params=params)
 
-  abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape()
+  abstract_sharded_state = jax.jit(initialize_state, out_shardings=state_mesh_shardings).eval_shape()
 
   unboxed_abstract_sharded_state = unbox_logicallypartioned(abstract_sharded_state)
-  # Initialization
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return (

@@ -15,8 +15,8 @@ limitations under the License.
 """
 
 """ Test that all weights are expected dtype (default float32) """
+import functools
 import unittest
-from absl.testing import absltest
 
 import pyconfig
 
@@ -46,8 +46,10 @@ class WeightDtypes(unittest.TestCase):
     learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
     tx = optimizers.get_optimizer(config, learning_rate_schedule)
     _, example_rng = jax.random.split(jax.random.PRNGKey(0), 2)
-
-    abstract_state, _, _ = max_utils.get_abstract_state(model, tx, config, example_rng, mesh)
+    initialize_state = functools.partial(
+        max_utils.init_initial_state, model=model, tx=tx, config=config, key=example_rng, is_training=True
+    )
+    abstract_state, _, _ = max_utils.get_abstract_state(initialize_state, config, mesh)
     return abstract_state.params
 
   def assert_weights_are_dtype(self, weights, expected_dtype):

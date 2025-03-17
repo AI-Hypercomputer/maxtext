@@ -15,6 +15,9 @@ limitations under the License.
 """
 
 """ Tests for the common Max Utils """
+
+import functools
+import chex
 import jax
 import max_utils
 from flax import linen as nn
@@ -25,6 +28,7 @@ from jax.sharding import Mesh
 import optax
 import pyconfig
 import unittest
+import diloco
 from layers import models
 from layers import quantizations
 
@@ -96,6 +100,108 @@ class MaxUtilsInitState(unittest.TestCase):
     self.assertEqual(
         max_utils.calculate_num_params_from_pytree(state.params), max_utils.calculate_num_params_from_pytree(self.params)
     )
+
+  def test_get_abstract_state_training(self):
+
+    class SimpleModel(nn.Module):
+      """Simple model with partitioned parameters to test sharding."""
+
+      def setup(self):
+        self.dense = nn.Dense(
+            features=4,
+            kernel_init=nn.with_logical_partitioning(nn.initializers.lecun_normal(), names=("mlp",)),
+        )
+
+      def __call__(self, x, y):
+        del y  # Unused.
+        return self.dense(x)
+
+    model = SimpleModel()
+    tx = optax.sgd(learning_rate=0.001)
+    initialize_state = functools.partial(
+        max_utils.init_initial_state, model=model, tx=tx, key=jax.random.key(seed=42), is_training=True
+    )
+    ShapeDtypeStruct = jax.ShapeDtypeStruct
+    expected_shape_dtypes = {
+        "params": {
+            "dense": {
+                "bias": ShapeDtypeStruct([4], jnp.float32),
+                "kernel": ShapeDtypeStruct([2048, 4], jnp.float32),
+            }
+        },
+    }
+    PSpec = jax.sharding.PartitionSpec
+    expected_pspecs = {
+        "params": {
+            "dense": {
+                "bias": PSpec(),
+                "kernel": PSpec(("fsdp_transpose", "tensor", "tensor_sequence", "autoregressive")),
+            }
+        },
+    }
+
+    with self.subTest("vanilla"):
+      config = pyconfig.initialize([None, "configs/base.yml"], enable_checkpointing=False)
+      mesh = Mesh(max_utils.create_device_mesh(config), config.mesh_axes)
+      sharded_state, state_mesh_annotations, state_mesh_shardings = max_utils.get_abstract_state(
+          functools.partial(initialize_state, config=config), config=config, mesh=mesh
+      )
+      self.assertIsInstance(sharded_state, train_state.TrainState)
+      chex.assert_trees_all_equal_shapes_and_dtypes(sharded_state.params, expected_shape_dtypes)
+      self.assertEqual(
+          state_mesh_annotations,
+          train_state.TrainState(
+              step=PSpec(),
+              apply_fn=model.apply,
+              params=expected_pspecs,
+              tx=tx,
+              opt_state=(optax.EmptyState(), optax.EmptyState()),
+          ),
+      )
+      self.assertEqual(
+          state_mesh_shardings,
+          train_state.TrainState(
+              step=jax.sharding.NamedSharding(mesh=mesh, spec=PSpec()),
+              apply_fn=model.apply,
+              params=jax.tree.map(
+                  lambda pspec: jax.sharding.NamedSharding(mesh=mesh, spec=pspec),
+                  expected_pspecs,
+              ),
+              tx=tx,
+              opt_state=(optax.EmptyState(), optax.EmptyState()),
+          ),
+      )
+
+    with self.subTest("diloco"):
+      config = pyconfig.initialize(
+          [None, "configs/base.yml"],
+          enable_checkpointing=False,
+          ici_diloco_parallelism=2,
+      )
+      mesh = Mesh(max_utils.create_device_mesh(config), config.mesh_axes)
+      sharded_state, state_mesh_annotations, state_mesh_shardings = max_utils.get_abstract_state(
+          functools.partial(initialize_state, config=config), config=config, mesh=mesh
+      )
+      # DiLoCo will create a different state type with additional diloco axis in each shape.
+      self.assertIsInstance(sharded_state, diloco.DiLoCoTrainState)
+      expected_diloco_shape_dtypes = jax.tree.map(
+          lambda shape_dtype: ShapeDtypeStruct((config.num_diloco_replicas, *shape_dtype.shape), shape_dtype.dtype),
+          expected_shape_dtypes,
+      )
+      chex.assert_trees_all_equal_shapes_and_dtypes(sharded_state.inner_state.params, expected_diloco_shape_dtypes)
+      # Expect the new array dimension to be sharded across the DiLoCo axis, while the `outer_params` continue to be sharded
+      # as per the original shardings.
+      expected_diloco_pspecs = jax.tree.map(lambda pspec: PSpec("diloco", *pspec), expected_pspecs)
+      self.assertEqual(state_mesh_annotations.inner_state.params, expected_diloco_pspecs)
+      self.assertEqual(state_mesh_annotations.outer_params, expected_pspecs)
+      self.assertEqual(
+          state_mesh_shardings.inner_state.params,
+          jax.tree.map(lambda pspec: jax.sharding.NamedSharding(mesh=mesh, spec=pspec), expected_diloco_pspecs),
+      )
+      self.assertEqual(
+          state_mesh_shardings.outer_params,
+          jax.tree.map(lambda pspec: jax.sharding.NamedSharding(mesh=mesh, spec=pspec), expected_pspecs),
+      )
 
 
 class ModelWithMultipleCollections(nn.Module):

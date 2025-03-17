@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-""" 
+"""
 Save a Cross Ahead of Time Compiled (XAOT) version of train.py's train step
 Generates shaped versions of state and data without ever constructing them, so its possible
 to compile with target hardware (e.g. hundreds/thousands of chips), without using the hardware.
@@ -23,6 +23,7 @@ before having to use the target hardware - you will see the same OOM error messa
 as you would on the target hardware.
 """
 
+import functools
 import jax
 from jax.experimental.topologies import get_topology_desc
 from jax.sharding import Mesh
@@ -93,7 +94,10 @@ def get_shaped_inputs(topology_mesh, config):
   shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
 
   # Shaped state
-  abstract_state, _, state_mesh_shardings = max_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
+  initialize_state = functools.partial(
+      max_utils.init_initial_state, model=model, tx=tx, config=config, key=example_rng, is_training=True
+  )
+  abstract_state, _, state_mesh_shardings = max_utils.get_abstract_state(initialize_state, config, topology_mesh)
 
   # Shaped batch
   shaped_batch = input_pipeline_interface.get_shaped_batch(config)
