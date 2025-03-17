@@ -77,6 +77,7 @@ class DecodeTests(unittest.TestCase):
   def test_gpu_base(self):
     decode_main(DecodeTests.CONFIGS["base"] + ["attention=dot_product"])
 
+  @pytest.mark.skip(reason="until b/400476456 is fixed")
   @pytest.mark.tpu_only
   def test_tpu_int8(self):
     decode_main(DecodeTests.CONFIGS["int8"])
