@@ -26,26 +26,26 @@ sys.path.append(parent_dir)
 import maxtext_trillium_model_configs as model_configs
 import maxtext_xpk_runner as mxr
 
-PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_proxy_server:latest"
-SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_server:latest"
-RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest"
+PROXY_IMAGE = "gcr.io/tpu-prod-env-multipod/pathways-scale/gke/dishaw/proxy_server:latest"
+SERVER_IMAGE = "gcr.io/tpu-prod-env-multipod/pathways-scale/gke/dishaw/server:latest"
+RUNNER = "gcr.io/tpu-prod-env-multipod/dishaw_pw_scale_maxtext_runner"
 
 # Cluster Params
-CLUSTER = "v6e-256-cluster"
-PROJECT = "tpu-prod-env-cluster"
-ZONE = "us-east5-b"
-REGION = "us-east5"
+CLUSTER = "bodaborg-v6e-256-ts"
+PROJECT = "tpu-prod-env-multipod"
+ZONE = "us-west1-c"
+REGION = "us-west1"
 COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
 # Other parameters (MUST BE SET BY USER)
-XPK_PATH = "../xpk"  # We're running this script from the maxtext directory
+XPK_PATH = "xpk"  # We're running this script from the maxtext directory
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = (
-    f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
+    f"gs://dishaw-logs-02/pw_mcjax_benchmarking/"
 )
 
-BENCHMARK_STEPS = 20
+BENCHMARK_STEPS = 200
 
 
 def main() -> int:
@@ -85,9 +85,9 @@ def main() -> int:
       runner_image=RUNNER,
 
       # User can add additional flags here.
-      server_flags="",
-      proxy_flags="",
-      worker_flags="",
+      server_flags=" --enable_metrics_collection=true ",
+      proxy_flags=" --enable_metrics_collection=true ",
+      worker_flags=" --enable_metrics_collection=true ",
   )
   num_slices_list = [
       2

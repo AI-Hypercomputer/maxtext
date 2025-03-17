@@ -17,7 +17,7 @@ grain-nightly
 flax>=0.8.0
 ml-collections
 --extra-index-url https://test.pypi.org/simple/
-ml-goodput-measurement==0.1.25
+ml-goodput-measurement==0.1.26
 numpy
 optax
 protobuf==3.20.3
