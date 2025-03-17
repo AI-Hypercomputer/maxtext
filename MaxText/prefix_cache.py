@@ -700,11 +700,21 @@ class PrefixCache:
       self._trie.insert(key)
       return True
 
-  def load(self, key: Key) -> Optional[Value]:
-    """Returns Value stored with key or None if not found."""
+  def load(self, key: Key, device: Any = None) -> Optional[Value]:
+    """Returns Value stored with key or None if not found.
+
+    Args:
+      key: key to load.
+      device:
+        The same type as device in the jax.device_put. Load the Value on the device.
+        If None, load the Value on the original device Value.device.
+    Return:
+      Value stored with key or None if not found.
+      The Value.device is not changed to device loaded on.
+    """
     logger.debug("load key=%r", key)
     with self._lock:
-      value = self._cache.retrieve(key)
+      value = self._cache.retrieve(key, device)
       if value is None:
         logger.warning(
             "The key should fetched by fetch_longest_common_prefix_key, load key=%r should be valid but not.", key

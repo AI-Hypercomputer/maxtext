@@ -898,6 +898,21 @@ class PrefixCacheTest(unittest.TestCase):
     del loaded_value
     assert first_save_bytes_in_use == get_byte_in_use()
 
+  @pytest.mark.tpu_only
+  def test_load_to_specific_device(self):
+    local_devices = jax.local_devices()
+    if len(local_devices) < 2:
+      pytest.skip("Need to test with multiple devices")
+
+    key = (1,)
+    value = create_default_value(prefix=jnp.ones((512, 512), device=local_devices[0]))
+    prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=value.prefix_size_bytes, dram_bytes=value.prefix_size_bytes * 2)
+    assert prefix_cache_inst.save(key, value)
+    loaded_value = prefix_cache_inst.load(key, device=local_devices[1])
+    assert loaded_value is not None
+    assert loaded_value.prefix.device == local_devices[1]
+    assert loaded_value.device == local_devices[0]
+
 
 if __name__ == "__main__":
   unittest.main()
