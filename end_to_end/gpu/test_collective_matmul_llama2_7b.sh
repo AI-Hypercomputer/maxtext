@@ -6,9 +6,10 @@ RS_THRESHOLD=67108864
 
 MODEL="llama2-7b"
 RUN_NAME=$MODEL-$(date +%Y-%m-%d-%H-%M)
+BASE_OUTPUT_DIR=/tmp/local_train
 
 export XLA_FLAGS="--xla_dump_hlo_as_text
-    --xla_dump_to=$BASE_OUTPUT_PATH/$RUN_NAME/HLO_dumps/
+    --xla_dump_to=$BASE_OUTPUT_DIR/$RUN_NAME/HLO_dumps/
     --xla_gpu_enable_latency_hiding_scheduler=true
     --xla_gpu_enable_triton_gemm=false
     --xla_gpu_graph_level=0
@@ -42,7 +43,7 @@ python3 MaxText/train.py \
     enable_checkpointing=false \
     ici_fsdp_parallelism=1 \
     ici_tensor_parallelism=8 \
-    base_output_directory=local_train \
+    base_output_directory=$BASE_OUTPUT_DIR \
     dataset_path=local \
     dataset_type=synthetic \
     hardware=gpu \
@@ -56,14 +57,14 @@ search_file() {
     find "$dir" -type f | grep -E ".*/${pattern}"
 }
 
-HLO_FILE=$(search_file $BASE_OUTPUT_PATH/$RUN_NAME/HLO_dumps/ "$FILE_PATTERN")
+HLO_FILE=$(search_file $BASE_OUTPUT_DIR/$RUN_NAME/HLO_dumps/ "$FILE_PATTERN")
 
 if [ ! -f "$HLO_FILE" ]; then
     echo "Error: $HLO_FILE file does not exist."
     exit 1
 fi
 
-EXPECTED_UNROLLED_AG=$((17))
-EXPECTED_UNROLLED_RS=$((9))
+EXPECTED_UNROLLED_AG=$((34))
+EXPECTED_UNROLLED_RS=$((18))
 
 python3 end_to_end/gpu/test_feature.py collective_matmul $HLO_FILE $((EXPECTED_UNROLLED_AG)) $((EXPECTED_UNROLLED_RS))
