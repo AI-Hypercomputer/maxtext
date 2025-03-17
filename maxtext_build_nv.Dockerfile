@@ -25,6 +25,8 @@ ENV PATH="/usr/local/google-cloud-sdk/bin:${PATH}"
 # Upgrade libcusprase to work with Jax
 RUN apt-get update && apt-get install -y libcusparse-12-8
 
+RUN pip install google-cloud-compute
+
 # Set the working directory in the container
 WORKDIR /deps
 
