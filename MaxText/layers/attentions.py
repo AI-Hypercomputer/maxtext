@@ -1212,11 +1212,12 @@ class Attention(nn.Module):
       # pylint: disable=no-value-for-parameter
       return self.kernel_init(*args) / depth_scaling
 
+    kernel_axes=("embed", "q_heads", "kv")
     query_proj = DenseGeneral(
         features=(self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=query_init,
-        kernel_axes=("embed", "q_heads", "kv"),
+        kernel_axes=kernel_axes,
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name="query",
@@ -1243,6 +1244,7 @@ class Attention(nn.Module):
       raise ValueError("Invalid num_kv_heads for GQA.")
 
     kernel_axes = ("embed", "kv_heads", "kv_head_dim")
+    # kernel_axes = ("embed", None, None)
 
     kv_proj = DenseGeneral(
         features=(self.num_kv_heads, self.head_dim),
