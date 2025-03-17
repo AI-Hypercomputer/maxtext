@@ -16,10 +16,16 @@ limitations under the License.
 
 import jax
 import jax.numpy as jnp
+from jax import debug
+
+
+def save_with_jit(x):
+  jnp.save("logits.npy", x)
+
 
 NEG_INF = -1.0e7  # Masking purpose
 
-
+# Load the tokenizer and model from Hugging Face
 # pylint: disable=bare-except, consider-using-generator, too-many-positional-arguments
 """ Common Maxtext inference utilities. These seem like they should be a library.
 
@@ -37,7 +43,11 @@ def sampling(logits, rng, algorithm, topk=0, nucleus_topp=0, temperature=1.0):
   temperature: temperature parameter for scaling probability
   """
   if algorithm == "greedy":
-    return jnp.argmax(logits, axis=-1)
+    jax.debug.print("sampling logits: {logits}", logits=logits)
+    argmax = jnp.argmax(logits, axis=-1)
+    jax.debug.print("sampling argmax: {argmax}", argmax=argmax)
+    debug.callback(save_with_jit, logits)
+    return argmax
   elif algorithm == "weighted":
     return jax.random.categorical(rng, logits / temperature)
   elif algorithm == "nucleus":

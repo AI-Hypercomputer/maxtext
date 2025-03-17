@@ -1152,7 +1152,7 @@ class MaxEngine(engine_api.Engine):
       return token_utils.TikToken(metadata)
     elif "deepseek" or "mistralai" in metadata.path:
       import tokenizer
-      return tokenizer.build_tokenizer(metadata.path, "huggingface", True, True, "")
+      return tokenizer.build_tokenizer(metadata.path, "huggingface", self.config.add_bos, self.config.add_eos, "")
     else:
       return token_utils.SentencePieceTokenizer(metadata)
 

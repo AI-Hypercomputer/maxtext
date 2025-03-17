@@ -24,6 +24,15 @@ import pyconfig
 
 from typing import Sequence
 from absl import app
+from google.cloud import storage
+
+
+def upload_blob(bucket_name, source_file_name, destination_blob_name):
+  """Uploads a file to the bucket."""
+  storage_client = storage.Client()
+  bucket = storage_client.get_bucket(bucket_name)
+  blob = bucket.blob(destination_blob_name)
+  blob.upload_from_filename(source_file_name)
 
 
 def main(argv: Sequence[str]) -> None:
@@ -44,7 +53,7 @@ def main(argv: Sequence[str]) -> None:
   tokenizer_model = engine.build_tokenizer(metadata)
   # tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
   tokens = tokenizer_model.encode(text)
-  print(tokens)
+  print(f"tokens ids: {tokens}")
   true_length = len(tokens)
   assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
   assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
@@ -78,6 +87,10 @@ def main(argv: Sequence[str]) -> None:
   results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
   output = tokenizer_model.decode(results)
   print(f"Input `{text}` -> `{output}`")
+
+  if jax.process_index() == 0:
+    upload_blob("ranran-multipod-dev", "logits.npy", f"deepseekv3-maxtext/v3-process0/logits.npy")
+    print(f"File is uploaded to gs://ranran-multipod-dev/deepseekv3-maxtext/v3-process0/logits.npy.")
 
   assert output.startswith(
       config.autoregressive_decode_assert
