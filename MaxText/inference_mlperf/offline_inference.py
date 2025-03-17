@@ -140,7 +140,7 @@ class OfflineInference:
         log.info(f"Compiling batched prefill: {length} num_prompts: {num_prompts}")
         self._cached_pref_batch[(length, num_prompts)] = (
             jax.jit(
-                self._prefill_insert_batch,
+                self.engine.prefill_insert_batch,
                 in_shardings=(
                     self.engine.param_layouts,
                     None,
@@ -184,40 +184,6 @@ class OfflineInference:
     prefill_result, first_token = self.engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
     decode_state = self.engine.insert(prefill_result, decode_state, slot)
     return first_token, decode_state
-
-  def _prefill_insert_batch(
-      self,
-      params,
-      tokens,
-      slots,
-      num_prompts,
-      decoder_positions,
-      decoder_segment_ids,
-      start_pos,
-      padded_length,
-      true_lengths,
-      decode_state,
-  ):
-    """return decodestate."""
-    cache, prefill_results, first_tokens = self.engine.prefill_concat(
-        params=params,
-        padded_tokens=tokens,
-        decoder_positions=decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
-        start_pos=start_pos,
-        true_lengths=true_lengths,
-        num_prompts=num_prompts,
-    )
-    decode_state = self.engine.insert_partial(
-        prefill_results,
-        decode_state,
-        cache,
-        slots,
-        num_prompts=num_prompts,
-        start_indices=start_pos,
-        seq_len=padded_length,
-    )
-    return first_tokens, decode_state
 
   def batch_inference_with_callback(
       self,
@@ -284,7 +250,7 @@ class OfflineInference:
         true_lengths = pad_num_prompts_len_array(true_lengths, 16)
         start_pos = pad_num_prompts_len_array(start_pos, 16)
 
-        prefill_fn = self._prefill_insert_batch
+        prefill_fn = self.engine.prefill_insert_batch
         log.info(f"invoking compiled function with length {prefill_len} num_prompts {num_prompts}")
         if (cached := self._cached_pref_batch.get((prefill_len, num_prompts))) is not None:
           prefill_fn = cached

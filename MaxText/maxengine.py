@@ -725,6 +725,41 @@ class MaxEngine(engine_api.Engine):
     prefix, _ = self.prefill(params=params, padded_tokens=padded_tokens, true_length=true_length, rng=rng)
     return self.insert(prefix, decode_state, slot)
 
+  def prefill_insert_batch(  # pylint: disable=too-many-positional-arguments
+      self,
+      params,
+      tokens,
+      slots,
+      num_prompts,
+      decoder_positions,
+      decoder_segment_ids,
+      start_pos,
+      padded_length,
+      true_lengths,
+      decode_state,
+  ) -> Tuple[List[engine_api.ResultTokens], DecodeState]:
+    """Prefill and insert a single computed prefill cache into KV cache, with prefill packing."""
+
+    cache, prefill_results, first_tokens = self.prefill_concat(
+        params=params,
+        padded_tokens=tokens,
+        decoder_positions=decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+        start_pos=start_pos,
+        true_lengths=true_lengths,
+        num_prompts=num_prompts,
+    )
+    decode_state = self.insert_partial(
+        prefill_results,
+        decode_state,
+        cache,
+        slots,
+        num_prompts=num_prompts,
+        start_indices=start_pos,
+        seq_len=padded_length,
+    )
+    return first_tokens, decode_state
+
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
   def generate(
       self,
