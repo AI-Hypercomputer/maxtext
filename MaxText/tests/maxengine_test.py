@@ -25,6 +25,7 @@ from jax.sharding import Mesh
 import numpy as np
 
 import common_types
+from jetstream.engine import token_utils
 from layers import models
 from layers import quantizations
 import max_utils
@@ -119,6 +120,87 @@ class MaxEngineTest(unittest.TestCase):
     self.assertEqual(prefill_result["tokens"].size, 1)
     self.assertNotEqual(prefill_result["tokens"], jnp.array([0]))
     self.assertTrue(jnp.array_equal(first_token.data.size, 3))
+
+  def test_chunked_prefill(self):
+    config = pyconfig.initialize(
+        [sys.argv[0], "configs/base.yml"],
+        per_device_batch_size=1.0,
+        run_name="test",
+        enable_checkpointing=False,
+        base_num_decoder_layers=2,
+        attention="dot_product",
+        max_target_length=16,
+        max_prefill_predict_length=8,
+        base_emb_dim=256,
+        base_num_query_heads=2,
+        base_num_kv_heads=2,
+        model_call_mode="inference",
+    )
+
+    engine = MaxEngine(config)
+    params = engine.load_params()
+
+    tokens = jnp.array([1, 306, 5360, 304, 306, 5360, 304])
+    padding_tokens = jnp.array([1, 306, 5360, 304, 306, 5360, 304, 0])
+    true_length = 7
+    prefill_length = 8
+    chunk_size = 4
+    assert tokens.shape[0] == true_length
+    assert padding_tokens.shape[0] == prefill_length
+
+    chunked_padded_tokens, chunked_true_lengths, chunked_positions = token_utils.chunk_and_pad_tokens(
+        tokens,
+        bos_id=1,
+        pad_id=0,
+        is_bos=False,
+        prefill_lengths=[prefill_length],
+        max_prefill_length=prefill_length,
+        chunk_size=chunk_size,
+        jax_padding=True,
+    )
+    # prefill_length // chunk_size = 2
+    assert len(chunked_padded_tokens) == 2
+
+    # Prefill without chunked
+    expected_prefill_result, expected_first_token = engine.prefill(
+        params=params, padded_tokens=padding_tokens, true_length=true_length
+    )
+
+    chunked_prefill_result = None
+    chunked_first_token = None
+    next_pos = 0
+    for chunk_num, _ in enumerate(chunked_padded_tokens):
+      if chunked_prefill_result is None:
+        chunked_prefill_result, chunked_first_token = engine.prefill(
+            params=params,
+            padded_tokens=chunked_padded_tokens[chunk_num],
+            true_length=chunked_true_lengths[chunk_num],
+            positions=chunked_positions[chunk_num],
+            complete_prompt_true_length=true_length,
+            complete_padded_prompt=padding_tokens,
+            previous_chunk=chunked_prefill_result,
+        )
+      else:
+        chunked_prefill_result, chunked_first_token = engine.prefill(
+            params=params | {"cache": chunked_prefill_result["cache"]},
+            padded_tokens=chunked_padded_tokens[chunk_num],
+            true_length=chunked_true_lengths[chunk_num],
+            positions=chunked_positions[chunk_num],
+            complete_prompt_true_length=true_length,
+            complete_padded_prompt=padding_tokens,
+            previous_chunk=chunked_prefill_result,
+        )
+      chunked_prefill_result["true_length_array"] = jnp.expand_dims(
+          jnp.arange(0, chunk_num * chunk_size + chunked_true_lengths[chunk_num]), 0
+      )
+      chunked_prefill_result["next_pos"] = jnp.full((1, 1), next_pos + chunked_true_lengths[chunk_num], dtype=jnp.int32)
+      next_pos = next_pos + chunked_true_lengths[chunk_num]
+
+    # Delete extra contents only used in chunked prefill
+    assert chunked_prefill_result is not None
+    del chunked_prefill_result["true_length_array"]
+    assert jax.tree.map(np.array_equal, expected_prefill_result, chunked_prefill_result)
+    assert jax.tree.map(np.array_equal, expected_first_token, chunked_first_token)
 
 
 if __name__ == "__main__":
