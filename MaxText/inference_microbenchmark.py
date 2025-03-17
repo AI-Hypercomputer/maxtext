@@ -27,6 +27,7 @@ from jetstream.engine import token_utils
 from MaxText import max_utils
 from MaxText import maxengine
 from MaxText import maxtext_utils
+from MaxText import prefill_packing
 from MaxText import prefix_cache
 from MaxText import profiler
 from MaxText import pyconfig
@@ -230,10 +231,8 @@ def prefill_insert_benchmark_loop(
   prof = profiler.Profiler(config)
   prof.activate(optional_postfix=profile_name)
   start = datetime.datetime.now()
-  rng = jax.random.PRNGKey(1234)
   for i in range(iters):
-    rng, rng_prefill = jax.random.split(rng)
-    decode_state = engine_insert(tokens, true_length, rng_prefill, decode_state, int(i % total_slots), params)
+    _, decode_state = engine_insert(params, tokens, int(i % total_slots), true_length, decode_state)
   jax.block_until_ready(decode_state)
   end = datetime.datetime.now()
   prof.deactivate()
@@ -242,10 +241,8 @@ def prefill_insert_benchmark_loop(
 
 def prefill_insert_benchmark(config, engine_insert, decode_state, params, total_slots, tokens, true_length, iters):
   """Handles warmup, running insert benchmark, and printing results."""
-  rng = jax.random.PRNGKey(1234)
   for i in range(_WARMUP_ITERS):
-    rng, rng_prefill = jax.random.split(rng)
-    decode_state = engine_insert(tokens, true_length, rng_prefill, decode_state, int(i % total_slots), params)
+    _, decode_state = engine_insert(params, tokens, int(i % total_slots), true_length, decode_state)
   jax.block_until_ready(decode_state)
 
   print(f"Prefill and insert benchmark results for length {tokens.size}:\n")
@@ -398,6 +395,7 @@ def summarize_prefill_result(engine_prefill, params, tokens, true_length):
 def run_benchmarks(config):
   """Run microbenchmarks."""
   engine = maxengine.MaxEngine(config)
+  prefill_processor = prefill_packing.PrefillProcessor(engine)
   rng = jax.random.PRNGKey(1234)
   rng, rng_load_params = jax.random.split(rng)
   params = engine.load_params(rng_load_params)
@@ -441,14 +439,7 @@ def run_benchmarks(config):
           ).lower(params, key_shape, i32_scalar, rng_shape)
       ).compile(compiler_options=None)
 
-      prefill_insert_executable[prefill_length] = (
-          jax.jit(
-              engine.prefill_insert,
-              in_shardings=(None, None, None, engine.decode_state_layouts, None, engine.param_layouts),
-              out_shardings=(engine.decode_state_layouts),
-              donate_argnames=("decode_state",),
-          ).lower(key_shape, i32_scalar, rng_shape, engine.decode_state_shapes, i32_scalar, params)
-      ).compile(compiler_options=None)
+      prefill_insert_executable[prefill_length] = prefill_processor.aot_compile(params, prefill_length)
 
       benchmark_results["prefill-result-sizes"][prefill_length] = summarize_prefill_result(
           prefill_executable[prefill_length], params, prefill_tokens[prefill_length], prefill_true_lengths[prefill_length]

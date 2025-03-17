@@ -763,20 +763,6 @@ class MaxEngine(engine_api.Engine):
     prefill_results = {k: jnp.stack(v) for k, v in prefill_results.items()}
     return cache, prefill_results, first_tokens
 
-  def prefill_insert(  # pylint: disable=too-many-positional-arguments
-      self,
-      padded_tokens: jax.Array,
-      true_length: int,
-      rng: Any,
-      decode_state: DecodeState,
-      slot: int,
-      params: Params,
-  ) -> DecodeState:
-    """Prefill and insert a single computed prefill cache into KV cache."""
-
-    prefix, _ = self.prefill(params=params, padded_tokens=padded_tokens, true_length=true_length, rng=rng)
-    return self.insert(prefix, decode_state, slot)
-
   # Public non-JIT generate method that updates page state
   def generate(
       self,
@@ -1424,8 +1410,9 @@ def create_engine_from_config_flags(
   print(f"Command line args: {args_str}")
   cmd_args = args_str.split(" ")
   for cmd_arg in cmd_args:
-    k, v = cmd_arg.split("=")
-    args[k.strip()] = v.strip()
+    if cmd_arg:
+      k, v = cmd_arg.split("=")
+      args[k.strip()] = v.strip()
   assert "load_parameters_path" in args, "load_parameters_path must be defined"
   if maxengine_config_filepath is None:
     maxengine_config_filepath = os.path.join(PKG_DIR, "configs", "base.yml")
