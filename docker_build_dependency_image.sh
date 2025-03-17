@@ -20,12 +20,14 @@
 # bash docker_build_dependency_image.sh MODE=nightly
 # bash docker_build_dependency_image.sh MODE=stable JAX_VERSION=0.4.13
 # Nightly build with JAX_VERSION for GPUs. Available versions listed at https://storage.googleapis.com/jax-releases/jax_nightly_releases.html:
-# bash docker_build_dependency_image.sh DEVICE=gpu MODE=nightly JAX_VERSION=0.4.36.dev20241109 # Note: this sets both jax-nightly and jaxlib-nightly 
+# bash docker_build_dependency_image.sh DEVICE=gpu MODE=nightly JAX_VERSION=0.4.36.dev20241109 # Note: this sets both jax-nightly and jaxlib-nightly
 # MODE=custom_wheels is the same as nightly except that it reinstalls any
 # additional wheels that are present in the maxtext directory.
 # The main use case is to install custom jax or jaxlib wheels but it also
 # works with any custom wheels.
 # bash docker_build_dependency_image.sh MODE=custom_wheels
+# bash docker_build_dependency_image.sh DEVICE=gpu MODE=jsts_stable  JSTS_VERSION=2025-03-01
+# bash docker_build_dependency_image.sh DEVICE=gpu MODE=jsts_nightly JSTS_VERSION=2025-03-01
 
 # Enable "exit immediately if any command fails" option
 set -e
@@ -49,6 +51,12 @@ done
 if [[ -z ${JAX_VERSION+x} ]] ; then
   export JAX_VERSION=NONE
   echo "Default JAX_VERSION=${JAX_VERSION}"
+fi
+
+
+if [[ -z ${JSTS_VERSION} ]] ; then
+  export JSTS_VERSION=latest
+  echo "Default Jax Stable Stack Version=${JSTS_VERSION}"
 fi
 
 if [[ -z ${MODE} ]]; then
@@ -91,12 +99,20 @@ if [[ -z ${LIBTPU_GCS_PATH+x} ]] ; then
     if [[ ${MODE} == "stable_stack" ]]; then
       build_stable_stack
     else
-      if [[ ${MODE} == "pinned" ]]; then
+      if [[ ${MODE} == "jsts_nightly" ]]; then
+        export BASEIMAGE=gcr.io/tpu-prod-env-multipod/maxtext_gpu_stable_stack_nightly_jax:$JSTS_VERSION
+        export DOCKERFILE=maxtext_gpu_gcp_dependencies.Dockerfile
+      elif [[ ${MODE} == "jsts_stable" ]]; then
+        export BASEIMAGE=gcr.io/tpu-prod-env-multipod/maxtext_gpu_jax_stable_stack:$JSTS_VERSION
+        export DOCKERFILE=maxtext_gpu_gcp_dependencies.Dockerfile
+      elif [[ ${MODE} == "pinned" ]]; then
         export BASEIMAGE=ghcr.io/nvidia/jax:base-2024-12-04
+        export DOCKERFILE=maxtext_gpu_dependencies.Dockerfile
       else
         export BASEIMAGE=ghcr.io/nvidia/jax:base
+        export DOCKERFILE=maxtext_gpu_dependencies.Dockerfile
       fi
-      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg DEVICE=$DEVICE --build-arg BASEIMAGE=$BASEIMAGE -f ./maxtext_gpu_dependencies.Dockerfile -t ${LOCAL_IMAGE_NAME} .
+      docker build --network host --build-arg MODE=${MODE} --build-arg JAX_VERSION=$JAX_VERSION --build-arg DEVICE=$DEVICE --build-arg BASEIMAGE=$BASEIMAGE --build-arg BASEIMAGE_TYPE=$BASEIMAGE_TYPE -f ./$DOCKERFILE -t ${LOCAL_IMAGE_NAME} .
     fi
   else
     if [[ ${MODE} == "stable_stack" ]]; then
