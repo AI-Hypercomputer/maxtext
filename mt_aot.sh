@@ -37,10 +37,21 @@ export WORKLOAD_NAME=$USER-$(echo $MODEL_NAME | sed 's/\.//g')-aot-${RANDOM:0:2}
 # export DCN_PP=1
 # export NUM_LAYERS_PER_PP_STAGE=1
 
+
+
+# For 405B, minimum need 32 nodes, so ICI TP=8, DCN PP=32 or 16
+# 672 nodes is 2^5*3*7, 126 layers is 2*3*3*7, so common is 2,3,7, max 42
+export PER_DEVICE_BATCH_SIZE=0.25
+export ICI_TP=8
+export TARGET_NUM_NODES=672
+export DCN_PP=21
+export NUM_LAYERS_PER_PP_STAGE=6 # max 6, could be 2,3 or 6
+
 # PP setting
 # Must turn on
-export PER_DEVICE_BATCH_SIZE=1
-export ICI_TP=1
+# export PER_DEVICE_BATCH_SIZE=1
+# export ICI_TP=1
+
 
 # OOM, 80G, TP should help here, but I'd like to isolate TP from FSDP for now https://xprof.corp.google.com/memory_viewer/lancewang-1849170665103313379
 # export TARGET_NUM_NODES=128
@@ -58,9 +69,9 @@ export ICI_TP=1
 # export NUM_LAYERS_PER_PP_STAGE=14 # 126 layers, (2,3,7), so (2,3,7,6,14,21), 3 repeats
 
 # 70.6G, https://xprof.corp.google.com/memory_viewer/lancewang-13350260186473749094
-export TARGET_NUM_NODES=96
-export DCN_PP=3 # 126 layers, could be 2, 3, 6, 7, 9, 14, 18, 21
-export NUM_LAYERS_PER_PP_STAGE=6 # 126 layers, (2,3,7), so (2,3,7,6,14,21), 7 repeats
+# export TARGET_NUM_NODES=96
+# export DCN_PP=3 # 126 layers, could be 2, 3, 6, 7, 9, 14, 18, 21
+# export NUM_LAYERS_PER_PP_STAGE=6 # 126 layers, (2,3,7), so (2,3,7,6,14,21), 7 repeats
 
 # OOM, 77G, https://xprof.corp.google.com/memory_viewer/lancewang-14585151666080368961
 # export TARGET_NUM_NODES=96
@@ -102,11 +113,18 @@ export NUM_LAYERS_PER_PP_STAGE=6 # 126 layers, (2,3,7), so (2,3,7,6,14,21), 7 re
 # export DCN_DP=8
 # export NUM_LAYERS_PER_PP_STAGE=9 # 126 layers, (2,3,7), so (2,3,7,6,14,21), 7 repeats
 
-# Must turn on
-export DCN_FSDP=$(($TARGET_NUM_NODES / $DCN_PP))
-export PP_MBS=$(($DCN_PP))
+# Must turn on for FSDP
+# export DCN_FSDP=$(($TARGET_NUM_NODES / $DCN_PP))
+# export PP_MBS=$(($DCN_PP))
+
+# Must turn on for DP
+export DCN_FSDP=1
+export DCN_DP=$(($TARGET_NUM_NODES / $DCN_PP))
+export PP_MBS=$((2 * $DCN_PP))
 
 
+export SCAN_LAYERS=False
+export SCAN_PP_ITER=True
 # export REMAT_POLICY=save_qkv_proj
 export REMAT_POLICY=full
 
@@ -146,13 +164,14 @@ XLA_FLAGS=--xla_gpu_enable_latency_hiding_scheduler=true \
 EOF
 
 
-COMMAND="python MaxText/train_compile.py MaxText/configs/models/gpu/llama3.1_405b.yml hardware=gpu base_output_directory=$OUTPUT_BUCKET/aot dataset_type=synthetic tokenizer_path=assets/tokenizer_llama3.tiktoken per_device_batch_size=$PER_DEVICE_BATCH_SIZE ici_tensor_parallelism=$ICI_TP dcn_fsdp_parallelism=$DCN_FSDP dcn_pipeline_parallelism=$DCN_PP max_target_length=4096 run_name=runner_aotc steps=10 enable_checkpointing=false model_name=$MODEL_NAME compile_topology=a3 compile_topology_num_slices=$TARGET_NUM_NODES logits_dot_in_fp32=false weight_dtype=bfloat16 opt_type=adamw attention=$ATTENTION profiler=xplane skip_first_n_steps_for_profiler=0 remat_policy=$REMAT_POLICY num_layers_per_pipeline_stage=$NUM_LAYERS_PER_PP_STAGE num_pipeline_microbatches=$PP_MBS";
+COMMAND="python MaxText/train_compile.py MaxText/configs/models/gpu/llama3.1_405b.yml hardware=gpu base_output_directory=$OUTPUT_BUCKET/aot dataset_type=synthetic tokenizer_path=assets/tokenizer_llama3.tiktoken per_device_batch_size=$PER_DEVICE_BATCH_SIZE ici_tensor_parallelism=$ICI_TP dcn_data_parallelism=$DCN_DP dcn_fsdp_parallelism=$DCN_FSDP dcn_pipeline_parallelism=$DCN_PP max_target_length=4096 run_name=runner_aotc steps=10 enable_checkpointing=false model_name=$MODEL_NAME compile_topology=a3 scan_layers=$SCAN_LAYERS scan_pipeline_iterations=$SCAN_PP_ITER compile_topology_num_slices=$TARGET_NUM_NODES logits_dot_in_fp32=false weight_dtype=bfloat16 opt_type=adamw attention=$ATTENTION profiler=xplane skip_first_n_steps_for_profiler=0 remat_policy=$REMAT_POLICY num_layers_per_pipeline_stage=$NUM_LAYERS_PER_PP_STAGE num_pipeline_microbatches=$PP_MBS";
 
 # remat_policy=custom decoder_layer_input=offload
 
 COMMAND='export LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:$LD_LIBRARY_PATH;'"${COMMAND}";
 
 echo $COMMAND
+$COMMAND
 
-python3 ../xpk/xpk.py workload delete --cluster $CLUSTER_NAME --workload $WORKLOAD_NAME;
-python3 ../xpk/xpk.py workload create --cluster $CLUSTER_NAME --workload $WORKLOAD_NAME --command "${COMMAND}" --docker-image=$LOCAL_IMAGE_NAME --device-type=$DEVICE_TYPE --num-nodes=$NUM_NODES --scheduler=gke.io/topology-aware-auto --env-file=env.txt
+# python3 ../xpk/xpk.py workload delete --cluster $CLUSTER_NAME --workload $WORKLOAD_NAME;
+# python3 ../xpk/xpk.py workload create --cluster $CLUSTER_NAME --workload $WORKLOAD_NAME --command "${COMMAND}" --docker-image=$LOCAL_IMAGE_NAME --device-type=$DEVICE_TYPE --num-nodes=$NUM_NODES --scheduler=gke.io/topology-aware-auto --env-file=env.txt

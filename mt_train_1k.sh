@@ -1,19 +1,17 @@
 #!/bin/bash
 
-# export MODEL_NAME=llama2-7b
+export MODEL_NAME=llama2-7b
 
 # Launch llama2 70b
 # export MODEL_NAME=llama2-70b
 
 # Launch llama3.1 405b
-export MODEL_NAME=llama3.1-405b
+# export MODEL_NAME=llama3.1-405b
 
 MODEL_SIZE=$(echo $MODEL_NAME | grep -o '[0-9]\+b')
 
 # Common parameters
 export CLUSTER_NAME=a3plus-benchmark
-
-# export ZONE=us-central1-b
 export ZONE=australia-southeast1
 
 export DEVICE_TYPE=h100-mega-80gb-8
@@ -45,6 +43,7 @@ export JAX_PGLE_PROFILING_RUNS=3
 # NCCL_DEBUG=INFO
 # NCCL_DEBUG_SUBSYS=INIT,NET,ENV,TUNING,COLL
 # NCCL_DEBUG_FILE=/var/log/yy/nccl_log.%h.%p
+# JAX_ENABLE_COMPILATION_CACHE=false
 
 cat <<EOF > env.txt
 
@@ -157,11 +156,15 @@ EOF
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/maxtext_sts_0305_pure
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/maxtext_sts_jax_nightly_0305_pure:latest-ray
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-mantaray_maxtext_jsts_gpu_a4_02252025-nv-fix2_xpk
-export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/maxtext_stable_stack_0305:working
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/maxtext_sts_0206_pure
 # export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/maxtext_sts_jax_nightly_0311
-# tfds_nightly==4.9.7.dev202503040044
-# 4.9.2.dev202308090034
+
+# export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/maxtext_stable_stack_0305:working
+# export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance-di-a4
+# export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/lance_0314
+# export LOCAL_IMAGE_NAME=gcr.io/tpu-prod-env-multipod/maxtext_gpu_stable_stack_nightly_jax:2025-04-02
+export LOCAL_IMAGE_NAME=gcr.io/supercomputer-testing/maxtext_gpu_stable_stack_nightly_jax:2025-04-02
+
 
 call_config() {
 
@@ -201,7 +204,8 @@ call_config() {
 
     echo 'NUM_NODES' ${NUM_NODES} 'PER_DEVICE_BATCH_SIZE' ${PER_DEVICE_BATCH_SIZE} 'ICI_TP' ${ICI_TP} 'DCN_FSDP' ${DCN_FSDP} 'DCN_PP' ${DCN_PP} 'NUM_LAYERS_PER_PP_STAGE' ${NUM_LAYERS_PER_PP_STAGE} 'REMAT_POLICY' ${REMAT_POLICY} 'ATTENTION' ${ATTENTION} WORKLOAD_NAME ${WORKLOAD_NAME}
 
-    COMMAND="python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml hardware=gpu run_name=$RUN_NAME steps=10 max_target_length=4096 model_name=$MODEL_NAME enable_checkpointing=false attention=$ATTENTION dataset_type=synthetic async_checkpointing=false base_output_directory=$OUTPUT_BUCKET logits_dot_in_fp32=false use_iota_embed=false scan_layers=false ici_tensor_parallelism=$ICI_TP dcn_fsdp_parallelism=$DCN_FSDP dcn_pipeline_parallelism=$DCN_PP per_device_batch_size=$PER_DEVICE_BATCH_SIZE num_layers_per_pipeline_stage=$NUM_LAYERS_PER_PP_STAGE weight_dtype=bfloat16 remat_policy=$REMAT_POLICY profiler=xplane skip_first_n_steps_for_profiler=5 num_pipeline_microbatches=$PP_MBS";
+    COMMAND="python3 MaxText/train.py MaxText/configs/models/gpu/$CONFIG_NAME.yml hardware=gpu run_name=$RUN_NAME steps=10 max_target_length=4096 model_name=$MODEL_NAME enable_checkpointing=false attention=$ATTENTION dataset_type=synthetic async_checkpointing=false base_output_directory=$OUTPUT_BUCKET logits_dot_in_fp32=false use_iota_embed=false scan_layers=false ici_tensor_parallelism=$ICI_TP dcn_fsdp_parallelism=$DCN_FSDP dcn_pipeline_parallelism=$DCN_PP per_device_batch_size=$PER_DEVICE_BATCH_SIZE num_layers_per_pipeline_stage=$NUM_LAYERS_PER_PP_STAGE weight_dtype=bfloat16 remat_policy=$REMAT_POLICY profiler=xplane skip_first_n_steps_for_profiler=5 num_pipeline_microbatches=$PP_MBS ";
+    # enable_padding_causal_mask=false
     # ici_tensor_sequence_parallelism=$T_SEQ
     # quantization=fp8
     COMMAND='export LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:$LD_LIBRARY_PATH;'"${COMMAND}";
@@ -227,8 +231,8 @@ call_config() {
 # Test run with 2 nodes, cuda kernel fails
 
 # 7B
-# export NODES=4
-# call_config --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 1 --ICI_TP 1 --DCN_FSDP $NODES --REMAT_POLICY save_qkv_proj --ATTENTION dot_product
+export NODES=4
+call_config --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 1 --ICI_TP 1 --DCN_FSDP $NODES --REMAT_POLICY save_qkv_proj --ATTENTION dot_product
 
 # 405B FSDP
 # export NODES=64
@@ -239,8 +243,8 @@ call_config() {
 # call_config --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 1 --ICI_TP 1 --DCN_FSDP 16 --DCN_PP 7 --NUM_LAYERS_PER_PP_STAGE 6 --REMAT_POLICY full --ATTENTION cudnn_flash_te
 
 # 405B PP on 96 nodes
-export NODES=96
-call_config --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 1 --ICI_TP 1 --DCN_FSDP 32 --DCN_PP 3 --NUM_LAYERS_PER_PP_STAGE 6 --REMAT_POLICY full --ATTENTION cudnn_flash_te
+# export NODES=96
+# call_config --NUM_NODES $NODES --PER_DEVICE_BATCH_SIZE 1 --ICI_TP 1 --DCN_FSDP 32 --DCN_PP 3 --NUM_LAYERS_PER_PP_STAGE 6 --REMAT_POLICY full --ATTENTION cudnn_flash_te
 
 
 # 405B PP2
