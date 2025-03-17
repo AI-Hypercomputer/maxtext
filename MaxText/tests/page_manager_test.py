@@ -17,7 +17,7 @@ import sys
 import unittest
 import jax
 import jax.numpy as jnp
-from inference.page_manager import PageManager, PageState
+from inference.page_manager import PageManager, PageState, get_valid_page_assignments
 import pyconfig
 import max_utils
 
@@ -66,8 +66,8 @@ class TestPageManager(unittest.TestCase):
             self.max_page_groups,
         ),
         "num_pages_used": (self.num_layers, self.max_page_groups),
-        "current_page": (self.num_layers, self.max_page_groups),
-        "current_page_position": (self.num_layers, self.max_page_groups),
+        "active_page": (self.num_layers, self.max_page_groups),
+        "active_page_position": (self.num_layers, self.max_page_groups),
     }
 
     for field, expected in expected_shapes.items():
@@ -89,7 +89,7 @@ class TestPageManager(unittest.TestCase):
     state = self.pm.get_initial_page_state()
     self._validate_state_shapes(state)  # Verify all array shapes
     self.assertTrue(jnp.all(state.page_status == 0))  # All pages should be initially free
-    self.assertTrue(jnp.all(state.page_map == -1))  # No pages should be mapped initially
+    self.assertTrue(jnp.all(state.num_pages_used == 0))  # No pages should be mapped initially
 
   def test_jit_compatibility(self):
     """Tests that PageManager methods are JIT-compatible."""
@@ -139,7 +139,8 @@ class TestPageManager(unittest.TestCase):
 
       # Get the indices of allocated pages from the page_map
       page_map = updated_state.page_map[layer_id, request_id]
-      used_page_indices = page_map[page_map >= 0]
+      num_used = updated_state.num_pages_used[layer_id, request_id]
+      used_page_indices = page_map[:num_used]
       self.assertEqual(len(used_page_indices), pages_needed)  # Check the number of allocated pages
       self.assertEqual(len(jnp.unique(used_page_indices)), pages_needed)  # Ensure no duplicates
 
@@ -172,8 +173,8 @@ class TestPageManager(unittest.TestCase):
     for layer_id in range(self.num_layers):
       self.assertEqual(int(updated_state.sequence_lengths[layer_id, 0]), 0)
       self.assertEqual(int(updated_state.num_pages_used[layer_id, 0]), 0)
-      self.assertEqual(int(updated_state.current_page[layer_id, 0]), -1)
-      self.assertEqual(int(updated_state.current_page_position[layer_id, 0]), 0)
+      self.assertFalse(bool(updated_state.has_active_page[layer_id, 0]))
+      self.assertEqual(int(updated_state.active_page_position[layer_id, 0]), 0)
 
     # Test case 2: Exact page multiple - correct number of pages should be allocated.
     updated_state = self.pm.update_prefill_pages(
@@ -235,8 +236,8 @@ class TestPageManager(unittest.TestCase):
           int(updated_state.sequence_lengths[layer_id, 0]), self.tokens_per_page + 1
       )  # Sequence length should be incremented
       self.assertEqual(int(updated_state.num_pages_used[layer_id, 0]), 2)  # Another page allocated
-      self.assertGreater(int(updated_state.current_page[layer_id, 0]), -1)  # Current page should be valid
-      self.assertEqual(int(updated_state.current_page_position[layer_id, 0]), 0)  # Check position!
+      self.assertGreater(int(updated_state.active_page[layer_id, 0]), -1)  # Current page should be valid
+      self.assertEqual(int(updated_state.active_page_position[layer_id, 0]), 0)  # Check position!
 
     # Test case 3: Partial page allocation - pages allocated only when needed.
     partial_state = self.pm.update_prefill_pages(page_state=initial_state, request_id=2, true_length=5)
@@ -245,15 +246,14 @@ class TestPageManager(unittest.TestCase):
     for layer_id in range(self.num_layers):
       self.assertEqual(int(partial_updated_state.sequence_lengths[layer_id, 2]), 6)  # Sequence length incremented
       self.assertEqual(int(partial_updated_state.num_pages_used[layer_id, 2]), 1)  # Still only one page used
-      self.assertEqual(int(partial_updated_state.current_page_position[layer_id, 2]), 5)
-
+      self.assertEqual(int(partial_updated_state.active_page_position[layer_id, 2]), 5)
 
   def test_state_consistency(self):
     """Checks internal consistency of PageState after allocation operations."""
     initial_state = self.pm.get_initial_page_state()
     # Initially, no pages should be allocated or mapped.
     self.assertEqual(int(jnp.sum(initial_state.page_status)), 0)
-    self.assertEqual(int(jnp.sum(initial_state.page_map != -1)), 0)
+    self.assertEqual(int(jnp.sum(initial_state.num_pages_used)), 0)  # Changed to check num_pages_used
 
     request_id = 0
     true_length = 12
@@ -263,13 +263,12 @@ class TestPageManager(unittest.TestCase):
 
     # Verify that the number of allocated pages (status 1) equals the number of mapped pages.
     for layer_id in range(self.num_layers):
-      allocated_pages = int(jnp.sum(state.page_status[layer_id]))
-      mapped_pages = int(jnp.sum(state.page_map[layer_id] != -1))
-      self.assertEqual(allocated_pages, mapped_pages)
+        allocated_pages = int(jnp.sum(state.page_status[layer_id]))
+        mapped_pages = int(jnp.sum(state.num_pages_used[layer_id]))
+        self.assertEqual(allocated_pages, mapped_pages)
 
-      # Check for duplicate page assignments within the layer.
-      page_assignments = state.page_map[layer_id][state.page_map[layer_id] != -1].flatten()
-      self.assertEqual(len(page_assignments), len(jnp.unique(page_assignments)))
+        page_assignments = get_valid_page_assignments(state, layer_id)
+        self.assertEqual(len(page_assignments), len(jnp.unique(page_assignments)))
 
   def test_request_id_boundaries(self):
     """Tests allocation at the boundaries: max request_id and max length."""
@@ -312,7 +311,8 @@ class TestPageManager(unittest.TestCase):
         )
 
         page_map = updated_state.page_map[layer_id, request_id]
-        used_page_indices = page_map[page_map >= 0]
+        num_used = updated_state.num_pages_used[layer_id, request_id]
+        used_page_indices = page_map[:num_used]
         for page_idx in used_page_indices:
           self.assertEqual(
               int(updated_state.page_status[layer_id, page_idx]),
@@ -390,7 +390,7 @@ class TestPageManager(unittest.TestCase):
 
       # Check the current page position was reset for the new page
       self.assertEqual(
-          int(updated_state.current_page_position[layer_id, 0]),
+          int(updated_state.active_page_position[layer_id, 0]),
           0,
           f"Layer {layer_id}: Current page position should be reset to 0 for the new page",
       )
