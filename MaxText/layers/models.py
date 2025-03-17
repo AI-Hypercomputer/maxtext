@@ -397,136 +397,126 @@ class Decoder(nn.Module):
 
   @nn.compact
   def __call__(
-      self,
-      decoder_input_tokens,
-      decoder_positions,
-      decoder_segment_ids=None,
-      deterministic=False,
-      model_mode=common_types.MODEL_MODE_TRAIN,
-      previous_chunk=None,
-      page_state: Optional[PageState] = None,
-      slot: Optional[int] = None,
-      true_length: Optional[int] = None,
+    self,
+    decoder_input_tokens,
+    decoder_positions,
+    decoder_segment_ids=None,
+    deterministic=False,
+    model_mode=common_types.MODEL_MODE_TRAIN,
+    previous_chunk=None,
+    page_state: Optional[PageState] = None,
+    layer_idx: Optional[int] = None,
+    slot: Optional[int] = None,
+    true_length: Optional[int] = None,
   ):
-    """Forward pass of the decoder."""
+    """Forward pass of the decoder.
+    
+    In standard mode (training, prefill), processes all layers sequentially.
+    In autoregressive mode with paged attention, can process a single layer when layer_idx is provided.
+    This optimization prevents double-looping over layers during token generation.
+    """
     cfg = self.config
     mesh = self.mesh
-    assert decoder_input_tokens.ndim == 2  # [batch, len]
-
-    # [batch, length] -> [batch, length, emb_dim]
+    
+    # 1. Process embeddings regardless of mode
     y = self.shared_embedding(decoder_input_tokens.astype("int32"))
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
-
+    
     if cfg.use_untrainable_positional_embedding:
-      y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
-
+        y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
+    
     if cfg.trainable_position_size > 0:
-      y += Embed(
-          num_embeddings=cfg.trainable_position_size,
-          features=cfg.emb_dim,
-          dtype=cfg.dtype,
-          embedding_init=nn.initializers.normal(stddev=1.0),
-          name="position_embedder",
-          config=cfg,
-      )(decoder_positions)
-
+        y += Embed(num_embeddings=cfg.trainable_position_size, features=cfg.emb_dim, 
+                  dtype=cfg.dtype, name="position_embedder", config=cfg)(decoder_positions)
+    
+    # 2. Setup remat policy and layers
     policy = self.get_remat_policy()
     RemattedBlockLayers = self.set_remat_policy(self.decoder_layer, policy)
-
-    if cfg.using_pipeline_parallelism:
-      if cfg.pipeline_fsdp_ag_once:
-        partition_spec = self.pipeline_module.get_weight_sharding(
-            y, decoder_segment_ids, decoder_positions, deterministic, model_mode
-        )
-      else:
-        partition_spec = None
-      y = self.pipeline_module(
-          y,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          partition_spec=partition_spec,
-          page_state=page_state,
-          slot=slot,
-      )
-    else:
-      if cfg.scan_layers:
-        if cfg.decoder_block == "deepseek":
-          assert len(RemattedBlockLayers) == 2, f"Scanned layers must have a length of 2 using deepseek."
-          dense_layer = RemattedBlockLayers[0]
-          moe_layer = RemattedBlockLayers[1]
-          y, _ = self.scan_decoder_layers(cfg, dense_layer, cfg.first_num_dense_layers, "dense_layers", mesh)(
-              y,
-              decoder_segment_ids,
-              decoder_positions,
-              deterministic,
-              model_mode,
-              page_state,
-              slot,
-          )
-          num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
-          y, _ = self.scan_decoder_layers(cfg, moe_layer, num_moe_layers, "moe_layers", mesh)(
-              y,
-              decoder_segment_ids,
-              decoder_positions,
-              deterministic,
-              model_mode,
-              page_state,
-              slot,
-          )
-        else:
-          RemattedBlockLayer = RemattedBlockLayers[0]
-          y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
-              y,
-              decoder_segment_ids,
-              decoder_positions,
-              deterministic,
-              model_mode,
-              page_state,
-              slot,
-          )
-      else:
-        if cfg.decoder_block == "deepseek":
-          # DeepSeek specific code
-          assert len(RemattedBlockLayers) == 2, f"Unscanned layers must have a length of 2 using deepseek."
-          dense_layer = RemattedBlockLayers[0]
-          moe_layer = RemattedBlockLayers[1]
-
-          layers = [dense_layer, moe_layer]
-          layer_prefixes = ["dense_layers", "moe_layers"]
-          num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
-          num_layers_list = [cfg.first_num_dense_layers, num_moe_layers]
-          # Iterate over the two layer groups (dense and MoE) and apply layer transformation
-          for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
-            for index in range(num_layers):
-              y = layer(config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant)(
-                  y,
-                  decoder_segment_ids,
-                  decoder_positions,
-                  deterministic,
-                  model_mode,
-                  page_state=page_state,
-                  layer_idx=index,
-                  slot=slot,
-              )
-        else:
-          for layer_idx in range(cfg.num_decoder_layers):
-            print(f"Decoder layer index: {layer_idx}")
+    
+    # 3. CRITICAL: Determine execution mode and process layers accordingly
+    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE and cfg.attention == "paged":
+        # AUTOREGRESSIVE PAGED ATTENTION MODE
+        
+        if layer_idx is not None:
+            # SINGLE-LAYER PROCESSING - NO LOOPS
+            layer_name = f"layers_{layer_idx}"
             RemattedBlockLayer = RemattedBlockLayers[0]
-            y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{layer_idx}", quant=self.quant)(
-                y,
-                decoder_segment_ids,
-                decoder_positions,
-                deterministic,
-                model_mode,
-                page_state=page_state,
-                layer_idx=layer_idx,  # Pass explicit layer index
-                slot=slot,  # Pass slot
-                true_length=true_length
+            
+            # Process only the specified layer with no looping
+            y = RemattedBlockLayer(config=cfg, mesh=mesh, name=layer_name, quant=self.quant)(
+                y, decoder_segment_ids, decoder_positions, deterministic, model_mode,
+                page_state=page_state, layer_idx=layer_idx, slot=slot, true_length=true_length
             )
+            
+            if self.is_mutable_collection('intermediates'):
+                print(f"Processing single layer: {layer_idx}")
+            
+            # Skip to final norm and output
+        else:
+            # NO LAYER SPECIFIED (initialization or other case) - Use standard path
+            if not cfg.scan_layers:
+                for i in range(cfg.num_decoder_layers):
+                    if self.is_mutable_collection('intermediates'):
+                        print(f"Standard loop - layer index: {i}")
+                    
+                    RemattedBlockLayer = RemattedBlockLayers[0]
+                    y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{i}", quant=self.quant)(
+                        y, decoder_segment_ids, decoder_positions, deterministic, model_mode,
+                        page_state=page_state, layer_idx=i, slot=slot, true_length=true_length
+                    )
+            else:
+                # Scanned layer processing (unchanged)
+                RemattedBlockLayer = RemattedBlockLayers[0]
+                y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
+                    y, decoder_segment_ids, decoder_positions, deterministic, model_mode,
+                    page_state=page_state, slot=slot
+                )
+    else:
+        if cfg.decoder_block == "deepseek":
+            # DeepSeek specific code
+            assert len(RemattedBlockLayers) == 2, f"Unscanned layers must have a length of 2 using deepseek."
+            dense_layer = RemattedBlockLayers[0]
+            moe_layer = RemattedBlockLayers[1]
 
+            layers = [dense_layer, moe_layer]
+            layer_prefixes = ["dense_layers", "moe_layers"]
+            num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
+            num_layers_list = [cfg.first_num_dense_layers, num_moe_layers]
+            
+            # Iterate over the two layer groups (dense and MoE) and apply layer transformation
+            for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
+                for index in range(num_layers):
+                    y = layer(config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant)(
+                        y,
+                        decoder_segment_ids,
+                        decoder_positions,
+                        deterministic,
+                        model_mode,
+                        page_state=page_state,
+                        layer_idx=index if cfg.attention == "paged" else None,
+                        slot=slot,
+                        true_length=true_length,
+                    )
+        else:
+            for layer_idx_loop in range(cfg.num_decoder_layers):
+                if cfg.attention == "paged" and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+                    print(f"Decoder layer index: {layer_idx_loop}")
+                
+                RemattedBlockLayer = RemattedBlockLayers[0]
+                y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{layer_idx_loop}", quant=self.quant)(
+                    y,
+                    decoder_segment_ids,
+                    decoder_positions,
+                    deterministic,
+                    model_mode,
+                    page_state=page_state,
+                    layer_idx=layer_idx_loop if cfg.attention == "paged" else None,
+                    slot=slot,
+                    true_length=true_length,
+                )
+
+    # Always process final norm layer and logits
     y = self.get_norm_layer()(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -538,30 +528,25 @@ class Decoder(nn.Module):
 
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
-      # Use the transpose of embedding matrix for logit transform.
-      logits = self.shared_embedding.attend(y)
-      if self.config.normalize_embedding_logits:
-        # Correctly normalize pre-softmax logits for this shared case.
-        logits = logits / jnp.sqrt(y.shape[-1])
-      if cfg.final_logits_soft_cap:
-        logits = logits / cfg.final_logits_soft_cap
-        logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
+        # Use the transpose of embedding matrix for logit transform.
+        logits = self.shared_embedding.attend(y)
+        if self.config.normalize_embedding_logits:
+            # Correctly normalize pre-softmax logits for this shared case.
+            logits = logits / jnp.sqrt(y.shape[-1])
+        if cfg.final_logits_soft_cap:
+            logits = logits / cfg.final_logits_soft_cap
+            logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
     else:
-      logits = linears.DenseGeneral(
-          cfg.vocab_size,
-          weight_dtype=cfg.weight_dtype,
-          dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,
-          kernel_axes=("embed", "vocab"),
-          name="logits_dense",
-          matmul_precision=self.config.matmul_precision,
-      )(y)
+        logits = linears.DenseGeneral(cfg.vocab_size, name="logits_dense")(y)
+    
     logits = nn.with_logical_constraint(
         logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
     )
+    
     if self.config.cast_logits_to_fp32:
-      logits = logits.astype(jnp.float32)
+        logits = logits.astype(jnp.float32)
+        
     return logits
-
 
 class Transformer(nn.Module):
   """An decoder-only Transformer model."""
@@ -600,6 +585,7 @@ class Transformer(nn.Module):
       true_length: Optional[int] = None,
       slot: Optional[int] = None,
       page_state: Optional[PageState] = None,
+      layer_idx: Optional[int] = None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target."""
 
@@ -629,5 +615,6 @@ class Transformer(nn.Module):
         page_state=page_state,
         slot=slot,
         true_length=true_length,
+        layer_idx=layer_idx,
     )
     return logits

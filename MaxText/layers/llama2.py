@@ -20,6 +20,7 @@ limitations under the License.
 
 from flax import linen as nn
 from jax.sharding import Mesh
+import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 
@@ -136,6 +137,55 @@ class LlamaDecoderLayer(nn.Module):
         true_length=true_length,
     )
 
+    # Conditional processing based on attention type and mode
+    if self.config.attention == "paged" and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+      # Unpack the results from Attention.__call__
+      q_input, k_pages, v_pages, lengths, page_indices, _ = attention_lnx
+
+      # The attention calculation is now done *HERE*, inside the layer.
+      from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention as jax_paged_attention
+      from jax.experimental import shard_map
+      from jax.sharding import PartitionSpec as P
+      import jax
+
+      # Define sharding specs (same as before)
+      q_pspec = P(None, None, None)
+      k_pspec = P(None, None, None, None)
+      v_pspec = P(None, None, None, None)
+      lengths_pspec = P(None)
+      page_indices_pspec = P(None, None)
+
+      # Define attention function (same as before)
+      def attention_fn(q, k, v, lens, indices):
+        return jax_paged_attention(
+            q=q,
+            k_pages=k,
+            v_pages=v,
+            lengths=lens,
+            page_indices=indices,
+            mask_value=-1e7,  # Use a static value
+            attn_logits_soft_cap=self.config.attn_logits_soft_cap,
+            pages_per_compute_block=self.config.pagedattn_pages_per_compute_block,
+        )
+
+      # Create sharded function
+      wrapped_attention = shard_map.shard_map(
+          attention_fn,
+          mesh=self.mesh,
+          in_specs=(q_pspec, k_pspec, v_pspec, lengths_pspec, page_indices_pspec),
+          out_specs=q_pspec,  # Output sharding
+          check_rep=False,
+      )
+
+      # Call attention computation, INSIDE the layer, inside mesh context.
+      with self.mesh:
+        attention_lnx = wrapped_attention(q_input, k_pages, v_pages, lengths, page_indices)
+        attention_lnx = jnp.expand_dims(attention_lnx, axis=1)  # Add back the sequence dimension
+
+      # Apply output projection *here*, after the attention calculation.
+      attention_lnx = attention_layer.out_projection(cfg.emb_dim, attention_lnx)
+
+    # The rest of the layer is unchanged
     attention_lnx = nn.with_logical_constraint(
         attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
     )
@@ -165,11 +215,8 @@ class LlamaDecoderLayer(nn.Module):
         quant=self.quant,
     )(hidden_states, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
-
     layer_output = mlp_lnx + intermediate_inputs
-
     layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
-
     layer_output = nn.with_logical_constraint(
         layer_output,
         ("activation_batch", "activation_norm_length", "activation_embed"),

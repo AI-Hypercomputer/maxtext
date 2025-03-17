@@ -1331,18 +1331,39 @@ class Attention(nn.Module):
     # When paged attention is enabled, paged attention op is used for all model modes except TRAIN,
     # which uses default attention op.
     if self.config.attention == "paged":
+      # Ensure we have enough pages for prefill
+      # Use ceiling division to round up
+      tokens_per_page = self.config.pagedattn_tokens_per_page
+      max_prefill_length = self.config.max_prefill_predict_length
+      required_pages = (max_prefill_length + tokens_per_page - 1) // tokens_per_page
+      
+      # Use max() to ensure we have at least one page
+      max_pages_per_prefill = max(1, required_pages)
+      
       self.paged_attention_op = PagedAttentionOp(
-          mesh=self.mesh,
-          num_pages=self.config.pagedattn_num_pages,
-          tokens_per_page=self.config.pagedattn_tokens_per_page,
-          max_pages_per_slot=self.config.max_target_length // self.config.pagedattn_tokens_per_page,
-          max_pages_per_prefill=self.config.max_prefill_predict_length // self.config.pagedattn_tokens_per_page,
-          pages_per_compute_block=self.config.pagedattn_pages_per_compute_block,
-          num_kv_heads=self.num_kv_heads,
-          kv_head_dim_size=self.head_dim,
-          dtype=self.dtype,
-          attn_logits_soft_cap=self.attn_logits_soft_cap,
+        mesh=self.mesh,
+        num_pages=self.config.pagedattn_num_pages,
+        tokens_per_page=tokens_per_page,
+        max_pages_per_slot=self.config.max_target_length // tokens_per_page,
+        max_pages_per_prefill=max_pages_per_prefill,  # Use our calculated value
+        pages_per_compute_block=self.config.pagedattn_pages_per_compute_block,
+        num_kv_heads=self.num_kv_heads,
+        kv_head_dim_size=self.head_dim,
+        dtype=self.dtype,
+        attn_logits_soft_cap=self.attn_logits_soft_cap,
       )
+
+    self.out_proj = DenseGeneral(
+            features=self.config.emb_dim,  # Use a known dimension
+            axis=(-2, -1),
+            kernel_init=self.kernel_init,
+            kernel_axes=("heads", "kv", "embed"),
+            dtype=self.dtype,
+            weight_dtype=self.weight_dtype,
+            name="out",
+            quant=self.quant,
+            matmul_precision=self.config.matmul_precision,
+        )
 
   def query_projection(self, inputs_q: Array) -> Array:
     """Query projection."""
@@ -1420,18 +1441,7 @@ class Attention(nn.Module):
     return query, key, value
 
   def out_projection(self, output_dim: int, out: Array) -> Array:
-    out_proj = DenseGeneral(
-        features=output_dim,
-        axis=(-2, -1),
-        kernel_init=self.kernel_init,
-        kernel_axes=("heads", "kv", "embed"),
-        dtype=self.dtype,
-        weight_dtype=self.weight_dtype,
-        name="out",
-        quant=self.quant,
-        matmul_precision=self.config.matmul_precision,
-    )(out)
-    return out_proj
+    return self.out_proj(out)
 
   def apply_rotary_embedding(self, inputs: Array, inputs_positions: Array, name: str):
     """Applies rotary embeddings, handling different model types.
@@ -1498,80 +1508,109 @@ class Attention(nn.Module):
       slot: Optional[int] = None,
       true_length: Optional[int] = None,
   ):
-    """Applies Attention on the input data.
+      """Applies Attention on the input data."""
+      inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+      batch, q_seq_len, _ = inputs_q.shape  # Needed for dummy output shape
 
-    Projects the inputs into multi-headed query, key, and value vectors,
-    applies dot-product attention and project the results to an output vector.
+      # Force initialization of all parameters by calling projection methods
+      is_init = self.is_initializing()
+      
+      # Initialize all projections regardless of initialization state
+      if self.config.fused_qkv:
+          query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
+      else:
+          query = self.query_projection(inputs_q)
+          key = self.kv_projection(inputs_kv, proj_name="key")
+          value = self.kv_projection(inputs_kv, proj_name="value")
 
-    There are three modes: training, prefill and autoregression. During training, the KV cache
-    is ignored. During prefill, the cache is filled. During autoregression the cache is used.
+      # Initialize output projection with dummy data
+      dummy_out = jnp.zeros((batch, q_seq_len, self.num_query_heads, self.head_dim), dtype=self.dtype)
+      _ = self.out_projection(inputs_q.shape[-1], dummy_out)
+      
+      # Return early during initialization, AFTER initializing all parameters
+      if is_init:
+          return jnp.zeros((batch, q_seq_len, self.config.emb_dim), dtype=self.dtype)
+      
+      # apply ROPE - only during non-initialization
+      query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
+      key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
 
-    In the cache initialization call, `inputs_q` has a shape [batch, length,
-    q_features] and `inputs_kv`: [batch, length, kv_features]. During the
-    incremental decoding stage, query, key and value all have the shape [batch,
-    1, qkv_features] corresponding to a single step.
+      # REMAINING CODE STAYS THE SAME
+      # Logical constraints, paged attention handling, etc.
+      if model_mode == common_types.MODEL_MODE_PREFILL:
+          query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
+          key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
+          value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
+      else:
+          query = nn.with_logical_constraint(query, self.query_axis_names)
+          key = nn.with_logical_constraint(key, self.key_axis_names)
+          value = nn.with_logical_constraint(value, self.value_axis_names)
+      
+      query = checkpoint_name(query, "query_proj")
+      key = checkpoint_name(key, "key_proj")
+      value = checkpoint_name(value, "value_proj")
 
-    Args:
-      inputs_q: input queries of shape `[batch, q_length, q_features]`.
-      inputs_kv: key/values of shape `[batch, kv_length, kv_features]`.
-      model_mode: corresponding to train, prefill and decode.
-      deterministic: Disables dropout if set to True.
-      layer_idx: Index of the layer (for paged attention with PageState)
+      assert not self.config.quantize_kvcache or self.kv_quant
 
-    Returns:
-      output of shape `[batch, length, q_features]`.
-    """
-    print(f"Attention.__call__: num_kv_heads={self.num_kv_heads}, num_query_heads={self.num_query_heads}")
-    inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
-    inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+      if self.config.attention == "paged" and model_mode != common_types.MODEL_MODE_TRAIN:
+          # Changed return types
+          if model_mode == common_types.MODEL_MODE_PREFILL:
+              # Get the attention output
+              attention_output = self.paged_attention_op(
+                  query,
+                  key,
+                  value,
+                  decoder_segment_ids,
+                  model_mode,
+                  previous_chunk,
+                  page_state=page_state,
+                  layer_idx=layer_idx,
+                  slot=slot,
+              )
+              
+              # Handle different return formats
+              if isinstance(attention_output, tuple) and len(attention_output) == 3:
+                  attn, local_max, local_sum = attention_output
+                  out = attn / (local_sum + 1e-9) if local_sum is not None else attn
+              elif isinstance(attention_output, tuple) and len(attention_output) == 4:
+                  cache, attn, local_max, local_sum = attention_output
+                  # Update cache variables
+                  self.sow("cache", "cached_prefill_key", cache["cache"]["cached_prefill_key"])
+                  self.sow("cache", "cached_prefill_value", cache["cache"]["cached_prefill_value"])
+                  out = attn / (local_sum + 1e-9) if local_sum is not None else attn
+              else:
+                  out = attention_output
 
-    # apply projection.
-    if self.config.fused_qkv:
-      query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
-    else:
-      query = self.query_projection(inputs_q)
-      key = self.kv_projection(inputs_kv, proj_name="key")
-      value = self.kv_projection(inputs_kv, proj_name="value")
+          else:  # AUTOREGRESSIVE
+              # Decode case handling
+              cache, q_input, k_pages, v_pages, lengths, page_indices, layer_idx_out = self.paged_attention_op(
+                  query,
+                  key,
+                  value,
+                  decoder_segment_ids,
+                  model_mode,
+                  previous_chunk,
+                  page_state=page_state,
+                  layer_idx=layer_idx,
+                  slot=slot,
+              )
+              # Update cache
+              self.sow("cache", "cached_prefill_key", cache["cache"]["cached_prefill_key"])
+              self.sow("cache", "cached_prefill_value", cache["cache"]["cached_prefill_value"])
+              out = (q_input, k_pages, v_pages, lengths, page_indices, layer_idx_out)
 
-    # apply ROPE
-    query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
-    key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
+      else:  # Not paged, or training mode
+          # Original logic for non-paged attention
+          out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, previous_chunk)
 
-    if model_mode == common_types.MODEL_MODE_PREFILL:
-      query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
-      key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
-      value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
-    else:
-      query = nn.with_logical_constraint(query, self.query_axis_names)
-      key = nn.with_logical_constraint(key, self.key_axis_names)
-      value = nn.with_logical_constraint(value, self.value_axis_names)
-    query = checkpoint_name(query, "query_proj")
-    key = checkpoint_name(key, "key_proj")
-    value = checkpoint_name(value, "value_proj")
+      # Apply output projection *only* for non-paged, or paged attention in prefill mode
+      if model_mode == common_types.MODEL_MODE_PREFILL or self.config.attention != "paged":
+          out = nn.with_logical_constraint(out, self.out_axis_names)
+          out = self.out_projection(inputs_q.shape[-1], out)
+          out = checkpoint_name(out, "out_proj")
 
-    assert not self.config.quantize_kvcache or self.kv_quant
-
-    if self.config.attention == "paged" and model_mode != common_types.MODEL_MODE_TRAIN:
-      unnormalized_out, _, exp_sum = self.paged_attention_op(
-          query,
-          key,
-          value,
-          decoder_segment_ids,
-          model_mode,
-          previous_chunk,
-          page_state=page_state,
-          layer_idx=layer_idx,  # Pass layer_idx
-          slot=slot,  # Pass slot
-          # true_length=true_length,
-      )
-      out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
-    else:
-      out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, previous_chunk)
-
-    out = nn.with_logical_constraint(out, self.out_axis_names)
-    out = self.out_projection(inputs_q.shape[-1], out)
-    out = checkpoint_name(out, "out_proj")
-    return out
+      return out
 
 
 class MLA(Attention):
