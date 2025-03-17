@@ -219,7 +219,7 @@ class HFTokenizer:
     return self.tokenizer.encode(s)
 
   def decode(self, t: Sequence[int]) -> str:
-    return self.tokenizer.decode(t)
+    return self.tokenizer.decode(t, skip_special_tokens=True)
 
 
 def build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token):

@@ -42,13 +42,18 @@ def main(argv: Sequence[str]) -> None:
   text = config.prompt
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
-  tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
+  # tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
+  tokens = tokenizer_model.encode(text)
+  print(tokens)
+  true_length = len(tokens)
   assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
   assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
   assert config.quantization != "nanoo_fp8", "NANOO fp8 on AMD MI300/MI325 GPUs is not supported in decode.py yet"
 
   slot = 0  # Always use decode batch slot 0.
 
+  import jax.numpy as jnp
+  tokens = jnp.array(tokens)
   # Prefill
   rng, rng_prefill = jax.random.split(rng)  # Split RNG before calling prefill
   prefill_result, first_token = engine.prefill(
