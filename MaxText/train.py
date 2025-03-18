@@ -135,8 +135,8 @@ def save_checkpoint(
   if config and config.enable_checkpointing:
     if (
         force
-        or (step % config.checkpoint_period == 0)
-        or (config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0)
+        or (step != 0 and step % config.checkpoint_period == 0)
+        or (config.enable_emergency_checkpoint and step != 0 and step % config.local_checkpoint_period == 0)
     ):
       blocking_until_ready_start = time.time()
       max_logging.log(f"Waiting for step {step} to finish before checkpoint...")
