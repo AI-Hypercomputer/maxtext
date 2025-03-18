@@ -100,7 +100,7 @@ python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=$OUTPUT_
 
 ### Enabling Google Cloud Monitoring on Maxtext
 
-Maxtext has an additional option of pushing Goodput and step time deviation metrics to Google CLoud Monitoring. By default if `monitor_goodput=True` is enabled, the data starts getting uploaded to Google Cloud Monitoring. Set `enable_gcp_goodput_metrics=False` and  `enable_gcp_step_deviation_metrics=False` to disable goodput and step_deviation respectively.
+Maxtext has an additional option of pushing Goodput and step time deviation metrics to Google Cloud Monitoring. By default if `monitor_goodput=True` is enabled, the data starts getting uploaded to Google Cloud Monitoring. Set `enable_gcp_goodput_metrics=False` and  `enable_gcp_step_deviation_metrics=False` to disable goodput and step_deviation respectively.
 
 ```Python
 python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=$OUTPUT_PATH dataset_path=$DATA_PATH run_name=goodput-test-run steps=200 goodput_upload_interval_seconds=30 step_deviation_interval_seconds=30 enable_gcp_goodput_metrics=True enable_gcp_step_deviation_metrics=True
