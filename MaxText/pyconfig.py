@@ -162,6 +162,12 @@ def validate_keys(keys):
     validate_deepseek_moe(keys)
 
 
+def validate_tokenizer(keys):
+  assert keys[
+      "tokenizer_path"
+  ], "Please provide tokenizer_path. Even if using pre-tokenized data, tokenizer is required to process special tokens."
+
+
 def validate_data_input(keys):
   """validate provided parameters for data input"""
   if not keys["hf_access_token"]:
@@ -494,6 +500,7 @@ class _HyperParameters:
     if raw_keys["remat_policy"] == "custom":
       raw_keys = validate_and_assign_remat_tensors(raw_keys)
     validate_keys(raw_keys)
+    validate_tokenizer(raw_keys)
     validate_data_input(raw_keys)
 
   @staticmethod
