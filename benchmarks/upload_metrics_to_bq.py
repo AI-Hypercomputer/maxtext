@@ -13,7 +13,7 @@
  See the License for the specific language governing permissions and
  limitations under the License.
  """
-
+import argparse
 from typing import Any, Dict, Sequence
 from statistics import median
 
@@ -23,6 +23,7 @@ from command_utils import run_command_with_updates
 from benchmark_db_utils import write_run
 from benchmark_db_utils import DEFAULT_LOCAL_DIR
 from benchmark_db_utils import recover_tuning_params
+from benchmark_db_utils import Metrics
 import dataclasses
 import fnmatch
 import getpass
@@ -30,13 +31,6 @@ import json
 import os
 import sys
 
-
-@dataclasses.dataclass
-class Metrics:
-  avg_tflops_per_sec: float
-  avg_tokens_per_sec: float
-  median_step_time: float
-  e2e_step_time: float
 
 hardware_id_to_bf16_tflops = {"v4": 275,
                               "v5e": 197,
@@ -47,6 +41,135 @@ hardware_id_to_bf16_tflops = {"v4": 275,
                               "a3mega": 989,
                               "a3ultra": 989,
                               }
+
+
+def add_parser_arguments(parser: argparse.ArgumentParser):
+  """Add arguments to the parser.
+
+  Args:
+    parser: parser to add shared arguments to.
+  """
+  parser.add_argument(
+      '--metrics_gcs_file',
+      type=str,
+      required=True,
+      help='Path to the metrics file in GCS',
+  )
+  parser.add_argument(
+      '--model_id',
+      type=str,
+      required=True,
+      help='ID of the model',
+  )
+  parser.add_argument(
+      '--hardware_id',
+      type=str,
+      required=True,
+      help='ID of the hardware',
+  )
+  parser.add_argument(
+      '--software_id',
+      type=str,
+      required=True,
+      help='ID of the software',
+  )
+  parser.add_argument(
+      '--number_of_chips',
+      type=int,
+      required=True,
+      help='Number of chips used',
+  )
+  parser.add_argument(
+      '--container_image_name',
+      type=str,
+      required=True,
+      help='Name of the container image used',
+  )
+  parser.add_argument(
+      '--global_batch_size',
+      type=int,
+      required=True,
+      help='Global batch size',
+  )
+  parser.add_argument(
+      '--precision',
+      type=str,
+      required=True,
+      help='Precision used (e.g. fp32, bf16)',
+  )
+  parser.add_argument(
+      '--optimizer',
+      type=str,
+      required=True,
+      help='Optimizer used (e.g. adam, sgd)',
+  )
+  parser.add_argument(
+      '--seq_length',
+      type=int,
+      required=True,
+      help='Sequence length',
+  )
+  parser.add_argument(
+      '--number_of_steps',
+      type=int,
+      required=True,
+      help='Number of steps',
+  )
+  parser.add_argument(
+      '--xla_flags',
+      type=str,
+      required=True,
+      help='XLA flags',
+  )
+  parser.add_argument(
+      '--dataset',
+      type=str,
+      required=True,
+      help='Dataset used',
+  )
+  parser.add_argument(
+      '--run_type',
+      type=str,
+      required=True,
+      help='Type of run (e.g. perf_optimization)',
+  )
+  parser.add_argument(
+      '--config_file',
+      type=str,
+      required=True,
+      help='Configuration file path',
+  )
+  parser.add_argument(
+      '--topology',
+      type=str,
+      required=True,
+      help='The topology of the hardware used in the run (valid for TPUs)',
+  )
+  parser.add_argument(
+      '--tuning_params',
+      type=str,
+      required=True,
+      help='Tuning parameters',
+  )
+  parser.add_argument(
+      '--db_project',
+      type=str,
+      required=True,
+      help='Project of the database',
+  )
+  parser.add_argument(
+      '--db_dataset',
+      type=str,
+      required=True,
+      help='Dataset of the database',
+  )
+  parser.add_argument(
+      '--is_test',
+      type=bool,
+      required=False,
+      default=True,
+      help='Whether to use the testing project or production project',
+  )
 
 
 def download_metrics_file_locally(metrics_gcs_file: str, local_file: str) -> int:
@@ -115,35 +238,20 @@ def main(argv: Sequence[str]) -> None:
   if int(os.environ["TPU_WORKER_ID"]) != 0:
     return
 
-  for arg in argv:
-    print(f"got arg: {arg}")
+  parser = argparse.ArgumentParser(
+      prog='BigQuery metrics uploader', usage='%(prog)s [options]'
+  )
+  add_parser_arguments(parser)
+  options = parser.parse_args()
 
-  metrics_gcs_file = argv[0]
-  model_id = argv[1]
-  hardware_id = argv[2]
-  software_id = argv[3]
-  number_of_chips = argv[4]
-  container_image_name = argv[5]
-  global_batch_size = argv[6]
-  precision = argv[7]
-  optimizer = argv[8]
-  seq_length = argv[9]
-  number_of_steps = argv[10]
-  xla_flags = argv[11]
-  dataset = argv[12]
-  run_type = argv[13]
-  config_file = argv[14]
-  topology = argv[15]
-  tuning_params = argv[16]
-  db_project = argv[17]
-  db_dataset = argv[18]
-
+  print(f"BigQuery metrics uploader got: {options}")
+  
   local_dir = DEFAULT_LOCAL_DIR
 
   # Download metrics from the GCS Bucket
   local_metrics_file = local_dir
-  print(f"Attempting metrics download from {metrics_gcs_file} to {local_metrics_file}.",flush=True)
-  rc = download_metrics_file_locally(metrics_gcs_file=metrics_gcs_file, local_file=local_metrics_file)
+  print(f"Attempting metrics download from {options.metrics_gcs_file} to {local_metrics_file}.",flush=True)
+  rc = download_metrics_file_locally(metrics_gcs_file=options.metrics_gcs_file, local_file=local_metrics_file)
   if rc != 0:
     print("metrics download FAIL")
     exit(rc)
@@ -151,7 +259,7 @@ def main(argv: Sequence[str]) -> None:
 
   # Parse Metrics
   # If there are more than 10 steps, have a buffer to avoid profiling bad perf:
-  number_of_steps = int(number_of_steps)
+  number_of_steps = int(options.number_of_steps)
   if number_of_steps - 10 > 0:
     compute_metrics_of_n_steps = number_of_steps - 10
   else:
@@ -165,16 +273,16 @@ def main(argv: Sequence[str]) -> None:
   print(f'Metrics: {metrics_from_file}')
 
   # Convert number of chips to number of nodes (number of vms)
-  number_of_chips = int(number_of_chips)
-  if hardware_id.startswith("v"):
+  number_of_chips = int(options.number_of_chips)
+  if options.hardware_id.startswith("v"):
     number_of_nodes = number_of_chips // 4
-  elif hardware_id == "a3mega" or hardware_id == "'a3ultra":
+  elif options.hardware_id == "a3mega" or options.hardware_id == "'a3ultra":
     number_of_nodes = number_of_chips // 8
   else:
     number_of_nodes = number_of_chips
 
   # Convert tflops to MFU based on hardware_id
-  avg_mfu = metrics_from_file.avg_tflops_per_sec / hardware_id_to_bf16_tflops[hardware_id]
+  avg_mfu = metrics_from_file.avg_tflops_per_sec / hardware_id_to_bf16_tflops[options.hardware_id]
 
   run_release_status = "local"
 
@@ -183,49 +291,30 @@ def main(argv: Sequence[str]) -> None:
   env_vars = json.dumps(env_dict)
 
   # Framework config in json
-  base_config = omegaconf.OmegaConf.load(config_file)
-  print(f"tuning_params: {tuning_params}")
-  tuning_params_dict = recover_tuning_params(tuning_params)
+  base_config = omegaconf.OmegaConf.load(options.config_file)
+  print(f"tuning_params: {options.tuning_params}")
+  tuning_params_dict = recover_tuning_params(options.tuning_params)
   config = update_config_with_tuning_params(base_config, tuning_params_dict)
   config_dict = omegaconf.OmegaConf.to_container(config, resolve=True)
   framework_config = json.dumps({"config": config_dict})
 
   # Load metrics to bq
   write_run(
-      db_project=db_project,
-      db_dataset=db_dataset,
-      model_id=model_id,
-      hardware_id=hardware_id,
-      software_id=software_id,
+      options=options,
+      metrics=metrics_from_file,
+      mfu=avg_mfu,
+      number_of_steps=number_of_steps,
       number_of_nodes=number_of_nodes,
       number_of_chips=number_of_chips,
-      container_image_name=container_image_name,
-      global_batch_size=int(global_batch_size),
-      precision=precision,
-      optimizer=optimizer,
-      seq_length=int(seq_length),
-      median_step_time=metrics_from_file.median_step_time,
-      e2e_time=metrics_from_file.e2e_step_time,
-      number_of_steps=number_of_steps,
-      mfu=avg_mfu,
-      tokens_per_second=metrics_from_file.avg_tokens_per_sec,
-      writer_path=local_dir,
       run_success=True,
-      run_type=run_type,
+      framework_config_in_json=framework_config,
+      env_variables=env_vars,
       run_release_status=run_release_status,
       other_metrics_in_json="",
-      nccl_driver_nickname=None,
-      env_variables=env_vars,
-      framework_config_in_json=framework_config,
-      xla_flags=xla_flags.replace(",", " "),
-      topology=topology,
-      dataset=dataset,
-      num_of_superblock=0,
-      update_person_ldap=getpass.getuser(),
       comment="",
-      is_test=False,
+      nccl_driver_nickname=None,
   )
-  print(f"DB write complete in project: {db_project}, dataset: {db_dataset}.")
+  print(f"DB write complete in project: {options.db_project}, dataset: {options.db_dataset}.")
 
 
 if __name__ == "__main__":

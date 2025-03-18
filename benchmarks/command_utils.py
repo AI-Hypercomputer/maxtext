@@ -89,7 +89,7 @@ def run_commands(commands, jobname, per_command_name, batch=10, dry_run=False):
     )
     max_return_code = max(max_return_code, batch_max_return_code)
     if max_return_code > 0:
-      return max_return_code
+      break
   return max_return_code
 
 
@@ -151,6 +151,7 @@ def run_command_batch(commands, jobname, per_command_name, output_logs):
     if completed == total:
       break
 
+    # Sleep for 1 second before polling processes again
     time.sleep(1)
   return max_returncode, returncodes
 

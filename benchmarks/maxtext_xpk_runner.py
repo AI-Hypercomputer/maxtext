@@ -103,7 +103,8 @@ class WorkloadConfig:
   topology: str = dataclasses.field(init=False)
   num_devices_per_slice: int = dataclasses.field(init=False)
   db_project: str = ""
-  db_dataset:str = ""
+  db_dataset: str = ""
+  db_is_test: bool = True
 
   def __post_init__(self):
     if self.device_type.startswith("v6e"):
@@ -271,55 +272,67 @@ def _get_config_tuning_params(wl_config: WorkloadConfig):
   return config_tuning_params
 
 
-def _build_args_from_config(wl_config: WorkloadConfig) -> str:
+def _build_args_from_config(wl_config: WorkloadConfig) -> dict:
   base_config = omegaconf.OmegaConf.load(wl_config.base_config)
 
-  args = f'{wl_config.metrics_gcs_file} '
-  args += f'{wl_config.model.model_type} '
-  args += f'{wl_config.hardware_id} '
-  args += 'jax_maxtext '
-  args += f'{wl_config.num_devices_per_slice*wl_config.num_slices*hardware_id_to_num_chips_per_node[wl_config.hardware_id]} '
-  args += f'{wl_config.base_docker_image} '
-
+  # Extract per_device_batch_size arg
   if 'per_device_batch_size' not in wl_config.model.tuning_params:
     per_device_batch_size = base_config.per_device_batch_size
   else:
     per_device_batch_size = wl_config.model.tuning_params['per_device_batch_size']
-  args += f'{per_device_batch_size * wl_config.num_devices_per_slice * wl_config.num_slices} '
 
+  # Extract precision arg
   if 'matmul_precision' not in wl_config.model.tuning_params:
     precision = base_config.matmul_precision
   else:
     precision = wl_config.model.tuning_params['matmul_precision']
-  args += f'{precision} '
 
+  # Extract optimizer arg
   if 'opt_type' not in wl_config.model.tuning_params:
     optimizer = base_config.opt_type
   else:
     optimizer = wl_config.model.tuning_params['opt_type']
-  args += f'{optimizer} '
 
+  # Extract sequence_length arg
   if 'max_target_length' not in wl_config.model.tuning_params:
     sequence_length = base_config.opt_type
   else:
     sequence_length = wl_config.model.tuning_params['max_target_length']
-  args += f'{sequence_length} '
-  args += f'{wl_config.num_steps} '
-  args += f'{wl_config.model.xla_flags.strip().replace(" ",",")} '
+
+  # Extract dataset arg
   if 'dataset_type' not in wl_config.model.tuning_params:
     dataset = base_config.opt_type
   else:
     dataset = wl_config.model.tuning_params['dataset_type']
-  args += f'{dataset} '
 
-  args += 'maxtext-xpk '
-  args += 'MaxText/configs/base.yml '
-  args += f'{wl_config.topology} '
-
+  # Extract xla_flags arg
+  xla_flags_str = wl_config.model.xla_flags.strip().replace(" ",",")
+  
+  # Extract tuning_params arg
   tuning_params_str = json.dumps(wl_config.model.tuning_params)
-  args += f"'{tuning_params_str}' "
-  args += f'{wl_config.db_project} '
-  args += f'{wl_config.db_dataset} '
+  
+  args = {}
+  args["metrics_gcs_file"] = wl_config.metrics_gcs_file
+  args["model_id"] = wl_config.model.model_type
+  args["hardware_id"] = wl_config.hardware_id
+  args["software_id"] = "jax_maxtext"
+  args["number_of_chips"] = wl_config.num_devices_per_slice*wl_config.num_slices
+  args["container_image_name"] = wl_config.base_docker_image
+  args["global_batch_size"] = per_device_batch_size * wl_config.num_devices_per_slice * wl_config.num_slices
+  args["precision"] = precision
+  args["optimizer"] = optimizer
+  args["seq_length"] = sequence_length
+  args["number_of_steps"] = wl_config.num_steps
+  args["xla_flags"] = f"'{xla_flags_str}'"
+  args["dataset"] = dataset
+  args["run_type"] = "maxtext-xpk"
+  args["config_file"] = "MaxText/configs/base.yml"
+  args["topology"] = wl_config.topology
+  args["tuning_params"] = f"'{tuning_params_str}'"
+  args["db_project"] = wl_config.db_project
+  args["db_dataset"] = wl_config.db_dataset
+  args["is_test"] = wl_config.db_is_test
+
   return args
 
 
@@ -584,7 +597,10 @@ def generate_xpk_workload_cmd(
   if wl_config.generate_metrics_and_upload_to_big_query:
     # TODO (optionally) make it so that this upload step is done on local device instead of within the workload.
     args = _build_args_from_config(wl_config)
-    upload_metrics_to_bq_cmd = f"python3 benchmarks/upload_metrics_to_bq.py {args}"
+    args_str = ""
+    for k,v in args.items():
+      args_str += f'--{k}={v} '
+    upload_metrics_to_bq_cmd = f"python3 benchmarks/upload_metrics_to_bq.py {args_str}"
 
   print(f'User command: {user_command}')
   return (
@@ -597,7 +613,6 @@ def generate_xpk_workload_cmd(
           f' {device_type}'
           f' --num-slices={wl_config.num_slices}'
           f' --command="{user_command} && {upload_metrics_to_bq_cmd}"'
-          # f' --command="{upload_metrics_to_bq_cmd}"'
           f' {docker_image_flag}'
           ' --enable-debug-logs'
           f' --workload={name}'
@@ -692,17 +707,9 @@ def main() -> int:
   )
 
   v6e_cluster_config = XpkClusterConfig(
-      cluster_name='bodaborg-v6e-256-ts',
-      project='tpu-prod-env-multipod',
-      zone='us-west1-c',
-      device_type='v6e-256',
-  )
-
-  v6e_cluster_config_yucmhab = XpkClusterConfig(
-      cluster_name='bodaborg-v6e-256-dnd-yucmhab',
-      project='tpu-prod-env-one-vm',
-      zone='us-east5',
-      device_type='v6e-256',
+      cluster_name='v6e-256',
+      project='my-cool-project',
+      zone='us-central2-b',
   )
 
   xpk_workload_cmds = []
@@ -734,8 +741,8 @@ def main() -> int:
     # Run workloads on the below clusters
     for cluster_config in [
       # v5e_cluster_config,
-      v6e_cluster_config,
-      # v6e_cluster_config_yucmhab,
+      # v6e_cluster_config,
+      v6e_cluster_config_yucmhab,
       # another_config,
     ]:
       # Run workloads in the following slice configurations
