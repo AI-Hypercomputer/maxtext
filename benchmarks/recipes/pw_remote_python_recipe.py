@@ -25,13 +25,37 @@ import maxtext_xpk_runner as mxr
 
 
 def main() -> int:
-  # V6e cluster config
+  # v4-128 cluster config
+  # cluster_config = mxr.XpkClusterConfig(
+  #     cluster_name="v4-128-bodaborg-us-central2-b",
+  #     project="cloud-tpu-multipod-dev",
+  #     zone="us-central2-b",
+  #     device_type="v4-128",
+  # )
+  
+  # 3x v6e-256 cluster config
   cluster_config = mxr.XpkClusterConfig(
-      cluster_name="v6e-256-cluster",
-      project="tpu-project",
+      cluster_name="bodaborg-v6e-256-dnd-yucmhab",
+      project="tpu-prod-env-one-vm",
       zone="us-east5-b",
       device_type="v6e-256",
   )
+
+  # big v6e-256 cluster config
+  # cluster_config = mxr.XpkClusterConfig(
+  #     cluster_name="bodaborg-v6e-256-ts",
+  #     project="tpu-prod-env-multipod",
+  #     zone="us-west1-c",
+  #     device_type="v6e-256",
+  # )
+
+  # akanksha v5e-8 cluster config
+  # cluster_config = mxr.XpkClusterConfig(
+  #     cluster_name="akshu-v5e-cz-v2e",
+  #     project="cloud-tpu-best-effort-colo",
+  #     zone="us-east5-b",
+  #     device_type="v5e-8",
+  # )
 
   xpk_path = "xpk"
 
@@ -54,16 +78,27 @@ def main() -> int:
       f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/{user}/"
       "server:latest"
   )
-  remote_python_image = f"gcr.io/{cluster_config.project}/{user}/remote_python_sidecar_latest:latest"
-  runner = f"gcr.io/{cluster_config.project}/{user}_latest:latest"
+
+  # use this for the .par path
+  remote_python_image = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/remote_python_sidecar_server:latest"
+  
+  # OSS user code image
+  # runner = (
+  #     f"gcr.io/{cluster_config.project}/{user}/remote_python_user_code:latest"
+  # )
+  
+  # .par user code image
+  runner = (
+      "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/remote_python_user_code:latest"
+  )
   base_output_directory = f"gs://{user}-{region}/{user}"
 
   list_of_models = [
-      model_configs.default_basic_1,
+      model_configs.default_basic_1_pw,
   ]
   pathways_config = mxr.PathwaysConfig(
       server_image=server_image,
-      proxy_server_image=proxy_image,
+      proxy_image=proxy_image,
       runner_image=runner,
       remote_python_sidecar_image=remote_python_image,
   )

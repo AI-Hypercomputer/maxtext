@@ -25,27 +25,42 @@ sys.path.append(parent_dir)
 import maxtext_trillium_model_configs as model_configs
 import maxtext_xpk_runner as mxr
 
-PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_proxy_server:latest"
-SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_server:latest"
-RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest"
+USER = os.environ["USER"]
+user=USER
+PROXY_IMAGE = f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/{user}/unsanitized_proxy_server:latest"
+SERVER_IMAGE = f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/{user}/unsanitized_server:latest"
+# RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest"
+RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/remote_python_user_code:latest"
+REMOTE_PYTHON_SIDECAR_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/remote_python_sidecar_server:latest"
 
 # Cluster Params
-CLUSTER = "v6e-256-cluster"
-PROJECT = "tpu-prod-env-cluster"
-ZONE = "us-east5-b"
-REGION = "us-east5"
+
+# BIG CLUSTER
+CLUSTER = "bodaborg-v6e-256-ts"
+PROJECT = "tpu-prod-env-multipod"
+ZONE = "us-west1-c"
+REGION = "us-west1"
+
+# SMALL CLUSTER
+# CLUSTER = "bodaborg-v6e-256-dnd-yucmhab"
+# PROJECT = "tpu-prod-env-one-vm"
+# ZONE = "us-east5-b"
+# REGION = "us-east5"
+
+
 COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
 # Other parameters (MUST BE SET BY USER)
 XPK_PATH = "../xpk"  # We're running this script from the maxtext directory
-USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = (
     f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
 )
+MAX_RESTARTS = 0
+BENCHMARK_STEPS = 30
 
-MAX_RESTARTS = 10_000
-BENCHMARK_STEPS=10_000_000
+# MAX_RESTARTS = 10_000
+# BENCHMARK_STEPS=10_000_000
 
 
 def main() -> int:
@@ -75,18 +90,24 @@ def main() -> int:
       server_image=SERVER_IMAGE,
       proxy_server_image=PROXY_IMAGE,
       runner_image=RUNNER,
+      remote_python_sidecar_image=REMOTE_PYTHON_SIDECAR_IMAGE,
 
       # User can add additional flags here.
-      server_flags="--enable_metrics_collection=true",
-      proxy_flags="--enable_metrics_collection=true",
-      worker_flags="--enable_metrics_collection=true",
+      # server_flags="--enable_metrics_collection=true",
+      # proxy_flags="--enable_metrics_collection=true",
+      # worker_flags="--enable_metrics_collection=true",
 
-      # server_flags="--enable_metrics_collection=false",
-      # proxy_flags="--enable_metrics_collection=false",
-      # worker_flags="--enable_metrics_collection=false",
+      server_flags="--enable_metrics_collection=false",
+      proxy_flags="--enable_metrics_collection=false",
+      worker_flags="--enable_metrics_collection=false",
   )
   num_slices_list = [
-      2
+      48,
+      40,
+      32,
+      24,
+      16,
+      8
   ]
 
   xpk_workload_cmds = []
@@ -119,6 +140,7 @@ def main() -> int:
             xpk_path=XPK_PATH,
             num_steps=BENCHMARK_STEPS,
             priority="medium",
+            # priority="high",
         )
         command, name = mxr.generate_xpk_workload_cmd(
             cluster_config=cluster_config, wl_config=wl_config

@@ -31,7 +31,7 @@ BASE_PATHWAYS_TUNING_PARAMS = {
     "checkpoint_storage_use_zarr3": False,
     "enable_pathways_goodput": True,
     "enable_single_controller": True,
-    "metrics_file": "metrics.txt",
+    # "metrics_file": "metrics.txt",
     "goodput_upload_interval_seconds": 30,
 }
 
@@ -1017,7 +1017,8 @@ llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds = _add_to_model_dictiona
             "max_target_length": 8192,
             "attention": "flash",
             "use_iota_embed": True,
-            "dataset_path": "gs://trillium-scale-datasets-q1-25-west",
+            # "dataset_path": "gs://trillium-scale-datasets-q1-25-west",
+            "dataset_path": "/tmp/dataset",
             "dataset_type": "tfds",
             "enable_checkpointing": True,
             "async_checkpointing": True,
