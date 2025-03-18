@@ -99,6 +99,21 @@ def initialize_page_state(
       active_page_position=jnp.zeros((num_layers, max_page_groups), dtype=jnp.int32),
   )
 
+def get_page_state_layer(
+  state: PageState, 
+  layer_id: int = 0
+) -> None:
+  return PageState(
+    page_status=state.page_status[layer_id],
+    page_map=state.page_map[layer_id],
+    num_pages_used=state.num_pages_used[layer_id],
+    sequence_lengths=state.sequence_lengths[layer_id],
+    active_page=state.active_page[layer_id],
+    has_active_page=state.has_active_page[layer_id],
+    active_page_position=state.active_page_position[layer_id],
+  )
+
+
 def get_valid_page_assignments(state, layer_id):
     max_groups = state.page_map.shape[1]
     max_pages_per_group = state.page_map.shape[2]
