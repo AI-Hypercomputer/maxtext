@@ -14,6 +14,7 @@
 """Elasticity manager.
 
 This class is responsible for managing the elastic training.
+
 It is responsible for:
 - Tracking the availability of slices.
 - Tracking the number of failures and reshard retries.
@@ -37,6 +38,7 @@ import numpy as np
 from elastic.debug import timing
 from elastic import reshard
 
+# TODO: b/393445969 - Remove this when the bug is fixed.
 jax._src.array.ArrayImpl._check_if_deleted = lambda _: False  # pylint: disable=protected-access
 
 PyTree: TypeAlias = Any
@@ -58,29 +60,29 @@ class Manager:
   good_slice_indices: set[int]
   _snapshots: collections.deque[Mapping[str, int | jax.Array | PyTree]]
 
-  TEST_VALUE = 100
+  _SIMPLE_EXECUTION_TEST_VALUE = 100
 
   def __init__(
       self,
       devices: Sequence[jax.Device] | None = None,
+      reshard_check_period: int = 1,
       snapshot_period: int = 1,
       snapshot_buffer_size: int = 1,
-      reshard_check_period: int = 1,
       max_failure_count: int | None = None,
       max_reshard_retry_count: int | None = None,
   ) -> None:
     if devices is None:
       devices = jax.devices()
     self.devices = devices
-    self.snapshot_period = snapshot_period
     self.reshard_check_period = reshard_check_period
+    self.snapshot_period = snapshot_period
     self.max_failure_count = max_failure_count
     self.max_reshard_retry_count = max_reshard_retry_count
 
     self.failure_count = 0
     self.reshard_retry_count = 0
-    self.good_slice_indices = self.get_slice_availability()
 
+    self.good_slice_indices = self.get_slice_availability()
     self._snapshots = collections.deque(maxlen=snapshot_buffer_size)
 
   @property
@@ -105,9 +107,138 @@ class Manager:
       self._total_slice_count = len(self.slice_to_devices)
     return self._total_slice_count
 
+  def slice_device_count(self, slice_index: int) -> int:
+    """Returns the number of devices in a slice."""
+    try:
+      return len(self.slice_to_devices[slice_index])
+    except KeyError as error:
+      raise ValueError(
+          f"Slice {slice_index=} not found in {self.slice_to_devices=}"
+      ) from error
+
+  @staticmethod
+  def _is_error_due_to_slice_down(error: Exception) -> bool:
+    """Check if the error is due to slice down."""
+    if "DATA_LOSS" in str(error):
+      _logger.debug("Caught JaxRuntimeError DATA_LOSS exception")
+    elif "NOT_FOUND" in str(error):
+      _logger.debug("Caught JaxRuntimeError NOT_FOUND exception")
+    elif "INTERNAL" in str(error):
+      _logger.debug("Caught JaxRuntimeError INTERNAL exception")
+
+    else:
+      _logger.debug("Unknown JaxRuntimeError")
+      return False
+
+    _logger.debug("\n".join(traceback.format_exception(error)))
+    return True
+
+  @classmethod
+  def _simple_execution(cls, devices: Sequence[jax.Device]) -> jax.Array:
+    """Simple execution to test if a slice is available.
+
+    This function is used to test if a slice is available. It executes a simple
+    computation on the devices and returns the result. If any of the devices are
+    not available, the returned array will fail with a JaxRuntimeError used.
+
+    Simply executing this function is not enough to determine if the slice is
+    available. We also need to check the value of the returned array.
+
+    Args:
+      devices: The devices to execute on.
+
+    Returns:
+      The result of the execution.
+    """
+    if not devices:
+      raise ValueError("No devices")
+
+    test_input = np.zeros(len(devices), dtype=float) + (
+        cls._SIMPLE_EXECUTION_TEST_VALUE - 1
+    )
+
+    return jax.pmap(lambda x: x + 1, devices=devices)(test_input)
+
+  @timing.timeit
+  def get_slice_availability(self) -> set[int]:
+    """Returns the set of good and bad slices."""
+    good_slice_indices = set()
+
+    results = {
+        slice_index: self._simple_execution(devices)
+        for slice_index, devices in self.slice_to_devices.items()
+    }
+
+    for slice_index, x in results.items():
+      _logger.debug("Checking slice_index=%s", slice_index)
+      expected = (
+          np.zeros(self.slice_device_count(slice_index), dtype=float)
+          + self._SIMPLE_EXECUTION_TEST_VALUE
+      )
+      try:
+        with timing.Timer(f"Checking {slice_index=}"):
+          jax.block_until_ready(x)
+          if np.allclose(x, expected):
+            good_slice_indices.add(slice_index)
+            _logger.debug("slice_index=%s good", slice_index)
+          else:
+            _logger.error(
+                "Error with _simple_execution for slice_index=%s. "
+                "This should never happen. Expected: %s, Actual: %s",
+                slice_index,
+                expected,
+                x,
+            )
+            raise ValueError(
+                f"Error with _simple_execution for slice_index={slice_index}."
+            )
+      except jax.errors.JaxRuntimeError as error:
+        if not self._is_error_due_to_slice_down(error):
+          raise
+        _logger.debug("slice_index=%s bad", slice_index)
+
+    _logger.debug("good_slice_indices=%s", good_slice_indices)
+
+    return good_slice_indices
+
+  def _is_ready_to_reshard(self, step: int) -> bool:
+    """Returns if it is time to reshard.
+
+    May update `good_slice_indices`.
+
+    Args:
+      step: The current step.
+    """
+    if step % self.reshard_check_period:
+      return False
+    if self.good_slice_count >= self.total_slice_count:
+      return False
+
+    good_slice_indices = self.get_slice_availability()
+
+    # If any of the existing good slices are no longer good, we cannot reshard.
+    if self.good_slice_indices - good_slice_indices:
+      return False
+
+    if len(good_slice_indices) == len(self.good_slice_indices):
+      return False
+
+    _logger.debug("New slice available.")
+    _logger.debug(
+        "Previous good slice indices: self.good_slice_indices=%s",
+        self.good_slice_indices,
+    )
+    _logger.debug(
+        "Current good slice indices: good_slice_indices=%s", good_slice_indices
+    )
+
+    self.good_slice_indices = good_slice_indices
+
+    return True
+
   @property
   def good_slice_to_devices(self) -> dict[int, Sequence[jax.Device]]:
-    """Returns the good slice to devices map."""
+    """The mapping from a good slice to its devices."""
     return {
         slice_index: self.slice_to_devices[slice_index]
         for slice_index in self.good_slice_indices
@@ -133,15 +264,6 @@ class Manager:
     """Returns the number of slices."""
     return len(self.good_slice_indices)
 
-  def slice_device_count(self, slice_index: int) -> int:
-    """Returns the number of devices in a slice."""
-    try:
-      return len(self.slice_to_devices[slice_index])
-    except KeyError as error:
-      raise ValueError(
-          f"Slice {slice_index=} not found in {self.slice_to_devices=}"
-      ) from error
-
   def scale_by_good_slices(self, x: int | float) -> int | float:
     """Scale x by the number of good slices."""
     if isinstance(x, int):
@@ -156,46 +278,6 @@ class Manager:
       return x * self.good_slice_count / self.total_slice_count
     else:
       raise ValueError(f"Unsupported type: {type(x)=}")
-
-  @timing.timeit
-  def initialize_snapshot(
-      self,
-      step: int,
-      snapshot: Mapping[str, int | PyTree],
-  ) -> None:
-    """Initializes the snapshot.
-
-    Args:
-      step: The current step.
-      snapshot: The snapshot to initialize.
-    """
-    self._snapshots.clear()
-    self.maybe_snapshot(
-        step=step,
-        snapshot=snapshot,
-        blocking=True,
-        force=True,
-    )
-    self._extend_snapshots()
-
-  def _extend_snapshots(self) -> None:
-    fill_count = self._snapshots.maxlen - len(self._snapshots)
-    try:
-      self._snapshots.extend([self._snapshots[-1]] * fill_count)
-    except IndexError as error:
-      raise ValueError("No snapshots available") from error
-
-  def pop_snapshot(self) -> tuple[int, Mapping[str, int | PyTree]]:
-    """Pop next snapshot."""
-    try:
-      snapshot_dict = self._snapshots.popleft()
-    except IndexError as error:
-      raise ValueError("No snapshots available") from error
-
-    step = snapshot_dict.pop("step")
-    snapshot = snapshot_dict.pop("snapshot")
-
-    return step, snapshot
 
   def _slice_down(self, reshard_retry: bool = False) -> None:
     """Slice down."""
@@ -231,113 +313,37 @@ class Manager:
           f"Max reshard retry count reached {self.max_reshard_retry_count=}"
       )
 
-  @staticmethod
-  def _is_error_due_to_slice_down(error: Exception) -> bool:
-    """Check if the error is due to slice down."""
-    if "DATA_LOSS" in str(error):
-      _logger.debug("Caught JaxRuntimeError DATA_LOSS exception")
-    elif "NOT_FOUND" in str(error):
-      _logger.debug("Caught JaxRuntimeError NOT_FOUND exception")
-    elif "INTERNAL" in str(error):
-      _logger.debug("Caught JaxRuntimeError INTERNAL exception")
-
-    else:
-      _logger.debug("Unknown JaxRuntimeError")
-      return False
-
-    _logger.debug("\n".join(traceback.format_exception(error)))
-    return True
-
-  def _is_ready_to_reshard(self, step: int) -> bool:
-    """Indicates if it is time to reshard.
-
-    May update `good_slice_indices`.
+  @timing.timeit
+  def initialize_snapshot(
+      self,
+      step: int,
+      snapshot: Mapping[str, int | PyTree],
+  ) -> None:
+    """Initializes the snapshot.
 
     Args:
       step: The current step.
-
-    Returns:
-      True if it is time to reshard, False otherwise.
+      snapshot: The snapshot to initialize.
     """
-    if step % self.reshard_check_period:
-      return False
-    if self.good_slice_count >= self.total_slice_count:
-      return False
-
-    good_slice_indices = self.get_slice_availability()
-
-    if not good_slice_indices & self.good_slice_indices:
-      raise ValueError("All copies of the snapshot have been lost")
-
-    if len(good_slice_indices) <= self.good_slice_count:
-      return False
-
-    _logger.debug("New slice available.")
-    _logger.debug(
-        "Previous good slice indices: self.good_slice_indices=%s",
-        self.good_slice_indices,
-    )
-    _logger.debug(
-        "Current good slice indices: good_slice_indices=%s", good_slice_indices
+    self._snapshots.clear()
+    self.maybe_snapshot(
+        step=step,
+        snapshot=snapshot,
+        block=True,
+        force=True,
     )
 
-    self.good_slice_indices = good_slice_indices
+  def pop_snapshot(self) -> tuple[int, Mapping[str, int | PyTree]]:
+    """Pop next snapshot."""
+    try:
+      snapshot_dict = self._snapshots.popleft()
+    except IndexError as error:
+      raise ValueError("No snapshots available") from error
 
-    return True
+    step = snapshot_dict.pop("step")
+    snapshot = snapshot_dict.pop("snapshot")
 
-  @classmethod
-  def _simple_execution(
-      cls, devices: Sequence[jax.Device], block: bool = False
-  ) -> jax.Array:
-    """Simple execution to test if a slice is available."""
-    if not devices:
-      raise ValueError("No devices")
-
-    x = np.zeros(len(devices), dtype=float) + (cls.TEST_VALUE - 1)
-    y = jax.pmap(lambda x: x + 1, devices=devices)(x)
-    if block:
-      jax.block_until_ready(y)
-    return y
-
-  @timing.timeit
-  def get_slice_availability(self) -> set[int]:
-    """Returns the set of good and bad slices."""
-    good_slice_indices = set()
-
-    results = {
-        slice_index: self._simple_execution(devices)
-        for slice_index, devices in self.slice_to_devices.items()
-    }
-
-    for slice_index, x in results.items():
-      _logger.debug("Checking slice_index=%s", slice_index)
-      expected = (
-          np.zeros(self.slice_device_count(slice_index), dtype=float)
-          + self.TEST_VALUE
-      )
-      try:
-        with timing.Timer(f"Checking {slice_index=}"):
-          jax.block_until_ready(x)
-          if np.allclose(x, expected):
-            good_slice_indices.add(slice_index)
-            _logger.debug("slice_index=%s good", slice_index)
-          else:
-            _logger.error(
-                "Error with _simple_execution for slice_index=%s. "
-                "This should never happen. Expected: %s, Actual: %s",
-                slice_index, expected, x
-            )
-            raise ValueError(
-                f"Error with _simple_execution for slice_index={slice_index}."
-            )
-      except jax.errors.JaxRuntimeError as error:
-        if not self._is_error_due_to_slice_down(error):
-          raise
-        _logger.debug("slice_index=%s bad", slice_index)
-
-    _logger.debug("good_slice_indices=%s", good_slice_indices)
-
-    return good_slice_indices
+    return step, snapshot
 
   @staticmethod
   def _get_snapshot_size(snapshot: Mapping[str, int | PyTree]) -> int:
@@ -393,7 +399,7 @@ class Manager:
       self,
       step: int,
       snapshot: Mapping[str, int | PyTree],
-      blocking: bool = False,
+      block: bool = False,
       force: bool = False,
   ) -> None:
     """Save step and state."""
@@ -406,13 +412,14 @@ class Manager:
     _logger.debug("Saving a snapshot of %s bytes", total_nbytes)
 
     snapshot_host = self._put_snapshot_on_host(snapshot)
-
     _logger.debug("Snapshot dispatched")
-    if blocking:
-      jax.block_until_ready(snapshot_host)
+
+    snapshot_dict = {"step": step, "snapshot": snapshot_host}
+    if True or block:
+      jax.block_until_ready(snapshot_dict)
       _logger.debug("Snapshot completed")
 
-    self._snapshots.appendleft({"step": step, "snapshot": snapshot_host})
+    self._snapshots.appendleft(snapshot_dict)
 
   @timing.timeit
   def get_resharded_snapshot(
@@ -511,6 +518,7 @@ class Manager:
         step=step,
         snapshot=snapshot,
         force=True,
+        block=True,
     )
 
     try:
@@ -555,6 +563,7 @@ class Manager:
     resharded_pinned_host = reshard.reshard(
         x,
         sharding_pinned_host,
+        donate_input=False,
     )
 
     sharding_device = jax.tree_util.tree_map(
@@ -595,7 +604,6 @@ class Manager:
       raise ValueError("`sharding` must contain only `Sharding` instances.")
 
     if dst_sharding.num_devices <= arr.sharding.num_devices:
-      # Reshard down
       arrays = [
           x.data
           for x in arr.addressable_shards
@@ -604,6 +612,7 @@ class Manager:
     else:
       # Reshard up
       slice_to_arrays = collections.defaultdict(list)
+
       for x in arr.addressable_shards:
         slice_to_arrays[x.data.device.slice_index].append(x.data)
       slice_to_arrays = dict(slice_to_arrays)
@@ -762,3 +771,4 @@ class Manager:
     return jax.make_array_from_single_device_arrays(
         arr.shape, dst_sharding, arrays
     )
+
