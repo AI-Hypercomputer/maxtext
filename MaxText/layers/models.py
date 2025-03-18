@@ -25,6 +25,7 @@ import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 import common_types
+from inference import page_manager
 from layers import attentions
 from layers import embeddings
 from layers import linears
@@ -63,6 +64,7 @@ class DecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      page_state: Optional[page_manager.PageState] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -160,7 +162,9 @@ class SequentialBlockDecoderLayers(nn.Module):
   quant: Quant
 
   @nn.compact
-  def __call__(self, inputs: jnp.ndarray, decoder_segment_ids, decoder_positions, deterministic, model_mode) -> jnp.ndarray:
+  def __call__(
+      self, inputs: jnp.ndarray, decoder_segment_ids, decoder_positions, deterministic, model_mode, page_state=None
+  ) -> jnp.ndarray:
     for lyr in range(self.num_decoder_layers):
       inputs = self.decoder_layer(config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant)(
           inputs,
@@ -168,6 +172,7 @@ class SequentialBlockDecoderLayers(nn.Module):
           decoder_positions,
           deterministic,
           model_mode,
+          page_state=page_state,
       )
     return inputs
 
@@ -297,6 +302,10 @@ class Decoder(nn.Module):
       from layers import gemma2
 
       return [gemma2.Gemma2DecoderLayer]
+    elif self.config.decoder_block == "gemma3":
+      from layers import gemma3
+
+      return [gemma3.Gemma3DecoderLayer]
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
 
@@ -313,7 +322,17 @@ class Decoder(nn.Module):
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
   def get_norm_layer(self):
-    if self.config.decoder_block in ("default", "llama2", "mistral", "deepseek", "gemma", "gemma2", "simple", "simple_mlp"):
+    if self.config.decoder_block in (
+        "default",
+        "llama2",
+        "mistral",
+        "deepseek",
+        "gemma",
+        "gemma2",
+        "gemma3",
+        "simple",
+        "simple_mlp",
+    ):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
@@ -379,6 +398,8 @@ class Decoder(nn.Module):
       decoder_segment_ids=None,
       deterministic=False,
       model_mode=common_types.MODEL_MODE_TRAIN,
+      previous_chunk=None,
+      page_state: Optional[page_manager.PageState] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -450,30 +471,39 @@ class Decoder(nn.Module):
           assert len(RemattedBlockLayers) == 2, f"Unscanned layers must have a length of 2 using deepseek."
           dense_layer = RemattedBlockLayers[0]
           moe_layer = RemattedBlockLayers[1]
-          num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
 
           layers = [dense_layer, moe_layer]
-          layer_prefix = ["dense_layers", "moe_layers"]
-          num_layers = [cfg.first_num_dense_layers, num_moe_layers]
-          for index in range(len(layers)):
-            y = layers[index](config=cfg, mesh=mesh, name=f"{layer_prefix[index]}_{index}", quant=self.quant)(
-                y,
-                decoder_segment_ids,
-                decoder_positions,
-                deterministic,
-                model_mode,
-            )
+          layer_prefixes = ["dense_layers", "moe_layers"]
+          num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
+          num_layers_list = [cfg.first_num_dense_layers, num_moe_layers]
+          # Iterate over the two layer groups (dense and MoE) and apply layer transformation
+          for layer, num_layers, layer_prefix in zip(layers, num_layers_list, layer_prefixes):
+            for index in range(num_layers):
+              y = layer(config=cfg, mesh=mesh, name=f"{layer_prefix}_{index}", quant=self.quant)(
+                  y,
+                  decoder_segment_ids,
+                  decoder_positions,
+                  deterministic,
+                  model_mode,
+                  page_state,
+              )
         else:
           for lyr in range(cfg.num_decoder_layers):
             RemattedBlockLayer = RemattedBlockLayers[0]
-            y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
+            layer_kwargs = {}
+            if cfg.decoder_block == "gemma3":
+              from layers import gemma3
+              # Gemma3 uses both global and sliding window attention depending on the layer index.
+              layer_kwargs = {"attention_type": gemma3.get_attention_type(layer_id=lyr)}
+            layer = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, **layer_kwargs)
+            y = layer(
                 y,
                 decoder_segment_ids,
                 decoder_positions,
                 deterministic,
                 model_mode,
+                page_state,
             )
-
     y = self.get_norm_layer()(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -504,9 +534,14 @@ class Decoder(nn.Module):
       )(
           y
       )  # We do not quantize the logits matmul.
-    logits = nn.with_logical_constraint(
-        logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
-    )
+
+    if model_mode in [common_types.MODEL_MODE_PREFILL, common_types.MODEL_MODE_AUTOREGRESSIVE]:
+      logits = nn.with_logical_constraint(logits, (None, None, "activation_vocab"))
+    else:
+      logits = nn.with_logical_constraint(
+          logits, ("activation_embed_and_logits_batch", "activation_length", "activation_vocab")
+      )
+
     if self.config.cast_logits_to_fp32:
       logits = logits.astype(jnp.float32)
     return logits
@@ -538,6 +573,41 @@ class Transformer(nn.Module):
 
     self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant)
 
+    if cfg.attention == "paged":
+      self.page_manager = self._create_page_manager(cfg)
+
+  def _create_page_manager(self, config) -> Optional[page_manager.PageManager]:
+    """Creates page manager for managing pages in the paged attention mechanism"""
+    assert config.max_target_length % config.pagedattn_tokens_per_page == 0
+    assert config.max_prefill_predict_length % config.pagedattn_tokens_per_page == 0
+    return page_manager.PageManager(
+        num_pages=self.config.pagedattn_num_pages,
+        tokens_per_page=self.config.pagedattn_tokens_per_page,
+        slots=int(self.config.per_device_batch_size * jax.device_count()),
+        max_target_length=self.config.max_target_length,
+        max_prefill_predict_length=self.config.max_prefill_predict_length,
+        max_pages_per_slot=self.config.max_target_length // self.config.pagedattn_tokens_per_page,
+    )
+
+  def _create_page_state(
+      self, model_mode: str, true_length: Optional[int] = None, slot: Optional[int] = None
+  ) -> Optional[page_manager.PageState]:
+    """Creates page state for tracking page status in the paged attention mechanism."""
+    if self.config.attention != "paged" or model_mode == common_types.MODEL_MODE_TRAIN:
+      return None
+    page_state = None
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      page_state = self.page_manager(
+          model_mode=model_mode,
+          slot=slot,
+          true_length=true_length,
+      )
+    elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+      page_state = self.page_manager(model_mode)
+    else:
+      raise ValueError(f"Unsupported model_mode {model_mode} by paged attention")
+    return page_state
+
   def __call__(
       self,
       decoder_input_tokens,
@@ -545,8 +615,17 @@ class Transformer(nn.Module):
       decoder_segment_ids=None,
       enable_dropout=True,
       model_mode=common_types.MODEL_MODE_TRAIN,
+      previous_chunk=None,
+      true_length: Optional[int] = None,
+      slot: Optional[int] = None,
   ):
-    """Applies Transformer decoder-branch on encoded-input and target."""
+    """Applies Transformer decoder-branch on encoded-input and target.
+
+    Args:
+      true_length: (Optional) Prompt length before padding
+      slot: (Optional) An integer representing the decode batch index selected
+        for this request.
+    """
 
     if decoder_segment_ids is not None and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       raise ValueError(
@@ -560,5 +639,7 @@ class Transformer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=not enable_dropout,
         model_mode=model_mode,
+        previous_chunk=previous_chunk,
+        page_state=self._create_page_state(model_mode=model_mode, true_length=true_length, slot=slot),
     )
     return logits

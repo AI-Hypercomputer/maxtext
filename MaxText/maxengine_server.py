@@ -56,6 +56,8 @@ def main(config):
       enable_jax_profiler=config.enable_jax_profiler if config.enable_jax_profiler else False,
       jax_profiler_port=config.jax_profiler_port if config.jax_profiler_port else 9999,
       enable_model_warmup=config.enable_model_warmup if config.enable_model_warmup else False,
+      lora_input_adapters_path=config.lora_input_adapters_path,
+      multi_sampling=config.multi_sampling if config.multi_sampling else False,
   )
   jetstream_server.wait_for_termination()
 

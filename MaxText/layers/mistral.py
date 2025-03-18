@@ -66,6 +66,8 @@ class MistralDecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      previous_chunk=None,
+      page_state=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -101,6 +103,9 @@ class MistralDecoderLayer(nn.Module):
         float32_logits=cfg.float32_logits,
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
+        prefill_cache_axis_order=tuple([int(i) for i in cfg.prefill_cache_axis_order.split(",")]),
+        ar_cache_axis_order=tuple([int(i) for i in cfg.ar_cache_axis_order.split(",")]),
+        compute_axis_order=tuple([int(i) for i in cfg.compute_axis_order.split(",")]),
     )
 
     attention_lnx = attention_layer(
@@ -110,6 +115,7 @@ class MistralDecoderLayer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        previous_chunk=previous_chunk,
     )
 
     attention_lnx = nn.with_logical_constraint(

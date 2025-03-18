@@ -275,6 +275,17 @@ class Fp8Einsum(nn.Module):
     return y
 
 
+@dataclass
+class NANOOFp8Quantization(Quantization):
+  """Configures NANOO Fp8 quantization for AMD MI300/MI325 GPUs"""
+
+  quant_mode = "train"
+
+  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
+    """Returns dot_general configured with aqt params."""
+    return nn.NANOOFp8DotGeneralOp
+
+
 def _get_int8_quant_config(config):
   drhs_bits = None
   drhs_accumulator_dtype = None
@@ -349,6 +360,8 @@ def _get_quant_config(config):
     return _get_mixed_precision_quant_config(mixed_precision_config)
   if config.quantization == "fp8":
     return "fp8"
+  if config.quantization == "nanoo_fp8":
+    return "nanoo_fp8"
   if config.quantization == "aqt_fp8":
     return _get_aqt_fp8_quant_config(config)
   raise ValueError(f"Invalid value configured for quantization {config.quantization}.")
@@ -381,6 +394,8 @@ def configure_quantization(config: Config, quant_mode_str: str = "train"):
   if quant_cfg:
     if quant_cfg == "fp8":
       return Fp8Quantization()
+    elif quant_cfg == "nanoo_fp8":
+      return NANOOFp8Quantization()
     quant_mode = get_quant_mode(quant_mode_str)
     replicate_scale = config.replicate_quant_scale if config.replicate_quant_scale else False
     return AqtQuantization(quant_dg=quant_cfg, quant_mode=quant_mode, replicate_scale=replicate_scale)

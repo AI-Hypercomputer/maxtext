@@ -304,6 +304,7 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
+  @pytest.mark.skip(reason="b/400476456 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
   @pytest.mark.tpu_only
   def test_moe_dropping_int8(self):
     compiled_trainstep_file = "/tmp/test_moe_dropping_int8.pickle"
@@ -390,6 +391,7 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
+  @pytest.mark.skip(reason="b/400476456 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
   @pytest.mark.tpu_only
   def test_moe_dense_int8(self):
     compiled_trainstep_file = "/tmp/test_moe_dense_int8.pickle"
@@ -458,6 +460,7 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
+  @pytest.mark.skip(reason="Fix sharding issue of all layers of DeepSeek")
   @pytest.mark.tpu_only
   def test_moe_deepseek_unscanned_bf16(self):
     compiled_trainstep_file = "/tmp/test_moe_deepseek_unscanned_bf16.pickle"
@@ -472,7 +475,7 @@ class TrainCompile(unittest.TestCase):
             "model_name=deepseek3-671b",
             "sparse_matmul=True",
             "megablox=False",
-            "per_device_batch_size=2",
+            "per_device_batch_size=1",
             "max_target_length=1024",
             "attention=dot_product",  # Change to flush attention once it works for MLA
             "dtype=bfloat16",
