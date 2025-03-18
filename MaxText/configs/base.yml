@@ -532,6 +532,8 @@ goodput_upload_interval_seconds: 30
 enable_pathways_goodput: False
 monitor_step_time_deviation: True
 step_deviation_interval_seconds: 30
+enable_gcp_goodput_metrics: True
+enable_gcp_step_deviation_metrics: True
 
 # GCP workload monitoring
 report_heartbeat_metric_for_gcp_monitoring: False

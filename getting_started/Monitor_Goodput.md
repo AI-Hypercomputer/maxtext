@@ -97,3 +97,22 @@ python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=$OUTPUT_
 
 1. MaxText installs the required packages on setup: `tensorboard-plugin-profile`, `tensorflow` and `tensorboard`.
 2. Follow the Tensorboard URL on MaxText logs to view all metrics in one location.
+
+### Enabling Google Cloud Monitoring on Maxtext
+
+Maxtext has an additional option of pushing Goodput and step time deviation metrics to Google CLoud Monitoring. By default if `monitor_goodput=True` is enabled, the data starts getting uploaded to Google Cloud Monitoring. Set `enable_gcp_goodput_metrics=False` and  `enable_gcp_step_deviation_metrics=False` to disable goodput and step_deviation respectively.
+
+```Python
+python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=$OUTPUT_PATH dataset_path=$DATA_PATH run_name=goodput-test-run steps=200 goodput_upload_interval_seconds=30 step_deviation_interval_seconds=30 enable_gcp_goodput_metrics=True enable_gcp_step_deviation_metrics=True
+```
+
+#### Visualization in Google Cloud Monitoring
+
+To visualize the collected metrics within Google Cloud Monitoring:
+
+1.  Verify that the workload is executing with `monitor_enabled=True`. This ensures automatic data ingestion into Google Cloud Monitoring.
+2.  Navigate to [Metrics Explorer](https://console.cloud.google.com/monitoring/metrics-explorer). Initiate metric selection by clicking "Select a metric," then search for and select the "Workload" resource. Subsequently, choose the "Workload" metric category.
+
+    a.  [**Productive Time:**](https://cloud.google.com/monitoring/api/metrics_gcp#:~:text=workload/goodput_time) Represents the cumulative duration the workload spent on productive tasks, measured by `compute.googleapis.com/workload/goodput_time`.  
+    b.  [**Non-Productive Time:**](https://cloud.google.com/monitoring/api/metrics_gcp#:~:text=workload/badput_time) Represents the cumulative duration the workload spent on non-productive tasks, measured by `compute.googleapis.com/workload/badput_time`.  
+    c.  [**Performance:**](https://cloud.google.com/monitoring/api/metrics_gcp#:~:text=workload/performance) Represents the workload's performance metric, specifically step deviation in this context, measured by `compute.googleapis.com/workload/performance`.
