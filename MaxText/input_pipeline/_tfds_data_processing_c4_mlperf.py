@@ -252,16 +252,20 @@ def preprocess_train_dataset(
     data_shuffle_seed: int,
 ) -> tf.data.Dataset:
   """Preprocess the training dataset."""
+  if sp_tokenizer.pad_id is not None:
+    pad_id = sp_tokenizer.pad_id
+  elif sp_tokenizer.unk_id is not None:
+    pad_id = sp_tokenizer.unk_id
+  else:
+    pad_id = -1
   train_ds = train_ds.map(
       lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)), num_parallel_calls=AUTOTUNE
   )
-
   train_ds = reduce_concat_tokens(train_ds, feature_key="targets", batch_size=4096)
   train_ds = split_tokens_to_targets_length(train_ds, max_target_length)
   train_ds = train_ds.shuffle(shuffle_buffer_size, seed=data_shuffle_seed)
-  train_ds = sequence_packing.pack_dataset(train_ds, max_target_length)
-
-  train_ds = train_ds.map(format_fn, num_parallel_calls=AUTOTUNE)
+  train_ds = sequence_packing.pack_dataset(train_ds, max_target_length, pad_id=pad_id)
+  train_ds = train_ds.map(format_fn, num_parallel_calls=AUTOTUNE, pad_id=pad_id)
   train_ds = train_ds.batch(train_global_batch_size_to_load // jax.process_count(), drop_remainder=True)
   train_ds = train_ds.prefetch(AUTOTUNE)
   return train_ds
@@ -274,7 +278,7 @@ def preprocess_eval_dataset(
     num_examples: Optional[int] = None,
 ) -> tf.data.Dataset:
   """Preprocess the evaluation dataset."""
-  eval_ds = sequence_packing.pack_dataset(eval_ds, max_target_length)
+  eval_ds = sequence_packing.pack_dataset(eval_ds, max_target_length, pad_id=0)
 
   eval_ds = eval_ds.map(format_fn, num_parallel_calls=AUTOTUNE)
 
