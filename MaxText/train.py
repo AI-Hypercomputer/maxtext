@@ -481,8 +481,8 @@ def train_step(model, mesh, config, state_mesh_shardings, state, data, dropout_r
     rng2: A new rng key that can be used in future calls.
 
   """
-  # f_move_state_scan = functools.partial(max_utils.move_state_scan, state_sharding=state_mesh_shardings, scan_over = config.base_num_decoder_layers)
-  f_move_state_scan = functools.partial(max_utils.move_state_unscan)
+  f_move_state_scan = functools.partial(max_utils.move_state_scan, state_sharding=state_mesh_shardings, scan_over = config.base_num_decoder_layers)
+  # f_move_state_scan = functools.partial(max_utils.move_state_unscan)
   reference_params, reference_params_sharding, extra_dpo_args, _loss_fn = [], [], [], loss_fn
   if config.use_dpo:
     state, reference_params = _split_dpo_state(state)

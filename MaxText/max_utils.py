@@ -852,10 +852,6 @@ def move_state_scan(state, sharding, state_sharding, scan_over):
   stacked_mu, unstacked_mu = partition_pytree_by_shape(state.opt_state[0].mu, is_stacked)
   stacked_nu, unstacked_nu = partition_pytree_by_shape(state.opt_state[0].nu, is_stacked)
 
-  stacked_params_sharding, unstacked_params_sharding = partition_pytree_by_shape(state_sharding.params, is_stacked)
-  stacked_mu_sharding, unstacked_mu_sharding = partition_pytree_by_shape(state_sharding.opt_state[0].mu, is_stacked)
-  stacked_nu_sharding, unstacked_nu_sharding = partition_pytree_by_shape(state_sharding.opt_state[0].nu, is_stacked)
-
   # device_put unstacked opt_state and params
   unstacked_params = jax.device_put(unstacked_params, sharding)
   unstacked_mu = jax.device_put(unstacked_mu, sharding)
