@@ -21,8 +21,9 @@ from pathlib import Path
 
 import ml_collections
 import jax
+import transformers
 import grain.python as grain
-
+from sentencepiece import SentencePieceProcessor
 from input_pipeline import _input_pipeline_utils
 from input_pipeline import _grain_tokenizer
 
@@ -70,12 +71,32 @@ def preprocessing_pipeline(
     data_columns = ("inputs", "targets")
   operations.append(_input_pipeline_utils.NormalizeFeatures(data_columns, tokenize))
 
-  if tokenize:
-    operations.append(
-        _grain_tokenizer.TokenizeAndTrim(
-            data_columns, max_target_length, tokenizer_path, add_bos, add_eos, tokenizer_type, hf_access_token
-        )
+  if tokenizer_type == "sentencepiece":
+    tokenizer_model = SentencePieceProcessor()
+    tokenizer_model.Load(tokenizer_path)
+    if tokenizer_model.pad_id() is not None:
+      pad_id = tokenizer_model.pad_id()
+    elif tokenizer_model.unk_id() is not None:
+      pad_id = tokenizer_model.unk_id()
+    else:
+      pad_id = -1
+  else:
+    tokenizer_model = transformers.AutoTokenizer.from_pretrained(
+        tokenizer_path,
+        add_bos_token=add_bos,
+        add_eos_token=add_eos,
+        legacy=False,
+        token=hf_access_token,
     )
+    if tokenizer_model.pad_token_id is not None:
+      pad_id = tokenizer_model.pad_token_id
+    elif tokenizer_model.unk_token_id is not None:
+      pad_id = tokenizer_model.unk_token_id
+    else:
+      pad_id = -1
+
+  if tokenize:
+    operations.append(_grain_tokenizer.TokenizeAndTrim(data_columns, max_target_length, add_bos, add_eos, tokenizer_model))
 
   # Pack and Batch examples.
   if packing and not use_dpo:
@@ -88,12 +109,22 @@ def preprocessing_pipeline(
     )
     operations.append(_input_pipeline_utils.ReformatPacking(data_columns))
   else:
-    operations.append(_input_pipeline_utils.PadToMaxLength(max_target_length))
+    operations.append(_input_pipeline_utils.PadToMaxLength(max_target_length, pad_id))
     operations.append(grain.Batch(batch_size=global_batch_size // jax.process_count(), drop_remainder=drop_remainder))
 
   # Shift inputs for teacher-forced training
   if shift and not use_dpo:
-    operations.append(_input_pipeline_utils.ShiftData(axis=1))
+    operations.append(
+        _input_pipeline_utils.ShiftData(
+            ignored_ids=[
+                pad_id,
+                tokenizer_model.bos_id()
+                if isinstance(tokenizer_model, SentencePieceProcessor)
+                else tokenizer_model.bos_token_id,
+            ],
+            axis=1,
+        )
+    )
 
   index_sampler = grain.IndexSampler(
       num_records=len(dataset),
