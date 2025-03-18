@@ -158,7 +158,11 @@ def _update_prefill_pages_for_group(
     page_index = current_map[page_group_id, index]
 
     # Free the page if it's within the valid range
-    updated_status = jax.lax.cond(is_valid, lambda: current_status.at[page_index].set(0), lambda: current_status)
+    updated_status = jax.lax.cond(
+        is_valid, 
+        lambda: current_status.at[page_index].set(0), 
+        lambda: current_status
+    )
 
     return (updated_status, current_map, pages_used)
 
@@ -199,19 +203,29 @@ def _update_prefill_pages_for_group(
 
       # Update page status and map if we should allocate
       current_status = jax.lax.cond(
-          should_allocate, lambda: current_status.at[next_free_page].set(1), lambda: current_status
+          should_allocate, 
+          lambda: current_status.at[next_free_page].set(1), 
+          lambda: current_status
       )
       current_map = jax.lax.cond(
-          should_allocate, lambda: current_map.at[page_group_id, index].set(next_free_page), lambda: current_map
+          should_allocate, 
+          lambda: current_map.at[page_group_id, index].set(next_free_page), 
+          lambda: current_map
       )
 
       # Increment pages_used if a page was allocated
-      pages_used = jax.lax.cond(should_allocate, lambda: pages_used.at[page_group_id].add(1), lambda: pages_used)
+      pages_used = jax.lax.cond(
+        should_allocate, 
+        lambda: pages_used.at[page_group_id].add(1), 
+        lambda: pages_used
+      )
 
       return (current_status, current_map, pages_used)
 
     new_page_status, new_page_map, new_pages_used = jax.lax.fori_loop(
-        0, max_pages_per_group, allocate_new_page, (current_status, current_map, pages_used)
+        0, 
+        max_pages_per_group, 
+        allocate_new_page, (current_status, current_map, pages_used)
     )
     return new_page_status, new_page_map, new_pages_used
 
@@ -247,7 +261,9 @@ def _update_prefill_pages_for_group(
       last_page_idx = jnp.minimum(num_pages_needed, max_pages_per_group) - 1
       last_page_valid = num_pages_needed > 0
       last_page_index = jax.lax.cond(
-          last_page_valid, lambda: new_page_map[page_group_id, last_page_idx], lambda: jnp.array(0, dtype=jnp.int32)
+          last_page_valid, 
+          lambda: new_page_map[page_group_id, last_page_idx], 
+          lambda: jnp.array(0, dtype=jnp.int32)
       )
 
       return PageState(
@@ -286,7 +302,7 @@ def _update_decode_pages_for_layer(
   layer_pages_used = page_state.num_pages_used[layer_id].copy()
   layer_active_page = page_state.active_page[layer_id].copy()
   layer_has_active_page = page_state.has_active_page[layer_id].copy()
-  layer_current_position = page_state.active_page_position[layer_id].copy()
+  layer_active_position = page_state.active_page_position[layer_id].copy()
 
   # Update sequence length and position within the page.
   # Only increment sequence lengths for active pages
@@ -294,7 +310,9 @@ def _update_decode_pages_for_layer(
 
   # Calculate new position for each page
   new_current_position = jnp.where(
-      layer_has_active_page, (new_sequence_lengths - 1) % tokens_per_page, layer_current_position
+      layer_has_active_page, 
+      (new_sequence_lengths - 1) % tokens_per_page, 
+      layer_active_position
   )
 
   # Determine which slots need new pages
@@ -315,18 +333,27 @@ def _update_decode_pages_for_layer(
     # Need new page if:
     # 1. We need more pages than we're using
     # 2. We have an active current page
-    needs_new_page = jnp.logical_and(new_pages_needed[group_index] > pages_used[group_index], has_current[group_index])
+    needs_new_page = jnp.logical_and(
+      new_pages_needed[group_index] > pages_used[group_index], 
+      has_current[group_index]
+    )
 
     # Find next free page if needed
     next_free_page = jax.lax.cond(
-        needs_new_page, lambda: _find_next_free_page_index(current_status), lambda: jnp.array(0, dtype=jnp.int32)
+        needs_new_page, 
+        lambda: _find_next_free_page_index(current_status), 
+        lambda: jnp.array(0, dtype=jnp.int32)
     )
 
     # Determine if we can allocate a new page
     should_allocate = jnp.logical_and(needs_new_page, next_free_page >= 0)
 
     # Update page status to allocate new page
-    updated_status = jax.lax.cond(should_allocate, lambda: current_status.at[next_free_page].set(1), lambda: current_status)
+    updated_status = jax.lax.cond(
+      should_allocate, 
+      lambda: current_status.at[next_free_page].set(1), 
+      lambda: current_status
+    )
 
     # Add page to page map
     updated_map = jax.lax.cond(
@@ -337,12 +364,16 @@ def _update_decode_pages_for_layer(
 
     # Update current page
     updated_pages = jax.lax.cond(
-        should_allocate, lambda: active_pages.at[group_index].set(next_free_page), lambda: active_pages
+        should_allocate, 
+        lambda: active_pages.at[group_index].set(next_free_page), 
+        lambda: active_pages
     )
 
     # Update count of pages used
     updated_used = jax.lax.cond(
-        should_allocate, lambda: pages_used.at[group_index].set(pages_used[group_index] + 1), lambda: pages_used
+        should_allocate, 
+        lambda: pages_used.at[group_index].set(pages_used[group_index] + 1), 
+        lambda: pages_used
     )
 
     # Current page is always valid when we have an active sequence
@@ -351,7 +382,11 @@ def _update_decode_pages_for_layer(
     return (updated_status, updated_map, updated_pages, updated_has_current, updated_used)
 
   # Update each group's state
-  (new_page_status, new_page_map, new_active_page, new_has_active_page, new_pages_used) = jax.lax.fori_loop(
+  (new_page_status, 
+   new_page_map, 
+   new_active_page, 
+   new_has_active_page, 
+   new_pages_used) = jax.lax.fori_loop(
       0,
       max_page_groups,
       update_group,
@@ -388,10 +423,19 @@ def _release_page_group_in_layer(
     page_idx = layer_page_map[page_group_id, i]
 
     # Only modify page_status if the page is valid
-    return jax.lax.cond(is_valid, lambda: page_status.at[page_idx].set(0), lambda: page_status)
+    return jax.lax.cond(
+      is_valid, 
+      lambda: page_status.at[page_idx].set(0), 
+      lambda: page_status
+    )
 
   # Free all valid pages in this group
-  new_layer_page_status = jax.lax.fori_loop(0, layer_page_map.shape[1], release_page, layer_page_status)
+  new_layer_page_status = jax.lax.fori_loop(
+    0, 
+    layer_page_map.shape[1], 
+    release_page, 
+    layer_page_status
+  )
 
   # Return a NEW PageState with cleared state for this page group
   return PageState(

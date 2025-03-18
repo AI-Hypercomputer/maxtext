@@ -20,7 +20,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import max_utils
 import maxengine
-from inference.page_manager import PageManager, PageState
+from inference.page_manager import PageManager, PageState, get_valid_page_assignments
 
 import os
 import pyconfig
@@ -95,42 +95,67 @@ def visualize_page_allocation(page_state, num_layers, num_pages, step, output_di
 
 
 def check_page_state_consistency(page_state, num_layers, step):
-  """Verify the consistency of page state across layers."""
-  issues_found = False
+    """Verify the consistency of page state across layers."""
+    issues_found = False
 
-  # Check for each layer
-  for layer_idx in range(num_layers):
-    # Check that page_status matches page_map
-    allocated_pages = []
-    for slot in range(page_state.page_map.shape[1]):
-      pages = [p for p in page_state.page_map[layer_idx, slot] if p >= 0]
-      allocated_pages.extend(pages)
+    # Check for each layer
+    for layer_idx in range(num_layers):
+        # Check that page_status matches page_map
+        # Get all valid page assignments for this layer
+        total_pages_allocated = int(jnp.sum(page_state.page_status[layer_idx]))
+        total_pages_mapped = int(jnp.sum(page_state.num_pages_used[layer_idx]))
+        
+        if total_pages_allocated != total_pages_mapped:
+            print(f"ERROR at step {step}: Layer {layer_idx} has allocation mismatch")
+            print(f"  {total_pages_allocated} pages marked allocated but {total_pages_mapped} pages mapped")
+            issues_found = True
+        
+        # Check for duplicate allocations using JAX-friendly approach
+        allocated_pages = []
+        for slot in range(page_state.num_pages_used.shape[1]):
+            num_used = int(page_state.num_pages_used[layer_idx, slot])
+            if num_used > 0:
+                # Get the valid page indices for this slot
+                for i in range(num_used):
+                    page_idx = int(page_state.page_map[layer_idx, slot, i])
+                    allocated_pages.append(page_idx)
+        
+        # Convert to native Python types for duplicate checking
+        # This avoids the "unhashable type" error
+        if allocated_pages:
+            # Count occurrences of each page index
+            page_counts = {}
+            for p in allocated_pages:
+                page_counts[p] = page_counts.get(p, 0) + 1
+            
+            # Find duplicates
+            duplicates = [p for p, count in page_counts.items() if count > 1]
+            if duplicates:
+                print(f"ERROR at step {step}: Layer {layer_idx} has duplicate page allocations: {duplicates}")
+                issues_found = True
 
-    # Check for duplicate allocations
-    duplicates = set([p for p in allocated_pages if allocated_pages.count(p) > 1])
-    if duplicates:
-      print(f"ERROR at step {step}: Layer {layer_idx} has duplicate page allocations: {duplicates}")
-      issues_found = True
+        # Check page_status consistency
+        for slot in range(page_state.page_map.shape[1]):
+            num_used = int(page_state.num_pages_used[layer_idx, slot])
+            for i in range(num_used):
+                page_idx = int(page_state.page_map[layer_idx, slot, i])
+                if page_state.page_status[layer_idx, page_idx] != 1:
+                    print(f"ERROR at step {step}: Layer {layer_idx} slot {slot} has inconsistent state for page {page_idx}")
+                    print(f"  Page is in page_map but page_status is {page_state.page_status[layer_idx, page_idx]}")
+                    issues_found = True
 
-    # Check page_status consistency
-    for page in allocated_pages:
-      if page_state.page_status[layer_idx, page] != 1:
-        print(f"ERROR at step {step}: Layer {layer_idx} has inconsistent state for page {page}")
-        print(f"  Page is in page_map but page_status is {page_state.page_status[layer_idx, page]}")
-        issues_found = True
+        # Check active page is valid
+        for slot in range(page_state.has_active_page.shape[1]):
+            has_active = bool(page_state.has_active_page[layer_idx, slot])
+            if has_active:
+                active_page = int(page_state.active_page[layer_idx, slot])
+                if page_state.page_status[layer_idx, active_page] != 1:
+                    print(f"ERROR at step {step}: Layer {layer_idx} slot {slot} active_page {active_page} not allocated")
+                    issues_found = True
 
-    # Check current page is valid
-    for slot in range(page_state.current_page.shape[1]):
-      current_page = page_state.current_page[layer_idx, slot]
-      if current_page >= 0:
-        if page_state.page_status[layer_idx, current_page] != 1:
-          print(f"ERROR at step {step}: Layer {layer_idx} slot {slot} current_page {current_page} not allocated")
-          issues_found = True
-
-  if not issues_found:
-    print(f"✓ Page state consistency check passed at step {step}")
-  return not issues_found
-
+    if not issues_found:
+        print(f"✓ Page state consistency check passed at step {step}")
+    return not issues_found
 
 def validate_config(config):
   assert config.load_full_state_path == "", (
@@ -268,8 +293,8 @@ def main(argv: Sequence[str]) -> None:
 
       # Show current page and position for first few layers
       for layer_idx in range(min(3, config.num_decoder_layers)):
-        current_page = engine.page_state.current_page[layer_idx, slot]
-        current_pos = engine.page_state.current_page_position[layer_idx, slot]
+        current_page = engine.page_state.active_page[layer_idx, slot]
+        current_pos = engine.page_state.active_page_position[layer_idx, slot]
         print(f"  Layer {layer_idx}: current_page={current_page}, position={current_pos}")
 
       check_page_state_consistency(engine.page_state, config.num_decoder_layers, f"token_{i+1}")

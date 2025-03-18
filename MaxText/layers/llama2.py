@@ -70,16 +70,16 @@ class LlamaDecoderLayer(nn.Module):
 
   @nn.compact
   def __call__(
-      self,
-      inputs,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic,
-      model_mode,
-      page_state: Optional[PageState] = None,
-      layer_idx: Optional[int] = None,
-      slot: Optional[int] = None,
-      true_length: Optional[int] = None,
+    self,
+    inputs,
+    decoder_segment_ids,
+    decoder_positions,
+    deterministic,
+    model_mode,
+    page_state: Optional[PageState] = None,
+    layer_idx: Optional[int] = None,
+    slot: Optional[int] = None,
+    true_length: Optional[int] = None,
   ):
     """Llama decoder layer forward pass."""
     cfg = self.config
@@ -132,60 +132,91 @@ class LlamaDecoderLayer(nn.Module):
         deterministic=deterministic,
         model_mode=model_mode,
         page_state=page_state,
-        layer_idx=layer_idx,  # Pass explicit layer index
-        slot=slot,  # Pass slot
+        layer_idx=layer_idx,
+        slot=slot,
         true_length=true_length,
     )
 
-    # Conditional processing based on attention type and mode
-    if self.config.attention == "paged" and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-      # Unpack the results from Attention.__call__
-      q_input, k_pages, v_pages, lengths, page_indices, _ = attention_lnx
+    # Special processing for paged attention in autoregressive mode
+    # Defensive handling of attention_lnx based on its structure
+    if (
+        self.config.attention == "paged" 
+        and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE
+        and isinstance(attention_lnx, tuple)
+    ):
+        # Check if the tuple has the expected length
+        if len(attention_lnx) >= 7:
+            # Standard case - we received the expected 7-tuple
+            cache, q_input, k_pages, v_pages, lengths, page_indices, pages_used = attention_lnx
+            
+            # Import necessary libraries
+            from jax.experimental import shard_map
+            from jax.sharding import PartitionSpec as P
+            import jax
 
-      # The attention calculation is now done *HERE*, inside the layer.
-      from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention as jax_paged_attention
-      from jax.experimental import shard_map
-      from jax.sharding import PartitionSpec as P
-      import jax
+            # Define sharding specs
+            q_pspec = P(None, None, None)  # [batch, heads, dim]
+            k_pspec = P(None, None, None, None)  # [kv_heads, num_pages, page_size, head_dim]
+            v_pspec = P(None, None, None, None)  # [kv_heads, num_pages, page_size, head_dim]
+            lengths_pspec = P(None)  # [batch]
+            page_indices_pspec = P(None, None)  # [batch, max_pages]
+            pages_used_pspec = P(None)  # [batch]
 
-      # Define sharding specs (same as before)
-      q_pspec = P(None, None, None)
-      k_pspec = P(None, None, None, None)
-      v_pspec = P(None, None, None, None)
-      lengths_pspec = P(None)
-      page_indices_pspec = P(None, None)
+            # Use our custom paged attention implementation
+            def attention_fn(q, k, v, lens, indices, used):
+                # Import our custom implementation
+                from inference.paged_attention import fixed_paged_attention
+                
+                # Use simplified implementation during initialization
+                if self.is_initializing():
+                    return jnp.zeros_like(q)
+                
+                return fixed_paged_attention(
+                    query=q,
+                    key_pages=k,
+                    value_pages=v,
+                    page_indices=indices,
+                    pages_used=used,
+                    lengths=lens,
+                    attn_logits_soft_cap=self.config.attn_logits_soft_cap,
+                )
 
-      # Define attention function (same as before)
-      def attention_fn(q, k, v, lens, indices):
-        return jax_paged_attention(
-            q=q,
-            k_pages=k,
-            v_pages=v,
-            lengths=lens,
-            page_indices=indices,
-            mask_value=-1e7,  # Use a static value
-            attn_logits_soft_cap=self.config.attn_logits_soft_cap,
-            pages_per_compute_block=self.config.pagedattn_pages_per_compute_block,
-        )
+            # Create sharded function with updated specs
+            wrapped_attention = shard_map.shard_map(
+                attention_fn,
+                mesh=self.mesh,
+                in_specs=(q_pspec, k_pspec, v_pspec, lengths_pspec, page_indices_pspec, pages_used_pspec),
+                out_specs=q_pspec,
+                check_rep=False,
+            )
 
-      # Create sharded function
-      wrapped_attention = shard_map.shard_map(
-          attention_fn,
-          mesh=self.mesh,
-          in_specs=(q_pspec, k_pspec, v_pspec, lengths_pspec, page_indices_pspec),
-          out_specs=q_pspec,  # Output sharding
-          check_rep=False,
-      )
+            # Call attention computation
+            with self.mesh:
+                # During initialization, just return zeros
+                if self.is_initializing():
+                    attention_output = jnp.zeros_like(q_input)
+                else:
+                    jax.debug.print("Attention inputs - shape: q={}, k={}, v={}, len={}, idx={}, used={}",
+                                  q_input.shape, k_pages.shape, v_pages.shape, 
+                                  lengths.shape, page_indices.shape, pages_used.shape)
+                    jax.debug.print("Sample values - q[0,0]={}; k[0,0,0]={}; v[0,0,0]={}; len[0]={}; idx[0,0]={}; used[0]={}",
+                                  q_input[0,0], k_pages[0,0,0], v_pages[0,0,0],
+                                  lengths[0], page_indices[0,0], pages_used[0])
 
-      # Call attention computation, INSIDE the layer, inside mesh context.
-      with self.mesh:
-        attention_lnx = wrapped_attention(q_input, k_pages, v_pages, lengths, page_indices)
-        attention_lnx = jnp.expand_dims(attention_lnx, axis=1)  # Add back the sequence dimension
+                    attention_output = wrapped_attention(q_input, k_pages, v_pages, lengths, page_indices, pages_used)
+                
+                # Add back sequence dimension
+                attention_lnx = jnp.expand_dims(attention_output, axis=1)
 
-      # Apply output projection *here*, after the attention calculation.
-      attention_lnx = attention_layer.out_projection(cfg.emb_dim, attention_lnx)
+            # Apply output projection
+            attention_lnx = attention_layer.out_projection(cfg.emb_dim, attention_lnx)
+        
+        elif len(attention_lnx) == 1 and "cache" in attention_lnx:
+            # Handle case where only cache is returned (during initialization)
+            # Just return zeros for now
+            attention_lnx = jnp.zeros_like(inputs)
 
-    # The rest of the layer is unchanged
+    # Continue with the rest of the layer processing
     attention_lnx = nn.with_logical_constraint(
         attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
     )
@@ -203,7 +234,7 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states, ("activation_batch", "activation_norm_length", "activation_embed")
     )
 
-    # MLP block.
+    # MLP block
     mlp_lnx = linears.MlpBlock(
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
@@ -223,15 +254,15 @@ class LlamaDecoderLayer(nn.Module):
     )
 
     if cfg.record_internal_nn_metrics:
-      self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
-      self.sow("intermediates", "activation_stdev", jnp.std(layer_output))
-      self.sow(
-          "intermediates",
-          "activation_fraction_zero",
-          jnp.sum(layer_output == 0) / jnp.size(layer_output),
-      )
+        self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
+        self.sow("intermediates", "activation_stdev", jnp.std(layer_output))
+        self.sow(
+            "intermediates",
+            "activation_fraction_zero",
+            jnp.sum(layer_output == 0) / jnp.size(layer_output),
+        )
 
     if cfg.scan_layers:
-      return layer_output, None
+        return layer_output, None
     else:
-      return layer_output
+        return layer_output

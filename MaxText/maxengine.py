@@ -231,7 +231,7 @@ class MaxEngine(engine_api.Engine):
     )
 
     self.prefill_kv_cache_annotations = max_utils.get_prefill_kv_cache_annotations(self.model, self.config, rng2, self._mesh)
-    
+
     # Special handling for paged attention
     if self.config.attention == "paged" or not self.prefill_kv_cache_annotations:
       self.prefill_kv_cache_shardings = {}
@@ -250,7 +250,7 @@ class MaxEngine(engine_api.Engine):
         self.prefill_kv_cache_shardings = self.prefill_kv_cache_shardings["decoder"]["layers_0"]
 
     self.kv_cache_annotations = max_utils.get_kv_cache_annotations(self.model, self.config, rng2, self._mesh)
-    
+
     # Special handling for paged attention
     if self.config.attention == "paged" or not self.kv_cache_annotations:
       self.kv_cache_shardings = {}
@@ -742,18 +742,56 @@ class MaxEngine(engine_api.Engine):
     prefix, _ = self.prefill(params=params, padded_tokens=padded_tokens, true_length=true_length, rng=rng, slot=slot)
     return self.insert(prefix, decode_state, slot)
 
+  def generate(
+      self,
+      params: Params,
+      decode_state: DecodeState,
+      slot: Optional[int] = None,
+      rng: Optional[PRNGKeyType] = None,
+  ) -> Tuple[DecodeState, engine_api.ResultTokens]:
+    """Public API for generate that updates page state outside JIT."""
+
+    # 1. PREPARE PAGE STATE UPDATE (Outside JIT)
+    if self.page_manager is not None and self.page_state is not None:
+      updated_page_state = self.page_manager.update_decode_pages(self.page_state)
+    else:
+      updated_page_state = None
+
+    # 2. Call JIT-compiled generate (Efficient core)
+    new_decode_state, result = self._generate_jit(
+        params=params,
+        decode_state=decode_state,
+        page_state=updated_page_state,  # Pass updated page_state
+        slot=slot,
+        rng=rng,
+    )
+
+    # 3. Update page state in engine (Outside JIT) - likely already done inside _generate_jit via model.apply
+    if self.page_manager is not None and self.page_state is not None:
+      self.page_state = updated_page_state  # Or if update is inside _generate_jit, this line may be redundant.
+
+    return new_decode_state, result
+
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
   def _generate_jit(
       self,
       params: Params,
       decode_state: DecodeState,
-      # page_state: Optional[PageState],
+      page_state: Optional[PageState],  # Uncommented page_state here
       slot: Optional[int],
       rng: Optional[PRNGKeyType] = None,
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
     """JIT-compiled implementation of generate."""
     if rng is None:
       rng = jax.random.PRNGKey(0)
+
+    jax.debug.print(
+        "generate_jit: decode_state['tokens'] shape={}, value={}", decode_state["tokens"].shape, decode_state["tokens"]
+    )
+    jax.debug.print(
+        "generate_jit: decode_state['next_pos'] shape={}, value={}", decode_state["next_pos"].shape, decode_state["next_pos"]
+    )
+    jax.debug.print("generate_jit: page_state: {}", page_state)  # Print PageState (will be verbose, but useful)
 
     previous_token = decode_state["tokens"]
     rng, new_rng = jax.random.split(rng)
@@ -802,85 +840,6 @@ class MaxEngine(engine_api.Engine):
         "generated_tokens": decode_state["generated_tokens"] + 1,
         "tokens": new_token,
     }
-
-    return new_decode_state, result
-
-  def generate(
-    self,
-    params: Params,
-    decode_state: DecodeState,
-    slot: Optional[int] = None,
-    rng: Optional[PRNGKeyType] = None,
-  ) -> Tuple[DecodeState, engine_api.ResultTokens]:
-    """Public API for generate that updates page state outside JIT."""
-
-    # 1. PREPARE INPUTS (Outside JIT)
-    if self.page_manager is not None and self.page_state is not None:
-      updated_page_state = self.page_manager.update_decode_pages(self.page_state)
-    else:
-      updated_page_state = None
-
-    # Get the current token from decode_state
-    previous_token = decode_state["tokens"]
-    next_pos = decode_state["next_pos"]
-
-    batch_size = previous_token.shape[0]  # Infer batch size
-
-    # 2. LAYER LOOP (Outside JIT)
-    new_caches = []  # To collect updated caches from each layer
-    for layer_idx in range(self.config.num_decoder_layers):
-      # Call model.apply for *each layer*, OUTSIDE the JIT
-      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-        layer_output, new_vars = self.model.apply(
-            params | {"cache": decode_state["cache"]},  # Use initial cache for each layer
-            previous_token,
-            next_pos,
-            enable_dropout=False,
-            model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-            rngs={"params": rng},
-            mutable=["cache"],
-            page_state=updated_page_state,  # Pass updated page_state
-            slot=slot,
-            layer_idx=layer_idx,
-        )
-
-      # Collect cache
-      new_caches.append(new_vars["cache"])  # Append the updated cache
-
-    # 3. Process Outputs (Outside JIT)
-
-    # sampling tokens
-    rng, new_rng = jax.random.split(rng)  # Split rng *after* model.apply
-    new_token = inference_utils.sampling(
-        layer_output,  # Use the layer_output from the last layer.
-        new_rng,  # Use the new split rng
-        self.config.decode_sampling_strategy,
-        topk=self.config.decode_sampling_top_k,
-        nucleus_topp=self.config.decode_sampling_nucleus_p,
-        temperature=self.config.decode_sampling_temperature,
-    )
-
-    all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
-    result = engine_api.ResultTokens(
-        data=jnp.concatenate((new_token, all_valid, decode_state["generated_tokens"]), axis=1),
-        tokens_idx=(0, 1),
-        valid_idx=(1, 2),
-        length_idx=(2, 3),
-        samples_per_slot=1,
-    )
-
-    # 4. Create NEW Decode State (Outside JIT)
-    new_decode_state = {
-        "logits": layer_output,  # Use output from the *last* layer
-        "cache": new_caches[-1],  # Use cache from the last layer
-        "next_pos": decode_state["next_pos"] + 1,
-        "generated_tokens": decode_state["generated_tokens"] + 1,
-        "tokens": new_token,
-    }
-
-    # Update page state
-    if self.page_manager is not None and self.page_state is not None:
-      self.page_state = updated_page_state
 
     return new_decode_state, result
 
@@ -1002,7 +961,11 @@ class MaxEngine(engine_api.Engine):
     unboxed_prefix["cache"] = self._maybe_unstack_prefill_result_cache(unboxed_prefix["cache"])
 
     # For paged attention, don't copy any cache values
-    if self.config.attention == "paged" or not hasattr(self, 'kv_cache_annotations_named') or not self.kv_cache_annotations_named:
+    if (
+        self.config.attention == "paged"
+        or not hasattr(self, "kv_cache_annotations_named")
+        or not self.kv_cache_annotations_named
+    ):
       inserted_cache = jax.lax.stop_gradient(decode_state["cache"])
     else:
       # Original non-paged attention code
@@ -1029,9 +992,9 @@ class MaxEngine(engine_api.Engine):
     inserted_generated_tokens = jax.lax.with_sharding_constraint(inserted_generated_tokens, self.replicated_sharding)
     inserted_next_pos = jax.lax.with_sharding_constraint(inserted_next_pos, self.replicated_sharding)
     inserted_tokens = jax.lax.with_sharding_constraint(inserted_tokens, self.replicated_sharding)
-    
+
     # Apply sharding constraint only if kv_cache_shardings is available
-    if self.config.attention != "paged" and hasattr(self, 'kv_cache_shardings') and self.kv_cache_shardings:
+    if self.config.attention != "paged" and hasattr(self, "kv_cache_shardings") and self.kv_cache_shardings:
       inserted_cache = jax.lax.with_sharding_constraint(inserted_cache, self.kv_cache_shardings)
 
     return {
@@ -1197,15 +1160,15 @@ class MaxEngine(engine_api.Engine):
       return None
 
     # Get the current page and position for this slot
-    current_page = page_state.current_page[layer_idx, slot]
-    current_pos = page_state.current_page_position[layer_idx, slot]
+    active_page = page_state.active_page[layer_idx, slot]
+    active_pos = page_state.active_page_position[layer_idx, slot]
 
     # Get the key/value arrays - don't modify them yet
     key_last = key[0, -1] if key.shape[1] > 1 else key[0, 0]
     value_last = value[0, -1] if value.shape[1] > 1 else value[0, 0]
 
     # For now, just print diagnostic info
-    print(f"Would update page {current_page} at position {current_pos} for layer {layer_idx}, slot {slot}")
+    print(f"Would update page {active_page} at position {active_pos} for layer {layer_idx}, slot {slot}")
     print(f"Key shape: {key_last.shape}, Value shape: {value_last.shape}")
 
     # Return page_state unchanged for now
@@ -1239,11 +1202,11 @@ class MaxEngine(engine_api.Engine):
     return stats
 
   def init_decode_state(
-    self,
-    *args,
-    rng: Optional[PRNGKeyType] = None,
-    page_state: Optional[PageState] = None,
-    **kwargs,
+      self,
+      *args,
+      rng: Optional[PRNGKeyType] = None,
+      page_state: Optional[PageState] = None,
+      **kwargs,
   ) -> DecodeState:
     """Initialises any state which a generation step transforms."""
     if rng is None:
@@ -1325,17 +1288,16 @@ class MaxEngine(engine_api.Engine):
       # Use try/except to handle cases where arrays might not have .names
       def extract_names_safely(x):
         try:
-          return tuple(x.names) if hasattr(x, 'names') else None
+          return tuple(x.names) if hasattr(x, "names") else None
         except (AttributeError, TypeError):
           return None
-      
-      self.kv_cache_annotations_named = jax.tree_util.tree_map(
-          extract_names_safely, cache, is_leaf=is_lp)
-      
+
+      self.kv_cache_annotations_named = jax.tree_util.tree_map(extract_names_safely, cache, is_leaf=is_lp)
+
       # Filter out None values to avoid downstream errors
       self.kv_cache_annotations_named = jax.tree_util.tree_map(
-          lambda x: x if x is not None else (), 
-          self.kv_cache_annotations_named)
+          lambda x: x if x is not None else (), self.kv_cache_annotations_named
+      )
 
     zeroed = max_utils.unbox_logicallypartioned(init_state)
     return zeroed

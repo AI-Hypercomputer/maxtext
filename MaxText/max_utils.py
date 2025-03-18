@@ -985,7 +985,7 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
 
 def get_prefill_kv_cache_annotations(model, config, rng, mesh):
   """Get a shaped abstraction of the state (including optimizer)"""
-  
+
   # For paged attention, return an empty dictionary
   if config.attention == "paged":
     return {}
@@ -1013,9 +1013,10 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return state_mesh_annotations
 
+
 def get_kv_cache_annotations(model, config, rng, mesh):
   """Get a shaped abstraction of the state (including optimizer)"""
-  
+
   # For paged attention, return an empty dictionary
   if config.attention == "paged":
     return {}
@@ -1042,6 +1043,7 @@ def get_kv_cache_annotations(model, config, rng, mesh):
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return state_mesh_annotations
+
 
 def print_pytree_shape(print_str, ptree):
   print("\n")

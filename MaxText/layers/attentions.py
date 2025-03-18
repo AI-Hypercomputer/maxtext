@@ -1336,34 +1336,34 @@ class Attention(nn.Module):
       tokens_per_page = self.config.pagedattn_tokens_per_page
       max_prefill_length = self.config.max_prefill_predict_length
       required_pages = (max_prefill_length + tokens_per_page - 1) // tokens_per_page
-      
+
       # Use max() to ensure we have at least one page
       max_pages_per_prefill = max(1, required_pages)
-      
+
       self.paged_attention_op = PagedAttentionOp(
-        mesh=self.mesh,
-        num_pages=self.config.pagedattn_num_pages,
-        tokens_per_page=tokens_per_page,
-        max_pages_per_slot=self.config.max_target_length // tokens_per_page,
-        max_pages_per_prefill=max_pages_per_prefill,  # Use our calculated value
-        pages_per_compute_block=self.config.pagedattn_pages_per_compute_block,
-        num_kv_heads=self.num_kv_heads,
-        kv_head_dim_size=self.head_dim,
-        dtype=self.dtype,
-        attn_logits_soft_cap=self.attn_logits_soft_cap,
+          mesh=self.mesh,
+          num_pages=self.config.pagedattn_num_pages,
+          tokens_per_page=tokens_per_page,
+          max_pages_per_slot=self.config.max_target_length // tokens_per_page,
+          max_pages_per_prefill=max_pages_per_prefill,  # Use our calculated value
+          pages_per_compute_block=self.config.pagedattn_pages_per_compute_block,
+          num_kv_heads=self.num_kv_heads,
+          kv_head_dim_size=self.head_dim,
+          dtype=self.dtype,
+          attn_logits_soft_cap=self.attn_logits_soft_cap,
       )
 
     self.out_proj = DenseGeneral(
-            features=self.config.emb_dim,  # Use a known dimension
-            axis=(-2, -1),
-            kernel_init=self.kernel_init,
-            kernel_axes=("heads", "kv", "embed"),
-            dtype=self.dtype,
-            weight_dtype=self.weight_dtype,
-            name="out",
-            quant=self.quant,
-            matmul_precision=self.config.matmul_precision,
-        )
+        features=self.config.emb_dim,  # Use a known dimension
+        axis=(-2, -1),
+        kernel_init=self.kernel_init,
+        kernel_axes=("heads", "kv", "embed"),
+        dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
+        name="out",
+        quant=self.quant,
+        matmul_precision=self.config.matmul_precision,
+    )
 
   def query_projection(self, inputs_q: Array) -> Array:
     """Query projection."""
@@ -1494,124 +1494,168 @@ class Attention(nn.Module):
 
   @nn.compact
   def __call__(
-      self,
-      inputs_q: Array,
-      inputs_kv: Array,
-      inputs_positions: Array,
-      decoder_segment_ids: Array | None = None,
-      *,
-      model_mode: str = common_types.MODEL_MODE_TRAIN,
-      deterministic: bool = False,
-      previous_chunk: Any = None,
-      page_state: Optional[PageState] = None,
-      layer_idx: Optional[int] = None,
-      slot: Optional[int] = None,
-      true_length: Optional[int] = None,
+    self,
+    inputs_q: Array,
+    inputs_kv: Array,
+    decoder_positions: Array,
+    decoder_segment_ids: Array | None = None,
+    *,
+    model_mode: str = common_types.MODEL_MODE_TRAIN,
+    deterministic: bool = False,
+    previous_chunk: Any = None,
+    page_state: Optional[PageState] = None,
+    layer_idx: Optional[int] = None,
+    slot: Optional[int] = None,
+    true_length: Optional[int] = None,
   ):
-      """Applies Attention on the input data."""
-      inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
-      batch, q_seq_len, _ = inputs_q.shape  # Needed for dummy output shape
+    """Applies Attention on the input data."""
+    # Apply logical constraints to inputs
+    inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
+    inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+    batch, q_seq_len, _ = inputs_q.shape
 
-      # Force initialization of all parameters by calling projection methods
-      is_init = self.is_initializing()
-      
-      # Initialize all projections regardless of initialization state
-      if self.config.fused_qkv:
-          query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
-      else:
-          query = self.query_projection(inputs_q)
-          key = self.kv_projection(inputs_kv, proj_name="key")
-          value = self.kv_projection(inputs_kv, proj_name="value")
+    # Return early during initialization, after initializing all parameters
+    is_init = self.is_initializing()
+    
+    # Initialize all projections regardless of initialization state
+    if self.config.fused_qkv:
+        query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
+    else:
+        query = self.query_projection(inputs_q)
+        key = self.kv_projection(inputs_kv, proj_name="key")
+        value = self.kv_projection(inputs_kv, proj_name="value")
 
-      # Initialize output projection with dummy data
-      dummy_out = jnp.zeros((batch, q_seq_len, self.num_query_heads, self.head_dim), dtype=self.dtype)
-      _ = self.out_projection(inputs_q.shape[-1], dummy_out)
-      
-      # Return early during initialization, AFTER initializing all parameters
-      if is_init:
-          return jnp.zeros((batch, q_seq_len, self.config.emb_dim), dtype=self.dtype)
-      
-      # apply ROPE - only during non-initialization
-      query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
-      key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
+    # Initialize output projection with dummy data to ensure all params are created
+    dummy_out = jnp.zeros((batch, q_seq_len, self.num_query_heads, self.head_dim), dtype=self.dtype)
+    _ = self.out_projection(inputs_q.shape[-1], dummy_out)
+    
+    # Return early during initialization
+    if is_init:
+        return jnp.zeros((batch, q_seq_len, self.config.emb_dim), dtype=self.dtype)
+    
+    # Apply ROPE embeddings to query and key
+    query = self.apply_rotary_embedding(query, decoder_positions, name="query_rotary")
+    key = self.apply_rotary_embedding(key, decoder_positions, name="key_rotary")
 
-      # REMAINING CODE STAYS THE SAME
-      # Logical constraints, paged attention handling, etc.
-      if model_mode == common_types.MODEL_MODE_PREFILL:
-          query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
-          key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
-          value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
-      else:
-          query = nn.with_logical_constraint(query, self.query_axis_names)
-          key = nn.with_logical_constraint(key, self.key_axis_names)
-          value = nn.with_logical_constraint(value, self.value_axis_names)
-      
-      query = checkpoint_name(query, "query_proj")
-      key = checkpoint_name(key, "key_proj")
-      value = checkpoint_name(value, "value_proj")
+    # Apply logical constraints based on model mode
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+        query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
+        key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
+        value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
+    else:
+        query = nn.with_logical_constraint(query, self.query_axis_names)
+        key = nn.with_logical_constraint(key, self.key_axis_names)
+        value = nn.with_logical_constraint(value, self.value_axis_names)
+    
+    # Apply checkpointing for gradient computation
+    query = checkpoint_name(query, "query_proj")
+    key = checkpoint_name(key, "key_proj")
+    value = checkpoint_name(value, "value_proj")
 
-      assert not self.config.quantize_kvcache or self.kv_quant
+    # Handle different attention mechanisms
+    if self.config.attention == "paged" and model_mode != common_types.MODEL_MODE_TRAIN:
+        # Paged attention logic
+        if model_mode == common_types.MODEL_MODE_PREFILL:
+            # In prefill mode: perform attention and get outputs
+            attention_output = self.paged_attention_op(
+                query,
+                key,
+                value,
+                decoder_segment_ids,
+                model_mode,
+                previous_chunk,
+                page_state=page_state,
+                layer_idx=layer_idx,
+                slot=slot,
+            )
+            
+            # Handle different output forms
+            if isinstance(attention_output, tuple) and len(attention_output) == 4:
+                cache, attn, local_max, local_sum = attention_output
+                # Update cache variables
+                self.sow("cache", "cached_prefill_key", cache["cache"]["cached_prefill_key"])
+                self.sow("cache", "cached_prefill_value", cache["cache"]["cached_prefill_value"])
+                # Normalize using softmax components
+                out = attn / (local_sum + 1e-9)
+            else:
+                out = attention_output
+        
+        else:  # AUTOREGRESSIVE mode
+            # Get inputs prepared for paged attention
+            cache, q_input, k_pages, v_pages, lengths, page_indices, pages_used = self.paged_attention_op(
+                query,
+                key,
+                value,
+                decoder_segment_ids,
+                model_mode,
+                previous_chunk,
+                page_state=page_state,
+                layer_idx=layer_idx,
+                slot=slot,
+            )
+            
+            # Update cache in-place
+            self.sow("cache", "cached_prefill_key", cache["cache"]["cached_prefill_key"])
+            self.sow("cache", "cached_prefill_value", cache["cache"]["cached_prefill_value"])
+            
+            from jax.sharding import PartitionSpec as P
+            
+            # Define sharding specs for distributed computation
+            q_pspec = P(None, None, None)  # [batch, heads, dim]
+            k_pspec = P(None, None, None, None)  # [kv_heads, num_pages, page_size, head_dim]
+            v_pspec = P(None, None, None, None)  # [kv_heads, num_pages, page_size, head_dim]
+            lengths_pspec = P(None)  # [batch]
+            page_indices_pspec = P(None, None)  # [batch, max_pages]
+            pages_used_pspec = P(None)  # [batch]
 
-      if self.config.attention == "paged" and model_mode != common_types.MODEL_MODE_TRAIN:
-          # Changed return types
-          if model_mode == common_types.MODEL_MODE_PREFILL:
-              # Get the attention output
-              attention_output = self.paged_attention_op(
-                  query,
-                  key,
-                  value,
-                  decoder_segment_ids,
-                  model_mode,
-                  previous_chunk,
-                  page_state=page_state,
-                  layer_idx=layer_idx,
-                  slot=slot,
-              )
-              
-              # Handle different return formats
-              if isinstance(attention_output, tuple) and len(attention_output) == 3:
-                  attn, local_max, local_sum = attention_output
-                  out = attn / (local_sum + 1e-9) if local_sum is not None else attn
-              elif isinstance(attention_output, tuple) and len(attention_output) == 4:
-                  cache, attn, local_max, local_sum = attention_output
-                  # Update cache variables
-                  self.sow("cache", "cached_prefill_key", cache["cache"]["cached_prefill_key"])
-                  self.sow("cache", "cached_prefill_value", cache["cache"]["cached_prefill_value"])
-                  out = attn / (local_sum + 1e-9) if local_sum is not None else attn
-              else:
-                  out = attention_output
+            from inference.paged_attention import custom_paged_attention, fixed_paged_attention
+            def attention_fn(q, k, v, lens, indices, used):
+                return fixed_paged_attention(
+                    query=q,
+                    key_pages=k,
+                    value_pages=v,
+                    page_indices=indices,
+                    pages_used=used,
+                    lengths=lens,
+                    attn_logits_soft_cap=self.config.attn_logits_soft_cap,
+                )
+            
+            # Create sharded function for distributed computation
+            from jax.experimental import shard_map
+            wrapped_attention = shard_map.shard_map(
+                attention_fn,
+                mesh=self.mesh,
+                in_specs=(q_pspec, k_pspec, v_pspec, lengths_pspec, page_indices_pspec, pages_used_pspec),
+                out_specs=q_pspec,
+                check_rep=False,
+            )
 
-          else:  # AUTOREGRESSIVE
-              # Decode case handling
-              cache, q_input, k_pages, v_pages, lengths, page_indices, layer_idx_out = self.paged_attention_op(
-                  query,
-                  key,
-                  value,
-                  decoder_segment_ids,
-                  model_mode,
-                  previous_chunk,
-                  page_state=page_state,
-                  layer_idx=layer_idx,
-                  slot=slot,
-              )
-              # Update cache
-              self.sow("cache", "cached_prefill_key", cache["cache"]["cached_prefill_key"])
-              self.sow("cache", "cached_prefill_value", cache["cache"]["cached_prefill_value"])
-              out = (q_input, k_pages, v_pages, lengths, page_indices, layer_idx_out)
+            # Execute attention computation within mesh context
+            with self.mesh:
+                attention_output = wrapped_attention(q_input, k_pages, v_pages, lengths, page_indices, pages_used)
+                
+            # Restore the sequence dimension for consistency with other paths
+            out = jnp.expand_dims(attention_output, axis=1)
 
-      else:  # Not paged, or training mode
-          # Original logic for non-paged attention
-          out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, previous_chunk)
+    else:  # Standard attention path
+        # Use the standard attention op for non-paged or training mode
+        out = self.attention_op(
+            query, 
+            key,
+            value,
+            decoder_segment_ids,
+            model_mode,
+            previous_chunk,
+        )
 
-      # Apply output projection *only* for non-paged, or paged attention in prefill mode
-      if model_mode == common_types.MODEL_MODE_PREFILL or self.config.attention != "paged":
-          out = nn.with_logical_constraint(out, self.out_axis_names)
-          out = self.out_projection(inputs_q.shape[-1], out)
-          out = checkpoint_name(out, "out_proj")
+    # Apply logical constraint to attention output
+    out = nn.with_logical_constraint(out, self.out_axis_names)
+    
+    # Apply output projection
+    out = self.out_projection(inputs_q.shape[-1], out)
+    out = checkpoint_name(out, "out_proj")
 
-      return out
-
+    return out
 
 class MLA(Attention):
   """Multi-Head Latent Attention (MLA) layer."""
