@@ -445,7 +445,7 @@ class MoeBlock(nn.Module):
             lhs=inputs,
             rhs=kernel,
             group_sizes=group_sizes,
-            preferred_element_type=jnp.bfloat16,
+            preferred_element_type=self.config.dtype,
             tiling=(min(tile_size[0], m), min(tile_size[1], k), min(tile_size[2], n)),
             lhs_quantize_dtype=lhs_quantize_dtype,
             rhs_quantize_dtype=rhs_quantize_dtype,
@@ -457,7 +457,7 @@ class MoeBlock(nn.Module):
             lhs=inputs,
             rhs=kernel,
             group_sizes=group_sizes,
-            preferred_element_type=jnp.bfloat16,
+            preferred_element_type=self.config.dtype,
         )
       if hs_shape[0] % pad_length:
         output = output[: hs_shape[0]]
