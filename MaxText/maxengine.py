@@ -371,18 +371,18 @@ class MaxEngine(engine_api.Engine):
         else - complete padded prompt
 
       true_length: The real length of the tokens, pre-pad.
-                  If chunked prefill is true - this represents true length of the current chunk
-                  else - true length of complete prompt
+        If chunked prefill is true - this represents true length of the current chunk
+        else - true length of complete prompt
       complete_prompt_true_length: true length of the entire prompt
-                  it can be none if chunked prefill is false
-                  if chunked prefill is true, it is needed for constructing final decoder segment Ids.
+        it can be none if chunked prefill is false
+        if chunked prefill is true, it is needed for constructing final decoder segment Ids.
       complete_padded_prompt: Optional[jax.Array] = None,
-                   it can be none if chunked prefill is false
-                   if chunked prefill is true, it is needed for constructing decoder active sequence indicator
+        it can be none if chunked prefill is false
+        if chunked prefill is true, it is needed for constructing decoder active sequence indicator
       positions: Optional[jax.Array] = None,
-                current position of the tokens in chunk - used for rope embeddings
+        current position of the tokens in chunk - used for rope embeddings
       previous_chunk: Optional[Any] = None, - Has relevant information from previous processed chunks
-      mainly - next postion and KV cache
+        mainly - next position and KV cache
 
     relevant params in call for chunked prefill where complete length is 10 (12 after padding),
     chunk size is 4 and current chunk is second chunk

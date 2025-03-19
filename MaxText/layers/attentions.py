@@ -238,7 +238,8 @@ class AttentionOp(nn.Module):
     output_mask = None
 
     if self.config.use_chunked_prefill and model_mode == common_types.MODEL_MODE_PREFILL:
-      return self.generate_attention_mask_for_chunk(query, key, previous_chunk)
+      ttt_chunked_mask = self.generate_attention_mask_for_chunk(query, key, previous_chunk)
+      print(f"{ttt_chunked_mask=}")
     elif (mask is not None) and (causal_mask is not None):
       output_mask = jnp.logical_and(mask, causal_mask)
     elif mask is not None:
@@ -254,7 +255,9 @@ class AttentionOp(nn.Module):
       sliding_mask = jnp.triu(all_ones, -1 * self.sliding_window_size + 1) * jnp.tril(all_ones, self.sliding_window_size - 1)
       output_mask = sliding_mask * output_mask
 
-    return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
+    ret = jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
+    print(f"{ret=}")
+    return ret
 
   def apply_attention(
       self,
@@ -1012,8 +1015,8 @@ class AttentionOp(nn.Module):
       key, value, decoder_segment_id.
 
     """
-    if self.config.use_chunked_prefill:
-      return self.chunked_prefill_kv_cache(key, value, decoder_segment_ids, previous_chunk)
+    # if self.config.use_chunked_prefill:
+    #   return self.chunked_prefill_kv_cache(key, value, decoder_segment_ids, previous_chunk)
 
     batch, _, heads, key_head_size = key.shape
     batch, _, heads, value_head_size = value.shape

@@ -125,30 +125,12 @@ class MaxEngineTest(unittest.TestCase):
     self.assertTrue(jnp.array_equal(first_token.data.size, 3))
 
   def test_chunked_prefill(self):
-    config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
-        per_device_batch_size=1.0,
-        run_name="test",
-        enable_checkpointing=False,
-        base_num_decoder_layers=2,
-        attention="dot_product",
-        max_target_length=16,
-        max_prefill_predict_length=8,
-        base_emb_dim=256,
-        base_num_query_heads=2,
-        base_num_kv_heads=2,
-        model_call_mode="inference",
-    )
-
-    engine = MaxEngine(config)
-    params = engine.load_params()
-
+    prefill_length = 8
+    
     tokens = jnp.array([1, 306, 5360, 304, 306, 5360, 304])
     padding_tokens = jnp.array([1, 306, 5360, 304, 306, 5360, 304, 0])
-    true_length = 7
-    prefill_length = 8
+    true_length = tokens.shape[0]
     chunk_size = 4
-    assert tokens.shape[0] == true_length
     assert padding_tokens.shape[0] == prefill_length
 
     chunked_padded_tokens, chunked_true_lengths, chunked_positions = token_utils.chunk_and_pad_tokens(
@@ -164,10 +146,60 @@ class MaxEngineTest(unittest.TestCase):
     # prefill_length // chunk_size = 2
     assert len(chunked_padded_tokens) == 2
 
+    config = self.init_pyconfig(
+        max_target_length=prefill_length * 2,
+        max_prefill_predict_length=prefill_length,
+        model_call_mode="inference",
+        capacity_factor=1,
+        use_chunked_prefill="false",
+    )
+
+    engine = MaxEngine(config)
+    params = engine.load_params()
     # Prefill without chunked
     expected_prefill_result, expected_first_token = engine.prefill(
         params=params, padded_tokens=padding_tokens, true_length=true_length
     )
+
+    config = self.init_pyconfig(
+        max_target_length=prefill_length * 2,
+        max_prefill_predict_length=prefill_length,
+        model_call_mode="inference",
+        capacity_factor=1,
+        use_chunked_prefill="false",
+    )
+
+    engine = MaxEngine(config)
+    params = engine.load_params()
+
+
+    expected_prefill_result2, expected_first_token2 = engine.prefill(
+        params=params, padded_tokens=padding_tokens, true_length=true_length
+    )
+    print(f"{expected_prefill_result=}\n=================\n {expected_prefill_result2=}")
+    assert jax.tree.all(jax.tree.map(np.array_equal, expected_prefill_result['cache'], expected_prefill_result2['cache'])), "the same"
+
+    config = self.init_pyconfig(
+        max_target_length=prefill_length * 2,
+        max_prefill_predict_length=prefill_length,
+        model_call_mode="inference",
+        capacity_factor=1,
+        use_chunked_prefill="true",
+    )
+
+    engine = MaxEngine(config)
+    params = engine.load_params()
+
+    expected_prefill_result2, expected_first_token2 = engine.prefill(
+        params=params, padded_tokens=padding_tokens, true_length=true_length,
+        complete_padded_prompt=padding_tokens,
+        complete_prompt_true_length=true_length,
+        previous_chunk=None,
+        positions=jax.numpy.array([[0,1,2,3,4,5,6,7]]),
+    )
+    print(f"{expected_prefill_result=}\n=================\n {expected_prefill_result2=}")
+    print(f"{jax.tree.map(lambda x: x.shape, expected_prefill_result2)}")
+    assert jax.tree.all(jax.tree.map(np.array_equal, expected_prefill_result['cache'], expected_prefill_result2['cache'])), "full chunked"
 
     chunked_prefill_result = None
     chunked_first_token = None
@@ -199,8 +231,12 @@ class MaxEngineTest(unittest.TestCase):
     # Delete extra contents only used in chunked prefill
     assert chunked_prefill_result is not None
     del chunked_prefill_result["true_length_array"]
-    assert jax.tree.map(np.array_equal, expected_prefill_result, chunked_prefill_result)
-    assert jax.tree.map(np.array_equal, expected_first_token, chunked_first_token)
+
+    # cached_prefill_key
+    print(f"{expected_prefill_result=}\n=================\n {chunked_prefill_result=}")
+    # assert jax.tree.all(jax.tree.map(np.array_equal, expected_prefill_result, chunked_prefill_result))
+    assert jax.tree.all(jax.tree.map(np.array_equal, expected_first_token, chunked_first_token))
+    assert jax.tree.all(jax.tree.map(np.array_equal, expected_prefill_result['cache'], chunked_prefill_result['cache']))
 
   def test_prefix_cache_with_chunked_prefill(self):
     prefill_lengths = [4, 8]
@@ -301,8 +337,8 @@ class MaxEngineTest(unittest.TestCase):
         true_length=longer_true_length,
     )
 
-    assert jax.tree.map(np.array_equal, expected_prefix, longer_prefix)
-    assert jax.tree.map(np.array_equal, expected_first_token, longer_first_token)
+    assert jax.tree.all(jax.tree.map(np.array_equal, expected_prefix, longer_prefix))
+    assert jax.tree.all(jax.tree.map(np.array_equal, expected_first_token, longer_first_token))
 
 
 if __name__ == "__main__":

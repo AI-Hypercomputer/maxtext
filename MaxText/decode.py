@@ -39,7 +39,8 @@ def main(argv: Sequence[str]) -> None:
   rng, rng_load_params = jax.random.split(rng)
   params = engine.load_params(rng_load_params)
 
-  text = config.prompt
+  # text = config.prompt
+  text = 'I love to'
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
   tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
@@ -54,6 +55,30 @@ def main(argv: Sequence[str]) -> None:
   prefill_result, first_token = engine.prefill(
       params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill, slot=slot
   )
+  print(f"({prefill_result['next_pos']=}")
+
+  copy_prefill_result = jax.tree.map(jax.numpy.copy, prefill_result)
+  copy_first_token = jax.tree.map(jax.numpy.copy, first_token)
+
+  text = 'I love'
+  metadata = engine.get_tokenizer()
+  tokenizer_model = engine.build_tokenizer(metadata)
+  tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
+  assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
+  assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
+  assert config.quantization != "nanoo_fp8", "NANOO fp8 on AMD MI300/MI325 GPUs is not supported in decode.py yet"
+
+  slot = 0  # Always use decode batch slot 0.
+
+  # Prefill
+  rng, rng_prefill = jax.random.split(rng)  # Split RNG before calling prefill
+  prefill_result2, first_token2 = engine.prefill(
+      params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill, slot=slot
+  )
+  print(f"({prefill_result2['next_pos']=}, {copy_prefill_result['next_pos']=})")
+  assert jax.tree.all(jax.tree.map(jax.numpy.array_equal, prefill_result2, copy_prefill_result))
+  assert jax.numpy.equal(prefill_result2['next_pos'], copy_prefill_result['next_pos'])
+  assert jax.tree.all(jax.tree.map(jax.numpy.array_equal, first_token2, copy_first_token))
 
   # Insert
   rng, rng_init_decode = jax.random.split(rng)

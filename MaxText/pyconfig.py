@@ -896,8 +896,8 @@ class HyperParameters:
     except AttributeError as exc:
       raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{attr}'") from exc
 
-  def __setattr__(self, attr, value):
-    raise ValueError("Reinitialization of config is not allowed")
+  # def __setattr__(self, attr, value):
+  #   raise ValueError("Reinitialization of config is not allowed")
 
   def get_keys(self):
     return self._config.keys
