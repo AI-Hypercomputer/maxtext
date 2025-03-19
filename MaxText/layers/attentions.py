@@ -304,8 +304,24 @@ class AttentionOp(nn.Module):
           # fallback to dot_product as pallas gpu flash attention doesn't support decode stage
           return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
         else:
-          key = jnp.repeat(key, self.num_query_heads // self.num_kv_heads, axis=2)
-          value = jnp.repeat(value, self.num_query_heads // self.num_kv_heads, axis=2)
+          head_axis = -2
+          num_query_heads = query.shape[head_axis]
+          num_kv_heads = key.shape[head_axis]
+          if num_query_heads != num_kv_heads:
+            # Handle cases where the number of query heads is different from the number of key/value heads.
+            if num_query_heads % num_kv_heads != 0:
+              raise ValueError(
+                  f"Number of query heads ({num_query_heads}) must be divisible by number of key/value heads ({num_kv_heads})."
+              )
+            # TODO Investigate if the KV copy can be eliminated. It's likely redundant.
+            q_heads_per_kv_head = num_query_heads // num_kv_heads
+
+            key = jnp.repeat(
+                key, q_heads_per_kv_head, axis=head_axis
+            )  # key shape [batch_size, kv_seq_len, num_kv_heads, head_dim]
+            value = jnp.repeat(
+                value, q_heads_per_kv_head, axis=head_axis
+            )  # value shape [batch_size, kv_seq_len, num_kv_heads, head_dim]
           out = gpu_pallas_attention.mha(query, key, value, decoder_segment_ids, sm_scale=1.0, causal=True)
           return out, None, None
     elif self.attention_kernel == "cudnn_flash_te":
@@ -328,17 +344,48 @@ class AttentionOp(nn.Module):
     # Reshape q to match gqa's expected shape
     q_for_gqa = q.squeeze(axis=1)
 
-    # Use the original gqa function to get the attention output
-    local_out, (local_sum, local_max) = gpu_pallas_decode_attention.gqa(
-        q=q_for_gqa,
-        k=k,
-        v=v,
-        kv_seq_len=lengths,
-        block_k=block_size,
-        sm_scale=1.0,
-        return_residuals=True,
-        normalize_output=False,
+    # Define logical axis names - clearer and avoids repeated calls.
+    b = nn.logical_to_mesh_axes(self.ragged_lengths_names)
+    bsnd = nn.logical_to_mesh_axes(self.cache_logical_axis_names)
+    bnd = nn.logical_to_mesh_axes((CACHE_BATCH, CACHE_HEADS, CACHE_KV))
+    bn = nn.logical_to_mesh_axes((CACHE_BATCH, CACHE_HEADS))
+
+    @functools.partial(
+        shard_map,
+        mesh=self.mesh,
+        in_specs=(bnd, bsnd, bsnd, b, None),
+        out_specs=(bnd, bn, bn),
+        check_rep=False,
     )
+    def wrap_ragged_attention(q: Array, k: Array, v: Array, lengths: Array, block_size: int) -> Tuple[Array, Array, Array]:
+      # Use the original gqa function to get the attention output
+      """
+      Wraps the GQA function with appropriate sharding.
+
+      Args:
+          q: Query tensor.
+          k: Key tensor.
+          v: Value tensor.
+          lengths: Sequence lengths.
+          block_size: Block size for attention.
+
+      Returns:
+          A tuple containing the output, max, and sum tensors.
+      """
+      # Use the original gqa function to get the attention output
+      local_out, (local_sum, local_max) = gpu_pallas_decode_attention.gqa(
+          q=q,
+          k=k,
+          v=v,
+          kv_seq_len=lengths,
+          block_k=block_size,
+          sm_scale=1.0,
+          return_residuals=True,
+          normalize_output=False,
+      )
+      return local_out, local_max, local_sum
+
+    local_out, local_max, local_sum = wrap_ragged_attention(q_for_gqa, k, v, lengths, block_size)
 
     # Reshape local_out, local_max and local_sum to match Maxtext requirements
     local_out = local_out.reshape(batch_size, q_length, q_heads, head_dim)
@@ -490,7 +537,7 @@ class AttentionOp(nn.Module):
     _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
 
     sliding_window_size = self.sliding_window_size
-    if self.attention_type == AttentionType.LOCAL_SLIDING:
+    if self.attention_type == AttentionType.LOCAL_SLIDING or not self.config.enable_padding_causal_mask:
       sliding_window_size = [self.sliding_window_size, 0]
       mask_type = "causal"  # SWA only works with causal masking
       attn_mask = None
@@ -711,32 +758,35 @@ class AttentionOp(nn.Module):
       return (batch, cache_length, 1, 1)
     raise f"Invalid config for kv_quant_axis:{self.kv_quant.axis_cfg}"
 
-  def _get_prefill_cache_vars(self, batch, heads, kv_head_size, model_mode):
+  def _get_prefill_cache_vars(self, batch, heads, key_head_size, value_head_size, model_mode):
 
     cache_length = self.max_prefill_predict_length
     dtype = self._get_cached_kv_dtype(self.dtype)
-    cache_logical_shape = (batch, cache_length, heads, kv_head_size)
 
     if model_mode == common_types.MODEL_MODE_PREFILL:
       cache_logical_axis_names = self.prefill_cache_logical_axis_names
     else:
       cache_logical_axis_names = self.cache_logical_axis_names
-
     cache_axis_names = self.transpose_tuple(cache_logical_axis_names, self.prefill_cache_axis_order)
-    cache_shape = self.transpose_tuple(cache_logical_shape, self.prefill_cache_axis_order)
+
+    cache_logical_shape = (batch, cache_length, heads, key_head_size)
+    cache_shape_key = self.transpose_tuple(cache_logical_shape, self.prefill_cache_axis_order)
+
+    cache_logical_shape = (batch, cache_length, heads, value_head_size)
+    cache_shape_value = self.transpose_tuple(cache_logical_shape, self.prefill_cache_axis_order)
 
     cached_key_var = self.variable(
         "cache",
         "cached_prefill_key",
         nn.with_logical_partitioning(jnp.zeros, cache_axis_names),
-        cache_shape,
+        cache_shape_key,
         dtype,
     )
     cached_value_var = self.variable(
         "cache",
         "cached_prefill_value",
         nn.with_logical_partitioning(jnp.zeros, cache_axis_names),
-        cache_shape,
+        cache_shape_value,
         dtype,
     )
     if model_mode == common_types.MODEL_MODE_PREFILL:
@@ -779,26 +829,29 @@ class AttentionOp(nn.Module):
     value_vars = (cached_value_var, cached_value_scale_var)
     return key_vars, value_vars, cached_segment_id_var
 
-  def _get_ar_cache_vars(self, batch, heads, kv_head_size, model_mode):
+  def _get_ar_cache_vars(self, batch, heads, key_head_size, value_head_size, model_mode):
 
     dtype = self._get_cached_kv_dtype(self.dtype)
     cache_length = self.max_target_length - self.max_prefill_predict_length
-    cache_logical_shape = (batch, cache_length, heads, kv_head_size)
 
     if model_mode == common_types.MODEL_MODE_PREFILL:
       cache_logical_axis_names = self.prefill_cache_logical_axis_names
     else:
       cache_logical_axis_names = self.cache_logical_axis_names
-
     cache_axis_names = self.transpose_tuple(cache_logical_axis_names, self.ar_cache_axis_order)
-    cache_shape = self.transpose_tuple(cache_logical_shape, self.ar_cache_axis_order)
+
+    cache_logical_shape = (batch, cache_length, heads, key_head_size)
+    cache_shape_key = self.transpose_tuple(cache_logical_shape, self.ar_cache_axis_order)
+
+    cache_logical_shape = (batch, cache_length, heads, value_head_size)
+    cache_shape_value = self.transpose_tuple(cache_logical_shape, self.ar_cache_axis_order)
 
     # TODO(b/339703100): investigate the issue why with_logical_partitioning doesn't enforce sharding
     cached_key_var = self.variable(
         "cache",
         "cached_ar_key",
         nn.with_logical_partitioning(jnp.zeros, cache_axis_names),
-        cache_shape,
+        cache_shape_key,
         dtype,
     )
     cached_key_var.value = nn.with_logical_constraint(
@@ -810,7 +863,7 @@ class AttentionOp(nn.Module):
         "cache",
         "cached_ar_value",
         nn.with_logical_partitioning(jnp.zeros, cache_axis_names),
-        cache_shape,
+        cache_shape_value,
         dtype,
     )
     cached_value_var.value = nn.with_logical_constraint(
@@ -876,14 +929,18 @@ class AttentionOp(nn.Module):
     function updates current key and value at the desired location and returns entire key and value
 
     """
-    batch, _, heads, kv_head_size = key.shape
+    batch, _, heads, key_head_size = key.shape
+    batch, _, heads, value_head_size = value.shape
+
     assert key.dtype == value.dtype, "Key and Value Dtypes should match."
 
     cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
-        batch, heads, kv_head_size, common_types.MODEL_MODE_PREFILL
+        batch, heads, key_head_size, value_head_size, common_types.MODEL_MODE_PREFILL
     )
     # TODO: Find a way to not enable the ar cache for prefill mode.
-    _ = self._get_ar_cache_vars(batch, heads, kv_head_size, common_types.MODEL_MODE_PREFILL)  # initialize it now
+    _ = self._get_ar_cache_vars(
+        batch, heads, key_head_size, value_head_size, common_types.MODEL_MODE_PREFILL
+    )  # initialize it now
 
     key_shaped_for_cache = jnp.transpose(key, self.prefill_cache_axis_order)
     value_shaped_for_cache = jnp.transpose(value, self.prefill_cache_axis_order)
@@ -958,14 +1015,17 @@ class AttentionOp(nn.Module):
     if self.config.use_chunked_prefill:
       return self.chunked_prefill_kv_cache(key, value, decoder_segment_ids, previous_chunk)
 
-    batch, _, heads, kv_head_size = key.shape
+    batch, _, heads, key_head_size = key.shape
+    batch, _, heads, value_head_size = value.shape
     assert key.dtype == value.dtype, "Key and Value Dtypes should match."
 
     cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
-        batch, heads, kv_head_size, common_types.MODEL_MODE_PREFILL
+        batch, heads, key_head_size, value_head_size, common_types.MODEL_MODE_PREFILL
     )
     # TODO: Find a way to not enable the ar cache for prefill mode.
-    _ = self._get_ar_cache_vars(batch, heads, kv_head_size, common_types.MODEL_MODE_PREFILL)  # initialize it now
+    _ = self._get_ar_cache_vars(
+        batch, heads, key_head_size, value_head_size, common_types.MODEL_MODE_PREFILL
+    )  # initialize it now
 
     key_shaped_for_cache = jnp.transpose(key, self.prefill_cache_axis_order)
     value_shaped_for_cache = jnp.transpose(value, self.prefill_cache_axis_order)
@@ -1116,12 +1176,14 @@ class AttentionOp(nn.Module):
     Raises:
       ValueError: when key/value shape is not [batch, 1, num_heads, heads_dim].
     """
-    batch, sequence, heads, kv_head_size = key.shape
+    batch, sequence, heads, key_head_size = key.shape
+    batch, sequence, heads, value_head_size = value.shape
+
     if sequence != 1:
       raise ValueError(f"Sequence length should be 1 during autoregression, got {sequence=}")
 
     cached_ar_key_vars, cached_ar_value_vars, cached_ar_segment_id_var, cache_ar_index_var, cache_ar_lengths_var = (
-        self._get_ar_cache_vars(batch, heads, kv_head_size, common_types.MODEL_MODE_AUTOREGRESSIVE)
+        self._get_ar_cache_vars(batch, heads, key_head_size, value_head_size, common_types.MODEL_MODE_AUTOREGRESSIVE)
     )
 
     self.update_ar_key_value(
@@ -1144,7 +1206,7 @@ class AttentionOp(nn.Module):
 
     # The below retrieves the existing prefill cache variables, not creating new ones
     cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
-        batch, heads, kv_head_size, common_types.MODEL_MODE_AUTOREGRESSIVE
+        batch, heads, key_head_size, value_head_size, common_types.MODEL_MODE_AUTOREGRESSIVE
     )
 
     cached_prefill = (
@@ -1319,6 +1381,8 @@ class Attention(nn.Module):
   sliding_window_size: int | None = None
   use_ragged_attention: bool = False
   ragged_block_size: int = 256
+  use_qk_norm: bool = False
+  query_pre_attn_scalar: float | None = None
 
   # Shard the query activation as the same as the key and value.
   # TODO: Find a better sharding axis name.
@@ -1510,9 +1574,13 @@ class Attention(nn.Module):
           name=name,
       )
     else:
+      max_timescale = self.config.rope_max_timescale
+      # For local attention use local_rope_max_timescale if it's is positive
+      if self.attention_type == AttentionType.LOCAL_SLIDING and self.config.local_rope_max_timescale > 0:
+        max_timescale = self.config.local_rope_max_timescale
       rotary_embedding = RotaryEmbedding(
           min_timescale=self.config.rope_min_timescale,
-          max_timescale=self.config.rope_max_timescale,
+          max_timescale=max_timescale,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
           name=name,
@@ -1570,9 +1638,29 @@ class Attention(nn.Module):
       key = self.kv_projection(inputs_kv, proj_name="key")
       value = self.kv_projection(inputs_kv, proj_name="value")
 
+      if self.use_qk_norm:
+        query = RMSNorm(
+            dtype=self.config.dtype,
+            weight_dtype=self.config.weight_dtype,
+            name="query_norm",
+            epsilon=self.config.normalization_layer_epsilon,
+            kernel_axes=("norm",),
+        )(query)
+
+        key = RMSNorm(
+            dtype=self.config.dtype,
+            weight_dtype=self.config.weight_dtype,
+            name="key_norm",
+            epsilon=self.config.normalization_layer_epsilon,
+            kernel_axes=("norm",),
+        )(key)
+
     # apply ROPE
     query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
     key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
+    # apply query_pre_attn_scalar if it's present.
+    if self.query_pre_attn_scalar and self.query_pre_attn_scalar != 1.0:
+      query = query * self.query_pre_attn_scalar
 
     if model_mode == common_types.MODEL_MODE_PREFILL:
       query = nn.with_logical_constraint(query, self.prefill_query_axis_names)

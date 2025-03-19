@@ -43,7 +43,7 @@ jobs:
         bash .github/workflows/build_and_upload_images.sh CLOUD_IMAGE_NAME=maxtext_jax_nightly MODE=nightly DEVICE=tpu PROJECT=tpu-prod-env-multipod LOCAL_IMAGE_NAME=maxtext_jax_nightly
     - name: build jax stable stack image
       run : |
-        bash .github/workflows/build_and_upload_images.sh CLOUD_IMAGE_NAME=maxtext_jax_stable_stack MODE=stable_stack DEVICE=TPU PROJECT=tpu-prod-env-multipod LOCAL_IMAGE_NAME=maxtext_jax_stable_stack BASEIMAGE=us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:latest MAXTEXT_REQUIREMENTS_FILE=requirements_with_jax_stable_stack.txt
+        bash .github/workflows/build_and_upload_images.sh CLOUD_IMAGE_NAME=maxtext_jax_stable_stack MODE=stable_stack DEVICE=tpu PROJECT=tpu-prod-env-multipod LOCAL_IMAGE_NAME=maxtext_jax_stable_stack BASEIMAGE=us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:latest MAXTEXT_REQUIREMENTS_FILE=requirements_with_jax_stable_stack.txt
     - name: build image with stable stack nightly jax
       run: |
         bash .github/workflows/build_and_upload_images.sh CLOUD_IMAGE_NAME=maxtext_stable_stack_nightly_jax MODE=stable_stack DEVICE=tpu PROJECT=tpu-prod-env-multipod LOCAL_IMAGE_NAME=maxtext_tpu_jax_stable_stack_nightly BASEIMAGE=us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/tpu/jax_nightly:latest MAXTEXT_REQUIREMENTS_FILE=requirements_with_jax_stable_stack.txt

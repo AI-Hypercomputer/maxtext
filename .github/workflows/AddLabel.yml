@@ -66,6 +66,8 @@ jobs:
               SurbhiJainUSC: "",
               hengtaoguo: "",
               A9isha: "",
+              wang2yn84: "",
+              wyzhang: "",
             }
             const reviews = await github.rest.pulls.listReviews({
               owner,

@@ -298,6 +298,14 @@ logical_axis_rules: [
                       ['embed_no_exp', ['fsdp', 'sequence', 'tensor_transpose']],
                       ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence']],
                       ['embed_no_exp', ['fsdp', 'sequence']],
+                      ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'expert']],
+                      ['q_lora', ['fsdp', 'sequence', 'tensor_transpose', 'expert']],
+                      ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'expert']],
+                      ['q_lora', ['fsdp', 'sequence', 'expert']],
+                      ['kv_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'expert']],
+                      ['kv_lora', ['fsdp', 'sequence', 'tensor_transpose', 'expert']],
+                      ['kv_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'expert']],
+                      ['kv_lora', ['fsdp', 'sequence', 'expert']],
                       ['norm', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['layers', 'stage'],
                       ['kv', []],
@@ -370,11 +378,17 @@ eval_per_device_batch_size: 0.0
 max_corpus_chars: 10_000_000
 train_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
+packing: True
 
 # direct preference optimization (DPO)
 use_dpo: False
 dpo_label_smoothing: 0.0
 dpo_beta: 0.1
+
+# Supervised Fine-Tuning (SFT)
+use_sft: False
+# sft_train_on_completion_only=False trains on both prompt and completion tokens; trains only on completion tokens otherwise
+sft_train_on_completion_only: False
 
 # dataset_type must be synthetic, hf, grain, tfds
 # details in: https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md
@@ -383,6 +397,7 @@ dataset_type: tfds
 dataset_path: "" # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
 dataset_name: 'c4/en:3.0.1'
 eval_dataset_name: 'c4/en:3.0.1'
+train_split: 'train'
 eval_split: 'validation'
 # for HuggingFace input pipeline (dataset_type=hf)
 hf_path: ''
@@ -492,7 +507,8 @@ trainable_position_size: -1  # enable gpt3 position embedding with a positive tr
 # RoPE parameters
 rope_type: "default" # one of "default", "llama3.1" or "yarn"
 rope_min_timescale: 1
-rope_max_timescale: 10_000
+rope_max_timescale: 10_000 # Timesclae For global Attention
+local_rope_max_timescale: -1 # If positive used for local window Attention, otherwise `rope_max_timescale` is used for both local and global
 
 # yarn RoPE parameters
 max_position_embeddings: 163840
@@ -552,6 +568,7 @@ inference_microbenchmark_prefill_lengths: "64,128,256,512,1024"
 inference_microbenchmark_stages: "prefill,generate"
 inference_microbenchmark_loop_iters: 10
 inference_microbenchmark_log_file_path: ""
+inference_microbenchmark_num_samples: [1, 2, 3, 4, 5]
 inference_metadata_file: "" # path to a json file
 inference_server: "MaxtextInterleavedServer"  # inference server to start
 inference_benchmark_test: False
@@ -636,3 +653,6 @@ pagedattn_pages_per_compute_block: 8
 # Chunked Prefill Parameters
 prefill_chunk_size: 256
 use_chunked_prefill: False
+
+# This is a temporary flag that will removed soon after the fix lands in TE
+enable_padding_causal_mask: True

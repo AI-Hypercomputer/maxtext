@@ -76,6 +76,7 @@ class LlamaDecoderLayer(nn.Module):
       deterministic,
       model_mode,
       page_state: Optional[page_manager.PageState] = None,
+      previous_chunk=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -127,6 +128,7 @@ class LlamaDecoderLayer(nn.Module):
         deterministic=deterministic,
         model_mode=model_mode,
         page_state=page_state,
+        previous_chunk=previous_chunk,
     )
 
     attention_lnx = nn.with_logical_constraint(
