@@ -68,7 +68,7 @@ class WorkloadConfig:
   base_docker_image: str
   libtpu_type: LibTpuType
   libtpu_nightly_version: str = None # A date in %Y%M%D format, 20241201
-  num_steps: int = 20
+  num_steps: int = 200
   max_restarts: int = 0
   priority: str = "medium"
   xpk_path: str = '~/xpk'
@@ -523,8 +523,8 @@ def main() -> int:
     #model_configs.deepseek_a1,
     #model_configs.deepseek_v5p_dp_a1,
     # model_configs.default_128
-    model_configs.llama3_1_405b_8192_fsdp_dcn_matt
-    #model_configs.llama3_1_405b_8192_explicit_matt_pp,
+    #model_configs.llama3_1_405b_8192_fsdp_dcn_matt
+    model_configs.llama3_1_405b_8192_explicit_matt_pp,
     #model_configs.llama3_1_405b_8192_explicit_matt_pp_overlapped
     #model_configs.matt_simple
     #model_configs.deepseek_big_experimental
@@ -554,8 +554,8 @@ def main() -> int:
     for cluster_config in [
       # v5e_cluster_config,
       #v5p_cluster_config,
-      v6e_cluster_config, #yucmhab
-      #v6e_cluster_config_big
+      #v6e_cluster_config, #yucmhab
+      v6e_cluster_config_big
       # another_config,
     ]:
       # Run workloads in the following slice configurations
