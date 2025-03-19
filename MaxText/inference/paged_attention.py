@@ -191,6 +191,8 @@ class PagedAttentionOp(nn.Module):
     jax.debug.print("paged_attention_decode: v_pages shape={}", v_pages.shape)
     jax.debug.print("paged_attention_decode: lengths shape={}, value={}", lengths.shape, lengths)
     jax.debug.print("paged_attention_decode: page_indices shape={}, value={}", page_indices.shape, page_indices)
+    jax.debug.print("paged_attention_decode: SUMMARY - q_input: {}, k_pages: {}, v_pages: {}, lengths: {}, page_indices: {}, pages_used: {}",
+                   q_input.shape, k_pages.shape, v_pages.shape, lengths, page_indices, pages_used)
     return q_input, k_pages, v_pages, lengths, page_indices, pages_used
   
 
@@ -263,7 +265,8 @@ class PagedAttentionOp(nn.Module):
         q_input, k_pages, v_pages, lengths, page_indices, pages_used = self.paged_attention_decode(
             query, key_pages_var, value_pages_var, page_state, layer_idx
         )
-        
+       
+        self.update(key_pages_var, value_pages_var, key, value, model_mode, page_state, layer_idx, slot) 
         # Return cache and prepared inputs
         return cache_dict, q_input, k_pages, v_pages, lengths, page_indices, pages_used
 
@@ -340,6 +343,7 @@ class PagedAttentionOp(nn.Module):
     if self.is_initializing():
       return
 
+    print(f"Starting PagedAttentionOp.update: model_mode={model_mode}, page_state={page_state is not None}")
     if page_state is None:
       if model_mode != common_types.MODEL_MODE_TRAIN:
         raise ValueError(f"page_state must be provided in {model_mode} mode")
@@ -348,7 +352,7 @@ class PagedAttentionOp(nn.Module):
     if model_mode == common_types.MODEL_MODE_PREFILL:
       self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value)
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-      self.update_decode_step_pages(key_pages_var, value_pages_var, key, value, page_state, layer_idx, slot)
+      self.update_decode_step_pages(key_pages_var, value_pages_var, key, value, page_state, layer_idx)
 
   def update_prefill_step_pages(
       self,
@@ -421,40 +425,37 @@ class PagedAttentionOp(nn.Module):
     # Create a mask for sequences with valid current pages
     valid_seq_mask = has_active_pages
 
-    # Create broadcast arrays
-    broadcast_pages = jnp.tile(active_pages[None, :], (kv_heads, 1))  # [kv_heads, valid_batch]
-    broadcast_pos = jnp.tile(active_positions[None, :], (kv_heads, 1))  # [kv_heads, valid_batch]
+    # Helper function to update a SINGLE element
+    def _update_single(kv_head_idx, seq_idx, key_pages, value_pages):
+        page_idx = active_pages[seq_idx]
+        pos_idx = active_positions[seq_idx]
 
-    # Create indices for each KV head
-    kv_indices = jnp.arange(kv_heads)[:, None]  # [kv_heads, 1]
-    kv_indices = jnp.tile(kv_indices, (1, valid_batch_size))  # [kv_heads, valid_batch]
-
-    # Create a mask for valid sequences to use in updates
-    seq_mask = jnp.tile(valid_seq_mask[None, :], (kv_heads, 1))
-
-    # Helper function to update a page safely with masking
-    def safe_update(target, indices, source, mask):
-        # Only update where mask is True (valid sequences)
-        target_head, target_page, target_pos = indices
-        return jax.lax.cond(
-            mask,
-            lambda: target.at[target_head, target_page, target_pos].set(source),
-            lambda: target
+        # Use JAX-compatible boolean operations:
+        is_valid = jnp.logical_and(
+            valid_seq_mask[seq_idx],
+            jnp.logical_and(0 <= page_idx, page_idx < num_pages)
         )
-    
-    # Apply the update function for each head/sequence combination
-    for head_idx in range(kv_heads):
-        for seq_idx in range(valid_batch_size):
-            if valid_seq_mask[seq_idx]:
-                # Update key and value pages for valid sequences
-                page_idx = active_pages[seq_idx]
-                pos_idx = active_positions[seq_idx]
-                
-                # Stay within bounds
-                if 0 <= page_idx < num_pages and 0 <= pos_idx < tokens_per_page:
-                    key_pages = key_pages.at[head_idx, page_idx, pos_idx].set(new_key[head_idx, seq_idx])
-                    value_pages = value_pages.at[head_idx, page_idx, pos_idx].set(new_value[head_idx, seq_idx])
+        is_valid = jnp.logical_and(
+            is_valid,
+            jnp.logical_and(0 <= pos_idx, pos_idx < tokens_per_page)
+        )
 
+        # Use jax.lax.cond for the update
+        key_pages = jax.lax.cond(
+            is_valid,
+            lambda: key_pages.at[kv_head_idx, page_idx, pos_idx].set(new_key[kv_head_idx, seq_idx]),
+            lambda: key_pages
+        )
+        value_pages = jax.lax.cond(
+            is_valid,
+            lambda: value_pages.at[kv_head_idx, page_idx, pos_idx].set(new_value[kv_head_idx, seq_idx]),
+            lambda: value_pages
+        )
+        return key_pages, value_pages
+
+    # vmap over heads and sequences
+    _update_single_vmap = jax.vmap(jax.vmap(_update_single, in_axes=(None, 0, None, None)), in_axes=(0, None, None, None))
+    key_pages, value_pages = _update_single_vmap(jnp.arange(kv_heads), jnp.arange(valid_batch_size), key_pages, value_pages)
 
     # Apply logical constraints
     key_pages = nn.with_logical_constraint(key_pages, self.kv_pages_axis_names)
