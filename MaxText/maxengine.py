@@ -184,8 +184,8 @@ class MaxEngine(engine_api.Engine):
         .compile(),
     )
 
-  def load_params(self, *args, rng: Optional[PRNGKeyType] = None, **kwargs) -> Params:
-    """Load Parameters, typically from GCS"""
+  def load_params(self, *args, params=None, rng: Optional[PRNGKeyType] = None, **kwargs) -> Params:
+    """Load Parameters from GCS or reshard given Parameters"""
     # pylint: disable=unused-argument
 
     if rng is None:
@@ -196,7 +196,17 @@ class MaxEngine(engine_api.Engine):
       self.model.quant.quant_mode = quantizations.get_quant_mode("serve")
 
     rng1, rng2, rng3 = jax.random.split(rng, 3)
-    state, self.state_mesh_annotations = max_utils.setup_decode_state(self.model, self.config, rng1, self._mesh, None)
+    if params:
+      print("Resharding given params")
+      _, self.state_mesh_annotations, state_mesh_shardings = max_utils.get_abstract_state(
+          self.model, None, self.config, rng, self._mesh, False
+      )
+      # reshard given params based on shardings from config in MaxEngine
+      params = jax.device_put(params, state_mesh_shardings.params)
+      state = max_utils.init_decode_state(None, params)
+      state = max_utils.unbox_logicallypartioned(state)
+    else:
+      state, self.state_mesh_annotations = max_utils.setup_decode_state(self.model, self.config, rng1, self._mesh, None)
     # pylint: disable=isinstance-second-argument-not-valid-type
     self.abstract_params = jax.tree_util.tree_map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
