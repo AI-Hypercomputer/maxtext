@@ -252,9 +252,13 @@ def main(argv: Sequence[str]) -> None:
 
   print(f"First token: {first_token}")
 
+  max_utils.print_mem_stats("After prefill")
+
   # Insert prefill result into decode state
   rng, rng_init_decode = jax.random.split(rng)
   decode_state = engine.init_decode_state(rng_init_decode, page_state=engine.page_state)  # Pass page_state
+  max_utils.print_mem_stats("After init_decode_state")
+
   decode_state = engine.insert(prefill_result, decode_state, slot=slot)
 
   # Generate tokens - page state updates happen inside the generate method

@@ -76,6 +76,7 @@ class PagedAttentionOp(nn.Module):
 
   def init_or_get_kv_pages(self, model_mode: str):
     """Get paged attention op."""
+    jax.debug.print("init_or_get_kv_pages called with model_mode: {}", model_mode) # ADD THIS
     # Get existing variables if they exist
     if self.has_variable("cache", "key_pages"):
       key_pages_var = self.variable("cache", "key_pages")
@@ -84,6 +85,7 @@ class PagedAttentionOp(nn.Module):
       # For AR mode, if shape doesn't match, reinitialize values but not variables
       if model_mode != common_types.MODEL_MODE_PREFILL and key_pages_var.value.shape[1] != self.num_pages:
         kv_pages_shape = (self.num_kv_heads, self.num_pages, self.tokens_per_page, self.kv_head_dim_size)
+        jax.debug.print("init_or_get_kv_pages: Resizing in AR mode. New shape: {}", kv_pages_shape) # ADD
         key_pages_var.value = jnp.zeros(kv_pages_shape, dtype=self.dtype)
         value_pages_var.value = jnp.zeros(kv_pages_shape, dtype=self.dtype)
     else:
@@ -95,6 +97,7 @@ class PagedAttentionOp(nn.Module):
         kv_pages_shape = (self.num_kv_heads, max_pages_per_prefill, self.tokens_per_page, self.kv_head_dim_size)
       else:
         kv_pages_shape = (self.num_kv_heads, self.num_pages, self.tokens_per_page, self.kv_head_dim_size)
+      jax.debug.print("init_or_get_kv_pages: Initializing with shape: {}", kv_pages_shape) # ADD
 
       key_pages_var = self.variable(
           "cache",
@@ -186,11 +189,11 @@ class PagedAttentionOp(nn.Module):
       page_indices = page_indices.at[:valid_batch_size].set(actual_indices)
       pages_used = pages_used.at[:valid_batch_size].set(actual_used)
 
-    jax.debug.print("paged_attention_decode: q_input shape={}, value={}", q_input.shape, q_input)
-    jax.debug.print("paged_attention_decode: k_pages shape={}", k_pages.shape)
-    jax.debug.print("paged_attention_decode: v_pages shape={}", v_pages.shape)
-    jax.debug.print("paged_attention_decode: lengths shape={}, value={}", lengths.shape, lengths)
-    jax.debug.print("paged_attention_decode: page_indices shape={}, value={}", page_indices.shape, page_indices)
+    # jax.debug.print("paged_attention_decode: q_input shape={}, value={}", q_input.shape, q_input)
+    # jax.debug.print("paged_attention_decode: k_pages shape={}", k_pages.shape)
+    # jax.debug.print("paged_attention_decode: v_pages shape={}", v_pages.shape)
+    # jax.debug.print("paged_attention_decode: lengths shape={}, value={}", lengths.shape, lengths)
+    # jax.debug.print("paged_attention_decode: page_indices shape={}, value={}", page_indices.shape, page_indices)
     jax.debug.print("paged_attention_decode: SUMMARY - q_input: {}, k_pages: {}, v_pages: {}, lengths: {}, page_indices: {}, pages_used: {}",
                    q_input.shape, k_pages.shape, v_pages.shape, lengths, page_indices, pages_used)
     return q_input, k_pages, v_pages, lengths, page_indices, pages_used
@@ -265,67 +268,13 @@ class PagedAttentionOp(nn.Module):
         q_input, k_pages, v_pages, lengths, page_indices, pages_used = self.paged_attention_decode(
             query, key_pages_var, value_pages_var, page_state, layer_idx
         )
-       
-        self.update(key_pages_var, value_pages_var, key, value, model_mode, page_state, layer_idx, slot) 
+
+        self.update(key_pages_var, value_pages_var, key, value, model_mode, page_state, layer_idx, slot)
         # Return cache and prepared inputs
         return cache_dict, q_input, k_pages, v_pages, lengths, page_indices, pages_used
 
     else:  # TRAIN mode or other
         raise ValueError(f"Unsupported model_mode: {model_mode}")
-
-
-    # # Only update pages if not initializing
-    # if not self.is_initializing():
-    #   if model_mode == common_types.MODEL_MODE_PREFILL:
-    #     self.update(key_pages_var, value_pages_var, key, value, model_mode, page_state, layer_idx)
-    #     # Prefill uses simple dot-product attention.
-    #     attn, local_max, local_sums = self.paged_dot_product_attention_with_max_and_sum(
-    #         query, key, value
-    #     )  # Return result directly
-    #     # Return attention and cache
-    #     return (
-    #         {
-    #             "cache": {
-    #                 "cached_prefill_key": key_pages_var.value,
-    #                 "cached_prefill_value": value_pages_var.value,
-    #             }
-    #         },
-    #         attn,
-    #         local_max,
-    #         local_sums,
-    #     )
-
-    #   elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-    #     # Get prepared inputs from paged_attention_decode
-    #     q_input, k_pages, v_pages, lengths, page_indices, pages_used = self.paged_attention_decode(
-    #         query, key_pages_var, value_pages_var, page_state, layer_idx
-    #     )
-    #     # Return prepared inputs *and* the cache, along with the layer_idx.
-    #     return (
-    #         {
-    #             "cache": {
-    #                 "cached_prefill_key": key_pages_var.value,
-    #                 "cached_prefill_value": value_pages_var.value,
-    #             }
-    #         },
-    #         q_input,
-    #         k_pages,
-    #         v_pages,
-    #         lengths,
-    #         page_indices,
-    #         pages_used,
-    #     )
-
-    #   else:
-    #     raise ValueError(f"Unsupported model_mode: {model_mode}")
-    # else:  # self.is_initializing() == True
-    #   # We're initializing.  Return a dictionary with a 'cache' key.
-    #   return {
-    #       "cache": {
-    #           "cached_prefill_key": key_pages_var.value,  # Use .value to get the array
-    #           "cached_prefill_value": value_pages_var.value,  # Use .value to get the array
-    #       }
-    #   }
 
   def update(
     self, 
@@ -373,7 +322,6 @@ class PagedAttentionOp(nn.Module):
     assert v_p == self.tokens_per_page, f"{v_p=} {self.tokens_per_page=}"
     assert v_d == d, f"{v_d=} {d=}"
 
-    # CHANGED: Check if we have enough total capacity (pages * tokens_per_page)
     total_capacity = v_n_p * v_p
     assert total_capacity >= t, f"Prefill cache too small! Capacity: {total_capacity} tokens, request: {t} tokens"
 
