@@ -45,6 +45,7 @@ import tensorflow as tf
 import ray_cluster
 
 from vertex_tensorboard import VertexTensorboardManager
+from metric_logger import MetricLogger
 # Placeholder: internal
 
 import jax.numpy as jnp
@@ -64,8 +65,6 @@ from train import (
   get_first_step,
   load_next_batch,
   record_scalar_metrics,
-  write_metrics,
-  clear_buffered_metrics,
   save_checkpoint,
   _split_dpo_state,
   _merge_dpo_state,
@@ -98,9 +97,8 @@ class MaxtextTrainer(ray_cluster.ResilientWorker):
     maxtext_args = kwargs['maxtext_args']
     if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
       os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-    pyconfig.initialize(maxtext_args)
+    self.config = pyconfig.initialize(maxtext_args)
     max_utils.print_system_information()
-    self.config = pyconfig.config
     validate_train_config(self.config)
     os.environ["TFDS_DATA_DIR"] = self.config.dataset_path
     self.vertex_tensorboard_manager = VertexTensorboardManager()
@@ -237,7 +235,6 @@ class MaxtextTrainer(ray_cluster.ResilientWorker):
       else:
         p_eval_step = None
 
-    local_metrics_file = open(self.config.metrics_file, "a", encoding="utf8") if self.config.metrics_file else None
     running_gcs_metrics = [] if self.config.gcs_metrics else None
 
     start_step = get_first_step(state)  # this is the start_step for training
@@ -259,6 +256,7 @@ class MaxtextTrainer(ray_cluster.ResilientWorker):
         performance_metric_queue = queue.Queue()
         gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
 
+    metric_logger = MetricLogger(writer, self.config)
     for step in np.arange(start_step, self.config.steps):
       with self.EnableHeartbeat():
         if step == first_profiling_step or prof.should_activate_periodic_profile(step):
@@ -292,7 +290,7 @@ class MaxtextTrainer(ray_cluster.ResilientWorker):
             checkpoint_manager.wait_until_finished()
             sys.exit()
 
-        write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, self.config)
+        metric_logger.write_metrics(running_gcs_metrics, metrics, step)
 
         if self.config.dump_hlo and step == start_step:
           jax.block_until_ready(state)  # Ensure compilation has finished.
@@ -339,9 +337,7 @@ class MaxtextTrainer(ray_cluster.ResilientWorker):
           )
           if self.config.use_dpo:
             cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = eval_dpo_reward_accuracy / eval_step_count
-          write_metrics(
-              writer, local_metrics_file, running_gcs_metrics, cumulative_eval_metrics, step, self.config, is_training=False
-          )
+          metric_logger.write_metrics(running_gcs_metrics, cumulative_eval_metrics, step, is_training=False)
           max_logging.log(
               f"average loss after {step=}: {eval_step_count=}, {eval_loss=},"
               f" total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}"
@@ -364,10 +360,9 @@ class MaxtextTrainer(ray_cluster.ResilientWorker):
 
     if checkpoint_manager is not None:
       checkpoint_manager.wait_until_finished()
-    write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, self.config.steps - 1, self.config)  # final step metrics
+    metric_logger.write_metrics(running_gcs_metrics, metrics, self.config.steps - 1)  # final step metrics  # final step metrics
     max_utils.close_summary_writer(writer)
     record_goodput(recorder, self.config, recorder.record_job_end_time if recorder else None)
-    clear_buffered_metrics()
     with mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       # pytype: disable=attribute-error
       compiled = p_train_step.lower(state, example_batch, nextrng).compile()
