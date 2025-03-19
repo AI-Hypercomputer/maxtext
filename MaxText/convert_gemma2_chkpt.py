@@ -55,6 +55,7 @@ def main(raw_args=None) -> None:
   parser.add_argument("--base_model_path", type=str, required=True)
   parser.add_argument("--maxtext_model_path", type=str, required=True)
   parser.add_argument("--model_size", type=str, required=True)
+  parser.add_argument("--weight_dtype", type=str, default="bfloat16", required=False)
   args = parser.parse_args(raw_args)
   if args.model_size not in ("2b", "9b", "27b"):
     raise NotImplementedError("only implemented for gemma 2 classes")
@@ -270,7 +271,7 @@ def main(raw_args=None) -> None:
 
   def astype_fn(x):
     if isinstance(x, jnp.ndarray):
-      return x.astype(jnp.bfloat16)
+      return x.astype(jax.numpy.dtype(args.weight_dtype))
     else:
       return x
 
