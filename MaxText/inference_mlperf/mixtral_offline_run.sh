@@ -66,6 +66,16 @@ then
   TOK_OUTLEN_MULTIPLIER="2.5"
 fi
 
+if [ -z "$WEIGHT_DTYPE" ];
+then
+  WEIGHT_DTYPE="bfloat16"
+fi
+
+if [ -z "$DTYPE" ];
+then
+  DTYPE="bfloat16"
+fi
+
 if [ -z "$MAXENGINE_ARGS" ];
 then
   CHECKPOINT="gs://vipannalla-bkt/checkpoints/quantized/mixtral-8x7b-instruct/11-06-24"
@@ -73,7 +83,8 @@ then
   QUANT_CFG="quantization=int8 quantize_kvcache=True checkpoint_is_quantized=True"
   LAYOUT_CFG="compute_axis_order=0,2,1,3 ar_cache_axis_order=0,2,1,3"
   MOE_CFG="megablox=False sparse_matmul=False capacity_factor=1 model_call_mode=inference"
-  MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${LAYOUT_CFG} ${MOE_CFG}"
+  DTYPE_CFG="weight_dtype=${WEIGHT_DTYPE} dtype=${DTYPE}"
+  MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${LAYOUT_CFG} ${MOE_CFG} ${DTYPE_CFG}"
 fi
 
 if [ -z "$BASEDIR" ];
