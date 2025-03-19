@@ -743,72 +743,142 @@ class MaxEngine(engine_api.Engine):
     return self.insert(prefix, decode_state, slot)
 
   def generate(
-      self,
-      params: Params,
-      decode_state: DecodeState,
-      slot: Optional[int] = None,
-      rng: Optional[PRNGKeyType] = None,
+    self,
+    params: Params,
+    decode_state: DecodeState,
+    slot: Optional[int] = None,
+    rng: Optional[PRNGKeyType] = None,
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
     """Public API for generate that updates page state outside JIT."""
-
-    # 1. PREPARE PAGE STATE UPDATE (Outside JIT)
     if self.page_manager is not None and self.page_state is not None:
-      updated_page_state = self.page_manager.update_decode_pages(self.page_state)
+        self.page_state = self.page_manager.update_decode_pages(self.page_state)
+    
+    # Perform a single token generation step
+    if self.config.attention == "paged":
+        # Optimized version for paged attention
+        return self._generate_paged_jit(
+            params=params,
+            decode_state=decode_state,
+            page_state=self.page_state,
+            slot=slot,
+            rng=rng
+        )
     else:
-      updated_page_state = None
+        # Original implementation for standard attention
+        return self._generate_jit(
+            params=params,
+            decode_state=decode_state,
+            page_state=None,
+            slot=slot,
+            rng=rng
+        )
 
-    # 2. Call JIT-compiled generate (Efficient core)
-    new_decode_state, result = self._generate_jit(
-        params=params,
-        decode_state=decode_state,
-        page_state=updated_page_state,  # Pass updated page_state
-        slot=slot,
-        rng=rng,
+  @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
+  def _generate_paged_jit(
+    self,
+    params: Params,
+    decode_state: DecodeState,
+    page_state: Optional[PageState], 
+    slot: Optional[int],
+    rng: Optional[PRNGKeyType] = None,
+  ) -> Tuple[DecodeState, engine_api.ResultTokens]:
+    """Optimized JIT implementation for paged attention."""
+    if rng is None:
+        rng = jax.random.PRNGKey(0)
+    
+    # Extract inputs
+    previous_token = decode_state["tokens"]
+    next_pos = decode_state["next_pos"]
+    rng, new_rng = jax.random.split(rng)
+    
+    # Create cache params - for paged attention, use a minimal empty dictionary
+    cache_params = {"cache": {}}
+
+    # Run one step generation
+    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+        # Process a single layer at a time for each token (much more memory efficient)
+        out_logits = None
+        for layer_idx in range(self.config.num_decoder_layers):
+            layer_out, _ = self.model.apply(
+                params | cache_params,
+                previous_token,
+                next_pos,
+                enable_dropout=False,
+                model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+                rngs={"params": new_rng},
+                mutable=["cache"],
+                page_state=page_state,
+                layer_idx=layer_idx,  # Process only this layer
+                slot=slot,
+            )
+            # For the final layer, capture the logits
+            if layer_idx == self.config.num_decoder_layers - 1:
+                out_logits = layer_out
+    
+    # Apply any needed constraints
+    if out_logits is not None:
+        out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
+    
+    # Sample tokens
+    new_token = inference_utils.sampling(
+        out_logits,
+        rng,
+        self.config.decode_sampling_strategy,
+        topk=self.config.decode_sampling_top_k,
+        nucleus_topp=self.config.decode_sampling_nucleus_p,
+        temperature=self.config.decode_sampling_temperature,
     )
-
-    # 3. Update page state in engine (Outside JIT) - likely already done inside _generate_jit via model.apply
-    if self.page_manager is not None and self.page_state is not None:
-      self.page_state = updated_page_state  # Or if update is inside _generate_jit, this line may be redundant.
-
+    
+    # Create result structure
+    all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
+    result = engine_api.ResultTokens(
+        data=jnp.concatenate((new_token, all_valid, decode_state["generated_tokens"]), axis=1),
+        tokens_idx=(0, 1),
+        valid_idx=(1, 2),
+        length_idx=(2, 3),
+        samples_per_slot=1,
+    )
+    
+    # Create new decode state with minimal cache
+    new_decode_state = {
+        "logits": out_logits,
+        "cache": {},  # Empty cache for paged attention
+        "next_pos": next_pos + 1,
+        "generated_tokens": decode_state["generated_tokens"] + 1,
+        "tokens": new_token,
+    }
+    
     return new_decode_state, result
 
   @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
   def _generate_jit(
-      self,
-      params: Params,
-      decode_state: DecodeState,
-      page_state: Optional[PageState],  # Uncommented page_state here
-      slot: Optional[int],
-      rng: Optional[PRNGKeyType] = None,
+    self,
+    params: Params,
+    decode_state: DecodeState,
+    page_state: Optional[PageState],
+    slot: Optional[int],
+    rng: Optional[PRNGKeyType] = None,
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
-    """JIT-compiled implementation of generate."""
+    """JIT-compiled implementation of generate for standard attention."""
     if rng is None:
-      rng = jax.random.PRNGKey(0)
-
-    jax.debug.print(
-        "generate_jit: decode_state['tokens'] shape={}, value={}", decode_state["tokens"].shape, decode_state["tokens"]
-    )
-    jax.debug.print(
-        "generate_jit: decode_state['next_pos'] shape={}, value={}", decode_state["next_pos"].shape, decode_state["next_pos"]
-    )
-    jax.debug.print("generate_jit: page_state: {}", page_state)  # Print PageState (will be verbose, but useful)
+        rng = jax.random.PRNGKey(0)
 
     previous_token = decode_state["tokens"]
     rng, new_rng = jax.random.split(rng)
 
     # run one step generation
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      out_logits, new_vars = self.model.apply(
-          params | {"cache": decode_state["cache"]},
-          previous_token,
-          decode_state["next_pos"],  # Correct position
-          enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-          rngs={"params": new_rng},
-          mutable=["cache"],
-          page_state=page_state,  # Pass page state
-          slot=slot,
-      )
+        out_logits, new_vars = self.model.apply(
+            params | {"cache": decode_state["cache"]},
+            previous_token,
+            decode_state["next_pos"],
+            enable_dropout=False,
+            model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+            rngs={"params": new_rng},
+            mutable=["cache"],
+            page_state=page_state,
+            slot=slot,
+        )
 
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
 
@@ -822,7 +892,7 @@ class MaxEngine(engine_api.Engine):
         temperature=self.config.decode_sampling_temperature,
     )
 
-    new_cache = new_vars["cache"]  # Grab cache
+    new_cache = new_vars["cache"]
 
     all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
     result = engine_api.ResultTokens(
@@ -833,7 +903,7 @@ class MaxEngine(engine_api.Engine):
         samples_per_slot=1,
     )
 
-    new_decode_state = {  # Create new decode state
+    new_decode_state = {
         "logits": out_logits,
         "cache": new_cache,
         "next_pos": decode_state["next_pos"] + 1,
@@ -966,18 +1036,21 @@ class MaxEngine(engine_api.Engine):
         or not hasattr(self, "kv_cache_annotations_named")
         or not self.kv_cache_annotations_named
     ):
-      inserted_cache = jax.lax.stop_gradient(decode_state["cache"])
+        inserted_cache = jax.lax.stop_gradient(decode_state["cache"])
     else:
-      # Original non-paged attention code
-      inserted_cache = jax.tree_util.tree_map_with_path(
-          copy,
-          unboxed_prefix["cache"],
-          decode_state["cache"],
-          self.kv_cache_annotations_named,
-      )
+        # Original non-paged attention code
+        inserted_cache = jax.tree_util.tree_map_with_path(
+            copy,
+            unboxed_prefix["cache"],
+            decode_state["cache"],
+            self.kv_cache_annotations_named,
+        )
+
+    # Cast prefix logits to match decode_state logits dtype
+    prefix_logits = unboxed_prefix["logits"].astype(decode_state["logits"].dtype)
 
     # Update the other decode state elements
-    inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state["logits"], unboxed_prefix["logits"], slot, 0)
+    inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state["logits"], prefix_logits, slot, 0)
     inserted_next_pos = jax.lax.dynamic_update_index_in_dim(decode_state["next_pos"], unboxed_prefix["next_pos"], slot, 0)
     inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(
         decode_state["generated_tokens"],
@@ -995,7 +1068,7 @@ class MaxEngine(engine_api.Engine):
 
     # Apply sharding constraint only if kv_cache_shardings is available
     if self.config.attention != "paged" and hasattr(self, "kv_cache_shardings") and self.kv_cache_shardings:
-      inserted_cache = jax.lax.with_sharding_constraint(inserted_cache, self.kv_cache_shardings)
+        inserted_cache = jax.lax.with_sharding_constraint(inserted_cache, self.kv_cache_shardings)
 
     return {
         "logits": inserted_logits,
@@ -1212,7 +1285,11 @@ class MaxEngine(engine_api.Engine):
     if rng is None:
       rng = jax.random.PRNGKey(0)
 
-    # During eval_shape, we'll still pass page_state but won't enforce it
+    # For paged attention, use a more memory-efficient approach
+    if self.config.attention == "paged":
+        return self._init_paged_decode_state(rng, page_state)
+    
+    # Original implementation for standard attention
     def init(abstract_params, page_state):
       x = jnp.ones(
           (int(self.config.per_device_batch_size * jax.device_count()), 1),
@@ -1276,31 +1353,52 @@ class MaxEngine(engine_api.Engine):
     init_state = initialize()
     cache = init_state["cache"]
 
-    # Handle different cache structures based on attention mode
-    if self.config.attention == "paged":
-      # For paged attention, we don't need/use the KV cache annotations
-      self.kv_cache_annotations_named = {}
-    else:
-      # For standard attention, extract names from logically partitioned arrays
-      def is_lp(k):
-        return isinstance(k, flax.linen.spmd.LogicallyPartitioned)
+    # Handle standard attention mode
+    def is_lp(k):
+      return isinstance(k, flax.linen.spmd.LogicallyPartitioned)
 
-      # Use try/except to handle cases where arrays might not have .names
-      def extract_names_safely(x):
-        try:
-          return tuple(x.names) if hasattr(x, "names") else None
-        except (AttributeError, TypeError):
-          return None
+    # Use try/except to handle cases where arrays might not have .names
+    def extract_names_safely(x):
+      try:
+        return tuple(x.names) if hasattr(x, "names") else None
+      except (AttributeError, TypeError):
+        return None
 
-      self.kv_cache_annotations_named = jax.tree_util.tree_map(extract_names_safely, cache, is_leaf=is_lp)
+    self.kv_cache_annotations_named = jax.tree_util.tree_map(extract_names_safely, cache, is_leaf=is_lp)
 
-      # Filter out None values to avoid downstream errors
-      self.kv_cache_annotations_named = jax.tree_util.tree_map(
-          lambda x: x if x is not None else (), self.kv_cache_annotations_named
-      )
+    # Filter out None values to avoid downstream errors
+    self.kv_cache_annotations_named = jax.tree_util.tree_map(
+        lambda x: x if x is not None else (), self.kv_cache_annotations_named
+    )
 
     zeroed = max_utils.unbox_logicallypartioned(init_state)
     return zeroed
+
+  def _init_paged_decode_state(self, rng, page_state):
+    """Memory-efficient initialization for paged attention decode state."""
+    batch_size = int(self.config.per_device_batch_size * jax.device_count())
+    
+    # Create an empty cache dictionary - we don't need to pre-allocate 
+    # since the paged attention mechanism doesn't use cached KV tensors
+    # in the same way as standard attention
+    cache = {} 
+    
+    # Initialize other state components
+    next_pos = jnp.zeros((batch_size, 1), dtype=jnp.int32)
+    generated_tokens = jnp.zeros((batch_size, 1), dtype=jnp.int32)
+    tokens = jnp.zeros((batch_size, 1), dtype=jnp.int32)
+    logits = jnp.zeros((batch_size, 1, self.config.vocab_size), dtype=self.config.dtype)
+    
+    # For paged attention, we don't need KV cache annotations
+    self.kv_cache_annotations_named = {}
+    
+    return {
+        "logits": logits,
+        "cache": cache,
+        "next_pos": next_pos,
+        "generated_tokens": generated_tokens,
+        "tokens": tokens,
+    }
 
   @property
   def max_concurrent_decodes(self) -> int:
