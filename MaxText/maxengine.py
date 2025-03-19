@@ -1319,7 +1319,6 @@ def create_engine_from_config_flags(batch_size, max_prefill_predict_length, max_
   args["ici_fsdp_parallelism"] = "1"
   args["ici_autoregressive_parallelism"] = "1"
   args["ici_tensor_parallelism"] = "-1"
-  args["weight_dtype"] = "bfloat16"
   args["attention"] = "dot_product"
 
   # batch and cache related
