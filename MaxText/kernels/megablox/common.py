@@ -55,5 +55,7 @@ def select_input_dtype(lhs: jnp.ndarray, rhs: jnp.ndarray) -> jnp.dtype:
   # input precision, we need to convert bf16 argument to fp32 beforehand.
   if supports_bfloat16_matmul() and lhs.dtype == jnp.bfloat16 and rhs.dtype == jnp.bfloat16:
     return jnp.bfloat16
+  elif lhs.dtype == jnp.float16 and rhs.dtype == jnp.float16:
+    return jnp.float16
   else:
     return jnp.float32
