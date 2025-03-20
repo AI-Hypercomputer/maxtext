@@ -205,6 +205,7 @@ class AttentionOp(nn.Module):
       output_mask = jax.lax.dynamic_update_slice(output_mask, causal_mask, (0, next_pos))
 
     output_mask = output_mask[None, None, None, :, :]
+    # return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
     return output_mask
 
   # Following Pallas MHA Flash Attention Reference.
@@ -233,7 +234,7 @@ class AttentionOp(nn.Module):
     output_mask = None
 
     if self.config.use_chunked_prefill and model_mode == common_types.MODEL_MODE_PREFILL:
-      causal_mask = self.generate_attention_causal_mask_for_chunk(query, key, previous_chunk)
+      causal_mask =  self.generate_attention_causal_mask_for_chunk(query, key, previous_chunk)
       if mask is not None:
         # mask created from decoder_segment_ids, which is full mask without chunked
         # need to adjust the length to match the chunked query

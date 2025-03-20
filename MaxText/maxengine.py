@@ -364,7 +364,7 @@ class MaxEngine(engine_api.Engine):
         previous_chunk=previous_chunk,
     )
 
-  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("request_id",))
+  @functools.partial(jax.jit, static_argnums=(0,))
   def prefill(
       self,
       *,
@@ -378,7 +378,7 @@ class MaxEngine(engine_api.Engine):
       complete_padded_prompt: Optional[jax.Array] = None,
       positions: Optional[jax.Array] = None,
       previous_chunk: Optional[Any] = None,
-      request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
+      # request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
       slot: Optional[int] = None,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
@@ -906,15 +906,14 @@ class MaxEngine(engine_api.Engine):
       donate_argnums=(
           1,
           2,
-      ),
-      static_argnames=("request_id",),
+      )
   )
   def insert(
       self,
       prefix: Prefix,
       decode_state: DecodeState,
       slot: int,
-      request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
+      # request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
   ) -> DecodeState:
     """Insert a single computed prefill cache into KV cache."""
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
