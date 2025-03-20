@@ -280,6 +280,7 @@ class Gpt3DecoderLayer(nn.Module):
       model_mode,
       previous_chunk=None,
       page_state=None,
+      slot=None,
   ):
     cfg = self.config
     mesh = self.mesh
