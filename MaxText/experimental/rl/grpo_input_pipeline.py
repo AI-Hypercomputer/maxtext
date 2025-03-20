@@ -35,17 +35,6 @@ class SingleHostDataLoader:
 
   def __next__(self):
     local_data = next(self.local_iterator)
-    # def _get_local_device_buffers(arr):
-    #   try:
-    #     local_device_arrays = np.split(arr, len(self.global_mesh.local_devices), axis=0)
-    #   except ValueError as array_split_error:
-    #     raise ValueError(
-    #         f"Unable to put to devices shape {arr.shape} with "
-    #         f"local device count {len(self.global_mesh.local_devices)} "
-    #     ) from array_split_error
-    #   return jnp.vstack(jax.device_put(local_device_arrays, self.global_mesh.local_devices))
-    # local_device_buffers = jtu.tree_map(partial(_get_local_device_buffers), local_data)
-
     return local_data
 
 

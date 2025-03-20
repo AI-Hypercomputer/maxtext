@@ -1,5 +1,5 @@
 """
-Copyright 2023 Google LLC
+Copyright 2025 Google LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,10 +15,12 @@ limitations under the License.
 """
 
 # pylint: disable=g-bad-todo, abstract-method, consider-using-with, ungrouped-imports
-"""Training loop and Decoding of the model."""
+"""
+This script implements Group Relative Policy Optimization (GRPO) training 
+using JAX. It optimizes a language model with reinforcement learning by 
+updating policy gradients based on reward functions
+"""
 
-# Calling jax.device_count here prevents a "TPU platform already registered" error.
-# See github.com/google/maxtext/issues/20 for more
 
 import datetime
 import os
@@ -46,11 +48,11 @@ import maxtext_utils
 import max_logging
 import profiler
 import pyconfig
+import maxengine
 
 from metric_logger import MetricLogger
 
 from vertex_tensorboard import VertexTensorboardManager
-# Placeholder: internal
 
 from experimental.rl import grpo_input_pipeline
 from layers import models
@@ -67,7 +69,6 @@ from train import (
     create_goodput_recorder,
     check_example_batch,
     setup_mesh_and_model,
-    record_activation_metrics,
 )
 
 from cloud_tpu_diagnostics import diagnostic
@@ -77,7 +78,6 @@ from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 from ml_goodput_measurement import monitoring
 
-import maxengine
 import transformers
 
 # pylint: disable=too-many-positional-arguments
@@ -138,7 +138,6 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   # completions shape: [B x G, max_target_length - max_prefill_length]
   # this includes the completion tokens + padding (upto max_target_length - max_prefill_length))
   # data["ar_completions"] contains tokens only upto the eos, no tokens thereafter other than pad_tokens
-  # prompt = data["prompt"]
   prompt_with_completions = data["prompt_completions"]
 
   # --- (3) Compute per-token log probabilities.
@@ -387,6 +386,8 @@ def compute_log_probs(
 
   Note: We assume that tokens have been already appropriately padded.
   """
+  if not is_train:
+    params = jax.lax.stop_gradient(params)
   logits, intermediate_outputs = model.apply(
       params,
       inputs,
@@ -396,8 +397,6 @@ def compute_log_probs(
       rngs=rngs,
       mutable="intermediates",
   )  # [B, S, E] - [batch, sequence, embedding/vocab]
-  if not is_train:
-    logits = jax.lax.stop_gradient(logits)
   # Remove last time step since there is no target for the final position.
   targets = inputs[:, 1:]
   # Shift left using dynamic slice (skip first column)
@@ -493,8 +492,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
         extra_grpo_args = [reference_params]
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_grpo_args, is_train=True)
-  # TODO: add these aux in loss function
-  # intermediate_outputs = aux["intermediate_outputs"]
+
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
 
@@ -529,9 +527,6 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
       "scalar": scalar_metrics,
       "scalars": {},
   }
-
-  # if config.record_internal_nn_metrics:
-  #   record_activation_metrics(metrics, intermediate_outputs, config)
 
   new_state = _merge_grpo_state(new_state, reference_params)
 
@@ -753,10 +748,7 @@ def train_loop(config, config_inference, state=None):
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       example_batch = prompt_completions(config_inference, engine, tokenizer_model, example_batch, state.params, init_rng)
-      # jax.debug.print("golden completion {x}",x=example_batch['completion'][0])
-      # jax.debug.print("ar_completion[0] {x}",x=tokenizer_model.decode(example_batch['prompt_completions'][0]))
-      # jax.debug.print("ar_completion_segmentation {x}",x=example_batch['ar_completions_segmentation'][0])
-      # jax.debug.print("ar_completion_position {x}",x=example_batch['ar_completions_position'][0])
+
       # TODO: ensure this partitioning is correct
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, nextrng)
@@ -868,7 +860,7 @@ def main(argv: Sequence[str]) -> None:
   config = pyconfig.initialize(argv)
   assert config.use_grpo, "Please set the value of use_grpo to True"
   config_inference = pyconfig.initialize(
-      argv
+      list(argv)
       + ["ici_tensor_parallelism=4", "per_device_batch_size=" + str(config.per_device_batch_size * config.num_generations)]
   )
   max_utils.print_system_information()
