@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-# pylint: disable=g-bad-todo, abstract-method, consider-using-with, ungrouped-imports
+# pylint: disable=g-bad-todo, abstract-method, consider-using-with, ungrouped-imports, attribute-error
 """
 This script implements Group Relative Policy Optimization (GRPO) training 
 using JAX. It optimizes a language model with reinforcement learning by 
@@ -244,7 +244,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 # --- GRPO Helpers ---
 
 
-def generate_completions(params, data, config, rng, tokenizer_model, engine, true_length):
+def generate_completions(config, tokenizer_model, engine, data, params, true_length, rng):
   """
   Autoregressively generates completions for a batch of prompts.
 
@@ -261,6 +261,13 @@ def generate_completions(params, data, config, rng, tokenizer_model, engine, tru
   Returns:
     A jnp.array of shape [B x num_generations, S] where S = length_of_prompt + max_completion_length.
   """
+  # decimate proportion of data when per_device_batch_size<1
+  for k, v in data.items():
+    if v.ndim == 2:
+      data[k] = v[: config.micro_batch_size_to_train_on, :]
+    else:
+      data[k] = v[: config.micro_batch_size_to_train_on]
+
   prompts = data["prompt"]
   rng, rng_load_params = jax.random.split(rng)
   G = config.num_generations
@@ -321,28 +328,6 @@ def generate_completions(params, data, config, rng, tokenizer_model, engine, tru
   )
   completion_mask = data["prompt_completions_position"] >= true_length[:, None] - 1
   data["ar_completions_segmentation"] = data["prompt_completions_segmentation"] * completion_mask.astype(jnp.int32)
-  return data
-
-
-def prompt_completions(config, engine, tokenizer_model, data, params, rng):
-  """Complete input prompts"""
-  for k, v in data.items():
-    if v.ndim == 2:
-      data[k] = v[: config.micro_batch_size_to_train_on, :]
-    else:
-      data[k] = v[: config.micro_batch_size_to_train_on]
-
-  rng, rng_gen = random.split(rng)
-  L_prompt = data["prompt_true_length"]
-  data = generate_completions(
-      params=params,  # TODO: this needs to be \theta_old, but for now we are using \theta_old = \theta
-      data=data,
-      config=config,
-      rng=rng_gen,
-      tokenizer_model=tokenizer_model,
-      engine=engine,
-      true_length=L_prompt,
-  )
   return data
 
 
@@ -745,13 +730,20 @@ def train_loop(config, config_inference, state=None):
       record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
       check_example_batch(config, example_batch=example_batch)
       # pylint: disable=not-callable
-      nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
+      rng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
-      example_batch = prompt_completions(config_inference, engine, tokenizer_model, example_batch, state.params, init_rng)
+      rng, rng_gen = random.split(rng)
+      (state_mesh_shardings, data_sharding, _) = in_shard_train
+      p_generate_completions = jax.jit(
+          functools.partial(generate_completions, config, tokenizer_model, engine),
+          in_shardings=(data_sharding, state_mesh_shardings.params, data_sharding, None),  # data, params, true_length, rng
+          out_shardings=(data_sharding,),  # data
+      )
+      example_batch = p_generate_completions(example_batch, state.params, example_batch["prompt_true_length"], rng_gen)
 
       # TODO: ensure this partitioning is correct
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        state, metrics = p_train_step(state, example_batch, nextrng)
+        state, metrics = p_train_step(state, example_batch, rng)
 
     step_time_delta = datetime.datetime.now() - last_step_completion
     last_step_completion = datetime.datetime.now()
@@ -798,7 +790,7 @@ def train_loop(config, config_inference, state=None):
         if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
           break
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-          eval_metrics = p_eval_step(state, eval_batch, nextrng)
+          eval_metrics = p_eval_step(state, eval_batch, rng)
         cumulative_eval_metrics["scalar"]["eval/total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
         cumulative_eval_metrics["scalar"]["eval/total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
         cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] += float(eval_metrics["scalar"]["evaluation/moe_lb_loss"])
@@ -836,8 +828,7 @@ def train_loop(config, config_inference, state=None):
   max_utils.close_summary_writer(writer)
   record_goodput(recorder, config, recorder.record_job_end_time if recorder else None)
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    # pytype: disable=attribute-error
-    compiled = p_train_step.lower(state, example_batch, nextrng).compile()
+    compiled = p_train_step.lower(state, example_batch, rng).compile()
     compiled_stats = compiled.memory_analysis()
     if compiled_stats is not None:
       max_logging.log(
