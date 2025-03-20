@@ -24,7 +24,7 @@ import functools
 import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-import common_types
+from MaxText import common_types
 from MaxText.inference import page_manager
 from MaxText.layers import attentions
 from MaxText.layers import embeddings

@@ -45,10 +45,10 @@ import sys
 from absl import flags
 import datasets
 import jax
-from MaxText import max_logging, max_utils, maxengine
+from MaxText from MaxText import max_logging, max_utils, maxengine
 from mmlu_categories import categories
 from mmlu_categories import subcategories
-import pyconfig
+from MaxText import pyconfig
 from tqdm import tqdm
 
 

@@ -19,7 +19,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
-from MaxText import checkpointing, common_types
+from MaxText from MaxText import checkpointing, common_types
 import functools
 import time
 import optax
@@ -32,7 +32,7 @@ from collections.abc import Sequence
 import collections
 from typing import Any, Tuple
 
-import max_logging
+from MaxText import max_logging
 
 
 import orbax.checkpoint as ocp
@@ -41,7 +41,7 @@ import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as 
 
 
 import flax
-from flax.training import train_state
+from flax.training from MaxText import train_state
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 

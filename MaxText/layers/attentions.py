@@ -25,12 +25,12 @@ import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
-from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
+from jax.experimental.pallas.ops.gpu from MaxText import decode_attention as gpu_pallas_decode_attention
 from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
-import common_types
+from MaxText import common_types
 from MaxText.kernels.ragged_attention import ragged_gqa
 from MaxText.kernels.ragged_attention import ragged_mha
 from MaxText.inference import page_manager, paged_attention

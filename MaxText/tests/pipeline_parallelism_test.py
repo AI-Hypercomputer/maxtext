@@ -19,9 +19,9 @@ from jax.sharding import Mesh
 
 
 import unittest
-import pytest
+from MaxText import pytest
 
-import pyconfig
+from MaxText import pyconfig
 
 
 from MaxText.layers import pipeline
@@ -29,9 +29,9 @@ import jax
 from jax import numpy as jnp
 from jax.sharding import Mesh
 
-from MaxText import common_types
-import pyconfig
-from MaxText import max_utils
+from MaxText from MaxText import common_types
+from MaxText import pyconfig
+from MaxText from MaxText import max_utils
 from flax.core import meta
 
 import jax.numpy as jnp

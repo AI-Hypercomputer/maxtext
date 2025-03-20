@@ -38,9 +38,9 @@ import orbax.checkpoint
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
-import checkpointing
-from MaxText import max_utils, maxtext_utils, max_logging, optimizers, profiler
-import pyconfig
+from MaxText import checkpointing
+from MaxText from MaxText import max_utils, maxtext_utils, max_logging, optimizers, profiler
+from MaxText import pyconfig
 import pathwaysutils  # pylint: disable=unused-import
 import tensorflow as tf
 

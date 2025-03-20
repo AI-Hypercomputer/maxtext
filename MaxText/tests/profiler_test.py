@@ -17,10 +17,10 @@ limitations under the License.
 """Profiler tests."""
 import sys
 import unittest
-import pytest
+from MaxText import pytest
 
-import profiler
-import pyconfig
+from MaxText import profiler
+from MaxText import pyconfig
 
 
 class ProfilerTest(unittest.TestCase):

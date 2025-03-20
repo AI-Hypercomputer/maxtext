@@ -18,14 +18,14 @@ limitations under the License.
 
 import logging
 import sys
-import common_types
+from MaxText import common_types
 import jax
 from jax import numpy as jnp
 import numpy as np
 import unittest
-import pyconfig
+from MaxText import pyconfig
 from MaxText.maxengine import MaxEngine
-import max_utils
+from MaxText import max_utils
 from MaxText.maxengine import MaxEngine
 from MaxText.layers import quantizations
 from MaxText.layers import models

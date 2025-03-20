@@ -16,7 +16,7 @@ limitations under the License.
 
 """ Tests for the common Max Utils """
 import unittest
-import pytest
+from MaxText import pytest
 from MaxText.train_compile import main as train_compile_main
 
 

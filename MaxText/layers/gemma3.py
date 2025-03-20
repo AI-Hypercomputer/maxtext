@@ -15,7 +15,7 @@ limitations under the License.
 """
 
 from flax import linen as nn
-import common_types
+from MaxText import common_types
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 import jax
@@ -29,7 +29,7 @@ from MaxText.layers import quantizations
 
 from typing import Optional
 
-import max_logging
+from MaxText import max_logging
 
 Embed = embeddings.Embed
 RMSNorm = normalizations.RMSNorm

@@ -22,9 +22,9 @@ from jax.experimental import mesh_utils
 
 import unittest
 
-import pyconfig
+from MaxText import pyconfig
 from MaxText.input_pipeline import _grain_data_processing
-from MaxText.input_pipeline import input_pipeline_interface
+from MaxText.input_pipeline from MaxText import input_pipeline_interface
 
 
 class GrainDataProcessingTest(unittest.TestCase):

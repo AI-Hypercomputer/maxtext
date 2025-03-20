@@ -34,9 +34,9 @@ import torch
 import psutil
 from tqdm import tqdm
 
-import max_logging
+from MaxText import max_logging
 from safetensors import safe_open
-import llama_or_mistral_ckpt
+from MaxText import llama_or_mistral_ckpt
 
 
 MODEL_PARAMS_DICT = {

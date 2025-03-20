@@ -23,7 +23,7 @@ from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2.flax import aqt_flax
 from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
-from MaxText import common_types
+from MaxText from MaxText import common_types
 from dataclasses import dataclass
 from flax.linen import fp8_ops
 from flax.linen import initializers as flax_initializers

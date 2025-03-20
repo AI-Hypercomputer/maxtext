@@ -18,16 +18,16 @@ import numpy as np
 jax.config.update("jax_platform_name", "cpu")
 import argparse
 import copy
-from flax.training import train_state
+from flax.training from MaxText import train_state
 
 from typing import Any
 import sys
-import max_logging
+from MaxText import max_logging
 
 
 import orbax
 
-import checkpointing
+from MaxText import checkpointing
 from MaxText.train import save_checkpoint
 
 Params = dict[str, Any]

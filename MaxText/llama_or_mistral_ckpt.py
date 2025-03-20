@@ -44,15 +44,15 @@ os.environ["JAX_PLATFORMS"] = "cpu"
 import numpy as np
 import jax
 from jax import tree
-from flax.training import train_state
+from flax.training from MaxText import train_state
 import torch
 import psutil
 from tqdm import tqdm
 
-import max_logging
-import max_utils
+from MaxText import max_logging
+from MaxText import max_utils
 from MaxText.train import save_checkpoint
-import checkpointing
+from MaxText import checkpointing
 from safetensors import safe_open
 from MaxText.utils import gcs_utils
 

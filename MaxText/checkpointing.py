@@ -19,10 +19,10 @@ limitations under the License.
 from typing import Any, Optional, Union
 from absl import flags
 from etils import epath
-from flax.training import train_state
+from flax.training from MaxText import train_state
 import grain.python as grain
 import jax
-import max_logging
+from MaxText import max_logging
 from MaxText.multihost_dataloading import MultiHostDataLoadIterator
 import numpy as np
 import orbax.checkpoint as ocp

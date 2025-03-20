@@ -37,13 +37,13 @@ import torch
 from tqdm import tqdm
 from absl import app
 import numpy as np
-import pyconfig
-from MaxText import max_utils
+from MaxText import pyconfig
+from MaxText from MaxText import max_utils
 from jax.sharding import Mesh
-import max_logging
-import checkpointing
+from MaxText import max_logging
+from MaxText import checkpointing
 from MaxText.generate_param_only_checkpoint import _read_train_checkpoint
-import llama_or_mistral_ckpt
+from MaxText import llama_or_mistral_ckpt
 from transformers import LlamaForCausalLM, MistralForCausalLM, AutoModelForCausalLM, AutoConfig
 from MaxText.max_utils import unpermute_from_match_maxtext_rope
 

@@ -33,10 +33,10 @@ import pathlib
 
 import numpy as np
 
-import checkpointing
+from MaxText import checkpointing
 import jax
-from flax.training import train_state
-import max_logging
+from flax.training from MaxText import train_state
+from MaxText import max_logging
 from MaxText.train import save_checkpoint
 import torch
 import sys

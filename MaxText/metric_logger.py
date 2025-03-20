@@ -22,7 +22,7 @@ import json
 import os
 import numpy as np
 
-import max_logging
+from MaxText import max_logging
 from MaxText.utils import gcs_utils
 
 

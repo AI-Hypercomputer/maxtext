@@ -18,11 +18,11 @@ limitations under the License.
 import unittest
 from absl.testing import absltest
 
-import pyconfig
+from MaxText import pyconfig
 
-from MaxText import optimizers
+from MaxText from MaxText import optimizers
 from MaxText.layers import models, quantizations
-from MaxText import max_utils
+from MaxText from MaxText import max_utils
 import jax
 from jax.sharding import Mesh
 import jax.numpy as jnp

@@ -30,7 +30,7 @@ from MaxText.layers import normalizations
 from MaxText.layers import models
 from MaxText.layers import quantizations
 
-import common_types
+from MaxText import common_types
 from MaxText.inference import page_manager
 from typing import Optional
 

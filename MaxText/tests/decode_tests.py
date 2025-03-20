@@ -17,7 +17,7 @@ limitations under the License.
 """Tests for decode with various configs"""
 import os
 import unittest
-import pytest
+from MaxText import pytest
 from MaxText.decode import main as decode_main
 from absl.testing import absltest
 

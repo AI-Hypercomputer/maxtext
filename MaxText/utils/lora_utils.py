@@ -16,16 +16,16 @@ limitations under the License.
 
 """ Common LoRA utils needed to support LoRA adapters."""
 
-import checkpointing
+from MaxText import checkpointing
 import os
 import json
 import jax
 import jax.numpy as jnp
-from flax.training import train_state
+from flax.training from MaxText import train_state
 from flax.linen import partitioning as nn_partitioning
 
-import max_utils
-import max_logging
+from MaxText import max_utils
+from MaxText import max_logging
 from MaxText.utils import gcs_utils
 
 

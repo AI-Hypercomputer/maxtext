@@ -18,14 +18,14 @@ limitations under the License.
 import sys
 import jax
 import unittest
-from MaxText import max_utils
+from MaxText from MaxText import max_utils
 from jax.sharding import Mesh
 from MaxText.layers import models, embeddings, quantizations
 
 import jax.numpy as jnp
 
-import pyconfig
-import pytest
+from MaxText import pyconfig
+from MaxText import pytest
 
 
 Mesh = jax.sharding.Mesh

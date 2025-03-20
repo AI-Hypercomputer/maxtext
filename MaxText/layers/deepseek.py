@@ -32,8 +32,8 @@ from MaxText.layers import attentions
 from MaxText.layers import embeddings
 from MaxText.layers import normalizations
 from MaxText.layers import models
-import common_types
-import max_logging
+from MaxText import common_types
+from MaxText import max_logging
 
 Array = common_types.Array
 Config = common_types.Config

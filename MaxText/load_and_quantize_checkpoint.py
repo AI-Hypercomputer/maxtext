@@ -16,10 +16,10 @@
 
 import jax
 
-from MaxText import max_utils, maxengine
+from MaxText from MaxText import max_utils, maxengine
 
 import os
-import pyconfig
+from MaxText import pyconfig
 
 from typing import Sequence
 from absl import app

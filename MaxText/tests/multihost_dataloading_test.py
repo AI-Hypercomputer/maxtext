@@ -24,10 +24,10 @@ from jax.sharding import PartitionSpec
 
 import tensorflow as tf
 import unittest
-import pytest
+from MaxText import pytest
 
-import pyconfig
-from MaxText import multihost_dataloading
+from MaxText import pyconfig
+from MaxText from MaxText import multihost_dataloading
 
 
 class MultihostDataloadingTest(unittest.TestCase):

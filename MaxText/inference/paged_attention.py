@@ -20,7 +20,7 @@ WARNING: THIS FILE IS A WORK IN PROGRESS.
 import functools
 from typing import Optional
 
-import common_types
+from MaxText import common_types
 import jax.numpy as jnp
 from flax import linen as nn
 from jax.experimental import shard_map

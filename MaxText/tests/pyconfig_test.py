@@ -12,7 +12,7 @@ limitations under the License.
 """
 
 import unittest
-import pyconfig
+from MaxText import pyconfig
 
 
 class PyconfigTest(unittest.TestCase):

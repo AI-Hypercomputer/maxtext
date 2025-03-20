@@ -29,16 +29,16 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 from jax.experimental import layout as jax_layout
 
-from MaxText import common_types
+from MaxText from MaxText import common_types
 from jetstream.core import config_lib
 from jetstream.engine import engine_api
-from jetstream.engine import tokenizer_pb2
-from jetstream.engine import tokenizer_api
+from jetstream.engine from MaxText import tokenizer_pb2
+from jetstream.engine from MaxText import tokenizer_api
 from jetstream.engine import token_utils
 from MaxText.utils import lora_utils
 
-from MaxText import max_utils, inference_utils
-import pyconfig
+from MaxText from MaxText import max_utils, inference_utils
+from MaxText import pyconfig
 
 import warnings
 

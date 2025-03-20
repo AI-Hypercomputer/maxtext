@@ -24,7 +24,7 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 import numpy as np
-from MaxText import common_types
+from MaxText from MaxText import common_types
 
 from jax.experimental import shard_map
 

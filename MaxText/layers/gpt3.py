@@ -36,7 +36,7 @@ from MaxText.layers import quantizations
 
 AttentionOp = attentions.AttentionOp
 
-import common_types
+from MaxText import common_types
 
 Array = common_types.Array
 Config = common_types.Config

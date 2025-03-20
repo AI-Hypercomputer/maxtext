@@ -23,12 +23,12 @@ limitations under the License.
    The output "parameter state" is output to the checkpoint directory. Additionally it is cast down to bf16.
 """
 
-import checkpointing
+from MaxText import checkpointing
 import jax
-import max_logging
-import max_utils
-import optimizers
-import pyconfig
+from MaxText import max_logging
+from MaxText import max_utils
+from MaxText import optimizers
+from MaxText import pyconfig
 
 from absl import app
 from etils import epath

@@ -19,13 +19,13 @@ from MaxText.layers import linears
 from MaxText.layers import initializers
 import jax.numpy as jnp
 
-import pyconfig
-from MaxText import max_utils
+from MaxText import pyconfig
+from MaxText from MaxText import max_utils
 from jax.sharding import Mesh
 import flax.linen as nn
 from typing import Tuple
-import common_types
-import pytest
+from MaxText import common_types
+from MaxText import pytest
 
 
 Array = common_types.Array

@@ -14,11 +14,11 @@
 
 import unittest
 
-import common_types
+from MaxText import common_types
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
+from MaxText import pytest
 from MaxText.inference.page_manager import PageState
 from MaxText.inference.paged_attention import PagedAttentionOp
 
