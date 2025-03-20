@@ -22,7 +22,7 @@ of variable-length sequences by dividing the attention context into fixed-size p
 similar to virtual memory systems.
 """
 
-# TODO Need to update unit tests for this file under Maxtext/tests/page_manager.py.
+# TODO(rupliu) Need to update unit tests for this file under Maxtext/tests/page_manager.py
 
 from typing import Optional, Tuple
 
@@ -97,13 +97,13 @@ class PageManager:
   max_prefill_predict_length: int
   max_pages_per_slot: int
 
-  def __init__(self, num_pages: int, tokens_per_page: int, max_target_length: int, max_prefill_length: int, batch_size: int):
-    self.num_pages = num_pages
-    self.tokens_per_page = tokens_per_page
-    self.max_target_length = max_target_length
-    self.max_pages_per_slot = max_target_length // tokens_per_page
-    self.slots = int(batch_size * jax.device_count())
-    self.max_prefill_predict_length = max_prefill_length
+  def __init__(self, config: Config):
+    self.num_pages = config.pagedattn_num_pages
+    self.tokens_per_page = config.pagedattn_tokens_per_page
+    self.max_target_length = config.max_target_length
+    self.max_pages_per_slot = config.max_target_length // config.pagedattn_tokens_per_page
+    self.slots = int(config.per_device_batch_size * jax.device_count())
+    self.max_prefill_predict_length = config.max_prefill_predict_length
 
   def release_slot_pages(
       self,

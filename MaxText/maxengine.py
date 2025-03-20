@@ -24,9 +24,8 @@ from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 from flax import struct
 
-from MaxText.globals import PKG_DIR
-from MaxText.inference.page_manager import PageManager, PageState
-from MaxText.layers import models, quantizations
+from inference.page_manager import PageManager, PageState
+from layers import models, quantizations
 
 import jax
 import jax.numpy as jnp
@@ -124,25 +123,12 @@ class MaxEngine(engine_api.Engine):
     self.decode_state_layouts = None
     self.param_layouts = None
 
+    # Initialize page manager and page state
+    self.page_manager = None
+    self.page_state = None
     if self.config.attention == "paged":
-      # Initialize page manager and page state
-      self.page_manager = PageManager(
-          num_pages=self.config.pagedattn_num_pages,
-          tokens_per_page=self.config.pagedattn_tokens_per_page,
-          max_target_length=self.config.max_target_length,
-          batch_size=self.config.per_device_batch_size,
-          max_prefill_length=self.config.max_prefill_predict_length,
-      )
-    else:
-      # Add a dummy object for page manager and page state to avoid tracing issue
-      self.page_manager = PageManager(
-          num_pages=1,
-          tokens_per_page=1,
-          max_target_length=2,
-          batch_size=1,
-          max_prefill_length=1,
-      )
-    self.page_state = self.page_manager.get_initial_page_state()
+      self.page_manager = PageManager(self.config)
+      self.page_state = self.page_manager.get_initial_page_state()
 
   def print_stats(self, label: str):
     max_utils.print_mem_stats(label)
@@ -402,7 +388,7 @@ class MaxEngine(engine_api.Engine):
 
   @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("request_id",))
   def _prefill_jit(
-      self,  # pytype: disable=signature-mismatch
+      self,
       *,
       params: Params,
       existing_prefix: Optional[ExistingPrefix] = None,
@@ -412,7 +398,7 @@ class MaxEngine(engine_api.Engine):
       rng: Optional[PRNGKeyType] = None,
       request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
       slot: Optional[int] = None,
-      page_state: Optional[PageState] = None,
+      page_state: Optional[PageState],
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -514,20 +500,24 @@ class MaxEngine(engine_api.Engine):
 
   # Public non-JIT prefill method that updates page state
   def prefill(
-      self,  # pytype: disable=signature-mismatch
+      self,
       *,
       params: Params,
-      existing_prefix: Optional[ExistingPrefix] = None,
+      existing_prefix: Optional[jax.Array] = None,
       padded_tokens: jax.Array,
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
+      complete_prompt_true_length: Optional[int] = None,
+      complete_padded_prompt: Optional[jax.Array] = None,
+      positions: Optional[jax.Array] = None,
+      previous_chunk: Optional[Any] = None,
       request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
       slot: Optional[int] = None,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Public API for prefill that updates page state outside JIT."""
     # Update page state before JIT call
-    if self.config.attention == "paged":
+    if self.page_manager is not None and self.page_state is not None:
       self.page_state = self.page_manager.reserve_prefix_slot_pages(
           slot=slot,
           true_length=true_length,
@@ -545,6 +535,10 @@ class MaxEngine(engine_api.Engine):
         slot=slot,
         rng=rng,
         request_id=request_id,
+        complete_prompt_true_length=complete_prompt_true_length,
+        complete_padded_prompt=complete_padded_prompt,
+        positions=positions,
+        previous_chunk=previous_chunk,
     )
 
   def prefill_multisampling_aot(  # pylint: disable=too-many-positional-arguments
@@ -776,13 +770,14 @@ class MaxEngine(engine_api.Engine):
     prefix, _ = self.prefill(params=params, padded_tokens=padded_tokens, true_length=true_length, rng=rng)
     return self.insert(prefix, decode_state, slot)
 
-  # Public non-JIT generate method that updates page state
-  def generate(
+  @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
+  def _generate_jit(
       self,
       params: Params,
       decode_state: DecodeState,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
+      page_state: Optional[PageState] = None,
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
     """Public API for generate that updates page state outside JIT."""
     # Update page state before JIT call
@@ -861,6 +856,31 @@ class MaxEngine(engine_api.Engine):
         "generated_tokens": decode_state["generated_tokens"] + 1,
         "tokens": new_token,
     }, result
+
+  # Public non-JIT generate method that updates page state
+  def generate(
+      self,
+      params: Params,
+      decode_state: DecodeState,
+      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
+      rng: Optional[PRNGKeyType] = None,
+  ) -> Tuple[DecodeState, engine_api.ResultTokens]:
+    """Public API for generate that updates page state outside JIT."""
+    # Update page state before JIT call
+
+    if self.page_manager is not None and self.page_state is not None:
+      self.page_state = self.page_manager.reserve_decode_step_pages(self.page_state)
+
+    # Call JIT-compiled version with current state
+    new_state, result = self._generate_jit(
+        params=params,
+        decode_state=decode_state,
+        sampler=sampler,
+        page_state=self.page_state,
+        rng=rng,
+    )
+
+    return new_state, result
 
   @functools.partial(
       jax.jit,

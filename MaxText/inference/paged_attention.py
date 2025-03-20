@@ -296,6 +296,7 @@ class PagedAttentionOp(nn.Module):
     assert v_n_kv == n_kv_head, f"{v_n_kv=} {n_kv_head=}"
     assert v_p == self.tokens_per_page, f"{v_p=} {self.tokens_per_page=}"
     assert v_d == head_dim, f"{v_d=} {head_dim=}"
+    assert page_state.page_map.shape == (page_state.num_pages_used.shape[0], self.max_pages_per_slot)
 
     # Handle both init (b>1) and runtime (b=1) cases
     if batch_size == 1:

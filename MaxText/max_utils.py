@@ -19,9 +19,9 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
-from MaxText.inference.page_manager import PageState
-from MaxText import checkpointing
-from MaxText import common_types
+from inference.page_manager import PageState
+import checkpointing
+import common_types
 import functools
 import time
 import optax

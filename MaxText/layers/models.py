@@ -169,10 +169,10 @@ class SequentialBlockDecoderLayers(nn.Module):
       inputs: jnp.ndarray,
       decoder_segment_ids,
       decoder_positions,
-      deterministic: bool,
+      deterministic,
       model_mode,
       slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
+      page_state=None,
   ) -> jnp.ndarray:
     for lyr in range(self.num_decoder_layers):
       inputs = self.decoder_layer(config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant)(
