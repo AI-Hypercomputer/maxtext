@@ -21,7 +21,7 @@ import sys
 import jax
 import json
 import jsonlines
-from MaxText from MaxText import inference_microbenchmark
+from MaxText import inference_microbenchmark
 from MaxText import pyconfig
 
 try:

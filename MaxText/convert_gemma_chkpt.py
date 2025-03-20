@@ -23,7 +23,7 @@ import numpy as np
 jax.config.update("jax_platform_name", "cpu")
 import argparse
 import copy
-from flax.training from MaxText import train_state
+from flax.training import train_state
 
 from typing import Any
 import sys

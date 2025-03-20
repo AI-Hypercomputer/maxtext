@@ -17,7 +17,7 @@ limitations under the License.
 """Integraion tests for test_checkpointing.sh"""
 from datetime import datetime
 import subprocess
-from MaxText import pytest
+import pytest
 
 
 def run_checkpoint_compatibility(attention_type):

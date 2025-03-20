@@ -18,7 +18,7 @@ limitations under the License.
 import jax
 from MaxText import max_utils
 from flax import linen as nn
-from flax.training from MaxText import train_state
+from flax.training import train_state
 from jax import numpy as jnp
 from jax import random
 from jax.sharding import Mesh

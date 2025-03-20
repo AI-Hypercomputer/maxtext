@@ -17,7 +17,7 @@ limitations under the License.
 """Profiler tests."""
 import sys
 import unittest
-from MaxText import pytest
+import pytest
 
 from MaxText import profiler
 from MaxText import pyconfig

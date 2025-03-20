@@ -35,7 +35,7 @@ import numpy as np
 
 from MaxText import checkpointing
 import jax
-from flax.training from MaxText import train_state
+from flax.training import train_state
 from MaxText import max_logging
 from MaxText.train import save_checkpoint
 import torch

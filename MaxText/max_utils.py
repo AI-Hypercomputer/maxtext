@@ -42,7 +42,7 @@ import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as 
 
 
 import flax
-from flax.training from MaxText import train_state
+from flax.training import train_state
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 

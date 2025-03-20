@@ -15,7 +15,7 @@ limitations under the License.
 import numpy as np
 import json
 import unittest
-from MaxText import pytest
+import pytest
 import string
 import random
 from MaxText.train import main as train_main

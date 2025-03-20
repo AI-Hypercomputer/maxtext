@@ -21,7 +21,7 @@ import os
 import json
 import jax
 import jax.numpy as jnp
-from flax.training from MaxText import train_state
+from flax.training import train_state
 from flax.linen import partitioning as nn_partitioning
 
 from MaxText import max_utils

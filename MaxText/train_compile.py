@@ -41,7 +41,7 @@ import os
 import pickle
 from MaxText import accelerator_to_spec_map
 from MaxText import train
-from MaxText.input_pipeline from MaxText import input_pipeline_interface
+from MaxText.input_pipeline import input_pipeline_interface
 
 # pylint: disable=too-many-positional-arguments
 

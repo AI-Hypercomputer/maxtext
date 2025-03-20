@@ -25,7 +25,7 @@ from jax.sharding import Mesh
 import flax.linen as nn
 from typing import Tuple
 from MaxText import common_types
-from MaxText import pytest
+import pytest
 
 
 Array = common_types.Array

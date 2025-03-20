@@ -44,7 +44,7 @@ os.environ["JAX_PLATFORMS"] = "cpu"
 import numpy as np
 import jax
 from jax import tree
-from flax.training from MaxText import train_state
+from flax.training import train_state
 import torch
 import psutil
 from tqdm import tqdm

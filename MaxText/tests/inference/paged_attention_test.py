@@ -18,7 +18,7 @@ from MaxText import common_types
 import jax
 import jax.numpy as jnp
 import numpy as np
-from MaxText import pytest
+import pytest
 from MaxText.inference.page_manager import PageState
 from MaxText.inference.paged_attention import PagedAttentionOp
 
