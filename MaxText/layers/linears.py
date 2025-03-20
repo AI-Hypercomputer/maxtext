@@ -721,7 +721,8 @@ class MoeBlock(nn.Module):
     matmul_precision = lax.Precision(self.config.matmul_precision)
 
     if self.config.model_call_mode != "inference":
-      loss = self.load_balance_loss(top_k_indices, weights)
+      scores = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
+      loss = self.load_balance_loss(top_k_indices, scores)
     else:
       loss = None
     batch_size = inputs.shape[0]
