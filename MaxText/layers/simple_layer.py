@@ -63,7 +63,9 @@ class SimpleMlpDecoderLayer(nn.Module):
         (self.config.mlp_dim, self.config.emb_dim),
     )
 
-  def __call__(self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode, page_state=None):
+  def __call__(
+      self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode, previous_chunk=None, page_state=None
+  ):
     intermediate = inputs @ self.ff_1.astype(inputs.dtype)
     output = intermediate @ self.ff_2.astype(inputs.dtype)
     if self.config.scan_layers:
