@@ -521,10 +521,11 @@ def optimize_mesh_for_tpu_v6e(mesh, devices):
 
 def create_device_mesh(config, devices=None):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
+  num_slices = 1 if config.inference_benchmark_test or devices is not None else config.num_slices
   if devices is None:
     devices = jax.devices()
   num_devices = len(devices)
-  num_slices = 1 if config.inference_benchmark_test else config.num_slices
+  
   num_devices_per_slice = num_devices // num_slices
 
   multi_slice_env = num_slices > 1

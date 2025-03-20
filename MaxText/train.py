@@ -583,7 +583,10 @@ def setup_mesh_and_model(config):
 
   # Mesh definition
   devices_array = max_utils.create_device_mesh(config)
-  mesh = Mesh(devices_array, config.mesh_axes)
+  slice0_devices = [devices_array[0]]
+  slice1_devices = [devices_array[1]]
+  mesh = Mesh(slice0_devices, config.mesh_axes)
+  inference_mesh = Mesh(slice1_devices, config.mesh_axes)
 
   # Model and Optimizer definition
   quant = quantizations.configure_quantization(config)
@@ -626,7 +629,7 @@ def setup_mesh_and_model(config):
         use_zarr3,
     )
 
-  return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
+  return init_rng, writer, checkpoint_manager, mesh, inference_mesh, model, learning_rate_schedule, tx
 
 
 def setup_train_loop(config):
