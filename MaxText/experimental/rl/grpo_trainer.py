@@ -35,6 +35,7 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax import random
+from jax.sharding import PartitionSpec as P
 import numpy as np
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -570,7 +571,7 @@ def setup_train_loop(config):
   """
   recorder = create_goodput_recorder(config)
   record_goodput(recorder, config, recorder.record_tpu_init_start_time if recorder else None)
-  init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
+  init_rng, writer, checkpoint_manager, mesh, inference_mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
 
   record_goodput(recorder, config, recorder.record_tpu_init_end_time if recorder else None)
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
@@ -579,6 +580,7 @@ def setup_train_loop(config):
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
 
+  _, _, inference_state_mesh_shardings = max_utils.get_abstract_state(model, tx, config, init_rng, inference_mesh, is_training=False)
   if not config.using_pipeline_parallelism:
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
     maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
@@ -589,8 +591,10 @@ def setup_train_loop(config):
       writer,
       checkpoint_manager,
       state_mesh_shardings,
+      inference_state_mesh_shardings,
       model,
       mesh,
+      inference_mesh,
       learning_rate_schedule,
       data_iterator,
       eval_data_iterator,
@@ -615,8 +619,10 @@ def train_loop(config, config_inference, state=None):
       writer,
       checkpoint_manager,
       state_mesh_shardings,
+      inference_state_mesh_shardings,
       model,
       mesh,
+      inference_mesh,
       learning_rate_schedule,
       data_iterator,
       eval_data_iterator,
@@ -647,7 +653,7 @@ def train_loop(config, config_inference, state=None):
 
   # Initializing maxengine and everything related from decode.py
   # TODO: Creating an engine here but might have two model compilation, need to initialize engine while passing model object
-  engine = maxengine.MaxEngine(config_inference)
+  engine = maxengine.MaxEngine(config_inference, devices=np.squeeze(inference_mesh.devices))
   init_rng, rng_load_params = jax.random.split(init_rng)
   # TODO: loading parameters from GCS here, need to pass in the same params to engine which already loaded
   _ = engine.load_params(rng_load_params)
@@ -852,7 +858,7 @@ def main(argv: Sequence[str]) -> None:
   assert config.use_grpo, "Please set the value of use_grpo to True"
   config_inference = pyconfig.initialize(
       list(argv)
-      + ["ici_tensor_parallelism=4", "per_device_batch_size=" + str(config.per_device_batch_size * config.num_generations)]
+      + ["dcn_data_parallelism=1", "ici_tensor_parallelism=4", "num_slices=1", "per_device_batch_size=" + str(config.per_device_batch_size * config.num_generations)]
   )
   max_utils.print_system_information()
   validate_train_config(config)
