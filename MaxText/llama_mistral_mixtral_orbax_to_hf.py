@@ -38,7 +38,7 @@ from tqdm import tqdm
 from absl import app
 import numpy as np
 from MaxText import pyconfig
-from MaxText from MaxText import max_utils
+from MaxText import max_utils
 from jax.sharding import Mesh
 from MaxText import max_logging
 from MaxText import checkpointing

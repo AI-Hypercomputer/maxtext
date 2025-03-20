@@ -27,7 +27,8 @@ from jax.experimental.compilation_cache import compilation_cache
 from MaxText.layers.attentions import AttentionType
 from MaxText.utils import gcs_utils
 from MaxText import accelerator_to_spec_map
-from MaxText from MaxText import max_utils, max_logging
+from MaxText import max_logging
+from MaxText import max_utils
 import omegaconf
 
 OmegaConf = omegaconf.OmegaConf

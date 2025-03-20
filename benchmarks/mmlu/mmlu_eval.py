@@ -45,7 +45,9 @@ import sys
 from absl import flags
 import datasets
 import jax
-from MaxText from MaxText import max_logging, max_utils, maxengine
+from MaxText import max_logging
+from MaxText import max_utils
+from MaxText import maxengine
 from mmlu_categories import categories
 from mmlu_categories import subcategories
 from MaxText import pyconfig

@@ -19,7 +19,8 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
-from MaxText from MaxText import checkpointing, common_types
+from MaxText import checkpointing
+from MaxText import common_types
 import functools
 import time
 import optax

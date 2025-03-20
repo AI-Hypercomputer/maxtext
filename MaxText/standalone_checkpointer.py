@@ -30,8 +30,9 @@ import jax
 from jax import numpy as jnp
 import numpy as np
 
-from MaxText from MaxText import checkpointing
-from MaxText from MaxText import max_utils, max_logging
+from MaxText import checkpointing
+from MaxText import max_utils
+from MaxText import max_logging
 from MaxText import pyconfig
 from MaxText.train import setup_mesh_and_model, get_first_step, validate_train_config, save_checkpoint
 

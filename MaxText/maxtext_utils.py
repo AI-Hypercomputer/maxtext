@@ -19,7 +19,7 @@ limitations under the License.
 
 import jax
 import optax
-from MaxText from MaxText import max_utils
+from MaxText import max_utils
 from jax.sharding import PartitionSpec as P
 from jax.experimental.serialize_executable import deserialize_and_load
 

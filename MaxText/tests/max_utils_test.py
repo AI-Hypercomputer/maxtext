@@ -16,7 +16,7 @@ limitations under the License.
 
 """ Tests for the common Max Utils """
 import jax
-from MaxText from MaxText import max_utils
+from MaxText import max_utils
 from flax import linen as nn
 from flax.training from MaxText import train_state
 from jax import numpy as jnp

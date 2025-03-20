@@ -20,11 +20,11 @@ import sys
 import unittest
 from absl.testing import parameterized
 
-from MaxText from MaxText import common_types, max_utils
+from MaxText import common_types
+
 from flax.core import freeze
 import jax
 import jax.numpy as jnp
-
 from MaxText import max_utils
 from MaxText import pytest
 

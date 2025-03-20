@@ -18,7 +18,7 @@ limitations under the License.
 """
 
 import numpy as np
-from MaxText from MaxText from MaxText import train_tokenizer
+from MaxText from MaxText import train_tokenizer
 from MaxText.input_pipeline import _input_pipeline_utils
 import unittest
 from MaxText import pytest

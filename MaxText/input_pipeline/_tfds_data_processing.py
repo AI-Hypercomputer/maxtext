@@ -24,9 +24,9 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 import jax
 
-from MaxText from MaxText import multihost_dataloading
-from MaxText from MaxText import tokenizer
-from MaxText from MaxText import sequence_packing
+from MaxText import multihost_dataloading
+from MaxText import tokenizer
+from MaxText import sequence_packing
 from MaxText.input_pipeline import _input_pipeline_utils
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE

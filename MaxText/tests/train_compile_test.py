@@ -18,6 +18,7 @@ limitations under the License.
 import unittest
 from MaxText import pytest
 from MaxText.train_compile import main as train_compile_main
+from MaxText.train import main as train_main
 
 
 class TrainCompile(unittest.TestCase):

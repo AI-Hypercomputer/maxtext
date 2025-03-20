@@ -18,9 +18,11 @@ limitations under the License.
 import sys
 import jax
 import unittest
-from MaxText from MaxText import max_utils
+from MaxText import max_utils
 from jax.sharding import Mesh
-from MaxText.layers import models, embeddings, quantizations
+from MaxText.layers import models
+from MaxText.layers import embeddings
+from MaxText.layers import quantizations
 
 import jax.numpy as jnp
 

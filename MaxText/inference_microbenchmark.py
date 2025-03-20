@@ -24,7 +24,7 @@ from collections.abc import MutableMapping
 
 from jetstream.engine import token_utils
 
-from MaxText from MaxText import max_utils
+from MaxText import max_utils
 from MaxText import maxengine
 from MaxText import maxtext_utils
 from MaxText import prefix_cache

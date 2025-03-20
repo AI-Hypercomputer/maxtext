@@ -20,7 +20,8 @@ import os
 
 import jax
 
-from MaxText from MaxText import max_logging, max_utils
+from MaxText import max_logging
+from MaxText import max_utils
 
 from cloud_accelerator_diagnostics import tensorboard
 from cloud_accelerator_diagnostics import uploader
