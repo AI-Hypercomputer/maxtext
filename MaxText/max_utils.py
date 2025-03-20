@@ -533,6 +533,10 @@ def create_device_mesh(config, devices=None):
 
   allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
 
+
+  max_logging.log(f"{num_slices=}")
+  max_logging.log(f"{multi_slice_env=}")
+  max_logging.log(f"{allow_split_physical_axes=}")
   if multi_slice_env:
     dcn_parallelism = fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN")
     if is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
@@ -570,6 +574,7 @@ def create_device_mesh(config, devices=None):
       if config.optimize_mesh_for_tpu_v6e:
         mesh = optimize_mesh_for_tpu_v6e(mesh, devices)
 
+  max_logging.log(f"{devices=}, {mesh=}")
   max_logging.log(f"Num_devices: {num_devices}, shape {mesh.shape}")
 
   return mesh
