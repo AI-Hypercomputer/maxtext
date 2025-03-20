@@ -223,10 +223,10 @@ llama2_70b_v5e_256 = _add_to_model_dictionary(
 )
 
 
-llama3_1_8b_8192 = _add_to_model_dictionary(
+llama3_1_8b_8192_v5e_256 = _add_to_model_dictionary(
     v5e_model_dict,
     MaxTextModel(
-        model_name="llama3_1-8b-8192",
+        model_name="llama3_1-8b-8192-v5e-256",
         model_type="llama3.1-8b",
         tuning_params={
             "per_device_batch_size": 2,
