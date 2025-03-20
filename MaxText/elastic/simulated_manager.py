@@ -35,7 +35,6 @@ class SimulatedManager(manager.Manager):
   def __init__(
       self,
       devices: Sequence[jax.Device],
-      total_slice_count: int,
       snapshot_period: int = 1,
       snapshot_buffer_size: int = 1,
       reshard_check_period: int = 1,
@@ -46,7 +45,6 @@ class SimulatedManager(manager.Manager):
 
     super().__init__(
         devices,
-        total_slice_count,
         snapshot_period,
         reshard_check_period,
         max_failure_count,

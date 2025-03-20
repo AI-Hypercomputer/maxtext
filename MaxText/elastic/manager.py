@@ -58,7 +58,8 @@ class Manager:
   failure_count: int
   reshard_retry_count: int
   good_slice_indices: set[int]
-  _snapshots: collections.deque[Mapping[str, int | jax.Array | PyTree]]
+  _snapshot_0: Mapping[str, int | jax.Array | PyTree]
+  _snapshot_1: Mapping[str, int | jax.Array | PyTree]
 
   _SIMPLE_EXECUTION_TEST_VALUE = 100
 
@@ -83,7 +84,8 @@ class Manager:
     self.reshard_retry_count = 0
 
     self.good_slice_indices = self.get_slice_availability()
-    self._snapshots = collections.deque(maxlen=snapshot_buffer_size)
+    self._snapshot_0 = None
+    self._snapshot_1 = None
 
   @property
   def devices(self) -> Sequence[jax.Device]:
@@ -120,14 +122,14 @@ class Manager:
   def _is_error_due_to_slice_down(error: Exception) -> bool:
     """Check if the error is due to slice down."""
     if "DATA_LOSS" in str(error):
-      _logger.debug("Caught JaxRuntimeError DATA_LOSS exception")
+      _logger.debug("Caught JaxRuntimeError DATA_LOSS error")
     elif "NOT_FOUND" in str(error):
-      _logger.debug("Caught JaxRuntimeError NOT_FOUND exception")
+      _logger.debug("Caught JaxRuntimeError NOT_FOUND error")
     elif "INTERNAL" in str(error):
-      _logger.debug("Caught JaxRuntimeError INTERNAL exception")
+      _logger.debug("Caught JaxRuntimeError INTERNAL error")
 
     else:
-      _logger.debug("Unknown JaxRuntimeError")
+      _logger.debug("Caught unknown JaxRuntimeError")
       return False
 
     _logger.debug("\n".join(traceback.format_exception(error)))
@@ -325,7 +327,6 @@ class Manager:
       step: The current step.
       snapshot: The snapshot to initialize.
     """
-    self._snapshots.clear()
     self.maybe_snapshot(
         step=step,
         snapshot=snapshot,
@@ -335,13 +336,14 @@ class Manager:
 
   def pop_snapshot(self) -> tuple[int, Mapping[str, int | PyTree]]:
     """Pop next snapshot."""
-    try:
-      snapshot_dict = self._snapshots.popleft()
-    except IndexError as error:
-      raise ValueError("No snapshots available") from error
+    if self._snapshot_0 is None:
+      raise IndexError("No snapshots left")
 
-    step = snapshot_dict.pop("step")
-    snapshot = snapshot_dict.pop("snapshot")
+    step = self._snapshot_0.pop("step")
+    snapshot = self._snapshot_0.pop("snapshot")
+
+    self._snapshot_0 = self._snapshot_1
+    self._snapshot_1 = None
 
     return step, snapshot
 
@@ -379,20 +381,26 @@ class Manager:
     Returns:
       A copy of the snapshot on the host.
     """
-    def copy(x: Any):
-      try:
-        return jax.device_put(x, x.sharding.with_memory_kind("pinned_host"))
-      except AttributeError:
-        pass
+    shardings = jax.tree.map(lambda x: x.sharding.with_memory_kind("pinned_host"), snapshot)
+    return  jax.device_put(snapshot, shardings)
 
-      try:
-        return x.copy()
-      except AttributeError:
-        pass
+    # def copy(x: Any):
+    #   try:
+    #     # return jax.device_put(x, x.sharding)
+    #     return jax.device_put(x, x.sharding.with_memory_kind("pinned_host"))
+    #     return jax.device_put(x, x.sharding.with_memory_kind("pinned_host"))
+    #   except AttributeError:
+    #     pass
+    #   raise RuntimeError(f"Snapshot leaf is not a JAX array {type(x)=}")
 
-      return x
+    #   try:
+    #     return x.copy()
+    #   except AttributeError:
+    #     pass
 
-    return jax.tree.map(copy, snapshot)
+    #   return x
+
+    # return jax.tree.map(copy, snapshot)
 
   @timing.timeit
   def maybe_snapshot(
@@ -419,7 +427,8 @@ class Manager:
       jax.block_until_ready(snapshot_dict)
       _logger.debug("Snapshot completed")
 
-    self._snapshots.appendleft(snapshot_dict)
+    self._snapshot_1 = self._snapshot_0
+    self._snapshot_0 = snapshot_dict
 
   @timing.timeit
   def get_resharded_snapshot(
@@ -559,7 +568,7 @@ class Manager:
         ),
         x,
     )
-    # Don't donate in case the snapshot is duplicated in _snapshots
+    # Don't donate in case the snapshot is duplicated in _snapshot
     resharded_pinned_host = reshard.reshard(
         x,
         sharding_pinned_host,
