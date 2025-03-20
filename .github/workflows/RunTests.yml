@@ -117,6 +117,18 @@ jobs:
     - name: Delete TPU image
       run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu --force-delete-tags --quiet
 
+  clean_up_docker:
+    if: ${{ always() }}  # always execute, regardless of previous jobs or steps.
+    needs: [gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
+    name: "Clean up Docker Images"
+    runs-on: ["self-hosted"]
+    strategy:
+      matrix:
+        runner: ["self-hosted"]  # Forces all self-hosted runners to run
+    steps:
+      - name: Cleanup Docker
+        run: docker system prune --all --force
+
   notify:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
     needs: [gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
