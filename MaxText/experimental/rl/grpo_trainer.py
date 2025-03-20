@@ -733,13 +733,14 @@ def train_loop(config, config_inference, state=None):
       rng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       rng, rng_gen = random.split(rng)
-      (state_mesh_shardings, data_sharding, _) = in_shard_train
-      p_generate_completions = jax.jit(
-          functools.partial(generate_completions, config, tokenizer_model, engine),
-          in_shardings=(data_sharding, state_mesh_shardings.params, data_sharding, None),  # data, params, true_length, rng
-          out_shardings=(data_sharding,),  # data
-      )
-      example_batch = p_generate_completions(example_batch, state.params, example_batch["prompt_true_length"], rng_gen)
+      # (state_mesh_shardings, data_sharding, _) = in_shard_train
+      # p_generate_completions = jax.jit(
+      #     functools.partial(generate_completions, config, tokenizer_model, engine),
+      #     in_shardings=(data_sharding, state_mesh_shardings.params, data_sharding, None),  # data, params, true_length, rng
+      #     out_shardings=(data_sharding,),  # data
+      # )
+      # example_batch = p_generate_completions(example_batch, state.params, example_batch["prompt_true_length"], rng_gen)
+      example_batch = generate_completions(config, tokenizer_model, engine, example_batch, state.params, example_batch["prompt_true_length"], rng_gen)
 
       # TODO: ensure this partitioning is correct
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
