@@ -643,7 +643,7 @@ class AttentionOp(nn.Module):
       query = partitioning.with_sharding_constraint(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
       key = partitioning.with_sharding_constraint(key, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
       value = partitioning.with_sharding_constraint(value, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
-    else:
+    elif model_mode == common_types.MODEL_MODE_PREFILL:
       query = partitioning.with_sharding_constraint(query, (BATCH, LENGTH, HEAD, D_KV))
       key = partitioning.with_sharding_constraint(key, (BATCH, KV_LENGTH, HEAD, D_KV))
       value = partitioning.with_sharding_constraint(value, (BATCH, KV_LENGTH, HEAD, D_KV))
@@ -651,7 +651,7 @@ class AttentionOp(nn.Module):
     attn_weights = self.qk_product(query, key, q_seq_len, model_mode)
     if self.is_partition_in_decode(q_seq_len):
       attn_weights = partitioning.with_sharding_constraint(attn_weights, (KV_LENGTH, HEAD, None, None, None))
-    else:
+    elif model_mode == common_types.MODEL_MODE_PREFILL:
       attn_weights = partitioning.with_sharding_constraint(attn_weights, (BATCH, HEAD, None, LENGTH, KV_LENGTH))
 
     if self.attn_logits_soft_cap:
@@ -664,7 +664,7 @@ class AttentionOp(nn.Module):
     attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode, previous_chunk)
     if self.is_partition_in_decode(q_seq_len):
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
-    else:
+    elif model_mode == common_types.MODEL_MODE_PREFILL:
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (BATCH, HEAD, None, LENGTH, KV_LENGTH))
     if attn_mask is not None:
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
