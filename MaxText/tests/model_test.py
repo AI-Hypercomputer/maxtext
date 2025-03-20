@@ -43,7 +43,7 @@ class TestModel(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,

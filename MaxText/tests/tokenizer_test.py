@@ -40,7 +40,8 @@ class TokenizerTest(unittest.TestCase):
     vocab_model_name = "test_tokenizer"
     cls.tokenizer_path = os.path.join(assets_path, vocab_model_name)
     cls.source_tokenizer = _input_pipeline_utils.get_tokenizer(
-        "../assets/tokenizer", "sentencepiece", add_bos=False, add_eos=False
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer"), "sentencepiece",
+        add_bos=False, add_eos=False
     )
     os.environ["TFDS_DATA_DIR"] = dataset_path
     read_config = tfds.ReadConfig(
@@ -82,7 +83,7 @@ class TikTokenTest(unittest.TestCase):
     dataset_name = "c4/en:3.0.1"
     dataset_path = "gs://maxtext-dataset"
     cls.source_tokenizer = _input_pipeline_utils.get_tokenizer(
-        "../assets/tokenizer_llama3.tiktoken",
+        os.path.join(os.path.dirname(".."), "assets", "tokenizer_llama3.tiktoken"),
         "tiktoken",
         add_bos=False,
         add_eos=False,
@@ -113,16 +114,17 @@ class HFTokenizerTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     source = "gs://maxtext-gemma/huggingface/gemma2-2b"
-    destination = "../assets"
+    destination = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets")
     subprocess.run(
         ["gcloud", "storage", "cp", "-R", source, destination],
         check=True,
     )
     cls.hf_tokenizer = _input_pipeline_utils.get_tokenizer(
-        "../assets/gemma2-2b", "huggingface", add_bos=False, add_eos=False
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "gemma2-2b"), "huggingface", add_bos=False, add_eos=False
     )
     cls.sp_tokenizer = _input_pipeline_utils.get_tokenizer(
-        "../assets/tokenizer.gemma", "sentencepiece", add_bos=False, add_eos=False
+      os.path.join(os.path.dirname(".."), "assets", "tokenizer.gemma"),
+      "sentencepiece", add_bos=False, add_eos=False
     )
 
   @pytest.mark.tpu_only

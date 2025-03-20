@@ -29,7 +29,8 @@ class Inference_Microbenchmark(unittest.TestCase):
         [
             None,
             "configs/tpu_smoke_test.yml",
-            "tokenizer_path=../assets/tokenizer.llama2",
+            "tokenizer_path={}".format(os.path.join(
+              os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")),
             "ici_autoregressive_parallelism=-1",
             "ici_fsdp_parallelism=1",
             "max_prefill_predict_length=1024",

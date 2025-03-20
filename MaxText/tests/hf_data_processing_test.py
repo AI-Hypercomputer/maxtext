@@ -32,7 +32,7 @@ class HfDataProcessingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],

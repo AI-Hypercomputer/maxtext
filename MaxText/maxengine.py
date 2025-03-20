@@ -14,6 +14,7 @@
 
 """Implementation of Engine API for MaxText"""
 import functools
+import os
 from typing import Any, List, Optional, Tuple, Callable
 from collections import defaultdict
 import uuid
@@ -249,8 +250,8 @@ class MaxEngine(engine_api.Engine):
     Load Single adapter from adapter_path.
     Expect adapter_config.json and LoRA adapter weights at this path within subdirectory `/0/items`.
     """
-    adapter_config_path = f"{adapter_path}/adapter_config.json"
-    adapter_weights_path = f"{adapter_path}/0/items"
+    adapter_config_path = os.path.join(adapter_path, "adapter_config.json")
+    adapter_weights_path = os.path.join(adapter_path, "0", "items")
 
     params, config = lora_utils.load_adapter(self.config, self.abstract_params, adapter_config_path, adapter_weights_path)
 
@@ -1332,7 +1333,8 @@ def create_engine_from_config_flags(batch_size, max_prefill_predict_length, max_
     k, v = cmd_arg.split("=")
     args[k.strip()] = v.strip()
   assert "load_parameters_path" in args, "load_parameters_path must be defined"
-  updated_args = ["MaxText/maxengine_server.py", "../configs/base.yml"]
+  updated_args = [os.path.join("MaxText", "maxengine_server.py"),
+                  os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")]
   for k, v in args.items():
     option = f"{k}={v}"
     updated_args.append(option)

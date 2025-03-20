@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 """ Tests for GPT3 """
+import os.path
 import sys
 import jax
 import unittest
@@ -61,7 +62,7 @@ class GPT3(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.cfg = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
         run_name="test",
         enable_checkpointing=False,
         model_name="gpt3-52k",

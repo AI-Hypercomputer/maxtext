@@ -66,7 +66,7 @@ class PyconfigTest(unittest.TestCase):
 
   def test_multiple_unmodifiable_configs(self):
     config_train = pyconfig.initialize(
-        ["train.py", "configs/base.yml"],
+        ["train.py", os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,
@@ -81,7 +81,7 @@ class PyconfigTest(unittest.TestCase):
         ici_fsdp_parallelism=4,
     )
     config_inference = pyconfig.initialize(
-        ["decode.py", "configs/base.yml"],
+        ["decode.py", os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,

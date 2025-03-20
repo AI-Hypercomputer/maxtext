@@ -45,7 +45,8 @@ class Train(unittest.TestCase):
             "steps=10",
             "enable_checkpointing=False",
             "quantization=int8",
-            "tokenizer_path=../assets/tokenizer.llama2",
+            "tokenizer_path={}".format(os.path.join(
+              os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")),
             "enable_goodput_recording=False",
             "monitor_goodput=False",
             "enable_checkpoint_cloud_logger=False",

@@ -13,7 +13,7 @@
 #  limitations under the License.
 
 import jax
-import sre_parse
+import os.path
 import unittest
 from MaxText.layers import linears
 from MaxText.layers import initializers
@@ -40,7 +40,7 @@ class TokenDroppingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.cfg = pyconfig.initialize(
-        [None, "configs/base.yml"],
+        [None, os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
         run_name="token_dropping_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -264,7 +264,7 @@ class MoeBlockTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_megablox(self):
     cfg = pyconfig.initialize(
-        [None, "configs/base.yml"],
+        [None, os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
         run_name="moe_block_megablox_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -289,7 +289,7 @@ class MoeBlockTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_ragged_dot(self):
     cfg = pyconfig.initialize(
-        [None, "configs/base.yml"],
+        [None, os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
         run_name="moe_block_ragged_dot_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -314,7 +314,7 @@ class MoeBlockTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_dense(self):
     cfg = pyconfig.initialize(
-        [None, "configs/base.yml"],
+        [None, os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
         run_name="moe_block_dense_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -339,7 +339,7 @@ class MoeBlockTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_megablox_expert_parallelism(self):
     cfg = pyconfig.initialize(
-        [None, "configs/base.yml"],
+        [None, os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
         run_name="moe_block_megablox_ep_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",

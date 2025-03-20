@@ -15,6 +15,7 @@
 """Tests for Attentions."""
 
 import itertools
+import os
 import random
 import sys
 import unittest
@@ -43,7 +44,7 @@ class AttentionTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,
@@ -337,7 +338,7 @@ class AttentionTest(unittest.TestCase):
     rtol, atol = 1e-02, 1e-02
 
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,
@@ -437,7 +438,7 @@ class AttentionTest(unittest.TestCase):
     rtol, atol = 1e-02, 1e-02
 
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,
@@ -726,7 +727,7 @@ class MLATest(parameterized.TestCase):
   def init_mla(self, rope_type):
     """Helper function to initialize MLA with different model names."""
     cfg = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,

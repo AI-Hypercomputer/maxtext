@@ -13,9 +13,11 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-
+import os.path
 import subprocess
 import sys
+import tempfile
+
 import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
@@ -32,16 +34,20 @@ class GrainDataProcessingTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
+    tmp_dir = tempfile.gettempdir()
     exit_code = subprocess.call(
-        ["bash", "../setup_gcsfuse.sh", "DATASET_GCS_BUCKET=maxtext-dataset", "MOUNT_PATH=/tmp/gcsfuse"]
+        ["bash", os.path.join(os.path.dirname(__file__), "setup_gcsfuse.sh"),
+         "DATASET_GCS_BUCKET=maxtext-dataset",
+         "MOUNT_PATH={}".format(os.path.join(tmp_dir, "gcsfuse"))]
     )
-    if exit_code != 0:
+    if exit_code != os.EX_OK:
       raise ValueError(f"Running setup_gcsfuse.sh failed with exit code: {exit_code}")
 
   def setUp(self):
     super().setUp()
+    tmp_dir = tempfile.gettempdir()
     self.config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
@@ -49,11 +55,11 @@ class GrainDataProcessingTest(unittest.TestCase):
         data_sharding=["data"],
         base_output_directory="gs://max-experiments/",
         dataset_type="grain",
-        grain_train_files="/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*",
-        tokenizer_path="../assets/tokenizer",
+        grain_train_files=os.path.join(tmp_dir, "gcsfuse", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*"),
+        tokenizer_path=os.path.join(os.path.dirname(".."), "assets", "tokenizer"),
         enable_checkpointing=False,
     )
-    self.mesh_shape_1d = (len(jax.devices()),)
+    self.mesh_shape_1d = len(jax.devices()),
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
     self.process_indices = input_pipeline_interface.get_process_loading_real_data(
         self.config.data_sharding,

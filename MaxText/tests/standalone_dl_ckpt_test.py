@@ -40,13 +40,14 @@ class Standalone_DL_CKPT(unittest.TestCase):
     sdl_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml"),
             "run_name=" + random_run_name,
             "base_output_directory=gs://runner-maxtext-logs",
             "dataset_path=gs://maxtext-dataset",
             "steps=100",
             "enable_checkpointing=false",
-            "tokenizer_path=../assets/tokenizer.llama2",
+            "tokenizer_path={}".format(os.path.join(
+              os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")),
         )
     )  # need to pass relative path to tokenizer
 
@@ -57,7 +58,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
     sckpt_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml"),
             f"run_name={random_run_name}",
             "base_output_directory=gs://runner-maxtext-logs",
             "dataset_path=gs://maxtext-dataset",
@@ -76,7 +77,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
     sckpt_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml"),
             f"run_name={random_run_name}",
             "base_output_directory=gs://runner-maxtext-logs",
             "dataset_path=gs://maxtext-dataset",
