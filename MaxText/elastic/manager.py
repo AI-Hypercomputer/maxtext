@@ -132,7 +132,8 @@ class Manager:
       _logger.debug("Caught unknown JaxRuntimeError")
       return False
 
-    _logger.debug("\n".join(traceback.format_exception(error)))
+    for line in traceback.format_exception(error):
+      _logger.debug(line)
     return True
 
   @classmethod
@@ -445,28 +446,21 @@ class Manager:
     while True:
       step, snapshot = self.pop_snapshot()
 
-      resharded_snapshot_host = {}
-      resharded_snapshot_device = {}
-      for k, v in snapshot.items():
-        resharded_host, resharded_device = self._reshard_snapshot(v, mesh)
-        resharded_snapshot_host[k] = resharded_host
-        resharded_snapshot_device[k] = resharded_device
+      _, snapshot_device = self._reshard_snapshot(snapshot, mesh)
 
       try:
-        jax.block_until_ready(resharded_snapshot_host)
-        jax.block_until_ready(resharded_snapshot_device)
+        jax.block_until_ready(snapshot_device)
         break
       except Exception as error:  # pylint: disable=broad-except
-        if not self._is_error_due_to_slice_down(error):
-          raise
+        self._is_error_due_to_slice_down(error)
         _logger.debug("Retrying with the next snapshot")
 
     self.initialize_snapshot(
         step=step,
-        snapshot=resharded_snapshot_host,
+        snapshot=snapshot_device,
     )
 
-    return step, resharded_snapshot_device
+    return step, snapshot_device
 
   @timing.timeit
   def maybe_reshard_down(
