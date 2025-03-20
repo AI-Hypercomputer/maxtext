@@ -33,10 +33,10 @@ import profiler
 import pyconfig
 import tensorflow as tf
 
-from input_pipeline.input_pipeline_interface import create_data_iterator
-from gcp_workload_monitor import GCPWorkloadMonitor
-from metric_logger import MetricLogger
-from train import (
+from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
+from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
+from MaxText.metric_logger import MetricLogger
+from MaxText.train import (
     check_example_batch,
     create_goodput_recorder,
     eval_step,

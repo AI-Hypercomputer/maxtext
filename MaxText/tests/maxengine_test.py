@@ -26,9 +26,9 @@ import unittest
 import pyconfig
 from MaxText.maxengine import MaxEngine
 import max_utils
-from maxengine import MaxEngine
-from layers import quantizations
-from layers import models
+from MaxText.maxengine import MaxEngine
+from MaxText.layers import quantizations
+from MaxText.layers import models
 
 Mesh = jax.sharding.Mesh
 

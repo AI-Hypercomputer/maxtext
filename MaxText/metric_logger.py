@@ -23,7 +23,7 @@ import os
 import numpy as np
 
 import max_logging
-from utils import gcs_utils
+from MaxText.utils import gcs_utils
 
 
 def _prepare_metrics_for_json(metrics, step, run_name):

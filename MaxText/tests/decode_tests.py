@@ -18,7 +18,7 @@ limitations under the License.
 import os
 import unittest
 import pytest
-from decode import main as decode_main
+from MaxText.decode import main as decode_main
 from absl.testing import absltest
 
 

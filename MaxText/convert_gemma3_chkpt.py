@@ -28,7 +28,7 @@ import max_logging
 import orbax
 
 import checkpointing
-from train import save_checkpoint
+from MaxText.train import save_checkpoint
 
 Params = dict[str, Any]
 

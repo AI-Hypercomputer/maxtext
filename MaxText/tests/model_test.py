@@ -26,8 +26,8 @@ import pytest
 
 import pyconfig
 
-from layers import models
-from layers import quantizations
+from MaxText.layers import models
+from MaxText.layers import quantizations
 
 Mesh = jax.sharding.Mesh
 MAX_PREFILL_PREDICT_LENGTH = 4

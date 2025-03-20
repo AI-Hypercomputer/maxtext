@@ -38,8 +38,8 @@ import pyconfig
 import os
 from jax import random
 from jax.sharding import Mesh
-from layers.models import Transformer
-from layers import quantizations
+from MaxText.layers.models import Transformer
+from MaxText.layers import quantizations
 import checkpointing
 
 import numpy as np

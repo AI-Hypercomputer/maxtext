@@ -22,7 +22,7 @@ import functools
 import numpy as np
 import pyconfig
 import pytest
-from layers import quantizations
+from MaxText.layers import quantizations
 import unittest
 from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2 import calibration

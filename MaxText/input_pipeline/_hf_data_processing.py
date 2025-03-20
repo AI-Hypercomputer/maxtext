@@ -24,7 +24,7 @@ import transformers
 import grain.python as grain
 import numpy as np
 
-from input_pipeline import _input_pipeline_utils
+from MaxText.input_pipeline import _input_pipeline_utils
 import multihost_dataloading
 
 

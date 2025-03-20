@@ -26,7 +26,7 @@ from jax.experimental.serialize_executable import deserialize_and_load
 
 import pickle
 import functools
-from input_pipeline import input_pipeline_interface
+from MaxText.input_pipeline import input_pipeline_interface
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 

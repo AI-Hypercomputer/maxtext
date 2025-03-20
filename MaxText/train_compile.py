@@ -33,12 +33,12 @@ import pyconfig
 from MaxText.layers import models, quantizations
 from typing import Sequence
 from absl import app
-from utils import gcs_utils
+from MaxText.utils import gcs_utils
 import os
 import pickle
 import accelerator_to_spec_map
 import train
-from input_pipeline import input_pipeline_interface
+from MaxText.input_pipeline import input_pipeline_interface
 
 # pylint: disable=too-many-positional-arguments
 

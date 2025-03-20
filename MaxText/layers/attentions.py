@@ -31,13 +31,13 @@ from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_ke
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
 import common_types
-from kernels.ragged_attention import ragged_gqa
-from kernels.ragged_attention import ragged_mha
-from inference import page_manager, paged_attention
-from layers import embeddings
-from layers import initializers
-from layers import linears
-from layers import quantizations
+from MaxText.kernels.ragged_attention import ragged_gqa
+from MaxText.kernels.ragged_attention import ragged_mha
+from MaxText.inference import page_manager, paged_attention
+from MaxText.layers import embeddings
+from MaxText.layers import initializers
+from MaxText.layers import linears
+from MaxText.layers import quantizations
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -240,7 +240,7 @@ class AttentionOp(nn.Module):
     if self.config.use_chunked_prefill and model_mode == common_types.MODEL_MODE_PREFILL:
       causal_mask = self.generate_attention_causal_mask_for_chunk(query, key, previous_chunk)
       if mask is not None:
-        # mask created from decoder_segment_ids, which is full mask without chunked
+        # mask created from MaxText.decoder_segment_ids, which is full mask without chunked
         # need to adjust the length to match the chunked query
         next_pos = previous_chunk["true_length_array"].shape[1] if previous_chunk is not None else 0
         mask = mask[:, :, :, next_pos : next_pos + causal_mask.shape[3], :]

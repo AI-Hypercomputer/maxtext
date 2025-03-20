@@ -35,7 +35,7 @@ from MaxText import max_utils, max_logging
 import pyconfig
 from MaxText.train import setup_mesh_and_model, get_first_step, validate_train_config, save_checkpoint
 
-from layers import models
+from MaxText.layers import models
 
 Transformer = models.Transformer
 

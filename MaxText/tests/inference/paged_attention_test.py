@@ -19,8 +19,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from inference.page_manager import PageState
-from inference.paged_attention import PagedAttentionOp
+from MaxText.inference.page_manager import PageState
+from MaxText.inference.paged_attention import PagedAttentionOp
 
 
 def reference_attention(query, key, value):

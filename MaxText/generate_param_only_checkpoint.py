@@ -35,10 +35,10 @@ from etils import epath
 from jax.sharding import Mesh
 from jax import random
 from typing import Sequence
-from layers import models, quantizations
-from train import save_checkpoint
-from utils import gcs_utils
-from utils import lora_utils
+from MaxText.layers import models, quantizations
+from MaxText.train import save_checkpoint
+from MaxText.utils import gcs_utils
+from MaxText.utils import lora_utils
 
 Transformer = models.Transformer
 

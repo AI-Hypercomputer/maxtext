@@ -32,7 +32,7 @@ from jax.experimental import multihost_utils
 import tokenizer
 import multihost_dataloading
 import sequence_packing
-from input_pipeline._input_pipeline_utils import get_tokenizer
+from MaxText.input_pipeline._input_pipeline_utils import get_tokenizer
 import max_logging
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE

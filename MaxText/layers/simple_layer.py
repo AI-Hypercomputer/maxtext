@@ -17,7 +17,7 @@ from jax import numpy as jnp
 from flax import linen as nn
 from jax.sharding import Mesh
 from typing import Optional
-from layers import quantizations
+from MaxText.layers import quantizations
 import common_types
 
 # pytype: disable=attribute-error

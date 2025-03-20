@@ -207,7 +207,7 @@ class MlpBlock(nn.Module):
     if self.config.decoder_block in ("default", "llama2", "mistral", "gemma", "deepseek"):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
-      from layers import gpt3
+      from MaxText.layers import gpt3
 
       return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=self.use_bias)
     else:

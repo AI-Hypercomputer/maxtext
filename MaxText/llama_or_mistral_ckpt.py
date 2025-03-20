@@ -51,10 +51,10 @@ from tqdm import tqdm
 
 import max_logging
 import max_utils
-from train import save_checkpoint
+from MaxText.train import save_checkpoint
 import checkpointing
 from safetensors import safe_open
-from utils import gcs_utils
+from MaxText.utils import gcs_utils
 
 MODEL_PARAMS_DICT = {
     "llama2-70b": {

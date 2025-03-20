@@ -32,9 +32,9 @@ sys.path.append(maxtext_parent_dir)
 
 import max_utils
 import pyconfig
-from input_pipeline import _input_pipeline_utils
-from layers import models
-from layers import quantizations
+from MaxText.input_pipeline import _input_pipeline_utils
+from MaxText.layers import models
+from MaxText.layers import quantizations
 
 DATA = {
     "messages": [

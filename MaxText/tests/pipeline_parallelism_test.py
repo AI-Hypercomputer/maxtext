@@ -36,7 +36,7 @@ from flax.core import meta
 
 import jax.numpy as jnp
 from flax import linen as nn
-from layers import simple_layer
+from MaxText.layers import simple_layer
 from MaxText.train import main as train_main
 
 

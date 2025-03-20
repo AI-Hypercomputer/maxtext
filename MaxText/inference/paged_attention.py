@@ -27,8 +27,8 @@ from jax.experimental import shard_map
 from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention_kernel
 from jax.sharding import PartitionSpec as P
 
-from inference import page_manager
-from inference import paged_attention_kernel_v2
+from MaxText.inference import page_manager
+from MaxText.inference import paged_attention_kernel_v2
 
 # pytype: disable=attribute-error
 
