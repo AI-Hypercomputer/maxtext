@@ -288,8 +288,8 @@ class YarnRotaryEmbedding(nn.Module):
 
   Attributes:
     embedding_dims: Dimension of the embedding to be generated.
-    max_seq_len: The maximum sequence length that will be encountered.
-    original_seq_len: The sequence length for which the base frequencies were defined.
+    max_position_embeddings: The maximum sequence length that will be encountered.
+    original_max_position_embeddings: The sequence length for which the base frequencies were defined.
     beta_fast: Lower bound parameter for correction.
     beta_slow: Upper bound parameter for correction.
     rope_theta: The base theta value for the frequency computation.
@@ -297,8 +297,8 @@ class YarnRotaryEmbedding(nn.Module):
   """
 
   embedding_dims: int
-  max_seq_len: int = 4096 * 4
-  original_seq_len: int = 4096
+  max_position_embeddings: int = 4096 * 4
+  original_max_position_embeddings: int = 4096
   beta_fast: float = 32
   beta_slow: float = 1
   rope_theta: float = 10000.0
@@ -315,27 +315,25 @@ class YarnRotaryEmbedding(nn.Module):
     # (Note: We use jnp.arange with float32 for precision.)
     freqs = 1.0 / (self.rope_theta ** (2.0 * jnp.arange(0, half_dim, dtype=jnp.float32) / self.embedding_dims))
 
-    # Adjust frequencies if using a longer sequence than originally trained.
-    if self.max_seq_len > self.original_seq_len:
-      low, high = self._find_correction_range(
-          self.beta_fast, self.beta_slow, self.embedding_dims, self.rope_theta, self.original_seq_len
-      )
-      smooth = 1 - self._linear_ramp_factor(low, high, half_dim)
-      # The corrected frequency is a weighted mix of the scaled and base values.
-      freqs = freqs / self.rope_factor * (1 - smooth) + freqs * smooth
+    low, high = self._find_correction_range(
+        self.beta_fast, self.beta_slow, self.embedding_dims, self.rope_theta, self.original_max_position_embeddings
+    )
+    smooth = 1 - self._linear_ramp_factor(low, high, half_dim)
+    # The corrected frequency is a weighted mix of the scaled and base values.
+    freqs = freqs / self.rope_factor * (1 - smooth) + freqs * smooth
 
     # Precompute frequencies for all positions by taking the outer product.
-    t = jnp.arange(self.max_seq_len, dtype=jnp.float32)  # shape [max_seq_len]
-    # This gives a [max_seq_len, half_dim] tensor with rows as time steps.
+    t = jnp.arange(self.max_position_embeddings, dtype=jnp.float32)  # shape [max_position_embeddings]
+    # This gives a [max_position_embeddings, half_dim] tensor with rows as time steps.
     freqs = jnp.outer(t, freqs)
     # Compute the complex “cis” values: exp(i * theta).
-    self.freqs_cis = jnp.exp(1j * freqs)  # shape [max_seq_len, half_dim]
+    self.freqs_cis = jnp.exp(1j * freqs)  # shape [max_position_embeddings, half_dim]
 
-  def _find_correction_dim(self, num_rotations: float, dim: int, base: float, max_seq_len: int) -> float:
+  def _find_correction_dim(self, num_rotations: float, dim: int, base: float, max_position_embeddings: int) -> float:
     """Compute the correction dimension for a given number of rotations."""
-    return dim * math.log(max_seq_len / (num_rotations * 2 * math.pi)) / (2 * math.log(base))
+    return dim * math.log(max_position_embeddings / (num_rotations * 2 * math.pi)) / (2 * math.log(base))
 
-  def _find_correction_range(self, low_rot: float, high_rot: float, dim: int, base: float, max_seq_len: int):
+  def _find_correction_range(self, low_rot: float, high_rot: float, dim: int, base: float, max_position_embeddings: int):
     """Computes the range of correction dimensions for rotary positional embeddings.
 
     Args:
@@ -343,13 +341,13 @@ class YarnRotaryEmbedding(nn.Module):
         high_rot (float): Upper bound for the number of rotations.
         dim (int): Dimensionality of the embedding space.
         base (float): Base value for the exponential computation.
-        max_seq_len (int): Maximum sequence length.
+        max_position_embeddings (int): Maximum sequence length.
 
     Returns:
         Tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
     """
-    low = math.floor(self._find_correction_dim(low_rot, dim, base, max_seq_len))
-    high = math.ceil(self._find_correction_dim(high_rot, dim, base, max_seq_len))
+    low = math.floor(self._find_correction_dim(low_rot, dim, base, max_position_embeddings))
+    high = math.ceil(self._find_correction_dim(high_rot, dim, base, max_position_embeddings))
     low = max(low, 0)
     high = min(high, dim - 1)
     return low, high
@@ -395,7 +393,7 @@ class YarnRotaryEmbedding(nn.Module):
     inputs_complex = inputs_reshaped[..., 0] + 1j * inputs_reshaped[..., 1]  # shape: [B, S, N, half_dim]
 
     # Lookup the precomputed frequencies using the position indices.
-    # self.freqs_cis has shape [max_seq_len, half_dim] so we use jnp.take along axis 0.
+    # self.freqs_cis has shape [max_position_embeddings, half_dim] so we use jnp.take along axis 0.
     # After indexing, shape becomes [B, S, half_dim]; we then add an axis for the heads.
     freqs = jnp.take(self.freqs_cis, position, axis=0)  # shape: [B, S, half_dim]
     freqs = freqs[:, :, jnp.newaxis, :]  # shape: [B, S, 1, half_dim]
@@ -405,7 +403,8 @@ class YarnRotaryEmbedding(nn.Module):
 
     # Convert the complex result back to a real tensor.
     # Split the complex number into its real and imaginary parts.
-    rotated_real = jnp.stack([jnp.real(rotated), jnp.imag(rotated)], axis=-1)  # shape: [B, S, N, half_dim, 2]
+    rotated_real = jnp.stack([jnp.real(rotated), jnp.imag(rotated)], axis=-2)  # shape: [B, S, N, 2, half_dim]
+    # [sin1, sin2, sin3, ..., cos1, cos2, ...] at last dimension
     output = rotated_real.reshape(B, S, N, H)
     if self.cast_as_fprop_dtype:
       output = output.astype(self.fprop_dtype)

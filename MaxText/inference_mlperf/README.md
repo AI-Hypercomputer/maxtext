@@ -91,10 +91,32 @@ cd maxtext && \
 python MaxText/decode.py MaxText/configs/base.yml tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${LOAD_PARAMS_PATH} max_prefill_predict_length=1024 max_target_length=2048 model_name=llama2-70b ici_fsdp_parallelism=1 ici_autoregressive_parallelism=1 ici_tensor_parallelism=-1 scan_layers=false weight_dtype=bfloat16 per_device_batch_size=11 attention=dot_product quantization=int8 save_quantized_params_path=${SAVE_QUANT_PARAMS_PATH}
 ```
 
-
-
-
 Your checkpoint is generated at `$SAVE_QUANT_PARAMS_PATH`. This is used to set `load_parameters_path` param below in `MAXENGINE_ARGS` env variable.
+
+#### CPU based quantization with Llama3.1-405b:
+
+The llama3.1-405b model takes about 800GB of memory. This does not fit in TPU machines and must be downloaded onto a large CPU machine (such as `m1-ultramem-160`) and quantized to a smaller quantized checkpoint (~400GB) to be loaded to TPUs for serving. After obtaining a llama3.1-405b checkpoint and converting it to a maxtext inference checkpoint, you can convert the checkpoint to a quantized checkpoint:
+
+1. Define paths to load maxtext checkpoint from and save quantized checkpoint to
+
+```
+export LOAD_PARAMS_PATH=gs://${USER}-bkt/llama3.1-405b/param-only-decode-ckpt-maxtext/checkpoints/0/items
+
+export SAVE_QUANT_PARAMS_PATH=gs://${USER}-bkt/quantized/llama3.1-405b
+```
+
+2. Run the following maxtext script to generate and save an int8 quantized checkpoint
+
+```
+export TOKENIZER_PATH=assets/tokenizer_llama3.tiktoken
+export MODEL_SIZE=llama3.1-405b
+export QUANTIZE_TYPE=int8
+
+cd maxtext && \
+python3 MaxText/load_and_quantize_checkpoint.py MaxText/configs/base.yml tokenizer_path=${TOKENIZER} load_parameters_path=${LOAD_PARAMS_PATH} max_prefill_predict_length=1024 max_target_length=2048 model_name=${MODEL_SIZE} ici_fsdp_parallelism=1 ici_autoregressive_parallelism=1 ici_tensor_parallelism=-1 scan_layers=false weight_dtype=bfloat16 per_device_batch_size=1 attention=dot_product quantization=${QUANTIZE_TYPE} save_quantized_params_path=${SAVE_QUANT_PARAMS_PATH} async_checkpointing=false
+```
+
+The quantized checkpoint is saved at `${SAVE_QUANT_PARAMS_PATH}`
 
 ### HuggingFace login
 ```

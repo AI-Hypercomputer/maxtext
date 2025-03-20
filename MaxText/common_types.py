@@ -36,6 +36,7 @@ AxisIdxes = tuple[int, ...]
 
 BATCH = "activation_batch"
 LENGTH = "activation_length"
+KV_LENGTH = "activation_kv_length"
 EMBED = "activation_embed"
 HEAD = "activation_heads"
 PREFILL_KV_BATCH = "activation_prefill_kv_batch"
@@ -43,6 +44,8 @@ KV_BATCH = "activation_kv_batch"
 KV_HEAD = "activation_kv_heads"
 KV_HEAD_DIM = "activation_kv_head_dim"
 D_KV = "activation_kv"
+DECODE_BATCH = "decode_batch"
+DECODE_LENGTH = "decode_length"
 CACHE_BATCH_PREFILL = "cache_batch_prefill"
 CACHE_BATCH = "cache_batch"
 CACHE_SEQUENCE = "cache_sequence"
@@ -56,6 +59,7 @@ CACHE_SCALE_KV = "cache_scale_kv"
 MODEL_MODE_AUTOREGRESSIVE = "autoregressive"
 MODEL_MODE_PREFILL = "prefill"
 MODEL_MODE_TRAIN = "train"
+MODEL_MODE_INSERT = "insert"
 
 DECODING_ACTIVE_SEQUENCE_INDICATOR = 1
 
