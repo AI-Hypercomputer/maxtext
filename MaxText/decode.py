@@ -68,7 +68,6 @@ def main(argv: Sequence[str]) -> None:
   prefill_result, first_token = engine.prefill(
       params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill, slot=slot
   )
-
   # Insert
   rng, rng_init_decode = jax.random.split(rng)
   decode_state = engine.init_decode_state(rng_init_decode)
@@ -89,8 +88,8 @@ def main(argv: Sequence[str]) -> None:
   print(f"Input `{text}` -> `{output}`")
 
   if jax.process_index() == 0:
-    upload_blob("ranran-multipod-dev", "logits.npy", f"deepseekv3-maxtext/v3-process0/logits.npy")
-    print(f"File is uploaded to gs://ranran-multipod-dev/deepseekv3-maxtext/v3-process0/logits.npy.")
+    upload_blob("ranran-multipod-dev", "flat_logits.npy", f"deepseekv3-maxtext/v3-process0-long-prompt/flat_logits.npy")
+    print(f"File is uploaded to gs://ranran-multipod-dev/deepseekv3-maxtext/v3-process0-long-prompt/flat_logits.npy.")
 
   assert output.startswith(
       config.autoregressive_decode_assert

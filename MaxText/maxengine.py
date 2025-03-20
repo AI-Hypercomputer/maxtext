@@ -53,6 +53,10 @@ DLL = jax_layout.DeviceLocalLayout
 Layout = jax_layout.Layout
 
 
+def save_with_jit(x):
+  jnp.save("flat_logits.npy", x)
+
+
 class MaxEngineConfig:
   """Engine specific config class to allow using multiple MaxEngine instances in an inference run.
   TODO: evaluate the need for this given the restructured pyconfig.py
@@ -441,6 +445,9 @@ class MaxEngine(engine_api.Engine):
           true_length=true_length,
           slot=slot,
       )
+    jax.debug.print("prefill flat_logits.shape: {x}", x=flat_logits.shape)
+    jax.debug.print("prefill flat_logits: {x}", x=flat_logits)
+    jax.debug.callback(save_with_jit, flat_logits)
     generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
     selected_logits = jax.lax.dynamic_slice(
         flat_logits,
@@ -1152,7 +1159,7 @@ class MaxEngine(engine_api.Engine):
       return token_utils.TikToken(metadata)
     elif "deepseek" or "mistralai" in metadata.path:
       import tokenizer
-      return tokenizer.build_tokenizer(metadata.path, "huggingface", self.config.add_bos, self.config.add_eos, "")
+      return tokenizer.build_tokenizer(metadata.path, "huggingface", self.config.add_bos, self.config.add_eos, self.config.hf_access_token)
     else:
       return token_utils.SentencePieceTokenizer(metadata)
 

@@ -46,7 +46,7 @@ def sampling(logits, rng, algorithm, topk=0, nucleus_topp=0, temperature=1.0):
     jax.debug.print("sampling logits: {logits}", logits=logits)
     argmax = jnp.argmax(logits, axis=-1)
     jax.debug.print("sampling argmax: {argmax}", argmax=argmax)
-    debug.callback(save_with_jit, logits)
+    # debug.callback(save_with_jit, logits)
     return argmax
   elif algorithm == "weighted":
     return jax.random.categorical(rng, logits / temperature)
