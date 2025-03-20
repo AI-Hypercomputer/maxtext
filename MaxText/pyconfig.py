@@ -22,8 +22,8 @@ import os
 import sys
 from typing import Any, Union
 
-from elastic.simulated_manager import SimulatedManager as Manager
-#from elastic.manager import Manager
+# from elastic.simulated_manager import SimulatedManager as Manager
+from elastic.manager import Manager
 import jax
 from jax.experimental.compilation_cache import compilation_cache
 from layers.attentions import AttentionType
