@@ -24,7 +24,7 @@ from jax.experimental import mesh_utils
 from jax.sharding import Mesh, PartitionSpec as P, NamedSharding
 from typing import Sequence, Mapping
 
-from timing_util import simple_timeit
+from MaxText.inference_mlperf.matmul.timing_util import simple_timeit
 
 PREFILL_LENS = [128, 256, 512, 1024]
 EMBED = 8192

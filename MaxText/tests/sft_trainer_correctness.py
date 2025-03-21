@@ -34,7 +34,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 maxtext_parent_dir = os.path.dirname(current_dir)
 sys.path.append(maxtext_parent_dir)
 
-from MaxText import max_utils
+from MaxText import max_utils, max_logging
 from MaxText import pyconfig
 from MaxText.input_pipeline import _input_pipeline_utils
 from MaxText.layers import models

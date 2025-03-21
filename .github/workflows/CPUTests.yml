@@ -25,7 +25,7 @@ jobs:
         python3 -m pip install pylint pyink pytype==2024.2.27
     - name: Typecheck the code with pytype
       run: |
-        pytype --jobs auto --disable import-error MaxText/
+        pytype --jobs auto MaxText/
     - name: Analysing the code with pylint in Maxtext/
       run: |
          pylint MaxText/  && \
