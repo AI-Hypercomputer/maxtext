@@ -130,7 +130,6 @@ def get_process_loading_real_data(
 
 def make_mixed_iterator(config, mesh, process_indices_train, process_indices_eval, train_iterator_fn, eval_iterator_fn):
   """Return iterators according to dataset_type"""
-  # train_iterator, eval_iterator = make_tfds_iterator(config, mesh, process_indices_train, process_indices_eval)
   if jax.process_index() in process_indices_train:
     train_iterator = train_iterator_fn()
   else:
