@@ -26,7 +26,6 @@ import datetime
 import os
 import sys
 import functools
-from collections import defaultdict
 import queue
 
 from typing import Sequence
@@ -289,13 +288,19 @@ def generate_completions(config, tokenizer_model, engine, data, params, true_len
       decode_state = engine.insert(prefill_result, decode_state, slot=slot)
       slot += 1
   steps = config.max_target_length - config.max_prefill_predict_length
-  completions = defaultdict(list)
-  for _ in range(steps):
+  # completions = defaultdict(list)
+  # for _ in range(steps):
+  #   rng, rng_generate = jax.random.split(rng)
+  #   decode_state, result_tokens = engine.generate(params, decode_state, rng=rng_generate)
+  #   for i in range(slot):
+  #     completions[i].append(result_tokens.get_result_at_slot(i).tokens.item())
+  # completions = jnp.array(list(completions.values()))
+  completions = jnp.zeros((prompts.shape[0], config.max_target_length - config.max_prefill_predict_length), dtype=jnp.int32)
+  for s in range(steps):
     rng, rng_generate = jax.random.split(rng)
     decode_state, result_tokens = engine.generate(params, decode_state, rng=rng_generate)
     for i in range(slot):
-      completions[i].append(result_tokens.get_result_at_slot(i).tokens.item())
-  completions = jnp.array(list(completions.values()))
+      completions.at[s,i].set(result_tokens.get_result_at_slot(i).tokens.item())
 
   prompt_with_completions, eos_positions = [], []
   for i in range(prompts.shape[0]):
@@ -334,7 +339,6 @@ def generate_completions(config, tokenizer_model, engine, data, params, true_len
 def dummy_reward_len(valid_seq_mask):
   # adding a 1 because valid_seq_mask is actually one less than the number of valid tokens
   reward = -abs(20 - (1 + jnp.sum(valid_seq_mask, axis=-1)))  # [BxG]
-  jax.debug.print("reward={reward}", reward=reward)
   return reward
 
 
@@ -733,13 +737,6 @@ def train_loop(config, config_inference, state=None):
       rng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       rng, rng_gen = random.split(rng)
-      # (state_mesh_shardings, data_sharding, _) = in_shard_train
-      # p_generate_completions = jax.jit(
-      #     functools.partial(generate_completions, config, tokenizer_model, engine),
-      #     in_shardings=(data_sharding, state_mesh_shardings.params, data_sharding, None),  # data, params, true_length, rng
-      #     out_shardings=(data_sharding,),  # data
-      # )
-      # example_batch = p_generate_completions(example_batch, state.params, example_batch["prompt_true_length"], rng_gen)
       example_batch = generate_completions(config, tokenizer_model, engine, example_batch, state.params, example_batch["prompt_true_length"], rng_gen)
 
       # TODO: ensure this partitioning is correct
