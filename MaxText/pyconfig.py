@@ -161,7 +161,7 @@ def validate_keys(keys):
 
   validate_multiple_slices(keys)
   if keys["num_experts"] > 1:
-    validate_megablox_parallelism(keys)
+    validate_sparse_matmul_parallelism(keys)
     validate_deepseek_moe(keys)
 
 
@@ -733,15 +733,9 @@ def validate_deepseek_moe(raw_keys):
     raise ValueError("Currently we do not support DeepSeek MoE with pipeline parallelism.")
 
 
-def validate_megablox_parallelism(raw_keys):
-  if (
-      raw_keys["sparse_matmul"]
-      and raw_keys["megablox"]
-      and (
-          using_sequence_parallelism(raw_keys) or using_pipeline_parallelism(raw_keys) or using_expert_parallelism(raw_keys)
-      )
-  ):
-    raise ValueError("Currently we only support Megablox with data and tensor parallelism.")
+def validate_sparse_matmul_parallelism(raw_keys):
+  if raw_keys["sparse_matmul"] and (using_sequence_parallelism(raw_keys) or using_pipeline_parallelism(raw_keys)):
+    raise ValueError("Currently we only support Megablox and Ragged dot with data, tensor, and expert parallelism.")
   tensor_parallelism = (
       raw_keys["ici_tensor_parallelism"]
       * raw_keys["dcn_tensor_parallelism"]
@@ -750,9 +744,14 @@ def validate_megablox_parallelism(raw_keys):
       * raw_keys["ici_tensor_transpose_parallelism"]
       * raw_keys["dcn_tensor_transpose_parallelism"]
   )
-  if raw_keys["megablox"] and using_tensor_parallelism(raw_keys) and (raw_keys["emb_dim"] % tensor_parallelism):
+  if raw_keys["sparse_matmul"] and using_tensor_parallelism(raw_keys) and (raw_keys["emb_dim"] % tensor_parallelism):
     raise ValueError(
         f"The embedding dimension {raw_keys['emb_dim']} is not divisible by tensor parallelism setting {tensor_parallelism}."
+    )
+  expert_parallelism = raw_keys["ici_expert_parallelism"] * raw_keys["dcn_expert_parallelism"]
+  if raw_keys["sparse_matmul"] and using_expert_parallelism(raw_keys) and (raw_keys["num_experts"] % expert_parallelism):
+    raise ValueError(
+        f"The expert dimension {raw_keys['num_experts']} is not divisible by expert parallelism setting {expert_parallelism}."
     )
 
 
@@ -876,6 +875,8 @@ def using_tensor_parallelism(raw_keys) -> bool:
 
 
 def using_sequence_parallelism(raw_keys) -> bool:
+  if int(raw_keys["ici_expert_parallelism"]) > 1 and int(raw_keys["dcn_expert_parallelism"]) > 1:
+    raise ValueError("Expert parallelism can only be enabled on ICI or DCN, not both.")
   return int(raw_keys["ici_sequence_parallelism"]) > 1 or int(raw_keys["dcn_sequence_parallelism"]) > 1
 
 
