@@ -15,14 +15,14 @@ limitations under the License.
 """
 
 import sys
+import os.path
+import unittest
+
 import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
-import unittest
-
 from MaxText import pyconfig
-import pytest
 from MaxText.input_pipeline import _hf_data_processing
 from MaxText.input_pipeline import input_pipeline_interface
 
@@ -96,8 +96,8 @@ class HfDataProcessingTest(unittest.TestCase):
 
     train_batch1 = get_first_batch(self.train_iter)
     train_batch2 = get_first_batch(self.train_iter)
-    self.assertTrue((train_batch1["inputs"] == train_batch2["inputs"]).all())
-    self.assertTrue((train_batch1["targets"] == train_batch2["targets"]).all())
+    self.assertTrue((train_batch1["inputs"] == train_batch2["inputs"]).all())  # pytype: disable=unsupported-operands
+    self.assertTrue((train_batch1["targets"] == train_batch2["targets"]).all())  # pytype: disable=unsupported-operands
 
 
 if __name__ == "__main__":

@@ -34,7 +34,7 @@ from absl import app
 from etils import epath
 from jax.sharding import Mesh
 from jax import random
-from typing import Sequence
+from typing import Sequence, Any, Tuple, Union
 from MaxText.layers import models, quantizations
 from MaxText.train import save_checkpoint
 from MaxText.utils import gcs_utils
@@ -197,7 +197,7 @@ def generate_decode_checkpoint(config):
   return True
 
 
-def main(argv: Sequence[str]) -> None:
+def main(argv: Union[Sequence[str], Tuple[Any, ...]]) -> None:
   print(argv)
   config = pyconfig.initialize(argv)
   generate_decode_checkpoint(config)

@@ -16,13 +16,15 @@ limitations under the License.
 
 """ Tests for the maxengine """
 
-import logging
 import sys
-from MaxText import common_types
+import unittest
+import os.path
+
 import jax
 from jax import numpy as jnp
 import numpy as np
-import unittest
+
+from MaxText import common_types
 from MaxText import pyconfig
 from MaxText import max_utils
 from MaxText.maxengine import MaxEngine

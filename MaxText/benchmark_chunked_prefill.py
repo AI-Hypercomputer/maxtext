@@ -22,7 +22,7 @@ from MaxText import maxengine
 import os
 from MaxText import pyconfig
 
-from typing import Sequence
+from typing import Sequence, Union, Any, Tuple
 from absl import app
 import jax.numpy as jnp
 import datetime
@@ -32,7 +32,7 @@ _WARMUP_ITERS = 2
 _BENCHMARK_ITERS = 5
 
 
-def main(argv: Sequence[str]) -> None:
+def main(argv: Union[Sequence[str], Tuple[Any, ...]]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   config = pyconfig.initialize(argv)

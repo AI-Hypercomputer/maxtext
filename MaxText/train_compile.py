@@ -34,7 +34,7 @@ from MaxText import max_utils
 from MaxText import pyconfig
 from MaxText.layers import models
 from MaxText.layers import quantizations
-from typing import Sequence
+from typing import Sequence, Tuple, Union, Any
 from absl import app
 from MaxText.utils import gcs_utils
 import os
@@ -135,7 +135,7 @@ def save_compiled(compiled, save_name):
     pickle.dump(serialized, f)
 
 
-def main(argv: Sequence[str]) -> None:
+def main(argv: Union[Sequence[str], Tuple[Any, ...]]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   print("Starting train_compile.py...", flush=True)

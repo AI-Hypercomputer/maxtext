@@ -17,6 +17,8 @@ limitations under the License.
 # pylint: disable=missing-module-docstring, missing-function-docstring
 import sys
 import numpy as np
+import os.path
+
 import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils

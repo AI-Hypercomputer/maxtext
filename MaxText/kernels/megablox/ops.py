@@ -18,7 +18,7 @@
 
 import jax
 import jax.numpy as jnp
-from MaxText.kernels.megablox.gmm import gmm as backend_gmm
+from MaxText.kernels.megablox.gmm import gmm as backend_gmm, tgmm as backend_tgmm
 from aqt.jax.v2 import aqt_tensor
 from typing import Literal
 
@@ -98,7 +98,7 @@ def _gmm_bwd(
       lhs_quantize_dtype=lhs_quantize_dtype,
       rhs_quantize_dtype=rhs_quantize_dtype,
   )
-  grad_rhs = backend.tgmm(
+  grad_rhs = backend_tgmm(
       lhs.swapaxes(0, 1), grad, group_sizes, rhs.dtype, tiling, group_offset, num_actual_groups, interpret=interpret
   )
 

@@ -16,12 +16,14 @@ limitations under the License.
 
 """ Tests for the standalone_checkpointer.py """
 import unittest
+import os.path
+import random
+import string
+from datetime import datetime
+
 import pytest
 from MaxText.standalone_checkpointer import main as sckpt_main
 from MaxText.standalone_dataloader import main as sdl_main
-from datetime import datetime
-import random
-import string
 
 
 class Standalone_DL_CKPT(unittest.TestCase):

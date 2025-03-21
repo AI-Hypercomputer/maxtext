@@ -12,6 +12,7 @@ limitations under the License.
 """
 
 import unittest
+import os.path
 from MaxText import pyconfig
 
 

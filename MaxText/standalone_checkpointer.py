@@ -23,7 +23,7 @@ limitations under the License.
 import datetime
 import os
 
-from typing import Sequence
+from typing import Sequence, Tuple, Any, Union
 from absl import app
 from flax.linen import partitioning as nn_partitioning
 import jax
@@ -108,7 +108,7 @@ def add_entropy_to_checkpoint(state):
     return state
 
 
-def main(argv: Sequence[str]) -> None:
+def main(argv: Union[Sequence[str], Tuple[Any, ...]]) -> None:
   jax.config.update("jax_cpu_enable_gloo_collectives", True)
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   config = pyconfig.initialize(argv)

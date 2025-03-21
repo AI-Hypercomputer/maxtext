@@ -124,8 +124,10 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
     eval_batch1 = get_first_batch(self.eval_iter)
     eval_batch2 = get_first_batch(self.eval_iter)
-    self.assertTrue((eval_batch1["inputs"] == eval_batch2["inputs"]).all())
-    self.assertTrue((eval_batch1["targets"] == eval_batch2["targets"]).all())
+    self.assertIsNotNone(eval_batch1)
+    self.assertIsNotNone(eval_batch2)
+    self.assertTrue((eval_batch1["inputs"] == eval_batch2["inputs"]).all()) # pytype: disable=unsupported-operands
+    self.assertTrue((eval_batch1["targets"] == eval_batch2["targets"]).all()) # pytype: disable=unsupported-operands
 
 
 if __name__ == "__main__":
