@@ -142,7 +142,7 @@ def elastic_handler(
   example_batch = None
   metric_logger = MetricLogger(writer, config)
 
-  # jax.block_until_ready(state)
+  jax.block_until_ready(state)
 
   return (
       config,
@@ -184,12 +184,6 @@ def train_loop(config, state=None):
       state,
   ) = setup_train_loop(config)
 
-  if config.use_dpo:
-    if "reference_params" not in state.params:
-      reference_params = jax.tree.map(jnp.copy, state.params["params"])
-      state = _merge_dpo_state(state, reference_params)
-    state_mesh_shardings = _merge_dpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
-
   # pylint: disable=line-too-long
   (
       functional_train,
@@ -198,16 +192,6 @@ def train_loop(config, state=None):
       static_argnums_train,
       donate_argnums_train,
   ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config)
-
-  if eval_data_iterator:
-    # pylint: disable=line-too-long
-    (
-        functional_eval,
-        in_shard_eval,
-        out_shard_eval,
-        static_argnums_eval,
-        donate_argnums_eval,
-    ) = maxtext_utils.get_functional_eval_with_signature(eval_step, mesh, state_mesh_shardings, model, config)
 
   num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
   max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
@@ -219,33 +203,13 @@ def train_loop(config, state=None):
   max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], writer)
   max_utils.add_config_to_summary_writer(config, writer)
 
-  # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
-  if config.compiled_trainstep_file != "":
-    print("Loading the compiled function...", flush=True)
-    # Need to pass train signature and state to determine i/o shapes of train_state for now.
-    p_train_step = maxtext_utils.load_compiled(config, functional_train, state)
-    # TODO: p_eval_step is not yet supported in load_compiled
-    p_eval_step = None
-    print("Loaded compiled function!", flush=True)
-  else:
-    p_train_step = jax.jit(
-        functional_train,
-        in_shardings=in_shard_train,
-        out_shardings=out_shard_train,
-        static_argnums=static_argnums_train,
-        donate_argnums=donate_argnums_train,
-    )
-
-    if eval_data_iterator:
-      p_eval_step = jax.jit(
-          functional_eval,
-          in_shardings=in_shard_eval,
-          out_shardings=out_shard_eval,
-          static_argnums=static_argnums_eval,
-          donate_argnums=donate_argnums_eval,
-      )
-    else:
-      p_eval_step = None
+  p_train_step = jax.jit(
+      functional_train,
+      in_shardings=in_shard_train,
+      out_shardings=out_shard_train,
+      static_argnums=static_argnums_train,
+      donate_argnums=donate_argnums_train,
+  )
 
   local_metrics_file = open(config.metrics_file, "a", encoding="utf8") if config.metrics_file else None
   running_gcs_metrics = [] if config.gcs_metrics else None
@@ -314,15 +278,6 @@ def train_loop(config, state=None):
             # pylint: disable=not-callable
             nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
             record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
-            # state = state.replace(step=state.step + 1, params=jax.tree.map(lambda x: x.copy(), state.params))
-            # metrics = {
-            #     "scalar": {
-            #         "perf/step_time_seconds": 0,
-            #         "perf/per_device_tflops_per_sec": 0,
-            #         "perf/per_device_tokens_per_sec": 0,
-            #         "learning/total_weights": 0,
-            #         "learning/loss": 0,
-            #     }, "scalars": {}}
             state, metrics = p_train_step(state, example_batch, nextrng)
 
           step_time_delta = datetime.datetime.now() - last_step_completion
@@ -332,7 +287,7 @@ def train_loop(config, state=None):
             performance_metric_queue.put(step_time_delta.total_seconds())
 
           if checkpoint_manager is not None:
-            state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
+            state_to_save = state
             if save_checkpoint(checkpoint_manager, int(step), state_to_save, config.dataset_type, data_iterator, config):
               checkpointing.print_save_message(step, config.async_checkpointing)
 
@@ -342,59 +297,6 @@ def train_loop(config, state=None):
               sys.exit()
 
           metric_logger.write_metrics(running_gcs_metrics, metrics, step)
-
-          if config.dump_hlo and step == start_step:
-            jax.block_until_ready(state)  # Ensure compilation has finished.
-            max_utils.upload_dump(
-                config.dump_hlo_local_dir,
-                config.dump_hlo_gcs_dir,
-                module_name=config.dump_hlo_module_name,
-                delete_local_after=config.dump_hlo_delete_local_after,
-                all_host_upload=config.dump_hlo_upload_all,
-            )
-
-          if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
-            assert eval_data_iterator
-            cumulative_eval_metrics = {
-                "scalar": {
-                    "eval/total_loss": 0.0,
-                    "eval/total_weights": 0.0,
-                    "eval/avg_loss": 0.0,
-                    "eval/moe_lb_loss": 0.0,
-                }
-            }
-            eval_dpo_reward_accuracy = 0.0
-            eval_step_count = 0
-            # pylint: disable=not-callable
-            for eval_batch in eval_data_iterator:
-              if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
-                break
-              with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-                eval_metrics = p_eval_step(state, eval_batch, nextrng)
-              cumulative_eval_metrics["scalar"]["eval/total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
-              cumulative_eval_metrics["scalar"]["eval/total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
-              cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] += float(eval_metrics["scalar"]["evaluation/moe_lb_loss"])
-              eval_dpo_reward_accuracy += float(eval_metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0))  # for dpo only
-              max_logging.log(f"Completed eval step {eval_step_count}")
-              eval_step_count += 1
-            eval_loss = cumulative_eval_metrics["scalar"]["eval/total_loss"] / (
-                cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS
-            )
-            cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
-            cumulative_eval_metrics["scalar"]["eval/avg_moe_lb_loss"] = (
-                cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
-            )
-          if config.use_dpo:
-            cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = eval_dpo_reward_accuracy / eval_step_count
-            metric_logger.write_metrics(running_gcs_metrics, cumulative_eval_metrics, step, is_training=False)
-            max_logging.log(
-                f"average loss after {step=}: {eval_step_count=}, {eval_loss=},"
-                f" total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}"
-            )
-            if eval_loss <= config.target_eval_loss:
-              max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
-              prof.deactivate()
-              break
 
           if step == last_profiling_step or prof.should_deactivate_periodic_profile(step):
             prof.deactivate(blocking_object=state)

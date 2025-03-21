@@ -60,6 +60,7 @@ class Manager:
   good_slice_indices: set[int]
   _snapshot_0: Mapping[str, int | jax.Array | PyTree]
   _snapshot_1: Mapping[str, int | jax.Array | PyTree]
+  _current_snapshot: int | None
 
   _SIMPLE_EXECUTION_TEST_VALUE = 100
 
@@ -86,6 +87,7 @@ class Manager:
     self.good_slice_indices = self.get_slice_availability()
     self._snapshot_0 = None
     self._snapshot_1 = None
+    self._current_snapshot = None
 
   @property
   def devices(self) -> Sequence[jax.Device]:
@@ -130,6 +132,8 @@ class Manager:
 
     else:
       _logger.debug("Caught unknown JaxRuntimeError")
+      for line in traceback.format_exception(error):
+        _logger.debug(line)
       return False
 
     for line in traceback.format_exception(error):
@@ -337,14 +341,23 @@ class Manager:
 
   def pop_snapshot(self) -> tuple[int, Mapping[str, int | PyTree]]:
     """Pop next snapshot."""
-    if self._snapshot_0 is None:
+
+    if self._current_snapshot == 0:
+      snapshot_dict = self._snapshot_0
+      self._snapshot_0 = None
+      self._current_snapshot = 1
+    elif self._current_snapshot == 1:
+      snapshot_dict = self._snapshot_1
+      self._snapshot_1 = None
+      self._current_snapshot = 0
+    else:
       raise IndexError("No snapshots left")
 
-    step = self._snapshot_0.pop("step")
-    snapshot = self._snapshot_0.pop("snapshot")
+    if snapshot_dict is None:
+      raise IndexError("No snapshots left")
 
-    self._snapshot_0 = self._snapshot_1
-    self._snapshot_1 = None
+    step = snapshot_dict.pop("step")
+    snapshot = snapshot_dict.pop("snapshot")
 
     return step, snapshot
 
@@ -382,8 +395,20 @@ class Manager:
     Returns:
       A copy of the snapshot on the host.
     """
+    slice_index_tree = jax.tree.map(lambda x: {d.slice_index for d in x.sharding.device_set}, snapshot)
+    slice_indices = jax.tree.reduce(operator.or_, slice_index_tree, set())
+    _logger.debug("_put_snapshot_on_host: snapshot is on slices: %s", slice_indices)
+
+    jax.block_until_ready(snapshot)
     shardings = jax.tree.map(lambda x: x.sharding.with_memory_kind("pinned_host"), snapshot)
-    return  jax.device_put(snapshot, shardings)
+
+    slice_index_tree = jax.tree.map(lambda x: {d.slice_index for d in x.device_set}, shardings)
+    slice_indices = jax.tree.reduce(operator.or_, slice_index_tree, set())
+    _logger.debug("_put_snapshot_on_host: shardings are on slices: %s", slice_indices)
+
+    ret = jax.device_put(snapshot, shardings)
+    jax.block_until_ready(ret)
+    return ret
 
     # def copy(x: Any):
     #   try:
@@ -420,16 +445,33 @@ class Manager:
 
     _logger.debug("Saving a snapshot of %s bytes", total_nbytes)
 
-    snapshot_host = self._put_snapshot_on_host(snapshot)
+    slice_index_tree = jax.tree.map(lambda x: {d.slice_index for d in x.sharding.device_set}, snapshot)
+    slice_indices = jax.tree.reduce(operator.or_, slice_index_tree, set())
+    _logger.debug("snapshot is on slices: %s", slice_indices)
+
+    snapshot_host = {}
+    for k, v in snapshot.items():
+      snapshot_host[k] = self._put_snapshot_on_host(v)
     _logger.debug("Snapshot dispatched")
+
+    slice_index_tree = jax.tree.map(lambda x: {d.slice_index for d in x.sharding.device_set}, snapshot_host)
+    slice_indices = jax.tree.reduce(operator.or_, slice_index_tree, set())
+    _logger.debug("snapshot_host is on slices: %s", slice_indices)
 
     snapshot_dict = {"step": step, "snapshot": snapshot_host}
     if True or block:
       jax.block_until_ready(snapshot_dict)
       _logger.debug("Snapshot completed")
 
-    self._snapshot_1 = self._snapshot_0
-    self._snapshot_0 = snapshot_dict
+    if self._current_snapshot == 0:
+      self._snapshot_1 = snapshot_dict
+      self._current_snapshot = 1
+    elif self._current_snapshot == 1:
+      self._snapshot_0 = snapshot_dict
+      self._current_snapshot = 0
+    else:
+      self._snapshot_0 = snapshot_dict
+      self._current_snapshot = 0
 
   @timing.timeit
   def get_resharded_snapshot(
@@ -446,7 +488,24 @@ class Manager:
     while True:
       step, snapshot = self.pop_snapshot()
 
-      _, snapshot_device = self._reshard_snapshot(snapshot, mesh)
+      slice_index_tree = jax.tree.map(lambda x: {d.slice_index for d in x.sharding.device_set}, snapshot)
+      slice_indices = jax.tree.reduce(operator.or_, slice_index_tree, set())
+      _logger.debug("snapshot is on slices: %s", slice_indices)
+
+      snapshot_host = {}
+      snapshot_device = {}
+      for k, v in snapshot.items():
+        host, device = self._reshard_snapshot(v, mesh)
+        snapshot_host[k] = host
+        snapshot_device[k] = device
+
+      slice_index_tree = jax.tree.map(lambda x: {d.slice_index for d in x.sharding.device_set}, snapshot_host)
+      slice_indices = jax.tree.reduce(operator.or_, slice_index_tree, set())
+      _logger.debug("snapshot_host is on slices: %s", slice_indices)
+
+      slice_index_tree = jax.tree.map(lambda x: {d.slice_index for d in x.sharding.device_set}, snapshot_device)
+      slice_indices = jax.tree.reduce(operator.or_, slice_index_tree, set())
+      _logger.debug("snapshot_device is on slices: %s", slice_indices)
 
       try:
         jax.block_until_ready(snapshot_device)
@@ -566,6 +625,7 @@ class Manager:
     resharded_pinned_host = reshard.reshard(
         x,
         sharding_pinned_host,
+        put_array=self.device_put_per_shard0,
         donate_input=False,
     )
 
@@ -607,11 +667,25 @@ class Manager:
       raise ValueError("`sharding` must contain only `Sharding` instances.")
 
     if dst_sharding.num_devices <= arr.sharding.num_devices:
-      arrays = [
-          x.data
-          for x in arr.addressable_shards
-          if x.device.slice_index in self.good_slice_indices
-      ]
+      _logger.debug("Getting shards from good_slice_indices=%s", self.good_slice_indices)
+      arrays = []
+      for x in arr.addressable_shards:
+        try:
+          jax.block_until_ready(x.data)
+          if x.device.slice_index not in self.good_slice_indices:
+            _logger.debug("shard ready on slice: %s which is supposed to be bad", x.device.slice_index)
+        except:
+          if x.device.slice_index in self.good_slice_indices:
+            _logger.debug("shard not ready on slice: %s which is supposed to be good", x.device.slice_index)
+
+        if x.device.slice_index in self.good_slice_indices:
+          arrays.append(x.data)
+
+      # arrays = [
+      #     x.data
+      #     for x in arr.addressable_shards
+      #     if x.device.slice_index in self.good_slice_indices
+      # ]
     else:
       # Reshard up
       slice_to_arrays = collections.defaultdict(list)

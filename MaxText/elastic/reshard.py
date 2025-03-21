@@ -58,16 +58,4 @@ def reshard(
   if put_array is None:
     put_array = default_put_array
 
-  flat_x, tree_def = jax.tree_util.tree_flatten(x)
-  flat_sharding = jax.api_util.flatten_axes(
-      "reshard sharding", tree_def, sharding
-  )
-
-  if len(flat_x) != len(flat_sharding):
-    raise ValueError("Mismatched length between `x` and `sharding`.")
-
-  arrays = [
-      put_array(arr, dst_sharding, donate_input)
-      for arr, dst_sharding in zip(flat_x, flat_sharding)
-  ]
-  return jax.tree_util.tree_unflatten(tree_def, arrays)
+  return jax.tree.map(lambda arr, sharding: put_array(arr, sharding, donate_input), x, sharding)
