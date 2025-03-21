@@ -13,7 +13,7 @@ export MODEL_VARIATION='v2-16b'
 export MODEL_NAME=deepseek2-16b
 
 # Installing torch for deps in forward_pass_logit_chekcker.py
-pip install torch --index-url https://download.pytorch.org/whl/cpu
+python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # After downloading checkpoints, copy them to GCS bucket at $CHKPT_BUCKET \
 # Non-Googlers please remember to use separate GCS paths for uploading model weights from HuggingFace ($CHKPT_BUCKET) and MaxText compatible weights ($MODEL_BUCKET).
@@ -23,7 +23,7 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu
 export CHKPT_BUCKET=gs://maxtext-deepseek/deepseek2-16b/hf
 export MODEL_BUCKET=gs://maxtext-deepseek/deepseek2-16b
 
-JAX_PLATFORMS=cpu python MaxText/convert_deepseek_ckpt.py.py --base_model_path ${CHKPT_BUCKET} --maxtext_model_path ${MODEL_BUCKET}/${idx} --model_size ${MODEL_VARIATION}
+JAX_PLATFORMS=cpu python3 -m MaxText.convert_deepseek_ckpt.py.py --base_model_path ${CHKPT_BUCKET} --maxtext_model_path ${MODEL_BUCKET}/${idx} --model_size ${MODEL_VARIATION}
 
 # Non-Googlers please remember to point `DATASET_PATH` to the GCS bucket where you have your training data
 export DATASET_PATH=gs://maxtext-dataset
@@ -34,7 +34,7 @@ export CONVERTED_CHECKPOINT=${MODEL_BUCKET}/${idx}/0/items
 export RUN_NAME=unscanned_chkpt_${idx}
 # Note that the `CONVERTED_CHECKPOINT` is in a `scanned` format which is great for training but for efficient decoding performance we want the checkpoint in an `unscanned` format.
 # We can do this by running `MaxText/generate_param_only_checkpoint.py` on `CONVERTED_CHECKPOINT` with `force_unroll=true`.
-JAX_PLATFORMS=cpu python MaxText/generate_param_only_checkpoint.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} load_parameters_path=${CONVERTED_CHECKPOINT} run_name=${RUN_NAME} model_name=${MODEL_NAME} force_unroll=true
+JAX_PLATFORMS=cpu python3 -m MaxText.generate_param_only_checkpoint.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} load_parameters_path=${CONVERTED_CHECKPOINT} run_name=${RUN_NAME} model_name=${MODEL_NAME} force_unroll=true
 
 export UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/checkpoints/0/items
-python3 MaxText/tests/forward_pass_logit_checker.py  MaxText/configs/base.yml tokenizer_type=huggingface tokenizer_path=deepseek-ai/DeepSeek-V2-Lite load_parameters_path=${UNSCANNED_CKPT_PATH} run_name=forward_pass_test_${MODEL_NAME} per_device_batch_size=1 model_name=${MODEL_NAME} max_prefill_predict_length=4 max_target_length=4 dataset_type=synthetic scan_layers=false sparse_matmul=False dtype=float32 activations_in_float32=true matmul_precision=high --max_kl_div=2e-4
+python3 -m MaxText.tests.forward_pass_logit_checker  MaxText/configs/base.yml tokenizer_type=huggingface tokenizer_path=deepseek-ai/DeepSeek-V2-Lite load_parameters_path=${UNSCANNED_CKPT_PATH} run_name=forward_pass_test_${MODEL_NAME} per_device_batch_size=1 model_name=${MODEL_NAME} max_prefill_predict_length=4 max_target_length=4 dataset_type=synthetic scan_layers=false sparse_matmul=False dtype=float32 activations_in_float32=true matmul_precision=high --max_kl_div=2e-4
