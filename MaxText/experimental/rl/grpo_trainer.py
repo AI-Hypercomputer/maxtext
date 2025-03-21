@@ -300,7 +300,7 @@ def generate_completions(config, tokenizer_model, engine, data, params, true_len
     rng, rng_generate = jax.random.split(rng)
     decode_state, result_tokens = engine.generate(params, decode_state, rng=rng_generate)
     for i in range(slot):
-      completions.at[s,i].set(result_tokens.get_result_at_slot(i).tokens.item())
+      completions.at[s, i].set(result_tokens.get_result_at_slot(i).tokens.item())
 
   prompt_with_completions, eos_positions = [], []
   for i in range(prompts.shape[0]):
@@ -737,7 +737,9 @@ def train_loop(config, config_inference, state=None):
       rng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       rng, rng_gen = random.split(rng)
-      example_batch = generate_completions(config, tokenizer_model, engine, example_batch, state.params, example_batch["prompt_true_length"], rng_gen)
+      example_batch = generate_completions(
+          config, tokenizer_model, engine, example_batch, state.params, example_batch["prompt_true_length"], rng_gen
+      )
 
       # TODO: ensure this partitioning is correct
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
