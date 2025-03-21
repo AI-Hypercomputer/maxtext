@@ -278,6 +278,7 @@ class Gpt3DecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      previous_chunk=None,
       page_state=None,
   ):
     cfg = self.config
