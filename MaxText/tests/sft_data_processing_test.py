@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-
+import os.path
 import subprocess
 import unittest
 
@@ -24,9 +24,9 @@ from jax.experimental import mesh_utils
 from datasets import Dataset
 import transformers
 
-import pyconfig
-from input_pipeline import _hf_data_processing
-from input_pipeline import input_pipeline_interface
+from MaxText import pyconfig
+from MaxText.input_pipeline import _hf_data_processing
+from MaxText.input_pipeline import input_pipeline_interface
 
 PROMPT_DATA = [
     [
@@ -87,21 +87,21 @@ class SFTDataProcessingTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
-    exit_code = subprocess.call(["gsutil", "cp", "-r", "gs://maxtext-dataset/hf/llama2-tokenizer", "../assets/"])
-    if exit_code != 0:
+    exit_code = subprocess.call(["gsutil", "cp", "-r", "gs://maxtext-dataset/hf/llama2-tokenizer", os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets") + os.path.sep])
+    if exit_code != os.EX_OK:
       raise ValueError(f"Download tokenizer with gsutil cp failed with exit code: {exit_code}")
 
   def setUp(self):
     super().setUp()
     self.config = pyconfig.initialize(
-        ["sft_trainer.py", "configs/sft.yml"],
+        ["sft_trainer.py", os.path.join("configs", "sft.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
         base_output_directory="gs://max-experiments/",
-        tokenizer_path="../assets/llama2-tokenizer",
+        tokenizer_path=os.path.join(os.path.dirname(".."), "assets", "llama2-tokenizer"),
         train_split="train",
         enable_checkpointing=False,
         use_sft=True,

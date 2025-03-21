@@ -19,24 +19,25 @@ import os
 import sys
 import queue
 
-from typing import Sequence
+from typing import Sequence, Any, Tuple, Union
 from absl import app
 from flax.linen import partitioning as nn_partitioning
 import jax
 import numpy as np
 
-import checkpointing
-import max_utils
-import maxtext_utils
-import max_logging
-import profiler
-import pyconfig
+from MaxText import checkpointing
+from MaxText import max_utils
+from MaxText import maxtext_utils
+from MaxText import max_logging
+from MaxText import profiler
+from MaxText import pyconfig
+from MaxText.utils import gcs_utils
 import tensorflow as tf
 
-from input_pipeline.input_pipeline_interface import create_data_iterator
-from gcp_workload_monitor import GCPWorkloadMonitor
-from metric_logger import MetricLogger
-from train import (
+from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
+from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
+from MaxText.metric_logger import MetricLogger
+from MaxText.train import (
     check_example_batch,
     create_goodput_recorder,
     eval_step,
@@ -245,7 +246,7 @@ def train_loop(config, state=None):
 
     if config.dump_hlo and step == start_step:
       jax.block_until_ready(state)  # Ensure compilation has finished.
-      max_utils.upload_dump(
+      gcs_utils.upload_dump(
           config.dump_hlo_local_dir,
           config.dump_hlo_gcs_dir,
           module_name=config.dump_hlo_module_name,
@@ -317,7 +318,7 @@ def train_loop(config, state=None):
   return state
 
 
-def main(argv: Sequence[str]) -> None:
+def main(argv: Union[Sequence[str], Tuple[Any, ...]]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   # TF allocates extraneous GPU memory when using TFDS data
   # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF

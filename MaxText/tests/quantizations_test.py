@@ -20,9 +20,9 @@ from jax import random, lax
 from flax import linen as nn
 import functools
 import numpy as np
-import pyconfig
+from MaxText import pyconfig
 import pytest
-from layers import quantizations
+from MaxText.layers import quantizations
 import unittest
 from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2 import calibration
@@ -52,7 +52,7 @@ class QuantTestModule(nn.Module):
 
 def _configure_quantization(quant_str="", quant_cfg_path="", mode_str="train", replicate_scale=False):
   config = pyconfig.initialize(
-      [None, "configs/base.yml"],
+      [None, os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
       enable_checkpointing=False,
       quantization=quant_str,
       quant_cfg_path=quant_cfg_path,

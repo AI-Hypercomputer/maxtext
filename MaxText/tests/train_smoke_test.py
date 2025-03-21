@@ -17,7 +17,7 @@ limitations under the License.
 """ Smoke test """
 import os
 import unittest
-from train import main as train_main
+from MaxText.train import main as train_main
 from absl.testing import absltest
 
 
@@ -44,7 +44,8 @@ class Train(unittest.TestCase):
             "dataset_type=synthetic",
             "steps=10",
             "enable_checkpointing=False",
-            "tokenizer_path=../assets/tokenizer.llama2",
+            "tokenizer_path={}".format(os.path.join(
+              os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")),
             "enable_goodput_recording=False",
             "enable_checkpoint_cloud_logger=False",
             "monitor_goodput=False",

@@ -19,7 +19,7 @@ Get LLaMA chkpt_vars from Meta
 
 Example cmd:
 To save a ckpt
-python3 MaxText/llama_or_mistral_ckpt.py --base-model-path <path/to/meta/ckpt> \
+python3 -m MaxText.llama_or_mistral_ckpt --base-model-path <path/to/meta/ckpt> \
     --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size llama2-7b
 
 The base model checkpoints should be in the format `{name}.{chkpt_idx}.pth`
@@ -49,12 +49,12 @@ import torch
 import psutil
 from tqdm import tqdm
 
-import max_logging
-import max_utils
-from train import save_checkpoint
-import checkpointing
+from MaxText import max_logging
+from MaxText import max_utils
+from MaxText.train import save_checkpoint
+from MaxText import checkpointing
 from safetensors import safe_open
-from utils import gcs_utils
+from MaxText.utils import gcs_utils
 
 MODEL_PARAMS_DICT = {
     "llama2-70b": {

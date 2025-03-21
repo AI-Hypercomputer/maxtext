@@ -16,18 +16,20 @@ limitations under the License.
 
 """ Tests for the maxengine """
 
-import logging
 import sys
-import common_types
+import unittest
+import os.path
+
 import jax
 from jax import numpy as jnp
 import numpy as np
-import unittest
-import pyconfig
-import max_utils
-from maxengine import MaxEngine
-from layers import quantizations
-from layers import models
+
+from MaxText import common_types
+from MaxText import pyconfig
+from MaxText import max_utils
+from MaxText.maxengine import MaxEngine
+from MaxText.layers import quantizations
+from MaxText.layers import models
 
 Mesh = jax.sharding.Mesh
 
@@ -44,7 +46,7 @@ class MaxEngineTest(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,
@@ -72,7 +74,7 @@ class MaxEngineTest(unittest.TestCase):
 
   def test_stack_and_unstack_prefill_cache(self):
     config = pyconfig.initialize(
-        [None, "configs/base.yml"],
+        [None, os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
         enable_checkpointing=False,
         stack_prefill_result_cache=True,
     )

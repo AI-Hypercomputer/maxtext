@@ -43,8 +43,9 @@ current_dir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentfra
 parent_dir = os.path.dirname(current_dir)
 sys.path.insert(0, parent_dir)
 
-from maxengine import create_engine_from_config_flags
-import offline_inference
+from MaxText.maxengine import create_engine_from_config_flags
+
+from MaxText.inference_mlperf import offline_inference
 
 _MLPERF_ID = "llama2-70b"
 log = logging.getLogger(__name__)

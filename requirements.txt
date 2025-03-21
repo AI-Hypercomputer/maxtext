@@ -19,6 +19,7 @@ ml-collections
 ml-goodput-measurement==0.0.5
 numpy
 optax
+pathwaysutils
 protobuf==3.20.3
 pylint
 pytest
