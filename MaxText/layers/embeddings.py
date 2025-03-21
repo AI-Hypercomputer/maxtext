@@ -50,7 +50,7 @@ class Embed(nn.Module):
   features: int
   cast_input_dtype: Optional[DType] = None
   dtype: DType = jnp.float32
-  attend_dtype: Optional[DType] = None
+  cast_activation_dtype: Optional[DType] = None
   embedding_init: Initializer = default_embed_init
 
   def setup(self):
@@ -60,6 +60,17 @@ class Embed(nn.Module):
         (self.num_embeddings, self.features),
         self.config.weight_dtype,
     )
+    self.activation_dtype = self.cast_activation_dtype if self.cast_activation_dtype is not None else self.dtype
+
+  def __cast_input_dtype(self, inputs: Array):
+    if self.cast_input_dtype:
+      inputs = inputs.astype(self.cast_input_dtype)
+    if not jnp.issubdtype(inputs.dtype, jnp.integer):
+      raise ValueError("Input type must be an integer or unsigned integer.")
+    return inputs
+
+  def __cast_activation_dtype(self, act: Array):
+    return jnp.asarray(act, self.embedding_dtype)
 
   def __call__(self, inputs: Array) -> Array:
     """Embeds the inputs along the last dimension.
@@ -72,17 +83,14 @@ class Embed(nn.Module):
       with an additional `features` dimension appended.
     """
     cfg = self.config
-    if self.cast_input_dtype:
-      inputs = inputs.astype(self.cast_input_dtype)
-    if not jnp.issubdtype(inputs.dtype, jnp.integer):
-      raise ValueError("Input type must be an integer or unsigned integer.")
 
+    inputs = self.__cast_input_dtype(inputs)
     if cfg.use_iota_embed:
       iota = lax.iota(jnp.int32, self.num_embeddings)
       one_hot = jnp.array(inputs[..., jnp.newaxis] == iota, dtype=self.dtype)
-      output = jnp.dot(one_hot, jnp.asarray(self.embedding, self.dtype))
+      output = jnp.dot(one_hot, self.__cast_activation_dtype(self.embedding))
     else:
-      output = jnp.asarray(self.embedding, self.dtype)[inputs]
+      output = self.__cast_activation_dtype(self.embedding)[inputs]
     output = nn.with_logical_constraint(
         output, ("activation_embed_and_logits_batch", "activation_length", "activation_embed")
     )
@@ -101,8 +109,7 @@ class Embed(nn.Module):
       Commonly used for weight-sharing between embeddings and logit transform
       in NLP models.
     """
-    dtype = self.attend_dtype if self.attend_dtype is not None else self.dtype
-    return jnp.dot(query, jnp.asarray(self.embedding, jnp.bfloat16).T)
+    return jnp.dot(self.__cast_activation_dtype(query), self.self.__cast_activation_dtype(self.embedding).T)
 
 
 class RotaryEmbedding(nn.Module):
