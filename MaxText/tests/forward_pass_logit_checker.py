@@ -121,7 +121,7 @@ def main(config, test_args):  # pylint: disable=W0621
     # The ellipsis is used to currently support jax nightly versions newer than
     # 1/9/2025 and stable tests. This can be simplified later
     max_logging.log(
-        f"Max Numerical Difference {np.max(np.subtract(full_train_logits[..., 0, :token_size, :], golden_logits[:token_size, :]))}"  # pylint: disable=C0301
+        f"Max Numerical Difference {np.max(np.abs(np.subtract(full_train_logits[..., 0, :token_size, :], golden_logits[:token_size, :])))}"  # pylint: disable=C0301
     )
 
     model_probabilities = jax.nn.softmax(full_train_logits[..., 0, :token_size, :], axis=-1)
