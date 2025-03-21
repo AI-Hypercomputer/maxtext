@@ -29,8 +29,24 @@ RUN if [ $DEVICE = "tpu" ]; then \
         pip install --no-cache-dir jax[tpu]==0.5.1; \
     fi
 
+RUN apt-get update && apt-get install --yes --no-install-recommends \
+    ca-certificates \
+    curl \
+    gnupg \
+  && echo "deb https://packages.cloud.google.com/apt gcsfuse-buster main" \
+    | tee /etc/apt/sources.list.d/gcsfuse.list \
+  && curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add - \
+  && apt-get update \
+  && apt-get install --yes gcsfuse \
+  && apt-get install --yes google-cloud-cli \
+  && apt-get install --yes dnsutils \
+  && mkdir /gcs
+
 # Install Maxtext requirements with Jax Stable Stack
 RUN pip install -r /deps/requirements_with_jax_stable_stack.txt
 
 # Run the script available in JAX Stable Stack base image to generate the manifest file
 RUN bash /jax-stable-stack/generate_manifest.sh PREFIX=maxtext COMMIT_HASH=$COMMIT_HASH
+
+# Clean up the build
+RUN apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
