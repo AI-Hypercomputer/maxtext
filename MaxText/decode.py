@@ -42,7 +42,9 @@ def main(argv: Sequence[str]) -> None:
   text = config.prompt
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
-  tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
+  has_chat_template = getattr(tokenizer_model.tokenizer, "chat_template", False)
+  tokens, true_length = tokenizer_model.encode(text, is_bos=not has_chat_template, 
+                          prefill_lengths=[config.max_prefill_predict_length])
   assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
   assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
   assert config.quantization != "nanoo_fp8", "NANOO fp8 on AMD MI300/MI325 GPUs is not supported in decode.py yet"
@@ -54,7 +56,6 @@ def main(argv: Sequence[str]) -> None:
   prefill_result, first_token = engine.prefill(
       params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill, slot=slot
   )
-
   # Insert
   rng, rng_init_decode = jax.random.split(rng)
   decode_state = engine.init_decode_state(rng_init_decode)
@@ -68,7 +69,7 @@ def main(argv: Sequence[str]) -> None:
     rng, rng_generate = jax.random.split(rng)
     decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
     sampled_tokens_list.append(sampled_tokens)
-
+      
   # Get results
   results = [sampled_tokens.get_result_at_slot(slot).tokens.item() for sampled_tokens in sampled_tokens_list]
   output = tokenizer_model.decode(results)
