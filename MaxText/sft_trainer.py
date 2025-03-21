@@ -211,12 +211,7 @@ def train_loop(config, state=None):
       try:
         example_batch = load_next_batch(data_iterator, example_batch, config)
       except Exception as e:  # pylint: disable=broad-except
-        max_logging.log(f"load_next_batch failed, you may run out of data. Error message: {e}")
-        if checkpoint_manager is not None:
-          if save_checkpoint(
-              checkpoint_manager, int(state.step), state, config.dataset_type, data_iterator, config, force=True
-          ):
-            checkpointing.print_save_message(state.step, config.async_checkpointing)
+        max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
         break
       record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
       check_example_batch(config, example_batch=example_batch)
@@ -299,6 +294,15 @@ def train_loop(config, state=None):
       max_utils.print_mem_stats("After params initialized")
 
   if checkpoint_manager is not None:
+    if int(state.step) - 1 % config.checkpoint_period != 0:
+      try:
+        if save_checkpoint(
+            checkpoint_manager, int(state.step) - 1, state, config.dataset_type, data_iterator, config, force=True
+        ):
+          checkpointing.print_save_message(int(state.step) - 1, config.async_checkpointing)
+      except Exception:  # pylint: disable=broad-except
+        max_logging.log(f"Checkpoint already saved for step {int(state.step)-1}.")
+
     checkpoint_manager.wait_until_finished()
   metric_logger.write_metrics(running_gcs_metrics, metrics, config.steps - 1)  # final step metrics
   max_utils.close_summary_writer(writer)
