@@ -20,7 +20,7 @@ import pytest
 import string
 import random
 
-from anyio import gettempdir
+from tempfile import gettempdir
 
 from MaxText.train import main as train_main
 

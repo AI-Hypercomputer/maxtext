@@ -13,17 +13,15 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-import tempfile
-
-from anyio import gettempdir
 
 """ Tests for the common Max Utils """
 import unittest
 import pytest
 import os.path
+import tempfile
+
 from tempfile import gettempdir
 from MaxText.train_compile import main as train_compile_main
-from MaxText.train import main as train_main
 
 
 class TrainCompile(unittest.TestCase):

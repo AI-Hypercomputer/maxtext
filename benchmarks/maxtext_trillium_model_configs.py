@@ -13,7 +13,6 @@
  See the License for the specific language governing permissions and
  limitations under the License.
  """
-from tempfile import gettempdir
 
 """Shared Benchmark config for v6e orchestrations."""
 
@@ -21,6 +20,7 @@ import dataclasses
 import typing
 import xla_flags_library
 import os.path
+from tempfile import gettempdir
 
 # TODO(vbarr@) Abstract software features like checkpointing,
 # real data / synthetic data out of this config

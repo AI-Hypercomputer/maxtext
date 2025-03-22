@@ -13,7 +13,6 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-from MaxText.multihost_dataloading import MultiHostDataLoadIterator
 
 # pylint: disable=g-bad-todo, abstract-method, consider-using-with, ungrouped-imports
 """Training loop and Decoding of the model."""
@@ -39,6 +38,7 @@ import orbax.checkpoint
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
+from MaxText.multihost_dataloading import MultiHostDataLoadIterator
 from MaxText import checkpointing
 from MaxText import max_utils
 from MaxText import maxtext_utils
@@ -46,19 +46,20 @@ from MaxText import max_logging
 from MaxText import optimizers
 from MaxText import profiler
 from MaxText import pyconfig
-import pathwaysutils  # pylint: disable=unused-import
+
+import pathwaysutils
+pathwaysutils.initialize()
+
 import tensorflow as tf
 
-from MaxText.metric_logger import MetricLogger
-from MaxText.utils import gcs_utils
-
-from MaxText.vertex_tensorboard import VertexTensorboardManager
-# Placeholder: internal
-
+from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
 from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.layers import models
-
-from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
+from MaxText.layers import quantizations
+from MaxText.metric_logger import MetricLogger
+from MaxText.utils import gcs_utils
+from MaxText.vertex_tensorboard import VertexTensorboardManager
+# Placeholder: internal
 
 import jax.numpy as jnp
 from jax import random
@@ -69,8 +70,6 @@ from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
-
-from MaxText.layers import quantizations
 
 from ml_goodput_measurement import goodput
 from ml_goodput_measurement import monitoring

@@ -199,7 +199,7 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.gpu_only
   def test_gpu_cudnn_flash_te(self):
-    cudnn_flash_te = [  # tests base config on GPU with flash attention"""
+    cudnn_flash_te = [  # tests base config on GPU with flash attention
         None,
         os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml"),
         r"base_output_directory=gs://runner-maxtext-logs",
