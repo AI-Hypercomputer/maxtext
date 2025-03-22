@@ -621,11 +621,84 @@ class MoeBlock(nn.Module):
       kernel = nn.with_logical_constraint(kernel, kernel_axes)
     return kernel
 
+  
   def dense_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
     # gate_logits: batch, length, expert
     gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", None))
     # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
     top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+
+    
+    # TODO(b/363005676) : Currently this hardcodes two activation functions (e.g. swigLU), we should support any number
+    def dispatch_a2a_overlapped_with_ff1(dispatch_mask,inputs, w0, w1):
+      # We overlap the a2a by chunking up the comms and compute along the embed axis.
+      # We rely on XLA with `--xla_tpu_enable_async_all_to_all` to schedule the a2a
+      # so only the first chunk is exposed, the rest can be overlapped.
+
+      # We found explicit communication via shard map is necessary to achieve overlap, details in b/366501973
+      def input_a2a(input_chunk):
+        return jax.lax.all_to_all(input_chunk, 'expert', 0, 1, tiled=True)
+
+
+      # Desired overlapped implementaion
+      # AG weigts over FSDP, keep sharded by exp - this might not be necessary, or perhaps
+      # we could include the sharding by weight and rely on XLA to figure out the FSDP AG
+      w0_kernel_axes = ("exp", None, None)
+      w0 = nn.with_logical_constraint(w0, w0_kernel_axes)
+      w1 = nn.with_logical_constraint(w1, w0_kernel_axes)
+
+      def chunked_a2a(inputs, w0, w1):
+        # Returns: inputs @ w0 and inputs @ w1
+
+        exp, batch, capacity, embed = jnp.shape(inputs)
+        # weights are [exp, model=embed, hidden=mlp]
+        mlp = jnp.shape(w0)[2] 
+
+        chunk_size = embed // self.config.num_moe_a2a_chunks
+        # We chunk along the contracting dimension (embed), thus each step produces a partial sum
+        running_partial_sum_0 = jnp.zeros((exp, batch, capacity, mlp), dtype=inputs.dtype)
+        running_partial_sum_1 = jnp.zeros((exp, batch, capacity, mlp), dtype=inputs.dtype)
+        running_partial_sum_0 = nn.with_logical_constraint(running_partial_sum_0, ('activation_exp', 'activation_batch_no_exp', None, "activation_mlp"))
+        running_partial_sum_1 = nn.with_logical_constraint(running_partial_sum_1, ('activation_exp', 'activation_batch_no_exp', None, "activation_mlp"))
+
+
+
+        for i in range(self.config.num_moe_a2a_chunks):
+            chunk_start = chunk_size * i
+
+            input_chunk = jax.lax.dynamic_slice_in_dim(inputs, chunk_start, chunk_size, 3)
+            #input_chunk = nn.with_logical_constraint(input_chunk, ("activation_exp", "activation_batch_no_exp", None, "activation_embed"))
+
+            # Inputs are exp, bach, capacity, embed
+            inputs_before_a2a_spec = nn.logical_to_mesh_axes((None, "activation_batch", None, "activation_embed"))
+            inputs_after_a2a_spec = nn.logical_to_mesh_axes(("activation_exp", "activation_batch_no_exp", None, "activation_embed"))
+            # Perform a2a on input_chunk Exp, B/X -> Exp/X, B
+            input_chunk = shard_map.shard_map(input_a2a, self.mesh, in_specs=inputs_before_a2a_spec, out_specs=inputs_after_a2a_spec)(input_chunk)
+
+            w0_chunk = jax.lax.dynamic_slice_in_dim(w0, chunk_start, chunk_size, 1)
+            w1_chunk = jax.lax.dynamic_slice_in_dim(w1, chunk_start, chunk_size, 1)
+
+            w0_chunk = nn.with_logical_constraint(w0_chunk, w0_kernel_axes)
+            w1_chunk = nn.with_logical_constraint(w1_chunk, w0_kernel_axes)
+
+            running_partial_sum_0 = running_partial_sum_0 + jnp.einsum("EBCM,EMH -> EBCH", input_chunk, w0_chunk)
+            running_partial_sum_1 = running_partial_sum_1 + jnp.einsum("EBCM,EMH -> EBCH", input_chunk, w1_chunk)
+        return running_partial_sum_0, running_partial_sum_1
+
+      with jax.named_scope("dispatch"):
+        dispatch = self.get_einsum(rhs_mesh_axes=mask_axes)("BSM,BSEC -> EBCM", inputs, dispatch_mask)
+        # Keep dispatch sharded like data parallel - we will A2A in chunks
+        dispatch = nn.with_logical_constraint(dispatch, (None, "activation_batch", None, "activation_embed"))
+      with jax.named_scope("wi_both"):
+        return chunked_a2a(dispatch, w0, w1)
+
+
+
+
+
+
+
+
 
     if self.config.decoder_block == "deepseek":
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
@@ -641,45 +714,50 @@ class MoeBlock(nn.Module):
       mask_axes = ("activation_batch", "activation_length", None, None)
       dispatch_mask = nn.with_logical_constraint(dispatch_mask, mask_axes)
       combine_mask = nn.with_logical_constraint(combine_mask, mask_axes)
-      if self.config.model_call_mode != "inference":
+      if self.config.model_call_mode != "inference" and self.config.load_balance_loss_weight > 0:
         loss = self.load_balance_loss(top_k_indices, weights)
       else:
         loss = None
       inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
-      with jax.named_scope("dispatch"):
-        dispatch = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=DISPATCH)(
-            "BSM,BSEC -> EBCM", inputs, dispatch_mask, precision=matmul_precision
-        )
-        dispatch = nn.with_logical_constraint(
-            dispatch,
-            ("activation_exp", "activation_batch_no_exp", None, "activation_embed"),
-        )
-      with jax.named_scope("wi_0"):
-        w0_kernel_axes = ("exp", None, "mlp")
-        w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
-        layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
-            "EBCM,EMH -> EBCH", dispatch, w0_kernel, precision=matmul_precision
-        )
-        if self.config.activations_in_float32:
-          layer_w0 = layer_w0.astype(jnp.float32)
-        layer_w0 = nn.with_logical_constraint(
-            layer_w0,
-            ("activation_exp", "activation_batch_no_exp", None, "activation_mlp"),
-        )
+      if self.config.num_moe_a2a_chunks > 1:
+        layer_w0, layer_w1 =  dispatch_a2a_overlapped_with_ff1(dispatch_mask,inputs, w0_kernel, w1_kernel)
         layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
-      with jax.named_scope("wi_1"):
-        w1_kernel_axes = ("exp", None, "mlp")
-        w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
-        layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
-            "EBCM,EMH -> EBCH", dispatch, w1_kernel, precision=matmul_precision
-        )
-        if self.config.activations_in_float32:
-          layer_w1 = layer_w1.astype(jnp.float32)
-        layer_w1 = nn.with_logical_constraint(
-            layer_w1,
-            ("activation_exp", "activation_batch_no_exp", None, "activation_mlp"),
-        )
         layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
+      else:
+        with jax.named_scope("dispatch"):
+          dispatch = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=DISPATCH)(
+              "BSM,BSEC -> EBCM", inputs, dispatch_mask, precision=matmul_precision
+          )
+          dispatch = nn.with_logical_constraint(
+              dispatch,
+              ("activation_exp", "activation_batch_no_exp", None, "activation_embed"),
+          )
+        with jax.named_scope("wi_0"):
+          w0_kernel_axes = ("exp", None, "mlp")
+          w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
+          layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
+              "EBCM,EMH -> EBCH", dispatch, w0_kernel, precision=matmul_precision
+          )
+          if self.config.activations_in_float32:
+            layer_w0 = layer_w0.astype(jnp.float32)
+          layer_w0 = nn.with_logical_constraint(
+              layer_w0,
+              ("activation_exp", "activation_batch_no_exp", None, "activation_mlp"),
+          )
+          layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
+        with jax.named_scope("wi_1"):
+          w1_kernel_axes = ("exp", None, "mlp")
+          w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
+          layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
+              "EBCM,EMH -> EBCH", dispatch, w1_kernel, precision=matmul_precision
+          )
+          if self.config.activations_in_float32:
+            layer_w1 = layer_w1.astype(jnp.float32)
+          layer_w1 = nn.with_logical_constraint(
+              layer_w1,
+              ("activation_exp", "activation_batch_no_exp", None, "activation_mlp"),
+          )
+          layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
       layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
       with jax.named_scope("wo"):

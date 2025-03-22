@@ -131,6 +131,10 @@ megablox: True
 sparse_matmul: True
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
 load_balance_loss_weight: 0.01 # weight for the load balance loss
+num_moe_a2a_chunks: 1 # Number of chunks used for MoE FF layeres to pipeline and add the A2A.
+# We can potentially hide  (chunks - 1) / chunk fraction of the a2a, at the cost of 
+# each matmul being a factor of chunk smaller - which may make the matmuls less efficient.
+# You should use --xla_tpu_enable_async_all_to_all in conjunction with num_moe_a2a_chunks > 1
 
 # deepseek moe
 base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer (use base_mlp_dim if not DeepSeek style)
