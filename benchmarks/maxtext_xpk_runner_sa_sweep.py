@@ -634,9 +634,9 @@ def main() -> int:
             base_docker_image=base_docker_image,
             pathways_config=None
           )
-          initial_block_size = 2048
-          final_block_size = 8192
-          step_block_size = 512
+          initial_block_size = 4096
+          final_block_size = 9216
+          step_block_size = 1024
           
           # for curr_block_q in range(2048,final_block_size,step_block_size):
           #   wl_config.mdel
