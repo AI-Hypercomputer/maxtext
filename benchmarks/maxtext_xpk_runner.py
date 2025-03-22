@@ -331,7 +331,7 @@ def build_user_command(
       f'model_name={wl_config.model.model_type}',
       f'base_output_directory={wl_config.base_output_directory}',
       f'{vertex_tensorboard}',
-      f'{run_name_command} '
+      f'{run_name_command}'
   ])
   return command
 
@@ -430,7 +430,7 @@ def generate_xpk_workload_cmd(
     docker_image_flag = f'--base-docker-image="{wl_config.base_docker_image}"'
 
   print(f'User command: {user_command}')
-  HLO_FOLDER=f"gs://mazumdera-test-bucket-us-east5/maxtext/contextpara/mazum-llama3-1-70b-1/hlos"
+  HLO_FOLDER="gs://DIR"
   now = datetime.datetime.now()
   timestamp = now.strftime("%Y-%m-%d-%H:%M")
 
@@ -516,9 +516,8 @@ def on_device_benchmark_runner(
 # Run maxtext_xpk_runner.py as a script for executing multiple workloads pythonically!
 def main() -> int:
   # Variables to configure:
-  output_bucket = 'gs://mazumdera-test-bucket-us-east5/maxtext/contextpara'
-  base_docker_image = 'gcr.io/tpu-prod-env-multipod/mazumdera_runner3' #_DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME
-  # base_docker_image = _DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME
+  output_bucket = 'gs://DIR'
+  base_docker_image = _DEFAULT_MAXTEXT_BASE_DOCKER_IMAGE_NAME
 
   # Set up the clusters to run workloads on!
   v5e_cluster_config = XpkClusterConfig(
@@ -576,14 +575,7 @@ def main() -> int:
   list_of_models = [
     # model_configs.llama2_70b_4096_sc,
     # model_configs.default_128
-    # model_configs.llama3_1_70b_131072,
-    model_configs.llama3_1_70b_131072_expt1,
-    model_configs.llama3_1_70b_131072_expt2,
-    # model_configs.llama3_1_70b_129024_context,
-    # model_configs.llama3_1_70b_131072_device,
-    # model_configs.llama3_1_70b_32768,
-    # model_configs.llama3_1_70b_131072_1,
-    # model_configs.llama3_1_70b_131072_2
+    model_configs.llama3_1_70b_131072,
   ]
 
   # Loop possibilities:
@@ -620,6 +612,7 @@ def main() -> int:
         # Use the libtpu dependencies from:
         for libtpu_type in [
             LibTpuType.CUSTOM
+            # TODO: revert this back to LibTpuType.MAXTEXT
             # LibTpuType.MAXTEXT
             # LibTpuType.NIGHTLY
         ]:
@@ -635,12 +628,10 @@ def main() -> int:
             base_docker_image=base_docker_image,
             pathways_config=None
           )
-
           command, name = generate_xpk_workload_cmd(
             cluster_config=cluster_config,
             wl_config=wl_config
           )
-
 
           print(f"Name of the workload is: {name} \n")
           xpk_workload_names.append(name)

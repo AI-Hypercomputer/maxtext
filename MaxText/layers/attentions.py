@@ -362,18 +362,12 @@ class AttentionOp(nn.Module):
         v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
     )
 
-    # mask_shape = (query.shape[2], key.shape[2])
     mask_shape = (self.config.max_target_length, self.config.max_target_length)
     mask = splash_attention_mask.CausalMask(shape=mask_shape)
 
-    # permute the mask if cp and load_balancing
+    # Create LoadBalancedCausalMask if cp and load_balancing
     if cp_size > 1 and load_balanced_context_parallel:
-      # mask = create_load_balance_causal_mask(shape=mask_shape,cp_size=cp_size)
       mask = LoadBalancedCausalMask(shape=mask_shape, cp_size=cp_size)
-
-    # jax.debug.print("permuted: mask items = {items}", items = new_mask.__getitem__((slice(mask.shape[0]),slice(mask.shape[1]))))
-
-    # jax.debug.print("new_mask == old_mask = {equal}", equal = new_mask.__getitem__((slice(mask.shape[0]),slice(mask.shape[1])))==mask.__getitem__((slice(mask.shape[0]),slice(mask.shape[1]))))
 
     # TODO: figure out local_sliding attention + load_balancing, default is global
     # Apply local masking if local sliding attention is enabled.
@@ -439,12 +433,6 @@ class AttentionOp(nn.Module):
       else:
         decoder_segment_ids_tuple = None
       attention_output = jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids_tuple)
-      # pdb.set_trace()
-      # jax.debug.print("attention_output.shape = {ash}", ash = attention_output.shape)
-      # full_mask = [per_head_mask for per_head_mask in multi_head_mask.masks]
-      # valid_tokens = multi_head_mask.masks.any(dim=-1) # [q_sl] -> [q_sl, 1] -> [q_sl, head_dim]
-      # valid_tokens = decoder_segment_ids_q & multi_head_mask.masks.any(dim=-1)
-      # attention_output = attention_output * valid_tokens # broadcasting along head_dim
 
       return attention_output
 
@@ -452,18 +440,17 @@ class AttentionOp(nn.Module):
 
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
 
-    # if cp_size > 1 and load_balanced_context_parallel:
-    #   # inverse reorder for load_balancing
-    #   x = self.reorder_causal_load_balancing(tensor=x, cp_size=cp_size, seq_dim=1, to_contiguous=True)
-
     return x
 
   
   @staticmethod
   def reorder_mask_load_balancing(tensor, cp_size: int, seq_dim: int):
-    """Reorders a tensor for load balancing the compute of causal attention."""
-    if type(tensor) is not np.ndarray:
-      breakpoint()
+    """
+    Reorders a tensor for load balancing the compute of causal attention.
+    This function works on numpy arrays instead of jax.numpy arrays.
+    This is needed because we need the mask to be statically computable.
+    So, we need to redefine the same logic as reorder_causal_load_balancing
+    """
 
     if tensor is None:
       return tensor
@@ -501,7 +488,6 @@ class AttentionOp(nn.Module):
         parts.append(np.take(tensor, index, axis=seq_dim))
       except Exception as e:
         print(f"Got exception={e}")
-        breakpoint()
 
     # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D]
     # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D]
@@ -509,7 +495,6 @@ class AttentionOp(nn.Module):
       combined = np.stack(parts, axis=seq_dim)
     except Exception as e:
       print(f"Got exception={e}")
-      breakpoint()
 
     return np.reshape(combined, ori_tensor_shape)
 

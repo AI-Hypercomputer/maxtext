@@ -33,16 +33,6 @@ from maxtext_xpk_runner import xpk_benchmark_runner
 from maxtext_xpk_runner import on_device_benchmark_runner
 from maxtext_xpk_runner import XpkClusterConfig
 from maxtext_xpk_runner import LibTpuType
-import datetime
-
-def get_current_day_hour_minute():
-  """Gets the current day, hour, and minute as a formatted string.
-
-  Returns:
-    A string in the format 'YYYYMMDDHHMM'.
-  """
-  now = datetime.datetime.now()
-  return now.strftime("%Y%m%d%H%M")
 
 def add_xpk_runner_arguments(custom_parser: argparse.ArgumentParser):
   """Add arguments to the xpk runner parser.

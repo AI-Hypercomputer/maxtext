@@ -1176,6 +1176,7 @@ def unpermute_from_match_maxtext_rope(arr, model_size):
   odds = arr[..., 1::2]
   return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
 
+# TODO: replace with reorder_mask_load_balancing from #1133
 def reorder_tokens_context_parallelism(tensor, cp_size: int, seq_dim: int, to_contiguous: bool):
   """Reorders a tensor for load balancing the compute of causal attention."""
 
