@@ -22,6 +22,8 @@ of variable-length sequences by dividing the attention context into fixed-size p
 similar to virtual memory systems.
 """
 
+# TODO(rupliu) Need to update unit tests for this file under Maxtext/tests/page_manager.py
+
 from typing import Optional, Tuple
 
 import common_types
@@ -33,6 +35,7 @@ from flax import struct
 Array = common_types.Array
 DType = common_types.DType
 AxisNames = common_types.AxisNames
+Config = common_types.Config
 
 
 @struct.dataclass
@@ -56,7 +59,22 @@ class PageState:
   current_page_position: Array
 
 
-class PageManager(nn.Module):
+def initialize_page_state(
+    num_pages: int,
+    num_slots: int,
+    max_pages_per_slot: int,
+) -> PageState:
+  return PageState(
+      page_status=jnp.zeros((num_pages,), dtype=jnp.int32),
+      page_map=jnp.zeros((num_slots, max_pages_per_slot), dtype=jnp.int32),
+      sequence_lengths=jnp.zeros((num_slots,), dtype=jnp.int32),
+      num_pages_used=jnp.zeros((num_slots,), dtype=jnp.int32),
+      current_page=jnp.zeros((num_slots,), dtype=jnp.int32),
+      current_page_position=jnp.zeros((num_slots,), dtype=jnp.int32),
+  )
+
+
+class PageManager:
   """Manages paged attention mechanism for efficient sequence processing.
 
   The PageManager implements a virtual memory-like system for attention, where the
@@ -79,83 +97,25 @@ class PageManager(nn.Module):
   max_prefill_predict_length: int
   max_pages_per_slot: int
 
-  def init_or_get_vars(self):
-    """Initializes or retrieves the state variables for the paging system.
-
-    Returns:
-      Tuple of nn.Variable objects representing:
-        - page_status: Status of each page (free/used)
-        - page_map: Mapping between slots and their assigned pages
-        - sequence_lengths: Length of sequence in each slot
-        - num_pages_used: Number of pages used by each slot
-        - current_page: Current active page for each slot
-        - current_page_position: Position within current pages
-    """
-    page_status_var = self.variable(
-        "cache", "page_status", nn.with_logical_partitioning(jnp.zeros, ("num_pages",)), (self.num_pages,), jnp.int32
-    )
-    page_map_var = self.variable(
-        "cache",
-        "page_map",
-        nn.with_logical_partitioning(jnp.zeros, ("slots", "max_pages_per_slot")),
-        (self.slots, self.max_pages_per_slot),
-        jnp.int32,
-    )
-    sequence_lengths_var = self.variable(
-        "cache", "sequence_lengths", nn.with_logical_partitioning(jnp.zeros, ("slots",)), (self.slots,), jnp.int32
-    )
-    num_pages_used_var = self.variable(
-        "cache", "num_pages_used", nn.with_logical_partitioning(jnp.zeros, ("slots",)), (self.slots,), jnp.int32
-    )
-    current_page_var = self.variable(
-        "cache", "current_page", nn.with_logical_partitioning(jnp.zeros, ("slots",)), (self.slots,), jnp.int32
-    )
-    current_page_position_var = self.variable(
-        "cache", "current_page_position", nn.with_logical_partitioning(jnp.zeros, ("slots",)), (self.slots,), jnp.int32
-    )
-
-    return (
-        page_status_var,
-        page_map_var,
-        sequence_lengths_var,
-        num_pages_used_var,
-        current_page_var,
-        current_page_position_var,
-    )
+  def __init__(self, config: Config):
+    self.num_pages = config.pagedattn_num_pages
+    self.tokens_per_page = config.pagedattn_tokens_per_page
+    self.max_target_length = config.max_target_length
+    self.max_pages_per_slot = config.max_target_length // config.pagedattn_tokens_per_page
+    self.slots = int(config.per_device_batch_size * jax.device_count())
+    self.max_prefill_predict_length = config.max_prefill_predict_length
 
   def release_slot_pages(
       self,
       slot: int,
-      page_status_var: nn.Variable,
-      page_map_var: nn.Variable,
-      sequence_lengths_var: nn.Variable,
-      num_pages_used_var: nn.Variable,
-      current_page_var: nn.Variable,
-      current_page_position_var: nn.Variable,
-  ) -> Tuple:
-    """Releases all pages assigned to a specific slot.
-
-    This method frees up all pages currently assigned to the given slot,
-    resetting their status and updating the page mapping accordingly.
-
-    Args:
-      slot: Integer identifying the slot to be released
-      page_status_var: Variable tracking page usage status
-      page_map_var: Variable mapping slots to pages
-      sequence_lengths_var: Variable tracking sequence lengths
-      num_pages_used_var: Variable tracking page usage counts
-      current_page_var: Variable tracking current active pages
-      current_page_position_var: Variable tracking positions in current pages
-
-    Returns:
-      Tuple of updated variables after releasing the slot's pages
-    """
-    page_status = page_status_var.value
-    page_map = page_map_var.value
-    sequence_lengths = sequence_lengths_var.value
-    num_pages_used = num_pages_used_var.value
-    current_page = current_page_var.value
-    current_page_position = current_page_position_var.value
+      page_state: PageState,
+  ) -> PageState:
+    page_status = page_state.page_status
+    page_map = page_state.page_map
+    sequence_lengths = page_state.sequence_lengths
+    current_page = page_state.current_page
+    current_page_position = page_state.current_page_position
+    num_pages_used = page_state.num_pages_used
 
     def _release_page(i, state):
       page_map, page_status = state
@@ -171,74 +131,28 @@ class PageManager(nn.Module):
     current_page = current_page.at[slot].set(0)
     current_page_position = current_page_position.at[slot].set(0)
 
-    page_status_var.value = page_status
-    page_map_var.value = page_map
-    sequence_lengths_var.value = sequence_lengths
-    num_pages_used_var.value = num_pages_used
-    current_page_var.value = current_page
-    current_page_position_var.value = current_page_position
-
-    return (
-        page_status_var,
-        page_map_var,
-        sequence_lengths_var,
-        num_pages_used_var,
-        current_page_var,
-        current_page_position_var,
+    return PageState(
+        page_status=page_status,
+        page_map=page_map,
+        sequence_lengths=sequence_lengths,
+        num_pages_used=num_pages_used,
+        current_page=current_page,
+        current_page_position=current_page_position,
     )
 
   def reserve_prefix_slot_pages(
       self,
       slot: int,
       true_length: int,
-      page_status_var: nn.Variable,
-      page_map_var: nn.Variable,
-      sequence_lengths_var: nn.Variable,
-      num_pages_used_var: nn.Variable,
-      current_page_var: nn.Variable,
-      current_page_position_var: nn.Variable,
-  ) -> Tuple:
-    """Reserves pages for a prefix sequence in the specified slot.
-
-    This method allocates the necessary pages for a prefix sequence of given length,
-    first releasing any existing pages assigned to the slot.
-
-    Args:
-      slot: Integer identifying the target slot
-      true_length: Actual length of the prefix sequence
-      page_status_var: Variable tracking page usage status
-      page_map_var: Variable mapping slots to pages
-      sequence_lengths_var: Variable tracking sequence lengths
-      num_pages_used_var: Variable tracking page usage counts
-      current_page_var: Variable tracking current active pages
-      current_page_position_var: Variable tracking positions in current pages
-
-    Returns:
-      Tuple of updated variables after reserving pages for the prefix
-    """
-    (
-        page_status_var,
-        page_map_var,
-        sequence_lengths_var,
-        num_pages_used_var,
-        current_page_var,
-        current_page_position_var,
-    ) = self.release_slot_pages(
-        slot,
-        page_status_var,
-        page_map_var,
-        sequence_lengths_var,
-        num_pages_used_var,
-        current_page_var,
-        current_page_position_var,
-    )
-
-    page_status = page_status_var.value
-    page_map = page_map_var.value
-    sequence_lengths = sequence_lengths_var.value
-    num_pages_used = num_pages_used_var.value
-    current_page = current_page_var.value
-    current_page_position = current_page_position_var.value
+      page_state: PageState,
+  ) -> PageState:
+    page_state = self.release_slot_pages(slot, page_state)
+    page_status = page_state.page_status
+    page_map = page_state.page_map
+    sequence_lengths = page_state.sequence_lengths
+    num_pages_used = page_state.num_pages_used
+    current_page = page_state.current_page
+    current_page_position = page_state.current_page_position
 
     prefill_slot_num_pages = jnp.ceil(true_length / self.tokens_per_page).astype(jnp.int32)
     prefill_slot_page_slice_idx = jnp.where(true_length == 0, 0, (true_length - 1) % self.tokens_per_page)
@@ -258,54 +172,25 @@ class PageManager(nn.Module):
     num_pages_used = num_pages_used.at[slot].set(prefill_slot_num_pages)
     current_page_position = current_page_position.at[slot].set(prefill_slot_page_slice_idx)
 
-    page_status_var.value = page_status
-    page_map_var.value = page_map
-    sequence_lengths_var.value = sequence_lengths
-    num_pages_used_var.value = num_pages_used
-    current_page_var.value = current_page
-    current_page_position_var.value = current_page_position
-
-    return (
-        page_status_var,
-        page_map_var,
-        sequence_lengths_var,
-        num_pages_used_var,
-        current_page_var,
-        current_page_position_var,
+    return PageState(
+        page_status=page_status,
+        page_map=page_map,
+        sequence_lengths=sequence_lengths,
+        num_pages_used=num_pages_used,
+        current_page=current_page,
+        current_page_position=current_page_position,
     )
 
   def reserve_decode_step_pages(
       self,
-      page_status_var: nn.Variable,
-      page_map_var: nn.Variable,
-      sequence_lengths_var: nn.Variable,
-      num_pages_used_var: nn.Variable,
-      current_page_var: nn.Variable,
-      current_page_position_var: nn.Variable,
-  ) -> Tuple:
-    """Reserves additional pages needed for a decoding step.
-
-    This method allocates new pages as needed when sequences grow during
-    autoregressive decoding, ensuring each active slot has sufficient pages
-    for its sequence.
-
-    Args:
-      page_status_var: Variable tracking page usage status
-      page_map_var: Variable mapping slots to pages
-      sequence_lengths_var: Variable tracking sequence lengths
-      num_pages_used_var: Variable tracking page usage counts
-      current_page_var: Variable tracking current active pages
-      current_page_position_var: Variable tracking positions in current pages
-
-    Returns:
-      Tuple of updated variables after reserving pages for the decode step
-    """
-    page_status = page_status_var.value
-    page_map = page_map_var.value
-    sequence_lengths = sequence_lengths_var.value
-    num_pages_used = num_pages_used_var.value
-    current_page = current_page_var.value
-    current_page_position = current_page_position_var.value
+      page_state: PageState,
+  ) -> PageState:
+    page_status = page_state.page_status
+    page_map = page_state.page_map
+    sequence_lengths = page_state.sequence_lengths
+    num_pages_used = page_state.num_pages_used
+    current_page = page_state.current_page
+    current_page_position = page_state.current_page_position
 
     sequence_lengths_step = jnp.logical_and(jnp.ones(sequence_lengths.shape, dtype=jnp.int32), sequence_lengths).astype(
         jnp.int32
@@ -334,91 +219,14 @@ class PageManager(nn.Module):
         0, jnp.count_nonzero(seq_new_page), _reserve_page, (page_map, page_status, current_page, updating_slots)
     )
 
-    page_status_var.value = page_status
-    page_map_var.value = page_map
-    sequence_lengths_var.value = sequence_lengths
-    num_pages_used_var.value = num_pages_used
-    current_page_var.value = current_page
-    current_page_position_var.value = current_page_position
-
-    return (
-        page_status_var,
-        page_map_var,
-        sequence_lengths_var,
-        num_pages_used_var,
-        current_page_var,
-        current_page_position_var,
-    )
-
-  @nn.compact
-  def __call__(
-      self, model_mode: Optional[str] = None, slot: Optional[int] = None, true_length: Optional[int] = None
-  ) -> PageState:
-
-    (
-        page_status_var,
-        page_map_var,
-        sequence_lengths_var,
-        num_pages_used_var,
-        current_page_var,
-        current_page_position_var,
-    ) = self.init_or_get_vars()
-
-    if model_mode == common_types.MODEL_MODE_PREFILL and self.is_mutable_collection("params"):
-      return PageState(
-          page_status_var.value,
-          page_map_var.value,
-          sequence_lengths_var.value,
-          num_pages_used_var.value,
-          current_page_var.value,
-          current_page_position_var.value,
-      )
-    elif model_mode == common_types.MODEL_MODE_PREFILL and slot is None and true_length is None:
-      return PageState(
-          page_status_var.value,
-          page_map_var.value,
-          sequence_lengths_var.value,
-          num_pages_used_var.value,
-          current_page_var.value,
-          current_page_position_var.value,
-      )
-    elif model_mode == common_types.MODEL_MODE_PREFILL:
-      self.reserve_prefix_slot_pages(
-          slot,
-          true_length,
-          page_status_var,
-          page_map_var,
-          sequence_lengths_var,
-          num_pages_used_var,
-          current_page_var,
-          current_page_position_var,
-      )
-    elif model_mode == common_types.MODEL_MODE_INSERT:
-      self.reserve_prefix_slot_pages(
-          slot,
-          true_length,
-          page_status_var,
-          page_map_var,
-          sequence_lengths_var,
-          num_pages_used_var,
-          current_page_var,
-          current_page_position_var,
-      )
-    elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-      self.reserve_decode_step_pages(
-          page_status_var,
-          page_map_var,
-          sequence_lengths_var,
-          num_pages_used_var,
-          current_page_var,
-          current_page_position_var,
-      )
-
     return PageState(
-        page_status_var.value,
-        page_map_var.value,
-        sequence_lengths_var.value,
-        num_pages_used_var.value,
-        current_page_var.value,
-        current_page_position_var.value,
+        page_status=page_status,
+        page_map=page_map,
+        sequence_lengths=sequence_lengths,
+        num_pages_used=num_pages_used,
+        current_page=current_page,
+        current_page_position=current_page_position,
     )
+
+  def get_initial_page_state(self) -> PageState:
+    return initialize_page_state(num_pages=self.num_pages, num_slots=self.slots, max_pages_per_slot=self.max_pages_per_slot)
