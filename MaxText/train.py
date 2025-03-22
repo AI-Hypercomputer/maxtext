@@ -822,9 +822,16 @@ def train_loop(config, state=None):
       record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
       try:
         example_batch = load_next_batch(data_iterator, example_batch, config)
+        # TODO: replace with train.py changes from #1133
+        # Reorder here everything in example_data, so tokens/pos/seg_id for both inputs and targets
+        cp_size = mesh.shape["context"]
+        for key,value in example_batch.items():
+          example_batch[key] = max_utils.reorder_tokens_context_parallelism(tensor=value, cp_size=cp_size, seq_dim=1, to_contiguous=False)
+        
       except Exception as e:  # pylint: disable=broad-except
         max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
         break
+      
       record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
       check_example_batch(config, example_batch=example_batch)
       # pylint: disable=not-callable
