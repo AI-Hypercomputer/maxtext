@@ -1,0 +1,33 @@
+base_config: "base.yml"
+
+use_grpo: True
+train_data_columns: ['prompt', 'completion']
+tokenizer_path: 'google/gemma-2-2b-it' 
+model_name: gemma2-2b 
+
+per_device_batch_size: 1.0
+learning_rate: 1.e-6 # from TRL
+
+enable_goodput_recording: False
+monitor_goodput: False
+dataset_type: hf 
+hf_path: 'json' 
+hf_data_dir: '' 
+
+#TRL
+max_prefill_predict_length: 512
+max_target_length: 1024
+hf_train_files: 'gs://mazumdera-test-bucket-europe-west4/rl-datasets/tldr_dataset.jsonl' 
+
+
+adam_b2: 0.999
+
+checkpoint_period: 20
+
+# Group Relative Policy Optimization (GRPO)
+num_generations: 4 # TRL is 8
+temperature: 0.9 #from TRL
+grpo_beta: 0.04 #from TRL
+
+decode_sampling_strategy: "weighted"
+async_checkpointing: false
