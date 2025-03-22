@@ -28,7 +28,12 @@ We have used MaxText to [demonstrate high-performance, well-converging training 
 Key supported features:
 * TPUs and GPUs
 * Training and Inference
-* Models: Llama2, Mistral and Gemma
+* Models: Llama 2, Llama 3, Mistral and Mixtral family, and Gemma, Gemma 2, Gemma 3
+
+## Announcements
+
+* [March 12, 2025] We are excited to announce support for Gemma 3: 4B, 12B, and 27B in text-only formats. Please see [Google Launch Blog](https://blog.google/technology/developers/gemma-3/) and [Developer Blog](https://developers.googleblog.com/en/introducing-gemma3/) for more information on Gemma 3.
+* [February, 2025] (Preview): We're excited to announce the preview of building Maxtext Docker images using the JAX Stable Stack base image, available for both TPUs and GPUs. This provides a more reliable and consistent build environment. Learn more [Here](getting_started/Run_MaxText_via_xpk.md)
 
 # Table of Contents
 
@@ -197,9 +202,3 @@ MaxText supports automatic upload of logs collected in a directory to a Tensorbo
 
 ## Monitor Goodput of Your Workload
 If you are interested in monitoring Goodput metrics of your workload, follow this [user guide](getting_started/Monitor_Goodput.md).
-
-## Announcement
-
-### February 2025
-
-* (Preview): We're excited to announce the preview of building Maxtext Docker images using the JAX Stable Stack base image, available for both TPUs and GPUs. This provides a more reliable and consistent build environment. Learn more [Here](getting_started/Run_MaxText_via_xpk.md)
