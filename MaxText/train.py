@@ -843,7 +843,6 @@ def train_loop(config, state=None):
           ):
             checkpointing.print_save_message(state_to_save.step, config.async_checkpointing)
         break
-      
       record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
       check_example_batch(config, example_batch=example_batch)
       # pylint: disable=not-callable
