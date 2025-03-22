@@ -35,6 +35,7 @@ def get_optimizer(config, learning_rate_schedule):
         eps=config.adam_eps,
         eps_root=config.adam_eps_root,
         weight_decay=config.adam_weight_decay,
+        mu_dtype=config.mu_dtype,
     )
   elif config.opt_type == "adam_pax":
     return adam_pax(
