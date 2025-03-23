@@ -126,14 +126,17 @@ def save_checkpoint(
     checkpoint_manager,
     step,
     state,
-    dataset_type="c4",
+    dataset_type="tfds",
     data_iterator=None,
     config=None,
+    force=False,
 ) -> bool:
   """Wrapper for saving checkpoint."""
   if config and config.enable_checkpointing:
-    if (step % config.checkpoint_period == 0) or (
-        config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0
+    if (
+        force
+        or (step % config.checkpoint_period == 0)
+        or (config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0)
     ):
       blocking_until_ready_start = time.time()
       max_logging.log(f"Waiting for step {step} to finish before checkpoint...")
@@ -161,6 +164,7 @@ def save_checkpoint(
     return checkpoint_manager.save(
         step,
         args=orbax.checkpoint.args.PyTreeSave(item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size),
+        force=force,
     )
 
   if dataset_type == "grain":
@@ -172,6 +176,7 @@ def save_checkpoint(
             ),
             iter=grain.PyGrainCheckpointSave(data_iterator.local_iterator),
         ),
+        force=force,
     )
   else:
     return checkpoint_manager.save(
@@ -181,6 +186,7 @@ def save_checkpoint(
                 item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size
             )
         ),
+        force=force,
     )
 
 
@@ -814,7 +820,23 @@ def train_loop(config, state=None):
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
-      example_batch = load_next_batch(data_iterator, example_batch, config)
+      try:
+        example_batch = load_next_batch(data_iterator, example_batch, config)
+      except Exception as e:  # pylint: disable=broad-except
+        max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
+        if checkpoint_manager is not None:
+          state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
+          if save_checkpoint(
+              checkpoint_manager,
+              int(state_to_save.step),
+              state_to_save,
+              config.dataset_type,
+              data_iterator,
+              config,
+              force=True,
+          ):
+            checkpointing.print_save_message(state_to_save.step, config.async_checkpointing)
+        break
       record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
       check_example_batch(config, example_batch=example_batch)
       # pylint: disable=not-callable

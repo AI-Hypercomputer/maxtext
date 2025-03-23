@@ -68,6 +68,45 @@ def apply_lora_on_base_params(base_params, lora_params, lora_scale_factor=1.0):
   apply_lora_recursively(base_params, lora_params, "")
 
 
+def unapply_lora_from_base_params(base_params, lora_params, lora_scale_factor=1.0):
+  """
+  Unapply the LoRA weights from the base weights of the model using formula:
+                W_org = W - BA, where
+                    W is the premerged weights of base and LoRA
+                    W_org is the original base model weights
+                    B is lora_b adapter weights
+                    A is lora_a adapter weights
+
+  Here both the base_params and lora_params are PyTrees of same structure depending
+  on the base model. The leaf nodes of lora_params are only not-None if it is the target
+  module for lora in its config.
+  """
+
+  def lora_update_or_base(base_weight, lora_a, lora_b):
+    if lora_a is not None and lora_b is not None:
+      return base_weight - jnp.einsum("br,rnd->bnd", lora_b, lora_a) * lora_scale_factor
+    else:
+      return base_weight  # Keep the base weight if no Lora update
+
+  def unapply_lora_recursively(base_params, lora_params, module_name):
+    for name, param in lora_params.items():
+      if isinstance(param, dict):
+        unapply_lora_recursively(base_params[name], param, f"{module_name}.{name}")
+      elif param is not None:
+        if name not in ["lora_a.kernel", "lora_b.kernel"]:
+          raise ValueError(f"Unexpected non-lora specific weights ({module_name}.{name}) found in the lora_params")
+
+        lora_b = lora_params["lora_a.kernel"]
+        lora_a = lora_params["lora_b.kernel"]
+
+        base_kernel = base_params["kernel"]
+
+        base_params["kernel"] = lora_update_or_base(base_kernel, lora_a, lora_b)
+        break
+
+  unapply_lora_recursively(base_params, lora_params, "")
+
+
 def load_adapter(config, base_abstract_state_params, adapter_config_path, adapter_weights_path):
   """
   Load the LoRA weights into a PyTree and return it.
@@ -83,12 +122,10 @@ def load_adapter(config, base_abstract_state_params, adapter_config_path, adapte
         lora_config = json.load(f)
 
     if lora_config is None:
-      max_logging.log(f"Failed to read lora_config from {adapter_config_path}.")
-      return None, None
+      raise FileNotFoundError(f"Failed to read lora_config from {adapter_config_path}.")
 
     if not gcs_utils.gcs_path_exists(f"{adapter_weights_path}/commit_success.txt"):
-      max_logging.log(f"Failed to read lora_weights from {adapter_weights_path}.")
-      return None, None
+      raise FileNotFoundError(f"Failed to read lora_weights from {adapter_weights_path}.")
 
     lora_state, _ = get_lora_abstract_state(base_abstract_state_params, lora_config)
 

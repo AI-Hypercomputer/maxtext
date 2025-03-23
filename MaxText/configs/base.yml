@@ -297,6 +297,14 @@ logical_axis_rules: [
                       ['embed_no_exp', ['fsdp', 'sequence', 'tensor_transpose']],
                       ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence']],
                       ['embed_no_exp', ['fsdp', 'sequence']],
+                      ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'expert']],
+                      ['q_lora', ['fsdp', 'sequence', 'tensor_transpose', 'expert']],
+                      ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'expert']],
+                      ['q_lora', ['fsdp', 'sequence', 'expert']],
+                      ['kv_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'expert']],
+                      ['kv_lora', ['fsdp', 'sequence', 'tensor_transpose', 'expert']],
+                      ['kv_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'expert']],
+                      ['kv_lora', ['fsdp', 'sequence', 'expert']],
                       ['norm', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['layers', 'stage'],
                       ['kv', []],
@@ -314,11 +322,7 @@ logical_axis_rules: [
                       ['paged_kv_head_dim_size', []],
                     ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
-# All the axis except TP for data sharding
-data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_sequence', 'expert', 'autoregressive']]
-
-# All the axis for data sharding, used only for subset hosts data loading
-all_shardings: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']]
+data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']]
 
 # sharding tolerance: float between 0.0 and 1.0 representing the allowed percentage of non-sharded parameters.
 sharding_tolerance: 0.02
@@ -373,11 +377,17 @@ eval_per_device_batch_size: 0.0
 max_corpus_chars: 10_000_000
 train_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
+packing: True
 
 # direct preference optimization (DPO)
 use_dpo: False
 dpo_label_smoothing: 0.0
 dpo_beta: 0.1
+
+# Supervised Fine-Tuning (SFT)
+use_sft: False
+# sft_train_on_completion_only=False trains on both prompt and completion tokens; trains only on completion tokens otherwise
+sft_train_on_completion_only: False
 
 # dataset_type must be synthetic, hf, grain, tfds
 # details in: https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md
@@ -386,6 +396,7 @@ dataset_type: tfds
 dataset_path: "" # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
 dataset_name: 'c4/en:3.0.1'
 eval_dataset_name: 'c4/en:3.0.1'
+train_split: 'train'
 eval_split: 'validation'
 # for HuggingFace input pipeline (dataset_type=hf)
 hf_path: ''
