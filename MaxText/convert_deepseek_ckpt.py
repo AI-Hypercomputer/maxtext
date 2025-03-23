@@ -331,20 +331,6 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
       else:
         self_attention["query"]["kernel"][layer_idx, ...] = query
 
-    # re-order to fit maxtext
-    self_attention["kv_norm"]["scale"] = np.transpose(self_attention["kv_norm"]["scale"], axes=(1, 0))
-    self_attention["wkv_a"]["kernel"] = np.transpose(self_attention["wkv_a"]["kernel"], axes=(1, 0, 2))
-    self_attention["wkv_b"]["kernel"] = np.transpose(self_attention["wkv_b"]["kernel"], axes=(1, 0, 2, 3))
-    self_attention["out"]["kernel"] = np.transpose(self_attention["out"]["kernel"], axes=(1, 0, 2, 3))
-    pre_self_attention_layer_norm["scale"] = np.transpose(pre_self_attention_layer_norm["scale"], axes=(1, 0))
-    post_self_attention_layer_norm["scale"] = np.transpose(post_self_attention_layer_norm["scale"], axes=(1, 0))
-    if q_lora_rank != 0:
-      self_attention["q_norm"]["scale"] = np.transpose(self_attention["q_norm"]["scale"], axes=(1, 0))
-      self_attention["wq_a"]["kernel"] = np.transpose(self_attention["wq_a"]["kernel"], axes=(1, 0, 2))
-      self_attention["wq_b"]["kernel"] = np.transpose(self_attention["wq_b"]["kernel"], axes=(1, 0, 2, 3))
-    else:
-      self_attention["query"]["kernel"] = np.transpose(self_attention["query"]["kernel"], axes=(1, 0, 2, 3))
-
     jax_weights["decoder"][f"{layer_key}"]["self_attention"] = self_attention
     jax_weights["decoder"][f"{layer_key}"]["pre_self_attention_layer_norm"] = pre_self_attention_layer_norm
     jax_weights["decoder"][f"{layer_key}"]["post_self_attention_layer_norm"] = post_self_attention_layer_norm
@@ -369,9 +355,6 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
         mlp["wi_1"]["kernel"][layer_idx, ...] = wi_1
         mlp["wo"]["kernel"][layer_idx, ...] = wo
 
-      mlp["wi_0"]["kernel"] = np.transpose(mlp["wi_0"]["kernel"], axes=(1, 0, 2))
-      mlp["wi_1"]["kernel"] = np.transpose(mlp["wi_1"]["kernel"], axes=(1, 0, 2))
-      mlp["wo"]["kernel"] = np.transpose(mlp["wo"]["kernel"], axes=(1, 0, 2))
       jax_weights["decoder"][f"{layer_key}"]["mlp"] = mlp
       logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
     else:
@@ -427,13 +410,6 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
         moe["shared_experts"]["wi_1"]["kernel"][layer_idx, ...] = shared_wi_1
         moe["shared_experts"]["wo"]["kernel"][layer_idx, ...] = shared_wo
 
-      # re-order
-      if q_lora_rank != 0:
-        moe["MoeBlock_0"]["gate"]["bias"] = np.transpose(moe["MoeBlock_0"]["gate"]["bias"], axes=(1, 0))
-      moe["MoeBlock_0"]["gate"]["kernel"] = np.transpose(moe["MoeBlock_0"]["gate"]["kernel"], axes=(1, 0, 2))
-      moe["shared_experts"]["wi_0"]["kernel"] = np.transpose(moe["shared_experts"]["wi_0"]["kernel"], axes=(1, 0, 2))
-      moe["shared_experts"]["wi_1"]["kernel"] = np.transpose(moe["shared_experts"]["wi_1"]["kernel"], axes=(1, 0, 2))
-      moe["shared_experts"]["wo"]["kernel"] = np.transpose(moe["shared_experts"]["wo"]["kernel"], axes=(1, 0, 2))
 
       for layer_idx in tqdm(range(layer_value), desc=layer_key, leave=False):
         for k in tqdm(range(num_experts), desc="experts", leave=False):
@@ -457,13 +433,13 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
           )
 
           if moe["MoeBlock_0"]["wi_0"] is None:
-            stack_shape = (num_experts, layer_value)
+            stack_shape = (layer_value, num_experts)
             moe["MoeBlock_0"]["wi_0"] = np.zeros(stack_shape + wi_0.shape, dtype=np.float16)
             moe["MoeBlock_0"]["wi_1"] = np.zeros(stack_shape + wi_1.shape, dtype=np.float16)
             moe["MoeBlock_0"]["wo"] = np.zeros(stack_shape + wo.shape, dtype=np.float16)
-          moe["MoeBlock_0"]["wi_0"][k, layer_idx, ...] = wi_0
-          moe["MoeBlock_0"]["wi_1"][k, layer_idx, ...] = wi_1
-          moe["MoeBlock_0"]["wo"][k, layer_idx, ...] = wo
+          moe["MoeBlock_0"]["wi_0"][layer_idx, k, ...] = wi_0
+          moe["MoeBlock_0"]["wi_1"][layer_idx, k, ...] = wi_1
+          moe["MoeBlock_0"]["wo"][layer_idx, k, ...] = wo
 
       jax_weights["decoder"][f"{layer_key}"]["DeepSeekMoeBlock_0"] = moe
       logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
