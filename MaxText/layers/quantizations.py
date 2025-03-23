@@ -32,7 +32,7 @@ import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_flatten_with_path, tree_unflatten
 from typing import Tuple, Sequence
-from inference import kvcache
+from MaxText.inference import kvcache
 
 # Params used to define mixed precision quantization configs
 DEFAULT = "__default__"  # default config

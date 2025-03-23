@@ -33,7 +33,7 @@ import jax.numpy as jnp
 from MaxText import common_types
 from MaxText.kernels.ragged_attention import ragged_gqa
 from MaxText.kernels.ragged_attention import ragged_mha
-from MaxText.inference import page_manager, paged_attention
+from MaxText.inference import page_manager, paged_attention, kvcache
 from MaxText.layers import embeddings
 from MaxText.layers import initializers
 from MaxText.layers import linears
