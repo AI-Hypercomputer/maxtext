@@ -27,6 +27,7 @@ import numpy as np
 from MaxText import common_types
 from MaxText import pyconfig
 from MaxText import max_utils
+from MaxText.constants import PKG_ROOT
 from MaxText.maxengine import MaxEngine
 from MaxText.layers import quantizations
 from MaxText.layers import models
@@ -46,7 +47,7 @@ class MaxEngineTest(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
+        [sys.argv[0], os.path.join(PKG_ROOT, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,
@@ -74,7 +75,7 @@ class MaxEngineTest(unittest.TestCase):
 
   def test_stack_and_unstack_prefill_cache(self):
     config = pyconfig.initialize(
-        [None, os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
+        [None, os.path.join(PKG_ROOT, "configs", "base.yml")],
         enable_checkpointing=False,
         stack_prefill_result_cache=True,
     )

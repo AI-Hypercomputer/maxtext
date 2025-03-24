@@ -26,6 +26,7 @@ from jax.experimental import mesh_utils
 import unittest
 
 from MaxText import pyconfig
+from MaxText.constants import PKG_ROOT
 from MaxText.input_pipeline import _grain_data_processing
 from MaxText.input_pipeline import input_pipeline_interface
 
@@ -51,7 +52,7 @@ class GrainDataProcessingTest(unittest.TestCase):
     super().setUp()
     tmp_dir = tempfile.gettempdir()
     self.config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
+        [sys.argv[0], os.path.join(PKG_ROOT, "configs", "base.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
@@ -60,7 +61,7 @@ class GrainDataProcessingTest(unittest.TestCase):
         base_output_directory="gs://max-experiments/",
         dataset_type="grain",
         grain_train_files=os.path.join(tmp_dir, "gcsfuse", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*"),
-        tokenizer_path=os.path.join(os.path.dirname(".."), "assets", "tokenizer"),
+        tokenizer_path=os.path.join(os.path.dirname(PKG_ROOT), "assets", "tokenizer"),
         enable_checkpointing=False,
     )
     self.mesh_shape_1d = (len(jax.devices()),)

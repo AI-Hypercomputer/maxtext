@@ -49,6 +49,7 @@ from psutil import Process
 from MaxText import max_utils
 from MaxText import optimizers
 from MaxText import pyconfig
+from MaxText.constants import PKG_ROOT
 from MaxText.layers.models import Transformer
 from MaxText.layers import quantizations
 from MaxText import checkpointing
@@ -81,7 +82,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
 
   base_args = [
       "",
-      "MaxText/configs/base.yml",  # base arg
+      os.path.join(PKG_ROOT, "configs", "base.yml"),  # base arg
       "per_device_batch_size=1",
       "ici_fsdp_parallelism=-1",
       "ici_tensor_parallelism=1",

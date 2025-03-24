@@ -35,6 +35,7 @@ from transformers import AutoTokenizer
 
 from MaxText import max_utils, max_logging
 from MaxText import pyconfig
+from MaxText.constants import PKG_ROOT
 from MaxText.input_pipeline import _input_pipeline_utils
 from MaxText.layers import models
 from MaxText.layers import quantizations
@@ -42,7 +43,7 @@ from MaxText.layers import quantizations
 
 def initialize_config(config):
   return pyconfig.initialize(
-      [sys.argv[0], os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "sft.yml")],
+      [sys.argv[0], os.path.join(PKG_ROOT, "configs", "sft.yml")],
       run_name="test-sft-trainer-correctness",
       model_name=config.model_name,
       tokenizer_path=config.tokenizer_path,
@@ -62,7 +63,7 @@ def initialize_config(config):
 def get_golden_data(config):
   """Get the golden data for SFTTrainer in TRL."""
   golden_data_path = os.path.join(
-      os.path.dirname(os.path.dirname(__file__)), "test_assets", f"golden_data_sft_{config.model_name}.jsonl"
+      PKG_ROOT, "test_assets", f"golden_data_sft_{config.model_name}.jsonl"
   )
   with jsonlines.open(golden_data_path, "r") as f:
     golden_data = list(f)

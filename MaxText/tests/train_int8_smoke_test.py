@@ -17,8 +17,11 @@ limitations under the License.
 """Smoke test for int8"""
 import os
 import unittest
-from MaxText.train import main as train_main
+
 from absl.testing import absltest
+
+from MaxText.constants import PKG_ROOT
+from MaxText.train import main as train_main
 
 
 class Train(unittest.TestCase):
@@ -45,7 +48,7 @@ class Train(unittest.TestCase):
             "steps=10",
             "enable_checkpointing=False",
             "quantization=int8",
-            f"tokenizer_path={os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'tokenizer.llama2')}",
+            f"tokenizer_path={os.path.join(os.path.dirname(PKG_ROOT), 'assets', 'tokenizer.llama2')}",
             "enable_goodput_recording=False",
             "monitor_goodput=False",
             "enable_checkpoint_cloud_logger=False",

@@ -307,7 +307,7 @@ def main(raw_args=None) -> None:
   tmp_dir = os.path.join(args.SCRIPT_DIR, tmp_dir_relative_to_script)
   zip_name = "script_dir_zip_" + args.RUN_NAME + ".tar.gz"
   bucket_dir = os.path.join(args.BUCKET_DIR, args.RUN_NAME)
-  bucket_path = os.path.join(f"gs://{args.BUCKET_NAME}", bucket_dir)
+  bucket_path = f"gs://{args.BUCKET_NAME}/{bucket_dir.replace(os.path.sep, '/')}"
   startup_script_file = os.path.join(tmp_dir, "startup_script.txt")
 
   print(f"Moving {args.SCRIPT_DIR} to {bucket_path}...")

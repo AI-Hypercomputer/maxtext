@@ -29,6 +29,7 @@ import pytest
 
 from aqt.jax.v2 import aqt_tensor
 
+from MaxText.constants import PKG_ROOT
 from MaxText.layers import quantizations
 from MaxText.layers.quantizations import AqtQuantization, Fp8Quantization, NANOOFp8Quantization
 from MaxText import pyconfig
@@ -60,7 +61,7 @@ def _configure_quantization(
     quant_str="", quant_cfg_path="", mode_str="train", replicate_scale=False
 ) -> Optional[Union[AqtQuantization, Fp8Quantization, NANOOFp8Quantization]]:
   config = pyconfig.initialize(
-      [None, os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
+      [None, os.path.join(PKG_ROOT, "configs", "base.yml")],
       enable_checkpointing=False,
       quantization=quant_str,
       quant_cfg_path=quant_cfg_path,

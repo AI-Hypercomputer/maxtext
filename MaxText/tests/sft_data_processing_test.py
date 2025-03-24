@@ -26,6 +26,7 @@ from datasets import Dataset
 import transformers
 
 from MaxText import pyconfig
+from MaxText.constants import PKG_ROOT
 from MaxText.input_pipeline import _hf_data_processing
 from MaxText.input_pipeline import input_pipeline_interface
 
@@ -94,7 +95,7 @@ class SFTDataProcessingTest(unittest.TestCase):
             "cp",
             "-r",
             "gs://maxtext-dataset/hf/llama2-tokenizer",
-            os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets") + os.path.sep,
+            os.path.join(PKG_ROOT, "assets") + os.path.sep,
         ]
     )
     if exit_code != os.EX_OK:
@@ -103,14 +104,14 @@ class SFTDataProcessingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.config = pyconfig.initialize(
-        ["sft_trainer.py", os.path.join("configs", "sft.yml")],
+        ["sft_trainer.py", os.path.join(PKG_ROOT, "configs", "sft.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
         base_output_directory="gs://max-experiments/",
-        tokenizer_path=os.path.join(os.path.dirname(".."), "assets", "llama2-tokenizer"),
+        tokenizer_path=os.path.join(os.path.dirname(PKG_ROOT), "assets", "llama2-tokenizer"),
         train_split="train",
         enable_checkpointing=False,
         use_sft=True,

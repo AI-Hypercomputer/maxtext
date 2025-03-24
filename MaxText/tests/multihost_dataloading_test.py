@@ -30,6 +30,7 @@ import pytest
 
 from MaxText import pyconfig
 from MaxText import multihost_dataloading
+from MaxText.constants import PKG_ROOT
 
 
 class MultihostDataloadingTest(unittest.TestCase):
@@ -38,7 +39,7 @@ class MultihostDataloadingTest(unittest.TestCase):
     super().setUp()
     batch_size = 4
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
+        [sys.argv[0], os.path.join(PKG_ROOT, "configs", "base.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],

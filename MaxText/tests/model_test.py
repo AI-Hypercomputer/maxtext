@@ -23,6 +23,7 @@ import pytest
 from MaxText import pyconfig
 from MaxText import max_utils
 from MaxText import common_types
+from MaxText.constants import PKG_ROOT
 from MaxText.layers import models
 from MaxText.layers import quantizations
 
@@ -40,7 +41,7 @@ class TestModel(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
+        [sys.argv[0], os.path.join(PKG_ROOT, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,

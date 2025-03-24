@@ -361,7 +361,7 @@ class _HyperParameters:
         loaded_parent_config_filename = os.path.join(os.path.dirname(config_name), parent_config_filename)
         if not os.path.isfile(loaded_parent_config_filename):
           dir_path = os.path.dirname(os.path.realpath(__file__))
-          loaded_parent_config_filename = os.path.join(dir_path, f"configs/{parent_config_filename}")
+          loaded_parent_config_filename = os.path.join(dir_path, "configs", parent_config_filename)
       else:
         loaded_parent_config_filename = parent_config_filename
 

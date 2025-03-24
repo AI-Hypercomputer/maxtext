@@ -14,6 +14,8 @@ limitations under the License.
 import os.path
 import unittest
 import pytest
+
+from MaxText.constants import PKG_ROOT
 from MaxText.train import main as train_main
 
 
@@ -24,13 +26,13 @@ class SimpleDecoderLayerTest(unittest.TestCase):
     train_main(
         [
             None,
-            os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml"),
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             r"base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_simple_decoder_layer_test",
             r"dataset_path=gs://maxtext-dataset",
             "decoder_block=simple",
             "enable_checkpointing=False",
-            f"tokenizer_path={os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'tokenizer.llama2')}",
+            f"tokenizer_path={os.path.join(os.path.dirname(PKG_ROOT), 'assets', 'tokenizer.llama2')}",
             "steps=3",
         ]
     )
@@ -40,13 +42,13 @@ class SimpleDecoderLayerTest(unittest.TestCase):
     train_main(
         [
             None,
-            os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml"),
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             r"base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_simple_decoder_layer_test",
             r"dataset_path=gs://maxtext-dataset",
             "decoder_block=simple_mlp",
             "enable_checkpointing=False",
-            f"tokenizer_path={os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'tokenizer.llama2')}",
+            f"tokenizer_path={os.path.join(os.path.dirname(PKG_ROOT), 'assets', 'tokenizer.llama2')}",
             "steps=3",
         ]
     )

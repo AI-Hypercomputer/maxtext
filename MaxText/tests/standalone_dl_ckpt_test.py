@@ -22,6 +22,8 @@ import string
 from datetime import datetime
 
 import pytest
+
+from MaxText.constants import PKG_ROOT
 from MaxText.standalone_checkpointer import main as sckpt_main
 from MaxText.standalone_dataloader import main as sdl_main
 
@@ -42,13 +44,13 @@ class Standalone_DL_CKPT(unittest.TestCase):
     sdl_main(
         (
             None,
-            os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml"),
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             "run_name=" + random_run_name,
             "base_output_directory=gs://runner-maxtext-logs",
             "dataset_path=gs://maxtext-dataset",
             "steps=100",
             "enable_checkpointing=false",
-            f"tokenizer_path={os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'tokenizer.llama2')}",
+            f"tokenizer_path={os.path.join(os.path.dirname(PKG_ROOT), 'assets', 'tokenizer.llama2')}",
         )
     )  # need to pass relative path to tokenizer
 
@@ -59,7 +61,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
     sckpt_main(
         (
             None,
-            os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml"),
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"run_name={random_run_name}",
             "base_output_directory=gs://runner-maxtext-logs",
             "dataset_path=gs://maxtext-dataset",
@@ -78,7 +80,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
     sckpt_main(
         (
             None,
-            os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml"),
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"run_name={random_run_name}",
             "base_output_directory=gs://runner-maxtext-logs",
             "dataset_path=gs://maxtext-dataset",

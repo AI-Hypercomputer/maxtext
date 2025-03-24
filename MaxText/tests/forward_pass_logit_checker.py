@@ -33,9 +33,7 @@ import argparse
 import sys
 import os
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-maxtext_parent_dir = os.path.dirname(current_dir)
-sys.path.append(maxtext_parent_dir)
+from MaxText.constants import PKG_ROOT
 
 from MaxText import common_types
 from MaxText import pyconfig
@@ -43,8 +41,6 @@ from MaxText import max_utils
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText import max_logging
-
-max_logging.log(f"Added parent directory = {maxtext_parent_dir}")
 
 import jax
 import jax.numpy as jnp
@@ -94,7 +90,7 @@ def main(config, test_args):  # pylint: disable=W0621
     state, _ = max_utils.setup_decode_state(model, config, rng1, mesh, None)
 
   if test_args.golden_logits_path == "":
-    input_golden_data_path = "MaxText/test_assets/golden_data_" + config.model_name + ".jsonl"
+    input_golden_data_path = os.path.join(PKG_ROOT, "test_assets", f"golden_data_{config.model_name}.jsonl")
   else:
     input_golden_data_path = test_args.golden_logits_path
   with jsonlines.open(input_golden_data_path, "r") as f:

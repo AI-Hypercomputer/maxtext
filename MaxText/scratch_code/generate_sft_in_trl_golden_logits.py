@@ -24,10 +24,12 @@ import argparse
 import jsonlines
 import os
 import sys
+
 import torch
 from transformers import TrainingArguments, AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
 
+from MaxText.constants import PKG_ROOT
 
 DATA = {
     "messages": [
@@ -119,7 +121,7 @@ def save_golden_logits(config):
       "trl_logits": trl_logits.tolist()[0],
   }
 
-  model_output_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "test_assets",
+  model_output_path = os.path.join(PKG_ROOT, "test_assets",
                                    f"golden_data_sft_{config.model_name}.jsonl")
   with jsonlines.open(model_output_path, "w") as f:
     f.write(data_to_save)

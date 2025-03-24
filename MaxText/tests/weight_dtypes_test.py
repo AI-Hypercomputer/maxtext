@@ -18,15 +18,16 @@ limitations under the License.
 import unittest
 import os.path
 
-from MaxText import pyconfig
-
-from MaxText import optimizers
-from MaxText.layers import models
-from MaxText.layers import quantizations
-from MaxText import max_utils
 import jax
 from jax.sharding import Mesh
 import jax.numpy as jnp
+
+from MaxText.constants import PKG_ROOT
+from MaxText.layers import models
+from MaxText.layers import quantizations
+from MaxText import pyconfig
+from MaxText import optimizers
+from MaxText import max_utils
 
 Transformer = models.Transformer
 
@@ -56,7 +57,7 @@ class WeightDtypes(unittest.TestCase):
   def test_default_float32(self):
     argv = [
         None,
-        os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml"),
+        os.path.join(PKG_ROOT, "configs", "base.yml"),
         "enable_checkpointing=False",
     ]
     weights = self.get_weights(argv)
@@ -65,7 +66,7 @@ class WeightDtypes(unittest.TestCase):
   def test_set_bf16(self):
     argv = [
         None,
-        os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml"),
+        os.path.join(PKG_ROOT, "configs", "base.yml"),
         "enable_checkpointing=False",
         "weight_dtype=bfloat16",
     ]

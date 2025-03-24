@@ -38,6 +38,7 @@ from MaxText import common_types
 from MaxText import max_utils
 from MaxText import inference_utils
 from MaxText import pyconfig
+from MaxText.constants import PKG_ROOT
 from MaxText.layers import models, quantizations
 from MaxText.utils import lora_utils
 
@@ -1333,8 +1334,8 @@ def create_engine_from_config_flags(batch_size, max_prefill_predict_length, max_
     args[k.strip()] = v.strip()
   assert "load_parameters_path" in args, "load_parameters_path must be defined"
   updated_args = [
-      os.path.join("MaxText", "maxengine_server.py"),
-      os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml"),
+      os.path.join(PKG_ROOT, "maxengine_server.py"),
+      os.path.join(PKG_ROOT, "configs", "base.yml"),
   ]
   for k, v in args.items():
     option = f"{k}={v}"

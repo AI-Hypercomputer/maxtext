@@ -25,6 +25,7 @@ from jax.sharding import Mesh
 import jax
 import jax.numpy as jnp
 
+from MaxText.constants import PKG_ROOT
 from MaxText.layers import models
 from MaxText.layers import embeddings
 from MaxText.layers import quantizations
@@ -63,7 +64,7 @@ class GPT3(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.cfg = pyconfig.initialize(
-        [sys.argv[0], os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
+        [sys.argv[0], os.path.join(PKG_ROOT, "configs", "base.yml")],
         run_name="test",
         enable_checkpointing=False,
         model_name="gpt3-52k",
