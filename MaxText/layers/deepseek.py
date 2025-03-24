@@ -148,6 +148,7 @@ class DeepSeekDenseLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      previous_chunk=None,
       page_state=None,
   ):
     cfg = self.config
@@ -196,6 +197,7 @@ class DeepSeekMoELayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      previous_chunk=None,
       page_state=None,
   ):
     cfg = self.config

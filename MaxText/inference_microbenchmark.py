@@ -63,14 +63,30 @@ def prefix_cache_benchmark(
 
   print(f"Prefix Cache benchmark results for prefill length {prefill_length}:\n")
 
-  value = prefix_cache.Value(
+  value: prefix_cache.Value = prefix_cache.Value(
       prefix=prefix,
       true_length=true_length,
       padded_length=prefill_length,
       tokens=tuple(i for i in range(prefill_length)),
   )
+
+  def copy_jax_array(x):
+    return x.copy()
+
+  def clone_value():
+    return prefix_cache.Value(
+        prefix=jax.tree.map(copy_jax_array, value.prefix),
+        true_length=value.true_length,
+        padded_length=value.padded_length,
+        tokens=value.tokens,
+        prefix_size_bytes=value.prefix_size_bytes,
+        device=value.device,
+    )
+
   prefix_size_bytes_gb = value.prefix_size_bytes / 1024 / 1024 / 1024
-  prefix_cache_inst = prefix_cache.PrefixCache(prefix_cache_entries_num * value.prefix_size_bytes)
+  max_bytes = prefix_cache_entries_num * value.prefix_size_bytes
+  # TODO(yuyanpeng): test hierarchical cache
+  prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=max_bytes, dram_bytes=max_bytes)
   common_len = int(prefill_length * common_prefix_proportion)
   remain_len = prefill_length - common_len
   common_prefix_key = tuple(i for i in range(common_len))
@@ -81,7 +97,7 @@ def prefix_cache_benchmark(
     # Add 100 to make sure filled prefix caching will not share the common_prefix_key.
     # The later save prefix part will evict all of them.
     key = tuple(100 + i + c_idx * prefill_length for i in range(prefill_length))
-    new_value = value.clone()
+    new_value = clone_value()
     prefix_cache_inst.save(key, new_value)
     new_value_list.append(new_value)
   jax.block_until_ready(new_value_list)
@@ -93,7 +109,7 @@ def prefix_cache_benchmark(
   for c_idx in range(iters):
     key = common_prefix_key + tuple(i + c_idx * remain_len for i in range(remain_len))
     # values are not relevant for caching now, just clone the same tokens and values for test
-    new_value = value.clone()
+    new_value = clone_value()
     jax.block_until_ready(new_value)
     start = datetime.datetime.now()
     prefix_cache_inst.save(key, new_value)
@@ -120,8 +136,8 @@ def prefix_cache_benchmark(
   value_load = None
   for _ in range(iters):
     start = datetime.datetime.now()
-    value = prefix_cache_inst.load(matched_key)
-    jax.block_until_ready(value)
+    loaded_value = prefix_cache_inst.load(matched_key)
+    jax.block_until_ready(loaded_value)
     end = datetime.datetime.now()
     load_sec += (end - start).total_seconds()
   del value_load
