@@ -12,7 +12,7 @@ limitations under the License.
 """
 
 """ Train tokenizer
-Example usage: python3 -m MaxText.train_tokenizer.py --dataset_path=gs://maxtext-dataset --dataset_name=c4/en:3.0.1
+Example usage: python3 -m MaxText.train_tokenizer --dataset_path=gs://maxtext-dataset --dataset_name=c4/en:3.0.1
 """
 
 import os
