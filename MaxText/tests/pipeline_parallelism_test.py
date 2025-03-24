@@ -15,28 +15,20 @@ limitations under the License.
 import sys
 import os.path
 
-import jax
-from jax.sharding import Mesh
-
-
 import unittest
 import pytest
 
-from MaxText import pyconfig
-
-
-from MaxText.layers import pipeline
 import jax
-from jax import numpy as jnp
 from jax.sharding import Mesh
+import jax.numpy as jnp
+
+from flax.core import meta
+from flax import linen as nn
 
 from MaxText import common_types
 from MaxText import pyconfig
 from MaxText import max_utils
-from flax.core import meta
-
-import jax.numpy as jnp
-from flax import linen as nn
+from MaxText.layers import pipeline
 from MaxText.layers import simple_layer
 from MaxText.train import main as train_main
 
@@ -248,8 +240,9 @@ class PipelineParallelismTest(unittest.TestCase):
             "ici_pipeline_parallelism=4",
             "num_layers_per_pipeline_stage=2",
             "num_pipeline_microbatches=8",
-            "tokenizer_path={}".format(os.path.join(
-              os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")),
+            "tokenizer_path={}".format(
+                os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")
+            ),
             "scan_layers=False",  # We see better performance only scanning the pipeline iterations.
         ]
     )
@@ -296,8 +289,9 @@ class PipelineParallelismTest(unittest.TestCase):
             "ici_pipeline_parallelism=4",
             "num_layers_per_pipeline_stage=8",
             "num_pipeline_microbatches=8",
-            "tokenizer_path={}".format(os.path.join(
-              os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")),
+            "tokenizer_path={}".format(
+                os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")
+            ),
             "scan_layers=False",  # We see better performance only scanning the pipeline iterations.
         ]
     )
@@ -325,8 +319,9 @@ class PipelineParallelismTest(unittest.TestCase):
             "steps=3",
             "enable_checkpointing=False",
             "ici_pipeline_parallelism=4",
-            "tokenizer_path={}".format(os.path.join(
-              os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")),
+            "tokenizer_path={}".format(
+                os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")
+            ),
             "quantization=fp8",
             "scan_layers=False",
             "attention=dot_product",
@@ -356,8 +351,9 @@ class PipelineParallelismTest(unittest.TestCase):
             "steps=3",
             "enable_checkpointing=False",
             "ici_pipeline_parallelism=4",
-            "tokenizer_path={}".format(os.path.join(
-              os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")),
+            "tokenizer_path={}".format(
+                os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")
+            ),
             "quantization=nanoo_fp8",
             "scan_layers=False",
             "attention=dot_product",

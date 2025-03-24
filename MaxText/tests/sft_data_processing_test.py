@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+
 import os.path
 import subprocess
 import unittest
@@ -87,7 +88,15 @@ class SFTDataProcessingTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
-    exit_code = subprocess.call(["gsutil", "cp", "-r", "gs://maxtext-dataset/hf/llama2-tokenizer", os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets") + os.path.sep])
+    exit_code = subprocess.call(
+        [
+            "gsutil",
+            "cp",
+            "-r",
+            "gs://maxtext-dataset/hf/llama2-tokenizer",
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets") + os.path.sep,
+        ]
+    )
     if exit_code != os.EX_OK:
       raise ValueError(f"Download tokenizer with gsutil cp failed with exit code: {exit_code}")
 

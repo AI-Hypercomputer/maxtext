@@ -17,22 +17,27 @@
 import functools
 import json
 import re
-from typing import Optional
+from typing import Optional, Union
+from typing import Tuple, Sequence
+from dataclasses import dataclass
+
 from aqt.jax.v2 import config as aqt_config
 from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2.flax import aqt_flax
 from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
-from MaxText import common_types
-from dataclasses import dataclass
-from flax.linen import fp8_ops
-from flax.linen import initializers as flax_initializers
-import flax.linen as nn
+
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_flatten_with_path, tree_unflatten
-from typing import Tuple, Sequence
+
+from flax.linen import fp8_ops
+from flax.linen import initializers as flax_initializers
+import flax.linen as nn
+
 from MaxText.inference import kvcache
+from MaxText import common_types
+
 
 # Params used to define mixed precision quantization configs
 DEFAULT = "__default__"  # default config
@@ -385,7 +390,9 @@ def get_quant_mode(quant_mode_str: str = "train"):
   return None
 
 
-def configure_quantization(config: Config, quant_mode_str: str = "train"):
+def configure_quantization(
+    config: Config, quant_mode_str: str = "train"
+) -> Optional[Union[AqtQuantization, Fp8Quantization, NANOOFp8Quantization]]:
   """Configure quantization based on user config and quant mode."""
   quant_cfg = _get_quant_config(config)
   if quant_cfg:

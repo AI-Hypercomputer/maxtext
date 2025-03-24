@@ -17,18 +17,19 @@ limitations under the License.
 """ Tests for GPT3 """
 import os.path
 import sys
-import jax
 import unittest
-from MaxText import max_utils
+
+import pytest
+
 from jax.sharding import Mesh
+import jax
+import jax.numpy as jnp
+
 from MaxText.layers import models
 from MaxText.layers import embeddings
 from MaxText.layers import quantizations
-
-import jax.numpy as jnp
-
+from MaxText import max_utils
 from MaxText import pyconfig
-import pytest
 
 
 Mesh = jax.sharding.Mesh

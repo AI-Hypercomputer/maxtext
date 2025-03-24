@@ -15,17 +15,23 @@ limitations under the License.
 """
 
 """ Tests for the quantizations """
+
+import os.path
+import unittest
+from typing import Optional, Union
+
 from jax import numpy as jnp
 from jax import random, lax
 from flax import linen as nn
-import functools
+
 import numpy as np
-from MaxText import pyconfig
 import pytest
-from MaxText.layers import quantizations
-import unittest
+
 from aqt.jax.v2 import aqt_tensor
-from aqt.jax.v2 import calibration
+
+from MaxText.layers import quantizations
+from MaxText.layers.quantizations import AqtQuantization, Fp8Quantization, NANOOFp8Quantization
+from MaxText import pyconfig
 
 _QUERY_REGEX = ".*/query"
 _VALUE_REGEX = ".*/value"
@@ -50,7 +56,9 @@ class QuantTestModule(nn.Module):
     return res_einsum, res_dg
 
 
-def _configure_quantization(quant_str="", quant_cfg_path="", mode_str="train", replicate_scale=False):
+def _configure_quantization(
+    quant_str="", quant_cfg_path="", mode_str="train", replicate_scale=False
+) -> Optional[Union[AqtQuantization, Fp8Quantization, NANOOFp8Quantization]]:
   config = pyconfig.initialize(
       [None, os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")],
       enable_checkpointing=False,

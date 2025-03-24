@@ -33,18 +33,21 @@ the GCS bucket as a local path using `setup_gcsfuse.sh`, but remember to mount a
 """
 
 from typing import Sequence, Any, Tuple, Union
+
 import torch
 from tqdm import tqdm
 from absl import app
 import numpy as np
+from jax.sharding import Mesh
+
+from transformers import LlamaForCausalLM, MistralForCausalLM, AutoModelForCausalLM, AutoConfig
+
 from MaxText import pyconfig
 from MaxText import max_utils
-from jax.sharding import Mesh
 from MaxText import max_logging
 from MaxText import checkpointing
 from MaxText.generate_param_only_checkpoint import _read_train_checkpoint
 from MaxText import llama_or_mistral_ckpt
-from transformers import LlamaForCausalLM, MistralForCausalLM, AutoModelForCausalLM, AutoConfig
 from MaxText.max_utils import unpermute_from_match_maxtext_rope
 
 

@@ -23,24 +23,23 @@ import flax
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
-from MaxText.layers import models, quantizations
-
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 from jax.experimental import layout as jax_layout
 
-from MaxText import common_types
 from jetstream.core import config_lib
 from jetstream.engine import engine_api
 from jetstream.engine import tokenizer_pb2
 from jetstream.engine import tokenizer_api
 from jetstream.engine import token_utils
-from MaxText.utils import lora_utils
 
+from MaxText import common_types
 from MaxText import max_utils
 from MaxText import inference_utils
 from MaxText import pyconfig
+from MaxText.layers import models, quantizations
+from MaxText.utils import lora_utils
 
 import warnings
 
@@ -1333,8 +1332,10 @@ def create_engine_from_config_flags(batch_size, max_prefill_predict_length, max_
     k, v = cmd_arg.split("=")
     args[k.strip()] = v.strip()
   assert "load_parameters_path" in args, "load_parameters_path must be defined"
-  updated_args = [os.path.join("MaxText", "maxengine_server.py"),
-                  os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml")]
+  updated_args = [
+      os.path.join("MaxText", "maxengine_server.py"),
+      os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml"),
+  ]
   for k, v in args.items():
     option = f"{k}={v}"
     updated_args.append(option)

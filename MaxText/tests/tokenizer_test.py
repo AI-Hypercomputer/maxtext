@@ -40,8 +40,10 @@ class TokenizerTest(unittest.TestCase):
     vocab_model_name = "test_tokenizer"
     cls.tokenizer_path = os.path.join(assets_path, vocab_model_name)
     cls.source_tokenizer = _input_pipeline_utils.get_tokenizer(
-        os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer"), "sentencepiece",
-        add_bos=False, add_eos=False
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer"),
+        "sentencepiece",
+        add_bos=False,
+        add_eos=False,
     )
     os.environ["TFDS_DATA_DIR"] = dataset_path
     read_config = tfds.ReadConfig(
@@ -120,11 +122,13 @@ class HFTokenizerTest(unittest.TestCase):
         check=True,
     )
     cls.hf_tokenizer = _input_pipeline_utils.get_tokenizer(
-        os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "gemma2-2b"), "huggingface", add_bos=False, add_eos=False
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "gemma2-2b"),
+        "huggingface",
+        add_bos=False,
+        add_eos=False,
     )
     cls.sp_tokenizer = _input_pipeline_utils.get_tokenizer(
-      os.path.join(os.path.dirname(".."), "assets", "tokenizer.gemma"),
-      "sentencepiece", add_bos=False, add_eos=False
+        os.path.join(os.path.dirname(".."), "assets", "tokenizer.gemma"), "sentencepiece", add_bos=False, add_eos=False
     )
 
   @pytest.mark.tpu_only

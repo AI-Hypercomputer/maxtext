@@ -54,11 +54,20 @@ class WeightDtypes(unittest.TestCase):
     jax.tree_util.tree_map_with_path(lambda x, y: self.assertEqual(y.dtype, expected_dtype), weights)
 
   def test_default_float32(self):
-    argv = [None, os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml"), "enable_checkpointing=False"]
+    argv = [
+        None,
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml"),
+        "enable_checkpointing=False",
+    ]
     weights = self.get_weights(argv)
     self.assert_weights_are_dtype(weights, jnp.float32)
 
   def test_set_bf16(self):
-    argv = [None, os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml"), "enable_checkpointing=False", "weight_dtype=bfloat16"]
+    argv = [
+        None,
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml"),
+        "enable_checkpointing=False",
+        "weight_dtype=bfloat16",
+    ]
     weights = self.get_weights(argv)
     self.assert_weights_are_dtype(weights, jnp.bfloat16)

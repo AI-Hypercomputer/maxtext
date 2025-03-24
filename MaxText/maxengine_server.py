@@ -19,6 +19,7 @@ import os
 import sys
 
 import pathwaysutils
+
 pathwaysutils.initialize()
 
 from MaxText import pyconfig

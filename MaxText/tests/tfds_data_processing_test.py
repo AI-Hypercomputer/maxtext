@@ -43,8 +43,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
         data_sharding=["data"],
         base_output_directory="gs://max-experiments/",
         dataset_path="gs://maxtext-dataset/",
-        tokenizer_path=os.path.join(
-              os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2"),
+        tokenizer_path=os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2"),
         enable_checkpointing=False,
         eval_interval=10,
     )
@@ -126,8 +125,8 @@ class TfdsDataProcessingTest(unittest.TestCase):
     eval_batch2 = get_first_batch(self.eval_iter)
     self.assertIsNotNone(eval_batch1)
     self.assertIsNotNone(eval_batch2)
-    self.assertTrue((eval_batch1["inputs"] == eval_batch2["inputs"]).all()) # pytype: disable=unsupported-operands
-    self.assertTrue((eval_batch1["targets"] == eval_batch2["targets"]).all()) # pytype: disable=unsupported-operands
+    self.assertTrue((eval_batch1["inputs"] == eval_batch2["inputs"]).all())  # pytype: disable=unsupported-operands
+    self.assertTrue((eval_batch1["targets"] == eval_batch2["targets"]).all())  # pytype: disable=unsupported-operands
 
 
 if __name__ == "__main__":

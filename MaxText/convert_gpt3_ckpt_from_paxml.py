@@ -32,26 +32,28 @@ python3 -m MaxText.convert_gpt3_ckpt_from_paxml \
   --run-name=$RUN_NAME \
   --base-output-directory=$BASE_OUTPUT_DIR
 """
-from MaxText import max_utils
-from MaxText import optimizers
-from MaxText import pyconfig
 import os
+import sys
+import argparse
+import gc
+
 from jax import random
 from jax.sharding import Mesh
-from MaxText.layers.models import Transformer
-from MaxText.layers import quantizations
-from MaxText import checkpointing
 
 import numpy as np
 import tensorstore as ts
 
-import sys
 import jax
-import gc
-from MaxText import max_logging
 from psutil import Process
+
+from MaxText import max_utils
+from MaxText import optimizers
+from MaxText import pyconfig
+from MaxText.layers.models import Transformer
+from MaxText.layers import quantizations
+from MaxText import checkpointing
+from MaxText import max_logging
 from MaxText.train import save_checkpoint
-import argparse
 
 
 def fmt_size(num_bytes: int) -> str:

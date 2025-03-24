@@ -20,18 +20,18 @@ limitations under the License.
 
 
 from typing import Optional
-from MaxText.layers import quantizations
-from MaxText.layers import linears
-from MaxText.layers import initializers
-import jax
+
 from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh
-from flax import linen as nn
 import jax.numpy as jnp
+from flax import linen as nn
+
 from MaxText.layers import attentions
 from MaxText.layers import embeddings
 from MaxText.layers import normalizations
 from MaxText.layers import models
+from MaxText.layers import quantizations
+from MaxText.layers import linears
+from MaxText.layers import initializers
 from MaxText import common_types
 from MaxText import max_logging
 

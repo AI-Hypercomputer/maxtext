@@ -10,6 +10,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+
 import os
 
 # pylint: disable=missing-module-docstring, missing-function-docstring
@@ -49,8 +50,7 @@ class GradientAccumulationTest(unittest.TestCase):
         "enable_checkpointing=False",
         "base_emb_dim=256",
         "base_num_decoder_layers=4",
-        "tokenizer_path={}".format(os.path.join(
-              os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")),
+        "tokenizer_path={}".format(os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")),
         "steps=50",
     ]
     # Run with gradient accumulation with accumulate_steps=10, per_device_batch=1 --> simulating per_device_batch=10

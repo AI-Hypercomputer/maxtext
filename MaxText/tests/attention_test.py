@@ -19,18 +19,17 @@ import os
 import random
 import sys
 import unittest
-from absl.testing import parameterized
 
-from MaxText import common_types
+from absl.testing import parameterized
 
 from flax.core import freeze
 import jax
 import jax.numpy as jnp
-from MaxText import max_utils
 import pytest
 
+from MaxText import common_types
+from MaxText import max_utils
 from MaxText import pyconfig
-
 from MaxText.layers import attentions
 
 Mesh = jax.sharding.Mesh

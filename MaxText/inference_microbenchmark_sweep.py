@@ -122,10 +122,10 @@ def main():
     try:
       microbenchmark_results = inference_microbenchmark.main(config, inference_metadata=inference_metadata)
       if microbenchmark_results:
-          metrics = microbenchmark_results["flattened_results"]
-          metrics = {k.lower(): v for k, v in metrics.items()}
+        metrics = microbenchmark_results["flattened_results"]
+        metrics = {k.lower(): v for k, v in metrics.items()}
       else:
-          metrics = {}
+        metrics = {}
       dimensions_json["oom"] = "False"
       print(
           f"Completed run {two_axis_order_product_id} out of: "

@@ -16,22 +16,21 @@ limitations under the License.
 Convert orbax Gemma checkpoint to MaxText compatible checkpoint.
 """
 
+import argparse
+import copy
+from typing import Any
+import sys
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 jax.config.update("jax_platform_name", "cpu")
-import argparse
-import copy
 from flax.training import train_state
-
-from typing import Any
-import sys
-from MaxText import max_logging
-
 
 import orbax
 
+from MaxText import max_logging
 from MaxText import checkpointing
 from MaxText.train import save_checkpoint
 

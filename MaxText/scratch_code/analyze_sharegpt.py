@@ -45,7 +45,7 @@ def get_prefill_and_generate_times(filename=""):
 
 def get_conversations_from_file(filename, max_input_tokens, max_output_tokens):
   convo_token_numbers = []
-  with open(filename, "r") as f:
+  with open(filename, "r", encoding="utf8") as f:
     loaded_share_gpt = json.load(f)
   for example in loaded_share_gpt:
     if len(example["conversations"]) < 2:

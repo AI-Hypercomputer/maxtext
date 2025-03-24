@@ -18,12 +18,16 @@ import datetime
 import os
 import sys
 import queue
-
 from typing import Sequence, Any, Tuple, Union
+
 from absl import app
 from flax.linen import partitioning as nn_partitioning
 import jax
 import numpy as np
+
+import tensorflow as tf
+
+from ml_goodput_measurement import monitoring
 
 from MaxText import checkpointing
 from MaxText import max_utils
@@ -32,8 +36,6 @@ from MaxText import max_logging
 from MaxText import profiler
 from MaxText import pyconfig
 from MaxText.utils import gcs_utils
-import tensorflow as tf
-
 from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
 from MaxText.metric_logger import MetricLogger
@@ -51,7 +53,6 @@ from MaxText.train import (
     train_step,
     validate_train_config,
 )
-from ml_goodput_measurement import monitoring
 
 
 def setup_train_loop(config):

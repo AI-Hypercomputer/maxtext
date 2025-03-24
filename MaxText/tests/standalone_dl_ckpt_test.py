@@ -48,8 +48,9 @@ class Standalone_DL_CKPT(unittest.TestCase):
             "dataset_path=gs://maxtext-dataset",
             "steps=100",
             "enable_checkpointing=false",
-            "tokenizer_path={}".format(os.path.join(
-              os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")),
+            "tokenizer_path={}".format(
+                os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")
+            ),
         )
     )  # need to pass relative path to tokenizer
 

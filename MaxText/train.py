@@ -48,6 +48,7 @@ from MaxText import profiler
 from MaxText import pyconfig
 
 import pathwaysutils
+
 pathwaysutils.initialize()
 
 import tensorflow as tf
@@ -175,7 +176,7 @@ def save_checkpoint(
             items=orbax.checkpoint.args.PyTreeSave(
                 item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size
             ),
-            iter=grain.PyGrainCheckpointSave(data_iterator.local_iterator), # pytype: disable=attribute-error
+            iter=grain.PyGrainCheckpointSave(data_iterator.local_iterator),  # pytype: disable=attribute-error
         ),
         force=force,
     )

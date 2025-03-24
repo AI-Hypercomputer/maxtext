@@ -30,6 +30,7 @@ To fit less memory, modify convert() to load/save weights in multiple passes.
 Each pass, load and save partial weights (subset of all weight variables).
 """
 # pylint: disable=g-line-too-long
+
 import argparse
 import pathlib
 import os
@@ -49,11 +50,12 @@ import torch
 import psutil
 from tqdm import tqdm
 
+from safetensors import safe_open
+
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.train import save_checkpoint
 from MaxText import checkpointing
-from safetensors import safe_open
 from MaxText.utils import gcs_utils
 
 MODEL_PARAMS_DICT = {
