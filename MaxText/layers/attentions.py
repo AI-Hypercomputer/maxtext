@@ -446,7 +446,7 @@ class AttentionOp(nn.Module):
 
     _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
 
-    using_context_parallelism = self.config.ici_context_parallelism > 1 or self.config.dcn_context_parallelism > 1
+    using_context_parallelism = self.mesh.shape['context'] > 1
 
     if self.attention_type == AttentionType.LOCAL_SLIDING and using_context_parallelism:
       raise AssertionError("Sliding window attention is not supported when context parallelism is enabled")

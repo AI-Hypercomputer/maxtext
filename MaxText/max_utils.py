@@ -1163,13 +1163,12 @@ def reorder_sequence(tensor, cp_size: int):
 
 
 @partial(jax.jit, static_argnums=1)
-def reorder_causal_load_balanced(batch, config):
+def reorder_causal_load_balanced(batch, cp_size):
   """Reorders the example batch sequences"""
-  context_parallel_size = config.ici_context_parallelism * config.dcn_context_parallelism
   return {
       key: reorder_sequence(
           value,  # Pass each key's value inside batch separately
-          cp_size=context_parallel_size,
+          cp_size=cp_size,
       )
       if key in ["inputs", "targets", "inputs_position", "targets_position", "inputs_segmentation", "targets_segmentation"]
       else value
@@ -1177,6 +1176,6 @@ def reorder_causal_load_balanced(batch, config):
   }
 
 
-def get_reorder_callable(config):
+def get_reorder_callable(cp_size):
   """Creates a callable that can be used with map() to reorder batches."""
-  return functools.partial(reorder_causal_load_balanced, config=config)
+  return functools.partial(reorder_causal_load_balanced, cp_size=cp_size)

@@ -104,15 +104,6 @@ def validate_train_config(config):
         "With synthetic data, the format is not important as packing is not applied."
     )
 
-  # Check if context parallelism is being used with sequence packing
-  using_context_parallel = config.ici_context_parallelism > 1 or config.dcn_context_parallelism > 1
-  if using_context_parallel and config.enable_packing and config.dataset_type != "synthetic":
-    raise ValueError(
-        "Context parallelism cannot be used with sequence packing except for synthetic data where packing is not applied. "
-        "Either disable sequence packing (set enable_packing=False) or disable context parallelism. "
-        "Context parallelism with packing support will be added soon."
-    )
-
 
 def get_first_step(state):
   with jax.spmd_mode("allow_all"):
@@ -665,11 +656,20 @@ def setup_train_loop(config):
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
 
+  context_parallel_size = mesh.shape['context']
+  # Check if context parallelism is being used with sequence packing
+  if context_parallel_size > 1 and config.enable_packing and config.dataset_type != "synthetic":
+    raise ValueError(
+        "Context parallelism cannot be used with sequence packing except for synthetic data where packing is not applied. "
+        "Either disable sequence packing (set enable_packing=False) or disable context parallelism. "
+        "Context parallelism with packing support will be added soon."
+    )
+
   # Apply reordering wrapper to data iterators if context parallelism is enabled
-  if (config.ici_context_parallelism > 1 or config.dcn_context_parallelism > 1) and config.context_parallel_load_balance:
-    data_iterator = map(max_utils.get_reorder_callable(config), data_iterator)
+  if context_parallel_size > 1 and config.context_parallel_load_balance:
+    data_iterator = map(max_utils.get_reorder_callable(context_parallel_size), data_iterator)
     if eval_data_iterator:
-      eval_data_iterator = map(max_utils.get_reorder_callable(config), eval_data_iterator)
+      eval_data_iterator = map(max_utils.get_reorder_callable(context_parallel_size), eval_data_iterator)
 
   state, _, state_mesh_shardings, data_iterator = max_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
