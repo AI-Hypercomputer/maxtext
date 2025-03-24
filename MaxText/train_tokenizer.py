@@ -89,7 +89,8 @@ def _train_sentencepiece(
     abs_model_path = os.path.abspath(os.path.expanduser(model_path))
   fname, _ = _dump_chars_to_textfile(dataset, maxchars=maxchars, data_keys=data_keys)
   tmp_dir = tempfile.gettempdir()
-  model_fp = tempfile.NamedTemporaryFile(delete=False, prefix=os.path.join(tmp_dir, "sp_tmp")).__enter__()
+  with tempfile.NamedTemporaryFile(delete=False, prefix=os.path.join(tmp_dir, "sp_tmp")) as model_fp:
+    pass
   argstr = " ".join(
       [
           f"--input={fname}",

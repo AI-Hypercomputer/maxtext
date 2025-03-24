@@ -16,14 +16,15 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from typing import Any, Callable, Optional
-
+from typing import Any, Optional
+import functools
 
 from flax import linen as nn
-import functools
+
 import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
+
 from MaxText import common_types
 from MaxText.inference import page_manager
 from MaxText.layers import attentions
@@ -99,9 +100,9 @@ class DecoderLayer(nn.Module):
         float32_logits=cfg.float32_logits,
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
-        prefill_cache_axis_order=tuple([int(i) for i in cfg.prefill_cache_axis_order.split(",")]),
-        ar_cache_axis_order=tuple([int(i) for i in cfg.ar_cache_axis_order.split(",")]),
-        compute_axis_order=tuple([int(i) for i in cfg.compute_axis_order.split(",")]),
+        prefill_cache_axis_order=tuple(map(int, cfg.prefill_cache_axis_order.split(","))),
+        ar_cache_axis_order=tuple(map(int, cfg.ar_cache_axis_order.split(","))),
+        compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
         reshape_q=cfg.reshape_q,
     )
 
@@ -184,6 +185,7 @@ class Decoder(nn.Module):
   config: Config
   shared_embedding: nn.Module
   mesh: Mesh
+  pipeline_module: pipeline.Pipeline
   quant: Optional[Quant] = None
 
   def setup(self):
@@ -469,7 +471,7 @@ class Decoder(nn.Module):
           )
       else:
         if cfg.decoder_block == "deepseek":
-          assert len(RemattedBlockLayers) == 2, f"Unscanned layers must have a length of 2 using deepseek."
+          assert len(RemattedBlockLayers) == 2, "Unscanned layers must have a length of 2 using deepseek."
           dense_layer = RemattedBlockLayers[0]
           moe_layer = RemattedBlockLayers[1]
 

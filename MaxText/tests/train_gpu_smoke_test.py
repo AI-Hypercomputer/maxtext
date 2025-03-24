@@ -29,13 +29,11 @@ class Train(unittest.TestCase):
         [
             None,
             "third_party/py/maxtext/configs/gpu_smoke_test.yml",
-            f"base_output_directory=gs://runner-maxtext-logs",
+            "base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_test",
             r"dataset_path=gs://maxtext-dataset",
             "enable_checkpointing=False",
-            "tokenizer_path={}".format(
-                os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")
-            ),
+            f"tokenizer_path={os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'tokenizer.llama2')}",
             "enable_goodput_recording=False",
             "enable_checkpoint_cloud_logger=False",
             "monitor_goodput=False",

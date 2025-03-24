@@ -24,18 +24,20 @@ import datetime
 import os
 
 from typing import Sequence, Tuple, Any, Union
+
 from absl import app
 from flax.linen import partitioning as nn_partitioning
+import numpy as np
+
 import jax
 from jax import numpy as jnp
-import numpy as np
+import jax.experimental.multihost_utils
 
 from MaxText import checkpointing
 from MaxText import max_utils
 from MaxText import max_logging
 from MaxText import pyconfig
 from MaxText.train import setup_mesh_and_model, get_first_step, validate_train_config, save_checkpoint
-
 from MaxText.layers import models
 
 Transformer = models.Transformer

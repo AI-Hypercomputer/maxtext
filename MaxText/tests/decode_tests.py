@@ -37,9 +37,7 @@ class DecodeTests(unittest.TestCase):
           "ici_tensor_parallelism=4",
           "max_target_length=128",
           "per_device_batch_size=1",
-          r"tokenizer_path={}".format(
-              os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")
-          ),
+          f"tokenizer_path={os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'tokenizer.llama2')}",
       ],
       "int8": [  # tests decode with int8 quantization
           None,
@@ -54,9 +52,7 @@ class DecodeTests(unittest.TestCase):
           "per_device_batch_size=1",
           "quantization=int8",
           "quantize_kvcache=True",
-          r"tokenizer_path={}".format(
-              os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")
-          ),
+          f"tokenizer_path={os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'tokenizer.llama2')}",
       ],
       "pdb_lt_1": [  # tests decode with per_device_batch_size < 1
           None,
@@ -69,9 +65,7 @@ class DecodeTests(unittest.TestCase):
           "ici_tensor_parallelism=4",
           "max_target_length=128",
           "per_device_batch_size=.25",
-          r"tokenizer_path={}".format(
-              os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")
-          ),
+          f"tokenizer_path={os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'tokenizer.llama2')}",
       ],
   }
 

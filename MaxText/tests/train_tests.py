@@ -34,11 +34,9 @@ class TrainTests(unittest.TestCase):
           r"dataset_path=gs://maxtext-dataset",
           "steps=2",
           "enable_checkpointing=False",
-          r"tokenizer_path={}".format(
-              os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")
-          ),
+          f"tokenizer_path={os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'tokenizer.llama2')}",
       ],
-      "synthetic": [  # tests base config with synthtic dataset
+      "synthetic": [  # tests base config with synthetic dataset
           None,
           os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "base.yml"),
           r"base_output_directory=gs://runner-maxtext-logs",
@@ -47,9 +45,7 @@ class TrainTests(unittest.TestCase):
           "steps=2",
           "enable_checkpointing=False",
           "dataset_type=synthetic",
-          r"tokenizer_path={}".format(
-              os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")
-          ),
+          f"tokenizer_path={os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'tokenizer.llama2')}",
       ],
       "pdb_lt_1": [  # tests base config with per_device_batch_size < 1
           None,
@@ -61,9 +57,7 @@ class TrainTests(unittest.TestCase):
           "enable_checkpointing=False",
           "per_device_batch_size=0.25",
           "ici_tensor_parallelism=4",
-          r"tokenizer_path={}".format(
-              os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")
-          ),
+          f"tokenizer_path={os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'tokenizer.llama2')}",
       ],
       "tp_transpose": [  # tests base config with ici_tensor_transpose_parallelism=4
           None,
@@ -73,9 +67,7 @@ class TrainTests(unittest.TestCase):
           r"dataset_path=gs://maxtext-dataset",
           "steps=2",
           "ici_tensor_transpose_parallelism=4",
-          r"tokenizer_path={}".format(
-              os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")
-          ),
+          f"tokenizer_path={os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'tokenizer.llama2')}",
       ],
       "int8": [  # tests base config with int8
           None,
@@ -86,9 +78,7 @@ class TrainTests(unittest.TestCase):
           "quantization=int8",
           "steps=2",
           "enable_checkpointing=False",
-          r"tokenizer_path={}".format(
-              os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")
-          ),
+          f"tokenizer_path={os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'tokenizer.llama2')}",
       ],
       "fp8": [  # tests base config with fp8
           None,
@@ -99,9 +89,7 @@ class TrainTests(unittest.TestCase):
           "quantization=fp8",
           "steps=2",
           "enable_checkpointing=False",
-          r"tokenizer_path={}".format(
-              os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")
-          ),
+          f"tokenizer_path={os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'tokenizer.llama2')}",
       ],
       "nanoo_fp8": [  # tests base config with nanoo_fp8
           None,
@@ -112,9 +100,7 @@ class TrainTests(unittest.TestCase):
           "quantization=nanoo_fp8",
           "steps=2",
           "enable_checkpointing=False",
-          r"tokenizer_path={}".format(
-              os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")
-          ),
+          f"tokenizer_path={os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'tokenizer.llama2')}",
       ],
       "dropout": [  # tests base config with dropout
           None,
@@ -127,9 +113,7 @@ class TrainTests(unittest.TestCase):
           "max_target_length=128",
           "per_device_batch_size=1",
           "dropout_rate=0.02",
-          r"tokenizer_path={}".format(
-              os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")
-          ),
+          f"tokenizer_path={os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'tokenizer.llama2')}",
       ],
       "hf_input_pipeline": [  # test for train.py with TFDS c4, using HF input pipeline
           None,
@@ -216,7 +200,7 @@ class TrainTests(unittest.TestCase):
         "steps=2",
         "enable_checkpointing=False",
         "attention=cudnn_flash_te",
-        r"tokenizer_path={}".format(os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")),
+        f"tokenizer_path={os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'tokenizer.llama2')}",
     ]
     train_main(cudnn_flash_te)
 

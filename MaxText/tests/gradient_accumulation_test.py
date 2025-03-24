@@ -50,7 +50,7 @@ class GradientAccumulationTest(unittest.TestCase):
         "enable_checkpointing=False",
         "base_emb_dim=256",
         "base_num_decoder_layers=4",
-        "tokenizer_path={}".format(os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")),
+        f"tokenizer_path={os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'tokenizer.llama2')}",
         "steps=50",
     ]
     # Run with gradient accumulation with accumulate_steps=10, per_device_batch=1 --> simulating per_device_batch=10

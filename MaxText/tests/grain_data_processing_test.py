@@ -41,7 +41,7 @@ class GrainDataProcessingTest(unittest.TestCase):
             "bash",
             os.path.join(os.path.dirname(__file__), "setup_gcsfuse.sh"),
             "DATASET_GCS_BUCKET=maxtext-dataset",
-            "MOUNT_PATH={}".format(os.path.join(tmp_dir, "gcsfuse")),
+            f"MOUNT_PATH={os.path.join(tmp_dir, 'gcsfuse')}",
         ]
     )
     if exit_code != os.EX_OK:

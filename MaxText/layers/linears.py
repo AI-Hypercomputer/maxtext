@@ -639,7 +639,8 @@ class MoeBlock(nn.Module):
     batch_size, seq_len, _ = top_k_indices.shape
     cp, sub_seq = self.get_context_partition_and_sub_seq(seq_len)
 
-    #  breaking the sequence into sub sequences. It is effectively grouping the tokens in a sequence into groups, and route only within each group.
+    # breaking the sequence into subsequences. It is effectively grouping the tokens in a sequence into groups, and
+    # route only within each group.
     top_k_indices = jnp.reshape(top_k_indices, (batch_size, cp, sub_seq, top_k_indices.shape[2]))
 
     tokens_per_batch = sub_seq * self.num_experts_per_tok
@@ -861,9 +862,9 @@ class MoeBlock(nn.Module):
           input_axis = ("activation_batch", "activation_length", None, "activation_embed")
           dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_embed")
           mlp_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_mlp")
-        dispatch_eimsum = f"BNSM,BNSEC -> EBNCM"
-        mlp_einsum = f"EBNCM,EMH -> EBNCH"
-        output_einsum = f"EBNCM,BNSEC -> BNSM"
+        dispatch_eimsum = "BNSM,BNSEC -> EBNCM"
+        mlp_einsum = "EBNCM,EMH -> EBNCH"
+        output_einsum = "EBNCM,BNSEC -> BNSM"
 
         inputs = jnp.reshape(inputs, (batch_size, cp, sub_seq, inputs.shape[2]))
         inputs = nn.with_logical_constraint(inputs, input_axis)

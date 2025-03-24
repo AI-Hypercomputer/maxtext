@@ -30,9 +30,7 @@ class SimpleDecoderLayerTest(unittest.TestCase):
             r"dataset_path=gs://maxtext-dataset",
             "decoder_block=simple",
             "enable_checkpointing=False",
-            "tokenizer_path={}".format(
-                os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")
-            ),
+            f"tokenizer_path={os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'tokenizer.llama2')}",
             "steps=3",
         ]
     )
@@ -48,9 +46,7 @@ class SimpleDecoderLayerTest(unittest.TestCase):
             r"dataset_path=gs://maxtext-dataset",
             "decoder_block=simple_mlp",
             "enable_checkpointing=False",
-            "tokenizer_path={}".format(
-                os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tokenizer.llama2")
-            ),
+            f"tokenizer_path={os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'tokenizer.llama2')}",
             "steps=3",
         ]
     )

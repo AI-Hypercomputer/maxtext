@@ -312,7 +312,7 @@ class AttentionTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_dot_product_cache_axis_order(self):
-    all_axis_orders = [axis_order for axis_order in itertools.permutations(range(4))]
+    all_axis_orders = list(itertools.permutations(range(4)))
     for axis_order in random.choices(all_axis_orders, k=4):
       self.dot_product_attention_helper(prefill_cache_axis_order=axis_order, ar_cache_axis_order=axis_order)
       print(f"passed test for {axis_order=}")

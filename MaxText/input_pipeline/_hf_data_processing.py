@@ -15,7 +15,6 @@ limitations under the License.
 """
 
 """Input pipeline using Huggingface datasets."""
-import functools
 
 import ml_collections
 import jax
@@ -92,7 +91,7 @@ def preprocessing_pipeline(
         batched=True,
         fn_kwargs={
             "hf_tokenizer": tokenizer,
-            "truncation": True if not use_sft else False,
+            "truncation": not use_sft,
             "max_length": max_target_length,
             "column_names": data_column_names,
         },
@@ -226,10 +225,7 @@ def make_hf_eval_iterator(
       token=config.hf_access_token,
   )
 
-  if config.eval_steps > 0:
-    eval_generate_padding_example = True
-  else:
-    eval_generate_padding_example = False
+  eval_generate_padding_example = bool(config.eval_steps)
   eval_iter = preprocessing_pipeline(
       dataloading_host_index=process_indices_eval.index(jax.process_index()),
       dataloading_host_count=len(process_indices_eval),

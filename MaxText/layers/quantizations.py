@@ -64,11 +64,9 @@ class Quantization:
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Placeholder for dot_general implementation in subclasses."""
-    pass
 
   def einsum(self, dtype: DType = jnp.float32):
     """Placeholder for einsum implementation in subclasses."""
-    pass
 
 
 def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
@@ -341,7 +339,8 @@ def _get_mixed_precision_quant_config(mixed_precision_config):
   for layer_name_re, layer_quantization_config in mixed_precision_config.items():
     # Make a copy of default_mp_config to avoid updaing original dict
     quant_config = default_mp_config.copy()
-    # print(f"Mixed precision config: processing {layer_name_re} - {layer_quantization_config}, default config - {quant_config}")
+    # print(f"Mixed precision config: processing {layer_name_re} - {layer_quantization_config},
+    #       default config - {quant_config}")
     if layer_name_re != DEFAULT:
       for k in quant_config.keys():
         quant_config[k] = layer_quantization_config.get(k, default_mp_config[k])
