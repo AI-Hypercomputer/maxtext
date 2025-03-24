@@ -13,7 +13,6 @@
 # limitations under the License.
 
 # model config for DeepSeek V2-Lite - 16B
-# Please note: DeepSeek-style is not fully support at this moment
 
 base_emb_dim: 2048
 base_num_query_heads: 16

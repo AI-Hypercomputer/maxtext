@@ -13,7 +13,6 @@
 # limitations under the License.
 
 # model config for DeepSeek V3 - 671B
-# Please note: DeepSeek V3 is not fully support at this moment
 
 base_emb_dim: 7168
 base_num_query_heads: 128
