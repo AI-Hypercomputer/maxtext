@@ -32,6 +32,9 @@ def test_maxtext_with_sft_in_trl():
       "--model-name=llama3.1-8b",
       "--tokenizer-path=assets/llama3.1-tokenizer",
       "--model-ckpt-path=gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items",
+      "--rtol=1e-05",
+      "--atol=0.06",
+      "--kl-div=7e-05",
   ]
 
   subprocess.run(command, check=True, cwd="..")
