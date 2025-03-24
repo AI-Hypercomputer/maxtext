@@ -62,9 +62,7 @@ def initialize_config(config):
 
 def get_golden_data(config):
   """Get the golden data for SFTTrainer in TRL."""
-  golden_data_path = os.path.join(
-      PKG_ROOT, "test_assets", f"golden_data_sft_{config.model_name}.jsonl"
-  )
+  golden_data_path = os.path.join(PKG_ROOT, "test_assets", f"golden_data_sft_{config.model_name}.jsonl")
   with jsonlines.open(golden_data_path, "r") as f:
     golden_data = list(f)
   return golden_data[0]

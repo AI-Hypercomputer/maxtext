@@ -121,8 +121,7 @@ def save_golden_logits(config):
       "trl_logits": trl_logits.tolist()[0],
   }
 
-  model_output_path = os.path.join(PKG_ROOT, "test_assets",
-                                   f"golden_data_sft_{config.model_name}.jsonl")
+  model_output_path = os.path.join(PKG_ROOT, "test_assets", f"golden_data_sft_{config.model_name}.jsonl")
   with jsonlines.open(model_output_path, "w") as f:
     f.write(data_to_save)
 

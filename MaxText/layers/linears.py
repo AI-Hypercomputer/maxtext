@@ -785,7 +785,7 @@ class MoeBlock(nn.Module):
 
     # the check is to prevent aqteinsum as einsum op for dispatch and combine einsums in ase when capacity_factor > 0
     # this is necessary to load pre-quantized weights in case of inference
-    if self.config.model_call_mode == "inference" and (einsum_name == DISPATCH or einsum_name == COMBINE):
+    if self.config.model_call_mode == "inference" and einsum_name in (DISPATCH, COMBINE):
       return jnp.einsum
 
     if self.quant:

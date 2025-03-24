@@ -33,7 +33,7 @@ from MaxText.layers import quantizations
 from MaxText.layers import linears
 from MaxText.layers import initializers
 from MaxText import common_types
-from MaxText import max_logging
+
 
 Array = common_types.Array
 Config = common_types.Config

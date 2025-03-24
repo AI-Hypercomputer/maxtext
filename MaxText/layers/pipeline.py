@@ -362,9 +362,7 @@ class Pipeline(nn.Module):
     # The first real output (microbatch 0) takes a certain amount of loop iterations to finish and be pushed to state_io
     # - it will land on a different index of state_io depending on the number of iterations.
     microbatch_0_idx = self.iterations_to_complete_first_microbatch() % self.microbatches_per_stage
-    permutation = (
-        np.arange(self.microbatches_per_stage) + microbatch_0_idx
-    ) % self.microbatches_per_stage
+    permutation = (np.arange(self.microbatches_per_stage) + microbatch_0_idx) % self.microbatches_per_stage
     # ^ permute so the value in land_idx is moved into idx 0, and (land_idx + 1) appear in idx 1, etc.
     output = output[:, permutation]
     return output
@@ -488,9 +486,7 @@ class Pipeline(nn.Module):
             "x_times": self.config.num_pipeline_repeats,
             "optimizer_dims_mapping": None,
         }
-        weights = meta.remove_axis(
-            weights, 0, circular_metadata_params
-        )
+        weights = meta.remove_axis(weights, 0, circular_metadata_params)
         # ^ Remove the circular metadata axis, this axis will be removed when passed to the main vmap,
         #   only one circular entry per stage.
         weights = gather_weights_for_stages_in(weights)
@@ -543,8 +539,7 @@ class Pipeline(nn.Module):
       return partition_spec_tree
 
     partition_spec_with_extra_layer = get_partition_spec(weights)
-    partition_spec = dict()
-    partition_spec["params"] = partition_spec_with_extra_layer["params"]["layers"]
+    partition_spec = {"params": partition_spec_with_extra_layer["params"]["layers"]}
     return partition_spec
 
   def get_physical_spec_no_fsdp(self, full_logical):
