@@ -105,7 +105,7 @@ def main(config, test_args):  # pylint: disable=W0621
 
     if test_args.hf_model_path != "":
       with torch.no_grad():
-        full_train_logits = model(torch.tensor(ids.tolist())).logits.cpu().numpy().astype("float32")
+        full_train_logits = model(torch.tensor(ids.tolist()), decoder_positions).logits.cpu().numpy().astype("float32")
     else:
       full_train_logits = model.apply(
           state.params,
