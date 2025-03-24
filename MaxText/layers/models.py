@@ -489,6 +489,8 @@ class Decoder(nn.Module):
                   previous_chunk=previous_chunk,
                   page_state=page_state,
               )
+              jax.debug.print("layer: {x}", x=index)
+              jax.debug.print("logits: {x}", x=y)
         else:
           for lyr in range(cfg.num_decoder_layers):
             RemattedBlockLayer = RemattedBlockLayers[0]
