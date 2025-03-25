@@ -181,7 +181,7 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
   # # LLaMA3.1 ROPE scaling, see the original pytorch implementation
   # https://github.com/meta-llama/llama-models/blob/301ca3a2b3b10e94ddcd1fdd2c57e52f812e1cac/models/llama3/reference_impl/model.py#L45C5-L45C18
   use_scale: bool = True
-  timescale: Array = jnp.empty(1.0)
+  timescale: Optional[Array] = None
 
   def _apply_scaling_factor(self, freq):
     scale_factor = 8
@@ -224,7 +224,6 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
       timescale = 1.0 / jax.vmap(self._apply_scaling_factor)(1.0 / timescale)
 
     # Expand timescale dimensions for broadcasting
-    t: Array | Any= timescale[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
     self.timescale = timescale[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
 
   def __call__(self, inputs: jax.Array, position: Optional[jax.Array] = None) -> jax.Array:

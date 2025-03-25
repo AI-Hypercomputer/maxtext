@@ -95,7 +95,7 @@ class SFTDataProcessingTest(unittest.TestCase):
             "cp",
             "-r",
             "gs://maxtext-dataset/hf/llama2-tokenizer",
-            os.path.join(PKG_ROOT, "assets") + os.path.sep,
+            os.path.join(PKG_ROOT, "assets", "")
         ]
     )
     if exit_code != os.EX_OK:

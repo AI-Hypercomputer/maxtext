@@ -47,9 +47,7 @@ from MaxText import optimizers
 from MaxText import profiler
 from MaxText import pyconfig
 
-import pathwaysutils
-
-pathwaysutils.initialize()
+import pathwaysutils  # pylint: disable=unused-import
 
 import tensorflow as tf
 

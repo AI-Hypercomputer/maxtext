@@ -40,7 +40,7 @@ class GrainDataProcessingTest(unittest.TestCase):
     exit_code = subprocess.call(
         [
             "bash",
-            os.path.join(os.path.dirname(__file__), "setup_gcsfuse.sh"),
+            os.path.join(os.path.dirname(PKG_ROOT), "setup_gcsfuse.sh"),
             "DATASET_GCS_BUCKET=maxtext-dataset",
             f"MOUNT_PATH={os.path.join(tmp_dir, 'gcsfuse')}",
         ]
