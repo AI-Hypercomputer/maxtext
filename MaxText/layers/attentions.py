@@ -611,7 +611,7 @@ class AttentionOp(nn.Module):
     return local_out, local_max, local_sum
 
   def is_partition_in_decode(self, seq_len):
-    return self.config.ici_context_parallelism > 0 and seq_len == 1
+    return self.config.ici_context_autoregressive_parallelism > 1 and seq_len == 1
 
   def apply_attention_dot(
       self,
@@ -947,7 +947,7 @@ class Attention(nn.Module):
           attn_logits_soft_cap=self.attn_logits_soft_cap,
       )
 
-  def query_projection(self, inputs_q: Array) -> Array:
+  def query_projection(self, inputs_q: Array, kernel_axes: AxisNames = ("embed", "q_heads", "kv")) -> Array:
     """Query projection."""
 
     # NOTE: T5 does not explicitly rescale the attention logits by
@@ -958,8 +958,6 @@ class Attention(nn.Module):
     def query_init(*args):
       # pylint: disable=no-value-for-parameter
       return self.kernel_init(*args) / depth_scaling
-
-    kernel_axes = (None, None, None) if self.config.ici_context_parallelism > 1 else ("embed", "q_heads", "kv")
     query_proj = DenseGeneral(
         features=(self.num_query_heads, self.head_dim),
         axis=-1,
@@ -973,7 +971,7 @@ class Attention(nn.Module):
     )(inputs_q)
     return query_proj
 
-  def kv_projection(self, inputs_kv: Array, proj_name: str) -> Array:
+  def kv_projection(self, inputs_kv: Array, proj_name: str, kernel_axes: AxisNames = ("embed", "kv_heads", "kv_head_dim")) -> Array:
     """Projection for Key and Value.
 
     Args:
@@ -989,9 +987,6 @@ class Attention(nn.Module):
 
     if self.num_query_heads % self.num_kv_heads != 0:
       raise ValueError("Invalid num_kv_heads for GQA.")
-
-    kernel_axes = (None, None, None) if self.config.ici_context_parallelism > 1 else ("embed", "kv_heads", "kv_head_dim")
-
     kv_proj = DenseGeneral(
         features=(self.num_kv_heads, self.head_dim),
         axis=-1,
@@ -1023,13 +1018,12 @@ class Attention(nn.Module):
     query, key, value = qkv_proj[:, :, 0, ...], qkv_proj[:, :, 1, ...], qkv_proj[:, :, 2, ...]
     return query, key, value
 
-  def out_projection(self, output_dim: int, out: Array) -> Array:
-    out_kernel_axis = (None, None, None) if self.config.ici_context_parallelism > 1 else ("heads", "kv", "embed")
+  def out_projection(self, output_dim: int, out: Array, kernel_axes: AxisNames = ("heads", "kv", "embed")) -> Array:
     out_proj = DenseGeneral(
         features=output_dim,
         axis=(-2, -1),
         kernel_init=self.kernel_init,
-        kernel_axes=out_kernel_axis,  # trade speed with memory
+        kernel_axes=kernel_axes,  # trade speed with memory
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         name="out",
@@ -1126,20 +1120,28 @@ class Attention(nn.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
-    if model_mode == common_types.MODEL_MODE_PREFILL:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
-    else:
+    if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       inputs_q = nn.with_logical_constraint(inputs_q, self.decode_input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.decode_input_axis_names)
-
+    else:
+      inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)    
+    
+    if self.config.ici_context_autoregressive_parallelism > 1:
+      q_kernel_axes = (None, None, None)
+      kv_kernel_axes = (None, None, None)
+      out_axes = (None, None, None)
+    else:
+      q_kernel_axes = ("embed", "q_heads", "kv")
+      kv_kernel_axes = ("embed", "kv_heads", "kv_head_dim")
+      out_axes = ("heads", "kv", "embed")
     # apply projection.
     if self.config.fused_qkv:
       query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
     else:
-      query = self.query_projection(inputs_q)
-      key = self.kv_projection(inputs_kv, proj_name="key")
-      value = self.kv_projection(inputs_kv, proj_name="value")
+      query = self.query_projection(inputs_q, kernel_axes = q_kernel_axes)
+      key = self.kv_projection(inputs_kv, proj_name="key", kernel_axes = kv_kernel_axes)
+      value = self.kv_projection(inputs_kv, proj_name="value", kernel_axes = kv_kernel_axes)
 
       if self.use_qk_norm:
         query = RMSNorm(
@@ -1195,7 +1197,7 @@ class Attention(nn.Module):
       out = nn.with_logical_constraint(out, self.out_axis_names)
     else:
       out = nn.with_logical_constraint(out, self.decode_out_axis_names)
-    out = self.out_projection(inputs_q.shape[-1], out)
+    out = self.out_projection(inputs_q.shape[-1], out, kernel_axes=out_axes)
     out = checkpoint_name(out, "out_proj")
     return out
 
