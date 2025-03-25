@@ -1085,20 +1085,20 @@ if __name__ == "__main__":
         max_logging.log(f"Ignoring {lora_id} adapter because its directory doesn't have adapter_config.json.")
         continue
 
-      with open(lora_config_path, "r", encoding="utf8") as file:
+      with open(lora_config_path, "rt", encoding="utf8") as file:
         lora_config_dict = json.load(file)
 
-        if lora_config_dict is not None:
-          lora_model_path = f"{lora_path}/adapter_model.bin"
-          lora_config_dict["lora_model_path"] = lora_model_path
+      if lora_config_dict is not None:
+        lora_model_path = f"{lora_path}/adapter_model.bin"
+        lora_config_dict["lora_model_path"] = lora_model_path
 
-          jax_lora_weights = convert_lora_weights_to_jax_weights(lora_config_dict, args.model_size)
+        jax_lora_weights = convert_lora_weights_to_jax_weights(lora_config_dict, args.model_size)
 
-          del lora_config_dict["lora_model_path"]
+        del lora_config_dict["lora_model_path"]
 
-          lora_output_gcs_path = f"{args.maxtext_model_path}/loras/{lora_id}"
+        lora_output_gcs_path = f"{args.maxtext_model_path}/loras/{lora_id}"
 
-          save_weights_to_checkpoint(lora_output_gcs_path, jax_lora_weights, SIMULATED_CPU_DEVICES_COUNT)
-          gcs_utils.write_dict_to_gcs_json(lora_config_dict, f"{lora_output_gcs_path}/adapter_config.json")
+        save_weights_to_checkpoint(lora_output_gcs_path, jax_lora_weights, SIMULATED_CPU_DEVICES_COUNT)
+        gcs_utils.write_dict_to_gcs_json(lora_config_dict, f"{lora_output_gcs_path}/adapter_config.json")
 
-          max_logging.log(f"Successfully saved lora_weights to {lora_output_gcs_path}.")
+        max_logging.log(f"Successfully saved lora_weights to {lora_output_gcs_path}.")

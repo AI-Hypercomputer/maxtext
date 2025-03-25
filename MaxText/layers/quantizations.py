@@ -357,7 +357,7 @@ def _get_quant_config(config):
     return _get_int8_quant_config(config)
   if config.quantization == "intmp":
     assert config.quant_cfg_path, "Must specify quant_cfg for mixed precision quantization"
-    with open(config.quant_cfg_path, "r") as config_file:
+    with open(config.quant_cfg_path, "rt", encoding="utf8") as config_file:
       mixed_precision_config = json.load(config_file)
     return _get_mixed_precision_quant_config(mixed_precision_config)
   if config.quantization == "fp8":

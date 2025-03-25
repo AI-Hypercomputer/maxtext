@@ -15,6 +15,8 @@ limitations under the License.
 """
 
 __author__ = "Google LLC"
-__version__ = "2025.4.25"
-__description__ = ("MaxText is a high performance, highly scalable, open-source LLM written in pure Python/Jax and "
-                   "targeting Google Cloud TPUs and GPUs for training and **inference.")
+__version__ = "2025.04.25"
+__description__ = (
+    "MaxText is a high performance, highly scalable, open-source LLM written in pure Python/Jax and "
+    "targeting Google Cloud TPUs and GPUs for training and **inference."
+)
