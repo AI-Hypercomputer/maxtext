@@ -517,6 +517,42 @@ def optimize_mesh_for_tpu_v6e(mesh, devices):
   max_logging.log("Optimized the mesh for TPU v6e")
   return new_mesh
 
+def reshape_mesh_to_zigzag_path(mesh, is_top_half):
+  zipzag_path = []
+  # For the top half, we go upward first; for the bottom half, we go downward first.
+  upward = is_top_half
+  for x in zip(*mesh):
+    if upward:
+      zipzag_path.extend(x[::-1])
+    else:
+      zipzag_path.extend(x)
+    # Alternate between upward and downward
+    upward = not upward
+
+  if not is_top_half:
+    # Reverse the path in the bottom half, because it is now going from left to right, we want it to go from right to left.
+    zipzag_path.reverse()
+
+  return zipzag_path
+
+def reshape_to_ring(devices):
+  device_coords = [d.coords for d in devices]
+  coord_size = len(device_coords[0])
+  max_coords = tuple(max(dc[i] for dc in device_coords) for i in range(coord_size))
+  min_coords = tuple(min(dc[i] for dc in device_coords) for i in range(coord_size))
+  dims = tuple(h - l + 1 for (h, l) in zip(max_coords, min_coords))
+  
+  device_map = [[None for _ in range(dims[1])] for _ in range(dims[0])]
+  for device in devices:
+    coords = device.coords
+    device_map[coords[0]][coords[1]] = device
+  midpoint = len(device_map) // 2
+  top_half_mesh = device_map[:midpoint]
+  bottom_half_mesh = device_map[midpoint:]
+
+  return reshape_mesh_to_zigzag_path(top_half_mesh, is_top_half=True) + reshape_mesh_to_zigzag_path(
+      bottom_half_mesh, is_top_half=False
+  )
 
 def create_device_mesh(config, devices=None):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
@@ -532,6 +568,11 @@ def create_device_mesh(config, devices=None):
   ici_parallelism = fill_unspecified_mesh_axes(config.ici_parallelism.copy(), num_devices_per_slice, "ICI")
 
   allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
+
+  if config.optimize_mesh_for_tpu_v6e:
+    devices = reshape_to_ring(devices)
+  
+  print(f"{devices=}")
 
   if multi_slice_env:
     dcn_parallelism = fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN")
@@ -567,9 +608,10 @@ def create_device_mesh(config, devices=None):
           ici_parallelism,
           devices,
       )
-      if config.optimize_mesh_for_tpu_v6e:
-        mesh = optimize_mesh_for_tpu_v6e(mesh, devices)
+      # if config.optimize_mesh_for_tpu_v6e:
+      #   mesh = optimize_mesh_for_tpu_v6e(mesh, devices)
 
+  print(f"{mesh=}")
   max_logging.log(f"Num_devices: {num_devices}, shape {mesh.shape}")
 
   return mesh
