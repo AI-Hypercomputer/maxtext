@@ -42,9 +42,6 @@ _MLPERF_ID = "llama2-70b"
 log = logging.getLogger(__name__)
 log.setLevel(os.getenv("LOGLEVEL", "INFO"))
 
-sys.path.insert(0, os.getcwd())
-
-
 from absl import app, flags
 
 FLAGS = flags.FLAGS
@@ -378,7 +375,6 @@ class SUT:
 
   def UnloadSamplesFromRam(self, sample_list):
     log.info("UnloadSamplesFromRam called")
-    pass
 
 
 def make_response(id_, response_token_ids):

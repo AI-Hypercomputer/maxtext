@@ -461,7 +461,7 @@ class OfflineInference:
           prefill_batch(self.prefill_buckets[padded_len][:-1], padded_len)
           self.prefill_buckets[padded_len] = [current]
     # For leftover requests in buckets at the end of computation, do prefill individually.
-    for padded_len in self.prefill_buckets.keys():
+    for padded_len in self.prefill_buckets:
       prefill_batch(self.prefill_buckets[padded_len], padded_len)
     self.prefill_buckets = defaultdict(list)
     while slot_to_id:

@@ -185,7 +185,7 @@ class Decoder(nn.Module):
   config: Config
   shared_embedding: nn.Module
   mesh: Mesh
-  pipeline_module: pipeline.Pipeline
+  pipeline_module: Optional[pipeline.Pipeline] = None
   quant: Optional[Quant] = None
 
   def setup(self):

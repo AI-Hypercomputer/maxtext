@@ -560,7 +560,7 @@ class Pipeline(nn.Module):
               else:
                 new_spec.append(None)
             elif isinstance(axis, (list, tuple)):
-              new_axis = (a for a in axis if (a not in ("fsdp", "fsdp_transpose")))
+              new_axis = (a for a in axis if a not in ("fsdp", "fsdp_transpose"))
               new_spec.append(tuple(new_axis))
             else:
               raise ValueError(f"Unsupported axis type: {type(axis)}")

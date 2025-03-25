@@ -328,7 +328,7 @@ def _dot_general_make(quant_cfg):
 def _get_default_mp_config(default=None):
   default_config = {_W_BITS: None, _A_BITS: None, _W_SCALE: 1.0, _A_SCALE: 1.0, _TILE_SIZE: -1}
   if default:
-    for k in default_config.keys():
+    for k in default_config:
       default_config[k] = default.get(k, default_config[k])
   return default_config
 
@@ -343,7 +343,7 @@ def _get_mixed_precision_quant_config(mixed_precision_config):
     # print(f"Mixed precision config: processing {layer_name_re} - {layer_quantization_config},
     #       default config - {quant_config}")
     if layer_name_re != DEFAULT:
-      for k in quant_config.keys():
+      for k in quant_config:
         quant_config[k] = layer_quantization_config.get(k, default_mp_config[k])
     ret_config[layer_name_re] = [_dot_general_make(quant_config), quant_config["tile_size"]]
   return ret_config

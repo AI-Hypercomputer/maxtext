@@ -17,8 +17,6 @@ import os.path
 from tempfile import gettempdir
 
 import jax
-import random
-import string
 
 
 def simple_timeit(f, *args, tries=10, task=None, enable_profile=False):
