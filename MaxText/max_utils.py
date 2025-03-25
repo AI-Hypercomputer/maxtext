@@ -267,7 +267,7 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
       num_nodes = jax.process_count()
       nodes_per_slice = num_nodes // num_slices
       max_logging.log(f"num_slices: {num_slices}, num_nodes: {num_nodes}, nodes_per_slice: {nodes_per_slice}")
-      node_rank = jax.process_index()
+      node_rank = jax._src.distributed.global_state.process_id  # pylint: disable=protected-access
       peer_ranks = []
       for i in range(num_slices):
         peer = node_rank % nodes_per_slice + i * nodes_per_slice
