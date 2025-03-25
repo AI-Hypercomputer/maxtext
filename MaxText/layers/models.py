@@ -64,6 +64,7 @@ class DecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      previous_chunk=None,
       page_state: Optional[page_manager.PageState] = None,
   ):
     cfg = self.config
@@ -302,6 +303,10 @@ class Decoder(nn.Module):
       from layers import gemma2
 
       return [gemma2.Gemma2DecoderLayer]
+    elif self.config.decoder_block == "gemma3":
+      from layers import gemma3
+
+      return [gemma3.Gemma3DecoderLayer]
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
 
@@ -318,7 +323,17 @@ class Decoder(nn.Module):
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
   def get_norm_layer(self):
-    if self.config.decoder_block in ("default", "llama2", "mistral", "deepseek", "gemma", "gemma2", "simple", "simple_mlp"):
+    if self.config.decoder_block in (
+        "default",
+        "llama2",
+        "mistral",
+        "deepseek",
+        "gemma",
+        "gemma2",
+        "gemma3",
+        "simple",
+        "simple_mlp",
+    ):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
@@ -471,18 +486,26 @@ class Decoder(nn.Module):
                   decoder_positions,
                   deterministic,
                   model_mode,
-                  page_state,
+                  previous_chunk=previous_chunk,
+                  page_state=page_state,
               )
         else:
           for lyr in range(cfg.num_decoder_layers):
             RemattedBlockLayer = RemattedBlockLayers[0]
-            y = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant)(
+            layer_kwargs = {}
+            if cfg.decoder_block == "gemma3":
+              from layers import gemma3
+              # Gemma3 uses both global and sliding window attention depending on the layer index.
+              layer_kwargs = {"attention_type": gemma3.get_attention_type(layer_id=lyr)}
+            layer = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, **layer_kwargs)
+            y = layer(
                 y,
                 decoder_segment_ids,
                 decoder_positions,
                 deterministic,
                 model_mode,
-                page_state,
+                previous_chunk=previous_chunk,
+                page_state=page_state,
             )
     y = self.get_norm_layer()(
         dtype=cfg.dtype,

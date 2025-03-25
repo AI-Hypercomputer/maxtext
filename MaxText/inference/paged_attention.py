@@ -28,6 +28,7 @@ from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention_kern
 from jax.sharding import PartitionSpec as P
 
 from inference import page_manager
+from inference import paged_attention_kernel_v2
 
 # pytype: disable=attribute-error
 
@@ -46,6 +47,7 @@ HEAD = common_types.HEAD
 D_KV = common_types.D_KV
 
 shard_map = shard_map.shard_map
+_use_kernel_v2 = False
 
 
 class PagedAttentionOp(nn.Module):
@@ -125,26 +127,73 @@ class PagedAttentionOp(nn.Module):
 
     return attn, local_max, local_sums
 
-  def paged_attention(
+  # TODO(rupliu): add sharding when SPMD is fully supported
+  def paged_attention_v2_prefill(
       self,
       query: Array,
       key_pages_var: nn.Variable,
       value_pages_var: nn.Variable,
       page_state: page_manager.PageState,
   ) -> Array:
-    """Apply Paged Attention.
-
-    Annotations:
-    b: batch_size
-    s: sequence length
-    n: query heads
-
-    k: kv_heads
-    x: num_pages
-    p: tokens_per_page
-
-    d: kv_head_dim_size
+    """Apply ragged input Paged Attention in prefill only. The assumption
+    is the batch_size is only 1
     """
+    assert query.shape[0] == 1  # ensure the batch size is 0
+    # shape of key_pages_var.value is [num_kv_heads, num_pages, tokens_per_page, head_dim]
+    k_p = jnp.permute_dims(key_pages_var.value, (1, 2, 0, 3))
+    v_p = jnp.permute_dims(value_pages_var.value, (1, 2, 0, 3))
+    c_q_l = jnp.array([0, page_state.sequence_lengths[0]])  # [0, prefill_true_length]
+    num_seqs = jnp.array([1])
+    query = query[0]  # [batch_size, max_num_tokens, num_kv_heads, head_dim] to [max_num_tokens, num_kv_heads, head_dim]
+    result = paged_attention_kernel_v2.ragged_paged_attention(
+        q=query,
+        k_pages=k_p,  # [total_num_pages, page_size, num_kv_heads, head_dim]
+        v_pages=v_p,
+        kv_lens=jnp.array([query.shape[0]]),  # max_prefill_length
+        cu_q_lens=c_q_l,  # the accumulative real lengths of requests, starting from 0
+        page_indices=page_state.page_map,
+        num_seqs=num_seqs,
+        # TODO(rupliu) debug: repeated response when enabled below
+        # num_kv_pages_per_block=self.pages_per_compute_block,
+    )
+    return jnp.expand_dims(result, axis=0)  # [batch_size, seq_len, n_kv_head, head_dim] and batch_size is 1 for now
+
+  # TODO(rupliu): add sharding when SPMD is fully supported
+  def paged_attention_v2_decode(
+      self,
+      query: Array,
+      key_pages_var: nn.Variable,
+      value_pages_var: nn.Variable,
+      page_state: page_manager.PageState,
+  ) -> Array:
+    """Apply ragged input Paged Attention in decode only."""
+    batch_size = query.shape[0]
+    query = jnp.squeeze(query, axis=1)  # [batch_size, seq_len, n_kv_head, head_dim] to [batch_size, n_kv_head, head_dim]
+    k_p = jnp.permute_dims(key_pages_var.value, (1, 2, 0, 3))
+    v_p = jnp.permute_dims(value_pages_var.value, (1, 2, 0, 3))
+    c_q_l = jnp.arange(batch_size + 1)  # one token per sequence
+    num_seqs = jnp.array([batch_size])  # real number of requests, set it to batch_size
+    result = paged_attention_kernel_v2.ragged_paged_attention(
+        q=query,  # [max_batched_num_tokens, num_kv_heads, head_dim]
+        k_pages=k_p,  # [total_num_pages, page_size, num_kv_heads, head_dim]
+        v_pages=v_p,  # [total_num_pages, page_size, num_kv_heads, head_dim]
+        kv_lens=page_state.sequence_lengths,  # [max_num_seqs]
+        cu_q_lens=c_q_l,  # [max_num_seqs+1]
+        page_indices=page_state.page_map,  # [max_num_seqs, pages_per_seq]
+        num_seqs=num_seqs,
+        num_kv_pages_per_block=self.pages_per_compute_block,
+    )
+    return jnp.expand_dims(result, axis=1)  # [batch_size, n_kv_head, head_dim] to [batch_size, seq_len, n_kv_head, head_dim]
+
+  # v1 kernel has around 20% performance gain than v2 kernel in decode only task
+  def paged_attention_v1_decode(
+      self,
+      query: Array,
+      key_pages_var: nn.Variable,
+      value_pages_var: nn.Variable,
+      page_state: page_manager.PageState,
+  ) -> Array:
+    """Apply Paged Attention v1 in decode only."""
     bsnd = nn.logical_to_mesh_axes(self.query_axis_names)
     kxpd = nn.logical_to_mesh_axes(self.kv_pages_axis_names)
     batch_q, seqlen_q, num_heads_q, head_dim = query.shape
@@ -169,14 +218,16 @@ class PagedAttentionOp(nn.Module):
     def wrap_paged_attention(q, k_pages, v_pages, lengths, page_indices, pages_per_compute_block):
       q = jnp.squeeze(q, axis=1)
       result = paged_attention_kernel.paged_attention(
-          q=q,
+          q=q,  # [batch_size, num_kv_heads, head_dim]
           k_pages=k_pages,
           v_pages=v_pages,
           lengths=lengths,
           page_indices=page_indices,
           pages_per_compute_block=pages_per_compute_block,
       )
-      return jnp.expand_dims(result, axis=1)
+      return jnp.expand_dims(
+          result, axis=1
+      )  # [batch_size, n_kv_head, head_dim] to [batch_size, seq_len, n_kv_head, head_dim]
 
     return wrap_paged_attention(
         query,
@@ -208,10 +259,13 @@ class PagedAttentionOp(nn.Module):
     self.update(key_pages_var, value_pages_var, key, value, model_mode, page_state)
 
     if model_mode == common_types.MODEL_MODE_PREFILL:
+      if _use_kernel_v2:
+        return self.paged_attention_v2_prefill(query, key_pages_var, value_pages_var, page_state), None, None
       return self.paged_dot_product_attention_with_max_and_sum(query, key, value)
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-      ar_output = self.paged_attention(query, key_pages_var, value_pages_var, page_state)
-      return ar_output, None, None
+      if _use_kernel_v2:
+        return self.paged_attention_v2_decode(query, key_pages_var, value_pages_var, page_state), None, None
+      return self.paged_attention_v1_decode(query, key_pages_var, value_pages_var, page_state), None, None
 
   def update(
       self,

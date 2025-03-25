@@ -1064,6 +1064,7 @@ llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds = _add_to_model_dictiona
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
+            "tokenizer_path": "assets/tokenizer_llama3.tiktoken",
         },
         xla_flags=(
             xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -1126,6 +1127,7 @@ llama3_1_70b_8192_iter_synth_data_and_checkpointing = _add_to_model_dictionary(
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
+            "tokenizer_path": "assets/tokenizer_llama3.tiktoken",
         },
         xla_flags=(
             xla_flags_library.DENSE_VMEM_LIMIT_FLAG
