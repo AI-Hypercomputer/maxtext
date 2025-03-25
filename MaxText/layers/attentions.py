@@ -958,6 +958,7 @@ class Attention(nn.Module):
     def query_init(*args):
       # pylint: disable=no-value-for-parameter
       return self.kernel_init(*args) / depth_scaling
+
     query_proj = DenseGeneral(
         features=(self.num_query_heads, self.head_dim),
         axis=-1,
@@ -971,7 +972,9 @@ class Attention(nn.Module):
     )(inputs_q)
     return query_proj
 
-  def kv_projection(self, inputs_kv: Array, proj_name: str, kernel_axes: AxisNames = ("embed", "kv_heads", "kv_head_dim")) -> Array:
+  def kv_projection(
+      self, inputs_kv: Array, proj_name: str, kernel_axes: AxisNames = ("embed", "kv_heads", "kv_head_dim")
+  ) -> Array:
     """Projection for Key and Value.
 
     Args:
@@ -1125,8 +1128,8 @@ class Attention(nn.Module):
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.decode_input_axis_names)
     else:
       inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)    
-    
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+
     if self.config.ici_context_autoregressive_parallelism > 1:
       q_kernel_axes = (None, None, None)
       kv_kernel_axes = (None, None, None)
@@ -1139,9 +1142,9 @@ class Attention(nn.Module):
     if self.config.fused_qkv:
       query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
     else:
-      query = self.query_projection(inputs_q, kernel_axes = q_kernel_axes)
-      key = self.kv_projection(inputs_kv, proj_name="key", kernel_axes = kv_kernel_axes)
-      value = self.kv_projection(inputs_kv, proj_name="value", kernel_axes = kv_kernel_axes)
+      query = self.query_projection(inputs_q, kernel_axes=q_kernel_axes)
+      key = self.kv_projection(inputs_kv, proj_name="key", kernel_axes=kv_kernel_axes)
+      value = self.kv_projection(inputs_kv, proj_name="value", kernel_axes=kv_kernel_axes)
 
       if self.use_qk_norm:
         query = RMSNorm(
