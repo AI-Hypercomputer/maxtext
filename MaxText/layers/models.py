@@ -64,6 +64,7 @@ class DecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      previous_chunk=None,
       page_state: Optional[page_manager.PageState] = None,
   ):
     cfg = self.config
@@ -485,7 +486,8 @@ class Decoder(nn.Module):
                   decoder_positions,
                   deterministic,
                   model_mode,
-                  page_state,
+                  previous_chunk=previous_chunk,
+                  page_state=page_state,
               )
         else:
           for lyr in range(cfg.num_decoder_layers):
@@ -502,7 +504,8 @@ class Decoder(nn.Module):
                 decoder_positions,
                 deterministic,
                 model_mode,
-                page_state,
+                previous_chunk=previous_chunk,
+                page_state=page_state,
             )
     y = self.get_norm_layer()(
         dtype=cfg.dtype,

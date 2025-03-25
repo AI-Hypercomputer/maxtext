@@ -49,7 +49,6 @@ Quant = quantizations.AqtQuantization
 # -----------------------------------------
 # The Decoder Layer for DeepSeek v3
 # -----------------------------------------
-# Please note: DeepSeek V3 is not fully support at this moment
 
 
 def self_attention_with_norm(inputs, cfg, mesh, quant, decoder_segment_ids, decoder_positions, deterministic, model_mode):
@@ -149,6 +148,7 @@ class DeepSeekDenseLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      previous_chunk=None,
       page_state=None,
   ):
     cfg = self.config
@@ -197,6 +197,7 @@ class DeepSeekMoELayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      previous_chunk=None,
       page_state=None,
   ):
     cfg = self.config
