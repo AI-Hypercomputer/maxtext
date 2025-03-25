@@ -177,13 +177,9 @@ class ResilientWorker:
     def initialize(self, coordinator_addr, num_processes):
         jax.distributed.initialize(coordinator_address=coordinator_addr, num_processes=num_processes, process_id=self.process_id, local_device_ids=0)
 
-    @contextmanager
-    def EnableHeartbeat(self):
-        try:
-            yield
-        finally:
-            current_time = datetime.datetime.now().isoformat()
-            self.redis.set(self.process_id, current_time)
+    def heartbeat(self):
+        current_time = datetime.datetime.now().isoformat()
+        self.redis.set(self.process_id, current_time)
     
     def run(self, *args, **kwargs):
         raise NotImplementedError
