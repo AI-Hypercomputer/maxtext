@@ -169,6 +169,7 @@ class KVCache(nn.Module):
   cache_scale_logical_axis_names: AxisNames = (CACHE_SCALE_BATCH, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV)
   prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
   ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
+  key_axis_order: AxisIdxes = (2, 0, 1, 3)
   use_chunked_prefill: bool = False
 
   def _get_cached_kv_dtype(self):
@@ -390,11 +391,16 @@ class KVCache(nn.Module):
       cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(
           cached_value_value, value_shaped_for_cache, (next_pos, 0, 0, 0)
       )
-      cached_prefill_segment_id_var.value = decoder_segment_ids
+
+      if decoder_segment_ids is not None:
+        # decoder_segment_ids is complete prompt, while cached_prefill_segment_id is max_prefill_length
+        new_segment_id_var = jnp.zeros(cached_prefill_segment_id_var.value.shape, jnp.int32)
+        cached_prefill_segment_id_var.value = jax.lax.dynamic_update_slice(new_segment_id_var, decoder_segment_ids, (0, 0))
+
       return (
           jnp.transpose(cached_prefill_key_vars[0].value, self.key_axis_order),
           jnp.transpose(cached_prefill_value_vars[0].value, self.key_axis_order),
-          cached_prefill_segment_id_var.value,
+          cached_prefill_segment_id_var.value if decoder_segment_ids is not None else None,
       )
     else:
       """
@@ -410,11 +416,16 @@ class KVCache(nn.Module):
       cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(
           cached_prefill_value_vars[0].value, value_shaped_for_cache, (next_pos, 0, 0, 0)
       )
-      cached_prefill_segment_id_var.value = decoder_segment_ids
+
+      if decoder_segment_ids is not None:
+        # decoder_segment_ids is complete prompt, while cached_prefill_segment_id is max_prefill_length
+        new_segment_id_var = jnp.zeros(cached_prefill_segment_id_var.value.shape, jnp.int32)
+        cached_prefill_segment_id_var.value = jax.lax.dynamic_update_slice(new_segment_id_var, decoder_segment_ids, (0, 0))
+
       return (
           jnp.transpose(cached_prefill_key_vars[0].value, self.key_axis_order),
           jnp.transpose(cached_prefill_value_vars[0].value, self.key_axis_order),
-          cached_prefill_segment_id_var.value,
+          cached_prefill_segment_id_var.value if decoder_segment_ids is not None else None,
       )
 
   def kv_cache_prefill(
