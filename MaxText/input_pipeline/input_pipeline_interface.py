@@ -55,19 +55,20 @@ class SyntheticDataIterator:
     # hack microbatch size: 8
     micro_batch_size = 8
     output = {}
-    output["inputs"] = jax.numpy.zeros((micro_batch_size, config.global_batch_size_to_load//micro_batch_size, config.max_target_length), dtype=jax.numpy.int32)
+    num_micro_batch_size = config.global_batch_size_to_load//micro_batch_size
+    output["inputs"] = jax.numpy.zeros((num_micro_batch_size, micro_batch_size, config.max_target_length), dtype=jax.numpy.int32)
     output["inputs_position"] = jax.numpy.zeros(
-        (micro_batch_size, config.global_batch_size_to_load//micro_batch_size, config.max_target_length), dtype=jax.numpy.int32
+        (num_micro_batch_size, micro_batch_size, config.max_target_length), dtype=jax.numpy.int32
     )
     output["inputs_segmentation"] = jax.numpy.ones(
-        (micro_batch_size, config.global_batch_size_to_load//micro_batch_size, config.max_target_length), dtype=jax.numpy.int32
+        (num_micro_batch_size, micro_batch_size, config.max_target_length), dtype=jax.numpy.int32
     )
-    output["targets"] = jax.numpy.zeros((micro_batch_size, config.global_batch_size_to_load//micro_batch_size, config.max_target_length), dtype=jax.numpy.int32)
+    output["targets"] = jax.numpy.zeros((config.global_batch_size_to_load, config.max_target_length), dtype=jax.numpy.int32)
     output["targets_position"] = jax.numpy.zeros(
-        (micro_batch_size, config.global_batch_size_to_load//micro_batch_size, config.max_target_length), dtype=jax.numpy.int32
+        (micro_batch_size, config.global_batch_size_to_load, config.max_target_length), dtype=jax.numpy.int32
     )
     output["targets_segmentation"] = jax.numpy.ones(
-        (micro_batch_size, config.global_batch_size_to_load//micro_batch_size, config.max_target_length), dtype=jax.numpy.int32
+        (micro_batch_size, config.global_batch_size_to_load, config.max_target_length), dtype=jax.numpy.int32
     )
     return output
 

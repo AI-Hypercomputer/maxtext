@@ -304,6 +304,7 @@ class PipelineStage:
       fwd_jitted,
       fwd_microbatch_id: int,
       args,
+      nextrng,
   ):
     """Perform forward pass on the stage with one microbatch.
 
@@ -315,14 +316,11 @@ class PipelineStage:
     Returns:
       The output of the stage.
     """
-    # TODO(linchai): should we use the same rng for all microbatches and all stages.
-    nextrng = jax.jit(jax.random.fold_in)(self.init_rng, fwd_microbatch_id)
     if not self.grad_func:
-      outputs, *_, grad_func = fwd_jitted(
+      outputs, grad_func = fwd_jitted(
           self.train_state, args, nextrng
-          )
+      )
       grad_func.__name__ = "grad_func"
-      # self.grad_func[0] = jax.jit(grad_func)
       self.grad_func = grad_func
 
       def grad_and_update(state, output_grads):
@@ -333,11 +331,16 @@ class PipelineStage:
       self.grad_and_update_func = jax.jit(
           grad_and_update,
           donate_argnums=0,
-          in_shardings=(self.state_mesh_shardings, self.input_sharding()),
+          in_shardings=(
+              self.state_mesh_shardings,
+              self.input_sharding(),
+          ),
           out_shardings=(self.state_mesh_shardings, self.input_sharding()),
       )
     else:
-      outputs, *_ = fwd_jitted(self.train_state, args, nextrng)
+      outputs, _ = fwd_jitted(
+          self.train_state, args, nextrng
+      )
 
     # Save activations and inputs for backward
     self.fwd_cache[fwd_microbatch_id] = (
@@ -373,13 +376,9 @@ class PipelineStage:
         # The last stage doesn't have the gradients of its outputs.
         # It computes the gradients from the loss.
         assert loss is not None
-        # reshape the loss to the shape of the last stage output.
-        loss = jnp.broadcast_to(
-            loss, self.fwd_cache[bwd_microbatch_id][0].shape
-        )
-        output_grads = jax.device_put(loss, self.input_sharding())
-      else:
-        assert output_grads is not None
+        # loss is already broadcasted and sharded in the loss_func.
+        output_grads = loss
+      assert output_grads is not None
 
       self.train_state, self.bwd_cache[bwd_microbatch_id] = (
           self.grad_and_update_func(self.train_state, output_grads)

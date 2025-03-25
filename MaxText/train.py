@@ -822,38 +822,16 @@ def train_loop(config):
   transfer_server = transfer.start_transfer_server(
       jax.local_devices()[0].client,
       f"[{slice_ipv6_addresses[my_slice_id]}]:{trans_ctrl_port}",
-      [f"[{slice_ipv6_addresses[my_slice_id]}]:0"],
+      [
+        f"[{slice_ipv6_addresses[my_slice_id]}]:0",
+        f"[{slice_ipv6_addresses[my_slice_id]}]:0",
+        f"[{slice_ipv6_addresses[my_slice_id]}]:0",
+        f"[{slice_ipv6_addresses[my_slice_id]}]:0",
+      ],
   )
-  # TODO(linchai): heuristic sleep duration to sync with the other slices for starting the transfer server.
-  time.sleep(30)
   transfer_connection = transfer_server.connect(
       f"[{slice_ipv6_addresses[(my_slice_id + 1) % len(slice_ipv6_addresses)]}]:{trans_ctrl_port}"
   )
-
-
-  ## transfer testing
-  if my_slice_id == 0:
-    mesh_0 = jax.make_mesh((4, 2), ("x", "y"), devices=jax.local_devices())
-    sharding_0 = NamedSharding(mesh_0, P("x", "y"))
-    a = jax.device_put(jnp.ones((16384, 2048)), sharding_0)
-
-    print("push to peer....")
-    transfer_server.await_pull(1, [a])
-  else:
-    mesh_1 = jax.make_mesh((4, 2), ("x", "y"), devices=jax.local_devices())
-    sharding_1 = NamedSharding(mesh_1, P("x", "y"))
-    d = jax.device_put(jnp.ones((16384, 2048)), sharding_1)
-    b_from_peer_spec = jax.ShapeDtypeStruct(
-        d.shape, d.dtype, sharding=sharding_1
-    )
-    print("pull from peer....")
-    b = transfer_connection.pull(1, [b_from_peer_spec])
-    jax.block_until_ready(b)
-    print("b ready")
-  jax.experimental.multihost_utils.sync_global_devices(
-      "Barrier after test ends"
-  )
-  ### transfer test ends
 
   if my_slice_id == 0:
     for stage_index in range(num_stage_layers):
@@ -867,6 +845,22 @@ def train_loop(config):
         pipelines_indexed[stage_index] = schedule.PipelineGPipeCircular(
             config, stage_index, transfer_server, transfer_connection
         )
+
+  writer = max_utils.initialize_summary_writer(config)
+  per_device_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(
+      config
+  )
+  per_device_tokens = maxtext_utils.calculate_tokens_training_per_device(config)
+  running_gcs_metrics = [] if config.gcs_metrics else None
+  local_metrics_file = open(config.metrics_file, "a", encoding="utf8") if config.metrics_file else None
+  metrics = {"scalar": {
+      "learning/total_weights": 0,
+      "perf/per_device_tokens_per_sec": 0,
+      "perf/per_device_tflops_per_sec": 0,
+      "perf/step_time_seconds": 0,
+      "learning/loss": 0},}
+  last_step_completion = datetime.datetime.now()
+  learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
 
   start_step = 0
   end_step = config.steps
@@ -889,11 +883,33 @@ def train_loop(config):
             pipelines_indexed[stage_index].step_backward(step)
           elif jax.process_index() == 1 and stage_index % 2 == 1:
             pipelines_indexed[stage_index].step_backward(step)
+      step_time_delta = datetime.datetime.now() - last_step_completion
+      record_scalar_metrics(
+          metrics,
+          step_time_delta,
+          per_device_tflops,
+          learning_rate_schedule(step),
+          per_device_tokens,
+      )
+      last_step_completion = datetime.datetime.now()
+      write_metrics(
+          writer, local_metrics_file, running_gcs_metrics, metrics, step, config
+      )
   
   time.sleep(120)
   jax.experimental.multihost_utils.sync_global_devices(
       "Barrier after training ends"
   )
+
+  write_metrics(
+      writer,
+      local_metrics_file,
+      running_gcs_metrics,
+      metrics,
+      config.steps - 1,
+      config,
+  )  # final step metrics
+  max_utils.close_summary_writer(writer)
 
 
 def main(argv: Sequence[str]) -> None:
