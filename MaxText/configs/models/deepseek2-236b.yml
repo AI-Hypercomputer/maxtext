@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # model config for DeepSeek V2 - 236B
-# Please note: DeepSeek-style is not fully support at this moment
+# Please note: DeepSeek V2 - 236B is not fully support at this moment
 
 base_emb_dim: 5120
 base_num_query_heads: 128
