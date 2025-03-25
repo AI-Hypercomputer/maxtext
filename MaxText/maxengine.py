@@ -184,8 +184,8 @@ class MaxEngine(engine_api.Engine):
         .compile(),
     )
 
-  def load_params(self, *args, rng: Optional[PRNGKeyType] = None, **kwargs) -> Params:
-    """Load Parameters, typically from GCS"""
+  def load_params(self, *args, params=None, rng: Optional[PRNGKeyType] = None, **kwargs) -> Params:
+    """Load Parameters from GCS or reshard given Parameters"""
     # pylint: disable=unused-argument
 
     if rng is None:
@@ -196,7 +196,17 @@ class MaxEngine(engine_api.Engine):
       self.model.quant.quant_mode = quantizations.get_quant_mode("serve")
 
     rng1, rng2, rng3 = jax.random.split(rng, 3)
-    state, self.state_mesh_annotations = max_utils.setup_decode_state(self.model, self.config, rng1, self._mesh, None)
+    if params:
+      print("Resharding given params")
+      _, self.state_mesh_annotations, state_mesh_shardings = max_utils.get_abstract_state(
+          self.model, None, self.config, rng, self._mesh, False
+      )
+      # reshard given params based on shardings from config in MaxEngine
+      params = jax.device_put(params, state_mesh_shardings.params)
+      state = max_utils.init_decode_state(None, params)
+      state = max_utils.unbox_logicallypartioned(state)
+    else:
+      state, self.state_mesh_annotations = max_utils.setup_decode_state(self.model, self.config, rng1, self._mesh, None)
     # pylint: disable=isinstance-second-argument-not-valid-type
     self.abstract_params = jax.tree_util.tree_map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
@@ -244,6 +254,12 @@ class MaxEngine(engine_api.Engine):
 
     params, config = lora_utils.load_adapter(self.config, self.abstract_params, adapter_config_path, adapter_weights_path)
 
+    if config is None:
+      raise ValueError(f"Failed to read lora_config from {adapter_config_path}")
+
+    if params is None:
+      raise ValueError(f"Failed to read lora_config from {adapter_config_path}")
+
     config["adapter_path"] = adapter_weights_path
 
     self.print_stats("After load_single_adapter.")
@@ -256,6 +272,13 @@ class MaxEngine(engine_api.Engine):
     lora_rank = int(adapter_config["r"])
     lora_scale_factor = float(adapter_config["lora_alpha"]) / lora_rank
     lora_utils.apply_lora_on_base_params(base_params, adapter_params, lora_scale_factor)
+
+  def unapply_adapter(self, base_params, adapter_config, adapter_params):
+    """Unapply the adapter params from the merged params to get back the base params."""
+
+    lora_rank = int(adapter_config["r"])
+    lora_scale_factor = float(adapter_config["lora_alpha"]) / lora_rank
+    lora_utils.unapply_lora_from_base_params(base_params, adapter_params, lora_scale_factor)
 
   def quantize_params(self, state, rng: Optional[PRNGKeyType] = None):
     """Forward pass to quantize decode params."""

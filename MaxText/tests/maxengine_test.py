@@ -16,20 +16,21 @@ limitations under the License.
 
 """ Tests for the maxengine """
 
-import logging
+import pytest
 import sys
-import common_types
-import jax
-from jax import numpy as jnp
-import numpy as np
 import unittest
-import pyconfig
+
+import jax
+import jax.numpy as jnp
+from jax.sharding import Mesh
+import numpy as np
+
+import common_types
+from layers import models
+from layers import quantizations
 import max_utils
 from maxengine import MaxEngine
-from layers import quantizations
-from layers import models
-
-Mesh = jax.sharding.Mesh
+import pyconfig
 
 
 class MaxEngineTest(unittest.TestCase):
@@ -43,19 +44,21 @@ class MaxEngineTest(unittest.TestCase):
     self.rng = jax.random.PRNGKey(0)
 
   def init_pyconfig(self, **kwargs):
+    init_kwargs = {
+        "per_device_batch_size": 1.0,
+        "run_name": "test",
+        "enable_checkpointing": False,
+        "base_num_decoder_layers": 2,
+        "attention": "dot_product",
+        "max_target_length": 16,
+        "base_emb_dim": 256,
+        "base_num_query_heads": 2,
+        "base_num_kv_heads": 2,
+        "max_prefill_predict_length": 4,
+    } | kwargs
     config = pyconfig.initialize(
         [sys.argv[0], "configs/base.yml"],
-        per_device_batch_size=1.0,
-        run_name="test",
-        enable_checkpointing=False,
-        base_num_decoder_layers=2,
-        attention="dot_product",
-        max_target_length=16,
-        base_emb_dim=256,
-        base_num_query_heads=2,
-        base_num_kv_heads=2,
-        max_prefill_predict_length=4,
-        **kwargs,
+        **init_kwargs,
     )
     return config
 
@@ -119,6 +122,95 @@ class MaxEngineTest(unittest.TestCase):
     self.assertEqual(prefill_result["tokens"].size, 1)
     self.assertNotEqual(prefill_result["tokens"], jnp.array([0]))
     self.assertTrue(jnp.array_equal(first_token.data.size, 3))
+
+  @pytest.mark.tpu_only
+  def test_chunked_prefill(self):
+    """Test identical result between chunked prefill with single and multiple chunked.
+
+    The return value in kv_cache_prefill function without chunked prefill is key and value itself.
+    Although the value of key and value are the same as stored in the KVCache without quantization,
+    the prefill still produce slightly different result while using multiple TPU devices due to unknown reasons.
+    Cannot test exactly identical between enabled / disable chunked prefill.
+    Only test enable chunked prefill.
+
+    The test could not pass on GPU.
+    """
+    prefill_length = 8
+    tokens = jnp.array([1, 11, 22, 33, 444, 555, 666])
+    padding_tokens = jnp.array([1, 11, 22, 33, 444, 555, 666, 0])
+    true_length = tokens.shape[0]
+    chunk_size = 4
+    assert padding_tokens.shape[0] == prefill_length
+
+    # jetstream.engine.token_utils:chunk_and_pad_tokens could produce the similar results
+    chunked_padded_tokens, chunked_true_lengths, chunked_positions = (
+        [jnp.array([1, 11, 22, 33]), jnp.array([444, 555, 666, 0])],
+        [4, 3],
+        [jnp.array([[0, 1, 2, 3]]), jnp.array([[4, 5, 6, 7]])],
+    )
+
+    # prefill_length // chunk_size = 2
+    assert len(chunked_padded_tokens) == 2
+    assert chunked_padded_tokens[0].shape[0] == chunk_size
+
+    # Model with chunked prefill
+    config = self.init_pyconfig(
+        use_chunked_prefill="true",
+        max_target_length=prefill_length * 4,
+        max_prefill_predict_length=prefill_length * 2,
+        model_call_mode="inference",
+        capacity_factor=1,
+        decoder_block="mistral",
+        scan_layers=False,
+    )
+    engine = MaxEngine(config)
+    params = engine.load_params()
+
+    # Chunk size >= length of tokens
+    one_chunk_prefill_result, one_chunk_first_token = engine.prefill(
+        params=params,
+        padded_tokens=padding_tokens,
+        true_length=true_length,
+        complete_padded_prompt=padding_tokens,
+        complete_prompt_true_length=true_length,
+        previous_chunk=None,
+        positions=jax.numpy.array([[0, 1, 2, 3, 4, 5, 6, 7]]),
+    )
+
+    # Two chunks
+    two_chunk_prefill_result = None
+    two_chunk_first_token = None
+    for chunk_num, _ in enumerate(chunked_padded_tokens):
+      if two_chunk_prefill_result is None:
+        two_chunk_prefill_result, two_chunk_first_token = engine.prefill(
+            params=params,
+            padded_tokens=chunked_padded_tokens[chunk_num],
+            true_length=chunked_true_lengths[chunk_num],
+            positions=chunked_positions[chunk_num],
+            complete_prompt_true_length=true_length,
+            complete_padded_prompt=padding_tokens,
+            previous_chunk=two_chunk_prefill_result,
+        )
+      else:
+        two_chunk_prefill_result, two_chunk_first_token = engine.prefill(
+            params=params | {"cache": two_chunk_prefill_result["cache"]},
+            padded_tokens=chunked_padded_tokens[chunk_num],
+            true_length=chunked_true_lengths[chunk_num],
+            positions=chunked_positions[chunk_num],
+            complete_prompt_true_length=true_length,
+            complete_padded_prompt=padding_tokens,
+            previous_chunk=two_chunk_prefill_result,
+        )
+      two_chunk_prefill_result["true_length_array"] = jnp.expand_dims(
+          jnp.arange(0, chunk_num * chunk_size + chunked_true_lengths[chunk_num]), 0
+      )
+
+    # Delete extra contents only used in chunked prefill
+    assert two_chunk_prefill_result is not None
+    del two_chunk_prefill_result["true_length_array"]
+
+    assert jax.tree.all(jax.tree.map(jnp.array_equal, one_chunk_prefill_result, two_chunk_prefill_result))
+    assert jax.tree.all(jax.tree.map(jnp.array_equal, one_chunk_first_token, two_chunk_first_token))
 
 
 if __name__ == "__main__":
