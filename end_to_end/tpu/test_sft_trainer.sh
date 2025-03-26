@@ -16,7 +16,7 @@ PRE_TRAINED_MODEL_CKPT_PATH=$(gcloud storage ls gs://maxtext-model-checkpoints/l
 BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs
 
 # SFT with HF pipeline
-python MaxText/sft_trainer.py MaxText/configs/sft.yml \
+python3 -m MaxText.sft_trainer MaxText/configs/sft.yml \
     run_name=${RUN_NAME}-hf base_output_directory=${BASE_OUTPUT_DIRECTORY} \
     model_name=${PRE_TRAINED_MODEL} load_parameters_path=${PRE_TRAINED_MODEL_CKPT_PATH}/scanned/0/items \
     dataset_type=hf hf_access_token=$HF_TOKEN tokenizer_path=${PRE_TRAINED_MODEL_TOKENIZER} \
@@ -42,7 +42,7 @@ largest_dir="${sorted_dirs[-1]}"
 FINE_TUNED_MODEL_CKPT_PATH=${CHECKPOINTS_PATH}/${largest_dir}/items
 
 # Decode
-python MaxText/decode.py MaxText/configs/sft.yml \
+python3 -m MaxText.decode MaxText/configs/sft.yml \
     run_name=${RUN_NAME}-hf-decode \
     model_name=${PRE_TRAINED_MODEL} tokenizer_path=assets/tokenizer.llama2 \
     load_parameters_path=${FINE_TUNED_MODEL_CKPT_PATH} \
