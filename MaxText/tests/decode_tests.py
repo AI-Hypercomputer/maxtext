@@ -17,9 +17,12 @@ limitations under the License.
 """Tests for decode with various configs"""
 import os
 import unittest
+
 import pytest
-from decode import main as decode_main
 from absl.testing import absltest
+
+from MaxText.decode import main as decode_main
+from MaxText.constants import PKG_ROOT
 
 
 class DecodeTests(unittest.TestCase):
@@ -28,7 +31,7 @@ class DecodeTests(unittest.TestCase):
   CONFIGS = {
       "base": [  # tests decode
           None,
-          "configs/base.yml",
+          os.path.join(PKG_ROOT, "configs", "base.yml"),
           r"base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           r"dataset_path=gs://maxtext-dataset",
@@ -37,11 +40,11 @@ class DecodeTests(unittest.TestCase):
           "ici_tensor_parallelism=4",
           "max_target_length=128",
           "per_device_batch_size=1",
-          r"tokenizer_path=../assets/tokenizer.llama2",
+          f"tokenizer_path={os.path.join(os.path.dirname(PKG_ROOT), 'assets', 'tokenizer.llama2')}",
       ],
       "int8": [  # tests decode with int8 quantization
           None,
-          "configs/base.yml",
+          os.path.join(PKG_ROOT, "configs", "base.yml"),
           r"base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           r"dataset_path=gs://maxtext-dataset",
@@ -52,11 +55,11 @@ class DecodeTests(unittest.TestCase):
           "per_device_batch_size=1",
           "quantization=int8",
           "quantize_kvcache=True",
-          r"tokenizer_path=../assets/tokenizer.llama2",
+          f"tokenizer_path={os.path.join(os.path.dirname(PKG_ROOT), 'assets', 'tokenizer.llama2')}",
       ],
       "pdb_lt_1": [  # tests decode with per_device_batch_size < 1
           None,
-          "configs/base.yml",
+          os.path.join(PKG_ROOT, "configs", "base.yml"),
           r"base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           r"dataset_path=gs://maxtext-dataset",
@@ -65,7 +68,7 @@ class DecodeTests(unittest.TestCase):
           "ici_tensor_parallelism=4",
           "max_target_length=128",
           "per_device_batch_size=.25",
-          r"tokenizer_path=../assets/tokenizer.llama2",
+          f"tokenizer_path={os.path.join(os.path.dirname(PKG_ROOT), 'assets', 'tokenizer.llama2')}",
       ],
   }
 
