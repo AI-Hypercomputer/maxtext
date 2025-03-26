@@ -16,21 +16,25 @@ limitations under the License.
 
 """ Tests for the maxengine """
 
-import pytest
 import sys
 import unittest
+import os.path
+
+import pytest
 
 import jax
-import jax.numpy as jnp
-from jax.sharding import Mesh
+from jax import numpy as jnp
 import numpy as np
 
-import common_types
-from layers import models
-from layers import quantizations
-import max_utils
-from maxengine import MaxEngine
-import pyconfig
+from MaxText import common_types
+from MaxText import pyconfig
+from MaxText import max_utils
+from MaxText.constants import PKG_ROOT
+from MaxText.maxengine import MaxEngine
+from MaxText.layers import quantizations
+from MaxText.layers import models
+
+Mesh = jax.sharding.Mesh
 
 
 class MaxEngineTest(unittest.TestCase):
@@ -57,7 +61,7 @@ class MaxEngineTest(unittest.TestCase):
         "max_prefill_predict_length": 4,
     } | kwargs
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_ROOT, "configs", "base.yml")],
         **init_kwargs,
     )
     return config
@@ -75,17 +79,17 @@ class MaxEngineTest(unittest.TestCase):
 
   def test_stack_and_unstack_prefill_cache(self):
     config = pyconfig.initialize(
-        [None, "configs/base.yml"],
+        [None, os.path.join(PKG_ROOT, "configs", "base.yml")],
         enable_checkpointing=False,
         stack_prefill_result_cache=True,
     )
     engine = MaxEngine(config, jax.devices())
     num_layers = engine.config.num_decoder_layers
-    input = {
+    input_d = {
         "decoder": {},
     }
     for i in range(num_layers):
-      input["decoder"][f"layers_{i}"] = {
+      input_d["decoder"][f"layers_{i}"] = {
           "a": jnp.ones((1, 10)),
           "b": jnp.ones((1, 9)),
       }
@@ -94,11 +98,11 @@ class MaxEngineTest(unittest.TestCase):
         "a": jnp.ones((num_layers, 1, 10)),
         "b": jnp.ones((num_layers, 1, 9)),
     }
-    got_stacked = engine._maybe_stack_prefill_result_cache(input)
+    got_stacked = engine._maybe_stack_prefill_result_cache(input_d)
     jax.tree.map(np.testing.assert_array_equal, got_stacked, expected_stacked)
 
     got_unstacked = engine._maybe_unstack_prefill_result_cache(got_stacked)
-    jax.tree.map(np.testing.assert_array_equal, got_unstacked, input)
+    jax.tree.map(np.testing.assert_array_equal, got_unstacked, input_d)
 
   def test_basic_prefill(self):
     devices_array = max_utils.create_device_mesh(self.cfg)

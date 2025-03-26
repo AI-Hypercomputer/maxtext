@@ -30,14 +30,14 @@ from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
-import common_types
-from kernels.ragged_attention import ragged_gqa
-from kernels.ragged_attention import ragged_mha
-from inference import kvcache, page_manager, paged_attention
-from layers import embeddings
-from layers import initializers
-from layers import linears
-from layers import quantizations
+from MaxText import common_types
+from MaxText.kernels.ragged_attention import ragged_gqa
+from MaxText.kernels.ragged_attention import ragged_mha
+from MaxText.inference import page_manager, paged_attention, kvcache
+from MaxText.layers import embeddings
+from MaxText.layers import initializers
+from MaxText.layers import linears
+from MaxText.layers import quantizations
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -188,7 +188,7 @@ class AttentionOp(nn.Module):
     causal_mask = (col_ids <= row_ids).astype(jnp.int32)
 
     next_pos = 0
-    if previous_chunk != None:
+    if previous_chunk is not None:
       # shape[1] of ['true_length_array'] gives the length of previously processed chunk
       next_pos = previous_chunk["true_length_array"].shape[1]
       overall_mask = jnp.zeros((q_seq_len, kv_seq_len), jnp.int32)
@@ -278,16 +278,15 @@ class AttentionOp(nn.Module):
         impl = self.tpu_ragged_attention
       elif jax.devices()[0].platform == "gpu":
         impl = self.gpu_ragged_attention
+      else:
+        raise NotImplementedError(jax.devices()[0].platform)
       return impl(query, key, value, lengths, self.ragged_block_size)
 
-    elif (
-        self.attention_kernel == "dot_product"
-        or (self.attention_kernel == "autoselected" and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE)
-        or (self.attention_kernel == "autoselected" and length < 128)
-        or (self.attention_kernel == "paged")
+    elif self.attention_kernel in ("dot_product", "paged") or (
+        self.attention_kernel == "autoselected" and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE or length < 128
     ):
       return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode, previous_chunk)
-    elif self.attention_kernel == "flash" or self.attention_kernel == "autoselected":
+    elif self.attention_kernel in ("flash", "autoselected"):
       if jax.devices()[0].platform == "tpu":
         if isinstance(key, KVTensor):
           key = key.dequant()
@@ -398,7 +397,7 @@ class AttentionOp(nn.Module):
       self, query: Array, key: Array | KVTensor, value: Array | KVTensor, lengths: Array, block_size: int
   ) -> tuple[Array, Array, Array]:
     """Ragged Attention."""
-    if isinstance(query, KVTensor) or isinstance(query, KVTensor):
+    if isinstance(query, KVTensor):
       raise TypeError("Ragged attention does not currently support quantized tensors.")
     b = nn.logical_to_mesh_axes(self.ragged_lengths_names)
     bsnd = nn.logical_to_mesh_axes(self.cache_logical_axis_names)
@@ -702,6 +701,8 @@ class AttentionOp(nn.Module):
       if self.reshape_q and q_seq_len == 1:
         query = jnp.broadcast_to(query, (b, n_kv, n // n_kv, 2, d))
       result = einsum("bkgtd,bksd->bkgts", query, key)
+    else:
+      raise ValueError(f"Unknown axis order {self.compute_axis_order}")
     return result
 
   def wv_product(self, attn_weights: Array, value: Array | KVTensor, model_mode: str) -> Array:
@@ -759,7 +760,7 @@ class AttentionOp(nn.Module):
     # Based on https://github.com/google-research/google-research/blob/master/scaling_transformer_inference_efficiency/attention.py
     global_max = functools.reduce(jnp.maximum, local_maxes)
     global_sum = sum(
-        [jnp.exp(local_max - global_max) * local_sum for (local_sum, local_max) in zip(local_sums, local_maxes)]
+        (jnp.exp(local_max - global_max) * local_sum for (local_sum, local_max) in zip(local_sums, local_maxes))
     )
 
     attn_out = 0

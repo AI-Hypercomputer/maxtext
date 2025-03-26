@@ -26,7 +26,7 @@ import jax.numpy as jnp
 from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
-from kernels.megablox import common
+from MaxText.kernels.megablox import common
 
 from aqt.jax.v2 import pallas as aqt_pl
 from aqt.jax.v2 import aqt_tensor

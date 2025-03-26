@@ -21,8 +21,8 @@ import sys
 import jax
 import json
 import jsonlines
-import inference_microbenchmark
-import pyconfig
+from MaxText import inference_microbenchmark
+from MaxText import pyconfig
 
 try:
   JaxRuntimeError = jax.errors.JaxRuntimeError  # added in JAX 0.4.34
@@ -48,7 +48,7 @@ def main():
   config = pyconfig.initialize(sys.argv)
   base_run_name = config.run_name
 
-  with open(config.inference_metadata_file, encoding="utf-8") as json_file:
+  with open(config.inference_metadata_file, "rt", encoding="utf-8") as json_file:
     inference_metadata = json.load(json_file)
     print(f"inference_metadata: {inference_metadata}")
 
@@ -121,8 +121,11 @@ def main():
     }
     try:
       microbenchmark_results = inference_microbenchmark.main(config, inference_metadata=inference_metadata)
-      metrics = microbenchmark_results["flattened_results"]
-      metrics = {k.lower(): v for k, v in metrics.items()}
+      if microbenchmark_results:
+        metrics = microbenchmark_results["flattened_results"]
+        metrics = {k.lower(): v for k, v in metrics.items()}
+      else:
+        metrics = {}
       dimensions_json["oom"] = "False"
       print(
           f"Completed run {two_axis_order_product_id} out of: "

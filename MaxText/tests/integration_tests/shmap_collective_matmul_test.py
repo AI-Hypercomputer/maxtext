@@ -14,9 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-"""Integraion test for pedagogical_examples/shmap_collective_matmul.py"""
+"""Integration test for pedagogical_examples/shmap_collective_matmul.py"""
+
 import subprocess
+import os.path
+
 import pytest
+
+from MaxText.constants import PKG_ROOT
 
 
 @pytest.mark.integration_test
@@ -26,7 +31,7 @@ def test_shmap_collective_matmul_example():
 
   command = [
       "python3",
-      "pedagogical_examples/shmap_collective_matmul.py",
+      os.path.join(os.path.dirname(PKG_ROOT), "pedagogical_examples", "shmap_collective_matmul.py"),
   ]
 
   subprocess.run(command, check=True, cwd="..")
