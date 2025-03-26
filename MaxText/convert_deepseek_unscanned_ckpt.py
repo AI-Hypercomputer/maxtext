@@ -37,149 +37,7 @@ from tqdm import tqdm
 import max_logging
 from safetensors import safe_open
 import llama_or_mistral_ckpt
-
-
-MODEL_PARAMS_DICT = {
-    "deepseek2-16b": {
-        "num_layers": 27,
-        "first_num_dense_layers": 1,
-        "base_num_query_heads": 16,
-        "base_emb_dim": 2048,
-        "num_experts": 64,
-        "q_lora_rank": 0,
-        "kv_lora_rank": 512,
-        "qk_nope_head_dim": 128,
-        "qk_rope_head_dim": 64,
-        "v_head_dim": 128,
-    },
-    "deepseek3-671b": {
-        "num_layers": 61,
-        "first_num_dense_layers": 3,
-        "base_num_query_heads": 128,
-        "base_emb_dim": 7168,
-        "num_experts": 256,
-        "q_lora_rank": 1536,
-        "kv_lora_rank": 512,
-        "qk_nope_head_dim": 128,
-        "qk_rope_head_dim": 64,
-        "v_head_dim": 128,
-    },
-}
-
-
-# skip to convert ckpts related to MTP for now
-MTP_KEYS_SUFFIX = [
-    "enorm.weight",
-    "hnorm.weight",
-    "eh_proj.weight",
-    "shared_head.norm.weight",
-    "shared_head.head.weight",
-    "model.layers.61.embed_tokens.weight",
-]
-
-
-def _is_key_ending_allowed(key, banned_endings) -> bool:
-  """
-  Checks if a key's ending is NOT in a list of banned endings.
-
-  Args:
-      text: The key to check.
-      banned_endings: A list of strings representing banned endings.
-
-  Returns:
-      True if the string's ending is not in the banned list, False otherwise.
-  """
-  for ending in banned_endings:
-    if key.endswith(ending):
-      return False
-  return True
-
-
-def _hf_to_maxtext_mapping(layer_idx, num_experts, first_num_dense_layers) -> dict:
-  """
-  Generates a mapping between Hugging Face (HF) and MaxText model weight names.
-  HF MLP is using self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x)).
-
-  Args:
-      layer_idx: The index of the current layer.
-      num_experts: The number of experts in MoE layers.
-      first_num_dense_layers: The number of initial dense layers.
-
-  Returns:
-      A dictionary mapping HF weight names to MaxText weight names.
-  """
-  mapping = {
-      "model.embed_tokens.weight": "token_embedder.embedding",
-      "lm_head.weight": "logits_dense.kernel",
-      "model.norm.weight": "decoder_norm.scale",
-  }
-
-  if layer_idx < first_num_dense_layers:
-    # Dense layers mapping
-    mapping.update(
-        {
-            f"model.layers.{layer_idx}.input_layernorm.weight": f"dense_layers.{layer_idx}.pre_self_attention_layer_norm.scale",
-            f"model.layers.{layer_idx}.post_attention_layernorm.weight": f"dense_layers.{layer_idx}.post_self_attention_layer_norm.scale",
-            f"model.layers.{layer_idx}.self_attn.q_proj.weight": f"dense_layers.{layer_idx}.self_attention.query.kernel",
-            f"model.layers.{layer_idx}.self_attn.q_a_proj.weight": f"dense_layers.{layer_idx}.self_attention.wq_a.kernel",
-            f"model.layers.{layer_idx}.self_attn.q_a_layernorm.weight": f"dense_layers.{layer_idx}.self_attention.q_norm.scale",
-            f"model.layers.{layer_idx}.self_attn.q_b_proj.weight": f"dense_layers.{layer_idx}.self_attention.wq_b.kernel",
-            f"model.layers.{layer_idx}.self_attn.kv_a_proj_with_mqa.weight": f"dense_layers.{layer_idx}.self_attention.wkv_a.kernel",
-            f"model.layers.{layer_idx}.self_attn.kv_b_proj.weight": f"dense_layers.{layer_idx}.self_attention.wkv_b.kernel",
-            f"model.layers.{layer_idx}.self_attn.o_proj.weight": f"dense_layers.{layer_idx}.self_attention.out.kernel",
-            f"model.layers.{layer_idx}.mlp.gate_proj.weight": f"dense_layers.{layer_idx}.mlp.wi_0.kernel",
-            f"model.layers.{layer_idx}.mlp.up_proj.weight": f"dense_layers.{layer_idx}.mlp.wi_1.kernel",
-            f"model.layers.{layer_idx}.mlp.down_proj.weight": f"dense_layers.{layer_idx}.mlp.wo.kernel",
-            f"model.layers.{layer_idx}.self_attn.kv_a_layernorm.weight": f"dense_layers.{layer_idx}.self_attention.kv_norm.scale",
-        }
-    )
-  else:
-    # MoE layers mapping
-    moe_layer_idx_in_maxtext = layer_idx - first_num_dense_layers
-    for expert_idx in range(num_experts):
-      mapping.update(
-          {
-              f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.DeepSeekMoeBlock_0.MoeBlock_0.{expert_idx}.wo",
-              f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.gate_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.DeepSeekMoeBlock_0.MoeBlock_0.{expert_idx}.wi_0",
-              f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.up_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.DeepSeekMoeBlock_0.MoeBlock_0.{expert_idx}.wi_1",
-          }
-      )
-    mapping.update(
-        {
-            f"model.layers.{layer_idx}.mlp.gate.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.DeepSeekMoeBlock_0.MoeBlock_0.gate.kernel",
-            f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias": f"moe_layers.{moe_layer_idx_in_maxtext}.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias",
-            f"model.layers.{layer_idx}.mlp.shared_experts.down_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.DeepSeekMoeBlock_0.shared_experts.wo.kernel",
-            f"model.layers.{layer_idx}.mlp.shared_experts.gate_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.DeepSeekMoeBlock_0.shared_experts.wi_0.kernel",
-            f"model.layers.{layer_idx}.mlp.shared_experts.up_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.DeepSeekMoeBlock_0.shared_experts.wi_1.kernel",
-            f"model.layers.{layer_idx}.self_attn.q_a_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.wq_a.kernel",
-            f"model.layers.{layer_idx}.self_attn.q_a_layernorm.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.q_norm.scale",
-            f"model.layers.{layer_idx}.self_attn.q_b_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.wq_b.kernel",
-            f"model.layers.{layer_idx}.self_attn.kv_a_layernorm.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.kv_norm.scale",
-            f"model.layers.{layer_idx}.self_attn.kv_a_proj_with_mqa.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.wkv_a.kernel",
-            f"model.layers.{layer_idx}.self_attn.kv_b_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.wkv_b.kernel",
-            f"model.layers.{layer_idx}.self_attn.o_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.out.kernel",
-            f"model.layers.{layer_idx}.self_attn.q_proj.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.self_attention.query.kernel",
-            f"model.layers.{layer_idx}.input_layernorm.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.pre_self_attention_layer_norm.scale",
-            f"model.layers.{layer_idx}.post_attention_layernorm.weight": f"moe_layers.{moe_layer_idx_in_maxtext}.post_self_attention_layer_norm.scale",
-        }
-    )
-  return mapping
-
-
-def print_nested_keys_directory(data, prefix=""):
-  """
-  Prints nested keys of a dictionary-like structure in a directory-like format.
-  Args:
-      data: The dictionary-like structure to traverse.
-      prefix: The current path prefix.
-  """
-  if isinstance(data, dict):
-    for key, value in data.items():
-      current_path = f"{prefix}{key}."
-      print_nested_keys_directory(value, current_path)
-  else:
-    print(f"key: {prefix}")
-    print(f"value shape: {data.shape}")
+import convert_deepseek_ckpt as ds_ckpt
 
 
 def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info) -> dict:
@@ -205,8 +63,8 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
         layer = int(parts[2]) if "layers" in key else 0
         if key.endswith("_scale_inv"):
           raise ValueError("fp8 checkpoint is not supported.")
-        if _is_key_ending_allowed(key, MTP_KEYS_SUFFIX):
-          mapped_key = _hf_to_maxtext_mapping(layer, num_experts, first_num_dense_layers)[key]
+        if ds_ckpt.is_key_ending_allowed(key, ds_ckpt.MTP_KEYS_SUFFIX):
+          mapped_key = ds_ckpt.hf_to_maxtext_mapping(layer, num_experts, first_num_dense_layers)[key]
           chkpt_vars[mapped_key] = f.get_tensor(key)
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
@@ -436,7 +294,6 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
 
         jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"] = moe
 
-  print_nested_keys_directory(jax_weights)
   del chkpt_vars
   gc.collect()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
@@ -456,7 +313,7 @@ def _convert_to_jax_weights(base_model_path, model_size, mem_info) -> dict:
   Returns:
       The converted JAX weights.
   """
-  model_params = MODEL_PARAMS_DICT[model_size]
+  model_params = ds_ckpt.MODEL_PARAMS_DICT[model_size]
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
   max_logging.log(f"Loading the base model from {base_model_path}")
   return _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
@@ -470,7 +327,7 @@ def main() -> None:
   parser.add_argument("--simulated_cpu_devices_count", type=int, required=False, default=16)
   args = parser.parse_args()
 
-  if args.model_size not in MODEL_PARAMS_DICT:
+  if args.model_size not in ds_ckpt.MODEL_PARAMS_DICT:
     raise NotImplementedError(f"Model '{args.model_size}' is not supported.")
 
   os.environ["JAX_PLATFORMS"] = "cpu"

@@ -78,7 +78,7 @@ MTP_KEYS_SUFFIX = [
 ]
 
 
-def _is_key_ending_allowed(key, banned_endings) -> bool:
+def is_key_ending_allowed(key, banned_endings) -> bool:
   """
   Checks if a key's ending is NOT in a list of banned endings.
 
@@ -95,7 +95,7 @@ def _is_key_ending_allowed(key, banned_endings) -> bool:
   return True
 
 
-def _hf_to_maxtext_mapping(layer_idx, num_experts, first_num_dense_layers) -> dict:
+def hf_to_maxtext_mapping(layer_idx, num_experts, first_num_dense_layers) -> dict:
   """
   Generates a mapping between Hugging Face (HF) and MaxText model weight names.
   HF MLP is using self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x)).
@@ -189,8 +189,8 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
         layer = int(parts[2]) if "layers" in key else 0
         if key.endswith("_scale_inv"):
           raise ValueError("fp8 checkpoint is not supported.")
-        if _is_key_ending_allowed(key, MTP_KEYS_SUFFIX):
-          mapped_key = _hf_to_maxtext_mapping(layer, num_experts, first_num_dense_layers)[key]
+        if is_key_ending_allowed(key, MTP_KEYS_SUFFIX):
+          mapped_key = hf_to_maxtext_mapping(layer, num_experts, first_num_dense_layers)[key]
           chkpt_vars[mapped_key] = f.get_tensor(key)
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
