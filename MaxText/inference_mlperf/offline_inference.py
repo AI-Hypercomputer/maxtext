@@ -134,7 +134,8 @@ class OfflineInference:
 
       input_data_batch = jax.ShapeDtypeStruct((max_length,), jnp.dtype("int32"))
       min_num_prompts = max_length // length
-      max_num_prompts = max_length // (length // 2)
+      # max_num_prompts = max_length // (length // 2)
+      max_num_prompts = min_num_prompts
       possible_prompts = range(min_num_prompts, max_num_prompts)
       for num_prompts in possible_prompts:
         log.info(f"Compiling batched prefill: {length} num_prompts: {num_prompts}")

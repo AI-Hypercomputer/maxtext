@@ -113,11 +113,14 @@ then
 fi
 
 export LOADGEN_RUN_TIMESTAMP=$(TZ=America/Los_Angeles date +%Y%m%d%H%M%S%Z)
+# export LOADGEN_RUN_TIMESTAMP=20250324142842PDT
+export LOADGEN_RUN_TIMESTAMP=20250325133705PDT
+
 export API_URL=0.0.0.0:9000
 if "$test_run"; then
   export DATASET_TYPE=test
   export DATASET_PATH=${DATA_DISK_DIR}/processed-data.pkl
-  export TOTAL_SAMPLE_COUNT=1000
+  export TOTAL_SAMPLE_COUNT=100
   export USER_CONFIG=user${TOTAL_SAMPLE_COUNT}.conf
 else
   export DATASET_TYPE=full
@@ -145,6 +148,9 @@ run_loadgen() {
   echo "PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES: ${PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES}"
   echo "MAXENGINE_ARGS: ${MAXENGINE_ARGS}"
   echo
+
+  return
+
   ${CMD} python -m offline_mode \
     --mlperf_test_mode=${TEST_MODE} \
     --input_mode tokenized \

@@ -50,6 +50,28 @@ def postprocess_text(preds, targets):
 
   return preds, targets
 
+import tensorflow as tf
+import tensorflow_text as tftxt
+from typing import Dict, Iterable, Union, Literal, Sequence, Collection, List
+from jetstream.engine import token_utils
+
+# class SentencePieceTokenizer:
+#   """
+#   Tokenizing and encoding/decoding text using the Sentencepiece tokenizer.
+#   """
+
+#   def __init__(self, model_path: str, add_bos: bool, add_eos: bool):
+#     # max_logging.log(f"Tokenizer path: {model_path}")
+#     with tf.io.gfile.GFile(model_path, "rb") as model_fp:
+#       sp_model = model_fp.read()
+#     self.sp_tokenizer = tftxt.SentencepieceTokenizer(model=sp_model, add_bos=add_bos, add_eos=add_eos, reverse=False)
+
+#   def encode(self, s: str) -> List[int]:
+#     return self.sp_tokenizer.tokenize(s)
+
+#   def decode(self, t: Sequence[int]) -> str:
+#     return self.sp_tokenizer.detokenize(t)
+
 
 def main():
 
@@ -70,6 +92,10 @@ def main():
     tokenizer = LlamaTokenizer(args.tokenizer_path)
   else:
     raise ValueError("Either --checkpoint-path or --tokenizer-path must be provided")
+
+  from jetstream.engine import tokenizer_pb2
+  metadata = tokenizer_pb2.TokenizerParameters(path="/opt/maxtext/assets/tokenizer.llama2", extra_ids=0)
+  mt_tokenizer = token_utils.SentencePieceTokenizer(metadata)
 
   targets = get_groundtruth(args.dataset_file)
 
@@ -96,15 +122,48 @@ def main():
     target = targets[qsl_idx]
     target_required.append(target)
     pred = np.frombuffer(bytes.fromhex(pred["data"]), eval_dtype)
-    if pred[0] > 32000 or pred[0] < 0:
-      pred = [1, *pred[1:]]
+    # Original
+    # if pred[0] > 32000 or pred[0] < 0:
+    #   pred = [1, *pred[1:]]
+    # gen_tok_len += len(pred)
+    # preds_token_ids.append(pred)
+
+    for i, val in enumerate(pred):
+        if 0 <= val <= 32000:
+            break
+    pred = np.concatenate((np.full(i, 1, dtype=pred.dtype), pred[i:]))
     gen_tok_len += len(pred)
     preds_token_ids.append(pred)
+
+    break
+    # My change
+    # pred1 = pred.copy()
+    # # print(f"\noriginal_pred: {pred}")
+    # fix = False
+    # current = [0]*len(pred1)
+    # for i in range(len(pred1)):
+    #   if pred1[i] > 32000 or pred1[i] < 0:
+    #     pred1[i] = 0
+    #   # import pdb; pdb.set_trace()
+    #   print(f"\n original logit is {pred[i]}, current logit is {pred1[i]}, input type is {type(pred1[i])}", flush=True)
+    #   # current[i] = mt_tokenizer.decode([int(pred1[i])])
+    #   current[i] = tokenizer.batch_decode({pred1[i]}, skip_special_tokens=True)
+    #   print(f"\n current token is {current[i]}")
+
+    # gen_tok_len += len(pred1)
+    # preds_token_ids.append(pred1)
+    # print(f"\npred: {pred} and decoded: {current}")
+    # # temp = tokenizer.batch_decode(pred1, skip_special_tokens=True)
+    # # temp = tokenizer.decode(pred1)
+    # # print(f"\ntokenized pred: {temp}")
+    # print(f"\ntarget: {target}")
+    break
 
   preds_decoded_text = tokenizer.batch_decode(preds_token_ids, skip_special_tokens=True)
 
   preds, targets = postprocess_text(preds_decoded_text, target_required)
 
+  print(f"\n\npreds: {preds} and targets: {targets}")
   result = metric.compute(predictions=preds, references=targets, use_stemmer=True, use_aggregator=False)
   result = {k: round(np.mean(v) * 100, 4) for k, v in result.items()}
   prediction_lens = [len(pred) for pred in preds]

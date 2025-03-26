@@ -733,7 +733,7 @@ class AttentionOp(nn.Module):
     if self.kv_quant:
       # manually cast to bf16 to avoid the fp32 XLA ops for speedup
       if isinstance(value, KVTensor) and self.kv_quant.dtype == jnp.float8_e4m3fn:
-        value.qvalue = value.qvalue.astype(jnp.bfloat16)
+        value.qvalue = value.qvalue.astype(self.config.dtype)
       einsum = self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(value)
     if model_mode == common_types.MODEL_MODE_TRAIN or self.compute_axis_order == (0, 1, 2, 3):
       out = einsum("bkgts,bskd->btkgd", attn_weights, value)
@@ -818,14 +818,14 @@ class AttentionOp(nn.Module):
           "cached_prefill_key_scale",
           nn.with_logical_partitioning(jnp.zeros, cache_scale_axis_names),
           cache_scale_shape,
-          jnp.bfloat16,
+          self.config.dtype,
       )
       cached_value_scale_var = self.variable(
           "cache",
           "cached_prefill_value_scale",
           nn.with_logical_partitioning(jnp.zeros, cache_scale_axis_names),
           cache_scale_shape,
-          jnp.bfloat16,
+          self.config.dtype,
       )
     else:
       cached_key_scale_var = None
@@ -907,14 +907,14 @@ class AttentionOp(nn.Module):
           "cached_ar_key_scale",
           nn.with_logical_partitioning(jnp.zeros, cache_scale_axis_names),
           cache_scale_shape,
-          jnp.bfloat16,
+          self.config.dtype,
       )
       cached_value_scale_var = self.variable(
           "cache",
           "cached_ar_value_scale",
           nn.with_logical_partitioning(jnp.zeros, cache_scale_axis_names),
           cache_scale_shape,
-          jnp.bfloat16,
+          self.config.dtype,
       )
     else:
       cached_key_scale_var = None
