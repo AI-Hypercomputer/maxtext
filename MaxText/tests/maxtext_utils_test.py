@@ -18,7 +18,7 @@ limitations under the License.
 import unittest
 import jax.numpy as jnp
 
-import maxtext_utils
+from MaxText import maxtext_utils
 
 
 class TestGradientClipping(unittest.TestCase):
@@ -26,7 +26,7 @@ class TestGradientClipping(unittest.TestCase):
   def test_grad_clipping_with_no_fp8_stats(self):
     raw_grads = {"params": jnp.array([3.0, -4.0]), "wi_0": jnp.array([5.0, -6.0])}
     clipped_grads = maxtext_utils.apply_gradient_clipping(raw_grads, None, 1.0)
-    for param_name in raw_grads.keys():
+    for param_name in raw_grads:
       # The grads should all be clipped and not equal to what they were before
       self.assertFalse(jnp.array_equal(raw_grads[param_name], clipped_grads[param_name]))
 
@@ -42,7 +42,7 @@ class TestGradientClipping(unittest.TestCase):
     clipped_grads = maxtext_utils.apply_gradient_clipping(raw_grads, None, 1.0)
 
     # Check all non-fp8 parameters have been clipped in a manner as if the fp8 stats were not present at all
-    for param_name in raw_grads["params"].keys():
+    for param_name in raw_grads["params"]:
       self.assertTrue(jnp.array_equal(expected_clipped_grads["params"][param_name], clipped_grads["params"][param_name]))
 
     # Then check all fp8 parameters were not clipped at all

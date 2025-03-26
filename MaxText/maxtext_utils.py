@@ -17,16 +17,16 @@ limitations under the License.
 # pylint: disable=bare-except, consider-using-generator
 """Utils that are only interesting to MaxText. """
 
+import pickle
+import functools
+
 import jax
 import optax
-import max_utils
 from jax.sharding import PartitionSpec as P
 from jax.experimental.serialize_executable import deserialize_and_load
 
-
-import pickle
-import functools
-from input_pipeline import input_pipeline_interface
+from MaxText import max_utils
+from MaxText.input_pipeline import input_pipeline_interface
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 

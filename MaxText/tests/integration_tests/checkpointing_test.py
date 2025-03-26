@@ -14,10 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-"""Integraion tests for test_checkpointing.sh"""
+"""Integration tests for test_checkpointing.sh"""
 from datetime import datetime
 import subprocess
+import os.path
+
 import pytest
+
+from MaxText.constants import PKG_ROOT
 
 
 def run_checkpointing(attention_type):
@@ -27,7 +31,7 @@ def run_checkpointing(attention_type):
 
   command = [
       "bash",
-      "end_to_end/test_checkpointing.sh",
+      os.path.join(os.path.dirname(PKG_ROOT), "end_to_end", "test_checkpointing.sh"),
       f"runner_{run_date}",  # run_name
       r"gs://runner-maxtext-logs",  # output_path
       r"gs://maxtext-dataset",  # dataset_path

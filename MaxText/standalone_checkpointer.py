@@ -23,20 +23,22 @@ limitations under the License.
 import datetime
 import os
 
-from typing import Sequence
+from typing import Sequence, Tuple, Any, Union
+
 from absl import app
 from flax.linen import partitioning as nn_partitioning
-import jax
-from jax import numpy as jnp
 import numpy as np
 
-import checkpointing
-import max_utils
-import max_logging
-import pyconfig
-from train import setup_mesh_and_model, get_first_step, validate_train_config, save_checkpoint
+import jax
+from jax import numpy as jnp
+import jax.experimental.multihost_utils
 
-from layers import models
+from MaxText import checkpointing
+from MaxText import max_utils
+from MaxText import max_logging
+from MaxText import pyconfig
+from MaxText.train import setup_mesh_and_model, get_first_step, validate_train_config, save_checkpoint
+from MaxText.layers import models
 
 Transformer = models.Transformer
 
@@ -108,7 +110,7 @@ def add_entropy_to_checkpoint(state):
     return state
 
 
-def main(argv: Sequence[str]) -> None:
+def main(argv: Union[Sequence[str], Tuple[Any, ...]]) -> None:
   jax.config.update("jax_cpu_enable_gloo_collectives", True)
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   config = pyconfig.initialize(argv)

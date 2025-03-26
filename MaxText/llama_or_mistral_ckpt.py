@@ -19,7 +19,7 @@ Get LLaMA chkpt_vars from Meta
 
 Example cmd:
 To save a ckpt
-python3 MaxText/llama_or_mistral_ckpt.py --base-model-path <path/to/meta/ckpt> \
+python3 -m MaxText.llama_or_mistral_ckpt --base-model-path <path/to/meta/ckpt> \
     --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size llama2-7b
 
 The base model checkpoints should be in the format `{name}.{chkpt_idx}.pth`
@@ -30,6 +30,7 @@ To fit less memory, modify convert() to load/save weights in multiple passes.
 Each pass, load and save partial weights (subset of all weight variables).
 """
 # pylint: disable=g-line-too-long
+
 import argparse
 import pathlib
 import os
@@ -49,12 +50,13 @@ import torch
 import psutil
 from tqdm import tqdm
 
-import max_logging
-import max_utils
-from train import save_checkpoint
-import checkpointing
 from safetensors import safe_open
-from utils import gcs_utils
+
+from MaxText import max_logging
+from MaxText import max_utils
+from MaxText.train import save_checkpoint
+from MaxText import checkpointing
+from MaxText.utils import gcs_utils
 
 MODEL_PARAMS_DICT = {
     "llama2-70b": {
@@ -1083,20 +1085,20 @@ if __name__ == "__main__":
         max_logging.log(f"Ignoring {lora_id} adapter because its directory doesn't have adapter_config.json.")
         continue
 
-      with open(lora_config_path, "r", encoding="utf8") as file:
+      with open(lora_config_path, "rt", encoding="utf8") as file:
         lora_config_dict = json.load(file)
 
-        if lora_config_dict is not None:
-          lora_model_path = f"{lora_path}/adapter_model.bin"
-          lora_config_dict["lora_model_path"] = lora_model_path
+      if lora_config_dict is not None:
+        lora_model_path = f"{lora_path}/adapter_model.bin"
+        lora_config_dict["lora_model_path"] = lora_model_path
 
-          jax_lora_weights = convert_lora_weights_to_jax_weights(lora_config_dict, args.model_size)
+        jax_lora_weights = convert_lora_weights_to_jax_weights(lora_config_dict, args.model_size)
 
-          del lora_config_dict["lora_model_path"]
+        del lora_config_dict["lora_model_path"]
 
-          lora_output_gcs_path = f"{args.maxtext_model_path}/loras/{lora_id}"
+        lora_output_gcs_path = f"{args.maxtext_model_path}/loras/{lora_id}"
 
-          save_weights_to_checkpoint(lora_output_gcs_path, jax_lora_weights, SIMULATED_CPU_DEVICES_COUNT)
-          gcs_utils.write_dict_to_gcs_json(lora_config_dict, f"{lora_output_gcs_path}/adapter_config.json")
+        save_weights_to_checkpoint(lora_output_gcs_path, jax_lora_weights, SIMULATED_CPU_DEVICES_COUNT)
+        gcs_utils.write_dict_to_gcs_json(lora_config_dict, f"{lora_output_gcs_path}/adapter_config.json")
 
-          max_logging.log(f"Successfully saved lora_weights to {lora_output_gcs_path}.")
+        max_logging.log(f"Successfully saved lora_weights to {lora_output_gcs_path}.")

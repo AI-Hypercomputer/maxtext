@@ -17,7 +17,7 @@ limitations under the License.
 """ Tests for kernels """
 
 import numpy as np
-from max_utils import permute_to_match_maxtext_rope, unpermute_from_match_maxtext_rope
+from MaxText.max_utils import permute_to_match_maxtext_rope, unpermute_from_match_maxtext_rope
 import unittest
 
 

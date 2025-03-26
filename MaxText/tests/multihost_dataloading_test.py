@@ -17,6 +17,8 @@ limitations under the License.
 # pylint: disable=missing-module-docstring, missing-function-docstring
 import sys
 import numpy as np
+import os.path
+
 import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
@@ -26,8 +28,9 @@ import tensorflow as tf
 import unittest
 import pytest
 
-import pyconfig
-import multihost_dataloading
+from MaxText import pyconfig
+from MaxText import multihost_dataloading
+from MaxText.constants import PKG_ROOT
 
 
 class MultihostDataloadingTest(unittest.TestCase):
@@ -36,7 +39,7 @@ class MultihostDataloadingTest(unittest.TestCase):
     super().setUp()
     batch_size = 4
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_ROOT, "configs", "base.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],

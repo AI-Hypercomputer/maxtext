@@ -14,17 +14,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import os.path
 import subprocess
 import sys
+import tempfile
+
 import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
 import unittest
 
-import pyconfig
-from input_pipeline import _grain_data_processing
-from input_pipeline import input_pipeline_interface
+from MaxText import pyconfig
+from MaxText.constants import PKG_ROOT
+from MaxText.input_pipeline import _grain_data_processing
+from MaxText.input_pipeline import input_pipeline_interface
 
 
 class GrainDataProcessingTest(unittest.TestCase):
@@ -32,16 +36,23 @@ class GrainDataProcessingTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
+    tmp_dir = tempfile.gettempdir()
     exit_code = subprocess.call(
-        ["bash", "../setup_gcsfuse.sh", "DATASET_GCS_BUCKET=maxtext-dataset", "MOUNT_PATH=/tmp/gcsfuse"]
+        [
+            "bash",
+            os.path.join(os.path.dirname(PKG_ROOT), "setup_gcsfuse.sh"),
+            "DATASET_GCS_BUCKET=maxtext-dataset",
+            f"MOUNT_PATH={os.path.join(tmp_dir, 'gcsfuse')}",
+        ]
     )
-    if exit_code != 0:
+    if exit_code != os.EX_OK:
       raise ValueError(f"Running setup_gcsfuse.sh failed with exit code: {exit_code}")
 
   def setUp(self):
     super().setUp()
+    tmp_dir = tempfile.gettempdir()
     self.config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_ROOT, "configs", "base.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
@@ -49,8 +60,8 @@ class GrainDataProcessingTest(unittest.TestCase):
         data_sharding=["data"],
         base_output_directory="gs://max-experiments/",
         dataset_type="grain",
-        grain_train_files="/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*",
-        tokenizer_path="../assets/tokenizer",
+        grain_train_files=os.path.join(tmp_dir, "gcsfuse", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*"),
+        tokenizer_path=os.path.join(os.path.dirname(PKG_ROOT), "assets", "tokenizer"),
         enable_checkpointing=False,
     )
     self.mesh_shape_1d = (len(jax.devices()),)
@@ -105,8 +116,8 @@ class GrainDataProcessingTest(unittest.TestCase):
 
     train_batch1 = get_first_batch(self.train_iter)
     train_batch2 = get_first_batch(self.train_iter)
-    self.assertTrue((train_batch1["inputs"] == train_batch2["inputs"]).all())
-    self.assertTrue((train_batch1["targets"] == train_batch2["targets"]).all())
+    self.assertTrue((train_batch1["inputs"] == train_batch2["inputs"]).all())  # pytype: disable=unsupported-operands
+    self.assertTrue((train_batch1["targets"] == train_batch2["targets"]).all())  # pytype: disable=unsupported-operands
 
 
 if __name__ == "__main__":
