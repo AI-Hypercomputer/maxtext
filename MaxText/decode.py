@@ -27,7 +27,7 @@ from MaxText import maxengine
 from MaxText import pyconfig
 
 # Number of text sequences to process in a single batch.
-_NUM_STREAMS = 1
+_NUM_STREAMS = 2
 
 
 def _batch_first_result_token(first_tokens: list[engine_api.ResultTokens], batch_size: int):
