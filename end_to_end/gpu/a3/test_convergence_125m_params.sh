@@ -34,7 +34,7 @@ then
     EVAL_METRICS=grain_checkpoint_save_restore
     echo "Using c4-array_record dataset type"
     echo "Mounting $DATASET_PATH to /tmp/gcsfuse/"
-    bash setup_gcsfuse.sh DATASET_GCS_BUCKET=$DATASET_PATH MOUNT_PATH=/tmp/gcsfuse/
+    bash setup_gcsfuse.sh DATASET_GCS_BUCKET="$DATASET_PATH" MOUNT_PATH=/tmp/gcsfuse/
     DATASET_PATH=/tmp/gcsfuse/
     CMD_DATA=" dataset_type=c4-array_record dataset_name=array-record/c4/en/3.0.1 eval_dataset_name=array-record/c4/en/3.0.1"
 fi
@@ -47,14 +47,32 @@ then
     CMD_DATA=" hf_path=parquet hf_data_files=gs://maxtext-dataset/hf/c4/c4-train-*.parquet dataset_type=hf tokenizer_path=assets/llama2-tokenizer"
 fi
 
-TRAIN_CMD="python MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME hardware=gpu \
-        steps=$STEPS dcn_data_parallelism=1 learning_rate=3e-4 \
-        base_emb_dim=1024 base_num_query_heads=8 base_num_kv_heads=8 base_mlp_dim=3584 base_num_decoder_layers=8 \
-        ici_fsdp_parallelism=8 metrics_file=metrics.txt per_device_batch_size=4 \
-        max_target_length=2048 enable_checkpointing=false attention=dot_product \
-        remat_policy=minimal quantization=$QUANTIZATION gradient_clipping_threshold=1.0 use_iota_embed=true \
-        scan_layers=false dataset_path=$DATASET_PATH async_checkpointing=false \
-        base_output_directory=$OUTPUT_PATH logits_dot_in_fp32=false"
+TRAIN_CMD="python3 -m MaxText.train MaxText/configs/base.yml
+             run_name=$RUN_NAME
+             hardware=gpu
+             steps=$STEPS
+             dcn_data_parallelism=1
+             learning_rate=3e-4
+             base_emb_dim=1024
+             base_num_query_heads=8
+             base_num_kv_heads=8
+             base_mlp_dim=3584
+             base_num_decoder_layers=8
+             ici_fsdp_parallelism=8
+             metrics_file=metrics.txt
+             per_device_batch_size=4
+             max_target_length=2048
+             enable_checkpointing=false
+             attention=dot_product
+             remat_policy=minimal
+             quantization=$QUANTIZATION
+             gradient_clipping_threshold=1.0
+             use_iota_embed=true
+             scan_layers=false
+             dataset_path=$DATASET_PATH
+             async_checkpointing=false
+             base_output_directory=$OUTPUT_PATH
+             logits_dot_in_fp32=false"
 TRAIN_CMD+=$CMD_DATA
 
 # Train
@@ -62,4 +80,4 @@ export XLA_ARGS="--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable
 $TRAIN_CMD
 
 # Assert training loss is smaller than input LOSS_THRESHOLD
-python3 end_to_end/tpu/eval_assert.py final_loss metrics.txt $LOSS_THRESHOLD
+python3 -m MaxText.end_to_end.tpu.eval_assert final_loss metrics.txt "$LOSS_THRESHOLD"

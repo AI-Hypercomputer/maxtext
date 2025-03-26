@@ -20,11 +20,20 @@ bash setup_gcsfuse.sh DATASET_GCS_BUCKET=$DATASET_PATH MOUNT_PATH=/tmp/gcsfuse/
 
 echo "Run_1: Starting the first run using the grain input pipeline"
 
-python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME steps=3 ${model_params}\
-    max_target_length=128 per_device_batch_size=1\
-    metrics_file=run_1_metrics.txt checkpoint_period=2 async_checkpointing=false\
-    dataset_path=/tmp/gcsfuse base_output_directory=$OUTPUT_PATH\
-    dataset_type=grain grain_worker_count=0 attention=$ATTENTION\
+python3 -m MaxText.train MaxText/configs/base.yml \
+    run_name="$RUN_NAME" \
+    steps=3 \
+    ${model_params} \
+    max_target_length=128 \
+    per_device_batch_size=1 \
+    metrics_file=run_1_metrics.txt \
+    checkpoint_period=2 \
+    async_checkpointing=false \
+    dataset_path='/tmp/gcsfuse' \
+    base_output_directory="$OUTPUT_PATH" \
+    dataset_type=grain \
+    grain_worker_count=0 \
+    attention="$ATTENTION" \
     grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*
 
 echo
@@ -32,22 +41,39 @@ echo "Finished Run_1 at step 2"
 echo "Run_2: Resuming using the tfds input pipeline"
 echo
 
-python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME steps=5 ${model_params}\
-    max_target_length=128 per_device_batch_size=1 attention=$ATTENTION\
-    metrics_file=run_2_metrics.txt checkpoint_period=2 async_checkpointing=false\
-    dataset_path=/tmp/gcsfuse base_output_directory=$OUTPUT_PATH\
+python3 -m MaxText.train MaxText/configs/base.yml \
+    run_name="$RUN_NAME" \
+    steps=5 \
+    ${model_params} \
+    max_target_length=128 \
+    per_device_batch_size=1 \
+    attention="$ATTENTION" \
+    metrics_file=run_2_metrics.txt \
+    checkpoint_period=2 \
+    async_checkpointing=false \
+    dataset_path=/tmp/gcsfuse \
+    base_output_directory="$OUTPUT_PATH"
 
 echo
 echo "Finished Run_2 at step 4"
 echo "Run_3: Resuming using the grain input pipeline"
 echo
 
-python3 MaxText/train.py MaxText/configs/base.yml run_name=$RUN_NAME steps=7 ${model_params}\
-    max_target_length=128 per_device_batch_size=1\
-    metrics_file=run_3_metrics.txt checkpoint_period=2 async_checkpointing=false\
-    dataset_path=/tmp/gcsfuse base_output_directory=$OUTPUT_PATH\
-    dataset_type=grain grain_worker_count=0 attention=$ATTENTION\
+python3 -m MaxText.train MaxText/configs/base.yml \
+    run_name="$RUN_NAME" \
+    steps=7 \
+    ${model_params} \
+    max_target_length=128 \
+    per_device_batch_size=1 \
+    metrics_file=run_3_metrics.txt \
+    checkpoint_period=2 \
+    async_checkpointing=false \
+    dataset_path=/tmp/gcsfuse \
+    base_output_directory="$OUTPUT_PATH" \
+    dataset_type=grain \
+    grain_worker_count=0 \
+    attention="$ATTENTION" \
     grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*
 
-python3 end_to_end/tpu/eval_assert.py test_start_step run_2_metrics.txt 3.0
-python3 end_to_end/tpu/eval_assert.py test_start_step run_3_metrics.txt 5.0
+python3 -m end_to_end.tpu.eval_assert test_start_step run_2_metrics.txt 3.0
+python3 -m end_to_end.tpu.eval_assert test_start_step run_3_metrics.txt 5.0

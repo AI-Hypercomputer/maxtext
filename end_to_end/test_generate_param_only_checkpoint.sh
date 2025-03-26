@@ -51,23 +51,26 @@ else
     cmd=''
 fi
 
-training_ckpt_run_id=${run_id}-ckpt-train-steps-5
-decode_ckpt_run_id=${run_id}-decode-ckpt-train-steps-5
+training_ckpt_run_id="${run_id}-ckpt-train-steps-5"
+decode_ckpt_run_id="${run_id}-decode-ckpt-train-steps-5"
 model_params="base_emb_dim=384 base_num_query_heads=8 base_num_kv_heads=8 base_mlp_dim=192 base_num_decoder_layers=8 head_dim=128"
 
 echo
 echo "Create a test training checkpoint"
 echo
-$cmd python3 MaxText/train.py MaxText/configs/base.yml \
-run_name=${training_ckpt_run_id} \
-base_output_directory=${base_output_directory} \
-dataset_path=${dataset_path} attention=${attention} \
-steps=5 checkpoint_period=3 async_checkpointing=false \
-quantization=${quantization} \
-${model_params} \
+$cmd python3 -m MaxText.train MaxText/configs/base.yml \
+  run_name="${training_ckpt_run_id}" \
+  base_output_directory="${base_output_directory}" \
+  dataset_path="${dataset_path}" \
+  attention="${attention}" \
+  steps=5 \
+  checkpoint_period=3 \
+  async_checkpointing=false \
+  quantization="${quantization}" \
+  ${model_params} \
 
 
-if [ $? -eq 0 ]
+if [ "$?" -eq 0 ]
 then
   echo
   echo "Successfully created a training checkpoint"
@@ -82,16 +85,18 @@ echo
 echo "Generate a decode checkpoint from the test training checkpoint"
 echo
 
-$cmd python3 MaxText/generate_param_only_checkpoint.py MaxText/configs/base.yml \
-run_name=${decode_ckpt_run_id} attention=${attention} \
-base_output_directory=${base_output_directory} \
-dataset_path=${dataset_path} async_checkpointing=false \
-load_full_state_path=${base_output_directory}/${training_ckpt_run_id}/checkpoints/3/items \
-quantization=${quantization} \
-${model_params} \
+$cmd python3 -m MaxText.generate_param_only_checkpoint MaxText/configs/base.yml \
+  run_name="${decode_ckpt_run_id}" \
+  attention="${attention}" \
+  base_output_directory="${base_output_directory}" \
+  dataset_path="${dataset_path}" \
+  async_checkpointing=false \
+  load_full_state_path="${base_output_directory}/${training_ckpt_run_id}/checkpoints/3/items" \
+  quantization="${quantization}" \
+  ${model_params}
 
 
-if [ $? -eq 0 ]
+if [ "$?" -eq 0 ]
 then
   echo "Successfully created an decode checkpoint"
   echo "Checkpoint path:  ${base_output_directory}/${decode_ckpt_run_id}/checkpoints/0/items"
@@ -104,17 +109,22 @@ fi
 echo
 echo "Run decode using the generated checkpoint"
 echo
-$cmd python3 MaxText/decode.py MaxText/configs/base.yml \
-run_name=${run_id}-decode-steps-50 \
-base_output_directory=${base_output_directory} \
-dataset_path=${dataset_path} \
-load_parameters_path=${base_output_directory}/${decode_ckpt_run_id}/checkpoints/0/items \
-attention=dot_product ici_tensor_parallelism=${ici_tensor_parallelism} steps=50 \
-metrics_file=/tmp/${run_id}_metrics.txt async_checkpointing=false max_target_length=128 per_device_batch_size=1 \
-quantization=${quantization} \
-${model_params} \
+$cmd python3 -m MaxText.decode MaxText/configs/base.yml \
+  run_name="${run_id}-decode-steps-50" \
+  base_output_directory="${base_output_directory}" \
+  dataset_path="${dataset_path}" \
+  load_parameters_path="${base_output_directory}/${decode_ckpt_run_id}/checkpoints/0/items" \
+  attention=dot_product \
+  ici_tensor_parallelism="${ici_tensor_parallelism}" \
+  steps=50 \
+  metrics_file="/tmp/${run_id}_metrics.txt" \
+  async_checkpointing=false \
+  max_target_length=128 \
+  per_device_batch_size=1 \
+  quantization="${quantization}" \
+  ${model_params}
 
-if [ $? -eq 0 ]
+if [ "$?" -eq 0 ]
 then
   echo "Successfully ran decode using decode optimized checkpoint"
 else
