@@ -16,6 +16,8 @@ audit=false
 accuracy=false
 fast_eval=false
 enable_batch_prefill=false
+enable_v2=false
+enable_debug=false
 
 for arg in "$@"; do
   case $arg in
@@ -24,6 +26,8 @@ for arg in "$@"; do
     -s) skip_warmup=true ;;
     -p) enable_profiler=true ;;
     -c) enable_batch_prefill=true ;;
+    -v2|--enable_v2) enable_v2=true ;;
+    --debug) enable_debug=true ;;
     -d) audit=true ;;
     -a) accuracy=true ;;
     -f) fast_eval=true ;;
@@ -38,9 +42,11 @@ done
 
 
 if "$dry_run"; then
-    CMD=echo
+    CMD='echo python3'
+elif "$enable_debug"; then
+    CMD='python3 -m debugpy --listen 5678 --wait-for-client'
 else
-    CMD=''
+    CMD='python3'
 fi
 
 SKIP_WARMUP_OPTION=""
@@ -56,6 +62,11 @@ fi
 BATCH_PREFILL_OPTION=""
 if "$enable_batch_prefill"; then
     BATCH_PREFILL_OPTION="--enable_batch_prefill"
+fi
+
+ENABLE_V2_OPTION=""
+if "$enable_v2"; then
+    ENABLE_V2_OPTION="--enable_v2"
 fi
 
 if [ -z "$TOKENIZER_PATH" ]; then
@@ -136,7 +147,7 @@ run_loadgen() {
   echo "PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES: ${PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES}"
   echo "MAXENGINE_ARGS: ${MAXENGINE_ARGS}"
   echo
-  ${CMD} python -m offline_mode \
+  ${CMD} -m offline_mode \
     --mlperf_test_mode=${TEST_MODE} \
     --input_mode tokenized \
     --output_mode tokenized \
@@ -149,7 +160,7 @@ run_loadgen() {
     --maxengine_args "${MAXENGINE_ARGS}" \
     --output_log_dir ${OUTPUT_LOG_DIR} \
     --tok_outlen_multiplier ${TOK_OUTLEN_MULTIPLIER} \
-    ${SKIP_WARMUP_OPTION} ${PROFILER_OPTION} ${BATCH_PREFILL_OPTION} 2>&1 | tee ${OUTPUT_LOG_DIR}/${LOADGEN_RUN_TYPE}_log.log
+    ${SKIP_WARMUP_OPTION} ${PROFILER_OPTION} ${BATCH_PREFILL_OPTION} ${ENABLE_V2_OPTION} 2>&1 | tee ${OUTPUT_LOG_DIR}/${LOADGEN_RUN_TYPE}_log.log
 }
 
 run_loadgen_performance () {
@@ -184,7 +195,7 @@ run_loadgen_accuracy () {
       EVAL_SCRIPT="evaluate-accuracy.py"
     fi
     echo
-    ${CMD} python3 ${EVAL_SCRIPT} \
+    ${CMD} ${EVAL_SCRIPT} \
       --checkpoint-path ${HF_CKPT} \
       --mlperf-accuracy-file ${OUTPUT_ACCURACY_JSON_PATH} \
       --dataset-file ${DATASET_PATH} 2>&1 | tee ${OUTPUT_LOG_DIR}/evaluate_offline_accuracy_log.log

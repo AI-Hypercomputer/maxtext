@@ -45,6 +45,7 @@ sys.path.insert(0, parent_dir)
 
 from maxengine import create_engine_from_config_flags
 import offline_inference
+import offline_inference_v2
 
 _MLPERF_ID = "llama2-70b"
 log = logging.getLogger(__name__)
@@ -150,6 +151,13 @@ flags.DEFINE_bool(
     "enable_batch_prefill",
     False,
     "If set, enable batch prefilling.",
+    required=False,
+)
+
+flags.DEFINE_bool(
+    "enable_v2",
+    False,
+    "If set, enable V2 offline inference.",
     required=False,
 )
 
@@ -308,6 +316,7 @@ class SUT:
     self._sample_id_to_input = None
     self._query_batches = _init_query_batches()
 
+  # yangmu 8: shouldn't this named 'filter-and-prepare-queries' ?
   def issue_queries(self, queries):
     log.info("Issue queries start")
     assert self._sample_id_to_input is not None
@@ -337,6 +346,7 @@ class SUT:
     # At this point _processed_data is ready
     log.info("Issue queries end")
 
+  # yangmu 9: shouldn't this named 'issue-queries' ?
   @timed("flush_queries")
   def flush_queries(self):
     log.info("Flush queries start")
@@ -464,13 +474,17 @@ def main(argv):
     (length, batch) = group_idx
     target_length = 2 * length
     log.info(f"Using batch size: {batch} and length: {length}")
+    # yangmu 7: so each engine instance handles one batch ?
     engine = create_engine_from_config_flags(
         batch_size=batch,
         max_prefill_predict_length=length,
         max_target_length=target_length,
         args_str=FLAGS.maxengine_args,
     )
-    offline_inf = offline_inference.OfflineInference(engine, params, base_engine, FLAGS.enable_batch_prefill)
+    if FLAGS.enable_v2:
+      offline_inf = offline_inference_v2.OfflineInferenceV3(engine, params, base_engine)
+    else:
+      offline_inf = offline_inference.OfflineInference(engine, params, base_engine, FLAGS.enable_batch_prefill)
     if params is None and offline_inf.params is not None:
       base_engine = engine
     params = offline_inf.params

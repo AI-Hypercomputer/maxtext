@@ -31,6 +31,8 @@ from jetstream.engine import engine_api
 import logging
 # pylint: disable=no-name-in-module
 from maxengine import set_engine_vars_from_base_engine
+from maxengine import PrefillPackingFeature
+from maxengine import BatchInput
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +87,8 @@ class OfflineInference:
 
     self._decode_state_executable = None
 
+    self.feature = PrefillPackingFeature(engine)
+
   def init_decode_state(self):
     if self.decode_state is None:
       assert self._decode_state_executable != None, "Decode state executable is none"
@@ -107,74 +111,9 @@ class OfflineInference:
         2048,
         4096,
     ]
-    i32_scalar = jax.ShapeDtypeStruct((), int)
-
-    for length in interesting_buckets:
-      if length > max_length:
-        break
-      log.info(f"Compiling prefill: {length}")
-      input_data = jax.ShapeDtypeStruct((length,), jnp.dtype("int32"))
-
-      insert_with_layout = jax.jit(
-          self._prefill_insert,
-          in_shardings=(self.engine.param_layouts, None, None, None, self.engine.decode_state_layouts),
-          out_shardings=(
-              None,
-              self.engine.decode_state_layouts,
-          ),
-          donate_argnames=("decode_state"),
-      )
-      lowered_insert = insert_with_layout.lower(
-          self.params, input_data, i32_scalar, i32_scalar, self.engine.decode_state_shapes
-      )
-      self._cached_pref[length] = lowered_insert.compile(compiler_options=None)
-
-      if length == 64 or length == 1024:
-        continue
-
-      input_data_batch = jax.ShapeDtypeStruct((max_length,), jnp.dtype("int32"))
-      min_num_prompts = max_length // length
-      max_num_prompts = max_length // (length // 2)
-      possible_prompts = range(min_num_prompts, max_num_prompts)
-      for num_prompts in possible_prompts:
-        log.info(f"Compiling batched prefill: {length} num_prompts: {num_prompts}")
-        self._cached_pref_batch[(length, num_prompts)] = (
-            jax.jit(
-                self.engine.prefill_insert_batch,
-                in_shardings=(
-                    self.engine.param_layouts,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    self.engine.decode_state_layouts,
-                ),
-                out_shardings=(
-                    None,
-                    self.engine.decode_state_layouts,
-                ),
-                static_argnames=(
-                    "num_prompts",
-                    "padded_length",
-                ),
-                donate_argnames=("decode_state",),
-            )
-            .lower(
-                self.params,
-                input_data_batch,
-                jnp.arange(0, 16, dtype=int),
-                num_prompts,
-                jnp.arange(0, max_length, dtype=int),
-                jnp.ones(max_length, dtype=int),
-                jnp.arange(0, max_length, 64, dtype=int),
-                length,
-                jnp.full(16, length, dtype=int),
-                self.engine.decode_state_shapes,
-            )
-            .compile(compiler_options=None)
-        )
+    log.info("prefill packing: begin aot compile")
+    self.feature.aot_compile(self.params, max_length, interesting_buckets)
+    log.info("prefill packing: end aot compile")
 
     self.batch_inference(warmup_samples, desc="warmup")
 
@@ -197,86 +136,32 @@ class OfflineInference:
     token.
     """
 
-    def prefill(prefill_bucket, prefill_len):
+    def prefill(prefill_bucket, prefill_len) -> None:
       nonlocal self
       if self.dummy:
         log.info("dummy prefill")
-        return 123
-      if (
-          not self.enable_batch_prefill
-          or prefill_len == self.max_prefill_length
-          or prefill_len * len(prefill_bucket) < self.max_prefill_length
-      ):
-        prefill_result = []
-        prefill_fn = self._prefill_insert
-        if (cached := self._cached_pref.get(prefill_len)) is not None:
-          prefill_fn = cached
-        else:
-          assert False, "prefill fn not found"
+        return
 
-        for slot, row in prefill_bucket:
-          first_token, self.decode_state = prefill_fn(self.params, row.tokens, slot, row.true_length, self.decode_state)
-          prefill_result.append((first_token, slot, row))
-        return prefill_result
-      else:
-        num_prompts = len(prefill_bucket)
-        sequence_indicators = []
-        total_len = 0
-        for idx, (slot, row) in enumerate(prefill_bucket):
-          sequence_indicators.append(np.full(row.true_length, idx * 2 + 1, dtype=int))
-          total_len += row.true_length
-        sequence_indicators.append(np.zeros(self.max_prefill_length - total_len, dtype=int))
-        sequence_indicator = jnp.array(np.concatenate(sequence_indicators))
+      input_ids = []
+      input_prompts = []
+      decode_slots = []
+      for slot, row in prefill_bucket:
+        decode_slots.append(slot)
+        input_ids.append(row.id)
+        input_prompts.append(row.tokens[:row.true_length])
+        if row.true_length > prefill_len:
+          log.info(f"length: {row.true_length} padding: {len(row.tokens)} prefill_len: {prefill_len}")
+      batch_input = BatchInput(input_ids, input_prompts, prefill_len)
 
-        positions = [np.arange(0, row.true_length) for (slot, row) in prefill_bucket]
-        positions.append(np.arange(0, self.max_prefill_length - total_len))
-        positions = jnp.array(np.concatenate(positions))
+      prefill_result, self.decode_state = self.feature.prefill_and_insert_batch(
+        self.params, batch_input, decode_slots, self.decode_state)
 
-        tokens = [row.tokens[: row.true_length] for (slot, row) in prefill_bucket]
-        tokens.append(jnp.zeros(self.max_prefill_length - total_len, dtype=int))
-        tokens = jnp.concat(tokens)
-        slots = [slot for (slot, row) in prefill_bucket]
-        true_lengths = [row.true_length for (slot, row) in prefill_bucket]
-        start_pos = np.cumsum([0] + [row.true_length for (slot, row) in prefill_bucket])[:-1]
-        start_pos = start_pos.tolist()
-
-        # pad slots to keep static shape of jitted function input
-        def pad_num_prompts_len_array(array_to_pad, pad_len):
-          if len(array_to_pad) < pad_len:
-            array_to_pad.extend([0] * (pad_len - len(array_to_pad)))
-          return jnp.array(array_to_pad)
-
-        slots = pad_num_prompts_len_array(slots, 16)
-        true_lengths = pad_num_prompts_len_array(true_lengths, 16)
-        start_pos = pad_num_prompts_len_array(start_pos, 16)
-
-        prefill_fn = self.engine.prefill_insert_batch
-        log.info(f"invoking compiled function with length {prefill_len} num_prompts {num_prompts}")
-        if (cached := self._cached_pref_batch.get((prefill_len, num_prompts))) is not None:
-          prefill_fn = cached
-        else:
-          assert False, "prefill batch not found"
-
-        first_tokens, self.decode_state = prefill_fn(
-            self.params,
-            tokens,
-            slots,
-            positions,
-            sequence_indicator,
-            start_pos,
-            true_lengths,
-            self.decode_state,
-        )  # pytype: disable=missing-parameter
-        prefill_result = [(first_tokens[idx], slot, row) for (idx, (slot, row)) in enumerate(prefill_bucket)]
-
-        return prefill_result
-
-    def prefill_batch(prefill_bucket, padded_len):
-      nonlocal self
-      prefill_results = prefill(prefill_bucket, padded_len)
-      for _first_token, _slot, _row in prefill_results:
-        log.info(f"Put row of len {_row.tokens.shape[0]} true length {_row.true_length} slot {_slot} to detokenize backlog")
-        self.detokenize_backlog.put((_first_token, True, _row.id, _slot), block=True)
+      for i in range(batch_input.count):
+        # TODO: does slot in prefill_bucket and prefill_result match here ?
+        _, row = prefill_bucket[i]
+        first_token, slot = prefill_result[i]
+        log.debug(f"Put row of len {row.tokens.shape[0]} true length {row.true_length} slot {slot} to detokenize backlog")
+        self.detokenize_backlog.put((first_token, True, row.id, slot), block=True)
 
     empty_slots = list(range(self.batch_size))
     slot_to_id = {}
@@ -363,7 +248,7 @@ class OfflineInference:
         # If slots are all full, decode until there are free slots
         # to insert
         num_decodes += 1
-        log.info(f"decode-{desc}-{num_decodes}")
+        log.debug(f"decode-{desc}-{num_decodes}")
         decode()
       # do one insert
       padded_len = len(row.tokens)
@@ -372,20 +257,18 @@ class OfflineInference:
           f"prefill-{desc}-{num_prefills} num_prefills {sum(num_prefills.values())} padded_len {padded_len} true_length {row.true_length} num_empty_slots {len(empty_slots)} num_decodes {num_decodes}"
       )
       total_num_prefills += 1
-      log.info(f"Total num prefill: {total_num_prefills}")
+      log.debug(f"Total num prefill: {total_num_prefills}")
       slot = empty_slots.pop()
       # directly prefill prompts
       if not self.enable_batch_prefill:
-        first_token, slot, row = prefill([(slot, row)], padded_len)[0]
-        self.detokenize_backlog.put((first_token, True, row.id, slot), block=True)
+        prefill([(slot, row)], padded_len)
         continue
 
       if len(self.prefill_buckets[padded_len // 2]) != 0:
-        prefill_batch(self.prefill_buckets[padded_len // 2], padded_len // 2)
+        prefill(self.prefill_buckets[padded_len // 2], padded_len // 2)
         self.prefill_buckets[padded_len // 2] = []
       if padded_len == self.max_prefill_length:
-        first_token, slot, row = prefill([(slot, row)], padded_len)[0]
-        self.detokenize_backlog.put((first_token, True, row.id, slot), block=True)
+        prefill([(slot, row)], padded_len)
         continue
       if padded_len == 64:
         row.tokens = jnp.concat([row.tokens, jnp.zeros(64, dtype=int)])
@@ -401,7 +284,7 @@ class OfflineInference:
           log.debug(
               f"Normal batch {padded_len} total padded len {len(self.prefill_buckets[padded_len]) * padded_len} total true len {total_true_len}"
           )
-          prefill_batch(self.prefill_buckets[padded_len], padded_len)
+          prefill(self.prefill_buckets[padded_len], padded_len)
           self.prefill_buckets[padded_len] = []
         # Already overloading, left over the last and do prefill
         elif total_true_len > self.max_prefill_length:
@@ -409,14 +292,14 @@ class OfflineInference:
               f"Overloading {padded_len} total padded len {len(self.prefill_buckets[padded_len]) * padded_len} total true len {total_true_len}"
           )
           current = self.prefill_buckets[padded_len][-1]
-          prefill_batch(self.prefill_buckets[padded_len][:-1], padded_len)
+          prefill(self.prefill_buckets[padded_len][:-1], padded_len)
           self.prefill_buckets[padded_len] = [current]
     # For leftover requests in buckets at the end of computation, do prefill individually.
     for padded_len in self.prefill_buckets.keys():
-      prefill_batch(self.prefill_buckets[padded_len], padded_len)
+      prefill(self.prefill_buckets[padded_len], padded_len)
     self.prefill_buckets = defaultdict(list)
     while slot_to_id:
-      log.info(f"decode-{desc}-{num_decodes} num_filled_slots {len(slot_to_id)}")
+      log.debug(f"decode-{desc}-{num_decodes} num_filled_slots {len(slot_to_id)}")
       num_decodes += 1
       decode()
 
@@ -424,11 +307,12 @@ class OfflineInference:
     detokenize_thread.join()
     log.info(f"summary-{desc}-prefills-{num_prefills}-decodes-{num_decodes} completed.")
 
-  def batch_inference(self, data: List[InputData], desc=""):
+  def batch_inference(self, data: List[InputData], desc="") -> dict[str, List[int]]:
     """data is list of obj with id, tokens, and true length"""
     data_dict = defaultdict(list)
     log.info("sorting data")
     for row in data:
+      # log.info(f"row shape: {row.tokens.shape}")
       data_dict[row.tokens.shape[0]].append(row)
     data_dict[128] += data_dict[64]
     data_dict[64] = []
@@ -438,12 +322,13 @@ class OfflineInference:
       random.shuffle(data_dict[padded_len])
       data += data_dict[padded_len]
     log.info("finished sorting data")
-    res = defaultdict(list)
 
+    res = defaultdict(list)
     def callback(id_, token):
       nonlocal res
       if token == self.tokenizer.eos_id:
         log.debug(f"res[{id_}] eos")
+        log.info(self.tokenizer.decode(res[id_]))
       if not res[id_] or res[id_][-1] != self.tokenizer.eos_id:
         res[id_].append(token)
       return token == self.tokenizer.eos_id
