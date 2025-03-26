@@ -150,9 +150,8 @@ def create_data_iterator(config, mesh):
   if config.dataset_type == "synthetic":
     return SyntheticDataIterator(config, mesh), None
 
-  data_load_sharding = config.data_sharding if config.expansion_factor_real_data == -1 else config.all_shardings
   process_indices_train = get_process_loading_real_data(
-      data_load_sharding,
+      config.data_sharding,
       config.global_batch_size_to_load,
       config.global_batch_size_to_train_on,
       config.max_target_length,
@@ -160,7 +159,7 @@ def create_data_iterator(config, mesh):
   )
   if config.eval_interval > 0:
     process_indices_eval = get_process_loading_real_data(
-        data_load_sharding,
+        config.data_sharding,
         config.global_batch_size_to_load_eval,
         config.global_batch_size_to_eval_on,
         config.max_target_length,

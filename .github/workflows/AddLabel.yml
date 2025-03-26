@@ -67,8 +67,10 @@ jobs:
               hengtaoguo: "",
               A9isha: "",
               wang2yn84: "",
-              singh-mitali: "",
               wyzhang: "",
+              mitalisi: "",
+              gpolovets1: "",
+              mailvijayasingh: "",
             }
             const reviews = await github.rest.pulls.listReviews({
               owner,

@@ -77,6 +77,7 @@ class LlamaDecoderLayer(nn.Module):
       model_mode,
       lora_params,
       page_state: Optional[page_manager.PageState] = None,
+      previous_chunk=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -133,6 +134,7 @@ class LlamaDecoderLayer(nn.Module):
         model_mode=model_mode,
         lora_params=lora_params_layers,
         page_state=page_state,
+        previous_chunk=previous_chunk,
     )
 
     attention_lnx = nn.with_logical_constraint(
