@@ -18,7 +18,7 @@
                           ***** IMPORTANT *****
 This script provisions new TPUs! You cannot run jobs on existing TPUs with this script,
 we recommend trying multihost_runner instead for this purpose. In addition you must include all
-of your installation commands inside of the --COMMAND arg, e.g. --COMMAND="bash setup.sh && python3 train.py"
+of your installation commands inside of the --COMMAND arg, e.g. --COMMAND="bash setup.sh && python3 -m MaxText.train"
 
 This script:
   1) Creates specified TPU(s)
@@ -270,7 +270,7 @@ def main(raw_args=None) -> None:
                       help='Main command to run on each TPU. \
                         This command is run from a copied version of SCRIPT_DIR on each TPU worker. \
                         You must include your dependency installations here, \
-                        e.g. --COMMAND=\'bash setup.sh && python3 train.py\'')
+                        e.g. --COMMAND=\'bash setup.sh && python3 -m MaxText.train\'')
   parser.add_argument('--BUCKET_NAME', type=str, default=None, required=True,
                       help='Name of GCS bucket, e.g. my-bucket')
   parser.add_argument('--BUCKET_DIR', type=str, default="",
@@ -307,7 +307,7 @@ def main(raw_args=None) -> None:
   tmp_dir = os.path.join(args.SCRIPT_DIR, tmp_dir_relative_to_script)
   zip_name = "script_dir_zip_" + args.RUN_NAME + ".tar.gz"
   bucket_dir = os.path.join(args.BUCKET_DIR, args.RUN_NAME)
-  bucket_path = os.path.join(f"gs://{args.BUCKET_NAME}", bucket_dir)
+  bucket_path = f"gs://{args.BUCKET_NAME}/{bucket_dir.replace(os.path.sep, '/')}"
   startup_script_file = os.path.join(tmp_dir, "startup_script.txt")
 
   print(f"Moving {args.SCRIPT_DIR} to {bucket_path}...")

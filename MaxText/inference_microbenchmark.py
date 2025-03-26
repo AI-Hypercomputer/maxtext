@@ -24,12 +24,12 @@ from collections.abc import MutableMapping
 
 from jetstream.engine import token_utils
 
-import max_utils
-import maxengine
-import maxtext_utils
-import prefix_cache
-import profiler
-import pyconfig
+from MaxText import max_utils
+from MaxText import maxengine
+from MaxText import maxtext_utils
+from MaxText import prefix_cache
+from MaxText import profiler
+from MaxText import pyconfig
 
 import warnings
 
@@ -547,9 +547,9 @@ def run_benchmarks(config):
   return results
 
 
-def main(argv):
+def main(config, **kwargs):
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  run_benchmarks(pyconfig.initialize(argv))
+  return run_benchmarks(pyconfig.initialize(config, **kwargs))
 
 
 if __name__ == "__main__":

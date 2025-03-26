@@ -16,9 +16,14 @@ limitations under the License.
 
 """ Tests for the common Max Utils """
 import unittest
+import os.path
+import tempfile
+from tempfile import gettempdir
+
 import pytest
-from train_compile import main as train_compile_main
-from train import main as train_main
+
+from MaxText.train_compile import main as train_compile_main
+from MaxText.constants import PKG_ROOT
 
 
 class TrainCompile(unittest.TestCase):
@@ -26,11 +31,12 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_save_compiled_v4(self):
-    compiled_trainstep_file = "/tmp/test_compiled_v4.pickle"
+    tmp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(tmp_dir, "test_compiled_v4.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v4-8",
             "compile_topology_num_slices=1",
@@ -42,11 +48,12 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_save_compiled_v5e(self):
-    compiled_trainstep_file = "/tmp/test_compiled_v5e.pickle"
+    tmp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(tmp_dir, "test_compiled_v5e.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-16",
             "compile_topology_num_slices=1",
@@ -59,11 +66,12 @@ class TrainCompile(unittest.TestCase):
   # TODO (b/366200617) : This tests fails in AOT, but config works fine on real hardware
   @pytest.mark.skip(reason="Issue w/ kernels_test. Error: The TPU is already in use by process...")
   def test_minimal_offloaded_v5e(self):
-    compiled_trainstep_file = "/tmp/test_compiled_v5e_offload.pickle"
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v5e_offload.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "compile_topology_num_slices=1",
@@ -81,11 +89,12 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_save_compiled_v5p_two_slices(self):
-    compiled_trainstep_file = "/tmp/test_compiled_v5p_two_slices.pickle"
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v5p_two_slices.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-8",
             "compile_topology_num_slices=2",
@@ -99,11 +108,12 @@ class TrainCompile(unittest.TestCase):
   @pytest.mark.skip(reason="Enable when downstream v6e AOT support reaches stable Jax.")
   @pytest.mark.tpu_only
   def test_save_compiled_v6e(self):
-    compiled_trainstep_file = "/tmp/test_compiled_v6e.pickle"
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v6e.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-16",
             "compile_topology_num_slices=1",
@@ -115,11 +125,12 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_sequence_parallelism(self):
-    compiled_trainstep_file = "/tmp/test_compiled.pickle"
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_compiled.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "use_iota_embed=true",
@@ -133,11 +144,12 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_remat_save_dot_except_mlpwi(self):
-    compiled_trainstep_file = "/tmp/test_remat_save_dot_except_mlpwi.pickle"
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_remat_save_dot_except_mlpwi.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "compile_topology_num_slices=1",
@@ -155,11 +167,12 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_remat_save_dot_except_mlp(self):
-    compiled_trainstep_file = "/tmp/test_remat_save_dot_except_mlp.pickle"
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_remat_save_dot_except_mlp.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "compile_topology_num_slices=1",
@@ -177,11 +190,12 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_remat_save_qkv_proj(self):
-    compiled_trainstep_file = "/tmp/test_remat_save_qkv_proj.pickle"
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_remat_save_qkv_proj.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "compile_topology_num_slices=1",
@@ -199,11 +213,12 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_remat_full(self):
-    compiled_trainstep_file = "/tmp/test_remat_full.pickle"
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_remat_full.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "compile_topology_num_slices=1",
@@ -221,11 +236,12 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_custom_64x4_mesh(self):
-    compiled_trainstep_file = "/tmp/test_custom_64x4_mesh.pickle"
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_custom_64x4_mesh.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -243,11 +259,12 @@ class TrainCompile(unittest.TestCase):
   @pytest.mark.skip(reason="Enable when AOT test work with host offloading.")
   @pytest.mark.tpu_only
   def test_llama3_1_70b_opt_offload(self):
-    compiled_trainstep_file = "/tmp/test_llama3_1_70b_opt_offload.pickle"
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_llama3_1_70b_opt_offload.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "compile_topology_num_slices=1",
@@ -261,11 +278,12 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_custom_32x8_mesh(self):
-    compiled_trainstep_file = "/tmp/test_custom_32x8_mesh.pickle"
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_custom_32x8_mesh.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -285,11 +303,12 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_moe_dropping_bf16(self):
-    compiled_trainstep_file = "/tmp/test_moe_dropping_bf16.pickle"
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_dropping_bf16.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -307,11 +326,12 @@ class TrainCompile(unittest.TestCase):
   @pytest.mark.skip(reason="b/400476456 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
   @pytest.mark.tpu_only
   def test_moe_dropping_int8(self):
-    compiled_trainstep_file = "/tmp/test_moe_dropping_int8.pickle"
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_dropping_int8.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-128",
             "use_iota_embed=true",
@@ -330,11 +350,12 @@ class TrainCompile(unittest.TestCase):
   # TODO(b/388572320): Add int8 quantization test once this bug is fixed.
   @pytest.mark.tpu_only
   def test_moe_megablox_bf16(self):
-    compiled_trainstep_file = "/tmp/test_moe_megablox_bf16.pickle"
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_megablox_bf16.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -351,11 +372,12 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_moe_ragged_dot_bf16(self):
-    compiled_trainstep_file = "/tmp/test_moe_ragged_dot_bf16.pickle"
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_ragged_dot_bf16.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -372,11 +394,12 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_moe_dense_bf16(self):
-    compiled_trainstep_file = "/tmp/test_moe_dense_bf16.pickle"
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_dense_bf16.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -394,11 +417,12 @@ class TrainCompile(unittest.TestCase):
   @pytest.mark.skip(reason="b/400476456 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
   @pytest.mark.tpu_only
   def test_moe_dense_int8(self):
-    compiled_trainstep_file = "/tmp/test_moe_dense_int8.pickle"
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_dense_int8.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-128",
             "use_iota_embed=true",
@@ -416,11 +440,12 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_moe_pp_bf16(self):
-    compiled_trainstep_file = "/tmp/test_moe_pp_bf16.pickle"
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_pp_bf16.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -439,11 +464,12 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_moe_deepseek_scanned_bf16(self):
-    compiled_trainstep_file = "/tmp/test_moe_deepseek_scanned_bf16.pickle"
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_deepseek_scanned_bf16.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
             "use_iota_embed=true",
@@ -463,11 +489,12 @@ class TrainCompile(unittest.TestCase):
   @pytest.mark.skip(reason="Fix sharding issue of all layers of DeepSeek")
   @pytest.mark.tpu_only
   def test_moe_deepseek_unscanned_bf16(self):
-    compiled_trainstep_file = "/tmp/test_moe_deepseek_unscanned_bf16.pickle"
+    temp_dir = tempfile.gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_deepseek_unscanned_bf16.pickle")
     train_compile_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
             "use_iota_embed=true",

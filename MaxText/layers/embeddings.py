@@ -21,7 +21,7 @@ from flax import linen as nn
 import jax
 from jax import lax
 import jax.numpy as jnp
-from layers import initializers
+from MaxText.layers import initializers
 
 Config = Any
 Array = jnp.ndarray
@@ -181,6 +181,7 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
   # # LLaMA3.1 ROPE scaling, see the original pytorch implementation
   # https://github.com/meta-llama/llama-models/blob/301ca3a2b3b10e94ddcd1fdd2c57e52f812e1cac/models/llama3/reference_impl/model.py#L45C5-L45C18
   use_scale: bool = True
+  # timescale: Optional[Array] = None
 
   def _apply_scaling_factor(self, freq):
     scale_factor = 8

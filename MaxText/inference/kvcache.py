@@ -21,7 +21,7 @@ from typing import Any, Optional
 from flax import linen as nn
 import jax
 import jax.numpy as jnp
-import common_types
+from MaxText import common_types
 
 
 Array = common_types.Array
@@ -49,8 +49,8 @@ def reverse_transpose(transposed_array, transpose_axis_order):
   return jax.numpy.moveaxis(transposed_array, (0, 1, 2, 3), transpose_axis_order)
 
 
-def transpose_tuple(items: tuple[Any, Any, Any, Any], axis_order: AxisIdxes) -> tuple[Any, Any, Any, Any]:
-  return tuple([items[i] for i in axis_order])
+def transpose_tuple(items: tuple[Any, ...], axis_order: AxisIdxes) -> tuple[Any, ...]:
+  return tuple((items[i] for i in axis_order))
 
 
 class KVQuant:
@@ -371,7 +371,7 @@ class KVCache(nn.Module):
     value_shaped_for_cache = jnp.transpose(value, self.prefill_cache_axis_order)
 
     next_pos = 0
-    if previous_chunk != None:
+    if previous_chunk is None:
       """
       if there is previous chunk information present,
         1. Fetch the cached key, value
@@ -574,7 +574,6 @@ class KVCache(nn.Module):
           ar_cache_update_idx,
           ar_cache_scale_update_axis,
       )
-    return
 
   def get_cached_values(self, cache_vars, target_dtype, cache_axis_order) -> jax.Array | KVTensor:
     cache_var, cache_scale_var = cache_vars

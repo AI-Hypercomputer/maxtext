@@ -25,9 +25,10 @@ import unittest
 import tensorflow as tf
 import tensorflow_datasets as tfds
 
-import pyconfig
-from input_pipeline import _tfds_data_processing
-from input_pipeline import input_pipeline_interface
+from MaxText import pyconfig
+from MaxText.constants import PKG_ROOT
+from MaxText.input_pipeline import _tfds_data_processing
+from MaxText.input_pipeline import input_pipeline_interface
 
 
 class TfdsDataProcessingTest(unittest.TestCase):
@@ -35,7 +36,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_ROOT, "configs", "base.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
@@ -43,7 +44,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
         data_sharding=["data"],
         base_output_directory="gs://max-experiments/",
         dataset_path="gs://maxtext-dataset/",
-        tokenizer_path="../assets/tokenizer",
+        tokenizer_path=os.path.join(os.path.dirname(PKG_ROOT), "assets", "tokenizer.llama2"),
         enable_checkpointing=False,
         eval_interval=10,
     )
@@ -123,8 +124,10 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
     eval_batch1 = get_first_batch(self.eval_iter)
     eval_batch2 = get_first_batch(self.eval_iter)
-    self.assertTrue((eval_batch1["inputs"] == eval_batch2["inputs"]).all())
-    self.assertTrue((eval_batch1["targets"] == eval_batch2["targets"]).all())
+    self.assertIsNotNone(eval_batch1)
+    self.assertIsNotNone(eval_batch2)
+    self.assertTrue((eval_batch1["inputs"] == eval_batch2["inputs"]).all())  # pytype: disable=unsupported-operands
+    self.assertTrue((eval_batch1["targets"] == eval_batch2["targets"]).all())  # pytype: disable=unsupported-operands
 
 
 if __name__ == "__main__":

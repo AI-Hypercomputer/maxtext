@@ -130,7 +130,7 @@ The tool `train_compile.py` is tightly linked to `train.py` and uses the same co
 After installing the dependencies listed above, you are ready to compile ahead of time:
 ```
 # Run the below on a single machine, e.g. a CPU
-python3 MaxText/train_compile.py MaxText/configs/base.yml compile_topology=v5e-256 compile_topology_num_slices=2 \
+python3 -m MaxText.train_compile MaxText/configs/base.yml compile_topology=v5e-256 compile_topology_num_slices=2 \
 global_parameter_scale=16 per_device_batch_size=4
 ```
 
@@ -143,7 +143,7 @@ Here is an example that saves then loads the compiled `train_step`, starting wit
 ```
 # Run the below on a single machine, e.g. a CPU
 export LIBTPU_INIT_ARGS="--xla_enable_async_all_gather=true"
-python3 MaxText/train_compile.py MaxText/configs/base.yml compile_topology=v5e-256 \
+python3 -m MaxText.train_compile MaxText/configs/base.yml compile_topology=v5e-256 \
 compile_topology_num_slices=2 \
 compiled_trainstep_file=my_compiled_train.pickle global_parameter_scale=16 \
 per_device_batch_size=4 steps=10000 learning_rate=1e-3
@@ -155,7 +155,7 @@ To load the compiled train_step, you just need to pass `compiled_trainstep_file=
 ```
 # Run the below on each host of the target hardware, e.g. each host on 2 slices of v5e-256
 export LIBTPU_INIT_ARGS="--xla_enable_async_all_gather=true"
-python3 MaxText/train.py MaxText/configs/base.yml run_name=example_load_compile \
+python3 -m MaxText.train MaxText/configs/base.yml run_name=example_load_compile \
 compiled_trainstep_file=my_compiled_train.pickle \
 global_parameter_scale=16  per_device_batch_size=4 steps=10000 learning_rate=1e-3 \
 base_output_directory=gs://my-output-bucket dataset_path=gs://my-dataset-bucket
@@ -177,7 +177,7 @@ This example illustrates the flags to use for a multihost GPU compilation target
 ```
 # Run the below on a single A3 machine
 export XLA_FLAGS="--xla_gpu_enable_async_collectives=true"
-python3 MaxText/train_compile.py MaxText/configs/base.yml compile_topology=a3 \
+python3 -m MaxText.train_compile MaxText/configs/base.yml compile_topology=a3 \
 compile_topology_num_slices=4 \
 compiled_trainstep_file=my_compiled_train.pickle global_parameter_scale=16 \
 attention=dot_product per_device_batch_size=4 steps=10000 learning_rate=1e-3
@@ -189,7 +189,7 @@ To load the compiled train_step, you just need to pass `compiled_trainstep_file=
 ```
 # Run the below on each of the 4 target A3 hosts.
 export XLA_FLAGS="--xla_gpu_enable_async_collectives=true"
-python3 MaxText/train.py MaxText/configs/base.yml run_name=example_load_compile \
+python3 -m MaxText.train MaxText/configs/base.yml run_name=example_load_compile \
 compiled_trainstep_file=my_compiled_train.pickle \
 attention=dot_product global_parameter_scale=16  per_device_batch_size=4 steps=10000 learning_rate=1e-3 \
 base_output_directory=gs://my-output-bucket dataset_path=gs://my-dataset-bucket

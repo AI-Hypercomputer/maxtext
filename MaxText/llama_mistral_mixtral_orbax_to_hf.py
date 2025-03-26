@@ -19,10 +19,10 @@ Get MaxText model weights from a MaxText run
 
 Example cmd:
 To save a ckpt
-python3 MaxText/llama_or_mistral_ckpt.py --base-model-path <path/to/meta/ckpt> \
+python3 -m MaxText.llama_or_mistral_ckpt --base-model-path <path/to/meta/ckpt> \
     --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size llama2-7b
 
-python3 MaxText/llama_mistral_mixtral_orbax_to_hf.py MaxText/configs/base.yml
+python3 -m MaxText.llama_mistral_mixtral_orbax_to_hf MaxText/configs/base.yml
             base_output_directory=path/to/saving/intermediate_MaxText_files
             load_parameters_path=/path/to/MaxText/checkpoint run_name=<your run name> model_name=<llama2 or mistral>
             hardware=gpu
@@ -32,20 +32,23 @@ Note that we are saving the converted HuggingFace model to a local path. You can
 the GCS bucket as a local path using `setup_gcsfuse.sh`, but remember to mount as read+write.
 """
 
-from typing import Sequence
+from typing import Sequence, Any, Tuple, Union
+
 import torch
 from tqdm import tqdm
 from absl import app
 import numpy as np
-import pyconfig
-import max_utils
 from jax.sharding import Mesh
-import max_logging
-import checkpointing
-from generate_param_only_checkpoint import _read_train_checkpoint
-import llama_or_mistral_ckpt
+
 from transformers import LlamaForCausalLM, MistralForCausalLM, AutoModelForCausalLM, AutoConfig
-from max_utils import unpermute_from_match_maxtext_rope
+
+from MaxText import pyconfig
+from MaxText import max_utils
+from MaxText import max_logging
+from MaxText import checkpointing
+from MaxText.generate_param_only_checkpoint import _read_train_checkpoint
+from MaxText import llama_or_mistral_ckpt
+from MaxText.max_utils import unpermute_from_match_maxtext_rope
 
 
 def reverse_scale(arr, scale):
@@ -246,7 +249,7 @@ def convert_orbax_hf(hf_model_path, config):
   hf_model.save_pretrained(hf_model_path, state_dict=new_hf_model_params)
 
 
-def main(argv: Sequence[str]):
+def main(argv: Union[Sequence[str], Tuple[Any, ...]]):
   config = pyconfig.initialize(argv[:-1])
   hf_model_path = argv[-1].split("=")[1]
   print(f"Will save converted HuggingFace checkpoint to path = {hf_model_path}")

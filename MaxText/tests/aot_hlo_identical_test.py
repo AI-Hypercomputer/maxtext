@@ -12,12 +12,16 @@ limitations under the License.
 """
 
 import unittest
+from tempfile import gettempdir
+
 import pytest
 import os
 import shutil
 import hashlib
 import sys
 import subprocess
+
+from MaxText.constants import PKG_ROOT
 
 
 class AotHloIdenticalTest(unittest.TestCase):
@@ -48,9 +52,9 @@ class AotHloIdenticalTest(unittest.TestCase):
         return os.path.join(directory, filename)
     raise FileNotFoundError(f"Could not find a file in directory {directory} with substring {substring}")
 
-  def delete_dir(self, dir):
-    if os.path.exists(dir):
-      shutil.rmtree(dir)
+  def delete_dir(self, directory):
+    if os.path.exists(directory):
+      shutil.rmtree(directory)
 
   def check_large_files_equal(self, file_path1, file_path2):
     """Asserts that two potentially large text files have identical content."""
@@ -81,12 +85,15 @@ class AotHloIdenticalTest(unittest.TestCase):
 
   def assert_compile_and_real_match_hlo(self, test_name, extra_config_args):
     hlo_filename_substring = "jit_train_step.after_optimizations_after_buffer_assignment.txt"
-    compile_dump_dir = f"/tmp/compile_test_xla_dump/{test_name}/aot/"
-    train_dump_dir = f"/tmp/compile_test_xla_dump/{test_name}/real/"
+    tmp_dir = gettempdir()
+    compile_dump_dir = os.path.join(tmp_dir, "compile_test_xla_dump", test_name, "aot", "")
+    train_dump_dir = os.path.join(tmp_dir, "compile_test_xla_dump", test_name, "real", "")
     self.delete_dir(compile_dump_dir)  # Ensure directories empty before use
     self.delete_dir(train_dump_dir)
 
-    self.run_compile_and_real("tests/aot_hlo_identical_script.sh", compile_dump_dir, train_dump_dir, extra_config_args)
+    self.run_compile_and_real(
+        os.path.join(PKG_ROOT, "tests", "aot_hlo_identical_script.sh"), compile_dump_dir, train_dump_dir, extra_config_args
+    )
 
     compile_hlo_file = self.find_file_by_substring(compile_dump_dir, hlo_filename_substring)
     train_hlo_file = self.find_file_by_substring(train_dump_dir, hlo_filename_substring)

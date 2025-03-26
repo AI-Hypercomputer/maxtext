@@ -15,31 +15,27 @@ limitations under the License.
 """
 
 """ Common Max Utils needed by multiple modules"""
-import numpy as np
-import jax
-import jax.numpy as jnp
-from jax.experimental import mesh_utils
-import checkpointing
-import common_types
 import functools
 import time
-import optax
 import os
-import psutil
 import socket
 import subprocess
-from etils import epath
 from collections.abc import Sequence
 import collections
 from typing import Any, Tuple
 
-import max_logging
-
-
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
+import numpy as np
+import jax
+import jax.numpy as jnp
+from jax.experimental import mesh_utils
 
+import optax
+
+import psutil
+from etils import epath
 
 import flax
 from flax.training import train_state
@@ -47,6 +43,10 @@ from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
 from tensorboardX import writer
+
+from MaxText import checkpointing
+from MaxText import common_types
+from MaxText import max_logging
 
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
 HYBRID_RING_32X8 = "hybrid_ring_32x8"

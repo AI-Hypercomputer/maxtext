@@ -14,17 +14,23 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+from json import JSONDecodeError
+
 """ Common GCS Utils needed by multiple modules"""
+
 import shutil
 import jax
 import json
 import os
 import socket
-import yaml
 from pathlib import Path
 
-import max_logging
+import yaml
+
 from google.cloud import storage
+import google.cloud.exceptions
+
+from MaxText import max_logging
 
 
 def write_config_raw_keys_for_gcs(raw_keys):
@@ -104,7 +110,7 @@ def gcs_path_exists(file_path):
     blob = bucket.blob(file_name)
 
     return blob.exists()
-  except Exception as e:
+  except (ValueError, IndexError, google.cloud.exceptions.NotFound) as e:
     print(f"Error while accessing {file_path} from GCE: {str(e)}")
     return False
 
@@ -165,8 +171,8 @@ def read_json_from_gcs(file_path):
     data = json.loads(json_string)
 
     return data
-  except Exception as e:
-    print(f"Error reading JSON file from GCS: {str(e)}")
+  except (JSONDecodeError, ValueError, TypeError) as e:
+    print("Error reading JSON file from GCS:", str(e))
     return None
 
 
@@ -189,5 +195,5 @@ def write_dict_to_gcs_json(data_dict, file_path):
 
     # Upload the JSON string to GCS
     blob.upload_from_string(json_string, content_type="application/json")
-  except Exception as e:
+  except (JSONDecodeError, ValueError, TypeError) as e:
     print(f"Failed to write json file at {file_path} with error: {str(e)}")

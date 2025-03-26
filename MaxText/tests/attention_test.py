@@ -15,22 +15,23 @@
 """Tests for Attentions."""
 
 import itertools
+import os
 import random
 import sys
 import unittest
-from absl.testing import parameterized
 
-import common_types
+from absl.testing import parameterized
 
 from flax.core import freeze
 import jax
 import jax.numpy as jnp
-import max_utils
 import pytest
 
-import pyconfig
-
-from layers import attentions
+from MaxText import common_types
+from MaxText import max_utils
+from MaxText import pyconfig
+from MaxText.constants import PKG_ROOT
+from MaxText.layers import attentions
 
 Mesh = jax.sharding.Mesh
 Attention = attentions.Attention
@@ -43,7 +44,7 @@ class AttentionTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_ROOT, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,
@@ -312,7 +313,7 @@ class AttentionTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_dot_product_cache_axis_order(self):
-    all_axis_orders = [axis_order for axis_order in itertools.permutations(range(4))]
+    all_axis_orders = list(itertools.permutations(range(4)))
     for axis_order in random.choices(all_axis_orders, k=4):
       self.dot_product_attention_helper(prefill_cache_axis_order=axis_order, ar_cache_axis_order=axis_order)
       print(f"passed test for {axis_order=}")
@@ -337,7 +338,7 @@ class AttentionTest(unittest.TestCase):
     rtol, atol = 1e-02, 1e-02
 
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_ROOT, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,
@@ -437,7 +438,7 @@ class AttentionTest(unittest.TestCase):
     rtol, atol = 1e-02, 1e-02
 
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_ROOT, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,
@@ -726,7 +727,7 @@ class MLATest(parameterized.TestCase):
   def init_mla(self, rope_type):
     """Helper function to initialize MLA with different model names."""
     cfg = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_ROOT, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,

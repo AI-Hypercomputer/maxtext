@@ -34,7 +34,7 @@ from jax.sharding import NamedSharding
 from jax.sharding import Mesh
 import grain.python as grain
 
-import max_logging
+from MaxText import max_logging
 
 
 def _build_global_shape_and_sharding(

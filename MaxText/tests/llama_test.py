@@ -19,7 +19,7 @@ import jax
 import unittest
 import jax.numpy as jnp
 from typing import Tuple
-from layers.llama2 import embeddings
+from MaxText.layers.llama2 import embeddings
 import numpy as np
 
 

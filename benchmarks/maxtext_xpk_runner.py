@@ -353,7 +353,7 @@ def build_user_command(
   else:
     if wl_config.libtpu_type == LibTpuType.NIGHTLY:
       install_libtpu_cmd += (
-          f' pip install libtpu-nightly==0.1.dev{wl_config.libtpu_nightly_version} -f'
+          f' python3 -m pip install libtpu-nightly==0.1.dev{wl_config.libtpu_nightly_version} -f'
           ' https://storage.googleapis.com/libtpu-releases/index.html &&'
       )
     elif wl_config.libtpu_type == LibTpuType.CUSTOM:
@@ -390,7 +390,7 @@ def build_user_command(
       'export ENABLE_PATHWAYS_PERSISTENCE=1 &&',
       f'export JAX_PLATFORMS={jax_platforms} &&',
       'export ENABLE_PJRT_COMPATIBILITY=true &&',
-      'python3 MaxText/train.py MaxText/configs/base.yml',
+      'python3 -m MaxText.train MaxText/configs/base.yml',
       f'{config_tuning_params}',
       f'steps={wl_config.num_steps}',
       f'model_name={wl_config.model.model_type}',
@@ -793,8 +793,8 @@ def main() -> int:
   #     batch=1,  # Parallel execution of workloads is not supported in XPK yet.
   #     dry_run=False,
   # )
- # print(f'Return_codes: {return_codes}')
-
+  # print(f'Return_codes: {return_codes}')
+  return os.EX_OK
 
 
 if __name__ == '__main__':

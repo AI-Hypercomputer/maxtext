@@ -107,7 +107,7 @@ bash setup_gcsfuse.sh DATASET_GCS_BUCKET=$BUCKET_NAME MOUNT_PATH=$MOUNT_PATH [FI
 bash setup_gcsfuse.sh \
 DATASET_GCS_BUCKET=maxtext-dataset \
 MOUNT_PATH=/tmp/gcsfuse && \
-python3 MaxText/train.py MaxText/configs/base.yml \
+python3 -m MaxText.train MaxText/configs/base.yml \
 run_name=<RUN_NAME> base_output_directory=gs://<MY_BUCKET>  \
 dataset_type=grain \
 grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record* \

@@ -16,35 +16,34 @@
 Runs SFT trainer correctness with TRL implementation.
 
 Usage:
-python3 MaxText/tests/sft_trainer_correctness.py --model-name=llama3.1-8b --tokenizer-path=meta-llama/Llama-3.1-8B --model-ckpt-path=gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items
+python3 -m MaxText.tests.sft_trainer_correctness \
+  --model-name=llama3.1-8b --tokenizer-path=meta-llama/Llama-3.1-8B \
+  --model-ckpt-path=gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items
 """
 
 import argparse
+import os.path
+import sys
+
 import jax
 import jax.numpy as jnp
 import jsonlines
 import numpy as np
-import os
-import sys
 
 from jax.sharding import Mesh
 from transformers import AutoTokenizer
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-maxtext_parent_dir = os.path.dirname(current_dir)
-sys.path.append(maxtext_parent_dir)
-
-import max_logging
-import max_utils
-import pyconfig
-from input_pipeline import _input_pipeline_utils
-from layers import models
-from layers import quantizations
+from MaxText import max_utils, max_logging
+from MaxText import pyconfig
+from MaxText.constants import PKG_ROOT
+from MaxText.input_pipeline import _input_pipeline_utils
+from MaxText.layers import models
+from MaxText.layers import quantizations
 
 
 def initialize_config(config):
   return pyconfig.initialize(
-      [sys.argv[0], "MaxText/configs/sft.yml"],
+      [sys.argv[0], os.path.join(PKG_ROOT, "configs", "sft.yml")],
       run_name="test-sft-trainer-correctness",
       model_name=config.model_name,
       tokenizer_path=config.tokenizer_path,
@@ -63,7 +62,7 @@ def initialize_config(config):
 
 def get_golden_data(config):
   """Get the golden data for SFTTrainer in TRL."""
-  golden_data_path = "MaxText/test_assets/golden_data_sft_" + config.model_name + ".jsonl"
+  golden_data_path = os.path.join(PKG_ROOT, "test_assets", f"golden_data_sft_{config.model_name}.jsonl")
   with jsonlines.open(golden_data_path, "r") as f:
     golden_data = list(f)
   return golden_data[0]
@@ -172,5 +171,5 @@ if __name__ == "__main__":
   parser.add_argument("--model-ckpt-path", type=str, required=True)
   parser.add_argument("--max-target-length", type=int, required=False, default=64)
   parser_config = parser.parse_args(sys.argv[1:])
-  config = initialize_config(parser_config)
-  main(config)
+  config_initialized = initialize_config(parser_config)
+  main(config_initialized)

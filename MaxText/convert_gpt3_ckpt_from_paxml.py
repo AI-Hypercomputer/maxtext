@@ -15,7 +15,7 @@ limitations under the License.
 """Convert weights from a paxml gpt3 model to a MaxText one.
 
 Test cmd for gpt3-52k:
-python MaxText/convert_gpt3_ckpt_from_paxml.py \
+python3 -m MaxText.convert_gpt3_ckpt_from_paxml \
   --paxml-ckpt-path=gs://maxtext-gpt3/ckpt_test/paxml/checkpoints/checkpoint_00000000/state \
   --maxtext-model-name=gpt3-52k \
   --run-name=$RUN_NAME \
@@ -26,32 +26,35 @@ True cmd for gpt3-175b:
 The script is memory demanding, requires at least 250 GiB in cpu and cumulative TPU memory of all devices should be
   above ~4.2 TiB (175 billion param * 4 byte/param * 3 (model var and 2 opt momentums) * 2 copies in converting) 
 
-python MaxText/convert_gpt3_ckpt_from_paxml.py \
+python3 -m MaxText.convert_gpt3_ckpt_from_paxml \
   --paxml-ckpt-path=gs://mlperf-llm-public2/gpt3_spmd1x64x24_tpuv4-3072_v84_20221101/checkpoints/checkpoint_00004000 \
   --maxtext-model-name=gpt3-175b \
   --run-name=$RUN_NAME \
   --base-output-directory=$BASE_OUTPUT_DIR
 """
-import max_utils
-import optimizers
-import pyconfig
 import os
+import sys
+import argparse
+import gc
+
 from jax import random
 from jax.sharding import Mesh
-from layers.models import Transformer
-from layers import quantizations
-import checkpointing
 
 import numpy as np
 import tensorstore as ts
 
-import sys
 import jax
-import gc
-import max_logging
 from psutil import Process
-from train import save_checkpoint
-import argparse
+
+from MaxText import max_utils
+from MaxText import optimizers
+from MaxText import pyconfig
+from MaxText.constants import PKG_ROOT
+from MaxText.layers.models import Transformer
+from MaxText.layers import quantizations
+from MaxText import checkpointing
+from MaxText import max_logging
+from MaxText.train import save_checkpoint
 
 
 def fmt_size(num_bytes: int) -> str:
@@ -79,7 +82,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
 
   base_args = [
       "",
-      "MaxText/configs/base.yml",  # base arg
+      os.path.join(PKG_ROOT, "configs", "base.yml"),  # base arg
       "per_device_batch_size=1",
       "ici_fsdp_parallelism=-1",
       "ici_tensor_parallelism=1",

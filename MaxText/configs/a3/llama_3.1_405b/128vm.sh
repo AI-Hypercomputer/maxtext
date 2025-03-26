@@ -13,7 +13,7 @@ set -e
 
 export OUTPUT_PATH="gs://maxtext-experiments-multipod"
 export RUN_NAME="llama-31-128vm-$(date +%Y-%m-%d-%H-%M)"
-export EXECUTABLE="train.py"
+export EXECUTABLE="train"
 
 # Set environment variables
 for ARGUMENT in "$@"; do
@@ -33,7 +33,7 @@ export XLA_FLAGS="--xla_dump_to=$OUTPUT_PATH/$RUN_NAME/HLO_dumps/
 --xla_disable_hlo_passes=rematerialization"
 
 # 128 nodes
-python MaxText/$EXECUTABLE MaxText/configs/models/llama3.1_405b.yml run_name=$RUN_NAME \
+python3 -m MaxText.$EXECUTABLE MaxText/configs/models/llama3.1_405b.yml run_name=$RUN_NAME \
     base_config=base.yml \
     run_name=gpu_train_test \
     hardware=gpu \

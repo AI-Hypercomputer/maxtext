@@ -23,10 +23,10 @@ import ml_collections
 import jax
 import grain.python as grain
 
-from input_pipeline import _input_pipeline_utils
-from input_pipeline import _grain_tokenizer
+from MaxText.input_pipeline import _input_pipeline_utils
+from MaxText.input_pipeline import _grain_tokenizer
 
-import multihost_dataloading
+from MaxText import multihost_dataloading
 
 
 def get_datasets(data_file_pattern):

@@ -28,7 +28,8 @@ def test_maxtext_with_sft_in_trl():
 
   command = [
       "python3",
-      "MaxText/tests/sft_trainer_correctness.py",
+      "-m",
+      "MaxText.tests.sft_trainer_correctness",
       "--model-name=llama3.1-8b",
       "--tokenizer-path=assets/llama3.1-tokenizer",
       "--model-ckpt-path=gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items",
