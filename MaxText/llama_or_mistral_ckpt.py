@@ -689,8 +689,13 @@ def _convert_pytorch_to_jax_weights(base_model_path, model_size, model_params, m
     max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
     chkpt_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = torch.load(ckpt_path, map_location="cpu")
   chkpt_vars = [chkpt_vars[i] for i in sorted(list(chkpt_vars.keys()))]
+
+  chkpt_vars_combined_dict = {}
+  for var in chkpt_vars:
+    chkpt_vars_combined_dict |= var
+
   # map weight names if they use HuggingFace instead of PyTorch convention
-  chkpt_vars = [_HFNamespaceMapper(var) for var in chkpt_vars]
+  chkpt_vars = [_HFNamespaceMapper(var) for var in [chkpt_vars_combined_dict]]
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
@@ -1061,7 +1066,7 @@ if __name__ == "__main__":
     base_weights_path += "/base"
 
   save_weights_to_checkpoint(
-      args.maxtext_model_path,
+      base_weights_path,
       convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint),
       SIMULATED_CPU_DEVICES_COUNT,
   )
