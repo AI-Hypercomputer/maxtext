@@ -134,6 +134,7 @@ def main(argv: Sequence[str]) -> None:
   for _ in steps:
     rng, rng_generate = jax.random.split(rng)
     decode_state = engine.insert(prefill_result_list[prefill_idx], decode_state, slot=prefill_idx)
+    prefill_idx += 1
     decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
     sampled_tokens_list.append(sampled_tokens)
 
