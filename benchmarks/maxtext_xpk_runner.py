@@ -409,7 +409,7 @@ def generate_xpk_workload_cmd(
           f' --num-slices={wl_config.num_slices}'
           f' --command="{user_command}"'
           f' {docker_image_flag}'
-          #' --enable-debug-logs'
+          ' --enable-debug-logs'
           f' --workload={name}'
           f' --priority={wl_config.priority}'
           f' --max-restarts={wl_config.max_restarts}'
@@ -490,11 +490,25 @@ def main() -> int:
       device_type='v5litepod-256',
   )
 
+  v6e_cluster_config_8 = XpkClusterConfig(
+    cluster_name='bodaborg-v6e-8-ts',
+    project='tpu-prod-env-multipod',
+    zone='us-west1-c',
+    device_type='v6e-8',
+  )
+
 
   v6e_cluster_config_big = XpkClusterConfig(
     cluster_name='bodaborg-v6e-256-ts',
     project='tpu-prod-env-multipod',
     zone='us-west1-c',
+    device_type='v6e-256',
+  )
+
+  v6e_cluster_config_new = XpkClusterConfig(
+    cluster_name='bodaborg-v6e-256-dnd-yucmhab-new',
+    project='tpu-prod-env-one-vm',
+    zone='us-east5-b',
     device_type='v6e-256',
   )
 
@@ -524,7 +538,8 @@ def main() -> int:
     #model_configs.deepseek_v5p_dp_a1,
     # model_configs.default_128
     #model_configs.llama3_1_405b_8192_fsdp_dcn_matt
-    model_configs.llama3_1_405b_8192_explicit_matt_pp,
+    #model_configs.llama3_1_405b_8192_explicit_matt_pp,
+    model_configs.llama3_v6e_8_networking,
     #model_configs.llama3_1_405b_8192_explicit_matt_pp_overlapped
     #model_configs.matt_simple
     #model_configs.deepseek_big_experimental
@@ -555,11 +570,13 @@ def main() -> int:
       # v5e_cluster_config,
       #v5p_cluster_config,
       #v6e_cluster_config, #yucmhab
-      v6e_cluster_config_big
+      #v6e_cluster_config_big,
+      #v6e_cluster_config_new,
+      v6e_cluster_config_8,
       # another_config,
     ]:
       # Run workloads in the following slice configurations
-      for num_slices in [2,]:
+      for num_slices in [4,]:
         # Use the libtpu dependencies from:
         for libtpu_type in [
             # LibTpuType.CUSTOM
