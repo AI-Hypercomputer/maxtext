@@ -12,22 +12,24 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-import jax
-import sre_parse
+import os.path
 import unittest
-from layers import linears
-from layers import initializers
-import jax.numpy as jnp
-
-import pyconfig
-import max_utils
-from jax.sharding import Mesh
-import flax.linen as nn
 from typing import Tuple
-import common_types
+
+import jax
+import jax.numpy as jnp
+from jax.sharding import Mesh
+
+import flax.linen as nn
 import pytest
 from flax.linen import partitioning as nn_partitioning
 
+from MaxText import pyconfig
+from MaxText import max_utils
+from MaxText import common_types
+from MaxText.constants import PKG_ROOT
+from MaxText.layers import linears
+from MaxText.layers import initializers
 
 Array = common_types.Array
 Config = common_types.Config
@@ -40,7 +42,7 @@ class TokenDroppingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.cfg = pyconfig.initialize(
-        [None, "configs/base.yml"],
+        [None, os.path.join(PKG_ROOT, "configs", "base.yml")],
         run_name="token_dropping_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -264,7 +266,7 @@ class MoeBlockTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_megablox(self):
     cfg = pyconfig.initialize(
-        [None, "configs/base.yml"],
+        [None, os.path.join(PKG_ROOT, "configs", "base.yml")],
         run_name="moe_block_megablox_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -289,7 +291,7 @@ class MoeBlockTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_ragged_dot(self):
     cfg = pyconfig.initialize(
-        [None, "configs/base.yml"],
+        [None, os.path.join(PKG_ROOT, "configs", "base.yml")],
         run_name="moe_block_ragged_dot_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -314,7 +316,7 @@ class MoeBlockTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_dense(self):
     cfg = pyconfig.initialize(
-        [None, "configs/base.yml"],
+        [None, os.path.join(PKG_ROOT, "configs", "base.yml")],
         run_name="moe_block_dense_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -339,7 +341,7 @@ class MoeBlockTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_megablox_expert_parallelism(self):
     cfg = pyconfig.initialize(
-        [None, "configs/base.yml"],
+        [None, os.path.join(PKG_ROOT, "configs", "base.yml")],
         run_name="moe_block_megablox_ep_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",

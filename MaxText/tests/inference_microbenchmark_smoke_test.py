@@ -14,11 +14,14 @@ limitations under the License.
 """
 
 """ Smoke test for inference microbenchmark"""
-import pyconfig
 import pytest
 import unittest
+import os.path
 from absl.testing import absltest
-from inference_microbenchmark import run_benchmarks
+
+from MaxText import pyconfig
+from MaxText.constants import PKG_ROOT
+from MaxText.inference_microbenchmark import run_benchmarks
 
 
 class Inference_Microbenchmark(unittest.TestCase):
@@ -28,8 +31,8 @@ class Inference_Microbenchmark(unittest.TestCase):
     config = pyconfig.initialize(
         [
             None,
-            "configs/tpu_smoke_test.yml",
-            "tokenizer_path=../assets/tokenizer.llama2",
+            os.path.join(PKG_ROOT, "configs", "tpu_smoke_test.yml"),
+            f"tokenizer_path={os.path.join(os.path.dirname(PKG_ROOT), 'assets', 'tokenizer.llama2')}",
             "ici_autoregressive_parallelism=-1",
             "ici_fsdp_parallelism=1",
             "max_prefill_predict_length=1024",
