@@ -15,16 +15,16 @@
 """CLI utility for running inference on a single/multi stream(s)"""
 
 import os
-from typing import Sequence
+from typing import Sequence, Any, Tuple, Union
 
 import jax
 import jax.numpy as jnp
 from absl import app
 from jetstream.engine import engine_api
 
-import max_utils
-import maxengine
-import pyconfig
+from MaxText import max_utils
+from MaxText import maxengine
+from MaxText import pyconfig
 
 # Number of text sequences to process in a single batch.
 _NUM_STREAMS = 1
@@ -77,7 +77,7 @@ def _batch_first_result_token(first_tokens: list[engine_api.ResultTokens], batch
   return result_tokens
 
 
-def main(argv: Sequence[str]) -> None:
+def main(argv: Union[Sequence[str], Tuple[Any, ...]]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 

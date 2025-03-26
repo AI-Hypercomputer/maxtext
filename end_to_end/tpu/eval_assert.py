@@ -17,7 +17,7 @@
 # pylint: skip-file
 """Reads and asserts over target values"""
 from absl import app
-from typing import Sequence
+from typing import Sequence, Any, Tuple, Union
 from math import isclose
 from google.cloud import storage
 import json
@@ -106,7 +106,7 @@ def test_start_step(metrics_file, start_step_target):
   assert start_step==float(start_step_target)
   print("Start step test passed.")
 
-def main(argv: Sequence[str]) -> None:
+def main(argv: Union[Sequence[str], Tuple[Any, ...]]) -> None:
 
   _, test_scenario, *test_vars = argv
 

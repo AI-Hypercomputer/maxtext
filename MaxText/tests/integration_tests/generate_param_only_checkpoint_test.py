@@ -14,10 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-"""Integraion tests for test_generate_param_only_checkpoint.sh"""
+"""Integration tests for test_generate_param_only_checkpoint.sh"""
+
 from datetime import datetime
 import subprocess
+import os.path
+
 import pytest
+
+from MaxText.constants import PKG_ROOT
 
 
 def run_generate_param_only_checkpoint(attention_type, quantization):
@@ -27,7 +32,7 @@ def run_generate_param_only_checkpoint(attention_type, quantization):
   # fmt: off
   command = [
       "bash",
-      "end_to_end/test_generate_param_only_checkpoint.sh",
+      os.path.join(os.path.dirname(PKG_ROOT), "end_to_end", "test_generate_param_only_checkpoint.sh"),
       "-r", f"runner_{run_date}",
       "-o", r"gs://runner-maxtext-logs",
       "-d", r"gs://maxtext-dataset",

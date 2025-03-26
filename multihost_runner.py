@@ -13,6 +13,7 @@
  See the License for the specific language governing permissions and
  limitations under the License.
  """
+import tempfile
 
 # pylint: disable=consider-using-with
 """ Script to run a command in a multislice/multihost environment
@@ -371,8 +372,9 @@ def main() -> None:
     print(f"Failed to retrieve slices {args.TPU_PREFIX} in project {args.PROJECT} zone {args.ZONE}", flush=True)
     return 1
 
-  local_log_dir = os.path.join("/tmp", args.RUN_NAME, "")
-  zip_name = "script_dir_zip_" + args.RUN_NAME + ".tar.gz"
+  temp_dir = tempfile.gettempdir()
+  local_log_dir = os.path.join(temp_dir, args.RUN_NAME, "")
+  zip_name = f"script_dir_zip_{args.RUN_NAME}.tar.gz"
 
   if args.USE_EXISTING_FOLDER is False:
     ##### Step 2 when using a new folder: Zip code and move it to the TPUs #####

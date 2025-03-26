@@ -43,7 +43,7 @@ export OUTFILE="${OUTDIR}/${script_name}.txt"
 mkdir -p $OUTDIR
 echo
 # Run script
-${cmd} python MaxText/${script_name}.py \
+${cmd} python3 -m MaxText.${script_name} \
   MaxText/configs/base.yml \
   tokenizer_path=${TOKENIZER_PATH} \
   load_parameters_path=${LOAD_PARAMETERS_PATH} \

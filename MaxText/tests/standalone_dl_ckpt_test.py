@@ -16,12 +16,16 @@ limitations under the License.
 
 """ Tests for the standalone_checkpointer.py """
 import unittest
-import pytest
-from standalone_checkpointer import main as sckpt_main
-from standalone_dataloader import main as sdl_main
-from datetime import datetime
+import os.path
 import random
 import string
+from datetime import datetime
+
+import pytest
+
+from MaxText.constants import PKG_ROOT
+from MaxText.standalone_checkpointer import main as sckpt_main
+from MaxText.standalone_dataloader import main as sdl_main
 
 
 class Standalone_DL_CKPT(unittest.TestCase):
@@ -40,13 +44,13 @@ class Standalone_DL_CKPT(unittest.TestCase):
     sdl_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             "run_name=" + random_run_name,
             "base_output_directory=gs://runner-maxtext-logs",
             "dataset_path=gs://maxtext-dataset",
             "steps=100",
             "enable_checkpointing=false",
-            "tokenizer_path=../assets/tokenizer.llama2",
+            f"tokenizer_path={os.path.join(os.path.dirname(PKG_ROOT), 'assets', 'tokenizer.llama2')}",
         )
     )  # need to pass relative path to tokenizer
 
@@ -57,7 +61,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
     sckpt_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"run_name={random_run_name}",
             "base_output_directory=gs://runner-maxtext-logs",
             "dataset_path=gs://maxtext-dataset",
@@ -76,7 +80,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
     sckpt_main(
         (
             None,
-            "configs/base.yml",
+            os.path.join(PKG_ROOT, "configs", "base.yml"),
             f"run_name={random_run_name}",
             "base_output_directory=gs://runner-maxtext-logs",
             "dataset_path=gs://maxtext-dataset",
