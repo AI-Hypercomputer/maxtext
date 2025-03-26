@@ -82,7 +82,7 @@ def main():
   elif args.dtype == "float":
     eval_dtype = np.float32
 
-  with open(args.mlperf_accuracy_file, "r") as f:
+  with open(args.mlperf_accuracy_file, "rt", encoding="utf8") as f:
     results = json.load(f)
 
   seen = set()
