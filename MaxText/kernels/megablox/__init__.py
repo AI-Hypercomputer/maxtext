@@ -13,4 +13,4 @@
 # limitations under the License.
 """Megablox kernel"""
 
-from kernels.megablox.ops import gmm
+from MaxText.kernels.megablox.ops import gmm
