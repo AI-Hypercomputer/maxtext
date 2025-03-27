@@ -65,7 +65,6 @@ class DecoderLayer(nn.Module):
       deterministic,
       model_mode,
       previous_chunk=None,
-      slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
   ):
     cfg = self.config
@@ -165,14 +164,7 @@ class SequentialBlockDecoderLayers(nn.Module):
 
   @nn.compact
   def __call__(
-      self,
-      inputs: jnp.ndarray,
-      decoder_segment_ids,
-      decoder_positions,
-      deterministic: bool,
-      model_mode,
-      slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
+      self, inputs: jnp.ndarray, decoder_segment_ids, decoder_positions, deterministic, model_mode, page_state=None
   ) -> jnp.ndarray:
     for lyr in range(self.num_decoder_layers):
       inputs = self.decoder_layer(config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant)(
@@ -181,7 +173,6 @@ class SequentialBlockDecoderLayers(nn.Module):
           decoder_positions,
           deterministic,
           model_mode,
-          slot=slot,
           page_state=page_state,
       )
     return inputs
@@ -409,7 +400,6 @@ class Decoder(nn.Module):
       deterministic=False,
       model_mode=common_types.MODEL_MODE_TRAIN,
       previous_chunk=None,
-      slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
   ):
     cfg = self.config
@@ -498,7 +488,6 @@ class Decoder(nn.Module):
                   model_mode,
                   previous_chunk=previous_chunk,
                   page_state=page_state,
-                  slot=slot,
               )
         else:
           for lyr in range(cfg.num_decoder_layers):
@@ -517,7 +506,6 @@ class Decoder(nn.Module):
                 model_mode,
                 previous_chunk=previous_chunk,
                 page_state=page_state,
-                slot=slot,
             )
     y = self.get_norm_layer()(
         dtype=cfg.dtype,
@@ -588,17 +576,51 @@ class Transformer(nn.Module):
 
     self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant)
 
+    if cfg.attention == "paged":
+      self.page_manager = self._create_page_manager(cfg)
+
+  def _create_page_manager(self, config) -> Optional[page_manager.PageManager]:
+    """Creates page manager for managing pages in the paged attention mechanism"""
+    assert config.max_target_length % config.pagedattn_tokens_per_page == 0
+    assert config.max_prefill_predict_length % config.pagedattn_tokens_per_page == 0
+    return page_manager.PageManager(
+        num_pages=self.config.pagedattn_num_pages,
+        tokens_per_page=self.config.pagedattn_tokens_per_page,
+        slots=int(self.config.per_device_batch_size * jax.device_count()),
+        max_target_length=self.config.max_target_length,
+        max_prefill_predict_length=self.config.max_prefill_predict_length,
+        max_pages_per_slot=self.config.max_target_length // self.config.pagedattn_tokens_per_page,
+    )
+
+  def _create_page_state(
+      self, model_mode: str, true_length: Optional[int] = None, slot: Optional[int] = None
+  ) -> Optional[page_manager.PageState]:
+    """Creates page state for tracking page status in the paged attention mechanism."""
+    if self.config.attention != "paged" or model_mode == common_types.MODEL_MODE_TRAIN:
+      return None
+    page_state = None
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      page_state = self.page_manager(
+          model_mode=model_mode,
+          slot=slot,
+          true_length=true_length,
+      )
+    elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+      page_state = self.page_manager(model_mode)
+    else:
+      raise ValueError(f"Unsupported model_mode {model_mode} by paged attention")
+    return page_state
+
   def __call__(
       self,
-      decoder_input_tokens: jnp.ndarray,
-      decoder_positions: jnp.ndarray,
+      decoder_input_tokens,
+      decoder_positions,
       decoder_segment_ids=None,
       enable_dropout=True,
       model_mode=common_types.MODEL_MODE_TRAIN,
       previous_chunk=None,
       true_length: Optional[int] = None,
       slot: Optional[int] = None,
-      page_state: Optional[page_manager.PageState] = None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target.
 
@@ -621,7 +643,6 @@ class Transformer(nn.Module):
         deterministic=not enable_dropout,
         model_mode=model_mode,
         previous_chunk=previous_chunk,
-        slot=slot,
-        page_state=page_state,
+        page_state=self._create_page_state(model_mode=model_mode, true_length=true_length, slot=slot),
     )
     return logits
