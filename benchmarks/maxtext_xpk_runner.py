@@ -118,6 +118,9 @@ class WorkloadConfig:
       elif size == 16:
         self.num_devices_per_slice = 16
         self.topology = "4x4"
+      elif size == 8:
+        self.num_devices_per_slice = 8
+        self.topology = "2x4"
       elif size == 4:
         self.num_devices_per_slice = 4
         self.topology = "2x2"
