@@ -777,6 +777,7 @@ class AttentionOp(nn.Module):
       decoder_segment_ids,
       model_mode,
       previous_chunk=None,
+      slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
   ):
 
@@ -1102,6 +1103,7 @@ class Attention(nn.Module):
       model_mode: str = common_types.MODEL_MODE_TRAIN,
       deterministic: bool = False,
       previous_chunk: Any = None,
+      slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
   ):
     """Applies Attention on the input data.
@@ -1185,7 +1187,7 @@ class Attention(nn.Module):
 
     if self.config.attention == "paged" and model_mode != common_types.MODEL_MODE_TRAIN:
       unnormalized_out, _, exp_sum = self.paged_attention_op(
-          query, key, value, decoder_segment_ids, model_mode, previous_chunk, page_state=page_state
+          query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
       )
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
     else:
@@ -1361,6 +1363,7 @@ class MLA(Attention):
       model_mode: str = common_types.MODEL_MODE_TRAIN,
       deterministic: bool = False,
       previous_chunk: Any = None,
+      slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
   ) -> Array:
     """Forward pass for MLA, reusing `AttentionOp` for the actual attention.
