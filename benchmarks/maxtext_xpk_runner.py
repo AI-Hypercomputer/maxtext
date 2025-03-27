@@ -123,6 +123,13 @@ class WorkloadConfig:
         self.topology = "2x2"
       else:
         raise ValueError(f"Unsupported v6e size: {size}")
+    elif self.device_type.startswith("v5litepod"):
+      size = int(self.device_type.split("-")[-1])
+      if size == 32:
+        self.num_devices_per_slice = 8
+        self.topology = "4x8"
+      else:
+        raise ValueError(f"Unsupported v5litepod size: {size}")
     else:
       raise ValueError(f"topology and num_devices_per_slice must be inferred when device_type starts with v6e. device_type: {self.device_type}")
 
