@@ -75,6 +75,7 @@ class LlamaDecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
       previous_chunk=None,
   ):
@@ -127,6 +128,7 @@ class LlamaDecoderLayer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        slot=slot,
         page_state=page_state,
         previous_chunk=previous_chunk,
     )
