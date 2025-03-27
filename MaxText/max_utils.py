@@ -19,7 +19,6 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
-from inference.page_manager import PageState
 import checkpointing
 import common_types
 import functools
@@ -32,7 +31,7 @@ import subprocess
 from etils import epath
 from collections.abc import Sequence
 import collections
-from typing import Any, Optional, Tuple
+from typing import Any, Tuple
 
 import max_logging
 
@@ -914,7 +913,7 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   )
 
 
-def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[PageState] = None):
+def get_prefill_kv_cache_annotations(model, config, rng, mesh):
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_kv_cache(model, config):
@@ -928,8 +927,6 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: Optio
         jnp.ones(input_shape),
         jnp.ones(input_shape),
         model_mode=common_types.MODEL_MODE_PREFILL,
-        slot=0,
-        page_state=page_state,
     )
     return model_vars["cache"]
 
@@ -942,7 +939,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: Optio
   return state_mesh_annotations
 
 
-def get_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[PageState] = None):
+def get_kv_cache_annotations(model, config, rng, mesh):
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_kv_cache(model, config):
@@ -956,8 +953,6 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[Page
         jnp.ones(input_shape),
         jnp.ones(input_shape),
         model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-        slot=0,
-        page_state=page_state,
     )
     return model_vars["cache"]
 
