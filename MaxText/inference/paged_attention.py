@@ -202,25 +202,28 @@ class PagedAttentionOp(nn.Module):
     num_heads_kv, num_pages, tokens_per_page, head_dim = key_pages_var.value.shape
 
     no_shard = P(None, None, None, None)
+    kv_pages_pspec = nn.logical_to_mesh_axes(("paged_kv_heads", None, None, None))
+    # query = jnp.reshape(query, (batch_q, seqlen_q, num_heads_kv, num_heads_q // num_heads_kv, head_dim))    
+    q_pspec = nn.logical_to_mesh_axes((None, None, "paged_kv_heads", None))
 
     @functools.partial(
         shard_map,
         mesh=self.mesh,
         in_specs=(
-            no_shard,
-            no_shard,
-            no_shard,
+            q_pspec,
+            kv_pages_pspec,
+            kv_pages_pspec,
             P(None),
             P(None, None),
             None,
         ),
-        out_specs=no_shard,
+        out_specs=q_pspec,
         check_rep=False,
     )
     def wrap_paged_attention(q, k_pages, v_pages, lengths, page_indices, pages_per_compute_block):
       q = jnp.squeeze(q, axis=1)
       result = paged_attention_kernel.paged_attention(
-          q=q,  # [batch_size, num_kv_heads, head_dim]
+          q=q,  # [batch_size, num_heads, head_dim]
           k_pages=k_pages,
           v_pages=v_pages,
           lengths=lengths,
