@@ -115,7 +115,7 @@ decoder_block: "llama2" # which style of DecoderBlock to use.
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes
 # then you should explicitly set base_embed_dim, base_num_query_heads, base_num_kv_heads,
 # base_mlp_dim, base_num_decoder_layers and/or head_dim.
-weight_dtype: float32
+weight_dtype: "float32"
 global_parameter_scale: 1
 base_emb_dim: 2048
 base_num_query_heads: 16
@@ -484,14 +484,18 @@ gradient_clipping_threshold: 1.0
 # batch by accumulating the gradient over a set of steps.
 gradient_accumulation_steps: 1
 
+opt_type: "adamw"  # one of "adamw", "adam_pax" or "sgd" 
+
 # AdamW optimizer parameters
 # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
-opt_type: "adamw"  # one of "adam_pax" or "adamw"
 adam_b1: 0.9 # Exponential decay rate to track the first moment of past gradients.
 adam_b2: 0.95 # Exponential decay rate to track the second moment of past gradients.
 adam_eps: 1.e-8 # A small constant applied to denominator outside of the square root.
 adam_eps_root: 0. # A small constant applied to denominator inside the square root.
 adam_weight_decay: 0.1 # AdamW Weight decay
+mu_dtype: "" # data type to store "mu" of AdamW tracking the first moment. Inherits from  weight_dtype if unset.
+# Setting nu_dtype is not yet supported by optax, instead nu_dtype is always inherited from weights.
+# See b/399961932 for more.
 
 # Stack trace parameters
 collect_stack_trace: False
