@@ -123,6 +123,13 @@ class WorkloadConfig:
         self.topology = "2x2"
       else:
         raise ValueError(f"Unsupported v6e size: {size}")
+    elif self.device_type.startswith("v5litepod"):
+      size = int(self.device_type.split("-")[-1])
+      if size == 32:
+        self.num_devices_per_slice = 8
+        self.topology = "4x8"
+      else:
+        raise ValueError(f"Unsupported v5litepod size: {size}")
     else:
       raise ValueError(f"topology and num_devices_per_slice must be inferred when device_type starts with v6e. device_type: {self.device_type}")
 
@@ -390,7 +397,7 @@ def build_user_command(
       'export ENABLE_PATHWAYS_PERSISTENCE=1 &&',
       f'export JAX_PLATFORMS={jax_platforms} &&',
       'export ENABLE_PJRT_COMPATIBILITY=true &&',
-      'python3 MaxText/train.py MaxText/configs/base.yml',
+      'python3 MaxText/elastic_train.py MaxText/configs/base.yml',
       f'{config_tuning_params}',
       f'steps={wl_config.num_steps}',
       f'model_name={wl_config.model.model_type}',
