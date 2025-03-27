@@ -710,7 +710,6 @@ def main() -> int:
       cluster_name='v6e-256',
       project='my-cool-project',
       zone='us-central2-b',
-      device_type='v6e-256',
   )
 
   xpk_workload_cmds = []
