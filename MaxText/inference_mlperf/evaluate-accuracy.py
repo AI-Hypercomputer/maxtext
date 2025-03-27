@@ -55,23 +55,6 @@ import tensorflow_text as tftxt
 from typing import Dict, Iterable, Union, Literal, Sequence, Collection, List
 from jetstream.engine import token_utils
 
-# class SentencePieceTokenizer:
-#   """
-#   Tokenizing and encoding/decoding text using the Sentencepiece tokenizer.
-#   """
-
-#   def __init__(self, model_path: str, add_bos: bool, add_eos: bool):
-#     # max_logging.log(f"Tokenizer path: {model_path}")
-#     with tf.io.gfile.GFile(model_path, "rb") as model_fp:
-#       sp_model = model_fp.read()
-#     self.sp_tokenizer = tftxt.SentencepieceTokenizer(model=sp_model, add_bos=add_bos, add_eos=add_eos, reverse=False)
-
-#   def encode(self, s: str) -> List[int]:
-#     return self.sp_tokenizer.tokenize(s)
-
-#   def decode(self, t: Sequence[int]) -> str:
-#     return self.sp_tokenizer.detokenize(t)
-
 
 def main():
 
