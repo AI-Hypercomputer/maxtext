@@ -25,12 +25,10 @@ sys.path.append(parent_dir)
 import maxtext_trillium_model_configs as model_configs
 import maxtext_xpk_runner as mxr
 
-PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_proxy_server:latest"
 SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_server:latest"
-# SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_server:latest"
-# PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_proxy_server:latest"
-# SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_server@sha256:23d7820532070a8e9e946335a760e2fb34360e514b6ba3004ecb8b068d082708"
-# PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_proxy_server@sha256:fae0e122bfad133373d8d8c4747b6f41f6c53b0f606b25ee5236cd14985d6084"
+PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_proxy_server:latest"
+# SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/lukebaumann/unsanitized_server:latest"
+# PROXY_IMAGE  = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/lukebaumann/unsanitized_proxy_server:latest"
 # RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest"
 RUNNER = "gcr.io/cloud-tpu-multipod-dev/lukebaumann_runner:latest"
 
@@ -38,27 +36,6 @@ RUNNER = "gcr.io/cloud-tpu-multipod-dev/lukebaumann_runner:latest"
 # CLUSTER = "v6e-256-cluster"
 # PROJECT = "tpu-prod-env-cluster"
 # ZONE = "us-east5-b"
-# COUNTRY = "us"
-# DEVICE_TYPE = "v6e-256"
-
-# # 4 slices
-# CLUSTER = "bodaborg-v6e-16-debug"
-# PROJECT = "tpu-prod-env-one-vm"
-# ZONE = "us-east5-b"
-# COUNTRY = "us"
-# DEVICE_TYPE = "v6e-16"
-
-# # 3 slices
-# CLUSTER = "bodaborg-v6e-256-dnd-yucmhab"
-# PROJECT = "tpu-prod-env-one-vm"
-# ZONE = "us-east5-b"
-# COUNTRY = "us"
-# DEVICE_TYPE = "v6e-256"
-
-# # Many slices
-# CLUSTER = "bodaborg-v6e-256-ts"
-# PROJECT = "tpu-prod-env-multipod"
-# ZONE = "us-west1-c"
 # COUNTRY = "us"
 # DEVICE_TYPE = "v6e-256"
 
@@ -101,7 +78,7 @@ def main() -> int:
       model_configs.llama3_1_8b_8192,
   ]
   num_slices_list = [
-      2
+      3
   ]
   pathways_config = mxr.PathwaysConfig(
       server_image=SERVER_IMAGE,
@@ -111,6 +88,8 @@ def main() -> int:
       # User can add additional flags here.
       server_flags="--temporary_flags_for_debugging=temporary_flag_for_debugging_enable_late_binding=false",
       proxy_flags=f"--temporary_flags_for_debugging=temporary_flag_for_debugging_experimental_elastic_slices=true;;;temporary_flag_for_debugging_experimental_num_ok_missing_slices={num_slices_list[0]}",
+      # server_flags="",
+      # proxy_flags=f"--num_elastic_slices={num_slices_list[0]}",
       worker_flags="",
   )
 
