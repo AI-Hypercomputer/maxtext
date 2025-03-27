@@ -690,7 +690,7 @@ class AttentionOp(nn.Module):
       n // n_kv: number of group for query, sometimes annotated with g
     """
     einsum = jnp.einsum
-    if self.kv_quant:
+    if self.kv_quant and self.kv_quant.dtype != jnp.float8_e5m2:
       einsum = self.kv_quant.einsum_fn_with_rhs_qtensor(key)
     b, t, n, d = query.shape
     n_kv = key.shape[-2]
@@ -699,14 +699,20 @@ class AttentionOp(nn.Module):
       query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
       if self.reshape_q and q_seq_len == 1:
         query = jnp.broadcast_to(query, (b, 2, n_kv, n // n_kv, d))
-      result = einsum("btkgd,bskd->bkgts", query, key)
+      if self.kv_quant and self.kv_quant.dtype == jnp.float8_e5m2:
+        query = query if type(query) == jnp.float8_e5m2 else jnp.float8_e5m2(query)
+        key = key if type(key) == jnp.float8_e5m2 else jnp.float8_e5m2(key)
+      result = einsum("btkgd,bskd->bkgts", query, key, preferred_element_type=self.config.dtype)
     elif self.compute_axis_order == (0, 2, 1, 3):
       query = jnp.transpose(query, axes=self.compute_axis_order)
       key = jax.tree.map(lambda x: jnp.transpose(x, axes=self.compute_axis_order), key)
       query = jnp.reshape(query, (b, n_kv, n // n_kv, t, d))
       if self.reshape_q and q_seq_len == 1:
         query = jnp.broadcast_to(query, (b, n_kv, n // n_kv, 2, d))
-      result = einsum("bkgtd,bksd->bkgts", query, key)
+      if self.kv_quant and self.kv_quant.dtype == jnp.float8_e5m2:
+        query = query if type(query) == jnp.float8_e5m2 else jnp.float8_e5m2(query)
+        key = key if type(key) == jnp.float8_e5m2 else jnp.float8_e5m2(key)
+      result = einsum("bkgtd,bksd->bkgts", query, key, preferred_element_type=self.config.dtype)
     return result
 
   def wv_product(self, attn_weights: Array, value: Array | KVTensor, model_mode: str) -> Array:
@@ -730,18 +736,24 @@ class AttentionOp(nn.Module):
     """
 
     einsum = jnp.einsum
-    if self.kv_quant:
+    if self.kv_quant and self.kv_quant.dtype != jnp.float8_e5m2:
       # manually cast to bf16 to avoid the fp32 XLA ops for speedup
       if isinstance(value, KVTensor) and self.kv_quant.dtype == jnp.float8_e4m3fn:
         value.qvalue = value.qvalue.astype(self.config.dtype)
       einsum = self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(value)
     if model_mode == common_types.MODEL_MODE_TRAIN or self.compute_axis_order == (0, 1, 2, 3):
-      out = einsum("bkgts,bskd->btkgd", attn_weights, value)
+      if self.kv_quant and self.kv_quant.dtype == jnp.float8_e5m2:
+        attn_weights = attn_weights if type(attn_weights) == jnp.float8_e5m2 else jnp.float8_e5m2(attn_weights)
+        value = value if type(value) == jnp.float8_e5m2 else jnp.float8_e5m2(value)
+      out = einsum("bkgts,bskd->btkgd", attn_weights, value, preferred_element_type=self.dtype)
       b, t, n_kv, g, d = out.shape
       result = jnp.reshape(out, (b, t, n_kv * g, d))
     elif self.compute_axis_order == (0, 2, 1, 3):
       value = jax.tree.map(lambda x: jnp.transpose(x, axes=self.compute_axis_order), value)
-      out = einsum("bkgts,bksd->bkgtd", attn_weights, value)
+      if self.kv_quant and self.kv_quant.dtype == jnp.float8_e5m2:
+        attn_weights = attn_weights if type(attn_weights) == jnp.float8_e5m2 else jnp.float8_e5m2(attn_weights)
+        value = value if type(value) == jnp.float8_e5m2 else jnp.float8_e5m2(value)
+      out = einsum("bkgts,bksd->bkgtd", attn_weights, value, preferred_element_type=self.dtype)
       b, n_kv, g, t, d = out.shape
       result = jnp.reshape(out, (b, n_kv * g, t, d))
       result = self.reverse_transepose(result, self.compute_axis_order)
@@ -1143,15 +1155,16 @@ class AttentionOp(nn.Module):
     if self.kv_quant:
       ar_cache_scale_axis_names = self.transpose_tuple(self.cache_scale_logical_axis_names, self.ar_cache_axis_order)
       ar_cache_scale_update_axis = ar_cache_scale_axis_names.index(CACHE_SCALE_SEQUENCE)
-      cached_key_scale_var.value = jax.lax.dynamic_update_index_in_dim(
-          cached_key_scale_var.value, one_token_key_scale_shaped_for_cache, ar_cache_update_idx, ar_cache_scale_update_axis
-      )
-      cached_value_scale_var.value = jax.lax.dynamic_update_index_in_dim(
-          cached_value_scale_var.value,
-          one_token_value_scale_shaped_for_cache,
-          ar_cache_update_idx,
-          ar_cache_scale_update_axis,
-      )
+      if self.kv_quant.dtype != jnp.float8_e5m2:
+        cached_key_scale_var.value = jax.lax.dynamic_update_index_in_dim(
+            cached_key_scale_var.value, one_token_key_scale_shaped_for_cache, ar_cache_update_idx, ar_cache_scale_update_axis
+        )
+        cached_value_scale_var.value = jax.lax.dynamic_update_index_in_dim(
+            cached_value_scale_var.value,
+            one_token_value_scale_shaped_for_cache,
+            ar_cache_update_idx,
+            ar_cache_scale_update_axis,
+        )
 
     return
 
@@ -1168,7 +1181,8 @@ class AttentionOp(nn.Module):
       elif dtype == jnp.float8_e4m3fn:
         scale_value /= quantizations.E4M3_MAX
 
-      cache_value = KVTensor(qvalue=cache_value, scale=[scale_value], scale_t=None, dequant_dtype=target_dtype, bias=[])
+      if self.kv_quant.dtype != jnp.float8_e5m2:
+        cache_value = KVTensor(qvalue=cache_value, scale=[scale_value], scale_t=None, dequant_dtype=target_dtype, bias=[])
     cache_value_in_logical_shape = jax.tree.map(lambda x: self.reverse_transepose(x, cache_axis_order), cache_value)
     return cache_value_in_logical_shape
 

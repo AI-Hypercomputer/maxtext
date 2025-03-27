@@ -123,7 +123,7 @@ def _rhs_axis_metadata_wrapper(
 @dataclass
 class AqtQuantization:
   """Configures AQT quantization github.com/google/aqt."""
-
+  quant_cfg: Config
   quant_dg: aqt_config.DotGeneral
   quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN
   replicate_scale: bool = False
@@ -364,6 +364,8 @@ def _get_quant_config(config):
     return "nanoo_fp8"
   if config.quantization == "aqt_fp8":
     return _get_aqt_fp8_quant_config(config)
+  if config.quantization == "fp8_e5m2":
+    return "fp8_e5m2"
   raise ValueError(f"Invalid value configured for quantization {config.quantization}.")
 
 
@@ -398,7 +400,7 @@ def configure_quantization(config: Config, quant_mode_str: str = "train"):
       return NANOOFp8Quantization()
     quant_mode = get_quant_mode(quant_mode_str)
     replicate_scale = config.replicate_quant_scale if config.replicate_quant_scale else False
-    return AqtQuantization(quant_dg=quant_cfg, quant_mode=quant_mode, replicate_scale=replicate_scale)
+    return AqtQuantization(quant_cfg=quant_cfg, quant_dg=quant_cfg, quant_mode=quant_mode, replicate_scale=replicate_scale)
   return None
 
 
@@ -464,6 +466,8 @@ class KVQuant:
       return jnp.int8
     if dtype_cfg == "fp8":
       return jnp.float8_e4m3fn
+    if dtype_cfg == "fp8_e5m2":
+      return jnp.float8_e5m2
     raise ValueError(f"Invalid kv_quant_dtype: {dtype_cfg}")
 
   def _get_max_axis(self, axis_names: AxisNames):
@@ -477,6 +481,12 @@ class KVQuant:
     """Quantize key/values stored in kvcache."""
     assert self.axis_cfg, "KV quant axis cannot be None"
     max_axis = self._get_max_axis(axis_names)
+
+    if self.dtype == jnp.float8_e5m2:
+      value = jnp.float8_e5m2(kv)
+      # Create a pseudo scale to avoid insert cache None type issue
+      scale_shape = tuple(1 if i in max_axis else s for i, s in enumerate(kv.shape))
+      return value, jnp.ones(scale_shape, dtype=kv.dtype)
     scale = jnp.max(jnp.abs(kv), axis=max_axis, keepdims=True)
     if self.dtype == jnp.int8:
       value = jnp.int8(jnp.rint(kv * (MAX_INT8 / scale)))
@@ -489,6 +499,12 @@ class KVQuant:
       return value, scale
     raise ValueError(f"Invalid KV quant dtype:{self.dtype}.")
 
+  # def bind_rhs(self, rhs_to_bind):
+  #     def fp8e5m2_einsum_with_rhs(equation, lhs, rhs):
+  #         return jnp.einsum(equation, lhs.astype(jnp.float8_e5m2), rhs_to_bind.astype(jnp.float8_e5m2))
+  #     return fp8e5m2_einsum_with_rhs
+
+
   def einsum_fn_with_rhs_qtensor(
       self,
       kv: Array | aqt_tensor.QTensor,
@@ -499,6 +515,9 @@ class KVQuant:
   ):
     # Assumes kv is already quantized.
     einsum = jnp.einsum
+    # if self.dtype == jnp.fp8_e5m2fn:
+    #   einsum = self.bind_rhs(kv)
+
     if isinstance(kv, aqt_tensor.QTensor):
       if kv.qvalue.dtype != jnp.float8_e4m3fn:
         num_bits = 4 if kv.qvalue.dtype == jnp.int4 else 8
