@@ -47,17 +47,28 @@ def main(argv: Sequence[str]) -> None:
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
   # set it to max complete prompt length that has to be bechmarked with chunked prefill
-  max_prefill_length = 7000
+  max_prefill_length = 8192
   tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[max_prefill_length])
-
+  true_length = 8192
+  print("true_lengths ", true_length)
   chunk_size = 2048
   # set this to array of acceptable chunk sizes
-  prefill_lengths = [1024, 2048, 4096, 7000]
+  prefill_lengths = [2048, 8192]
   # prefill_lengths = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144]
 
-  padded_tokens, true_lengths, positions = token_utils.chunk_and_pad_tokens(
-      tokens, tokenizer_model.bos_id, tokenizer_model.pad_id, False, prefill_lengths, max_prefill_length, chunk_size, True
-  )
+  padded_tokens, true_lengths, positions = token_utils.chunk_and_pad_tokens(tokens=tokens, 
+                                                                            bos_id=tokenizer_model.bos_id,
+                                                                            pad_id=tokenizer_model.pad_id,
+                                                                            is_bos=False,
+                                                                            prefill_lengths=prefill_lengths,
+                                                                            chunk_size=chunk_size,
+                                                                            max_prefill_length=max_prefill_length,
+                                                                            jax_padding=True)
+
+  print("true_lengths ", true_lengths)
+  # padded_tokens, true_lengths, positions = token_utils.chunk_and_pad_tokens(
+  #     tokens, tokenizer_model.bos_id, tokenizer_model.pad_id, False, prefill_lengths, max_prefill_length, chunk_size, True
+  # )
   rng, _ = jax.random.split(rng)
 
   def run_chunked_prefill():

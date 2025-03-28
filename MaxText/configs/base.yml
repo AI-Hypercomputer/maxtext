@@ -646,7 +646,7 @@ pagedattn_tokens_per_page: 32
 pagedattn_pages_per_compute_block: 8
 
 # Chunked Prefill Parameters
-prefill_chunk_size: 256
+prefill_chunk_size: 2048
 use_chunked_prefill: False
 
 # This is a temporary flag that will removed soon after the fix lands in TE
