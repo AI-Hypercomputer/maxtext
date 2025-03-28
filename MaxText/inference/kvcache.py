@@ -690,3 +690,15 @@ class KVCache(nn.Module):
       return self.kv_cache_autoregressive(key, value, use_ragged_attention)
     else:
       raise ValueError(f"Model Mode isn't supported! {model_mode=}")
+
+
+class MLA_KVCache(KVCache):
+  @nn.compact
+  def __call__(
+      self,
+      key_latent: Array,
+      key_rope: Array,
+      decoder_segment_ids: Array,
+      model_mode: str,
+  ) -> tuple:
+    retun super.__call__(key_latent, key_rope, decoder_segment_ids, model_mode)
