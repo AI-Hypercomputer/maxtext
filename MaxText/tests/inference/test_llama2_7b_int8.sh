@@ -24,4 +24,4 @@ args=(
 )
 
 # Execute the Python script with the arguments
-python "${args[@]}"
+python3 "${args[@]}"

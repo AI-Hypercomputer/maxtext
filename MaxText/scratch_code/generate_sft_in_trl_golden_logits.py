@@ -16,7 +16,7 @@
 
 Usage:
 
-python3 MaxText/scratch_code/generate_sft_in_trl_golden_logits.py --model-name=llama3.1-8b --tokenizer-path=meta-llama/Llama-3.1-8B --max-target-length=64
+python3 -m MaxText.scratch_code/generate_sft_in_trl_golden_logits.py --model-name=llama3.1-8b --tokenizer-path=meta-llama/Llama-3.1-8B --max-target-length=64
 """
 
 import argparse

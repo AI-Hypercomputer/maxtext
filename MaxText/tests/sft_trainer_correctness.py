@@ -16,7 +16,7 @@
 Runs SFT trainer correctness with TRL implementation.
 
 Usage:
-python3 MaxText/tests/sft_trainer_correctness.py --model-name=llama3.1-8b --tokenizer-path=meta-llama/Llama-3.1-8B --model-ckpt-path=gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items
+python3 -m MaxText.tests/sft_trainer_correctness.py --model-name=llama3.1-8b --tokenizer-path=meta-llama/Llama-3.1-8B --model-ckpt-path=gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items
 """
 
 import argparse
