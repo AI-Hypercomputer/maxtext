@@ -19,25 +19,28 @@ import functools
 import math
 from typing import Any, Optional, Tuple
 
+import common_types
 from flax import linen as nn
 from flax.linen import partitioning
+from inference import kvcache
+from inference import page_manager
+from inference import paged_attention
 import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
-from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
 from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
+from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
-import common_types
 from kernels.ragged_attention import ragged_gqa
 from kernels.ragged_attention import ragged_mha
-from inference import kvcache, page_manager, paged_attention
 from layers import embeddings
 from layers import initializers
 from layers import linears
 from layers import quantizations
+
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -151,8 +154,6 @@ class AttentionOp(nn.Module):
   flash_axis_names: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
   ragged_qkv_axis_names: AxisNames = (CACHE_BATCH, CACHE_HEADS, CACHE_SEQUENCE, CACHE_KV)
   ragged_lengths_names: AxisNames = (CACHE_BATCH,)
-  prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
-  ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
   compute_axis_order: AxisIdxes = (0, 1, 2, 3)
   key_axis_order: AxisIdxes = (2, 0, 1, 3)
 
@@ -170,7 +171,7 @@ class AttentionOp(nn.Module):
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
     """Check attention inputs."""
 
-    assert key.ndim == value.ndim, "k, v must have same rank."
+    assert key.ndim == value.ndim, f"k (dim {key.ndim}), v (dim {value.ndim}) must have same rank."
     assert query.shape[:-3] == key.shape[:-3] == value.shape[:-3], "q, k, v batch dims must match."
     assert key.shape[-2] == value.shape[-2], "k, v num_kv_heads must match."
     assert key.shape[-3] == value.shape[-3], "k, v lengths must match."
@@ -787,30 +788,16 @@ class AttentionOp(nn.Module):
       value,
       decoder_segment_ids,
       model_mode,
+      cached_values = [None, None],
       previous_chunk=None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
   ):
 
-    prefill_kv_cache = None
-    ar_kv_cache = None
+    prefill_kv_cache = cached_values[0]
+    ar_kv_cache = cached_values[1]
     if model_mode != common_types.MODEL_MODE_TRAIN:
-      prefill_kv_cache, ar_kv_cache = kvcache.KVCache(
-          self.max_prefill_predict_length,
-          self.max_target_length,
-          self.dtype,
-          kv_quant=self.kv_quant,
-          prefill_cache_axis_order=self.prefill_cache_axis_order,
-          ar_cache_axis_order=self.ar_cache_axis_order,
-          use_chunked_prefill=self.config.use_chunked_prefill,
-      )(
-          key,
-          value,
-          decoder_segment_ids,
-          model_mode,
-          use_ragged_attention=self.use_ragged_attention,
-          previous_chunk=previous_chunk,
-      )
+      assert prefill_kv_cache
       key, value, decoder_segment_ids = prefill_kv_cache
 
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
@@ -933,8 +920,6 @@ class Attention(nn.Module):
         num_kv_heads=self.num_kv_heads,
         dropout_rate=self.dropout_rate,
         dtype=self.dtype,
-        prefill_cache_axis_order=self.prefill_cache_axis_order,
-        ar_cache_axis_order=self.ar_cache_axis_order,
         compute_axis_order=self.compute_axis_order,
         reshape_q=self.reshape_q,
         attention_type=self.attention_type,
@@ -1103,6 +1088,26 @@ class Attention(nn.Module):
     inputs = rotary_embedding(inputs, inputs_positions)
     return inputs
 
+  def update_kv_caches(self, key, value, decoder_segment_ids, model_mode, previous_chunk):
+    """Updates the KV caches for prefill and autoregressive modes."""
+    prefill_kv_cache, ar_kv_cache = kvcache.KVCache(
+        self.max_prefill_predict_length,
+        self.max_target_length,
+        self.dtype,
+        kv_quant=self.kv_quant,
+        prefill_cache_axis_order=self.prefill_cache_axis_order,
+        ar_cache_axis_order=self.ar_cache_axis_order,
+        use_chunked_prefill=self.config.use_chunked_prefill,
+    )(
+        key,
+        value,
+        decoder_segment_ids,
+        model_mode,
+        use_ragged_attention=self.use_ragged_attention,
+        previous_chunk=previous_chunk,
+    )
+    return [prefill_kv_cache, ar_kv_cache]
+
   @nn.compact
   def __call__(
       self,
@@ -1202,7 +1207,12 @@ class Attention(nn.Module):
       )
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
     else:
-      out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, previous_chunk)
+      cached_values = [None, None]
+      if model_mode != common_types.MODEL_MODE_TRAIN:
+        cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
+      out = self.attention_op(
+          query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk
+      )
 
     if model_mode == common_types.MODEL_MODE_PREFILL:
       out = nn.with_logical_constraint(out, self.out_axis_names)
@@ -1327,7 +1337,7 @@ class MLA(Attention):
       mscale = 0.1 * self.mscale * jnp.log(self.rope_factor) + 1.0
       self.softmax_scale = self.softmax_scale * mscale * mscale
 
-  def mla_query_projection(self, inputs_q: Array, inputs_positions: Array) -> Array:
+  def mla_query_projection(self, inputs_q: Array, inputs_positions: Array, model_mode) -> Array:
     """Query projection for MLA, e.g. includes LoRA if q_lora_rank > 0."""
     if self.q_lora_rank == 0:
       q = self.query_proj(inputs_q)
@@ -1342,26 +1352,84 @@ class MLA(Attention):
     q_pe = self.apply_rotary_embedding(q_pe, inputs_positions, name="query_rope")
     # Query projection is scaled by self.softmax_scale to be consistent MaxText implementation.
     # DeepSeek v3 was doing it in attention score computation.
-    return jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
+    query = jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
+    else:
+      query = nn.with_logical_constraint(query, self.query_axis_names)
+    return query
 
-  def mla_kv_projection(self, inputs: Array, inputs_positions: Array) -> Tuple[Array, Array]:
-    """MLA key/value projection with integrated rotary embedding."""
-    low_rank = self.wkv_a(inputs)
-    low_rank_main, low_rank_rope = jnp.split(low_rank, [self.kv_lora_rank], axis=-1)
-    low_rank_main = self.kv_norm(low_rank_main)
-    # Note: cache `low_rank_main` and `low_rank_rope` for inference.
+  def mla_get_key_value(self, low_rank_main, key_rope, model_mode):
+    # if model_mode != common_types.MODEL_MODE_TRAIN:
+    #   breakpoint()
     kv_out = self.wkv_b(low_rank_main)
 
     # Split kv_out into key_nope and value parts.
     key_nope, value = jnp.split(kv_out, [self.qk_nope_head_dim], axis=-1)
+    key_rope = jnp.broadcast_to(key_rope, (key_nope.shape[0], key_nope.shape[1], self.num_query_heads, key_rope.shape[3]))
+
+    key = jnp.concatenate([key_nope, key_rope], axis=-1)
+
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
+      value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
+    else:
+      key = nn.with_logical_constraint(key, self.key_axis_names)
+      value = nn.with_logical_constraint(value, self.value_axis_names)
+    return key, value
+
+  def update_mla_kv_caches(self, low_rank_main, key_rope, decoder_segment_ids, model_mode, previous_chunk=None):
+    """Updates the MlaKvCache in prefill and autoregressive modes."""
+    prefill_mla_cache, ar_mla_cache = kvcache.MlaKVCache(
+        self.max_prefill_predict_length,
+        self.max_target_length,
+        self.dtype,
+        kv_quant=self.kv_quant,
+        prefill_cache_axis_order=self.prefill_cache_axis_order,
+        ar_cache_axis_order=self.ar_cache_axis_order,
+        use_chunked_prefill=self.config.use_chunked_prefill,
+    )(low_rank_main,
+      key_rope,
+      decoder_segment_ids,
+      model_mode,
+      use_ragged_attention=self.use_ragged_attention,
+      previous_chunk=previous_chunk)
+
+    if prefill_mla_cache:
+      low_rank_main, key_rope, decoder_segment_ids = prefill_mla_cache
+      key, value = self.mla_get_key_value(low_rank_main, key_rope, model_mode)
+      prefill_kv_cache = key, value, decoder_segment_ids
+    else:
+      prefill_kv_cache = None
+
+    if ar_mla_cache:
+      low_rank_main, key_rope, decoder_segment_ids, lengths = ar_mla_cache
+      key, value = self.mla_get_key_value(low_rank_main, key_rope, model_mode)
+      ar_kv_cache = key, value, decoder_segment_ids, lengths
+    else:
+      ar_kv_cache = None
+    return [prefill_kv_cache, ar_kv_cache]
+
+  def mla_kv_projection(
+      self, inputs: Array, inputs_positions: Array, decoder_segment_ids, model_mode, previous_chunk):
+    """MLA key/value projection with integrated rotary embedding."""
+    low_rank = self.wkv_a(inputs)
+    low_rank_main, low_rank_rope = jnp.split(low_rank, [self.kv_lora_rank], axis=-1)
+    low_rank_main = self.kv_norm(low_rank_main)
 
     # Apply rotary embedding to key_rope.
     key_rope = jnp.expand_dims(low_rank_rope, axis=2)
     key_rope = self.apply_rotary_embedding(key_rope, inputs_positions, name="key_rope")
-    key_rope = jnp.broadcast_to(key_rope, (key_nope.shape[0], key_nope.shape[1], self.num_query_heads, key_rope.shape[3]))
 
-    key = jnp.concatenate([key_nope, key_rope], axis=-1)
-    return key, value
+    key, value = self.mla_get_key_value(low_rank_main, key_rope, model_mode)
+    cached_values = [None, None]
+    if model_mode != common_types.MODEL_MODE_TRAIN:
+      if self.config.mla_naive_kvcache:
+        cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
+      else:
+        cached_values = self.update_mla_kv_caches(low_rank_main, key_rope, decoder_segment_ids, model_mode, previous_chunk)
+
+    return key, value, cached_values
 
   @nn.compact
   def __call__(
@@ -1394,23 +1462,16 @@ class MLA(Attention):
     inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
     inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
 
-    query = self.mla_query_projection(inputs_q, inputs_positions)
-    key, value = self.mla_kv_projection(inputs_kv, inputs_positions)
-
-    if model_mode == common_types.MODEL_MODE_PREFILL:
-      query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
-      key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
-      value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
-    else:
-      query = nn.with_logical_constraint(query, self.query_axis_names)
-      key = nn.with_logical_constraint(key, self.key_axis_names)
-      value = nn.with_logical_constraint(value, self.value_axis_names)
+    query = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
+    key, value, cached_values = self.mla_kv_projection(
+        inputs_kv, inputs_positions, decoder_segment_ids, model_mode, previous_chunk
+    )
 
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
 
-    out = self.attention_op(query, key, value, decoder_segment_ids, model_mode)
+    out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values)
     out = nn.with_logical_constraint(out, self.out_axis_names)
     out = self.out_projection(inputs_q.shape[-1], out)
     return out
