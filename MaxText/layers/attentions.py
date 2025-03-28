@@ -1083,7 +1083,7 @@ class Attention(nn.Module):
     inputs = rotary_embedding(inputs, inputs_positions)
     return inputs
   
-  def update_kv_caches(self, key, value, decoder_segment_ids, model_mode, previous_chunk) :
+  def update_kv_caches(self, key, value, decoder_segment_ids, model_mode, previous_chunk=None) :
     prefill_kv_cache = None
     ar_kv_cache = None
     prefill_kv_cache, ar_kv_cache = kvcache.KVCache(
@@ -1331,7 +1331,7 @@ class MLA(Attention):
       mscale = 0.1 * self.mscale * jnp.log(self.rope_factor) + 1.0
       self.softmax_scale = self.softmax_scale * mscale * mscale
 
-  def mla_query_projection(self, inputs_q: Array, inputs_positions: Array) -> Array:
+  def mla_query_projection(self, inputs_q: Array, inputs_positions: Array, model_mode) -> Array:
     """Query projection for MLA, e.g. includes LoRA if q_lora_rank > 0."""
     if self.q_lora_rank == 0:
       q = self.query_proj(inputs_q)
@@ -1346,43 +1346,90 @@ class MLA(Attention):
     q_pe = self.apply_rotary_embedding(q_pe, inputs_positions, name="query_rope")
     # Query projection is scaled by self.softmax_scale to be consistent MaxText implementation.
     # DeepSeek v3 was doing it in attention score computation.
-    return jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
-
-  def mla_kv_cache_latent(self, low_rank_main, key_rope, decoder_segment_ids):
-    prefill_kv_cache = None
-    ar_kv_cache = None
-    return 
+    query = jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
+    else:
+      query = nn.with_logical_constraint(query, self.query_axis_names)
+    return query
  
+  def mla_get_key_value(self, low_rank_main, key_rope, model_mode):
+    kv_out = self.wkv_b(low_rank_main)
+    
+    # Split kv_out into key_nope and value parts.
+    key_nope, value = jnp.split(kv_out, [self.qk_nope_head_dim], axis=-1)
+    key_rope = jnp.broadcast_to(key_rope, (key_nope.shape[0], key_nope.shape[1], self.num_query_heads, key_rope.shape[3]))
 
-  def mla_kv_projection(self, inputs: Array, inputs_positions: Array) -> Tuple[Array, Array]:
+    key = jnp.concatenate([key_nope, key_rope], axis=-1)
+    
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
+      value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
+    else:
+      key = nn.with_logical_constraint(key, self.key_axis_names)
+      value = nn.with_logical_constraint(value, self.value_axis_names)
+    return key, value
+    
+  def update_mla_kv_caches(self, low_rank_main, key_rope, decoder_segment_ids, model_mode) :
+    
+    if model_mode == common_types.MODEL_MODE_PREFILL:
+      low_rank_main = nn.with_logical_constraint(low_rank_main, self.prefill_key_axis_names)
+      key_rope= nn.with_logical_constraint(key_rope, self.prefill_value_axis_names)
+    else:
+      low_rank_main = nn.with_logical_constraint(low_rank_main, self.key_axis_names)
+      key_rope = nn.with_logical_constraint(key_rope, self.value_axis_names)
+  
+    prefill_mla_kvcache, ar_mla_kvcache = kvcache.MLA_KVCache(
+      self.max_prefill_predict_length,
+      self.max_target_length,
+      self.dtype,
+      kv_quant=self.kv_quant,
+      prefill_cache_axis_order=self.prefill_cache_axis_order,
+      ar_cache_axis_order=self.ar_cache_axis_order,
+      )(
+        low_rank_main,
+        key_rope,
+        decoder_segment_ids,
+        model_mode
+        )
+    if prefill_mla_kvcache:
+      low_rank_main, low_rank_rope, decoder_segment_ids = prefill_mla_kvcache
+      key, value = self.mla_get_key_value(low_rank_main, key_rope)
+      prefill_kv_cache = (key, value, decoder_segment_ids)
+      
+    if ar_mla_kvcache:
+      low_rank_main, low_rank_rope, decoder_segment_ids, lengths = ar_mla_kvcache
+      key, value = self.mla_get_key_value(low_rank_main, key_rope)
+      ar_kv_cache = (key, value, decoder_segment_ids, lengths)
+    
+    return prefill_kv_cache, ar_kv_cache
+
+  def mla_kv_projection(self, inputs: Array, inputs_positions: Array, decoder_segment_ids, model_mode) -> Tuple[Array, Array]:
     """MLA key/value projection with integrated rotary embedding."""
     low_rank = self.wkv_a(inputs)
     low_rank_main, low_rank_rope = jnp.split(low_rank, [self.kv_lora_rank], axis=-1)
     low_rank_main = self.kv_norm(low_rank_main)
-    
+  
     # Apply rotary embedding to key_rope.
     key_rope = jnp.expand_dims(low_rank_rope, axis=2)
     key_rope = self.apply_rotary_embedding(key_rope, inputs_positions, name="key_rope")
-    key_rope = jnp.broadcast_to(key_rope, (key_nope.shape[0], key_nope.shape[1], self.num_query_heads, key_rope.shape[3]))
+    
+    key, value = self.mla_get_key_value(low_rank_main, key_rope, model_mode)
+
 
     prefill_kv_cache = None
     ar_kv_cache = None
-    
     if model_mode != common_types.MODEL_MODE_TRAIN:
-      if not naive_mla:
-        prefill_kv_cache, ar_kv_cache = kvcache.MLA_KVCache(
-          self.max_prefill_predict_length,
-          self.max_target_length,
-          self.dtype,
-          kv_quant=self.kv_quant,
-          )
+      if self.config.mla_naive_kvcache:
+        prefill_kv_cache, ar_kv_cache = self.update_kv_caches(key, value, decoder_segment_ids, model_mode)
+      else:
+        prefill_kv_cache, ar_kv_cache = self.update_mla_kv_caches(low_rank_main, key_rope, decoder_segment_ids, model_mode)
     
-    # Note: cache `low_rank_main` and `low_rank_rope` for inference.
-    kv_out = self.wkv_b(low_rank_main)
+    return key, value, prefill_kv_cache, ar_kv_cache
+    
 
-    # Split kv_out into key_nope and value parts.
-    key_nope, value = jnp.split(kv_out, [self.qk_nope_head_dim], axis=-1)
-    key = jnp.concatenate([key_nope, key_rope], axis=-1)
+    
+    
     return key, value, prefill_kv_cache, ar_kv_cache
 
   @nn.compact
@@ -1415,17 +1462,8 @@ class MLA(Attention):
     inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
     inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
 
-    query = self.mla_query_projection(inputs_q, inputs_positions)
-    key, value = self.mla_kv_projection(inputs_kv, inputs_positions)
-
-    if model_mode == common_types.MODEL_MODE_PREFILL:
-      query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
-      key = nn.with_logical_constraint(key, self.prefill_key_axis_names)
-      value = nn.with_logical_constraint(value, self.prefill_value_axis_names)
-    else:
-      query = nn.with_logical_constraint(query, self.query_axis_names)
-      key = nn.with_logical_constraint(key, self.key_axis_names)
-      value = nn.with_logical_constraint(value, self.value_axis_names)
+    query = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
+    key, value, prefill_kv_cache, ar_kv_cache = self.mla_kv_projection(inputs_kv, inputs_positions, decoder_segment_ids, model_mode)
 
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
