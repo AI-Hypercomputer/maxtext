@@ -261,7 +261,7 @@ jax_cache_dir: "~/jax_cache"
 hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
 
 # Parallelism
-mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive', 'context_autoregressive']
+mesh_axes: ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']
 logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],

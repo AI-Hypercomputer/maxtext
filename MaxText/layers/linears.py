@@ -851,7 +851,7 @@ class MoeBlock(nn.Module):
         # todo: try replace softmax_probs with padded weights and verify with decode acc tests
         softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
         dispatch_mask, combine_mask = self.generate_masks_subgroup(top_k_indices, softmax_probs)
-        if self.config.ici_context_autoregressive_parallelism > 0 and cp == 1:
+        if self.config.ici_context_autoregressive_parallelism > 1 and cp == 1:
           mask_axes = ("activation_length", "activation_batch", None, None, None)
           input_axis = ("activation_length", "activation_batch", None, "activation_embed")
           dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_embed")
