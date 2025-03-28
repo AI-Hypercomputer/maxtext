@@ -27,6 +27,7 @@ from absl import app
 import jax.numpy as jnp
 import datetime
 from jetstream.engine import token_utils
+import profiler
 
 _WARMUP_ITERS = 2
 _BENCHMARK_ITERS = 5
@@ -53,7 +54,7 @@ def main(argv: Sequence[str]) -> None:
   print("true_lengths ", true_length)
   chunk_size = 2048
   # set this to array of acceptable chunk sizes
-  prefill_lengths = [2048, 8192]
+  prefill_lengths = [1024, 2048, 4096, 8192]
   # prefill_lengths = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144]
 
   padded_tokens, true_lengths, positions = token_utils.chunk_and_pad_tokens(tokens=tokens, 
@@ -110,12 +111,17 @@ def main(argv: Sequence[str]) -> None:
     end = datetime.datetime.now()
     print("time taken for chunk prefill warmup: ", end - start)
 
+  prof = profiler.Profiler(config)
+  prof.activate(optional_postfix="chunked_prefill")
+  
   for _ in range(_BENCHMARK_ITERS):
     start = datetime.datetime.now()
     prefill_result = run_chunked_prefill()
     jax.block_until_ready(prefill_result)
     end = datetime.datetime.now()
+
     print("time taken for chunk prefill ", end - start)
+  prof.deactivate()
 
 
 if __name__ == "__main__":

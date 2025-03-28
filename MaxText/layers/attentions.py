@@ -169,7 +169,8 @@ class AttentionOp(nn.Module):
 
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
     """Check attention inputs."""
-
+    # jax.debug.print("shapes  {key_shape}", key_shape=key.shape[-3])
+    # jax.debug.print("shapes value  {value_shape}", value_shape=value.shape[-3])
     assert key.ndim == value.ndim, "k, v must have same rank."
     assert query.shape[:-3] == key.shape[:-3] == value.shape[:-3], "q, k, v batch dims must match."
     assert key.shape[-2] == value.shape[-2], "k, v num_kv_heads must match."
@@ -181,30 +182,35 @@ class AttentionOp(nn.Module):
   def generate_attention_causal_mask_for_chunk(self, query, key, previous_chunk: Any = None) -> Array:
     _, q_seq_len, _, _ = query.shape
     _, kv_seq_len, _, _ = key.shape
-    mask_shape = (q_seq_len, q_seq_len)
-    row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
-    col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
-    # causal mask represents causality within query sequence
-    causal_mask = (col_ids <= row_ids).astype(jnp.int32)
+    # mask_shape = (q_seq_len, q_seq_len)
+    # row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
+    # col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
+    # # causal mask represents causality within query sequence
+    # causal_mask = (col_ids <= row_ids).astype(jnp.int32)
 
     next_pos = 0
     if previous_chunk != None:
       # shape[1] of ['true_length_array'] gives the length of previously processed chunk
       next_pos = previous_chunk["true_length_array"].shape[1]
-      overall_mask = jnp.zeros((q_seq_len, kv_seq_len), jnp.int32)
-      # mask wrt to previous chunk is all ones as the current seq depends on all tokens from before
-      previous_mask = jnp.ones((q_seq_len, next_pos), jnp.int32)
+    mask_shape = (q_seq_len, kv_seq_len)
+    row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
+    col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
+    # causal mask represents causality within query sequence
+    causal_mask = (col_ids - next_pos <= row_ids).astype(jnp.int32)
+    #   overall_mask = jnp.zeros((q_seq_len, kv_seq_len), jnp.int32)
+    #   # mask wrt to previous chunk is all ones as the current seq depends on all tokens from before
+    #   previous_mask = jnp.ones((q_seq_len, next_pos), jnp.int32)
 
-      # update current mask at next position
-      output_mask = jax.lax.dynamic_update_slice(overall_mask, causal_mask, (0, next_pos))
-      # update previous mask at the start of output mask
-      output_mask = jax.lax.dynamic_update_slice(output_mask, previous_mask, (0, 0))
-    else:
-      # if no previous chunk is processed, entire mask is just the causal mask within query seq
-      output_mask = jnp.zeros((q_seq_len, kv_seq_len), jnp.int32)
-      output_mask = jax.lax.dynamic_update_slice(output_mask, causal_mask, (0, next_pos))
+    #   # update current mask at next position
+    #   output_mask = jax.lax.dynamic_update_slice(overall_mask, causal_mask, (0, next_pos))
+    #   # update previous mask at the start of output mask
+    #   output_mask = jax.lax.dynamic_update_slice(output_mask, previous_mask, (0, 0))
+    # else:
+    #   # if no previous chunk is processed, entire mask is just the causal mask within query seq
+    #   output_mask = jnp.zeros((q_seq_len, kv_seq_len), jnp.int32)
+    #   output_mask = jax.lax.dynamic_update_slice(output_mask, causal_mask, (0, next_pos))
 
-    output_mask = output_mask[None, None, None, :, :]
+    output_mask = causal_mask[None, None, None, :, :]
     return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
     # return output_mask
 
@@ -215,8 +221,14 @@ class AttentionOp(nn.Module):
       self, query, key, decoder_segment_ids: Array | None, model_mode: str, previous_chunk: Any = None
   ) -> Array | None:
     mask = None
+    
+    if self.config.use_chunked_prefill and model_mode == common_types.MODEL_MODE_PREFILL:
+      causal_mask = self.generate_attention_causal_mask_for_chunk(query, key, previous_chunk)
+      return causal_mask
+    
     if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       mask = decoder_segment_ids[:, None, None, None, :] == common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+    
     elif decoder_segment_ids is not None:
       mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
       mask = mask[:, None, None, :, :]
@@ -232,10 +244,6 @@ class AttentionOp(nn.Module):
       causal_mask = (col_ids <= row_ids)[None, None, None, :, :]
 
     output_mask = None
-
-    if self.config.use_chunked_prefill and model_mode == common_types.MODEL_MODE_PREFILL:
-      causal_mask = self.generate_attention_causal_mask_for_chunk(query, key, previous_chunk)
-      return causal_mask
       # if mask is not None:
       #   # mask created from decoder_segment_ids, which is full mask without chunked
       #   # need to adjust the length to match the chunked query

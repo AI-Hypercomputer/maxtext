@@ -354,8 +354,8 @@ class KVCache(nn.Module):
     function updates current key and value at the desired location and returns entire key and value
 
     """
-    batch, _, heads, key_head_size = key.shape
-    batch, _, heads, value_head_size = value.shape
+    batch, k, heads, key_head_size = key.shape
+    batch, v, heads, value_head_size = value.shape
 
     assert key.dtype == value.dtype, "Key and Value Dtypes should match."
 
@@ -387,9 +387,18 @@ class KVCache(nn.Module):
       cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice(
           cached_key_value, key_shaped_for_cache, (next_pos, 0, 0, 0)
       )
+      _, b, c, d = cached_prefill_key_vars[0].value.shape
+      
+      cached_prefill_key_vars_value = jax.lax.slice(
+          cached_prefill_key_vars[0].value, (0,0,0,0), (next_pos + k, b, c, d)
+      )
 
       cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(
           cached_value_value, value_shaped_for_cache, (next_pos, 0, 0, 0)
+      )
+
+      cached_prefill_value_vars_value  = jax.lax.slice(
+          cached_prefill_value_vars[0].value, (0,0,0,0), (next_pos + v, b, c, d)
       )
 
       if decoder_segment_ids is not None:
@@ -398,8 +407,8 @@ class KVCache(nn.Module):
         cached_prefill_segment_id_var.value = jax.lax.dynamic_update_slice(new_segment_id_var, decoder_segment_ids, (0, 0))
 
       return (
-          jnp.transpose(cached_prefill_key_vars[0].value, self.key_axis_order),
-          jnp.transpose(cached_prefill_value_vars[0].value, self.key_axis_order),
+          jnp.transpose(cached_prefill_key_vars_value, self.key_axis_order),
+          jnp.transpose(cached_prefill_value_vars_value, self.key_axis_order),
           cached_prefill_segment_id_var.value if decoder_segment_ids is not None else None,
       )
     else:
@@ -413,8 +422,19 @@ class KVCache(nn.Module):
       cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice(
           cached_prefill_key_vars[0].value, key_shaped_for_cache, (next_pos, 0, 0, 0)
       )
+      _, b, c, d = cached_prefill_key_vars[0].value.shape
+      
+      cached_prefill_key_vars_value = jax.lax.slice(
+          cached_prefill_key_vars[0].value, (0,0,0,0), (next_pos + k, b, c, d)
+      )
+
+
       cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(
           cached_prefill_value_vars[0].value, value_shaped_for_cache, (next_pos, 0, 0, 0)
+      )
+
+      cached_prefill_value_vars_value  = jax.lax.slice(
+          cached_prefill_value_vars[0].value, (0,0,0,0), (next_pos + v, b, c, d)
       )
 
       if decoder_segment_ids is not None:
@@ -423,8 +443,8 @@ class KVCache(nn.Module):
         cached_prefill_segment_id_var.value = jax.lax.dynamic_update_slice(new_segment_id_var, decoder_segment_ids, (0, 0))
 
       return (
-          jnp.transpose(cached_prefill_key_vars[0].value, self.key_axis_order),
-          jnp.transpose(cached_prefill_value_vars[0].value, self.key_axis_order),
+          jnp.transpose(cached_prefill_key_vars_value, self.key_axis_order),
+          jnp.transpose(cached_prefill_value_vars_value, self.key_axis_order),
           cached_prefill_segment_id_var.value if decoder_segment_ids is not None else None,
       )
 

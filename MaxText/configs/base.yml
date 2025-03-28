@@ -646,8 +646,8 @@ pagedattn_tokens_per_page: 32
 pagedattn_pages_per_compute_block: 8
 
 # Chunked Prefill Parameters
-prefill_chunk_size: 2048
-use_chunked_prefill: False
+prefill_chunk_size: 8192
+use_chunked_prefill: True
 
 # This is a temporary flag that will removed soon after the fix lands in TE
 enable_padding_causal_mask: True
