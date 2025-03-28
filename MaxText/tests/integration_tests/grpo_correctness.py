@@ -110,33 +110,6 @@ class GRPOTest(unittest.TestCase):
         torch_dtype=torch.float32,
     )
 
-  # def test_inference(self):
-  #   """ This is to test GRPO input pipeline and generate prompts
-  #   """
-
-  # def test_logits(self):
-  #   def _prepare_inputs():
-  #     input_ids = jnp.tile(jnp.array(self.tokenizer_model.encode(self.input_str)), (4, 1))
-  #     input_segmentation =  (input_ids > 0).astype(jnp.int32)
-  #     input_position = jnp.tile(jnp.arange(input_ids.shape[1]), (4, 1))
-
-  #     return input_ids, input_segmentation, input_position
-
-  #   inputs, inputs_segmentation, inputs_position = _prepare_inputs()
-  #   logits, _ = self.model.apply(
-  #     self.state.params,
-  #     inputs,
-  #     inputs_position,
-  #     decoder_segment_ids = inputs_segmentation,
-  #     enable_dropout=False,
-  #     rngs=self.rng,
-  #     mutable="intermediates",
-  #   )
-  #   logits = np.asarray(logits)
-  #   hf_logits = self.hf_model(input_ids = torch.tensor(inputs.tolist()), attention_mask = torch.tensor(inputs_segmentation.tolist())).logits.detach().numpy()
-  #   print(f"Max Diff {np.max(np.abs(logits - hf_logits))}")
-  #   self.assertTrue(jax.numpy.allclose(hf_logits, logits, rtol=1e-2, atol=2e-1, equal_nan=False))
-
   def _prepare_maxtext_inputs(self):
     prompt = self.tokenizer_model.encode(self.input_str)
     input_ids = jnp.pad(
