@@ -631,17 +631,28 @@ class AttentionOp(nn.Module):
       query = query.astype(jnp.float32)
       key = key.astype(jnp.float32)
 
-    q_seq_len = query.shape[1]
-
     # special sharding for decode
+    q_seq_len = query.shape[1]
+    prefill_qkv_sharding = (BATCH, LENGTH, HEAD, D_KV)
+    decode_qkv_sharding = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV)
     if self.is_partition_in_decode(q_seq_len):
-      query = partitioning.with_sharding_constraint(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
-      key = partitioning.with_sharding_constraint(key, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
-      value = partitioning.with_sharding_constraint(value, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+      query = partitioning.with_sharding_constraint(query, decode_qkv_sharding)
+      # avoid sharding scale tensor when using kv cache quantization
+      if self.kv_quant and isinstance(key, KVTensor) and isinstance(value, KVTensor):
+        key.qvalue = partitioning.with_sharding_constraint(key.qvalue, decode_qkv_sharding)
+        value.qvalue = partitioning.with_sharding_constraint(value.qvalue, decode_qkv_sharding)
+      else:
+        key = partitioning.with_sharding_constraint(key, decode_qkv_sharding)
+        value = partitioning.with_sharding_constraint(value, decode_qkv_sharding)
     elif model_mode == common_types.MODEL_MODE_PREFILL:
-      query = partitioning.with_sharding_constraint(query, (BATCH, LENGTH, HEAD, D_KV))
-      key = partitioning.with_sharding_constraint(key, (BATCH, KV_LENGTH, HEAD, D_KV))
-      value = partitioning.with_sharding_constraint(value, (BATCH, KV_LENGTH, HEAD, D_KV))
+      query = partitioning.with_sharding_constraint(query, prefill_qkv_sharding)
+      # avoid sharding scale tensor when using kv cache quantization
+      if self.kv_quant and isinstance(key, KVTensor) and isinstance(value, KVTensor):
+        key.qvalue = partitioning.with_sharding_constraint(key.qvalue, prefill_qkv_sharding)
+        value.qvalue = partitioning.with_sharding_constraint(value.qvalue, prefill_qkv_sharding)
+      else:
+        key = partitioning.with_sharding_constraint(key, prefill_qkv_sharding)
+        value = partitioning.with_sharding_constraint(value, prefill_qkv_sharding)
 
     attn_weights = self.qk_product(query, key, q_seq_len, model_mode)
     if self.is_partition_in_decode(q_seq_len):

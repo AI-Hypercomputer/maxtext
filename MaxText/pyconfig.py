@@ -488,6 +488,8 @@ class _HyperParameters:
 
     # Type conversions
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
+    raw_keys["weight_dtype"] = jax.numpy.dtype(raw_keys["weight_dtype"])
+    raw_keys["mu_dtype"] = set_mu_dtype(raw_keys)
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
 
@@ -565,6 +567,17 @@ def create_parallelisms_list(raw_keys):
   raw_keys["ici_parallelism"] = ici_parallelism
   raw_keys["dcn_parallelism"] = dcn_parallelism
   return raw_keys
+
+
+def set_mu_dtype(raw_keys):
+  # Default mu_dtype to weight_dtype if unset
+  if raw_keys["mu_dtype"]:
+    assert raw_keys["opt_type"] != "adam_pax", "opt_type adam_pax doesn't support explicitly setting mu_dtype"
+
+  if raw_keys["mu_dtype"] == "":
+    return raw_keys["weight_dtype"]
+  else:
+    return jax.numpy.dtype(raw_keys["mu_dtype"])
 
 
 def validate_and_set_hlo_dump_defaults(raw_keys):
