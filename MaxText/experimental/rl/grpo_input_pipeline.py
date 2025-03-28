@@ -115,8 +115,8 @@ def preprocessing_pipeline(
       read_options=grain.ReadOptions(num_threads=num_threads, prefetch_buffer_size=128),
   )
 
-  # single_host_gen = SingleHostDataLoader(dataloader, global_mesh)
-  return iter(dataloader)
+  single_host_gen = SingleHostDataLoader(dataloader, global_mesh)
+  return single_host_gen
 
 
 def make_hf_train_iterator(
