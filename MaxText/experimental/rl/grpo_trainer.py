@@ -40,7 +40,6 @@ from jax import random
 from jax.sharding import PartitionSpec as P
 import numpy as np
 
-
 from MaxText import checkpointing
 from MaxText import max_utils
 from MaxText import maxtext_utils
@@ -654,7 +653,7 @@ def setup_train_loop(config):
 
   record_goodput(recorder, config, recorder.record_tpu_init_end_time if recorder else None)
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
-  data_iterator, eval_data_iterator = grpo_input_pipeline.create_data_iterator(config, mesh)
+  data_iterator, eval_data_iterator = grpo_input_pipeline.create_data_iterator(config, inference_mesh)
   state, _, state_mesh_shardings, data_iterator = max_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
