@@ -147,6 +147,8 @@ shared_experts: 1
 routed_scaling_factor: 1.0 # scaling factor for routing scores
 routed_score_func: "" # scoring function for routing
 routed_bias: False # a flag if a bias term is added for routing
+n_groups: 1 # number of groups for routing
+topk_group: 1 # number of top groups to route inputs
 
 # pipeline parallelism
 # The number of decoder layers is equal to the product of num_stages, num_layers_per_pipeline_stage and num_pipeline_repeats.

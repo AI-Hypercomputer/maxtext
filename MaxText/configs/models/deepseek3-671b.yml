@@ -32,6 +32,8 @@ shared_experts: 1
 routed_scaling_factor: 2.5
 routed_score_func: "sigmoid"
 routed_bias: True
+n_groups: 8
+topk_group: 4
 decoder_block: "deepseek"
 # MLA
 attention_type: "mla"

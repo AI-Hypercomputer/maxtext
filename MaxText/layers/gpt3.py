@@ -49,7 +49,7 @@ HEAD = common_types.HEAD
 D_KV = common_types.D_KV
 EMBED = common_types.EMBED
 
-DenseGeneral = linears.DenseGeneral
+DenseWithNormBias = linears.DenseWithNormBias
 NdInitializer = initializers.NdInitializer
 Initializer = initializers.Initializer
 nd_dense_init = initializers.nd_dense_init
@@ -158,7 +158,7 @@ class Gpt3MultiHeadAttention(nn.Module):
   def qkv_projection(self, inputs: Array, proj_name: str):
     """Fused QKV projection"""
 
-    qkv_proj = DenseGeneral(
+    qkv_proj = DenseWithNormBias(
         features=(3, self.num_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
@@ -169,14 +169,14 @@ class Gpt3MultiHeadAttention(nn.Module):
         quant=self.quant,
         use_bias=self.use_bias,
         matmul_precision=self.config.matmul_precision,
-    )(inputs)
+    )(inputs)[0]
     qkv_proj = checkpoint_name(qkv_proj, "qkv_proj")
     query, key, value = qkv_proj[:, :, 0, ...], qkv_proj[:, :, 1, ...], qkv_proj[:, :, 2, ...]
     return query, key, value
 
   def projection(self, inputs: Array, proj_name: str) -> Array:
     """individual projection for one of q, k and v."""
-    proj = DenseGeneral(
+    proj = DenseWithNormBias(
         features=(self.num_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
@@ -187,12 +187,12 @@ class Gpt3MultiHeadAttention(nn.Module):
         quant=self.quant,
         use_bias=self.use_bias,
         matmul_precision=self.config.matmul_precision,
-    )(inputs)
+    )(inputs)[0]
     return proj
 
   def out_projection(self, output_dim: int, out: Array) -> Array:
     """output projection"""
-    out_proj = DenseGeneral(
+    out_proj = DenseWithNormBias(
         features=output_dim,
         axis=(-2, -1),
         kernel_init=self.kernel_init,
@@ -203,7 +203,7 @@ class Gpt3MultiHeadAttention(nn.Module):
         quant=self.quant,
         use_bias=self.use_bias,
         matmul_precision=self.config.matmul_precision,
-    )(out)
+    )(out)[0]
     return out_proj
 
   @nn.compact
