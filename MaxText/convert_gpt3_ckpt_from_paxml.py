@@ -32,15 +32,15 @@ python MaxText/convert_gpt3_ckpt_from_paxml.py \
   --run-name=$RUN_NAME \
   --base-output-directory=$BASE_OUTPUT_DIR
 """
-import max_utils
-import optimizers
-import pyconfig
+from MaxText import max_utils
+from MaxText import optimizers
+from MaxText import pyconfig
 import os
 from jax import random
 from jax.sharding import Mesh
-from layers.models import Transformer
-from layers import quantizations
-import checkpointing
+from MaxText.layers.models import Transformer
+from MaxText.layers import quantizations
+from MaxText import checkpointing
 
 import numpy as np
 import tensorstore as ts
@@ -48,9 +48,9 @@ import tensorstore as ts
 import sys
 import jax
 import gc
-import max_logging
+from MaxText import max_logging
 from psutil import Process
-from train import save_checkpoint
+from MaxText.train import save_checkpoint
 import argparse
 
 

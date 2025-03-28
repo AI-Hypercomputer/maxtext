@@ -25,7 +25,7 @@ import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
-from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
+from jax.experimental.pallas.ops.gpu from MaxText import decode_attention as gpu_pallas_decode_attention
 from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
@@ -235,7 +235,7 @@ class AttentionOp(nn.Module):
     if self.config.use_chunked_prefill and model_mode == common_types.MODEL_MODE_PREFILL:
       causal_mask = self.generate_attention_causal_mask_for_chunk(query, key, previous_chunk)
       if mask is not None:
-        # mask created from decoder_segment_ids, which is full mask without chunked
+        # mask created from MaxText.decoder_segment_ids, which is full mask without chunked
         # need to adjust the length to match the chunked query
         next_pos = previous_chunk["true_length_array"].shape[1] if previous_chunk is not None else 0
         mask = mask[:, :, :, next_pos : next_pos + causal_mask.shape[3], :]

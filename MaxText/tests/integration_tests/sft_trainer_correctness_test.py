@@ -14,7 +14,7 @@
 
 """Integration tests for SFT trainer correctness."""
 
-import pytest
+from MaxText import pytest
 import subprocess
 
 

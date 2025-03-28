@@ -14,9 +14,9 @@
 
 """Prefix Cache Test"""
 
-import prefix_cache
+from MaxText import prefix_cache
 
-import pytest
+from MaxText import pytest
 import unittest
 import jax
 import jax.numpy as jnp

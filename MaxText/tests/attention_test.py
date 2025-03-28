@@ -20,17 +20,17 @@ import sys
 import unittest
 from absl.testing import parameterized
 
-import common_types
+from MaxText import common_types
 
 from flax.core import freeze
 import jax
 import jax.numpy as jnp
-import max_utils
-import pytest
+from MaxText import max_utils
+from MaxText import pytest
 
-import pyconfig
+from MaxText import pyconfig
 
-from layers import attentions
+from MaxText.layers import attentions
 
 Mesh = jax.sharding.Mesh
 Attention = attentions.Attention

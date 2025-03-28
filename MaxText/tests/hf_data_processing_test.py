@@ -21,10 +21,10 @@ from jax.experimental import mesh_utils
 
 import unittest
 
-import pyconfig
-import pytest
-from input_pipeline import _hf_data_processing
-from input_pipeline import input_pipeline_interface
+from MaxText import pyconfig
+from MaxText import pytest
+from MaxText.input_pipeline import _hf_data_processing
+from MaxText.input_pipeline from MaxText import input_pipeline_interface
 
 
 class HfDataProcessingTest(unittest.TestCase):

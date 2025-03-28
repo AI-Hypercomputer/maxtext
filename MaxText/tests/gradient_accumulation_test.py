@@ -15,10 +15,10 @@ limitations under the License.
 import numpy as np
 import json
 import unittest
-import pytest
+from MaxText import pytest
 import string
 import random
-from train import main as train_main
+from MaxText.train import main as train_main
 
 
 def generate_random_string(length=10):

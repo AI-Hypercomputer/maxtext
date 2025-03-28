@@ -16,7 +16,7 @@ limitations under the License.
 
 """ Tests for the maxengine """
 
-import pytest
+from MaxText import pytest
 import sys
 import unittest
 
@@ -25,12 +25,12 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 import numpy as np
 
-import common_types
-from layers import models
-from layers import quantizations
-import max_utils
-from maxengine import MaxEngine
-import pyconfig
+from MaxText import common_types
+from MaxText.layers import models
+from MaxText.layers import quantizations
+from MaxText import max_utils
+from MaxText.maxengine import MaxEngine
+from MaxText import pyconfig
 
 
 class MaxEngineTest(unittest.TestCase):

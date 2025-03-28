@@ -18,10 +18,10 @@ limitations under the License.
 """
 
 import numpy as np
-import train_tokenizer
-from input_pipeline import _input_pipeline_utils
+from MaxText import train_tokenizer
+from MaxText.input_pipeline import _input_pipeline_utils
 import unittest
-import pytest
+from MaxText import pytest
 import tensorflow_datasets as tfds
 import subprocess
 import os

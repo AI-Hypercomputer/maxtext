@@ -20,15 +20,15 @@ WARNING: THIS FILE IS A WORK IN PROGRESS.
 import functools
 from typing import Optional
 
-import common_types
+from MaxText import common_types
 import jax.numpy as jnp
 from flax import linen as nn
 from jax.experimental import shard_map
 from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention_kernel
 from jax.sharding import PartitionSpec as P
 
-from inference import page_manager
-from inference import paged_attention_kernel_v2
+from MaxText.inference import page_manager
+from MaxText.inference import paged_attention_kernel_v2
 
 # pytype: disable=attribute-error
 

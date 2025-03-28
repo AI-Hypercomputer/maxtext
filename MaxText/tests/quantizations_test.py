@@ -20,9 +20,9 @@ from jax import random, lax
 from flax import linen as nn
 import functools
 import numpy as np
-import pyconfig
-import pytest
-from layers import quantizations
+from MaxText import pyconfig
+from MaxText import pytest
+from MaxText.layers import quantizations
 import unittest
 from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2 import calibration

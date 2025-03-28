@@ -49,12 +49,12 @@ import torch
 import psutil
 from tqdm import tqdm
 
-import max_logging
-import max_utils
-from train import save_checkpoint
-import checkpointing
+from MaxText import max_logging
+from MaxText import max_utils
+from MaxText.train import save_checkpoint
+from MaxText import checkpointing
 from safetensors import safe_open
-from utils import gcs_utils
+from MaxText.utils import gcs_utils
 
 MODEL_PARAMS_DICT = {
     "llama2-70b": {
