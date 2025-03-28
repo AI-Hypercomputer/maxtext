@@ -160,7 +160,7 @@ if __name__ == "__main__":
   parser.add_argument("--hf_model_path", type=str, required=False, default="")
   test_args, _ = parser.parse_known_args()
 
-  # Remove args defined in this test file to avoid error from MaxText.pyconfig
+  # Remove args defined in this test file to avoid error from pyconfig
   model_args = sys.argv
   to_remove_args = ["--atol", "--rtol", "--token_size", "--max_kl_div", "--golden_logits_path", "--hf_model_path"]
   for arg in to_remove_args:
