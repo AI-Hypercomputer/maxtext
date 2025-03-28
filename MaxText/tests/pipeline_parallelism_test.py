@@ -19,7 +19,7 @@ from jax.sharding import Mesh
 
 
 import unittest
-from MaxText import pytest
+import pytest
 
 from MaxText import pyconfig
 

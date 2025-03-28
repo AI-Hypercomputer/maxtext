@@ -16,7 +16,7 @@ limitations under the License.
 
 """ Tests for the standalone_checkpointer.py """
 import unittest
-from MaxText import pytest
+import pytest
 from MaxText.standalone_checkpointer import main as sckpt_main
 from MaxText.standalone_dataloader import main as sdl_main
 from datetime import datetime

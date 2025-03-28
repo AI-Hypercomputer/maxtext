@@ -16,7 +16,7 @@ limitations under the License.
 
 """ Tests for the maxengine """
 
-from MaxText import pytest
+import pytest
 import sys
 import unittest
 

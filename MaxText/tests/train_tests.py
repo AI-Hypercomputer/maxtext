@@ -17,7 +17,7 @@ limitations under the License.
 """Tests for train.py with various configs"""
 import os
 import unittest
-from MaxText import pytest
+import pytest
 from MaxText.train import main as train_main
 from absl.testing import absltest
 

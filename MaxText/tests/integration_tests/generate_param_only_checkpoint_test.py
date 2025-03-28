@@ -17,7 +17,7 @@ limitations under the License.
 """Integraion tests for test_generate_param_only_checkpoint.sh"""
 from datetime import datetime
 import subprocess
-from MaxText import pytest
+import pytest
 
 
 def run_generate_param_only_checkpoint(attention_type, quantization):

@@ -17,7 +17,7 @@ limitations under the License.
 """ Tests for kernels """
 
 import numpy as np
-from MaxText import pytest
+import pytest
 import unittest
 import jax
 import jax.numpy as jnp

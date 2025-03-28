@@ -16,7 +16,7 @@
 
 from MaxText import prefix_cache
 
-from MaxText import pytest
+import pytest
 import unittest
 import jax
 import jax.numpy as jnp

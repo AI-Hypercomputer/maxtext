@@ -26,7 +26,7 @@ from flax.core import freeze
 import jax
 import jax.numpy as jnp
 from MaxText import max_utils
-from MaxText import pytest
+import pytest
 
 from MaxText import pyconfig
 

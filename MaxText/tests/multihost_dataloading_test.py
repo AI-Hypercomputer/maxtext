@@ -24,7 +24,7 @@ from jax.sharding import PartitionSpec
 
 import tensorflow as tf
 import unittest
-from MaxText import pytest
+import pytest
 
 from MaxText import pyconfig
 from MaxText import multihost_dataloading

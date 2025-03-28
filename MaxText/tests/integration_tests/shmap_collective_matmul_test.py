@@ -16,7 +16,7 @@ limitations under the License.
 
 """Integraion test for pedagogical_examples/shmap_collective_matmul.py"""
 import subprocess
-from MaxText import pytest
+import pytest
 
 
 @pytest.mark.integration_test

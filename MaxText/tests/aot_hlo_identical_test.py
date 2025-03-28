@@ -12,7 +12,7 @@ limitations under the License.
 """
 
 import unittest
-from MaxText import pytest
+import pytest
 import os
 import shutil
 import hashlib

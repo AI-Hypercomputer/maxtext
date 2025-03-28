@@ -27,7 +27,7 @@ from MaxText.layers import quantizations
 import jax.numpy as jnp
 
 from MaxText import pyconfig
-from MaxText import pytest
+import pytest
 
 
 Mesh = jax.sharding.Mesh

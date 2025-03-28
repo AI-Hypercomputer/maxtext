@@ -22,7 +22,7 @@ from jax.experimental import mesh_utils
 import unittest
 
 from MaxText import pyconfig
-from MaxText import pytest
+import pytest
 from MaxText.input_pipeline import _hf_data_processing
 from MaxText.input_pipeline import input_pipeline_interface
 
