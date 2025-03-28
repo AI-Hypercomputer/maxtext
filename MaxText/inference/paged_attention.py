@@ -75,15 +75,16 @@ class PagedAttentionOp(nn.Module):
       key_pages_var = self.variable("cache", "key_pages")
       value_pages_var = self.variable("cache", "value_pages")
 
+      required_ar_shape = (self.num_kv_heads, self.num_pages, self.tokens_per_page, self.kv_head_dim_size)
       # For AR mode, if shape doesn't match, reinitialize values but not variables
-      if model_mode != common_types.MODEL_MODE_PREFILL and key_pages_var.value.shape[1] != self.num_pages:
-        kv_pages_shape = (self.num_kv_heads, self.num_pages, self.tokens_per_page, self.kv_head_dim_size)
-        key_pages_var.value = jnp.zeros(kv_pages_shape, dtype=self.dtype)
-        value_pages_var.value = jnp.zeros(kv_pages_shape, dtype=self.dtype)
+      if key_pages_var.value.shape != required_ar_shape:
+        jax.debug.print("Resizing existing KV pages to full AR size.") # Optional debug print
+        key_pages_var.value = jnp.zeros(required_ar_shape, dtype=self.dtype)
+        value_pages_var.value = jnp.zeros(required_ar_shape, dtype=self.dtype)
     else:
       # Initial creation - choose size based on mode
-      num_pages = self.max_pages_per_prefill if model_mode == common_types.MODEL_MODE_PREFILL else self.num_pages
-      kv_pages_shape = (self.num_kv_heads, num_pages, self.tokens_per_page, self.kv_head_dim_size)
+      num_pages_to_init = self.num_pages
+      kv_pages_shape = (self.num_kv_heads, num_pages_to_init, self.tokens_per_page, self.kv_head_dim_size)
       key_pages_var = self.variable(
           "cache",
           "key_pages",
@@ -330,17 +331,15 @@ class PagedAttentionOp(nn.Module):
     new_value = value.reshape(batch_size, kv_heads, head_dim)[:, :, :]
     new_value = jnp.transpose(new_value, (1, 0, 2))  # n_kv, b, d
 
-    broadcast_pages = jnp.tile(page_state.current_page, (kv_heads, 1))  # [n_kv, b]
-    broadcast_pos = jnp.tile(page_state.current_page_position, (kv_heads, 1))  # [n_kv, b]
+    broadcast_pages = jnp.tile(page_state.active_page, (kv_heads, 1))  # [n_kv, b]
+    broadcast_pos = jnp.tile(page_state.active_page_position, (kv_heads, 1))  # [n_kv, b]
+
     kv_indices = jnp.arange(kv_heads)[:, None]  # [n_kv, 1]
     kv_indices = jnp.tile(kv_indices, (1, batch_size))  # [n_kv, b]
 
     # [num_kv_heads, num_pages, tokens_per_page, head_dim]
     key_pages_updated = key_pages.at[kv_indices, broadcast_pages, broadcast_pos].set(new_key)
     value_pages_updated = value_pages.at[kv_indices, broadcast_pages, broadcast_pos].set(new_value)
-
-    key_pages_updated = nn.with_logical_constraint(key_pages_updated, self.kv_pages_axis_names)
-    value_pages_updated = nn.with_logical_constraint(value_pages_updated, self.kv_pages_axis_names)
 
     key_pages_var.value = key_pages_updated
     value_pages_var.value = value_pages_updated

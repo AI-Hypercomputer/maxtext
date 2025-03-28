@@ -540,11 +540,11 @@ class MaxEngine(engine_api.Engine):
     """Public API for prefill that updates page state outside JIT."""
     # Update page state before JIT call
     if self.page_manager is not None and self.page_state is not None:
-      self.page_state = self.page_manager.reserve_prefix_slot_pages(
-          slot=slot,
-          true_length=true_length,
-          page_state=self.page_state,
-      )
+      self.page_state = self.page_manager.update_prefill_pages(
+      page_state=self.page_state,
+      page_group_id=slot,
+      true_length=true_length,
+    )
 
     # Call JIT-compiled version with current state
     return self._prefill_jit(
@@ -864,7 +864,7 @@ class MaxEngine(engine_api.Engine):
     # Update page state before JIT call
 
     if self.page_manager is not None and self.page_state is not None:
-      self.page_state = self.page_manager.reserve_decode_step_pages(self.page_state)
+      self.page_state = self.page_manager.update_decode_pages(self.page_state)
 
     # Call JIT-compiled version with current state
     new_state, result = self._generate_jit(
