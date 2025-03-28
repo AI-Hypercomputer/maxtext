@@ -205,8 +205,8 @@ class AttentionOp(nn.Module):
       output_mask = jax.lax.dynamic_update_slice(output_mask, causal_mask, (0, next_pos))
 
     output_mask = output_mask[None, None, None, :, :]
-    # return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
-    return output_mask
+    return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
+    # return output_mask
 
   # Following Pallas MHA Flash Attention Reference.
   # https://github.com/jax-ml/jax/blob/main/jax/experimental/pallas/ops/tpu/flash_attention.py
@@ -235,11 +235,12 @@ class AttentionOp(nn.Module):
 
     if self.config.use_chunked_prefill and model_mode == common_types.MODEL_MODE_PREFILL:
       causal_mask = self.generate_attention_causal_mask_for_chunk(query, key, previous_chunk)
-      if mask is not None:
-        # mask created from decoder_segment_ids, which is full mask without chunked
-        # need to adjust the length to match the chunked query
-        next_pos = previous_chunk["true_length_array"].shape[1] if previous_chunk is not None else 0
-        mask = mask[:, :, :, next_pos : next_pos + causal_mask.shape[3], :]
+      return causal_mask
+      # if mask is not None:
+      #   # mask created from decoder_segment_ids, which is full mask without chunked
+      #   # need to adjust the length to match the chunked query
+      #   next_pos = previous_chunk["true_length_array"].shape[1] if previous_chunk is not None else 0
+      #   mask = mask[:, :, :, next_pos : next_pos + causal_mask.shape[3], :]
 
     if (mask is not None) and (causal_mask is not None):
       output_mask = jnp.logical_and(mask, causal_mask)
