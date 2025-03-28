@@ -701,4 +701,4 @@ class MLA_KVCache(KVCache):
       decoder_segment_ids: Array,
       model_mode: str,
   ) -> tuple:
-    retun super.__call__(key_latent, key_rope, decoder_segment_ids, model_mode)
+    return super.__call__(key_latent, key_rope, decoder_segment_ids, model_mode)

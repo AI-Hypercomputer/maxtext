@@ -151,8 +151,6 @@ class AttentionOp(nn.Module):
   flash_axis_names: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
   ragged_qkv_axis_names: AxisNames = (CACHE_BATCH, CACHE_HEADS, CACHE_SEQUENCE, CACHE_KV)
   ragged_lengths_names: AxisNames = (CACHE_BATCH,)
-  prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
-  ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
   compute_axis_order: AxisIdxes = (0, 1, 2, 3)
   key_axis_order: AxisIdxes = (2, 0, 1, 3)
 
@@ -787,29 +785,14 @@ class AttentionOp(nn.Module):
       value,
       decoder_segment_ids,
       model_mode,
+      prefill_kv_cache=None,
+      ar_kv_cache=None,
       previous_chunk=None,
       page_state: Optional[page_manager.PageState] = None,
   ):
 
-    prefill_kv_cache = None
-    ar_kv_cache = None
     if model_mode != common_types.MODEL_MODE_TRAIN:
-      prefill_kv_cache, ar_kv_cache = kvcache.KVCache(
-          self.max_prefill_predict_length,
-          self.max_target_length,
-          self.dtype,
-          kv_quant=self.kv_quant,
-          prefill_cache_axis_order=self.prefill_cache_axis_order,
-          ar_cache_axis_order=self.ar_cache_axis_order,
-          use_chunked_prefill=self.config.use_chunked_prefill,
-      )(
-          key,
-          value,
-          decoder_segment_ids,
-          model_mode,
-          use_ragged_attention=self.use_ragged_attention,
-          previous_chunk=previous_chunk,
-      )
+      assert prefill_kv_cache
       key, value, decoder_segment_ids = prefill_kv_cache
 
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
@@ -932,8 +915,6 @@ class Attention(nn.Module):
         num_kv_heads=self.num_kv_heads,
         dropout_rate=self.dropout_rate,
         dtype=self.dtype,
-        prefill_cache_axis_order=self.prefill_cache_axis_order,
-        ar_cache_axis_order=self.ar_cache_axis_order,
         compute_axis_order=self.compute_axis_order,
         reshape_q=self.reshape_q,
         attention_type=self.attention_type,
@@ -1101,6 +1082,27 @@ class Attention(nn.Module):
       )
     inputs = rotary_embedding(inputs, inputs_positions)
     return inputs
+  
+  def update_kv_caches(self, key, value, decoder_segment_ids, model_mode, previous_chunk) :
+    prefill_kv_cache = None
+    ar_kv_cache = None
+    prefill_kv_cache, ar_kv_cache = kvcache.KVCache(
+      self.max_prefill_predict_length,
+      self.max_target_length,
+      self.dtype,
+      kv_quant=self.kv_quant,
+      prefill_cache_axis_order=self.prefill_cache_axis_order,
+      ar_cache_axis_order=self.ar_cache_axis_order,
+      use_chunked_prefill=self.config.use_chunked_prefill,
+      )(
+        key,
+        value,
+        decoder_segment_ids,
+        model_mode,
+        use_ragged_attention=self.use_ragged_attention,
+        previous_chunk=previous_chunk,
+        )
+    return prefill_kv_cache, ar_kv_cache
 
   @nn.compact
   def __call__(
@@ -1200,7 +1202,11 @@ class Attention(nn.Module):
       )
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
     else:
-      out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, previous_chunk)
+      prefill_kv_cache=None
+      ar_kv_cache = None
+      if model_mode != common_types.MODEL_MODE_TRAIN:
+        prefill_kv_cache, ar_kv_cache = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
+      out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, prefill_kv_cache, ar_kv_cache, previous_chunk)
 
     if model_mode == common_types.MODEL_MODE_PREFILL:
       out = nn.with_logical_constraint(out, self.out_axis_names)
@@ -1342,24 +1348,42 @@ class MLA(Attention):
     # DeepSeek v3 was doing it in attention score computation.
     return jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
 
+  def mla_kv_cache_latent(self, low_rank_main, key_rope, decoder_segment_ids):
+    prefill_kv_cache = None
+    ar_kv_cache = None
+    return 
+ 
+
   def mla_kv_projection(self, inputs: Array, inputs_positions: Array) -> Tuple[Array, Array]:
     """MLA key/value projection with integrated rotary embedding."""
     low_rank = self.wkv_a(inputs)
     low_rank_main, low_rank_rope = jnp.split(low_rank, [self.kv_lora_rank], axis=-1)
     low_rank_main = self.kv_norm(low_rank_main)
-    # Note: cache `low_rank_main` and `low_rank_rope` for inference.
-    kv_out = self.wkv_b(low_rank_main)
-
-    # Split kv_out into key_nope and value parts.
-    key_nope, value = jnp.split(kv_out, [self.qk_nope_head_dim], axis=-1)
-
+    
     # Apply rotary embedding to key_rope.
     key_rope = jnp.expand_dims(low_rank_rope, axis=2)
     key_rope = self.apply_rotary_embedding(key_rope, inputs_positions, name="key_rope")
     key_rope = jnp.broadcast_to(key_rope, (key_nope.shape[0], key_nope.shape[1], self.num_query_heads, key_rope.shape[3]))
 
+    prefill_kv_cache = None
+    ar_kv_cache = None
+    
+    if model_mode != common_types.MODEL_MODE_TRAIN:
+      if not naive_mla:
+        prefill_kv_cache, ar_kv_cache = kvcache.MLA_KVCache(
+          self.max_prefill_predict_length,
+          self.max_target_length,
+          self.dtype,
+          kv_quant=self.kv_quant,
+          )
+    
+    # Note: cache `low_rank_main` and `low_rank_rope` for inference.
+    kv_out = self.wkv_b(low_rank_main)
+
+    # Split kv_out into key_nope and value parts.
+    key_nope, value = jnp.split(kv_out, [self.qk_nope_head_dim], axis=-1)
     key = jnp.concatenate([key_nope, key_rope], axis=-1)
-    return key, value
+    return key, value, prefill_kv_cache, ar_kv_cache
 
   @nn.compact
   def __call__(
@@ -1407,7 +1431,7 @@ class MLA(Attention):
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
 
-    out = self.attention_op(query, key, value, decoder_segment_ids, model_mode)
+    out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, prefill_kv_cache, ar_kv_cache)
     out = nn.with_logical_constraint(out, self.out_axis_names)
     out = self.out_projection(inputs_q.shape[-1], out)
     return out
