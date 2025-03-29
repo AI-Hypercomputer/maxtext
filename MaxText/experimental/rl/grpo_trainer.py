@@ -27,6 +27,7 @@ import os
 import sys
 import functools
 import queue
+from collections import defaultdict
 
 from typing import Sequence
 from absl import app
@@ -38,7 +39,7 @@ from jax import random
 from jax.sharding import PartitionSpec as P
 import numpy as np
 
-import pathwaysutils  # pylint: disable=unused-import
+# import pathwaysutils  # pylint: disable=unused-import
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 maxtext_parent_dir = os.path.dirname(os.path.dirname(current_dir))
@@ -291,13 +292,26 @@ def generate_completions(config, tokenizer_model, engine, data, params, true_len
       decode_state = engine.insert(prefill_result, decode_state, slot=slot)
       slot += 1
   steps = config.max_target_length - config.max_prefill_predict_length
-  completions = jnp.zeros((prompts.shape[0], config.max_target_length - config.max_prefill_predict_length), dtype=jnp.int32)
+  # completions = jnp.zeros((prompts.shape[0], config.max_target_length - config.max_prefill_predict_length), dtype=jnp.int32)
+
+  # for s in range(steps):
+  #   rng, rng_generate = jax.random.split(rng)
+  #   decode_state, result_tokens = engine.generate(params, decode_state, rng=rng_generate)
+  #   for i in range(slot):
+  #     completions.at[s, i].set(result_tokens.get_result_at_slot(i).tokens.item())
+  max_logging.log("completed prefill, starting generate")
+  completions = defaultdict(list)
+  result_tokens_list = []
   for s in range(steps):
     rng, rng_generate = jax.random.split(rng)
     decode_state, result_tokens = engine.generate(params, decode_state, rng=rng_generate)
+    result_tokens_list.append(result_tokens)
+  max_logging.log("completed generations, now extracting tokens")
+  for s in range(steps):
     for i in range(slot):
-      completions.at[s, i].set(result_tokens.get_result_at_slot(i).tokens.item())
-
+      completions[i].append(result_tokens_list[s].get_result_at_slot(i).tokens.item())
+  completions = jnp.array(np.array(completions.values()))
+  
   prompt_with_completions, eos_positions = [], []
   for i in range(prompts.shape[0]):
     tokens = prompts[i]

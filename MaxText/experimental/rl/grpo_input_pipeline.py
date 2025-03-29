@@ -74,7 +74,7 @@ def preprocessing_pipeline(
     dataset = dataset.map(
         _input_pipeline_utils.tokenization,
         batched=True,
-        fn_kwargs={"hf_tokenizer": tokenizer, "max_length": max_target_length - 1, "column_names": data_column_names},
+        fn_kwargs={"hf_tokenizer": tokenizer, "truncation": True, "max_length": max_target_length - 1, "column_names": data_column_names},
     )
   dataset = dataset.select_columns(data_column_names)
   dataset = _input_pipeline_utils.HFDataSource(
@@ -114,8 +114,8 @@ def preprocessing_pipeline(
       read_options=grain.ReadOptions(num_threads=num_threads, prefetch_buffer_size=128),
   )
 
-  single_host_gen = SingleHostDataLoader(dataloader, global_mesh)
-  return single_host_gen
+  # single_host_gen = SingleHostDataLoader(dataloader, global_mesh)
+  return iter(dataloader)
 
 
 def make_hf_train_iterator(
