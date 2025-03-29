@@ -28,6 +28,7 @@ import os
 import sys
 import functools
 import queue
+from collections import defaultdict
 
 from typing import Sequence
 from absl import app
@@ -40,7 +41,7 @@ from jax import random
 from jax.sharding import PartitionSpec as P
 import numpy as np
 
-import pathwaysutils  # pylint: disable=unused-import
+# import pathwaysutils  # pylint: disable=unused-import
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 maxtext_parent_dir = os.path.dirname(os.path.dirname(current_dir))
