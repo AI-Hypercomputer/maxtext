@@ -15,16 +15,18 @@ limitations under the License.
 """
 
 import sys
+import os.path
+
 import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
 import unittest
 
-import pyconfig
-import pytest
-from input_pipeline import _hf_data_processing
-from input_pipeline import input_pipeline_interface
+from MaxText import pyconfig
+from MaxText.globals import PKG_DIR
+from MaxText.input_pipeline import _hf_data_processing
+from MaxText.input_pipeline import input_pipeline_interface
 
 
 class HfDataProcessingTest(unittest.TestCase):
@@ -32,7 +34,7 @@ class HfDataProcessingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
@@ -43,7 +45,7 @@ class HfDataProcessingTest(unittest.TestCase):
         hf_path="parquet",
         hf_data_dir="",
         hf_train_files="gs://maxtext-dataset/hf/c4/c4-train-00000-of-01637.parquet",
-        tokenizer_path="google-t5/t5-large",
+        tokenizer_path=os.path.join(os.path.dirname(PKG_DIR), "assets", "google-t5", "t5-large"),
         enable_checkpointing=False,
     )
     self.config = config

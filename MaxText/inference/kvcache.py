@@ -21,7 +21,7 @@ from typing import Any, Optional
 from flax import linen as nn
 import jax
 import jax.numpy as jnp
-import common_types
+from MaxText import common_types
 
 
 Array = common_types.Array

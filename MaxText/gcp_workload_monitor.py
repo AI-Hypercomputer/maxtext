@@ -20,7 +20,7 @@ import time
 import queue
 import threading
 
-import max_logging
+from MaxText import max_logging
 import requests  # type: ignore[pyi-error]
 import jax
 

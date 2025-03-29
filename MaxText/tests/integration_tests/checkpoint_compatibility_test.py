@@ -17,16 +17,20 @@ limitations under the License.
 """Integraion tests for test_checkpointing.sh"""
 from datetime import datetime
 import subprocess
+import os.path
 import pytest
+from MaxText.globals import PKG_DIR
 
 
 def run_checkpoint_compatibility(attention_type):
   """Tests checkpoint compatibility."""
 
   run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+  script_path = os.path.join(os.path.dirname(PKG_DIR), "end_to_end", "test_checkpoint_compatibility.sh")
+  if not os.path.isfile(script_path): raise FileNotFoundError(script_path)
   command = [
       "bash",
-      "end_to_end/test_checkpoint_compatibility.sh",
+      script_path,
       f"runner_{run_date}",  # run_name
       r"gs://runner-maxtext-logs",  # output_path
       r"gs://maxtext-dataset",  # dataset_path

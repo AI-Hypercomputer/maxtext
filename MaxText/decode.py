@@ -22,9 +22,9 @@ import jax.numpy as jnp
 from absl import app
 from jetstream.engine import engine_api
 
-import max_utils
-import maxengine
-import pyconfig
+from MaxText import max_utils
+from MaxText import maxengine
+from MaxText import pyconfig
 
 # Number of text sequences to process in a single batch.
 _NUM_STREAMS = 1

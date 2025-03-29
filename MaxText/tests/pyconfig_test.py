@@ -12,8 +12,10 @@ limitations under the License.
 """
 
 import unittest
-import pyconfig
+import os.path
 
+from MaxText import pyconfig
+from MaxText.globals import PKG_DIR
 
 class PyconfigTest(unittest.TestCase):
   """Tests for pyconfig.py"""
@@ -66,7 +68,7 @@ class PyconfigTest(unittest.TestCase):
 
   def test_multiple_unmodifiable_configs(self):
     config_train = pyconfig.initialize(
-        ["train.py", "configs/base.yml"],
+        ["python3", "-m", "MaxText.train", os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,
@@ -81,7 +83,7 @@ class PyconfigTest(unittest.TestCase):
         ici_fsdp_parallelism=4,
     )
     config_inference = pyconfig.initialize(
-        ["decode.py", "configs/base.yml"],
+        ["python3", "-m", "MaxText.decode", os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,

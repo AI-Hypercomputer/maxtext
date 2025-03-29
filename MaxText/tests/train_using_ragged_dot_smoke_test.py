@@ -18,7 +18,9 @@ import os
 import unittest
 
 from absl.testing import absltest
-from train import main as train_main
+
+from MaxText.globals import PKG_DIR
+from MaxText.train import main as train_main
 
 
 class Train(unittest.TestCase):
@@ -30,7 +32,7 @@ class Train(unittest.TestCase):
     train_main(
         [
             None,
-            "third_party/py/maxtext/configs/base.yml",
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"base_output_directory={test_tmpdir}",
             "run_name=ragged_dot_smoke_test",
             "base_emb_dim=8",

@@ -30,14 +30,14 @@ from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
-import common_types
-from kernels.ragged_attention import ragged_gqa
-from kernels.ragged_attention import ragged_mha
-from inference import kvcache, page_manager, paged_attention
-from layers import embeddings
-from layers import initializers
-from layers import linears
-from layers import quantizations
+from MaxText import common_types
+from MaxText.kernels.ragged_attention import ragged_gqa
+from MaxText.kernels.ragged_attention import ragged_mha
+from MaxText.inference import kvcache, page_manager, paged_attention
+from MaxText.layers import embeddings
+from MaxText.layers import initializers
+from MaxText.layers import linears
+from MaxText.layers import quantizations
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error

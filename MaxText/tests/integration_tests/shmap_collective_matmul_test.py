@@ -16,7 +16,9 @@ limitations under the License.
 
 """Integraion test for pedagogical_examples/shmap_collective_matmul.py"""
 import subprocess
+import os.path
 import pytest
+from MaxText.globals import PKG_DIR
 
 
 @pytest.mark.integration_test
@@ -26,7 +28,8 @@ def test_shmap_collective_matmul_example():
 
   command = [
       "python3",
-      "pedagogical_examples/shmap_collective_matmul.py",
+      "-m",
+      "pedagogical_examples.shmap_collective_matmul"
   ]
 
-  subprocess.run(command, check=True, cwd="..")
+  subprocess.run(command, check=True, cwd=os.path.dirname(PKG_DIR))

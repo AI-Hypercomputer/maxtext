@@ -16,14 +16,16 @@ limitations under the License.
 
 """ Test that all weights are expected dtype (default float32) """
 import unittest
+import os.path
 from absl.testing import absltest
 
-import pyconfig
+from MaxText import pyconfig
 
-import optimizers
-from layers import models
-from layers import quantizations
-import max_utils
+from MaxText import optimizers
+from MaxText.layers import models
+from MaxText.layers import quantizations
+from MaxText import max_utils
+from MaxText.globals import PKG_DIR
 import jax
 from jax.sharding import Mesh
 import jax.numpy as jnp
@@ -60,21 +62,21 @@ class StateDtypes(unittest.TestCase):
     jax.tree_util.tree_map_with_path(lambda x, y: self.assertEqual(y.dtype, expected_dtype), weights)
 
   def test_default_float32(self):
-    argv = [None, "configs/base.yml", "enable_checkpointing=False"]
+    argv = [None, os.path.join(PKG_DIR, "configs", "base.yml"), "enable_checkpointing=False"]
     weights = self.get_weights(argv)
     self.assert_pytree_is_dtype(weights, jnp.float32)
 
   def test_set_bf16(self):
-    argv = [None, "configs/base.yml", "enable_checkpointing=False", "weight_dtype=bfloat16"]
+    argv = [None, os.path.join(PKG_DIR, "configs", "base.yml"), "enable_checkpointing=False", "weight_dtype=bfloat16"]
     weights = self.get_weights(argv)
     self.assert_pytree_is_dtype(weights, jnp.bfloat16)
 
   def test_default_mu_float32(self):
-    argv = [None, "configs/base.yml", "enable_checkpointing=False"]
+    argv = [None, os.path.join(PKG_DIR, "configs", "base.yml"), "enable_checkpointing=False"]
     mu = self.get_mu(argv)
     self.assert_pytree_is_dtype(mu, jnp.float32)
 
   def test_set_mu_bf16(self):
-    argv = [None, "configs/base.yml", "enable_checkpointing=False", "mu_dtype=bfloat16"]
+    argv = [None, os.path.join(PKG_DIR, "configs", "base.yml"), "enable_checkpointing=False", "mu_dtype=bfloat16"]
     mu = self.get_mu(argv)
     self.assert_pytree_is_dtype(mu, jnp.bfloat16)
