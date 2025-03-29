@@ -18,7 +18,9 @@ limitations under the License.
 import sys
 import jax
 import unittest
+import os.path
 from MaxText import max_utils
+from MaxText.globals import PKG_DIR
 from jax.sharding import Mesh
 from MaxText.layers import models
 from MaxText.layers import embeddings
@@ -61,7 +63,7 @@ class GPT3(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.cfg = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         run_name="test",
         enable_checkpointing=False,
         model_name="gpt3-52k",

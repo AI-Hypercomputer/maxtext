@@ -10,6 +10,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+from MaxText.globals import PKG_DIR
 
 # pylint: disable=line-too-long
 """Convert weights from a paxml gpt3 model to a MaxText one.
@@ -79,7 +80,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
 
   base_args = [
       "",
-      "MaxText/configs/base.yml",  # base arg
+      os.path.join(PKG_DIR, "configs", "base.yml"),  # base arg
       "per_device_batch_size=1",
       "ici_fsdp_parallelism=-1",
       "ici_tensor_parallelism=1",

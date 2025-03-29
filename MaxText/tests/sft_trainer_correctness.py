@@ -30,6 +30,8 @@ import sys
 from jax.sharding import Mesh
 from transformers import AutoTokenizer
 
+from MaxText.globals import PKG_DIR
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 maxtext_parent_dir = os.path.dirname(current_dir)
 sys.path.append(maxtext_parent_dir)
@@ -44,7 +46,7 @@ from MaxText.layers import quantizations
 
 def initialize_config(config):
   return pyconfig.initialize(
-      [sys.argv[0], "MaxText/configs/sft.yml"],
+      [sys.argv[0], os.path.join(PKG_DIR, "configs", "sft.yml")],
       run_name="test-sft-trainer-correctness",
       model_name=config.model_name,
       tokenizer_path=config.tokenizer_path,
@@ -63,7 +65,7 @@ def initialize_config(config):
 
 def get_golden_data(config):
   """Get the golden data for SFTTrainer in TRL."""
-  golden_data_path = "MaxText/test_assets/golden_data_sft_" + config.model_name + ".jsonl"
+  golden_data_path = os.path.join(PKG_DIR, "test_assets", f"golden_data_sft_{config.model_name}.jsonl")
   with jsonlines.open(golden_data_path, "r") as f:
     golden_data = list(f)
   return golden_data[0]

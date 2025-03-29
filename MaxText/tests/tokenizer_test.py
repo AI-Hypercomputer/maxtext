@@ -20,6 +20,8 @@ limitations under the License.
 import numpy as np
 from MaxText import train_tokenizer
 from MaxText.input_pipeline import _input_pipeline_utils
+from MaxText.globals import PKG_DIR
+
 import unittest
 import pytest
 import tensorflow_datasets as tfds
@@ -40,7 +42,7 @@ class TokenizerTest(unittest.TestCase):
     vocab_model_name = "test_tokenizer"
     cls.tokenizer_path = os.path.join(assets_path, vocab_model_name)
     cls.source_tokenizer = _input_pipeline_utils.get_tokenizer(
-        "../assets/tokenizer", "sentencepiece", add_bos=False, add_eos=False
+        os.path.join(PKG_DIR, "assets", "tokenizer"), "sentencepiece", add_bos=False, add_eos=False
     )
     os.environ["TFDS_DATA_DIR"] = dataset_path
     read_config = tfds.ReadConfig(

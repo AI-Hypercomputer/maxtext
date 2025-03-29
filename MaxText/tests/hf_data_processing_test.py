@@ -15,6 +15,8 @@ limitations under the License.
 """
 
 import sys
+import os.path
+
 import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
@@ -22,7 +24,7 @@ from jax.experimental import mesh_utils
 import unittest
 
 from MaxText import pyconfig
-import pytest
+from MaxText.globals import PKG_DIR
 from MaxText.input_pipeline import _hf_data_processing
 from MaxText.input_pipeline import input_pipeline_interface
 
@@ -32,7 +34,7 @@ class HfDataProcessingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],

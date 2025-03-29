@@ -18,6 +18,7 @@ import os
 import unittest
 from absl.testing import absltest
 from MaxText.train import main as train_main
+from MaxText.globals import PKG_DIR
 
 
 class Train(unittest.TestCase):
@@ -33,7 +34,7 @@ class Train(unittest.TestCase):
             "run_name=runner_test",
             r"dataset_path=gs://maxtext-dataset",
             "enable_checkpointing=False",
-            "tokenizer_path=../assets/tokenizer.llama2",
+            rf"tokenizer_path={os.path.join(PKG_DIR, 'assets', 'tokenizer.llama2')}",
             "enable_goodput_recording=False",
             "enable_checkpoint_cloud_logger=False",
             "monitor_goodput=False",

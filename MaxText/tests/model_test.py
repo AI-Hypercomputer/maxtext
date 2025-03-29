@@ -14,8 +14,10 @@
 
 import sys
 import unittest
+import os.path
 
 from MaxText import common_types
+from MaxText.globals import PKG_DIR
 
 from flax.core import freeze
 import jax
@@ -43,7 +45,7 @@ class TestModel(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,

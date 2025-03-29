@@ -16,6 +16,7 @@ limitations under the License.
 
 import subprocess
 import sys
+import os.path
 import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
@@ -23,9 +24,10 @@ from jax.experimental import mesh_utils
 import unittest
 
 from MaxText import pyconfig
+from MaxText.globals import PKG_DIR
 from MaxText.input_pipeline import _grain_data_processing
 from MaxText.input_pipeline import input_pipeline_interface
-
+from MaxText.globals import PKG_DIR
 
 class GrainDataProcessingTest(unittest.TestCase):
 
@@ -41,7 +43,7 @@ class GrainDataProcessingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
@@ -50,7 +52,7 @@ class GrainDataProcessingTest(unittest.TestCase):
         base_output_directory="gs://max-experiments/",
         dataset_type="grain",
         grain_train_files="/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*",
-        tokenizer_path="../assets/tokenizer",
+        tokenizer_path=os.path.join(PKG_DIR, "assets", "tokenizer"),
         enable_checkpointing=False,
     )
     self.mesh_shape_1d = (len(jax.devices()),)

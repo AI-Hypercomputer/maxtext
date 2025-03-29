@@ -17,11 +17,13 @@ import functools
 from typing import Any, List, Optional, Tuple, Callable
 from collections import defaultdict
 import uuid
+import os.path
 
 import flax
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
+from MaxText.globals import PKG_DIR
 from MaxText.inference.page_manager import PageManager, PageState
 from MaxText.layers import models, quantizations
 
@@ -1433,7 +1435,7 @@ def create_engine_from_config_flags(batch_size, max_prefill_predict_length, max_
     k, v = cmd_arg.split("=")
     args[k.strip()] = v.strip()
   assert "load_parameters_path" in args, "load_parameters_path must be defined"
-  updated_args = ["MaxText/maxengine_server.py", "../configs/base.yml"]
+  updated_args = [os.path.join(PKG_DIR, "maxengine_server.py"), os.path.join(PKG_DIR, "configs", "base.yml")]
   for k, v in args.items():
     option = f"{k}={v}"
     updated_args.append(option)

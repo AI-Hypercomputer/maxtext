@@ -24,8 +24,10 @@ from MaxText import pyconfig
 import pytest
 from MaxText.layers import quantizations
 import unittest
+import os.path
 from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2 import calibration
+from MaxText.globals import PKG_DIR
 
 _QUERY_REGEX = ".*/query"
 _VALUE_REGEX = ".*/value"
@@ -52,7 +54,7 @@ class QuantTestModule(nn.Module):
 
 def _configure_quantization(quant_str="", quant_cfg_path="", mode_str="train", replicate_scale=False):
   config = pyconfig.initialize(
-      [None, "configs/base.yml"],
+      [None, os.path.join(PKG_DIR, "configs", "base.yml")],
       enable_checkpointing=False,
       quantization=quant_str,
       quant_cfg_path=quant_cfg_path,
