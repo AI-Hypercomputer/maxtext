@@ -107,24 +107,35 @@ class WorkloadConfig:
   db_is_test: bool = True
 
   def __post_init__(self):
-    if self.device_type.startswith("v6e"):
+    """Initializes num_devices_per_slice and topology for recording the run into BigQuery"""
+    if self.device_type.startswith("v6e") or self.device_type.startswith("v5e") or self.device_type.startswith("v5litepod"):
       size = int(self.device_type.split("-")[-1])
       if size == 256:
         self.num_devices_per_slice = 256
         self.topology = "16x16"
+      elif size == 128:
+        self.num_devices_per_slice = 128
+        self.topology = "8x16"
       elif size == 64:
         self.num_devices_per_slice = 64
         self.topology = "8x8"
+      elif size == 32:
+        self.num_devices_per_slice = 32
+        self.topology = "4x8"
       elif size == 16:
         self.num_devices_per_slice = 16
         self.topology = "4x4"
+      elif size == 8:
+        self.num_devices_per_slice = 8
+        self.topology = "2x4"
       elif size == 4:
         self.num_devices_per_slice = 4
         self.topology = "2x2"
       else:
-        raise ValueError(f"Unsupported v6e size: {size}")
+        raise ValueError(f"Unsupported v5e or v6e size: {size}")
     else:
-      raise ValueError(f"topology and num_devices_per_slice must be inferred when device_type starts with v6e. device_type: {self.device_type}")
+      self.num_devices_per_slice = int(self.device_type.split("-")[1])/2
+      self.topology = ""
 
 
 @dataclasses.dataclass
@@ -600,7 +611,7 @@ def generate_xpk_workload_cmd(
     args_str = ""
     for k,v in args.items():
       args_str += f'--{k}={v} '
-    upload_metrics_to_bq_cmd = f"python3 benchmarks/upload_metrics_to_bq.py {args_str}"
+    upload_metrics_to_bq_cmd = f"&& python3 benchmarks/upload_metrics_to_bq.py {args_str}"
 
   print(f'User command: {user_command}')
   return (
@@ -612,7 +623,7 @@ def generate_xpk_workload_cmd(
           f' --zone={cluster_config.zone}'
           f' {device_type}'
           f' --num-slices={wl_config.num_slices}'
-          f' --command="{user_command} && {upload_metrics_to_bq_cmd}"'
+          f' --command="{user_command} {upload_metrics_to_bq_cmd}"'
           f' {docker_image_flag}'
           ' --enable-debug-logs'
           f' --workload={name}'
