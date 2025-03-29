@@ -456,10 +456,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     aux = jax.tree_map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
   else:
     if config.optimizer_memory_host_offload:
-      cast_params = jax.device_put(state.params, max_utils.with_memory_kind(state_mesh_shardings.params, "device"))
-      state = state.replace(params=cast_params)
       if config.use_dpo:
-        reference_params = jax.device_put(reference_params, max_utils.with_memory_kind(reference_params_sharding, "device"))
         extra_dpo_args = [reference_params]
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
@@ -478,6 +475,25 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
             jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="device"), state_mesh_shardings.opt_state),
         )
     )
+  # Move attention parameters to device before optimizer update
+  if config.parameter_memory_host_offload:
+    if config.param_scan_axis == 1:
+      # TODO: Support parameter offloading when param_scan_axis=1 causes a transpose
+      config.parameter_memory_host_offload = False
+    else:
+      max_logging.log("Moving attention parameters to device before optimizer update")
+      def move(path, value):
+        allowed_paths = max_utils.common_paths
+        if max_utils.should_offload_parameters(path, allowed_paths):
+          max_logging.log(f"train.py: Moving {path} to device")
+          return value.with_memory_kind(kind="device")
+        return value
+      state = state.replace(
+          params=jax.device_put(
+              state.params,
+              jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params),
+          )
+      )
   new_state = state.apply_gradients(grads=grads)
 
   scalar_metrics = {

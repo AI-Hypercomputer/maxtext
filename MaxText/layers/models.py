@@ -31,6 +31,9 @@ from layers import embeddings
 from layers import linears
 from layers import normalizations, quantizations
 from layers import pipeline
+import max_logging
+from jax._src.sharding_impls import TransferToMemoryKind
+import max_utils
 
 Array = common_types.Array
 Config = common_types.Config
@@ -277,9 +280,31 @@ class Decoder(nn.Module):
       return policy
 
   def set_remat_policy(self, block_layers, policy):
+    """Apply parameter movement and rematerialization policy to layers."""
     RemattedBlockLayers = []
     for block_layer in block_layers:
-      layer = nn.remat(  # pylint: disable=invalid-name
+      if self.config.parameter_memory_host_offload:
+        def move_to_device(variables):
+          """Move parameters to device with proper sharding."""
+          allowed_paths = max_utils.models_paths
+          def map_fn(path_tuple, value):
+            path_str = '/'.join(str(p) for p in path_tuple)
+            if max_utils.should_offload_parameters(path_tuple, allowed_paths):
+              max_logging.log(f"models.py: Moving parameter {path_str} to device")
+              return jax.device_put(value, TransferToMemoryKind("device"))
+            return value
+          return jax.tree_util.tree_map_with_path(map_fn, variables)
+
+        # Transform layer class before remat
+        block_layer = nn.map_variables(
+            block_layer,
+            ['params'],
+            move_to_device,
+            mutable=True
+        )
+
+      # Apply remat policy to layer
+      layer = nn.remat(
           block_layer,
           prevent_cse=not self.config.scan_layers,
           policy=policy,
