@@ -93,7 +93,14 @@ def main(argv: Sequence[str]) -> None:
   text = config.prompt
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
-  tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[config.max_prefill_predict_length])
+  try:
+    # TODO: update jetstream.engine.tokenizer_api.Tokenizer to maintain tokenizer state.
+    has_chat_template = getattr(tokenizer_model.tokenizer, "chat_template", False)  # pytype: disable=attribute-error
+  except AttributeError as _:
+    has_chat_template = False
+  tokens, true_length = tokenizer_model.encode(
+      text, is_bos=not has_chat_template, prefill_lengths=[config.max_prefill_predict_length]
+  )
   assert true_length <= config.max_prefill_predict_length, "can't take too many tokens"
   assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
   assert config.quantization != "nanoo_fp8", "NANOO fp8 on AMD MI300/MI325 GPUs is not supported in decode.py yet"
