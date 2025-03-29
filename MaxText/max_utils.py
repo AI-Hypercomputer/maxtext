@@ -1085,3 +1085,61 @@ def unpermute_from_match_maxtext_rope(arr, model_size):
   evens = arr[..., ::2]
   odds = arr[..., 1::2]
   return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
+
+# TODO: replace with reorder_mask_load_balancing from #1133
+def reorder_tokens_context_parallelism(tensor, cp_size: int, seq_dim: int, to_contiguous: bool):
+  """Reorders a tensor for load balancing the compute of causal attention."""
+
+  if tensor is None:
+    return tensor
+
+  if cp_size == 1:
+    return tensor
+
+  if cp_size % 2 != 0:
+    raise ValueError(f"{cp_size=} must be a multiple of 2.")
+
+  # Need to ensure we have 2 pairs to swap for balancing between cp ranks
+  if tensor.shape[seq_dim] % (cp_size * 2) != 0:
+    raise ValueError(f"{tensor.shape=} is not a multiple of {cp_size*2=}")
+
+  # [B, S, H, D] -> [B, 2*cp_size, S/2*cp_size, D] #Anisha: this is ours
+  # [S, B, H, D] -> [2*cp_size, S/2*cp_size, B, H, D]
+
+  ori_tensor_shape = tensor.shape
+  tensor = jnp.reshape(
+      tensor,
+      (
+          *ori_tensor_shape[:seq_dim],
+          2 * cp_size,
+          ori_tensor_shape[seq_dim] // (2 * cp_size),
+          *ori_tensor_shape[seq_dim + 1 :],
+      ),
+  )
+
+  parts = []
+  if not to_contiguous:
+    for cp_rank in range(cp_size):
+      # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
+      # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
+      index = jnp.array([cp_rank, (2 * cp_size - cp_rank - 1)])
+      parts.append(jnp.take(tensor, index, axis=seq_dim))
+  else:
+    for cp_rank in range(cp_size // 2):
+      # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
+      # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
+      base = 4 * cp_rank
+      index = jnp.array([base, base + 2])
+      parts.append(jnp.take(tensor, index, axis=seq_dim))
+    for cp_rank in range(cp_size // 2):
+      # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
+      # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
+      base = 2 * cp_size - 1 - 4 * cp_rank
+      index = jnp.array([base, base - 2])
+      parts.append(jnp.take(tensor, index, axis=seq_dim))
+
+  # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D]
+  # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D]
+  combined = jnp.stack(parts, axis=seq_dim)
+
+  return jnp.reshape(combined, ori_tensor_shape)

@@ -614,6 +614,10 @@ def generate_xpk_workload_cmd(
     upload_metrics_to_bq_cmd = f"&& python3 benchmarks/upload_metrics_to_bq.py {args_str}"
 
   print(f'User command: {user_command}')
+  HLO_FOLDER="gs://DIR"
+  now = datetime.datetime.now()
+  timestamp = now.strftime("%Y-%m-%d-%H:%M")
+
   return (
       (
           f'{workload_create_command}'
@@ -629,6 +633,7 @@ def generate_xpk_workload_cmd(
           f' --workload={name}'
           f' --priority={wl_config.priority}'
           f' --max-restarts={wl_config.max_restarts}'
+          f' --debug-dump-gcs={HLO_FOLDER}/{wl_config.model.model_name}_{timestamp}_{wl_config.num_slices}_{temp_post_fix}'
           # ' --use-vertex-tensorboard'
           # f' --experiment-name={test_purpose_name}'
           f' {additional_flags}'
@@ -724,12 +729,48 @@ def main() -> int:
       device_type='v6e-256',
   )
 
+  v6e_cluster_config_yucmhab = XpkClusterConfig(
+      device_type='v6e-256',
+      zone='us-east5-b',
+      project='tpu-prod-env-one-vm',
+      cluster_name='bodaborg-v6e-256-dnd-yucmhab'
+  )
+
+  v6e_cluster_config_ts = XpkClusterConfig(
+  cluster_name='bodaborg-v6e-256-ts',
+  project='tpu-prod-env-multipod',
+  zone='us-west1-c',
+  device_type='v6e-256',
+  )
+
+  v6e_cluster_config_xrc = XpkClusterConfig(
+  cluster_name='bodaborg-v6e-256-rxc',
+  project='tpu-prod-env-one-vm',
+  zone='asia-northeast1-b',
+  device_type='v6e-256',
+  )
+
+  v6e_cluster_config_starfish = XpkClusterConfig(
+    zone='europe-west4-a',
+    project='cloud-tpu-prod-starfish',
+    device_type='v6e-256',
+    cluster_name='raymondzou-v6e-256-2',
+  )
+
+  v6e_cluster_config_yuiadrs = XpkClusterConfig(
+      zone='us-east4-b',
+      project='tpu-prod-env-multipod',
+      device_type='v6e-256',
+      cluster_name='bodaborg-v6e-256-qual-yuiadrs-c',
+    )
+
   xpk_workload_cmds = []
   xpk_workload_names = []
 
   list_of_models = [
-    model_configs.llama2_70b_4096_sc,
+    # model_configs.llama2_70b_4096_sc,
     # model_configs.default_128
+    model_configs.llama3_1_70b_131072,
   ]
 
   # Loop possibilities:
@@ -754,15 +795,20 @@ def main() -> int:
     for cluster_config in [
       # v5e_cluster_config,
       # v6e_cluster_config,
-      v6e_cluster_config_yucmhab,
+      # v6e_cluster_config_yucmhab,
+      v6e_cluster_config_yuiadrs,
+      # v6e_cluster_config_starfish,
+      # v6e_cluster_config_ts,
+      # v6e_cluster_config_xrc,
       # another_config,
     ]:
       # Run workloads in the following slice configurations
       for num_slices in [1,]:
         # Use the libtpu dependencies from:
         for libtpu_type in [
-            # LibTpuType.CUSTOM
-            LibTpuType.MAXTEXT
+            LibTpuType.CUSTOM
+            # TODO: revert this back to LibTpuType.MAXTEXT
+            # LibTpuType.MAXTEXT
             # LibTpuType.NIGHTLY
         ]:
           wl_config = WorkloadConfig(
