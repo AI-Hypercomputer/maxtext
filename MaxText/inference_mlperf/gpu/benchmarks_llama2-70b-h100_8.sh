@@ -60,23 +60,24 @@ if "$test_mode"; then
 fi
 
 export XLA_FLAGS="--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_command_buffer=FUSION --xla_disable_hlo_passes=rematerialization"
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.94
 echo XLA_FLAGS: $XLA_FLAGS
 
-# if [[ -z ${QUANTIZATION} ]] ; then
-#   export QUANTIZATION="aqt_fp8"
-# fi
+if [[ -z ${QUANTIZATION} ]] ; then
+    export QUANTIZATION="aqt_fp8"
+fi
 
 if [[ -z ${KV_QUANT_DTYPE} ]] ; then
-  export KV_QUANT_DTYPE="fp8"
-  export QUANTIZE_KVCACHE=True
+    export KV_QUANT_DTYPE="fp8"
+    export QUANTIZE_KVCACHE=True
 fi
 
 if [[ -z ${CHECKPOINT} ]] ; then
-  export CHECKPOINT="gs://inference-benchmarks/models/llama2-70b-chat/2024-05-08-23-16/param-only-decode-ckpt-maxtext/checkpoints/0/items"
+    export CHECKPOINT="gs://inference-benchmarks/models/llama2-70b-chat/2024-05-08-23-16/param-only-decode-ckpt-maxtext/checkpoints/0/items"
 fi
 
 if [[ -z ${TOKENIZER_PATH} ]] ; then
-  export TOKENIZER_PATH="/opt//maxtext/assets/tokenizer.llama2"
+    export TOKENIZER_PATH="/opt//maxtext/assets/tokenizer.llama2"
 fi
 
 if [ -z "$PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES" ];
