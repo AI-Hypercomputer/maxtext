@@ -28,6 +28,7 @@ import os
 import sys
 import functools
 import queue
+from collections import defaultdict
 
 from typing import Sequence
 from absl import app
