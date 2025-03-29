@@ -45,6 +45,7 @@ load_full_state_path: ""
 enable_checkpointing: True
 async_checkpointing: True
 checkpoint_period: 10_000
+num_checkpoints_to_keep: 5
 # enables one replica to read the ckpt then broadcast to the rest
 enable_single_replica_ckpt_restoring: False
 
@@ -637,6 +638,14 @@ sa_q_layout: "HEAD_DIM_MINOR"
 sa_k_layout: "HEAD_DIM_MINOR"
 sa_v_layout: "HEAD_DIM_MINOR"
 
+# Ray
+use_ray: False
+failure_sim_time: 300
+crash_prob: 0.5
+hang_prob: 0.5
+
+# Logging
+log_hps: False
 #######################
 ### Paged Attention ###
 #######################
