@@ -305,7 +305,8 @@ def _get_int8_quant_config(config):
 
 
 def _get_aqt_fp8_quant_config(config):
-  return aqt_config.config_fwd_fp8()
+  cfg = aqt_config.config_v4(fwd_bits="e4m3", dlhs_bits=None, drhs_bits=None, fwd_accumulator_dtype=jnp.bfloat16)
+  return cfg
 
 
 def _dot_general_make(quant_cfg):
