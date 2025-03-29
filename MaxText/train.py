@@ -45,7 +45,7 @@ import max_logging
 import optimizers
 import profiler
 import pyconfig
-import pathwaysutils  # pylint: disable=unused-import
+import pathwaysutils
 import tensorflow as tf
 
 from metric_logger import MetricLogger
@@ -946,6 +946,7 @@ def train_loop(config, state=None):
 
 
 def main(argv: Sequence[str]) -> None:
+  pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   jax.config.update("jax_enable_compilation_cache", os.environ.get("JAX_ENABLE_COMPILATION_CACHE", True))
   # TF allocates extraneous GPU memory when using TFDS data
