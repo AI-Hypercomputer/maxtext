@@ -247,7 +247,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "ici_pipeline_parallelism=4",
             "num_layers_per_pipeline_stage=2",
             "num_pipeline_microbatches=8",
-            rf"tokenizer_path={os.path.join(PKG_DIR, 'assets', 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
             "scan_layers=False",  # We see better performance only scanning the pipeline iterations.
         ]
     )
@@ -294,7 +294,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "ici_pipeline_parallelism=4",
             "num_layers_per_pipeline_stage=8",
             "num_pipeline_microbatches=8",
-            rf"tokenizer_path={os.path.join(PKG_DIR, 'assets', 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
             "scan_layers=False",  # We see better performance only scanning the pipeline iterations.
         ]
     )
@@ -322,7 +322,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "steps=3",
             "enable_checkpointing=False",
             "ici_pipeline_parallelism=4",
-            rf"tokenizer_path={os.path.join(PKG_DIR, 'assets', 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
             "quantization=fp8",
             "scan_layers=False",
             "attention=dot_product",
@@ -352,7 +352,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "steps=3",
             "enable_checkpointing=False",
             "ici_pipeline_parallelism=4",
-            rf"tokenizer_path={os.path.join(PKG_DIR, 'assets', 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
             "quantization=nanoo_fp8",
             "scan_layers=False",
             "attention=dot_product",

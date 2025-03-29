@@ -46,7 +46,7 @@ class Train(unittest.TestCase):
             "steps=10",
             "enable_checkpointing=False",
             "quantization=int8",
-            rf"tokenizer_path={os.path.join(PKG_DIR, 'assets', 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
             "enable_goodput_recording=False",
             "monitor_goodput=False",
             "enable_checkpoint_cloud_logger=False",

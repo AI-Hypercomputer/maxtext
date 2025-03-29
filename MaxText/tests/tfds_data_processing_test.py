@@ -44,7 +44,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
         data_sharding=["data"],
         base_output_directory="gs://max-experiments/",
         dataset_path="gs://maxtext-dataset/",
-        tokenizer_path=os.path.join(PKG_DIR, "assets", "tokenizer"),
+        tokenizer_path=os.path.join(os.path.dirname(PKG_DIR), "assets", "tokenizer"),
         enable_checkpointing=False,
         eval_interval=10,
     )

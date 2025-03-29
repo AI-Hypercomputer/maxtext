@@ -16,6 +16,4 @@
 
 python3 -m pylint $(git ls-files '*.py')
 
-python3 -m pip install -e .
-cd MaxText
-python3 -m pytest
+python3 -m pytest --pyargs MaxText.tests

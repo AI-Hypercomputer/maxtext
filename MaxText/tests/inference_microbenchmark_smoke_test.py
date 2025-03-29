@@ -31,7 +31,7 @@ class Inference_Microbenchmark(unittest.TestCase):
         [
             None,
             os.path.join(PKG_DIR, "configs", "tpu_smoke_test.yml"),
-            rf"tokenizer_path={os.path.join(PKG_DIR, 'assets', 'tokenizer.llama2')}",
+            rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
             "ici_autoregressive_parallelism=-1",
             "ici_fsdp_parallelism=1",
             "max_prefill_predict_length=1024",
