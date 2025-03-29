@@ -33,7 +33,8 @@ from jax.experimental import layout as jax_layout
 import common_types
 from jetstream.core import config_lib
 from jetstream.engine import engine_api
-from jetstream.engine import tokenizer_pb2
+from jetstream.engine.tokenizer_pb2 import TokenizerParameters
+from jetstream.engine.tokenizer_pb2 import TokenizerType
 from jetstream.engine import tokenizer_api
 from jetstream.engine import token_utils
 from utils import lora_utils
@@ -41,7 +42,6 @@ from utils import lora_utils
 import max_utils
 import inference_utils
 import pyconfig
-
 import warnings
 
 warnings.simplefilter("ignore", category=FutureWarning)
@@ -1262,16 +1262,30 @@ class MaxEngine(engine_api.Engine):
         "tokens": self.replicated_sharding,
     }
 
-  def get_tokenizer(self) -> tokenizer_pb2.TokenizerParameters:
+  def get_tokenizer(self) -> TokenizerParameters:
     """Return a protobuf of tokenizer info, callable from Py or C++."""
-    return tokenizer_pb2.TokenizerParameters(path=self.config.tokenizer_path, extra_ids=0)
+    try:
+      tokenizer_type_val = TokenizerType.DESCRIPTOR.values_by_name[self.config.tokenizer_type].number
+      return TokenizerParameters(
+          path=self.config.tokenizer_path,
+          tokenizer_type=tokenizer_type_val,
+          access_token=self.config.hf_access_token,
+          use_chat_template=self.config.use_chat_template,
+          extra_ids=0,
+      )
+    except KeyError as _:
+      raise KeyError(f"Unsupported tokenizer type: {self.config.tokenizer_type}") from None
 
-  def build_tokenizer(self, metadata: tokenizer_pb2.TokenizerParameters) -> tokenizer_api.Tokenizer:
+  def build_tokenizer(self, metadata: TokenizerParameters) -> tokenizer_api.Tokenizer:
     """Return a tokenizer"""
-    if "tiktoken" in metadata.path:
+    if metadata.tokenizer_type == TokenizerType.tiktoken:
       return token_utils.TikToken(metadata)
-    else:
+    elif metadata.tokenizer_type == TokenizerType.sentencepiece:
       return token_utils.SentencePieceTokenizer(metadata)
+    elif metadata.tokenizer_type == TokenizerType.huggingface:
+      return token_utils.HuggingFaceTokenizer(metadata)
+    else:
+      raise ValueError(f"Unsupported tokenizer type: {metadata.tokenizer_type}")
 
   def init_decode_state(
       self,
