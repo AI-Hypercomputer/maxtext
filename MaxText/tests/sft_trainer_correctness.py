@@ -136,7 +136,7 @@ def get_kl_div(maxtext_logits, hf_logits):
   return kl_div
 
 
-def main(config):
+def main(config, test_args):
   golden_data = get_golden_data(config)
   inputs, inputs_segmentation, inputs_position = prepare_maxtext_inputs(golden_data["data"], config)
   maxtext_data = {
@@ -155,14 +155,14 @@ def main(config):
   assert jax.numpy.allclose(
       maxtext_logits[0],
       trl_logits,
-      rtol=1e-05,
-      atol=0.06,
+      rtol=float(test_args.rtol),
+      atol=float(test_args.atol),
       equal_nan=False,
   )
 
   kl_div = get_kl_div(maxtext_logits, trl_logits)
   max_logging.log(f"KL divergence: {kl_div}, max KL divergence: {jnp.max(kl_div)}")
-  assert jax.numpy.all(kl_div < 7e-5)
+  assert jax.numpy.all(kl_div < float(test_args.kl_div))
 
 
 if __name__ == "__main__":
@@ -171,6 +171,9 @@ if __name__ == "__main__":
   parser.add_argument("--tokenizer-path", type=str, required=True)
   parser.add_argument("--model-ckpt-path", type=str, required=True)
   parser.add_argument("--max-target-length", type=int, required=False, default=64)
-  parser_config = parser.parse_args(sys.argv[1:])
-  config = initialize_config(parser_config)
-  main(config)
+  parser.add_argument("--atol", type=float, required=True)
+  parser.add_argument("--rtol", type=float, required=True)
+  parser.add_argument("--kl-div", type=float, required=True)
+  test_args = parser.parse_args(sys.argv[1:])
+  config = initialize_config(test_args)
+  main(config, test_args)
