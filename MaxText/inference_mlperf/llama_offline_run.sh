@@ -83,14 +83,23 @@ then
   HF_CKPT="meta-llama/Llama-2-70b-chat-hf"
 fi
 
+if [ -z "$WEIGHT_DTYPE" ];
+then
+  WEIGHT_DTYPE="bfloat16"
+fi
 
+if [ -z "$DTYPE" ];
+then
+  DTYPE="bfloat16"
+fi
 
 if [ -z "$MAXENGINE_ARGS" ];
 then
   CHECKPOINT="gs://msingh-bkt/checkpoints/quant_${MODEL_NAME}-chat/mlperf_070924/int8_"
-  BASE_CFG="model_name=${MODEL_NAME} tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT}"
+  BASE_CFG="model_name=${MODEL_NAME} tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT}}"
+  DTYPE_CFG="weight_dtype=${WEIGHT_DTYPE} dtype=${DTYPE}"
   QUANT_CFG="quantization=int8 quantize_kvcache=True checkpoint_is_quantized=True"
-  MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG}"
+  MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${DTYPE_CFG}"
 fi
 
 if [ -z "$BASEDIR" ];
