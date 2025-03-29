@@ -174,7 +174,7 @@ class MoeLoopBlock(nn.Module):
 
   @nn.compact
   def __call__(self, inputs, deterministic: bool = False):
-    gate_logits = linears.DenseGeneral(
+    gate_logits, _ = linears.MoeGate(
         self.num_experts, dtype=self.dtype, kernel_init=self.kernel_init, kernel_axes=self.kernel_axes, name="gate"
     )(inputs)
 
