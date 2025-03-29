@@ -18,7 +18,7 @@ logical_axis_rules: [
                       ['vocab', ['tensor', 'autoregressive']],
                       ['activation_batch', []],
                       ['activation_length', []],
-                      ['activation_embed', []],
+                      ['activation_embed', ['tensor', 'autoregressive']],
                       ['activation_vocab', ['tensor', 'autoregressive']],
                       ['heads', ['tensor', 'autoregressive']],
                       ['kv', []],
