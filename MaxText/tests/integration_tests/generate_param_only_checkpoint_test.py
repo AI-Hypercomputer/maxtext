@@ -25,10 +25,12 @@ def run_generate_param_only_checkpoint(attention_type, quantization):
   """Tests generating a parameter-only checkpoint."""
 
   run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+  script_path = os.path.join(os.path.dirname(PKG_DIR), "end_to_end", "test_generate_param_only_checkpoint.sh")
+  if not os.path.isfile(script_path): raise FileNotFoundError(script_path)
   # fmt: off
   command = [
       "bash",
-      os.path.join(os.path.dirname(PKG_DIR), "end_to_end", "test_generate_param_only_checkpoint.sh"),
+      script_path,
       "-r", f"runner_{run_date}",
       "-o", r"gs://runner-maxtext-logs",
       "-d", r"gs://maxtext-dataset",

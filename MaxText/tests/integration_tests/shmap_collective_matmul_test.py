@@ -28,7 +28,8 @@ def test_shmap_collective_matmul_example():
 
   command = [
       "python3",
-      os.path.join(os.path.dirname(PKG_DIR), "pedagogical_examples", "shmap_collective_matmul.py"),
+      "-m",
+      "pedagogical_examples.shmap_collective_matmul"
   ]
 
-  subprocess.run(command, check=True, cwd="..")
+  subprocess.run(command, check=True, cwd=os.path.dirname(PKG_DIR))

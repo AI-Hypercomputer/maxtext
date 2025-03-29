@@ -37,8 +37,10 @@ class GrainDataProcessingTest(unittest.TestCase):
   def setUpClass(cls):
     super().setUpClass()
     temp_dir = tempfile.gettempdir()
+    script_path = os.path.join(os.path.dirname(PKG_DIR), "setup_gcsfuse.sh")
+    if not os.path.isfile(script_path): raise FileNotFoundError(script_path)
     exit_code = subprocess.call(
-        ["bash", os.path.join(os.path.dirname(PKG_DIR), "setup_gcsfuse.sh"),
+        ["bash", script_path,
          "DATASET_GCS_BUCKET=maxtext-dataset", f"MOUNT_PATH={os.path.join(temp_dir, 'gcsfuse')}"]
     )
     if exit_code != 0:
