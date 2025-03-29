@@ -42,6 +42,9 @@ apt update -y && apt -y install gcsfuse
 rm -rf /var/lib/apt/lists/*
 EOF
 
+# We need to pin specific versions of setuptools, see b/402501203 for more.
+pip3 install setuptools==65.5.0
+
 # Set environment variables
 for ARGUMENT in "$@"; do
     IFS='=' read -r KEY VALUE <<< "$ARGUMENT"
