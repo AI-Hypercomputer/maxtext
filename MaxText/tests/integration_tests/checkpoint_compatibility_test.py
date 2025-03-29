@@ -18,6 +18,7 @@ limitations under the License.
 from datetime import datetime
 import subprocess
 import os.path
+import pytest
 from MaxText.globals import PKG_DIR
 
 
