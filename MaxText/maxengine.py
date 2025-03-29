@@ -276,8 +276,8 @@ class MaxEngine(engine_api.Engine):
     Load Single adapter from adapter_path.
     Expect adapter_config.json and LoRA adapter weights at this path within subdirectory `/0/items`.
     """
-    adapter_config_path = f"{adapter_path}/adapter_config.json"
-    adapter_weights_path = f"{adapter_path}/0/items"
+    adapter_config_path = os.path.join(adapter_path, "adapter_config.json")
+    adapter_weights_path = os.path.join(adapter_path, "0", "items")
 
     params, config = lora_utils.load_adapter(self.config, self.abstract_params, adapter_config_path, adapter_weights_path)
 

@@ -1076,8 +1076,8 @@ if __name__ == "__main__":
     lora_ids = list_folders_pathlib(args.lora_input_adapters_path)
 
     for lora_id in lora_ids:
-      lora_path = f"{args.lora_input_adapters_path}/{lora_id}"
-      lora_config_path = f"{lora_path}/adapter_config.json"
+      lora_path = os.path.join(args.lora_input_adapters_path, lora_id)
+      lora_config_path = os.path.join(lora_path, "adapter_config.json")
 
       if not os.path.exists(lora_config_path):
         max_logging.log(f"Ignoring {lora_id} adapter because its directory doesn't have adapter_config.json.")
@@ -1097,6 +1097,6 @@ if __name__ == "__main__":
           lora_output_gcs_path = f"{args.maxtext_model_path}/loras/{lora_id}"
 
           save_weights_to_checkpoint(lora_output_gcs_path, jax_lora_weights, SIMULATED_CPU_DEVICES_COUNT)
-          gcs_utils.write_dict_to_gcs_json(lora_config_dict, f"{lora_output_gcs_path}/adapter_config.json")
+          gcs_utils.write_dict_to_gcs_json(lora_config_dict, os.path.join(lora_output_gcs_path, "adapter_config.json"))
 
           max_logging.log(f"Successfully saved lora_weights to {lora_output_gcs_path}.")

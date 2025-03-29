@@ -17,7 +17,9 @@ limitations under the License.
 """Integraion tests for test_checkpointing.sh"""
 from datetime import datetime
 import subprocess
+import os.path
 import pytest
+from MaxText.globals import PKG_DIR
 
 
 def run_checkpoint_compatibility(attention_type):
@@ -26,7 +28,7 @@ def run_checkpoint_compatibility(attention_type):
   run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
   command = [
       "bash",
-      "end_to_end/test_checkpoint_compatibility.sh",
+      os.path.join(os.path.dirname(PKG_DIR), "end_to_end", "test_checkpoint_compatibility.sh"),
       f"runner_{run_date}",  # run_name
       r"gs://runner-maxtext-logs",  # output_path
       r"gs://maxtext-dataset",  # dataset_path

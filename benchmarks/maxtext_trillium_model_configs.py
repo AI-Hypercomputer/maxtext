@@ -18,6 +18,7 @@
 import dataclasses
 import os.path
 import typing
+from tempfile import gettempdir
 import xla_flags_library
 
 from benchmarks.globals import PKG_DIR
@@ -500,7 +501,7 @@ llama2_70b_4096_sc_real_data_tfds = _add_to_model_dictionary(
     ),
 )
 
-
+temp_dir = gettempdir()
 llama2_70b_4096_sc_real_data_grain = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
@@ -523,7 +524,7 @@ llama2_70b_4096_sc_real_data_grain = _add_to_model_dictionary(
             "enable_checkpointing": False,
             "dataset_type": "grain",
             "grain_train_files": (
-                "/tmp/dataset/array-record/c4/en/3.0.1/c4-train.array_record*"
+                os.path.join(temp_dir, "dataset", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*")
             ),
             "grain_worker_count": 24,
             "profiler": "xplane",
@@ -580,7 +581,7 @@ llama2_70b_4096_sc_real_data_grain_checkpoint = _add_to_model_dictionary(
             "async_checkpointing": True,
             "dataset_type": "grain",
             "grain_train_files": (
-                "/tmp/dataset/array-record/c4/en/3.0.1/c4-train.array_record*"
+                os.path.join(temp_dir, "dataset", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*")
             ),
             "grain_worker_count": 24,
             "profiler": "xplane",

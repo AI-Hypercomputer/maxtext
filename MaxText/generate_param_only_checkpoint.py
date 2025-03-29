@@ -23,6 +23,7 @@ limitations under the License.
    The output "parameter state" is output to the checkpoint directory. Additionally it is cast down to bf16.
 """
 
+import os.path
 from MaxText import checkpointing
 import jax
 from MaxText import max_logging
@@ -113,9 +114,9 @@ def _generate_lora_decode_checkpoints(config, mesh):
   lora_adapters = gcs_utils.gcs_list_directories(config.lora_input_adapters_path)
   for lora_id in lora_adapters:
     # Expected lora_checkpoint_dir = <checkpoint_dir>/loras/<lora_id>
-    lora_checkpoint_dir = f"{config.checkpoint_dir}loras/{lora_id}/"
+    lora_checkpoint_dir = os.path.join(config.checkpoint_dir, "loras", lora_id, "")
 
-    lora_adapter_path = f"{config.lora_input_adapters_path}/{lora_id}/"
+    lora_adapter_path = os.path.join(config.lora_input_adapters_path, lora_id, "")
 
     # Create a checkpoint manager to save decode checkpoint at lora_checkpoint_dir
     checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
@@ -131,11 +132,11 @@ def _generate_lora_decode_checkpoints(config, mesh):
 
     _possibly_unroll_params(config, lora_state, lora_state_annotations, mesh)
 
-    gcs_utils.write_dict_to_gcs_json(lora_config, lora_checkpoint_dir + "adapter_config.json")
+    gcs_utils.write_dict_to_gcs_json(lora_config, os.path.join(lora_checkpoint_dir, "adapter_config.json"))
 
     # Save decode state to config's checkpoint directory at step 0
     _save_decode_checkpoint(config, lora_state, checkpoint_manager)
-    max_logging.log(f"Successfully saved LoRA checkpoint at: {lora_checkpoint_dir}0/items")
+    max_logging.log(f"Successfully saved LoRA checkpoint at: {os.path.join(lora_checkpoint_dir, '0', 'items')}")
 
 
 def _save_decode_checkpoint(config, state, checkpoint_manager):

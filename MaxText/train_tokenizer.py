@@ -48,7 +48,8 @@ def _dump_chars_to_textfile(dataset: tf.data.Dataset, maxchars: int = int(1e7), 
   """
   char_count = 0
   ds_iter = dataset.as_numpy_iterator()
-  with tempfile.NamedTemporaryFile(delete=False, prefix="/tmp/ds_chars") as outfp:
+  temp_dir = tempfile.gettempdir()
+  with tempfile.NamedTemporaryFile(delete=False, prefix=os.path.join(temp_dir, "ds_chars")) as outfp:
     while char_count < maxchars:
       example = next(ds_iter)
       for k in data_keys:
@@ -87,7 +88,8 @@ def _train_sentencepiece(
   else:
     abs_model_path = os.path.abspath(os.path.expanduser(model_path))
   fname, _ = _dump_chars_to_textfile(dataset, maxchars=maxchars, data_keys=data_keys)
-  with tempfile.NamedTemporaryFile(delete=False, prefix="/tmp/sp_tmp") as model_fp:
+  temp_dir = tempfile.gettempdir()
+  with tempfile.NamedTemporaryFile(delete=False, prefix=os.path.join(temp_dir, "sp_tmp")) as model_fp:
     pass  # we just want a prefix'd tmp-filename
   argstr = " ".join(
       [

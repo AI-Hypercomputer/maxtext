@@ -14,14 +14,18 @@
 
 """Integration tests for SFT trainer correctness."""
 
+import os.path
 import pytest
 import subprocess
+
+from MaxText.globals import PKG_DIR
 
 
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
 def test_maxtext_with_sft_in_trl():
-  command = ["gsutil", "cp", "-r", "gs://maxtext-dataset/hf/llama3.1-tokenizer", "../assets/"]
+  command = ["gsutil", "cp", "-r", "gs://maxtext-dataset/hf/llama3.1-tokenizer",
+             os.path.join(os.path.dirname(PKG_DIR), "assets", "")]
   exit_code = subprocess.call(command)
   if exit_code != 0:
     raise ValueError(f"{command} failed with exit code: {exit_code}")
@@ -31,7 +35,7 @@ def test_maxtext_with_sft_in_trl():
       "-m",
       "MaxText.tests.sft_trainer_correctness",
       "--model-name=llama3.1-8b",
-      "--tokenizer-path=assets/llama3.1-tokenizer",
+      f"--tokenizer-path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'llama3.1-tokenizer')}",
       "--model-ckpt-path=gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items",
   ]
 

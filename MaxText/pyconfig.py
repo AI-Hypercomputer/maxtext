@@ -358,7 +358,7 @@ class _HyperParameters:
         loaded_parent_config_filename = os.path.join(os.path.dirname(config_name), parent_config_filename)
         if not os.path.isfile(loaded_parent_config_filename):
           dir_path = os.path.dirname(os.path.realpath(__file__))
-          loaded_parent_config_filename = os.path.join(dir_path, f"configs/{parent_config_filename}")
+          loaded_parent_config_filename = os.path.join(dir_path, "configs", parent_config_filename)
       else:
         loaded_parent_config_filename = parent_config_filename
 
@@ -525,10 +525,10 @@ class _HyperParameters:
       model_name = raw_keys["model_name"]
       # First look at the model configs next to the base_config_path, and
       # fallback to the python codebase if the config cannot be found.
-      file_path = os.path.join(os.path.dirname(base_config_path), f"models/{model_name}.yml")
+      file_path = os.path.join(os.path.dirname(base_config_path), "models", f"{model_name}.yml")
       if not os.path.isfile(file_path):
         dir_path = os.path.dirname(os.path.realpath(__file__))
-        file_path = os.path.join(dir_path, f"configs/models/{model_name}.yml")
+        file_path = os.path.join(dir_path, "configs", "models", f"{model_name}.yml")
       # Use OmegaConf to load the model-specific configuration.
       model_vars = OmegaConf.load(file_path)
       model_vars = OmegaConf.to_container(model_vars, resolve=True)

@@ -17,6 +17,8 @@ limitations under the License.
 import subprocess
 import sys
 import os.path
+import tempfile
+
 import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
@@ -34,14 +36,17 @@ class GrainDataProcessingTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
+    temp_dir = tempfile.gettempdir()
     exit_code = subprocess.call(
-        ["bash", "../setup_gcsfuse.sh", "DATASET_GCS_BUCKET=maxtext-dataset", "MOUNT_PATH=/tmp/gcsfuse"]
+        ["bash", os.path.join(os.path.dirname(PKG_DIR), "setup_gcsfuse.sh"),
+         "DATASET_GCS_BUCKET=maxtext-dataset", f"MOUNT_PATH={os.path.join(temp_dir, 'gcsfuse')}"]
     )
     if exit_code != 0:
       raise ValueError(f"Running setup_gcsfuse.sh failed with exit code: {exit_code}")
 
   def setUp(self):
     super().setUp()
+    temp_dir = tempfile.gettempdir()
     self.config = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1,
@@ -51,7 +56,8 @@ class GrainDataProcessingTest(unittest.TestCase):
         data_sharding=["data"],
         base_output_directory="gs://max-experiments/",
         dataset_type="grain",
-        grain_train_files="/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*",
+        grain_train_files=os.path.join(temp_dir, "gcsfuse", "array-record", "c4", "en",
+          "3.0.1", "c4-train.array_record*"),
         tokenizer_path=os.path.join(os.path.dirname(PKG_DIR), "assets", "tokenizer"),
         enable_checkpointing=False,
     )

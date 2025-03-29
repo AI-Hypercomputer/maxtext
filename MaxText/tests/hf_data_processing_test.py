@@ -45,7 +45,7 @@ class HfDataProcessingTest(unittest.TestCase):
         hf_path="parquet",
         hf_data_dir="",
         hf_train_files="gs://maxtext-dataset/hf/c4/c4-train-00000-of-01637.parquet",
-        tokenizer_path="google-t5/t5-large",
+        tokenizer_path=os.path.join(os.path.dirname(PKG_DIR), "assets", "google-t5", "t5-large"),
         enable_checkpointing=False,
     )
     self.config = config

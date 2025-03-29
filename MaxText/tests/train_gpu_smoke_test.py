@@ -29,7 +29,7 @@ class Train(unittest.TestCase):
     train_main(
         [
             None,
-            "third_party/py/maxtext/configs/gpu_smoke_test.yml",
+            os.path.join(PKG_DIR, "configs", "gpu_smoke_test.yml"),
             f"base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_test",
             r"dataset_path=gs://maxtext-dataset",

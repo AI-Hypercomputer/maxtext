@@ -126,7 +126,7 @@ class TrainTests(unittest.TestCase):
           "dataset_type=hf",
           "hf_path=parquet",
           r"hf_train_files=gs://maxtext-dataset/hf/c4/c4-train-00000-of-01637.parquet",
-          r"tokenizer_path=google-t5/t5-large",
+          rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'google-t5', 't5-large')}",
       ],
   }
 
