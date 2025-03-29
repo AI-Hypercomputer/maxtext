@@ -10,6 +10,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+import tempfile
 
 # pylint: disable=missing-module-docstring, missing-function-docstring
 import numpy as np
@@ -32,9 +33,10 @@ class GradientAccumulationTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_grad_accumulate_same_loss(self):
     random_suffix = generate_random_string()
-    run_accumulate_metrics_file = fos.path.join(temp_dir, "runner_grad_accumulate_{random_suffix}.txt"
+    temp_dir = tempfile.gettempdir()
+    run_accumulate_metrics_file = os.path.join(temp_dir, f"runner_grad_accumulate_{random_suffix}.txt")
     print(f"{run_accumulate_metrics_file=}")
-    run_regular_metrics_file = fos.path.join(temp_dir, "runner_regular_{random_suffix}.txt"
+    run_regular_metrics_file = os.path.join(temp_dir, f"runner_regular_{random_suffix}.txt")
     print(f"{run_regular_metrics_file=}")
     shared_maxtext_args = [
         None,
