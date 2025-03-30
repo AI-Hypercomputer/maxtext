@@ -41,11 +41,25 @@ prompt_template='Example 1:\nQuestion: What is the capital of France?\nChoices:\
 import collections
 import re
 import sys
+import os
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+benchmark_parent_dir = os.path.dirname(current_dir)
+maxtext_parent_dir = os.path.dirname(benchmark_parent_dir)
+
+sys.path.append(maxtext_parent_dir)
+sys.path.append(maxtext_parent_dir + "/MaxText")
+print(f"maxtext_parent_dir: {maxtext_parent_dir}")
+print(f"MaxText: {maxtext_parent_dir}/MaxText")
+
+import max_logging
+
+max_logging.log(f"Added parent directory = {maxtext_parent_dir}")
+max_logging.log(f"Added parent directory = {maxtext_parent_dir}/MaxText/")
 
 from absl import flags
 import datasets
 import jax
-import max_logging
 import max_utils
 import maxengine
 from mmlu_categories import categories
@@ -82,10 +96,9 @@ def parse_answer(output):
   predicted_answer = match.group(1) or match.group(2) if match else None
   return predicted_answer
 
-
 def main(config):
   engine = maxengine.MaxEngine(config)
-  params = engine.load_params()
+  params = engine.load_params(jax.random.PRNGKey(12345))
 
   metadata = engine.get_tokenizer()
   tokenizer = engine.build_tokenizer(metadata)
@@ -119,10 +132,12 @@ def main(config):
       true_length = max_prefill_predict_length
     assert config.quantization != "fp8", "fp8 on NVIDIA GPUs is not supported in decode.py yet"
     assert config.quantization != "nanoo_fp8", "NANOO fp8 on AMD MI300/MI325 GPUs is not supported in decode.py yet"
-
-    # Perform prefill
-    prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
+    
     slot = 0
+    rng = jax.random.PRNGKey(4321)
+    # Perform prefill
+    prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, 
+                                                 true_length=true_length, rng=rng, slot=slot)
 
     # Initialize decode state
     decode_state = engine.init_decode_state()
@@ -160,8 +175,11 @@ def main(config):
       subject_correct[subject] += 1
     total_count += 1
     subject_total[subject] += 1
+    max_logging.log(f"\n\nPrompt: {prompt}")
+    max_logging.log(f"Model output: {output}")
+    max_logging.log(f"Correct_answer: {correct_answer}: Matching: {correct_answer==predicted_answer}\n")
 
-    if idx % 50 == 0:
+    if idx % 10 == 0:
       max_logging.log(f" Accuracy: {correct_count / total_count:.4f}")
 
   # Final accuracy
@@ -199,13 +217,13 @@ def main(config):
       cat_correct[category_name] += subcat_correct[subcat_label]
       cat_total[category_name] += subcat_total[subcat_label]
 
-  max_logging.log("\nCategory Accuracies:")
+  print("\nCategory Accuracies:")
   for category_name in cat_total:
     if cat_total[category_name] > 0:
       acc = cat_correct[category_name] / cat_total[category_name]
-      max_logging.log(f"Accuracy for category '{category_name}': {acc:.4f}")
+      print(f"Accuracy for category '{category_name}': {acc:.4f}")
     else:
-      max_logging.log(f"Accuracy for category '{category_name}': No data available.")
+      print(f"Accuracy for category '{category_name}': No data available.")
 
 
 def validate_config(config):
