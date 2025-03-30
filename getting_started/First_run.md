@@ -15,6 +15,7 @@ multiple hosts.
 
 1. [Create and SSH to the single-host VM of your choice.](https://cloud.google.com/tpu/docs/users-guide-tpu-vm#creating_a_cloud_tpu_vm_with_gcloud). You can use any available single host TPU, such as `v5litepod-8`, `v5p-8` or `v4-8`.
 2. Clone MaxText onto that TPUVM.
+# This is a test comment
 3. Within the root directory of that `git` repo, install dependencies and pre-commit hook by running:
 ```
 bash setup.sh
