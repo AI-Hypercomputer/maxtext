@@ -844,6 +844,8 @@ def train_loop(config, config_inference, state=None):
       # example_batch = p_generate_completions(example_batch, {'params':state.params['params']}, example_batch["prompt_true_length"], rng_gen)
       example_batch = generate_completions(config, tokenizer_model, engine, example_batch, inference_params, example_batch["prompt_true_length"], rng_gen)
 
+      # transfer example_batch sharding to training mesh
+      example_batch = jax.device_put(example_batch, in_shard_train[1])
       # TODO: ensure this partitioning is correct
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, rng)
