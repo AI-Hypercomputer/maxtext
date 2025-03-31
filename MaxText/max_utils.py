@@ -1063,7 +1063,7 @@ def print_system_information():
   Note that this will initialize the JAX backend."""
   max_logging.log(f"System Information: Jax Version: {jax.__version__}")
   max_logging.log(f"System Information: Jaxlib Version: {jax.lib.__version__}")
-  max_logging.log(f"System Information: Jax Backend: {jax.lib.xla_bridge.get_backend().platform_version}")
+  max_logging.log(f"System Information: Jax Backend: {jax.extend.backend.get_backend().platform_version}")
 
 
 def permute_to_match_maxtext_rope(arr):
