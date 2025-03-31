@@ -1395,7 +1395,7 @@ def set_engine_vars_from_base_engine(
   )
 
 
-def create_engine_from_config_flags(batch_size, max_prefill_predict_length, max_target_length, args_str):
+def create_engine_from_config_flags(maxengine_config_filepath, batch_size, max_prefill_predict_length, max_target_length, args_str):
   """Create new MaxEngine instance with given batch_size, prefill and target lengths, and any config
   params provided through `args_str`.
   """
@@ -1418,7 +1418,9 @@ def create_engine_from_config_flags(batch_size, max_prefill_predict_length, max_
     k, v = cmd_arg.split("=")
     args[k.strip()] = v.strip()
   assert "load_parameters_path" in args, "load_parameters_path must be defined"
-  updated_args = [os.path.join(PKG_DIR, "maxengine_server.py"), os.path.join(PKG_DIR, "configs", "base.yml")]
+  if maxengine_config_filepath is None:
+    maxengine_config_filepath = os.path.join(PKG_DIR, "configs", "base.yml")
+  updated_args = [os.path.join(PKG_DIR, "maxengine_server.py"), maxengine_config_filepath]
   for k, v in args.items():
     option = f"{k}={v}"
     updated_args.append(option)
