@@ -611,7 +611,7 @@ class AttentionOp(nn.Module):
     return local_out, local_max, local_sum
 
   def is_partition_in_decode(self, seq_len):
-    return self.config.ici_context_parallelism > 0 and seq_len == 1
+    return self.config.ici_context_autoregressive_parallelism > 0 and seq_len == 1
 
   def apply_attention_dot(
       self,
@@ -971,7 +971,9 @@ class Attention(nn.Module):
       # pylint: disable=no-value-for-parameter
       return self.kernel_init(*args) / depth_scaling
 
-    kernel_axes = (None, None, None) if self.config.ici_context_parallelism > 1 else ("embed", "q_heads", "kv")
+    kernel_axes = (
+        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("embed", "q_heads", "kv")
+    )
     query_proj = DenseGeneral(
         features=(self.num_query_heads, self.head_dim),
         axis=-1,
@@ -1002,7 +1004,11 @@ class Attention(nn.Module):
     if self.num_query_heads % self.num_kv_heads != 0:
       raise ValueError("Invalid num_kv_heads for GQA.")
 
-    kernel_axes = (None, None, None) if self.config.ici_context_parallelism > 1 else ("embed", "kv_heads", "kv_head_dim")
+    kernel_axes = (
+        (None, None, None)
+        if self.config.ici_context_autoregressive_parallelism > 1
+        else ("embed", "kv_heads", "kv_head_dim")
+    )
 
     kv_proj = DenseGeneral(
         features=(self.num_kv_heads, self.head_dim),
@@ -1036,7 +1042,9 @@ class Attention(nn.Module):
     return query, key, value
 
   def out_projection(self, output_dim: int, out: Array) -> Array:
-    out_kernel_axis = (None, None, None) if self.config.ici_context_parallelism > 1 else ("heads", "kv", "embed")
+    out_kernel_axis = (
+        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed")
+    )
     out_proj = DenseGeneral(
         features=output_dim,
         axis=(-2, -1),
