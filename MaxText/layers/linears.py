@@ -1004,14 +1004,12 @@ class MoeBlock(nn.Module):
 
     w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts, cfg.emb_dim, self.intermediate_dim)
     if cfg.sparse_matmul:
-      max_logging.log("Running MoE sparse matmul implementation.")
       if quantizations.in_serve_mode(self.quant):
         w0_kernel, w1_kernel, wo_kernel = self.retrieve_quantized_weight(
             inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel
         )
       return self.sparse_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
     else:
-      max_logging.log("Running MoE dense matmul implementation.")
       return self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
 
 
