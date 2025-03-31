@@ -333,7 +333,9 @@ class _HyperParameters:
             " at the CLI or ENV"
         )
 
-      if isinstance(new_proposal, type(raw_data_from_yaml[k])):
+      if new_proposal is None:
+        raw_keys[k] = None  # This allows users to set empty strings via CLI, otherwise parsed as "None" - b/405981568
+      elif isinstance(new_proposal, type(raw_data_from_yaml[k])):
         raw_keys[k] = new_proposal  # take the raw data, no type conversion
       else:
         try:
