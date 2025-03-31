@@ -21,6 +21,7 @@ import uuid
 import flax
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
+from flax import struct
 
 from inference.page_manager import PageManager, PageState
 from layers import models, quantizations
@@ -52,6 +53,20 @@ Params = Any
 PRNGKeyType = Any
 DLL = jax_layout.DeviceLocalLayout
 Layout = jax_layout.Layout
+
+
+# TODO(yuyanpeng): Should import ExistingPrefix from jetstream.engine.engine_api
+@struct.dataclass
+class ExistingPrefix:
+  """Represents a prefix that has already been processed.
+
+  Attributes:
+    cache: The kv-cache for the prefix get from model params cache.
+    common_prefix_tokens: The tokens that have already been processed without padding.
+  """
+
+  cache: Any
+  common_prefix_tokens: jax.Array
 
 
 class MaxEngineConfig:
@@ -371,10 +386,6 @@ class MaxEngine(engine_api.Engine):
       padded_tokens: jax.Array,
       true_length: int,
       rng: Optional[PRNGKeyType] = None,
-      complete_prompt_true_length: Optional[int] = None,
-      complete_padded_prompt: Optional[jax.Array] = None,
-      positions: Optional[jax.Array] = None,
-      previous_chunk: Optional[Any] = None,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Wrapper for prefill for ahead-of-time compilation."""
 
@@ -383,10 +394,6 @@ class MaxEngine(engine_api.Engine):
         padded_tokens=padded_tokens,
         true_length=true_length,
         rng=rng,
-        complete_prompt_true_length=complete_prompt_true_length,
-        complete_padded_prompt=complete_padded_prompt,
-        positions=positions,
-        previous_chunk=previous_chunk,
     )
 
   @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("request_id",))
@@ -394,15 +401,11 @@ class MaxEngine(engine_api.Engine):
       self,
       *,
       params: Params,
-      existing_prefix: Optional[jax.Array] = None,
+      existing_prefix: Optional[ExistingPrefix] = None,
       padded_tokens: jax.Array,
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
-      complete_prompt_true_length: Optional[int] = None,
-      complete_padded_prompt: Optional[jax.Array] = None,
-      positions: Optional[jax.Array] = None,
-      previous_chunk: Optional[Any] = None,
       request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
       slot: Optional[int] = None,
       page_state: Optional[PageState] = None,
@@ -416,69 +419,40 @@ class MaxEngine(engine_api.Engine):
 
       padded_tokens: Logically appended tokens to any existing prefix, this is
         what we compute prefill on.
-        If chunked prefill is true - this represents current padded chunk. (eg the last chunk might need to be padded)
-        else - complete padded prompt
 
       true_length: The real length of the tokens, pre-pad.
-                  If chunked prefill is true - this represents true length of the current chunk
-                  else - true length of complete prompt
-      complete_prompt_true_length: true length of the entire prompt
-                  it can be none if chunked prefill is false
-                  if chunked prefill is true, it is needed for constructing final decoder segment Ids.
-      complete_padded_prompt: Optional[jax.Array] = None,
-                   it can be none if chunked prefill is false
-                   if chunked prefill is true, it is needed for constructing decoder active sequence indicator
-      positions: Optional[jax.Array] = None,
-                current position of the tokens in chunk - used for rope embeddings
-      previous_chunk: Optional[Any] = None, - Has relevant information from previous processed chunks
-      mainly - next postion and KV cache
-
-    relevant params in call for chunked prefill where complete length is 10 (12 after padding),
-    chunk size is 4 and current chunk is second chunk
-
-    padded_tokens = [t4, t5, t6, t7]
-    true_length = 4
-    complete_prompt_true_length = 10
-    complete_padded_prompt = [t0, t1, t2, t3...t11]
-    positions = [4, 5, 6, 7]
-    previous_chunk = {'cache':{}}
-
-    If chunked prefill is false and prefill call is for entire prompt
-    padded_tokens = [t0, t1, .., t11]
-    true_length = 10
-    complete_prompt_true_length = None
-    complete_padded_prompt = None
-    positions = None
-    previous_chunk = None
 
     Returns:
       kv_cache: For the resulting text.
     """
-    if existing_prefix:
-      raise ValueError("We don't know what to do with existing_prefix")
 
     if rng is None:
       rng = jax.random.PRNGKey(0)
 
-    input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
-    if positions is None:
-      positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
-    if not self.config.use_chunked_prefill:
-      zero_to_n = jnp.arange(0, padded_tokens.shape[0])
-      ones_to_keep = zero_to_n < true_length
-      next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
-    else:
-      zero_to_n = jnp.arange(0, complete_padded_prompt.shape[0])  # pytype: disable=attribute-error
-      ones_to_keep = zero_to_n < complete_prompt_true_length
-      next_pos = jnp.full((1, 1), complete_prompt_true_length, dtype=jnp.int32)
+    start_position = 0
+    previous_chunk = None
+    input_params = params
+    if existing_prefix is not None:
+      input_params = params | {"cache": existing_prefix.cache}
+      start_position = existing_prefix.common_prefix_tokens.shape[0]
+      # TODO(yuyanpeng): rename previous_chunk
+      previous_chunk = jnp.expand_dims(existing_prefix.common_prefix_tokens, 0)
 
+    full_true_length = start_position + true_length
+
+    input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
+    positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
+
+    # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
+    start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
+    ones_to_keep = start_to_n < full_true_length
     one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
     rng, new_rng = jax.random.split(rng)
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       flat_logits, new_vars = self.model.apply(
-          params,
+          input_params,
           input_tokens,
           positions,
           decoder_segment_ids=sequence_indicator,
@@ -525,6 +499,7 @@ class MaxEngine(engine_api.Engine):
 
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
+    next_pos = jnp.full((1, 1), full_true_length, dtype=jnp.int32)
     return {
         "logits": selected_logits,
         "cache": cache,
@@ -538,15 +513,11 @@ class MaxEngine(engine_api.Engine):
       self,
       *,
       params: Params,
-      existing_prefix: Optional[jax.Array] = None,
+      existing_prefix: Optional[ExistingPrefix] = None,
       padded_tokens: jax.Array,
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
-      complete_prompt_true_length: Optional[int] = None,
-      complete_padded_prompt: Optional[jax.Array] = None,
-      positions: Optional[jax.Array] = None,
-      previous_chunk: Optional[Any] = None,
       request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
       slot: Optional[int] = None,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
@@ -570,10 +541,6 @@ class MaxEngine(engine_api.Engine):
         slot=slot,
         rng=rng,
         request_id=request_id,
-        complete_prompt_true_length=complete_prompt_true_length,
-        complete_padded_prompt=complete_padded_prompt,
-        positions=positions,
-        previous_chunk=previous_chunk,
     )
 
   def prefill_multisampling_aot(  # pylint: disable=too-many-positional-arguments
@@ -690,7 +657,7 @@ class MaxEngine(engine_api.Engine):
       self,
       *,
       params: Params,
-      existing_prefix: Optional[jax.Array] = None,
+      existing_prefix: Optional[ExistingPrefix] = None,
       padded_tokens: jax.Array,
       decoder_positions: jax.Array,
       decoder_segment_ids: jax.Array,
@@ -1382,12 +1349,12 @@ class MaxEngine(engine_api.Engine):
 
   @property
   def use_chunked_prefill(self) -> bool:
-    """Maximum prefill length."""
+    """Whether to use chunked prefill."""
     return self.config.use_chunked_prefill
 
   @property
   def prefill_chunk_size(self) -> int:
-    """Maximum prefill length."""
+    """Prefill chunk size."""
     return int(self.config.prefill_chunk_size)
 
   @property
