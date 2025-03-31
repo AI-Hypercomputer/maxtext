@@ -627,7 +627,7 @@ class MoeBlock(nn.Module):
     return update_weights
 
   def get_context_partition_and_sub_seq(self, seq_len):
-    cp = self.config.ici_context_parallelism
+    cp = self.config.ici_context_autoregressive_parallelism
     if seq_len % cp != 0:
       cp = 1
     sub_seq = seq_len // cp
@@ -852,7 +852,7 @@ class MoeBlock(nn.Module):
         # todo: try replace softmax_probs with padded weights and verify with decode acc tests
         softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
         dispatch_mask, combine_mask = self.generate_masks_subgroup(top_k_indices, softmax_probs)
-        if self.config.ici_context_parallelism > 0 and cp == 1:
+        if self.config.ici_context_autoregressive_parallelism > 0 and cp == 1:
           mask_axes = ("activation_length", "activation_batch", None, None, None)
           input_axis = ("activation_length", "activation_batch", None, "activation_embed")
           dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_embed")
