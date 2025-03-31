@@ -313,7 +313,6 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
       "fsdp",
       "fsdp_transpose",
       "sequence",
-      "context",
       "tensor",
       "tensor_transpose",
       "tensor_sequence",
