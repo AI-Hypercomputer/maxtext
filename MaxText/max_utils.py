@@ -606,27 +606,67 @@ def is_valid_custom_mesh(ici_parallelism, strategy):
   else:
     raise ValueError(f"The strategy {strategy} to reshape the mesh is invalid.")
 
+def reshape_mesh_to_zigzag_path(mesh, is_top_half):
+  """Reshape mesh to zigzag path. E.g. [(0,0), (0,1), (1,0), (1,1)] -> [(1,0), (0,0), (0,1), (1,1)]"""
+  zipzag_path = []
+  # For the top half, we go upward first; for the bottom half, we go downward first.
+  upward = is_top_half
+  for x in zip(*mesh):
+    if upward:
+      zipzag_path.extend(x[::-1])
+    else:
+      zipzag_path.extend(x)
+    # Alternate between upward and downward
+    upward = not upward
+
+  if not is_top_half:
+    # Reverse the path in the bottom half, because it is now going from left to right, we want it to go from right to left.
+    zipzag_path.reverse()
+
+  return zipzag_path
+
+
+def reshape_mesh_to_ring(mesh, dims):
+  """Reshape mesh to a 1-D ring using zigzag path."""
+  devices = [[None for _ in range(dims[1])] for _ in range(dims[0])]
+  for device in mesh.flatten():
+    coords = device.coords
+    devices[coords[0]][coords[1]] = device
+  midpoint = len(devices) // 2
+  top_half_mesh = devices[:midpoint]
+  bottom_half_mesh = devices[midpoint:]
+
+  ring = reshape_mesh_to_zigzag_path(top_half_mesh, is_top_half=True) + reshape_mesh_to_zigzag_path(
+      bottom_half_mesh, is_top_half=False
+  )
+
+  # indices = [0, 1, 3, 2, 4, 5, 7, 6, 8, 9, 11, 10, 12, 13, 15, 14]
+  # return np.reshape(np.array(ring)[indices], mesh.shape)
+
+  return np.array(ring).reshape(mesh.shape)
 
 def optimize_mesh_for_tpu_v6e(mesh, devices):
   """Apply transformations to the mesh to optimize for TPU v6e"""
   if devices[0].device_kind != "TPU v6 lite":
     return mesh
-  num_devices = len(devices)
-  mesh_is_1d_ring = num_devices in mesh.shape
-  if not mesh_is_1d_ring:
-    return mesh
+  # num_devices = len(devices)
+  # mesh_is_1d_ring = num_devices in mesh.shape
+  # if not mesh_is_1d_ring:
+  #   return mesh
   # check that the physical topology is 2x4
   device_coords = [d.coords for d in devices]
   coord_size = len(device_coords[0])
   max_coords = tuple(max(dc[i] for dc in device_coords) for i in range(coord_size))
   min_coords = tuple(min(dc[i] for dc in device_coords) for i in range(coord_size))
   dims = tuple(h - l + 1 for (h, l) in zip(max_coords, min_coords))
-  if dims != (2, 4, 1):
-    return mesh
-  axis_idx = mesh.shape.index(num_devices)
-  new_mesh = np.moveaxis(mesh, axis_idx, 0)
-  new_mesh[4:] = new_mesh[-1:3:-1]
-  new_mesh = np.moveaxis(new_mesh, 0, axis_idx)
+  # if not ((len(dims) == 3 and dims[2] == 1) or len(dims) == 2):  # Not a 2D physical mesh
+  #   return mesh
+
+  # axis_idx = mesh.shape.index(num_devices)
+  # new_mesh = np.moveaxis(mesh, axis_idx, 0)
+  new_mesh = reshape_mesh_to_ring(mesh, dims)
+
+  # new_mesh = np.moveaxis(new_mesh, 0, axis_idx)
   max_logging.log("Optimized the mesh for TPU v6e")
   return new_mesh
 
@@ -675,6 +715,9 @@ def create_device_mesh(config, devices=None):
             contiguous_submeshes=False,
             allow_split_physical_axes=allow_split_physical_axes,
         )
+        print(f"old mesh: {mesh=}")
+        if config.optimize_mesh_for_tpu_v6e:
+          mesh = optimize_mesh_for_tpu_v6e(mesh, devices)
     else:
       mesh = mesh_utils.create_device_mesh(
           ici_parallelism,
@@ -682,7 +725,7 @@ def create_device_mesh(config, devices=None):
       )
       if config.optimize_mesh_for_tpu_v6e:
         mesh = optimize_mesh_for_tpu_v6e(mesh, devices)
-
+  print(f"new mesh: {mesh=}")
   max_logging.log(f"Num_devices: {num_devices}, shape {mesh.shape}")
 
   return mesh
