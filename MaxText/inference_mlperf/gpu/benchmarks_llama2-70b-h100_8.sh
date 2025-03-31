@@ -51,7 +51,7 @@ if "$dry_run"; then
 fi
 
 if "$enable_profiler"; then
-    RUN_OPTIONS="${RUN_OPTIONS} -p "
+    RUN_OPTIONS="${RUN_OPTIONS} -p -m=${profiler_mode} -x=${profiler_tensorboard_dir} "
 fi
 
 
@@ -62,6 +62,10 @@ fi
 export XLA_FLAGS="--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_command_buffer=FUSION --xla_disable_hlo_passes=rematerialization"
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.94
 echo XLA_FLAGS: $XLA_FLAGS
+
+if [[ -z ${MAXENGINE_CONFIG_FILEPATH} ]] ; then
+    export MAXENGINE_CONFIG_FILEPATH="$(dirname $0)/../configs/inference.yml"
+fi
 
 if [[ -z ${QUANTIZATION} ]] ; then
     export QUANTIZATION="aqt_fp8"
@@ -77,7 +81,7 @@ if [[ -z ${CHECKPOINT} ]] ; then
 fi
 
 if [[ -z ${TOKENIZER_PATH} ]] ; then
-    export TOKENIZER_PATH="/opt//maxtext/assets/tokenizer.llama2"
+    export TOKENIZER_PATH="/opt/maxtext/assets/tokenizer.llama2"
 fi
 
 if [ -z "$PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES" ];

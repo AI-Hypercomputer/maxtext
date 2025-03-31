@@ -50,6 +50,12 @@ for i in "${stage[@]}"; do
 done
 
 # Default parameters
+if [[ -z ${BASE_OUTPUT_DIRECTORY} ]] ; then
+    export BASE_OUTPUT_DIRECTORY="/tmp/maxtext"
+fi
+if [[ -z ${MAXENGINE_CONFIG_FILEPATH} ]] ; then
+    MAXENGINE_CONFIG_FILEPATH="$(dirname $0)/../../configs/inference.yml"
+fi
 if [[ -z ${QUANTIZATION} ]] ; then
     QUANTIZATION="aqt_fp8"
 fi
@@ -87,8 +93,8 @@ done
 XLA_FLAGS="--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_command_buffer=FUSION --xla_disable_hlo_passes=rematerialization" \
 TF_FORCE_GPU_ALLOW_GROWTH=true \
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.94 \
-python3 $(dirname $0)/../../inference_microbenchmark.py $(dirname $0)/../../configs/base.yml  \
-    base_output_directory=/tmp/maxtext/  \
+python3 $(dirname $0)/../../inference_microbenchmark.py $MAXENGINE_CONFIG_FILEPATH  \
+    base_output_directory=$BASE_OUTPUT_DIRECTORY  \
     tokenizer_path=/opt/maxtext/assets/tokenizer.llama2 \
     model_name='llama2-70b' \
     max_prefill_predict_length=$max_prefill_predict_length  \

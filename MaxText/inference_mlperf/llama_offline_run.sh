@@ -83,6 +83,9 @@ then
   HF_CKPT="meta-llama/Llama-2-70b-chat-hf"
 fi
 
+if [[ -z ${MAXENGINE_CONFIG_FILEPATH} ]] ; then
+    MAXENGINE_CONFIG_FILEPATH="../configs/base.yml"
+fi
 
 
 if [ -z "$MAXENGINE_ARGS" ];
@@ -137,6 +140,7 @@ run_loadgen() {
   echo "MAXENGINE_ARGS: ${MAXENGINE_ARGS}"
   echo
   ${CMD} python -m offline_mode \
+    --maxengine_config_filepath=${MAXENGINE_CONFIG_FILEPATH} \
     --mlperf_test_mode=${TEST_MODE} \
     --input_mode tokenized \
     --output_mode tokenized \
