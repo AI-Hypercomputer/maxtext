@@ -304,6 +304,14 @@ def generate_completions(config, tokenizer_model, engine, data, params, true_len
       decode_state = engine.insert(prefill_result, decode_state, slot=slot)
       slot += 1
   steps = config.max_target_length - config.max_prefill_predict_length
+  # completions = jnp.zeros((prompts.shape[0], config.max_target_length - config.max_prefill_predict_length), dtype=jnp.int32)
+
+  # for s in range(steps):
+  #   rng, rng_generate = jax.random.split(rng)
+  #   decode_state, result_tokens = engine.generate(params, decode_state, rng=rng_generate)
+  #   for i in range(slot):
+  #     completions.at[s, i].set(result_tokens.get_result_at_slot(i).tokens.item())
+  max_logging.log("completed prefill, starting generate")
   completions = defaultdict(list)
   result_tokens_list = []
   for _ in range(steps):
@@ -793,12 +801,7 @@ def train_loop(config, config_inference, state=None):
       inference_data_sharding = jax.sharding.NamedSharding(mesh=inference_mesh, spec=P(*config.data_sharding))
       example_batch = jax.device_put(example_batch, inference_data_sharding)
       inference_params = jax.device_put({'params':state.params['params']}, inference_state_mesh_shardings.params)
-      # p_generate_completions = jax.jit(
-      #     functools.partial(generate_completions, config, tokenizer_model, engine),
-      #     in_shardings=(inference_data_sharding, inference_state_mesh_shardings.params, inference_data_sharding, None),  # data, params, true_length, rng
-      #     out_shardings=(inference_data_sharding,),  # data
-      # )
-      # example_batch = p_generate_completions(example_batch, {'params':state.params['params']}, example_batch["prompt_true_length"], rng_gen)
+      
       example_batch = generate_completions(config, tokenizer_model, engine, example_batch, inference_params, example_batch["prompt_true_length"], rng_gen)
 
       # transfer example_batch sharding to training mesh
