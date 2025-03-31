@@ -44,7 +44,7 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.insert(0, parent_dir)
 
 from MaxText.maxengine import create_engine_from_config_flags
-import offline_inference
+from MaxText.inference_mlperf import offline_inference
 
 _MLPERF_ID = "llama2-70b"
 log = logging.getLogger(__name__)
@@ -180,6 +180,13 @@ flags.DEFINE_string(
     "Rename some of the dataset columns to whats expected by code. For example, "
     "mixtral dataset uses ref_token_length instead of ref_token_len. Format is a string dict "
     'eg. {"tok_input_len": "tok_input_length"}',
+    required=False,
+)
+
+flags.DEFINE_string(
+    "maxengine_config_filepath",
+    None,
+    "Base config filepath for initializing MaxEngine.",
     required=False,
 )
 
@@ -467,6 +474,7 @@ def main(argv):
     target_length = 2 * length
     log.info(f"Using batch size: {batch} and length: {length}")
     engine = create_engine_from_config_flags(
+        maxengine_config_filepath=FLAGS.maxengine_config_filepath,
         batch_size=batch,
         max_prefill_predict_length=length,
         max_target_length=target_length,
