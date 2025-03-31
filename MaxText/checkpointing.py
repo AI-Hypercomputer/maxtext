@@ -82,6 +82,7 @@ def create_orbax_checkpoint_manager(
           create=True,
           save_interval_steps=save_interval_steps,
           enable_async_checkpointing=use_async,
+          #single_host_load_and_broadcast=True,
       ),
       logger=orbax_logger,
   )

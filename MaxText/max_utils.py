@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 """ Common Max Utils needed by multiple modules"""
+import datetime
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -702,6 +703,8 @@ def setup_initial_state(
 
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
+    max_logging.log("#### Start restoring ckpt")
+    start_time = datetime.datetime.now()
     restored, raw_params = checkpointing.load_state_if_possible(
         checkpoint_manager,
         data_iterator,
@@ -712,7 +715,7 @@ def setup_initial_state(
         config.enable_single_replica_ckpt_restoring,
         config.dataset_type,
     )
-
+    max_logging.log(f"#### ckpt loading takes {datetime.datetime.now()-start_time}")
     if restored:
       if isinstance(
           checkpoint_manager,

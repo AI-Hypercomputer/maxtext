@@ -615,6 +615,8 @@ def setup_mesh_and_model(config):
     use_zarr3 = config.checkpoint_storage_use_zarr3
     if config.enable_single_controller:
       use_ocdbt, use_zarr3 = False, False
+    max_logging.log("#### Start creating orbax_checkpoint_manager")
+    start_time = datetime.datetime.now()
     checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
         config.checkpoint_dir,
         config.enable_checkpointing,
@@ -625,6 +627,7 @@ def setup_mesh_and_model(config):
         use_ocdbt,
         use_zarr3,
     )
+    max_logging.log(f"#### Created orbax_checkpoint_manager in {datetime.datetime.now()-start_time}")
 
   return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
 

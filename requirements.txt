@@ -1,6 +1,7 @@
 jax>=0.4.30
 jaxlib>=0.4.30
-orbax-checkpoint>=0.5.12
+#orbax-checkpoint @ git+https://github.com/google/orbax/@test_738521457#subdirectory=checkpoint
+orbax-checkpoint @ git+https://github.com/google/orbax/#subdirectory=checkpoint
 absl-py
 array-record
 aqtp
