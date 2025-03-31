@@ -335,18 +335,32 @@ class MaxEngine(engine_api.Engine):
     one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
+    prefill_length = padded_tokens.shape[0]
     rng, new_rng = jax.random.split(rng)
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-      flat_logits, new_vars = self.model.apply(
-          params,
-          input_tokens,
-          positions,
-          decoder_segment_ids=sequence_indicator,
-          enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_PREFILL,
-          rngs={"params": new_rng},
-          mutable=["cache"],
-      )
+    if prefill_length == 1024:
+      with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+        flat_logits, new_vars = self.model.apply(
+            params,
+            input_tokens,
+            positions,
+            decoder_segment_ids=sequence_indicator,
+            enable_dropout=False,
+            model_mode=common_types.MODEL_MODE_PREFILL,
+            rngs={"params": new_rng},
+            mutable=["cache"],
+        )
+    else:
+      with self._mesh, nn_partitioning.axis_rules(self.config.generate_logical_axis_rules):
+        flat_logits, new_vars = self.model.apply(
+            params,
+            input_tokens,
+            positions,
+            decoder_segment_ids=sequence_indicator,
+            enable_dropout=False,
+            model_mode=common_types.MODEL_MODE_PREFILL,
+            rngs={"params": new_rng},
+            mutable=["cache"],
+        )
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
     generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
@@ -528,7 +542,7 @@ class MaxEngine(engine_api.Engine):
 
     rng, new_rng = jax.random.split(rng)
     # run one step generation
-    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+    with self._mesh, nn_partitioning.axis_rules(self.config.generate_logical_axis_rules):
       out_logits, new_vars = self.model.apply(
           params | {"cache": decode_state["cache"]},
           previous_token,
