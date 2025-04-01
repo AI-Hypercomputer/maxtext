@@ -182,20 +182,26 @@ class AttentionOp(nn.Module):
   def generate_attention_mask(
       self, query, key, decoder_segment_ids: Array | None, model_mode: str, previous_chunk: Any = None
   ) -> Array | None:
+    _, q_seq_len, _, _ = query.shape
+    _, kv_seq_len, _, _ = key.shape
+
     mask = None
     if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       mask = decoder_segment_ids[:, None, None, None, :] == common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     elif decoder_segment_ids is not None:
       mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
+      shape = list(mask.shape)
+      shape[2] = kv_seq_len - q_seq_len
+      previous = jnp.full(tuple(shape), common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR)
+      mask = jnp.concatenate([previous, mask], axis=2)
       mask = mask[:, None, None, :, :]
 
-    _, q_seq_len, _, _ = query.shape
-    _, kv_seq_len, _, _ = key.shape
-    next_pos = 0
-    if previous_chunk is not None:
-      next_pos = previous_chunk.shape[1]
-      if mask is not None:
-        mask = mask[:, :, :, next_pos : next_pos + q_seq_len, :]
+    # next_pos = 0
+    ### YYY: maybe no need mask in chunked
+    # if previous_chunk is not None:
+    #   next_pos = previous_chunk.shape[1]
+    #   if mask is not None:
+    #     mask = mask[:, :, :, next_pos : next_pos + q_seq_len, :]
 
     causal_mask = None
     # We enforce causality except for AUTOREGRESSION
@@ -203,11 +209,17 @@ class AttentionOp(nn.Module):
       mask_shape = (q_seq_len, kv_seq_len)
       # row_ids indicates the position of query
       # col_ids indicates the position of kv
-      row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
-      col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
+      row_ids = jnp.expand_dims(jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0), 0)
+      col_ids = jnp.expand_dims(jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1), 0)
       # Attention mask for chunked prefill is generated in the same way
       # as mentioned in SARATHI - https://arxiv.org/abs/2308.16369
-      causal_mask = (col_ids <= row_ids + next_pos)[None, None, None, :, :]
+      ### YYY: we have dynamic next_pos
+      # [b, 1] -> [b, 1, 1]
+      next_pos = previous_chunk[:, :, None] if previous_chunk is not None else jnp.zeros((1, 1, 1))
+      causal_mask = (col_ids <= row_ids + next_pos)[:, None, None, :, :]
+
+    # if self.config.use_chunked_prefill and model_mode == common_types.MODEL_MODE_PREFILL:
+    #   return causal_mask
 
     output_mask = None
     if (mask is not None) and (causal_mask is not None):

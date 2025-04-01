@@ -69,7 +69,7 @@ def main(argv: Sequence[str]) -> None:
         max_prefill_length=max_prefill_length,
         jax_padding=True,
     )
-    input_tokens.append(input_token)
+    input_tokens.append(tokens[0 : min(len(tokens), start_pos + chunk_size)])
     padded_input_tokens.append(padded_input_token)
     input_true_lengths.append(input_true_length)
 
@@ -79,6 +79,12 @@ def main(argv: Sequence[str]) -> None:
     prefill_result = None
     existing_prefix = None
     for input_token, padded_input_token, input_true_length in zip(input_tokens, padded_input_tokens, input_true_lengths):
+      if existing_prefix is not None:
+        existing_prefix = maxengine.ExistingPrefix(
+            cache=existing_prefix.cache,
+            common_prefix_tokens=existing_prefix.common_prefix_tokens,
+            position=jax.numpy.arange(input_token.shape[0], input_token.shape[0] + padded_input_token.shape[0]),
+        )
       prefill_result, _ = engine.prefill(
           params=params,
           existing_prefix=existing_prefix,
@@ -88,7 +94,8 @@ def main(argv: Sequence[str]) -> None:
       )
       existing_prefix = maxengine.ExistingPrefix(
           cache=prefill_result["cache"],
-          common_prefix_tokens=input_token,
+          common_prefix_tokens=jax.numpy.array([len(input_token)]),
+          position=None,
       )
 
     return prefill_result

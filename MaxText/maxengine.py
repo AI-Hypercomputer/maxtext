@@ -67,6 +67,7 @@ class ExistingPrefix:
 
   cache: Any
   common_prefix_tokens: jax.Array
+  position: Any
 
 
 class MaxEngineConfig:
@@ -432,19 +433,21 @@ class MaxEngine(engine_api.Engine):
     start_position = 0
     previous_chunk = None
     input_params = params
+    start_to_n = existing_prefix.position if existing_prefix is not None else jnp.arange(0, padded_tokens.shape[0])
+    positions = jnp.expand_dims(start_to_n, 0)
     if existing_prefix is not None:
       input_params = params | {"cache": existing_prefix.cache}
-      start_position = existing_prefix.common_prefix_tokens.shape[0]
+      ### YYY: be next pos with shape (1)
+      start_position = existing_prefix.common_prefix_tokens
       # TODO(yuyanpeng): rename previous_chunk
       previous_chunk = jnp.expand_dims(existing_prefix.common_prefix_tokens, 0)
 
     full_true_length = start_position + true_length
 
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
-    positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
 
     # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
-    start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
+    # start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
     ones_to_keep = start_to_n < full_true_length
     one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     sequence_indicator = jnp.expand_dims(one_d_output, 0)

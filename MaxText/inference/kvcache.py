@@ -344,7 +344,7 @@ class KVCache(nn.Module):
     value_vars = (cached_value_var, cached_value_scale_var)
     return key_vars, value_vars, cached_segment_id_var, cache_index_var, cached_lengths_var
 
-  def kv_cache_prefill_concatenated(self, key: Array, value: Array, decoder_segment_ids: Array, previous_chunk: Any):
+  def kv_cache_chunked_prefill(self, key: Array, value: Array, decoder_segment_ids: Array, previous_chunk: Any):
     """Return KV cache concatenating to existing prefix."""
 
     assert not self.kv_quant, "Not support kv_quant now."
@@ -352,8 +352,6 @@ class KVCache(nn.Module):
     batch, _, heads, value_head_size = value.shape
 
     assert key.dtype == value.dtype, "Key and Value Dtypes should match."
-
-    assert previous_chunk is not None
 
     cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
         batch, heads, key_head_size, value_head_size, common_types.MODEL_MODE_PREFILL
@@ -366,35 +364,47 @@ class KVCache(nn.Module):
     key_shaped_for_cache = jnp.transpose(key, self.prefill_cache_axis_order)
     value_shaped_for_cache = jnp.transpose(value, self.prefill_cache_axis_order)
 
-    next_pos = previous_chunk.shape[1]
+    # YYY: why transpose twice??
     cached_key = self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order)
     cached_value = self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order)
     cached_key_value = jnp.transpose(cached_key, self.prefill_cache_axis_order)
     cached_value_value = jnp.transpose(cached_value, self.prefill_cache_axis_order)
 
-    seq_axis = self.prefill_cache_logical_axis_names.index(CACHE_SEQUENCE)
-    cache_seq_axis = self.prefill_cache_axis_order.index(seq_axis)
+    ### YYY: align the length, tile, and mask where update
 
-    cached_prefill_key_vars[0].value = jnp.concatenate(
-        [cached_key_value[:next_pos], key_shaped_for_cache],
-        axis=cache_seq_axis,
+    # seq_axis = self.prefill_cache_logical_axis_names.index(CACHE_SEQUENCE)
+    # cache_seq_axis = self.prefill_cache_axis_order.index(seq_axis)
+    # CACHE_SEQUENCE is 0
+
+    assert self.max_prefill_length == cached_key_value.shape[0], f"{self.max_prefill_length=}, {cached_key_value.shape[0]=}"
+    assert key_shaped_for_cache.shape[0] == value_shaped_for_cache.shape[0]
+    # print(f"{key_shaped_for_cache=}, {(self.max_prefill_length // key_shaped_for_cache.shape[0], 1, 1, 1)=}")
+    key_shaped_for_cache_tiled = jnp.tile(
+        key_shaped_for_cache, (self.max_prefill_length // key_shaped_for_cache.shape[0], 1, 1, 1)
     )
-
-    cached_prefill_value_vars[0].value = jnp.concatenate(
-        [cached_value_value[:next_pos], value_shaped_for_cache],
-        axis=cache_seq_axis,
+    value_shaped_for_cache_tiled = jnp.tile(
+        value_shaped_for_cache, (self.max_prefill_length // value_shaped_for_cache.shape[0], 1, 1, 1)
     )
+    next_pos = previous_chunk if previous_chunk is not None else jnp.zeros((1, 1), dtype=jnp.int32)
+    zero_to_n = jnp.expand_dims(jnp.arange(0, self.max_prefill_length), 0)
+    # print(f"{next_pos=} <= {zero_to_n=} < {(next_pos + key_shaped_for_cache_tiled.shape[0])=}")
+    update_mask = next_pos <= zero_to_n
+    kv_update_mask = jnp.transpose(update_mask, (1, 0))[:, None, :, None]  # seq, 1, batch, 1
+    key_shaped_for_cache_tiled = jnp.where(kv_update_mask, key_shaped_for_cache_tiled, cached_key_value)
+    value_shaped_for_cache_tiled = jnp.where(kv_update_mask, value_shaped_for_cache_tiled, cached_value_value)
 
+    cached_prefill_key_vars[0].value = key_shaped_for_cache_tiled
+
+    cached_prefill_value_vars[0].value = value_shaped_for_cache_tiled
+
+    ### YYY: we don't use segment ids cache
     if decoder_segment_ids is not None:
-      cached_prefill_segment_id_var.value = jnp.concatenate(
-          [cached_prefill_segment_id_var.value[:, :next_pos], decoder_segment_ids],
-          axis=1,
-      )
+      cached_prefill_segment_id_var.value = decoder_segment_ids
 
     return (
         jnp.transpose(cached_prefill_key_vars[0].value, self.key_axis_order),
         jnp.transpose(cached_prefill_value_vars[0].value, self.key_axis_order),
-        cached_prefill_segment_id_var.value if decoder_segment_ids is not None else None,
+        decoder_segment_ids if decoder_segment_ids is not None else None,
     )
 
   def kv_cache_prefill(
@@ -416,8 +426,8 @@ class KVCache(nn.Module):
       key, value, decoder_segment_id.
 
     """
-    if previous_chunk is not None:
-      return self.kv_cache_prefill_concatenated(key, value, decoder_segment_ids, previous_chunk)
+    if self.use_chunked_prefill:
+      return self.kv_cache_chunked_prefill(key, value, decoder_segment_ids, previous_chunk)
 
     batch, _, heads, key_head_size = key.shape
     batch, _, heads, value_head_size = value.shape

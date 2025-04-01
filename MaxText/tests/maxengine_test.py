@@ -50,10 +50,10 @@ class MaxEngineTest(unittest.TestCase):
         "per_device_batch_size": 1.0,
         "run_name": "test",
         "enable_checkpointing": False,
-        "base_num_decoder_layers": 2,
+        "base_num_decoder_layers": 1,
         "attention": "dot_product",
         "max_target_length": 16,
-        "base_emb_dim": 256,
+        "base_emb_dim": 8,
         "base_num_query_heads": 2,
         "base_num_kv_heads": 2,
         "max_prefill_predict_length": 4,
@@ -125,7 +125,7 @@ class MaxEngineTest(unittest.TestCase):
     self.assertNotEqual(prefill_result["tokens"], jnp.array([0]))
     self.assertTrue(jnp.array_equal(first_token.data.size, 3))
 
-  @pytest.mark.skip(reason="Can only pass on CPU.")
+  #   @pytest.mark.skip(reason="Can only pass on CPU.")
   def test_chunked_prefill(self):
     """Test identical result between chunked prefill with single and multiple chunked.
 
@@ -141,8 +141,8 @@ class MaxEngineTest(unittest.TestCase):
     assert padding_tokens.shape[0] == prefill_length
 
     model_config_args = {
-        "max_target_length": prefill_length * 4,
-        "max_prefill_predict_length": prefill_length * 2,
+        "max_target_length": prefill_length * 2,
+        "max_prefill_predict_length": prefill_length * 1,
         "model_call_mode": "inference",
         "capacity_factor": 1,
         "decoder_block": "mistral",
@@ -177,6 +177,11 @@ class MaxEngineTest(unittest.TestCase):
         true_length=true_length,
     )
 
+    # def eq_len(x, y):
+    #   return jnp.array_equal(x[:7], y[:7])
+
+    # print(f"{one_chunk_prefill_result=}, {expected_prefill_result=}")
+    # print(f"{(jax.tree.map(eq_len, one_chunk_prefill_result, expected_prefill_result))=}")
     assert jax.tree.all(jax.tree.map(jnp.array_equal, one_chunk_prefill_result, expected_prefill_result))
     assert jax.tree.all(jax.tree.map(jnp.array_equal, one_chunk_first_token, expected_first_token))
 
@@ -193,7 +198,9 @@ class MaxEngineTest(unittest.TestCase):
     )
 
     existing_prefix = maxengine.ExistingPrefix(
-        cache=two_chunk_prefill_result["cache"], common_prefix_tokens=padding_tokens[:4]
+        cache=two_chunk_prefill_result["cache"],
+        common_prefix_tokens=jnp.array([4]),
+        position=jnp.arange(4, 8),
     )
     two_chunk_prefill_result, two_chunk_first_token = engine.prefill(
         params=params,
@@ -205,6 +212,10 @@ class MaxEngineTest(unittest.TestCase):
     # Delete extra contents only used in chunked prefill
     assert two_chunk_prefill_result is not None
 
+    print(f"{one_chunk_prefill_result=}, {two_chunk_prefill_result=}")
+    print(f"{(jax.tree.map(jnp.array_equal, one_chunk_prefill_result, two_chunk_prefill_result))=}")
+
+    ### YYY: only cache_prefill_segment_id different
     assert jax.tree.all(jax.tree.map(jnp.array_equal, one_chunk_prefill_result, two_chunk_prefill_result))
     assert jax.tree.all(jax.tree.map(jnp.array_equal, one_chunk_first_token, two_chunk_first_token))
     assert jax.tree.all(jax.tree.map(jnp.array_equal, expected_prefill_result, two_chunk_prefill_result))
