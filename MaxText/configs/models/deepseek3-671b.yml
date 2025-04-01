@@ -14,6 +14,9 @@
 
 # model config for DeepSeek V3 - 671B
 
+# For DeepSeek default device-limited routing, 
+# please set n_routing_groups=8 and topk_routing_group=4 in your command-line arguments.
+
 base_emb_dim: 7168
 base_num_query_heads: 128
 base_num_kv_heads: 128
@@ -32,8 +35,6 @@ shared_experts: 1
 routed_scaling_factor: 2.5
 routed_score_func: "sigmoid"
 routed_bias: True
-n_routing_groups: 8 # adjustable to control communication costs in routing
-topk_routing_group: 4 # adjustable to control communication costs in routing
 decoder_block: "deepseek"
 # MLA
 attention_type: "mla"

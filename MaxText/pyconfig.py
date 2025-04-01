@@ -743,6 +743,17 @@ def set_and_validate_pipeline_config(raw_keys):
 def validate_deepseek_moe(raw_keys):
   if raw_keys["decoder_block"] == "deepseek" and using_pipeline_parallelism(raw_keys):
     raise ValueError("Currently we do not support DeepSeek MoE with pipeline parallelism.")
+  if raw_keys["n_routing_groups"] != -1:
+    if raw_keys["topk_routing_group"] == -1:
+      raise ValueError(f'config topk_routing_group: {raw_keys["topk_routing_group"]} is not defined')
+    if raw_keys["n_routing_groups"] <= raw_keys["topk_routing_group"]:
+      raise ValueError(
+          f'config n_routing_groups: {raw_keys["n_routing_groups"]} must be greter than topk_routing_group: {raw_keys["topk_routing_group"]}'
+      )
+    if raw_keys["num_experts"] % raw_keys["n_routing_groups"] != 0:
+      raise ValueError(
+          f'config num_experts: {raw_keys["num_experts"]} must be divisible by n_routing_groups: {raw_keys["n_routing_groups"]}'
+      )
 
 
 def validate_sparse_matmul_parallelism(raw_keys):
