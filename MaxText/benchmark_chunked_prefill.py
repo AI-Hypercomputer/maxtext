@@ -26,9 +26,11 @@ from typing import Sequence
 from absl import app
 import datetime
 from jetstream.engine import token_utils
+import profiler
 
 _WARMUP_ITERS = 2
 _BENCHMARK_ITERS = 5
+_PROFILE_ITERS = 1
 
 
 def main(argv: Sequence[str]) -> None:
@@ -106,6 +108,20 @@ def main(argv: Sequence[str]) -> None:
     jax.block_until_ready(prefill_result)
     end = datetime.datetime.now()
     print("time taken for chunk prefill ", end - start)
+  
+  prof = profiler.Profiler(config)
+  prof.activate(optional_postfix="chunked_prefill")
+
+  for _ in range(_PROFILE_ITERS):
+    start = datetime.datetime.now()
+    prefill_result = run_chunked_prefill()
+    jax.block_until_ready(prefill_result)
+    end = datetime.datetime.now()
+
+    print("time taken for chunk prefill ", end - start)
+
+
+  prof.deactivate()
 
 
 if __name__ == "__main__":
