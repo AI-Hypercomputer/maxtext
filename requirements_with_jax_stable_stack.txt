@@ -16,7 +16,6 @@ tensorflow-text>=2.13.0
 tensorflow-datasets
 tensorboardx>=2.6.2.2
 tiktoken
-torch
 transformers
 mlperf-logging@git+https://github.com/mlperf/logging.git
 google-jetstream@git+https://github.com/AI-Hypercomputer/JetStream.git
