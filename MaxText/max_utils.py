@@ -268,7 +268,7 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
       num_nodes = jax.process_count()
       nodes_per_slice = num_nodes // num_slices
       max_logging.log(f"num_slices: {num_slices}, num_nodes: {num_nodes}, nodes_per_slice: {nodes_per_slice}")
-      node_rank = jax.process_index()
+      node_rank = jax._src.distributed.global_state.process_id  # pylint: disable=protected-access
       peer_ranks = []
       for i in range(num_slices):
         peer = node_rank % nodes_per_slice + i * nodes_per_slice
@@ -1063,7 +1063,7 @@ def print_system_information():
   Note that this will initialize the JAX backend."""
   max_logging.log(f"System Information: Jax Version: {jax.__version__}")
   max_logging.log(f"System Information: Jaxlib Version: {jax.lib.__version__}")
-  max_logging.log(f"System Information: Jax Backend: {jax.lib.xla_bridge.get_backend().platform_version}")
+  max_logging.log(f"System Information: Jax Backend: {jax.extend.backend.get_backend().platform_version}")
 
 
 def permute_to_match_maxtext_rope(arr):
