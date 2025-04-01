@@ -84,6 +84,17 @@ def _canonicalize_tuple(x):
     return (x,)
 
 
+def _compute_dot_general(inputs, kernel, kernel_axes, axis, contract_ind, matmul_precision, quant):
+  """Computes a dot_general operation that may be quantized."""
+  dot_general = lax.dot_general
+  matmul_precision = lax.Precision(matmul_precision)
+  if quant:
+    dot_general_cls = quant.dot_general_cls(mesh_axes=kernel_axes)
+    dot_general = dot_general_cls()
+    return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
+  return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision)
+
+
 class DenseGeneral(nn.Module):
   """A linear transformation with flexible axes.
 
@@ -94,7 +105,6 @@ class DenseGeneral(nn.Module):
     dtype: the dtype of the computation (default: float32).
     kernel_init: initializer function for the weight matrix.
     use_bias: whether to add bias in linear transformation.
-    score_func: scoring function for output normalization.
     quant: quantization config, defaults to None implying no quantization.
   """
 
@@ -106,7 +116,6 @@ class DenseGeneral(nn.Module):
   kernel_axes: Tuple[Optional[str], ...] = ()
   quant: Optional[Quant] = None
   use_bias: bool = False
-  score_func: str = ""
   matmul_precision: str = "default"
 
   @nn.compact
@@ -120,15 +129,81 @@ class DenseGeneral(nn.Module):
       The transformed input.
     """
 
-    def compute_dot_general(inputs, kernel, axis, contract_ind):
-      """Computes a dot_general operation that may be quantized."""
-      dot_general = lax.dot_general
-      matmul_precision = lax.Precision(self.matmul_precision)
-      if self.quant:
-        dot_general_cls = self.quant.dot_general_cls(mesh_axes=self.kernel_axes)
-        dot_general = dot_general_cls()
-        return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
-      return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision)
+    features = _canonicalize_tuple(self.features)
+    axis = _canonicalize_tuple(self.axis)
+
+    inputs = jnp.asarray(inputs, self.dtype)
+    axis = _normalize_axes(axis, inputs.ndim)
+
+    kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
+    kernel_in_axis = np.arange(len(axis))
+    kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
+    if quantizations.in_serve_mode(self.quant):
+      # During aqt convert state we delete kernel weight from params to save memory.
+      # Instead they are retrieved from the tensors stored in the 'aqt' collection.
+      kernel = jnp.zeros(kernel_shape)
+    else:
+      kernel = self.param(
+          "kernel",
+          nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
+          kernel_shape,
+          self.weight_dtype,
+          kernel_in_axis,
+          kernel_out_axis,
+      )
+    kernel = jnp.asarray(kernel, self.dtype)
+    contract_ind = tuple(range(0, len(axis)))
+    output = _compute_dot_general(inputs, kernel, self.kernel_axes, axis, contract_ind, self.matmul_precision, self.quant)
+
+    if self.use_bias:
+      bias_axes, bias_shape = (
+          self.kernel_axes[-len(features) :],
+          kernel_shape[-len(features) :],
+      )
+      bias = self.param(
+          "bias",
+          nn.with_logical_partitioning(bias_init, bias_axes),
+          bias_shape,
+          self.weight_dtype,
+      )
+      bias = jnp.asarray(bias, self.dtype)
+      output += bias
+    return output
+
+
+class GateLogit(nn.Module):
+  """A layer used to compute gate logits, allowing to return the pre bias values for DeepSeek routing.
+
+  Attributes:
+    features: tuple with numbers of output features.
+    model_name: which model to run.
+    axis: tuple with axes to apply the transformation on.
+    weight_dtype: the dtype of the weights (default: float32).
+    dtype: the dtype of the computation (default: float32).
+    kernel_init: initializer function for the weight matrix.
+    kernel_axes: tuple with axes to apply kernel function.
+    use_bias: whether to add learnable bias in gate logit scores.
+      When enabled, this bias aids expert load balancing (like in DeepSeek V3),
+      and is not part of the loss calculation.
+    score_func: scoring function for output normalization before applying bias.
+    quant: quantization config, defaults to None implying no quantization.
+    matmul_precision: precision for JAX functions.
+  """
+
+  features: Union[Iterable[int], int]
+  model_name: str
+  axis: Union[Iterable[int], int] = -1
+  weight_dtype: DType = jnp.float32
+  dtype: DType = jnp.float32
+  kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal")
+  kernel_axes: Tuple[Optional[str], ...] = ()
+  use_bias: bool = False
+  score_func: str = ""
+  quant: Optional[Quant] = None
+  matmul_precision: str = "default"
+
+  @nn.compact
+  def __call__(self, inputs: Array) -> Tuple[Array, Optional[Array]]:
 
     features = _canonicalize_tuple(self.features)
     axis = _canonicalize_tuple(self.axis)
@@ -155,10 +230,13 @@ class DenseGeneral(nn.Module):
     kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(axis)))
-    output = compute_dot_general(inputs, kernel, axis, contract_ind)
+    output = _compute_dot_general(inputs, kernel, self.kernel_axes, axis, contract_ind, self.matmul_precision, self.quant)
+    pre_bias_logits = None
 
     if self.score_func:
       output = _convert_to_activation_function(self.score_func)(output)
+      if self.model_name.startswith("deepseek3"):
+        pre_bias_logits = output
 
     if self.use_bias:
       bias_axes, bias_shape = (
@@ -173,7 +251,7 @@ class DenseGeneral(nn.Module):
       )
       bias = jnp.asarray(bias, self.dtype)
       output += bias
-    return output
+    return output, pre_bias_logits
 
 
 class MlpBlock(nn.Module):
@@ -373,6 +451,19 @@ class MoeBlock(nn.Module):
     wo_kernel = jnp.asarray(wo_kernel, self.dtype)
     return w0_kernel, w1_kernel, wo_kernel
 
+  def get_topk(self, gate_logits, pre_bias_logits):
+    # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
+    if self.config.model_name.startswith("deepseek3"):
+      top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
+    else:
+      top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+
+    if self.config.decoder_block == "deepseek":
+      top_k_weights = self.deepseek_scale_weights(top_k_weights)
+    else:
+      top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+    return top_k_weights, top_k_indices
+
   def deepseek_scale_weights(self, weights):
     """Scales weights according to DeepSeek's v3 reference implementation.
     https://github.com/deepseek-ai/DeepSeek-V3/blob/2f7b80eecebf3d1c84da5a0d465f6639ea175012/inference/model.py#L592-L594
@@ -382,17 +473,56 @@ class MoeBlock(nn.Module):
     weights *= self.config.routed_scaling_factor
     return weights
 
-  def permute(self, inputs, gate_logits):
-    """Permute tokens to group by expert to fit gmm call."""
+  def deepseek_routing(self, gate_logits, pre_bias_logits):
+    """DeepSeek routing logit. It involves two-stage selection process:
 
+    1) Group Scoring: Experts are partitioned into n_routing_groups.
+    Within each group, the logits of the top-2 scoring experts are summed to create an aggregate score for the group.
+    2) The top-K (topk_routing_group) groups are identified based on their aggregate scores.
+    The final set of selected experts is chosen only from within these top-K groups.
+
+    The selection uses post_bias logits, but the return weigths are based on pre_bias logits.
+    """
+    # TODO(ranran): Add an option to turn off device-limited routing as it may not be optimal for TPUs.
+    batch_size, seq_len = gate_logits.shape[0], gate_logits.shape[1]
+    n = batch_size * seq_len
+    experts_per_group = self.num_experts // self.num_experts_per_tok
+
+    # Reshape
+    gate_logits_flat = jnp.reshape(gate_logits, (n, self.num_experts))
+    pre_bias_logits_falt = jnp.reshape(pre_bias_logits, (n, self.num_experts))
+    scores_grouped = jnp.reshape(gate_logits_flat, (n, self.config.n_routing_groups, experts_per_group))
+
+    # Group selection: select top2 from each group, sum values, then select top groups
+    top2_in_group_vals, _ = jax.lax.top_k(scores_grouped, k=2)
+    group_scores = jnp.sum(top2_in_group_vals.astype(jnp.float32), axis=-1)
+    group_idx = jax.lax.top_k(group_scores, k=self.config.topk_routing_group)[1]
+
+    # Create masks for selected groups
+    group_mask = jax.nn.one_hot(group_idx, num_classes=self.config.n_routing_groups, dtype=jnp.float32)
+    group_mask = jnp.sum(group_mask, axis=1)
+
+    # Apply masks and get topk indices and weights
+    score_mask_grouped = jnp.expand_dims(group_mask, axis=-1)
+    score_mask_expanded = jnp.broadcast_to(score_mask_grouped, (n, self.num_experts_per_tok, experts_per_group))
+    score_mask = jnp.reshape(score_mask_expanded, (n, self.num_experts))
+    negative_infinity = -jax.numpy.inf
+    masked_scores = jnp.where(score_mask > 0, gate_logits_flat, negative_infinity)
+    top_k_indices = jax.lax.top_k(masked_scores, k=self.num_experts_per_tok)[1]
+    top_k_weights = jnp.take_along_axis(pre_bias_logits_falt, top_k_indices, axis=-1)
+
+    # Reshape
+    top_k_indices = jnp.reshape(top_k_indices, (batch_size, seq_len, self.num_experts_per_tok))
+    top_k_weights = jnp.reshape(top_k_weights, (batch_size, seq_len, self.num_experts_per_tok))
+    return top_k_weights, top_k_indices
+
+  def permute(self, inputs, gate_logits, pre_bias_logits):
+    """Permute tokens to group by expert to fit gmm call."""
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
     inputs_shape = inputs.shape
     inputs_2d = jnp.reshape(inputs, (inputs_shape[0] * inputs_shape[1], inputs_shape[2]))
-    weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
-    if self.config.decoder_block == "deepseek":
-      weights = self.deepseek_scale_weights(weights)
-    else:
-      weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+    weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits)
+
     flatten_selected_experts = jnp.ravel(selected_experts)
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
     sorted_indices = sorted_selected_experts // self.num_experts_per_tok
@@ -420,7 +550,7 @@ class MoeBlock(nn.Module):
       )
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
 
-  def sparse_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
+  def sparse_matmul(self, inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel):
     tile_size = (512, 1024, 1024)  # (m, k, n)
 
     def local_permute(inputs, global_group_sizes, local_expert_size):
@@ -519,8 +649,13 @@ class MoeBlock(nn.Module):
     # Currently, we only support data and tensor parallelism with Megablox.
     # We all gather the input activations over tensor parallelism to follow strategy
     # in https://parsa.epfl.ch/course-info/cs723/papers/Megatron.pdf.
-    input_partition_spec = nn.logical_to_mesh_axes(("activation_batch", None, None))
+    input_partition_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
     gate_logits_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
+    if self.config.model_name.startswith("deepseek3"):
+      pre_bias_logits_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
+    else:
+      # pre_bias_logits is None for non-DeepSeek v3 models
+      pre_bias_logits_pspec = None
     w0_pspec = nn.logical_to_mesh_axes(("exp", None, "mlp"))
     w1_pspec = nn.logical_to_mesh_axes(("exp", None, "mlp"))
     wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp", None))
@@ -535,13 +670,13 @@ class MoeBlock(nn.Module):
     @functools.partial(
         shard_map.shard_map,
         mesh=self.mesh,
-        in_specs=(input_partition_spec, gate_logits_pspec, w0_pspec, w1_pspec, wo_pspec),
+        in_specs=(input_partition_pspec, gate_logits_pspec, pre_bias_logits_pspec, w0_pspec, w1_pspec, wo_pspec),
         out_specs=(nn.logical_to_mesh_axes(("activation_batch", None, "activation_embed"))),
         check_rep=False,
     )
-    def wrapper(x, logits, w0, w1, wo):
+    def wrapper(x, logits, pre_bias_logits, w0, w1, wo):
       batch_size, sequence_length, _ = x.shape
-      x, sorted_selected_experts, weights, group_sizes = self.permute(x, logits)
+      x, sorted_selected_experts, weights, group_sizes = self.permute(x, logits, pre_bias_logits)
 
       if self.get_expert_parallelism() > 1:
         axis_name = "expert"
@@ -564,7 +699,6 @@ class MoeBlock(nn.Module):
             * self.config.num_experts_per_tok
         )
         output_shape = jnp.zeros((buffer_size, self.config.emb_dim), dtype=x.dtype)
-        original_x = x
         x = jax.lax.ragged_all_to_all(
             x,
             output_shape,
@@ -612,7 +746,7 @@ class MoeBlock(nn.Module):
       )
       return output, None
 
-    return wrapper(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+    return wrapper(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)
 
   def reshape_and_update_weights(self, weights, indices):
     # input of weights & indices: (batch_size, seq_len, num_experts_per_tok)
@@ -812,18 +946,13 @@ class MoeBlock(nn.Module):
       kernel = nn.with_logical_constraint(kernel, kernel_axes)
     return kernel
 
-  def dense_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
+  def dense_matmul(self, inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel):
     # gate_logits: batch, length, expert
-    # follow router_logits non-sharded kernel
     gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", None))
-    # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
-    top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
-
-    if self.config.decoder_block == "deepseek":
-      top_k_weights = self.deepseek_scale_weights(top_k_weights)
-    else:
-      top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
-
+    if self.config.model_name.startswith("deepseek3"):
+      # pre_bias_logits is None for non-DeepSeek v3 models
+      pre_bias_logits = nn.with_logical_constraint(pre_bias_logits, ("activation_batch", "activation_length", None))
+    top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits)
     weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
     matmul_precision = lax.Precision(self.config.matmul_precision)
 
@@ -970,11 +1099,11 @@ class MoeBlock(nn.Module):
       return output, None
 
   def retrieve_quantized_weight(
-      self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel
+      self, inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel
   ) -> tuple[QTensor, QTensor, QTensor]:
     # This is called only during tracing. This is to invoke creation of quantized tensor inside AqtEinsum.
     # After jit, this will become no-op and will not affect performance.
-    _ = self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+    _ = self.dense_matmul(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)
 
     w0_kernel = self.variables["aqt"]["AqtEinsum_0"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
     w1_kernel = self.variables["aqt"]["AqtEinsum_1"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
@@ -989,28 +1118,30 @@ class MoeBlock(nn.Module):
   def __call__(self, inputs):
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
-    gate_logits = DenseGeneral(
+
+    gate_logits, pre_bias_logits = GateLogit(
         self.num_experts,
+        model_name=cfg.model_name,
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
         kernel_init=self.kernel_init,
         kernel_axes=self.kernel_axes,
         name="gate",
-        use_bias=self.config.routed_bias,
-        score_func=self.config.routed_score_func,
-        matmul_precision=self.config.matmul_precision,
+        use_bias=cfg.routed_bias,
+        score_func=cfg.routed_score_func,
+        matmul_precision=cfg.matmul_precision,
     )(inputs)
 
     w0_kernel, w1_kernel, wo_kernel = self.generate_kernels(cfg.num_experts, cfg.emb_dim, self.intermediate_dim)
     if cfg.sparse_matmul:
       if quantizations.in_serve_mode(self.quant):
         w0_kernel, w1_kernel, wo_kernel = self.retrieve_quantized_weight(
-            inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel
+            inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel
         )
-      return self.sparse_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+      return self.sparse_matmul(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)
     else:
-      return self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+      return self.dense_matmul(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)
 
 
 class DeepSeekMoeBlock(nn.Module):
