@@ -56,7 +56,7 @@ def main(argv: Sequence[str]) -> None:
   prefill_lengths = [1024, 2048, 4096, 8192]
 
   # chunked first to separate time of chunked and tokenized.
-  input_tokens = []
+  common_prefix_tokens = []
   padded_input_tokens = []
   input_true_lengths = []
   # use whole tokens with padding for long context to max_prefill_length
@@ -71,7 +71,7 @@ def main(argv: Sequence[str]) -> None:
         max_prefill_length=max_prefill_length,
         jax_padding=True,
     )
-    input_tokens.append(input_token)
+    common_prefix_tokens.append(tokens[0 : min(len(tokens), start_pos + chunk_size)])
     padded_input_tokens.append(padded_input_token)
     input_true_lengths.append(input_true_length)
 
@@ -80,7 +80,9 @@ def main(argv: Sequence[str]) -> None:
   def run_chunked_prefill():
     prefill_result = None
     existing_prefix = None
-    for input_token, padded_input_token, input_true_length in zip(input_tokens, padded_input_tokens, input_true_lengths):
+    for common_prefix_token, padded_input_token, input_true_length in zip(
+        common_prefix_tokens, padded_input_tokens, input_true_lengths
+    ):
       prefill_result, _ = engine.prefill(
           params=params,
           existing_prefix=existing_prefix,
@@ -90,7 +92,7 @@ def main(argv: Sequence[str]) -> None:
       )
       existing_prefix = maxengine.ExistingPrefix(
           cache=prefill_result["cache"],
-          common_prefix_tokens=input_token,
+          common_prefix_tokens=common_prefix_token,
       )
 
     return prefill_result
