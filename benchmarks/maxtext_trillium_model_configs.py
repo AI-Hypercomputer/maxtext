@@ -1528,3 +1528,81 @@ deepseek_matt_a1 = _add_to_model_dictionary(
     ),
   )
 )
+
+
+
+deepseek_manual_matt_a1 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="deepseek_manual_matt_a1",
+    model_type="default",
+    tuning_params={
+        "per_device_batch_size": 1,
+        "max_target_length": 2048,
+        "ici_fsdp_parallelism": 64,
+        "ici_expert_parallelism": 4,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        # "out_proj": "offload",
+        # "query_proj": "offload",
+        # "key_proj": "offload",
+        # "value_proj": "offload",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "sa_block_q": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+        "megablox": False,
+        "sparse_matmul": False,
+        "capacity_factor": 1.0,
+        "tokenizer_path": "assets/tokenizer.mistral-v3",
+        "dtype": "bfloat16",
+        "opt_type": "sgd",
+        "weight_dtype": "bfloat16",
+        "allow_split_physical_axes": True,
+        "custom_mesh": "hybrid_ring_64x4",
+        "attention": "dot_product",
+        "sharding_tolerance": 2, # This should never be more than 1
+
+        # DS def
+        "base_emb_dim": 7168,
+        "base_num_query_heads": 128,
+        "base_num_kv_heads": 128,
+        "base_mlp_dim": 18432,
+        "base_moe_mlp_dim": 2048,
+        "base_num_decoder_layers": 21,
+        "first_num_dense_layers": 3,
+        #"mlp_activations": ["silu","linear"],
+        "vocab_size": 129280,
+        "enable_dropout": False,
+        "logits_via_embedding": False,
+        "normalization_layer_epsilon": 1.0e-6,
+        "num_experts": 256,
+        "num_experts_per_tok": 8,
+        "shared_experts": 1,
+        "routed_scaling_factor": 2.5,
+        "routed_score_func": "sigmoid",
+        "routed_bias": True,
+        #MLA
+        "attention_type": "mla",
+        "q_lora_rank": 1536,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "v_head_dim": 128,
+        "rope_type": "yarn",
+        "mscale": 1.0,
+        "decoder_block": "deepseek"
+    },
+    xla_flags=(
+        xla_flags_library.MOE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+    ),
+  )
+)
