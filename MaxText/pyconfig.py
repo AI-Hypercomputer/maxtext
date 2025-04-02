@@ -575,6 +575,7 @@ class _HyperParameters:
     
     raw_keys["eval_steps"] = math.ceil(5760 * 8192 / max_target_length /global_batch_size_to_eval_on)
     raw_keys["eval_interval"] = math.ceil(377487360 / max_target_length / global_batch_size_to_train_on)
+    # raw_keys["eval_interval"] = 10
 
   @staticmethod
   def update_model_vars(base_config_path, raw_keys, config_name: str):

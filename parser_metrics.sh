@@ -1,5 +1,8 @@
 #!/bin/bash
 mlperf_log='/tmp/large_scale_multislice_test_log'
+
+sudo apt-get update
+sudo apt-get install bc
 # Calculate block_time for each first_epoch_num
 total=0
 num=0

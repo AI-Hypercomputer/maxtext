@@ -74,6 +74,30 @@ def add_pathways_arguments(parser: argparse.ArgumentParser):
       default=False,
       help='whether to use pathways or not.',
   )
+  parser.add_argument(
+      '--pathways_server_flags',
+      type=str,
+      default='',
+      help='flags passed to pathways server.',
+  )
+  parser.add_argument(
+      '--pathways_proxy_server_flags',
+      type=str,
+      default='',
+      help='flags passed to pathways proxy server.',
+  )
+  parser.add_argument(
+      '--pathways_worker_flags',
+      type=str,
+      default='',
+      help='flags passed to pathways workers.',
+  )
+  parser.add_argument(
+      '--pathways_gcs_location',
+      type=str,
+      default='',
+      help='GCS bucket used for Pathways.',
+  )
 
 def add_xpk_runner_arguments(custom_parser: argparse.ArgumentParser):
   """Add arguments to the xpk runner parser.
@@ -152,7 +176,7 @@ def add_xpk_runner_arguments(custom_parser: argparse.ArgumentParser):
   custom_parser.add_argument(
       '--xpk_path',
       type=str,
-      default=os.path.join(os.path.dirname(PKG_DIR), os.path.join("~", "xpk")),
+      default=os.path.join(os.path.dirname(PKG_DIR), "../xpk"),
       help='path to xpk dir.',
   )
   custom_parser.add_argument(
@@ -238,7 +262,7 @@ def main() -> None:
   on_device_runner_parser = subparsers.add_parser("on-device")
   add_xpk_runner_arguments(xpk_runner_parser)
   add_on_device_runner_arguments(on_device_runner_parser)
-  add_pathways_arguments(parser)
+  add_pathways_arguments(xpk_runner_parser)
   options = parser.parse_args()
 
   # Check that there are no duplicate model configs
@@ -266,6 +290,10 @@ def main() -> None:
       proxy_server_image=options.pathways_proxy_server_image,
       runner_image=options.pathways_runner_image,
       remote_python_sidecar_image=options.remote_python_sidecar_image,
+      server_flags=options.pathways_server_flags,
+      proxy_flags=options.pathways_proxy_server_flags,
+      worker_flags=options.pathways_worker_flags,
+      pathways_gcs_location=options.pathways_gcs_location,
     )
 
   if options.runner == "xpk":

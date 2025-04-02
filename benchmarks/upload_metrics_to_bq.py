@@ -18,12 +18,12 @@ from typing import Any, Dict, Sequence
 from statistics import median
 
 import omegaconf
-from command_utils import run_command_with_updates
+from benchmarks.command_utils import run_command_with_updates
 # from benchmark_db_utils import install_mantaray_locally
-from benchmark_db_utils import write_run
-from benchmark_db_utils import DEFAULT_LOCAL_DIR
-from benchmark_db_utils import recover_tuning_params
-from benchmark_db_utils import Metrics
+from benchmarks.benchmark_db_utils import write_run
+from benchmarks.benchmark_db_utils import DEFAULT_LOCAL_DIR
+from benchmarks.benchmark_db_utils import recover_tuning_params
+from benchmarks.benchmark_db_utils import Metrics
 from MaxText.inference_utils import str2bool
 import dataclasses
 import fnmatch

@@ -62,8 +62,11 @@ PATHWAYS_MLPERF_TUNING_PARAMS = {
     "async_checkpointing": True,
     "enable_pathways_goodput": False,
     "enable_checkpointing": True,
-    "checkpoint_period": 20,
+    "checkpoint_period": 1000,
     "enable_checkpoint_cloud_logger": False,
+    "monitor_goodput": False,
+    "enable_tensorboard": False,
+    "use_vertex_tensorboard": False,
 }
 
 
@@ -853,12 +856,10 @@ llama3_1_405b_8192_fsdp_dcn_mlperf_pathways = _add_to_model_dictionary(
         "decoder_layer_input": "offload",
         "max_target_length": 8192,
         "attention": "flash",
-        "gcs_metrics": True,
-        # "gcs_metrics": False,
+        # "gcs_metrics": True,
         "use_iota_embed": True,
         # "dataset_type": "synthetic",
         "reuse_example_batch": -1,
-        # "profiler": "xplane",
         "sa_block_q": 2048,
         "sa_block_kv": 2048,
         "sa_block_kv_compute": 2048,
@@ -876,23 +877,108 @@ llama3_1_405b_8192_fsdp_dcn_mlperf_pathways = _add_to_model_dictionary(
         "tokenizer_type": "huggingface",
         "tokenizer_path": "assets/mistral/tokenizer",
         "dataset_path": "gs://trillium-scale-datasets-q1-25-west",
+        # "dataset_path": "/tmp/dataset/trillium-scale-datasets-q1-25-west",
+        "dataset_type": "c4_mlperf",
+        "dataset_name": "c4/en:3.0.7",
+        "eval_dataset_name": "c4/en:3.0.9",
+        # "profiler": "xplane",
+        # "skip_first_n_steps_for_profiler": 45,
+        # "profiler_steps": 5,
+        "steps": 500,
+        "weight_dtype": "float32",
+        "dtype": "bfloat16",
+        "learning_rate": 8.e-5,
+        "warmup_steps_fraction": 0.0067,
+        "learning_rate_schedule_steps": 2400000,
+        "target_eval_loss": 5.6,
+        "data_shuffle_seed": 8976,
+        "enable_step_logging": False,
+        "enable_metric_writing": False,
+        "enable_tensorboard": False,
+    },
+    pathways_tuning_params=PATHWAYS_MLPERF_TUNING_PARAMS,
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+    ),
+    pathways_xla_flag_options={
+        xla_flags_library.REMOVE: [
+            "--2a886c8_chip_config_name=megachip_tccontrol"
+        ],
+        xla_flags_library.ADD_SERVER: (
+            xla_flags_library.ENHANCED_LAUNCH_BARRIER
+        ),
+        xla_flags_library.ADD_PROXY: (
+            xla_flags_library.ENHANCED_LAUNCH_BARRIER
+        ),
+        xla_flags_library.ADD_WORKER: (
+            xla_flags_library.ENHANCED_LAUNCH_BARRIER
+        ),
+    }
+  )
+)
+
+llama3_1_405b_8192_fsdp_dcn_mlperf_pathways_2 = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama3-1-405b-8192-fsdp-dcn-mlperf-pathways-2",
+    model_type="llama3.1-405b",
+    tuning_params={
+        "per_device_batch_size": 0.5,
+        "eval_per_device_batch_size": 1,
+        "ici_fsdp_parallelism": 64,
+        "ici_tensor_parallelism": 4,
+        "dcn_fsdp_parallelism": 2,
+        "allow_split_physical_axes": True,
+        "custom_mesh": "hybrid_ring_64x4",
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "out_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        # "gcs_metrics": True,
+        "use_iota_embed": True,
+        # "dataset_type": "synthetic",
+        "reuse_example_batch": -1,
+        "profiler": "xplane",
+        "sa_block_q": 2048,
+        "sa_block_kv": 2048,
+        "sa_block_kv_compute": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_kv_dkv": 2048,
+        "sa_block_kv_dkv_compute": 2048,
+        "sa_block_q_dq": 2048,
+        "sa_block_kv_dq": 2048,
+        "opt_type": "adam_pax",
+        "enable_checkpointing": True,
+        "load_parameters_path": "gs://qinwen-mlperf/llama405_perf/qinwen/qinwe-llama3-1-405-2-031904-k9l/checkpoints/0/items",
+        "tokenizer_type": "huggingface",
+        "tokenizer_path": "assets/mistral/tokenizer",
+        "dataset_path": "gs://trillium-scale-datasets-q1-25-west",
         "dataset_type": "c4_mlperf",
         "dataset_name": "c4/en:3.0.7",
         "eval_dataset_name": "c4/en:3.0.9",
         "skip_first_n_steps_for_profiler": 295, 
         "weight_dtype": "float32",
         "dtype": "bfloat16",
-        # "steps": 300, 
+        "steps": 300, 
         "learning_rate": 8.e-5,
         "warmup_steps_fraction": 0.0067,
         "learning_rate_schedule_steps": 2400000,
         "target_eval_loss": 5.6,
-        "data_shuffle_seed": 8941,
+        "data_shuffle_seed": 7186,
+        # "enable_metric_writing": False,
+        "enable_goodput_recording": False,
+        "monitor_goodput": False,
     },
     pathways_tuning_params=PATHWAYS_MLPERF_TUNING_PARAMS,
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
-        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR
         + xla_flags_library.HOST_OFFLOAD_FLAGS
     ),
     pathways_xla_flag_options={
@@ -930,7 +1016,6 @@ llama3_1_405b_8192_fsdp_dcn_mlperf = _add_to_model_dictionary(
         "use_iota_embed": True,
         # "dataset_type": "synthetic",
         "reuse_example_batch": -1,
-        "profiler": "xplane",
         "sa_block_q": 2048,
         "sa_block_kv": 2048,
         "sa_block_kv_compute": 2048,
@@ -949,15 +1034,20 @@ llama3_1_405b_8192_fsdp_dcn_mlperf = _add_to_model_dictionary(
         "dataset_type": "c4_mlperf",
         "dataset_name": "c4/en:3.0.7",
         "eval_dataset_name": "c4/en:3.0.9",
-        "skip_first_n_steps_for_profiler": 295, 
+        "profiler": "xplane",
+        "skip_first_n_steps_for_profiler": 10,
+        "profiler_steps": 5,
         "weight_dtype": "float32",
         "dtype": "bfloat16",
-        "steps": 300, 
+        "steps": 20,
         "learning_rate": 8.e-5,
         "warmup_steps_fraction": 0.0067,
         "learning_rate_schedule_steps": 2400000,
         "target_eval_loss": 5.6,
         "data_shuffle_seed": 8941,
+        "enable_step_logging": True,
+        "enable_metric_writing": True,
+        "enable_tensorboard": True,
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG

@@ -20,14 +20,14 @@ from benchmarks.globals import PKG_DIR
 import datetime
 import sys
 import os
-import args_helper as helper
+import benchmarks.recipes.args_helper as helper
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(parent_dir)
 
-import maxtext_trillium_model_configs as model_configs
-import maxtext_xpk_runner as mxr
-from xpk_configs import XpkClusterConfig
+import benchmarks.maxtext_trillium_model_configs as model_configs
+import benchmarks.maxtext_xpk_runner as mxr
+from benchmarks.xpk_configs import XpkClusterConfig
 
 
 PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_proxy_server:latest"
@@ -35,15 +35,16 @@ SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_s
 RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest"
 
 # Cluster Params
-CLUSTER = "v6e-256-cluster"
-PROJECT = "tpu-prod-env-cluster"
-ZONE = "us-east5-b"
-REGION = "us-east5"
-COUNTRY = "us"
-DEVICE_TYPE = "v6e-256"
+CLUSTER="bodaborg-v6e-256-lcscld-c"
+PROJECT="tpu-prod-env-one-vm"
+ZONE="southamerica-west1-a"
+REGION="southamerica-west1"
+COUNTRY="us"
+DEVICE_TYPE="v6e-256"
 
 # Other parameters (MUST BE SET BY USER)
-XPK_PATH = os.path.join(os.path.dirname(PKG_DIR), os.path.join("~", "xpk"))  # We're running this script from the maxtext directory
+# XPK_PATH = os.path.join(os.path.dirname(PKG_DIR), os.path.join("~", "xpk"))  # We're running this script from the maxtext directory
+XPK_PATH="../xpk"
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = (
     f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
@@ -71,13 +72,13 @@ def main() -> int:
 
   models = {
       "mcjax": [
-          # model_configs.llama3_1_8b_8192,
+          model_configs.llama3_1_8b_8192,
           # model_configs.llama3_1_70b_8192,
           # model_configs.llama3_1_405b_8192_fsdp_dcn,
           # model_configs.llama2_70b_4096_real_data_long_run,
       ],
       "pathways": [
-          model_configs.llama3_1_8b_8192,
+        #   model_configs.llama3_1_8b_8192,
           # model_configs.llama3_1_70b_8192,
           # model_configs.llama3_1_405b_8192_fsdp_dcn,
           # model_configs.llama2_70b_4096_real_data_long_run,
@@ -94,7 +95,10 @@ def main() -> int:
       worker_flags="",
   )
   num_slices_list = [
-      2
+      1,
+      1,
+      1,
+      1,
   ]
 
   xpk_workload_cmds = []
