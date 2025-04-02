@@ -206,3 +206,7 @@ DEBUG_LOGS = {
 DISABLE_COLLECTIVE_MATMUL = (
     " --xla_jf_spmd_threshold_for_windowed_einsum_mib=1000000"
 )
+
+ASYNC_ALL_TO_ALL = (
+  " --xla_tpu_enable_async_all_to_all"
+)

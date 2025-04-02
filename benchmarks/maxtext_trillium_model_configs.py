@@ -1530,15 +1530,16 @@ deepseek_matt_a1 = _add_to_model_dictionary(
 )
 
 
-
+# docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2025-04-02"'
+# commit a7b27f60f146c78415f456e163f90fc2b2aec42d (HEAD -> mattdavidow-ds-gogo, origin/mattdavidow-ds-gogo)
 deepseek_manual_matt_a1 = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
     model_name="deepseek_manual_matt_a1",
     model_type="default",
     tuning_params={
-        "per_device_batch_size": 1,
-        "max_target_length": 2048,
+        "per_device_batch_size": 6,
+        "max_target_length": 4096,
         "ici_fsdp_parallelism": 64,
         "ici_expert_parallelism": 4,
         "remat_policy": "custom",
@@ -1566,7 +1567,6 @@ deepseek_manual_matt_a1 = _add_to_model_dictionary(
         "weight_dtype": "bfloat16",
         "allow_split_physical_axes": True,
         "custom_mesh": "hybrid_ring_64x4",
-        "attention": "dot_product",
         "sharding_tolerance": 2, # This should never be more than 1
 
         # DS def
@@ -1603,6 +1603,7 @@ deepseek_manual_matt_a1 = _add_to_model_dictionary(
         xla_flags_library.MOE_VMEM_LIMIT_FLAG
         + xla_flags_library.CF_FOR_ALL_GATHER
         + xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.ASYNC_ALL_TO_ALL
     ),
   )
 )
