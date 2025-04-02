@@ -32,6 +32,8 @@ shared_experts: 1
 routed_scaling_factor: 2.5
 routed_score_func: "sigmoid"
 routed_bias: True
+n_routing_groups: 8 # adjustable to control communication costs in routing
+topk_routing_group: 4 # adjustable to control communication costs in routing
 decoder_block: "deepseek"
 # MLA
 attention_type: "mla"

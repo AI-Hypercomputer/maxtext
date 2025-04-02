@@ -41,11 +41,19 @@ prompt_template='Example 1:\nQuestion: What is the capital of France?\nChoices:\
 import collections
 import re
 import sys
+import os
 
+current_dir = os.path.dirname(os.path.abspath(__file__))
+benchmark_parent_dir = os.path.dirname(current_dir)
+maxtext_parent_dir = os.path.dirname(benchmark_parent_dir)
+
+sys.path.append(maxtext_parent_dir)
+sys.path.append(maxtext_parent_dir + "/MaxText")
+
+import max_logging
 from absl import flags
 import datasets
 import jax
-import max_logging
 import max_utils
 import maxengine
 from mmlu_categories import categories

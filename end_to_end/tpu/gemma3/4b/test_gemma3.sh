@@ -11,7 +11,7 @@
 set -ex
 idx=$(date +%Y-%m-%d-%H-%M)
 export MODEL_VARIATION='4b'
-export MODEL_NAME=gemma3-4b
+export MODEL_NAME=gemma3-${MODEL_VARIATION}
 
 # Installing torch for deps in forward_pass_logit_chekcker.py
 pip install torch --index-url https://download.pytorch.org/whl/cpu
@@ -47,3 +47,12 @@ python MaxText/decode.py MaxText/configs/base.yml tokenizer_path=assets/tokenize
 
 # # to get higher precision (eg. float32) run on CPU with `JAX_PLATFORMS=cpu`
 python3 MaxText/tests/forward_pass_logit_checker.py  MaxText/configs/base.yml tokenizer_path=assets/tokenizer.gemma3 load_parameters_path=${UNSCANNED_CKPT_PATH} run_name=forward_pass_test_${MODEL_NAME} per_device_batch_size=1 model_name=${MODEL_NAME} max_prefill_predict_length=4 max_target_length=4 dataset_type=synthetic scan_layers=false --atol=1.0 --rtol=1.0
+
+# Finetune by using the scanned converted checkpoint by specifying`load_parameters_path=${CONVERTED_CHECKPOINT}`. For Googlers, uncomment the line below if you want to use the pre-converted checkpoint.
+# export CONVERTED_CHECKPOINT=gs://maxtext-model-checkpoints/gemma3-4b/2025-03-18-19-03/scanned/0/items
+FINETUNE_RUN_NAME=runner_finetune_${idx}
+python MaxText/train.py MaxText/configs/base.yml model_name=$MODEL_NAME base_output_directory=${BASE_OUTPUT_DIRECTORY} dataset_path=${DATASET_PATH} load_parameters_path=${CONVERTED_CHECKPOINT} tokenizer_path=assets/tokenizer.gemma3 per_device_batch_size=1 run_name=$FINETUNE_RUN_NAME steps=10 enable_checkpointing=true sharding_tolerance=0.03
+
+# We also run pre-training, this is similar to the finetuning command except we don't pass any checkpoint directory to load_parameters_path
+PRETRAIN_RUN_NAME=runner_pretrain_${idx}
+python MaxText/train.py MaxText/configs/base.yml model_name=$MODEL_NAME base_output_directory=${BASE_OUTPUT_DIRECTORY} dataset_path=${DATASET_PATH} tokenizer_path=assets/tokenizer.gemma3 per_device_batch_size=1 run_name=$PRETRAIN_RUN_NAME steps=10 enable_checkpointing=false sharding_tolerance=0.03

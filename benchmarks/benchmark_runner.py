@@ -31,7 +31,7 @@ from maxtext_xpk_runner import PathwaysConfig
 from maxtext_xpk_runner import WorkloadConfig
 from maxtext_xpk_runner import xpk_benchmark_runner
 from maxtext_xpk_runner import on_device_benchmark_runner
-from maxtext_xpk_runner import XpkClusterConfig
+from xpk_configs import XpkClusterConfig
 from maxtext_xpk_runner import LibTpuType
 
 def add_pathways_arguments(parser: argparse.ArgumentParser):

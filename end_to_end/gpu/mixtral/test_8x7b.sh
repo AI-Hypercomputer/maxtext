@@ -54,7 +54,7 @@ echo "Finished fine-tuning"
 #     async_checkpointing=false attention=dot_product capacity_factor=0.1 \
 #     ici_expert_parallelism=8 ici_fsdp_parallelism=1 max_prefill_predict_length=11 \
 #     max_target_length=24 megablox=False per_device_batch_size=1 \
-#     prompt="[INST] I love to [/INST]" scan_layers=false \
+#     prompt='"[INST] I love to [/INST]"' scan_layers=false \
 #     tokenizer_path=assets/tokenizer.mistral-v1
 # echo "Finished decoding"
 

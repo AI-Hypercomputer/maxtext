@@ -26,6 +26,24 @@ class PyconfigTest(unittest.TestCase):
 
     self.assertEqual(raw_keys, {"megablox": None, "foo": ["x", "y"]})
 
+  def test_empty_string_parse_as_empty_string(self):
+    config = pyconfig.initialize(
+        ["train.py", "configs/base.yml"],
+        skip_jax_distributed_system=True,  # We should check for this automatically instead - b/407047411
+        quantization="",
+    )
+
+    self.assertTrue(config.quantization is None or config.quantization == "")
+
+  def test_empty_string_parse_as_empty_string(self):
+    config = pyconfig.initialize(
+        ["train.py", "configs/base.yml"],
+        skip_jax_distributed_system=True,  # We should check for this automatically instead - b/407047411
+        quantization=None,
+    )
+
+    self.assertTrue(config.quantization is None or config.quantization == "")
+
   def test_logical_axis_override(self):
     raw_keys = {
         "megablox": None,

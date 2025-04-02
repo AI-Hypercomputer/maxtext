@@ -10,7 +10,6 @@
 
 set -ex
 idx=$(date +%Y-%m-%d-%H-%M)
-export MODEL_VARIATION='v2-16b'
 export MODEL_NAME='deepseek2-16b'
 export TOKENIZER_PATH='deepseek-ai/DeepSeek-V2-Lite'
 
@@ -24,7 +23,7 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu
 # You can use the HuggingFace checkpoint at https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite
 export CHKPT_BUCKET=gs://maxtext-deepseek/deepseek2-16b/hf
 export MODEL_BUCKET=gs://maxtext-deepseek/deepseek2-16b
-JAX_PLATFORMS=cpu python MaxText/convert_deepseek_ckpt.py.py --base_model_path ${CHKPT_BUCKET} --maxtext_model_path ${MODEL_BUCKET}/${idx} --model_size ${MODEL_VARIATION}
+JAX_PLATFORMS=cpu python MaxText/convert_deepseek_ckpt.py --base_model_path ${CHKPT_BUCKET} --maxtext_model_path ${MODEL_BUCKET}/${idx} --model_size ${MODEL_NAME}
 
 # Step 2:
 # Non-Googlers please remember to point `DATASET_PATH` to the GCS bucket where you have your training data
