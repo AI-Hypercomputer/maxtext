@@ -13,6 +13,7 @@
 # limitations under the License.
 
 # model config for mixtral-8x22b
+# tokenizer_path is assets/tokenizer.mistral-v3
 
 base_emb_dim: 6144
 base_num_query_heads: 48
@@ -28,4 +29,4 @@ normalization_layer_epsilon: 1.0e-5
 num_experts: 8
 num_experts_per_tok: 2
 rope_max_timescale: 1_000_000
-decoder_block: "mistral"
+decoder_block: "mixtral"

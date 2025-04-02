@@ -1,5 +1,5 @@
 """
-Copyright 2024 Google LLC
+Copyright 2025 Google LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,14 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-"""Transformer model definition."""
+"""Decoder layer definition for mixtral."""
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
 
 from typing import Optional
 from layers import quantizations
-from layers import linears
+from layers import moe
 from layers import initializers
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
@@ -45,11 +45,11 @@ RMSNorm = normalizations.RMSNorm
 Quant = quantizations.AqtQuantization
 
 # -----------------------------------------
-# The Decoder Layer for Mistral
+# The Decoder Layer for Mixtral
 # -----------------------------------------
 
 
-class MistralDecoderLayer(nn.Module):
+class MixtralDecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
 
   config: models.Config
@@ -134,16 +134,19 @@ class MistralDecoderLayer(nn.Module):
         hidden_states, ("activation_batch", "activation_norm_length", "activation_embed")
     )
 
-    mlp_lnx = linears.MlpBlock(
+    load_balance_loss = None
+    mlp_lnx, load_balance_loss = moe.MoeBlock(
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=mesh,
+        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", None),
         intermediate_dim=cfg.mlp_dim,
-        activations=cfg.mlp_activations,
-        intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
-        name="mlp",
-        config=cfg,
         quant=self.quant,
-    )(hidden_states, deterministic=deterministic)
+    )(hidden_states)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     layer_output = mlp_lnx + intermediate_inputs
@@ -153,6 +156,9 @@ class MistralDecoderLayer(nn.Module):
         layer_output,
         ("activation_batch", "activation_norm_length", "activation_embed"),
     )
+
+    if load_balance_loss is not None:
+      self.sow("intermediates", "moe_lb_loss", load_balance_loss)
 
     if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))
