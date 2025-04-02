@@ -611,7 +611,7 @@ class AttentionOp(nn.Module):
     return local_out, local_max, local_sum
 
   def is_partition_in_decode(self, seq_len):
-    return self.config.ici_context_parallelism > 0 and seq_len == 1
+    return self.config.ici_context_autoregressive_parallelism > 0 and seq_len == 1
 
   def apply_attention_dot(
       self,
@@ -631,17 +631,28 @@ class AttentionOp(nn.Module):
       query = query.astype(jnp.float32)
       key = key.astype(jnp.float32)
 
-    q_seq_len = query.shape[1]
-
     # special sharding for decode
+    q_seq_len = query.shape[1]
+    prefill_qkv_sharding = (BATCH, LENGTH, HEAD, D_KV)
+    decode_qkv_sharding = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV)
     if self.is_partition_in_decode(q_seq_len):
-      query = partitioning.with_sharding_constraint(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
-      key = partitioning.with_sharding_constraint(key, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
-      value = partitioning.with_sharding_constraint(value, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+      query = partitioning.with_sharding_constraint(query, decode_qkv_sharding)
+      # avoid sharding scale tensor when using kv cache quantization
+      if self.kv_quant and isinstance(key, KVTensor) and isinstance(value, KVTensor):
+        key.qvalue = partitioning.with_sharding_constraint(key.qvalue, decode_qkv_sharding)
+        value.qvalue = partitioning.with_sharding_constraint(value.qvalue, decode_qkv_sharding)
+      else:
+        key = partitioning.with_sharding_constraint(key, decode_qkv_sharding)
+        value = partitioning.with_sharding_constraint(value, decode_qkv_sharding)
     elif model_mode == common_types.MODEL_MODE_PREFILL:
-      query = partitioning.with_sharding_constraint(query, (BATCH, LENGTH, HEAD, D_KV))
-      key = partitioning.with_sharding_constraint(key, (BATCH, KV_LENGTH, HEAD, D_KV))
-      value = partitioning.with_sharding_constraint(value, (BATCH, KV_LENGTH, HEAD, D_KV))
+      query = partitioning.with_sharding_constraint(query, prefill_qkv_sharding)
+      # avoid sharding scale tensor when using kv cache quantization
+      if self.kv_quant and isinstance(key, KVTensor) and isinstance(value, KVTensor):
+        key.qvalue = partitioning.with_sharding_constraint(key.qvalue, prefill_qkv_sharding)
+        value.qvalue = partitioning.with_sharding_constraint(value.qvalue, prefill_qkv_sharding)
+      else:
+        key = partitioning.with_sharding_constraint(key, prefill_qkv_sharding)
+        value = partitioning.with_sharding_constraint(value, prefill_qkv_sharding)
 
     attn_weights = self.qk_product(query, key, q_seq_len, model_mode)
     if self.is_partition_in_decode(q_seq_len):
@@ -777,6 +788,7 @@ class AttentionOp(nn.Module):
       decoder_segment_ids,
       model_mode,
       previous_chunk=None,
+      slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
   ):
 
@@ -959,7 +971,9 @@ class Attention(nn.Module):
       # pylint: disable=no-value-for-parameter
       return self.kernel_init(*args) / depth_scaling
 
-    kernel_axes = (None, None, None) if self.config.ici_context_parallelism > 1 else ("embed", "q_heads", "kv")
+    kernel_axes = (
+        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("embed", "q_heads", "kv")
+    )
     query_proj = DenseGeneral(
         features=(self.num_query_heads, self.head_dim),
         axis=-1,
@@ -990,7 +1004,11 @@ class Attention(nn.Module):
     if self.num_query_heads % self.num_kv_heads != 0:
       raise ValueError("Invalid num_kv_heads for GQA.")
 
-    kernel_axes = (None, None, None) if self.config.ici_context_parallelism > 1 else ("embed", "kv_heads", "kv_head_dim")
+    kernel_axes = (
+        (None, None, None)
+        if self.config.ici_context_autoregressive_parallelism > 1
+        else ("embed", "kv_heads", "kv_head_dim")
+    )
 
     kv_proj = DenseGeneral(
         features=(self.num_kv_heads, self.head_dim),
@@ -1024,7 +1042,9 @@ class Attention(nn.Module):
     return query, key, value
 
   def out_projection(self, output_dim: int, out: Array) -> Array:
-    out_kernel_axis = (None, None, None) if self.config.ici_context_parallelism > 1 else ("heads", "kv", "embed")
+    out_kernel_axis = (
+        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed")
+    )
     out_proj = DenseGeneral(
         features=output_dim,
         axis=(-2, -1),
@@ -1102,6 +1122,7 @@ class Attention(nn.Module):
       model_mode: str = common_types.MODEL_MODE_TRAIN,
       deterministic: bool = False,
       previous_chunk: Any = None,
+      slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
   ):
     """Applies Attention on the input data.
@@ -1185,7 +1206,7 @@ class Attention(nn.Module):
 
     if self.config.attention == "paged" and model_mode != common_types.MODEL_MODE_TRAIN:
       unnormalized_out, _, exp_sum = self.paged_attention_op(
-          query, key, value, decoder_segment_ids, model_mode, previous_chunk, page_state=page_state
+          query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
       )
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
     else:
@@ -1361,6 +1382,7 @@ class MLA(Attention):
       model_mode: str = common_types.MODEL_MODE_TRAIN,
       deterministic: bool = False,
       previous_chunk: Any = None,
+      slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
   ) -> Array:
     """Forward pass for MLA, reusing `AttentionOp` for the actual attention.

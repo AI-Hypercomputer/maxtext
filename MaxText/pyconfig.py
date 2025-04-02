@@ -333,7 +333,9 @@ class _HyperParameters:
             " at the CLI or ENV"
         )
 
-      if isinstance(new_proposal, type(raw_data_from_yaml[k])):
+      if new_proposal is None:
+        raw_keys[k] = None  # This allows users to set empty strings via CLI, otherwise parsed as "None" - b/405981568
+      elif isinstance(new_proposal, type(raw_data_from_yaml[k])):
         raw_keys[k] = new_proposal  # take the raw data, no type conversion
       else:
         try:
@@ -489,6 +491,8 @@ class _HyperParameters:
 
     # Type conversions
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
+    raw_keys["weight_dtype"] = jax.numpy.dtype(raw_keys["weight_dtype"])
+    raw_keys["mu_dtype"] = set_mu_dtype(raw_keys)
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
 
@@ -543,7 +547,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["ici_fsdp_parallelism"],
       raw_keys["ici_fsdp_transpose_parallelism"],
       raw_keys["ici_sequence_parallelism"],
-      raw_keys["ici_context_parallelism"],
+      raw_keys["ici_context_autoregressive_parallelism"],
       raw_keys["ici_tensor_parallelism"],
       raw_keys["ici_tensor_transpose_parallelism"],
       raw_keys["ici_tensor_sequence_parallelism"],
@@ -556,7 +560,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["dcn_fsdp_parallelism"],
       raw_keys["dcn_fsdp_transpose_parallelism"],
       raw_keys["dcn_sequence_parallelism"],
-      raw_keys["dcn_context_parallelism"],
+      raw_keys["dcn_context_autoregressive_parallelism"],
       raw_keys["dcn_tensor_parallelism"],
       raw_keys["dcn_tensor_transpose_parallelism"],
       raw_keys["dcn_tensor_sequence_parallelism"],
@@ -566,6 +570,17 @@ def create_parallelisms_list(raw_keys):
   raw_keys["ici_parallelism"] = ici_parallelism
   raw_keys["dcn_parallelism"] = dcn_parallelism
   return raw_keys
+
+
+def set_mu_dtype(raw_keys):
+  # Default mu_dtype to weight_dtype if unset
+  if raw_keys["mu_dtype"]:
+    assert raw_keys["opt_type"] != "adam_pax", "opt_type adam_pax doesn't support explicitly setting mu_dtype"
+
+  if raw_keys["mu_dtype"] == "":
+    return raw_keys["weight_dtype"]
+  else:
+    return jax.numpy.dtype(raw_keys["mu_dtype"])
 
 
 def validate_and_set_hlo_dump_defaults(raw_keys):
@@ -601,7 +616,7 @@ def validate_multiple_slices(raw_keys):
                   raw_keys["dcn_tensor_parallelism"],
                   raw_keys["dcn_tensor_sequence_parallelism"],
                   raw_keys["dcn_expert_parallelism"],
-                  raw_keys["dcn_context_parallelism"],
+                  raw_keys["dcn_context_autoregressive_parallelism"],
                   raw_keys["dcn_autoregressive_parallelism"],
               ]
           )
@@ -635,7 +650,7 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["ici_fsdp_parallelism"],
           raw_keys["ici_fsdp_transpose_parallelism"],
           raw_keys["ici_sequence_parallelism"],
-          raw_keys["ici_context_parallelism"],
+          raw_keys["ici_context_autoregressive_parallelism"],
           raw_keys["ici_tensor_parallelism"],
           raw_keys["ici_tensor_transpose_parallelism"],
           raw_keys["ici_tensor_sequence_parallelism"],
@@ -648,7 +663,7 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["dcn_fsdp_parallelism"],
           raw_keys["dcn_fsdp_transpose_parallelism"],
           raw_keys["dcn_sequence_parallelism"],
-          raw_keys["dcn_context_parallelism"],
+          raw_keys["dcn_context_autoregressive_parallelism"],
           raw_keys["dcn_tensor_parallelism"],
           raw_keys["dcn_tensor_transpose_parallelism"],
           raw_keys["dcn_tensor_sequence_parallelism"],
@@ -661,7 +676,7 @@ def set_and_validate_pipeline_config(raw_keys):
           "fsdp",
           "fsdp_transpose",
           "sequence",
-          "context",
+          "context_autoregressive",
           "tensor",
           "tensor_transpose",
           "tensor_sequence",
@@ -675,7 +690,7 @@ def set_and_validate_pipeline_config(raw_keys):
               "fsdp",
               "fsdp_transpose",
               "sequence",
-              "context",
+              "context_autoregressive",
               "tensor",
               "tensor_transpose",
               "tensor_sequence",
