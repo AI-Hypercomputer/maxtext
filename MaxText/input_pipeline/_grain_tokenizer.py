@@ -33,11 +33,9 @@ class TokenizeAndTrim(grain.MapTransform):
   # pylint: disable=attribute-defined-outside-init
   feature_names: str | Sequence[str]
   sequence_length: int | Sequence[int]
-  model_path: str
   add_bos: bool
   add_eos: bool
-  tokenizer_type: str
-  hf_access_token: str | None
+  tokenizer: SentencePieceProcessor | transformers.PreTrainedTokenizerBase
 
   def __post_init__(self):
     self._processor = None
@@ -49,11 +47,6 @@ class TokenizeAndTrim(grain.MapTransform):
 
   def sentencepiece_tokenize(self, features):
     """use sentencepiece tokenizer"""
-    if self._processor is None:
-      with self._initialize_processor_lock:
-        if self._processor is None:  # Ensures only one thread initializes SPP.
-          self._processor = SentencePieceProcessor()
-          self._processor.Load(self.model_path)
     if self._processor is not None:
       for feature_name, sequence_length in zip(self.feature_names, self.sequence_length, strict=True):
         text = features[feature_name]
@@ -72,30 +65,25 @@ class TokenizeAndTrim(grain.MapTransform):
 
   def huggingface_tokenize(self, features):
     """use huggingface tokenizer in json format"""
-    if self._processor is None:
-      with self._initialize_processor_lock:
-        if self._processor is None:  # Ensures only one thread initializes SPP.
-          self._processor = transformers.AutoTokenizer.from_pretrained(
-              self.model_path,
-              add_bos_token=self.add_bos,
-              add_eos_token=self.add_eos,
-              legacy=False,
-              token=self.hf_access_token,
-          )
-    for feature_name, sequence_length in zip(self.feature_names, self.sequence_length, strict=True):
-      text = features[feature_name]
-      token_ids = self._processor(text, truncation=True, max_length=sequence_length)["input_ids"]
-      features[feature_name] = np.asarray(token_ids, dtype=np.int32)
+    if self._processor is not None:
+      for feature_name, sequence_length in zip(self.feature_names, self.sequence_length, strict=True):
+        text = features[feature_name]
+        token_ids = self._processor(text, truncation=True, max_length=sequence_length)["input_ids"]
+        features[feature_name] = np.asarray(token_ids, dtype=np.int32)
     return features
 
   def map(self, features: dict[str, Any]) -> dict[str, Any]:
     """Maps to each element."""
-    if self.tokenizer_type == "sentencepiece":
+    if self._processor is None:
+      with self._initialize_processor_lock:
+        if self._processor is None:  # Ensures only one thread initializes SPP.
+          self._processor = self.tokenizer
+    if isinstance(self._processor, SentencePieceProcessor):
       return self.sentencepiece_tokenize(features)
-    elif self.tokenizer_type == "huggingface":
+    elif isinstance(self._processor, transformers.PreTrainedTokenizerBase):
       return self.huggingface_tokenize(features)
     else:
-      raise ValueError(f"Unsupported tokenizer_type in grain: {self.tokenizer_type}")
+      raise ValueError(f"Unsupported tokenizer_type in grain: {type(self._processor)}")
 
   def __getstate__(self):
     state = self.__dict__.copy()

@@ -104,11 +104,18 @@ def preprocessing_pipeline(
     dataset = dataset.map(lambda x: {col: x[col] for col in data_column_names}, num_parallel_calls=AUTOTUNE)
 
   data_column_names = data_column_names if use_dpo else ("inputs", "targets")
+
+  tokenizer_model = _input_pipeline_utils.get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token)
+  if tokenizer_model.pad_id is not None:
+    pad_id = tokenizer_model.pad_id
+  elif tokenizer_model.unk_id is not None:
+    pad_id = tokenizer_model.unk_id
+  else:
+    pad_id = -1
+
   if tokenize:
-    tokenizer_model = _input_pipeline_utils.get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token)
-    data_keys = data_column_names
     dataset = dataset.map(
-        lambda x: tokenizer.TokenizeOp(tokenizer=tokenizer_model, features=x, data_keys=data_keys),
+        lambda x: tokenizer.TokenizeOp(tokenizer=tokenizer_model, features=x, data_keys=data_column_names),
         num_parallel_calls=AUTOTUNE,
     )
 
@@ -135,18 +142,18 @@ def preprocessing_pipeline(
 
   # Perform greedy sequence packing and batching
   if pack_examples and not use_dpo:
-    dataset = sequence_packing.pack_dataset(dataset, max_target_length)
+    dataset = sequence_packing.pack_dataset(dataset, max_target_length, pad_id)
     dataset = dataset.batch(global_batch_size // jax.process_count(), drop_remainder=drop_remainder)
   else:
     # simple (static-shape) padded batching
     dataset = dataset.padded_batch(
         global_batch_size // jax.process_count(),
         padded_shapes={k: max_target_length for k in data_column_names},
-        padding_values={k: 0 for k in data_column_names},
+        padding_values={k: pad_id for k in data_column_names},
         drop_remainder=drop_remainder,
     )
     dataset = dataset.map(
-        lambda x: _input_pipeline_utils.add_segmentation_and_position(x, data_column_names),
+        lambda x: _input_pipeline_utils.add_segmentation_and_position(x, data_column_names, padding_token=pad_id),
         num_parallel_calls=tf.data.AUTOTUNE,
         deterministic=True,
     )

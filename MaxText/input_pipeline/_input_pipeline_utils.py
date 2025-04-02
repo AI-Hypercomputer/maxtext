@@ -38,7 +38,7 @@ def normalize_features(x, column_name):
   return {"inputs": x[column_name], "targets": x[column_name]}
 
 
-def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=""):
+def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None):
   # Load tokenizer
   tokenizer_model = tokenizer.build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token)
   return tokenizer_model
@@ -54,9 +54,9 @@ def shift_data_by_truncation(x):
   return x
 
 
-def add_segmentation_and_position(x, data_columns):
+def add_segmentation_and_position(x, data_columns, padding_token=0):
   for data_column in data_columns:
-    x[f"{data_column}_segmentation"] = tf.cast(x[data_column] != 0, tf.int32)
+    x[f"{data_column}_segmentation"] = tf.cast(x[data_column] != padding_token, tf.int32)
     x[f"{data_column}_position"] = tf.broadcast_to(
         tf.range(x[data_column].shape[-1], dtype=np.int32)[None, :], x[data_column].shape
     )
@@ -334,23 +334,24 @@ class ReformatPacking(grain.MapTransform):
 class PadToMaxLength(grain.MapTransform):
   """Pads each input to the specified length"""
 
-  def __init__(self, max_length):
+  def __init__(self, max_length, pad_id):
     self.max_length = max_length
+    self.pad_id = pad_id
 
   def map(self, data: dict[str, np.ndarray]):
     """map to each element"""
 
-    def _pad(x, max_length):
+    def _pad(x, max_length, pad_id):
       pad_amount = max(max_length - x.shape[0], 0)
       pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
-      return np.pad(x, pad_amount)
+      return np.pad(x, pad_amount, constant_values=pad_id)
 
     data_columns = list(data.keys())
     for data_column in data_columns:
-      data[f"{data_column}_segmentation"] = (data[data_column] != 0).astype(np.int32)
+      data[f"{data_column}_segmentation"] = (data[data_column] != self.pad_id).astype(np.int32)
       data[f"{data_column}_position"] = np.arange(data[data_column].shape[0], dtype=np.int32)
     for key, _ in data.items():
-      data[key] = _pad(data[key], self.max_length)
+      data[key] = _pad(data[key], self.max_length, self.pad_id)
     return data
 
 
@@ -366,7 +367,7 @@ def shift_right(x, axis=1):
   return padded[tuple(slices)]
 
 
-def shift_left(x, axis=1):
+def shift_left(x, pad_id, axis=1):
   """Shift to the left and pad."""
   pad_widths = [(0, 0)] * len(x.shape)
   pad_widths[axis] = (0, 1)
@@ -374,17 +375,15 @@ def shift_left(x, axis=1):
       slice(None),
   ] * len(x.shape)
   slices[axis] = slice(1, None)
-  padded = np.pad(x, pad_widths, mode="constant", constant_values=x.dtype.type(0))
+  padded = np.pad(x, pad_widths, mode="constant", constant_values=x.dtype.type(pad_id))
   return padded[tuple(slices)]
 
 
-def shift_and_refine(x, bos_id=None, unk_id=0, axis=1):
-  """Shift inputs, set segmentation to 0 when target element is unk_id and bos_id if provided"""
-  x["targets"] = shift_left(x["targets"], axis=axis)
-  if bos_id:
-    x["targets_segmentation"] = np.where((x["targets"] != unk_id) & (x["targets"] != bos_id), x["targets_segmentation"], 0)
-  else:
-    x["targets_segmentation"] = np.where(x["targets"] != unk_id, x["targets_segmentation"], 0)
+def shift_and_refine(x, ignored_ids, axis=1):
+  """Shift inputs, set segmentation to 0 when target element is in ignored_ids if provided"""
+  x["targets"] = shift_left(x["targets"], ignored_ids[0], axis=axis)
+  for ignore_id in ignored_ids:
+    x["targets_segmentation"] = np.where(x["targets"] != ignore_id, x["targets_segmentation"], 0)
 
   return x
 
@@ -393,10 +392,9 @@ def shift_and_refine(x, bos_id=None, unk_id=0, axis=1):
 class ShiftData(grain.MapTransform):
   """Shift inputs and refine annotations."""
 
-  def __init__(self, bos_id=None, unk_id=0, axis=1):
+  def __init__(self, ignored_ids, axis=1):
+    self.ignored_ids = ignored_ids
     self.axis = axis
-    self.bos_id = bos_id
-    self.unk_id = unk_id
 
   def map(self, data):
-    return shift_and_refine(data, bos_id=self.bos_id, unk_id=self.unk_id, axis=self.axis)
+    return shift_and_refine(data, ignored_ids=self.ignored_ids, axis=self.axis)
