@@ -33,7 +33,6 @@ from layers import normalizations, quantizations
 from layers import pipeline
 import max_logging
 from jax._src.sharding_impls import TransferToMemoryKind
-import max_utils
 
 Array = common_types.Array
 Config = common_types.Config
@@ -280,19 +279,15 @@ class Decoder(nn.Module):
       return policy
 
   def set_remat_policy(self, block_layers, policy):
-    """Apply parameter movement and rematerialization policy to layers."""
     RemattedBlockLayers = []
     for block_layer in block_layers:
       if self.config.parameter_memory_host_offload:
+        # Define parameter movement with mesh-based sharding
         def move_to_device(variables):
           """Move parameters to device with proper sharding."""
-          allowed_paths = max_utils.models_paths
-          def map_fn(path_tuple, value):
-            path_str = '/'.join(str(p) for p in path_tuple)
-            if max_utils.should_offload_parameters(path_tuple, allowed_paths):
-              max_logging.log(f"models.py: Moving parameter {path_str} to device")
-              return jax.device_put(value, TransferToMemoryKind("device"))
-            return value
+          def map_fn(path, value):
+            max_logging.log(f"models.py: Moving parameter {path} to device")
+            return jax.device_put(value, TransferToMemoryKind("device"))
           return jax.tree_util.tree_map_with_path(map_fn, variables)
 
         # Transform layer class before remat
@@ -550,6 +545,7 @@ class Decoder(nn.Module):
         name="decoder_norm",
         epsilon=cfg.normalization_layer_epsilon,
         kernel_axes=("norm",),
+        parameter_memory_host_offload=cfg.parameter_memory_host_offload,
     )(y)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
 
@@ -571,6 +567,7 @@ class Decoder(nn.Module):
           kernel_axes=("embed", "vocab"),
           name="logits_dense",
           matmul_precision=self.config.matmul_precision,
+          parameter_memory_host_offload=cfg.parameter_memory_host_offload,
       )(
           y
       )  # We do not quantize the logits matmul.

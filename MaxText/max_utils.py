@@ -881,58 +881,6 @@ def _cross_entropy_with_logits_bwd(
 cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd, _cross_entropy_with_logits_bwd)
 
 
-# Number of input parameters to offload
-NUM_INPUT_PARAMETERS = 5
-
-# Paths for model parameters
-models_paths = {
-    'wi_0':  ['params', 'mlp', 'wi_0', 'kernel'],
-    'wi_1':  ['params', 'mlp', 'wi_1', 'kernel'],
-    'key':   ['params', 'self_attention', 'key', 'kernel'],
-    'query': ['params', 'self_attention', 'query', 'kernel'],
-    'value': ['params', 'self_attention', 'value', 'kernel'],
-    'wo':    ['params', 'mlp', 'wo', 'kernel'],
-    'out':   ['params', 'self_attention', 'out', 'kernel']
-}
-
-# Paths for common parameters
-common_paths = {
-    'wi_0':  ['params', 'decoder', 'layers', 'mlp', 'wi_0', 'kernel'],
-    'wi_1':  ['params', 'decoder', 'layers', 'mlp', 'wi_1', 'kernel'],
-    'key':   ['params', 'decoder', 'layers', 'self_attention', 'key', 'kernel'],
-    'query': ['params', 'decoder', 'layers', 'self_attention', 'query', 'kernel'],
-    'value': ['params', 'decoder', 'layers', 'self_attention', 'value', 'kernel'],
-    'wo':    ['params', 'decoder', 'layers', 'mlp', 'wo', 'kernel'],
-    'out':   ['params', 'decoder', 'layers', 'self_attention', 'out', 'kernel']
-}
-
-def should_offload_parameters(path, allowed_paths):
-  """
-  Determine if parameters should be offloaded based on the number of devices.
-
-  All self-attention and MLP layer parameters will be offloaded for a single device
-  to maximize device memory savings. The outputs of self-attention and MLP layer
-  parameters are not offloaded on multiple devices because these parameters on hosts
-  will be used for computation before moving them back to devices in XLA code
-  transformation.
-
-  TODO: Add support for output parameter offloading:
-        - self_attention: out
-        - mlp: wo
-  """
-  path_keys = [p.key for p in path]
-  devices = jax.devices()
-  num_devices = len(devices)
-
-  if num_devices == 1:
-    return path_keys in allowed_paths.values()
-  else:
-    return any(
-        path_keys == list(allowed_paths.values())[i]
-        for i in range(min(NUM_INPUT_PARAMETERS, len(allowed_paths)))
-    )
-
-
 def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   """Get a shaped abstraction of the state (including optimizer)"""
   init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
@@ -947,15 +895,12 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
     opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)
     state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state)
   if is_training and config.parameter_memory_host_offload:
-    def move(path, value):
-      allowed_paths = common_paths
-      if should_offload_parameters(path, allowed_paths):
-        max_logging.log(f"train.py: Moving {path} to host")
-        return value.with_memory_kind(kind="pinned_host")
-      return value
+    assert config.param_scan_axis == 0, "You must set the scan axis 0 to enable parameter offloading."
+    def move(path, x):
+      max_logging.log(f"max_utils.py: Moving {path} to host")
+      return x.with_memory_kind(kind="pinned_host")
     params = jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params)
     state_mesh_shardings = state_mesh_shardings.replace(params=params)
-
 
   abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape()
 
