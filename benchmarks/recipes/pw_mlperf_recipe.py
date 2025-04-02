@@ -34,17 +34,19 @@ SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_s
 RUNNER = "gcr.io/tpu-prod-env-multipod/wstcliyu_latest:latest"
 
 # Cluster Params
-CLUSTER = "v6e-256-cluster"
-PROJECT = "tpu-prod-env-cluster"
-ZONE = "us-east5-b"
-REGION = "us-east5"
-COUNTRY = "us"
-DEVICE_TYPE = "v6e-256"
+# CLUSTER = "v6e-256-cluster"
+# PROJECT = "tpu-prod-env-cluster"
+# ZONE = "us-east5-b"
+# REGION = "us-east5"
+# COUNTRY = "us"
+# DEVICE_TYPE = "v6e-256"
 
 # Sustained Capacity Cluster
-CLUSTER="bodaborg-v6e-256-dnd-yucmhab"
+# CLUSTER="bodaborg-v6e-256-dnd-yucmhab"
+CLUSTER="bodaborg-v6e-256-lcscld-c"
 PROJECT="tpu-prod-env-one-vm"
-ZONE="us-east5-b"
+ZONE="southamerica-west1-a"
+REGION="southamerica-west1"
 COUNTRY="us"
 DEVICE_TYPE="v6e-256"
 
@@ -59,6 +61,7 @@ DEVICE_TYPE="v6e-256"
 # CLUSTER = "bodaborg-v6e-256-ts"
 # PROJECT="tpu-prod-env-multipod"
 # ZONE="us-west1-c"
+# REGION = "us-west1"
 # COUNTRY = "us"
 # DEVICE_TYPE = "v6e-256"
 
