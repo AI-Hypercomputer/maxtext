@@ -111,6 +111,8 @@ class WorkloadConfig:
   db_dataset: str = ""
   db_is_test: bool = True
   disruption_configs: DisruptionConfig = None
+  xpk_storage_dataset: str = ''
+  xpk_storage_checkpoint: str = ''
 
   def __post_init__(self):
     """Initializes num_devices_per_slice and topology for recording the run into BigQuery"""
@@ -628,6 +630,7 @@ def generate_xpk_workload_cmd(
           f' --project={cluster_config.project}'
           f' --zone={cluster_config.zone}'
           f' {device_type}'
+          f' --storage={wl_config.xpk_storage_dataset} --storage={wl_config.xpk_storage_checkpoint}'
           f' --num-slices={wl_config.num_slices}'
           f' --command="{user_command} {upload_metrics_to_bq_cmd}"'
           f' {docker_image_flag}'
