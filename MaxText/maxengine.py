@@ -987,11 +987,6 @@ class MaxEngine(engine_api.Engine):
   @functools.partial(
       jax.jit,
       static_argnums=(0,),
-      donate_argnums=(
-          1,
-          2,
-      ),
-      static_argnames=("request_id",),
   )
   def insert(
       self,
