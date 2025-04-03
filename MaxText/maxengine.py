@@ -398,7 +398,7 @@ class MaxEngine(engine_api.Engine):
 
   @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("request_id",))
   def _prefill_jit(
-      self, # pytype: disable=signature-mismatch
+      self,  # pytype: disable=signature-mismatch
       *,
       params: Params,
       existing_prefix: Optional[ExistingPrefix] = None,
@@ -510,7 +510,7 @@ class MaxEngine(engine_api.Engine):
 
   # Public non-JIT prefill method that updates page state
   def prefill(
-      self, # pytype: disable=signature-mismatch
+      self,  # pytype: disable=signature-mismatch
       *,
       params: Params,
       existing_prefix: Optional[ExistingPrefix] = None,
