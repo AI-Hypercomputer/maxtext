@@ -171,7 +171,7 @@ def _pack_with_tf_ops(dataset: tf.data.Dataset, keys: List[str], key2length: Dic
       for k in keys:
         new_seq = one_example[k][: key2length[k]]
         new_seq_len = tf.size(new_seq)
-        new_partial[k] = tf.concat([partial[k], new_seq], pad_id)
+        new_partial[k] = tf.concat([partial[k], new_seq], 0)
         new_partial[k + "_position"] = tf.concat([partial[k + "_position"], tf.range(new_seq_len)], 0)
       partial = new_partial
       return i + 1, partial, outputs
