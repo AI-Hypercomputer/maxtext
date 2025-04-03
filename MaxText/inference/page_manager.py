@@ -178,34 +178,28 @@ def _release_pages_for_group(
     page_idx = current_page_map[page_group_id, i]
 
     # Only modify page_status if the page was validly assigned to this group
-    should_release = jnp.logical_and(is_valid, page_idx >= 0) # Safety check for valid index
+    should_release = jnp.logical_and(is_valid, page_idx >= 0)  # Safety check for valid index
 
     # Set global page status to 0 (free) if it should be released
     return jax.lax.cond(
-      should_release,
-      lambda: status.at[page_idx].set(0),
-      lambda: status # Otherwise, return status unchanged
+        should_release, lambda: status.at[page_idx].set(0), lambda: status  # Otherwise, return status unchanged
     )
 
   # Iterate up to the maximum possible pages per group, freeing the valid ones
-  new_page_status = jax.lax.fori_loop(
-    0,
-    max_pages_per_group,
-    release_page,
-    current_page_status
-  )
+  new_page_status = jax.lax.fori_loop(0, max_pages_per_group, release_page, current_page_status)
 
   # Return NEW PageState with updated global status and cleared state for this group.
   # Resetting num_pages_used implicitly invalidates the page_map entries for this group.
   return PageState(
       page_status=new_page_status,
-      page_map=page_state.page_map, # Map itself isn't cleared, but invalidated by num_pages_used
+      page_map=page_state.page_map,  # Map itself isn't cleared, but invalidated by num_pages_used
       num_pages_used=page_state.num_pages_used.at[page_group_id].set(0),
       sequence_lengths=page_state.sequence_lengths.at[page_group_id].set(0),
       active_page=page_state.active_page.at[page_group_id].set(0),
       has_active_page=page_state.has_active_page.at[page_group_id].set(False),
       active_page_position=page_state.active_page_position.at[page_group_id].set(0),
   )
+
 
 def _update_prefill_pages_for_group(
     page_state: PageState,
@@ -253,88 +247,86 @@ def _update_prefill_pages_for_group(
 
   # 3. Handle normal allocation (true_length > 0)
   def handle_normal_case(_):
-      # Calculate page requirements for the given length
-      num_pages_needed = (true_length + tokens_per_page - 1) // tokens_per_page
-      # Position within the *last* page (0-indexed)
-      last_page_position = (true_length - 1) % tokens_per_page
+    # Calculate page requirements for the given length
+    num_pages_needed = (true_length + tokens_per_page - 1) // tokens_per_page
+    # Position within the *last* page (0-indexed)
+    last_page_position = (true_length - 1) % tokens_per_page
 
-      # Check resource availability: enough free pages globally AND group has capacity
-      num_free_pages = jnp.sum(current_page_status == 0)
-      group_has_capacity = num_pages_needed <= max_pages_per_group
-      has_enough_resources = jnp.logical_and(num_free_pages >= num_pages_needed, group_has_capacity)
+    # Check resource availability: enough free pages globally AND group has capacity
+    num_free_pages = jnp.sum(current_page_status == 0)
+    group_has_capacity = num_pages_needed <= max_pages_per_group
+    has_enough_resources = jnp.logical_and(num_free_pages >= num_pages_needed, group_has_capacity)
 
-      # === Branch: Allocate if resources are sufficient ===
-      def allocate_and_update_state(initial_state_tuple: Tuple[Array, Array, Array]):
-          loop_page_status, loop_page_map, loop_num_pages_used = initial_state_tuple
+    # === Branch: Allocate if resources are sufficient ===
+    def allocate_and_update_state(initial_state_tuple: Tuple[Array, Array, Array]):
+      loop_page_status, loop_page_map, loop_num_pages_used = initial_state_tuple
 
-          # Inner function to allocate a single page within the loop
-          def allocate_one_page(page_idx_in_group, loop_state_tuple):
-              # page_idx_in_group: 0, 1, ..., num_pages_needed-1
-              current_loop_status, current_loop_map, current_loop_num_used = loop_state_tuple
+      # Inner function to allocate a single page within the loop
+      def allocate_one_page(page_idx_in_group, loop_state_tuple):
+        # page_idx_in_group: 0, 1, ..., num_pages_needed-1
+        current_loop_status, current_loop_map, current_loop_num_used = loop_state_tuple
 
-              # Find the next globally available free page index
-              next_free_page_global = _find_next_free_page_index(current_loop_status)
+        # Find the next globally available free page index
+        next_free_page_global = _find_next_free_page_index(current_loop_status)
 
-              # Check if a page was actually found (should be true if has_enough_resources)
-              page_allocated = next_free_page_global >= 0
+        # Check if a page was actually found (should be true if has_enough_resources)
+        page_allocated = next_free_page_global >= 0
 
-              # Update global status: Mark found page as allocated (1)
-              new_loop_status = jax.lax.cond(
-                  page_allocated,
-                  lambda: current_loop_status.at[next_free_page_global].set(1),
-                  lambda: current_loop_status
-              )
-              # Update group's map: Record the global index at the correct position
-              new_loop_map = jax.lax.cond(
-                  page_allocated,
-                  lambda: current_loop_map.at[page_group_id, page_idx_in_group].set(next_free_page_global),
-                  lambda: current_loop_map
-              )
-              # Update group's count: Increment num_pages_used for this group
-              new_loop_num_used = jax.lax.cond(
-                  page_allocated,
-                  lambda: current_loop_num_used.at[page_group_id].add(1),
-                  lambda: current_loop_num_used
-              )
-              # Return updated state tuple for the next loop iteration
-              return new_loop_status, new_loop_map, new_loop_num_used
+        # Update global status: Mark found page as allocated (1)
+        new_loop_status = jax.lax.cond(
+            page_allocated, lambda: current_loop_status.at[next_free_page_global].set(1), lambda: current_loop_status
+        )
+        # Update group's map: Record the global index at the correct position
+        new_loop_map = jax.lax.cond(
+            page_allocated,
+            lambda: current_loop_map.at[page_group_id, page_idx_in_group].set(next_free_page_global),
+            lambda: current_loop_map,
+        )
+        # Update group's count: Increment num_pages_used for this group
+        new_loop_num_used = jax.lax.cond(
+            page_allocated, lambda: current_loop_num_used.at[page_group_id].add(1), lambda: current_loop_num_used
+        )
+        # Return updated state tuple for the next loop iteration
+        return new_loop_status, new_loop_map, new_loop_num_used
 
-          # Loop `num_pages_needed` times, allocating one page per iteration
-          final_page_status, final_page_map, final_num_pages_used = jax.lax.fori_loop(
-              0, num_pages_needed, allocate_one_page,
-              (loop_page_status, loop_page_map, loop_num_pages_used) # Initial state for loop
-          )
-
-          # Determine the active page: the global index of the *last* page allocated
-          # Its index within the group's map is num_pages_needed - 1
-          active_page_global_index = final_page_map[page_group_id, num_pages_needed - 1]
-
-          # Construct the final PageState object with all updates
-          return PageState(
-              page_status=final_page_status,
-              page_map=final_page_map,
-              num_pages_used=final_num_pages_used,
-              # Update state specific to this group using released_state as base
-              sequence_lengths=released_state.sequence_lengths.at[page_group_id].set(true_length),
-              active_page=released_state.active_page.at[page_group_id].set(active_page_global_index),
-              has_active_page=released_state.has_active_page.at[page_group_id].set(True), # Mark as active
-              active_page_position=released_state.active_page_position.at[page_group_id].set(last_page_position),
-          )
-
-      # === Branch: Return cleared state if resources are insufficient ===
-      def return_cleared_state(_initial_state_tuple):
-          # Optional: Add debug print for allocation failure
-          # jax.debug.print("Prefill failed for page group {id}: Not enough resources.", id=page_group_id)
-          # Return the state as it was immediately after releasing the group's pages
-          return released_state
-
-      # Conditionally execute allocation or return the cleared state based on resource check
-      return jax.lax.cond(
-          has_enough_resources,
-          allocate_and_update_state, # Function to call if True
-          return_cleared_state,      # Function to call if False
-          (current_page_status, current_page_map, current_num_pages_used) # Argument passed to chosen function
+      # Loop `num_pages_needed` times, allocating one page per iteration
+      final_page_status, final_page_map, final_num_pages_used = jax.lax.fori_loop(
+          0,
+          num_pages_needed,
+          allocate_one_page,
+          (loop_page_status, loop_page_map, loop_num_pages_used),  # Initial state for loop
       )
+
+      # Determine the active page: the global index of the *last* page allocated
+      # Its index within the group's map is num_pages_needed - 1
+      active_page_global_index = final_page_map[page_group_id, num_pages_needed - 1]
+
+      # Construct the final PageState object with all updates
+      return PageState(
+          page_status=final_page_status,
+          page_map=final_page_map,
+          num_pages_used=final_num_pages_used,
+          # Update state specific to this group using released_state as base
+          sequence_lengths=released_state.sequence_lengths.at[page_group_id].set(true_length),
+          active_page=released_state.active_page.at[page_group_id].set(active_page_global_index),
+          has_active_page=released_state.has_active_page.at[page_group_id].set(True),  # Mark as active
+          active_page_position=released_state.active_page_position.at[page_group_id].set(last_page_position),
+      )
+
+    # === Branch: Return cleared state if resources are insufficient ===
+    def return_cleared_state(_initial_state_tuple):
+      # Optional: Add debug print for allocation failure
+      # jax.debug.print("Prefill failed for page group {id}: Not enough resources.", id=page_group_id)
+      # Return the state as it was immediately after releasing the group's pages
+      return released_state
+
+    # Conditionally execute allocation or return the cleared state based on resource check
+    return jax.lax.cond(
+        has_enough_resources,
+        allocate_and_update_state,  # Function to call if True
+        return_cleared_state,  # Function to call if False
+        (current_page_status, current_page_map, current_num_pages_used),  # Argument passed to chosen function
+    )
 
   # Main condition: Handle zero length or normal allocation case
   return jax.lax.cond(true_length == 0, handle_zero_length, handle_normal_case, None)
@@ -377,8 +369,8 @@ def _update_decode_pages_global(
   # 2. Calculate new position within the active page for active groups
   new_active_page_position = jnp.where(
       page_state.has_active_page,
-      (new_sequence_lengths - 1) % tokens_per_page, # New position after increment
-      page_state.active_page_position # Keep old position for inactive groups
+      (new_sequence_lengths - 1) % tokens_per_page,  # New position after increment
+      page_state.active_page_position,  # Keep old position for inactive groups
   )
 
   # 3. Determine which groups need a new page allocated
@@ -386,10 +378,7 @@ def _update_decode_pages_global(
   required_pages_per_group = (new_sequence_lengths + tokens_per_page - 1) // tokens_per_page
 
   # Identify groups needing allocation: Active AND require more pages than currently used AND have capacity
-  needs_new_page_mask = jnp.logical_and(
-      page_state.has_active_page,
-      required_pages_per_group > page_state.num_pages_used
-  )
+  needs_new_page_mask = jnp.logical_and(page_state.has_active_page, required_pages_per_group > page_state.num_pages_used)
   has_capacity_mask = required_pages_per_group <= max_pages_per_group
   # Final mask: groups that meet all conditions for needing allocation attempt
   needs_allocation_mask = jnp.logical_and(needs_new_page_mask, has_capacity_mask)
@@ -415,33 +404,21 @@ def _update_decode_pages_global(
     # --- Perform updates conditionally based on `can_allocate` ---
 
     # Update global page status: Mark the found page as allocated (1)
-    new_status = jax.lax.cond(
-        can_allocate,
-        lambda: current_status.at[next_free_page_global].set(1),
-        lambda: current_status
-    )
+    new_status = jax.lax.cond(can_allocate, lambda: current_status.at[next_free_page_global].set(1), lambda: current_status)
 
     # Update group's page map: Assign the new page's global index.
     # The index within the group's map where the new page goes is the *old* num_pages_used.
     page_map_index = current_num_used[group_idx]
     new_map = jax.lax.cond(
-        can_allocate,
-        lambda: current_map.at[group_idx, page_map_index].set(next_free_page_global),
-        lambda: current_map
+        can_allocate, lambda: current_map.at[group_idx, page_map_index].set(next_free_page_global), lambda: current_map
     )
 
     # Update group's page count: Increment num_pages_used for this group
-    new_num_used = jax.lax.cond(
-        can_allocate,
-        lambda: current_num_used.at[group_idx].add(1),
-        lambda: current_num_used
-    )
+    new_num_used = jax.lax.cond(can_allocate, lambda: current_num_used.at[group_idx].add(1), lambda: current_num_used)
 
     # Update group's active page: Set to the newly allocated page's global index
     new_active_page = jax.lax.cond(
-        can_allocate,
-        lambda: current_active_page.at[group_idx].set(next_free_page_global),
-        lambda: current_active_page
+        can_allocate, lambda: current_active_page.at[group_idx].set(next_free_page_global), lambda: current_active_page
     )
 
     # --- Reconstruct state for next iteration/return ---
@@ -451,10 +428,10 @@ def _update_decode_pages_global(
         page_status=new_status,
         page_map=new_map,
         num_pages_used=new_num_used,
-        sequence_lengths=current_state.sequence_lengths, # Already updated
+        sequence_lengths=current_state.sequence_lengths,  # Already updated
         active_page=new_active_page,
         has_active_page=current_state.has_active_page,
-        active_page_position=current_state.active_page_position # Already updated
+        active_page_position=current_state.active_page_position,  # Already updated
     )
 
   # --- Execute the loop ---
@@ -463,18 +440,18 @@ def _update_decode_pages_global(
       page_status=page_state.page_status,
       page_map=page_state.page_map,
       num_pages_used=page_state.num_pages_used,
-      sequence_lengths=new_sequence_lengths,        # Use new lengths
+      sequence_lengths=new_sequence_lengths,  # Use new lengths
       active_page=page_state.active_page,
       has_active_page=page_state.has_active_page,
-      active_page_position=new_active_page_position # Use new positions
+      active_page_position=new_active_page_position,  # Use new positions
   )
 
   # Apply the conditional allocation logic across all groups
   final_state = jax.lax.fori_loop(
-      0,                     # Start index
-      max_page_groups,       # End index (exclusive)
-      allocate_for_group_if_needed, # Function to apply
-      initial_loop_state     # Initial state for the loop
+      0,  # Start index
+      max_page_groups,  # End index (exclusive)
+      allocate_for_group_if_needed,  # Function to apply
+      initial_loop_state,  # Initial state for the loop
   )
 
   # Optional: Post-loop check for allocation failures (e.g., ran out of pages mid-loop)
@@ -547,7 +524,7 @@ class PageManager:
   def _validate_init_params(self) -> None:
     """Validates initialization parameters for logical consistency."""
     if self.max_pages_per_group <= 0:
-        raise ValueError(f"Invalid `pagedattn_max_pages_per_group`: {self.max_pages_per_group}. Must be positive.")
+      raise ValueError(f"Invalid `pagedattn_max_pages_per_group`: {self.max_pages_per_group}. Must be positive.")
     # Check if max_pages_per_group is sufficient to hold the longest possible sequence
     min_required_pages = (self.max_target_length + self.tokens_per_page - 1) // self.tokens_per_page
     if self.max_pages_per_group < min_required_pages:
@@ -605,20 +582,20 @@ class PageManager:
 
     # Define the action for valid input
     def process_valid_request(current_page_state):
-        # Delegate to the internal helper function
-        return _update_prefill_pages_for_group(
-            current_page_state,
-            page_group_id,
-            true_length,
-            self.tokens_per_page,
-            self.max_pages_per_group,
-        )
+      # Delegate to the internal helper function
+      return _update_prefill_pages_for_group(
+          current_page_state,
+          page_group_id,
+          true_length,
+          self.tokens_per_page,
+          self.max_pages_per_group,
+      )
 
     # Define the action for invalid input (return state unchanged)
     def return_original_state(current_page_state):
-        # Optional: Log or signal invalid input if required outside JAX tracing
-        # jax.debug.print("Invalid prefill request: page_group_id={gid} or true_length={len}", gid=page_group_id, len=true_length)
-        return current_page_state
+      # Optional: Log or signal invalid input if required outside JAX tracing
+      # jax.debug.print("Invalid prefill request: page_group_id={gid} or true_length={len}", gid=page_group_id, len=true_length)
+      return current_page_state
 
     # Conditionally execute based on input validity
     return jax.lax.cond(is_valid_input, process_valid_request, return_original_state, page_state)
@@ -648,11 +625,7 @@ class PageManager:
       ```
     """
     # Delegate to the internal helper function that handles the global update logic
-    return _update_decode_pages_global(
-        page_state,
-        self.tokens_per_page,
-        self.max_pages_per_group
-    )
+    return _update_decode_pages_global(page_state, self.tokens_per_page, self.max_pages_per_group)
 
   def release_pages(self, page_state: PageState, page_group_id: int) -> PageState:
     """Releases all pages associated with a given page group (global state).
@@ -682,23 +655,14 @@ class PageManager:
       )
       ```
     """
-    # Input Validation
     is_valid_input = jnp.logical_and(page_group_id >= 0, page_group_id < self.max_page_groups)
 
-    # Define action for valid input
     def process_valid_request(current_page_state):
-        # Delegate to the internal helper function for releasing pages
-        return _release_pages_for_group(
-            current_page_state,
-            page_group_id,
-            self.max_pages_per_group
-        )
+      return _release_pages_for_group(current_page_state, page_group_id, self.max_pages_per_group)
 
     # Define action for invalid input
     def return_original_state(current_page_state):
-        # Optional: Log or signal invalid input
-        # jax.debug.print("Invalid release request: page_group_id={gid}", gid=page_group_id)
-        return current_page_state
+      return current_page_state
 
     # Conditionally execute based on input validity
     return jax.lax.cond(is_valid_input, process_valid_request, return_original_state, page_state)
@@ -721,7 +685,5 @@ class PageManager:
       ```
     """
     return initialize_page_state(
-        num_pages=self.num_pages,
-        max_page_groups=self.max_page_groups,
-        max_pages_per_group=self.max_pages_per_group
+        num_pages=self.num_pages, max_page_groups=self.max_page_groups, max_pages_per_group=self.max_pages_per_group
     )

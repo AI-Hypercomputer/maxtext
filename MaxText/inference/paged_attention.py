@@ -78,7 +78,7 @@ class PagedAttentionOp(nn.Module):
       required_ar_shape = (self.num_kv_heads, self.num_pages, self.tokens_per_page, self.kv_head_dim_size)
       # For AR mode, if shape doesn't match, reinitialize values but not variables
       if key_pages_var.value.shape != required_ar_shape:
-        jax.debug.print("Resizing existing KV pages to full AR size.") # Optional debug print
+        jax.debug.print("Resizing existing KV pages to full AR size.")  # Optional debug print
         key_pages_var.value = jnp.zeros(required_ar_shape, dtype=self.dtype)
         value_pages_var.value = jnp.zeros(required_ar_shape, dtype=self.dtype)
     else:
@@ -204,7 +204,7 @@ class PagedAttentionOp(nn.Module):
 
     no_shard = P(None, None, None, None)
     kv_pages_pspec = nn.logical_to_mesh_axes(("paged_kv_heads", None, None, None))
-    # query = jnp.reshape(query, (batch_q, seqlen_q, num_heads_kv, num_heads_q // num_heads_kv, head_dim))    
+    # query = jnp.reshape(query, (batch_q, seqlen_q, num_heads_kv, num_heads_q // num_heads_kv, head_dim))
     q_pspec = nn.logical_to_mesh_axes((None, None, "paged_kv_heads", None))
 
     @functools.partial(
@@ -344,42 +344,3 @@ class PagedAttentionOp(nn.Module):
     key_pages_var.value = key_pages_updated
     value_pages_var.value = value_pages_updated
     return key_pages_var, value_pages_var
-
-  def release_slot(
-      self,
-      slot: int,
-      page_state: page_manager.PageState,
-  ) -> page_manager.PageState:
-    """Releases all pages assigned to a slot and updates page state.
-
-    Args:
-      slot: The slot number to release
-      page_state: Current page state
-
-    Returns:
-      Updated page state with released pages
-    """
-    # Reset page map entries for this slot
-    slot_pages = page_state.page_map[slot]
-    used_pages = slot_pages[slot_pages > 0]
-
-    # Update page status to mark pages as free
-    new_page_status = page_state.page_status.at[used_pages].set(0)
-
-    # Reset page map
-    new_page_map = page_state.page_map.at[slot].set(0)
-
-    # Reset other state
-    new_sequence_lengths = page_state.sequence_lengths.at[slot].set(0)
-    new_num_pages_used = page_state.num_pages_used.at[slot].set(0)
-    new_current_page = page_state.current_page.at[slot].set(0)
-    new_current_page_position = page_state.current_page_position.at[slot].set(0)
-
-    return page_manager.PageState(
-        page_status=new_page_status,
-        page_map=new_page_map,
-        sequence_lengths=new_sequence_lengths,
-        num_pages_used=new_num_pages_used,
-        current_page=new_current_page,
-        current_page_position=new_current_page_position,
-    )
