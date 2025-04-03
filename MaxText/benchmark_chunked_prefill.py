@@ -52,7 +52,7 @@ def main(argv: Sequence[str]) -> None:
 
   chunk_size = 2048
   # set this to array of acceptable chunk sizes
-  prefill_lengths = [1024, 2048, 4096, 7000]
+  prefill_lengths = config.inference_microbenchmark_prefill_lengths
   # prefill_lengths = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144]
 
   padded_tokens, true_lengths, positions = token_utils.chunk_and_pad_tokens(
