@@ -49,7 +49,6 @@ Quant = quantizations.AqtQuantization
 # -----------------------------------------
 # The Decoder Layer for DeepSeek v3
 # -----------------------------------------
-# Please note: DeepSeek V3 is not fully support at this moment
 
 
 def self_attention_with_norm(inputs, cfg, mesh, quant, decoder_segment_ids, decoder_positions, deterministic, model_mode):
@@ -84,8 +83,8 @@ def self_attention_with_norm(inputs, cfg, mesh, quant, decoder_segment_ids, deco
       qk_nope_head_dim=cfg.qk_nope_head_dim,
       qk_rope_head_dim=cfg.qk_rope_head_dim,
       v_head_dim=cfg.v_head_dim,
-      max_seq_len=cfg.max_target_length,
-      original_seq_len=cfg.original_seq_len,
+      max_position_embeddings=cfg.max_position_embeddings,
+      original_max_position_embeddings=cfg.original_max_position_embeddings,
       mscale=cfg.mscale,
       rope_factor=cfg.rope_factor,
   )
@@ -149,7 +148,9 @@ class DeepSeekDenseLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      previous_chunk=None,
       page_state=None,
+      slot=None,
   ):
     cfg = self.config
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
@@ -197,7 +198,9 @@ class DeepSeekMoELayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      previous_chunk=None,
       page_state=None,
+      slot=None,
   ):
     cfg = self.config
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))

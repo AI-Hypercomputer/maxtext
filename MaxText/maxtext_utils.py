@@ -309,7 +309,17 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
   """
   total_num_params = max_utils.calculate_num_params_from_pytree(params)
   product_num_devices_for_weight_sharding = 1
-  for axis in ["fsdp", "fsdp_transpose", "sequence", "tensor", "tensor_transpose", "tensor_sequence", "stage", "expert"]:
+  for axis in [
+      "fsdp",
+      "fsdp_transpose",
+      "sequence",
+      "context_autoregressive",
+      "tensor",
+      "tensor_transpose",
+      "tensor_sequence",
+      "stage",
+      "expert",
+  ]:
     product_num_devices_for_weight_sharding *= mesh.shape[axis]
   total_num_params_per_chip = max_utils.calculate_total_params_per_chip(params)
   perfectly_sharded_params_per_chip = total_num_params / product_num_devices_for_weight_sharding
@@ -320,7 +330,7 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
   unsharded_param_perc = total_num_params_per_chip / perfectly_sharded_params_per_chip - 1
   assert unsharded_param_perc < tolerance, (
       f"Number of unsharded parameters exceeds tolerance {tolerance * 100}% "
-      f"of total parameters with a value of {unsharded_param_perc}%."
+      f"of total parameters with a value of {unsharded_param_perc * 100}%."
   )
 
 

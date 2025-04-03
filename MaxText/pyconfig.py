@@ -25,6 +25,7 @@ from typing import Any, Union
 import jax
 from jax.experimental.compilation_cache import compilation_cache
 from layers.attentions import AttentionType
+from utils import gcs_utils
 import accelerator_to_spec_map
 import max_logging
 import max_utils
@@ -157,19 +158,25 @@ def validate_keys(keys):
 
   validate_multiple_slices(keys)
   if keys["num_experts"] > 1:
-    validate_megablox_parallelism(keys)
+    validate_sparse_matmul_parallelism(keys)
     validate_deepseek_moe(keys)
+
+
+def validate_tokenizer(keys):
+  assert keys[
+      "tokenizer_path"
+  ], "Please provide tokenizer_path. Even if using pre-tokenized data, tokenizer is required to process special tokens."
 
 
 def validate_data_input(keys):
   """validate provided parameters for data input"""
+  if not keys["hf_access_token"]:
+    keys["hf_access_token"] = None
   if keys["dataset_type"] == "hf":
     max_logging.log(
         f"dataset_type set to hf, will use {keys['hf_path']=}, {keys['hf_data_dir']=} and {keys['hf_train_files']=} to read data"
     )
     assert keys["hf_path"] != "", "hf_path can't be empty when dataset_type=hf"
-    if not keys["hf_access_token"]:
-      keys["hf_access_token"] = None
     if not keys["hf_train_files"]:
       keys["hf_train_files"] = None
     if not keys["hf_eval_files"]:
@@ -186,11 +193,20 @@ def validate_data_input(keys):
     assert keys["grain_train_files"] != "", "grain_train_files can't be empty when dataset_type=grain"
     if keys["eval_interval"] > 0:
       assert keys["grain_eval_files"], "Please specify grain_eval_files or set eval_interval to <=0."
+    assert keys["tokenizer_type"] in (
+        "sentencepiece",
+        "huggingface",
+    ), f"grain pipeline only supports tokenizer_type: sentencepiece, huggingface, but got {keys['tokenizer_type']}"
   elif keys["dataset_type"] == "tfds":
     max_logging.log(f"dataset_type set to tfds, will use {keys['dataset_path']=} and {keys['dataset_name']=}")
     assert keys["dataset_name"] != "", "dataset_name can't be empty when dataset_type=tfds"
     if keys["eval_interval"] > 0:
       assert keys["eval_split"], "Please specify eval_split or set eval_interval to <=0."
+
+  if "tokenizer_llama3.tiktoken" in keys["tokenizer_path"]:
+    assert (
+        keys["tokenizer_type"] == "tiktoken"
+    ), "tokenizer_type must be tiktoken when using tokenizer=tokenizer_llama3.tiktoken"
 
   if keys["sharding_tolerance"] > 1.0 or keys["sharding_tolerance"] < 0.0:
     max_logging.log(
@@ -223,6 +239,9 @@ def validate_model_name(s: str) -> bool:
       "gemma2-2b",
       "gemma2-9b",
       "gemma2-27b",
+      "gemma3-4b",
+      "gemma3-12b",
+      "gemma3-27b",
       "gpt3-175b",
       "gpt3-22b",
       "gpt3-6b",
@@ -325,7 +344,9 @@ class _HyperParameters:
             " at the CLI or ENV"
         )
 
-      if isinstance(new_proposal, type(raw_data_from_yaml[k])):
+      if new_proposal is None:
+        raw_keys[k] = None  # This allows users to set empty strings via CLI, otherwise parsed as "None" - b/405981568
+      elif isinstance(new_proposal, type(raw_data_from_yaml[k])):
         raw_keys[k] = new_proposal  # take the raw data, no type conversion
       else:
         try:
@@ -476,16 +497,19 @@ class _HyperParameters:
       max_logging.log("Override add_bos and add_eos to False when dataset_type=c4_mlperf")
 
     # Write raw_keys to GCS before type conversions
-    max_utils.write_config_raw_keys_for_gcs(raw_keys)
+    gcs_utils.write_config_raw_keys_for_gcs(raw_keys)
 
     # Type conversions
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
+    raw_keys["weight_dtype"] = jax.numpy.dtype(raw_keys["weight_dtype"])
+    raw_keys["mu_dtype"] = set_mu_dtype(raw_keys)
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
 
     if raw_keys["remat_policy"] == "custom":
       raw_keys = validate_and_assign_remat_tensors(raw_keys)
     validate_keys(raw_keys)
+    validate_tokenizer(raw_keys)
     validate_data_input(raw_keys)
 
   @staticmethod
@@ -534,6 +558,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["ici_fsdp_parallelism"],
       raw_keys["ici_fsdp_transpose_parallelism"],
       raw_keys["ici_sequence_parallelism"],
+      raw_keys["ici_context_autoregressive_parallelism"],
       raw_keys["ici_tensor_parallelism"],
       raw_keys["ici_tensor_transpose_parallelism"],
       raw_keys["ici_tensor_sequence_parallelism"],
@@ -546,6 +571,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["dcn_fsdp_parallelism"],
       raw_keys["dcn_fsdp_transpose_parallelism"],
       raw_keys["dcn_sequence_parallelism"],
+      raw_keys["dcn_context_autoregressive_parallelism"],
       raw_keys["dcn_tensor_parallelism"],
       raw_keys["dcn_tensor_transpose_parallelism"],
       raw_keys["dcn_tensor_sequence_parallelism"],
@@ -555,6 +581,17 @@ def create_parallelisms_list(raw_keys):
   raw_keys["ici_parallelism"] = ici_parallelism
   raw_keys["dcn_parallelism"] = dcn_parallelism
   return raw_keys
+
+
+def set_mu_dtype(raw_keys):
+  # Default mu_dtype to weight_dtype if unset
+  if raw_keys["mu_dtype"]:
+    assert raw_keys["opt_type"] != "adam_pax", "opt_type adam_pax doesn't support explicitly setting mu_dtype"
+
+  if raw_keys["mu_dtype"] == "":
+    return raw_keys["weight_dtype"]
+  else:
+    return jax.numpy.dtype(raw_keys["mu_dtype"])
 
 
 def validate_and_set_hlo_dump_defaults(raw_keys):
@@ -571,7 +608,7 @@ def validate_and_set_hlo_dump_defaults(raw_keys):
   if not raw_keys["dump_hlo_gcs_dir"]:
     raw_keys["dump_hlo_gcs_dir"] = os.path.join(raw_keys["base_output_directory"], raw_keys["run_name"], "xla_dump")
   else:
-    raw_keys["dump_hlo_gcs_dir"] = max_utils.add_trailing_slash(raw_keys["dump_hlo_gcs_dir"])
+    raw_keys["dump_hlo_gcs_dir"] = gcs_utils.add_trailing_slash(raw_keys["dump_hlo_gcs_dir"])
   if not os.environ.get("XLA_FLAGS"):
     os.environ["XLA_FLAGS"] = raw_keys["dump_hlo_xla_flags"]
   return raw_keys
@@ -590,6 +627,7 @@ def validate_multiple_slices(raw_keys):
                   raw_keys["dcn_tensor_parallelism"],
                   raw_keys["dcn_tensor_sequence_parallelism"],
                   raw_keys["dcn_expert_parallelism"],
+                  raw_keys["dcn_context_autoregressive_parallelism"],
                   raw_keys["dcn_autoregressive_parallelism"],
               ]
           )
@@ -623,6 +661,7 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["ici_fsdp_parallelism"],
           raw_keys["ici_fsdp_transpose_parallelism"],
           raw_keys["ici_sequence_parallelism"],
+          raw_keys["ici_context_autoregressive_parallelism"],
           raw_keys["ici_tensor_parallelism"],
           raw_keys["ici_tensor_transpose_parallelism"],
           raw_keys["ici_tensor_sequence_parallelism"],
@@ -635,6 +674,7 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["dcn_fsdp_parallelism"],
           raw_keys["dcn_fsdp_transpose_parallelism"],
           raw_keys["dcn_sequence_parallelism"],
+          raw_keys["dcn_context_autoregressive_parallelism"],
           raw_keys["dcn_tensor_parallelism"],
           raw_keys["dcn_tensor_transpose_parallelism"],
           raw_keys["dcn_tensor_sequence_parallelism"],
@@ -647,6 +687,7 @@ def set_and_validate_pipeline_config(raw_keys):
           "fsdp",
           "fsdp_transpose",
           "sequence",
+          "context_autoregressive",
           "tensor",
           "tensor_transpose",
           "tensor_sequence",
@@ -660,6 +701,7 @@ def set_and_validate_pipeline_config(raw_keys):
               "fsdp",
               "fsdp_transpose",
               "sequence",
+              "context_autoregressive",
               "tensor",
               "tensor_transpose",
               "tensor_sequence",
@@ -713,17 +755,22 @@ def set_and_validate_pipeline_config(raw_keys):
 def validate_deepseek_moe(raw_keys):
   if raw_keys["decoder_block"] == "deepseek" and using_pipeline_parallelism(raw_keys):
     raise ValueError("Currently we do not support DeepSeek MoE with pipeline parallelism.")
-
-
-def validate_megablox_parallelism(raw_keys):
-  if (
-      raw_keys["sparse_matmul"]
-      and raw_keys["megablox"]
-      and (
-          using_sequence_parallelism(raw_keys) or using_pipeline_parallelism(raw_keys) or using_expert_parallelism(raw_keys)
+  if raw_keys["n_routing_groups"] != -1:
+    if raw_keys["topk_routing_group"] == -1:
+      raise ValueError(f'config topk_routing_group: {raw_keys["topk_routing_group"]} is not defined')
+    if raw_keys["n_routing_groups"] <= raw_keys["topk_routing_group"]:
+      raise ValueError(
+          f'config n_routing_groups: {raw_keys["n_routing_groups"]} must be greter than topk_routing_group: {raw_keys["topk_routing_group"]}'
       )
-  ):
-    raise ValueError("Currently we only support Megablox with data and tensor parallelism.")
+    if raw_keys["num_experts"] % raw_keys["n_routing_groups"] != 0:
+      raise ValueError(
+          f'config num_experts: {raw_keys["num_experts"]} must be divisible by n_routing_groups: {raw_keys["n_routing_groups"]}'
+      )
+
+
+def validate_sparse_matmul_parallelism(raw_keys):
+  if raw_keys["sparse_matmul"] and (using_sequence_parallelism(raw_keys) or using_pipeline_parallelism(raw_keys)):
+    raise ValueError("Currently we only support Megablox and Ragged dot with data, tensor, and expert parallelism.")
   tensor_parallelism = (
       raw_keys["ici_tensor_parallelism"]
       * raw_keys["dcn_tensor_parallelism"]
@@ -732,9 +779,14 @@ def validate_megablox_parallelism(raw_keys):
       * raw_keys["ici_tensor_transpose_parallelism"]
       * raw_keys["dcn_tensor_transpose_parallelism"]
   )
-  if raw_keys["megablox"] and using_tensor_parallelism(raw_keys) and (raw_keys["emb_dim"] % tensor_parallelism):
+  if raw_keys["sparse_matmul"] and using_tensor_parallelism(raw_keys) and (raw_keys["emb_dim"] % tensor_parallelism):
     raise ValueError(
         f"The embedding dimension {raw_keys['emb_dim']} is not divisible by tensor parallelism setting {tensor_parallelism}."
+    )
+  expert_parallelism = raw_keys["ici_expert_parallelism"] * raw_keys["dcn_expert_parallelism"]
+  if raw_keys["sparse_matmul"] and using_expert_parallelism(raw_keys) and (raw_keys["num_experts"] % expert_parallelism):
+    raise ValueError(
+        f"The expert dimension {raw_keys['num_experts']} is not divisible by expert parallelism setting {expert_parallelism}."
     )
 
 
@@ -858,6 +910,8 @@ def using_tensor_parallelism(raw_keys) -> bool:
 
 
 def using_sequence_parallelism(raw_keys) -> bool:
+  if int(raw_keys["ici_expert_parallelism"]) > 1 and int(raw_keys["dcn_expert_parallelism"]) > 1:
+    raise ValueError("Expert parallelism can only be enabled on ICI or DCN, not both.")
   return int(raw_keys["ici_sequence_parallelism"]) > 1 or int(raw_keys["dcn_sequence_parallelism"]) > 1
 
 

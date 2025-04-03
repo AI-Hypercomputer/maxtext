@@ -32,7 +32,7 @@ python3 MaxText/train.py MaxText/configs/base.yml model_name=mixtral-8x7b hardwa
     enable_checkpointing=false ici_expert_parallelism=-1 ici_fsdp_parallelism=1 \
     max_target_length=1024 megablox=False per_device_batch_size=1 \
     reuse_example_batch=1 steps=5 tokenizer_path=assets/tokenizer.mistral-v1 \
-    weight_dtype=bfloat16
+    weight_dtype=bfloat16 sparse_matmul=False
 echo "Finished pre-training"
 
 # Run fine-tuning - dropping implementation
@@ -44,7 +44,7 @@ python3 MaxText/train.py MaxText/configs/base.yml model_name=mixtral-8x7b hardwa
     ici_expert_parallelism=-1 ici_fsdp_parallelism=1 \
     max_target_length=1024 megablox=False per_device_batch_size=1 \
     reuse_example_batch=1 steps=5 tokenizer_path=assets/tokenizer.mistral-v1 \
-    weight_dtype=bfloat16
+    weight_dtype=bfloat16 sparse_matmul=False
 echo "Finished fine-tuning"
 
 # # TODO(b/391864113): Add this once the bug is fixed
@@ -54,7 +54,7 @@ echo "Finished fine-tuning"
 #     async_checkpointing=false attention=dot_product capacity_factor=0.1 \
 #     ici_expert_parallelism=8 ici_fsdp_parallelism=1 max_prefill_predict_length=11 \
 #     max_target_length=24 megablox=False per_device_batch_size=1 \
-#     prompt="[INST] I love to [/INST]" scan_layers=false \
+#     prompt='"[INST] I love to [/INST]"' scan_layers=false \
 #     tokenizer_path=assets/tokenizer.mistral-v1
 # echo "Finished decoding"
 

@@ -13,7 +13,9 @@
 # limitations under the License.
 
 # model config for DeepSeek V3 - 671B
-# Please note: DeepSeek V3 is not fully support at this moment
+
+# For DeepSeek default device-limited routing, 
+# please set n_routing_groups=8 and topk_routing_group=4 in your command-line arguments.
 
 base_emb_dim: 7168
 base_num_query_heads: 128
@@ -33,6 +35,7 @@ shared_experts: 1
 routed_scaling_factor: 2.5
 routed_score_func: "sigmoid"
 routed_bias: True
+decoder_block: "deepseek"
 # MLA
 attention_type: "mla"
 q_lora_rank: 1536
@@ -40,6 +43,11 @@ kv_lora_rank: 512
 qk_nope_head_dim: 128
 qk_rope_head_dim: 64
 v_head_dim: 128
-rope_type: "yarn"
 mscale: 1.0
-decoder_block: "deepseek"
+# RoPE
+rope_type: "yarn"
+rope_max_timescale: 10_000 # DeepSeek uses  "rope_theta": 10000
+max_position_embeddings: 163840
+original_max_position_embeddings: 4096
+rope_factor: 40
+beta_fast: 32

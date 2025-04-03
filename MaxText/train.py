@@ -45,10 +45,11 @@ import max_logging
 import optimizers
 import profiler
 import pyconfig
-import pathwaysutils  # pylint: disable=unused-import
+import pathwaysutils
 import tensorflow as tf
 
 from metric_logger import MetricLogger
+from utils import gcs_utils
 
 from vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
@@ -125,14 +126,17 @@ def save_checkpoint(
     checkpoint_manager,
     step,
     state,
-    dataset_type="c4",
+    dataset_type="tfds",
     data_iterator=None,
     config=None,
+    force=False,
 ) -> bool:
   """Wrapper for saving checkpoint."""
   if config and config.enable_checkpointing:
-    if (step % config.checkpoint_period == 0) or (
-        config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0
+    if (
+        force
+        or (step % config.checkpoint_period == 0)
+        or (config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0)
     ):
       blocking_until_ready_start = time.time()
       max_logging.log(f"Waiting for step {step} to finish before checkpoint...")
@@ -160,6 +164,7 @@ def save_checkpoint(
     return checkpoint_manager.save(
         step,
         args=orbax.checkpoint.args.PyTreeSave(item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size),
+        force=force,
     )
 
   if dataset_type == "grain":
@@ -171,6 +176,7 @@ def save_checkpoint(
             ),
             iter=grain.PyGrainCheckpointSave(data_iterator.local_iterator),
         ),
+        force=force,
     )
   else:
     return checkpoint_manager.save(
@@ -180,6 +186,7 @@ def save_checkpoint(
                 item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size
             )
         ),
+        force=force,
     )
 
 
@@ -446,7 +453,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
         + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
     )
     raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], grad_and_loss["grad"])
-    aux = jax.tree_map(lambda x: jnp.sum(x, axis=0), aux)
+    aux = jax.tree_map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
   else:
     if config.optimizer_memory_host_offload:
       cast_params = jax.device_put(state.params, max_utils.with_memory_kind(state_mesh_shardings.params, "device"))
@@ -813,7 +820,11 @@ def train_loop(config, state=None):
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
-      example_batch = load_next_batch(data_iterator, example_batch, config)
+      try:
+        example_batch = load_next_batch(data_iterator, example_batch, config)
+      except Exception as e:  # pylint: disable=broad-except
+        max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
+        break
       record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
       check_example_batch(config, example_batch=example_batch)
       # pylint: disable=not-callable
@@ -840,9 +851,9 @@ def train_loop(config, state=None):
 
     metric_logger.write_metrics(running_gcs_metrics, metrics, step)
 
-    if config.dump_hlo and step == start_step:
+    if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
       jax.block_until_ready(state)  # Ensure compilation has finished.
-      max_utils.upload_dump(
+      gcs_utils.upload_dump(
           config.dump_hlo_local_dir,
           config.dump_hlo_gcs_dir,
           module_name=config.dump_hlo_module_name,
@@ -900,6 +911,22 @@ def train_loop(config, state=None):
       max_utils.print_mem_stats("After params initialized")
 
   if checkpoint_manager is not None:
+    if int(state.step) - 1 % config.checkpoint_period != 0:
+      try:
+        state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
+        if save_checkpoint(
+            checkpoint_manager,
+            int(state_to_save) - 1,
+            state_to_save,
+            config.dataset_type,
+            data_iterator,
+            config,
+            force=True,
+        ):
+          checkpointing.print_save_message(int(state_to_save) - 1, config.async_checkpointing)
+      except Exception:  # pylint: disable=broad-except
+        max_logging.log(f"Checkpoint is already saved for step {int(state.step)-1}.")
+
     checkpoint_manager.wait_until_finished()
   metric_logger.write_metrics(running_gcs_metrics, metrics, config.steps - 1)  # final step metrics
   max_utils.close_summary_writer(writer)
@@ -919,7 +946,9 @@ def train_loop(config, state=None):
 
 
 def main(argv: Sequence[str]) -> None:
+  pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+  jax.config.update("jax_enable_compilation_cache", os.environ.get("JAX_ENABLE_COMPILATION_CACHE", True))
   # TF allocates extraneous GPU memory when using TFDS data
   # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
   tf.config.set_visible_devices([], "GPU")

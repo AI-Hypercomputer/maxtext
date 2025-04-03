@@ -23,7 +23,7 @@ import os
 import numpy as np
 
 import max_logging
-import max_utils
+from utils import gcs_utils
 
 
 def _prepare_metrics_for_json(metrics, step, run_name):
@@ -60,6 +60,7 @@ class MetricLogger:
           raise ValueError(f"When writing metrics, {self.buffered_step=} was none")
         metrics_to_write = self.buffered_metrics
         steps_to_write = self.buffered_step
+        self.log_metrics(metrics_to_write, steps_to_write)
       self.buffered_metrics = metrics
       self.buffered_step = step
     else:
@@ -75,6 +76,16 @@ class MetricLogger:
 
       if self.config.gcs_metrics and jax.process_index() == 0:
         running_gcs_metrics = self.write_metrics_for_gcs(metrics_to_write, steps_to_write, running_gcs_metrics, is_training)
+
+  def log_metrics(self, metrics, step):
+    """Logs metrics via max_logging"""
+    max_logging.log(
+        f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
+        f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
+        f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
+        f"total_weights: {metrics['scalar']['learning/total_weights']}, "
+        f"loss: {metrics['scalar']['learning/loss']:.3f}"
+    )
 
   def write_metrics_locally(self, metrics, step):
     """Writes metrics locally for testing"""
@@ -98,7 +109,7 @@ class MetricLogger:
 
       gcs_filename = os.path.join(self.config.metrics_dir, metrics_filename)
       max_logging.log(f"Moving file {metrics_filename} to GCS...")
-      max_utils.upload_blob(gcs_filename, metrics_filename)
+      gcs_utils.upload_blob(gcs_filename, metrics_filename)
       max_logging.log(f"File {metrics_filename} moved successfully!")
       running_metrics = []  # reset running_metrics to empty list
     return running_metrics
@@ -114,14 +125,6 @@ class MetricLogger:
 
       if is_training:
         full_log = step % self.config.log_period == 0
-
-        max_logging.log(
-            f"completed step: {step}, seconds: {metrics['scalar']['perf/step_time_seconds']:.3f}, "
-            f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
-            f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
-            f"total_weights: {metrics['scalar']['learning/total_weights']}, "
-            f"loss: {metrics['scalar']['learning/loss']:.3f}"
-        )
 
         if full_log and jax.process_index() == 0:
           max_logging.log(f"To see full metrics 'tensorboard --logdir={self.config.tensorboard_dir}'")

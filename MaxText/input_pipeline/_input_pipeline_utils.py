@@ -38,7 +38,7 @@ def normalize_features(x, column_name):
   return {"inputs": x[column_name], "targets": x[column_name]}
 
 
-def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=""):
+def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None):
   # Load tokenizer
   tokenizer_model = tokenizer.build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token)
   return tokenizer_model
@@ -54,9 +54,9 @@ def shift_data_by_truncation(x):
   return x
 
 
-def add_segmentation_and_position(x, data_columns):
+def add_segmentation_and_position(x, data_columns, padding_token=0):
   for data_column in data_columns:
-    x[f"{data_column}_segmentation"] = tf.cast(x[data_column] != 0, tf.int32)
+    x[f"{data_column}_segmentation"] = tf.cast(x[data_column] != padding_token, tf.int32)
     x[f"{data_column}_position"] = tf.broadcast_to(
         tf.range(x[data_column].shape[-1], dtype=np.int32)[None, :], x[data_column].shape
     )
@@ -66,12 +66,104 @@ def add_segmentation_and_position(x, data_columns):
 ########## Functions used by HF pipeline
 
 
-def tokenization(example, hf_tokenizer, max_length, column_names):
+def combine_columns(example, columns):
+  """Combine columns such as 'prompt' and 'completion' for sft training"""
+  assert len(columns) > 1
+  combined = []
+  for i in range(len(example[columns[0]])):
+    for c in columns:
+      combined.append(example[c][i])
+  example["messages"] = combined
+  return example
+
+
+def is_conversational(example):
+  """Check if data is in a conversational format.
+  Examples:
+
+  example = {'prompt': [{'content': 'question', 'role': 'user'}], 'completion': [{'content': 'answer', 'role': 'assistant'}]}
+  is_conversational(example) return True.
+
+  example = {"prompt": "I love to"})
+  is_conversational(example) returns False.
+  """
+  supported_columns = ["prompt", "completion", "messages"]
+  data_columns = [column for column in example.keys() if column in supported_columns]
+
+  if data_columns:
+    for column in data_columns:
+      messages = example[column]
+      if isinstance(messages, list):
+        if isinstance(messages[0], dict) and "role" in messages[0] and "content" in messages[0]:
+          return True
+
+  return False
+
+
+def extract_messages_and_mask(example, data_column_name):
+  """For sft training, we will have a column containing all the message contents,
+  and the 'is_prompt' column indicating whether each message is prompt or not."""
+  messages = []
+  is_prompt = []
+  for x in example[data_column_name]:
+    if x["role"] == "user":
+      messages.append("<user>" + x["content"] + "</user>")
+      is_prompt.append(True)
+    elif x["role"] == "assistant":
+      messages.append("<assistant>" + x["content"] + "</assistant>")
+      is_prompt.append(False)
+  example["is_prompt"] = is_prompt
+  example[data_column_name] = messages
+  return example
+
+
+def tokenization(example, hf_tokenizer, truncation, max_length, column_names):
   """Tokenize a HuggingFace dataset"""
-  return {
-      column_name: hf_tokenizer(example[column_name], truncation=True, max_length=max_length)["input_ids"]
-      for column_name in column_names
-  }
+  for column_name in column_names:
+    if isinstance(example[column_name], list):
+      example[column_name] = [
+          hf_tokenizer(x, truncation=truncation, max_length=max_length)["input_ids"] for x in example[column_name]
+      ]
+    elif isinstance(example[column_name], str):
+      example[column_name] = hf_tokenizer(example[column_name], truncation=truncation, max_length=max_length)["input_ids"]
+  return example
+
+
+@dataclasses.dataclass
+class SFTPromptMasking(grain.MapTransform):
+  """Construct inputs and targets for SFT training. Concat prompt and completion to generate inputs.
+  For targets, if train on completion only, the prompt will be masked by unk_id. Otherwise the same as inputs.
+  """
+
+  def __init__(
+      self, text_column_name, completion_only, max_target_length, add_bos, add_eos, bos_id=None, eos_id=None, unk_id=0
+  ):
+    self.text_column_name = text_column_name
+    self.completion_only = completion_only
+    self.max_target_length = max_target_length
+    self.add_bos = add_bos
+    self.add_eos = add_eos
+    if self.add_bos:
+      self.bos_id = bos_id
+    if self.add_eos:
+      self.eos_id = eos_id
+    self.unk_id = unk_id
+
+  def map(self, features):
+    inputs, targets = [], []
+    for i, text in enumerate(features[self.text_column_name]):
+      inputs += text
+      targets += [self.unk_id] * len(text) if self.completion_only and features["is_prompt"][i] else text
+    if self.add_bos:
+      inputs = [self.bos_id] + inputs
+      targets = [self.bos_id] + targets
+    if self.add_eos:
+      inputs += [self.eos_id]
+      targets += [self.eos_id]
+    return {
+        "inputs": np.asarray(inputs[: self.max_target_length], dtype=np.int32),
+        "targets": np.asarray(targets[: self.max_target_length], dtype=np.int32),
+    }
 
 
 @dataclasses.dataclass
@@ -108,7 +200,10 @@ class HFDataSource(grain.RandomAccessDataSource):
     self.generate_padding_example = generate_padding_example
     self.max_target_lenth = max_target_length
     self.data_column_names = data_column_names
-    self.n_shards = dataset.n_shards
+    if hasattr(dataset, "n_shards"):
+      self.n_shards = dataset.n_shards
+    else:
+      self.n_shards = 1
     self._check_shard_count()
     self.dataset_shards = [dataloading_host_index * self.num_threads + i for i in range(self.num_threads)]
     self.datasets = [split_dataset_by_node(dataset, world_size=self.n_shards, rank=x) for x in self.dataset_shards]
@@ -133,9 +228,7 @@ class HFDataSource(grain.RandomAccessDataSource):
       self.datasets[idx] = split_dataset_by_node(self.dataset, world_size=self.n_shards, rank=self.dataset_shards[idx])
       self.data_iters[idx] = iter(self.datasets[idx])
     else:
-      max_logging.log(
-          f"Run out of shards on host {self.dataloading_host_index}, shard {self.dataset_shards[idx]} is not available"
-      )
+      max_logging.log(f"Run out of shards on host {self.dataloading_host_index}, shard {new_shard} is not available")
       self.out_of_data = True
       if self.generate_padding_example:
         max_logging.log(
@@ -160,11 +253,14 @@ class HFDataSource(grain.RandomAccessDataSource):
           if self.generate_padding_example:
             return {column_name: np.zeros(self.max_target_lenth, dtype=np.int32) for column_name in self.data_column_names}
           else:
-            return None
+            raise StopIteration("Running out of data")
         data = next(self.data_iters[idx])
         return data
-      except StopIteration:
-        self._update_shard(idx)
+      except StopIteration as e:
+        if not self.out_of_data:
+          self._update_shard(idx)
+        else:
+          raise e
 
 
 ########## Functions used by Grain pipeline
@@ -238,23 +334,24 @@ class ReformatPacking(grain.MapTransform):
 class PadToMaxLength(grain.MapTransform):
   """Pads each input to the specified length"""
 
-  def __init__(self, max_length):
+  def __init__(self, max_length, pad_id):
     self.max_length = max_length
+    self.pad_id = pad_id
 
   def map(self, data: dict[str, np.ndarray]):
     """map to each element"""
 
-    def _pad(x, max_length):
+    def _pad(x, max_length, pad_id):
       pad_amount = max(max_length - x.shape[0], 0)
       pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
-      return np.pad(x, pad_amount)
+      return np.pad(x, pad_amount, constant_values=pad_id)
 
     data_columns = list(data.keys())
     for data_column in data_columns:
-      data[f"{data_column}_segmentation"] = (data[data_column] != 0).astype(np.int32)
+      data[f"{data_column}_segmentation"] = (data[data_column] != self.pad_id).astype(np.int32)
       data[f"{data_column}_position"] = np.arange(data[data_column].shape[0], dtype=np.int32)
     for key, _ in data.items():
-      data[key] = _pad(data[key], self.max_length)
+      data[key] = _pad(data[key], self.max_length, self.pad_id)
     return data
 
 
@@ -270,16 +367,23 @@ def shift_right(x, axis=1):
   return padded[tuple(slices)]
 
 
-def shift_and_refine(x, axis=1):
-  """Shift inputs, set segmentation to 0 when target element is 0.
-  Replace EOS by 0 for packed inputs."""
-  x["inputs"] = shift_right(x["inputs"], axis=axis)
-  targets_nonzero = x["targets"] != 0
-  x["inputs_segmentation"] *= targets_nonzero
-  x["targets_segmentation"] *= targets_nonzero
-  # For packed targets, the first shifted token of a new sequence is made
-  # 0, rather than being the EOS token for the last sequence.
-  x["inputs"] *= x["inputs_segmentation"] == shift_right(x["inputs_segmentation"], axis=axis)
+def shift_left(x, pad_id, axis=1):
+  """Shift to the left and pad."""
+  pad_widths = [(0, 0)] * len(x.shape)
+  pad_widths[axis] = (0, 1)
+  slices = [
+      slice(None),
+  ] * len(x.shape)
+  slices[axis] = slice(1, None)
+  padded = np.pad(x, pad_widths, mode="constant", constant_values=x.dtype.type(pad_id))
+  return padded[tuple(slices)]
+
+
+def shift_and_refine(x, ignored_ids, axis=1):
+  """Shift inputs, set segmentation to 0 when target element is in ignored_ids if provided"""
+  x["targets"] = shift_left(x["targets"], ignored_ids[0], axis=axis)
+  for ignore_id in ignored_ids:
+    x["targets_segmentation"] = np.where(x["targets"] != ignore_id, x["targets_segmentation"], 0)
 
   return x
 
@@ -288,8 +392,9 @@ def shift_and_refine(x, axis=1):
 class ShiftData(grain.MapTransform):
   """Shift inputs and refine annotations."""
 
-  def __init__(self, axis=1):
+  def __init__(self, ignored_ids, axis=1):
+    self.ignored_ids = ignored_ids
     self.axis = axis
 
   def map(self, data):
-    return shift_and_refine(data, axis=self.axis)
+    return shift_and_refine(data, ignored_ids=self.ignored_ids, axis=self.axis)

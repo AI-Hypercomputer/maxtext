@@ -66,7 +66,10 @@ class GemmaDecoderLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
+      previous_chunk=None,
       page_manager=None,
+      page_state=None,
+      slot=None,
   ):
     cfg = self.config
     mesh = self.mesh
