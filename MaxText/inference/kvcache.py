@@ -351,20 +351,16 @@ class KVCache(nn.Module):
     value_vars = (cached_value_var, cached_value_scale_var)
     return key_vars, value_vars, cached_segment_id_var, cache_index_var, cached_lengths_var
 
-  def chunked_prefill_kv_cache(self, key: Array, value: Array, decoder_segment_ids: Array, previous_chunk: Any = None):
-    """
-    function returns appropriate prefill_cache if there is previous_chunk already processed
-    if no pervious chunk is processed,
-    function returns a cache that has non zero first chunk part of key and value
+  def kv_cache_prefill_concatenated(self, key: Array, value: Array, decoder_segment_ids: Array, previous_chunk: Any):
+    """Return KV cache concatenating to existing prefix."""
 
-    else
-    function updates current key and value at the desired location and returns entire key and value
-
-    """
+    assert not self.kv_quant, "Not support kv_quant now."
     batch, _, key_heads, key_head_size = key.shape
     batch, _, value_heads, value_head_size = value.shape
 
     assert key.dtype == value.dtype, "Key and Value Dtypes should match."
+
+    assert previous_chunk is not None
 
     cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
         batch, key_heads, value_heads, key_head_size, value_head_size, common_types.MODEL_MODE_PREFILL
@@ -377,63 +373,36 @@ class KVCache(nn.Module):
     key_shaped_for_cache = jnp.transpose(key, self.prefill_cache_axis_order)
     value_shaped_for_cache = jnp.transpose(value, self.prefill_cache_axis_order)
 
-    next_pos = 0
-    if previous_chunk != None:
-      """
-      if there is previous chunk information present,
-        1. Fetch the cached key, value
-        2. Update current key value at the desired position.
-        3. take transpose before returning as that is how the attention op expects the key and value
-      """
-      next_pos = previous_chunk["true_length_array"].shape[1]
-      cached_key = self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order)
-      cached_value = self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order)
-      cached_key_value = jnp.transpose(cached_key, self.prefill_cache_axis_order)
-      cached_value_value = jnp.transpose(cached_value, self.prefill_cache_axis_order)
+    next_pos = previous_chunk.shape[1]
+    cached_key = self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order)
+    cached_value = self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order)
+    cached_key_value = jnp.transpose(cached_key, self.prefill_cache_axis_order)
+    cached_value_value = jnp.transpose(cached_value, self.prefill_cache_axis_order)
 
-      cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice(
-          cached_key_value, key_shaped_for_cache, (next_pos, 0, 0, 0)
+    seq_axis = self.prefill_cache_logical_axis_names.index(CACHE_SEQUENCE)
+    cache_seq_axis = self.prefill_cache_axis_order.index(seq_axis)
+
+    cached_prefill_key_vars[0].value = jnp.concatenate(
+        [cached_key_value[:next_pos], key_shaped_for_cache],
+        axis=cache_seq_axis,
+    )
+
+    cached_prefill_value_vars[0].value = jnp.concatenate(
+        [cached_value_value[:next_pos], value_shaped_for_cache],
+        axis=cache_seq_axis,
+    )
+
+    if decoder_segment_ids is not None:
+      cached_prefill_segment_id_var.value = jnp.concatenate(
+          [cached_prefill_segment_id_var.value[:, :next_pos], decoder_segment_ids],
+          axis=1,
       )
 
-      cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(
-          cached_value_value, value_shaped_for_cache, (next_pos, 0, 0, 0)
-      )
-
-      if decoder_segment_ids is not None:
-        # decoder_segment_ids is complete prompt, while cached_prefill_segment_id is max_prefill_length
-        new_segment_id_var = jnp.zeros(cached_prefill_segment_id_var.value.shape, jnp.int32)
-        cached_prefill_segment_id_var.value = jax.lax.dynamic_update_slice(new_segment_id_var, decoder_segment_ids, (0, 0))
-
-      return (
-          jnp.transpose(cached_prefill_key_vars[0].value, self.key_axis_order),
-          jnp.transpose(cached_prefill_value_vars[0].value, self.key_axis_order),
-          cached_prefill_segment_id_var.value if decoder_segment_ids is not None else None,
-      )
-    else:
-      """
-      if there is previous chunk information present,
-        1. Fetch the cached key, value
-        2. Update current key value at the desired position. (beginning - (0,0,0,0))
-        3. take transpose before returning as that is how the attention op expects the key and value
-
-      """
-      cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice(
-          cached_prefill_key_vars[0].value, key_shaped_for_cache, (next_pos, 0, 0, 0)
-      )
-      cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice(
-          cached_prefill_value_vars[0].value, value_shaped_for_cache, (next_pos, 0, 0, 0)
-      )
-
-      if decoder_segment_ids is not None:
-        # decoder_segment_ids is complete prompt, while cached_prefill_segment_id is max_prefill_length
-        new_segment_id_var = jnp.zeros(cached_prefill_segment_id_var.value.shape, jnp.int32)
-        cached_prefill_segment_id_var.value = jax.lax.dynamic_update_slice(new_segment_id_var, decoder_segment_ids, (0, 0))
-
-      return (
-          jnp.transpose(cached_prefill_key_vars[0].value, self.key_axis_order),
-          jnp.transpose(cached_prefill_value_vars[0].value, self.key_axis_order),
-          cached_prefill_segment_id_var.value if decoder_segment_ids is not None else None,
-      )
+    return (
+        jnp.transpose(cached_prefill_key_vars[0].value, self.key_axis_order),
+        jnp.transpose(cached_prefill_value_vars[0].value, self.key_axis_order),
+        cached_prefill_segment_id_var.value if decoder_segment_ids is not None else None,
+    )
 
   def kv_cache_prefill(
       self,
@@ -454,9 +423,9 @@ class KVCache(nn.Module):
       key, value, decoder_segment_id.
 
     """
-    if self.use_chunked_prefill:
-      return self.chunked_prefill_kv_cache(key, value, decoder_segment_ids, previous_chunk)
-    # print(f"prefill key.shape {key.shape} value.shape {value.shape}")
+    if previous_chunk is not None:
+      return self.kv_cache_prefill_concatenated(key, value, decoder_segment_ids, previous_chunk)
+
     batch, _, key_heads, key_head_size = key.shape
     batch, _, value_heads, value_head_size = value.shape
     assert key.dtype == value.dtype, "Key and Value Dtypes should match."
