@@ -98,8 +98,11 @@ def initialize_page_state(
   Returns:
     An initialized `PageState` object with all values set to their defaults (zeros/False).
   """
+  # Workaround for corrupted state in page 0, could be in kernel.
+  initial_page_status = jnp.zeros((num_pages,), dtype=jnp.int32)
+  initial_page_status = initial_page_status.at[0].set(1)
   return PageState(
-      page_status=jnp.zeros((num_pages,), dtype=jnp.int32),
+      page_status=initial_page_status,
       page_map=jnp.zeros((max_page_groups, max_pages_per_group), dtype=jnp.int32),
       num_pages_used=jnp.zeros((max_page_groups,), dtype=jnp.int32),
       sequence_lengths=jnp.zeros((max_page_groups,), dtype=jnp.int32),
@@ -123,13 +126,17 @@ def _find_next_free_page_index(page_status: Array) -> Array:
     The index of the next free page (the lowest index where `page_status` is 0).
     Returns -1 if no free pages are found (i.e., `page_status` contains only 1s).
   """
-  overall_free_mask = page_status == 0
-  # jnp.argmax returns the index of the first True. If all are False, it returns 0.
-  next_free_overall = jnp.argmax(overall_free_mask)
-  # We need jnp.any to distinguish between "index 0 is free" and "no pages are free".
+  # Search for free pages starting from index 1, 0 is problematic?
+  search_status = page_status[1:]
+  overall_free_mask = search_status == 0
+  # argmax on the sliced array gives index relative to the slice start (index 1)
+  next_free_relative = jnp.argmax(overall_free_mask)
+  next_free_overall = next_free_relative + 1
+
+  # Check if any free page was found in the sliced array
   has_free_overall = jnp.any(overall_free_mask)
 
-  # Return the found index if a free page exists, otherwise return -1.
+  # Return the found index (>= 1) if a free page exists, otherwise return -1.
   return jnp.where(has_free_overall, next_free_overall, -1)
 
 

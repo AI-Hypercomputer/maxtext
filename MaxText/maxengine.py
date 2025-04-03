@@ -983,89 +983,91 @@ class MaxEngine(engine_api.Engine):
         "generated_tokens": inserted_generated_tokens,
         "tokens": inserted_tokens,
     }
-
+  
   @functools.partial(
       jax.jit,
       static_argnums=(0,),
+      donate_argnames=("decode_state",)
   )
-  def insert(
+  def _insert_jit(
       self,
       prefix: Prefix,
       decode_state: DecodeState,
       slot: int,
+      page_state_in: PageState,
       request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
   ) -> DecodeState:
-    """Insert a single computed prefill cache into KV cache."""
+    """(Modified insert logic - JIT compiled) Inserts prefill cache using provided page_state."""
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
-
     unboxed_prefix["cache"] = self._maybe_unstack_prefill_result_cache(unboxed_prefix["cache"])
 
     def copy(path, partial_cache, full_cache, annotations):
-      path_key = path[-1].key
-      if path_key in [
-          "cache_ar_index",
-          "cached_ar_key",
-          "cached_ar_value",
-          "cached_ar_key_scale",
-          "cached_ar_value_scale",
-      ]:
-        return full_cache  # we don't even zero these out because we can mask them out.
+        path_key = path[-1].key
+        if path_key in [
+            "cache_ar_index",
+            "cached_ar_key",
+            "cached_ar_value",
+            "cached_ar_key_scale",
+            "cached_ar_value_scale",
+        ]:
+          return full_cache
 
-      batch_idx = -1
-      if "cache_batch" in annotations:
-        batch_idx = annotations.index("cache_batch")
-      elif "cache_scale_batch" in annotations:
-        batch_idx = annotations.index("cache_scale_batch")
+        batch_idx = -1
+        if "cache_batch" in annotations:
+          batch_idx = annotations.index("cache_batch")
+        elif "cache_scale_batch" in annotations:
+          batch_idx = annotations.index("cache_scale_batch")
 
-      if batch_idx < 0:
-        raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
+        if batch_idx < 0:
+          raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
 
-      if path_key == "cache_ar_segment_id":
-        ### goal: zero this out in case there is existing data
-        s = list(full_cache.shape)
-        s[batch_idx] = 1
-        zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
-        return jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
-      elif path_key == "cache_prefill_segment_id":
-        s = list(full_cache.shape)
-        s[batch_idx] = 1
-        zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
-        ## zero out in case prefill cache is too small to cover
-        full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
-        ## copy prefill cachce
-        full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
-        return full_cache
-      elif path_key == "cached_ar_lengths":
-        return full_cache.at[slot].set(0)
-      elif path_key in [
-          "cached_prefill_key",
-          "cached_prefill_value",
-          "cached_prefill_key_scale",
-          "cached_prefill_value_scale",
-      ]:
-        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
-      else:
-        raise ValueError(f"We don't have a strategy for inserting {path_key}")
+        if path_key == "cache_ar_segment_id":
+          s = list(full_cache.shape)
+          s[batch_idx] = 1
+          zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
+          return jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
+        elif path_key == "cache_prefill_segment_id":
+          s = list(full_cache.shape)
+          s[batch_idx] = 1
+          zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
+          # zero out in case prefill cache is too small to cover
+          full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
+          # copy prefill cache
+          full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+          return full_cache
+        elif path_key == "cached_ar_lengths":
+          return full_cache.at[slot].set(0)
+        elif path_key in [
+            "cached_prefill_key",
+            "cached_prefill_value",
+            "cached_prefill_key_scale",
+            "cached_prefill_value_scale",
+        ]:
+          return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+        else:
+          raise ValueError(f"We don't have a strategy for inserting {path_key}")
 
     if self.config.attention == "paged":
-
       def _copy_paged(path, prefix_cache, decode_state_cache):
         path_key = path[-1].key
         if path_key in ["key_pages", "value_pages"]:
+          page_map_for_slot = page_state_in.page_map[slot]
+          num_pages_to_copy = page_state_in.num_pages_used[slot]
 
           def _update_pages(prefix_page_idx, state):
-            decode_state_pages, prefix_pages, page_map = state
+            decode_state_pages, prefix_pages, current_page_map = state
             prefix_page = jax.lax.dynamic_index_in_dim(prefix_pages, prefix_page_idx, axis=1)
+            dest_page_idx = current_page_map[prefix_page_idx]
             decode_state_pages = jax.lax.dynamic_update_slice_in_dim(
-                decode_state_pages, prefix_page, page_map[prefix_page_idx], axis=1
+                decode_state_pages, prefix_page, dest_page_idx, axis=1
             )
-            return decode_state_pages, prefix_pages, page_map
+            return decode_state_pages, prefix_pages, current_page_map
 
           decode_state_cache, _, _ = jax.lax.fori_loop(
               0,
-              self.page_state.num_pages_used[slot],
+              num_pages_to_copy,
               _update_pages,
-              (decode_state_cache, prefix_cache, self.page_state.page_map[slot]),
+              (decode_state_cache, prefix_cache, page_map_for_slot),
           )
           return decode_state_cache
         else:
@@ -1107,6 +1109,44 @@ class MaxEngine(engine_api.Engine):
         "generated_tokens": inserted_generated_tokens,
         "tokens": inserted_tokens,
     }
+
+
+  def insert(
+      self,
+      prefix: Prefix,
+      decode_state: DecodeState,
+      slot: int,
+      request_id: Optional[uuid.UUID] = None,
+  ) -> DecodeState:
+      """Non-JIT wrapper for inserting prefill cache and updating page state."""
+
+      current_page_state = None
+      if self.config.attention == "paged" and self.page_manager is not None:
+          if self.page_state is None:
+             self.page_state = self.page_manager.get_initial_page_state()
+          # Block to ensure any pending updates to self.page_state are reflected
+          # todo(patemotter): avoid explicit block
+          jax.block_until_ready(self.page_state)
+          current_page_state = self.page_state
+
+      updated_decode_state = self._insert_jit(
+          prefix=prefix,
+          decode_state=decode_state,
+          slot=slot,
+          page_state_in=current_page_state,
+          request_id=request_id,
+      )
+      # todo(patemotter): avoid explicit block
+      jax.block_until_ready(updated_decode_state)
+
+      # Manually update the PageState *after* the JIT call in Python land
+      if self.config.attention == "paged" and self.page_manager is not None and self.page_state is not None:
+          new_has_active_page = self.page_state.has_active_page.at[slot].set(True)
+          self.page_state = self.page_state.replace(has_active_page=new_has_active_page)
+          # todo(patemotter): avoid explicit block
+          jax.block_until_ready(self.page_state)
+      return updated_decode_state
+
 
   @functools.partial(
       jax.jit,
