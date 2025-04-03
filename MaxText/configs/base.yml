@@ -221,6 +221,7 @@ attn_logits_soft_cap: 0.0
 final_logits_soft_cap: 0.0
 use_post_attn_norm: False
 use_post_ffw_norm: False
+mla_naive_kvcache: True
 
 # MLA parameters
 q_lora_rank: 0
@@ -314,6 +315,7 @@ logical_axis_rules: [
                       ['kv_head_dim', []],
                       ['cache_batch_prefill', []],
                       ['cache_batch', []],
+                      ['cache_heads_none', []],
                       ['cache_heads', ['autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['cache_heads', ['autoregressive', 'tensor', 'tensor_sequence']],
                       ['cache_kv', []],
