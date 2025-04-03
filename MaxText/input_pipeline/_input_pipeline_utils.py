@@ -27,6 +27,9 @@ import numpy as np
 import tensorflow as tf
 import max_logging
 import tokenizer
+import requests
+from PIL import Image
+from io import BytesIO
 
 Features = Dict[str, tf.Tensor]
 AUTOTUNE = tf.data.experimental.AUTOTUNE
@@ -127,6 +130,17 @@ def tokenization(example, hf_tokenizer, truncation, max_length, column_names):
     elif isinstance(example[column_name], str):
       example[column_name] = hf_tokenizer(example[column_name], truncation=truncation, max_length=max_length)["input_ids"]
   return example
+
+
+def get_image_array_from_url(url):
+  """Get image array from url."""
+  # This line for headers is to avoid 403/429 errors from rate-limiting CDNs and bypass anti-bot filters
+  headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+  response = requests.get(url, headers=headers)
+  response.raise_for_status()
+  img = Image.open(BytesIO(response.content))
+  img_array = np.array(img)
+  return img_array
 
 
 @dataclasses.dataclass
