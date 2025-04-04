@@ -174,16 +174,11 @@ def add_xpk_runner_arguments(custom_parser: argparse.ArgumentParser):
       help='Number of restarts to attempt.',
   )
   custom_parser.add_argument(
-      '--xpk_storage_checkpoint',
+      '--xpk_storage',
       type=str,
       default="",
-      help='Mount point to checkpoint bucket',
-  )
-  custom_parser.add_argument(
-      '--xpk_storage_dataset',
-      type=str,
-      default="",
-      help='Mount point to dataset bucket',
+      action="append",
+      help='Mount point to storage bucket',
   )
 
 
@@ -296,8 +291,7 @@ def main() -> None:
       pathways_config=pw_config,
       # Internal only support, not for customers
       generate_metrics_and_upload_to_big_query=False,
-      xpk_storage_dataset=options.xpk_storage_dataset,
-      xpk_storage_checkpoint=options.xpk_storage_checkpoint,
+      xpk_storage=options.xpk_storage,
     )
 
     xpk_benchmark_runner(cluster_config, [workload_config])

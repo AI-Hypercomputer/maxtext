@@ -43,6 +43,7 @@ from benchmark_db_utils import DEFAULT_TUNING_PARAMS_FILE
 import xla_flags_library as xla_flags
 from disruption_management.disruption_handler import DisruptionConfig
 from disruption_management.disruption_manager import DisruptionManager
+from typing import Optional, List
 from xpk_configs import XpkClusterConfig
 
 from MaxText.globals import PKG_DIR
@@ -111,8 +112,7 @@ class WorkloadConfig:
   db_dataset: str = ""
   db_is_test: bool = True
   disruption_configs: DisruptionConfig = None
-  xpk_storage_dataset: str = ''
-  xpk_storage_checkpoint: str = ''
+  xpk_storage: Optional[List[str]] = None
 
   def __post_init__(self):
     """Initializes num_devices_per_slice and topology for recording the run into BigQuery"""
@@ -622,6 +622,8 @@ def generate_xpk_workload_cmd(
     upload_metrics_to_bq_cmd = f"&& python3 benchmarks/upload_metrics_to_bq.py {args_str}"
 
   print(f'User command: {user_command}')
+  all_xpk_storage = ""
+  all_xpk_storage = " ".join(f"--storage={storage_test}" for storage_test in args.xpk_storage)
   return (
       (
           f'{workload_create_command}'
@@ -630,7 +632,7 @@ def generate_xpk_workload_cmd(
           f' --project={cluster_config.project}'
           f' --zone={cluster_config.zone}'
           f' {device_type}'
-          f' --storage={wl_config.xpk_storage_dataset} --storage={wl_config.xpk_storage_checkpoint}'
+          f' {all_xpk_storage}'
           f' --num-slices={wl_config.num_slices}'
           f' --command="{user_command} {upload_metrics_to_bq_cmd}"'
           f' {docker_image_flag}'
