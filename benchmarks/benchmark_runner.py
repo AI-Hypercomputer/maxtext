@@ -171,6 +171,13 @@ def add_xpk_runner_arguments(custom_parser: argparse.ArgumentParser):
       default=0,
       help='Number of restarts to attempt.',
   )
+  custom_parser.add_argument(
+      '--xpk_storage',
+      default= None,
+      action="append",
+      help='XPK storage resources used by the workload.',
+  )
+
 
 def add_on_device_runner_arguments(custom_parser: argparse.ArgumentParser):
   """Add arguments to the on-device runner parser.
@@ -281,6 +288,7 @@ def main() -> None:
       pathways_config=pw_config,
       # Internal only support, not for customers
       generate_metrics_and_upload_to_big_query=False,
+      xpk_storage=options.xpk_storage,
     )
 
     xpk_benchmark_runner(cluster_config, [workload_config])
