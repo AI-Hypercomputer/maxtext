@@ -304,14 +304,7 @@ def generate_completions(config, tokenizer_model, engine, data, params, true_len
       decode_state = engine.insert(prefill_result, decode_state, slot=slot)
       slot += 1
   steps = config.max_target_length - config.max_prefill_predict_length
-  # completions = jnp.zeros((prompts.shape[0], config.max_target_length - config.max_prefill_predict_length), dtype=jnp.int32)
 
-  # for s in range(steps):
-  #   rng, rng_generate = jax.random.split(rng)
-  #   decode_state, result_tokens = engine.generate(params, decode_state, rng=rng_generate)
-  #   for i in range(slot):
-  #     completions.at[s, i].set(result_tokens.get_result_at_slot(i).tokens.item())
-  max_logging.log("completed prefill, starting generate")
   completions = defaultdict(list)
   result_tokens_list = []
   for _ in range(steps):
@@ -326,29 +319,6 @@ def generate_completions(config, tokenizer_model, engine, data, params, true_len
       completions[i].append(result_token.get_result_at_slot(i).tokens.item())
   completions = jnp.array(np.array(list(completions.values())))
 
-  # prompt_with_completions, eos_positions = [], []
-  # for i in range(prompts.shape[0]):
-  #   tokens = prompts[i]
-  #   current_token_true_length = true_length[i]
-  #   concatenated_prompts = jnp.concatenate(
-  #       [tokens[: current_token_true_length - 1], completions[i]], axis=0  # remove EOS token in input prompt
-  #   )
-  #   eos_positions.append(
-  #       jnp.where(
-  #           jnp.any(concatenated_prompts == tokenizer_model.eos_token_id),
-  #           jnp.argmax(concatenated_prompts == tokenizer_model.eos_token_id),
-  #           concatenated_prompts.shape[0],
-  #       )
-  #   )
-  #   prompt_with_completions.append(
-  #       jnp.pad(
-  #           concatenated_prompts,
-  #           (0, config.max_target_length - concatenated_prompts.shape[0]),
-  #           constant_values=tokenizer_model.pad_token_id,
-  #       )
-  #   )
-  # data["prompt_completions"] = jnp.array(prompt_with_completions)
-  # eos_positions = jnp.stack(eos_positions)
 
   def concat_and_find_eos(prompt, true_length, completion):
     total_len = prompt.shape[0] + completion.shape[0]
@@ -723,7 +693,7 @@ def train_loop(config, config_inference, state=None):
     ) = maxtext_utils.get_functional_eval_with_signature(eval_step, mesh, state_mesh_shardings, model, config)
 
   # TODO: fix tflops calculations for grpo setting
-  num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
+  num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params['params'])
   max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
   per_device_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(config)
   per_device_tokens = maxtext_utils.calculate_tokens_training_per_device(config)
