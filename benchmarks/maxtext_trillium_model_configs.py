@@ -978,7 +978,7 @@ llama3_1_70b_8192 = _add_to_model_dictionary(
 llama3_1_70b_8192_iter_synthetic = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
-    model_name="llama3_1-70b-8192",
+    model_name="llama3_1-70b-8192_synthetic",
     model_type="llama3.1-70b",
     tuning_params={
         "per_device_batch_size": 2,
@@ -1018,10 +1018,10 @@ llama3_1_70b_8192_iter_synthetic = _add_to_model_dictionary(
   )
 )
  
-llama3_1_70b_8192_iter_real_data = _add_to_model_dictionary(
+llama3_1_70b_8192_iter_real_data_grain = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
-    model_name="llama3_1-70b-8192",
+    model_name="llama3_1-70b-8192_rd_grain",
     model_type="llama3.1-70b",
     tuning_params={
         "per_device_batch_size": 2,
@@ -1068,7 +1068,7 @@ llama3_1_70b_8192_iter_real_data = _add_to_model_dictionary(
 llama3_1_70b_8192_iter_synthetic_ckpt = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
-    model_name="llama3_1-70b-8192",
+    model_name="llama3_1-70b-8192_synthetic_ckpt",
     model_type="llama3.1-70b",
     tuning_params={
         "per_device_batch_size": 2,
@@ -1113,7 +1113,7 @@ llama3_1_70b_8192_iter_synthetic_ckpt = _add_to_model_dictionary(
 llama3_1_70b_8192_iter_real_data_and_checkpointing = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
-    model_name="llama3_1-70b-8192",
+    model_name="llama3-1-70b_8192_rd_ckpt_grain",
     model_type="llama3.1-70b",
     tuning_params={
         "per_device_batch_size": 2,
