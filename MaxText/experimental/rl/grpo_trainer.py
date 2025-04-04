@@ -22,6 +22,7 @@ updating policy gradients based on reward functions
 """
 
 
+from collections import defaultdict
 import datetime
 import os
 import sys
@@ -32,6 +33,7 @@ from typing import Sequence
 from absl import app
 import tensorflow as tf
 from flax.linen import partitioning as nn_partitioning
+from flax import struct
 import jax
 import jax.numpy as jnp
 from jax import random
@@ -98,6 +100,17 @@ def _split_grpo_state(state):
 
 def _merge_grpo_state(state, reference_params):
   return state.replace(params=dict(state.params, reference_params=reference_params))
+
+@struct.dataclass
+class LossAux:
+    total_loss: float
+    avg_reward: float
+    avg_reward_std: float
+    avg_advantage: float
+    avg_kl: float
+    completion_length: float
+    moe_lb_loss: float
+    total_weights: float
 
 
 def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_train=True):
@@ -197,7 +210,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   group_std = jnp.std(rewards_grouped, axis=1)  # shape [B]
   repeated_group_mean = jnp.repeat(group_mean, G)  # shape [BxG]
   repeated_group_std = jnp.repeat(group_std, G)  # shape [BxG]
-  advantages = (rewards - repeated_group_mean) / (repeated_group_std + 1e-4)  # shape [BxG]
+  advantages = (rewards - repeated_group_mean) / (repeated_group_std + EPS)  # shape [BxG]
 
   # --- (8) Compute per-token loss.
   # We follow the TRL GRPO loss:
@@ -226,16 +239,16 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   avg_reward = jnp.mean(rewards)
   avg_advantage = jnp.mean(advantages)
   avg_completion_length = jnp.mean(jnp.sum(data["ar_completions_segmentation"] != 0, axis=1))
-  aux = {
-      "total_loss": loss,
-      "avg_reward": avg_reward,
-      "avg_reward_std": jnp.mean(repeated_group_std),
-      "avg_advantage": avg_advantage,
-      "avg_kl": avg_kl,
-      "completion_length": avg_completion_length,
-      "moe_lb_loss": moe_lb_loss,
-      "total_weights": total_weights,
-  }
+  aux = LossAux(
+    total_loss=loss,
+    avg_reward=avg_reward,
+    avg_reward_std=jnp.mean(repeated_group_std),
+    avg_advantage=avg_advantage,
+    avg_kl=avg_kl,
+    completion_length=avg_completion_length,
+    moe_lb_loss=moe_lb_loss,
+    total_weights=total_weights,
+  )
 
   return loss, aux
 
@@ -262,10 +275,11 @@ def generate_completions(config, tokenizer_model, engine, data, params, true_len
   """
   # decimate proportion of data when per_device_batch_size<1
   for k, v in data.items():
+    assert v.ndim == 1 or v.ndim == 2, f"Invalid {v.shape=} found for key={k}"
     if v.ndim == 2:
-      data[k] = v[: config.micro_batch_size_to_train_on, :]
+      data[k] = v[:config.micro_batch_size_to_train_on, :]
     else:
-      data[k] = v[: config.micro_batch_size_to_train_on]
+      data[k] = v[:config.micro_batch_size_to_train_on]
 
   prompts = data["prompt"]
   rng, rng_load_params = jax.random.split(rng)
@@ -274,9 +288,7 @@ def generate_completions(config, tokenizer_model, engine, data, params, true_len
   rng, rng_init_decode = jax.random.split(rng_load_params)
   decode_state = engine.init_decode_state(rng_init_decode)
   slot = 0
-  for i in range(prompts.shape[0]):
-    tokens = prompts[i]
-    current_token_true_length = true_length[i]
+  for tokens, current_token_true_length in zip(prompts, true_length):
     # Split RNG before calling prefill
     rng, rng_prefill = jax.random.split(rng)
     # generate the KV cache by prefilling the prompt tokens
@@ -288,41 +300,78 @@ def generate_completions(config, tokenizer_model, engine, data, params, true_len
       decode_state = engine.insert(prefill_result, decode_state, slot=slot)
       slot += 1
   steps = config.max_target_length - config.max_prefill_predict_length
-  completions = jnp.zeros((prompts.shape[0], config.max_target_length - config.max_prefill_predict_length), dtype=jnp.int32)
-  for s in range(steps):
+  completions = defaultdict(list)
+  result_tokens_list = []
+  for _ in range(steps):
     rng, rng_generate = jax.random.split(rng)
     decode_state, result_tokens = engine.generate(params, decode_state, rng=rng_generate)
-    for i in range(slot):
-      completions.at[s, i].set(result_tokens.get_result_at_slot(i).tokens.item())
+    result_tokens.copy_to_host_async()
+    result_tokens_list.append(result_tokens)
 
-  prompt_with_completions, eos_positions = [], []
-  for i in range(prompts.shape[0]):
-    tokens = prompts[i]
-    current_token_true_length = true_length[i]
-    concatenated_prompts = jnp.concatenate(
-        [tokens[: current_token_true_length - 1], completions[i]], axis=0  # remove EOS token in input prompt
-    )
-    eos_positions.append(
-        jnp.where(
-            jnp.any(concatenated_prompts == tokenizer_model.eos_token_id),
-            jnp.argmax(concatenated_prompts == tokenizer_model.eos_token_id),
-            concatenated_prompts.shape[0],
-        )
-    )
-    prompt_with_completions.append(
-        jnp.pad(
-            concatenated_prompts,
-            (0, config.max_target_length - concatenated_prompts.shape[0]),
-            constant_values=tokenizer_model.pad_token_id,
-        )
-    )
-  data["prompt_completions"] = jnp.array(prompt_with_completions)
-  eos_positions = jnp.stack(eos_positions)
-  data["prompt_completions_segmentation"] = jnp.arange(data["prompt_completions"].shape[1])[None, :] < eos_positions[
+  for step in range(steps):
+    result_token = result_tokens_list[step].convert_to_numpy()
+    for i in range(slot):
+      completions[i].append(result_token.get_result_at_slot(i).tokens.item())
+  completions = jnp.array(np.array(list(completions.values())))
+
+  # prompt_with_completions, eos_positions = [], []
+  # for i in range(prompts.shape[0]):
+  #   tokens = prompts[i]
+  #   current_token_true_length = true_length[i]
+  #   concatenated_prompts = jnp.concatenate(
+  #       [tokens[: current_token_true_length - 1], completions[i]], axis=0  # remove EOS token in input prompt
+  #   )
+  #   eos_positions.append(
+  #       jnp.where(
+  #           jnp.any(concatenated_prompts == tokenizer_model.eos_token_id),
+  #           jnp.argmax(concatenated_prompts == tokenizer_model.eos_token_id),
+  #           concatenated_prompts.shape[0],
+  #       )
+  #   )
+  #   prompt_with_completions.append(
+  #       jnp.pad(
+  #           concatenated_prompts,
+  #           (0, config.max_target_length - concatenated_prompts.shape[0]),
+  #           constant_values=tokenizer_model.pad_token_id,
+  #       )
+  #   )
+  # data["prompt_completions"] = jnp.array(prompt_with_completions)
+  # eos_positions = jnp.stack(eos_positions)
+
+  def concat_and_find_eos(prompt, true_length, completion):
+    total_len = prompt.shape[0] + completion.shape[0]
+    prompt_mask = jnp.arange(prompt.shape[0]) < true_length
+    trimmed_prompt = jnp.where(prompt_mask, prompt, 0)
+
+    # Initialize with padded prompt
+    full_seq = jnp.zeros((total_len,), dtype=prompt.dtype)
+    full_seq = full_seq.at[:prompt.shape[0]].set(trimmed_prompt)
+
+    # Dynamically insert completion at true_len position
+    full_seq = jax.lax.dynamic_update_slice(full_seq, completion, (true_length,))
+
+    # Find EOS index
+    eos_mask = full_seq == tokenizer_model.eos_token_id
+    eos_indices = jnp.where(eos_mask, jnp.arange(total_len), total_len)
+    eos_index = jnp.min(eos_indices)
+
+    return full_seq, eos_index
+
+  batched_concat_and_eos = jax.vmap(
+    lambda prompt, true_len, completion: concat_and_find_eos(
+        prompt, true_len, completion
+    ),
+    in_axes=(0, 0, 0)
+  )
+  prompts = jnp.repeat(prompts, G, axis=0)
+  true_length = jnp.repeat(true_length, G, axis=0)
+  data["prompt_completions"], eos_positions = batched_concat_and_eos(prompts, true_length, completions)
+
+  data["prompt_completions_segmentation"] = (jnp.arange(data["prompt_completions"].shape[1])[None, :] < eos_positions[
       :, None
-  ].astype(jnp.int32)
+  ]).astype(jnp.int32)
   data["prompt_completions_position"] = jnp.where(
-      data["prompt_completions_segmentation"], jnp.arange(data["prompt_completions"].shape[1]) + 1, 0
+      data["prompt_completions_segmentation"], jnp.arange(data["prompt_completions"].shape[1]), 0
   )
   completion_mask = data["prompt_completions_position"] >= true_length[:, None] - 1
   data["ar_completions_segmentation"] = data["prompt_completions_segmentation"] * completion_mask.astype(jnp.int32)
@@ -475,8 +524,8 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_grpo_args, is_train=True)
 
-  total_weights = aux["total_weights"]
-  moe_lb_loss = aux["moe_lb_loss"]
+  total_weights = aux.total_weights
+  moe_lb_loss = aux.moe_lb_loss
 
   if config.gradient_clipping_threshold > 0:
     grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
@@ -493,10 +542,10 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
 
   scalar_metrics = {
       "learning/loss": loss,
-      "learning/avg_reward": aux["avg_reward"],
-      "learning/avg_reward_std": aux["avg_reward_std"],
-      "learning/avg_advantage": aux["avg_advantage"],
-      "learning/avg_kl": aux["avg_kl"],
+      "learning/avg_reward": aux.avg_reward,
+      "learning/avg_reward_std": aux.avg_reward_std,
+      "learning/avg_advantage": aux.avg_advantage,
+      "learning/avg_kl": aux.avg_kl,
       "learning/moe_lb_loss": moe_lb_loss,
       "learning/total_weights": total_weights,
   }
@@ -504,7 +553,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
     scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
     scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(new_state.params)
-    scalar_metrics["learning/avg_reward"] = aux["avg_reward"]
+    scalar_metrics["learning/avg_reward"] = aux.avg_reward
   metrics = {
       "scalar": scalar_metrics,
       "scalars": {},

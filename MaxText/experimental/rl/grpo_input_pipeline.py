@@ -19,14 +19,13 @@ class SingleHostDataLoader:
     self.global_mesh = global_mesh
     self.dataloader = dataloader
     if not isinstance(self.dataloader, Iterable):
-      raise ValueError("Type error: dataloader should be either tf.data.Dataset or Iterable.")
+      raise ValueError("Type error: dataloader should be an Iterable.")
     self.local_iterator = iter(self.dataloader)
 
   def reset(self):
-    if isinstance(self.dataloader, Iterable):
-      self.local_iterator = iter(self.dataloader)
-    else:
-      raise ValueError("Type error: dataloader should be either tf.data.Dataset or grain.DataLoader.")
+    if not isinstance(self.dataloader, Iterable):
+      raise ValueError("Type error: dataloader should be a grain.DataLoader.")
+    self.local_iterator = iter(self.dataloader)  
 
   def __iter__(self):
     self.reset()
@@ -48,6 +47,8 @@ def preprocessing_pipeline(
     hf_access_token,
     global_batch_size,
     max_target_length,
+    shuffle: bool = False,
+    data_shuffle_seed=0,
     add_bos=True,
     add_eos=True,
     num_threads=1,
@@ -58,7 +59,8 @@ def preprocessing_pipeline(
   Return an iterator of dataset local to each host.
   """
 
-  assert global_batch_size % global_mesh.size == 0, "Batch size should be divisible number of global devices."
+  if global_batch_size % global_mesh.size != 0:
+    raise ValueError("Batch size should be divisible number of global devices.")
 
   if tokenize:
     tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -100,8 +102,8 @@ def preprocessing_pipeline(
       shard_options=grain.ShardOptions(
           shard_index=dataloading_host_index, shard_count=dataloading_host_count, drop_remainder=False
       ),
-      shuffle=False,
-      seed=0,
+      shuffle=shuffle,
+      seed=data_shuffle_seed,
   )
 
   dataloader = grain.DataLoader(
@@ -154,6 +156,7 @@ def create_data_iterator(config, mesh):
       config.max_target_length,
       mesh,
   )
-  assert config.eval_interval <= 0, "GRPO input pipeline is not supported for eval data"
+  if config.eval_interval > 0:
+    raise ValueError("GRPO input pipeline is not supported for eval data")
   train_iterator_fn = functools.partial(make_hf_train_iterator, config, mesh, process_indices_train)
   return input_pipeline_interface.make_mixed_iterator(config, mesh, process_indices_train, [], train_iterator_fn, None)
