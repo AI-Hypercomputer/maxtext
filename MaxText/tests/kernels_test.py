@@ -21,7 +21,7 @@ import pytest
 import unittest
 import jax
 import jax.numpy as jnp
-from kernels.ragged_attention import ragged_mqa, reference_mqa, ragged_mha, reference_mha, ragged_gqa, reference_gqa
+from MaxText.kernels.ragged_attention import ragged_mqa, reference_mqa, ragged_mha, reference_mha, ragged_gqa, reference_gqa
 
 
 class RaggedAttentionTest(unittest.TestCase):

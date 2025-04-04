@@ -20,7 +20,7 @@ from typing import Dict, Iterable, Union, Literal, Sequence, Collection, List
 from pathlib import Path
 import tensorflow as tf
 import tensorflow_text as tftxt
-import max_logging
+from MaxText import max_logging
 import transformers
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe

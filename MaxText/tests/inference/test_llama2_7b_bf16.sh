@@ -2,7 +2,8 @@
 
 # Define the arguments in an array
 args=(
-  "MaxText/decode.py"
+  "-m"
+  "MaxText.decode"
   "MaxText/configs/base.yml"
   "tokenizer_path=assets/tokenizer.llama2"
   "model_name=llama2-7b"
@@ -23,5 +24,5 @@ args=(
 )
 
 # Execute the Python script with the arguments
-python "${args[@]}"
+python3 "${args[@]}"
 

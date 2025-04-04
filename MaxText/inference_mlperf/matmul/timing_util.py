@@ -16,6 +16,8 @@ import datetime
 import jax
 import random
 import string
+import os.path
+import tempfile
 
 
 def simple_timeit(f, *args, tries=10, task=None, enable_profile=False):
@@ -23,7 +25,8 @@ def simple_timeit(f, *args, tries=10, task=None, enable_profile=False):
   assert task is not None
 
   trace_name = f"{task}"  # + '_' ]+ ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(10))
-  trace_dir = f"/tmp/{trace_name}"
+  temp_dir = tempfile.gettempdir()
+  trace_dir = os.path.join(temp_dir, trace_name)
   print(trace_dir)
 
   outcomes_ms = []
@@ -47,7 +50,8 @@ def simple_timeit(f, *args, tries=10, task=None, enable_profile=False):
   assert task is not None
 
   trace_name = f"t_{task}_" + "".join(random.choice(string.ascii_uppercase + string.digits) for _ in range(10))
-  trace_dir = f"/tmp/{trace_name}"
+  temp_dir = tempfile.gettempdir()
+  trace_dir = os.path.join(temp_dir, trace_name)
 
   outcomes_ms = []
   jax.block_until_ready(f(*args))  # warm it up!

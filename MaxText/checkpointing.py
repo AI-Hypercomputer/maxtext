@@ -22,8 +22,8 @@ from etils import epath
 from flax.training import train_state
 import grain.python as grain
 import jax
-import max_logging
-from multihost_dataloading import MultiHostDataLoadIterator
+from MaxText import max_logging
+from MaxText.multihost_dataloading import MultiHostDataLoadIterator
 import numpy as np
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager

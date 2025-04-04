@@ -16,17 +16,22 @@ limitations under the License.
 
 """Integraion test for pedagogical_examples/shmap_collective_matmul.py"""
 import subprocess
+import os.path
 import pytest
+from MaxText.globals import PKG_DIR
+from MaxText.tests.globals import TEST_DISABLE_SUBPROCESS, TEST_DISABLE_SUBPROCESS_STR
 
 
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
+@pytest.mark.skipif(TEST_DISABLE_SUBPROCESS, reason=TEST_DISABLE_SUBPROCESS_STR)
 def test_shmap_collective_matmul_example():
   """Validate Pedagogical Example, Shmap_collective_matmul."""
 
   command = [
       "python3",
-      "pedagogical_examples/shmap_collective_matmul.py",
+      "-m",
+      "pedagogical_examples.shmap_collective_matmul"
   ]
 
-  subprocess.run(command, check=True, cwd="..")
+  subprocess.run(command, check=True, cwd=os.path.dirname(PKG_DIR))

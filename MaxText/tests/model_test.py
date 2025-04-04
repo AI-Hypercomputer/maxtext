@@ -14,20 +14,22 @@
 
 import sys
 import unittest
+import os.path
 
-import common_types
+from MaxText import common_types
+from MaxText.globals import PKG_DIR
 
 from flax.core import freeze
 import jax
 import jax.numpy as jnp
-import max_utils
+from MaxText import max_utils
 import numpy as np
 import pytest
 
-import pyconfig
+from MaxText import pyconfig
 
-from layers import models
-from layers import quantizations
+from MaxText.layers import models
+from MaxText.layers import quantizations
 
 Mesh = jax.sharding.Mesh
 MAX_PREFILL_PREDICT_LENGTH = 4
@@ -43,7 +45,7 @@ class TestModel(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,

@@ -26,7 +26,7 @@ similar to virtual memory systems.
 
 from typing import Optional, Tuple
 
-import common_types
+from MaxText import common_types
 import jax
 import jax.numpy as jnp
 from flax import linen as nn

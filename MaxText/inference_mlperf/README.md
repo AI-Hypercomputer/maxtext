@@ -6,9 +6,11 @@ Follow these [instructions](https://cloud.google.com/tpu/docs/v5e-inference#tpu-
 
 
 ### Setup a virtual env
+```
 sudo apt install python3.10-venv
-python -m venv .env
+python3 -m venv .env
 source .env/bin/activate
+```
 
 ### Install loadgen
 ```
@@ -16,7 +18,7 @@ sudo apt-get install python3-dev
 sudo apt-get install build-essential -y
 git clone git@github.com:mlcommons/inference.git
 cd inference/
-cd loadgen/ && pip install .
+cd loadgen/ && python3 -m pip install .
 ```
 
 ### Download datasets
@@ -52,7 +54,7 @@ cd ~
 git clone git@github.com:google/maxtext.git
 cd maxtext
 bash setup.sh
-pip install -r MaxText/inference_mlperf/requirements.txt
+python3 -m pip install -r MaxText/inference_mlperf/requirements.txt
 ```
 
 ### Generate quantized checkpoint
@@ -88,7 +90,7 @@ export SAVE_QUANT_PARAMS_PATH=gs://${USER}-bkt/quantized/llama2-70b-chat
 # other tokenizers under maxtext/assets/ directory.
 export TOKENIZER_PATH=maxtext/assets/tokenizer.llama2
 cd maxtext && \
-python MaxText/decode.py MaxText/configs/base.yml tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${LOAD_PARAMS_PATH} max_prefill_predict_length=1024 max_target_length=2048 model_name=llama2-70b ici_fsdp_parallelism=1 ici_autoregressive_parallelism=1 ici_tensor_parallelism=-1 scan_layers=false weight_dtype=bfloat16 per_device_batch_size=11 attention=dot_product quantization=int8 save_quantized_params_path=${SAVE_QUANT_PARAMS_PATH}
+python3 -m MaxText.decode MaxText/configs/base.yml tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${LOAD_PARAMS_PATH} max_prefill_predict_length=1024 max_target_length=2048 model_name=llama2-70b ici_fsdp_parallelism=1 ici_autoregressive_parallelism=1 ici_tensor_parallelism=-1 scan_layers=false weight_dtype=bfloat16 per_device_batch_size=11 attention=dot_product quantization=int8 save_quantized_params_path=${SAVE_QUANT_PARAMS_PATH}
 ```
 
 Your checkpoint is generated at `$SAVE_QUANT_PARAMS_PATH`. This is used to set `load_parameters_path` param below in `MAXENGINE_ARGS` env variable.
@@ -113,7 +115,7 @@ export MODEL_SIZE=llama3.1-405b
 export QUANTIZE_TYPE=int8
 
 cd maxtext && \
-python3 MaxText/load_and_quantize_checkpoint.py MaxText/configs/base.yml tokenizer_path=${TOKENIZER} load_parameters_path=${LOAD_PARAMS_PATH} max_prefill_predict_length=1024 max_target_length=2048 model_name=${MODEL_SIZE} ici_fsdp_parallelism=1 ici_autoregressive_parallelism=1 ici_tensor_parallelism=-1 scan_layers=false weight_dtype=bfloat16 per_device_batch_size=1 attention=dot_product quantization=${QUANTIZE_TYPE} save_quantized_params_path=${SAVE_QUANT_PARAMS_PATH} async_checkpointing=false
+python3 -m MaxText.load_and_quantize_checkpoint MaxText/configs/base.yml tokenizer_path=${TOKENIZER} load_parameters_path=${LOAD_PARAMS_PATH} max_prefill_predict_length=1024 max_target_length=2048 model_name=${MODEL_SIZE} ici_fsdp_parallelism=1 ici_autoregressive_parallelism=1 ici_tensor_parallelism=-1 scan_layers=false weight_dtype=bfloat16 per_device_batch_size=1 attention=dot_product quantization=${QUANTIZE_TYPE} save_quantized_params_path=${SAVE_QUANT_PARAMS_PATH} async_checkpointing=false
 ```
 
 The quantized checkpoint is saved at `${SAVE_QUANT_PARAMS_PATH}`
@@ -188,7 +190,7 @@ bash ./mixtral_offline_run.sh -d
 ```
 # Capture profile
 bash ./llama_offline_run.sh -p -e
-python -m jax.collect_profile 9999 2000 --log_dir /tmp/profiles --no_perfetto_link
+python3 -m jax.collect_profile 9999 2000 --log_dir /tmp/profiles --no_perfetto_link
 
 # View profile
 tensorboard --logdir /tmp/profiles
