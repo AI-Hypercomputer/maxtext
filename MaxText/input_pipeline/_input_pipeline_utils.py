@@ -69,8 +69,10 @@ def add_segmentation_and_position(x, data_columns, padding_token=0):
 def combine_columns(example):
   """Combine columns such as 'prompt' and 'completion' for sft training"""
   assert len(example.column_names) > 1
+
   def join_fields(example):
     return {"messages": [example["prompt"][0], example["completion"][0]]}
+
   features = example.features.copy()
   features["messages"] = datasets.Sequence(datasets.Value("string"))
   new_ds = example.map(join_fields, features=features)
