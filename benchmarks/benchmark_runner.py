@@ -178,7 +178,7 @@ def add_xpk_runner_arguments(custom_parser: argparse.ArgumentParser):
       type=str,
       default="",
       action="append",
-      help='Mount point to storage bucket',
+      help='XPK storage resources used by the workload',
   )
 
 

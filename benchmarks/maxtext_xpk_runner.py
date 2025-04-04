@@ -623,7 +623,8 @@ def generate_xpk_workload_cmd(
 
   print(f'User command: {user_command}')
   all_xpk_storage = ""
-  all_xpk_storage = " ".join(f"--storage={storage_test}" for storage_test in args.xpk_storage)
+  if args.xpk_storage:
+    all_xpk_storage = " ".join(f"--storage={storage_test}" for storage_test in args.xpk_storage)
   return (
       (
           f'{workload_create_command}'
