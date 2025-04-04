@@ -957,7 +957,7 @@ def convert_to_jax_weights(base_model_path, model_size, huggingface_ckpt):
   return _convert_pytorch_to_jax_weights(base_model_path, model_size, model_params, mem_info)
 
 
-def save_weights_to_checkpoint(maxtext_model_path, jax_weights, device_count):
+def save_weights_to_checkpoint(maxtext_model_path, jax_weights, device_count, use_ocdbt, use_zarr3):
   """
   Function to save jax_weights ready for MaxText to a parameters checkpoint.
 
@@ -1004,7 +1004,12 @@ def save_weights_to_checkpoint(maxtext_model_path, jax_weights, device_count):
   save_interval_steps = 1
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      maxtext_model_path, enable_checkpointing, async_checkpointing, save_interval_steps
+      maxtext_model_path,
+      enable_checkpointing,
+      async_checkpointing,
+      save_interval_steps,
+      use_ocdbt=use_ocdbt,
+      use_zarr3=use_zarr3,
   )
 
   state_new = train_state.TrainState(
@@ -1049,6 +1054,8 @@ if __name__ == "__main__":
   parser.add_argument("--model-size", type=str, required=True)
   parser.add_argument("--lora-input-adapters-path", type=str, required=False)
   parser.add_argument("--huggingface-checkpoint", type=bool, required=False, default=False)
+  parser.add_argument("--use-ocdbt", type=bool, required=False, default=True)
+  parser.add_argument("--use-zarr3", type=bool, required=False, default=True)
   args = parser.parse_args()
 
   if args.model_size not in MODEL_PARAMS_DICT:
@@ -1064,6 +1071,8 @@ if __name__ == "__main__":
       args.maxtext_model_path,
       convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint),
       SIMULATED_CPU_DEVICES_COUNT,
+      args.use_ocdbt,
+      args.use_zarr3,
   )
   max_logging.log(f"Successfully saved base_weights to {base_weights_path}.")
 
@@ -1096,7 +1105,9 @@ if __name__ == "__main__":
 
           lora_output_gcs_path = f"{args.maxtext_model_path}/loras/{lora_id}"
 
-          save_weights_to_checkpoint(lora_output_gcs_path, jax_lora_weights, SIMULATED_CPU_DEVICES_COUNT)
+          save_weights_to_checkpoint(
+              lora_output_gcs_path, jax_lora_weights, SIMULATED_CPU_DEVICES_COUNT, args.use_ocdbt, args.use_zarr3
+          )
           gcs_utils.write_dict_to_gcs_json(lora_config_dict, f"{lora_output_gcs_path}/adapter_config.json")
 
           max_logging.log(f"Successfully saved lora_weights to {lora_output_gcs_path}.")
