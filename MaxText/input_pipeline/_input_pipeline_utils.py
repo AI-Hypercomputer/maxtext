@@ -21,12 +21,16 @@ import warnings
 from typing import Dict
 from threading import current_thread
 import datasets
+from datasets import Value
 from datasets.distributed import split_dataset_by_node
 import grain.python as grain
 import numpy as np
 import tensorflow as tf
 import max_logging
 import tokenizer
+import requests
+from PIL import Image
+from io import BytesIO
 
 Features = Dict[str, tf.Tensor]
 AUTOTUNE = tf.data.experimental.AUTOTUNE
@@ -66,15 +70,15 @@ def add_segmentation_and_position(x, data_columns, padding_token=0):
 ########## Functions used by HF pipeline
 
 
-def combine_columns(example, columns):
+def combine_columns(example):
   """Combine columns such as 'prompt' and 'completion' for sft training"""
-  assert len(columns) > 1
-  combined = []
-  for i in range(len(example[columns[0]])):
-    for c in columns:
-      combined.append(example[c][i])
-  example["messages"] = combined
-  return example
+  def join_fields(example):
+    return {"messages": [example["prompt"][0], example["completion"][0]]}
+  features = example.features.copy()
+  features["messages"] = datasets.Sequence(datasets.Value("string"))
+  new_ds = example.map(join_fields, features=features)
+  new_ds = new_ds.select_columns(["messages"])
+  return new_ds
 
 
 def is_conversational(example):
@@ -127,6 +131,17 @@ def tokenization(example, hf_tokenizer, truncation, max_length, column_names):
     elif isinstance(example[column_name], str):
       example[column_name] = hf_tokenizer(example[column_name], truncation=truncation, max_length=max_length)["input_ids"]
   return example
+
+
+def get_image_array_from_url(url):
+  """Get image array from url."""
+  # This line for headers is to avoid 403/429 errors from rate-limiting CDNs and bypass anti-bot filters
+  headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+  response = requests.get(url, headers=headers)
+  response.raise_for_status()
+  img = Image.open(BytesIO(response.content))
+  img_array = np.array(img)
+  return img_array
 
 
 @dataclasses.dataclass

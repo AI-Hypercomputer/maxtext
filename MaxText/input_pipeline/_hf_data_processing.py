@@ -67,9 +67,8 @@ def preprocessing_pipeline(
     assert _input_pipeline_utils.is_conversational(example), "Dataset is not in conversational format."
 
     if len(data_column_names) > 1:
-      dataset = dataset.map(
-          _input_pipeline_utils.combine_columns, fn_kwargs={"columns": data_column_names}, remove_columns=data_column_names
-      )
+      dataset = _input_pipeline_utils.combine_columns(dataset)
+      print(f"dataset {dataset}")
       data_column_names = dataset.column_names[:1]
     dataset = dataset.select_columns(data_column_names)
     dataset = dataset.map(
@@ -194,6 +193,14 @@ def make_hf_train_iterator(
       streaming=True,
       token=config.hf_access_token,
   )
+  # for example in train_ds.take(1):
+  #   all_keys = example.keys()
+  #   print(f"Example keys: {all_keys}")
+  #   image = example["image"]
+  #   print(f"Image type: {type(image)}")
+    
+  # model_name = config.model_name
+
   train_iter = preprocessing_pipeline(
       dataloading_host_index=process_indices_train.index(jax.process_index()),
       dataloading_host_count=len(process_indices_train),
