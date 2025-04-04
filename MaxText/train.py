@@ -946,7 +946,7 @@ def train_loop(config, state=None):
 
 
 def main(argv: Sequence[str]) -> None:
-  pathwaysutils.initialize()
+  # pathwaysutils.initialize()
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   # TF allocates extraneous GPU memory when using TFDS data
   # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF

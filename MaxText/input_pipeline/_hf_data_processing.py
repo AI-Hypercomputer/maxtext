@@ -67,9 +67,7 @@ def preprocessing_pipeline(
     assert _input_pipeline_utils.is_conversational(example), "Dataset is not in conversational format."
 
     if len(data_column_names) > 1:
-      dataset = dataset.map(
-          _input_pipeline_utils.combine_columns, fn_kwargs={"columns": data_column_names}, remove_columns=data_column_names
-      )
+      dataset = _input_pipeline_utils.combine_columns(dataset)
       data_column_names = dataset.column_names[:1]
     dataset = dataset.select_columns(data_column_names)
     dataset = dataset.map(
