@@ -23,6 +23,7 @@ import xla_flags_library
 # real data / synthetic data out of this config
 # TODO(vbarr@) Make slice dependent configurations to allow for a model's tuning
 # to adjust at scales.
+# TODO(vbarr@) Add a way to list workloads through the xpk maxtext runner.
 
 # The minimum set of tuning params required for pathways. Does not include
 # checkpointing params.
@@ -77,6 +78,55 @@ def _add_to_model_dictionary(
 ) -> MaxTextModel:
   model_dictionary[maxtext_model.model_name.replace("-", "_")] = maxtext_model
   return maxtext_model
+
+
+deepseek_a1 = _add_to_model_dictionary(
+  trillium_model_dict,
+    MaxTextModel(
+      model_name="deepseek_a1",
+      model_type="deepseek3-671b",
+      tuning_params={
+          "per_device_batch_size": 1,
+          "max_target_length": 8192,
+          "ici_fsdp_parallelism": -1,
+          "ici_expert_parallelism": 4,
+          # "dcn_fsdp_parallelism": 1,
+          "remat_policy": "custom",
+          "decoder_layer_input": "offload",
+          "out_proj": "offload",
+          "query_proj": "offload",
+          "key_proj": "offload",
+          "value_proj": "offload",
+          "gcs_metrics": True,
+          "use_iota_embed": True,
+          "dataset_path": "gs://max-datasets-rogue",
+          "dataset_type": "synthetic",
+          "reuse_example_batch": 1,
+          "enable_checkpointing": False,
+          "profiler": "xplane",
+          "skip_first_n_steps_for_profiler": 10,
+          # "sa_block_q": 2048,
+          # "sa_block_q_dkv": 2048,
+          # "sa_block_q_dq": 2048,
+          "megablox": False,
+          "sparse_matmul": False,
+          "capacity_factor": 1.0,
+          "tokenizer_path": "assets/tokenizer.mistral-v3",
+          "dtype": "bfloat16",
+          "opt_type": "sgd",
+          # "weight_dtype": "bfloat16",
+          #"allow_split_physical_axes": True,
+          #"custom_mesh": "hybrid_ring_64x4",
+          "attention": "flash", # dot_product
+          "sharding_tolerance": 1337, # This should never be more than 1
+      },
+      xla_flags=(
+          # xla_flags_library.MOE_VMEM_LIMIT_FLAG
+          xla_flags_library.CF_FOR_ALL_GATHER
+          + xla_flags_library.DATA_PARALLEL_OVERLAP
+      ),
+  )
+)
 
 
 default_basic_1 = _add_to_model_dictionary(

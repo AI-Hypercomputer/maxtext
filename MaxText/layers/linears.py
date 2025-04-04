@@ -37,6 +37,7 @@ import max_utils
 from aqt.jax.v2 import aqt_tensor
 from kernels import megablox as mblx
 from enum import Enum, auto
+from jaxtyping import Array, Float, Int
 
 
 Array = common_types.Array
@@ -504,7 +505,7 @@ class MoeBlock(nn.Module):
           cumulated_array = jnp.cumsum(array_with_zeros, axis=0, dtype=input_array.dtype)
           return cumulated_array[shard_id]
         elif strategy == TransformStrategy.RECV_SIZE:
-          # Received size in the traget output
+          # Received size in the target output
           return input_array[:, shard_id]
         else:
           raise ValueError(f"Unknown tranform array strategy: {strategy}")
@@ -614,7 +615,11 @@ class MoeBlock(nn.Module):
 
     return wrapper(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
 
-  def reshape_and_update_weights(self, weights, indices):
+  def reshape_and_update_weights(
+    self,
+    weights: Float[Array, "B S K"],
+    indices: Int[Array, "B S K"]
+  ) -> Float[Array, "B S E"]:
     # input of weights & indices: (batch_size, seq_len, num_experts_per_tok)
     # output of updated weights: (batch_size, seq_len, num_experts)
     update_weights = jnp.zeros((weights.shape[0], weights.shape[1], self.num_experts), dtype=self.dtype)
@@ -771,14 +776,15 @@ class MoeBlock(nn.Module):
 
   # See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details.
   def load_balance_loss(self, top_k_indices, logits):
-    expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
-    summed_expert_mask = jnp.sum(expert_mask, axis=2)
-    # Get fraction of tokens dispatched to each expert
-    density = jnp.mean(summed_expert_mask, axis=1)
-    # get fraction of probability allocated to each expert
-    density_prob = jnp.mean(logits, axis=1)
-    loss = jnp.mean(density * density_prob) * (self.num_experts**2) * self.config.load_balance_loss_weight
-    return loss
+    with jax.named_scope("loss calculation"):
+      expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
+      summed_expert_mask = jnp.sum(expert_mask, axis=2)
+      # Get fraction of tokens dispatched to each expert
+      density = jnp.mean(summed_expert_mask, axis=1)
+      # get fraction of probability allocated to each expert
+      density_prob = jnp.mean(logits, axis=1)
+      loss = jnp.mean(density * density_prob) * (self.num_experts**2) * self.config.load_balance_loss_weight
+      return loss
 
   def get_einsum(self, rhs_mesh_axes: Tuple[Optional[str], ...] = (), einsum_name=None):
 
@@ -812,7 +818,368 @@ class MoeBlock(nn.Module):
       kernel = nn.with_logical_constraint(kernel, kernel_axes)
     return kernel
 
+
+  def get_num_token_groups(self, batch_size: int, seq_length: int) -> int:
+    assert self.config.ici_expert_parallelism > 0 and self.config.dcn_expert_parallelism > 0, "Can't compute num of shards"
+    num_expert_shards = self.config.ici_expert_parallelism * self.config.dcn_expert_parallelism
+    assert (
+      self.config.ici_fsdp_parallelism > 0
+      and self.config.ici_fsdp_transpose_parallelism > 0
+      and self.config.ici_sequence_parallelism > 0
+      and self.config.ici_data_parallelism > 0
+      and self.config.dcn_fsdp_parallelism > 0
+      and self.config.dcn_fsdp_transpose_parallelism > 0
+      and self.config.dcn_sequence_parallelism > 0
+      and self.config.dcn_data_parallelism > 0
+    ), "Can't compute data shards with current parallelism values"
+    num_data_shards = (
+      self.config.ici_fsdp_parallelism
+      * self.config.ici_fsdp_transpose_parallelism
+      * self.config.ici_sequence_parallelism
+      * self.config.ici_data_parallelism
+      * self.config.dcn_fsdp_parallelism
+      * self.config.dcn_fsdp_transpose_parallelism
+      * self.config.dcn_sequence_parallelism
+      * self.config.dcn_data_parallelism
+    )
+    num_tokens = batch_size * seq_length
+
+    # 1. Make sure that we can split the tokens into groups evenly
+    # 2. Make sure we can split the groups evenly into the num of total data * expert shards
+    def check_conditions(num_token_groups):
+      return (
+        num_tokens % num_token_groups == 0
+        and num_token_groups % (num_expert_shards * num_data_shards) == 0
+      )
+
+    num_token_groups = 1
+    while num_token_groups <= num_tokens and not check_conditions(num_token_groups):
+      num_token_groups += 1
+
+    if num_token_groups <= num_tokens and not check_conditions(num_token_groups):
+      raise ValueError("We can't find a valid num_token_groups.")
+
+
+    print(
+      f"batch: {batch_size}, sequence: {seq_length}, num_tokens: {num_tokens},"
+      f"expert_shards: {num_expert_shards}, data_shards: {num_data_shards}, num_token_groups: {num_token_groups}")
+    return num_token_groups
+
+
+  def get_expert_capacity(self, token_group_size: int) -> int:
+    expert_capacity = round(self.config.capacity_factor * token_group_size / self.num_experts)
+    assert(
+      expert_capacity > 0
+    ), f"Expert capacity set to {expert_capacity} must be greater than 0."
+    return expert_capacity
+
+
+  def create_dispatch_weights(
+      self,
+      top_k_choices: Int[Array, "G S K"],
+      expert_capacity: int) -> Float[Array, "G S E C"]:
+    # Return the one-hot array assigning each datapoint to K experts.
+
+    # Why do we need both top_k_weights and top_k_choices?
+    # OK so in MaxText right now they need top_k_weights because they determine the softmax after the top_k function.
+    # In this implementation we do it first so its no longer needed. (Some more details here on how it is used that
+    # be great to learn to fully understand this.)
+
+    # 1. Make the leading axis the num_selected_experts (K):
+    # TODO WHY WE DON"T NEED WEIGHTS
+    num_token_groups, _, experts_per_token = top_k_choices.shape
+
+    # Ensure that k=smaller number has priority, IDK how this does this though
+    top_k_choices = jnp.swapaxes(top_k_choices, 1, 2)  # -> [G, K, S]
+    top_k_choices.reshape((num_token_groups, -1)) # -> [G, K * S]
+
+    # Mask out of indicies??
+    # One hot example:
+    # each row is length num_classes, where row[x] = 1 where x in first_arg else 0
+    # jax.nn.one_hot(jnp.array([0, 1, 2]), 3)
+    # Array([[1., 0., 0.],
+    #        [0., 1., 0.],
+    #        [0., 0., 1.]], dtype=float32)
+    top_k_choices_one_hot = jax.nn.one_hot(top_k_choices, self.num_experts)  # -> [G, K * S, E]
+
+    # CumSum to figure out the capacity available per expert and make sure we stay within capacity
+    # [G, K*S, E]
+    buffer_index = jnp.cumsum(top_k_choices_one_hot, axis=1, dtype=jnp.int32)
+
+    # top_k_choices_one_hot = 0 or 1
+    # buffer_index = a cumulative sum that will represent the priority order that a token
+    # will be used.
+
+    # Result will be ordered so that each token will be indexed from -1 to #K*S - 1.
+    # -1 means ignore, and the remaining is the order those tokens should be considered for each expert.
+    buffer_index = top_k_choices_one_hot * buffer_index - 1
+
+    # Limit the number of tokens per expert to expert_capacity.
+    # This will create a mask where each row will have 1 index = 1 for the token that gets to go to an expert
+    # it will ignore buffer_index < 0 and > expert_capacity.
+
+    def split_dimensions(arr: Array, dim_size: int, dim: int) -> Array:
+      arr_shapes = list(arr.shape)
+
+      def exact_div(a: int, b: int) -> int:
+        result, remainder = divmod(a, b)
+        if remainder:
+          raise ValueError(f"Unable to divide {b} into {a} evenly. Remainder: {remainder}")
+        return result
+      arr_shapes[dim] = exact_div(arr_shapes[dim], dim_size)
+      arr_shapes.insert(dim, dim_size)
+      return jnp.reshape(arr, tuple(arr_shapes))
+
+    # What I DON'T understand is how to use this large matrix of 0 0 0 1 that is one additional dimension larger
+    position_mask = jax.nn.one_hot(buffer_index, expert_capacity, dtype=jnp.bool_)  # -> [G, K*S, E, C]
+
+    # Split K*S out by S / also experts per token.
+    # Create a K-hot tensor.
+    position_mask = split_dimensions(position_mask, dim_size=experts_per_token, dim=1)  # -> [G, K, S, E, C]
+    position_mask = position_mask.sum(1)  # -> [G, S, E, C]
+
+    # TODO IDK why we weight it based on the total experts per token, and why the prioritized values have the lowest weight
+    weighted_position_mask = position_mask / float(experts_per_token)
+    return weighted_position_mask
+
+
+  def router(
+    self,
+    inputs: Float[Array, "G S D"],
+    expert_capacity: int
+  ) -> tuple[Int[Array, "G S K"], Any]:  #TODO
+
+    d_model = inputs.shape[-1]
+    num_experts = self.num_experts
+
+    # [G, S, E]
+    router_logits = jnp.einsum(
+      "gsd,de->gse",
+      name="router_logits",
+      sizes={"d": d_model, "e": num_experts},  # Why are we sizing things
+      precision=lax.Precision(self.config.matmul_precision)
+    )(inputs)
+
+    router_probs = jax.nn.softmax(router_logits, axis=-1)
+
+    _, top_k_choices = jax.lax.top_k(router_probs, self.num_experts_per_tok)
+    # TODO(vbarr)  likely i am not creating the weights / updating them in the
+    # same way that maxtext does and idk why.
+    weights = self.create_dispatch_weights(top_k_choices, expert_capacity)
+
+    # 2.5. Loss
+    if self.config.model_call_mode != "inference":
+      loss = self.load_balance_loss(top_k_choices, weights)
+    else:
+      loss = None
+
+    return weights, loss
+
+
+  def expert_dispatch(
+    self,
+    inputs: Float[Array, "G S D"],
+    dispatch_weights: Float[Array, "G S E C"],
+  ) -> Float[Array, "_ E X C D"]:  # _ is G/X
+
+    model_dim = inputs.shape[-1]
+    num_token_groups, _, num_experts, capacity = dispatch_weights.shape
+    dispatch_mask = dispatch_weights > 0
+
+    inputs = jnp.einsum(
+      "gsd,gsec->gecd",
+      inputs,
+      dispatch_mask
+    ).astype(self.dtype)  # -> [G, E, C, D]
+
+    # TODO This shouldnt be recalculated
+    num_data_shards = (
+      self.config.ici_fsdp_parallelism
+      * self.config.ici_fsdp_transpose_parallelism
+      * self.config.ici_sequence_parallelism
+      * self.config.ici_data_parallelism
+      * self.config.dcn_fsdp_parallelism
+      * self.config.dcn_fsdp_transpose_parallelism
+      * self.config.dcn_sequence_parallelism
+      * self.config.dcn_data_parallelism
+    )
+
+    num_expert_shards = self.config.ici_expert_parallelism * self.config.dcn_expert_parallelism
+
+    with jax.named_scope("expert_dispatch"):
+      inputs = inputs.reshape((
+        num_data_shards,
+        num_expert_shards,
+        num_token_groups // num_data_shards // num_expert_shards,
+        num_experts,
+        capacity,
+        model_dim
+      ))  # -> [d, e, G / d / e, E, C, D]
+
+      inputs = jnp.swapaxes(inputs, 1, 3)  # -> [d, E, G/d/e, e, C, D]
+      inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
+
+      inputs = inputs.reshape((
+        num_token_groups // num_expert_shards,
+        num_experts,
+        num_expert_shards,
+        capacity,
+        model_dim,
+      ))  # -> [G/e, E, e, C, D]
+
+      return inputs
+
+  # E is number of experts
+  # X is expert sharding
+  # C is capacity per expert
+  # D is d model
+  # G / X is Groups divided by expert shards
+  def expert_collect(
+    self,
+    inputs: Float[Array, "_ E X C D"],  # _ is G/X
+    dispatch_weights: Float[Array, "G S E C"],
+  ) -> Float[Array, "G S D"]:
+    model_dim = inputs[-1]
+    num_token_groups, _, num_experts, capacity = dispatch_weights.shape
+
+    # TODO This shouldnt be recalculated
+    num_data_shards = (
+      self.config.ici_fsdp_parallelism
+      * self.config.ici_fsdp_transpose_parallelism
+      * self.config.ici_sequence_parallelism
+      * self.config.ici_data_parallelism
+      * self.config.dcn_fsdp_parallelism
+      * self.config.dcn_fsdp_transpose_parallelism
+      * self.config.dcn_sequence_parallelism
+      * self.config.dcn_data_parallelism
+    )
+
+    num_expert_shards = self.config.ici_expert_parallelism * self.config.dcn_expert_parallelism
+
+    with jax.named_scope("expert_collect"):
+      # Reshape to extract model shards
+      inputs.reshape((
+        num_data_shards,
+        num_token_groups // num_data_shards // num_experts,
+        num_experts,
+        num_expert_shards,
+        capacity,
+        model_dim
+      ))  # -> [Da G/Da/X, E, X, C, D]
+
+      # TODO(WHY ARE WE SWAPING AXES?)
+      inputs = inputs.swapaxes[1, 2]  # -> [Da E G/Da/X, X, C, D]
+      inputs = inputs.swapaxes[1, 3]  # -> [Da X G/Da/X, E, C, D]
+      inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
+
+      # Reform into group view before next steps
+      inputs.reshape((
+        num_token_groups,
+        num_experts,
+        capacity,
+        model_dim
+      ))  # -> [G E C D]
+
+      # Combine experts and expert weights!
+      inputs = jnp.einsum(
+        "gecd,gsec->gsd",
+        inputs,
+        dispatch_weights
+      ).astype(self.dtype)
+      return inputs
+
+
+
+      # TODO incorporate load_balance_loss() but merge it with other one_hot needs
+      # TODO try it????
+
+
+  def dense_matmul_v2(self, inputs, w0_kernel, w1_kernel, wo_kernel):
+    # 1. Reshape inputs in terms of groups, tokens per group.
+    batch_size, sequence_length, _ = inputs.shape
+    num_token_groups = self.get_num_token_groups(batch_size, sequence_length)  # -> G
+    token_group_size = batch_size * sequence_length // (num_token_groups)  # -> S
+    inputs = inputs.reshape((num_token_groups, token_group_size, *inputs.shape[2:]))  # -> G S D
+
+    # 2. Determine the expert capacity
+    expert_capacity = self.get_expert_capacity(token_group_size)  # -> C
+
+    # 3. Route, softmax, and topk
+    dispatch_weights, loss = self.router(input, expert_capacity)  # -> [G, S, E, C]
+
+    # 4. Dispatch weights with inputs
+    dispatch = self.expert_dispatch(inputs, dispatch_weights)  # -> [G/e, E, e, C, D]
+
+    # 5. Do the Feedforward Layer + some reordering of the inputs to fit it
+    matmul_precision=self.config.matmul_precision
+    with jax.named_scope("wi_0"):
+      w0_kernel_axes = ("exp", None, "mlp")
+      w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
+      # E = expert
+      # B = Batch
+      # C = Capacity
+      # M = Model dim
+      # H = Hidden dim
+      # G/X, E, X, C, D x EDH -> G/X E X C H
+      layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
+          "GEXCD,EMH -> GEXCH", dispatch, w0_kernel, precision=matmul_precision
+      )
+      if self.config.activations_in_float32:
+        layer_w0 = layer_w0.astype(jnp.float32)
+      layer_w0 = nn.with_logical_constraint(
+          layer_w0,
+          ("activation_exp", "activation_batch_no_exp", None, "activation_mlp"),
+      )
+      layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
+    with jax.named_scope("wi_1"):
+      w1_kernel_axes = ("exp", None, "mlp")
+      w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
+      layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
+          "GEXCD,EMH -> GEXCH", dispatch, w1_kernel, precision=matmul_precision
+      )
+      if self.config.activations_in_float32:
+        layer_w1 = layer_w1.astype(jnp.float32)
+      layer_w1 = nn.with_logical_constraint(
+          layer_w1,
+          ("activation_exp", "activation_batch_no_exp", None, "activation_mlp"),
+      )
+      layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
+    layer_w0_act = _convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
+    layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
+    with jax.named_scope("wo"):
+      wo_kernel_axes = ("exp", "mlp", None)
+      wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
+      intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
+          "GEXCH,EHM -> GEXCD", layer_multiply, wo_kernel, precision=matmul_precision
+      )
+      intermediate_layer = nn.with_logical_constraint(
+          intermediate_layer,
+          ("activation_exp", "activation_batch_no_exp", None, "activation_embed"),
+      )
+      if self.config.activations_in_float32:
+        intermediate_layer = intermediate_layer.astype(jnp.float32)
+      intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
+
+    # Expert Collect
+    output = self.expert_collect(intermediate_layer, dispatch_weights)  # -> [G S D]
+    # TODO() how this can be an RS instead of A2A for certain experts per tokens.
+    # reorder here so that means adjust the mlp to be in groups?? lol
+    output = output.reshape((batch_size, sequence_length, -1)) # -> [B Seq D]
+
+    # with jax.named_scope("combine"):
+    #   # Matmul & element wise operation
+    #   output = self.get_einsum(rhs_mesh_axes=mask_axes, einsum_name=COMBINE)(
+    #       "EBCM,BSEC -> BSM",
+    #       intermediate_layer,
+    #       combine_mask,
+    #       precision=matmul_precision,
+    #   ).astype(self.dtype)
+    return output, loss
+
+
+
   def dense_matmul(self, inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel):
+    # gate logics must be used for defining the routing?
     # gate_logits: batch, length, expert
     # follow router_logits non-sharded kernel
     gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", None))
@@ -822,9 +1189,13 @@ class MoeBlock(nn.Module):
     if self.config.decoder_block == "deepseek":
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
     else:
+      # SOFTMAX IS DONE FIRST
       top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
-
+    # zero out non-top ks
+    # why cant you have dynamic shapes?
     weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
+    # is it by here we already are including num_experts_per_tok and we have to ag before?
+    # TODO(@vbarr) Draw the AG case
     matmul_precision = lax.Precision(self.config.matmul_precision)
 
     if self.config.model_call_mode != "inference":
@@ -988,6 +1359,10 @@ class MoeBlock(nn.Module):
   def __call__(self, inputs):
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
+    # 1. compute gate logics one linear operation with DxE matmul to give a score for each expert
+    # expert 1 likes token x this amount...
+    # FLOPS: B T D X
+    # Gate logics are so small then you could do it some other way? D > 256
     gate_logits = DenseGeneral(
         self.num_experts,
         dtype=self.dtype,
@@ -1010,8 +1385,15 @@ class MoeBlock(nn.Module):
         )
       return self.sparse_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
     else:
+      # I think I care about the dense matmul implementation...
       max_logging.log("Running MoE dense matmul implementation.")
-      return self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+      # inputs = batch * seq
+      # gate_logits
+      # w0_kernel = input weights 0
+      # w1_kernel = weights of w1
+      # wo_kernel = output weights
+      # return self.dense_matmul(inputs, gate_logits, w0_kernel, w1_kernel, wo_kernel)
+      return self.dense_matmul_v2(inputs, w0_kernel, w1_kernel, wo_kernel)
 
 
 class DeepSeekMoeBlock(nn.Module):

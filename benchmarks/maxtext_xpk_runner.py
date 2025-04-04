@@ -318,10 +318,10 @@ def _build_args_from_config(wl_config: WorkloadConfig) -> dict:
 
   # Extract xla_flags arg
   xla_flags_str = wl_config.model.xla_flags.strip().replace(" ",",")
-  
+
   # Extract tuning_params arg
   tuning_params_str = json.dumps(wl_config.model.tuning_params)
-  
+
   args = {}
   args["metrics_gcs_file"] = wl_config.metrics_gcs_file
   args["model_id"] = wl_config.model.model_type
@@ -710,25 +710,33 @@ def main() -> int:
   db_dataset = "mantaray_v2"
 
   # Set up the clusters to run workloads on!
-  v5e_cluster_config = XpkClusterConfig(
-      cluster_name='v5e-256',
-      project='my-cool-project',
-      zone='us-central2-b',
-      device_type='v5litepod-256',
+  # v5e_cluster_config = XpkClusterConfig(
+  #     cluster_name='v5e-256',
+  #     project='my-cool-project',
+  #     zone='us-central2-b',
+  #     device_type='v5litepod-256',
+  # )
+
+  v5p_cluster_config = XpkClusterConfig(
+      cluster_name='mlperf-v5p-256-2',
+       project='cloud-tpu-multipod-dev',
+      zone='europe-west4-b',
+      device_type='v5p-256',
   )
 
-  v6e_cluster_config = XpkClusterConfig(
-      cluster_name='v6e-256',
-      project='my-cool-project',
-      zone='us-central2-b',
-      device_type='v6e-256',
-  )
+  # v6e_cluster_config = XpkClusterConfig(
+  #     cluster_name='v6e-256',
+  #     project='my-cool-project',
+  #     zone='us-central2-b',
+  #     device_type='v6e-256',
+  # )
 
   xpk_workload_cmds = []
   xpk_workload_names = []
 
   list_of_models = [
-    model_configs.llama2_70b_4096_sc,
+    model_configs.deepseek_a1,
+    # model_configs.llama2_70b_4096_sc,
     # model_configs.default_128
   ]
 
@@ -754,7 +762,8 @@ def main() -> int:
     for cluster_config in [
       # v5e_cluster_config,
       # v6e_cluster_config,
-      v6e_cluster_config_yucmhab,
+      v5p_cluster_config,
+      # 6e_cluster_config_yucmhab,
       # another_config,
     ]:
       # Run workloads in the following slice configurations
@@ -765,30 +774,33 @@ def main() -> int:
             LibTpuType.MAXTEXT
             # LibTpuType.NIGHTLY
         ]:
-          wl_config = WorkloadConfig(
-            db_project=db_project,
-            db_dataset=db_dataset,
-            model=model,
-            num_slices=num_slices,
-            device_type=cluster_config.device_type,
-            base_output_directory=base_output_dir,
-            priority="medium",
-            max_restarts=0,
-            libtpu_type=libtpu_type,
-            libtpu_nightly_version="",
-            base_docker_image=base_docker_image,
-            pathways_config=None,
-          )
-          command, name = generate_xpk_workload_cmd(
-            cluster_config=cluster_config,
-            wl_config=wl_config
-          )
+          # for ep, fsdp in zip((4,8,128), (32,16, 1)):
+          #   model.tuning_params['ici_fsdp_parallelism'] = fsdp
+          #   model.tuning_params['ici_expert_parallelism'] = ep
+            wl_config = WorkloadConfig(
+              db_project=db_project,
+              db_dataset=db_dataset,
+              model=model,
+              num_slices=num_slices,
+              device_type=cluster_config.device_type,
+              base_output_directory=base_output_dir,
+              priority="medium",
+              max_restarts=0,
+              libtpu_type=libtpu_type,
+              libtpu_nightly_version="",
+              base_docker_image="gcr.io/tpu-prod-env-multipod/mattdavidow-bin-2025-03-02",
+              pathways_config=None
+            )
+            command, name = generate_xpk_workload_cmd(
+              cluster_config=cluster_config,
+              wl_config=wl_config
+            )
 
-          print(f"Name of the workload is: {name} \n")
-          xpk_workload_names.append(name)
+            print(f"Name of the workload is: {name} \n")
+            xpk_workload_names.append(name)
 
-          print(f"XPK command to be used is: {command} \n")
-          xpk_workload_cmds.append(command)
+            print(f"XPK command to be used is: {command} \n")
+            xpk_workload_cmds.append(command)
 
   for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
     return_code = run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
