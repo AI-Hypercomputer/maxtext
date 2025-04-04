@@ -21,6 +21,7 @@ import warnings
 from typing import Dict
 from threading import current_thread
 import datasets
+from datasets import Value
 from datasets.distributed import split_dataset_by_node
 import grain.python as grain
 import numpy as np
@@ -69,15 +70,15 @@ def add_segmentation_and_position(x, data_columns):
 ########## Functions used by HF pipeline
 
 
-def combine_columns(example, columns):
+def combine_columns(example):
   """Combine columns such as 'prompt' and 'completion' for sft training"""
-  assert len(columns) > 1
-  combined = []
-  for i in range(len(example[columns[0]])):
-    for c in columns:
-      combined.append(example[c][i])
-  example["messages"] = combined
-  return example
+  def join_fields(example):
+    return {"messages": [example["prompt"][0], example["completion"][0]]}
+  features = example.features.copy()
+  features["messages"] = datasets.Sequence(datasets.Value("string"))
+  new_ds = example.map(join_fields, features=features)
+  new_ds = new_ds.select_columns(["messages"])
+  return new_ds
 
 
 def is_conversational(example):
