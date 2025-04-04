@@ -68,9 +68,9 @@ def preprocessing_pipeline(
 
     if len(data_column_names) > 1:
       dataset = dataset.map(
-          _input_pipeline_utils.combine_columns, fn_kwargs={"columns": data_column_names}, remove_columns=data_column_names
+          _input_pipeline_utils.combine_columns, fn_kwargs={"columns": data_column_names}, remove_columns=dataset.column_names
       )
-      data_column_names = dataset.column_names[:1]
+      data_column_names = list(next(iter(dataset)).keys())
     dataset = dataset.select_columns(data_column_names)
     dataset = dataset.map(
         _input_pipeline_utils.extract_messages_and_mask, fn_kwargs={"data_column_name": data_column_names[0]}
