@@ -67,7 +67,7 @@ if [[ -z ${PREFILL_LENGTHS} ]] ; then
     PREFILL_LENGTHS=1024
 fi
 if [[ -z ${PER_DEVICE_BATCH_SIZE} ]] ; then
-    PER_DEVICE_BATCH_SIZE=160
+    PER_DEVICE_BATCH_SIZE=190
 fi
 if [[ -z ${ATTENTION} ]] ; then
     ATTENTION=dot_product
