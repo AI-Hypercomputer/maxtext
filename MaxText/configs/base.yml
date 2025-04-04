@@ -148,8 +148,8 @@ shared_experts: 1
 routed_scaling_factor: 1.0 # scaling factor for routing scores
 routed_score_func: "" # scoring function for routing
 routed_bias: False # a flag if a bias term is added for routing
-n_routing_groups: 1 # number of groups for routing
-topk_routing_group: 1 # number of top groups to route inputs. For EP, 
+n_routing_groups: -1 # number of groups for routing, disabled by default
+topk_routing_group: -1 # number of top groups to route inputs. For EP, 
 # sending activations to a maximum of topk_routing_group distinct devices can yield performance benefits.
 
 # pipeline parallelism
@@ -222,6 +222,7 @@ attn_logits_soft_cap: 0.0
 final_logits_soft_cap: 0.0
 use_post_attn_norm: False
 use_post_ffw_norm: False
+mla_naive_kvcache: True
 
 # MLA parameters
 q_lora_rank: 0
@@ -315,6 +316,7 @@ logical_axis_rules: [
                       ['kv_head_dim', []],
                       ['cache_batch_prefill', []],
                       ['cache_batch', []],
+                      ['cache_heads_none', []],
                       ['cache_heads', ['autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['cache_heads', ['autoregressive', 'tensor', 'tensor_sequence']],
                       ['cache_kv', []],
@@ -414,6 +416,8 @@ hf_access_token: ''
 grain_train_files: ''
 grain_eval_files: ''
 grain_worker_count: 1
+# for using pathways
+colocated_python_data_input: False  # experimental feature, under testing
 
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps

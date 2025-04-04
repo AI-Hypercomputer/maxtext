@@ -11,7 +11,7 @@ logical_axis_rules: [
                       ['activation_length_q', ['context_autoregressive']],
                       ['activation_kv_length', ['context_autoregressive']],
                       ['activation_norm_length', ['tensor_sequence', 'sequence']],
-                      ['activation_embed', ['tensor', 'tensor_transpose']],
+                      ['activation_embed', ['tensor_transpose']],
                       ['activation_mlp', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_kv', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_prefill_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],

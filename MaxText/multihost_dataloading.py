@@ -21,7 +21,7 @@ Adapted from Sholto's:
 https://github.com/sholtodouglas/multihost_dataloading
 """
 from functools import lru_cache, partial  # pylint: disable=g-importing-member
-from typing import Callable, Any, Union
+from typing import Callable, Any, Union, Sequence
 from collections.abc import Iterator, Iterable
 import tensorflow as tf  # pylint: disable=g-import-not-at-top
 import time
@@ -32,6 +32,8 @@ import jax.tree_util as jtu
 from jax.sharding import PartitionSpec
 from jax.sharding import NamedSharding
 from jax.sharding import Mesh
+from jax.experimental import colocated_python
+import jax.numpy as jnp
 import grain.python as grain
 
 import max_logging
@@ -117,3 +119,106 @@ class MultiHostDataLoadIterator:
 
   def __next__(self):
     return get_next_batch_sharded(self.local_iterator, self.global_mesh)
+
+
+@colocated_python.colocated_python
+def _get_next(dummy_array):
+  """get next batch from the iterator stored in the state of colocated python"""
+  if "iterator" not in colocated_python.__dict__:
+    raise ValueError("iterator not found in colocated_python.__dict__")
+  if "global_shape" not in colocated_python.__dict__:
+    raise ValueError("_global_shape not found in colocated_python.__dict__")
+  local_data = next(colocated_python.__dict__["iterator"])
+  global_shape = colocated_python.__dict__["global_shape"]
+  for k, v in local_data.items():
+    local_data[k] = jnp.asarray(v)
+
+  def form_global_array_colocated_python(path, array, devices, global_shape, sharding):
+    try:
+      device_arrays = np.split(array, len(devices), axis=0)
+    except ValueError as array_split_error:
+      raise ValueError(
+          f"Unable to put to devices shape {array.shape} with "
+          f"local device count {len(devices)} "
+          f"at {jtu.keystr(path)}"
+      ) from array_split_error
+    device_arrays = jax.device_put(device_arrays, devices)
+    return jax.make_array_from_single_device_arrays(shape=global_shape, sharding=sharding, arrays=device_arrays)
+
+  return jtu.tree_map_with_path(
+      partial(
+          form_global_array_colocated_python,
+          devices=list(dummy_array.sharding.addressable_devices),
+          global_shape=global_shape,
+          sharding=dummy_array.sharding,
+      ),
+      local_data,
+  )
+
+
+def _colocated_cpu_devices(
+    devices: Sequence[jax.Device],
+) -> Sequence[jax.Device]:
+  """Returns CPU devices colocated with the given devices."""
+  return colocated_python.colocated_cpu_devices(devices)
+
+
+def _get_cpu_mesh(mesh: Mesh):
+  flat_devices = tuple(mesh.devices.flat)
+  flat_cpu_devices = _colocated_cpu_devices(flat_devices)
+  cpu_mesh = jax.sharding.Mesh(
+      np.array(flat_cpu_devices).reshape(mesh.devices.shape), mesh.axis_names, axis_types=mesh.axis_types
+  )
+  return cpu_mesh
+
+
+class RemoteIterator:
+  "iterator class for using colocated python, iterator is initiated remotely and stored in the state of colocated python"
+
+  def __init__(self, get_ds_fn, preprocessing_fn, config, global_mesh):
+    self.config = config
+    self.cpu_devices = _colocated_cpu_devices(jax.local_devices())
+    self.tpu_devices = jax.local_devices()
+    self.global_mesh = global_mesh
+    self.cpu_mesh = _get_cpu_mesh(global_mesh)
+    self.tpu_sharding = jax.sharding.NamedSharding(self.global_mesh, PartitionSpec(global_mesh.axis_names))
+    self.cpu_sharding = jax.sharding.NamedSharding(self.cpu_mesh, PartitionSpec(self.cpu_mesh.axis_names))
+    global_shape = (config.global_batch_size_to_load, config.max_target_length)
+    self.dummy_array = jnp.zeros((len(self.cpu_devices)))
+    self.dummy_array = jax.device_put(self.dummy_array, self.cpu_sharding)
+
+    @colocated_python.colocated_python
+    def init(dummy_array):
+      colocated_python.config = config
+      colocated_python.global_shape = global_shape
+      if config.dataset_type == "tfds":
+        ds = get_ds_fn(dataloading_host_index=jax.process_index(), dataloading_host_count=jax.process_count())
+        dataloader = preprocessing_fn(dataset=ds)
+        colocated_python.iterator = dataloader.as_numpy_iterator()
+      elif config.dataset_type == "grain":
+        ds = get_ds_fn()
+        dataloader = preprocessing_fn(
+            dataset=ds, dataloading_host_index=jax.process_index(), dataloading_host_count=jax.process_count()
+        )
+        colocated_python.iterator = iter(dataloader)
+      return dummy_array
+
+    out = jax.device_get(init(self.dummy_array))
+    if out is not None:
+      max_logging.log("RemoteIterator initiated.")
+
+  def __iter__(self):
+    return self
+
+  def __next__(self):
+    out = _get_next(self.dummy_array)
+
+    def put_to_tpu_devices(path, array, sharding):
+      try:
+        jax.device_put(array, sharding)
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        max_logging.log(f"Error putting data to TPU device path{path}, exception={e}")
+
+    input_gdas = jtu.tree_map_with_path(partial(put_to_tpu_devices, sharding=self.tpu_sharding), out)
+
+    return input_gdas
