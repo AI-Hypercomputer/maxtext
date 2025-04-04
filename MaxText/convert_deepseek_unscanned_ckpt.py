@@ -337,6 +337,8 @@ def main() -> None:
       args.maxtext_model_path,
       _convert_to_jax_weights(args.base_model_path, args.model_size, mem_info),
       args.simulated_cpu_devices_count,
+      False,
+      False,
   )
 
 

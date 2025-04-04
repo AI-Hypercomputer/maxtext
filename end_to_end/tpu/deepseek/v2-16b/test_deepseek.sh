@@ -27,7 +27,7 @@ JAX_PLATFORMS=cpu python MaxText/convert_deepseek_ckpt.py --base_model_path ${CH
 
 # Step 2:
 # Note that the `CONVERTED_CHECKPOINT` is in a `scanned` format which is great for training but for efficient decoding performance we want the checkpoint in an `unscanned` format.
-JAX_PLATFORMS=cpu python MaxText/convert_deepseek_unscanned_ckpt.py.py --base_model_path ${CHKPT_BUCKET} --maxtext_model_path ${MODEL_BUCKET}/${idx}/unscanned --model_size ${MODEL_VARIATION}
+JAX_PLATFORMS=cpu python MaxText/convert_deepseek_unscanned_ckpt.py --base_model_path ${CHKPT_BUCKET} --maxtext_model_path ${MODEL_BUCKET}/${idx}/unscanned --model_size ${MODEL_NAME}
 
 # Step 3:
 export UNSCANNED_CKPT_PATH=${MODEL_BUCKET}/${idx}/unscanned/0/items

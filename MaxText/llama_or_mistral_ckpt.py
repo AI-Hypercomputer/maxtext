@@ -957,7 +957,7 @@ def convert_to_jax_weights(base_model_path, model_size, huggingface_ckpt):
   return _convert_pytorch_to_jax_weights(base_model_path, model_size, model_params, mem_info)
 
 
-def save_weights_to_checkpoint(maxtext_model_path, jax_weights, device_count):
+def save_weights_to_checkpoint(maxtext_model_path, jax_weights, device_count, use_ocdbt=True, use_zarr3=True):
   """
   Function to save jax_weights ready for MaxText to a parameters checkpoint.
 
@@ -1004,7 +1004,12 @@ def save_weights_to_checkpoint(maxtext_model_path, jax_weights, device_count):
   save_interval_steps = 1
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-      maxtext_model_path, enable_checkpointing, async_checkpointing, save_interval_steps
+      maxtext_model_path,
+      enable_checkpointing,
+      async_checkpointing,
+      save_interval_steps,
+      use_ocdbt=use_ocdbt,
+      use_zarr3=use_zarr3,
   )
 
   state_new = train_state.TrainState(
