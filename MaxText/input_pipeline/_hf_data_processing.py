@@ -60,18 +60,29 @@ def preprocessing_pipeline(
     dataset = dataset.shuffle(seed=data_shuffle_seed)
 
   if use_sft:
-    try:
-      example = next(iter(dataset))
-    except StopIteration:
-      raise StopIteration("Dataset is empty.")
-    assert _input_pipeline_utils.is_conversational(example), "Dataset is not in conversational format."
+    dataset = dataset.select_columns(data_column_names)
+
+    supported_columns = [["prompt", "completion"], ["messages"]]
+    assert any(
+        set(data_column_names) == set(supported) for supported in supported_columns
+    ), f"Dataset column names mismatch. Expected columns to match one of {supported_columns}, but got {data_column_names}"
+    assert _input_pipeline_utils.is_conversational(
+        dataset.features, data_column_names
+    ), "Dataset is not in conversational format."
 
     if len(data_column_names) > 1:
-      dataset = dataset.map(
-          _input_pipeline_utils.combine_columns, fn_kwargs={"columns": data_column_names}, remove_columns=data_column_names
+      combined_column_name = "messages"
+      dataset_features = datasets.Features(
+          {combined_column_name: [{"content": datasets.Value(dtype="string"), "role": datasets.Value(dtype="string")}]}
       )
-      data_column_names = dataset.column_names[:1]
-    dataset = dataset.select_columns(data_column_names)
+      dataset = dataset.map(
+          _input_pipeline_utils.combine_columns,
+          fn_kwargs={"columns": data_column_names, "data_column": combined_column_name},
+          remove_columns=data_column_names,
+          features=dataset_features,
+      )
+
+    data_column_names = list(dataset.features.keys())
     dataset = dataset.map(
         _input_pipeline_utils.extract_messages_and_mask, fn_kwargs={"data_column_name": data_column_names[0]}
     )
