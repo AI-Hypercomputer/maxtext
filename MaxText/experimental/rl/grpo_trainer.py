@@ -748,7 +748,7 @@ def train_loop(config, config_inference, state=None):
     ) = maxtext_utils.get_functional_eval_with_signature(eval_step, mesh, state_mesh_shardings, model, config)
 
   # TODO: fix tflops calculations for grpo setting
-  num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
+  num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params['params'])
   max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
   per_device_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(config)
   per_device_tokens = maxtext_utils.calculate_tokens_training_per_device(config)
