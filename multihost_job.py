@@ -306,7 +306,7 @@ def main(raw_args=None) -> None:
   ##### Step 1: Zip code and move it to GCS #####
   tmp_dir_relative_to_script = os.path.join("tmp", args.RUN_NAME, "")
   tmp_dir = os.path.join(args.SCRIPT_DIR, tmp_dir_relative_to_script)
-  zip_name = "script_dir_zip_" + args.RUN_NAME + ".tar.gz"
+  zip_name = f"script_dir_zip_{args.RUN_NAME}.tar.gz"
   bucket_dir = os.path.join(args.BUCKET_DIR, args.RUN_NAME)
   bucket_path = os.path.join(f"gs://{args.BUCKET_NAME}", bucket_dir)
   startup_script_file = os.path.join(tmp_dir, "startup_script.txt")

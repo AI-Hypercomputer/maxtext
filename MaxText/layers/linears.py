@@ -21,13 +21,19 @@ from typing import Any, Callable, Iterable, Sequence, Tuple, Union, Optional
 import flax.linen as nn
 from jax import lax
 import jax.numpy as jnp
-import common_types
-from layers import initializers
-from layers import normalizations
-from layers import quantizations
+from MaxText import common_types
+from MaxText.layers import initializers
+from MaxText.layers import normalizations
+from MaxText.layers import quantizations
 import numpy as np
 from jax.ad_checkpoint import checkpoint_name
+from jax.experimental import shard_map
+import math
+from MaxText import max_logging
+from MaxText import max_utils
 from aqt.jax.v2 import aqt_tensor
+from MaxText.kernels import megablox as mblx
+from enum import Enum, auto
 
 
 Array = common_types.Array
@@ -190,7 +196,7 @@ class MlpBlock(nn.Module):
     if self.config.decoder_block in ("default", "llama2", "mistral", "mixtral", "gemma", "deepseek"):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
-      from layers import gpt3
+      from MaxText.layers import gpt3
 
       return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=self.use_bias)
     else:

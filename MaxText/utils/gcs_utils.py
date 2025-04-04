@@ -23,7 +23,7 @@ import socket
 import yaml
 from pathlib import Path
 
-import max_logging
+from MaxText import max_logging
 from google.cloud import storage
 
 

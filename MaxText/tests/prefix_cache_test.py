@@ -14,7 +14,7 @@
 
 """Prefix Cache Test"""
 
-import prefix_cache
+from MaxText import prefix_cache
 
 import pytest
 import unittest

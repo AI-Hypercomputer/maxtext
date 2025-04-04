@@ -28,7 +28,7 @@ Please note:
 You can training from scratch to generate a new checkpoint. One example command to run pretraining with V3 on v5p-256.
 
 ```
-python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} run_name=matmul_pre_training per_device_batch_size=4 enable_checkpointing=false model_name=deepseek3-671b ici_fsdp_parallelism=128 steps=5 max_target_length=1024 async_checkpointing=false tokenizer_type=huggingface tokenizer_path=deepseek-ai/DeepSeek-V3 attention=flash dtype=bfloat16 weight_dtype=bfloat16 megablox=False sparse_matmul=False dataset_type=synthetic
+python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} run_name=matmul_pre_training per_device_batch_size=4 enable_checkpointing=false model_name=deepseek3-671b ici_fsdp_parallelism=128 steps=5 max_target_length=1024 async_checkpointing=false tokenizer_type=huggingface tokenizer_path=deepseek-ai/DeepSeek-V3 attention=flash dtype=bfloat16 weight_dtype=bfloat16 megablox=False sparse_matmul=False dataset_type=synthetic
 ```
 
 
@@ -45,20 +45,20 @@ After you have a MaxText compatible ckeckpoint, you could fine-tune it with diff
 One example command to run general finetuning with V3 on v5p-256.
 
 ```
-python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} dataset_path=${DATASET_PATH} load_parameters_path=${CONVERTED_CHECKPOINT} run_name=matmul_fine_tuning per_device_batch_size=4 model_name=deepseek3-671b steps=5 max_target_length=1024 async_checkpointing=false tokenizer_type=huggingface tokenizer_path=deepseek-ai/DeepSeek-V3 attention=flash dtype=bfloat16 weight_dtype=bfloat16 megablox=False sparse_matmul=False enable_checkpointing=true ici_expert_parallelism=128 ici_fsdp_parallelism=1
+python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} dataset_path=${DATASET_PATH} load_parameters_path=${CONVERTED_CHECKPOINT} run_name=matmul_fine_tuning per_device_batch_size=4 model_name=deepseek3-671b steps=5 max_target_length=1024 async_checkpointing=false tokenizer_type=huggingface tokenizer_path=deepseek-ai/DeepSeek-V3 attention=flash dtype=bfloat16 weight_dtype=bfloat16 megablox=False sparse_matmul=False enable_checkpointing=true ici_expert_parallelism=128 ici_fsdp_parallelism=1
 ```
 
 One example command to run supervised finetuning with V3 on v5p-256. Supervised fine-tuning is only working with HuggingFace conversational datasets. And, you can customize the dataset path using the `hf_path` config and provide your access token with `hf_access_token` config.
 
 ```
-python3 MaxText/sft_trainer.py MaxText/configs/sft.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} load_parameters_path=${CONVERTED_CHECKPOINT} run_name=matmul_supervised_fine_tuning per_device_batch_size=4 model_name=deepseek3-671b steps=5 max_target_length=1024 async_checkpointing=false tokenizer_type=huggingface tokenizer_path=deepseek-ai/DeepSeek-V3 attention=flash dtype=bfloat16 weight_dtype=bfloat16 megablox=False sparse_matmul=False enable_checkpointing=true ici_expert_parallelism=128 ici_fsdp_parallelism=1 dataset_type=hf
+python3 -m MaxText.sft_trainer MaxText/configs/sft.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} load_parameters_path=${CONVERTED_CHECKPOINT} run_name=matmul_supervised_fine_tuning per_device_batch_size=4 model_name=deepseek3-671b steps=5 max_target_length=1024 async_checkpointing=false tokenizer_type=huggingface tokenizer_path=deepseek-ai/DeepSeek-V3 attention=flash dtype=bfloat16 weight_dtype=bfloat16 megablox=False sparse_matmul=False enable_checkpointing=true ici_expert_parallelism=128 ici_fsdp_parallelism=1 dataset_type=hf
 ```
 
 ## Decoding
 One example command to run supervised finetuning with V3 on v5p-256 with unscanned ckeckpoint for fast decoding. When decoding with a supervised fine-tuned checkpoint, format your prompt as `prompt='<user>your text</user> <assistant>'`.
 
 ```
-python MaxText/decode.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} load_parameters_path=${CONVERTED_CHECKPOINT} run_name=decode per_device_batch_size=1 enable_checkpointing=false model_name=deepseek3-671b max_prefill_predict_length=100 max_target_length=1024 tokenizer_type=huggingface tokenizer_path=deepseek-ai/DeepSeek-V3 attention=flash dtype=bfloat16 weight_dtype=bfloat16 megablox=False sparse_matmul=False ici_tensor_parallelism=128 ici_fsdp_parallelism=1 prompt="An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and outputs are all vectors. The output is " scan_layers=False
+python3 -m MaxText.decode MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} load_parameters_path=${CONVERTED_CHECKPOINT} run_name=decode per_device_batch_size=1 enable_checkpointing=false model_name=deepseek3-671b max_prefill_predict_length=100 max_target_length=1024 tokenizer_type=huggingface tokenizer_path=deepseek-ai/DeepSeek-V3 attention=flash dtype=bfloat16 weight_dtype=bfloat16 megablox=False sparse_matmul=False ici_tensor_parallelism=128 ici_fsdp_parallelism=1 prompt="An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and outputs are all vectors. The output is " scan_layers=False
 ```
 
 ## Supported MoE strategy

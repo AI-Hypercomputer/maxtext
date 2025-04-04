@@ -34,13 +34,13 @@ ICI_FSDP_PARALLELISM=${4:-${ICI_FSDP_PARALLELISM:-64}}
 ICI_TENSOR_PARALLELISM=${5:-${ICI_TENSOR_PARALLELISM:-8}}
 RUNNAME=${6:-${RUNNAME:-convergence_test_0}}
 BASE_OUTPUT_DIRECTORY=${7:-${BASE_OUTPUT_DIRECTORY:-gs://some-bucket}}
-EXECUTABLE=${8:-train.py} # Or train_compile.py
+EXECUTABLE=${8:-train} # Or train_compile
 
-if [[ "$EXECUTABLE" == "train_compile.py" ]]; then
+if [[ "$EXECUTABLE" == "train_compile" ]]; then
   COMPILE_TOPOLOGY=${9}
   COMPILE_TOPOLOGY_NUM_SLICES=${10}
   
-  python3 MaxText/"$EXECUTABLE" MaxText/configs/base.yml run_name="${RUNNAME}" model_name=gpt3-175b\
+  python3 -m MaxText."$EXECUTABLE" MaxText/configs/base.yml run_name="${RUNNAME}" model_name=gpt3-175b\
     base_output_directory="${BASE_OUTPUT_DIRECTORY}"\
     enable_checkpointing=false async_checkpointing=false\
     steps=20\
@@ -53,7 +53,7 @@ if [[ "$EXECUTABLE" == "train_compile.py" ]]; then
     compile_topology="${COMPILE_TOPOLOGY}"\
     compile_topology_num_slices="${COMPILE_TOPOLOGY_NUM_SLICES}"
 else
-  python3 MaxText/"$EXECUTABLE" MaxText/configs/base.yml run_name="${RUNNAME}" model_name=gpt3-175b\
+  python3 -m MaxText."$EXECUTABLE" MaxText/configs/base.yml run_name="${RUNNAME}" model_name=gpt3-175b\
     base_output_directory="${BASE_OUTPUT_DIRECTORY}"\
     enable_checkpointing=false async_checkpointing=false\
     steps=20\

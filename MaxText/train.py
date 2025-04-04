@@ -38,26 +38,26 @@ import orbax.checkpoint
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
-import checkpointing
-import max_utils
-import maxtext_utils
-import max_logging
-import optimizers
-import profiler
-import pyconfig
-import pathwaysutils
+from MaxText import checkpointing
+from MaxText import max_utils
+from MaxText import maxtext_utils
+from MaxText import max_logging
+from MaxText import optimizers
+from MaxText import profiler
+from MaxText import pyconfig
+import pathwaysutils  # pylint: disable=unused-import
 import tensorflow as tf
 
-from metric_logger import MetricLogger
-from utils import gcs_utils
+from MaxText.metric_logger import MetricLogger
+from MaxText.utils import gcs_utils
 
-from vertex_tensorboard import VertexTensorboardManager
+from MaxText.vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
-from input_pipeline.input_pipeline_interface import create_data_iterator
-from layers import models
+from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
+from MaxText.layers import models
 
-from gcp_workload_monitor import GCPWorkloadMonitor
+from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
 
 import jax.numpy as jnp
 from jax import random
@@ -69,7 +69,7 @@ from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
-from layers import quantizations
+from MaxText.layers import quantizations
 
 from ml_goodput_measurement import goodput
 from ml_goodput_measurement import monitoring

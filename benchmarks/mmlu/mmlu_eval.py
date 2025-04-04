@@ -18,20 +18,20 @@ To get optimal performace the prompt template needs to be adjusted (e.g. CoT or 
 
 
 To run the MMLU benchmark:
-python3  MaxText/benchmarks/mmlu/mmlu_eval.py  MaxText/configs/base.yml \
+python3 -m MaxText.benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
 tokenizer_path=assets/tokenizer_llama3.tiktoken \
 load_parameters_path=check_point_path model_name=llama3.1-8b \
 max_prefill_predict_length=1024 max_target_length=2048 ici_tensor_parallelism=4  per_device_batch_size=1
 
 # Example of using the prompt_template flag for Chain-of-Thought (CoT) prompting:
-python3 MaxText/benchmarks/mmlu/mmlu_eval.py MaxText/configs/base.yml \
+python3 -m MaxText.benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
 tokenizer_path=assets/tokenizer_llama3.tiktoken \
 load_parameters_path=check_point_path model_name=llama3.1-8b \
 max_prefill_predict_length=1024 max_target_length=2048 ici_tensor_parallelism=4 per_device_batch_size=1 \
 prompt_template="The following are multiple choice questions (with answers) about {subject}.\n\n{question}\n{choices}\nAnswer: Let's think step by step."
 
 # Example of using the prompt_template flag for 5-shot prompting (replace with actual examples):
-python3 MaxText/benchmarks/mmlu/mmlu_eval.py MaxText/configs/base.yml \
+python3 -m MaxText.benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
 tokenizer_path=assets/tokenizer_llama3.tiktoken \
 load_parameters_path=check_point_path model_name=llama3.1-8b \
 max_prefill_predict_length=1024 max_target_length=2048 ici_tensor_parallelism=4 per_device_batch_size=1 \
@@ -41,24 +41,16 @@ prompt_template='Example 1:\nQuestion: What is the capital of France?\nChoices:\
 import collections
 import re
 import sys
-import os
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-benchmark_parent_dir = os.path.dirname(current_dir)
-maxtext_parent_dir = os.path.dirname(benchmark_parent_dir)
-
-sys.path.append(maxtext_parent_dir)
-sys.path.append(maxtext_parent_dir + "/MaxText")
-
-import max_logging
 from absl import flags
 import datasets
 import jax
-import max_utils
-import maxengine
+from MaxText import max_logging
+from MaxText import max_utils
+from MaxText import maxengine
 from mmlu_categories import categories
 from mmlu_categories import subcategories
-import pyconfig
+from MaxText import pyconfig
 from tqdm import tqdm
 
 

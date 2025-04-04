@@ -28,15 +28,15 @@ from jax.ad_checkpoint import checkpoint_name
 
 from flax import linen as nn
 
-from layers import attentions
-from layers import initializers
-from layers import linears
-from layers import models
-from layers import quantizations
+from MaxText.layers import attentions
+from MaxText.layers import initializers
+from MaxText.layers import linears
+from MaxText.layers import models
+from MaxText.layers import quantizations
 
 AttentionOp = attentions.AttentionOp
 
-import common_types
+from MaxText import common_types
 
 Array = common_types.Array
 Config = common_types.Config

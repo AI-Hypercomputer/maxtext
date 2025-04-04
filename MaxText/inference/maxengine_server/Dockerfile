@@ -39,7 +39,7 @@ bash setup.sh
 
 RUN cd /JetStream && \
 git checkout ${JETSTREAM_VERSION} && \
-pip install -e .
+python3 -m pip install -e .
 
 COPY maxengine_server_entrypoint.sh /usr/bin/
 
