@@ -252,16 +252,20 @@ def preprocess_train_dataset(
     data_shuffle_seed: int,
 ) -> tf.data.Dataset:
   """Preprocess the training dataset."""
+  if sp_tokenizer.pad_id is not None:
+    pad_id = sp_tokenizer.pad_id
+  elif sp_tokenizer.unk_id is not None:
+    pad_id = sp_tokenizer.unk_id
+  else:
+    pad_id = -1
   train_ds = train_ds.map(
       lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)), num_parallel_calls=AUTOTUNE
   )
-
   train_ds = reduce_concat_tokens(train_ds, feature_key="targets", batch_size=4096)
   train_ds = split_tokens_to_targets_length(train_ds, max_target_length)
   train_ds = train_ds.shuffle(shuffle_buffer_size, seed=data_shuffle_seed)
-  train_ds = sequence_packing.pack_dataset(train_ds, max_target_length)
-
-  train_ds = train_ds.map(format_fn, num_parallel_calls=AUTOTUNE)
+  train_ds = sequence_packing.pack_dataset(train_ds, max_target_length, pad_id=pad_id)
+  train_ds = train_ds.map(lambda x: format_fn(x, pad_id=pad_id), num_parallel_calls=AUTOTUNE)
   train_ds = train_ds.batch(train_global_batch_size_to_load // jax.process_count(), drop_remainder=True)
   train_ds = train_ds.prefetch(AUTOTUNE)
   return train_ds
@@ -269,14 +273,21 @@ def preprocess_train_dataset(
 
 def preprocess_eval_dataset(
     eval_ds: tf.data.Dataset,
+    sp_tokenizer,
     eval_global_batch_size_to_load: int,
     max_target_length: int,
     num_examples: Optional[int] = None,
 ) -> tf.data.Dataset:
   """Preprocess the evaluation dataset."""
-  eval_ds = sequence_packing.pack_dataset(eval_ds, max_target_length)
+  if sp_tokenizer.pad_id is not None:
+    pad_id = sp_tokenizer.pad_id
+  elif sp_tokenizer.unk_id is not None:
+    pad_id = sp_tokenizer.unk_id
+  else:
+    pad_id = -1
+  eval_ds = sequence_packing.pack_dataset(eval_ds, max_target_length, pad_id=pad_id)
 
-  eval_ds = eval_ds.map(format_fn, num_parallel_calls=AUTOTUNE)
+  eval_ds = eval_ds.map(lambda x: format_fn(x, pad_id=pad_id), num_parallel_calls=AUTOTUNE)
 
   # ensure array split in an equal division for each device
   # pad zeros up to the same batch_size among all processes
@@ -339,9 +350,12 @@ def make_c4_mlperf_eval_iterator(
   # note validation_tokenized_5662seqs split is pre tokenized, reduce_concated and split to target_length
   #   mainly to avoid eval sequences change depending on the number of hosts
   eval_ds = rekey(eval_ds, {"inputs": None, "targets": "ids"})
-
+  sp_tokenizer = get_tokenizer(
+      config.tokenizer_path, config.tokenizer_type, config.add_bos, config.add_eos, config.hf_access_token
+  )
   eval_ds = preprocess_eval_dataset(
       eval_ds,
+      sp_tokenizer=sp_tokenizer,
       eval_global_batch_size_to_load=config.global_batch_size_to_load_eval,
       max_target_length=config.max_target_length,
   )

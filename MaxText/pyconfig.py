@@ -162,6 +162,12 @@ def validate_keys(keys):
     validate_deepseek_moe(keys)
 
 
+def validate_tokenizer(keys):
+  assert keys[
+      "tokenizer_path"
+  ], "Please provide tokenizer_path. Even if using pre-tokenized data, tokenizer is required to process special tokens."
+
+
 def validate_data_input(keys):
   """validate provided parameters for data input"""
   if not keys["hf_access_token"]:
@@ -196,6 +202,11 @@ def validate_data_input(keys):
     assert keys["dataset_name"] != "", "dataset_name can't be empty when dataset_type=tfds"
     if keys["eval_interval"] > 0:
       assert keys["eval_split"], "Please specify eval_split or set eval_interval to <=0."
+
+  if "tokenizer_llama3.tiktoken" in keys["tokenizer_path"]:
+    assert (
+        keys["tokenizer_type"] == "tiktoken"
+    ), "tokenizer_type must be tiktoken when using tokenizer=tokenizer_llama3.tiktoken"
 
   if keys["sharding_tolerance"] > 1.0 or keys["sharding_tolerance"] < 0.0:
     max_logging.log(
@@ -333,7 +344,9 @@ class _HyperParameters:
             " at the CLI or ENV"
         )
 
-      if isinstance(new_proposal, type(raw_data_from_yaml[k])):
+      if new_proposal is None:
+        raw_keys[k] = None  # This allows users to set empty strings via CLI, otherwise parsed as "None" - b/405981568
+      elif isinstance(new_proposal, type(raw_data_from_yaml[k])):
         raw_keys[k] = new_proposal  # take the raw data, no type conversion
       else:
         try:
@@ -496,6 +509,7 @@ class _HyperParameters:
     if raw_keys["remat_policy"] == "custom":
       raw_keys = validate_and_assign_remat_tensors(raw_keys)
     validate_keys(raw_keys)
+    validate_tokenizer(raw_keys)
     validate_data_input(raw_keys)
 
   @staticmethod
@@ -544,7 +558,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["ici_fsdp_parallelism"],
       raw_keys["ici_fsdp_transpose_parallelism"],
       raw_keys["ici_sequence_parallelism"],
-      raw_keys["ici_context_parallelism"],
+      raw_keys["ici_context_autoregressive_parallelism"],
       raw_keys["ici_tensor_parallelism"],
       raw_keys["ici_tensor_transpose_parallelism"],
       raw_keys["ici_tensor_sequence_parallelism"],
@@ -557,7 +571,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["dcn_fsdp_parallelism"],
       raw_keys["dcn_fsdp_transpose_parallelism"],
       raw_keys["dcn_sequence_parallelism"],
-      raw_keys["dcn_context_parallelism"],
+      raw_keys["dcn_context_autoregressive_parallelism"],
       raw_keys["dcn_tensor_parallelism"],
       raw_keys["dcn_tensor_transpose_parallelism"],
       raw_keys["dcn_tensor_sequence_parallelism"],
@@ -613,7 +627,7 @@ def validate_multiple_slices(raw_keys):
                   raw_keys["dcn_tensor_parallelism"],
                   raw_keys["dcn_tensor_sequence_parallelism"],
                   raw_keys["dcn_expert_parallelism"],
-                  raw_keys["dcn_context_parallelism"],
+                  raw_keys["dcn_context_autoregressive_parallelism"],
                   raw_keys["dcn_autoregressive_parallelism"],
               ]
           )
@@ -647,7 +661,7 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["ici_fsdp_parallelism"],
           raw_keys["ici_fsdp_transpose_parallelism"],
           raw_keys["ici_sequence_parallelism"],
-          raw_keys["ici_context_parallelism"],
+          raw_keys["ici_context_autoregressive_parallelism"],
           raw_keys["ici_tensor_parallelism"],
           raw_keys["ici_tensor_transpose_parallelism"],
           raw_keys["ici_tensor_sequence_parallelism"],
@@ -660,7 +674,7 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["dcn_fsdp_parallelism"],
           raw_keys["dcn_fsdp_transpose_parallelism"],
           raw_keys["dcn_sequence_parallelism"],
-          raw_keys["dcn_context_parallelism"],
+          raw_keys["dcn_context_autoregressive_parallelism"],
           raw_keys["dcn_tensor_parallelism"],
           raw_keys["dcn_tensor_transpose_parallelism"],
           raw_keys["dcn_tensor_sequence_parallelism"],
@@ -673,7 +687,7 @@ def set_and_validate_pipeline_config(raw_keys):
           "fsdp",
           "fsdp_transpose",
           "sequence",
-          "context",
+          "context_autoregressive",
           "tensor",
           "tensor_transpose",
           "tensor_sequence",
@@ -687,7 +701,7 @@ def set_and_validate_pipeline_config(raw_keys):
               "fsdp",
               "fsdp_transpose",
               "sequence",
-              "context",
+              "context_autoregressive",
               "tensor",
               "tensor_transpose",
               "tensor_sequence",
@@ -741,6 +755,17 @@ def set_and_validate_pipeline_config(raw_keys):
 def validate_deepseek_moe(raw_keys):
   if raw_keys["decoder_block"] == "deepseek" and using_pipeline_parallelism(raw_keys):
     raise ValueError("Currently we do not support DeepSeek MoE with pipeline parallelism.")
+  if raw_keys["n_routing_groups"] != -1:
+    if raw_keys["topk_routing_group"] == -1:
+      raise ValueError(f'config topk_routing_group: {raw_keys["topk_routing_group"]} is not defined')
+    if raw_keys["n_routing_groups"] <= raw_keys["topk_routing_group"]:
+      raise ValueError(
+          f'config n_routing_groups: {raw_keys["n_routing_groups"]} must be greter than topk_routing_group: {raw_keys["topk_routing_group"]}'
+      )
+    if raw_keys["num_experts"] % raw_keys["n_routing_groups"] != 0:
+      raise ValueError(
+          f'config num_experts: {raw_keys["num_experts"]} must be divisible by n_routing_groups: {raw_keys["n_routing_groups"]}'
+      )
 
 
 def validate_sparse_matmul_parallelism(raw_keys):

@@ -24,7 +24,7 @@ AUTOTUNE = tf.data.experimental.AUTOTUNE
 
 
 def pack_dataset(
-    dataset: tf.data.Dataset, key2length: Union[int, Dict[str, int]], keys: Optional[List[str]] = None
+    dataset: tf.data.Dataset, key2length: Union[int, Dict[str, int]], pad_id: int, keys: Optional[List[str]] = None
 ) -> tf.data.Dataset:
   """Creates a 'packed' version of a dataset on-the-fly.
   Adapted from the mesh-tf implementation.
@@ -88,7 +88,7 @@ def pack_dataset(
   # We pad with a negative value instead of the default 0 because 0 is a
   # valid token for some tokenizers for e.g., representing unknown value
   dataset = dataset.padded_batch(batch_size, padded_shapes={k: [-1] for k in keys}, padding_values=-1)
-  dataset = _pack_with_tf_ops(dataset, keys, key2length)
+  dataset = _pack_with_tf_ops(dataset, keys, key2length, pad_id)
 
   # Set the Tensor shapes correctly since they get lost in the process.
   def my_fn(x):
@@ -97,7 +97,7 @@ def pack_dataset(
   return dataset.map(my_fn, num_parallel_calls=AUTOTUNE)
 
 
-def _pack_with_tf_ops(dataset: tf.data.Dataset, keys: List[str], key2length: Dict[str, int]) -> tf.data.Dataset:
+def _pack_with_tf_ops(dataset: tf.data.Dataset, keys: List[str], key2length: Dict[str, int], pad_id: int) -> tf.data.Dataset:
   """Helper-function for packing a dataset which has already been batched.
   Helper for pack_dataset()  Uses tf.while_loop.
   Args:
@@ -117,7 +117,11 @@ def _pack_with_tf_ops(dataset: tf.data.Dataset, keys: List[str], key2length: Dic
     new_partial = empty_example.copy()
     new_outputs = {}
     for k in keys_etc:
-      new_outputs[k] = outputs[k].write(outputs[k].size(), tf.pad(partial[k], [[0, key2length[k] - tf.size(partial[k])]]))
+      # use pad_id to pad inputs/targets, use 0 to pad *_position
+      pad_id_to_use = 0 if len(k.split("_")) > 1 else pad_id
+      new_outputs[k] = outputs[k].write(
+          outputs[k].size(), tf.pad(partial[k], [[0, key2length[k] - tf.size(partial[k])]], constant_values=pad_id_to_use)
+      )
     return new_partial, new_outputs
 
   def map_fn(x):
@@ -188,7 +192,7 @@ def _pack_with_tf_ops(dataset: tf.data.Dataset, keys: List[str], key2length: Dic
     packed = {k: outputs[k].stack() for k in keys_etc}
     for k in keys:
       packed[k + "_segmentation"] = tf.cumsum(tf.cast(tf.equal(packed[k + "_position"], 0), tf.int32), axis=1) * tf.cast(
-          tf.not_equal(packed[k], 0), tf.int32
+          tf.not_equal(packed[k], pad_id), tf.int32
       )
     return packed
 

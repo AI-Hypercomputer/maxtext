@@ -14,6 +14,9 @@
 
 # model config for DeepSeek V3 - 671B
 
+# For DeepSeek default device-limited routing, 
+# please set n_routing_groups=8 and topk_routing_group=4 in your command-line arguments.
+
 base_emb_dim: 7168
 base_num_query_heads: 128
 base_num_kv_heads: 128
