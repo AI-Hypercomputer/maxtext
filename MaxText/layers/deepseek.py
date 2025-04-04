@@ -22,6 +22,7 @@ limitations under the License.
 from typing import Optional
 from layers import quantizations
 from layers import linears
+from layers import moe
 from layers import initializers
 import jax
 from jax.ad_checkpoint import checkpoint_name
@@ -210,7 +211,7 @@ class DeepSeekMoELayer(nn.Module):
         inputs, self.config, self.mesh, self.quant, decoder_segment_ids, decoder_positions, deterministic, model_mode
     )
 
-    mlp_lnx = linears.DeepSeekMoeBlock(
+    mlp_lnx = moe.DeepSeekMoeBlock(
         config=cfg,
         mesh=self.mesh,
         kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
