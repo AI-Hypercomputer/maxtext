@@ -29,6 +29,8 @@ import sys
 import functools
 import queue
 from collections import defaultdict
+import threading
+from queue import Queue
 
 from typing import Sequence
 from absl import app
@@ -115,6 +117,30 @@ class LossAux:
     completion_length: float
     moe_lb_loss: float
     total_weights: float
+
+class Buffer:
+  def __init__(self, maxsize=1):
+    self.queue = Queue(maxsize=maxsize)
+    self.lock = threading.Lock()
+
+  def push(self, data, data_sharding):
+    def _put():
+      device_data = jax.device_put(data, data_sharding)
+      with self.lock:
+        if self.queue.full():
+          try:
+            self.queue.get_nowait()
+          except:
+            pass
+        self.queue.put(device_data)
+    threading.Thread(target=_put).start()
+
+  def pull(self):
+    with self.lock:
+      try:
+        return self.queue.get_nowait()
+      except:
+        return None
 
 
 def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_train=True):
@@ -743,6 +769,10 @@ def train_loop(config, config_inference, state=None):
   example_batch = None
   last_step_completion = datetime.datetime.now()
 
+  param_buffer = Buffer(maxsize=1)
+  # initialize inference_params from the state before step=0
+  inference_params = jax.device_put({'params':state.params['params']}, inference_state_mesh_shardings.params)
+
   performance_metric_queue = None
   if config.report_heartbeat_metric_for_gcp_monitoring or config.report_performance_metric_for_gcp_monitoring:
     gcp_workload_monitor = GCPWorkloadMonitor(config.run_name)
@@ -770,8 +800,8 @@ def train_loop(config, config_inference, state=None):
       # # inference shardings coming from inference mesh
       inference_data_sharding = jax.sharding.NamedSharding(mesh=inference_mesh, spec=P(*config.data_sharding))
       example_batch = jax.device_put(example_batch, inference_data_sharding)
-      inference_params = jax.device_put({'params':state.params['params']}, inference_state_mesh_shardings.params)
-      
+      # inference_params = jax.device_put({'params':state.params['params']}, inference_state_mesh_shardings.params)
+      inference_params = param_buffer.pull() or inference_params
       example_batch = generate_completions(config, tokenizer_model, engine, example_batch, inference_params, example_batch["prompt_true_length"], rng_gen)
 
       # transfer example_batch sharding to training mesh
@@ -779,7 +809,8 @@ def train_loop(config, config_inference, state=None):
       # TODO: ensure this partitioning is correct
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, rng)
-
+      if step != 0 and step % config.inference_rollouts == 0:
+        param_buffer.push({'params':state.params['params']}, inference_state_mesh_shardings.params)
     step_time_delta = datetime.datetime.now() - last_step_completion
     last_step_completion = datetime.datetime.now()
     record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
