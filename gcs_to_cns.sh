@@ -1,10 +1,11 @@
+#!/bin/bash
 # Copyright 2024 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#      https://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,18 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# model config for llama3.1-405b
+set -e
 
-base_emb_dim: 16384
-base_num_query_heads: 128
-base_num_kv_heads: 8
-# base_num_decoder_layers: 126
-base_mlp_dim: 53248
-head_dim: 128
-mlp_activations: ["silu","linear"]
-vocab_size: 128256
-enable_dropout: False
-logits_via_embedding: False
-normalization_layer_epsilon: 1.0e-5
-rope_max_timescale: 500_000
-decoder_block: "llama2" # Uses the same decoder block as llama2
+LOG_FILE_IN_GCS=$1
+filename=$(basename $LOG_FILE_IN_GCS)
+output_file=$(date "+%Y-%m-%d-%H:%M:%S")_${filename}
+
+CNS_PATH=/cns/pi-d/home/${USER}/tensorboard/multislice/
+fileutil mkdir -p ${CNS_PATH}
+/google/data/ro/projects/cloud/bigstore/mpm/fileutil_bs/stable/bin/fileutil_bs cp /bigstore/${LOG_FILE_IN_GCS} ${CNS_PATH}/$output_file
+echo file to put into xprof: ${CNS_PATH}/$output_file
