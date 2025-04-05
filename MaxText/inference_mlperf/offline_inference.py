@@ -30,7 +30,7 @@ from jetstream.engine import engine_api
 
 import logging
 # pylint: disable=no-name-in-module
-from maxengine import set_engine_vars_from_base_engine
+from MaxText.maxengine import set_engine_vars_from_base_engine
 
 log = logging.getLogger(__name__)
 

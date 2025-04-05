@@ -36,7 +36,7 @@ from jax.experimental import colocated_python
 import jax.numpy as jnp
 import grain.python as grain
 
-import max_logging
+from MaxText import max_logging
 
 
 def _build_global_shape_and_sharding(

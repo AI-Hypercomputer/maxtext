@@ -16,8 +16,12 @@
 """Shared Benchmark config for v6e orchestrations."""
 
 import dataclasses
+import os.path
 import typing
+from tempfile import gettempdir
 import xla_flags_library
+
+from benchmarks.globals import PKG_DIR
 
 # TODO(vbarr@) Abstract software features like checkpointing,
 # real data / synthetic data out of this config
@@ -497,7 +501,7 @@ llama2_70b_4096_sc_real_data_tfds = _add_to_model_dictionary(
     ),
 )
 
-
+temp_dir = gettempdir()
 llama2_70b_4096_sc_real_data_grain = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
@@ -520,7 +524,7 @@ llama2_70b_4096_sc_real_data_grain = _add_to_model_dictionary(
             "enable_checkpointing": False,
             "dataset_type": "grain",
             "grain_train_files": (
-                "/tmp/dataset/array-record/c4/en/3.0.1/c4-train.array_record*"
+                os.path.join(temp_dir, "dataset", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*")
             ),
             "grain_worker_count": 24,
             "profiler": "xplane",
@@ -577,7 +581,7 @@ llama2_70b_4096_sc_real_data_grain_checkpoint = _add_to_model_dictionary(
             "async_checkpointing": True,
             "dataset_type": "grain",
             "grain_train_files": (
-                "/tmp/dataset/array-record/c4/en/3.0.1/c4-train.array_record*"
+                os.path.join(temp_dir, "dataset", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*")
             ),
             "grain_worker_count": 24,
             "profiler": "xplane",
@@ -625,7 +629,7 @@ llama2_70b_4096_real_data_long_run = _add_to_model_dictionary(
             "profiler": "xplane",
             "dataset_path": "gs://max-datasets-rogue",
             "dataset_type": "tfds",
-            "tokenizer_path": "assets/tokenizer.llama2",
+            "tokenizer_path": os.path.join(os.path.dirname(PKG_DIR), "assets", "tokenizer.llama2"),
             "sa_block_q": 1024,
             "sa_block_q_dkv": 2048,
             "sa_block_q_dq": 2048,
@@ -1431,7 +1435,7 @@ gemma2_9b_8192 = _add_to_model_dictionary(
             "reuse_example_batch": 1,
             "enable_checkpointing": False,
             "profiler": "xplane",
-            "tokenizer_path": "assets/tokenizer.llama2",
+            "tokenizer_path": os.path.join(os.path.dirname(PKG_DIR), "assets", "tokenizer.llama2"),
             "sa_block_q": 2048,
             "sa_block_q_dkv": 2048,
             "sa_block_q_dq": 2048,
@@ -1464,7 +1468,7 @@ gemma2_27b_8192 = _add_to_model_dictionary(
             "reuse_example_batch": 1,
             "enable_checkpointing": False,
             "profiler": "xplane",
-            "tokenizer_path": "assets/tokenizer.llama2",
+            "tokenizer_path": os.path.join(os.path.dirname(PKG_DIR), "assets", "tokenizer.llama2"),
             "sa_block_q": 2048,
             "sa_block_q_dkv": 2048,
             "sa_block_q_dq": 2048,

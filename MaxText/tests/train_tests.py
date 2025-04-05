@@ -18,7 +18,8 @@ limitations under the License.
 import os
 import unittest
 import pytest
-from train import main as train_main
+from MaxText.train import main as train_main
+from MaxText.globals import PKG_DIR
 from absl.testing import absltest
 
 
@@ -28,28 +29,28 @@ class TrainTests(unittest.TestCase):
   CONFIGS = {
       "base": [  # short test for train.py with TFDS c4
           None,
-          "configs/base.yml",
+          os.path.join(PKG_DIR, "configs", "base.yml"),
           r"base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           r"dataset_path=gs://maxtext-dataset",
           "steps=2",
           "enable_checkpointing=False",
-          r"tokenizer_path=../assets/tokenizer.llama2",
+          rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
       ],
       "synthetic": [  # tests base config with synthtic dataset
           None,
-          "configs/base.yml",
+          os.path.join(PKG_DIR, "configs", "base.yml"),
           r"base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           r"dataset_path=gs://maxtext-dataset",
           "steps=2",
           "enable_checkpointing=False",
           "dataset_type=synthetic",
-          r"tokenizer_path=../assets/tokenizer.llama2",
+          rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
       ],
       "pdb_lt_1": [  # tests base config with per_device_batch_size < 1
           None,
-          "configs/base.yml",
+          os.path.join(PKG_DIR, "configs", "base.yml"),
           r"base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           r"dataset_path=gs://maxtext-dataset",
@@ -57,54 +58,54 @@ class TrainTests(unittest.TestCase):
           "enable_checkpointing=False",
           "per_device_batch_size=0.25",
           "ici_tensor_parallelism=4",
-          r"tokenizer_path=../assets/tokenizer.llama2",
+          rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
       ],
       "tp_transpose": [  # tests base config with ici_tensor_transpose_parallelism=4
           None,
-          "configs/base.yml",
+          os.path.join(PKG_DIR, "configs", "base.yml"),
           r"base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           r"dataset_path=gs://maxtext-dataset",
           "steps=2",
           "ici_tensor_transpose_parallelism=4",
-          r"tokenizer_path=../assets/tokenizer.llama2",
+          rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
       ],
       "int8": [  # tests base config with int8
           None,
-          "configs/base.yml",
+          os.path.join(PKG_DIR, "configs", "base.yml"),
           r"base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           r"dataset_path=gs://maxtext-dataset",
           "quantization=int8",
           "steps=2",
           "enable_checkpointing=False",
-          r"tokenizer_path=../assets/tokenizer.llama2",
+          rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
       ],
       "fp8": [  # tests base config with fp8
           None,
-          "configs/base.yml",
+          os.path.join(PKG_DIR, "configs", "base.yml"),
           r"base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           r"dataset_path=gs://maxtext-dataset",
           "quantization=fp8",
           "steps=2",
           "enable_checkpointing=False",
-          r"tokenizer_path=../assets/tokenizer.llama2",
+          rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
       ],
       "nanoo_fp8": [  # tests base config with nanoo_fp8
           None,
-          "configs/base.yml",
+          os.path.join(PKG_DIR, "configs", "base.yml"),
           r"base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           r"dataset_path=gs://maxtext-dataset",
           "quantization=nanoo_fp8",
           "steps=2",
           "enable_checkpointing=False",
-          r"tokenizer_path=../assets/tokenizer.llama2",
+          rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
       ],
       "dropout": [  # tests base config with dropout
           None,
-          "configs/base.yml",
+          os.path.join(PKG_DIR, "configs", "base.yml"),
           r"base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           r"dataset_path=gs://maxtext-dataset",
@@ -113,11 +114,11 @@ class TrainTests(unittest.TestCase):
           "max_target_length=128",
           "per_device_batch_size=1",
           "dropout_rate=0.02",
-          r"tokenizer_path=../assets/tokenizer.llama2",
+          rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
       ],
       "hf_input_pipeline": [  # test for train.py with TFDS c4, using HF input pipeline
           None,
-          "configs/base.yml",
+          os.path.join(PKG_DIR, "configs", "base.yml"),
           r"base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           "steps=2",
@@ -193,14 +194,14 @@ class TrainTests(unittest.TestCase):
   def test_gpu_cudnn_flash_te(self):
     cudnn_flash_te = [  # tests base config on GPU with flash attention"""
         None,
-        "configs/base.yml",
+        os.path.join(PKG_DIR, "configs", "base.yml"),
         r"base_output_directory=gs://runner-maxtext-logs",
         "run_name=runner_test",
         r"dataset_path=gs://maxtext-dataset",
         "steps=2",
         "enable_checkpointing=False",
         "attention=cudnn_flash_te",
-        r"tokenizer_path=../assets/tokenizer.llama2",
+        rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
     ]
     train_main(cudnn_flash_te)
 

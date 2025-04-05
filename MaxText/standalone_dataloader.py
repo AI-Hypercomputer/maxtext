@@ -19,15 +19,15 @@ limitations under the License.
 import jax
 import os
 
-import max_logging
+from MaxText import max_logging
 
 from typing import Sequence
 import datetime
 from absl import app
 import numpy as np
 
-import pyconfig
-from train import validate_train_config, get_first_step, load_next_batch, setup_train_loop
+from MaxText import pyconfig
+from MaxText.train import validate_train_config, get_first_step, load_next_batch, setup_train_loop
 
 
 def data_load_loop(config, state=None):

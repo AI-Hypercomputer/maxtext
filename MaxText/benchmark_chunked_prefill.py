@@ -16,11 +16,11 @@
 # pylint: disable=ungrouped-imports
 import jax
 
-import max_utils
-import maxengine
+from MaxText import max_utils
+from MaxText import maxengine
 
 import os
-import pyconfig
+from MaxText import pyconfig
 
 from typing import Sequence
 from absl import app
