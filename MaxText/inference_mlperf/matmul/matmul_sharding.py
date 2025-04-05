@@ -12,29 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import datetime
-import jax
-import jaxtyping
-import random
-import string
-import numpy as np
-
 from functools import partial
-from jax.experimental import mesh_utils
-from jax.sharding import Mesh, PartitionSpec as P, NamedSharding
-from typing import Sequence, Mapping
 
-from timing_util import simple_timeit
+import jax
+from jax.experimental import mesh_utils
+from jax.sharding import Mesh
+
+from MaxText.inference_mlperf.matmul.timing_util import simple_timeit
 
 PREFILL_LENS = [128, 256, 512, 1024]
 EMBED = 8192
 MLP = 28672
 LAYERS = 80
 DTYPES = [jax.numpy.int8, jax.numpy.bfloat16]
-devices = jax.devices()
-print("Devices:")
-print(devices)
-print()
 
 
 def matmul(mesh, mesh_dim, dtype=jax.numpy.bfloat16, batch=1024, enable_visual=False):
@@ -81,14 +71,20 @@ def matmuls(mesh, mesh_dim, enable_visual=False):
 
 
 # Start here
-mesh_axis_names = ("model", "seq")
-for mesh_dim in [(4, 2), (8, 1)]:
-  mesh = Mesh(devices=mesh_utils.create_device_mesh(mesh_dim, devices), axis_names=mesh_axis_names)
-  matmuls(mesh, mesh_dim)
+if __name__ == "__main__":
+  devices = jax.devices()
+  print("Devices:")
+  print(devices)
+  print()
 
-mesh_dim = (4, 2)
-new_devices = [[devices[0], devices[4]], [devices[1], devices[5]], [devices[3], devices[7]], [devices[2], devices[6]]]
-mesh = jax.sharding.Mesh(new_devices, ["model", "seq"])
-print("Optimized device topology for 2x4")
-print(new_devices)
-matmuls(mesh, mesh_dim)
+  mesh_axis_names = ("model", "seq")
+  for mesh_dim in [(4, 2), (8, 1)]:
+    mesh = Mesh(devices=mesh_utils.create_device_mesh(mesh_dim, devices), axis_names=mesh_axis_names)
+    matmuls(mesh, mesh_dim)
+
+  mesh_dim = (4, 2)
+  new_devices = [[devices[0], devices[4]], [devices[1], devices[5]], [devices[3], devices[7]], [devices[2], devices[6]]]
+  mesh = jax.sharding.Mesh(new_devices, ["model", "seq"])
+  print("Optimized device topology for 2x4")
+  print(new_devices)
+  matmuls(mesh, mesh_dim)

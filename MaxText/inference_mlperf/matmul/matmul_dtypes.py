@@ -14,7 +14,7 @@
 
 import jax
 
-import timing_util
+from MaxText.inference_mlperf.matmul import timing_util
 
 _PROFILE = False
 MATMUL_SIZES = [(250, 2048)]
