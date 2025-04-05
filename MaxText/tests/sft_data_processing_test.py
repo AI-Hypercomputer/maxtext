@@ -153,7 +153,6 @@ class SFTDataProcessingTest(unittest.TestCase):
         grain_worker_count=0,
     )
 
-  @unittest.skipIf(TEST_DISABLE_SFT_DATA_PROCESSING, TEST_DISABLE_SFT_DATA_PROCESSING_STR)
   def test_sft_format_with_messages(self):
     train_ds = Dataset.from_dict({"messages": MESSAGES_DATA * 2})
     data_columns = ["messages"]
