@@ -559,8 +559,9 @@ class Pipeline(nn.Module):
     return physical_no_fsdp
 
   def all_gather_over_fsdp(self, sharding_info):
+    weights_in_compute_dtype = jax.tree.map(lambda x: x.astype(self.config.dtype), self.layers.variables)
     physical_constraint_no_fsdp = self.get_physical_spec_no_fsdp(sharding_info)
-    return jax.lax.with_sharding_constraint(self.layers.variables, physical_constraint_no_fsdp)
+    return jax.lax.with_sharding_constraint(weights_in_compute_dtype, physical_constraint_no_fsdp)
 
   @nn.compact
   def __call__(
@@ -679,7 +680,7 @@ class Pipeline(nn.Module):
     if self.config.pipeline_fsdp_ag_once:
       all_pipeline_weights = self.all_gather_over_fsdp(partition_spec)
     else:
-      all_pipeline_weights = self.layers.variables
+      all_pipeline_weights = jax.tree.map(lambda x: x.astype(self.config.dtype), self.layers.variables)
 
     def run_iteration_scannable(model, loop_state, xs):
       # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we explicitly wrap
