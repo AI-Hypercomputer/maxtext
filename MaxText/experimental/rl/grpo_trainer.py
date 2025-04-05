@@ -383,7 +383,6 @@ def generate_completions(config, tokenizer_model, engine, data, params, true_len
   )
   completion_mask = data["prompt_completions_position"] >= true_length[:, None] - 1
   data["ar_completions_segmentation"] = data["prompt_completions_segmentation"] * completion_mask.astype(jnp.int32)
-  max_logging.log("Completed generating data through inference")
   return data
 
 
@@ -770,6 +769,7 @@ def train_loop(config, config_inference, state=None):
   last_step_completion = datetime.datetime.now()
 
   param_buffer = Buffer(maxsize=1)
+  data_buffer = Buffer(maxsize=-1)
   # initialize inference_params from the state before step=0
   inference_params = jax.device_put({'params':state.params['params']}, inference_state_mesh_shardings.params)
 
@@ -781,6 +781,17 @@ def train_loop(config, config_inference, state=None):
     if config.report_performance_metric_for_gcp_monitoring:
       performance_metric_queue = queue.Queue()
       gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
+
+  # do K rollouts of inference
+  for k in range(config.inference_rollouts):
+    example_batch = load_next_batch(data_iterator, example_batch, config)
+    rng = jax.jit(jax.random.fold_in)(init_rng, k)
+    rng, rng_gen = random.split(rng)
+    inference_data_sharding = jax.sharding.NamedSharding(mesh=inference_mesh, spec=P(*config.data_sharding))
+    example_batch = jax.device_put(example_batch, inference_data_sharding)
+    example_batch = generate_completions(config, tokenizer_model, engine, example_batch, inference_params, example_batch["prompt_true_length"], rng_gen)
+    data_buffer.push(example_batch, in_shard_train[1])
+
 
   metric_logger = MetricLogger(writer, config)
   for step in np.arange(start_step, config.steps):
@@ -803,12 +814,13 @@ def train_loop(config, config_inference, state=None):
       # inference_params = jax.device_put({'params':state.params['params']}, inference_state_mesh_shardings.params)
       inference_params = param_buffer.pull() or inference_params
       example_batch = generate_completions(config, tokenizer_model, engine, example_batch, inference_params, example_batch["prompt_true_length"], rng_gen)
-
+      data_buffer.push(example_batch, in_shard_train[1])
       # transfer example_batch sharding to training mesh
-      example_batch = jax.device_put(example_batch, in_shard_train[1])
-      # TODO: ensure this partitioning is correct
+      # example_batch = jax.device_put(example_batch, in_shard_train[1])
+
+      training_batch = data_buffer.queue.get(block=True)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        state, metrics = p_train_step(state, example_batch, rng)
+        state, metrics = p_train_step(state, training_batch, rng)
       if step != 0 and step % config.inference_rollouts == 0:
         param_buffer.push({'params':state.params['params']}, inference_state_mesh_shardings.params)
     step_time_delta = datetime.datetime.now() - last_step_completion
