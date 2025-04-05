@@ -24,6 +24,7 @@ from benchmark_db_utils import write_run
 from benchmark_db_utils import DEFAULT_LOCAL_DIR
 from benchmark_db_utils import recover_tuning_params
 from benchmark_db_utils import Metrics
+from inference_utils import str2bool
 import dataclasses
 import fnmatch
 import getpass
@@ -165,7 +166,7 @@ def add_parser_arguments(parser: argparse.ArgumentParser):
   )
   parser.add_argument(
       '--is_test',
-      type=bool,
+      type=str2bool,
       required=False,
       default=True,
       help='Whether to use the testing project or production project',
