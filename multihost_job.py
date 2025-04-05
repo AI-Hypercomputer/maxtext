@@ -45,6 +45,7 @@ import subprocess
 from datetime import datetime
 import os
 import shutil
+from inference_utils import str2bool
 
 
 
@@ -284,7 +285,7 @@ def main(raw_args=None) -> None:
   parser.add_argument('--CQR_EXTRA_ARGS', type=str, default=None,
                       help='Additional arguments to be passed verbatim to the CQR request, e.g. \
                       --CQR_EXTRA_ARGS="--reserved --service-account=my-service-account-email-address')
-  parser.add_argument('--ENABLE_AUTOCHECKPOINT', type=bool, default=False,
+  parser.add_argument('--ENABLE_AUTOCHECKPOINT', type=str2bool, default=False,
                       help='Whether to enable the Autocheckpoint feature')
   args = parser.parse_args(raw_args)
 
