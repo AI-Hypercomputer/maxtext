@@ -19,10 +19,12 @@ import pytest
 import subprocess
 
 from MaxText.globals import PKG_DIR
+from MaxText.tests.globals import TEST_DISABLE_SUBPROCESS, TEST_DISABLE_SUBPROCESS_STR
 
 
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
+@pytest.mark.skipif(TEST_DISABLE_SUBPROCESS, reason=TEST_DISABLE_SUBPROCESS_STR)
 def test_maxtext_with_sft_in_trl():
   command = ["gsutil", "cp", "-r", "gs://maxtext-dataset/hf/llama3.1-tokenizer",
              os.path.join(os.path.dirname(PKG_DIR), "assets", "")]
