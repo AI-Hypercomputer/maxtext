@@ -300,6 +300,10 @@ class Decoder(nn.Module):
       from layers import mistral
 
       return [mistral.MistralDecoderLayer]
+    elif self.config.decoder_block == "mixtral":
+      from layers import mixtral
+
+      return [mixtral.MixtralDecoderLayer]
     elif self.config.decoder_block == "deepseek":
       from layers import deepseek
 
@@ -336,6 +340,7 @@ class Decoder(nn.Module):
         "default",
         "llama2",
         "mistral",
+        "mixtral",
         "deepseek",
         "gemma",
         "gemma2",
