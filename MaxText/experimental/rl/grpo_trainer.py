@@ -256,7 +256,112 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 # --- GRPO Helpers ---
 
 
-def generate_completions(config, tokenizer_model, engine, data, params, true_length, rng):
+def prefill(engine, params, decode_state, data, num_generations, rng):
+  """
+    Args:
+      engine: The generation engine instance responsible for managing decoding and inference.
+      params: Model parameters used for generating logits during inference.
+      decode_state: Current decoding state, which maintains token positions, masks, and cached states.
+      data: Input batch containing prompt tokens, segementation and position.
+      num_generations: Number of completions to generate per prompt (G in many RLHF-style pipelines).
+      rng: JAX PRNG key for controlling stochastic behavior (e.g., sampling, dropout).
+    
+    Returns:
+      decode_state: Updated decode state after prefill, including new cached key/value pairs.
+      prefill_slots: A structure containing token positions and model states needed for next-stage decoding.
+  """
+  prompts, true_length = data['prompt'], data['prompt_true_length']
+  slot = 0
+  for tokens, current_token_true_length in zip(prompts, true_length):
+    # Split RNG before calling prefill
+    rng, rng_prefill = jax.random.split(rng)
+    # generate the KV cache by prefilling the prompt tokens
+    # Generate G completions for a prompt with different rng
+    for _ in range(num_generations):
+      prefill_result, _ = engine.prefill(
+        params=params, padded_tokens=tokens, true_length=current_token_true_length, rng=rng_prefill
+      )
+      decode_state = engine.insert(prefill_result, decode_state, slot=slot)
+      slot += 1
+  return decode_state, slot
+
+
+def generate(engine, params, decode_state, prefill_slots, num_decode_steps, rng):
+  """
+    Args:
+      engine: The generation engine instance used to run autoregressive decoding.
+      params: Model parameters used to compute logits during token generation.
+      decode_state: The current decode state containing cached attention key/value pairs and positions.
+      prefill_slots: Slots prepared during prefill that mark which sequences are active and ready to decode.
+      num_decode_steps: Number of decoding steps to perform (i.e., target length - prefill length).
+      rng: JAX PRNG key used for sampling, top-k/top-p filtering, or any stochastic decoding behavior.
+    
+    Returns:
+      completions: Generated sequences (e.g., token IDs) of shape [num_prompts * num_generations, num_decode_steps].
+  """
+  completions = defaultdict(list)
+  result_tokens_list = []
+  for _ in range(num_decode_steps):
+    rng, rng_generate = jax.random.split(rng)
+    decode_state, result_tokens = engine.generate(params, decode_state, rng=rng_generate)
+    result_tokens.copy_to_host_async()
+    result_tokens_list.append(result_tokens)
+
+  for step in range(num_decode_steps):
+    result_token = result_tokens_list[step].convert_to_numpy()
+    for i in range(prefill_slots):
+      completions[i].append(result_token.get_result_at_slot(i).tokens.item())
+  completions = jnp.array(np.array(list(completions.values())))
+  return completions
+
+
+def concatenate_prompt_with_completions(config, tokenizer_model, data, completions):
+  """
+    Args:
+      config: Configuration object containing generation settings such as max sequence length or EOS token ID.
+      tokenizer_model: Tokenizer used to decode or manipulate tokens (e.g., identifying special tokens like EOS).
+      data: Input batch containing prompt tokens, segementation and position.
+      completions: Generated token sequences to be appended to the corresponding prompts.
+
+    Returns:
+      prompt_completions: Concatenated sequences of prompt + generated completions for each sample.
+      eos_positions: Indices indicating the position of the first EOS token in each concatenated sequence.
+  """
+  
+  def _concat_and_find_eos(prompt, true_len, completion):
+    total_len = prompt.shape[0] + completion.shape[0]
+    prompt_mask = jnp.arange(prompt.shape[0]) < true_len
+    trimmed_prompt = jnp.where(prompt_mask, prompt, 0)
+
+    # Initialize with padded prompt
+    full_seq = jnp.zeros((total_len,), dtype=prompt.dtype)
+    full_seq = full_seq.at[:prompt.shape[0]].set(trimmed_prompt)
+
+    # Dynamically insert completion at true_len position
+    full_seq = jax.lax.dynamic_update_slice(full_seq, completion, (true_len,))
+
+    # Find EOS index
+    eos_mask = full_seq == tokenizer_model.eos_token_id
+    eos_indices = jnp.where(eos_mask, jnp.arange(total_len), total_len)
+    eos_index = jnp.min(eos_indices)
+
+    return full_seq, eos_index
+
+  batched_concat_and_eos = jax.vmap(
+    lambda prompt, true_len, completion: _concat_and_find_eos(
+        prompt, true_len, completion
+    ),
+    in_axes=(0, 0, 0)
+  )
+  prompts = data["prompt"]
+  true_length = data["prompt_true_length"]
+  prompts = jnp.repeat(prompts, config.num_generations, axis=0)
+  true_length = jnp.repeat(true_length, config.num_generations, axis=0)
+  prompt_completions, eos_positions = batched_concat_and_eos(prompts, true_length, completions)
+  return prompt_completions, eos_positions
+
+
+def generate_completions(config, tokenizer_model, engine, data, params, rng):
   """
   Autoregressively generates completions for a batch of prompts.
 
@@ -268,7 +373,6 @@ def generate_completions(config, tokenizer_model, engine, data, params, true_len
          - temperature: sampling temperature.
     rng: JAX PRNGKeys.
     tokenizer_model: Tokenizer for generate
-    true_length: Length of the prompt out of the max_target_length
 
   Returns:
     A jnp.array of shape [B x num_generations, S] where S = length_of_prompt + max_completion_length.
@@ -281,91 +385,16 @@ def generate_completions(config, tokenizer_model, engine, data, params, true_len
     else:
       data[k] = v[:config.micro_batch_size_to_train_on]
 
-  prompts = data["prompt"]
   rng, rng_load_params = jax.random.split(rng)
-  G = config.num_generations
 
   rng, rng_init_decode = jax.random.split(rng_load_params)
   decode_state = engine.init_decode_state(rng_init_decode)
-  slot = 0
-  for tokens, current_token_true_length in zip(prompts, true_length):
-    # Split RNG before calling prefill
-    rng, rng_prefill = jax.random.split(rng)
-    # generate the KV cache by prefilling the prompt tokens
-    # Generate G completions for a prompt with different rng
-    for _ in range(G):
-      prefill_result, _ = engine.prefill(
-          params=params, padded_tokens=tokens, true_length=current_token_true_length, rng=rng_prefill
-      )
-      decode_state = engine.insert(prefill_result, decode_state, slot=slot)
-      slot += 1
-  steps = config.max_target_length - config.max_prefill_predict_length
-  completions = defaultdict(list)
-  result_tokens_list = []
-  for _ in range(steps):
-    rng, rng_generate = jax.random.split(rng)
-    decode_state, result_tokens = engine.generate(params, decode_state, rng=rng_generate)
-    result_tokens.copy_to_host_async()
-    result_tokens_list.append(result_tokens)
 
-  for step in range(steps):
-    result_token = result_tokens_list[step].convert_to_numpy()
-    for i in range(slot):
-      completions[i].append(result_token.get_result_at_slot(i).tokens.item())
-  completions = jnp.array(np.array(list(completions.values())))
+  decode_state, prefill_slots = prefill(engine, params, decode_state, data, config.num_generations, rng)
 
-  # prompt_with_completions, eos_positions = [], []
-  # for i in range(prompts.shape[0]):
-  #   tokens = prompts[i]
-  #   current_token_true_length = true_length[i]
-  #   concatenated_prompts = jnp.concatenate(
-  #       [tokens[: current_token_true_length - 1], completions[i]], axis=0  # remove EOS token in input prompt
-  #   )
-  #   eos_positions.append(
-  #       jnp.where(
-  #           jnp.any(concatenated_prompts == tokenizer_model.eos_token_id),
-  #           jnp.argmax(concatenated_prompts == tokenizer_model.eos_token_id),
-  #           concatenated_prompts.shape[0],
-  #       )
-  #   )
-  #   prompt_with_completions.append(
-  #       jnp.pad(
-  #           concatenated_prompts,
-  #           (0, config.max_target_length - concatenated_prompts.shape[0]),
-  #           constant_values=tokenizer_model.pad_token_id,
-  #       )
-  #   )
-  # data["prompt_completions"] = jnp.array(prompt_with_completions)
-  # eos_positions = jnp.stack(eos_positions)
+  completions = generate(engine, params, decode_state, prefill_slots, config.max_target_length - config.max_prefill_predict_length, rng)
 
-  def concat_and_find_eos(prompt, true_length, completion):
-    total_len = prompt.shape[0] + completion.shape[0]
-    prompt_mask = jnp.arange(prompt.shape[0]) < true_length
-    trimmed_prompt = jnp.where(prompt_mask, prompt, 0)
-
-    # Initialize with padded prompt
-    full_seq = jnp.zeros((total_len,), dtype=prompt.dtype)
-    full_seq = full_seq.at[:prompt.shape[0]].set(trimmed_prompt)
-
-    # Dynamically insert completion at true_len position
-    full_seq = jax.lax.dynamic_update_slice(full_seq, completion, (true_length,))
-
-    # Find EOS index
-    eos_mask = full_seq == tokenizer_model.eos_token_id
-    eos_indices = jnp.where(eos_mask, jnp.arange(total_len), total_len)
-    eos_index = jnp.min(eos_indices)
-
-    return full_seq, eos_index
-
-  batched_concat_and_eos = jax.vmap(
-    lambda prompt, true_len, completion: concat_and_find_eos(
-        prompt, true_len, completion
-    ),
-    in_axes=(0, 0, 0)
-  )
-  prompts = jnp.repeat(prompts, G, axis=0)
-  true_length = jnp.repeat(true_length, G, axis=0)
-  data["prompt_completions"], eos_positions = batched_concat_and_eos(prompts, true_length, completions)
+  data["prompt_completions"], eos_positions = concatenate_prompt_with_completions(config, tokenizer_model, data, completions)
 
   data["prompt_completions_segmentation"] = (jnp.arange(data["prompt_completions"].shape[1])[None, :] < eos_positions[
       :, None
@@ -373,7 +402,7 @@ def generate_completions(config, tokenizer_model, engine, data, params, true_len
   data["prompt_completions_position"] = jnp.where(
       data["prompt_completions_segmentation"], jnp.arange(data["prompt_completions"].shape[1]), 0
   )
-  completion_mask = data["prompt_completions_position"] >= true_length[:, None] - 1
+  completion_mask = data["prompt_completions_position"] >= data["prompt_true_length"][:, None] - 1
   data["ar_completions_segmentation"] = data["prompt_completions_segmentation"] * completion_mask.astype(jnp.int32)
   return data
 
@@ -780,7 +809,7 @@ def train_loop(config, config_inference, state=None):
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       rng, rng_gen = random.split(rng)
       example_batch = generate_completions(
-          config, tokenizer_model, engine, example_batch, state.params, example_batch["prompt_true_length"], rng_gen
+          config, tokenizer_model, engine, example_batch, state.params, rng_gen
       )
 
       # TODO: ensure this partitioning is correct
@@ -891,7 +920,8 @@ def main(argv: Sequence[str]) -> None:
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   config = pyconfig.initialize(argv)
-  assert config.use_grpo, "Please set the value of use_grpo to True"
+  if not config.use_grpo:
+    raise ValueError("Please set the value of use_grpo to True")
   config_inference = pyconfig.initialize(
       list(argv)
       + ["ici_tensor_parallelism=4", "per_device_batch_size=" + str(config.per_device_batch_size * config.num_generations)]
