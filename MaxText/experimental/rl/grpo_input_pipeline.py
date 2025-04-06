@@ -25,7 +25,7 @@ class SingleHostDataLoader:
   def reset(self):
     if not isinstance(self.dataloader, Iterable):
       raise ValueError("Type error: dataloader should be a grain.DataLoader.")
-    self.local_iterator = iter(self.dataloader)  
+    self.local_iterator = iter(self.dataloader)
 
   def __iter__(self):
     self.reset()
@@ -75,7 +75,12 @@ def preprocessing_pipeline(
     dataset = dataset.map(
         _input_pipeline_utils.tokenization,
         batched=True,
-        fn_kwargs={"hf_tokenizer": tokenizer, "truncation":True , "max_length":max_target_length - 1, "column_names": data_column_names},
+        fn_kwargs={
+            "hf_tokenizer": tokenizer,
+            "truncation": True,
+            "max_length": max_target_length - 1,
+            "column_names": data_column_names,
+        },
     )
   dataset = dataset.select_columns(data_column_names)
   dataset = _input_pipeline_utils.HFDataSource(
