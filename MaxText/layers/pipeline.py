@@ -20,7 +20,7 @@ import numpy as np
 from jax import numpy as jnp
 from flax.core import meta
 from flax import linen as nn
-import common_types
+from MaxText import common_types
 import functools
 from typing import Any
 

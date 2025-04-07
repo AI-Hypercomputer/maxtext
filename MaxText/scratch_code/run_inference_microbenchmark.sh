@@ -1,5 +1,5 @@
 # llama2-7b 
-python MaxText/inference_microbenchmark.py \
+python3 -m MaxText.inference_microbenchmark \
 MaxText/configs/base.yml \
 async_checkpointing=false \
 attention=autoselected \

@@ -18,7 +18,7 @@ from typing import Callable, Tuple, Union
 
 from flax import linen as nn
 import jax
-import common_types
+from MaxText import common_types
 
 Array = common_types.Array
 DType = common_types.DType

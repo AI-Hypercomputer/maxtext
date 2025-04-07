@@ -25,10 +25,10 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 import jax
 
-import multihost_dataloading
-import tokenizer
-import sequence_packing
-from input_pipeline import _input_pipeline_utils
+from MaxText import multihost_dataloading
+from MaxText import tokenizer
+from MaxText import sequence_packing
+from MaxText.input_pipeline import _input_pipeline_utils
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 

@@ -19,7 +19,7 @@ Get LLaMA chkpt_vars from Meta
 
 Example cmd:
 To save a ckpt
-python3 MaxText/llama_or_mistral_ckpt.py --base-model-path <path/to/meta/ckpt> \
+python3 -m MaxText.llama_or_mistral_ckpt --base-model-path <path/to/meta/ckpt> \
     --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size llama2-7b
 
 The base model checkpoints should be in the format `{name}.{chkpt_idx}.pth`
@@ -50,12 +50,12 @@ import torch
 import psutil
 from tqdm import tqdm
 
-import max_logging
-import max_utils
-from train import save_checkpoint
-import checkpointing
+from MaxText import max_logging
+from MaxText import max_utils
+from MaxText.train import save_checkpoint
+from MaxText import checkpointing
 from safetensors import safe_open
-from utils import gcs_utils
+from MaxText.utils import gcs_utils
 
 MODEL_PARAMS_DICT = {
     "llama2-70b": {
@@ -1086,8 +1086,8 @@ if __name__ == "__main__":
     lora_ids = list_folders_pathlib(args.lora_input_adapters_path)
 
     for lora_id in lora_ids:
-      lora_path = f"{args.lora_input_adapters_path}/{lora_id}"
-      lora_config_path = f"{lora_path}/adapter_config.json"
+      lora_path = os.path.join(args.lora_input_adapters_path, lora_id)
+      lora_config_path = os.path.join(lora_path, "adapter_config.json")
 
       if not os.path.exists(lora_config_path):
         max_logging.log(f"Ignoring {lora_id} adapter because its directory doesn't have adapter_config.json.")
@@ -1109,6 +1109,6 @@ if __name__ == "__main__":
           save_weights_to_checkpoint(
               lora_output_gcs_path, jax_lora_weights, SIMULATED_CPU_DEVICES_COUNT, args.use_ocdbt, args.use_zarr3
           )
-          gcs_utils.write_dict_to_gcs_json(lora_config_dict, f"{lora_output_gcs_path}/adapter_config.json")
+          gcs_utils.write_dict_to_gcs_json(lora_config_dict, os.path.join(lora_output_gcs_path, "adapter_config.json"))
 
           max_logging.log(f"Successfully saved lora_weights to {lora_output_gcs_path}.")

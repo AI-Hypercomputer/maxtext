@@ -19,7 +19,7 @@ from typing import Any, Optional, Tuple
 from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2 import config as aqt_config
 from aqt.jax.v2.flax import aqt_flax
-import common_types
+from MaxText import common_types
 from flax import linen as nn
 import jax
 import jax.numpy as jnp

@@ -25,18 +25,18 @@ from flax.linen import partitioning as nn_partitioning
 import jax
 import numpy as np
 
-import checkpointing
-import max_utils
-import maxtext_utils
-import max_logging
-import profiler
-import pyconfig
+from MaxText import checkpointing
+from MaxText import max_utils
+from MaxText import maxtext_utils
+from MaxText import max_logging
+from MaxText import profiler
+from MaxText import pyconfig
 import tensorflow as tf
 
-from input_pipeline.input_pipeline_interface import create_data_iterator
-from gcp_workload_monitor import GCPWorkloadMonitor
-from metric_logger import MetricLogger
-from train import (
+from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
+from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
+from MaxText.metric_logger import MetricLogger
+from MaxText.train import (
     check_example_batch,
     create_goodput_recorder,
     eval_step,

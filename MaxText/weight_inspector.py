@@ -16,7 +16,7 @@ This assumes weights are dumped in a pickle file
 
 Usage:
 
-python MaxText/weight_inspector.py --lhs left_hand.pkl --rhs right_hand.pkl
+python3 -m MaxText.weight_inspector --lhs left_hand.pkl --rhs right_hand.pkl
 
 """
 
@@ -24,7 +24,7 @@ import argparse
 import pickle
 import numpy as np
 import torch
-import max_logging
+from MaxText import max_logging
 
 
 def inspect_weights(left_path, right_path):

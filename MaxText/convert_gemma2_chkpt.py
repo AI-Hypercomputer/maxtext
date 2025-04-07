@@ -27,13 +27,13 @@ from flax.training import train_state
 
 from typing import Any
 import sys
-import max_logging
+from MaxText import max_logging
 
 
 import orbax
 
-import checkpointing
-from train import save_checkpoint
+from MaxText import checkpointing
+from MaxText.train import save_checkpoint
 
 Params = dict[str, Any]
 
