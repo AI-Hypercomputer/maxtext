@@ -178,7 +178,7 @@ def add_xpk_runner_arguments(custom_parser: argparse.ArgumentParser):
       '--xpk_storage',
       default= None,
       action="append",
-      help='Names of XPK storages the workload uses.',
+      help='Names of XPK storages the workload uses. Example, --xpk_storage=storage_test1 --xpk_storage=storage_test2',
   )
 
 
