@@ -441,21 +441,27 @@ def get_coordinator_ip_address():
   return coordinator_ip_address
 
 
+def get_unspecified_mesh_axes_value(parallelism_vals, target_product, parallelism_type):
+  """Evaluates unspecified DCN/ICI parallelism values"""
+  assert (
+      parallelism_vals.count(-1) == 1
+  ), f"Found unspecified values (-1) for more than one {parallelism_type}\
+    parallelism axis. At most one axis can be unspecified."
+
+  determined_val = target_product / np.prod(parallelism_vals) * -1
+
+  assert (
+      determined_val >= 1 and determined_val.is_integer
+  ), f"Unspecified value unable to be determined with the given\
+    {parallelism_type} parallelism values"
+
+  return int(determined_val)
+
+
 def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):
   """Evaluates unspecified DCN/ICI parallelism values"""
   if -1 in parallelism_vals:
-    assert (
-        parallelism_vals.count(-1) == 1
-    ), f"Found unspecified values (-1) for more than one {parallelism_type}\
-      parallelism axis. At most one axis can be unspecified."
-
-    determined_val = target_product / np.prod(parallelism_vals) * -1
-
-    assert (
-        determined_val >= 1 and determined_val.is_integer
-    ), f"Unspecified value unable to be determined with the given\
-      {parallelism_type} parallelism values"
-
+    determined_val = get_unspecified_mesh_axes_value(parallelism_vals, target_product, parallelism_type)
     parallelism_vals[parallelism_vals.index(-1)] = int(determined_val)
 
   target_type = "slices" if parallelism_type == "DCN" else "devices per slice"
@@ -1105,4 +1111,100 @@ def print_system_information():
   Note that this will initialize the JAX backend."""
   max_logging.log(f"System Information: Jax Version: {jax.__version__}")
   max_logging.log(f"System Information: Jaxlib Version: {jax.lib.__version__}")
-  max_logging.log(f"System Information: Jax Backend: {jax.lib.xla_bridge.get_backend().platform_version}")
+  max_logging.log(f"System Information: Jax Backend: {jax.extend.backend.get_backend().platform_version}")
+
+
+def permute_to_match_maxtext_rope(arr):
+  """Permutes the Huggingface Rope to match the MaxText logic."""
+  assert arr.shape[-1] % 2 == 0, "The last dimension for rope has to be even."
+  evens, odds = np.split(arr, 2, axis=arr.ndim - 1)  # pylint: disable=W0632
+  x = np.empty_like(arr)
+  x[..., ::2] = evens
+  x[..., 1::2] = odds
+  return x
+
+
+def unpermute_from_match_maxtext_rope(arr, model_size):
+  """
+  Function to get the RoPE values in correct ordering
+  """
+  if model_size[:8] != "llama3.1":
+    return arr
+  evens = arr[..., ::2]
+  odds = arr[..., 1::2]
+  return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
+
+
+@partial(jax.jit, static_argnums=1)
+def reorder_sequence(tensor, cp_size: int):
+  """Reorders the sequence of the tensor. For example, with cp_size=2,
+  [0, 1, 2, 3, 4, 5, 6, 7] -> [0, 1, 6, 7, 2, 3, 4, 5]"""
+
+  # Assumption is the tensor is of shape [B,S]
+  # Reshape [B,S] -> [B, 2*cp_size, S/(2*cp_size)]
+  batch_size = tensor.shape[0]
+  seq_len = tensor.shape[1]
+  group_size = seq_len // (2 * cp_size)
+
+  reshaped = tensor.reshape(batch_size, 2 * cp_size, group_size)
+
+  # Create first and second halves
+  first_half = jnp.arange(cp_size)
+  second_half = jnp.arange(2 * cp_size - 1, cp_size - 1, -1)
+
+  # Stack and reshape to interleave
+  src_indices = jnp.stack([first_half, second_half], axis=1).reshape(-1)
+
+  # Indexing the reshaped tensor using JAX take operation
+  reordered = jnp.take(reshaped, src_indices, axis=1)
+
+  # Reshape back to original dimensions
+  return reordered.reshape(batch_size, seq_len)
+
+
+@partial(jax.jit, static_argnums=1)
+def reorder_causal_load_balanced(batch, cp_size):
+  """Reorders the example batch sequences"""
+  return {
+      key: reorder_sequence(
+          value,  # Pass each key's value inside batch separately
+          cp_size=cp_size,
+      )
+      if key in ["inputs", "targets", "inputs_position", "targets_position", "inputs_segmentation", "targets_segmentation"]
+      else value
+      for key, value in batch.items()
+  }
+
+
+def shard_reorder_causal_load_balanced(batch, cp_size):
+  """Shard the output of the reordered sequence."""
+  reordered = reorder_causal_load_balanced(batch, cp_size)
+  for _, v in batch.items():
+    if isinstance(v, jax.Array):
+      reordered = jax.lax.with_sharding_constraint(reordered, v.sharding)
+      break
+  return reordered
+
+
+def get_reorder_callable(cp_size):
+  """Creates a callable that can be used with map() to reorder batches."""
+  return functools.partial(shard_reorder_causal_load_balanced, cp_size=cp_size)
+
+
+def compute_axis_product(axis_spec, mesh_dict):
+  """Computes the product of the axis specified in axis_spec."""
+  if isinstance(axis_spec, str):
+    axis_spec = (axis_spec,)
+  elif axis_spec is None:
+    return 1
+  product = 1
+  for dim_name in axis_spec:
+    if dim_name in mesh_dict:
+      product *= mesh_dict[dim_name]
+  return product
+
+
+def construct_parallelism_name(mesh_axis: str, prefix: str) -> str:
+  if mesh_axis == "stage":
+    return f"{prefix}_pipeline_parallelism"
+  return f"{prefix}_{mesh_axis}_parallelism"

@@ -167,31 +167,61 @@ def make_tfds_train_iterator(
     process_indices_train,
 ):
   """load dataset, preprocess and return iterators"""
-  train_ds = get_datasets(
-      dataset_name=config.dataset_name,
-      data_split="train",
-      shuffle_files=config.enable_data_shuffling,
-      shuffle_seed=config.data_shuffle_seed,
-      dataloading_host_index=process_indices_train.index(jax.process_index()),
-      dataloading_host_count=len(process_indices_train),
-  )
-  train_iter = preprocessing_pipeline(
-      dataset=train_ds,
-      tokenizer_path=config.tokenizer_path,
-      tokenizer_type=config.tokenizer_type,
-      global_batch_size=config.global_batch_size_to_load,
-      global_mesh=global_mesh,
-      max_target_length=config.max_target_length,
-      data_column_names=config.train_data_columns,
-      shuffle=config.enable_data_shuffling,
-      data_shuffle_seed=config.data_shuffle_seed,
-      tokenize=config.tokenize_train_data,
-      add_bos=config.add_bos,
-      add_eos=config.add_eos,
-      use_dpo=config.use_dpo,
-      hf_access_token=config.hf_access_token,
-  )
-  return train_iter
+  assert config.global_batch_size_to_load % global_mesh.size == 0, "Batch size should be divisible number of global devices."
+  if not config.colocated_python_data_input:
+    train_ds = get_datasets(
+        dataset_name=config.dataset_name,
+        data_split=config.train_split,
+        shuffle_files=config.enable_data_shuffling,
+        shuffle_seed=config.data_shuffle_seed,
+        dataloading_host_index=process_indices_train.index(jax.process_index()),
+        dataloading_host_count=len(process_indices_train),
+    )
+    train_dataloader = preprocessing_pipeline(
+        dataset=train_ds,
+        tokenizer_path=config.tokenizer_path,
+        tokenizer_type=config.tokenizer_type,
+        global_batch_size=config.global_batch_size_to_load,
+        max_target_length=config.max_target_length,
+        data_column_names=config.train_data_columns,
+        shuffle=config.enable_data_shuffling,
+        data_shuffle_seed=config.data_shuffle_seed,
+        tokenize=config.tokenize_train_data,
+        add_bos=config.add_bos,
+        add_eos=config.add_eos,
+        num_epochs=config.num_epoch,
+        pack_examples=config.packing,
+        use_dpo=config.use_dpo,
+        hf_access_token=config.hf_access_token,
+    )
+    return multihost_dataloading.MultiHostDataLoadIterator(train_dataloader, global_mesh, config)
+  else:
+    get_ds_fn = functools.partial(
+        get_datasets,
+        dataset_name=config.dataset_name,
+        dataset_path=config.dataset_path,
+        data_split=config.train_split,
+        shuffle_files=config.enable_data_shuffling,
+        shuffle_seed=config.data_shuffle_seed,
+    )
+    preprocessing_fn = functools.partial(
+        preprocessing_pipeline,
+        tokenizer_path=config.tokenizer_path,
+        tokenizer_type=config.tokenizer_type,
+        global_batch_size=config.global_batch_size_to_load,
+        max_target_length=config.max_target_length,
+        data_column_names=config.train_data_columns,
+        shuffle=config.enable_data_shuffling,
+        data_shuffle_seed=config.data_shuffle_seed,
+        tokenize=config.tokenize_train_data,
+        add_bos=config.add_bos,
+        add_eos=config.add_eos,
+        num_epochs=config.num_epoch,
+        pack_examples=config.packing,
+        use_dpo=config.use_dpo,
+        hf_access_token=config.hf_access_token,
+    )
+    return multihost_dataloading.RemoteIterator(get_ds_fn, preprocessing_fn, config, global_mesh)
 
 
 def make_tfds_eval_iterator(
@@ -200,30 +230,57 @@ def make_tfds_eval_iterator(
     process_indices_eval,
 ):
   """load eval dataset, preprocess and return iterators"""
-  eval_ds = get_datasets(
-      dataset_name=config.eval_dataset_name,
-      data_split=config.eval_split,
-      shuffle_files=False,
-      shuffle_seed=config.data_shuffle_seed,
-      dataloading_host_index=process_indices_eval.index(jax.process_index()),
-      dataloading_host_count=len(process_indices_eval),
-  )
-
-  eval_iter = preprocessing_pipeline(
-      dataset=eval_ds,
-      tokenizer_path=config.tokenizer_path,
-      tokenizer_type=config.tokenizer_type,
-      global_batch_size=config.global_batch_size_to_load_eval,
-      global_mesh=global_mesh,
-      max_target_length=config.max_target_length,
-      data_column_names=config.eval_data_columns,
-      shuffle=False,
-      data_shuffle_seed=config.data_shuffle_seed,
-      tokenize=config.tokenize_eval_data,
-      add_bos=config.add_bos,
-      add_eos=config.add_eos,
-      use_dpo=config.use_dpo,
-      hf_access_token=config.hf_access_token,
-  )
-
-  return eval_iter
+  assert (
+      config.global_batch_size_to_load_eval % global_mesh.size == 0
+  ), "Batch size should be divisible number of global devices."
+  if not config.colocated_python_data_input:
+    eval_ds = get_datasets(
+        dataset_name=config.eval_dataset_name,
+        data_split=config.eval_split,
+        shuffle_files=False,
+        shuffle_seed=config.data_shuffle_seed,
+        dataloading_host_index=process_indices_eval.index(jax.process_index()),
+        dataloading_host_count=len(process_indices_eval),
+    )
+    eval_dataloader = preprocessing_pipeline(
+        dataset=eval_ds,
+        tokenizer_path=config.tokenizer_path,
+        tokenizer_type=config.tokenizer_type,
+        global_batch_size=config.global_batch_size_to_load_eval,
+        max_target_length=config.max_target_length,
+        data_column_names=config.eval_data_columns,
+        shuffle=False,
+        data_shuffle_seed=config.data_shuffle_seed,
+        tokenize=config.tokenize_eval_data,
+        add_bos=config.add_bos,
+        add_eos=config.add_eos,
+        pack_examples=config.packing,
+        use_dpo=config.use_dpo,
+        hf_access_token=config.hf_access_token,
+    )
+    return multihost_dataloading.MultiHostDataLoadIterator(eval_dataloader, global_mesh, config)
+  else:
+    get_ds_fn = functools.partial(
+        get_datasets,
+        dataset_name=config.eval_dataset_name,
+        data_split=config.eval_split,
+        shuffle_files=False,
+        shuffle_seed=config.data_shuffle_seed,
+    )
+    preprocessing_fn = functools.partial(
+        preprocessing_pipeline,
+        tokenizer_path=config.tokenizer_path,
+        tokenizer_type=config.tokenizer_type,
+        global_batch_size=config.global_batch_size_to_load_eval,
+        max_target_length=config.max_target_length,
+        data_column_names=config.eval_data_columns,
+        shuffle=False,
+        data_shuffle_seed=config.data_shuffle_seed,
+        tokenize=config.tokenize_eval_data,
+        add_bos=config.add_bos,
+        add_eos=config.add_eos,
+        pack_examples=config.packing,
+        use_dpo=config.use_dpo,
+        hf_access_token=config.hf_access_token,
+    )
+    return multihost_dataloading.RemoteIterator(get_ds_fn, preprocessing_fn, config, global_mesh)

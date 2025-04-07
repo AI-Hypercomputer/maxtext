@@ -179,6 +179,45 @@ class TrainTests(unittest.TestCase):
     ]
     train_main(cudnn_flash_te)
 
+  @pytest.mark.gpu_only
+  def test_gpu_context_parallelism(self):
+    os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
+    context_parallel = [  # tests base config on GPU with context parallelism and flash attention"""
+        None,
+        os.path.join(PKG_DIR, "configs", "base.yml"),
+        rf"base_output_directory=gs://runner-maxtext-logs",
+        "run_name=runner_test",
+        r"dataset_path=gs://maxtext-dataset",
+        "steps=10",
+        "enable_checkpointing=False",
+        "attention=cudnn_flash_te",
+        "ici_fsdp_parallelism=-1",
+        "ici_context_parallelism=2",
+        "context_parallel_load_balance=True",
+        "packing=False",
+        rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
+    ]
+    train_main(context_parallel)
+
+  @pytest.mark.gpu_only
+  def test_gpu_tensor_parallelism(self):
+    os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
+    tensor_parallel = [  # tests base config on GPU with context parallelism and flash attention"""
+        None,
+        os.path.join(PKG_DIR, "configs", "base.yml"),
+        rf"base_output_directory=gs://runner-maxtext-logs",
+        "run_name=runner_test",
+        r"dataset_path=gs://maxtext-dataset",
+        "steps=10",
+        "enable_checkpointing=False",
+        "attention=cudnn_flash_te",
+        "ici_fsdp_parallelism=-1",
+        "ici_tensor_parallelism=2",
+        "packing=False",
+        rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
+    ]
+    train_main(tensor_parallel)
+
 
 if __name__ == "__main__":
   absltest.main()

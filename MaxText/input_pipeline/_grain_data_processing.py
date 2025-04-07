@@ -118,25 +118,63 @@ def make_grain_train_iterator(
     process_indices,
 ):
   """Load, preprocess dataset and return iterators"""
-  train_ds = get_datasets(config.grain_train_files)
-  train_iter = preprocessing_pipeline(
-      dataset=train_ds,
-      tokenizer_path=config.tokenizer_path,
-      global_batch_size=config.global_batch_size_to_load,
-      global_mesh=global_mesh,
-      max_target_length=config.max_target_length,
-      grain_worker_count=config.grain_worker_count,
-      dataloading_host_index=process_indices.index(jax.process_index()),
-      dataloading_host_count=len(process_indices),
-      data_columns=config.train_data_columns,
-      shuffle=config.enable_data_shuffling,
-      data_shuffle_seed=config.data_shuffle_seed,
-      tokenize=config.tokenize_train_data,
-      add_bos=config.add_bos,
-      add_eos=config.add_eos,
-      use_dpo=config.use_dpo,
-  )
-  return train_iter
+  assert config.global_batch_size_to_load % global_mesh.size == 0, "Batch size should be divisible number of global devices."
+  if not config.colocated_python_data_input:
+    train_ds = get_datasets(
+        config.grain_train_files,
+        config.grain_file_type,
+        shuffle=config.enable_data_shuffling,
+        shuffle_seed=config.data_shuffle_seed,
+        num_epoch=config.num_epoch,
+        dataloading_host_index=process_indices.index(jax.process_index()),
+        dataloading_host_count=len(process_indices),
+        grain_worker_count=config.grain_worker_count,
+    )
+    if config.use_dpo:
+      train_dataloader = dpo_preprocessing_pipeline(
+          train_ds,
+          config,
+          data_columns=config.train_data_columns,
+          tokenize=config.tokenize_train_data,
+          grain_worker_count=config.grain_worker_count,
+      )
+    else:
+      train_dataloader = pretrain_preprocessing_pipeline(
+          train_ds,
+          config,
+          data_columns=config.train_data_columns,
+          tokenize=config.tokenize_train_data,
+          grain_worker_count=config.grain_worker_count,
+      )
+    return multihost_dataloading.MultiHostDataLoadIterator(train_dataloader, global_mesh, config)
+  else:
+    get_ds_fn = functools.partial(
+        get_datasets,
+        config.grain_train_files,
+        config.grain_file_type,
+        shuffle=config.enable_data_shuffling,
+        shuffle_seed=config.data_shuffle_seed,
+        num_epoch=config.num_epoch,
+        grain_worker_count=config.grain_worker_count,
+    )
+    if config.use_dpo:
+      preprocessing_fn = functools.partial(
+          pretrain_preprocessing_pipeline,
+          config=config,
+          data_columns=config.train_data_columns,
+          tokenize=config.tokenize_train_data,
+          grain_worker_count=config.grain_worker_count,
+      )
+    else:
+      preprocessing_fn = functools.partial(
+          pretrain_preprocessing_pipeline,
+          config=config,
+          data_columns=config.train_data_columns,
+          tokenize=config.tokenize_train_data,
+          grain_worker_count=config.grain_worker_count,
+      )
+    global_shape = (config.global_batch_size_to_load, config.max_target_length)
+    return multihost_dataloading.RemoteIterator(get_ds_fn, preprocessing_fn, global_mesh, global_shape)
 
 
 def make_grain_eval_iterator(
@@ -144,23 +182,62 @@ def make_grain_eval_iterator(
     global_mesh,
     process_indices,
 ):
-
-  eval_ds = get_datasets(config.grain_eval_files)
-  eval_iter = preprocessing_pipeline(
-      dataset=eval_ds,
-      tokenizer_path=config.tokenizer_path,
-      global_batch_size=config.global_batch_size_to_load_eval,
-      global_mesh=global_mesh,
-      max_target_length=config.max_target_length,
-      grain_worker_count=config.grain_worker_count,
-      dataloading_host_index=process_indices.index(jax.process_index()),
-      dataloading_host_count=len(process_indices),
-      data_columns=config.eval_data_columns,
-      shuffle=False,
-      data_shuffle_seed=config.data_shuffle_seed,
-      tokenize=config.tokenize_eval_data,
-      add_bos=config.add_bos,
-      add_eos=config.add_eos,
-      use_dpo=config.use_dpo,
-  )
-  return eval_iter
+  assert (
+      config.global_batch_size_to_load_eval % global_mesh.size == 0
+  ), "Batch size should be divisible number of global devices."
+  if not config.colocated_python_data_input:
+    eval_ds = get_datasets(
+        config.grain_eval_files,
+        config.grain_file_type,
+        shuffle=False,
+        shuffle_seed=config.data_shuffle_seed,
+        num_epoch=1,
+        dataloading_host_index=process_indices.index(jax.process_index()),
+        dataloading_host_count=len(process_indices),
+        grain_worker_count=config.grain_worker_count_eval,
+    )
+    if config.use_dpo:
+      eval_dataloader = dpo_preprocessing_pipeline(
+          eval_ds,
+          config,
+          data_columns=config.eval_data_columns,
+          tokenize=config.tokenize_eval_data,
+          grain_worker_count=config.grain_worker_count_eval,
+      )
+    else:
+      eval_dataloader = pretrain_preprocessing_pipeline(
+          eval_ds,
+          config,
+          data_columns=config.eval_data_columns,
+          tokenize=config.tokenize_eval_data,
+          grain_worker_count=config.grain_worker_count_eval,
+      )
+    return multihost_dataloading.MultiHostDataLoadIterator(eval_dataloader, global_mesh, config)
+  else:
+    get_ds_fn = functools.partial(
+        get_datasets,
+        config.grain_eval_files,
+        config.grain_file_type,
+        shuffle=False,  # No shuffle for eval
+        shuffle_seed=config.data_shuffle_seed,
+        num_epoch=1,
+        grain_worker_count=config.grain_worker_count_eval,
+    )
+    if config.use_dpo:
+      preprocessing_fn = functools.partial(
+          dpo_preprocessing_pipeline,
+          config=config,
+          data_columns=config.eval_data_columns,
+          tokenize=config.tokenize_eval_data,
+          grain_worker_count=config.grain_worker_count_eval,
+      )
+    else:
+      preprocessing_fn = functools.partial(
+          pretrain_preprocessing_pipeline,
+          config=config,
+          data_columns=config.eval_data_columns,
+          tokenize=config.tokenize_eval_data,
+          grain_worker_count=config.grain_worker_count_eval,
+      )
+    global_shape = (config.global_batch_size_to_load, config.max_target_length)
+    return multihost_dataloading.RemoteIterator(get_ds_fn, preprocessing_fn, global_mesh, global_shape)
