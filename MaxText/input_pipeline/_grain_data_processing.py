@@ -196,7 +196,7 @@ def make_grain_train_iterator(
           tokenize=config.tokenize_train_data,
           grain_worker_count=config.grain_worker_count,
       )
-    return multihost_dataloading.MultiHostDataLoadIterator(train_dataloader, global_mesh)
+    return multihost_dataloading.MultiHostDataLoadIterator(train_dataloader, global_mesh, config)
   else:
     get_ds_fn = functools.partial(
         get_datasets,
@@ -262,7 +262,7 @@ def make_grain_eval_iterator(
           tokenize=config.tokenize_eval_data,
           grain_worker_count=config.grain_worker_count_eval,
       )
-    return multihost_dataloading.MultiHostDataLoadIterator(eval_dataloader, global_mesh)
+    return multihost_dataloading.MultiHostDataLoadIterator(eval_dataloader, global_mesh, config)
   else:
     get_ds_fn = functools.partial(
         get_datasets,

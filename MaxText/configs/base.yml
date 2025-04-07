@@ -63,11 +63,12 @@ checkpoint_storage_use_zarr3: True
 checkpoint_storage_concurrent_gb: 96
 ############################### END CHECKPOINTING ##################################
 
-
+############################### BEGIN TESTING ##################################
 reuse_example_batch: 0 # for testing TPU performance, this options repeated uses the same batch.
-
-
 metrics_file: "" # for testing, local file that stores scalar metrics. If empty, no metrics are written.
+disalbe_key_validation: False # for testing, if true, skip the key validation.
+############################### END TESTING ##################################
+
 # If true save metrics such as loss and TFLOPS to GCS in {base_output_directory}/{run_name}/metrics/
 gcs_metrics: False
 
@@ -330,7 +331,7 @@ logical_axis_rules: [
                     ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
 data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']]
-
+input_data_sharding_logical_axes: ['activation_embed_and_logits_batch', 'activation_norm_length']
 # sharding tolerance: float between 0.0 and 1.0 representing the allowed percentage of non-sharded parameters.
 sharding_tolerance: 0.02
 
