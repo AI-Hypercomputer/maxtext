@@ -116,16 +116,15 @@ class MetricLogger:
 
   def write_metrics_to_tensorboard(self, metrics, step, is_training):
     """Writes metrics to TensorBoard"""
-    with jax.spmd_mode("allow_all"):
-      if jax.process_index() == 0:
-        for metric_name in metrics.get("scalar", []):
-          self.writer.add_scalar(metric_name, np.array(metrics["scalar"][metric_name]), step)
-        for metric_name in metrics.get("scalars", []):
-          self.writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
+    if jax.process_index() == 0:
+      for metric_name in metrics.get("scalar", []):
+        self.writer.add_scalar(metric_name, np.array(metrics["scalar"][metric_name]), step)
+      for metric_name in metrics.get("scalars", []):
+        self.writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
 
-      if is_training:
-        full_log = step % self.config.log_period == 0
+    if is_training:
+      full_log = step % self.config.log_period == 0
 
-        if full_log and jax.process_index() == 0:
-          max_logging.log(f"To see full metrics 'tensorboard --logdir={self.config.tensorboard_dir}'")
-          self.writer.flush()
+      if full_log and jax.process_index() == 0:
+        max_logging.log(f"To see full metrics 'tensorboard --logdir={self.config.tensorboard_dir}'")
+        self.writer.flush()

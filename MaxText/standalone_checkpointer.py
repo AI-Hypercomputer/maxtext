@@ -99,13 +99,12 @@ def add_entropy_to_checkpoint(state):
   Returns:
     state: Returns state with entropy added to the optimizer state.
   """
-  with jax.spmd_mode("allow_all"):
-    opt_0 = state.opt_state[0]
-    opt_0 = opt_0._replace(mu=jax.tree_util.tree_map(lambda k: jnp.cos(1000 * k), state.params))
-    opt_0 = opt_0._replace(nu=jax.tree_util.tree_map(lambda k: jnp.sin(1000 * k), state.params))
-    new_opt = [opt_0] + list(state.opt_state[1:])
-    state = state.replace(opt_state=new_opt)
-    return state
+  opt_0 = state.opt_state[0]
+  opt_0 = opt_0._replace(mu=jax.tree_util.tree_map(lambda k: jnp.cos(1000 * k), state.params))
+  opt_0 = opt_0._replace(nu=jax.tree_util.tree_map(lambda k: jnp.sin(1000 * k), state.params))
+  new_opt = [opt_0] + list(state.opt_state[1:])
+  state = state.replace(opt_state=new_opt)
+  return state
 
 
 def main(argv: Sequence[str]) -> None:
