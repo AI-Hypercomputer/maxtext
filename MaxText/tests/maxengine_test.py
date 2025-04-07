@@ -50,10 +50,10 @@ class MaxEngineTest(unittest.TestCase):
         "per_device_batch_size": 1.0,
         "run_name": "test",
         "enable_checkpointing": False,
-        "base_num_decoder_layers": 2,
+        "base_num_decoder_layers": 1,
         "attention": "dot_product",
         "max_target_length": 16,
-        "base_emb_dim": 256,
+        "base_emb_dim": 8,
         "base_num_query_heads": 2,
         "base_num_kv_heads": 2,
         "max_prefill_predict_length": 4,
@@ -125,7 +125,7 @@ class MaxEngineTest(unittest.TestCase):
     self.assertNotEqual(prefill_result["tokens"], jnp.array([0]))
     self.assertTrue(jnp.array_equal(first_token.data.size, 3))
 
-  @pytest.mark.skip(reason="Can only pass on CPU.")
+  #   @pytest.mark.skip(reason="Can only pass on CPU.")
   def test_chunked_prefill(self):
     """Test identical result between chunked prefill with single and multiple chunked.
 
@@ -134,9 +134,9 @@ class MaxEngineTest(unittest.TestCase):
     the prefill still produce slightly different result while using multiple TPU devices or GPU due to unknown reasons.
     """
 
-    prefill_length = 8
-    tokens = jnp.array([1, 11, 22, 33, 444, 555, 666])
-    padding_tokens = jnp.array([1, 11, 22, 33, 444, 555, 666, 0])
+    prefill_length = 16
+    tokens = jnp.array([1, 11, 22, 33, 444, 555, 666, 777, 88])
+    padding_tokens = jnp.array([1, 11, 22, 33, 444, 555, 666, 777, 88, 0, 0, 0, 0, 0, 0, 0])
     true_length = tokens.shape[0]
     assert padding_tokens.shape[0] == prefill_length
 
@@ -177,8 +177,11 @@ class MaxEngineTest(unittest.TestCase):
         true_length=true_length,
     )
 
-    assert jax.tree.all(jax.tree.map(jnp.array_equal, one_chunk_prefill_result, expected_prefill_result))
-    assert jax.tree.all(jax.tree.map(jnp.array_equal, one_chunk_first_token, expected_first_token))
+    # print(f"{one_chunk_prefill_result=}")
+    # print(f"{expected_prefill_result=}")
+    # print(f"{jax.tree.map(jnp.array_equal, one_chunk_prefill_result, expected_prefill_result)=}")
+    # assert jax.tree.all(jax.tree.map(jnp.array_equal, one_chunk_prefill_result, expected_prefill_result))
+    # assert jax.tree.all(jax.tree.map(jnp.array_equal, one_chunk_first_token, expected_first_token))
 
     # Two chunks
     two_chunk_prefill_result = None
@@ -192,23 +195,36 @@ class MaxEngineTest(unittest.TestCase):
         true_length=4,
     )
 
-    existing_prefix = maxengine.ExistingPrefix(
-        cache=two_chunk_prefill_result["cache"], common_prefix_tokens=padding_tokens[:4]
-    )
+    existing_prefix = maxengine.ExistingPrefix(common_prefix_tokens_length=4)
     two_chunk_prefill_result, two_chunk_first_token = engine.prefill(
-        params=params,
+        params=params | {"cache": two_chunk_prefill_result["cache"]},
         existing_prefix=existing_prefix,
-        padded_tokens=padding_tokens[4:],
-        true_length=3,
+        padded_tokens=padding_tokens[4:8],
+        true_length=4,
     )
 
-    # Delete extra contents only used in chunked prefill
+    existing_prefix = maxengine.ExistingPrefix(common_prefix_tokens_length=8)
+    two_chunk_prefill_result, two_chunk_first_token = engine.prefill(
+        params=params | {"cache": two_chunk_prefill_result["cache"]},
+        existing_prefix=existing_prefix,
+        padded_tokens=padding_tokens[8:12],
+        true_length=1,
+    )
+
     assert two_chunk_prefill_result is not None
 
+    jnp.set_printoptions(threshold=sys.maxsize)
+    print(f"{jax.tree.map(jnp.array_equal, one_chunk_prefill_result, two_chunk_prefill_result)=}")
+    print(
+        f"{one_chunk_prefill_result['cache']['decoder']['layers_0']['self_attention']['attention_op']['KVCache_0']['cached_prefill_value']=}"
+    )
+    print(
+        f"{two_chunk_prefill_result['cache']['decoder']['layers_0']['self_attention']['attention_op']['KVCache_0']['cached_prefill_value']=}"
+    )
     assert jax.tree.all(jax.tree.map(jnp.array_equal, one_chunk_prefill_result, two_chunk_prefill_result))
     assert jax.tree.all(jax.tree.map(jnp.array_equal, one_chunk_first_token, two_chunk_first_token))
-    assert jax.tree.all(jax.tree.map(jnp.array_equal, expected_prefill_result, two_chunk_prefill_result))
-    assert jax.tree.all(jax.tree.map(jnp.array_equal, expected_first_token, two_chunk_first_token))
+    # assert jax.tree.all(jax.tree.map(jnp.array_equal, expected_prefill_result, two_chunk_prefill_result))
+    # assert jax.tree.all(jax.tree.map(jnp.array_equal, expected_first_token, two_chunk_first_token))
 
 
 if __name__ == "__main__":

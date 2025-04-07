@@ -182,20 +182,17 @@ class AttentionOp(nn.Module):
   def generate_attention_mask(
       self, query, key, decoder_segment_ids: Array | None, model_mode: str, previous_chunk: Any = None
   ) -> Array | None:
+    _, q_seq_len, _, _ = query.shape
+    _, kv_seq_len, _, _ = key.shape
+    next_pos = previous_chunk if previous_chunk is not None else 0
+
     mask = None
     if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       mask = decoder_segment_ids[:, None, None, None, :] == common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     elif decoder_segment_ids is not None:
       mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
+      mask = jax.lax.dynamic_slice_in_dim(mask, start_index=next_pos, slice_size=q_seq_len, axis=1)
       mask = mask[:, None, None, :, :]
-
-    _, q_seq_len, _, _ = query.shape
-    _, kv_seq_len, _, _ = key.shape
-    next_pos = 0
-    if previous_chunk is not None:
-      next_pos = previous_chunk.shape[1]
-      if mask is not None:
-        mask = mask[:, :, :, next_pos : next_pos + q_seq_len, :]
 
     causal_mask = None
     # We enforce causality except for AUTOREGRESSION

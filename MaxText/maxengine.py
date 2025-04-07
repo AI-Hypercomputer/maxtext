@@ -65,8 +65,7 @@ class ExistingPrefix:
     common_prefix_tokens: The tokens that have already been processed without padding.
   """
 
-  cache: Any
-  common_prefix_tokens: jax.Array
+  common_prefix_tokens_length: int
 
 
 class MaxEngineConfig:
@@ -431,28 +430,24 @@ class MaxEngine(engine_api.Engine):
 
     start_position = 0
     previous_chunk = None
-    input_params = params
     if existing_prefix is not None:
-      input_params = params | {"cache": existing_prefix.cache}
-      start_position = existing_prefix.common_prefix_tokens.shape[0]
+      start_position = existing_prefix.common_prefix_tokens_length
       # TODO(yuyanpeng): rename previous_chunk
-      previous_chunk = jnp.expand_dims(existing_prefix.common_prefix_tokens, 0)
-
-    full_true_length = start_position + true_length
-
-    input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
-    positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
+      previous_chunk = start_position
 
     # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
-    start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
-    ones_to_keep = start_to_n < full_true_length
+    zero_to_n = jnp.arange(0, padded_tokens.shape[0])
+    ones_to_keep = zero_to_n < true_length
     one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
+
+    input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
+    positions = jnp.expand_dims(zero_to_n + start_position, 0)
 
     rng, new_rng = jax.random.split(rng)
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       flat_logits, new_vars = self.model.apply(
-          input_params,
+          params,
           input_tokens,
           positions,
           decoder_segment_ids=sequence_indicator,
@@ -499,7 +494,7 @@ class MaxEngine(engine_api.Engine):
 
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
-    next_pos = jnp.full((1, 1), full_true_length, dtype=jnp.int32)
+    next_pos = jnp.full((1, 1), start_position + true_length, dtype=jnp.int32)
     return {
         "logits": selected_logits,
         "cache": cache,

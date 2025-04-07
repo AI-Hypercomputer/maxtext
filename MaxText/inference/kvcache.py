@@ -344,7 +344,7 @@ class KVCache(nn.Module):
     value_vars = (cached_value_var, cached_value_scale_var)
     return key_vars, value_vars, cached_segment_id_var, cache_index_var, cached_lengths_var
 
-  def kv_cache_prefill_concatenated(self, key: Array, value: Array, decoder_segment_ids: Array, previous_chunk: Any):
+  def kv_cache_prefill_chunked(self, key: Array, value: Array, decoder_segment_ids: Array, previous_chunk: Any):
     """Return KV cache concatenating to existing prefix."""
 
     assert not self.kv_quant, "Not support kv_quant now."
@@ -353,7 +353,7 @@ class KVCache(nn.Module):
 
     assert key.dtype == value.dtype, "Key and Value Dtypes should match."
 
-    assert previous_chunk is not None
+    # assert previous_chunk is not None
 
     cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
         batch, heads, key_head_size, value_head_size, common_types.MODEL_MODE_PREFILL
@@ -366,7 +366,7 @@ class KVCache(nn.Module):
     key_shaped_for_cache = jnp.transpose(key, self.prefill_cache_axis_order)
     value_shaped_for_cache = jnp.transpose(value, self.prefill_cache_axis_order)
 
-    next_pos = previous_chunk.shape[1]
+    next_pos = previous_chunk if previous_chunk is not None else 0
     cached_key = self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order)
     cached_value = self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order)
     cached_key_value = jnp.transpose(cached_key, self.prefill_cache_axis_order)
@@ -375,20 +375,25 @@ class KVCache(nn.Module):
     seq_axis = self.prefill_cache_logical_axis_names.index(CACHE_SEQUENCE)
     cache_seq_axis = self.prefill_cache_axis_order.index(seq_axis)
 
-    cached_prefill_key_vars[0].value = jnp.concatenate(
-        [cached_key_value[:next_pos], key_shaped_for_cache],
-        axis=cache_seq_axis,
+    # If next_pos + cached_key_value.shape[seq_axis] > than max_prefill_length cause undefined behavior
+
+    cached_key_value = jax.lax.dynamic_update_slice_in_dim(
+        cached_key_value, key_shaped_for_cache, start_index=next_pos, axis=cache_seq_axis
+    )
+    cached_value_value = jax.lax.dynamic_update_slice_in_dim(
+        cached_value_value, value_shaped_for_cache, start_index=next_pos, axis=cache_seq_axis
     )
 
-    cached_prefill_value_vars[0].value = jnp.concatenate(
-        [cached_value_value[:next_pos], value_shaped_for_cache],
-        axis=cache_seq_axis,
-    )
+    cached_prefill_key_vars[0].value = cached_key_value
+    cached_prefill_value_vars[0].value = cached_value_value
 
     if decoder_segment_ids is not None:
-      cached_prefill_segment_id_var.value = jnp.concatenate(
-          [cached_prefill_segment_id_var.value[:, :next_pos], decoder_segment_ids],
-          axis=1,
+      cache_segment_ids_value = jax.lax.dynamic_update_slice_in_dim(
+          cached_prefill_segment_id_var.value, decoder_segment_ids, start_index=next_pos, axis=1
+      )
+      zero_to_n = jax.lax.broadcasted_iota(jnp.int32, cached_prefill_segment_id_var.value.shape, 0)
+      cached_prefill_segment_id_var.value = jnp.where(
+          zero_to_n < (next_pos + decoder_segment_ids.shape[1]), cache_segment_ids_value, 0
       )
 
     return (
@@ -416,8 +421,8 @@ class KVCache(nn.Module):
       key, value, decoder_segment_id.
 
     """
-    if previous_chunk is not None:
-      return self.kv_cache_prefill_concatenated(key, value, decoder_segment_ids, previous_chunk)
+    if self.use_chunked_prefill:
+      return self.kv_cache_prefill_chunked(key, value, decoder_segment_ids, previous_chunk)
 
     batch, _, heads, key_head_size = key.shape
     batch, _, heads, value_head_size = value.shape
