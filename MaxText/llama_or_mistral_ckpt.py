@@ -38,6 +38,7 @@ import re
 import logging
 import json
 from dataclasses import dataclass
+from inference_utils import str2bool
 
 os.environ["JAX_PLATFORMS"] = "cpu"
 
@@ -1053,9 +1054,9 @@ if __name__ == "__main__":
   parser.add_argument("--maxtext-model-path", type=str, required=True)
   parser.add_argument("--model-size", type=str, required=True)
   parser.add_argument("--lora-input-adapters-path", type=str, required=False)
-  parser.add_argument("--huggingface-checkpoint", type=bool, required=False, default=False)
-  parser.add_argument("--use-ocdbt", type=bool, required=False, default=True)
-  parser.add_argument("--use-zarr3", type=bool, required=False, default=True)
+  parser.add_argument("--huggingface-checkpoint", type=str2bool, required=False, default=False)
+  parser.add_argument("--use-ocdbt", type=str2bool, required=False, default=True)
+  parser.add_argument("--use-zarr3", type=str2bool, required=False, default=True)
   args = parser.parse_args()
 
   if args.model_size not in MODEL_PARAMS_DICT:

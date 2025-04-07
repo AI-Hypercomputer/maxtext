@@ -26,6 +26,7 @@ import argparse
 import os
 import time
 
+from inference_utils import str2bool
 from maxtext_trillium_model_configs import trillium_model_dict
 from maxtext_v5e_model_configs import v5e_model_dict
 from maxtext_xpk_runner import PathwaysConfig
@@ -69,7 +70,7 @@ def add_pathways_arguments(parser: argparse.ArgumentParser):
   )
   parser.add_argument(
       '--use_pathways',
-      type=bool,
+      type=str2bool,
       default=False,
       help='whether to use pathways or not.',
   )

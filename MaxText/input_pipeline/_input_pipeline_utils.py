@@ -66,36 +66,34 @@ def add_segmentation_and_position(x, data_columns, padding_token=0):
 ########## Functions used by HF pipeline
 
 
-def combine_columns(example, columns):
+def combine_columns(example, columns, data_column):
   """Combine columns such as 'prompt' and 'completion' for sft training"""
   assert len(columns) > 1
   combined = []
   for i in range(len(example[columns[0]])):
     for c in columns:
       combined.append(example[c][i])
-  example["messages"] = combined
+  example[data_column] = combined
   return example
 
 
-def is_conversational(example):
+def is_conversational(features, data_columns):
   """Check if data is in a conversational format.
   Examples:
 
-  example = {'prompt': [{'content': 'question', 'role': 'user'}], 'completion': [{'content': 'answer', 'role': 'assistant'}]}
-  is_conversational(example) return True.
+  features = {'prompt': [{'content': Value(dtype='string', id=None), 'role': Value(dtype='string', id=None)}], 'completion': [{'content': Value(dtype='string', id=None), 'role': Value(dtype='string', id=None)}]}
+  data_columns = ["prompt", "completion"]
+  is_conversational(features, data_columns) return True.
 
-  example = {"prompt": "I love to"})
-  is_conversational(example) returns False.
+  features = {'prompt': [Value(dtype='string', id=None)], 'completion': [Value(dtype='string', id=None)]}
+  data_columns = ["prompt", "completion"]
+  is_conversational(features, data_columns) returns False.
   """
-  supported_columns = ["prompt", "completion", "messages"]
-  data_columns = [column for column in example.keys() if column in supported_columns]
-
-  if data_columns:
-    for column in data_columns:
-      messages = example[column]
-      if isinstance(messages, list):
-        if isinstance(messages[0], dict) and "role" in messages[0] and "content" in messages[0]:
-          return True
+  for column in data_columns:
+    messages = features[column]
+    if isinstance(messages, list):
+      if isinstance(messages[0], dict) and "role" in messages[0] and "content" in messages[0]:
+        return True
 
   return False
 

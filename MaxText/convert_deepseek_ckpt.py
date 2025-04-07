@@ -35,6 +35,7 @@ import psutil
 from tqdm import tqdm
 
 from MaxText import max_logging
+from MaxText.inference_utils import str2bool
 from safetensors import safe_open
 from MaxText import llama_or_mistral_ckpt
 
@@ -499,8 +500,8 @@ def main() -> None:
   parser.add_argument("--maxtext_model_path", type=str, required=True)
   parser.add_argument("--model_size", type=str, required=True)
   parser.add_argument("--simulated_cpu_devices_count", type=int, required=False, default=16)
-  parser.add_argument("--use-ocdbt", type=bool, required=False, default=True)
-  parser.add_argument("--use-zarr3", type=bool, required=False, default=True)
+  parser.add_argument("--use-ocdbt", type=str2bool, required=False, default=True)
+  parser.add_argument("--use-zarr3", type=str2bool, required=False, default=True)
   args = parser.parse_args()
 
   if args.model_size not in MODEL_PARAMS_DICT:
