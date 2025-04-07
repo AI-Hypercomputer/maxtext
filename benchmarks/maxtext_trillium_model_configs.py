@@ -1002,9 +1002,6 @@ llama3_1_70b_8192_iter_synthetic = _add_to_model_dictionary(
         "sa_block_q_dq": 2048,
         "sa_block_kv_dq": 2048,
         "sa_use_fused_bwd_kernel": True,
-        #"profiler": "xplane",
-        #"skip_first_n_steps_for_profiler": 10,
-        #"profiler_steps": 5,
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -1048,10 +1045,6 @@ llama3_1_70b_8192_iter_real_data_grain = _add_to_model_dictionary(
         "sa_block_q_dq": 2048,
         "sa_block_kv_dq": 2048,
         "sa_use_fused_bwd_kernel": True,
-        #"gcs_metrics": True,
-        #"profiler": "xplane",
-        #"skip_first_n_steps_for_profiler": 10,
-        #"profiler_steps": 5,
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -1094,9 +1087,6 @@ llama3_1_70b_8192_iter_synthetic_ckpt = _add_to_model_dictionary(
         "sa_block_q_dq": 2048,
         "sa_block_kv_dq": 2048,
         "sa_use_fused_bwd_kernel": True,
-        #"profiler": "xplane",
-        #"skip_first_n_steps_for_profiler": 10,
-        #"profiler_steps": 5,
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -1142,10 +1132,6 @@ llama3_1_70b_8192_iter_real_data_and_checkpointing = _add_to_model_dictionary(
         "sa_block_q_dq": 2048,
         "sa_block_kv_dq": 2048,
         "sa_use_fused_bwd_kernel": True,
-        #"gcs_metrics": True,
-        #"profiler": "xplane",
-        #"skip_first_n_steps_for_profiler": 10,
-        #"profiler_steps": 5,
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
