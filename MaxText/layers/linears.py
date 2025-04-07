@@ -704,7 +704,7 @@ class MoeBlock(nn.Module):
         # Or we could apply capacity_factor for excessive experts.
         # Note: Reducing buffer increase the risk of token dropping under unbalanced distribution.
         buffer_size = int(
-            self.get_expert_parallelism()
+            2
             * self.config.per_device_batch_size
             * self.config.max_target_length
             * self.config.num_experts_per_tok
