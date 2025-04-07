@@ -75,7 +75,7 @@ class PathwaysConfig:
   server_image: str = None
   proxy_server_image: str = None
   runner_image: str = None
-  remote_python_sidecar_image: str = None
+  colocated_python_sidecar_image: str = None
   server_flags: str = ''
   proxy_flags: str = ''
   worker_flags: str = ''
@@ -510,9 +510,9 @@ def _get_pathways_specific_flags(wl_config: WorkloadConfig):
   if pw_config is None:
     return ''
 
-  remote_python_sidecar_image_flag = (
-      f' --remote-python-sidecar-image={pw_config.remote_python_sidecar_image}'
-      if pw_config.remote_python_sidecar_image is not None
+  colocated_python_sidecar_image_flag = (
+      f' --colocated-python-sidecar-image={pw_config.colocated_python_sidecar_image}'
+      if pw_config.colocated_python_sidecar_image is not None
       else ''
   )
   server_image_flag = (
@@ -533,7 +533,7 @@ def _get_pathways_specific_flags(wl_config: WorkloadConfig):
   pathways_specific_flags = (
       f' {server_image_flag} '
       f' {proxy_server_image_flag} '
-      f' {remote_python_sidecar_image_flag} '
+      f' {colocated_python_sidecar_image_flag} '
       f' --termination-grace-period-seconds=300 '
       f' --pathways-gcs-location={wl_config.base_output_directory} '
       f' --custom-pathways-server-args="{server_flags}" '
