@@ -27,6 +27,8 @@ import numpy as np
 import tensorflow as tf
 import max_logging
 import tokenizer
+from PIL import Image
+
 
 Features = Dict[str, tf.Tensor]
 AUTOTUNE = tf.data.experimental.AUTOTUNE
@@ -70,9 +72,13 @@ def combine_columns(example, columns, data_column):
   """Combine columns such as 'prompt' and 'completion' for sft training"""
   assert len(columns) > 1
   combined = []
-  for i in range(len(example[columns[0]])):
-    for c in columns:
-      combined.append(example[c][i])
+  if "query" in columns and "label" in columns:
+    combined = [{"content": example["query"], "role": "user"},
+                {"content": example["label"][0], "role": "assistant"}]
+  else:
+    for i in range(len(example[columns[0]])):
+      for c in columns:
+        combined.append(example[c][i])
   example[data_column] = combined
   return example
 
@@ -95,6 +101,8 @@ def is_conversational(features, data_columns):
       if isinstance(messages[0], dict) and "role" in messages[0] and "content" in messages[0]:
         return True
 
+  if "query" in data_columns and "label" in data_columns:
+    return True
   return False
 
 
@@ -124,6 +132,114 @@ def tokenization(example, hf_tokenizer, truncation, max_length, column_names):
       ]
     elif isinstance(example[column_name], str):
       example[column_name] = hf_tokenizer(example[column_name], truncation=truncation, max_length=max_length)["input_ids"]
+  return example
+
+
+_IMAGE_MEAN = (127.5,) * 3
+_IMAGE_STD = (127.5,) * 3
+_DEFAULT_IMAGE_SIZE = 896
+
+# def normalize_images(images):
+#   """Normalize the image to zero mean and unit variance.
+
+#   In order to change the image mean and std, we need to change the _IMAGE_MEAN
+#   and _IMAGE_STD global constants in this file.
+
+#   Args:
+#     images: The images to normalize.
+
+#   Returns:
+#     The normalized images.
+#   """
+#   images -= jnp.asarray(_IMAGE_MEAN)
+#   images /= jnp.asarray(_IMAGE_STD)
+#   return images
+
+
+# def pre_process_image(
+#     image,
+#     *,
+#     image_height: int = _DEFAULT_IMAGE_SIZE,
+#     image_width: int = _DEFAULT_IMAGE_SIZE,
+# ):
+#   """Pre-process image.
+
+#   Performs a bi-linear resize (with anti-aliasing) and normalizes the image.
+
+#   Args:
+#     image: The image to pre-process.
+#     image_height: The height of the image (default to 896).
+#     image_width: The width of the image (default to 896).
+
+#   Returns:
+#     The pre-processed image.
+#   """
+#   print(image.shape)
+#   image = jnp.asarray(
+#       tf.image.decode_jpeg(tf.io.encode_jpeg(image), channels=3)
+#   )
+#   image = jax.image.resize(
+#       image,
+#       shape=(image_height, image_width, 3),
+#       method="bilinear",
+#       antialias=True,
+#   )
+#   image = normalize_images(image)
+#   image = jnp.clip(image, -1, 1)
+#   return image
+
+def normalize_images(images):
+  """Normalize the image to zero mean and unit variance.
+
+  In order to change the image mean and std, we need to change the _IMAGE_MEAN
+  and _IMAGE_STD global constants in this file.
+
+  Args:
+    images: The images to normalize.
+
+  Returns:
+    The normalized images.
+  """
+  images = np.array(images, dtype=np.float32)
+  images -= np.asarray(_IMAGE_MEAN)
+  images /= np.asarray(_IMAGE_STD)
+  return images
+
+
+def pre_process_image(
+    image,
+    *,
+    image_height: int = _DEFAULT_IMAGE_SIZE,
+    image_width: int = _DEFAULT_IMAGE_SIZE,
+):
+  """Pre-process image.
+
+  Performs a bi-linear resize (with anti-aliasing) and normalizes the image.
+
+  Args:
+    image: The image to pre-process.
+    image_height: The height of the image (default to 896).
+    image_width: The width of the image (default to 896).
+
+  Returns:
+    The pre-processed image as np array.
+  """
+  if not isinstance(image, Image.Image):
+    raise ValueError("Input image must be a PIL Image object.")
+  
+  image = image.convert("RGB")
+  image = image.resize((image_width, image_height), Image.Resampling.BILINEAR)
+  image = np.array(image)
+  image = normalize_images(image)
+  image = np.clip(image, -1, 1)
+  # return image.tolist()
+  return image
+
+
+def preprocess_dataset_image(example, image_column_name, data_column):
+  """Combine columns such as 'prompt' and 'completion' for sft training"""
+  img_array = pre_process_image(example[image_column_name])
+  example[data_column] = img_array
   return example
 
 

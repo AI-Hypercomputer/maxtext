@@ -49,6 +49,7 @@ def preprocessing_pipeline(
     generate_padding_example=False,
     use_dpo=None,
     use_sft=None,
+    use_multimodal=None,
     sft_train_on_completion_only=True,
     grain_worker_count=1,  # only support 0 or 1
 ):
@@ -58,11 +59,30 @@ def preprocessing_pipeline(
 
   if shuffle:
     dataset = dataset.shuffle(seed=data_shuffle_seed)
+  for example in dataset.take(1):
+    print(example)
+  if use_multimodal:
+    dataset_multimodal = dataset.select_columns(['image'])
+    image_column_name = "image"
+    image_array_column_name = "image_array"
+    dataset_features = datasets.Features(
+        {image_array_column_name: datasets.Array3D(dtype="float32", shape=(896, 896, 3))}
+    )
+    dataset_multimodal = dataset_multimodal.map(
+        _input_pipeline_utils.preprocess_dataset_image,
+        fn_kwargs={"image_column_name": image_column_name, "data_column": image_array_column_name},
+        remove_columns=image_column_name,
+        features=dataset_features,
+    )
+    for example in dataset_multimodal.take(1):
+      print(len(example['image_array']))
+      print(type(example['image_array']))
+      
 
   if use_sft:
     dataset = dataset.select_columns(data_column_names)
 
-    supported_columns = [["prompt", "completion"], ["messages"]]
+    supported_columns = [["prompt", "completion"], ["messages"], ["query", "label", "image"]]
     assert any(
         set(data_column_names) == set(supported) for supported in supported_columns
     ), f"Dataset column names mismatch. Expected columns to match one of {supported_columns}, but got {data_column_names}"
@@ -102,7 +122,7 @@ def preprocessing_pipeline(
     pad_id = tokenizer.unk_token_id
   else:
     pad_id = -1
-
+  # dataset = datasets.concatenate_datasets([dataset, dataset_multimodal], axis=1)
   if tokenize:
     dataset = dataset.map(
         _input_pipeline_utils.tokenization,
@@ -114,7 +134,17 @@ def preprocessing_pipeline(
             "column_names": data_column_names,
         },
     )
-
+  print(dataset)
+  print(dataset_multimodal)
+  dataset = datasets.concatenate_datasets([dataset, dataset_multimodal], axis=1)
+  for example in dataset.take(1):
+    print("*"*50)
+    messages = example["messages"]
+    is_prompt = example["is_prompt"]
+    image_array = example["image_array"]
+    print(f"tokenized message: {messages}")
+    print(f"is prompt: {is_prompt}")
+    print(f"image_array shape: {image_array.shape}")
   dataset = _input_pipeline_utils.HFDataSource(
       dataset,
       dataloading_host_index,
@@ -124,6 +154,7 @@ def preprocessing_pipeline(
       max_target_length,
       data_column_names,
   )
+  print(dataset)
   operations = []
   if use_sft:
     operations.append(
@@ -224,6 +255,7 @@ def make_hf_train_iterator(
       generate_padding_example=False,
       use_dpo=config.use_dpo,
       use_sft=config.use_sft,
+      use_multimodal=config.use_multimodal,
       sft_train_on_completion_only=config.sft_train_on_completion_only,
   )
   return train_iter
