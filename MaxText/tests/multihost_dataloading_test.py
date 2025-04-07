@@ -61,7 +61,7 @@ class MultihostDataloadingTest(unittest.TestCase):
     dataset = tf.data.Dataset.from_tensor_slices(global_data)
     dataset = dataset.repeat()
     dataset = dataset.batch(batch_size)
-    self.multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataset, self.mesh)
+    self.multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataset, self.mesh, config.logical_axis_rules)
 
   @pytest.mark.tpu_only
   def test_batch_sharded_data_pipeline(self):

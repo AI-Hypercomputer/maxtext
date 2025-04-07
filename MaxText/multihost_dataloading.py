@@ -36,25 +36,47 @@ from jax.experimental import colocated_python
 import jax.numpy as jnp
 import grain.python as grain
 
+from MaxText import maxtext_utils
 from MaxText import max_logging
 
 
-def _build_global_shape_and_sharding(
-    local_shape: tuple[int, ...], global_mesh: Mesh
-) -> tuple[tuple[int, ...], NamedSharding]:
-  sharding = NamedSharding(global_mesh, PartitionSpec(global_mesh.axis_names))
-
+def _build_global_shape(local_shape: tuple[int, ...]) -> tuple[tuple[int, ...], NamedSharding]:
   global_shape = (jax.process_count() * local_shape[0],) + local_shape[1:]
+  return global_shape
 
-  return global_shape, sharding
+
+def _calculate_input_data_sharding_prod(mesh: Mesh, input_data_shardings: NamedSharding) -> int:
+  """Calculate the product of the mesh sizes for the batch dimension of input data sharding."""
+  try:
+    physical_axes = input_data_shardings.spec[0]
+  except AttributeError:
+    raise ValueError(
+        f"input_data_shardings does not have a .spec attribute (expected a PartitionSpec), got: {type(input_data_shardings)}"
+    )
+  except (IndexError, TypeError):
+    raise ValueError(f"input_data_shardings.spec is not indexable: {input_data_shardings.spec}")
+
+  # If it's a string (single axis), convert to tuple for consistent handling
+  if isinstance(physical_axes, str):
+    physical_axes = (physical_axes,)
+
+  # Calculate product of mesh sizes for these dimensions
+  product = 1
+  for dim_name in physical_axes:
+    if dim_name in mesh.shape:
+      product *= mesh.shape[dim_name]
+
+  return product
 
 
-def _form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
+def _form_global_array(
+    path, array: np.ndarray, global_mesh: Mesh, input_data_shardings: NamedSharding, input_data_sharding_factor: int
+) -> jax.Array:
   """Put local sharded array into local devices"""
-  global_shape, sharding = _build_global_shape_and_sharding(np.shape(array), global_mesh)
+  global_shape = _build_global_shape(np.shape(array))
 
   try:
-    local_device_arrays = np.split(array, len(global_mesh.local_devices), axis=0)
+    local_device_arrays = np.split(array, input_data_sharding_factor, axis=0)
   except ValueError as array_split_error:
     raise ValueError(
         f"Unable to put to devices shape {array.shape} with "
@@ -62,11 +84,24 @@ def _form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
         f"at {jtu.keystr(path)}"
     ) from array_split_error
 
-  local_device_buffers = jax.device_put(local_device_arrays, global_mesh.local_devices)
-  return jax.make_array_from_single_device_arrays(global_shape, sharding, local_device_buffers)
+  # The data sharding factor is only part of the data loading axes, when enable
+  # e.g. TP, device per shard is no longer 1
+  devices_per_shard = len(global_mesh.local_devices) // input_data_sharding_factor
+  local_device_buffers = []
+  for i, shard in enumerate(local_device_arrays):
+    # Calculate which devices should get this shard
+    shard_devices = global_mesh.local_devices[i * devices_per_shard : (i + 1) * devices_per_shard]
+
+    # Put the same shard data on each device in this group
+    for device in shard_devices:
+      local_device_buffers.append(jax.device_put(shard, device))
+
+  return jax.make_array_from_single_device_arrays(global_shape, input_data_shardings, local_device_buffers)
 
 
-def get_next_batch_sharded(local_iterator: Iterator, global_mesh: Mesh) -> jax.Array:
+def get_next_batch_sharded(
+    local_iterator: Iterator, global_mesh: Mesh, input_data_shardings: NamedSharding, input_data_sharding_factor: int
+) -> jax.Array:
   """Splits the host loaded data equally over all devices."""
 
   SLEEP_TIME = 10
@@ -86,8 +121,15 @@ def get_next_batch_sharded(local_iterator: Iterator, global_mesh: Mesh) -> jax.A
   # Try one last time, if this fails we will see the full stack trace.
   if not loaded_data_success:
     local_data = next(local_iterator)
-
-  input_gdas = jtu.tree_map_with_path(partial(_form_global_array, global_mesh=global_mesh), local_data)
+  input_gdas = jtu.tree_map_with_path(
+      partial(
+          _form_global_array,
+          global_mesh=global_mesh,
+          input_data_shardings=input_data_shardings,
+          input_data_sharding_factor=input_data_sharding_factor,
+      ),
+      local_data,
+  )
 
   return input_gdas
 
@@ -95,9 +137,11 @@ def get_next_batch_sharded(local_iterator: Iterator, global_mesh: Mesh) -> jax.A
 class MultiHostDataLoadIterator:
   """fold get_next_batch_sharded into a iterator class"""
 
-  def __init__(self, dataloader: Union[tf.data.Dataset, Iterable], global_mesh: Mesh):
+  def __init__(self, dataloader: Union[tf.data.Dataset, Iterable], global_mesh: Mesh, logical_axis_rules):
     self.global_mesh = global_mesh
     self.dataloader = dataloader
+    self.input_data_shardings = maxtext_utils.get_input_data_sharding(global_mesh, logical_axis_rules)
+    self.input_data_sharding_factor = _calculate_input_data_sharding_prod(global_mesh, self.input_data_shardings)
     if isinstance(self.dataloader, tf.data.Dataset):
       self.local_iterator = self.dataloader.as_numpy_iterator()
     elif isinstance(self.dataloader, Iterable):
@@ -118,7 +162,9 @@ class MultiHostDataLoadIterator:
     return self
 
   def __next__(self):
-    return get_next_batch_sharded(self.local_iterator, self.global_mesh)
+    return get_next_batch_sharded(
+        self.local_iterator, self.global_mesh, self.input_data_shardings, self.input_data_sharding_factor
+    )
 
 
 @colocated_python.colocated_python

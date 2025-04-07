@@ -19,6 +19,7 @@ import os
 import sys
 import jax
 from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 from jax.experimental import mesh_utils
 
 import unittest
@@ -52,8 +53,10 @@ class TfdsDataProcessingTest(unittest.TestCase):
     self.config = config
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
+    data_pspec = P(*self.config.data_sharding)
+    data_sharding = jax.sharding.NamedSharding(self.mesh, data_pspec)
     self.process_indices = input_pipeline_interface.get_process_loading_real_data(
-        self.config.data_sharding,
+        data_sharding,
         self.config.global_batch_size_to_load,
         self.config.global_batch_size_to_train_on,
         self.config.max_target_length,

@@ -21,6 +21,7 @@ import os.path
 import numpy as np
 import jax
 from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 from jax.experimental import mesh_utils
 from datasets import Dataset
 import transformers
@@ -30,6 +31,8 @@ from MaxText.globals import PKG_DIR
 from MaxText.input_pipeline import _hf_data_processing
 from MaxText.input_pipeline import input_pipeline_interface
 from MaxText.tests.globals import TEST_DISABLE_SFT_DATA_PROCESSING, TEST_DISABLE_SFT_DATA_PROCESSING_STR
+from MaxText import multihost_dataloading
+
 
 PROMPT_DATA = [
     [
@@ -120,8 +123,10 @@ class SFTDataProcessingTest(unittest.TestCase):
     )
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
+    data_pspec = P(*self.config.data_sharding)
+    data_sharding = jax.sharding.NamedSharding(self.mesh, data_pspec)
     self.process_indices = input_pipeline_interface.get_process_loading_real_data(
-        self.config.data_sharding,
+        data_sharding,
         self.config.global_batch_size_to_load,
         self.config.global_batch_size_to_train_on,
         self.config.max_target_length,
@@ -136,7 +141,7 @@ class SFTDataProcessingTest(unittest.TestCase):
     )
 
   def get_train_iterator(self, train_ds, data_columns):
-    self.train_iter = _hf_data_processing.preprocessing_pipeline(
+    train_data_loader = _hf_data_processing.preprocessing_pipeline(
         dataloading_host_index=self.process_indices.index(jax.process_index()),
         dataloading_host_count=len(self.process_indices),
         global_mesh=self.mesh,
@@ -157,6 +162,9 @@ class SFTDataProcessingTest(unittest.TestCase):
         use_sft=self.config.use_sft,
         sft_train_on_completion_only=self.config.sft_train_on_completion_only,
         grain_worker_count=0,
+    )
+    self.train_iter = multihost_dataloading.MultiHostDataLoadIterator(
+        train_data_loader, self.mesh, self.config.logical_axis_rules
     )
 
   def test_sft_format_with_messages(self):
