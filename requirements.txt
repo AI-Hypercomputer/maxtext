@@ -15,6 +15,7 @@ google-api-core
 google-api-python-client
 grain[parquet]>=0.2.6
 flax>=0.8.0
+jaxtyping
 ml-collections
 ml-goodput-measurement==0.0.8
 numpy
