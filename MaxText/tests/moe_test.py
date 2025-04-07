@@ -13,11 +13,11 @@
 #  limitations under the License.
 
 import jax
-import sre_parse
 import os.path
 import unittest
 from MaxText.layers import linears
 from MaxText.layers import initializers
+from MaxText.layers import moe
 import jax.numpy as jnp
 
 from MaxText import pyconfig
@@ -55,7 +55,7 @@ class TokenDroppingTest(unittest.TestCase):
     )
     self.rng = jax.random.PRNGKey(42)
     devices_array = max_utils.create_device_mesh(self.cfg)
-    self.model = linears.MoeBlock(
+    self.model = moe.MoeBlock(
         config=self.cfg,
         num_experts=self.cfg.num_experts,
         num_experts_per_tok=self.cfg.num_experts_per_tok,
@@ -181,7 +181,7 @@ class DeepSeekRoutingTest(unittest.TestCase):
     )
     self.rng = jax.random.PRNGKey(42)
     devices_array = max_utils.create_device_mesh(self.cfg)
-    self.model = linears.MoeBlock(
+    self.model = moe.MoeBlock(
         config=self.cfg,
         num_experts=self.cfg.num_experts,
         num_experts_per_tok=self.cfg.num_experts_per_tok,
@@ -243,9 +243,14 @@ class MoeLoopBlock(nn.Module):
 
   @nn.compact
   def __call__(self, inputs, deterministic: bool = False):
-    gate_logits = linears.DenseGeneral(
-        self.num_experts, dtype=self.dtype, kernel_init=self.kernel_init, kernel_axes=self.kernel_axes, name="gate"
-    )(inputs)
+    gate_logits = moe.GateLogit(
+        self.num_experts,
+        self.config.model_name,
+        dtype=self.dtype,
+        kernel_init=self.kernel_init,
+        kernel_axes=self.kernel_axes,
+        name="gate",
+    )(inputs)[0]
 
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
     weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.weight_dtype)
@@ -290,7 +295,7 @@ class MoeBlockTest(unittest.TestCase):
     return variables, output
 
   def get_moe_output(self, variables, hidden_states, cfg, mesh):
-    model = linears.MoeBlock(
+    model = moe.MoeBlock(
         config=cfg,
         num_experts=cfg.num_experts,
         num_experts_per_tok=cfg.num_experts_per_tok,
