@@ -19,6 +19,7 @@ export QUANTIZE_TYPE="int8"
 JAX_PLATFORMS=cpu python3 MaxText/load_and_quantize_checkpoint.py \
     MaxText/configs/base.yml \
     tokenizer_path=assets/tokenizer_llama3.tiktoken \
+    tokenizer_type=tiktoken \
     load_parameters_path=${UNSCANNED_CHECKPOINT} \
     max_prefill_predict_length=1024 \
     max_target_length=2048 \

@@ -24,7 +24,6 @@ import pyconfig
 
 from typing import Sequence
 from absl import app
-import jax.numpy as jnp
 import datetime
 from jetstream.engine import token_utils
 
@@ -46,50 +45,54 @@ def main(argv: Sequence[str]) -> None:
   text = config.prompt
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
-  # set it to max complete prompt length that has to be bechmarked with chunked prefill
-  max_prefill_length = 7000
-  tokens, true_length = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[max_prefill_length])
+  # set it to max complete prompt length that has to be benchmarked with chunked prefill
+  max_prefill_length = config.max_prefill_predict_length
+  tokens, _ = tokenizer_model.encode(text, is_bos=True, prefill_lengths=[max_prefill_length])
 
-  chunk_size = 2048
+  chunk_size = config.prefill_chunk_size
   # set this to array of acceptable chunk sizes
-  prefill_lengths = [1024, 2048, 4096, 7000]
-  # prefill_lengths = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144]
+  prefill_lengths = [1024, 2048, 4096, 8192]
 
-  padded_tokens, true_lengths, positions = token_utils.chunk_and_pad_tokens(
-      tokens, tokenizer_model.bos_id, tokenizer_model.pad_id, False, prefill_lengths, max_prefill_length, chunk_size, True
-  )
+  # chunked first to separate time of chunked and tokenized.
+  common_prefix_tokens = []
+  padded_input_tokens = []
+  input_true_lengths = []
+  # use whole tokens with padding for long context to max_prefill_length
+  for start_pos in range(0, len(tokens), chunk_size):
+    input_token = tokens[start_pos : min(len(tokens), start_pos + chunk_size)]
+    padded_input_token, input_true_length = token_utils.pad_tokens(
+        input_token,
+        tokenizer_model.bos_id,
+        tokenizer_model.pad_id,
+        is_bos=False,
+        prefill_lengths=prefill_lengths,
+        max_prefill_length=max_prefill_length,
+        jax_padding=True,
+    )
+    common_prefix_tokens.append(tokens[0 : min(len(tokens), start_pos + chunk_size)])
+    padded_input_tokens.append(padded_input_token)
+    input_true_lengths.append(input_true_length)
+
   rng, _ = jax.random.split(rng)
 
   def run_chunked_prefill():
     prefill_result = None
-    next_pos = 0
-    for chunk_num, _ in enumerate(padded_tokens):
-      if prefill_result is None:
-        prefill_result, _ = engine.prefill(
-            params=params,
-            padded_tokens=padded_tokens[chunk_num],
-            true_length=true_lengths[chunk_num],
-            positions=positions[chunk_num],
-            complete_prompt_true_length=true_length,
-            complete_padded_prompt=tokens,
-            previous_chunk=prefill_result,
-            rng=rng,
-        )
-      else:
-        prefill_result, _ = engine.prefill(
-            params=params | {"cache": prefill_result["cache"]},
-            padded_tokens=padded_tokens[chunk_num],
-            true_length=true_lengths[chunk_num],
-            positions=positions[chunk_num],
-            complete_prompt_true_length=true_length,
-            complete_padded_prompt=tokens,
-            previous_chunk=prefill_result,
-            rng=rng,
-        )
-      true_length_array = jnp.expand_dims(jnp.arange(0, chunk_num * chunk_size + true_lengths[chunk_num]), 0)
-      prefill_result["true_length_array"] = true_length_array
-      prefill_result["next_pos"] = jnp.full((1, 1), next_pos + true_lengths[chunk_num], dtype=jnp.int32)
-      next_pos = next_pos + true_lengths[chunk_num]
+    existing_prefix = None
+    for common_prefix_token, padded_input_token, input_true_length in zip(
+        common_prefix_tokens, padded_input_tokens, input_true_lengths
+    ):
+      prefill_result, _ = engine.prefill(
+          params=params,
+          existing_prefix=existing_prefix,
+          padded_tokens=padded_input_token,
+          true_length=input_true_length,
+          rng=rng,
+      )
+      existing_prefix = maxengine.ExistingPrefix(
+          cache=prefill_result["cache"],
+          common_prefix_tokens=common_prefix_token,
+      )
+
     return prefill_result
 
   for _ in range(_WARMUP_ITERS):

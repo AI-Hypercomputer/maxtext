@@ -474,42 +474,53 @@ class MoeBlock(nn.Module):
     return weights
 
   def deepseek_routing(self, gate_logits, pre_bias_logits):
-    """DeepSeek routing logit. It involves two-stage selection process:
+    """DeepSeek routing logit.
+
+    When the configuration specifies a number of routing groups (n_routing_groups is not -1),
+    it involves two-stage selection process:
 
     1) Group Scoring: Experts are partitioned into n_routing_groups.
     Within each group, the logits of the top-2 scoring experts are summed to create an aggregate score for the group.
     2) The top-K (topk_routing_group) groups are identified based on their aggregate scores.
     The final set of selected experts is chosen only from within these top-K groups.
 
+    If the configuration does not specify routing groups (n_routing_groups is -1),
+    using a standard top-k routing mechanism.
+
     The selection uses post_bias logits, but the return weigths are based on pre_bias logits.
     """
-    # TODO(ranran): Add an option to turn off device-limited routing as it may not be optimal for TPUs.
+    # Reshape
     batch_size, seq_len = gate_logits.shape[0], gate_logits.shape[1]
     n = batch_size * seq_len
-    experts_per_group = self.num_experts // self.num_experts_per_tok
-
-    # Reshape
     gate_logits_flat = jnp.reshape(gate_logits, (n, self.num_experts))
-    pre_bias_logits_falt = jnp.reshape(pre_bias_logits, (n, self.num_experts))
-    scores_grouped = jnp.reshape(gate_logits_flat, (n, self.config.n_routing_groups, experts_per_group))
+    pre_bias_logits_flat = jnp.reshape(pre_bias_logits, (n, self.num_experts))
 
-    # Group selection: select top2 from each group, sum values, then select top groups
-    top2_in_group_vals, _ = jax.lax.top_k(scores_grouped, k=2)
-    group_scores = jnp.sum(top2_in_group_vals.astype(jnp.float32), axis=-1)
-    group_idx = jax.lax.top_k(group_scores, k=self.config.topk_routing_group)[1]
+    if self.config.n_routing_groups != -1:
+      # Enable device-limited routing
+      experts_per_group = self.num_experts // self.config.n_routing_groups
+      scores_grouped = jnp.reshape(gate_logits_flat, (n, self.config.n_routing_groups, experts_per_group))
 
-    # Create masks for selected groups
-    group_mask = jax.nn.one_hot(group_idx, num_classes=self.config.n_routing_groups, dtype=jnp.float32)
-    group_mask = jnp.sum(group_mask, axis=1)
+      # Group selection: select top2 from each group, sum values, then select top groups
+      top2_in_group_vals, _ = jax.lax.top_k(scores_grouped, k=2)
+      group_scores = jnp.sum(top2_in_group_vals.astype(jnp.float32), axis=-1)
+      group_idx = jax.lax.top_k(group_scores, k=self.config.topk_routing_group)[1]
 
-    # Apply masks and get topk indices and weights
-    score_mask_grouped = jnp.expand_dims(group_mask, axis=-1)
-    score_mask_expanded = jnp.broadcast_to(score_mask_grouped, (n, self.num_experts_per_tok, experts_per_group))
-    score_mask = jnp.reshape(score_mask_expanded, (n, self.num_experts))
-    negative_infinity = -jax.numpy.inf
-    masked_scores = jnp.where(score_mask > 0, gate_logits_flat, negative_infinity)
-    top_k_indices = jax.lax.top_k(masked_scores, k=self.num_experts_per_tok)[1]
-    top_k_weights = jnp.take_along_axis(pre_bias_logits_falt, top_k_indices, axis=-1)
+      # Create masks for selected groups
+      group_mask = jax.nn.one_hot(group_idx, num_classes=self.config.n_routing_groups, dtype=jnp.float32)
+      group_mask = jnp.sum(group_mask, axis=1)
+
+      # Apply masks and get topk indices
+      score_mask_grouped = jnp.expand_dims(group_mask, axis=-1)
+      score_mask_expanded = jnp.broadcast_to(score_mask_grouped, (n, self.config.n_routing_groups, experts_per_group))
+      score_mask = jnp.reshape(score_mask_expanded, (n, self.num_experts))
+      negative_infinity = -jax.numpy.inf
+      masked_scores = jnp.where(score_mask > 0, gate_logits_flat, negative_infinity)
+      top_k_indices = jax.lax.top_k(masked_scores, k=self.num_experts_per_tok)[1]
+    else:
+      top_k_indices = jax.lax.top_k(gate_logits_flat, k=self.num_experts_per_tok)[1]
+
+    # Get topk weights from pre bias logits
+    top_k_weights = jnp.take_along_axis(pre_bias_logits_flat, top_k_indices, axis=-1)
 
     # Reshape
     top_k_indices = jnp.reshape(top_k_indices, (batch_size, seq_len, self.num_experts_per_tok))
