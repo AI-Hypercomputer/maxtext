@@ -173,11 +173,12 @@ def add_xpk_runner_arguments(custom_parser: argparse.ArgumentParser):
       default=0,
       help='Number of restarts to attempt.',
   )
+  # To create storage follow https://github.com/AI-Hypercomputer/xpk?tab=readme-ov-file#storage.
   custom_parser.add_argument(
       '--xpk_storage',
       default= None,
       action="append",
-      help='XPK storage resources used by the workload.',
+      help='Names of XPK storages the workload uses.',
   )
 
 
