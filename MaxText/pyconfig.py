@@ -527,6 +527,12 @@ class _HyperParameters:
         1,
     )
 
+    raw_keys["pagedattn_max_page_groups"] = raw_keys["global_batch_size_to_load"]
+    if raw_keys["pagedattn_max_pages_per_group"] <= 0:
+      raw_keys["pagedattn_max_pages_per_group"] = (
+          raw_keys["max_target_length"] + raw_keys["pagedattn_tokens_per_page"] - 1
+      ) // raw_keys["pagedattn_tokens_per_page"]
+
     raw_keys["num_slices"] = max_utils.get_num_slices(raw_keys)
     raw_keys["quantization_local_shard_count"] = get_quantization_local_shard_count(raw_keys)
     raw_keys = create_parallelisms_list(raw_keys)

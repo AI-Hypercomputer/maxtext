@@ -323,8 +323,8 @@ logical_axis_rules: [
                       ['cache_kv', []],
                       ['cache_sequence', []],
                       ['exp', 'expert'],
-                      ['paged_kv_heads', []],
-                      ['num_pages', ['tensor']],
+                      ['paged_kv_heads', ['tensor']],
+                      ['num_pages', []],
                       ['tokens_per_page', []],
                       ['paged_kv_head_dim_size', []],
                     ]
@@ -654,14 +654,13 @@ sa_v_layout: "HEAD_DIM_MINOR"
 ### Determine if we want to use load balance for context parallelism
 context_parallel_load_balance: True
 
-#######################
 ### Paged Attention ###
-#######################
 # These settings take effect only when `attention=paged`.
 # They should be adjusted based on the available HBM and model config.
 pagedattn_num_pages: 64
 pagedattn_tokens_per_page: 32
-pagedattn_pages_per_compute_block: 8
+pagedattn_pages_per_compute_block: 4
+pagedattn_max_pages_per_group: -1  # defaults to (max_target_length + pa_tokens_per_page - 1) // pa_tokens_per_page
 
 # Chunked Prefill Parameters
 prefill_chunk_size: 256
