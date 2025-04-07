@@ -13,10 +13,10 @@
 #  limitations under the License.
 
 import jax
+import sre_parse
 import unittest
 from layers import linears
 from layers import initializers
-from layers import moe
 import jax.numpy as jnp
 
 import pyconfig
@@ -53,7 +53,7 @@ class TokenDroppingTest(unittest.TestCase):
     )
     self.rng = jax.random.PRNGKey(42)
     devices_array = max_utils.create_device_mesh(self.cfg)
-    self.model = moe.MoeBlock(
+    self.model = linears.MoeBlock(
         config=self.cfg,
         num_experts=self.cfg.num_experts,
         num_experts_per_tok=self.cfg.num_experts_per_tok,
@@ -179,7 +179,7 @@ class DeepSeekRoutingTest(unittest.TestCase):
     )
     self.rng = jax.random.PRNGKey(42)
     devices_array = max_utils.create_device_mesh(self.cfg)
-    self.model = moe.MoeBlock(
+    self.model = linears.MoeBlock(
         config=self.cfg,
         num_experts=self.cfg.num_experts,
         num_experts_per_tok=self.cfg.num_experts_per_tok,
@@ -241,14 +241,9 @@ class MoeLoopBlock(nn.Module):
 
   @nn.compact
   def __call__(self, inputs, deterministic: bool = False):
-    gate_logits = moe.GateLogit(
-        self.num_experts,
-        self.config.model_name,
-        dtype=self.dtype,
-        kernel_init=self.kernel_init,
-        kernel_axes=self.kernel_axes,
-        name="gate",
-    )(inputs)[0]
+    gate_logits = linears.DenseGeneral(
+        self.num_experts, dtype=self.dtype, kernel_init=self.kernel_init, kernel_axes=self.kernel_axes, name="gate"
+    )(inputs)
 
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
     weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.weight_dtype)
@@ -293,7 +288,7 @@ class MoeBlockTest(unittest.TestCase):
     return variables, output
 
   def get_moe_output(self, variables, hidden_states, cfg, mesh):
-    model = moe.MoeBlock(
+    model = linears.MoeBlock(
         config=cfg,
         num_experts=cfg.num_experts,
         num_experts_per_tok=cfg.num_experts_per_tok,
