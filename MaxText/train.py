@@ -674,10 +674,11 @@ def setup_train_loop(config):
     )
 
   # Apply reordering wrapper to data iterators if context parallelism is enabled
-  if context_parallel_size > 1 and config.context_parallel_load_balance:
-    data_iterator = map(max_utils.get_reorder_callable(context_parallel_size), data_iterator)
-    if eval_data_iterator:
-      eval_data_iterator = map(max_utils.get_reorder_callable(context_parallel_size), eval_data_iterator)
+  with mesh:
+    if context_parallel_size > 1 and config.context_parallel_load_balance:
+      data_iterator = map(max_utils.get_reorder_callable(context_parallel_size), data_iterator)
+      if eval_data_iterator:
+        eval_data_iterator = map(max_utils.get_reorder_callable(context_parallel_size), eval_data_iterator)
 
   state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager

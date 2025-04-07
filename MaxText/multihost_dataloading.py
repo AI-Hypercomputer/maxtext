@@ -27,6 +27,8 @@ import tensorflow as tf  # pylint: disable=g-import-not-at-top
 import time
 import numpy as np
 
+from flax import linen as nn
+
 import jax
 import jax.tree_util as jtu
 from jax.sharding import PartitionSpec
@@ -34,39 +36,93 @@ from jax.sharding import NamedSharding
 from jax.sharding import Mesh
 from jax.experimental import colocated_python
 import jax.numpy as jnp
-import grain.python as grain
 
 from MaxText import max_logging
+import ml_collections
 
 
-def _build_global_shape_and_sharding(
-    local_shape: tuple[int, ...], global_mesh: Mesh
-) -> tuple[tuple[int, ...], NamedSharding]:
-  sharding = NamedSharding(global_mesh, PartitionSpec(global_mesh.axis_names))
-
+def _build_global_shape(local_shape: tuple[int, ...]) -> tuple[tuple[int, ...], NamedSharding]:
   global_shape = (jax.process_count() * local_shape[0],) + local_shape[1:]
+  return global_shape
 
-  return global_shape, sharding
 
-
-def _form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
-  """Put local sharded array into local devices"""
-  global_shape, sharding = _build_global_shape_and_sharding(np.shape(array), global_mesh)
-
+def _calculate_input_data_sharding_prod(mesh: Mesh, input_data_shardings: NamedSharding) -> tuple[int, ...]:
+  """Calculate the product of the mesh sizes for input data sharding."""
   try:
-    local_device_arrays = np.split(array, len(global_mesh.local_devices), axis=0)
-  except ValueError as array_split_error:
+    spec = input_data_shardings.spec
+  except AttributeError:
     raise ValueError(
-        f"Unable to put to devices shape {array.shape} with "
-        f"local device count {len(global_mesh.local_devices)} "
-        f"at {jtu.keystr(path)}"
-    ) from array_split_error
+        f"input_data_shardings does not have a .spec attribute (expected a PartitionSpec), got: {type(input_data_shardings)}"
+    )
 
-  local_device_buffers = jax.device_put(local_device_arrays, global_mesh.local_devices)
-  return jax.make_array_from_single_device_arrays(global_shape, sharding, local_device_buffers)
+  def compute_product(axis_spec):
+    if isinstance(axis_spec, str):
+      axis_spec = (axis_spec,)
+    elif axis_spec is None:
+      return 1
+    product = 1
+    for dim_name in axis_spec:
+      if dim_name in mesh.shape:
+        product *= mesh.shape[dim_name]
+    return product
+
+  batch_product = compute_product(spec[0])
+  sequence_product = compute_product(spec[1]) if len(spec) > 1 else 1
+
+  return (batch_product, sequence_product)
 
 
-def get_next_batch_sharded(local_iterator: Iterator, global_mesh: Mesh) -> jax.Array:
+def _form_global_array(
+    path,
+    array: np.ndarray,
+    global_mesh: Mesh,
+    input_data_shardings: NamedSharding,
+    input_data_sharding_factor: tuple[int, ...],  # e.g., (4, 1)
+) -> jax.Array:
+  """Put local sharded array into devices using ND sharding, with replication on leftover devices."""
+
+  global_shape = _build_global_shape(array.shape)
+
+  if len(input_data_sharding_factor) != array.ndim:
+    raise ValueError(
+        f"Sharding factor {input_data_sharding_factor} must match array rank {array.ndim} "
+        f"for array of shape {array.shape}"
+    )
+
+  def recursive_split(arr, factors, axis=0):
+    if axis >= len(factors):
+      return [arr]
+    if factors[axis] == 1:
+      return recursive_split(arr, factors, axis + 1)
+    split_chunks = np.array_split(arr, factors[axis], axis=axis)
+    return [s for chunk in split_chunks for s in recursive_split(chunk, factors, axis + 1)]
+
+  # Shard the array into subarrays
+  local_shards = recursive_split(array, input_data_sharding_factor)
+
+  num_shards = np.prod(input_data_sharding_factor)
+  num_devices = len(global_mesh.local_devices)
+
+  if num_devices % num_shards != 0:
+    raise ValueError(f"Cannot evenly replicate {num_shards} shards across {num_devices} devices. " f"at {jtu.keystr(path)}")
+
+  replication_factor = num_devices // num_shards
+  local_device_buffers = []
+
+  for i, shard in enumerate(local_shards):
+    shard_devices = global_mesh.local_devices[i * replication_factor : (i + 1) * replication_factor]
+    for device in shard_devices:
+      local_device_buffers.append(jax.device_put(shard, device))
+
+  return jax.make_array_from_single_device_arrays(global_shape, input_data_shardings, local_device_buffers)
+
+
+def get_next_batch_sharded(
+    local_iterator: Iterator,
+    global_mesh: Mesh,
+    input_data_shardings: NamedSharding,
+    input_data_sharding_factor: tuple[int, ...],
+) -> jax.Array:
   """Splits the host loaded data equally over all devices."""
 
   SLEEP_TIME = 10
@@ -86,8 +142,15 @@ def get_next_batch_sharded(local_iterator: Iterator, global_mesh: Mesh) -> jax.A
   # Try one last time, if this fails we will see the full stack trace.
   if not loaded_data_success:
     local_data = next(local_iterator)
-
-  input_gdas = jtu.tree_map_with_path(partial(_form_global_array, global_mesh=global_mesh), local_data)
+  input_gdas = jtu.tree_map_with_path(
+      partial(
+          _form_global_array,
+          global_mesh=global_mesh,
+          input_data_shardings=input_data_shardings,
+          input_data_sharding_factor=input_data_sharding_factor,
+      ),
+      local_data,
+  )
 
   return input_gdas
 
@@ -95,9 +158,12 @@ def get_next_batch_sharded(local_iterator: Iterator, global_mesh: Mesh) -> jax.A
 class MultiHostDataLoadIterator:
   """fold get_next_batch_sharded into a iterator class"""
 
-  def __init__(self, dataloader: Union[tf.data.Dataset, Iterable], global_mesh: Mesh):
+  def __init__(self, dataloader: Union[tf.data.Dataset, Iterable], global_mesh: Mesh, config: ml_collections.ConfigDict):
     self.global_mesh = global_mesh
     self.dataloader = dataloader
+    data_pspec = PartitionSpec(*config.input_data_sharding_logical_axes)
+    self.input_data_shardings = nn.logical_to_mesh_sharding(data_pspec, global_mesh, config.logical_axis_rules)
+    self.input_data_sharding_factor = _calculate_input_data_sharding_prod(global_mesh, self.input_data_shardings)
     if isinstance(self.dataloader, tf.data.Dataset):
       self.local_iterator = self.dataloader.as_numpy_iterator()
     elif isinstance(self.dataloader, Iterable):
@@ -118,7 +184,9 @@ class MultiHostDataLoadIterator:
     return self
 
   def __next__(self):
-    return get_next_batch_sharded(self.local_iterator, self.global_mesh)
+    return get_next_batch_sharded(
+        self.local_iterator, self.global_mesh, self.input_data_shardings, self.input_data_sharding_factor
+    )
 
 
 @colocated_python.colocated_python
