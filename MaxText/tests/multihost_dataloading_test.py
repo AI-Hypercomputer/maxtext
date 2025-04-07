@@ -44,6 +44,7 @@ class MultihostDataloadingTest(unittest.TestCase):
         mesh_axes=["data"],
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
+        input_data_sharding_logical_axes=["batch"],
         base_output_directory="gs://max-experiments/",
         dataset_path="gs://maxtext-dataset/",
         enable_checkpointing=False,
@@ -61,7 +62,7 @@ class MultihostDataloadingTest(unittest.TestCase):
     dataset = tf.data.Dataset.from_tensor_slices(global_data)
     dataset = dataset.repeat()
     dataset = dataset.batch(batch_size)
-    self.multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataset, self.mesh)
+    self.multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataset, self.mesh, config)
 
   @pytest.mark.tpu_only
   def test_batch_sharded_data_pipeline(self):

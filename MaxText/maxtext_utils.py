@@ -23,6 +23,7 @@ import os
 from MaxText import max_utils
 from jax.sharding import PartitionSpec as P
 from jax.experimental.serialize_executable import deserialize_and_load
+from flax import linen as nn
 
 import pickle
 import functools
@@ -50,12 +51,16 @@ NUM_IMAGES_PER_SEQUENCE = 1
 NUM_IMAGE_CHANNELS = 3
 
 
+def get_input_data_sharding(mesh, input_data_sharding_logical_axes, logical_axis_rules):
+  data_pspec = P(*input_data_sharding_logical_axes)
+  return nn.logical_to_mesh_sharding(data_pspec, mesh, logical_axis_rules)
+
+
 def get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config):
   """Get the shardings (both state and data) for train_step"""
   functional_train = get_functional_train_step(train_step, model, config, state_mesh_shardings)
   functional_train.__name__ = "train_step"
-  data_pspec = P(*config.data_sharding)
-  data_sharding = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
+  data_sharding = get_input_data_sharding(mesh, config.input_data_sharding_logical_axes, config.logical_axis_rules)
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = (state_mesh_shardings, None)  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
@@ -71,8 +76,7 @@ def get_functional_eval_with_signature(eval_step, mesh, state_mesh_shardings, mo
   """Get the shardings (both state and data) for eval_step"""
   functional_eval = get_functional_eval_step(eval_step, model, config)
   functional_eval.__name__ = "eval_step"
-  data_pspec = P(*config.data_sharding)
-  data_sharding = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
+  data_sharding = get_input_data_sharding(mesh, config.input_data_sharding_logical_axes, config.logical_axis_rules)
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = None  # metrics
   static_argnums = ()  # We partial out the static argnums of model, config

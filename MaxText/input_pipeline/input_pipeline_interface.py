@@ -26,6 +26,7 @@ from MaxText.input_pipeline._tfds_data_processing import make_tfds_train_iterato
 from MaxText.input_pipeline._grain_data_processing import make_grain_train_iterator, make_grain_eval_iterator
 from MaxText.input_pipeline._tfds_data_processing_c4_mlperf import make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator
 from MaxText.input_pipeline._hf_data_processing import make_hf_train_iterator, make_hf_eval_iterator
+from MaxText import maxtext_utils
 from MaxText import multihost_dataloading
 
 
@@ -35,8 +36,9 @@ class SyntheticDataIterator:
   def __init__(self, config, mesh):
     self.mesh = mesh
     self.config = config
-    data_pspec = P(*config.data_sharding)
-    data_pspec_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
+    data_pspec_shardings = maxtext_utils.get_input_data_sharding(
+        mesh, config.input_data_sharding_logical_axes, config.logical_axis_rules
+    )
     self.data_generator = jax.jit(
         SyntheticDataIterator.raw_generate_synthetic_data, out_shardings=data_pspec_shardings, static_argnums=0
     )
@@ -82,7 +84,7 @@ class BadSyntheticDataIterator:
   def __init__(self, config, mesh):
     self.mesh = mesh
     dataset = BadSyntheticDataIterator.get_bad_synthetic_data(config)
-    self.data_generator = multihost_dataloading.MultiHostDataLoadIterator(dataset, self.mesh)
+    self.data_generator = multihost_dataloading.MultiHostDataLoadIterator(dataset, self.mesh, config)
 
   def __iter__(self):
     return self.data_generator
@@ -118,8 +120,7 @@ def get_process_loading_real_data(
     data_sharding, global_batch_size_to_load, global_batch_size_to_train_on, max_target_length, mesh
 ):
   """Get list of processes loading data from GCS when expansion_factor_real_data != -1"""
-  sharding = jax.sharding.NamedSharding(mesh, P(*data_sharding))
-  devices_indices_map = sharding.devices_indices_map((global_batch_size_to_load, max_target_length))
+  devices_indices_map = data_sharding.devices_indices_map((global_batch_size_to_load, max_target_length))
   batch_cutoff = global_batch_size_to_train_on
   process_loading_real_data = set()
   for p, indices in devices_indices_map.items():
@@ -149,8 +150,11 @@ def create_data_iterator(config, mesh):
   if config.dataset_type == "synthetic":
     return SyntheticDataIterator(config, mesh), None
 
+  input_data_sharding = maxtext_utils.get_input_data_sharding(
+      mesh, config.input_data_sharding_logical_axes, config.logical_axis_rules
+  )
   process_indices_train = get_process_loading_real_data(
-      config.data_sharding,
+      input_data_sharding,
       config.global_batch_size_to_load,
       config.global_batch_size_to_train_on,
       config.max_target_length,
@@ -158,7 +162,7 @@ def create_data_iterator(config, mesh):
   )
   if config.eval_interval > 0:
     process_indices_eval = get_process_loading_real_data(
-        config.data_sharding,
+        input_data_sharding,
         config.global_batch_size_to_load_eval,
         config.global_batch_size_to_eval_on,
         config.max_target_length,

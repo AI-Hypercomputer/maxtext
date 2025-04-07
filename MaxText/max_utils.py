@@ -780,6 +780,29 @@ def reorder_causal_load_balanced(batch, cp_size):
   }
 
 
+def shard_reorder_causal_load_balanced(batch, cp_size):
+  """Shard the output of the reordered sequence."""
+  reordered = reorder_causal_load_balanced(batch, cp_size)
+  for _, v in batch.items():
+    if isinstance(v, jax.Array):
+      reordered = jax.lax.with_sharding_constraint(reordered, v.sharding)
+      break
+  return reordered
+
+
 def get_reorder_callable(cp_size):
   """Creates a callable that can be used with map() to reorder batches."""
-  return functools.partial(reorder_causal_load_balanced, cp_size=cp_size)
+  return functools.partial(shard_reorder_causal_load_balanced, cp_size=cp_size)
+
+
+def compute_axis_product(axis_spec, mesh_dict):
+  """Computes the product of the axis specified in axis_spec."""
+  if isinstance(axis_spec, str):
+    axis_spec = (axis_spec,)
+  elif axis_spec is None:
+    return 1
+  product = 1
+  for dim_name in axis_spec:
+    if dim_name in mesh_dict:
+      product *= mesh_dict[dim_name]
+  return product

@@ -219,7 +219,7 @@ class TrainTests(unittest.TestCase):
         "steps=10",
         "enable_checkpointing=False",
         "attention=cudnn_flash_te",
-        "ici_fsdp_parallelism=2",
+        "ici_fsdp_parallelism=-1",
         "ici_context_parallelism=2",
         "context_parallel_load_balance=True",
         "packing=False",
