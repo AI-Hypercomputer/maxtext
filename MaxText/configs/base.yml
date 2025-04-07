@@ -385,6 +385,7 @@ max_corpus_chars: 10_000_000
 train_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 packing: True
+num_epoch: 1  # only grain and tfds pipeline supports num_epoch > 1
 
 # direct preference optimization (DPO)
 use_dpo: False
@@ -415,7 +416,9 @@ hf_access_token: ''
 # for Grain input pipeline (dataset_type=grain)
 grain_train_files: ''
 grain_eval_files: ''
+grain_file_type: 'arrayrecord' # arrayrecord or parquet 
 grain_worker_count: 1
+grain_worker_count_eval: 1
 # for using pathways
 colocated_python_data_input: False  # experimental feature, under testing
 

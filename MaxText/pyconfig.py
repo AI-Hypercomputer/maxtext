@@ -211,6 +211,7 @@ def validate_data_input(keys):
       keys["hf_eval_split"] = "train"
     if keys["eval_interval"] > 0:
       assert keys["hf_eval_split"], "Please specify hf_eval_split or set eval_interval to <=0."
+    assert keys["num_epoch"] == 1, f"hf pipeline only supports num_epoch=1, but num_epoch={keys['num_epoch']} is given."
 
   elif keys["dataset_type"] == "grain":
     max_logging.log(
