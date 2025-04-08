@@ -28,6 +28,8 @@ from MaxText.layers import initializers
 from MaxText.layers import normalizations
 from MaxText.layers import quantizations
 from MaxText.layers import linears
+from MaxText.layers.gpu_ragged_dot import gpu_ragged_dot
+
 import numpy as np
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
@@ -382,11 +384,12 @@ class MoeBlock(nn.Module):
       else:
         if self.quant is not None:
           raise NotImplementedError("Quantization is not yet supported with ragged_dot, please set" " megablox=True")
-        output = jax.lax.ragged_dot(
-            lhs=inputs,
-            rhs=kernel,
+        output = gpu_ragged_dot(
+            x=inputs,
+            A=kernel,
             group_sizes=group_sizes,
-            preferred_element_type=jnp.bfloat16,
+            compute_dtype=jnp.bfloat16,
+            acc_dtype=jnp.bfloat16,
         )
       if hs_shape[0] % pad_length:
         output = output[: hs_shape[0]]
