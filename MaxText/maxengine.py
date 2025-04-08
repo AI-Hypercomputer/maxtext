@@ -1254,7 +1254,13 @@ class MaxEngine(engine_api.Engine):
     elif metadata.tokenizer_type == TokenizerType.sentencepiece:
       return token_utils.SentencePieceTokenizer(metadata)
     elif metadata.tokenizer_type == TokenizerType.huggingface:
-      return token_utils.HuggingFaceTokenizer(metadata)
+      tokenizer_model = token_utils.HuggingFaceTokenizer(metadata)
+      if tokenizer_model.tokenizer.pad_token_id is None:
+        if tokenizer_model.tokenizer.unk_token_id is not None:
+          tokenizer_model.tokenizer.pad_token_id = tokenizer_model.tokenizer.unk_token_id
+        else:
+          tokenizer_model.tokenizer.pad_token_id = -1
+      return tokenizer_model
     else:
       raise ValueError(f"Unsupported tokenizer type: {metadata.tokenizer_type}")
 

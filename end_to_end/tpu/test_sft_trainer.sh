@@ -51,7 +51,7 @@ PROMPT="<user>${PROMPT}</user> <assistant>"
 # Decode
 python3 -m MaxText.decode MaxText/configs/sft.yml \
     run_name=${RUN_NAME}-hf-decode \
-    model_name=${PRE_TRAINED_MODEL} tokenizer_path=${PRE_TRAINED_MODEL_TOKENIZER} \
+    model_name=${PRE_TRAINED_MODEL} tokenizer_path=${PRE_TRAINED_MODEL_TOKENIZER} tokenizer_type=huggingface \
     load_parameters_path=${FINE_TUNED_MODEL_CKPT_PATH} \
     per_device_batch_size=${PER_DEVICE_BATCH_SIZE} max_target_length=128 max_prefill_predict_length=64 \
     attention=dot_product decode_sampling_strategy=greedy prompt="${PROMPT}"
