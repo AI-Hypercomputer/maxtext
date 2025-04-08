@@ -177,6 +177,9 @@ class MaxEngineTest(unittest.TestCase):
         true_length=true_length,
     )
 
+    print(f"{jax.tree.map(jnp.array_equal, one_chunk_prefill_result['cache'], params['cache'])=}")
+    assert False
+
     # print(f"{one_chunk_prefill_result=}")
     # print(f"{expected_prefill_result=}")
     # print(f"{jax.tree.map(jnp.array_equal, one_chunk_prefill_result, expected_prefill_result)=}")

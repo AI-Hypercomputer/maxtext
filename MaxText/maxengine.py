@@ -65,6 +65,7 @@ class ExistingPrefix:
     common_prefix_tokens: The tokens that have already been processed without padding.
   """
 
+  cache: Any
   common_prefix_tokens_length: int
 
 
@@ -434,6 +435,7 @@ class MaxEngine(engine_api.Engine):
       start_position = existing_prefix.common_prefix_tokens_length
       # TODO(yuyanpeng): rename previous_chunk
       previous_chunk = start_position
+      params = params | existing_prefix.cache
 
     # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
     zero_to_n = jnp.arange(0, padded_tokens.shape[0])

@@ -82,13 +82,14 @@ def main(argv: Sequence[str]) -> None:
         common_prefix_tokens, padded_input_tokens, input_true_lengths
     ):
       prefill_result, _ = engine.prefill(
-          params=params | ({"cache": prefill_result["cache"]} if prefill_result is not None else {}),
+          params=params,
           existing_prefix=existing_prefix,
           padded_tokens=padded_input_token,
           true_length=input_true_length,
           rng=rng,
       )
       existing_prefix = maxengine.ExistingPrefix(
+          cache=prefill_result["cache"],
           common_prefix_tokens_length=len(common_prefix_token),
       )
 
@@ -107,6 +108,14 @@ def main(argv: Sequence[str]) -> None:
     jax.block_until_ready(prefill_result)
     end = datetime.datetime.now()
     print("time taken for chunk prefill ", end - start)
+
+  with jax.profiler.trace("/w/tmp/profiler/chunked_prefill"):
+    for _ in range(1):
+      start = datetime.datetime.now()
+      prefill_result = run_chunked_prefill()
+      jax.block_until_ready(prefill_result)
+      end = datetime.datetime.now()
+      print("time taken for chunk prefill ", end - start)
 
 
 if __name__ == "__main__":
