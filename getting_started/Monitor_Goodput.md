@@ -180,23 +180,21 @@ goodput_monitor = monitoring.GoodputMonitor(
       gcp_options=gcp_options,
     )
 ```
-#### Monitoring Dashboards
-
-Goodput, Badput and Step Time Deviation metrics can be visualized using GCM dashboards:
-
-1. Navigate to your projects Google Cloud Monitoring `Dashboards` page.
-2. Create a Custom Dashboard if you do not have one already, and select the [metrics](https://cloud.google.com/monitoring/api/metrics_gcp) you want to monitor.
-   - compute.googleapis.com/workload/goodput_time (Goodput)
-   - compute.googleapis.com/workload/badput_time (Badput Breakdown)
-   - compute.googleapis.com/workload/performance (Step Time Deviation)
-
-
-#### Monitoring Raw Metrics
+#### Monitoring Raw Metrics and Dashboards
 
 Goodput, Badput and Step Time Deviation metrics can be monitored using GCM Metrics Explorer:
 
-1. Navigate to your projects Google Cloud Monitoring `Metrics Explorer` page.
-2. Select the [metrics](https://cloud.google.com/monitoring/api/metrics_gcp) you want to monitor:
-   - compute.googleapis.com/workload/goodput_time (Goodput)
-   - compute.googleapis.com/workload/badput_time (Badput Breakdown)
-   - compute.googleapis.com/workload/performance (Step Time Deviation)
+1.  Verify that the workload is executing with monitoring enabled. This ensures automatic data ingestion into Google Cloud Monitoring.
+2.  Navigate to [Metrics Explorer](https://console.cloud.google.com/monitoring/metrics-explorer). Initiate metric selection by clicking `Select a metric` then search for and select the `Workload` resource. Subsequently, choose the `Workload` metric category.
+
+    a.  [**Productive Time:**](https://cloud.google.com/monitoring/api/metrics_gcp#:~:text=workload/goodput_time)
+    Represents the cumulative duration the workload spent on productive tasks,
+    measured by `compute.googleapis.com/workload/goodput_time`.  
+    b.  [**Non-Productive Time:**](https://cloud.google.com/monitoring/api/metrics_gcp#:~:text=workload/badput_time)
+    Represents the cumulative duration the workload spent on non-productive tasks,
+    measured by `compute.googleapis.com/workload/badput_time`.  
+    c.  [**Performance:**](https://cloud.google.com/monitoring/api/metrics_gcp#:~:text=workload/performance)
+    Represents the workload's performance metric, specifically step deviation
+    in this context, measured by `compute.googleapis.com/workload/performance`.  
+3.  Navigate to [Dashboards](https://console.cloud.google.com/monitoring/dashboards).
+4.  Create a custom dashboard if there isn't one and add useful widgets with the above mentioned metrics.
