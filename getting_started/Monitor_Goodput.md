@@ -151,35 +151,15 @@ goodput_monitor = monitoring.GoodputMonitor(
 If you do not wish to send metrics to Google Cloud Monitoring then please set
 the flag `enable_gcp_goodput_metrics` to `False` for disabling goodput metrics
 and `enable_gcp_step_deviation_metrics` to `False` for disabling step deviation
-metrics while creating the GCPOptions object.
+metrics.
 
-Setting `monitoring_enabled` to `False` will disable both tensorboard and GCM
+```Python
+python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=$OUTPUT_PATH dataset_path=$DATA_PATH run_name=goodput-test-run steps=200 goodput_upload_interval_seconds=30 enable_gcp_goodput_metrics=False enable_gcp_step_deviation_metrics=False
+```
+
+Setting `monitor_goodput` to `False` will disable both tensorboard and GCM
 monitoring.
 
-```python
-
-gcp_options = goodput_utils.GCPOptions(
-      project_id=None, # If None, the library will automatically identify from GCE internal metadata
-      location=None, # If None, the library will automatically identify from GCE internal metadata
-      replica_id='0', # Default is '0'
-      acc_type=None, # If None, the library will automatically identify from GCE internal metadata
-      enable_gcp_goodput_metrics=False,
-      enable_gcp_step_deviation_metrics=False,
-    )
-
-
-goodput_monitor = monitoring.GoodputMonitor(
-      job_name=config.run_name,
-      logger_name=logger_name,
-      tensorboard_dir=config.tensorboard_dir,
-      upload_interval=config.goodput_upload_interval_seconds,
-      monitoring_enabled=True,
-      include_badput_breakdown=True,
-      include_step_deviation=True,
-      configured_ideal_step_time=None,
-      gcp_options=gcp_options,
-    )
-```
 #### Monitoring Raw Metrics and Dashboards
 
 Goodput, Badput and Step Time Deviation metrics can be monitored using GCM Metrics Explorer:
