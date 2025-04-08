@@ -620,6 +620,10 @@ def generate_xpk_workload_cmd(
     upload_metrics_to_bq_cmd = f"&& python3 benchmarks/upload_metrics_to_bq.py {args_str}"
 
   print(f'User command: {user_command}')
+  HLO_FOLDER='gs://DIR/hlos' # Replace DIR with the GCS directory you want the HLOs in
+  now = datetime.datetime.now()
+  timestamp = now.strftime("%Y-%m-%d-%H:%M")
+
   return (
       (
           f'{workload_create_command}'
@@ -635,6 +639,7 @@ def generate_xpk_workload_cmd(
           f' --workload={name}'
           f' --priority={wl_config.priority}'
           f' --max-restarts={wl_config.max_restarts}'
+          f' --debug-dump-gcs={HLO_FOLDER}/{wl_config.model.model_name}_{timestamp}_{wl_config.num_slices}_{temp_post_fix}',
           # ' --use-vertex-tensorboard'
           # f' --experiment-name={test_purpose_name}'
           f' {additional_flags}'
