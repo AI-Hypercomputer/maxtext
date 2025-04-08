@@ -44,7 +44,7 @@ frozenlist==1.5.0
 fsspec==2024.9.0
 gast==0.6.0
 gcsfs==2024.9.0.post1
-google-api-core==2.21.0
+google-api-core==2.24.1
 google-auth==2.35.0
 google-auth-oauthlib==1.2.1
 google-cloud-aiplatform==1.61.0
@@ -94,7 +94,7 @@ mccabe==0.7.0
 mdurl==0.1.2
 ml-collections==0.1.1
 ml-dtypes==0.4.1
-ml-goodput-measurement==0.0.5
+ml-goodput-measurement==0.0.8
 more-itertools==10.5.0
 msgpack==1.1.0
 msgspec==0.18.6

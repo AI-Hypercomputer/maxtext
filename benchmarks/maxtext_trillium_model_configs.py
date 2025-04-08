@@ -1036,7 +1036,7 @@ llama3_1_70b_8192_lr_real_data = _add_to_model_dictionary(
 llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
-        model_name="llama3_1-70b-8192",
+        model_name="llama3_1-70b-8192-iter-real-data-and-checkpointing-tfds",
         model_type="llama3.1-70b",
         tuning_params={
             "per_device_batch_size": 2,
