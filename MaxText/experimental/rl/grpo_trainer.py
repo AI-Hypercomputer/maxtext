@@ -151,13 +151,11 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   # completions shape: [B x G, max_target_length - max_prefill_length]
   # this includes the completion tokens + padding (upto max_target_length - max_prefill_length))
   # data["ar_completions"] contains tokens only upto the eos, no tokens thereafter other than pad_tokens
-  prompt_with_completions = data["prompt_completions"]
+  prompt_with_completions = data[f"{config.train_data_columns}_completions"]
 
   # --- (3) Compute per-token log probabilities.
-  # prompt_position = data["prompt_position"]
-  # prompt_segmentation = data["prompt_segmentation"]
-  prompt_completions_position = data["prompt_completions_position"]
-  prompt_completions_segmentation = data["prompt_completions_segmentation"]
+  prompt_completions_position = data[f"{config.train_data_columns}_completions_position"]
+  prompt_completions_segmentation = data[f"{config.train_data_columns}_completions_segmentation"]
   completions_segmentation = data["ar_completions_segmentation"]
 
   # compute_log_probs returns logits.
@@ -257,7 +255,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 # --- GRPO Helpers ---
 
 
-def prefill(engine, params, decode_state, data, num_generations, rng):
+def prefill(engine, params, decode_state, prompts, true_length, num_generations, rng):
   """
   Args:
     engine: The generation engine instance responsible for managing decoding and inference.
@@ -271,7 +269,6 @@ def prefill(engine, params, decode_state, data, num_generations, rng):
     decode_state: Updated decode state after prefill, including new cached key/value pairs.
     prefill_slots: A structure containing token positions and model states needed for next-stage decoding.
   """
-  prompts, true_length = data["prompt"], data["prompt_true_length"]
   slot = 0
   for tokens, current_token_true_length in zip(prompts, true_length):
     # Split RNG before calling prefill
@@ -316,7 +313,7 @@ def generate(engine, params, decode_state, prefill_slots, num_decode_steps, rng)
   return completions
 
 
-def concatenate_prompt_with_completions(config, tokenizer_model, data, completions):
+def concatenate_prompt_with_completions(config, tokenizer_model, prompts, true_length, completions):
   """
   Args:
     config: Configuration object containing generation settings such as max sequence length or EOS token ID.
@@ -351,8 +348,6 @@ def concatenate_prompt_with_completions(config, tokenizer_model, data, completio
   batched_concat_and_eos = jax.vmap(
       lambda prompt, true_len, completion: _concat_and_find_eos(prompt, true_len, completion), in_axes=(0, 0, 0)
   )
-  prompts = data["prompt"]
-  true_length = data["prompt_true_length"]
   prompts = jnp.repeat(prompts, config.num_generations, axis=0)
   true_length = jnp.repeat(true_length, config.num_generations, axis=0)
   prompt_completions, eos_positions = batched_concat_and_eos(prompts, true_length, completions)
@@ -379,31 +374,32 @@ def generate_completions(config, tokenizer_model, engine, data, params, rng):
   for k, v in data.items():
     assert v.ndim == 1 or v.ndim == 2, f"Invalid {v.shape=} found for key={k}"
     if v.ndim == 2:
-      data[k] = v[: config.micro_batch_size_to_train_on, :]
+      data[k] = v[:config.micro_batch_size_to_train_on, :]
     else:
-      data[k] = v[: config.micro_batch_size_to_train_on]
+      data[k] = v[:config.micro_batch_size_to_train_on]
 
   rng, rng_load_params = jax.random.split(rng)
 
   rng, rng_init_decode = jax.random.split(rng_load_params)
   decode_state = engine.init_decode_state(rng_init_decode)
 
-  decode_state, prefill_slots = prefill(engine, params, decode_state, data, config.num_generations, rng)
+  prompts, true_length = data[f"{config.train_data_columns}"], data[f"{config.train_data_columns}_true_length"]
+  decode_state, prefill_slots = prefill(engine, params, decode_state, prompts, true_length, config.num_generations, rng)
 
   completions = generate(
       engine, params, decode_state, prefill_slots, config.max_target_length - config.max_prefill_predict_length, rng
   )
 
-  data["prompt_completions"], eos_positions = concatenate_prompt_with_completions(config, tokenizer_model, data, completions)
+  data[f"{config.train_data_columns}_completions"], eos_positions = concatenate_prompt_with_completions(config, tokenizer_model, prompts, true_length, completions)
 
-  data["prompt_completions_segmentation"] = (
-      jnp.arange(data["prompt_completions"].shape[1])[None, :] < eos_positions[:, None]
+  data[f"{config.train_data_columns}_completions_segmentation"] = (
+      jnp.arange(data[f"{config.train_data_columns}_completions"].shape[1])[None, :] < eos_positions[:, None]
   ).astype(jnp.int32)
-  data["prompt_completions_position"] = jnp.where(
-      data["prompt_completions_segmentation"], jnp.arange(data["prompt_completions"].shape[1]), 0
+  data[f"{config.train_data_columns}_completions_position"] = jnp.where(
+      data[f"{config.train_data_columns}_completions_segmentation"], jnp.arange(data[f"{config.train_data_columns}_completions"].shape[1]), 0
   )
-  completion_mask = data["prompt_completions_position"] >= data["prompt_true_length"][:, None] - 1
-  data["ar_completions_segmentation"] = data["prompt_completions_segmentation"] * completion_mask.astype(jnp.int32)
+  completion_mask = data[f"{config.train_data_columns}_completions_position"] >= data[f"{config.train_data_columns}_true_length"][:, None] - 1
+  data["ar_completions_segmentation"] = data[f"{config.train_data_columns}_segmentation"] * completion_mask.astype(jnp.int32)
   return data
 
 
