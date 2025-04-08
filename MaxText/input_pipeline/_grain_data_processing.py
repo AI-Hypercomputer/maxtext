@@ -203,7 +203,7 @@ def make_grain_eval_iterator(
   assert (
       config.global_batch_size_to_load_eval % global_mesh.size == 0
   ), "Batch size should be divisible number of global devices."
-  if config.colocated_python_data_input:
+  if not config.colocated_python_data_input:
     eval_ds = get_datasets(config.grain_eval_files)
     eval_dataloader = preprocessing_pipeline(
         dataset=eval_ds,
