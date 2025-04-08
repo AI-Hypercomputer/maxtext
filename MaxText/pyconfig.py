@@ -82,6 +82,29 @@ def validate_attention_type(s: str) -> None:
     raise ValueError("Invalid attention type was passed. Valid options ", valid_attention_types)
 
 
+def validate_attention_window_params(
+    attention_type: str,
+    chunk_attn_window_size: int,
+    sliding_window_size: int,
+) -> None:
+  """
+  Validates window size parameters for attention types 'chunk' and 'local'.
+  """
+  if attention_type == AttentionType.CHUNK.value:
+    # Validate chunk_attn_window_size for 'chunk' attention
+    if not isinstance(chunk_attn_window_size, int) or chunk_attn_window_size <= 0:
+      raise ValueError(
+          f"When attention_type is 'chunk', chunk_attn_window_size must be an integer greater than 0. "
+          f"Got: {chunk_attn_window_size}"
+      )
+  elif attention_type == AttentionType.LOCAL_SLIDING.value:
+    if not isinstance(sliding_window_size, int) or sliding_window_size <= 0:
+      raise ValueError(
+          f"When attention_type is 'local', sliding_window_size must be an integer greater than 0. "
+          f"Got: {sliding_window_size}"
+      )
+
+
 def validate_profiler_type(s: str) -> None:
   valid_profiler_types = ("", "nsys", "xplane")
   if s not in valid_profiler_types:  # currently supported attention
@@ -125,6 +148,9 @@ def validate_rope_type(rope_type: str) -> None:
 def validate_keys(keys):
   validate_attention_kernel(keys["attention"])
   validate_attention_type(keys["attention_type"])
+  validate_attention_window_params(
+      keys["attention_type"], keys.get("chunk_attn_window_size"), keys.get("sliding_window_size")
+  )
   validate_profiler_type(keys["profiler"])
   validate_periodic_profiler(keys["profiler"], keys["profile_periodically_period"], keys["profiler_steps"])
   validate_compute_axis_order(keys["compute_axis_order"])
