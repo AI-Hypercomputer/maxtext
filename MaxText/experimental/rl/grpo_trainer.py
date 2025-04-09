@@ -39,28 +39,25 @@ import jax.numpy as jnp
 from jax import random
 import numpy as np
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-maxtext_parent_dir = os.path.dirname(os.path.dirname(current_dir))
-sys.path.append(maxtext_parent_dir)
 
-import checkpointing
-import max_utils
-import maxtext_utils
-import max_logging
-import profiler
-import pyconfig
-import maxengine
+from MaxText import checkpointing
+from MaxText import max_utils
+from MaxText import maxtext_utils
+from MaxText import max_logging
+from MaxText import profiler
+from MaxText import pyconfig
+from MaxText import maxengine
 
-from metric_logger import MetricLogger
+from MaxText.metric_logger import MetricLogger
 
-from vertex_tensorboard import VertexTensorboardManager
+from MaxText.vertex_tensorboard import VertexTensorboardManager
 
-from experimental.rl import grpo_input_pipeline
-from layers import models
+from MaxText.experimental.rl import grpo_input_pipeline
+from MaxText.layers import models
 
-from gcp_workload_monitor import GCPWorkloadMonitor
+from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
 
-from train import (
+from MaxText.train import (
     validate_train_config,
     get_first_step,
     load_next_batch,
@@ -398,8 +395,9 @@ def generate_completions(config, tokenizer_model, engine, data, params, rng):
   data[f"{config.train_data_columns}_completions_position"] = jnp.where(
       data[f"{config.train_data_columns}_completions_segmentation"], jnp.arange(data[f"{config.train_data_columns}_completions"].shape[1]), 0
   )
-  completion_mask = data[f"{config.train_data_columns}_completions_position"] >= data[f"{config.train_data_columns}_true_length"][:, None] - 1
-  data["ar_completions_segmentation"] = data[f"{config.train_data_columns}_segmentation"] * completion_mask.astype(jnp.int32)
+  true_length = jnp.repeat(true_length, config.num_generations, axis=0)
+  completion_mask = data[f"{config.train_data_columns}_completions_position"] >= true_length[:, None] - 1
+  data["ar_completions_segmentation"] = data[f"{config.train_data_columns}_completions_segmentation"] * completion_mask.astype(jnp.int32)
   return data
 
 

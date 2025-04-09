@@ -1,16 +1,14 @@
 import jax
 from jax.sharding import Mesh
-import jax.numpy as jnp
 import numpy as np
-from input_pipeline import input_pipeline_interface
-from input_pipeline import _input_pipeline_utils
 import functools
 import datasets
 import transformers
 import grain.python as grain
 from collections.abc import Iterable
-from functools import partial
-import jax.tree_util as jtu
+
+from MaxText.input_pipeline import input_pipeline_interface
+from MaxText.input_pipeline import _input_pipeline_utils
 
 
 class SingleHostDataLoader:
@@ -143,7 +141,7 @@ def make_hf_train_iterator(
       dataloading_host_count=len(process_indices_train),
       global_mesh=global_mesh,
       dataset=train_ds,
-      data_column_names=config.train_data_columns,
+      data_column_names=[config.train_data_columns],
       tokenize=config.tokenize_train_data,
       tokenizer_path=config.tokenizer_path,
       hf_access_token=config.hf_access_token,

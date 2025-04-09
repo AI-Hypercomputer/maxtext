@@ -34,11 +34,7 @@ import transformers
 
 from datasets import load_dataset
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-maxtext_parent_dir = os.path.dirname(os.path.dirname(current_dir))
-sys.path.append(maxtext_parent_dir)
-
-from experimental.rl.grpo_trainer import compute_log_probs, grpo_loss_fn, _merge_grpo_state
+from MaxText.experimental.rl.grpo_trainer import compute_log_probs, grpo_loss_fn, _merge_grpo_state
 
 
 Array = common_types.Array
