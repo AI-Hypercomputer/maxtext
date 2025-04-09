@@ -417,7 +417,7 @@ llama2_70b_4096_sc = _add_to_model_dictionary(
         model_name="llama2-70b-4096-sc",
         model_type="llama2-70b",
         tuning_params={
-            "per_device_batch_size": 2,
+            "per_device_batch_size": 3,
             "ici_fsdp_parallelism": 1,
             "ici_fsdp_transpose_parallelism": -1,
             "ici_tensor_parallelism": 1,
@@ -939,7 +939,7 @@ llama3_1_70b_8192 = _add_to_model_dictionary(
         model_name="llama3_1-70b-8192",
         model_type="llama3.1-70b",
         tuning_params={
-            "per_device_batch_size": 4,
+            "per_device_batch_size": 5,
             "ici_fsdp_parallelism": -1,
             "remat_policy": "custom",
             "decoder_layer_input": "offload",
