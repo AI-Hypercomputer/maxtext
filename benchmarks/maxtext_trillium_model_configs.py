@@ -975,6 +975,176 @@ llama3_1_70b_8192 = _add_to_model_dictionary(
     ),
 )
 
+llama3_1_70b_8192_iter_synthetic = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama3_1_70b_8192_synthetic",
+    model_type="llama3.1-70b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": -1,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "use_iota_embed": True,
+        "dataset_type": "synthetic",
+        "enable_checkpointing": False,
+        "sa_block_q": 2048,
+        "sa_block_kv": 2048,
+        "sa_block_kv_compute": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_kv_dkv": 2048,
+        "sa_block_kv_dkv_compute": 2048,
+        "sa_block_q_dq": 2048,
+        "sa_block_kv_dq": 2048,
+        "sa_use_fused_bwd_kernel": True,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE 
+        +  " --xla_tpu_iova_dma_chunk_size_bytes=104857"
+    ),
+  )
+)
+ 
+llama3_1_70b_8192_iter_real_data_grain = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama3_1_70b_8192_rd_grain",
+    model_type="llama3.1-70b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": -1,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "use_iota_embed": True,
+        "dataset_path": "/tmp/dataset",
+        "dataset_type": "grain",
+        "grain_train_files": "/tmp/dataset/array-record/c4/en/3.0.1/c4-train.array_record*",
+        "grain_worker_count": 24,
+        "enable_checkpointing": False,
+        "sa_block_q": 2048,
+        "sa_block_kv": 2048,
+        "sa_block_kv_compute": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_kv_dkv": 2048,
+        "sa_block_kv_dkv_compute": 2048,
+        "sa_block_q_dq": 2048,
+        "sa_block_kv_dq": 2048,
+        "sa_use_fused_bwd_kernel": True,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE 
+        +  " --xla_tpu_iova_dma_chunk_size_bytes=104857"
+    ),
+  )
+)
+ 
+llama3_1_70b_8192_iter_synthetic_ckpt = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama3_1_70b_8192_synthetic_ckpt",
+    model_type="llama3.1-70b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": -1,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "use_iota_embed": True,
+        "dataset_type": "synthetic",
+        "enable_checkpointing": True,
+        "async_checkpointing": True,
+        "checkpoint_period": 20,
+        "sa_block_q": 2048,
+        "sa_block_kv": 2048,
+        "sa_block_kv_compute": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_kv_dkv": 2048,
+        "sa_block_kv_dkv_compute": 2048,
+        "sa_block_q_dq": 2048,
+        "sa_block_kv_dq": 2048,
+        "sa_use_fused_bwd_kernel": True,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE 
+        +  " --xla_tpu_iova_dma_chunk_size_bytes=104857"
+    ),
+  )
+)
+ 
+llama3_1_70b_8192_iter_real_data_and_checkpointing = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama3_1_70b_8192_rd_ckpt_grain",
+    model_type="llama3.1-70b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": -1,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "use_iota_embed": True,
+        "dataset_path": "/tmp/dataset",
+        "dataset_type": "grain",
+        "grain_train_files": "/tmp/dataset/array-record/c4/en/3.0.1/c4-train.array_record*",
+        "grain_worker_count": 24,
+        "enable_checkpointing": True,
+        "async_checkpointing": True,
+        "checkpoint_period": 20,
+        "sa_block_q": 2048,
+        "sa_block_kv": 2048,
+        "sa_block_kv_compute": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_kv_dkv": 2048,
+        "sa_block_kv_dkv_compute": 2048,
+        "sa_block_q_dq": 2048,
+        "sa_block_kv_dq": 2048,
+        "sa_use_fused_bwd_kernel": True,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE 
+        +  " --xla_tpu_iova_dma_chunk_size_bytes=104857"
+    ),
+  )
+)
+
 
 llama3_1_70b_8192_lr_real_data = _add_to_model_dictionary(
     trillium_model_dict,
