@@ -173,6 +173,14 @@ def add_xpk_runner_arguments(custom_parser: argparse.ArgumentParser):
       default=0,
       help='Number of restarts to attempt.',
   )
+  # To create storage follow https://github.com/AI-Hypercomputer/xpk?tab=readme-ov-file#storage.
+  custom_parser.add_argument(
+      '--xpk_storage',
+      default= None,
+      action="append",
+      help='Names of XPK storages the workload uses. Example, --xpk_storage=storage_test1 --xpk_storage=storage_test2',
+  )
+
 
 def add_on_device_runner_arguments(custom_parser: argparse.ArgumentParser):
   """Add arguments to the on-device runner parser.
@@ -283,6 +291,7 @@ def main() -> None:
       pathways_config=pw_config,
       # Internal only support, not for customers
       generate_metrics_and_upload_to_big_query=False,
+      xpk_storage=options.xpk_storage,
     )
 
     xpk_benchmark_runner(cluster_config, [workload_config])
