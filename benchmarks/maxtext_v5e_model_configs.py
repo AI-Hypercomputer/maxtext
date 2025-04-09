@@ -14,8 +14,8 @@
 """Shared Benchmark config for v5e orchestrations."""
 
 import os.path
-import xla_flags_library
-from maxtext_trillium_model_configs import MaxTextModel, _add_to_model_dictionary
+from benchmarks import xla_flags_library
+from benchmarks.maxtext_trillium_model_configs import MaxTextModel, _add_to_model_dictionary
 from benchmarks.globals import PKG_DIR
 
 
