@@ -632,6 +632,9 @@ class AttentionOp(nn.Module):
       mask_type = "padding_causal"  # only padding_causal mask type can take a created mask
       attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
 
+    # for cudnn version only, weight already folding scaling.
+    scale_factor = 1
+
     dpa_layer = DotProductAttention(
         head_dim=head_dim,
         num_attention_heads=self.num_query_heads,
@@ -643,7 +646,7 @@ class AttentionOp(nn.Module):
         dtype=self.dtype,
         float32_logits=self.float32_logits,
         qkv_layout="BSHD_BSHD_BSHD",  # 'BS3HD', 'BSHD_BS2HD' or 'BSHD_BSHD_BSHD'
-        scale_factor=1.0 / math.sqrt(head_dim),
+        scale_factor=scale_factor,
         transpose_batch_sequence=False,
         window_size=sliding_window_size,
     )
