@@ -19,7 +19,7 @@ import dataclasses
 import os.path
 import typing
 from tempfile import gettempdir
-import xla_flags_library
+from benchmarks import xla_flags_library
 
 from benchmarks.globals import PKG_DIR
 

@@ -36,15 +36,15 @@ import tempfile
 import threading
 import time
 
-import maxtext_trillium_model_configs as model_configs
-from command_utils import run_command_with_updates
-from benchmark_db_utils import DEFAULT_TUNING_PARAMS_FILE
+import benchmarks.maxtext_trillium_model_configs as model_configs
+from benchmarks.command_utils import run_command_with_updates
+from benchmarks.benchmark_db_utils import DEFAULT_TUNING_PARAMS_FILE
 
-import xla_flags_library as xla_flags
-from disruption_management.disruption_handler import DisruptionConfig
-from disruption_management.disruption_manager import DisruptionManager
+import benchmarks.xla_flags_library as xla_flags
+from benchmarks.disruption_management.disruption_handler import DisruptionConfig
+from benchmarks.disruption_management.disruption_manager import DisruptionManager
 from typing import Optional, List
-from xpk_configs import XpkClusterConfig
+from benchmarks.xpk_configs import XpkClusterConfig
 
 from MaxText.globals import PKG_DIR
 

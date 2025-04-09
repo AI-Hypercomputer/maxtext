@@ -22,7 +22,7 @@ import uuid
 import dataclasses
 from tempfile import gettempdir
 
-from command_utils import run_command_with_updates
+from benchmarks.command_utils import run_command_with_updates
 from argparse import Namespace
 
 BQ_WRITER_PATH = "/benchmark-automation/benchmark_db_writer/src"
