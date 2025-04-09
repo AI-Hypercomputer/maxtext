@@ -10,6 +10,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+
 import tempfile
 import unittest
 import pytest
@@ -37,7 +38,7 @@ class AotHloIdenticalTest(unittest.TestCase):
           stdout=sys.stdout,  # Stream to stdout
           stderr=sys.stdout,  # Stream to stdout
           text=True,  # Decode output and error as text
-          cwd=os.path.dirname(PKG_DIR)
+          cwd=os.path.dirname(PKG_DIR),
       )
       return result
     except subprocess.CalledProcessError as e:
@@ -90,8 +91,9 @@ class AotHloIdenticalTest(unittest.TestCase):
     self.delete_dir(compile_dump_dir)  # Ensure directories empty before use
     self.delete_dir(train_dump_dir)
 
-    self.run_compile_and_real(os.path.join(PKG_DIR, "tests", "aot_hlo_identical_script.sh"),
-                              compile_dump_dir, train_dump_dir, extra_config_args)
+    self.run_compile_and_real(
+        os.path.join(PKG_DIR, "tests", "aot_hlo_identical_script.sh"), compile_dump_dir, train_dump_dir, extra_config_args
+    )
 
     compile_hlo_file = self.find_file_by_substring(compile_dump_dir, hlo_filename_substring)
     train_hlo_file = self.find_file_by_substring(train_dump_dir, hlo_filename_substring)

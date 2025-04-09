@@ -121,12 +121,10 @@ class HFTokenizerTest(unittest.TestCase):
         check=True,
     )
     cls.hf_tokenizer = _input_pipeline_utils.get_tokenizer(
-      os.path.join(os.path.dirname(PKG_DIR), "assets", "gemma2-2b"),
-      "huggingface", add_bos=False, add_eos=False
+        os.path.join(os.path.dirname(PKG_DIR), "assets", "gemma2-2b"), "huggingface", add_bos=False, add_eos=False
     )
     cls.sp_tokenizer = _input_pipeline_utils.get_tokenizer(
-        os.path.join(os.path.dirname(PKG_DIR), "assets", "tokenizer.gemma"),
-      "sentencepiece", add_bos=False, add_eos=False
+        os.path.join(os.path.dirname(PKG_DIR), "assets", "tokenizer.gemma"), "sentencepiece", add_bos=False, add_eos=False
     )
 
   @pytest.mark.tpu_only

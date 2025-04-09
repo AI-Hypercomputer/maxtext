@@ -24,6 +24,7 @@ from MaxText import profiler
 from MaxText import pyconfig
 from MaxText.globals import PKG_DIR
 
+
 class ProfilerTest(unittest.TestCase):
   """Test for profiler."""
 
