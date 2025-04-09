@@ -43,7 +43,7 @@ rm -rf /var/lib/apt/lists/*
 EOF
 
 # We need to pin specific versions of setuptools, see b/402501203 for more.
-python3 -m pip install setuptools==65.5.0
+python3 -m pip install setuptools==65.5.0 wheel==0.45.1
 
 # Set environment variables
 for ARGUMENT in "$@"; do
