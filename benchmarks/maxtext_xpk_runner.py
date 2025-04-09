@@ -114,6 +114,10 @@ class WorkloadConfig:
 
   def __post_init__(self):
     """Initializes num_devices_per_slice and topology for recording the run into BigQuery"""
+    if not self.generate_metrics_and_upload_to_big_query:
+      return
+    if self.device_type is None:
+      raise ValueError(f"device_type is None and generate_metrics_and_upload_to_big_query is enabled. Device_type is required for uploading run results to BigQuery")
     if self.device_type.startswith("v6e") or self.device_type.startswith("v5e") or self.device_type.startswith("v5litepod"):
       size = int(self.device_type.split("-")[-1])
       if size == 256:

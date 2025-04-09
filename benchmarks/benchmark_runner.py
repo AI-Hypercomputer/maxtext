@@ -306,7 +306,9 @@ def main() -> None:
       libtpu_type=libtpu_type,
       libtpu_nightly_version=options.libtpu_version,
       run_name=options.run_name,
-      pathways_config=pw_config
+      pathways_config=pw_config,
+      # Internal only support, not for customers
+      generate_metrics_and_upload_to_big_query=False,
     )
     on_device_benchmark_runner(workload_configs=[workload_config])
 
