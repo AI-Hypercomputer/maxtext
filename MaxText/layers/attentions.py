@@ -612,7 +612,6 @@ class AttentionOp(nn.Module):
       query: Array,
       key: Array,
       value: Array,
-      scale_factor: float | None,
       decoder_segment_ids: Array | None,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
   ) -> Array:
