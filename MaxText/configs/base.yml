@@ -677,3 +677,7 @@ enable_padding_causal_mask: True
 use_qk_norm: False
 # Every `X` layers will NOT use RoPE
 nope_layer_interval: -1
+
+# Multimodal flags
+use_multimodal: False
+image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config

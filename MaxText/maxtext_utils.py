@@ -430,10 +430,12 @@ def init_initial_state(model, tx, config, is_training, key):
   Args: model, tx, config, is_training, key
   """
   input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+  image_shape = (config.micro_batch_size_to_train_on, 1, config.image_size_for_vit, config.image_size_for_vit, 3)
   model_vars = model.init(
       {"params": key, "dropout": key, "aqt": key},
       np.ones(input_shape, dtype=jnp.int32),
       np.ones(input_shape, dtype=jnp.int32),
+      encoder_images=np.ones(image_shape, dtype=jnp.int32),
   )
   if is_training:
     return init_training_state(model.apply, model_vars, tx)
