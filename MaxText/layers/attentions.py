@@ -273,7 +273,7 @@ class AttentionOp(nn.Module):
   use_ragged_attention: bool = False
   ragged_block_size: int = 256
 
-  scale_factor: float = 1
+  scale_factor: float = 1  # scaling factor for query in attention. currently used in cudnn only.
 
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
     """Check attention inputs."""
@@ -637,9 +637,9 @@ class AttentionOp(nn.Module):
 
     # scaling factor for fused query weight or not
     if self.scale_factor is None:
-        scale_factor = 1.0 / sqrt(query.shape[-1])
+      scale_factor = 1.0 / jnp.sqrt(query.shape[-1])
     else:
-        scale_factor = self.scale_factor
+      scale_factor = self.scale_factor
 
     dpa_layer = DotProductAttention(
         head_dim=head_dim,
