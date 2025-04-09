@@ -1103,7 +1103,7 @@ llama3_1_70b_8192_iter_synthetic_ckpt = _add_to_model_dictionary(
 llama3_1_70b_8192_iter_real_data_and_checkpointing = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
-    model_name="llama3_1_70b_8192_rd_ckpt_grain",
+    model_name="llama3_1_70b_8192_rd_ckpt_grain_test",
     model_type="llama3.1-70b",
     tuning_params={
         "per_device_batch_size": 2,
