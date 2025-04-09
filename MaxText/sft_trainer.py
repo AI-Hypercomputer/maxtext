@@ -210,6 +210,9 @@ def train_loop(config, state=None):
       record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
       try:
         example_batch = load_next_batch(data_iterator, example_batch, config)
+        # TODO(hengtaoguo): replace with real images inside the load_next_batch.
+        if config.use_multimodal:
+          example_batch['images'] = jax.random.randint(jax.random.PRNGKey(0), shape=(config.micro_batch_size_to_train_on, 1, config.image_size_for_vit, config.image_size_for_vit, 3), minval=0, maxval=256, dtype=jax.numpy.int32)
       except Exception as e:  # pylint: disable=broad-except
         max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
         break
