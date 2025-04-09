@@ -17,6 +17,7 @@ import os.path
 from MaxText import pyconfig
 from MaxText.globals import PKG_DIR
 
+
 class PyconfigTest(unittest.TestCase):
   """Tests for pyconfig.py"""
 

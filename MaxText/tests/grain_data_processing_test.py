@@ -30,6 +30,7 @@ from MaxText.input_pipeline import _grain_data_processing
 from MaxText.input_pipeline import input_pipeline_interface
 from MaxText.globals import PKG_DIR
 
+
 class GrainDataProcessingTest(unittest.TestCase):
 
   @classmethod
@@ -37,10 +38,10 @@ class GrainDataProcessingTest(unittest.TestCase):
     super().setUpClass()
     temp_dir = tempfile.gettempdir()
     script_path = os.path.join(os.path.dirname(PKG_DIR), "setup_gcsfuse.sh")
-    if not os.path.isfile(script_path): raise FileNotFoundError(script_path)
+    if not os.path.isfile(script_path):
+      raise FileNotFoundError(script_path)
     exit_code = subprocess.call(
-        ["bash", script_path,
-         "DATASET_GCS_BUCKET=maxtext-dataset", f"MOUNT_PATH={os.path.join(temp_dir, 'gcsfuse')}"]
+        ["bash", script_path, "DATASET_GCS_BUCKET=maxtext-dataset", f"MOUNT_PATH={os.path.join(temp_dir, 'gcsfuse')}"]
     )
     if exit_code != 0:
       raise ValueError(f"Running setup_gcsfuse.sh failed with exit code: {exit_code}")
@@ -57,8 +58,7 @@ class GrainDataProcessingTest(unittest.TestCase):
         data_sharding=["data"],
         base_output_directory="gs://max-experiments/",
         dataset_type="grain",
-        grain_train_files=os.path.join(temp_dir, "gcsfuse", "array-record", "c4", "en",
-          "3.0.1", "c4-train.array_record*"),
+        grain_train_files=os.path.join(temp_dir, "gcsfuse", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*"),
         tokenizer_path=os.path.join(os.path.dirname(PKG_DIR), "assets", "tokenizer"),
         enable_checkpointing=False,
     )

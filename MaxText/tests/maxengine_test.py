@@ -34,6 +34,7 @@ from MaxText.maxengine import MaxEngine
 from MaxText import pyconfig, maxengine
 from MaxText.globals import PKG_DIR
 
+
 class MaxEngineTest(unittest.TestCase):
   """Tests for MaxEngine."""
 
