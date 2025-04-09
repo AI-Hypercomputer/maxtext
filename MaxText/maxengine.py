@@ -519,6 +519,7 @@ class MaxEngine(engine_api.Engine):
       params: Params,
       existing_prefix: Optional[ExistingPrefix] = None,
       padded_tokens: jax.Array,
+      image_array: Optional[jax.Array] = None,
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,

@@ -100,6 +100,7 @@ class Gemma3DecoderLayer(nn.Module):
       page_state=None,
       slot=None,
   ):
+    print(f"inputs.shape = {inputs.shape}")
     cfg = self.config
     mesh = self.mesh
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
