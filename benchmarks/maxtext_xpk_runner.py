@@ -99,7 +99,7 @@ class WorkloadConfig:
   num_steps: int = 20
   max_restarts: int = 0
   priority: str = 'medium'
-  xpk_path: str = os.path.join(os.path.dirname(PKG_DIR), os.path.join("~", "xpk"))
+  xpk_path: str = os.path.join("~", "xpk")
   pathways_config: PathwaysConfig = None
   run_name: str = None
   generate_metrics_and_upload_to_big_query: bool = True
