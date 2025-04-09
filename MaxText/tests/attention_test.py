@@ -19,6 +19,7 @@ import random
 import sys
 import unittest
 import os.path
+import numpy as np
 from absl.testing import parameterized
 
 from MaxText import common_types
@@ -35,7 +36,97 @@ from MaxText.layers import attentions
 
 Mesh = jax.sharding.Mesh
 Attention = attentions.Attention
+ChunkedCausalMask = attentions.ChunkedCausalMask
 MLA = attentions.MLA
+
+
+class ChunkedCausalMaskTest(unittest.TestCase):
+  """Test for the ChunkedCausalMask."""
+
+  def test_basic_chunking(self):
+    """Tests the mask with a simple chunk size."""
+    seq_len = 8
+    chunk_size = 4
+    mask = ChunkedCausalMask(shape=(seq_len, seq_len), chunk_size=chunk_size)
+
+    # Manually compute the expected mask
+    # Causal within chunks (0-3, 4-7)
+    expected_mask = np.zeros((seq_len, seq_len), dtype=np.bool_)
+    for r in range(seq_len):
+      for c in range(seq_len):
+        q_chunk = r // chunk_size
+        kv_chunk = c // chunk_size
+        if q_chunk == kv_chunk and r >= c:
+          expected_mask[r, c] = True
+
+    # Get the actual mask by slicing
+    actual_mask = mask[:, :]
+
+    np.testing.assert_array_equal(actual_mask, expected_mask)
+    # Make sure _generate_chunk_attention_mask also produces the same mask
+    actual_mask = attentions._generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
+    np.testing.assert_array_equal(actual_mask, expected_mask)
+
+  def test_full_length_chunk(self):
+    """Tests when chunk size equals sequence length (should be causal)."""
+    seq_len = 6
+    chunk_size = 6  # Same as seq_len
+    mask = ChunkedCausalMask(shape=(seq_len, seq_len), chunk_size=chunk_size)
+
+    # Expected mask is a standard lower triangular causal mask
+    expected_mask = np.tril(np.ones((seq_len, seq_len), dtype=np.bool_))
+
+    actual_mask = mask[:, :]
+    np.testing.assert_array_equal(actual_mask, expected_mask)
+    # Make sure _generate_chunk_attention_mask also produces the same mask
+    actual_mask = attentions._generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
+    np.testing.assert_array_equal(actual_mask, expected_mask)
+
+  def test_single_token_chunk(self):
+    """Tests when chunk size is 1 (only attend to self)."""
+    seq_len = 5
+    chunk_size = 1
+    mask = ChunkedCausalMask(shape=(seq_len, seq_len), chunk_size=chunk_size)
+
+    # Expected mask is just the identity matrix
+    expected_mask = np.eye(seq_len, dtype=np.bool_)
+
+    actual_mask = mask[:, :]
+    np.testing.assert_array_equal(actual_mask, expected_mask)
+    # Make sure _generate_chunk_attention_mask also produces the same mask
+    actual_mask = attentions._generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
+    np.testing.assert_array_equal(actual_mask, expected_mask)
+
+  def test_non_square_shape(self):
+    """Tests with different query and key sequence lengths."""
+    q_len = 6
+    kv_len = 8
+    chunk_size = 3
+    mask = ChunkedCausalMask(shape=(q_len, kv_len), chunk_size=chunk_size)
+
+    # Manually compute expected mask
+    expected_mask = np.zeros((q_len, kv_len), dtype=np.bool_)
+    for r in range(q_len):
+      for c in range(kv_len):
+        q_chunk = r // chunk_size
+        kv_chunk = c // chunk_size
+        if q_chunk == kv_chunk and r >= c:
+          expected_mask[r, c] = True
+
+    actual_mask = mask[:, :]
+    np.testing.assert_array_equal(actual_mask, expected_mask)
+    # Make sure _generate_chunk_attention_mask also produces the same mask
+    actual_mask = attentions._generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
+    np.testing.assert_array_equal(actual_mask, expected_mask)
+
+  def test_value_error_on_zero_chunk_size(self):
+    """Tests that a ValueError is raised for chunk_size <= 0."""
+    with self.assertRaises(ValueError):
+      ChunkedCausalMask(shape=(4, 4), chunk_size=0)
+    with self.assertRaises(ValueError):
+      ChunkedCausalMask(shape=(4, 4), chunk_size=-2)
+    with self.assertRaises(ValueError):
+      attentions._generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
 
 
 class AttentionTest(unittest.TestCase):
