@@ -254,6 +254,10 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
         process_id=int(process_id),
         initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
     )
+
+    ocp.multihost.initialize_runtime_to_distributed_ids()
+    ocp.multihost.initialize_distributed_to_device_ids()
+
     if raw_keys["use_replicator_service"]:
       REPLICATOR_FILE = "replicator.yaml"
       TEMP_FILE = REPLICATOR_FILE + ".tmp"
@@ -268,12 +272,22 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
       num_nodes = jax.process_count()
       nodes_per_slice = num_nodes // num_slices
       max_logging.log(f"num_slices: {num_slices}, num_nodes: {num_nodes}, nodes_per_slice: {nodes_per_slice}")
+
       node_rank = jax._src.distributed.global_state.process_id  # pylint: disable=protected-access
+      my_process_index = jax.process_index()
+      processIndex_to_nodeRank = ocp.multihost.runtime_to_distributed_ids()
+      max_logging.log(f"Mapping of IDs: jax-init-info.txt={process_id}, NodeRank={node_rank}, ProcessIndex={my_process_index}, ProcessIndex->NodeRank={processIndex_to_nodeRank}")
+
+      my_in_pipeline_index = my_process_index % nodes_per_slice
       peer_ranks = []
       for i in range(num_slices):
-        peer = node_rank % nodes_per_slice + i * nodes_per_slice
-        if peer != node_rank:
-          peer_ranks.append(peer)
+        peer_process_index = i * nodes_per_slice + my_in_pipeline_index
+        if peer_process_index != my_process_index:
+          peer_process_rank = processIndex_to_nodeRank[peer_process_index]
+          peer_ranks.append(peer_process_rank)
+
+      max_logging.log(f"Peers for NodeRank {node_rank}: {peer_ranks}")
+
       run_name = raw_keys["run_name"]
       if run_name == "":
         run_name = os.environ.get("JOBSET_NAME")  # using XPK default
@@ -283,7 +297,6 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
       assume-data-parallelism: {num_slices}
       node-rank: {node_rank}
       nodes: {num_nodes}
-      workers-per-node: 1
       peer-ranks: {peer_ranks}
       backup-interval-minutes: {raw_keys["replicator_backup_interval_minutes"]}"""
 
@@ -301,8 +314,8 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
     )
     jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
 
-  ocp.multihost.initialize_runtime_to_distributed_ids()
-  ocp.multihost.initialize_distributed_to_device_ids()
+    ocp.multihost.initialize_runtime_to_distributed_ids()
+    ocp.multihost.initialize_distributed_to_device_ids()
 
 
 def _retrieve_jax_init_info(raw_keys):
