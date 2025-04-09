@@ -273,6 +273,8 @@ class AttentionOp(nn.Module):
   use_ragged_attention: bool = False
   ragged_block_size: int = 256
 
+  scale_factor: float = 1
+
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
     """Check attention inputs."""
 
@@ -610,6 +612,7 @@ class AttentionOp(nn.Module):
       query: Array,
       key: Array,
       value: Array,
+      scale_factor: float | None,
       decoder_segment_ids: Array | None,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
   ) -> Array:
@@ -632,8 +635,11 @@ class AttentionOp(nn.Module):
       mask_type = "padding_causal"  # only padding_causal mask type can take a created mask
       attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
 
-    # for cudnn version only, weight already folding scaling.
-    scale_factor = 1
+    # scaling factor for fused query weight or not
+    if self.scale_factor is None:
+        scale_factor = 1.0 / sqrt(query.shape[-1])
+    else:
+        scale_factor = self.scale_factor
 
     dpa_layer = DotProductAttention(
         head_dim=head_dim,
