@@ -294,7 +294,7 @@ def train_loop(config, state=None):
       max_utils.print_mem_stats("After params initialized")
 
   if checkpoint_manager is not None:
-    if int(state.step) - 1 % config.checkpoint_period != 0:
+    if (int(state.step) - 1) % config.checkpoint_period != 0:
       try:
         if save_checkpoint(
             checkpoint_manager, int(state.step) - 1, state, config.dataset_type, data_iterator, config, force=True
