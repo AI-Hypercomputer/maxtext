@@ -17,10 +17,10 @@
 import jax
 import os
 import sys
-import pathwaysutils
-import pyconfig
+import pathwaysutils  # pylint: disable=unused-import
+from MaxText import pyconfig
 
-import maxengine_config
+from MaxText import maxengine_config
 from jetstream.core import server_lib, config_lib
 
 # _PORT = flags.DEFINE_integer('port', 9000, 'port to listen on')

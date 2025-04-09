@@ -17,33 +17,37 @@ import functools
 from typing import Any, List, Optional, Tuple, Callable
 from collections import defaultdict
 import uuid
+import os.path
 
 import flax
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 from flax import struct
 
-from inference.page_manager import PageManager, PageState
-from layers import models, quantizations
+from MaxText.globals import PKG_DIR
+from MaxText.inference.page_manager import PageManager, PageState
+from MaxText.layers import models, quantizations
 
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 from jax.experimental import layout as jax_layout
 
-import common_types
+from MaxText import common_types
 from jetstream.core import config_lib
 from jetstream.engine import engine_api
 from jetstream.engine.tokenizer_pb2 import TokenizerParameters
 from jetstream.engine.tokenizer_pb2 import TokenizerType
 from jetstream.engine import tokenizer_api
 from jetstream.engine import token_utils
-from utils import lora_utils
+from MaxText.utils import lora_utils
 
-import max_utils
-import inference_utils
-import pyconfig
+from MaxText import max_utils
+from MaxText import inference_utils
+from MaxText import pyconfig
+
 import warnings
+
 
 warnings.simplefilter("ignore", category=FutureWarning)
 DecodeState = Any
@@ -289,8 +293,8 @@ class MaxEngine(engine_api.Engine):
     Load Single adapter from adapter_path.
     Expect adapter_config.json and LoRA adapter weights at this path within subdirectory `/0/items`.
     """
-    adapter_config_path = f"{adapter_path}/adapter_config.json"
-    adapter_weights_path = f"{adapter_path}/0/items"
+    adapter_config_path = os.path.join(adapter_path, "adapter_config.json")
+    adapter_weights_path = os.path.join(adapter_path, "0", "items")
 
     params, config = lora_utils.load_adapter(self.config, self.abstract_params, adapter_config_path, adapter_weights_path)
 
@@ -1250,7 +1254,13 @@ class MaxEngine(engine_api.Engine):
     elif metadata.tokenizer_type == TokenizerType.sentencepiece:
       return token_utils.SentencePieceTokenizer(metadata)
     elif metadata.tokenizer_type == TokenizerType.huggingface:
-      return token_utils.HuggingFaceTokenizer(metadata)
+      tokenizer_model = token_utils.HuggingFaceTokenizer(metadata)
+      if tokenizer_model.tokenizer.pad_token_id is None:
+        if tokenizer_model.tokenizer.unk_token_id is not None:
+          tokenizer_model.tokenizer.pad_token_id = tokenizer_model.tokenizer.unk_token_id
+        else:
+          tokenizer_model.tokenizer.pad_token_id = -1
+      return tokenizer_model
     else:
       raise ValueError(f"Unsupported tokenizer type: {metadata.tokenizer_type}")
 
@@ -1414,7 +1424,7 @@ def create_engine_from_config_flags(batch_size, max_prefill_predict_length, max_
     k, v = cmd_arg.split("=")
     args[k.strip()] = v.strip()
   assert "load_parameters_path" in args, "load_parameters_path must be defined"
-  updated_args = ["MaxText/maxengine_server.py", "../configs/base.yml"]
+  updated_args = [os.path.join(PKG_DIR, "maxengine_server.py"), os.path.join(PKG_DIR, "configs", "base.yml")]
   for k, v in args.items():
     option = f"{k}={v}"
     updated_args.append(option)

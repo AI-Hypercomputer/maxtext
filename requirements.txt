@@ -16,9 +16,10 @@ google-api-python-client
 grain-nightly
 flax>=0.8.0
 ml-collections
-ml-goodput-measurement==0.0.5
+ml-goodput-measurement==0.0.8
 numpy
 optax
+pathwaysutils
 protobuf==3.20.3
 pylint
 pytest

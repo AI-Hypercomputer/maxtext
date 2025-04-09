@@ -120,7 +120,7 @@ run_loadgen() {
   echo "PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES: ${PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES}"
   echo "MAXENGINE_ARGS: ${MAXENGINE_ARGS}"
 
-  ${cmd} python -m offline_mode \
+  ${cmd} python3 -m offline_mode \
     --mlperf_test_mode=${TEST_MODE} \
     --input_mode tokenized \
     --output_mode tokenized \

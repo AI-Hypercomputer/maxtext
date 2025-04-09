@@ -24,13 +24,13 @@ import functools
 import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-import common_types
-from inference import page_manager
-from layers import attentions
-from layers import embeddings
-from layers import linears
-from layers import normalizations, quantizations
-from layers import pipeline
+from MaxText import common_types
+from MaxText.inference import page_manager
+from MaxText.layers import attentions
+from MaxText.layers import embeddings
+from MaxText.layers import linears
+from MaxText.layers import normalizations, quantizations
+from MaxText.layers import pipeline
 
 Array = common_types.Array
 Config = common_types.Config
@@ -292,40 +292,44 @@ class Decoder(nn.Module):
     if self.config.decoder_block == "default":
       return [DecoderLayer]
     elif self.config.decoder_block == "llama2":
-      from layers import llama2
+      from MaxText.layers import llama2
 
       return [llama2.LlamaDecoderLayer]
     elif self.config.decoder_block == "mistral":
       # TODO(ranran): update to Mistral with sliding window attention
-      from layers import mistral
+      from MaxText.layers import mistral
 
       return [mistral.MistralDecoderLayer]
+    elif self.config.decoder_block == "mixtral":
+      from MaxText.layers import mixtral
+
+      return [mixtral.MixtralDecoderLayer]
     elif self.config.decoder_block == "deepseek":
-      from layers import deepseek
+      from MaxText.layers import deepseek
 
       return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
     elif self.config.decoder_block == "gemma":
-      from layers import gemma
+      from MaxText.layers import gemma
 
       return [gemma.GemmaDecoderLayer]
     elif self.config.decoder_block == "gemma2":
-      from layers import gemma2
+      from MaxText.layers import gemma2
 
       return [gemma2.Gemma2DecoderLayer]
     elif self.config.decoder_block == "gemma3":
-      from layers import gemma3
+      from MaxText.layers import gemma3
 
       return [gemma3.Gemma3DecoderLayer]
     elif self.config.decoder_block == "gpt3":
-      from layers import gpt3
+      from MaxText.layers import gpt3
 
       return [gpt3.Gpt3DecoderLayer]
     elif self.config.decoder_block == "simple":
-      from layers import simple_layer
+      from MaxText.layers import simple_layer
 
       return [simple_layer.SimpleDecoderLayer]
     elif self.config.decoder_block == "simple_mlp":
-      from layers import simple_layer
+      from MaxText.layers import simple_layer
 
       return [simple_layer.SimpleMlpDecoderLayer]
     else:
@@ -336,6 +340,7 @@ class Decoder(nn.Module):
         "default",
         "llama2",
         "mistral",
+        "mixtral",
         "deepseek",
         "gemma",
         "gemma2",
@@ -345,7 +350,7 @@ class Decoder(nn.Module):
     ):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
-      from layers import gpt3
+      from MaxText.layers import gpt3
 
       return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=True)
     else:
@@ -505,7 +510,7 @@ class Decoder(nn.Module):
             RemattedBlockLayer = RemattedBlockLayers[0]
             layer_kwargs = {}
             if cfg.decoder_block == "gemma3":
-              from layers import gemma3
+              from MaxText.layers import gemma3
               # Gemma3 uses both global and sliding window attention depending on the layer index.
               layer_kwargs = {"attention_type": gemma3.get_attention_type(layer_id=lyr)}
             layer = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, **layer_kwargs)

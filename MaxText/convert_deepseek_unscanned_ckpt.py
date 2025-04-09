@@ -34,8 +34,8 @@ import torch
 import psutil
 from tqdm import tqdm
 
-import max_logging
-from inference_utils import str2bool
+from MaxText import max_logging
+from MaxText.inference_utils import str2bool
 from safetensors import safe_open
 import llama_or_mistral_ckpt
 import convert_deepseek_ckpt as ds_ckpt

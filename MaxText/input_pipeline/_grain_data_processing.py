@@ -25,10 +25,10 @@ import jax
 import transformers
 import grain.python as grain
 from sentencepiece import SentencePieceProcessor
-from input_pipeline import _input_pipeline_utils
-from input_pipeline import _grain_tokenizer
+from MaxText.input_pipeline import _input_pipeline_utils
+from MaxText.input_pipeline import _grain_tokenizer
 
-import multihost_dataloading
+from MaxText import multihost_dataloading
 
 
 def get_datasets(data_file_pattern):
@@ -203,7 +203,7 @@ def make_grain_eval_iterator(
   assert (
       config.global_batch_size_to_load_eval % global_mesh.size == 0
   ), "Batch size should be divisible number of global devices."
-  if config.colocated_python_data_input:
+  if not config.colocated_python_data_input:
     eval_ds = get_datasets(config.grain_eval_files)
     eval_dataloader = preprocessing_pipeline(
         dataset=eval_ds,

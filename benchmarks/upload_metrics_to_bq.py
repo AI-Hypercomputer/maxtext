@@ -24,7 +24,7 @@ from benchmark_db_utils import write_run
 from benchmark_db_utils import DEFAULT_LOCAL_DIR
 from benchmark_db_utils import recover_tuning_params
 from benchmark_db_utils import Metrics
-from inference_utils import str2bool
+from MaxText.inference_utils import str2bool
 import dataclasses
 import fnmatch
 import getpass

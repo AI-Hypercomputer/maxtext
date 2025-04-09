@@ -18,10 +18,11 @@ limitations under the License.
 import sys
 import unittest
 import pytest
+import os.path
 
-import profiler
-import pyconfig
-
+from MaxText import profiler
+from MaxText import pyconfig
+from MaxText.globals import PKG_DIR
 
 class ProfilerTest(unittest.TestCase):
   """Test for profiler."""
@@ -30,7 +31,7 @@ class ProfilerTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_periodic_profiler_third_period_starts(self):
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         enable_checkpointing=False,
         run_name="test_periodic_profiler_starts_after_regular_profile",
         profiler="xplane",
@@ -46,7 +47,7 @@ class ProfilerTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_periodic_profiler_not_start_middle_period(self):
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         enable_checkpointing=False,
         run_name="test_periodic_profiler_starts_after_regular_profile",
         profiler="xplane",
@@ -62,7 +63,7 @@ class ProfilerTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_periodic_profiler_third_period_ends(self):
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         enable_checkpointing=False,
         run_name="test_periodic_profiler_starts_after_regular_profile",
         profiler="xplane",
@@ -78,7 +79,7 @@ class ProfilerTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_periodic_profiler_third_period_middle_not_end(self):
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         enable_checkpointing=False,
         run_name="test_periodic_profiler_starts_after_regular_profile",
         profiler="xplane",

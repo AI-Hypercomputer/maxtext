@@ -15,8 +15,8 @@ limitations under the License.
 
 import unittest
 
-import common_types
-from inference import kvcache
+from MaxText import common_types
+from MaxText.inference import kvcache
 
 import jax
 from jax import random
