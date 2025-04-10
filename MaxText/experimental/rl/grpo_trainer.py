@@ -812,12 +812,14 @@ def train_loop(config, config_inference, state=None):
     else:
       p_eval_step = None
 
-  data_sharding = in_shard_train[1]
-  param_sharding = state_mesh_shardings.params
+  inference_data_sharding = jax.sharding.NamedSharding(mesh=inference_mesh, spec=P(*config.data_sharding))
+  param_sharding = inference_state_mesh_shardings.params
+  functional_generate_completions = functools.partial(generate_completions, config, tokenizer_model, engine)
+  functional_generate_completions.__name__ = "generate_completions"
   p_generate_completions = jax.jit(
-      functools.partial(generate_completions, config, tokenizer_model, engine),
-      in_shardings=(data_sharding, param_sharding, None),
-      out_shardings=data_sharding,
+      functional_generate_completions,
+      in_shardings=(inference_data_sharding, param_sharding, None),
+      out_shardings=inference_data_sharding,
       donate_argnums=(0,),
   )
 
@@ -852,9 +854,8 @@ def train_loop(config, config_inference, state=None):
     example_batch = load_next_batch(data_iterator, example_batch, config)
     rng = jax.jit(jax.random.fold_in)(init_rng, k)
     rng, rng_gen = random.split(rng)
-    inference_data_sharding = jax.sharding.NamedSharding(mesh=inference_mesh, spec=P(*config.data_sharding))
     example_batch = jax.device_put(example_batch, inference_data_sharding)
-    example_batch = generate_completions(config, tokenizer_model, engine, example_batch, inference_params, example_batch["prompt_true_length"], rng_gen)
+    example_batch = p_generate_completions(example_batch, inference_params, rng_gen)
     data_buffer.push(example_batch, in_shard_train[1])
 
 
@@ -873,16 +874,10 @@ def train_loop(config, config_inference, state=None):
       rng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       rng, rng_gen = random.split(rng)
-      example_batch = p_generate_completions(example_batch, state.params, rng_gen)
-      # # inference shardings coming from inference mesh
-      inference_data_sharding = jax.sharding.NamedSharding(mesh=inference_mesh, spec=P(*config.data_sharding))
       example_batch = jax.device_put(example_batch, inference_data_sharding)
-      # inference_params = jax.device_put({'params':state.params['params']}, inference_state_mesh_shardings.params)
       inference_params = param_buffer.pull() or inference_params
-      example_batch = generate_completions(config, tokenizer_model, engine, example_batch, inference_params, example_batch["prompt_true_length"], rng_gen)
+      example_batch = p_generate_completions(example_batch, inference_params, rng_gen)
       data_buffer.push(example_batch, in_shard_train[1])
-      # transfer example_batch sharding to training mesh
-      # example_batch = jax.device_put(example_batch, in_shard_train[1])
 
       training_batch = data_buffer.queue.get(block=True)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
