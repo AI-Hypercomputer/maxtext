@@ -16,6 +16,7 @@ limitations under the License.
 
 import subprocess
 import unittest
+import os.path
 
 import numpy as np
 import jax
@@ -24,9 +25,11 @@ from jax.experimental import mesh_utils
 from datasets import Dataset
 import transformers
 
-import pyconfig
-from input_pipeline import _hf_data_processing
-from input_pipeline import input_pipeline_interface
+from MaxText import pyconfig
+from MaxText.globals import PKG_DIR
+from MaxText.input_pipeline import _hf_data_processing
+from MaxText.input_pipeline import input_pipeline_interface
+from MaxText.tests.globals import TEST_DISABLE_SFT_DATA_PROCESSING, TEST_DISABLE_SFT_DATA_PROCESSING_STR
 
 PROMPT_DATA = [
     [
@@ -87,21 +90,29 @@ class SFTDataProcessingTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
-    exit_code = subprocess.call(["gsutil", "cp", "-r", "gs://maxtext-dataset/hf/llama2-tokenizer", "../assets/"])
+    exit_code = subprocess.call(
+        [
+            "gsutil",
+            "cp",
+            "-r",
+            "gs://maxtext-dataset/hf/llama2-tokenizer",
+            os.path.join(os.path.dirname(PKG_DIR), "assets", ""),
+        ]
+    )
     if exit_code != 0:
       raise ValueError(f"Download tokenizer with gsutil cp failed with exit code: {exit_code}")
 
   def setUp(self):
     super().setUp()
     self.config = pyconfig.initialize(
-        ["sft_trainer.py", "configs/sft.yml"],
+        [os.path.join(PKG_DIR, "sft_trainer"), os.path.join(PKG_DIR, "configs", "sft.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
         base_output_directory="gs://max-experiments/",
-        tokenizer_path="../assets/llama2-tokenizer",
+        tokenizer_path=os.path.join(os.path.dirname(PKG_DIR), "assets", "llama2-tokenizer"),
         train_split="train",
         enable_checkpointing=False,
         use_sft=True,
@@ -183,6 +194,7 @@ class SFTDataProcessingTest(unittest.TestCase):
         packed_exp2_targets_predictable,
     )
 
+  @unittest.skipIf(TEST_DISABLE_SFT_DATA_PROCESSING, TEST_DISABLE_SFT_DATA_PROCESSING_STR)
   def test_sft_format_with_prompt_completion(self):
     train_ds = Dataset.from_dict({"prompt": PROMPT_DATA * 2, "completion": COMPLETION_DATA * 2})
     data_columns = ["prompt", "completion"]

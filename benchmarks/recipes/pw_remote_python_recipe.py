@@ -22,11 +22,12 @@ sys.path.append(parent_dir)
 
 import maxtext_trillium_model_configs as model_configs
 import maxtext_xpk_runner as mxr
+from xpk_configs import XpkClusterConfig
 
 
 def main() -> int:
   # V6e cluster config
-  cluster_config = mxr.XpkClusterConfig(
+  cluster_config = XpkClusterConfig(
       cluster_name="v6e-256-cluster",
       project="tpu-project",
       zone="us-east5-b",

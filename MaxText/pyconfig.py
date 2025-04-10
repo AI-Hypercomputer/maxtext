@@ -24,11 +24,11 @@ from typing import Any, Union
 
 import jax
 from jax.experimental.compilation_cache import compilation_cache
-from layers.attentions import AttentionType
-from utils import gcs_utils
-import accelerator_to_spec_map
-import max_logging
-import max_utils
+from MaxText.layers.attentions import AttentionType
+from MaxText.utils import gcs_utils
+from MaxText import accelerator_to_spec_map
+from MaxText import max_logging
+from MaxText import max_utils
 import omegaconf
 
 OmegaConf = omegaconf.OmegaConf
@@ -82,6 +82,29 @@ def validate_attention_type(s: str) -> None:
     raise ValueError("Invalid attention type was passed. Valid options ", valid_attention_types)
 
 
+def validate_attention_window_params(
+    attention_type: str,
+    chunk_attn_window_size: int,
+    sliding_window_size: int,
+) -> None:
+  """
+  Validates window size parameters for attention types 'chunk' and 'local'.
+  """
+  if attention_type == AttentionType.CHUNK.value:
+    # Validate chunk_attn_window_size for 'chunk' attention
+    if not isinstance(chunk_attn_window_size, int) or chunk_attn_window_size <= 0:
+      raise ValueError(
+          f"When attention_type is 'chunk', chunk_attn_window_size must be an integer greater than 0. "
+          f"Got: {chunk_attn_window_size}"
+      )
+  elif attention_type == AttentionType.LOCAL_SLIDING.value:
+    if not isinstance(sliding_window_size, int) or sliding_window_size <= 0:
+      raise ValueError(
+          f"When attention_type is 'local', sliding_window_size must be an integer greater than 0. "
+          f"Got: {sliding_window_size}"
+      )
+
+
 def validate_profiler_type(s: str) -> None:
   valid_profiler_types = ("", "nsys", "xplane")
   if s not in valid_profiler_types:  # currently supported attention
@@ -125,6 +148,9 @@ def validate_rope_type(rope_type: str) -> None:
 def validate_keys(keys):
   validate_attention_kernel(keys["attention"])
   validate_attention_type(keys["attention_type"])
+  validate_attention_window_params(
+      keys["attention_type"], keys.get("chunk_attn_window_size"), keys.get("sliding_window_size")
+  )
   validate_profiler_type(keys["profiler"])
   validate_periodic_profiler(keys["profiler"], keys["profile_periodically_period"], keys["profiler_steps"])
   validate_compute_axis_order(keys["compute_axis_order"])
@@ -162,6 +188,12 @@ def validate_keys(keys):
     validate_deepseek_moe(keys)
 
 
+def validate_tokenizer(keys):
+  assert keys[
+      "tokenizer_path"
+  ], "Please provide tokenizer_path. Even if using pre-tokenized data, tokenizer is required to process special tokens."
+
+
 def validate_data_input(keys):
   """validate provided parameters for data input"""
   if not keys["hf_access_token"]:
@@ -196,6 +228,11 @@ def validate_data_input(keys):
     assert keys["dataset_name"] != "", "dataset_name can't be empty when dataset_type=tfds"
     if keys["eval_interval"] > 0:
       assert keys["eval_split"], "Please specify eval_split or set eval_interval to <=0."
+
+  if "tokenizer_llama3.tiktoken" in keys["tokenizer_path"]:
+    assert (
+        keys["tokenizer_type"] == "tiktoken"
+    ), "tokenizer_type must be tiktoken when using tokenizer=tokenizer_llama3.tiktoken"
 
   if keys["sharding_tolerance"] > 1.0 or keys["sharding_tolerance"] < 0.0:
     max_logging.log(
@@ -333,7 +370,9 @@ class _HyperParameters:
             " at the CLI or ENV"
         )
 
-      if isinstance(new_proposal, type(raw_data_from_yaml[k])):
+      if new_proposal is None:
+        raw_keys[k] = None  # This allows users to set empty strings via CLI, otherwise parsed as "None" - b/405981568
+      elif isinstance(new_proposal, type(raw_data_from_yaml[k])):
         raw_keys[k] = new_proposal  # take the raw data, no type conversion
       else:
         try:
@@ -358,7 +397,7 @@ class _HyperParameters:
         loaded_parent_config_filename = os.path.join(os.path.dirname(config_name), parent_config_filename)
         if not os.path.isfile(loaded_parent_config_filename):
           dir_path = os.path.dirname(os.path.realpath(__file__))
-          loaded_parent_config_filename = os.path.join(dir_path, f"configs/{parent_config_filename}")
+          loaded_parent_config_filename = os.path.join(dir_path, "configs", parent_config_filename)
       else:
         loaded_parent_config_filename = parent_config_filename
 
@@ -488,12 +527,15 @@ class _HyperParameters:
 
     # Type conversions
     raw_keys["dtype"] = jax.numpy.dtype(raw_keys["dtype"])
+    raw_keys["weight_dtype"] = jax.numpy.dtype(raw_keys["weight_dtype"])
+    raw_keys["mu_dtype"] = set_mu_dtype(raw_keys)
     raw_keys["logical_axis_rules"] = _lists_to_tuples(raw_keys["logical_axis_rules"])
     raw_keys["data_sharding"] = _lists_to_tuples(raw_keys["data_sharding"])
 
     if raw_keys["remat_policy"] == "custom":
       raw_keys = validate_and_assign_remat_tensors(raw_keys)
     validate_keys(raw_keys)
+    validate_tokenizer(raw_keys)
     validate_data_input(raw_keys)
 
   @staticmethod
@@ -523,10 +565,10 @@ class _HyperParameters:
       model_name = raw_keys["model_name"]
       # First look at the model configs next to the base_config_path, and
       # fallback to the python codebase if the config cannot be found.
-      file_path = os.path.join(os.path.dirname(base_config_path), f"models/{model_name}.yml")
+      file_path = os.path.join(os.path.dirname(base_config_path), "models", f"{model_name}.yml")
       if not os.path.isfile(file_path):
         dir_path = os.path.dirname(os.path.realpath(__file__))
-        file_path = os.path.join(dir_path, f"configs/models/{model_name}.yml")
+        file_path = os.path.join(dir_path, "configs", "models", f"{model_name}.yml")
       # Use OmegaConf to load the model-specific configuration.
       model_vars = OmegaConf.load(file_path)
       model_vars = OmegaConf.to_container(model_vars, resolve=True)
@@ -542,7 +584,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["ici_fsdp_parallelism"],
       raw_keys["ici_fsdp_transpose_parallelism"],
       raw_keys["ici_sequence_parallelism"],
-      raw_keys["ici_context_parallelism"],
+      raw_keys["ici_context_autoregressive_parallelism"],
       raw_keys["ici_tensor_parallelism"],
       raw_keys["ici_tensor_transpose_parallelism"],
       raw_keys["ici_tensor_sequence_parallelism"],
@@ -555,7 +597,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["dcn_fsdp_parallelism"],
       raw_keys["dcn_fsdp_transpose_parallelism"],
       raw_keys["dcn_sequence_parallelism"],
-      raw_keys["dcn_context_parallelism"],
+      raw_keys["dcn_context_autoregressive_parallelism"],
       raw_keys["dcn_tensor_parallelism"],
       raw_keys["dcn_tensor_transpose_parallelism"],
       raw_keys["dcn_tensor_sequence_parallelism"],
@@ -565,6 +607,17 @@ def create_parallelisms_list(raw_keys):
   raw_keys["ici_parallelism"] = ici_parallelism
   raw_keys["dcn_parallelism"] = dcn_parallelism
   return raw_keys
+
+
+def set_mu_dtype(raw_keys):
+  # Default mu_dtype to weight_dtype if unset
+  if raw_keys["mu_dtype"]:
+    assert raw_keys["opt_type"] != "adam_pax", "opt_type adam_pax doesn't support explicitly setting mu_dtype"
+
+  if raw_keys["mu_dtype"] == "":
+    return raw_keys["weight_dtype"]
+  else:
+    return jax.numpy.dtype(raw_keys["mu_dtype"])
 
 
 def validate_and_set_hlo_dump_defaults(raw_keys):
@@ -600,7 +653,7 @@ def validate_multiple_slices(raw_keys):
                   raw_keys["dcn_tensor_parallelism"],
                   raw_keys["dcn_tensor_sequence_parallelism"],
                   raw_keys["dcn_expert_parallelism"],
-                  raw_keys["dcn_context_parallelism"],
+                  raw_keys["dcn_context_autoregressive_parallelism"],
                   raw_keys["dcn_autoregressive_parallelism"],
               ]
           )
@@ -634,7 +687,7 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["ici_fsdp_parallelism"],
           raw_keys["ici_fsdp_transpose_parallelism"],
           raw_keys["ici_sequence_parallelism"],
-          raw_keys["ici_context_parallelism"],
+          raw_keys["ici_context_autoregressive_parallelism"],
           raw_keys["ici_tensor_parallelism"],
           raw_keys["ici_tensor_transpose_parallelism"],
           raw_keys["ici_tensor_sequence_parallelism"],
@@ -647,7 +700,7 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["dcn_fsdp_parallelism"],
           raw_keys["dcn_fsdp_transpose_parallelism"],
           raw_keys["dcn_sequence_parallelism"],
-          raw_keys["dcn_context_parallelism"],
+          raw_keys["dcn_context_autoregressive_parallelism"],
           raw_keys["dcn_tensor_parallelism"],
           raw_keys["dcn_tensor_transpose_parallelism"],
           raw_keys["dcn_tensor_sequence_parallelism"],
@@ -660,7 +713,7 @@ def set_and_validate_pipeline_config(raw_keys):
           "fsdp",
           "fsdp_transpose",
           "sequence",
-          "context",
+          "context_autoregressive",
           "tensor",
           "tensor_transpose",
           "tensor_sequence",
@@ -674,7 +727,7 @@ def set_and_validate_pipeline_config(raw_keys):
               "fsdp",
               "fsdp_transpose",
               "sequence",
-              "context",
+              "context_autoregressive",
               "tensor",
               "tensor_transpose",
               "tensor_sequence",
@@ -728,6 +781,17 @@ def set_and_validate_pipeline_config(raw_keys):
 def validate_deepseek_moe(raw_keys):
   if raw_keys["decoder_block"] == "deepseek" and using_pipeline_parallelism(raw_keys):
     raise ValueError("Currently we do not support DeepSeek MoE with pipeline parallelism.")
+  if raw_keys["n_routing_groups"] != -1:
+    if raw_keys["topk_routing_group"] == -1:
+      raise ValueError(f'config topk_routing_group: {raw_keys["topk_routing_group"]} is not defined')
+    if raw_keys["n_routing_groups"] <= raw_keys["topk_routing_group"]:
+      raise ValueError(
+          f'config n_routing_groups: {raw_keys["n_routing_groups"]} must be greter than topk_routing_group: {raw_keys["topk_routing_group"]}'
+      )
+    if raw_keys["num_experts"] % raw_keys["n_routing_groups"] != 0:
+      raise ValueError(
+          f'config num_experts: {raw_keys["num_experts"]} must be divisible by n_routing_groups: {raw_keys["n_routing_groups"]}'
+      )
 
 
 def validate_sparse_matmul_parallelism(raw_keys):

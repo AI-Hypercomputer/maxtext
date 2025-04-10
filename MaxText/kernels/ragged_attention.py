@@ -23,11 +23,10 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
-from jax.experimental import shard_map
-
 import numpy as np
-
 from MaxText import common_types
+
+from jax.experimental import shard_map
 
 
 BATCH = common_types.BATCH

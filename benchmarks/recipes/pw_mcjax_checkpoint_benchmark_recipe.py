@@ -13,6 +13,7 @@
  See the License for the specific language governing permissions and
  limitations under the License.
  """
+from benchmarks.globals import PKG_DIR
 
 """Recipe to test checkpointing and restore for Pathways and McJax.
  The recipe will run synchronously and will run the benchmark steps for each
@@ -32,6 +33,7 @@ sys.path.append(parent_dir)
 
 import maxtext_trillium_model_configs as model_configs
 import maxtext_xpk_runner as mxr
+from xpk_configs import XpkClusterConfig
 
 PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_proxy_server:latest"
 SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_server:latest"
@@ -45,7 +47,7 @@ COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
 # Other parameters (MUST BE SET BY USER)
-XPK_PATH = "../xpk"  # We're running this script from the maxtext directory
+XPK_PATH = os.path.join(os.path.dirname(PKG_DIR), os.path.join("~", "xpk"))  # We're running this script from the maxtext directory
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = (
     f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
@@ -206,7 +208,7 @@ def _run_workloads_async(xpk_workloads, cluster_config, run_type="Initial"):
 
 def main() -> int:
   # V6e cluster config
-  cluster_config = mxr.XpkClusterConfig(
+  cluster_config = XpkClusterConfig(
       cluster_name=CLUSTER,
       project=PROJECT,
       zone=ZONE,

@@ -60,35 +60,36 @@ if "$test_mode"; then
 fi
 
 export XLA_FLAGS="--xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_enable_command_buffer=FUSION --xla_disable_hlo_passes=rematerialization"
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.94
 echo XLA_FLAGS: $XLA_FLAGS
 
-# if [[ -z ${QUANTIZATION} ]] ; then
-#   export QUANTIZATION="aqt_fp8"
-# fi
+if [[ -z ${QUANTIZATION} ]] ; then
+    export QUANTIZATION="aqt_fp8"
+fi
 
 if [[ -z ${KV_QUANT_DTYPE} ]] ; then
-  export KV_QUANT_DTYPE="fp8"
-  export QUANTIZE_KVCACHE=True
+    export KV_QUANT_DTYPE="fp8"
+    export QUANTIZE_KVCACHE=True
 fi
 
 if [[ -z ${CHECKPOINT} ]] ; then
-  export CHECKPOINT="gs://inference-benchmarks/models/llama2-70b-chat/2024-05-08-23-16/param-only-decode-ckpt-maxtext/checkpoints/0/items"
+    export CHECKPOINT="gs://inference-benchmarks/models/llama2-70b-chat/2024-05-08-23-16/param-only-decode-ckpt-maxtext/checkpoints/0/items"
 fi
 
 if [[ -z ${TOKENIZER_PATH} ]] ; then
-  export TOKENIZER_PATH="/opt//maxtext/assets/tokenizer.llama2"
+    export TOKENIZER_PATH="/opt//maxtext/assets/tokenizer.llama2"
 fi
 
 if [ -z "$PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES" ];
 then
     PREFILL_LEN="1024"
-    BATCH_SIZE_PER_DEVICE="160" 
+    BATCH_SIZE_PER_DEVICE="160"
     export PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES="${PREFILL_LEN},${BATCH_SIZE_PER_DEVICE}"
 fi
 
 
 BASE_CFG="model_name=llama2-70b tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT} scan_layers=false hardware=gpu async_checkpointing=False ici_tensor_parallelism=-1 weight_dtype=bfloat16"
-KV_QUANT_CFG="quantize_kvcache=${QUANTIZE_KVCACHE} kv_quant_dtype=${KV_QUANT_DTYPE}"
+KV_QUANT_CFG="quantize_kvcache=${QUANTIZE_KVCACHE} kv_quant_dtype=${KV_QUANT_DTYPE} quantization=${QUANTIZATION}"
 export MAXENGINE_ARGS="${BASE_CFG} ${KV_QUANT_CFG} optimize_mesh_for_tpu_v6e=false"
 echo
 echo $MAXENGINE_ARGS
