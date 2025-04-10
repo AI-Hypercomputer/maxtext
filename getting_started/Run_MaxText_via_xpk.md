@@ -48,7 +48,7 @@ gcloud auth login
 
 * Run this command to configure docker to use docker-credential-gcloud for GCR registries:
 ```
-gcloud auth configure-docker us-docker.pkg.dev
+gcloud auth configure-docker
 ```
 
 * Test the installation by running
