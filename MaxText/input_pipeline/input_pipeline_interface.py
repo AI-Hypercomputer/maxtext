@@ -22,11 +22,11 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
-from input_pipeline._tfds_data_processing import make_tfds_train_iterator, make_tfds_eval_iterator
-from input_pipeline._grain_data_processing import make_grain_train_iterator, make_grain_eval_iterator
-from input_pipeline._tfds_data_processing_c4_mlperf import make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator
-from input_pipeline._hf_data_processing import make_hf_train_iterator, make_hf_eval_iterator
-import multihost_dataloading
+from MaxText.input_pipeline._tfds_data_processing import make_tfds_train_iterator, make_tfds_eval_iterator
+from MaxText.input_pipeline._grain_data_processing import make_grain_train_iterator, make_grain_eval_iterator
+from MaxText.input_pipeline._tfds_data_processing_c4_mlperf import make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator
+from MaxText.input_pipeline._hf_data_processing import make_hf_train_iterator, make_hf_eval_iterator
+from MaxText import multihost_dataloading
 
 
 class SyntheticDataIterator:
@@ -130,7 +130,6 @@ def get_process_loading_real_data(
 
 def make_mixed_iterator(config, mesh, process_indices_train, process_indices_eval, train_iterator_fn, eval_iterator_fn):
   """Return iterators according to dataset_type"""
-  # train_iterator, eval_iterator = make_tfds_iterator(config, mesh, process_indices_train, process_indices_eval)
   if jax.process_index() in process_indices_train:
     train_iterator = train_iterator_fn()
   else:

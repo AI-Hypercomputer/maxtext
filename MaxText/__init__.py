@@ -13,3 +13,10 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+
+__author__ = "Google LLC"
+__version__ = "2025.04.25"
+__description__ = (
+    "MaxText is a high performance, highly scalable, open-source LLM written in pure Python/Jax and "
+    "targeting Google Cloud TPUs and GPUs for training and **inference."
+)

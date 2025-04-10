@@ -14,20 +14,27 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+from MaxText.tests.globals import TEST_DISABLE_SUBPROCESS, TEST_DISABLE_SUBPROCESS_STR
+
 """Integraion tests for test_generate_param_only_checkpoint.sh"""
 from datetime import datetime
 import subprocess
+import os.path
 import pytest
+from MaxText.globals import PKG_DIR
 
 
 def run_generate_param_only_checkpoint(attention_type, quantization):
   """Tests generating a parameter-only checkpoint."""
 
   run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+  script_path = os.path.join(os.path.dirname(PKG_DIR), "end_to_end", "test_generate_param_only_checkpoint.sh")
+  if not os.path.isfile(script_path):
+    raise FileNotFoundError(script_path)
   # fmt: off
   command = [
       "bash",
-      "end_to_end/test_generate_param_only_checkpoint.sh",
+      script_path,
       "-r", f"runner_{run_date}",
       "-o", r"gs://runner-maxtext-logs",
       "-d", r"gs://maxtext-dataset",
@@ -36,12 +43,13 @@ def run_generate_param_only_checkpoint(attention_type, quantization):
       "-q", quantization,
   ]
 
-  subprocess.run(command, check=True, cwd="..")
+  subprocess.run(command, check=True, cwd=os.path.dirname(PKG_DIR))
 
 
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
 @pytest.mark.parametrize("quantization", [(""), ("int8")])
+@pytest.mark.skipif(TEST_DISABLE_SUBPROCESS, reason=TEST_DISABLE_SUBPROCESS_STR)
 def test_autoselected_attention(quantization):
   run_generate_param_only_checkpoint("autoselected", quantization)
 
@@ -49,5 +57,6 @@ def test_autoselected_attention(quantization):
 @pytest.mark.integration_test
 @pytest.mark.gpu_only
 @pytest.mark.parametrize("quantization", [(""), ("int8")])
+@pytest.mark.skipif(TEST_DISABLE_SUBPROCESS, reason=TEST_DISABLE_SUBPROCESS_STR)
 def test_with_dot_product(quantization):
   run_generate_param_only_checkpoint("dot_product", quantization)

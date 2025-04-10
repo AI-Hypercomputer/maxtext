@@ -16,21 +16,24 @@ limitations under the License.
 
 import os
 import unittest
+from tempfile import gettempdir
 
 from absl.testing import absltest
-from train import main as train_main
+
+from MaxText.globals import PKG_DIR
+from MaxText.train import main as train_main
 
 
 class Train(unittest.TestCase):
   """Smoke test for MoE using ragged_dot in G3 only."""
 
   def test_tiny_config(self):
-    test_tmpdir = os.environ.get("TEST_TMPDIR")
-    outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
+    test_tmpdir = os.environ.get("TEST_TMPDIR", gettempdir())
+    outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", test_tmpdir)
     train_main(
         [
             None,
-            "third_party/py/maxtext/configs/base.yml",
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"base_output_directory={test_tmpdir}",
             "run_name=ragged_dot_smoke_test",
             "base_emb_dim=8",
@@ -54,7 +57,7 @@ class Train(unittest.TestCase):
             "enable_goodput_recording=False",
             "enable_checkpoint_cloud_logger=False",
             "monitor_goodput=False",
-            f"metrics_file={outputs_dir}/metrics.json",
+            f"metrics_file={os.path.join(outputs_dir, 'metrics.json')}",
         ]
     )
 

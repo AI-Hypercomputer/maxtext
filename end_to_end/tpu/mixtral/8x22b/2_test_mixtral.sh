@@ -23,7 +23,7 @@ export DATASET_PATH=gs://maxtext-dataset
 export TOKENIZER_PATH=assets/tokenizer.mistral-v3
 
 # Run pre-training without load_parameters_path - megablox implementation
-python3 MaxText/train.py MaxText/configs/base.yml \
+python3 -m MaxText.train MaxText/configs/base.yml \
   base_output_directory=${BASE_OUTPUT_PATH} dataset_path=${DATASET_PATH} \
   run_name=pre_training_megablox per_device_batch_size=4 enable_checkpointing=false \
   model_name=mixtral-8x22b ici_tensor_parallelism=1 ici_fsdp_parallelism=-1 \
@@ -32,7 +32,7 @@ python3 MaxText/train.py MaxText/configs/base.yml \
   weight_dtype=bfloat16 megablox=True sparse_matmul=True
 
 # Run pre-training without load_parameters_path - matmul implementation
-python3 MaxText/train.py MaxText/configs/base.yml \
+python3 -m MaxText.train MaxText/configs/base.yml \
   base_output_directory=${BASE_OUTPUT_PATH} dataset_path=${DATASET_PATH} \
   run_name=pre_training_matmul per_device_batch_size=4 enable_checkpointing=false \
   model_name=mixtral-8x22b ici_tensor_parallelism=1 ici_fsdp_parallelism=-1 \
@@ -41,7 +41,7 @@ python3 MaxText/train.py MaxText/configs/base.yml \
   weight_dtype=bfloat16 megablox=False sparse_matmul=False
 
 # Run pre-training without load_parameters_path - dropping implementation
-python3 MaxText/train.py MaxText/configs/base.yml \
+python3 -m MaxText.train MaxText/configs/base.yml \
   base_output_directory=${BASE_OUTPUT_PATH} dataset_path=${DATASET_PATH} \
   run_name=pre_training_dropping per_device_batch_size=4 enable_checkpointing=false \
   model_name=mixtral-8x22b ici_tensor_parallelism=1 ici_fsdp_parallelism=-1 \

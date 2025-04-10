@@ -23,7 +23,7 @@ from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2.flax import aqt_flax
 from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
-import common_types
+from MaxText import common_types
 from dataclasses import dataclass
 from flax.linen import fp8_ops
 from flax.linen import initializers as flax_initializers
@@ -32,7 +32,7 @@ import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_flatten_with_path, tree_unflatten
 from typing import Tuple, Sequence
-from inference import kvcache
+from MaxText.inference import kvcache
 
 # Params used to define mixed precision quantization configs
 DEFAULT = "__default__"  # default config
@@ -305,7 +305,8 @@ def _get_int8_quant_config(config):
 
 
 def _get_aqt_fp8_quant_config(config):
-  return aqt_config.config_fwd_fp8()
+  cfg = aqt_config.config_v4(fwd_bits="e4m3", dlhs_bits=None, drhs_bits=None, fwd_accumulator_dtype=jnp.bfloat16)
+  return cfg
 
 
 def _dot_general_make(quant_cfg):

@@ -23,8 +23,8 @@ shared_args="configs/base.yml base_output_directory=gs://runner-maxtext-logs run
 aot_args="compile_topology=v4-8 compile_topology_num_slices=1"
 
 export XLA_FLAGS=--xla_dump_to=${compile_dump_dir}
-python3 train_compile.py $shared_args $aot_args 
+python3 -m MaxText.train_compile $shared_args $aot_args
 
 export XLA_FLAGS=--xla_dump_to=${train_dump_dir}
-python train.py $shared_args
+python3 -m MaxText.train $shared_args
 
