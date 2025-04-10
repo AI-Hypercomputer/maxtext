@@ -80,6 +80,7 @@ class PipelineGPipeCircular(ABC):
     # Clean per iteration runtime states
     self.stage.reset_runtime_states()
     self._internal_losses = []
+    self._targets_cache = None
 
     example_batch = None
     if self.stage.is_first:
@@ -359,7 +360,7 @@ class PipelineGPipeCircular(ABC):
           inputs_wb, i, step_index
       )
       with jax.named_scope(f"Forward_stage_{self.stage.stage_index}_mb_{i}"):
-        outputs = self.stage.forward_step(self.stage.get_jitted_forward_func(), i, input_mb, nextrng)  # type: ignore[index]
+        outputs = self.stage.forward_step(self.stage.get_jitted_forward_func(), input_mb, i, nextrng)  # type: ignore[index]
         self._fwd_send(
             outputs,
             input_mb["inputs_position"],

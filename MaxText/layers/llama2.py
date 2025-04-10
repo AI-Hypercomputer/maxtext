@@ -21,6 +21,7 @@ limitations under the License.
 from flax import linen as nn
 from jax.sharding import Mesh
 import jax.numpy as jnp
+import jax
 from jax.ad_checkpoint import checkpoint_name
 # from jax.experimental.pallas.ops.tpu import flash_attention
 from layers import attentions
@@ -65,6 +66,7 @@ class LlamaDecoderLayer(nn.Module):
   config: models.Config
   mesh: Mesh
   quant: Optional[Quant] = None
+  stage_index: Optional[int] = None
 
   @nn.compact
   def __call__(
@@ -177,6 +179,39 @@ class LlamaDecoderLayer(nn.Module):
     else:
       return layer_output
 
+class SequentialBlockLlamaDecoderLayers(nn.Module):
+  """Sequential unscanned series of decoder layers."""
+
+  decoder_layer: Any
+  num_decoder_layers: int
+  config: Config
+  mesh: Mesh
+  quant: Quant
+
+  @nn.compact
+  def __call__(
+      self,
+      inputs: jnp.ndarray,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+  ) -> jnp.ndarray:
+    for lyr in range(self.num_decoder_layers):
+      inputs = self.decoder_layer(
+          config=self.config,
+          mesh=self.mesh,
+          name=f"layers_{lyr}",
+          quant=self.quant,
+      )(
+          inputs,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+      )
+    return inputs
+
 
 class LlamaDecoderLayerStage(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
@@ -184,6 +219,7 @@ class LlamaDecoderLayerStage(nn.Module):
   config: models.Config
   mesh: Mesh
   quant: Optional[Quant] = None
+  stage_index: Optional[int] = None
 
   def scan_decoder_layers(self, cfg, decoder_layer, length, metdata_axis_name, mesh):
     initializing = self.is_mutable_collection("params")
@@ -286,12 +322,9 @@ class LlamaDecoderLayerStage(nn.Module):
       elif cfg.remat_policy == "minimal_offloaded":
         policy = jax.checkpoint_policies.offload_dot_with_no_batch_dims(offload_src="device", offload_dst="pinned_host")
       elif cfg.remat_policy == "custom":
-        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=cfg.tensors_on_device,
-            names_which_can_be_offloaded=cfg.tensors_to_offload,
-            offload_src="device",
-            offload_dst="pinned_host",
-            )
+        policy = jax.checkpoint_policies.save_only_these_names(
+            *cfg.tensors_on_device
+        )
       elif cfg.remat_policy == "minimal_flash":
         policy = jax.checkpoint_policies.save_from_both_policies(
             jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims,

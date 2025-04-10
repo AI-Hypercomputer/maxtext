@@ -29,7 +29,6 @@ from layers import attentions
 from layers import embeddings
 from layers import linears
 from layers import normalizations, quantizations
-from layers import pipeline
 
 Array = common_types.Array
 Config = common_types.Config
@@ -357,11 +356,8 @@ class Decoder(nn.Module):
       elif cfg.remat_policy == "minimal_offloaded":
         policy = jax.checkpoint_policies.offload_dot_with_no_batch_dims(offload_src="device", offload_dst="pinned_host")
       elif cfg.remat_policy == "custom":
-        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=cfg.tensors_on_device,
-            names_which_can_be_offloaded=cfg.tensors_to_offload,
-            offload_src="device",
-            offload_dst="pinned_host",
+        policy = jax.checkpoint_policies.save_only_these_names(
+            *cfg.tensors_on_device
         )
       elif cfg.remat_policy == "minimal_flash":
         policy = jax.checkpoint_policies.save_from_both_policies(
