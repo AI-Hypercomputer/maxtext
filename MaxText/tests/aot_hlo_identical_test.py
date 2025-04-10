@@ -52,9 +52,9 @@ class AotHloIdenticalTest(unittest.TestCase):
         return os.path.join(directory, filename)
     raise FileNotFoundError(f"Could not find a file in directory {directory} with substring {substring}")
 
-  def delete_dir(self, dir):
-    if os.path.exists(dir):
-      shutil.rmtree(dir)
+  def delete_dir(self, directory):
+    if os.path.exists(directory):
+      shutil.rmtree(directory)
 
   def check_large_files_equal(self, file_path1, file_path2):
     """Asserts that two potentially large text files have identical content."""
