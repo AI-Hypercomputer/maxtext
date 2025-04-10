@@ -192,6 +192,7 @@ def make_tfds_train_iterator(
         tokenize=config.tokenize_train_data,
         add_bos=config.add_bos,
         add_eos=config.add_eos,
+        num_epochs=config.num_epoch,
         use_dpo=config.use_dpo,
         hf_access_token=config.hf_access_token,
     )
@@ -217,6 +218,7 @@ def make_tfds_train_iterator(
         tokenize=config.tokenize_train_data,
         add_bos=config.add_bos,
         add_eos=config.add_eos,
+        num_epochs=config.num_epoch,
         use_dpo=config.use_dpo,
         hf_access_token=config.hf_access_token,
     )
