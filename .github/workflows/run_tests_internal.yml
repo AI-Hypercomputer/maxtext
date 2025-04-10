@@ -56,5 +56,5 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run Tests
         run: |
-          cd MaxText
-          python3 -m pytest ${{ inputs.test_directory }} -m "${{ inputs.pytest_marker }}"
+          python3 -m pip install -e .
+          python3 -m pytest --pyargs MaxText.tests -m "${{ inputs.pytest_marker }}"

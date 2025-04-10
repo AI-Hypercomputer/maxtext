@@ -17,27 +17,27 @@ import sys
 import jax
 from jax.sharding import Mesh
 
-
+import os.path
 import unittest
 import pytest
 
-import pyconfig
+from MaxText import pyconfig
+from MaxText.globals import PKG_DIR
 
-
-from layers import pipeline
+from MaxText.layers import pipeline
 import jax
 from jax import numpy as jnp
 from jax.sharding import Mesh
 
-import common_types
-import pyconfig
-import max_utils
+from MaxText import common_types
+from MaxText import pyconfig
+from MaxText import max_utils
 from flax.core import meta
 
 import jax.numpy as jnp
 from flax import linen as nn
-from layers import simple_layer
-from train import main as train_main
+from MaxText.layers import simple_layer
+from MaxText.train import main as train_main
 
 
 def assert_same_output_and_grad(f1, f2, *inputs):
@@ -161,7 +161,7 @@ class PipelineParallelismTest(unittest.TestCase):
   def test_circular_minimum_microbatches_same_output_and_grad(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 4 microbatches
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         enable_checkpointing=False,
         run_name="circular_minimum_microbatches",
         max_target_length=128,
@@ -177,7 +177,7 @@ class PipelineParallelismTest(unittest.TestCase):
   def test_circular_extra_microbatches_same_output_and_grad(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         enable_checkpointing=False,
         run_name="circular_extra_microbatches",
         max_target_length=128,
@@ -193,7 +193,7 @@ class PipelineParallelismTest(unittest.TestCase):
   def test_circular_ag_once(self):
     # 2 stages, 8 microbatches, all gather once
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         enable_checkpointing=False,
         run_name="circular_ag_once",
         max_target_length=128,
@@ -210,7 +210,7 @@ class PipelineParallelismTest(unittest.TestCase):
   def test_non_circular_same_output_and_grad(self):
     # 4 stages, 4 layers (no circular repeats, 1 layer per stage), 4 microbatches
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         enable_checkpointing=False,
         run_name="non_circular",
         max_target_length=128,
@@ -228,7 +228,7 @@ class PipelineParallelismTest(unittest.TestCase):
     train_main(
         [
             None,
-            "configs/base.yml",
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             r"base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_pipeline_parallelism_test",
             r"dataset_path=gs://maxtext-dataset",
@@ -247,7 +247,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "ici_pipeline_parallelism=4",
             "num_layers_per_pipeline_stage=2",
             "num_pipeline_microbatches=8",
-            "tokenizer_path=../assets/tokenizer.llama2",
+            rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
             "scan_layers=False",  # We see better performance only scanning the pipeline iterations.
         ]
     )
@@ -256,7 +256,7 @@ class PipelineParallelismTest(unittest.TestCase):
   def test_delay_activation_forwarding_same_output_and_grad(self):
     # 4 stages, delayed activation forwarding, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         enable_checkpointing=False,
         run_name="activation_forwarding",
         max_target_length=128,
@@ -275,7 +275,7 @@ class PipelineParallelismTest(unittest.TestCase):
     train_main(
         [
             None,
-            "configs/base.yml",
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             r"base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_pipeline_parallelism_test",
             r"dataset_path=gs://maxtext-dataset",
@@ -294,7 +294,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "ici_pipeline_parallelism=4",
             "num_layers_per_pipeline_stage=8",
             "num_pipeline_microbatches=8",
-            "tokenizer_path=../assets/tokenizer.llama2",
+            rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
             "scan_layers=False",  # We see better performance only scanning the pipeline iterations.
         ]
     )
@@ -305,7 +305,7 @@ class PipelineParallelismTest(unittest.TestCase):
     train_main(
         [
             None,
-            "configs/base.yml",
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             r"base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_pipeline_parallelism_fp8_test",
             r"dataset_path=gs://maxtext-dataset",
@@ -322,7 +322,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "steps=3",
             "enable_checkpointing=False",
             "ici_pipeline_parallelism=4",
-            "tokenizer_path=../assets/tokenizer.llama2",
+            rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
             "quantization=fp8",
             "scan_layers=False",
             "attention=dot_product",
@@ -335,7 +335,7 @@ class PipelineParallelismTest(unittest.TestCase):
     train_main(
         [
             None,
-            "configs/base.yml",
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             r"base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_pipeline_parallelism_nanoo_fp8_test",
             r"dataset_path=gs://maxtext-dataset",
@@ -352,7 +352,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "steps=3",
             "enable_checkpointing=False",
             "ici_pipeline_parallelism=4",
-            "tokenizer_path=../assets/tokenizer.llama2",
+            rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
             "quantization=nanoo_fp8",
             "scan_layers=False",
             "attention=dot_product",

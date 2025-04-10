@@ -13,6 +13,9 @@
  See the License for the specific language governing permissions and
  limitations under the License.
  """
+from tempfile import gettempdir
+
+from MaxText.globals import PKG_DIR
 
 # pylint: disable=consider-using-with
 """ Script to run a command in a multislice/multihost environment
@@ -34,7 +37,8 @@ Common issues:
 
   You may have to create/authorize ssh-keys when first sshing into the TPUs.
   For this purpose you may need to first run:
-    ssh-keygen -f ~/.ssh/google_compute_engine
+    gcloud compute os-login ssh-keys add --key-file ~/.ssh/google_compute_engine.pub
+    gcloud compute os-login ssh-keys list # (make sure the key has been added)
 """
 
 import argparse
@@ -85,6 +89,8 @@ parser.add_argument('--USE_EXISTING_FOLDER', type=str, default="False",
                     help='If true, use the existing code directory on the TPU')
 parser.add_argument('--INTERNAL_IP', type=str, default="False",
                     help="Set true if running script locally from a TPU or GCE instance, false otherwise.")
+parser.add_argument('--SCP_TIMEOUT_SECS', type=int, default=600,
+                    help="Timeout to give up on the SCP operation, which moves local code to the workers.")
 args = parser.parse_args()
 args.USE_EXISTING_FOLDER = args.USE_EXISTING_FOLDER.lower() == "true"
 args.INTERNAL_IP = args.INTERNAL_IP.lower() == "true"
@@ -162,7 +168,7 @@ def kill_existing_processes_str():
   return """#!/bin/bash
 _TPU_VERSION_NAME="${1}"
 device_name="accel"
-if [[ "${_TPU_VERSION_NAME}" =~ ^v5.* ]]; then
+if [[ "${_TPU_VERSION_NAME}" =~ ^v[56].* ]]; then
   device_name="vfio/"
 fi
 echo "Searching for existing processes on device ${device_name}..."
@@ -192,7 +198,7 @@ def scps(slices, run_name_dir, zip_name):
   os.makedirs(run_name_dir, exist_ok=True)
   zip_path = os.path.join(run_name_dir, zip_name)
   command = ["tar","--exclude=tmp", "-czf", zip_path, "./"]
-  subprocess.run(command, check=True)
+  subprocess.run(command, check=True, cwd=args.SCRIPT_DIR)
 
   # Move zip file to each tpuvm worker
   commands = []
@@ -283,7 +289,8 @@ def run_commands(commands, id_to_print, jobname, worker_list, is_shell=False, ou
     else:
       output_log = subprocess.DEVNULL
 
-    children.append(subprocess.Popen(command, stdout=output_log, stderr=output_log, shell=is_shell))
+    children.append(subprocess.Popen(command, stdout=output_log, stderr=output_log, shell=is_shell,
+      cwd=os.path.dirname(PKG_DIR)))
 
   while True:
     returncodes = [child.poll() for child in children]
@@ -299,9 +306,13 @@ def run_commands(commands, id_to_print, jobname, worker_list, is_shell=False, ou
       slow_str = ""
     print(f"[t={seconds_elapsed:.2f}, {jobname}] Completed {completed}/{total}{slow_str}...")
 
-    if seconds_elapsed >= 60 and not 0 in returncodes and jobname == "SCP":
-      print("SCP operation timed out - terminating all processes."\
-        " Please check that --INTERNAL_IP flag is set correctly.")
+    if seconds_elapsed >= args.SCP_TIMEOUT_SECS and not 0 in returncodes and jobname == "SCP":
+      print(f"SCP operation timed out after {args.SCP_TIMEOUT_SECS=} seconds - terminating all processes."\
+        "If progress was being made, you can either increase this timeout with --SCP_TIMEOUT_SECS=<LARGER VALUE>,"
+        " or decrease the number of files you are copying (all files recursively in SCRIPT_DIR which defaults"
+        " to current working directory). If no progress was being made please check that --INTERNAL_IP flag"
+        " is set correctly - it should be TRUE if the runner machine and worker machines are in the same"
+        " GCP project, FALSE otherwise.")
       for child in children:
         child.terminate()
       max_returncode = 255
@@ -371,8 +382,9 @@ def main() -> None:
     print(f"Failed to retrieve slices {args.TPU_PREFIX} in project {args.PROJECT} zone {args.ZONE}", flush=True)
     return 1
 
-  local_log_dir = os.path.join("/tmp", args.RUN_NAME, "")
-  zip_name = "script_dir_zip_" + args.RUN_NAME + ".tar.gz"
+  temp_dir = gettempdir()
+  local_log_dir = os.path.join(temp_dir, args.RUN_NAME, "")
+  zip_name = f"script_dir_zip_{args.RUN_NAME}.tar.gz"
 
   if args.USE_EXISTING_FOLDER is False:
     ##### Step 2 when using a new folder: Zip code and move it to the TPUs #####

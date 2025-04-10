@@ -5,7 +5,7 @@
 set -ex
 
 # We install torch CPU because the checkpoint conversion script does not need a TPU/GPU
-pip install torch --index-url https://download.pytorch.org/whl/cpu
+python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # This is defined in 2_test_llama3.1_405b.sh
 export MODEL_VARIATION='llama3.1-405b'
@@ -16,9 +16,10 @@ export SAVE_QUANT_PARAMS_PATH=gs://maxtext-llama/llama3.1_405b_int8
 
 export QUANTIZE_TYPE="int8"
 
-JAX_PLATFORMS=cpu python3 MaxText/load_and_quantize_checkpoint.py \
+JAX_PLATFORMS=cpu python3 -m MaxText.load_and_quantize_checkpoint \
     MaxText/configs/base.yml \
     tokenizer_path=assets/tokenizer_llama3.tiktoken \
+    tokenizer_type=tiktoken \
     load_parameters_path=${UNSCANNED_CHECKPOINT} \
     max_prefill_predict_length=1024 \
     max_target_length=2048 \

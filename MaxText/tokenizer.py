@@ -20,7 +20,7 @@ from typing import Dict, Iterable, Union, Literal, Sequence, Collection, List
 from pathlib import Path
 import tensorflow as tf
 import tensorflow_text as tftxt
-import max_logging
+from MaxText import max_logging
 import transformers
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
@@ -193,6 +193,8 @@ class SentencePieceTokenizer:
     with tf.io.gfile.GFile(model_path, "rb") as model_fp:
       sp_model = model_fp.read()
     self.sp_tokenizer = tftxt.SentencepieceTokenizer(model=sp_model, add_bos=add_bos, add_eos=add_eos, reverse=False)
+    self.pad_id = self.sp_tokenizer.string_to_id("<pad>")
+    self.unk_id = self.sp_tokenizer.string_to_id("<unk>")
 
   def encode(self, s: str) -> List[int]:
     return self.sp_tokenizer.tokenize(s)
@@ -214,6 +216,10 @@ class HFTokenizer:
         add_eos_token=add_eos,
         token=hf_access_token,
     )
+    self.pad_id = self.tokenizer.pad_token_id
+    self.unk_id = self.tokenizer.unk_token_id
+    self.bos_id = self.tokenizer.bos_token_id
+    self.eos_id = self.tokenizer.eos_token_id
 
   def encode(self, s: str) -> List[int]:
     return self.tokenizer.encode(s)

@@ -12,8 +12,11 @@ limitations under the License.
 """
 
 import unittest
+import os.path
 import pytest
-from train import main as train_main
+
+from MaxText.train import main as train_main
+from MaxText.globals import PKG_DIR
 
 
 class SimpleDecoderLayerTest(unittest.TestCase):
@@ -23,13 +26,13 @@ class SimpleDecoderLayerTest(unittest.TestCase):
     train_main(
         [
             None,
-            "configs/base.yml",
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             r"base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_simple_decoder_layer_test",
             r"dataset_path=gs://maxtext-dataset",
             "decoder_block=simple",
             "enable_checkpointing=False",
-            "tokenizer_path=../assets/tokenizer.llama2",
+            rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
             "steps=3",
         ]
     )
@@ -39,13 +42,13 @@ class SimpleDecoderLayerTest(unittest.TestCase):
     train_main(
         [
             None,
-            "configs/base.yml",
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             r"base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_simple_decoder_layer_test",
             r"dataset_path=gs://maxtext-dataset",
             "decoder_block=simple_mlp",
             "enable_checkpointing=False",
-            "tokenizer_path=../assets/tokenizer.llama2",
+            rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
             "steps=3",
         ]
     )

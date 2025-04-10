@@ -20,15 +20,17 @@ from typing import Dict, Any, Type
 import logging
 import uuid
 import dataclasses
+from tempfile import gettempdir
 
-from command_utils import run_command_with_updates
+from benchmarks.command_utils import run_command_with_updates
 from argparse import Namespace
 
 BQ_WRITER_PATH = "/benchmark-automation/benchmark_db_writer/src"
-DEFAULT_LOCAL_DIR = "/tmp/"
+temp_dir = gettempdir()
+DEFAULT_LOCAL_DIR = os.path.join(temp_dir, "")
 # bq_writer_repo_root = get_bq_writer_path(DEFAULT_LOCAL_DIR)
 
-DEFAULT_TUNING_PARAMS_FILE = "/tmp/tuning_params.json"
+DEFAULT_TUNING_PARAMS_FILE = os.path.join(temp_dir, "tuning_params.json")
 
 
 @dataclasses.dataclass

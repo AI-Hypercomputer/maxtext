@@ -15,7 +15,7 @@ limitations under the License.
 
 Usage:
 
-python3 MaxText/scratch_code/generate_hf_golden_logits.py --model-id=deepseek-ai/DeepSeek-V2-Lite --output-path=golden_DeepSeek-V2-Lite.jsonl --prompts='I love to,Today is a,What is the', --gcs_bucket=my-gcs-bucket
+python3 -m MaxText.scratch_code.generate_hf_golden_logits --model-id=deepseek-ai/DeepSeek-V2-Lite --output-path=golden_DeepSeek-V2-Lite.jsonl --prompts='I love to,Today is a,What is the', --gcs_bucket=my-gcs-bucket
 
 """
 

@@ -18,7 +18,7 @@ limitations under the License.
 import unittest
 import jax.numpy as jnp
 
-import maxtext_utils
+from MaxText import maxtext_utils
 
 
 class TestGradientClipping(unittest.TestCase):

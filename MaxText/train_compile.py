@@ -28,20 +28,20 @@ from jax.experimental.topologies import get_topology_desc
 from jax.sharding import Mesh
 from jax.experimental.serialize_executable import serialize
 from flax.linen import partitioning as nn_partitioning
-import maxtext_utils
-import optimizers
-import max_utils
-import pyconfig
-from layers import models
-from layers import quantizations
+from MaxText import maxtext_utils
+from MaxText import optimizers
+from MaxText import max_utils
+from MaxText import pyconfig
+from MaxText.layers import models
+from MaxText.layers import quantizations
 from typing import Sequence
 from absl import app
-from utils import gcs_utils
+from MaxText.utils import gcs_utils
 import os
 import pickle
-import accelerator_to_spec_map
-import train
-from input_pipeline import input_pipeline_interface
+from MaxText import accelerator_to_spec_map
+from MaxText import train
+from MaxText.input_pipeline import input_pipeline_interface
 
 # pylint: disable=too-many-positional-arguments
 

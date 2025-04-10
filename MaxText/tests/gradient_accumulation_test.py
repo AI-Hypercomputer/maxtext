@@ -11,6 +11,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import tempfile
+
 # pylint: disable=missing-module-docstring, missing-function-docstring
 import numpy as np
 import json
@@ -18,7 +20,10 @@ import unittest
 import pytest
 import string
 import random
-from train import main as train_main
+import os.path
+
+from MaxText.train import main as train_main
+from MaxText.globals import PKG_DIR
 
 
 def generate_random_string(length=10):
@@ -31,20 +36,21 @@ class GradientAccumulationTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_grad_accumulate_same_loss(self):
     random_suffix = generate_random_string()
-    run_accumulate_metrics_file = f"/tmp/runner_grad_accumulate_{random_suffix}.txt"
+    temp_dir = tempfile.gettempdir()
+    run_accumulate_metrics_file = os.path.join(temp_dir, f"runner_grad_accumulate_{random_suffix}.txt")
     print(f"{run_accumulate_metrics_file=}")
-    run_regular_metrics_file = f"/tmp/runner_regular_{random_suffix}.txt"
+    run_regular_metrics_file = os.path.join(temp_dir, f"runner_regular_{random_suffix}.txt")
     print(f"{run_regular_metrics_file=}")
     shared_maxtext_args = [
         None,
-        "configs/base.yml",
+        os.path.join(PKG_DIR, "configs", "base.yml"),
         r"base_output_directory=gs://runner-maxtext-logs",
         r"dataset_path=gs://maxtext-dataset",
         "gradient_clipping_threshold=0",  # Ensures we are testing raw scales of gradients (clipping off)
         "enable_checkpointing=False",
         "base_emb_dim=256",
         "base_num_decoder_layers=4",
-        "tokenizer_path=../assets/tokenizer.llama2",
+        rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
         "steps=50",
     ]
     # Run with gradient accumulation with accumulate_steps=10, per_device_batch=1 --> simulating per_device_batch=10
