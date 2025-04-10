@@ -37,7 +37,7 @@ export XLA_FLAGS="--xla_dump_hlo_as_text
     --xla_gpu_enable_reduce_scatter_combine_by_dim=false
     --xla_disable_hlo_passes=rematerialization"
 
-python3 MaxText/train.py \
+python3 -m MaxText.train \
     MaxText/configs/base.yml \
     model_name=${MODEL} \
     quantization=fp8 \

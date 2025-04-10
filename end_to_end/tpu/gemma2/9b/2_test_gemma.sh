@@ -17,7 +17,7 @@
 set -ex
 export MODEL_VARIATION='9b'
 
-# Installing torch for deps in forward_pass_logit_chekcker.py
+# Installing torch for deps in forward_pass_logit_checker.py
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 if [ -z "${BASE_OUTPUT_PATH}" ]; then
