@@ -252,7 +252,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 # --- GRPO Helpers ---
 
 
-def prefill(engine, params, decode_state, prompts, true_length, num_generations, rng):
+def prefill(engine, params, prompts, true_length, num_generations, decode_state, rng):
   """
   Args:
     engine: The generation engine instance responsible for managing decoding and inference.
@@ -266,48 +266,54 @@ def prefill(engine, params, decode_state, prompts, true_length, num_generations,
     decode_state: Updated decode state after prefill, including new cached key/value pairs.
     prefill_slots: A structure containing token positions and model states needed for next-stage decoding.
   """
-  slot = 0
-  for tokens, current_token_true_length in zip(prompts, true_length):
-    # Split RNG before calling prefill
+  """
+  JIT-compatible version of prefill using a single lax.scan over the repeated batch.
+  """
+  # Repeat each prompt `num_generations` times
+  repeated_prompts = jnp.repeat(prompts, num_generations, axis=0)
+  repeated_true_length = jnp.repeat(true_length, num_generations, axis=0)
+
+  def _scan_prefill_step(carry, inputs):
+    decode_state, rng, slot = carry
+    tokens, true_len = inputs
     rng, rng_prefill = jax.random.split(rng)
-    # generate the KV cache by prefilling the prompt tokens
-    # Generate G completions for a prompt with different rng
-    for _ in range(num_generations):
-      prefill_result, _ = engine.prefill(
-          params=params, padded_tokens=tokens, true_length=current_token_true_length, rng=rng_prefill
-      )
-      decode_state = engine.insert(prefill_result, decode_state, slot=slot)
-      slot += 1
-  return decode_state, slot
+    prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_len, rng=rng_prefill)
+    decode_state = engine.insert(prefill_result, decode_state, slot)
+    return (decode_state, rng, slot + 1), None
+
+  (decode_state, _, _), _ = jax.lax.scan(
+      _scan_prefill_step, init=(decode_state, rng, 0), xs=(repeated_prompts, repeated_true_length)
+  )
+
+  return decode_state
 
 
-def generate(engine, params, decode_state, prefill_slots, num_decode_steps, rng):
+def generate(engine, params, num_decode_steps, decode_state, rng):
   """
   Args:
     engine: The generation engine instance used to run autoregressive decoding.
     params: Model parameters used to compute logits during token generation.
     decode_state: The current decode state containing cached attention key/value pairs and positions.
-    prefill_slots: Slots prepared during prefill that mark which sequences are active and ready to decode.
     num_decode_steps: Number of decoding steps to perform (i.e., target length - prefill length).
     rng: JAX PRNG key used for sampling, top-k/top-p filtering, or any stochastic decoding behavior.
 
   Returns:
     completions: Generated sequences (e.g., token IDs) of shape [num_prompts * num_generations, num_decode_steps].
   """
-  completions = defaultdict(list)
-  result_tokens_list = []
-  for _ in range(num_decode_steps):
+  # result_tokens_list = []
+  # for _ in range(num_decode_steps):
+  #   rng, rng_generate = jax.random.split(rng)
+  #   decode_state, result_tokens = engine.generate(params, decode_state, rng=rng_generate)
+  #   result_tokens_list.append(result_tokens.data[:,0])
+
+  def _scan_generate_step(carry, _):
+    rng, decode_state = carry
     rng, rng_generate = jax.random.split(rng)
     decode_state, result_tokens = engine.generate(params, decode_state, rng=rng_generate)
-    result_tokens.copy_to_host_async()
-    result_tokens_list.append(result_tokens)
+    return (rng, decode_state), result_tokens.data[:, 0]
 
-  for step in range(num_decode_steps):
-    result_token = result_tokens_list[step].convert_to_numpy()
-    for i in range(prefill_slots):
-      completions[i].append(result_token.get_result_at_slot(i).tokens.item())
-  completions = jnp.array(np.array(list(completions.values())))
-  return completions
+  (_, all_tokens) = jax.lax.scan(_scan_generate_step, init=(rng, decode_state), xs=None, length=num_decode_steps)
+  return jnp.transpose(all_tokens, (1, 0))
 
 
 def concatenate_prompt_with_completions(config, tokenizer_model, prompts, true_length, completions):
@@ -371,9 +377,9 @@ def generate_completions(config, tokenizer_model, engine, data, params, rng):
   for k, v in data.items():
     assert v.ndim == 1 or v.ndim == 2, f"Invalid {v.shape=} found for key={k}"
     if v.ndim == 2:
-      data[k] = v[:config.micro_batch_size_to_train_on, :]
+      data[k] = v[: config.micro_batch_size_to_train_on, :]
     else:
-      data[k] = v[:config.micro_batch_size_to_train_on]
+      data[k] = v[: config.micro_batch_size_to_train_on]
 
   rng, rng_load_params = jax.random.split(rng)
 
@@ -381,23 +387,31 @@ def generate_completions(config, tokenizer_model, engine, data, params, rng):
   decode_state = engine.init_decode_state(rng_init_decode)
 
   prompts, true_length = data[f"{config.train_data_columns}"], data[f"{config.train_data_columns}_true_length"]
-  decode_state, prefill_slots = prefill(engine, params, decode_state, prompts, true_length, config.num_generations, rng)
+  decode_state = jax.jit(
+      functools.partial(prefill, engine, params, prompts, true_length, config.num_generations), donate_argnums=(0,)
+  )(decode_state, rng)
 
-  completions = generate(
-      engine, params, decode_state, prefill_slots, config.max_target_length - config.max_prefill_predict_length, rng
+  completions = jax.jit(
+      functools.partial(generate, engine, params, config.max_target_length - config.max_prefill_predict_length)
+  )(decode_state, rng)
+
+  data[f"{config.train_data_columns}_completions"], eos_positions = concatenate_prompt_with_completions(
+      config, tokenizer_model, prompts, true_length, completions
   )
-
-  data[f"{config.train_data_columns}_completions"], eos_positions = concatenate_prompt_with_completions(config, tokenizer_model, prompts, true_length, completions)
 
   data[f"{config.train_data_columns}_completions_segmentation"] = (
       jnp.arange(data[f"{config.train_data_columns}_completions"].shape[1])[None, :] < eos_positions[:, None]
   ).astype(jnp.int32)
   data[f"{config.train_data_columns}_completions_position"] = jnp.where(
-      data[f"{config.train_data_columns}_completions_segmentation"], jnp.arange(data[f"{config.train_data_columns}_completions"].shape[1]), 0
+      data[f"{config.train_data_columns}_completions_segmentation"],
+      jnp.arange(data[f"{config.train_data_columns}_completions"].shape[1]),
+      0,
   )
   true_length = jnp.repeat(true_length, config.num_generations, axis=0)
   completion_mask = data[f"{config.train_data_columns}_completions_position"] >= true_length[:, None] - 1
-  data["ar_completions_segmentation"] = data[f"{config.train_data_columns}_completions_segmentation"] * completion_mask.astype(jnp.int32)
+  data["ar_completions_segmentation"] = data[
+      f"{config.train_data_columns}_completions_segmentation"
+  ] * completion_mask.astype(jnp.int32)
   return data
 
 
@@ -766,6 +780,15 @@ def train_loop(config, config_inference, state=None):
     else:
       p_eval_step = None
 
+  data_sharding = in_shard_train[1]
+  param_sharding = state_mesh_shardings.params
+  p_generate_completions = jax.jit(
+      functools.partial(generate_completions, config, tokenizer_model, engine),
+      in_shardings=(data_sharding, param_sharding, None),
+      out_shardings=data_sharding,
+      donate_argnums=(0,),
+  )
+
   running_gcs_metrics = [] if config.gcs_metrics else None
 
   start_step = get_first_step(state)  # this is the start_step for training
@@ -802,7 +825,7 @@ def train_loop(config, config_inference, state=None):
       rng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       rng, rng_gen = random.split(rng)
-      example_batch = generate_completions(config, tokenizer_model, engine, example_batch, state.params, rng_gen)
+      example_batch = p_generate_completions(example_batch, state.params, rng_gen)
 
       # TODO: ensure this partitioning is correct
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
