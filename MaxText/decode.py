@@ -92,9 +92,10 @@ def main(argv: Sequence[str]) -> None:
   params = engine.load_params(rng_load_params)
 
   text = config.prompt
-  image = max_multimodal_utils.load_image_rgb(config.image_path)
-  image_array = max_multimodal_utils.pre_process_image(image)
-  print(f"image shape: {image_array.shape}")
+  image = None
+  if config.image_path is not None:
+    image = max_multimodal_utils.load_image_rgb(config.image_path)
+    image = max_multimodal_utils.normalize_image(image)
 
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)

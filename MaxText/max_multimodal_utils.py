@@ -1,6 +1,10 @@
 import numpy as np
 from PIL import Image
+from etils import enp
+import jax.numpy as jnp
 
+
+# Image normalization constants.
 _IMAGE_MEAN = (127.5,) * 3
 _IMAGE_STD = (127.5,) * 3
 _DEFAULT_IMAGE_SIZE = 896  # SigLip expected input image size
@@ -61,6 +65,7 @@ def load_image_rgb(image_path):
   Returns:
     A PIL Image object in RGB format, or None if an error occurred.
   """
+  # TODO(hengtaoguo): Support loading image from GCS and URL
   try:
     img = Image.open(image_path)
     img_rgb = img.convert("RGB")
@@ -71,5 +76,32 @@ def load_image_rgb(image_path):
   except Exception as e:
     print(f"Error loading or converting image: {e}")
     return None
+
+
+def normalize_image(images, *, is_single_prompt: bool = True):
+  """Add additional `B` and `N` dimensions for VisionEncoder.
+  Args:
+    images: One image obj/array or a sequence of image obj/array shaped [H, W, C].
+    is_single_prompt: Whether the input is a single prompt.
+  Returns:
+    images: A jnp array of shape [B, N, H, W, C], where N is the number of images.
+  """
+  if images is None:
+    return None
+
+  # TODO(hengtaoguo): This assume all images have the same shape.
+  # TODO(hengtaoguo): Pad / resize images to support multiple images.
+  if not enp.is_array(images):
+    images = jnp.asarray(images)
+
+  if is_single_prompt:
+    if len(images.shape) == 3:  # Add the `N` optional dimension   # pytype: disable=attribute-error
+      images = images[None, ...]
+    images = images[None, ...]  # Add the `B` dimension
+  else:
+    if len(images.shape) == 4:  # Add the `N` optional dimension   # pytype: disable=attribute-error
+      images = images[:, None, ...]
+  return images
+  
 
 
