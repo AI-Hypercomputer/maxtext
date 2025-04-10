@@ -17,8 +17,10 @@ limitations under the License.
 """Smoke test for int8"""
 import os
 import unittest
-from train import main as train_main
+from MaxText.train import main as train_main
 from absl.testing import absltest
+
+from MaxText.globals import PKG_DIR
 
 
 class Train(unittest.TestCase):
@@ -29,7 +31,7 @@ class Train(unittest.TestCase):
     train_main(
         [
             None,
-            "third_party/py/maxtext/configs/base.yml",
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_test",
             r"dataset_path=gs://maxtext-dataset",
@@ -45,7 +47,7 @@ class Train(unittest.TestCase):
             "steps=10",
             "enable_checkpointing=False",
             "quantization=int8",
-            "tokenizer_path=../assets/tokenizer.llama2",
+            rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
             "enable_goodput_recording=False",
             "monitor_goodput=False",
             "enable_checkpoint_cloud_logger=False",

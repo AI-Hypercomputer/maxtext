@@ -24,12 +24,12 @@ from collections.abc import MutableMapping
 
 from jetstream.engine import token_utils
 
-import max_utils
-import maxengine
-import maxtext_utils
-import prefix_cache
-import profiler
-import pyconfig
+from MaxText import max_utils
+from MaxText import maxengine
+from MaxText import maxtext_utils
+from MaxText import prefix_cache
+from MaxText import profiler
+from MaxText import pyconfig
 
 import warnings
 

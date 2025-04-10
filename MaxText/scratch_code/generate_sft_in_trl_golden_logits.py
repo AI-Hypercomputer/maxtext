@@ -16,7 +16,7 @@
 
 Usage:
 
-python3 MaxText/scratch_code/generate_sft_in_trl_golden_logits.py --model-name=llama3.1-8b --tokenizer-path=meta-llama/Llama-3.1-8B --max-target-length=64
+python3 -m MaxText.scratch_code.generate_sft_in_trl_golden_logits --model-name=llama3.1-8b --tokenizer-path=meta-llama/Llama-3.1-8B --max-target-length=64
 """
 
 import argparse
@@ -118,7 +118,7 @@ def save_golden_logits(config):
       "trl_logits": trl_logits.tolist()[0],
   }
 
-  model_output_path = "/".join([os.getcwd(), "MaxText/test_assets", f"golden_data_sft_{config.model_name}.jsonl"])
+  model_output_path = os.path.join(os.getcwd(), "MaxText", "test_assets", f"golden_data_sft_{config.model_name}.jsonl")
   with jsonlines.open(model_output_path, "w") as f:
     f.write(data_to_save)
 

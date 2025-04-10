@@ -20,7 +20,7 @@ import torch
 import jax
 import unittest
 import jax.numpy as jnp
-from layers import embeddings
+from MaxText.layers import embeddings
 import numpy as np
 
 

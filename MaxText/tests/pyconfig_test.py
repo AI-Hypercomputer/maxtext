@@ -12,7 +12,10 @@ limitations under the License.
 """
 
 import unittest
-import pyconfig
+import os.path
+
+from MaxText import pyconfig
+from MaxText.globals import PKG_DIR
 
 
 class PyconfigTest(unittest.TestCase):
@@ -25,6 +28,15 @@ class PyconfigTest(unittest.TestCase):
     pyconfig.validate_and_update_keys(raw_keys, model_keys, config_name="config")
 
     self.assertEqual(raw_keys, {"megablox": None, "foo": ["x", "y"]})
+
+  def test_empty_string_parse_as_empty_string(self):
+    config = pyconfig.initialize(
+        [os.path.join(PKG_DIR, "train.py"), os.path.join(PKG_DIR, "configs", "base.yml")],
+        skip_jax_distributed_system=True,  # We should check for this automatically instead - b/407047411
+        quantization="",
+    )
+
+    self.assertTrue(config.quantization is None or config.quantization == "")
 
   def test_logical_axis_override(self):
     raw_keys = {
@@ -66,7 +78,7 @@ class PyconfigTest(unittest.TestCase):
 
   def test_multiple_unmodifiable_configs(self):
     config_train = pyconfig.initialize(
-        ["train.py", "configs/base.yml"],
+        [os.path.join(PKG_DIR, "train.py"), os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,
@@ -81,7 +93,7 @@ class PyconfigTest(unittest.TestCase):
         ici_fsdp_parallelism=4,
     )
     config_inference = pyconfig.initialize(
-        ["decode.py", "configs/base.yml"],
+        [os.path.join(PKG_DIR, "decode.py"), os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,

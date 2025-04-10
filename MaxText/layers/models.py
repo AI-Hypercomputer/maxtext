@@ -24,13 +24,13 @@ import functools
 import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-import common_types
-from inference import page_manager
-from layers import attentions
-from layers import embeddings
-from layers import linears
-from layers import normalizations, quantizations
-from layers import pipeline
+from MaxText import common_types
+from MaxText.inference import page_manager
+from MaxText.layers import attentions
+from MaxText.layers import embeddings
+from MaxText.layers import linears
+from MaxText.layers import normalizations, quantizations
+from MaxText.layers import pipeline
 
 Array = common_types.Array
 Config = common_types.Config
@@ -65,6 +65,7 @@ class DecoderLayer(nn.Module):
       deterministic,
       model_mode,
       previous_chunk=None,
+      slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
   ):
     cfg = self.config
@@ -164,7 +165,14 @@ class SequentialBlockDecoderLayers(nn.Module):
 
   @nn.compact
   def __call__(
-      self, inputs: jnp.ndarray, decoder_segment_ids, decoder_positions, deterministic, model_mode, page_state=None
+      self,
+      inputs: jnp.ndarray,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic: bool,
+      model_mode,
+      slot: Optional[int] = None,
+      page_state: Optional[page_manager.PageState] = None,
   ) -> jnp.ndarray:
     for lyr in range(self.num_decoder_layers):
       inputs = self.decoder_layer(config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant)(
@@ -173,6 +181,7 @@ class SequentialBlockDecoderLayers(nn.Module):
           decoder_positions,
           deterministic,
           model_mode,
+          slot=slot,
           page_state=page_state,
       )
     return inputs
@@ -283,40 +292,44 @@ class Decoder(nn.Module):
     if self.config.decoder_block == "default":
       return [DecoderLayer]
     elif self.config.decoder_block == "llama2":
-      from layers import llama2
+      from MaxText.layers import llama2
 
       return [llama2.LlamaDecoderLayer]
     elif self.config.decoder_block == "mistral":
       # TODO(ranran): update to Mistral with sliding window attention
-      from layers import mistral
+      from MaxText.layers import mistral
 
       return [mistral.MistralDecoderLayer]
+    elif self.config.decoder_block == "mixtral":
+      from MaxText.layers import mixtral
+
+      return [mixtral.MixtralDecoderLayer]
     elif self.config.decoder_block == "deepseek":
-      from layers import deepseek
+      from MaxText.layers import deepseek
 
       return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
     elif self.config.decoder_block == "gemma":
-      from layers import gemma
+      from MaxText.layers import gemma
 
       return [gemma.GemmaDecoderLayer]
     elif self.config.decoder_block == "gemma2":
-      from layers import gemma2
+      from MaxText.layers import gemma2
 
       return [gemma2.Gemma2DecoderLayer]
     elif self.config.decoder_block == "gemma3":
-      from layers import gemma3
+      from MaxText.layers import gemma3
 
       return [gemma3.Gemma3DecoderLayer]
     elif self.config.decoder_block == "gpt3":
-      from layers import gpt3
+      from MaxText.layers import gpt3
 
       return [gpt3.Gpt3DecoderLayer]
     elif self.config.decoder_block == "simple":
-      from layers import simple_layer
+      from MaxText.layers import simple_layer
 
       return [simple_layer.SimpleDecoderLayer]
     elif self.config.decoder_block == "simple_mlp":
-      from layers import simple_layer
+      from MaxText.layers import simple_layer
 
       return [simple_layer.SimpleMlpDecoderLayer]
     else:
@@ -327,6 +340,7 @@ class Decoder(nn.Module):
         "default",
         "llama2",
         "mistral",
+        "mixtral",
         "deepseek",
         "gemma",
         "gemma2",
@@ -336,7 +350,7 @@ class Decoder(nn.Module):
     ):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
-      from layers import gpt3
+      from MaxText.layers import gpt3
 
       return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=True)
     else:
@@ -400,6 +414,7 @@ class Decoder(nn.Module):
       deterministic=False,
       model_mode=common_types.MODEL_MODE_TRAIN,
       previous_chunk=None,
+      slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
   ):
     cfg = self.config
@@ -488,13 +503,14 @@ class Decoder(nn.Module):
                   model_mode,
                   previous_chunk=previous_chunk,
                   page_state=page_state,
+                  slot=slot,
               )
         else:
           for lyr in range(cfg.num_decoder_layers):
             RemattedBlockLayer = RemattedBlockLayers[0]
             layer_kwargs = {}
             if cfg.decoder_block == "gemma3":
-              from layers import gemma3
+              from MaxText.layers import gemma3
               # Gemma3 uses both global and sliding window attention depending on the layer index.
               layer_kwargs = {"attention_type": gemma3.get_attention_type(layer_id=lyr)}
             layer = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, **layer_kwargs)
@@ -506,6 +522,7 @@ class Decoder(nn.Module):
                 model_mode,
                 previous_chunk=previous_chunk,
                 page_state=page_state,
+                slot=slot,
             )
     y = self.get_norm_layer()(
         dtype=cfg.dtype,
@@ -576,51 +593,17 @@ class Transformer(nn.Module):
 
     self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant)
 
-    if cfg.attention == "paged":
-      self.page_manager = self._create_page_manager(cfg)
-
-  def _create_page_manager(self, config) -> Optional[page_manager.PageManager]:
-    """Creates page manager for managing pages in the paged attention mechanism"""
-    assert config.max_target_length % config.pagedattn_tokens_per_page == 0
-    assert config.max_prefill_predict_length % config.pagedattn_tokens_per_page == 0
-    return page_manager.PageManager(
-        num_pages=self.config.pagedattn_num_pages,
-        tokens_per_page=self.config.pagedattn_tokens_per_page,
-        slots=int(self.config.per_device_batch_size * jax.device_count()),
-        max_target_length=self.config.max_target_length,
-        max_prefill_predict_length=self.config.max_prefill_predict_length,
-        max_pages_per_slot=self.config.max_target_length // self.config.pagedattn_tokens_per_page,
-    )
-
-  def _create_page_state(
-      self, model_mode: str, true_length: Optional[int] = None, slot: Optional[int] = None
-  ) -> Optional[page_manager.PageState]:
-    """Creates page state for tracking page status in the paged attention mechanism."""
-    if self.config.attention != "paged" or model_mode == common_types.MODEL_MODE_TRAIN:
-      return None
-    page_state = None
-    if model_mode == common_types.MODEL_MODE_PREFILL:
-      page_state = self.page_manager(
-          model_mode=model_mode,
-          slot=slot,
-          true_length=true_length,
-      )
-    elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-      page_state = self.page_manager(model_mode)
-    else:
-      raise ValueError(f"Unsupported model_mode {model_mode} by paged attention")
-    return page_state
-
   def __call__(
       self,
-      decoder_input_tokens,
-      decoder_positions,
+      decoder_input_tokens: jnp.ndarray,
+      decoder_positions: jnp.ndarray,
       decoder_segment_ids=None,
       enable_dropout=True,
       model_mode=common_types.MODEL_MODE_TRAIN,
       previous_chunk=None,
       true_length: Optional[int] = None,
       slot: Optional[int] = None,
+      page_state: Optional[page_manager.PageState] = None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target.
 
@@ -643,6 +626,7 @@ class Transformer(nn.Module):
         deterministic=not enable_dropout,
         model_mode=model_mode,
         previous_chunk=previous_chunk,
-        page_state=self._create_page_state(model_mode=model_mode, true_length=true_length, slot=slot),
+        slot=slot,
+        page_state=page_state,
     )
     return logits
