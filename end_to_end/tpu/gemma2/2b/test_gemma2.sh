@@ -13,7 +13,7 @@ set -ex
 idx=$(date +%Y-%m-%d-%H-%M)
 export MODEL_VARIATION='2b'
 
-# Installing torch for deps in forward_pass_logit_chekcker.py
+# Installing torch for deps in forward_pass_logit_checker.py
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # After downloading checkpoints, copy them to GCS bucket at $CHKPT_BUCKET \
