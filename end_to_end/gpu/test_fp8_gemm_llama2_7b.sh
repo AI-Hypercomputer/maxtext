@@ -37,7 +37,7 @@ export XLA_FLAGS="--xla_dump_hlo_as_text
     --xla_gpu_enable_reduce_scatter_combine_by_dim=false
     --xla_disable_hlo_passes=rematerialization"
 
-python3 MaxText/train.py \
+python3 -m MaxText.train \
     MaxText/configs/base.yml \
     model_name=${MODEL} \
     quantization=fp8 \
@@ -77,4 +77,4 @@ fi
 
 EXPECTED_FP8_GEMM=$((21))
 
-python3 end_to_end/gpu/test_feature.py fp8_gemm $HLO_FILE $((EXPECTED_FP8_GEMM))
+python3 -m end_to_end.gpu.test_feature fp8_gemm $HLO_FILE $((EXPECTED_FP8_GEMM))
