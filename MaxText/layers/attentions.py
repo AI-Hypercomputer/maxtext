@@ -622,10 +622,17 @@ class AttentionOp(nn.Module):
 
     _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
 
+    using_context_parallelism = self.mesh.shape['context'] > 1
+
+    if self.attention_type == AttentionType.LOCAL_SLIDING and using_context_parallelism:
+      raise AssertionError("Sliding window attention is not supported when context parallelism is enabled")
+
     sliding_window_size = self.sliding_window_size
     if self.attention_type == AttentionType.LOCAL_SLIDING or not self.config.enable_padding_causal_mask:
       sliding_window_size = [self.sliding_window_size, 0]
-      mask_type = "causal"  # SWA only works with causal masking
+
+    if self.attention_type == AttentionType.LOCAL_SLIDING or using_context_parallelism:
+      mask_type = "causal"  # SWA and Context Parallelism only work with causal masking
       attn_mask = None
     else:
       # generate attn_mask
@@ -646,6 +653,8 @@ class AttentionOp(nn.Module):
         scale_factor=1.0 / math.sqrt(head_dim),
         transpose_batch_sequence=False,
         window_size=sliding_window_size,
+        context_parallel_causal_load_balanced=self.config.context_parallel_load_balance,
+        context_parallel_axis="context",
     )
     return dpa_layer(query, key, value, mask=attn_mask)
 
@@ -1237,7 +1246,7 @@ class Attention(nn.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
-    if model_mode == common_types.MODEL_MODE_PREFILL:
+    if model_mode == common_types.MODEL_MODE_PREFILL or model_mode == common_types.MODEL_MODE_TRAIN:
       inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
     else:
@@ -1305,7 +1314,7 @@ class Attention(nn.Module):
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
       out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk)
 
-    if model_mode == common_types.MODEL_MODE_PREFILL:
+    if model_mode == common_types.MODEL_MODE_PREFILL or model_mode == common_types.MODEL_MODE_TRAIN:
       out = nn.with_logical_constraint(out, self.out_axis_names)
     else:
       out = nn.with_logical_constraint(out, self.decode_out_axis_names)
