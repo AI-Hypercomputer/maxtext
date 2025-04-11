@@ -599,7 +599,9 @@ class AttentionOp(nn.Module):
 
     devices_in_data_fsdp = self.mesh.shape["data"] * self.mesh.shape["fsdp"]
     assert (query.shape[0] / devices_in_data_fsdp).is_integer(), (
-        "Batch dimension should be shardable among the devices in data and fsdp" " axis"
+        "Batch dimension should be shardable among the devices in data and fsdp"
+        " axis"
+        f" got {query.shape[0]=}/{devices_in_data_fsdp=}"
     )
     x = wrap_flash_attention(query, key, value, decoder_segment_ids)
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
