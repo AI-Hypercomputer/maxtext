@@ -13,7 +13,7 @@ idx=$(date +%Y-%m-%d-%H-%M)
 export MODEL_NAME='deepseek2-16b'
 export TOKENIZER_PATH='deepseek-ai/DeepSeek-V2-Lite'
 
-# Installing torch for deps in forward_pass_logit_chekcker.py
+# Installing torch for deps in forward_pass_logit_checker.py
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # Step 1:

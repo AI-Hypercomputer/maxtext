@@ -18,27 +18,27 @@ export BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs
 export DATASET_PATH=gs://maxtext-dataset
 export ASYNC_CHECKPOINTING=false
 
-# We install torch CPU because the checkpoint conversion script MaxText/llama_or_mistral_ckpt.py does not need a TPU/GPU
+# We install torch CPU because the checkpoint conversion script MaxText.llama_or_mistral_ckpt does not need a TPU/GPU
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # We define a var for the path to the Meta checkpoint. Non-Googlers please remember to update the source `META_CHECKPOINT_PATH` to the GCS bucket where you have your Meta checkpoint
 export META_CHECKPOINT_PATH=gs://maxtext-llama/llama2-7b/meta-ckpt
 
 # In the following command, we are copying Meta's checkpoint into a local directory `tmp`. 
-# You can use a different local directory than /tmp/, if you do so, please use the same local path for `base-model-path` when running `python3 -m MaxText.llama_or_mistral_ckpt.py`
+# You can use a different local directory than /tmp/, if you do so, please use the same local path for `base-model-path` when running `python3 -m MaxText.llama_or_mistral_ckpt`
 gcloud storage cp -r ${META_CHECKPOINT_PATH} /tmp/
 
 # `CONVERTED_CHECKPOINT_PATH` is the path to the GCS bucket where we want to save our converted (Orbax) checkpoint. Non-Googlers please remember to point `CONVERTED_CHECKPOINT_PATH` to a GCS bucket that you own
 export CONVERTED_CHECKPOINT_PATH=gs://maxtext-llama/test/${idx}/decode-ckpt-maxtext
 
-# Next, run the conversion script `MaxText/llama_or_mistral_ckpt.py` to convert Meta's PyTorch checkpoint in `base-model-path` and save the new converted (Orbax) checkpoint in the `maxtext-model-path`
+# Next, run the conversion script `MaxText.llama_or_mistral_ckpt` to convert Meta's PyTorch checkpoint in `base-model-path` and save the new converted (Orbax) checkpoint in the `maxtext-model-path`
 python3 -m MaxText.llama_or_mistral_ckpt --base-model-path /tmp/meta-ckpt --model-size llama2-7b --maxtext-model-path ${CONVERTED_CHECKPOINT_PATH}
 
-# We define `CONVERTED_CHECKPOINT` to refer to the checkpoint subdirectory exactly inside `CONVERTED_CHECKPOINT_PATH`. This way it is easier to use this path in the `train.py` and `decode.py` commands
+# We define `CONVERTED_CHECKPOINT` to refer to the checkpoint subdirectory exactly inside `CONVERTED_CHECKPOINT_PATH`. This way it is easier to use this path in the `train` and `decode` commands
 export CONVERTED_CHECKPOINT=${CONVERTED_CHECKPOINT_PATH}/0/items
 
 # Note that the `CONVERTED_CHECKPOINT` is in a `scanned` format which is great for training but for efficient decoding performance we want the checkpoint in an `unscanned` format.
-# We can do this by running `MaxText/generate_param_only_checkpoint.py` on `CONVERTED_CHECKPOINT` with `force_unroll=true`. 
+# We can do this by running `MaxText.generate_param_only_checkpoint` on `CONVERTED_CHECKPOINT` with `force_unroll=true`. 
 export DIRECT_PARAMETER_CHECKPOINT_RUN=direct_generate_param_only_checkpoint_${idx}
 python3 -m MaxText.generate_param_only_checkpoint MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} load_parameters_path=${CONVERTED_CHECKPOINT} run_name=${DIRECT_PARAMETER_CHECKPOINT_RUN} model_name='llama2-7b' force_unroll=true
 
@@ -58,7 +58,7 @@ python3 -m MaxText.train MaxText/configs/base.yml load_parameters_path=${CONVERT
 # We also run pre-training of Llama2-7b, this is similar to the finetuning command except we don't pass any checkpoint directory to load parameters from
 python3 -m MaxText.train MaxText/configs/base.yml run_name=runner_pretraining_${idx} base_output_directory=${BASE_OUTPUT_DIRECTORY} dataset_path=${DATASET_PATH} async_checkpointing=${ASYNC_CHECKPOINTING} per_device_batch_size=1 model_name='llama2-7b' ici_tensor_parallelism=4 steps=10 max_target_length=1024 per_device_batch_size=1
 
-# Now, run decoding on the checkpoint generated from our finetune run. Note that the finetune run checkpoint generates the `full state` which has both parameters and optimizer state. For decoding, we only need to use the parameters. So, we can use the `MaxText/generate_param_only_checkpoint.py` to convert
+# Now, run decoding on the checkpoint generated from our finetune run. Note that the finetune run checkpoint generates the `full state` which has both parameters and optimizer state. For decoding, we only need to use the parameters. So, we can use the `MaxText.generate_param_only_checkpoint` to convert
 # the full state checkpoint into a parameter only checkpoint for more efficient memory use. Note that the path provided to the flag `load_full_state_path` is the path to the checkpoint subdirectory inside the `BASE_OUTPUT_DIRECTORY` from our previous finetuning run, say the checkpoint saved at finetuning step #5
 # Also, `force_unroll=true` is converting the output parameter only checkpoint into an unscanned format for efficient decoding
 export PARAMETER_CHECKPOINT_RUN=generate_param_only_checkpoint_${idx}
