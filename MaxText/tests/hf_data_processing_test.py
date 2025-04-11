@@ -98,8 +98,8 @@ class HfDataProcessingTest(unittest.TestCase):
 
     train_batch1 = get_first_batch(self.train_iter)
     train_batch2 = get_first_batch(self.train_iter)
-    self.assertTrue((train_batch1["inputs"] == train_batch2["inputs"]).all())
-    self.assertTrue((train_batch1["targets"] == train_batch2["targets"]).all())
+    self.assertTrue((train_batch1["inputs"] == train_batch2["inputs"]).all())  # pytype: disable=unsupported-operands
+    self.assertTrue((train_batch1["targets"] == train_batch2["targets"]).all())  # pytype: disable=unsupported-operands
 
 
 if __name__ == "__main__":
