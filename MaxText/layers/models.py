@@ -332,6 +332,10 @@ class Decoder(nn.Module):
       from MaxText.layers import simple_layer
 
       return [simple_layer.SimpleMlpDecoderLayer]
+    elif self.config.decoder_block == "llama4":
+      from MaxText.layers import llama4
+
+      return [llama4.Llama4DecoderLayer]
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
@@ -347,6 +351,7 @@ class Decoder(nn.Module):
         "gemma3",
         "simple",
         "simple_mlp",
+        "llama4",
     ):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
@@ -513,6 +518,10 @@ class Decoder(nn.Module):
               from MaxText.layers import gemma3
               # Gemma3 uses both global and sliding window attention depending on the layer index.
               layer_kwargs = {"attention_type": gemma3.get_attention_type(layer_id=lyr)}
+            if cfg.decoder_block == "llama4":
+              from MaxText.layers import llama4
+
+              layer_kwargs = {"is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval)}
             layer = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, **layer_kwargs)
             y = layer(
                 y,
