@@ -60,50 +60,17 @@ class GRPOTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.cfg = pyconfig.initialize(
-        [None, "MaxText/experimental/rl/grpo.yml"],
-        run_name="grpo_test",
-        model_name="llama3.1-8b",
-        enable_checkpointing=True,
-        # load_parameters_path="gs://maxtext-model-checkpoints/gemma2-2b-it/2025-02-20-18-01/scanned/0/items",
+        [None, "MaxText/experimental/rl/grpo_trainer_test.yml"],
+        run_name="generate_grpo_test_data",
         load_parameters_path="gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items",
-        max_target_length=32,
-        per_device_batch_size=1,
-        max_prefill_predict_length=16,
-        dataset_type="synthetic",
-        dtype="float32",
-        matmul_precision="high",
-        logits_dot_in_fp32=True,
     )
     self.cfg_no_ckpt_loading = pyconfig.initialize(
-        [None, "MaxText/experimental/rl/grpo.yml"],
-        run_name="grpo_test",
-        model_name="llama3.1-8b",
-        enable_checkpointing=True,
-        # load_parameters_path="gs://maxtext-model-checkpoints/gemma2-2b-it/2025-02-20-18-01/scanned/0/items",
-        # load_parameters_path="gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items",
-        max_target_length=32,
-        per_device_batch_size=1,
-        max_prefill_predict_length=16,
-        dataset_type="synthetic",
-        dtype="float32",
-        matmul_precision="high",
-        logits_dot_in_fp32=True,
-        base_num_decoder_layers=8,
-        base_emb_dim=1024,
+        [None, "MaxText/experimental/rl/grpo_trainer_test.yml"],
+        run_name="generate_grpo_test_data_no_ckpt_loading",
     )
     self.cfg_no_ckpt_loading_inference = pyconfig.initialize(
-        [None, "MaxText/experimental/rl/grpo.yml"],
-        run_name="grpo_test",
-        model_name="llama3.1-8b",
-        enable_checkpointing=True,
-        # load_parameters_path="gs://maxtext-model-checkpoints/gemma2-2b-it/2025-02-20-18-01/scanned/0/items",
-        # load_parameters_path="gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items",
-        max_target_length=32,
-        max_prefill_predict_length=16,
-        dataset_type="synthetic",
-        dtype="float32",
-        matmul_precision="high",
-        logits_dot_in_fp32=True,
+        [None, "MaxText/experimental/rl/grpo_trainer_test.yml"],
+        run_name="generate_grpo_test_data_no_ckpt_loading_inference",
         ici_tensor_parallelism=4,
         per_device_batch_size=self.cfg_no_ckpt_loading.per_device_batch_size * self.cfg_no_ckpt_loading.num_generations,
     )
@@ -201,7 +168,7 @@ class GRPOTest(unittest.TestCase):
 
     hf_per_token_logps = self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep)  # pylint: disable=protected-access
 
-    input_ids, input_segmentation, input_position, completion_segmentation = self._prepare_maxtext_inputs()
+    input_ids, input_segmentation, input_position, completion_segmentation = _prepare_maxtext_inputs(self.input_str, self.tokenizer_model)
     maxtext_per_token_logps, _ = compute_log_probs(
         self.model,
         self.state.params,
@@ -226,10 +193,10 @@ class GRPOTest(unittest.TestCase):
         "ar_completions_segmentation": completion_segmentation,
     }
     maxtext_loss, aux = grpo_loss_fn(self.model, self.cfg, data, self.rng, self.state.params, reference_params)
-    self.assertEqual(self.trainer._metrics["train"]["kl"][0], aux["avg_kl"].tolist())
+    self.assertEqual(self.trainer._metrics["train"]["kl"][0], aux.avg_kl.tolist())
     self.assertEqual(hf_loss.item(), maxtext_loss.tolist())
     # since this is on-policy
-    self.assertEqual(aux["avg_advantage"].tolist(), 0.0)
+    self.assertEqual(aux.avg_advantage.tolist(), 0.0)
     # since we are at step 0
     maxtext_per_token_logps, _ = compute_log_probs(
         self.model,

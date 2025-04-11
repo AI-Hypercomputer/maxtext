@@ -1,0 +1,13 @@
+base_config: "grpo.yml"
+
+model_name: "llama3.1-8b"
+enable_checkpointing: True
+max_target_length: 32
+per_device_batch_size: 1
+max_prefill_predict_length: 16
+base_num_decoder_layers: 8
+base_emb_dim: 1024
+dataset_type: "synthetic"
+dtype: "float32"
+matmul_precision: "high"
+logits_dot_in_fp32: True

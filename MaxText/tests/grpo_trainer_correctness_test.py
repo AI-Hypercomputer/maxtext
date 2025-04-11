@@ -16,7 +16,7 @@
 Runs GRPO trainer unit test correctness with golden logits generated from maxtext/MaxText/scratch_code/generate_grpo_golden_logits.py
 
 Usage:
-python3 -m MaxText.tests.grpo_trainer_correctness_test --model-name=llama3.1-8b --tokenizer-path=meta-llama/Llama-3.1-8B
+pytest MaxText.tests.grpo_trainer_correctness_test.py
 """
 
 import argparse
@@ -26,6 +26,7 @@ import jsonlines
 import numpy as np
 import os
 import sys
+import unittest
 
 from jax.sharding import Mesh
 from transformers import AutoTokenizer
@@ -47,30 +48,6 @@ from MaxText.experimental.rl.grpo_trainer import compute_log_probs, grpo_loss_fn
 from MaxText import maxengine
 import transformers
 
-
-def initialize_config(config):
-  return pyconfig.initialize(
-      # [sys.argv[0], os.path.join(PKG_DIR, "configs", "experimental/rl/grpo.yml")],
-      [None, "MaxText/experimental/rl/grpo.yml"],
-      run_name="test-grpo-trainer-correctness-test",
-      model_name=config.model_name,
-      tokenizer_path=config.tokenizer_path,
-      enable_checkpointing=False,
-      # load_parameters_path=config.model_ckpt_path,
-      max_target_length=32,
-      per_device_batch_size=1,
-      max_prefill_predict_length=16,
-      dataset_type="synthetic",
-      dtype="float32",
-      matmul_precision="high",
-      logits_dot_in_fp32=True,
-      skip_jax_distributed_system=True,
-      init_weights_seed=42,
-      base_num_decoder_layers=8,
-      base_emb_dim=1024,
-  )
-
-
 def get_golden_data(config):
   """Get the golden data for GrpoTrainer from maxtext/MaxText/scratch_code/generate_grpo_golden_logits.py."""
   golden_data_path = os.path.join(PKG_DIR, "test_assets", f"golden_data_grpo_{config.model_name}.jsonl")
@@ -89,17 +66,7 @@ def setup_maxtext_model(config):
   state, _ = max_utils.setup_decode_state(maxtext_model, config, rng1, mesh, None)
   reference_params = jax.tree.map(jnp.copy, state.params["params"])
   state = _merge_grpo_state(state, reference_params)
-  tokenizer_model = transformers.AutoTokenizer.from_pretrained(
-      "meta-llama/Llama-3.1-8B",
-      add_bos_token=config.add_bos,
-      add_eos_token=config.add_eos,
-      model_max_length=config.max_target_length,
-      legacy=False,
-      token=config.hf_access_token,
-      padding_side="left",
-  )
-  tokenizer_model.add_special_tokens({"pad_token": "<pad>"})
-  return maxtext_model, state, reference_params, init_rng, tokenizer_model
+  return maxtext_model, state, reference_params, init_rng
 
 
 def _prepare_maxtext_inputs(input_str, tokenizer_model):
@@ -131,61 +98,117 @@ def get_maxtext_logits(maxtext_model, state, input_ids, input_position, input_se
   )
   return maxtext_per_token_logps.cpu().numpy().astype("float32")
 
+class GrpoTrainerTest(unittest.TestCase):
+  def setUp(self):
+    super().setUp()
+    self.config = pyconfig.initialize(
+        [None, "MaxText/experimental/rl/grpo.yml"],
+        run_name="grpo_test",
+        model_name="llama3.1-8b",
+        enable_checkpointing=True,
+        # load_parameters_path="gs://maxtext-model-checkpoints/gemma2-2b-it/2025-02-20-18-01/scanned/0/items",
+        # load_parameters_path="gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items",
+        max_target_length=32,
+        per_device_batch_size=1,
+        max_prefill_predict_length=16,
+        dataset_type="synthetic",
+        dtype="float32",
+        matmul_precision="high",
+        logits_dot_in_fp32=True,
+        base_num_decoder_layers=8,
+        base_emb_dim=1024,
+        init_weights_seed=42,
+        prompt = "Hello world this is a test",
+    )
+    self.config_inference = pyconfig.initialize(
+        [None, "MaxText/experimental/rl/grpo.yml"],
+        run_name="grpo_test",
+        model_name="llama3.1-8b",
+        enable_checkpointing=True,
+        # load_parameters_path="gs://maxtext-model-checkpoints/gemma2-2b-it/2025-02-20-18-01/scanned/0/items",
+        # load_parameters_path="gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items",
+        max_target_length=32,
+        per_device_batch_size=1,
+        max_prefill_predict_length=16,
+        dataset_type="synthetic",
+        dtype="float32",
+        matmul_precision="high",
+        logits_dot_in_fp32=True,
+        base_num_decoder_layers=8,
+        base_emb_dim=1024,
+        init_weights_seed=42,
+        prompt = "Hello world this is a test",
+        ici_tensor_parallelism = 4,
+        per_decide_batch_size = self.config.per_device_batch_size * self.config.num_generations
+    )
+    self.rtol=1e-05
+    self.atol=1e-08
 
-def main(config, config_inference, test_args):
-  golden_data = get_golden_data(config)
-  maxtext_model, state, reference_params, rng, tokenizer_model = setup_maxtext_model(config)
-  input_ids, input_segmentation, input_position, completion_segmentation = _prepare_maxtext_inputs(
-      config.prompt, tokenizer_model
-  )
-  maxtext_per_token_logps = get_maxtext_logits(
-      maxtext_model, state, input_ids, input_position, input_segmentation, completion_segmentation, config
-  )
+    self.tokenizer_model = transformers.AutoTokenizer.from_pretrained(
+      "meta-llama/Llama-3.1-8B",
+      add_bos_token=self.config.add_bos,
+      add_eos_token=self.config.add_eos,
+      model_max_length=self.config.max_target_length,
+      legacy=False,
+      token=self.config.hf_access_token,
+      padding_side="left",
+      )
+    self.tokenizer_model.add_special_tokens({"pad_token": "<pad>"})
 
-  # get maxtext grpo loss
-  data = {
-      "prompt_completions": input_ids,
-      "prompt_completions_position": input_position,
-      "prompt_completions_segmentation": input_segmentation,
-      "ar_completions_segmentation": completion_segmentation,
-  }
-  maxtext_loss, aux = grpo_loss_fn(maxtext_model, config, data, rng, state.params, reference_params)
 
-  assert maxtext_loss.tolist() == golden_data["maxtext_loss"]
-  assert aux["avg_kl"].tolist() == golden_data["avg_kl"]
-  golden_maxtext_logits = np.array(golden_data["maxtext_per_token_logps_no_ckpt_loading"])
 
-  max_logging.log(
-      f"Max numerical difference: {np.max(np.abs(np.subtract(maxtext_per_token_logps[0], golden_maxtext_logits)))}"
-  )
-  assert jax.numpy.allclose(
-      maxtext_per_token_logps[0],
-      golden_maxtext_logits,
-      rtol=float(test_args.rtol),
-      atol=float(test_args.atol),
-      equal_nan=False,
-  )
+  def test_grpo_trainer_correctness(self):
+    # Get the expected (golden) data.
+    golden_data = get_golden_data(self.config)
+    # Initialize the model and related objects.
+    maxtext_model, state, reference_params, rng = setup_maxtext_model(self.config)
+    # Prepare inputs for the model.
+    input_ids, input_segmentation, input_position, completion_segmentation = _prepare_maxtext_inputs(
+        self.config.prompt, self.tokenizer_model
+    )
+    # Obtain per-token logits.
+    maxtext_per_token_logps = get_maxtext_logits(
+        maxtext_model, state, input_ids, input_position, input_segmentation, completion_segmentation, self.config
+    )
+    golden_maxtext_logits = np.array(golden_data["maxtext_per_token_logps_no_ckpt_loading"])
 
-  # get_generated_completions(config_inference):
-  engine = maxengine.MaxEngine(config_inference)
-  generated_completions = generate_completions(
-      config, tokenizer_model, engine, tokenizer_model.encode(config.prompt), state.params["params"], rng
-  )
-  assert generated_completions == golden_data["generated_completions"]
+    self.assertTrue(
+        jax.numpy.allclose(
+            maxtext_per_token_logps[0],
+            golden_maxtext_logits,
+            rtol=float(self.rtol),
+            atol=float(self.atol),
+            equal_nan=False,
+        )
+    )
+    max_diff = np.max(np.abs(np.subtract(maxtext_per_token_logps[0], golden_maxtext_logits)))
+    print("Max numerical difference:", max_diff)
+
+    # Create the data dictionary required for computing the loss.
+    data = {
+        "prompt_completions": input_ids,
+        "prompt_completions_position": input_position,
+        "prompt_completions_segmentation": input_segmentation,
+        "ar_completions_segmentation": completion_segmentation,
+    }
+    # Compute the loss and auxiliary values.
+    maxtext_loss, aux = grpo_loss_fn(maxtext_model, self.config, data, rng, state.params, reference_params)
+
+    # Assert that the computed loss and auxiliary averages match the golden data.
+    self.assertEqual(maxtext_loss.tolist(), golden_data["maxtext_loss"])
+    self.assertEqual(aux["avg_kl"].tolist(), golden_data["avg_kl"])
+
+
+
+    # Generate completions using the inference engine.
+    engine = maxengine.MaxEngine(self.config_inference)
+    generated_completions = generate_completions(
+        self.config, self.tokenizer_model, engine, self.tokenizer_model.encode(self.config.prompt), state.params["params"], rng
+    )
+    # Assert that the generated completions match the golden reference.
+    self.assertEqual(generated_completions, golden_data["generated_completions"])
+
 
 
 if __name__ == "__main__":
-  parser = argparse.ArgumentParser()
-  parser.add_argument("--model-name", type=str, required=True)
-  parser.add_argument("--tokenizer-path", type=str, required=True)
-  parser.add_argument("--atol", type=float, required=True)
-  parser.add_argument("--rtol", type=float, required=True)
-  test_args = parser.parse_args(sys.argv[1:])
-  test_args.prompt = "Hello world this is a test"
-  config = initialize_config(test_args)
-  # modify test_args for config inference
-  new_per_decide_batch_size = test_args.per_device_batch_size * test_args.num_generations
-  test_args.per_device_batch_size = new_per_decide_batch_size
-  test_args.ici_tensor_parallelism = 4
-  config_inference = initialize_config(test_args)
-  main(config, config_inference, test_args)
+  unittest.main()
