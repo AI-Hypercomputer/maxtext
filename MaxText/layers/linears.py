@@ -19,6 +19,7 @@ import operator
 from typing import Any, Callable, Iterable, Sequence, Tuple, Union, Optional
 
 import flax.linen as nn
+import jax
 from jax import lax
 import jax.numpy as jnp
 from MaxText import common_types
@@ -28,7 +29,8 @@ from MaxText.layers import quantizations
 import numpy as np
 from jax.ad_checkpoint import checkpoint_name
 from aqt.jax.v2 import aqt_tensor
-
+from jax._src.sharding_impls import TransferToMemoryKind
+from MaxText import max_logging
 
 Array = common_types.Array
 Config = common_types.Config
@@ -104,6 +106,7 @@ class DenseGeneral(nn.Module):
   quant: Optional[Quant] = None
   use_bias: bool = False
   matmul_precision: str = "default"
+  parameter_memory_host_offload: bool = False
 
   @nn.compact
   def __call__(self, inputs: Array) -> Array:
@@ -138,6 +141,10 @@ class DenseGeneral(nn.Module):
           kernel_in_axis,
           kernel_out_axis,
       )
+    # Move logit_dense kernel to device if parameter offloading is enabled
+    if self.parameter_memory_host_offload:
+      max_logging.log(f"linear.py: Moving parameter logits_dense kernel to device")
+      kernel = jax.device_put(kernel, TransferToMemoryKind("device"))
     kernel = jnp.asarray(kernel, self.dtype)
     contract_ind = tuple(range(0, len(axis)))
     output = _compute_dot_general(inputs, kernel, self.kernel_axes, axis, contract_ind, self.matmul_precision, self.quant)

@@ -18,7 +18,10 @@ from typing import Any, Tuple, Optional
 
 from flax import linen as nn
 from jax import lax
+from jax._src.sharding_impls import TransferToMemoryKind
+import jax
 import jax.numpy as jnp
+from MaxText import max_logging
 from MaxText.layers import initializers
 
 Initializer = initializers.Initializer
@@ -32,6 +35,7 @@ class RMSNorm(nn.Module):
   weight_dtype: Any = jnp.float32
   kernel_axes: Tuple[Optional[str], ...] = ()
   scale_init: Initializer = nn.initializers.ones
+  parameter_memory_host_offload: bool = False
 
   @nn.compact
   def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
@@ -46,6 +50,10 @@ class RMSNorm(nn.Module):
         (features,),
         self.weight_dtype,
     )
+    # Move scale to device if parameter offloading is enabled
+    if self.parameter_memory_host_offload:
+      max_logging.log("normalizations.py: Moving scale parameter to device")
+      scale = jax.device_put(scale, TransferToMemoryKind("device"))
 
     scale = jnp.asarray(scale, self.dtype)
     return y * scale
