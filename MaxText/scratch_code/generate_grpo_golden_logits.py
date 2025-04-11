@@ -19,7 +19,7 @@ Usage:
 python3 -m MaxText.scratch_code.generate_grpo_golden_logits
 """
 
-import argparse
+import functools
 import jax
 import os
 import unittest
@@ -33,9 +33,7 @@ import numpy as np
 import MaxText.pyconfig as pyconfig
 import MaxText.max_utils as max_utils
 from jax.sharding import Mesh
-import flax.linen as nn
-from typing import Tuple
-import sys
+from flax import linen as nn
 import MaxText.common_types as common_types
 import torch
 # from datasets import Dataset
@@ -81,7 +79,9 @@ class GRPOTest(unittest.TestCase):
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     # With checkpoint
     self.model = models.Transformer(config=self.cfg, mesh=mesh, quant=None)
-    self.state, _ = max_utils.setup_decode_state(self.model, self.cfg, self.rng, mesh, None)
+    self.state, state_mesh_annotations = max_utils.setup_decode_state(self.model, self.cfg, self.rng, mesh, None)
+    self.state_mesh_shardings = nn.logical_to_mesh_sharding(state_mesh_annotations, mesh, self.cfg.logical_axis_rules)
+    self.data_sharding = jax.NamedSharding(mesh, jax.sharding.PartitionSpec(None))
     # Without checkpoint
     self.model_no_ckpt_loading = models.Transformer(config=self.cfg_no_ckpt_loading, mesh=mesh, quant=None)
     self.state_no_ckpt_loading, _ = max_utils.setup_decode_state(
@@ -265,19 +265,26 @@ class GRPOTest(unittest.TestCase):
         reference_params_no_ckpt_loading,
     )
 
-    # engine = maxengine.MaxEngine(self.config_inference)
-    # generated_completions = generate_completions(
-    #     self.cfg_no_ckpt_loading,
-    #     self.tokenizer_model,
-    #     engine,
-    #     self.tokenizer_model.encode(self.input_str),
-    #     self.state_no_ckpt_loading.params["params"],
-    #     self.rng,
-    # )
-
+    engine = maxengine.MaxEngine(self.cfg_no_ckpt_loading_inference)
+    _ = engine.load_params(self.rng)
+    prompt_tokens = self.tokenizer_model.encode(self.input_str)
+    prompt = jnp.pad(
+        jnp.tile(jnp.array(prompt_tokens), (4, 1)),
+        ((0, 0), (0, 4)),
+        constant_values=0,
+    )
+    prompt_true_length = jnp.array([len(prompt_tokens)] * 4)
+    data = {"prompt": prompt, "prompt_true_length": prompt_true_length}
+    p_generate_completions = jax.jit(
+        functools.partial(generate_completions, self.cfg, self.tokenizer_model, engine),
+        in_shardings=(self.data_sharding, self.state_mesh_shardings.params, None),
+        out_shardings=self.data_sharding,
+        donate_argnums=(0,),
+    )
+    data = p_generate_completions(data, {"params": self.state_no_ckpt_loading.params["params"]}, self.rng)
     data_to_save = {
         "maxtext_loss": maxtext_loss.tolist(),
-        # "generated_completions": generated_completions,
+        "generated_completions": data['prompt_completions'][0].tolist(),
         "maxtext_per_token_logps_no_ckpt_loading": maxtext_per_token_logps_no_ckpt_loading.tolist()[
             0
         ],  # Convert numpy array to list for JSON serialization
