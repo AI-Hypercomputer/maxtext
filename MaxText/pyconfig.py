@@ -211,7 +211,6 @@ def validate_data_input(keys):
       keys["hf_eval_split"] = "train"
     if keys["eval_interval"] > 0:
       assert keys["hf_eval_split"], "Please specify hf_eval_split or set eval_interval to <=0."
-    assert keys["num_epoch"] == 1, f"hf pipeline only supports num_epoch=1, but num_epoch={keys['num_epoch']} is given."
 
   elif keys["dataset_type"] == "grain":
     max_logging.log(
@@ -273,6 +272,7 @@ def validate_model_name(s: str) -> bool:
       "gpt3-22b",
       "gpt3-6b",
       "gpt3-52k",
+      "llama4-17b-16e",
   )
   if s not in valid_model_names:
     raise ValueError(f"Invalid model name was passed. Got {s}, Valid options {valid_model_names}")
@@ -482,9 +482,33 @@ class _HyperParameters:
     raw_keys["emb_dim"] = 2**emb_scale * raw_keys["base_emb_dim"]
     raw_keys["num_query_heads"] = 2**num_head_scale * raw_keys["base_num_query_heads"]
     raw_keys["num_kv_heads"] = 2**num_head_scale * raw_keys["base_num_kv_heads"]
-    raw_keys["mlp_dim"] = 2**mlp_dim_scale * raw_keys["base_mlp_dim"]
-    raw_keys["moe_mlp_dim"] = 2**mlp_dim_scale * raw_keys["base_moe_mlp_dim"]
     raw_keys["num_decoder_layers"] = 2**layer_scale * raw_keys["base_num_decoder_layers"]
+
+    # if this is a model of this particular family we won't use global scaling and will set moe_mlp_dim and mlp_dim according
+    # to the authors' math. otherwise we'll use global scaling as usual
+    if raw_keys["model_name"].startswith("llama4"):
+      mlp_dim = 4 * raw_keys["emb_dim"]
+      moe_mlp_dim = raw_keys["ffn_exp"] * raw_keys["emb_dim"]
+      # TODO @jacobplatin: can probably clean this up, but fine for now
+      # just // 3 should take care of the int part
+      mlp_dim = int(2 * mlp_dim / 3)
+      moe_mlp_dim = int(2 * moe_mlp_dim / 3)
+      mlp_dim = mlp_dim * raw_keys["ffn_dim_multiplier"]
+      moe_mlp_dim = moe_mlp_dim * raw_keys["ffn_dim_multiplier"]
+
+      if raw_keys["auto_scale_F"]:
+        total_num_active_experts = raw_keys["num_experts_per_tok"] + raw_keys["shared_experts"]
+        moe_mlp_dim = int(moe_mlp_dim / total_num_active_experts)
+
+      # round down to be a multiple of the specified value
+      mlp_dim += -mlp_dim % raw_keys["multiple_of"]
+      moe_mlp_dim += -moe_mlp_dim % raw_keys["multiple_of"]
+
+      raw_keys["mlp_dim"] = int(mlp_dim)
+      raw_keys["moe_mlp_dim"] = int(moe_mlp_dim)
+    else:
+      raw_keys["mlp_dim"] = 2**mlp_dim_scale * raw_keys["base_mlp_dim"]
+      raw_keys["moe_mlp_dim"] = 2**mlp_dim_scale * raw_keys["base_moe_mlp_dim"]
 
     # This is the first command that initializes the backend - it calls
     # jax.devices()

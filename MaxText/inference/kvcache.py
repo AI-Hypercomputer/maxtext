@@ -260,6 +260,10 @@ class KVCache(nn.Module):
   def _get_ar_cache_vars(self, batch, key_heads, value_heads, key_head_size, value_head_size, model_mode):
 
     dtype = self._get_cached_kv_dtype()
+    if self.max_target_length <= self.max_prefill_length:
+      raise ValueError(
+          f"max_target_length: {self.max_target_length} should be greater than max_prefill_length: {self.max_prefill_length}!"
+      )
     cache_length = self.max_target_length - self.max_prefill_length
 
     if model_mode == common_types.MODEL_MODE_PREFILL:

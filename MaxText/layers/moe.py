@@ -234,7 +234,8 @@ class MoeBlock(nn.Module):
 
     if self.config.decoder_block == "deepseek":
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
-    else:
+    # NOTE: for LLama4, we take a different approach (see `moe.py` for details)
+    elif self.config.decoder_block != "llama4":
       top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
     return top_k_weights, top_k_indices
 
@@ -738,6 +739,40 @@ class MoeBlock(nn.Module):
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits = nn.with_logical_constraint(pre_bias_logits, ("activation_batch", "activation_length", None))
     top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits)
+    # NOTE @jacobplatin: I would MUCH prefer to use inheritance and override this function
+    # instead of having these nasty if statements, but I was running into a strange JAX
+    # tracing error and didn't have the time to debug thoroughly
+    is_llama4_decoder_layer = self.config.decoder_block == "llama4"
+    if is_llama4_decoder_layer:
+      top_k_weights_reshaped = top_k_weights.reshape(-1, 1)
+      top_k_indices_reshaped = top_k_indices.reshape(-1, 1)
+
+      bsz, seq_len, num_experts = gate_logits.shape
+      bsz_times_seq_len = bsz * seq_len
+      base_embed_dim = inputs.shape[-1]
+      router_scores = (
+          jnp.full((bsz_times_seq_len, num_experts), -jnp.inf, dtype=jnp.bfloat16)
+          .at[jnp.arange(bsz_times_seq_len)[:, None], top_k_indices_reshaped]
+          .set(top_k_weights_reshaped)
+          .T
+      )
+
+      router_scores = jax.nn.sigmoid(router_scores.astype(jnp.float32)).astype(jnp.bfloat16)
+      router_indices = (
+          jnp.arange(bsz_times_seq_len)[None, :].repeat(num_experts, axis=0).reshape(-1, 1).repeat(base_embed_dim, axis=1)
+      )
+      reshaped_inputs = inputs.reshape(-1, base_embed_dim)  # Shape: (bsz_times_seq_len, base_embed_dim)
+      # outed_in_EG_D = jnp.tile(reshaped_inputs, (num_experts, 1))
+      gather_indices = jnp.arange(bsz_times_seq_len)  # Shape: (N,)
+      gather_indices = jnp.tile(gather_indices, num_experts)  # Shape: (num_experts * N,)
+      routed_in_EG_D = jnp.take(reshaped_inputs, gather_indices, axis=0)
+      # jax.debug.callback(
+      #   save_numpy_array,
+      #   "tiled_routed.npy",
+      #   routed_in_EG_D,
+      # )
+      routed_in_EG_D = routed_in_EG_D * router_scores.reshape(-1, 1)
+
     weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
     matmul_precision = lax.Precision(self.config.matmul_precision)
 
@@ -751,6 +786,7 @@ class MoeBlock(nn.Module):
 
     cp, sub_seq = self.get_context_partition_and_sub_seq(seq_len)
 
+    # TODO @jacobplatin: allow Llama4 MoE to handle capacity factor > 0
     if self.config.capacity_factor > 0:
       # token dropping if needed
       if self.config.model_call_mode != "inference":
@@ -851,17 +887,22 @@ class MoeBlock(nn.Module):
           output = jnp.reshape(output, (output.shape[0], output.shape[1] * output.shape[2], output.shape[3]))
       return output, loss
     else:
-      inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
+      if not is_llama4_decoder_layer:
+        inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
+      else:
+        # TODO @jacobplatin: does this also need an `nn.with_logical_constraint`?
+        inputs = routed_in_EG_D.reshape(num_experts, -1, base_embed_dim)
       with jax.named_scope("wi_0"):
+        einsum_w0_w1_op_str = "ESM,EMH -> ESH" if is_llama4_decoder_layer else "BSM,EMH -> BSEH"
         layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
-            "BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision
+            einsum_w0_w1_op_str, inputs, w0_kernel, precision=matmul_precision
         )
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
         layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
       with jax.named_scope("wi_1"):
         layer_w1 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
-            "BSM,EMH -> BSEH", inputs, w1_kernel, precision=matmul_precision
+            einsum_w0_w1_op_str, inputs, w1_kernel, precision=matmul_precision
         )
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
@@ -869,19 +910,24 @@ class MoeBlock(nn.Module):
       layer_w0_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
       with jax.named_scope("wo"):
+        einsum_wo_op_str = "ESH,EHM -> ESM" if is_llama4_decoder_layer else "BSEH,EHM -> BSEM"
         intermediate_layer = self.get_einsum(rhs_mesh_axes=self.wo_kernel_axes)(
-            "BSEH,EHM -> BSEM", layer_multiply, wo_kernel, precision=matmul_precision
+            einsum_wo_op_str, layer_multiply, wo_kernel, precision=matmul_precision
         )
         if self.config.activations_in_float32:
           intermediate_layer = intermediate_layer.astype(jnp.float32)
         intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
+        # For the Llama4 case, we are done and don't need the w_sum
+        # einsum op, so we return intermediate_layer as the output
+        if is_llama4_decoder_layer:
+          return intermediate_layer, None, router_indices
       with jax.named_scope("w_sum"):
         output = jnp.einsum(
             "BSEM,BSE -> BSM",
             intermediate_layer,
             weights,
         ).astype(self.dtype)
-      return output, None
+      return output, None, None
 
   def retrieve_quantized_weight(
       self, inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel
@@ -903,7 +949,7 @@ class MoeBlock(nn.Module):
   def __call__(self, inputs):
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
-
+    is_llama4_decoder_block = cfg.decoder_block == "llama4"
     gate_logits, pre_bias_logits = GateLogit(
         self.num_experts,
         model_name=cfg.model_name,
@@ -914,7 +960,7 @@ class MoeBlock(nn.Module):
         kernel_axes=self.kernel_axes,
         name="gate",
         use_bias=cfg.routed_bias,
-        score_func=cfg.routed_score_func,
+        score_func=cfg.routed_score_func if not is_llama4_decoder_block else None,
         matmul_precision=cfg.matmul_precision,
     )(inputs)
 
@@ -953,7 +999,7 @@ class DeepSeekMoeBlock(nn.Module):
   @nn.compact
   def __call__(self, inputs):
     cfg = self.config
-    routed_experts, _ = MoeBlock(
+    routed_experts, _, router_indices = MoeBlock(
         config=cfg,
         num_experts=cfg.num_experts,
         num_experts_per_tok=cfg.num_experts_per_tok,
@@ -977,4 +1023,15 @@ class DeepSeekMoeBlock(nn.Module):
         quant=self.quant,
     )(inputs)
 
-    return routed_experts + shared_experts
+    # NOTE @jacobplatin: some as above -- I would like to avoid all of these terrible conditions
+    # by using inheritance but JAX tracing isn't playing nicely with child classes...
+    if cfg.decoder_block == "llama4":
+      bsz, seq_len, embed_size = inputs.shape
+      shared_experts = shared_experts.reshape(-1, embed_size)
+      num_rows, num_cols = router_indices.shape
+      scatter_rows = router_indices.flatten()
+      scatter_cols = jnp.tile(jnp.arange(num_cols), num_rows)
+      return shared_experts.at[(scatter_rows, scatter_cols)].add(routed_experts.flatten()).reshape(bsz, seq_len, embed_size)
+
+    else:
+      return routed_experts + shared_experts
