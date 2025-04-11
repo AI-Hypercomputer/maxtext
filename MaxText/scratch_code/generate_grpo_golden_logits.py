@@ -45,7 +45,6 @@ import transformers
 from datasets import load_dataset
 
 from MaxText.experimental.rl.grpo_trainer import compute_log_probs, grpo_loss_fn, _merge_grpo_state, generate_completions
-from MaxText.tests.grpo_trainer_correctness_test import _prepare_maxtext_inputs
 from MaxText import maxengine
 from MaxText.globals import PKG_DIR
 
@@ -61,16 +60,19 @@ class GRPOTest(unittest.TestCase):
     super().setUp()
     self.cfg = pyconfig.initialize(
         [None, "MaxText/experimental/rl/grpo_trainer_test.yml"],
+        model_name="llama3.1-8b",
         run_name="generate_grpo_test_data",
         load_parameters_path="gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items",
     )
     self.cfg_no_ckpt_loading = pyconfig.initialize(
         [None, "MaxText/experimental/rl/grpo_trainer_test.yml"],
         run_name="generate_grpo_test_data_no_ckpt_loading",
+        enable_checkpointing=False,
     )
     self.cfg_no_ckpt_loading_inference = pyconfig.initialize(
         [None, "MaxText/experimental/rl/grpo_trainer_test.yml"],
         run_name="generate_grpo_test_data_no_ckpt_loading_inference",
+        enable_checkpointing=False,
         ici_tensor_parallelism=4,
         per_device_batch_size=self.cfg_no_ckpt_loading.per_device_batch_size * self.cfg_no_ckpt_loading.num_generations,
     )
@@ -110,7 +112,6 @@ class GRPOTest(unittest.TestCase):
         num_generations=4,
         max_prompt_length=16,
         max_completion_length=16,
-        temperature=0.0,
     )
     self.hf_model = transformers.AutoModelForCausalLM.from_pretrained(
         "meta-llama/Llama-3.1-8B",
@@ -124,6 +125,20 @@ class GRPOTest(unittest.TestCase):
         train_dataset=load_dataset("trl-lib/tldr", split="train"),
     )
 
+  def _prepare_maxtext_inputs(self):
+    prompt = self.tokenizer_model.encode(self.input_str)
+    input_ids = jnp.pad(
+        jnp.tile(jnp.concat([jnp.array(prompt), jnp.array(prompt)], axis=-1), (4, 1)),
+        ((0, 0), (0, 4)),
+        constant_values=0,
+    )  # pad some tokens at the end of input prompt
+    input_segmentation = (input_ids > 0).astype(jnp.int32)
+    input_position = jnp.where(input_segmentation, jnp.arange(input_segmentation.shape[1]), 0)
+    completion_segmentation = jnp.tile(
+        jnp.pad(jnp.array([0] * len(prompt) + [1] * len(prompt)), (0, input_ids.shape[1] - 2 * len(prompt))), (4, 1)
+    )
+    return input_ids, input_segmentation, input_position, completion_segmentation
+  
   def _prepare_trl_inputs(self):
     tokenized_inputs = self.tokenizer_model([self.input_str], return_tensors="pt")
     input_ids = torch.cat((tokenized_inputs["input_ids"], tokenized_inputs["input_ids"]), axis=-1)
@@ -168,7 +183,7 @@ class GRPOTest(unittest.TestCase):
 
     hf_per_token_logps = self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep)  # pylint: disable=protected-access
 
-    input_ids, input_segmentation, input_position, completion_segmentation = _prepare_maxtext_inputs(self.input_str, self.tokenizer_model)
+    input_ids, input_segmentation, input_position, completion_segmentation = self._prepare_maxtext_inputs()
     maxtext_per_token_logps, _ = compute_log_probs(
         self.model,
         self.state.params,
@@ -241,9 +256,6 @@ class GRPOTest(unittest.TestCase):
         is_train=False,
     )
 
-    # Convert logits to fp32
-    maxtext_per_token_logps_no_ckpt_loading = maxtext_per_token_logps_no_ckpt_loading.cpu().numpy().astype("float32")
-
     maxtext_loss, aux = grpo_loss_fn(
         self.model_no_ckpt_loading,
         self.cfg_no_ckpt_loading,
@@ -253,26 +265,26 @@ class GRPOTest(unittest.TestCase):
         reference_params_no_ckpt_loading,
     )
 
-    engine = maxengine.MaxEngine(self.config_inference)
-    generated_completions = generate_completions(
-        self.cfg_no_ckpt_loading,
-        self.tokenizer_model,
-        engine,
-        self.tokenizer_model.encode(self.input_str),
-        self.state_no_ckpt_loading.params["params"],
-        self.rng,
-    )
+    # engine = maxengine.MaxEngine(self.config_inference)
+    # generated_completions = generate_completions(
+    #     self.cfg_no_ckpt_loading,
+    #     self.tokenizer_model,
+    #     engine,
+    #     self.tokenizer_model.encode(self.input_str),
+    #     self.state_no_ckpt_loading.params["params"],
+    #     self.rng,
+    # )
 
     data_to_save = {
         "maxtext_loss": maxtext_loss.tolist(),
-        "generated_completions": generated_completions,
+        # "generated_completions": generated_completions,
         "maxtext_per_token_logps_no_ckpt_loading": maxtext_per_token_logps_no_ckpt_loading.tolist()[
             0
         ],  # Convert numpy array to list for JSON serialization
-        "avg_kl": aux["avg_kl"].tolist(),
+        "avg_kl": aux.avg_kl.tolist(),
     }
     model_output_path = os.path.join(
-        os.path.dirname(PKG_DIR), "MaxText", "test_assets", f"golden_data_grpo_{self.cfg.model_name}.jsonl"
+        os.path.dirname(PKG_DIR), "MaxText", "test_assets", f"golden_data_grpo_{self.cfg_no_ckpt_loading.model_name}.jsonl"
     )
     with jsonlines.open(model_output_path, "w") as f:
       f.write(data_to_save)
