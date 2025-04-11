@@ -187,7 +187,7 @@ class MlpBlock(nn.Module):
   quant: Optional[Quant] = None
 
   def get_norm_layer(self):
-    if self.config.decoder_block in ("default", "llama2", "mistral", "mixtral", "gemma", "deepseek"):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "mixtral", "gemma", "deepseek", "llama4"):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
       from MaxText.layers import gpt3
