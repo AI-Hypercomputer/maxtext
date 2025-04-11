@@ -145,7 +145,7 @@ class GRPOTest(unittest.TestCase):
     hf_logits = self.hf_model(input_ids = torch.tensor(inputs.tolist()), attention_mask = torch.tensor(inputs_segmentation.tolist())).logits.detach().numpy()
     print(f"Max Diff {np.max(np.abs(logits - hf_logits))}")
     self.assertTrue(jax.numpy.allclose(hf_logits, logits, rtol=1e-2, atol=2e-1, equal_nan=False))
-  
+
   def test_logps(self):
 
     input_ids, input_segmentation, input_position, completion_segmentation = self._prepare_maxtext_inputs()
@@ -161,7 +161,7 @@ class GRPOTest(unittest.TestCase):
     )
     hf_input_ids, attention_mask, logits_to_keep = self._prepare_trl_inputs()
     with torch.no_grad():
-        hf_per_token_logps = self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep)  # pylint: disable=protected-access
+      hf_per_token_logps = self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep)  # pylint: disable=protected-access
 
     print(
         f"Max Diff {np.max(np.abs(np.trim_zeros(np.asarray(maxtext_per_token_logps)[0]) - hf_per_token_logps.detach().numpy()[0]))}"

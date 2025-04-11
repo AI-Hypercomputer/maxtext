@@ -30,11 +30,11 @@ from MaxText.layers import initializers
 import jax.numpy as jnp
 import numpy as np
 
-import MaxText.pyconfig as pyconfig
-import MaxText.max_utils as max_utils
+from MaxText import pyconfig
+from MaxText import max_utils
 from jax.sharding import Mesh
 from flax import linen as nn
-import MaxText.common_types as common_types
+from MaxText import common_types
 import torch
 # from datasets import Dataset
 from trl import GRPOConfig, GRPOTrainer
@@ -138,7 +138,7 @@ class GRPOTest(unittest.TestCase):
         jnp.pad(jnp.array([0] * len(prompt) + [1] * len(prompt)), (0, input_ids.shape[1] - 2 * len(prompt))), (4, 1)
     )
     return input_ids, input_segmentation, input_position, completion_segmentation
-  
+
   def _prepare_trl_inputs(self):
     tokenized_inputs = self.tokenizer_model([self.input_str], return_tensors="pt")
     input_ids = torch.cat((tokenized_inputs["input_ids"], tokenized_inputs["input_ids"]), axis=-1)
