@@ -148,7 +148,7 @@ routed_scaling_factor: 1.0 # scaling factor for routing scores
 routed_score_func: "" # scoring function for routing
 routed_bias: False # a flag if a bias term is added for routing
 n_routing_groups: -1 # number of groups for routing, disabled by default
-topk_routing_group: -1 # number of top groups to route inputs. For EP, 
+topk_routing_group: -1 # number of top groups to route inputs. For EP,
 # sending activations to a maximum of topk_routing_group distinct devices can yield performance benefits.
 
 # pipeline parallelism
@@ -496,7 +496,7 @@ gradient_clipping_threshold: 1.0
 # batch by accumulating the gradient over a set of steps.
 gradient_accumulation_steps: 1
 
-opt_type: "adamw"  # one of "adamw", "adam_pax" or "sgd" 
+opt_type: "adamw"  # one of "adamw", "adam_pax" or "sgd"
 
 # AdamW optimizer parameters
 # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
