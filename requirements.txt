@@ -19,7 +19,6 @@ ml-collections
 ml-goodput-measurement==0.0.8
 numpy
 optax
-pathwaysutils
 protobuf==3.20.3
 pylint
 pytest
@@ -37,5 +36,5 @@ transformers
 mlperf-logging@git+https://github.com/mlperf/logging.git
 google-jetstream@git+https://github.com/AI-Hypercomputer/JetStream.git
 jsonlines
-pathwaysutils@git+https://github.com/google/pathways-utils.git
+pathwaysutils@git+https://github.com/AI-Hypercomputer/pathways-utils.git
 omegaconf
