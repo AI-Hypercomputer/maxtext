@@ -1,0 +1,10 @@
+base_config: "grpo.yml"
+
+enable_checkpointing: True
+max_target_length: 32
+per_device_batch_size: 1
+max_prefill_predict_length: 16
+dataset_type: "synthetic"
+dtype: "float32"
+matmul_precision: "high"
+logits_dot_in_fp32: True
