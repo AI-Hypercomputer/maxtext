@@ -204,7 +204,7 @@ class Fp8Quantization(Quantization):
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
-    return nn.Fp8DotGeneralOp
+    return nn.Fp8DirectDotGeneralOp
 
   def einsum(self, dtype: DType = jnp.float32):
     return Fp8Einsum(dtype=dtype)
