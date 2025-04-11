@@ -10,6 +10,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+
 import tempfile
 
 # pylint: disable=missing-module-docstring, missing-function-docstring
@@ -23,6 +24,7 @@ import os.path
 
 from MaxText.train import main as train_main
 from MaxText.globals import PKG_DIR
+
 
 def generate_random_string(length=10):
   characters = string.ascii_letters  # Include letters, digits, and punctuation

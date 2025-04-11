@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+
 from MaxText.tests.globals import TEST_DISABLE_SUBPROCESS, TEST_DISABLE_SUBPROCESS_STR
 
 """Integraion tests for test_generate_param_only_checkpoint.sh"""
@@ -22,12 +23,14 @@ import os.path
 import pytest
 from MaxText.globals import PKG_DIR
 
+
 def run_generate_param_only_checkpoint(attention_type, quantization):
   """Tests generating a parameter-only checkpoint."""
 
   run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
   script_path = os.path.join(os.path.dirname(PKG_DIR), "end_to_end", "test_generate_param_only_checkpoint.sh")
-  if not os.path.isfile(script_path): raise FileNotFoundError(script_path)
+  if not os.path.isfile(script_path):
+    raise FileNotFoundError(script_path)
   # fmt: off
   command = [
       "bash",

@@ -119,8 +119,7 @@ class QuantizationTest(unittest.TestCase):
 
   def test_mixed_precision_config_int8w(self):
     quant = _configure_quantization(
-        quant_str="intmp",
-        quant_cfg_path=os.path.join(PKG_DIR, "configs", "quantization", "int8_weight_only.json")
+        quant_str="intmp", quant_cfg_path=os.path.join(PKG_DIR, "configs", "quantization", "int8_weight_only.json")
     )
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 1)
     self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
@@ -131,7 +130,7 @@ class QuantizationTest(unittest.TestCase):
   def test_mixed_precision_config_scale(self):
     quant = _configure_quantization(
         quant_str="intmp",
-        quant_cfg_path=os.path.join(PKG_DIR, "configs", "quantization", "dense_llm_weight_only_scale.json")
+        quant_cfg_path=os.path.join(PKG_DIR, "configs", "quantization", "dense_llm_weight_only_scale.json"),
     )
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7)
     self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
@@ -144,8 +143,7 @@ class QuantizationTest(unittest.TestCase):
 
   def test_mixed_precision_config_subchannel(self):
     quant = _configure_quantization(
-        quant_str="intmp",
-        quant_cfg_path=os.path.join(PKG_DIR, "configs", "quantization", "dense_llm_subchannel.json")
+        quant_str="intmp", quant_cfg_path=os.path.join(PKG_DIR, "configs", "quantization", "dense_llm_subchannel.json")
     )
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7)
     self.assertTrue(quantizations.DEFAULT in quant.quant_dg)

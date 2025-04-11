@@ -25,6 +25,7 @@ import random
 import string
 import os.path
 
+
 class Standalone_DL_CKPT(unittest.TestCase):
   """Tests for standalone_checkpointer.py, checkpoint and restore."""
 

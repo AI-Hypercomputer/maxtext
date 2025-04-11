@@ -38,9 +38,11 @@ def normalize_features(x, column_name):
   return {"inputs": x[column_name], "targets": x[column_name]}
 
 
-def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None):
+def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None, dataset_type="tfds"):
   # Load tokenizer
-  tokenizer_model = tokenizer.build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token)
+  tokenizer_model = tokenizer.build_tokenizer(
+      tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token, dataset_type
+  )
   return tokenizer_model
 
 
@@ -287,17 +289,6 @@ class ParseFeatures(grain.MapTransform):
 
 
 @dataclasses.dataclass
-class InputsTargetsFeatures(grain.MapTransform):
-  """Normalize text feature keys."""
-
-  def __init__(self, column_name):
-    self.column_name = column_name
-
-  def map(self, features):
-    return {"inputs": features[self.column_name], "targets": features[self.column_name]}
-
-
-@dataclasses.dataclass
 class NormalizeFeatures(grain.MapTransform):
   """Normalize text feature keys."""
 
@@ -310,6 +301,25 @@ class NormalizeFeatures(grain.MapTransform):
       return {col: features[col].numpy()[0].decode() for col in self.column_names}
     else:
       return {col: features[col].numpy() for col in self.column_names}
+
+
+@dataclasses.dataclass
+class Rekey(grain.MapTransform):
+  """Rname keys according to a mappign dict"""
+
+  def __init__(self, mapping_dict, keep_old_keys=False):
+    self.mapping_dict = mapping_dict
+    self.keep_old_keys = keep_old_keys
+
+  def map(self, features):
+    old_keys = set()
+    for new_key, old_key in self.mapping_dict.items():
+      features[new_key] = features[old_key]
+      old_keys.add(old_key)
+    if not self.keep_old_keys:
+      for key in old_keys:
+        del features[key]
+    return features
 
 
 @dataclasses.dataclass

@@ -32,10 +32,6 @@ from transformers import AutoTokenizer
 
 from MaxText.globals import PKG_DIR
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-maxtext_parent_dir = os.path.dirname(current_dir)
-sys.path.append(maxtext_parent_dir)
-
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import pyconfig
@@ -167,15 +163,20 @@ def main(config, test_args):
   assert jax.numpy.all(kl_div < float(test_args.kl_div))
 
 
+def get_argument_parser():
+  argument_parser = argparse.ArgumentParser()
+  argument_parser.add_argument("--model-name", type=str, required=True)
+  argument_parser.add_argument("--tokenizer-path", type=str, required=True)
+  argument_parser.add_argument("--model-ckpt-path", type=str, required=True)
+  argument_parser.add_argument("--max-target-length", type=int, required=False, default=64)
+  argument_parser.add_argument("--atol", type=float, required=True)
+  argument_parser.add_argument("--rtol", type=float, required=True)
+  argument_parser.add_argument("--kl-div", type=float, required=True)
+  return argument_parser
+
+
 if __name__ == "__main__":
-  parser = argparse.ArgumentParser()
-  parser.add_argument("--model-name", type=str, required=True)
-  parser.add_argument("--tokenizer-path", type=str, required=True)
-  parser.add_argument("--model-ckpt-path", type=str, required=True)
-  parser.add_argument("--max-target-length", type=int, required=False, default=64)
-  parser.add_argument("--atol", type=float, required=True)
-  parser.add_argument("--rtol", type=float, required=True)
-  parser.add_argument("--kl-div", type=float, required=True)
+  parser = get_argument_parser()
   test_args = parser.parse_args(sys.argv[1:])
   config = initialize_config(test_args)
   main(config, test_args)

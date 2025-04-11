@@ -90,9 +90,15 @@ class SFTDataProcessingTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
-    exit_code = subprocess.call([
-      "gsutil", "cp", "-r", "gs://maxtext-dataset/hf/llama2-tokenizer",
-      os.path.join(os.path.dirname(PKG_DIR), "assets", "")])
+    exit_code = subprocess.call(
+        [
+            "gsutil",
+            "cp",
+            "-r",
+            "gs://maxtext-dataset/hf/llama2-tokenizer",
+            os.path.join(os.path.dirname(PKG_DIR), "assets", ""),
+        ]
+    )
     if exit_code != 0:
       raise ValueError(f"Download tokenizer with gsutil cp failed with exit code: {exit_code}")
 

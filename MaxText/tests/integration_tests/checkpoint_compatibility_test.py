@@ -14,7 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-"""Integraion tests for test_checkpointing.sh"""
+"""Integration tests for test_checkpointing.sh"""
+
 from datetime import datetime
 import subprocess
 import os.path
@@ -28,7 +29,8 @@ def run_checkpoint_compatibility(attention_type):
 
   run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
   script_path = os.path.join(os.path.dirname(PKG_DIR), "end_to_end", "test_checkpoint_compatibility.sh")
-  if not os.path.isfile(script_path): raise FileNotFoundError(script_path)
+  if not os.path.isfile(script_path):
+    raise FileNotFoundError(script_path)
   command = [
       "bash",
       script_path,

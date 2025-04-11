@@ -22,6 +22,7 @@ from absl.testing import absltest
 
 from MaxText.globals import PKG_DIR
 
+
 class Train(unittest.TestCase):
   """Smoke test for int8 G3 only"""
 

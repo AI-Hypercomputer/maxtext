@@ -215,8 +215,9 @@ param_scan_axis: 1
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
 attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
-attention_type: 'global' # Supported attention_type: global, local_sliding, mla
+attention_type: 'global' # Supported attention_type: global, local_sliding, chunk, mla
 sliding_window_size: 0
+chunk_attn_window_size: 0
 attn_logits_soft_cap: 0.0
 final_logits_soft_cap: 0.0
 use_post_attn_norm: False
@@ -384,6 +385,7 @@ max_corpus_chars: 10_000_000
 train_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 packing: True
+num_epoch: 1  # only grain and tfds pipeline supports num_epoch > 1
 
 # direct preference optimization (DPO)
 use_dpo: False
@@ -414,7 +416,9 @@ hf_access_token: ''
 # for Grain input pipeline (dataset_type=grain)
 grain_train_files: ''
 grain_eval_files: ''
+grain_file_type: 'arrayrecord' # arrayrecord or parquet 
 grain_worker_count: 1
+grain_worker_count_eval: 1
 # for using pathways
 colocated_python_data_input: False  # experimental feature, under testing
 

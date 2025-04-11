@@ -36,14 +36,15 @@ import tempfile
 import threading
 import time
 
-import maxtext_trillium_model_configs as model_configs
-from command_utils import run_command_with_updates
-from benchmark_db_utils import DEFAULT_TUNING_PARAMS_FILE
+import benchmarks.maxtext_trillium_model_configs as model_configs
+from benchmarks.command_utils import run_command_with_updates
+from benchmarks.benchmark_db_utils import DEFAULT_TUNING_PARAMS_FILE
 
-import xla_flags_library as xla_flags
-from disruption_management.disruption_handler import DisruptionConfig
-from disruption_management.disruption_manager import DisruptionManager
-from xpk_configs import XpkClusterConfig
+import benchmarks.xla_flags_library as xla_flags
+from benchmarks.disruption_management.disruption_handler import DisruptionConfig
+from benchmarks.disruption_management.disruption_manager import DisruptionManager
+from typing import Optional, List
+from benchmarks.xpk_configs import XpkClusterConfig
 
 from MaxText.globals import PKG_DIR
 
@@ -98,22 +99,27 @@ class WorkloadConfig:
   num_steps: int = 20
   max_restarts: int = 0
   priority: str = 'medium'
-  xpk_path: str = os.path.join(os.path.dirname(PKG_DIR), os.path.join("~", "xpk"))
+  xpk_path: str = os.path.join("~", "xpk")
   pathways_config: PathwaysConfig = None
   run_name: str = None
   generate_metrics_and_upload_to_big_query: bool = True
   hardware_id: str = 'v6e'
   metrics_gcs_file: str = ''
-  base_config: str = os.path.join(PKG_DIR, "configs", "base.yml")
+  base_config: str = os.path.join("MaxText", "configs", "base.yml")
   topology: str = dataclasses.field(init=False)
   num_devices_per_slice: int = dataclasses.field(init=False)
   db_project: str = ""
   db_dataset: str = ""
   db_is_test: bool = True
   disruption_configs: DisruptionConfig = None
+  xpk_storage: Optional[List[str]] = None
 
   def __post_init__(self):
     """Initializes num_devices_per_slice and topology for recording the run into BigQuery"""
+    if not self.generate_metrics_and_upload_to_big_query:
+      return
+    if self.device_type is None:
+      raise ValueError(f"device_type is None and generate_metrics_and_upload_to_big_query is enabled. Device_type is required for uploading run results to BigQuery")
     if self.device_type.startswith("v6e") or self.device_type.startswith("v5e") or self.device_type.startswith("v5litepod"):
       size = int(self.device_type.split("-")[-1])
       if size == 256:
@@ -343,7 +349,7 @@ def _build_args_from_config(wl_config: WorkloadConfig) -> dict:
   args["xla_flags"] = f"'{xla_flags_str}'"
   args["dataset"] = dataset
   args["run_type"] = "maxtext-xpk"
-  args["config_file"] = os.path.join(PKG_DIR, "configs", "base.yml")
+  args["config_file"] = os.path.join("MaxText", "configs", "base.yml")
   args["topology"] = wl_config.topology
   args["tuning_params"] = f"'{tuning_params_str}'"
   args["db_project"] = wl_config.db_project
@@ -407,7 +413,7 @@ def build_user_command(
       'export ENABLE_PATHWAYS_PERSISTENCE=1 &&',
       f'export JAX_PLATFORMS={jax_platforms} &&',
       'export ENABLE_PJRT_COMPATIBILITY=true &&',
-      f'python3 -m MaxText.train {os.path.join(PKG_DIR, "configs", "base.yml")}',
+      f'python3 -m MaxText.train {os.path.join("MaxText", "configs", "base.yml")}',
       f'{config_tuning_params}',
       f'steps={wl_config.num_steps}',
       f'model_name={wl_config.model.model_type}',
@@ -620,6 +626,9 @@ def generate_xpk_workload_cmd(
     upload_metrics_to_bq_cmd = f"&& python3 benchmarks/upload_metrics_to_bq.py {args_str}"
 
   print(f'User command: {user_command}')
+  all_xpk_storage = ""
+  if wl_config.xpk_storage:
+    all_xpk_storage = " ".join(f"--storage={storage_test}" for storage_test in wl_config.xpk_storage)
   return (
       (
           f'{workload_create_command}'
@@ -628,6 +637,7 @@ def generate_xpk_workload_cmd(
           f' --project={cluster_config.project}'
           f' --zone={cluster_config.zone}'
           f' {device_type}'
+          f' {all_xpk_storage}'
           f' --num-slices={wl_config.num_slices}'
           f' --command="{user_command} {upload_metrics_to_bq_cmd}"'
           f' {docker_image_flag}'

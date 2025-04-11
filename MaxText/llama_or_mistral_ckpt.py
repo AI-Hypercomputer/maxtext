@@ -38,7 +38,7 @@ import re
 import logging
 import json
 from dataclasses import dataclass
-from inference_utils import str2bool
+from safetensors import safe_open
 
 os.environ["JAX_PLATFORMS"] = "cpu"
 
@@ -50,11 +50,11 @@ import torch
 import psutil
 from tqdm import tqdm
 
+from MaxText import checkpointing
 from MaxText import max_logging
 from MaxText import max_utils
+from MaxText.inference_utils import str2bool
 from MaxText.train import save_checkpoint
-from MaxText import checkpointing
-from safetensors import safe_open
 from MaxText.utils import gcs_utils
 
 MODEL_PARAMS_DICT = {
