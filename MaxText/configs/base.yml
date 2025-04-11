@@ -148,7 +148,7 @@ routed_scaling_factor: 1.0 # scaling factor for routing scores
 routed_score_func: "" # scoring function for routing
 routed_bias: False # a flag if a bias term is added for routing
 n_routing_groups: -1 # number of groups for routing, disabled by default
-topk_routing_group: -1 # number of top groups to route inputs. For EP, 
+topk_routing_group: -1 # number of top groups to route inputs. For EP,
 # sending activations to a maximum of topk_routing_group distinct devices can yield performance benefits.
 
 # pipeline parallelism
@@ -419,7 +419,7 @@ hf_access_token: ''
 # for Grain input pipeline (dataset_type=grain)
 grain_train_files: ''
 grain_eval_files: ''
-grain_file_type: 'arrayrecord' # arrayrecord or parquet 
+grain_file_type: 'arrayrecord' # arrayrecord or parquet
 grain_worker_count: 1
 grain_worker_count_eval: 1
 # for using pathways
@@ -499,7 +499,7 @@ gradient_clipping_threshold: 1.0
 # batch by accumulating the gradient over a set of steps.
 gradient_accumulation_steps: 1
 
-opt_type: "adamw"  # one of "adamw", "adam_pax" or "sgd" 
+opt_type: "adamw"  # one of "adamw", "adam_pax" or "sgd"
 
 # AdamW optimizer parameters
 # We use AdamW following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
@@ -525,7 +525,7 @@ trainable_position_size: -1  # enable gpt3 position embedding with a positive tr
 # RoPE parameters
 rope_type: "default" # one of "default", "llama3.1" or "yarn"
 rope_min_timescale: 1
-rope_max_timescale: 10_000 # Timesclae For global Attention
+rope_max_timescale: 10_000 # Timescale For global Attention
 local_rope_max_timescale: -1 # If positive used for local window Attention, otherwise `rope_max_timescale` is used for both local and global
 
 # yarn RoPE parameters
@@ -669,3 +669,11 @@ use_chunked_prefill: False
 
 # This is a temporary flag that will removed soon after the fix lands in TE
 enable_padding_causal_mask: True
+
+# Llama4-specific
+# Whether to apply Query/Key normalization.
+# NOTE: non-Llama4 models use RMSNorm before RoPE
+# whereas Llama4 models use L2Norm after RoPE
+use_qk_norm: False
+# Every `X` layers will NOT use RoPE
+nope_layer_interval: -1

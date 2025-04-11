@@ -68,12 +68,12 @@ def get_data(golden_data, golden_data_index, config):
   logits = np.asarray(golden_data[golden_data_index]["logits"], dtype=np.float32)
   max_logging.log(f" prompt=\"{golden_data[golden_data_index]['prompt']}\" raw ids={ids}, logits.shape = {logits.shape}")
 
-  decoder_segment_ids = jax.numpy.zeros(s) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
-  decoder_positions = jnp.stack(
-      [jnp.arange(config.max_target_length, dtype=jnp.int32) for _ in range(config.global_batch_size_to_train_on)]
+  decoder_segment_ids = np.zeros(s) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+  decoder_positions = np.stack(
+      [np.arange(config.max_target_length, dtype=np.int32) for _ in range(config.global_batch_size_to_train_on)]
   )
 
-  ids = jnp.stack([ids for _ in range(config.global_batch_size_to_train_on)])
+  ids = np.stack([ids for _ in range(config.global_batch_size_to_train_on)])
   max_logging.log(f"ids={ids}, decoder_segment_ids = {decoder_segment_ids}, decoder_positions= {decoder_positions}")
 
   return ids, decoder_segment_ids, decoder_positions, logits
