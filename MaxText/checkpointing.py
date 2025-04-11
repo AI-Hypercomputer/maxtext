@@ -334,10 +334,10 @@ def load_params_from_path(load_parameters_from_path, abstract_unboxed_params, ch
   ckpt = epath.Path(load_parameters_from_path)
 
   # *_concurrent_gb should be set for large models, the default is 96.
-  ckptr = ocp.Checkpointer(
+  ckptr = ocp.PyTreeCheckpointer(
       ocp.PyTreeCheckpointHandler(
           restore_concurrent_gb=checkpoint_storage_concurrent_gb, save_concurrent_gb=checkpoint_storage_concurrent_gb
-      )
+      ), use_ocdbt=False, use_zarr3=False
   )
 
   # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.
@@ -354,6 +354,6 @@ def load_params_from_path(load_parameters_from_path, abstract_unboxed_params, ch
 def save_params_to_path(checkpoint_dir, params):
   """Save decode params in checkpoint at specified path."""
   assert checkpoint_dir, "checkpoint_dir is not defined."
-  orbax_checkpointer = ocp.PyTreeCheckpointer()
+  orbax_checkpointer = ocp.PyTreeCheckpointer(use_ocdbt=False, use_zarr3=False)
   orbax_checkpointer.save(checkpoint_dir, {"params": params}, force=True)
   print(f"Quantized params checkpoint saved at: {checkpoint_dir}")
