@@ -1,0 +1,14 @@
+base_config: "grpo.yml"
+
+model_name: "default"
+vocab_size: 128256
+max_target_length: 32
+per_device_batch_size: 1
+max_prefill_predict_length: 16
+dataset_type: "synthetic"
+dtype: "float32"
+matmul_precision: "high"
+logits_dot_in_fp32: True
+prompt: "Hello world this is a test"
+init_weights_seed: 42
+enable_dropout: False
