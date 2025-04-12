@@ -43,6 +43,7 @@ from jetstream.engine import token_utils
 from MaxText.utils import lora_utils
 
 from MaxText import max_utils
+from MaxText import maxtext_utils
 from MaxText import inference_utils
 from MaxText import pyconfig
 
@@ -105,7 +106,7 @@ class MaxEngine(engine_api.Engine):
     self.config = config
 
     # Mesh definition
-    devices_array = max_utils.create_device_mesh(config=config, devices=devices)
+    devices_array = maxtext_utils.create_device_mesh(config=config, devices=devices)
     self._mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
     # Model and Optimizer definition
@@ -238,15 +239,15 @@ class MaxEngine(engine_api.Engine):
     rng1, rng2, rng3 = jax.random.split(rng, 3)
     if params:
       print("Resharding given params")
-      _, self.state_mesh_annotations, state_mesh_shardings = max_utils.get_abstract_state(
+      _, self.state_mesh_annotations, state_mesh_shardings = maxtext_utils.get_abstract_state(
           self.model, None, self.config, rng, self._mesh, False
       )
       # reshard given params based on shardings from config in MaxEngine
       params = jax.device_put(params, state_mesh_shardings.params)
-      state = max_utils.init_decode_state(None, params)
+      state = maxtext_utils.init_decode_state(None, params)
       state = max_utils.unbox_logicallypartioned(state)
     else:
-      state, self.state_mesh_annotations = max_utils.setup_decode_state(self.model, self.config, rng1, self._mesh, None)
+      state, self.state_mesh_annotations = maxtext_utils.setup_decode_state(self.model, self.config, rng1, self._mesh, None)
     # pylint: disable=isinstance-second-argument-not-valid-type
     self.abstract_params = jax.tree_util.tree_map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
@@ -255,7 +256,7 @@ class MaxEngine(engine_api.Engine):
         state.params,
     )
 
-    self.prefill_kv_cache_annotations = max_utils.get_prefill_kv_cache_annotations(
+    self.prefill_kv_cache_annotations = maxtext_utils.get_prefill_kv_cache_annotations(
         self.model, self.config, rng2, self._mesh, self.page_state
     )
     self.prefill_kv_cache_shardings = jax.tree_util.tree_map(
@@ -271,7 +272,7 @@ class MaxEngine(engine_api.Engine):
       )
       self.prefill_kv_cache_shardings = self.prefill_kv_cache_shardings["decoder"]["layers_0"]
 
-    self.kv_cache_annotations = max_utils.get_kv_cache_annotations(
+    self.kv_cache_annotations = maxtext_utils.get_kv_cache_annotations(
         self.model, self.config, rng2, self._mesh, self.page_state
     )
     self.kv_cache_shardings = jax.tree_util.tree_map(
@@ -353,7 +354,7 @@ class MaxEngine(engine_api.Engine):
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding),
         params,
     )
-    max_utils.save_quantized_checkpoint_if_configured(self.config, params)
+    maxtext_utils.save_quantized_checkpoint_if_configured(self.config, params)
     self.model.quant.quant_mode = quantizations.get_quant_mode("serve")
     return params
 
@@ -1394,7 +1395,7 @@ def set_engine_vars_from_base_engine(
     engine.model.quant.quant_mode = base_engine.model.quant.quant_mode
   engine.state_mesh_annotations = base_engine.state_mesh_annotations
   engine.abstract_params = base_engine.abstract_params
-  engine.kv_cache_annotations = max_utils.get_kv_cache_annotations(engine.model, engine.config, rng, engine.mesh)  # pylint: disable=protected-access
+  engine.kv_cache_annotations = maxtext_utils.get_kv_cache_annotations(engine.model, engine.config, rng, engine.mesh)  # pylint: disable=protected-access
   engine.kv_cache_shardings = jax.tree_util.tree_map(
       lambda x: jax.sharding.NamedSharding(engine.mesh, x),
       engine.kv_cache_annotations,  # pylint: disable=protected-access

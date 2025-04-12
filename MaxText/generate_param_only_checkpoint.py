@@ -28,6 +28,7 @@ from MaxText import checkpointing
 import jax
 from MaxText import max_logging
 from MaxText import max_utils
+from MaxText import maxtext_utils
 from MaxText import optimizers
 from MaxText import pyconfig
 
@@ -94,9 +95,11 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
   quant = quantizations.configure_quantization(config)
   model = Transformer(config, mesh, quant)
   rng = random.PRNGKey(0)
-  learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
+  learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
-  state, state_mesh_notations, _, _ = max_utils.setup_training_state(model, None, tx, config, rng, mesh, checkpoint_manager)
+  state, state_mesh_notations, _, _ = maxtext_utils.setup_training_state(
+      model, None, tx, config, rng, mesh, checkpoint_manager
+  )
   num_params = max_utils.calculate_num_params_from_pytree(state.params)
   max_logging.log(f"In input checkpoint Number of model params={num_params/1e9:.3f} billion")
   return state, state_mesh_notations
@@ -108,7 +111,7 @@ def _generate_lora_decode_checkpoints(config, mesh):
   quant = quantizations.configure_quantization(config)
   model = Transformer(config, mesh, quant)
   rng = random.PRNGKey(0)
-  learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
+  learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
 
   lora_adapters = gcs_utils.gcs_list_directories(config.lora_input_adapters_path)
@@ -142,7 +145,7 @@ def _generate_lora_decode_checkpoints(config, mesh):
 def _save_decode_checkpoint(config, state, checkpoint_manager):
   """Generate checkpoint for decode from the training_state."""
   with jax.spmd_mode("allow_all"):
-    decode_state = max_utils.init_decode_state(
+    decode_state = maxtext_utils.init_decode_state(
         None, jax.tree_util.tree_map(lambda x: x.astype(jax.numpy.bfloat16), state.params)
     )
   if checkpoint_manager is not None:
@@ -158,7 +161,7 @@ def generate_decode_checkpoint(config):
   - Inference checkpoint will be saved at the config's checkpoint directory.
   """
 
-  devices_array = max_utils.create_device_mesh(config)
+  devices_array = maxtext_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
 
   assert config.checkpoint_dir, "checkpoint_dir not configured"

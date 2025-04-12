@@ -38,7 +38,7 @@ from tqdm import tqdm
 from absl import app
 import numpy as np
 from MaxText import pyconfig
-from MaxText import max_utils
+from MaxText import maxtext_utils
 from jax.sharding import Mesh
 from MaxText import max_logging
 from MaxText import checkpointing
@@ -79,7 +79,7 @@ def load_model_state(config):
   """
   Loads the MaxText model's TrainState from the Orbax checkpoint
   """
-  devices_array = max_utils.create_device_mesh(config)
+  devices_array = maxtext_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
 
   # Create a checkpoint manager to load decode checkpoint at config.checkpoint_dir

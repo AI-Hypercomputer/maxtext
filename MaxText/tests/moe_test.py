@@ -21,7 +21,7 @@ from MaxText.layers import moe
 import jax.numpy as jnp
 
 from MaxText import pyconfig
-from MaxText import max_utils
+from MaxText import maxtext_utils
 from MaxText.globals import PKG_DIR
 from jax.sharding import Mesh
 import flax.linen as nn
@@ -54,7 +54,7 @@ class TokenDroppingTest(unittest.TestCase):
         capacity_factor=2,
     )
     self.rng = jax.random.PRNGKey(42)
-    devices_array = max_utils.create_device_mesh(self.cfg)
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.model = moe.MoeBlock(
         config=self.cfg,
         num_experts=self.cfg.num_experts,
@@ -180,7 +180,7 @@ class DeepSeekRoutingTest(unittest.TestCase):
         sparse_matmul=True,
     )
     self.rng = jax.random.PRNGKey(42)
-    devices_array = max_utils.create_device_mesh(self.cfg)
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.model = moe.MoeBlock(
         config=self.cfg,
         num_experts=self.cfg.num_experts,
@@ -354,7 +354,7 @@ class MoeBlockTest(unittest.TestCase):
         rng_hidden_states, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
     )
 
-    devices_array = max_utils.create_device_mesh(cfg)
+    devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
     actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
@@ -379,7 +379,7 @@ class MoeBlockTest(unittest.TestCase):
         rng_hidden_states, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
     )
 
-    devices_array = max_utils.create_device_mesh(cfg)
+    devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
     actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
@@ -404,7 +404,7 @@ class MoeBlockTest(unittest.TestCase):
         rng_hidden_states, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
     )
 
-    devices_array = max_utils.create_device_mesh(cfg)
+    devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
     actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
@@ -430,7 +430,7 @@ class MoeBlockTest(unittest.TestCase):
         rng_hidden_states, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
     )
 
-    devices_array = max_utils.create_device_mesh(cfg)
+    devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
     with nn_partitioning.axis_rules(cfg.logical_axis_rules):
       variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
