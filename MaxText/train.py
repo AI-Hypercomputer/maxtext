@@ -939,14 +939,14 @@ def train_loop(config, state=None):
         state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
         if save_checkpoint(
             checkpoint_manager,
-            int(state_to_save) - 1,
+            int(state.step) - 1,
             state_to_save,
             config.dataset_type,
             data_iterator,
             config,
             force=True,
         ):
-          checkpointing.print_save_message(int(state_to_save) - 1, config.async_checkpointing)
+          checkpointing.print_save_message(int(state.step) - 1, config.async_checkpointing)
       except Exception:  # pylint: disable=broad-except
         max_logging.log(f"Checkpoint is already saved for step {int(state.step)-1}.")
 
