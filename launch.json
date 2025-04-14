@@ -1,0 +1,33 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: grpo_trainer.py",
+            "type": "python",
+            "request": "launch",
+            "module": "MaxText.experimental.rl.grpo_trainer",
+            "args": [
+                "MaxText/experimental/rl/grpo.yml",
+                "per_device_batch_size=1",
+                "tokenizer_path='google/gemma-2-2b-it'",
+                "run_name=${env:USER}-pw-grpo-run",
+                "model_name=gemma2-2b",
+                "base_output_directory=gs://runner-maxtext-logs",
+                "dataset_type=hf",
+                "hf_path='trl-lib/tldr'",
+                "use_grpo=true",
+                // "load_parameters_path=gs://maxtext-model-checkpoints/gemma2-2b/2025-01-29-19-26/scanned/0/items",
+                "steps=20",
+                "async_checkpointing=false",
+                "enable_single_controller=true"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "JAX_BACKEND_TARGET": "grpc://localhost:29000",
+                "JAX_PLATFORMS": "proxy"  
+            }
+        }
+    ]
+}
