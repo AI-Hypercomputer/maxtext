@@ -42,6 +42,7 @@ from MaxText import checkpointing
 from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import max_logging
+from MaxText import mllog_utils
 from MaxText import optimizers
 from MaxText import profiler
 from MaxText import pyconfig
@@ -54,7 +55,8 @@ from MaxText.utils import gcs_utils
 from MaxText.vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
-from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
+# from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
+from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator, get_shaped_batch, get_shaped_batch_eval
 from MaxText.layers import models
 
 from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
@@ -943,6 +945,7 @@ def train_loop(config, state=None):
           f"average loss after {step=}: {eval_step_count=}, {eval_loss=},"
           f" total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}"
       )
+      mllog_utils.early_stop_check(config, step, eval_loss, start_step)
       if eval_loss <= config.target_eval_loss:
         max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
         if step > first_profiling_step:
@@ -976,17 +979,17 @@ def train_loop(config, state=None):
   metric_logger.write_metrics(running_gcs_metrics, metrics, config.steps - 1)  # final step metrics
   max_utils.close_summary_writer(writer)
   record_goodput(recorder, config, recorder.record_job_end_time if recorder else None)
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    # pytype: disable=attribute-error
-    compiled = p_train_step.lower(state, example_batch, nextrng).compile()
-    compiled_stats = compiled.memory_analysis()
-    if compiled_stats is not None:
-      max_logging.log(
-          f"Output size: {compiled_stats.output_size_in_bytes}, "
-          f"temp size: {compiled_stats.temp_size_in_bytes}, "
-          f"argument size: {compiled_stats.argument_size_in_bytes}, "
-          f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
-      )
+  # with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  #   # pytype: disable=attribute-error
+  #   compiled = p_train_step.lower(state, example_batch, nextrng).compile()
+  #   compiled_stats = compiled.memory_analysis()
+  #   if compiled_stats is not None:
+  #     max_logging.log(
+  #         f"Output size: {compiled_stats.output_size_in_bytes}, "
+  #         f"temp size: {compiled_stats.temp_size_in_bytes}, "
+  #         f"argument size: {compiled_stats.argument_size_in_bytes}, "
+  #         f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
+  #     )
   return state
 
 

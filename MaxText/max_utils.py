@@ -49,6 +49,7 @@ from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
 from tensorboardX import writer
+from google.cloud import storage
 
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
 HYBRID_RING_32X8 = "hybrid_ring_32x8"

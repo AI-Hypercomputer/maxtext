@@ -17,13 +17,13 @@
 import datetime
 import sys
 import os
-import args_helper as helper
+import benchmarks.recipes.args_helper as helper
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(parent_dir)
 
-import maxtext_trillium_model_configs as model_configs
-import maxtext_xpk_runner as mxr
+import benchmarks.maxtext_trillium_model_configs as model_configs
+import benchmarks.maxtext_xpk_runner as mxr
 
 PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_proxy_server:latest"
 SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_server:latest"
@@ -43,12 +43,12 @@ RUNNER = "gcr.io/tpu-prod-env-multipod/wstcliyu_latest:latest"
 
 # Sustained Capacity Cluster
 # CLUSTER="bodaborg-v6e-256-dnd-yucmhab"
-CLUSTER="bodaborg-v6e-256-lcscld-c"
-PROJECT="tpu-prod-env-one-vm"
-ZONE="southamerica-west1-a"
-REGION="southamerica-west1"
-COUNTRY="us"
-DEVICE_TYPE="v6e-256"
+# CLUSTER="bodaborg-v6e-256-lcscld-c"
+# PROJECT="tpu-prod-env-one-vm"
+# ZONE="southamerica-west1-a"
+# REGION="southamerica-west1"
+# COUNTRY="us"
+# DEVICE_TYPE="v6e-256"
 
 # Debug Cluster
 # CLUSTER = "bodaborg-v6e-16-debug"
@@ -65,11 +65,19 @@ DEVICE_TYPE="v6e-256"
 # COUNTRY = "us"
 # DEVICE_TYPE = "v6e-256"
 
+
+CLUSTER="bodaborg-v6e-256-od"
+PROJECT="tpu-prod-env-multipod"
+ZONE="asia-southeast1-b"
+REGION="asia-southeast1"
+COUNTRY="us"
+DEVICE_TYPE="v6e-256"
+
 # Other parameters (MUST BE SET BY USER)
 XPK_PATH = "../xpk"  # We're running this script from the maxtext directory
 USER = os.environ["USER"]
 
-MAX_RESTARTS = 2
+MAX_RESTARTS = 10
 BENCHMARK_STEPS = 1000
 USE_GCSFUSE = False
 
@@ -102,6 +110,8 @@ def main() -> int:
 
   model_list = [
       model_configs.llama3_1_405b_8192_fsdp_dcn_mlperf_pathways,
+      # model_configs.llama3_1_405b_8192_fsdp_dcn_mlperf_pathways_2,
+      # model_configs.llama3_1_8b_8192,
   ]
   pathways_config = mxr.PathwaysConfig(
     server_image=SERVER_IMAGE,
@@ -123,7 +133,9 @@ def main() -> int:
     ),
   )
   num_slices_list = [
-      2
+      2,
+      # 4,
+      # 16,
   ]
 
   xpk_workload_cmds = []
@@ -137,9 +149,9 @@ def main() -> int:
 
       # Make modifications to the model config here to add in any additional
       # flags or changes to the model config.
-      model.tuning_params["use_vertex_tensorboard"] = True
-      model.tuning_params["vertex_tensorboard_project"] = PROJECT
-      model.tuning_params["vertex_tensorboard_region"] = REGION
+      # model.tuning_params["use_vertex_tensorboard"] = True
+      # model.tuning_params["vertex_tensorboard_project"] = PROJECT
+      # model.tuning_params["vertex_tensorboard_region"] = REGION
 
       # Run workloads in the following slice configurations
       for num_slices in num_slices_list:
@@ -148,7 +160,7 @@ def main() -> int:
             num_slices=num_slices,
             device_type=cluster_config.device_type,
             base_output_directory=BASE_OUTPUT_DIRECTORY
-            + f"pw_{num_slices}_slice_{DEVICE_TYPE}_{model.model_name}/",
+            + f"pw_{num_slices}_slice_{DEVICE_TYPE}_{model.model_name}",
             max_restarts=MAX_RESTARTS,
             libtpu_type=None,
             libtpu_nightly_version="",
@@ -157,6 +169,7 @@ def main() -> int:
             xpk_path=XPK_PATH,
             num_steps=BENCHMARK_STEPS,
             priority="high",
+            generate_metrics_and_upload_to_big_query=False,
         )
         command, name = mxr.generate_xpk_workload_cmd(
             cluster_config=cluster_config, wl_config=wl_config

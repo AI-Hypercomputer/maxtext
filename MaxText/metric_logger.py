@@ -89,18 +89,18 @@ class MetricLogger:
     """Writes metrics to gcs"""
     metrics_dict_step = _prepare_metrics_for_json(metrics, step, self.config.run_name)
     running_metrics.append(metrics_dict_step)
-    if is_training and (step + 1) % self.config.log_period == 0 or step == self.config.steps - 1:
-      start_step = (step // self.config.log_period) * self.config.log_period
-      metrics_filename = f"metrics_step_{start_step:06}_to_step_{step:06}.txt"
-      with open(metrics_filename, "w", encoding="utf8") as metrics_for_gcs:
-        for metrics_step in running_metrics:
-          metrics_for_gcs.write(str(json.dumps(metrics_step)) + "\n")
+    # if is_training and (step + 1) % self.config.log_period == 0 or step == self.config.steps - 1:
+    #   start_step = (step // self.config.log_period) * self.config.log_period
+    #   metrics_filename = f"metrics_step_{start_step:06}_to_step_{step:06}.txt"
+    #   with open(metrics_filename, "w", encoding="utf8") as metrics_for_gcs:
+    #     for metrics_step in running_metrics:
+    #       metrics_for_gcs.write(str(json.dumps(metrics_step)) + "\n")
 
-      gcs_filename = os.path.join(self.config.metrics_dir, metrics_filename)
-      max_logging.log(f"Moving file {metrics_filename} to GCS...")
-      max_utils.upload_blob(gcs_filename, metrics_filename)
-      max_logging.log(f"File {metrics_filename} moved successfully!")
-      running_metrics = []  # reset running_metrics to empty list
+    #   gcs_filename = os.path.join(self.config.metrics_dir, metrics_filename)
+    #   max_logging.log(f"Moving file {metrics_filename} to GCS...")
+    #   gcs_utils.upload_blob(gcs_filename, metrics_filename)
+    #   max_logging.log(f"File {metrics_filename} moved successfully!")
+    #   running_metrics = []  # reset running_metrics to empty list
     return running_metrics
 
   def write_metrics_to_tensorboard(self, metrics, step, is_training):

@@ -417,7 +417,8 @@ def build_user_command(
       'export ENABLE_PATHWAYS_PERSISTENCE=1 &&',
       f'export JAX_PLATFORMS={jax_platforms} &&',
       'export ENABLE_PJRT_COMPATIBILITY=true &&',
-      f'python3 -m MaxText.train {os.path.join(PKG_DIR, "configs", "base.yml")}',
+      # f'python3 -m MaxText.train {os.path.join(PKG_DIR, "configs", "base.yml")}',
+      'python3 -m MaxText.train MaxText/configs/base.yml',
       f'{config_tuning_params}',
       f'steps={steps_to_run}',
       f'model_name={wl_config.model.model_type}',
@@ -629,7 +630,7 @@ def generate_xpk_workload_cmd(
     args_str = ""
     for k,v in args.items():
       args_str += f'--{k}={v} '
-    upload_metrics_to_bq_cmd = f"&& python3 benchmarks/upload_metrics_to_bq.py {args_str}"
+    upload_metrics_to_bq_cmd = f"&& python3 -m benchmarks.upload_metrics_to_bq {args_str}"
 
   print(f'User command: {user_command}')
   all_xpk_storage = ""
