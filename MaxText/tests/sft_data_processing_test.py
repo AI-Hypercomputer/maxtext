@@ -29,7 +29,6 @@ from MaxText import pyconfig
 from MaxText.globals import PKG_DIR
 from MaxText.input_pipeline import _hf_data_processing
 from MaxText.input_pipeline import input_pipeline_interface
-from MaxText.tests.globals import TEST_DISABLE_SFT_DATA_PROCESSING, TEST_DISABLE_SFT_DATA_PROCESSING_STR
 
 PROMPT_DATA = [
     [
@@ -106,7 +105,7 @@ class SFTDataProcessingTest(unittest.TestCase):
     super().setUp()
     self.config = pyconfig.initialize(
         [os.path.join(PKG_DIR, "sft_trainer"), os.path.join(PKG_DIR, "configs", "sft.yml")],
-        per_device_batch_size=1,
+        per_device_batch_size=2,
         run_name="test",
         mesh_axes=["data"],
         logical_axis_rules=[["batch", "data"]],
@@ -160,7 +159,7 @@ class SFTDataProcessingTest(unittest.TestCase):
     )
 
   def test_sft_format_with_messages(self):
-    train_ds = Dataset.from_dict({"messages": MESSAGES_DATA * 2})
+    train_ds = Dataset.from_dict({"messages": MESSAGES_DATA * 4})
     data_columns = ["messages"]
     self.get_train_iterator(train_ds, data_columns)
 
@@ -194,9 +193,8 @@ class SFTDataProcessingTest(unittest.TestCase):
         packed_exp2_targets_predictable,
     )
 
-  @unittest.skipIf(TEST_DISABLE_SFT_DATA_PROCESSING, TEST_DISABLE_SFT_DATA_PROCESSING_STR)
   def test_sft_format_with_prompt_completion(self):
-    train_ds = Dataset.from_dict({"prompt": PROMPT_DATA * 2, "completion": COMPLETION_DATA * 2})
+    train_ds = Dataset.from_dict({"prompt": PROMPT_DATA * 4, "completion": COMPLETION_DATA * 4})
     data_columns = ["prompt", "completion"]
     self.get_train_iterator(train_ds, data_columns)
 
