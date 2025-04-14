@@ -227,7 +227,16 @@ class MoeBlock(nn.Module):
 
   def get_topk(self, gate_logits, pre_bias_logits):
     # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
-    if self.config.model_name.startswith("deepseek3"):
+    if self.config.use_random_routing:
+      print("using random routing...")
+      bs, seq_len, num_experts = gate_logits.shape
+      indices = jnp.arange(num_experts).repeat(bs * seq_len)
+      # Not sure how to do so in a scanned training with split: key, subkey = jax.random.split(key)
+      rng = jax.random.PRNGKey(1234)
+      selected_num = bs * seq_len * self.num_experts_per_tok
+      top_k_indices = jax.random.choice(rng, indices, shape=(selected_num,)).reshape(bs, seq_len, self.num_experts_per_tok)
+      top_k_weights = jnp.take_along_axis(gate_logits, top_k_indices, axis=-1)
+    elif self.config.model_name.startswith("deepseek3"):
       top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
     else:
       top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
