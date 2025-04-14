@@ -22,12 +22,13 @@ updating policy gradients based on reward functions
 """
 
 
-from collections import defaultdict
 import datetime
 import os
 import sys
 import functools
 import queue
+import threading
+from queue import Queue
 
 from typing import Sequence
 from absl import app
@@ -37,8 +38,8 @@ from flax import struct
 import jax
 import jax.numpy as jnp
 from jax import random
+from jax.sharding import PartitionSpec as P
 import numpy as np
-
 
 from MaxText import checkpointing
 from MaxText import max_utils
@@ -66,7 +67,6 @@ from MaxText.train import (
     record_goodput,
     create_goodput_recorder,
     check_example_batch,
-    setup_mesh_and_model,
 )
 
 from cloud_tpu_diagnostics import diagnostic
@@ -109,6 +109,30 @@ class LossAux:
   completion_length: float
   moe_lb_loss: float
   total_weights: float
+
+class Buffer:
+  def __init__(self, maxsize=1):
+    self.queue = Queue(maxsize=maxsize)
+    self.lock = threading.Lock()
+
+  def push(self, data, data_sharding):
+    def _put():
+      device_data = jax.device_put(data, data_sharding)
+      with self.lock:
+        if self.queue.full():
+          try:
+            self.queue.get_nowait()
+          except:
+            pass
+        self.queue.put(device_data)
+    threading.Thread(target=_put).start()
+
+  def pull(self):
+    with self.lock:
+      try:
+        return self.queue.get_nowait()
+      except:
+        return None
 
 
 def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_train=True):
@@ -492,6 +516,76 @@ def compute_log_probs(
 # -----------------------------------------------------------------------------
 
 
+def setup_mesh_and_model(config):
+  """Set up the mesh and the model for training
+
+  Args:
+    config
+
+  Returns:
+    init_rng: RNG key
+    writer: Summary writer for tensorboard
+    checkpoint_manager: Orbax checkpointer
+    state_mesh_annotations: the mesh annotations for the train state
+    model:
+    mesh:
+    learning_rate_schedule:
+    tx:
+  """
+
+  init_rng = random.PRNGKey(config.init_weights_seed)
+  writer = max_utils.initialize_summary_writer(config)
+
+  # Mesh definition
+  devices_array = max_utils.create_device_mesh(config)
+  slice0_devices = [devices_array[0]]
+  slice1_devices = [devices_array[1]]
+  mesh = Mesh(slice0_devices, config.mesh_axes)
+  inference_mesh = Mesh(slice1_devices, config.mesh_axes)
+
+  # Model and Optimizer definition
+  quant = quantizations.configure_quantization(config)
+  model = Transformer(config, mesh, quant=quant)
+  learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
+  tx = optimizers.get_optimizer(config, learning_rate_schedule)
+  logger = checkpointing.setup_checkpoint_logger(config)
+  if config.enable_emergency_checkpoint:
+    if config.use_replicator_service:
+      checkpoint_manager = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
+          config.local_checkpoint_directory,
+          config.local_checkpoint_period,
+          mesh,
+      )
+    else:
+      abstract_state, _, _ = max_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
+      checkpoint_manager = checkpointing.create_orbax_emergency_checkpoint_manager(
+          config.local_checkpoint_directory,
+          config.checkpoint_dir,
+          mesh,
+          abstract_state,
+          config.local_checkpoint_period,
+          config.checkpoint_period,
+          logger,
+      )
+  else:
+    # TODO(b/368121306): Remove this once zarr3 support is plumbed on the backend
+    use_ocdbt = config.checkpoint_storage_use_ocdbt
+    use_zarr3 = config.checkpoint_storage_use_zarr3
+    if config.enable_single_controller:
+      use_ocdbt, use_zarr3 = False, False
+    checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
+        config.checkpoint_dir,
+        config.enable_checkpointing,
+        config.async_checkpointing,
+        config.checkpoint_period,
+        config.dataset_type,
+        logger,
+        use_ocdbt,
+        use_zarr3,
+    )
+
+  return init_rng, writer, checkpoint_manager, mesh, inference_mesh, model, learning_rate_schedule, tx
+
 def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   """
 
@@ -646,15 +740,16 @@ def setup_train_loop(config):
   """
   recorder = create_goodput_recorder(config)
   record_goodput(recorder, config, recorder.record_tpu_init_start_time if recorder else None)
-  init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
+  init_rng, writer, checkpoint_manager, mesh, inference_mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
 
   record_goodput(recorder, config, recorder.record_tpu_init_end_time if recorder else None)
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
-  data_iterator, eval_data_iterator = grpo_input_pipeline.create_data_iterator(config, mesh)
+  data_iterator, eval_data_iterator = grpo_input_pipeline.create_data_iterator(config, inference_mesh)
   state, _, state_mesh_shardings, data_iterator = max_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
 
+  _, _, inference_state_mesh_shardings = max_utils.get_abstract_state(model, tx, config, init_rng, inference_mesh, is_training=False)
   if not config.using_pipeline_parallelism:
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
     maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
@@ -665,8 +760,10 @@ def setup_train_loop(config):
       writer,
       checkpoint_manager,
       state_mesh_shardings,
+      inference_state_mesh_shardings,
       model,
       mesh,
+      inference_mesh,
       learning_rate_schedule,
       data_iterator,
       eval_data_iterator,
@@ -691,8 +788,10 @@ def train_loop(config, config_inference, state=None):
       writer,
       checkpoint_manager,
       state_mesh_shardings,
+      inference_state_mesh_shardings,
       model,
       mesh,
+      inference_mesh,
       learning_rate_schedule,
       data_iterator,
       eval_data_iterator,
@@ -723,7 +822,7 @@ def train_loop(config, config_inference, state=None):
 
   # Initializing maxengine and everything related from decode.py
   # TODO: Creating an engine here but might have two model compilation, need to initialize engine while passing model object
-  engine = maxengine.MaxEngine(config_inference)
+  engine = maxengine.MaxEngine(config_inference, devices=np.squeeze(inference_mesh.devices))
   init_rng, rng_load_params = jax.random.split(init_rng)
   # TODO: loading parameters from GCS here, need to pass in the same params to engine which already loaded
   _ = engine.load_params(rng_load_params)
@@ -739,7 +838,7 @@ def train_loop(config, config_inference, state=None):
     ) = maxtext_utils.get_functional_eval_with_signature(eval_step, mesh, state_mesh_shardings, model, config)
 
   # TODO: fix tflops calculations for grpo setting
-  num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
+  num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params['params'])
   max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
   per_device_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(config)
   per_device_tokens = maxtext_utils.calculate_tokens_training_per_device(config)
@@ -777,12 +876,14 @@ def train_loop(config, config_inference, state=None):
     else:
       p_eval_step = None
 
-  data_sharding = in_shard_train[1]
-  param_sharding = state_mesh_shardings.params
+  inference_data_sharding = jax.sharding.NamedSharding(mesh=inference_mesh, spec=P(*config.data_sharding))
+  param_sharding = inference_state_mesh_shardings.params
+  functional_generate_completions = functools.partial(generate_completions, config, tokenizer_model, engine)
+  functional_generate_completions.__name__ = "generate_completions"
   p_generate_completions = jax.jit(
-      functools.partial(generate_completions, config, tokenizer_model, engine),
-      in_shardings=(data_sharding, param_sharding, None),
-      out_shardings=data_sharding,
+      functional_generate_completions,
+      in_shardings=(inference_data_sharding, param_sharding, None),
+      out_shardings=inference_data_sharding,
       donate_argnums=(0,),
   )
 
@@ -798,6 +899,11 @@ def train_loop(config, config_inference, state=None):
   example_batch = None
   last_step_completion = datetime.datetime.now()
 
+  param_buffer = Buffer(maxsize=1)
+  data_buffer = Buffer(maxsize=-1)
+  # initialize inference_params from the state before step=0
+  inference_params = jax.device_put({'params':state.params['params']}, inference_state_mesh_shardings.params)
+
   performance_metric_queue = None
   if config.report_heartbeat_metric_for_gcp_monitoring or config.report_performance_metric_for_gcp_monitoring:
     gcp_workload_monitor = GCPWorkloadMonitor(config.run_name)
@@ -806,6 +912,16 @@ def train_loop(config, config_inference, state=None):
     if config.report_performance_metric_for_gcp_monitoring:
       performance_metric_queue = queue.Queue()
       gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
+
+  # do K rollouts of inference
+  for k in range(config.inference_rollouts):
+    example_batch = load_next_batch(data_iterator, example_batch, config)
+    rng = jax.jit(jax.random.fold_in)(init_rng, k)
+    rng, rng_gen = random.split(rng)
+    example_batch = jax.device_put(example_batch, inference_data_sharding)
+    example_batch = p_generate_completions(example_batch, inference_params, rng_gen)
+    data_buffer.push(example_batch, in_shard_train[1])
+
 
   metric_logger = MetricLogger(writer, config)
   for step in np.arange(start_step, config.steps):
@@ -822,12 +938,16 @@ def train_loop(config, config_inference, state=None):
       rng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       rng, rng_gen = random.split(rng)
-      example_batch = p_generate_completions(example_batch, state.params, rng_gen)
+      example_batch = jax.device_put(example_batch, inference_data_sharding)
+      inference_params = param_buffer.pull() or inference_params
+      example_batch = p_generate_completions(example_batch, inference_params, rng_gen)
+      data_buffer.push(example_batch, in_shard_train[1])
 
-      # TODO: ensure this partitioning is correct
+      training_batch = data_buffer.queue.get(block=True)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        state, metrics = p_train_step(state, example_batch, rng)
-
+        state, metrics = p_train_step(state, training_batch, rng)
+      if step != 0 and step % config.inference_rollouts == 0:
+        param_buffer.push({'params':state.params['params']}, inference_state_mesh_shardings.params)
     step_time_delta = datetime.datetime.now() - last_step_completion
     last_step_completion = datetime.datetime.now()
     record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
@@ -940,7 +1060,7 @@ def main(argv: Sequence[str]) -> None:
     )
   config_inference = pyconfig.initialize(
       list(argv)
-      + ["ici_tensor_parallelism=4", "per_device_batch_size=" + str(config.per_device_batch_size * config.num_generations)]
+      + ["dcn_data_parallelism=1", "ici_tensor_parallelism=4", "num_slices=1", "per_device_batch_size=" + str(config.per_device_batch_size * config.num_generations)]
   )
   max_utils.print_system_information()
   validate_train_config(config)
