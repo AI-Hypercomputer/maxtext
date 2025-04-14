@@ -42,11 +42,11 @@ class PrefillBucket:
 
   def __init__(self, capacity: int):
     # decode slots
-    self.slots = []
+    self.slots: list[int] = []
     # input row ids
-    self.row_ids = []
-    # prompt token ids, a list of jax.Array
-    self.token_ids = []
+    self.row_ids: list[int] = []
+    # prompt token ids, a list of np.ndarray
+    self.token_ids: list[np.ndarray] = []
 
     if capacity <= 0:
       raise ValueError("capacity must be a positive number.")
@@ -62,7 +62,7 @@ class PrefillBucket:
     self.length = 0
     self.count = 0
 
-  def try_add(self, slot: int, row_id: int, token_ids: jax.Array) -> bool:
+  def try_add(self, slot: int, row_id: int, token_ids: np.ndarray) -> bool:
     """Try to add a prefill prompt to bucket.
 
     Returns False if bucket doesn't have enough space.
@@ -78,7 +78,7 @@ class PrefillBucket:
     self.count += 1
     return True
 
-  def add(self, slot: int, row_id: int, token_ids: jax.Array) -> None:
+  def add(self, slot: int, row_id: int, token_ids: np.ndarray) -> None:
     """Adds a prefill prompt to bucket.
 
     Raise ValueError if fails.
@@ -168,7 +168,9 @@ class BatchedPrefillProcessor:
     self.engine = engine
     self.process_batch_func = {}
     self.buckets = {}
+
     self.max_batch_size = max_batch_size
+    self.jit_array = jax.jit(jnp.array)
 
   def aot_compile(self, params: Params, input_padding: int, capacity: int, num_prompts: int):
     """Ahead-of-time compile prefill processing routines."""
@@ -181,14 +183,14 @@ class BatchedPrefillProcessor:
       decode_state: DecodeState,
       decode_slot: int,
       input_id: int,
-      input_prompt: jax.Array,
+      input_prompt: np.ndarray,
       input_padding: int,
       capacity: int,
       prefill_done: Callable[[List[Tuple[engine_api.ResultTokens, int]], List[int], DecodeState], None],
   ) -> None:
     """Process a new input.
 
-    This may trigger MaxEngine prefill API call."""
+    This may trigger prefill API call."""
 
     length = len(input_prompt)
     if length > capacity or length > input_padding:
@@ -230,35 +232,37 @@ class BatchedPrefillProcessor:
   ) -> Tuple[List[Tuple[engine_api.ResultTokens, int]], DecodeState]:
     """Process all items in a bucket."""
 
+    zeros = [0] * (self.max_batch_size - bucket.count)
+    unalloc = bucket.unallocated()
+
     slots = bucket.slots
+    slots.extend(zeros)
+    slots = self.jit_array(np.array(slots))
+
     lengths = [len(prompt) for prompt in bucket.token_ids]
+
     offsets = np.cumsum([0] + lengths)[:-1].tolist()
+    offsets.extend(zeros)
+    offsets = self.jit_array(np.array(offsets))
 
     tok_ids = bucket.token_ids
-    tok_ids.append(jnp.zeros(bucket.unallocated(), dtype=jnp.int32))
-    tok_ids = jnp.concat(tok_ids)
+    tok_ids.append(np.zeros(unalloc, dtype=np.int32))
+    tok_ids = self.jit_array(np.concatenate(tok_ids))
 
     pos_ids = []
-    for length in lengths:
-      pos_ids.append(np.arange(length, dtype=int))
-    pos_ids.append(np.arange(bucket.unallocated(), dtype=int))
-    pos_ids = jnp.array(np.concatenate(pos_ids))
+    for i in range(bucket.count):
+      pos_ids.append(np.arange(lengths[i], dtype=int))
+    pos_ids.append(np.arange(unalloc, dtype=int))
+    pos_ids = self.jit_array(np.concatenate(pos_ids))
 
     seg_ids = []
     for i in range(bucket.count):
       seg_ids.append(np.full(lengths[i], i * 2 + 1, dtype=int))
-    seg_ids.append(np.zeros(bucket.unallocated(), dtype=int))
-    seg_ids = jnp.array(np.concatenate(seg_ids))
+    seg_ids.append(np.zeros(unalloc, dtype=int))
+    seg_ids = self.jit_array(np.concatenate(seg_ids))
 
-    # Use padding below to keep static shape of jitted function input.
-    def zero_padded(arr: list[int], padding: int):
-      if len(arr) < padding:
-        arr.extend([0] * (padding - len(arr)))
-      return jnp.array(arr)
-
-    slots = zero_padded(slots, self.max_batch_size)
-    offsets = zero_padded(offsets, self.max_batch_size)
-    lengths = zero_padded(lengths, self.max_batch_size)
+    lengths.extend(zeros)
+    lengths = self.jit_array(np.array(lengths))
 
     prefill_fn = self._process_batch_compiled(model_params, input_padding, bucket.capacity, bucket.count)
     first_tokens, decode_state = prefill_fn(
