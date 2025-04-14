@@ -66,7 +66,7 @@ def _form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
   return jax.make_array_from_single_device_arrays(global_shape, sharding, local_device_buffers)
 
 
-def get_next_batch_sharded(local_iterator: Iterator, global_mesh: Mesh) -> jax.Array:
+def get_next_batch_sharded(local_iterator: Iterator, global_mesh: Mesh, global_batch_size_to_train_on: int | None) -> jax.Array:
   """Splits the host loaded data equally over all devices."""
 
   SLEEP_TIME = 10
@@ -86,7 +86,9 @@ def get_next_batch_sharded(local_iterator: Iterator, global_mesh: Mesh) -> jax.A
   # Try one last time, if this fails we will see the full stack trace.
   if not loaded_data_success:
     local_data = next(local_iterator)
-
+  if global_batch_size_to_train_on is not None:
+    for k, v in local_data.items():
+      local_data[k] = v[:global_batch_size_to_train_on]
   input_gdas = jtu.tree_map_with_path(partial(_form_global_array, global_mesh=global_mesh), local_data)
 
   return input_gdas
@@ -95,7 +97,8 @@ def get_next_batch_sharded(local_iterator: Iterator, global_mesh: Mesh) -> jax.A
 class MultiHostDataLoadIterator:
   """fold get_next_batch_sharded into a iterator class"""
 
-  def __init__(self, dataloader: Union[tf.data.Dataset, grain.DataLoader], global_mesh: Mesh):
+  def __init__(self, dataloader: Union[tf.data.Dataset, grain.DataLoader], global_mesh: Mesh, global_size_to_train_on: int | None):
+    self.global_size_to_train_on = global_size_to_train_on
     self.global_mesh = global_mesh
     self.dataloader = dataloader
     if isinstance(self.dataloader, tf.data.Dataset):
@@ -118,7 +121,7 @@ class MultiHostDataLoadIterator:
     return self
 
   def __next__(self):
-    return get_next_batch_sharded(self.local_iterator, self.global_mesh)
+    return get_next_batch_sharded(self.local_iterator, self.global_mesh, self.global_size_to_train_on)
 
 
 @colocated_python.colocated_python

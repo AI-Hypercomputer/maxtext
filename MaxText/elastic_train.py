@@ -51,6 +51,7 @@ from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 from flax.linen import partitioning as nn_partitioning
+import json
 import jax
 from ml_goodput_measurement import monitoring
 import pathwaysutils
@@ -118,8 +119,9 @@ def elastic_handler(
     with mesh:
       data_iterator, _ = create_data_iterator(config, mesh)
 
-      step, snapshot = elastic_manager.get_resharded_snapshot(mesh)
-
+      step, snapshot, snapshot_controller = elastic_manager.get_resharded_snapshot(mesh)
+      if config.dataset_type == "grain":
+        data_iterator.set_state(json.dumps(snapshot_controller['data_iterator'], indent=4).encode())
       # We do not want to restore from the previous checkpoint but instead
       # restore from the host offloaded snapshot.
       if checkpoint_manager is not None:
@@ -263,6 +265,9 @@ def train_loop(config, elastic_manager, state=None):
           "params": state.params,
           "opt_state": state.opt_state,
       },
+      snapshot_controller={
+        "data_iterator": json.loads(data_iterator.local_iterator.get_state().decode()),
+      } if config.dataset_type=="grain" else None,
       force=True,
       block=True,
   )
@@ -318,6 +323,9 @@ def train_loop(config, elastic_manager, state=None):
               "params": state.params,
               "opt_state": state.opt_state,
           },
+          snapshot_controller={
+            "data_iterator": json.loads(data_iterator.local_iterator.get_state().decode()),
+          } if config.dataset_type=="grain" else None,
           block=True,
       )
 
@@ -328,6 +336,9 @@ def train_loop(config, elastic_manager, state=None):
               "opt_state": state.opt_state,
           },
           elastic_handler=elastic_handler,
+          snapshot_controller={
+            "data_iterator": json.loads(data_iterator.local_iterator.get_state().decode()),
+          } if config.dataset_type=="grain" else None,
           handler_kwargs={
               "config": config,
               "elastic_manager": elastic_manager,
