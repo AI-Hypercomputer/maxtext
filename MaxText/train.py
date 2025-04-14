@@ -141,10 +141,8 @@ def save_checkpoint(
 ) -> bool:
   """Wrapper for saving checkpoint."""
   if config and config.enable_checkpointing:
-    if (
-        force
-        or (step % config.checkpoint_period == 0)
-        or (config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0)
+    if (step % config.checkpoint_period == 0 and step != 0) or (
+        config.enable_emergency_checkpoint and step % config.local_checkpoint_period == 0
     ):
       blocking_until_ready_start = time.time()
       max_logging.log(f"Waiting for step {step} to finish before checkpoint...")
@@ -488,21 +486,24 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     )
   new_state = state.apply_gradients(grads=grads)
 
-  scalar_metrics = {
+  if config.enable_metric_writing:
+    scalar_metrics = {
       "learning/loss": loss,
       "learning/moe_lb_loss": moe_lb_loss,
       "learning/total_weights": total_weights,
-  }
-  if not config.optimizer_memory_host_offload:
-    scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
-    scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
-    scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(new_state.params)
-  if config.use_dpo:
-    scalar_metrics["learning/dpo_reward_accuracy"] = aux["reward_accuracy"]
-  metrics = {
-      "scalar": scalar_metrics,
-      "scalars": {},
-  }
+    }
+    if not config.optimizer_memory_host_offload:
+      scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
+      scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
+      scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(new_state.params)
+    if config.use_dpo:
+      scalar_metrics["learning/dpo_reward_accuracy"] = aux["reward_accuracy"]
+    metrics = {
+        "scalar": scalar_metrics,
+        "scalars": {},
+    }
+  else:
+    metrics = {'scalar': {'learning/loss': loss}, 'scalars': {}}
 
   if config.record_internal_nn_metrics:
     record_activation_metrics(metrics, intermediate_outputs, config)
@@ -656,6 +657,7 @@ def setup_train_loop(config):
     data_iterator:
     state: the initialized train state
   """
+  mllog_utils.init_start()
   recorder = create_goodput_recorder(config)
   record_goodput(recorder, config, recorder.record_tpu_init_start_time if recorder else None)
   init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
@@ -723,6 +725,7 @@ def setup_train_loop(config):
       data_iterator,
       eval_data_iterator,
       state,
+      tx,
   )
 
 
@@ -749,6 +752,7 @@ def train_loop(config, state=None):
       data_iterator,
       eval_data_iterator,
       state,
+      tx,
   ) = setup_train_loop(config)
 
   if config.use_dpo:
@@ -794,6 +798,39 @@ def train_loop(config, state=None):
     # TODO: p_eval_step is not yet supported in load_compiled
     p_eval_step = None
     print("Loaded compiled function!", flush=True)
+  elif config.pre_compile:
+    train_shaped_batch = get_shaped_batch(config)
+    # pre compile graph
+    shaped_rng = jax.ShapeDtypeStruct(init_rng.shape, init_rng.dtype)
+    # Shaped state
+    abstract_state, state_mesh_annotations, _ =  max_utils.get_abstract_state(model, tx, config, init_rng, mesh)
+    # Shaped batch
+    func_input_args = (abstract_state, train_shaped_batch, shaped_rng)
+    func_input_kwargs = {}
+
+    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      p_train_step_lower = jax.jit(
+        functional_train,
+        in_shardings=in_shard_train,
+        out_shardings=out_shard_train,
+        static_argnums=static_argnums_train,
+        donate_argnums=donate_argnums_train).lower(*func_input_args, **func_input_kwargs)
+
+    p_train_step = p_train_step_lower.compile()
+
+    if eval_data_iterator:
+      eval_shaped_batch = get_shaped_batch_eval(config, mesh)
+      func_input_args = (abstract_state, eval_shaped_batch, shaped_rng)
+      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        p_eval_step_lower = jax.jit(
+          functional_eval,
+          in_shardings=in_shard_eval,
+          out_shardings=out_shard_eval,
+          static_argnums=static_argnums_eval,
+          donate_argnums=donate_argnums_eval,
+        ).lower(*func_input_args, **func_input_kwargs)
+
+      p_eval_step = p_eval_step_lower.compile()
   else:
     p_train_step = jax.jit(
         functional_train,
@@ -825,6 +862,11 @@ def train_loop(config, state=None):
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
+  p_random_next = jax.jit(jax.random.fold_in).lower(init_rng, start_step).compile()
+  mllog_utils.init_print(config, start_step)
+  mllog_utils.init_stop()
+  mllog_utils.run_start()
+  mllog_utils.block_start(config)
 
   performance_metric_queue = None
   if config.report_heartbeat_metric_for_gcp_monitoring or config.report_performance_metric_for_gcp_monitoring:
@@ -851,26 +893,28 @@ def train_loop(config, state=None):
       record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
       check_example_batch(config, example_batch=example_batch)
       # pylint: disable=not-callable
-      nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
+      nextrng = p_random_next(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, nextrng)
 
     step_time_delta = datetime.datetime.now() - last_step_completion
     last_step_completion = datetime.datetime.now()
-    record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
-    if performance_metric_queue:
-      performance_metric_queue.put(step_time_delta.total_seconds())
+    if config.enable_metric_writing:
+      record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
+    if config.enable_step_logging:
+      if performance_metric_queue:
+        performance_metric_queue.put(step_time_delta.total_seconds())
 
-    if checkpoint_manager is not None:
-      state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
-      if save_checkpoint(checkpoint_manager, int(step), state_to_save, config.dataset_type, data_iterator, config):
-        checkpointing.print_save_message(step, config.async_checkpointing)
+    # if checkpoint_manager is not None:
+    #   state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
+    #   if save_checkpoint(checkpoint_manager, int(step), state_to_save, config.dataset_type, data_iterator, config):
+    #     checkpointing.print_save_message(step, config.async_checkpointing)
 
-      # Upon preemption, exit when and only when all ongoing saves are complete.
-      if checkpoint_manager.reached_preemption(step):
-        checkpoint_manager.wait_until_finished()
-        sys.exit()
+    #   # Upon preemption, exit when and only when all ongoing saves are complete.
+    #   if checkpoint_manager.reached_preemption(step):
+    #     checkpoint_manager.wait_until_finished()
+    #     sys.exit()
 
     metric_logger.write_metrics(running_gcs_metrics, metrics, step)
 
@@ -884,7 +928,7 @@ def train_loop(config, state=None):
           all_host_upload=config.dump_hlo_upload_all,
       )
 
-    if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
+    if config.eval_interval > 0 and step > start_step and step % config.eval_interval == 0:
       assert eval_data_iterator
       cumulative_eval_metrics = {
           "scalar": {
@@ -924,7 +968,8 @@ def train_loop(config, state=None):
       )
       if eval_loss <= config.target_eval_loss:
         max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
-        prof.deactivate()
+        if step > first_profiling_step:
+          prof.deactivate()
         break
 
     if step == last_profiling_step or prof.should_deactivate_periodic_profile(step):
