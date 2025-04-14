@@ -519,6 +519,66 @@ def optimize_mesh_for_tpu_v6e(mesh, devices):
   return new_mesh
 
 
+def create_device_mesh(config, devices=None):
+  """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
+  num_slices = 1 if config.inference_benchmark_test or devices is not None else config.num_slices
+  if devices is None:
+    devices = jax.devices()
+  num_devices = len(devices)
+  
+  num_devices_per_slice = num_devices // num_slices
+
+  multi_slice_env = num_slices > 1
+
+  # Find possible unspecified parallelisms
+  ici_parallelism = config.ici_parallelism.copy()
+  if -1 in config.ici_parallelism:
+    ici_parallelism = fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, "ICI")
+
+  allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
+
+  if multi_slice_env:
+    dcn_parallelism = fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN")
+    if is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
+      mesh = create_custom_device_mesh(ici_parallelism, dcn_parallelism, devices, config.custom_mesh)
+    else:
+      mesh = mesh_utils.create_hybrid_device_mesh(
+          ici_parallelism,
+          dcn_parallelism,
+          devices,
+          allow_split_physical_axes=allow_split_physical_axes,
+      )
+  else:
+    if allow_split_physical_axes:
+      if is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
+        mesh = mesh_utils.create_device_mesh(
+            [16, 16],
+            devices,
+            contiguous_submeshes=False,
+            allow_split_physical_axes=False,
+        )
+        mesh = reshape_mesh_to_rings(mesh, config.custom_mesh)
+        mesh = np.reshape(mesh, ici_parallelism)
+      else:
+        mesh = mesh_utils.create_device_mesh(
+            ici_parallelism,
+            devices,
+            contiguous_submeshes=False,
+            allow_split_physical_axes=allow_split_physical_axes,
+        )
+    else:
+      mesh = mesh_utils.create_device_mesh(
+          ici_parallelism,
+          devices,
+      )
+      if config.optimize_mesh_for_tpu_v6e:
+        mesh = optimize_mesh_for_tpu_v6e(mesh, devices)
+
+  max_logging.log(f"Num_devices: {num_devices}, shape {mesh.shape}")
+
+  return mesh
+
+
 def unbox_logicallypartioned(boxed_pytree):
   """Unboxes the flax.LogicallyPartitioned pieces
 

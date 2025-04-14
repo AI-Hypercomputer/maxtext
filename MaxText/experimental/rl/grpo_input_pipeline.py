@@ -173,15 +173,18 @@ def make_hf_train_iterator(
   return local_iter
 
 
-def create_data_iterator(config, mesh):
+def create_data_iterator(config, meshes):
   process_indices_train = input_pipeline_interface.get_process_loading_real_data(
       config.data_sharding,
       config.global_batch_size_to_load,
       config.global_batch_size_to_train_on,
       config.max_target_length,
-      mesh,
+      meshes[0],
   )
   if config.eval_interval > 0:
     raise ValueError("GRPO input pipeline is not supported for eval data")
-  train_iterator_fn = functools.partial(make_hf_train_iterator, config, mesh, process_indices_train)
-  return input_pipeline_interface.make_mixed_iterator(config, mesh, process_indices_train, [], train_iterator_fn, None)
+  train_iterators = []
+  for mesh in meshes:
+    train_iterator_fn = functools.partial(make_hf_train_iterator, config, mesh, process_indices_train)
+    train_iterators.append(input_pipeline_interface.make_mixed_iterator(config, mesh, process_indices_train, [], train_iterator_fn, None))
+  return train_iterators
