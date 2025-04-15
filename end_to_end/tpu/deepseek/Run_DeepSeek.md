@@ -40,7 +40,7 @@ To get started, follow the instructions at HuggingFace ([V3](https://huggingface
 
 ## Fine-tuning
 
-After you have a MaxText compatible ckeckpoint, you could fine-tune it with different datasets.
+After you have a MaxText compatible ckeckpoint, you could fine-tune it with different datasets. 
 
 One example command to run general finetuning with V3 on v5p-256.
 
@@ -65,7 +65,7 @@ python3 -m MaxText.decode MaxText/configs/base.yml base_output_directory=${BASE_
 * Dropless
   * [MegaBlocks](https://arxiv.org/abs/2211.15841) implementation with flag `sparse_matmul=True megablox=True`.
   * [JAX ragged_dot](https://github.com/jax-ml/jax/blob/a8fb0e01f8d083fff337d3c26375bb1b77344a99/jax/_src/lax/lax.py#L2415) implementation with flag `sparse_matmul=True megablox=False`.
-  * General dense matmul implementation with flag `sparse_matmul=False capacity_factor=-1`.
+  * Generagel dense matmul implementation with flag `sparse_matmul=False capacity_factor=-1`.
 * Dropping implementation with flag `sparse_matmul=False` and reasonable `capacity_factor`, commonly used from 1 to 1.25.
 
 See more examples in scripts for [V3](v3-671b/test_deepseek.sh) and [V2-Lite](v2-16b/test_deepseek.sh).
