@@ -161,7 +161,7 @@ def filter_instances(instance_list, tpu_prefix):
 
 def write_kill_script(kill_processes_script_name):
   kill_processes_script = os.path.join(args.SCRIPT_DIR, kill_processes_script_name)
-  with open(kill_processes_script, "w", encoding="utf-8") as f:
+  with open(kill_processes_script, "wt", encoding="utf-8") as f:
     f.write(kill_existing_processes_str())
 
 def kill_existing_processes_str():
@@ -280,10 +280,10 @@ def run_commands(commands, id_to_print, jobname, worker_list, is_shell=False, ou
   start_time = datetime.now()
   for i, command in enumerate(commands):
     if output_logs and i == id_to_print:
-      persistent_log = open(output_logs[i], "w", encoding="utf-8")
+      persistent_log = open(output_logs[i], "wt", encoding="utf-8")
       output_log = Tee(sys.stdout, persistent_log)
     elif output_logs:
-      output_log = open(output_logs[i], "w", encoding="utf-8")
+      output_log = open(output_logs[i], "wt", encoding="utf-8")
     elif i == id_to_print:
       output_log = None
     else:

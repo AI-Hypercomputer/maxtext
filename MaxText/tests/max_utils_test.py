@@ -15,17 +15,22 @@ limitations under the License.
 """
 
 """ Tests for the common Max Utils """
+
+import unittest
+import os.path
+
 import jax
-from MaxText import max_utils
-from flax import linen as nn
-from flax.training import train_state
 from jax import numpy as jnp
 from jax import random
 from jax.sharding import Mesh
+
+from flax import linen as nn
+from flax.training import train_state
+
 import optax
+
 from MaxText import pyconfig
-import unittest
-import os.path
+from MaxText import max_utils
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.globals import PKG_DIR

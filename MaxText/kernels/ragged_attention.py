@@ -18,15 +18,16 @@ limitations under the License.
 
 import functools
 
+import numpy as np
+
 import jax
 from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
-import numpy as np
-from MaxText import common_types
-
 from jax.experimental import shard_map
+
+from MaxText import common_types
 
 
 BATCH = common_types.BATCH

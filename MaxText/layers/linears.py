@@ -18,16 +18,17 @@ import functools
 import operator
 from typing import Any, Callable, Iterable, Sequence, Tuple, Union, Optional
 
+import numpy as np
 import flax.linen as nn
 from jax import lax
 import jax.numpy as jnp
+from jax.ad_checkpoint import checkpoint_name
+from aqt.jax.v2 import aqt_tensor
+
 from MaxText import common_types
 from MaxText.layers import initializers
 from MaxText.layers import normalizations
 from MaxText.layers import quantizations
-import numpy as np
-from jax.ad_checkpoint import checkpoint_name
-from aqt.jax.v2 import aqt_tensor
 
 
 Array = common_types.Array
@@ -187,7 +188,7 @@ class MlpBlock(nn.Module):
   quant: Optional[Quant] = None
 
   def get_norm_layer(self):
-    if self.config.decoder_block in ("default", "llama2", "mistral", "mixtral", "gemma", "deepseek", "llama4"):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "mixtral", "gemma", "deepseek"):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
       from MaxText.layers import gpt3

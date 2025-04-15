@@ -14,22 +14,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+from typing import Optional
+
 from flax import linen as nn
-from MaxText import common_types
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-import jax
 
+from MaxText import common_types
 from MaxText.layers import normalizations
 from MaxText.layers import attentions
 from MaxText.layers import initializers
 from MaxText.layers import embeddings
 from MaxText.layers import linears
 from MaxText.layers import quantizations
-
-from typing import Optional
-
-from MaxText import max_logging
 
 Embed = embeddings.Embed
 RMSNorm = normalizations.RMSNorm
@@ -132,7 +129,7 @@ class Gemma3DecoderLayer(nn.Module):
         attention_type=self.attention_type,
         sliding_window_size=cfg.sliding_window_size,
         attn_logits_soft_cap=cfg.attn_logits_soft_cap,
-        use_qk_norm=True,  # Gemma 3 models use query, key normalizations
+        use_qk_norm=True,  # Gemma 3 models use querry, key normalizations
         query_pre_attn_scalar=query_pre_attn_scalar,
     )
 

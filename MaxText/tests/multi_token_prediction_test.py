@@ -13,9 +13,9 @@
 #  limitations under the License.
 #  multi_token_prediction_test.py
 
-import sys
 import os.path
 import unittest
+
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh

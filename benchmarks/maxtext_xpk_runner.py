@@ -26,27 +26,24 @@
 import dataclasses
 import enum
 import json
-import omegaconf
 import os
 import queue
 import random
 import string
 import subprocess
-import tempfile
 import threading
 import time
+from typing import Optional, List
+
+import omegaconf
 
 import benchmarks.maxtext_trillium_model_configs as model_configs
 from benchmarks.command_utils import run_command_with_updates
-from benchmarks.benchmark_db_utils import DEFAULT_TUNING_PARAMS_FILE
-
 import benchmarks.xla_flags_library as xla_flags
 from benchmarks.disruption_management.disruption_handler import DisruptionConfig
 from benchmarks.disruption_management.disruption_manager import DisruptionManager
-from typing import Optional, List
 from benchmarks.xpk_configs import XpkClusterConfig
 
-from MaxText.globals import PKG_DIR
 
 # Assumes you built maxtext dep image.
 # Assumes you have xpk installed in a git clone repo of ~/{wl_config.xpk_path}/xpk.py
@@ -119,7 +116,8 @@ class WorkloadConfig:
     if not self.generate_metrics_and_upload_to_big_query:
       return
     if self.device_type is None:
-      raise ValueError(f"device_type is None and generate_metrics_and_upload_to_big_query is enabled. Device_type is required for uploading run results to BigQuery")
+      raise ValueError("device_type is None and generate_metrics_and_upload_to_big_query is enabled. "
+                       "Device_type is required for uploading run results to BigQuery")
     if self.device_type.startswith("v6e") or self.device_type.startswith("v5e") or self.device_type.startswith("v5litepod"):
       size = int(self.device_type.split("-")[-1])
       if size == 256:
@@ -330,33 +328,29 @@ def _build_args_from_config(wl_config: WorkloadConfig) -> dict:
 
   # Extract xla_flags arg
   xla_flags_str = wl_config.model.xla_flags.strip().replace(" ",",")
-  
+
   # Extract tuning_params arg
   tuning_params_str = json.dumps(wl_config.model.tuning_params)
-  
-  args = {}
-  args["metrics_gcs_file"] = wl_config.metrics_gcs_file
-  args["model_id"] = wl_config.model.model_type
-  args["hardware_id"] = wl_config.hardware_id
-  args["software_id"] = "jax_maxtext"
-  args["number_of_chips"] = wl_config.num_devices_per_slice*wl_config.num_slices
-  args["container_image_name"] = wl_config.base_docker_image
-  args["global_batch_size"] = per_device_batch_size * wl_config.num_devices_per_slice * wl_config.num_slices
-  args["precision"] = precision
-  args["optimizer"] = optimizer
-  args["seq_length"] = sequence_length
-  args["number_of_steps"] = wl_config.num_steps
-  args["xla_flags"] = f"'{xla_flags_str}'"
-  args["dataset"] = dataset
-  args["run_type"] = "maxtext-xpk"
-  args["config_file"] = os.path.join("MaxText", "configs", "base.yml")
-  args["topology"] = wl_config.topology
-  args["tuning_params"] = f"'{tuning_params_str}'"
-  args["db_project"] = wl_config.db_project
-  args["db_dataset"] = wl_config.db_dataset
-  args["is_test"] = wl_config.db_is_test
-
-  return args
+  return {"metrics_gcs_file": wl_config.metrics_gcs_file,
+          "model_id": wl_config.model.model_type,
+          "hardware_id": wl_config.hardware_id,
+          "software_id": "jax_maxtext",
+          "number_of_chips": wl_config.num_devices_per_slice * wl_config.num_slices,
+          "container_image_name": wl_config.base_docker_image,
+          "global_batch_size": per_device_batch_size * wl_config.num_devices_per_slice * wl_config.num_slices,
+          "precision": precision,
+          "optimizer": optimizer,
+          "seq_length": sequence_length,
+          "number_of_steps": wl_config.num_steps,
+          "xla_flags": f"'{xla_flags_str}'",
+          "dataset": dataset,
+          "run_type": "maxtext-xpk",
+          "config_file": os.path.join("MaxText", "configs", "base.yml"),
+          "topology": wl_config.topology,
+          "tuning_params": f"'{tuning_params_str}'",
+          "db_project": wl_config.db_project,
+          "db_dataset": wl_config.db_dataset,
+          "is_test": wl_config.db_is_test}
 
 
 def build_user_command(
@@ -677,7 +671,9 @@ def run_xpk_workload(
   )
   return_code = run_command_with_updates(command, 'Run XPK workload')
   if return_code == 0 and wait_for_completion:
-    return_code = wait_for_xpk_workload_completion(cluster_config, workload_name, wl_config.xpk_path) # Wait for completion after successful run
+    return_code = wait_for_xpk_workload_completion(
+        cluster_config, workload_name, wl_config.xpk_path
+    ) # Wait for completion after successful run
   return return_code
 
 

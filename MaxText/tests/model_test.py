@@ -16,18 +16,15 @@ import sys
 import unittest
 import os.path
 
-from MaxText import common_types
-from MaxText.globals import PKG_DIR
-
-from flax.core import freeze
 import jax
 import jax.numpy as jnp
-from MaxText import max_utils
-import numpy as np
+
 import pytest
 
 from MaxText import pyconfig
-
+from MaxText import max_utils
+from MaxText import common_types
+from MaxText.globals import PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
 

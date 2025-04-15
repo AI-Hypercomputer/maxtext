@@ -1007,12 +1007,12 @@ llama3_1_70b_8192_iter_synthetic = _add_to_model_dictionary(
         + xla_flags_library.DATA_PARALLEL_OVERLAP
         + xla_flags_library.CF_FOR_ALL_GATHER
         + xla_flags_library.HOST_OFFLOAD_FLAGS
-        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE 
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
         +  " --xla_tpu_iova_dma_chunk_size_bytes=104857"
     ),
   )
 )
- 
+
 llama3_1_70b_8192_iter_real_data_grain = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
@@ -1050,12 +1050,12 @@ llama3_1_70b_8192_iter_real_data_grain = _add_to_model_dictionary(
         + xla_flags_library.DATA_PARALLEL_OVERLAP
         + xla_flags_library.CF_FOR_ALL_GATHER
         + xla_flags_library.HOST_OFFLOAD_FLAGS
-        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE 
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
         +  " --xla_tpu_iova_dma_chunk_size_bytes=104857"
     ),
   )
 )
- 
+
 llama3_1_70b_8192_iter_synthetic_ckpt = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
@@ -1092,12 +1092,12 @@ llama3_1_70b_8192_iter_synthetic_ckpt = _add_to_model_dictionary(
         + xla_flags_library.DATA_PARALLEL_OVERLAP
         + xla_flags_library.CF_FOR_ALL_GATHER
         + xla_flags_library.HOST_OFFLOAD_FLAGS
-        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE 
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
         +  " --xla_tpu_iova_dma_chunk_size_bytes=104857"
     ),
   )
 )
- 
+
 llama3_1_70b_8192_iter_real_data_and_checkpointing = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
@@ -1137,12 +1137,11 @@ llama3_1_70b_8192_iter_real_data_and_checkpointing = _add_to_model_dictionary(
         + xla_flags_library.DATA_PARALLEL_OVERLAP
         + xla_flags_library.CF_FOR_ALL_GATHER
         + xla_flags_library.HOST_OFFLOAD_FLAGS
-        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE 
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
         +  " --xla_tpu_iova_dma_chunk_size_bytes=104857"
     ),
   )
 )
-
 
 llama3_1_70b_8192_lr_real_data = _add_to_model_dictionary(
     trillium_model_dict,

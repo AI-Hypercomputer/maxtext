@@ -16,14 +16,15 @@ limitations under the License.
 
 """ Common LoRA utils needed to support LoRA adapters."""
 
-from MaxText import checkpointing
-import os
 import json
+
 import jax
 import jax.numpy as jnp
+
 from flax.training import train_state
 from flax.linen import partitioning as nn_partitioning
 
+from MaxText import checkpointing
 from MaxText import max_utils
 from MaxText import max_logging
 from MaxText.utils import gcs_utils
@@ -118,7 +119,7 @@ def load_adapter(config, base_abstract_state_params, adapter_config_path, adapte
     if adapter_config_path.startswith("gs://"):
       lora_config = gcs_utils.read_json_from_gcs(adapter_config_path)
     else:
-      with open(adapter_config_path, "r") as f:
+      with open(adapter_config_path, "rt", encoding="utf8") as f:
         lora_config = json.load(f)
 
     if lora_config is None:
@@ -254,7 +255,7 @@ def get_lora_abstract_state(base_abstract_params, lora_config):
     base_sharding_pspec_size = len(base_param_sharding.spec)
 
     if base_sharding_pspec_size > 4:
-      raise ValueError(f"Encountered unexpected size of PartitionSpec in sharding. Size > 4 is not supported")
+      raise ValueError("Encountered unexpected size of PartitionSpec in sharding. Size > 4 is not supported")
 
     base_mesh = base_param_sharding.mesh
     base_memory_kind = base_param_sharding.memory_kind
@@ -307,10 +308,10 @@ def get_lora_abstract_state(base_abstract_params, lora_config):
           raise ValueError(f"Unexpected key={name} exists in the abstract params of base model.")
 
         if not isinstance(param, jax.ShapeDtypeStruct):
-          raise ValueError(f"Unexpected type found in the abstract params of the base model.")
+          raise ValueError("Unexpected type found in the abstract params of the base model.")
 
-        lora_a_key = f"lora_a.kernel"
-        lora_b_key = f"lora_b.kernel"
+        lora_a_key = "lora_a.kernel"
+        lora_b_key = "lora_b.kernel"
 
         target_module = module_is_target_module(module_name, lora_target_modules)
 

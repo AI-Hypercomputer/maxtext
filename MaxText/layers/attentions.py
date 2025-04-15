@@ -354,20 +354,20 @@ class AttentionOp(nn.Module):
       if lengths is None:
         lengths = jnp.sum(decoder_segment_ids, axis=-1)
 
-      if jax.devices()[0].platform == "tpu":
+      platform = jax.devices()[0].platform
+      if platform == "tpu":
         impl = self.tpu_ragged_attention
-      elif jax.devices()[0].platform == "gpu":
+      elif platform == "gpu":
         impl = self.gpu_ragged_attention
+      else:
+        raise NotImplementedError(platform)
       return impl(query, key, value, lengths, self.ragged_block_size)
 
-    elif (
-        self.attention_kernel == "dot_product"
-        or (self.attention_kernel == "autoselected" and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE)
-        or (self.attention_kernel == "autoselected" and length < 128)
-        or (self.attention_kernel == "paged")
+    elif self.attention_kernel in ("dot_product", "paged") or (
+        self.attention_kernel == "autoselected" and (model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE or length < 128)
     ):
       return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode, previous_chunk)
-    elif self.attention_kernel == "flash" or self.attention_kernel == "autoselected":
+    elif self.attention_kernel in ("flash", "autoselected"):
       if jax.devices()[0].platform == "tpu":
         if isinstance(key, KVTensor):
           key = key.dequant()
@@ -478,7 +478,7 @@ class AttentionOp(nn.Module):
       self, query: Array, key: Array | KVTensor, value: Array | KVTensor, lengths: Array, block_size: int
   ) -> tuple[Array, Array, Array]:
     """Ragged Attention."""
-    if isinstance(query, KVTensor) or isinstance(query, KVTensor):
+    if isinstance(query, (KVTensor, KVTensor)):
       raise TypeError("Ragged attention does not currently support quantized tensors.")
     b = nn.logical_to_mesh_axes(self.ragged_lengths_names)
     bsnd = nn.logical_to_mesh_axes(self.cache_logical_axis_names)
@@ -866,7 +866,7 @@ class AttentionOp(nn.Module):
     # Based on https://github.com/google-research/google-research/blob/master/scaling_transformer_inference_efficiency/attention.py
     global_max = functools.reduce(jnp.maximum, local_maxes)
     global_sum = sum(
-        [jnp.exp(local_max - global_max) * local_sum for (local_sum, local_max) in zip(local_sums, local_maxes)]
+        (jnp.exp(local_max - global_max) * local_sum for (local_sum, local_max) in zip(local_sums, local_maxes))
     )
 
     attn_out = 0
@@ -932,21 +932,6 @@ class AttentionOp(nn.Module):
       return prefill_unnormalized_output / prefill_exponentials_sum
 
 
-class L2Norm(nn.Module):
-  """
-  Implementation of L2Norm in JAX.
-
-  Attributes:
-    eps: float, epsilon used for numerical stability (default value should be ok for most cases).
-  """
-
-  eps: float = 1e-6
-
-  @nn.compact
-  def __call__(self, x):
-    return x * jax.lax.rsqrt(jnp.mean(x**2, axis=-1, keepdims=True) + self.eps)
-
-
 class Attention(nn.Module):
   """Generic Attention.
 
@@ -969,7 +954,6 @@ class Attention(nn.Module):
       numerical issues with bfloat16.
     quant: Quant, stores quantization parameters, defaults to None implying no quantization.
     kv_quant: KVQuant, stores KV cache quantization parameters, defaults to None
-    is_nope_layer: bool, whether to skip RoPE on this Attention layer
   """
 
   config: Config
@@ -1015,8 +999,6 @@ class Attention(nn.Module):
   ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
   compute_axis_order: AxisIdxes = (0, 1, 2, 3)
   reshape_q: bool = False
-
-  is_nope_layer: bool = False
 
   def setup(self):
     self.attention_op = AttentionOp(
@@ -1266,7 +1248,7 @@ class Attention(nn.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
-    if model_mode == common_types.MODEL_MODE_PREFILL or model_mode == common_types.MODEL_MODE_TRAIN:
+    if model_mode in (common_types.MODEL_MODE_PREFILL, common_types.MODEL_MODE_TRAIN):
       inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
     else:
@@ -1280,9 +1262,8 @@ class Attention(nn.Module):
       query = self.query_projection(inputs_q)
       key = self.kv_projection(inputs_kv, proj_name="key")
       value = self.kv_projection(inputs_kv, proj_name="value")
-      is_llama4_decoder_block = self.config.decoder_block == "llama4"
-      # NOTE: llama 4 does L2 normalization after RoPE
-      if self.use_qk_norm and not is_llama4_decoder_block:
+
+      if self.use_qk_norm:
         query = RMSNorm(
             dtype=self.config.dtype,
             weight_dtype=self.config.weight_dtype,
@@ -1299,19 +1280,9 @@ class Attention(nn.Module):
             kernel_axes=("norm",),
         )(key)
 
-    # NOTE: is_nope_layer should be used in attention mask and also used in attention tuning
-    use_rope = not self.is_nope_layer
-    use_qk_norm = self.use_qk_norm and use_rope
-
-    if use_rope:
-      query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
-      key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
-
-    if use_qk_norm and is_llama4_decoder_block:
-      l2_norm = L2Norm(self.config.normalization_layer_epsilon)
-      query = l2_norm(query)
-      key = l2_norm(key)
-
+    # apply ROPE
+    query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
+    key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
     # apply query_pre_attn_scalar if it's present.
     if self.query_pre_attn_scalar and self.query_pre_attn_scalar != 1.0:
       query = query * self.query_pre_attn_scalar
@@ -1345,7 +1316,7 @@ class Attention(nn.Module):
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
       out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk)
 
-    if model_mode == common_types.MODEL_MODE_PREFILL or model_mode == common_types.MODEL_MODE_TRAIN:
+    if model_mode in (common_types.MODEL_MODE_PREFILL, common_types.MODEL_MODE_TRAIN):
       out = nn.with_logical_constraint(out, self.out_axis_names)
     else:
       out = nn.with_logical_constraint(out, self.decode_out_axis_names)
