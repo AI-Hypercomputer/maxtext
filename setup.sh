@@ -163,10 +163,10 @@ elif [[ $MODE == "nightly" ]]; then
         # Install jax-nightly
         if [[ -n "$JAX_VERSION" ]]; then
             echo "Installing jax-nightly, jaxlib-nightly ${JAX_VERSION}"
-            python3 -m pip install -U --pre jax==${JAX_VERSION} jaxlib==${JAX_VERSION} jax-cuda12-plugin[with_cuda] jax-cuda12-pjrt -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+            python3 -m pip install -U --pre jax==${JAX_VERSION} jaxlib==${JAX_VERSION} jax-cuda12-plugin[with-cuda] jax-cuda12-pjrt -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
         else
             echo "Installing latest jax-nightly, jaxlib-nightly"
-            python3 -m pip install -U --pre jax jaxlib jax-cuda12-plugin[with_cuda] jax-cuda12-pjrt -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+            python3 -m pip install -U --pre jax jaxlib jax-cuda12-plugin[with-cuda] jax-cuda12-pjrt -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
         fi
         # Install Transformer Engine
         export NVTE_FRAMEWORK=jax
