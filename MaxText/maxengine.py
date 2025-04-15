@@ -1401,7 +1401,9 @@ def set_engine_vars_from_base_engine(
   )
 
 
-def create_engine_from_config_flags(maxengine_config_filepath, batch_size, max_prefill_predict_length, max_target_length, args_str):
+def create_engine_from_config_flags(
+    maxengine_config_filepath, batch_size, max_prefill_predict_length, max_target_length, args_str
+):
   """Create new MaxEngine instance with given batch_size, prefill and target lengths, and any config
   params provided through `args_str`.
   """
