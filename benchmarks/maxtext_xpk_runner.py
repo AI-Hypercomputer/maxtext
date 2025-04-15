@@ -836,8 +836,8 @@ def main() -> int:
   #     batch=1,  # Parallel execution of workloads is not supported in XPK yet.
   #     dry_run=False,
   # )
- # print(f'Return_codes: {return_codes}')
-
+  # print(f'Return_codes: {return_codes}')
+  return os.EX_OK
 
 
 if __name__ == '__main__':
