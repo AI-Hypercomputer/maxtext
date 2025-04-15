@@ -79,7 +79,7 @@ def preprocessing_pipeline(
           _input_pipeline_utils.combine_columns,
           fn_kwargs={"columns": data_column_names, "data_column": combined_column_name},
           remove_columns=data_column_names,
-          element=dataset_features,
+          features=dataset_features,
       )
 
     data_column_names = list(dataset.features.keys())
