@@ -19,16 +19,17 @@ import sys
 import jax
 import unittest
 import os.path
+
+from jax.sharding import Mesh
+import jax.numpy as jnp
+
 from MaxText import max_utils
 from MaxText.globals import PKG_DIR
-from jax.sharding import Mesh
 from MaxText.layers import models
 from MaxText.layers import embeddings
 from MaxText.layers import quantizations
-
-import jax.numpy as jnp
-
 from MaxText import pyconfig
+
 import pytest
 
 

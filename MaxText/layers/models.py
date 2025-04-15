@@ -16,7 +16,7 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 
 from flax import linen as nn
@@ -24,6 +24,7 @@ import functools
 import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
+
 from MaxText import common_types
 from MaxText.inference import page_manager
 from MaxText.layers import attentions
@@ -100,9 +101,9 @@ class DecoderLayer(nn.Module):
         float32_logits=cfg.float32_logits,
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
-        prefill_cache_axis_order=tuple([int(i) for i in cfg.prefill_cache_axis_order.split(",")]),
-        ar_cache_axis_order=tuple([int(i) for i in cfg.ar_cache_axis_order.split(",")]),
-        compute_axis_order=tuple([int(i) for i in cfg.compute_axis_order.split(",")]),
+        prefill_cache_axis_order=tuple(map(int, cfg.prefill_cache_axis_order.split(","))),
+        ar_cache_axis_order=tuple(map(int, cfg.ar_cache_axis_order.split(","))),
+        compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
         reshape_q=cfg.reshape_q,
     )
 
@@ -332,10 +333,6 @@ class Decoder(nn.Module):
       from MaxText.layers import simple_layer
 
       return [simple_layer.SimpleMlpDecoderLayer]
-    elif self.config.decoder_block == "llama4":
-      from MaxText.layers import llama4
-
-      return [llama4.Llama4DecoderLayer]
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
@@ -351,7 +348,6 @@ class Decoder(nn.Module):
         "gemma3",
         "simple",
         "simple_mlp",
-        "llama4",
     ):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
@@ -460,7 +456,7 @@ class Decoder(nn.Module):
     else:
       if cfg.scan_layers:
         if cfg.decoder_block == "deepseek":
-          assert len(RemattedBlockLayers) == 2, f"Scanned layers must have a length of 2 using deepseek."
+          assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
           dense_layer = RemattedBlockLayers[0]
           moe_layer = RemattedBlockLayers[1]
           y, _ = self.scan_decoder_layers(cfg, dense_layer, cfg.first_num_dense_layers, "dense_layers", mesh)(
@@ -489,7 +485,7 @@ class Decoder(nn.Module):
           )
       else:
         if cfg.decoder_block == "deepseek":
-          assert len(RemattedBlockLayers) == 2, f"Unscanned layers must have a length of 2 using deepseek."
+          assert len(RemattedBlockLayers) == 2, "Unscanned layers must have a length of 2 using deepseek."
           dense_layer = RemattedBlockLayers[0]
           moe_layer = RemattedBlockLayers[1]
 
@@ -518,10 +514,6 @@ class Decoder(nn.Module):
               from MaxText.layers import gemma3
               # Gemma3 uses both global and sliding window attention depending on the layer index.
               layer_kwargs = {"attention_type": gemma3.get_attention_type(layer_id=lyr)}
-            if cfg.decoder_block == "llama4":
-              from MaxText.layers import llama4
-
-              layer_kwargs = {"is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval)}
             layer = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, **layer_kwargs)
             y = layer(
                 y,
@@ -579,7 +571,8 @@ class Decoder(nn.Module):
 class Transformer(nn.Module):
   """An decoder-only Transformer model."""
 
-  # Make new attributes required, so that all Transformer dependencies (train, decode, compile, etc) will error instead of silently use defaults.
+  # Make new attributes required, so that all Transformer dependencies (train, decode, compile, etc) will error instead
+  #   of silently use defaults.
   # pylint: disable=attribute-defined-outside-init
   config: Config
   mesh: Mesh

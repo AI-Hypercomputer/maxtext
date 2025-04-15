@@ -112,7 +112,7 @@ class PyconfigTest(unittest.TestCase):
         config_inference.ici_tensor_parallelism,
     )
     with self.assertRaises(ValueError):
-      config_inference.__setattr__("ici_fsdp_parallelism", 4)
+      config_inference.ici_fsdp_parallelism = 4
 
 
 if __name__ == "__main__":

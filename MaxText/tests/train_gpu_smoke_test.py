@@ -25,12 +25,11 @@ class Train(unittest.TestCase):
   """Smoke test for GPUs."""
 
   def test_tiny_config(self):
-    test_tmpdir = os.environ.get("TEST_TMPDIR")
     train_main(
         [
             None,
             os.path.join(PKG_DIR, "configs", "gpu_smoke_test.yml"),
-            f"base_output_directory=gs://runner-maxtext-logs",
+            "base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_test",
             r"dataset_path=gs://maxtext-dataset",
             "enable_checkpointing=False",

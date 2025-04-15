@@ -17,26 +17,30 @@
 
 
 import functools
-from typing import Any, Iterable, Tuple, Union, Optional
+from typing import Iterable, Tuple, Union, Optional
+from enum import Enum, auto
+import math
 
-import flax.linen as nn
+import numpy as np
+
 import jax
 from jax import lax
 import jax.numpy as jnp
+from jax.ad_checkpoint import checkpoint_name
+from jax.experimental import shard_map
+
+import flax.linen as nn
+
+from aqt.jax.v2 import aqt_tensor
+
 from MaxText import common_types
 from MaxText.layers import initializers
 from MaxText.layers import normalizations
 from MaxText.layers import quantizations
 from MaxText.layers import linears
-import numpy as np
-from jax.ad_checkpoint import checkpoint_name
-from jax.experimental import shard_map
-import math
 from MaxText import max_logging
 from MaxText import max_utils
-from aqt.jax.v2 import aqt_tensor
 from MaxText.kernels import megablox as mblx
-from enum import Enum, auto
 
 
 Array = common_types.Array
@@ -234,7 +238,7 @@ class MoeBlock(nn.Module):
 
     if self.config.decoder_block == "deepseek":
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
-    elif self.config.decoder_block != "llama4":
+    else:
       top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
     return top_k_weights, top_k_indices
 
@@ -703,7 +707,7 @@ class MoeBlock(nn.Module):
 
     # the check is to prevent aqteinsum as einsum op for dispatch and combine einsums in ase when capacity_factor > 0
     # this is necessary to load pre-quantized weights in case of inference
-    if self.config.model_call_mode == "inference" and (einsum_name == DISPATCH or einsum_name == COMBINE):
+    if self.config.model_call_mode == "inference" and einsum_name in (DISPATCH, COMBINE):
       return jnp.einsum
 
     if self.quant:
@@ -738,12 +742,7 @@ class MoeBlock(nn.Module):
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits = nn.with_logical_constraint(pre_bias_logits, ("activation_batch", "activation_length", None))
     top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits)
-    is_llama4_decoder_layer = self.config.decoder_block == "llama4"
-    if is_llama4_decoder_layer:
-      router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(jnp.bfloat16)
-      inputs = inputs * router_scores
-    else:
-      weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
+    weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
     matmul_precision = lax.Precision(self.config.matmul_precision)
 
     if self.config.model_call_mode != "inference":
@@ -756,13 +755,7 @@ class MoeBlock(nn.Module):
 
     cp, sub_seq = self.get_context_partition_and_sub_seq(seq_len)
 
-    # TODO @jacobplatin: allow Llama4 MoE to handle capacity factor > 0
     if self.config.capacity_factor > 0:
-      if is_llama4_decoder_layer:
-        # TODO @jacobplatin
-        raise ValueError(
-            "Llama4 decoder has not been tested with capacity_factor > 0 -- please set that value to -1 for now!"
-        )
       # token dropping if needed
       if self.config.model_call_mode != "inference":
         dispatch_mask, combine_mask = self.generate_masks(top_k_indices, weights)
@@ -770,9 +763,9 @@ class MoeBlock(nn.Module):
         input_axis = ("activation_batch", "activation_length", "activation_embed")
         dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, "activation_embed")
         mlp_axis = ("activation_exp", "activation_batch_no_exp", None, "activation_mlp")
-        dispatch_eimsum = f"BSM,BSEC -> EBCM"
-        mlp_einsum = f"EBCM,EMH -> EBCH"
-        output_einsum = f"EBCM,BSEC -> BSM"
+        dispatch_eimsum = "BSM,BSEC -> EBCM"
+        mlp_einsum = "EBCM,EMH -> EBCH"
+        output_einsum = "EBCM,BSEC -> BSM"
       else:
         # todo: try replace softmax_probs with padded weights and verify with decode acc tests
         softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
@@ -787,9 +780,9 @@ class MoeBlock(nn.Module):
           input_axis = ("activation_batch", "activation_length", None, "activation_embed")
           dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_embed")
           mlp_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_mlp")
-        dispatch_eimsum = f"BNSM,BNSEC -> EBNCM"
-        mlp_einsum = f"EBNCM,EMH -> EBNCH"
-        output_einsum = f"EBNCM,BNSEC -> BNSM"
+        dispatch_eimsum = "BNSM,BNSEC -> EBNCM"
+        mlp_einsum = "EBNCM,EMH -> EBNCH"
+        output_einsum = "EBNCM,BNSEC -> BNSM"
 
         inputs = jnp.reshape(inputs, (batch_size, cp, sub_seq, inputs.shape[2]))
         inputs = nn.with_logical_constraint(inputs, input_axis)
@@ -887,8 +880,6 @@ class MoeBlock(nn.Module):
           intermediate_layer = intermediate_layer.astype(jnp.float32)
         intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("w_sum"):
-        if is_llama4_decoder_layer:
-          weights = self.reshape_and_update_weights(jnp.ones_like(top_k_weights), top_k_indices)
         output = jnp.einsum(
             "BSEM,BSE -> BSM",
             intermediate_layer,
@@ -916,6 +907,7 @@ class MoeBlock(nn.Module):
   def __call__(self, inputs):
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
+
     gate_logits, pre_bias_logits = GateLogit(
         self.num_experts,
         model_name=cfg.model_name,
@@ -984,7 +976,7 @@ class DeepSeekMoeBlock(nn.Module):
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
-        name=f"shared_experts",
+        name="shared_experts",
         config=cfg,
         quant=self.quant,
     )(inputs)

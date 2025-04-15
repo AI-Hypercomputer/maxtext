@@ -260,10 +260,6 @@ class KVCache(nn.Module):
   def _get_ar_cache_vars(self, batch, key_heads, value_heads, key_head_size, value_head_size, model_mode):
 
     dtype = self._get_cached_kv_dtype()
-    if self.max_target_length <= self.max_prefill_length:
-      raise ValueError(
-          f"max_target_length: {self.max_target_length} should be greater than max_prefill_length: {self.max_prefill_length}!"
-      )
     cache_length = self.max_target_length - self.max_prefill_length
 
     if model_mode == common_types.MODEL_MODE_PREFILL:
@@ -711,7 +707,7 @@ class MlaKVCache(KVCache):
       Optional[Tuple[Array, Array, Array, Array]],
   ]:
     assert model_mode != common_types.MODEL_MODE_TRAIN, "incorrectly updating kvcache in train mode."
-    assert self.kv_quant == None, "kvcache quantization not supported with mla."
+    assert self.kv_quant is None, "kvcache quantization not supported with mla."
     key_latent = self.key_latent_add_head_dim(key_latent)
     prefill_cache, ar_cache = super().__call__(key_latent, key_rope, decoder_segment_ids, model_mode)
     if prefill_cache:

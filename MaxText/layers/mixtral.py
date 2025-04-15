@@ -20,13 +20,15 @@ limitations under the License.
 
 
 from typing import Optional
+
+from jax.ad_checkpoint import checkpoint_name
+import jax.numpy as jnp
+
+from flax import linen as nn
+
 from MaxText.layers import quantizations
 from MaxText.layers import moe
 from MaxText.layers import initializers
-from jax.ad_checkpoint import checkpoint_name
-from jax.sharding import Mesh
-from flax import linen as nn
-import jax.numpy as jnp
 from MaxText.layers import attentions
 from MaxText.layers import embeddings
 from MaxText.layers import normalizations
@@ -102,9 +104,9 @@ class MixtralDecoderLayer(nn.Module):
         float32_logits=cfg.float32_logits,
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
-        prefill_cache_axis_order=tuple([int(i) for i in cfg.prefill_cache_axis_order.split(",")]),
-        ar_cache_axis_order=tuple([int(i) for i in cfg.ar_cache_axis_order.split(",")]),
-        compute_axis_order=tuple([int(i) for i in cfg.compute_axis_order.split(",")]),
+        prefill_cache_axis_order=tuple(map(int, cfg.prefill_cache_axis_order.split(","))),
+        ar_cache_axis_order=tuple(map(int, cfg.ar_cache_axis_order.split(","))),
+        compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
     )
 
     attention_lnx = attention_layer(
