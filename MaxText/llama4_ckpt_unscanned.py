@@ -99,15 +99,6 @@ def _incoming_ckpt_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1,
       f"layers.{layer_idx}.feed_forward.w1.weight": f"model.layers.{layer_idx}.mlp.gate_proj.weight",
       f"layers.{layer_idx}.feed_forward.w2.weight": f"model.layers.{layer_idx}.mlp.down_proj.weight",
       f"layers.{layer_idx}.feed_forward.w3.weight": f"model.layers.{layer_idx}.mlp.up_proj.weight",
-      # LoRA Adapter
-      f"layers.{layer_idx}.attention.wq.lora_A.weights": f"base_model.model.model.layers.{layer_idx}.self_attn.q_proj.lora_A.weight",
-      f"layers.{layer_idx}.attention.wq.lora_B.weights": f"base_model.model.model.layers.{layer_idx}.self_attn.q_proj.lora_B.weight",
-      f"layers.{layer_idx}.attention.wk.lora_A.weights": f"base_model.model.model.layers.{layer_idx}.self_attn.k_proj.lora_A.weight",
-      f"layers.{layer_idx}.attention.wk.lora_B.weights": f"base_model.model.model.layers.{layer_idx}.self_attn.k_proj.lora_B.weight",
-      f"layers.{layer_idx}.attention.wv.lora_A.weights": f"base_model.model.model.layers.{layer_idx}.self_attn.v_proj.lora_A.weight",
-      f"layers.{layer_idx}.attention.wv.lora_B.weights": f"base_model.model.model.layers.{layer_idx}.self_attn.v_proj.lora_B.weight",
-      f"layers.{layer_idx}.attention.wo.lora_A.weights": f"base_model.model.model.layers.{layer_idx}.self_attn.o_proj.lora_A.weight",
-      f"layers.{layer_idx}.attention.wo.lora_B.weights": f"base_model.model.model.layers.{layer_idx}.self_attn.o_proj.lora_B.weight",
   }
 
   if model_size.startswith("llama4"):
@@ -168,6 +159,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
   head_dim = model_params["dims_per_head"]
   base_num_kv_heads = model_params["num_kv_heads"]
   vocab_size = model_params["vocab"]
+  interleave_moe_layer = model_params["interleave_moe_layer_step"]
   num_experts = model_params["num_experts"] if "num_experts" in model_params else None
   rope_type = model_params.get("rope_type")
   scale_query = model_params.get("scale_query", True)
@@ -237,19 +229,6 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
     jax_weights["decoder"].update(
         {
             layer_name: {
-                "DeepSeekMoeBlock_0": {
-                    "MoeBlock_0": {
-                        "wi_0": None,
-                        "wi_1": None,
-                        "wo": None,
-                        "gate": {"kernel": None},
-                    },
-                    "shared_experts": {
-                        "wi_0": {"kernel": None},
-                        "wi_1": {"kernel": None},
-                        "wo": {"kernel": None},
-                    },
-                },
                 "self_attention": {
                     "query": {"kernel": None},
                     "key": {"kernel": None},
@@ -261,6 +240,30 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
             },
         }
     )
+
+    is_dense_layer = (layer_idx + 1) % interleave_moe_layer != 0
+    if is_dense_layer:
+      mlp_dict = {
+          "wi_0": {"kernel": None},
+          "wi_1": {"kernel": None},
+          "wo": {"kernel": None},
+      }
+      jax_weights["decoder"][layer_name]["mlp"] = mlp_dict
+    else:
+      moe_dict = {
+          "MoeBlock_0": {
+              "wi_0": None,
+              "wi_1": None,
+              "wo": None,
+              "gate": {"kernel": None},
+          },
+          "shared_experts": {
+              "wi_0": {"kernel": None},
+              "wi_1": {"kernel": None},
+              "wo": {"kernel": None},
+          },
+      }
+      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"] = moe_dict
 
     self_attention = jax_weights["decoder"][layer_name]["self_attention"]
 
@@ -358,6 +361,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
 
   # self attention layer norm and swap the layer index
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
+    is_dense_layer = (layer_idx + 1) % interleave_moe_layer != 0
     layer_name = f"layers_{layer_idx}"
     layer_weight = {"pre_self_attention_layer_norm": {"scale": None}, "post_self_attention_layer_norm": {"scale": None}}
     pre_self_attention_layernorm_name = (
@@ -368,9 +372,14 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
     pre_self_attention_layernorm = (
         chkpt_vars[0][pre_self_attention_layernorm_name].type(torch.float32).numpy().astype(CAST_DTYPE)
     )
-    post_self_attention_layernorm_name = (
-        f"layers.{layer_idx}.feed_forward.norm.weight" if is_llama4_model else f"layers.{layer_idx}.ffn_norm.weight"
-    )
+    if is_llama4_model:
+      post_self_attention_layernorm_name = (
+          f"layers.{layer_idx}.feed_forward.mlp.layer_norm_weight"
+          if is_dense_layer
+          else f"layers.{layer_idx}.feed_forward.norm.weight"
+      )
+    else:
+      post_self_attention_layernorm_name = f"layers.{layer_idx}.ffn_norm.weight"
     post_self_attention_layernorm = (
         chkpt_vars[0][post_self_attention_layernorm_name].type(torch.float32).numpy().astype(CAST_DTYPE)
     )
@@ -382,43 +391,32 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
   max_logging.log("Processing layer weights")
 
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
-    # TODO: get rid of layer_weight support for the `num_experts is None` branch
     layer_name = f"layers_{layer_idx}"
-    if num_experts is None:
-      if is_llama4_model:
-        raise NotImplementedError("Non-MoE model conversion logic for Llama4 is not yet supported!")
-      wi_0 = np.concatenate(
+    is_dense_layer = (layer_idx + 1) % interleave_moe_layer != 0
+    if is_dense_layer:
+      wi_0_1 = np.concatenate(
           [
-              var[f"layers.{layer_idx}.feed_forward.w1.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
+              var[f"layers.{layer_idx}.feed_forward.mlp.fc1_weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
               for var in chkpt_vars
           ],
           axis=0,
       ).transpose()
-      wi_1 = np.concatenate(
-          [
-              var[f"layers.{layer_idx}.feed_forward.w3.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
-              for var in chkpt_vars
-          ],
-          axis=0,
-      ).transpose()
+      wi_0_1_chunks = np.array_split(wi_0_1, 2, axis=1)
+      wi_0 = wi_0_1_chunks[0]
+      wi_1 = wi_0_1_chunks[1]
+
       wo = np.concatenate(
           [
-              var[f"layers.{layer_idx}.feed_forward.w1.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
+              var[f"layers.{layer_idx}.feed_forward.mlp.fc2_weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
               for var in chkpt_vars
           ],
           axis=1,
       ).transpose()
-      if layer_weight["mlp"]["wi_0"]["kernel"] is None:
-        stack_shape = (base_num_decoder_layers,)
-        layer_weight["mlp"]["wi_0"]["kernel"] = np.zeros(stack_shape + wi_0.shape, dtype=CAST_DTYPE)
-        layer_weight["mlp"]["wi_1"]["kernel"] = np.zeros(stack_shape + wi_1.shape, dtype=CAST_DTYPE)
-        layer_weight["mlp"]["wo"]["kernel"] = np.zeros(stack_shape + wo.shape, dtype=CAST_DTYPE)
 
-      layer_weight["mlp"]["wi_0"]["kernel"][layer_idx, ...] = wi_0  # pytype: disable=unsupported-operands
-      layer_weight["mlp"]["wi_1"]["kernel"][layer_idx, ...] = wi_1  # pytype: disable=unsupported-operands
-      layer_weight["mlp"]["wo"]["kernel"][layer_idx, ...] = wo  # pytype: disable=unsupported-operands
+      jax_weights["decoder"][layer_name]["mlp"]["wi_0"]["kernel"] = wi_0
+      jax_weights["decoder"][layer_name]["mlp"]["wi_1"]["kernel"] = wi_1
+      jax_weights["decoder"][layer_name]["mlp"]["wo"]["kernel"] = wo
     else:
-
       gate = chkpt_vars[0][f"layers.{layer_idx}.feed_forward.router_DE"].type(torch.float32).numpy().astype(CAST_DTYPE)
       jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["gate"]["kernel"] = gate
       base_emb_dim = model_params["base_emb_dim"]
@@ -531,6 +529,7 @@ if __name__ == "__main__":
   parser.add_argument("--use-ocdbt", type=str2bool, required=False, default=True)
   parser.add_argument("--use-zarr3", type=str2bool, required=False, default=True)
   args = parser.parse_args()
+  logging.basicConfig(level=logging.DEBUG)
 
   if args.model_size not in MODEL_PARAMS_DICT or not args.model_size.startswith("llama4"):
     raise NotImplementedError("Currently, we only support llama4 models but got " + args.model_size)
