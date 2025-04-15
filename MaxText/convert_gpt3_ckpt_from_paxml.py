@@ -11,6 +11,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+from MaxText.globals import PKG_DIR
+
 # pylint: disable=line-too-long
 """Convert weights from a paxml gpt3 model to a MaxText one.
 
@@ -32,29 +34,26 @@ python3 -m MaxText.convert_gpt3_ckpt_from_paxml \
   --run-name=$RUN_NAME \
   --base-output-directory=$BASE_OUTPUT_DIR
 """
+from MaxText import max_utils
+from MaxText import optimizers
+from MaxText import pyconfig
 import os
-import sys
-import argparse
-import gc
-
 from jax import random
 from jax.sharding import Mesh
+from MaxText.layers.models import Transformer
+from MaxText.layers import quantizations
+from MaxText import checkpointing
 
 import numpy as np
 import tensorstore as ts
 
+import sys
 import jax
-from psutil import Process
-
-from MaxText import max_utils
-from MaxText import optimizers
-from MaxText import pyconfig
-from MaxText.constants import PKG_ROOT
-from MaxText.layers.models import Transformer
-from MaxText.layers import quantizations
-from MaxText import checkpointing
+import gc
 from MaxText import max_logging
+from psutil import Process
 from MaxText.train import save_checkpoint
+import argparse
 
 
 def fmt_size(num_bytes: int) -> str:
@@ -82,7 +81,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
 
   base_args = [
       "",
-      os.path.join(PKG_ROOT, "configs", "base.yml"),  # base arg
+      os.path.join(PKG_DIR, "configs", "base.yml"),  # base arg
       "per_device_batch_size=1",
       "ici_fsdp_parallelism=-1",
       "ici_tensor_parallelism=1",

@@ -17,15 +17,15 @@ limitations under the License.
 # pylint: disable=bare-except, consider-using-generator
 """Utils that are only interesting to MaxText. """
 
-import pickle
-import functools
-
 import jax
 import optax
+from MaxText import max_utils
 from jax.sharding import PartitionSpec as P
 from jax.experimental.serialize_executable import deserialize_and_load
 
-from MaxText import max_utils
+
+import pickle
+import functools
 from MaxText.input_pipeline import input_pipeline_interface
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
@@ -314,6 +314,7 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
       "fsdp_transpose",
       "sequence",
       "context",
+      "context_autoregressive",
       "tensor",
       "tensor_transpose",
       "tensor_sequence",
@@ -325,7 +326,7 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
   perfectly_sharded_params_per_chip = total_num_params / product_num_devices_for_weight_sharding
   assert total_num_params_per_chip >= perfectly_sharded_params_per_chip, (
       "Number of parameters per chip must not be less than in the ideal sharded "
-      "scenario across `fsdp`, `fsdp_transpose`,`sequence`, `tensor`, `tensor_transpose`, `tensor_sequence`, `expert` axes."
+      "scenario across `fsdp`, `fsdp_transpose`, `context`, `sequence`, `tensor`, `tensor_transpose`, `tensor_sequence`, `stage`, `expert` axes."
   )
   unsharded_param_perc = total_num_params_per_chip / perfectly_sharded_params_per_chip - 1
   assert unsharded_param_perc < tolerance, (

@@ -15,24 +15,19 @@ limitations under the License.
 """
 
 """ Tests for the quantizations """
-
-import os.path
-import unittest
-from typing import Optional, Union
-
 from jax import numpy as jnp
 from jax import random, lax
 from flax import linen as nn
-
+import functools
 import numpy as np
-import pytest
-
-from aqt.jax.v2 import aqt_tensor
-
-from MaxText.constants import PKG_ROOT
-from MaxText.layers import quantizations
-from MaxText.layers.quantizations import AqtQuantization, Fp8Quantization, NANOOFp8Quantization
 from MaxText import pyconfig
+import pytest
+from MaxText.layers import quantizations
+import unittest
+import os.path
+from aqt.jax.v2 import aqt_tensor
+from aqt.jax.v2 import calibration
+from MaxText.globals import PKG_DIR
 
 _QUERY_REGEX = ".*/query"
 _VALUE_REGEX = ".*/value"
@@ -57,11 +52,9 @@ class QuantTestModule(nn.Module):
     return res_einsum, res_dg
 
 
-def _configure_quantization(
-    quant_str="", quant_cfg_path="", mode_str="train", replicate_scale=False
-) -> Optional[Union[AqtQuantization, Fp8Quantization, NANOOFp8Quantization]]:
+def _configure_quantization(quant_str="", quant_cfg_path="", mode_str="train", replicate_scale=False):
   config = pyconfig.initialize(
-      [None, os.path.join(PKG_ROOT, "configs", "base.yml")],
+      [None, os.path.join(PKG_DIR, "configs", "base.yml")],
       enable_checkpointing=False,
       quantization=quant_str,
       quant_cfg_path=quant_cfg_path,
@@ -125,7 +118,9 @@ class QuantizationTest(unittest.TestCase):
     # self.assertEqual(res_dg.dtype, np.dtype(np.float32))
 
   def test_mixed_precision_config_int8w(self):
-    quant = _configure_quantization(quant_str="intmp", quant_cfg_path="configs/quantization/int8_weight_only.json")
+    quant = _configure_quantization(
+        quant_str="intmp", quant_cfg_path=os.path.join(PKG_DIR, "configs", "quantization", "int8_weight_only.json")
+    )
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 1)
     self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
     quant_cfg, tile_size = quant.quant_dg[quantizations.DEFAULT]
@@ -134,7 +129,8 @@ class QuantizationTest(unittest.TestCase):
 
   def test_mixed_precision_config_scale(self):
     quant = _configure_quantization(
-        quant_str="intmp", quant_cfg_path="configs/quantization/dense_llm_weight_only_scale.json"
+        quant_str="intmp",
+        quant_cfg_path=os.path.join(PKG_DIR, "configs", "quantization", "dense_llm_weight_only_scale.json"),
     )
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7)
     self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
@@ -146,7 +142,9 @@ class QuantizationTest(unittest.TestCase):
     self.assertEqual(quant_cfg.fwd.dg_quantizer.rhs.numerics.bits, 4)
 
   def test_mixed_precision_config_subchannel(self):
-    quant = _configure_quantization(quant_str="intmp", quant_cfg_path="configs/quantization/dense_llm_subchannel.json")
+    quant = _configure_quantization(
+        quant_str="intmp", quant_cfg_path=os.path.join(PKG_DIR, "configs", "quantization", "dense_llm_subchannel.json")
+    )
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7)
     self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
     quant_cfg, tile_size = quant.quant_dg[quantizations.DEFAULT]

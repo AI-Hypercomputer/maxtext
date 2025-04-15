@@ -16,14 +16,18 @@ import sys
 import unittest
 import os.path
 
+from MaxText import common_types
+from MaxText.globals import PKG_DIR
+
+from flax.core import freeze
 import jax
 import jax.numpy as jnp
+from MaxText import max_utils
+import numpy as np
 import pytest
 
 from MaxText import pyconfig
-from MaxText import max_utils
-from MaxText import common_types
-from MaxText.constants import PKG_ROOT
+
 from MaxText.layers import models
 from MaxText.layers import quantizations
 
@@ -41,7 +45,7 @@ class TestModel(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(PKG_ROOT, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,

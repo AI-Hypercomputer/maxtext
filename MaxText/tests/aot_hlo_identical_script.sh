@@ -27,3 +27,4 @@ python3 -m MaxText.train_compile $shared_args $aot_args
 
 export XLA_FLAGS=--xla_dump_to=${train_dump_dir}
 python3 -m MaxText.train $shared_args
+

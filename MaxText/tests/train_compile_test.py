@@ -17,13 +17,11 @@ limitations under the License.
 """ Tests for the common Max Utils """
 import unittest
 import os.path
-import tempfile
-from tempfile import gettempdir
-
 import pytest
-
+from tempfile import gettempdir
 from MaxText.train_compile import main as train_compile_main
-from MaxText.constants import PKG_ROOT
+from MaxText.train import main as train_main
+from MaxText.globals import PKG_DIR
 
 
 class TrainCompile(unittest.TestCase):
@@ -31,12 +29,12 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_save_compiled_v4(self):
-    tmp_dir = gettempdir()
-    compiled_trainstep_file = os.path.join(tmp_dir, "test_compiled_v4.pickle")
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v4.pickle")
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v4-8",
             "compile_topology_num_slices=1",
@@ -48,12 +46,12 @@ class TrainCompile(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_save_compiled_v5e(self):
-    tmp_dir = gettempdir()
-    compiled_trainstep_file = os.path.join(tmp_dir, "test_compiled_v5e.pickle")
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_compiled_v5e.pickle")
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-16",
             "compile_topology_num_slices=1",
@@ -71,7 +69,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "compile_topology_num_slices=1",
@@ -94,7 +92,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-8",
             "compile_topology_num_slices=2",
@@ -113,7 +111,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-16",
             "compile_topology_num_slices=1",
@@ -130,7 +128,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "use_iota_embed=true",
@@ -149,7 +147,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "compile_topology_num_slices=1",
@@ -172,7 +170,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "compile_topology_num_slices=1",
@@ -195,7 +193,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "compile_topology_num_slices=1",
@@ -218,7 +216,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5e-256",
             "compile_topology_num_slices=1",
@@ -241,7 +239,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -264,7 +262,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "compile_topology_num_slices=1",
@@ -283,7 +281,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -308,7 +306,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -331,7 +329,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-128",
             "use_iota_embed=true",
@@ -355,7 +353,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -377,7 +375,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -399,7 +397,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -422,7 +420,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-128",
             "use_iota_embed=true",
@@ -445,7 +443,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v6e-256",
             "use_iota_embed=true",
@@ -469,7 +467,7 @@ class TrainCompile(unittest.TestCase):
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
             "use_iota_embed=true",
@@ -489,12 +487,12 @@ class TrainCompile(unittest.TestCase):
   @pytest.mark.skip(reason="Fix sharding issue of all layers of DeepSeek")
   @pytest.mark.tpu_only
   def test_moe_deepseek_unscanned_bf16(self):
-    temp_dir = tempfile.gettempdir()
+    temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_deepseek_unscanned_bf16.pickle")
     train_compile_main(
         (
             None,
-            os.path.join(PKG_ROOT, "configs", "base.yml"),
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-256",
             "use_iota_embed=true",
@@ -508,5 +506,53 @@ class TrainCompile(unittest.TestCase):
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
             "scan_layers=False",
+        )
+    )
+
+  @pytest.mark.tpu_only
+  def test_moe_deepseek_with_device_limit(self):
+    compiled_trainstep_file = "/tmp/test_moe_deepseek_with_device_limit.pickle"
+    train_compile_main(
+        (
+            None,
+            os.path.join(PKG_DIR, "configs", "base.yml"),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek3-671b",
+            "sparse_matmul=True",
+            "megablox=False",
+            "per_device_batch_size=1",
+            "max_target_length=1024",
+            "attention=dot_product",  # Change to flush attention once it works for MLA
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "n_routing_groups=8",
+            "topk_routing_group=4",
+        )
+    )
+
+  @pytest.mark.tpu_only
+  def test_moe_deepseek_without_device_limit(self):
+    compiled_trainstep_file = "/tmp/test_moe_deepseek_without_device_limit.pickle"
+    train_compile_main(
+        (
+            None,
+            os.path.join(PKG_DIR, "configs", "base.yml"),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek3-671b",
+            "sparse_matmul=True",
+            "megablox=False",
+            "per_device_batch_size=1",
+            "max_target_length=1024",
+            "attention=dot_product",  # Change to flush attention once it works for MLA
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "n_routing_groups=-1",
+            "topk_routing_group=-1",
         )
     )

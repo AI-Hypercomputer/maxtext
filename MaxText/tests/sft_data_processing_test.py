@@ -14,9 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-import os.path
 import subprocess
 import unittest
+import os.path
 
 import numpy as np
 import jax
@@ -26,7 +26,7 @@ from datasets import Dataset
 import transformers
 
 from MaxText import pyconfig
-from MaxText.constants import PKG_ROOT
+from MaxText.globals import PKG_DIR
 from MaxText.input_pipeline import _hf_data_processing
 from MaxText.input_pipeline import input_pipeline_interface
 
@@ -90,22 +90,28 @@ class SFTDataProcessingTest(unittest.TestCase):
   def setUpClass(cls):
     super().setUpClass()
     exit_code = subprocess.call(
-        ["gsutil", "cp", "-r", "gs://maxtext-dataset/hf/llama2-tokenizer", os.path.join(PKG_ROOT, "assets", "")]
+        [
+            "gsutil",
+            "cp",
+            "-r",
+            "gs://maxtext-dataset/hf/llama2-tokenizer",
+            os.path.join(os.path.dirname(PKG_DIR), "assets", ""),
+        ]
     )
-    if exit_code != os.EX_OK:
+    if exit_code != 0:
       raise ValueError(f"Download tokenizer with gsutil cp failed with exit code: {exit_code}")
 
   def setUp(self):
     super().setUp()
     self.config = pyconfig.initialize(
-        ["sft_trainer.py", os.path.join(PKG_ROOT, "configs", "sft.yml")],
-        per_device_batch_size=1,
+        [os.path.join(PKG_DIR, "sft_trainer"), os.path.join(PKG_DIR, "configs", "sft.yml")],
+        per_device_batch_size=2,
         run_name="test",
         mesh_axes=["data"],
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
         base_output_directory="gs://max-experiments/",
-        tokenizer_path=os.path.join(os.path.dirname(PKG_ROOT), "assets", "llama2-tokenizer"),
+        tokenizer_path=os.path.join(os.path.dirname(PKG_DIR), "assets", "llama2-tokenizer"),
         train_split="train",
         enable_checkpointing=False,
         use_sft=True,
@@ -153,41 +159,19 @@ class SFTDataProcessingTest(unittest.TestCase):
     )
 
   def test_sft_format_with_messages(self):
-    train_ds = Dataset.from_dict({"messages": MESSAGES_DATA * 2})
+    train_ds = Dataset.from_dict({"messages": MESSAGES_DATA * 4})
     data_columns = ["messages"]
     self.get_train_iterator(train_ds, data_columns)
 
     # exp1 is longer than max_target_length=44, testing truncation
-    truncated_exp1_inputs = (
-        "<s> <user>example one question one</user> <assistant>example one answer one</assistant> "
-        "<user>example one question two</user> <assistant>example one answer two</assistant"
-    )
-    truncated_exp1_targets = (
-        "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> "
-        "<assistant>example one answer one</assistant><unk><unk><unk><unk><unk><unk><unk><unk>"
-        "<unk><unk> <assistant>example one answer two</assistant<unk>"
-    )
-    truncated_exp1_targets_predictable = (
-        "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> "
-        "<assistant>example one answer one</assistant><unk><unk><unk><unk><unk><unk>"
-        "<unk><unk><unk><unk> <assistant>example one answer two</assistant<unk>"
-    )
+    truncated_exp1_inputs = "<s> <user>example one question one</user> <assistant>example one answer one</assistant> <user>example one question two</user> <assistant>example one answer two</assistant"
+    truncated_exp1_targets = "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> <assistant>example one answer one</assistant><unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> <assistant>example one answer two</assistant<unk>"
+    truncated_exp1_targets_predictable = "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> <assistant>example one answer one</assistant><unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> <assistant>example one answer two</assistant<unk>"
 
     # exp2 is packed from 2nd and 3rd entries, testing packing
-    packed_exp2_inputs = (
-        "<s> <user>question two</user> <assistant>answer two</assistant></s><s> "
-        "<user>question three</user> <assistant>answer three</assistant></s><unk><unk><unk><unk>"
-    )
-    packed_exp2_targets = (
-        "<unk><unk><unk><unk><unk><unk><unk><unk> <assistant>answer two</assistant></s><s><unk><unk>"
-        "<unk><unk><unk><unk><unk><unk> <assistant>answer three</assistant></s><unk><unk><unk><unk>"
-        "<unk>"
-    )
-    packed_exp2_targets_predictable = (
-        "<unk><unk><unk><unk><unk><unk><unk><unk> <assistant>answer two</assistant></s>"
-        "<unk><unk><unk><unk><unk><unk><unk><unk><unk> "
-        "<assistant>answer three</assistant></s><unk><unk><unk><unk><unk>"
-    )
+    packed_exp2_inputs = "<s> <user>question two</user> <assistant>answer two</assistant></s><s> <user>question three</user> <assistant>answer three</assistant></s><unk><unk><unk><unk>"
+    packed_exp2_targets = "<unk><unk><unk><unk><unk><unk><unk><unk> <assistant>answer two</assistant></s><s><unk><unk><unk><unk><unk><unk><unk><unk> <assistant>answer three</assistant></s><unk><unk><unk><unk><unk>"
+    packed_exp2_targets_predictable = "<unk><unk><unk><unk><unk><unk><unk><unk> <assistant>answer two</assistant></s><unk><unk><unk><unk><unk><unk><unk><unk><unk> <assistant>answer three</assistant></s><unk><unk><unk><unk><unk>"
 
     batch = next(self.train_iter)
     self.assertEqual(self.tokenizer.decode(batch["inputs"][0]), truncated_exp1_inputs)
@@ -210,41 +194,19 @@ class SFTDataProcessingTest(unittest.TestCase):
     )
 
   def test_sft_format_with_prompt_completion(self):
-    train_ds = Dataset.from_dict({"prompt": PROMPT_DATA * 2, "completion": COMPLETION_DATA * 2})
+    train_ds = Dataset.from_dict({"prompt": PROMPT_DATA * 4, "completion": COMPLETION_DATA * 4})
     data_columns = ["prompt", "completion"]
     self.get_train_iterator(train_ds, data_columns)
 
     # exp1 is longer than max_target_length=44, testing truncation
-    truncated_exp1_inputs = (
-        "<s> <user>example one question one</user> <assistant>example one answer one</assistant> "
-        "<user>example one question two</user> <assistant>example one answer two</assistant"
-    )
-    truncated_exp1_targets = (
-        "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> "
-        "<assistant>example one answer one</assistant><unk><unk><unk><unk><unk><unk><unk><unk>"
-        "<unk><unk> <assistant>example one answer two</assistant<unk>"
-    )
-    truncated_exp1_targets_predictable = (
-        "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> "
-        "<assistant>example one answer one</assistant><unk><unk><unk><unk><unk><unk>"
-        "<unk><unk><unk><unk> <assistant>example one answer two</assistant<unk>"
-    )
+    truncated_exp1_inputs = "<s> <user>example one question one</user> <assistant>example one answer one</assistant> <user>example one question two</user> <assistant>example one answer two</assistant"
+    truncated_exp1_targets = "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> <assistant>example one answer one</assistant><unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> <assistant>example one answer two</assistant<unk>"
+    truncated_exp1_targets_predictable = "<unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> <assistant>example one answer one</assistant><unk><unk><unk><unk><unk><unk><unk><unk><unk><unk> <assistant>example one answer two</assistant<unk>"
 
     # exp2 is packed from 2nd and 3rd entries, testing packing
-    packed_exp2_inputs = (
-        "<s> <user>question two</user> <assistant>answer two</assistant></s><s> "
-        "<user>question three</user> <assistant>answer three</assistant></s><unk><unk><unk><unk>"
-    )
-    packed_exp2_targets = (
-        "<unk><unk><unk><unk><unk><unk><unk><unk> <assistant>answer two</assistant></s><s><unk><unk>"
-        "<unk><unk><unk><unk><unk><unk> <assistant>answer three</assistant></s><unk><unk><unk><unk>"
-        "<unk>"
-    )
-    packed_exp2_targets_predictable = (
-        "<unk><unk><unk><unk><unk><unk><unk><unk> <assistant>answer two</assistant></s>"
-        "<unk><unk><unk><unk><unk><unk><unk><unk><unk> "
-        "<assistant>answer three</assistant></s><unk><unk><unk><unk><unk>"
-    )
+    packed_exp2_inputs = "<s> <user>question two</user> <assistant>answer two</assistant></s><s> <user>question three</user> <assistant>answer three</assistant></s><unk><unk><unk><unk>"
+    packed_exp2_targets = "<unk><unk><unk><unk><unk><unk><unk><unk> <assistant>answer two</assistant></s><s><unk><unk><unk><unk><unk><unk><unk><unk> <assistant>answer three</assistant></s><unk><unk><unk><unk><unk>"
+    packed_exp2_targets_predictable = "<unk><unk><unk><unk><unk><unk><unk><unk> <assistant>answer two</assistant></s><unk><unk><unk><unk><unk><unk><unk><unk><unk> <assistant>answer three</assistant></s><unk><unk><unk><unk><unk>"
 
     batch = next(self.train_iter)
     self.assertEqual(self.tokenizer.decode(batch["inputs"][0]), truncated_exp1_inputs)

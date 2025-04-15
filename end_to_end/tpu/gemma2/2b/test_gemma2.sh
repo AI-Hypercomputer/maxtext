@@ -13,7 +13,7 @@ set -ex
 idx=$(date +%Y-%m-%d-%H-%M)
 export MODEL_VARIATION='2b'
 
-# Installing torch for deps in forward_pass_logit_chekcker.py
+# Installing torch for deps in forward_pass_logit_checker.py
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # After downloading checkpoints, copy them to GCS bucket at $CHKPT_BUCKET \
@@ -23,7 +23,7 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 #   https://www.kaggle.com/models/google/gemma-2/flax/gemma2-2b-it
 export CHKPT_BUCKET=gs://maxtext-gemma/gemma2/flax
 export MODEL_BUCKET=gs://maxtext-gemma/gemma2
-python3 -m MaxText.convert_gemma2_chkpt.py --base_model_path ${CHKPT_BUCKET}/${MODEL_VARIATION} --maxtext_model_path ${MODEL_BUCKET}/${MODEL_VARIATION}/${idx} --model_size ${MODEL_VARIATION}
+python3 -m MaxText.convert_gemma2_chkpt --base_model_path ${CHKPT_BUCKET}/${MODEL_VARIATION} --maxtext_model_path ${MODEL_BUCKET}/${MODEL_VARIATION}/${idx} --model_size ${MODEL_VARIATION}
 
 
 # Non-Googlers please remember to point `DATASET_PATH` to the GCS bucket where you have your training data
@@ -35,7 +35,7 @@ export CONVERTED_CHECKPOINT=${MODEL_BUCKET}/${MODEL_VARIATION}/${idx}/0/items
 export RUN_NAME=unscanned_chkpt_${idx}
 # Note that the `CONVERTED_CHECKPOINT` is in a `scanned` format which is great for training but for efficient decoding performance we want the checkpoint in an `unscanned` format.
 # We can do this by running `MaxText/generate_param_only_checkpoint.py` on `CONVERTED_CHECKPOINT` with `force_unroll=true`.
-python3 -m MaxText.generate_param_only_checkpoint.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} load_parameters_path=${CONVERTED_CHECKPOINT} run_name=${RUN_NAME} model_name='gemma2-2b' force_unroll=true
+python3 -m MaxText.generate_param_only_checkpoint MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} load_parameters_path=${CONVERTED_CHECKPOINT} run_name=${RUN_NAME} model_name='gemma2-2b' force_unroll=true
 
 export UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/checkpoints/0/items
 
@@ -57,7 +57,7 @@ python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=${BASE_O
 # So, we can use the `MaxText/generate_param_only_checkpoint.py` to convert the full state checkpoint into a parameter only checkpoint for more efficient memory use. Note that the path provided to the flag `load_full_state_path` is the path to the checkpoint subdirectory inside the `BASE_OUTPUT_DIRECTORY` from our previous finetuning run.
 # `force_unroll=true` is converting the output parameter only checkpoint into an unscanned format for efficient decoding
 export PARAM_RUN_NAME=param_chkpt_${idx}
-python3 -m MaxText.generate_param_only_checkpoint.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} load_full_state_path=${BASE_OUTPUT_DIRECTORY}/${FINETUNE_RUN_NAME}/checkpoints/5/items run_name=${PARAM_RUN_NAME} model_name='gemma2-2b' force_unroll=true
+python3 -m MaxText.generate_param_only_checkpoint MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIRECTORY} load_full_state_path=${BASE_OUTPUT_DIRECTORY}/${FINETUNE_RUN_NAME}/checkpoints/5/items run_name=${PARAM_RUN_NAME} model_name='gemma2-2b' force_unroll=true
 
 # Now, run decoding on the checkpoint generated from our finetune run.
 python3 -m MaxText.decode MaxText/configs/base.yml tokenizer_path=assets/tokenizer.gemma load_parameters_path=${BASE_OUTPUT_DIRECTORY}/${PARAM_RUN_NAME}/checkpoints/0/items per_device_batch_size=1 run_name=runner_$(date +%Y-%m-%d-%H-%M) max_prefill_predict_length=8 max_target_length=16 dataset_type=synthetic steps=10 async_checkpointing=false scan_layers=false model_name=gemma2-2b prompt="I love to"

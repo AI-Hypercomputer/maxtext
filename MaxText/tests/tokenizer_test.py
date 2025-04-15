@@ -17,17 +17,16 @@ limitations under the License.
 """ Tests for tokenizer
 """
 
-import subprocess
-import unittest
-import os
-
 import numpy as np
-import pytest
-import tensorflow_datasets as tfds
-
-from MaxText.constants import PKG_ROOT
 from MaxText import train_tokenizer
 from MaxText.input_pipeline import _input_pipeline_utils
+from MaxText.globals import PKG_DIR
+
+import unittest
+import pytest
+import tensorflow_datasets as tfds
+import subprocess
+import os
 
 
 class TokenizerTest(unittest.TestCase):
@@ -43,10 +42,7 @@ class TokenizerTest(unittest.TestCase):
     vocab_model_name = "test_tokenizer"
     cls.tokenizer_path = os.path.join(assets_path, vocab_model_name)
     cls.source_tokenizer = _input_pipeline_utils.get_tokenizer(
-        os.path.join(os.path.dirname(PKG_ROOT), "assets", "tokenizer"),
-        "sentencepiece",
-        add_bos=False,
-        add_eos=False,
+        os.path.join(os.path.dirname(PKG_DIR), "assets", "tokenizer"), "sentencepiece", add_bos=False, add_eos=False
     )
     os.environ["TFDS_DATA_DIR"] = dataset_path
     read_config = tfds.ReadConfig(
@@ -88,7 +84,7 @@ class TikTokenTest(unittest.TestCase):
     dataset_name = "c4/en:3.0.1"
     dataset_path = "gs://maxtext-dataset"
     cls.source_tokenizer = _input_pipeline_utils.get_tokenizer(
-        os.path.join(os.path.dirname(PKG_ROOT), "assets", "tokenizer_llama3.tiktoken"),
+        os.path.join(os.path.dirname(PKG_DIR), "assets", "tokenizer_llama3.tiktoken"),
         "tiktoken",
         add_bos=False,
         add_eos=False,
@@ -119,19 +115,16 @@ class HFTokenizerTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     source = "gs://maxtext-gemma/huggingface/gemma2-2b"
-    destination = os.path.join(os.path.dirname(PKG_ROOT), "assets")
+    destination = os.path.join(os.path.dirname(PKG_DIR), "assets")
     subprocess.run(
         ["gcloud", "storage", "cp", "-R", source, destination],
         check=True,
     )
     cls.hf_tokenizer = _input_pipeline_utils.get_tokenizer(
-        os.path.join(os.path.dirname(PKG_ROOT), "assets", "gemma2-2b"),
-        "huggingface",
-        add_bos=False,
-        add_eos=False,
+        os.path.join(os.path.dirname(PKG_DIR), "assets", "gemma2-2b"), "huggingface", add_bos=False, add_eos=False
     )
     cls.sp_tokenizer = _input_pipeline_utils.get_tokenizer(
-        os.path.join(os.path.dirname(PKG_ROOT), "assets", "tokenizer.gemma"), "sentencepiece", add_bos=False, add_eos=False
+        os.path.join(os.path.dirname(PKG_DIR), "assets", "tokenizer.gemma"), "sentencepiece", add_bos=False, add_eos=False
     )
 
   @pytest.mark.tpu_only

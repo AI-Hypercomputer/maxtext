@@ -13,10 +13,10 @@ google-cloud-storage
 google-cloud-monitoring
 google-api-core
 google-api-python-client
-grain-nightly
+grain[parquet]>=0.2.6
 flax>=0.8.0
 ml-collections
-ml-goodput-measurement==0.0.5
+ml-goodput-measurement==0.0.8
 numpy
 optax
 pathwaysutils
@@ -35,7 +35,7 @@ tensorboard-plugin-profile
 tiktoken
 transformers
 mlperf-logging@git+https://github.com/mlperf/logging.git
-google-jetstream
+google-jetstream@git+https://github.com/AI-Hypercomputer/JetStream.git
 jsonlines
 pathwaysutils@git+https://github.com/google/pathways-utils.git
 omegaconf

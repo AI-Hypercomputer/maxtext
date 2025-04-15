@@ -12,24 +12,24 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
+import jax
 import os.path
 import unittest
-from typing import Tuple
-
-import jax
+from MaxText.layers import linears
+from MaxText.layers import initializers
+from MaxText.layers import moe
 import jax.numpy as jnp
-from jax.sharding import Mesh
-
-import flax.linen as nn
-import pytest
-from flax.linen import partitioning as nn_partitioning
 
 from MaxText import pyconfig
 from MaxText import max_utils
+from MaxText.globals import PKG_DIR
+from jax.sharding import Mesh
+import flax.linen as nn
+from typing import Tuple
 from MaxText import common_types
-from MaxText.constants import PKG_ROOT
-from MaxText.layers import linears
-from MaxText.layers import initializers
+import pytest
+from flax.linen import partitioning as nn_partitioning
+
 
 Array = common_types.Array
 Config = common_types.Config
@@ -42,7 +42,7 @@ class TokenDroppingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.cfg = pyconfig.initialize(
-        [None, os.path.join(PKG_ROOT, "configs", "base.yml")],
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
         run_name="token_dropping_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -55,7 +55,7 @@ class TokenDroppingTest(unittest.TestCase):
     )
     self.rng = jax.random.PRNGKey(42)
     devices_array = max_utils.create_device_mesh(self.cfg)
-    self.model = linears.MoeBlock(
+    self.model = moe.MoeBlock(
         config=self.cfg,
         num_experts=self.cfg.num_experts,
         num_experts_per_tok=self.cfg.num_experts_per_tok,
@@ -160,6 +160,73 @@ class TokenDroppingTest(unittest.TestCase):
     self.assertTrue(jax.numpy.allclose(expected_combine_mask, actual_combine_mask, rtol=1e-02, atol=1e-02))
 
 
+class DeepSeekRoutingTest(unittest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.cfg = pyconfig.initialize(
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
+        run_name="deepseek_routing_test",
+        enable_checkpointing=False,
+        decoder_block="deepseek",
+        dtype="bfloat16",
+        max_target_length=2,
+        max_prefill_predict_length=1,
+        per_device_batch_size=1,
+        n_routing_groups=4,
+        topk_routing_group=2,
+        num_experts=16,
+        num_experts_per_tok=4,
+        sparse_matmul=True,
+    )
+    self.rng = jax.random.PRNGKey(42)
+    devices_array = max_utils.create_device_mesh(self.cfg)
+    self.model = moe.MoeBlock(
+        config=self.cfg,
+        num_experts=self.cfg.num_experts,
+        num_experts_per_tok=self.cfg.num_experts_per_tok,
+        mesh=Mesh(devices_array, self.cfg.mesh_axes),
+        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        dtype=self.cfg.dtype,
+    )
+
+  def test_deepseek_routing(self):
+    # shape as [batch, sequence, num_experts] = [1,2,16]
+    gate_logits = jnp.array(
+        [
+            [
+                [0.20, 0.10, 0.05, 0.10, 0.10, 0.60, 0.30, 0.10, 0.80, 0.01, 0.01, 0.01, 0.05, 0.80, 0.20, 0.10],
+                [0.68, 0.20, 0.06, 0.03, 0.32, 0.10, 0.05, 0.02, 0.65, 0.20, 0.04, 0.01, 0.32, 0.10, 0.05, 0.02],
+            ]
+        ]
+    )
+    pre_bias_logits = gate_logits - 0.5
+
+    # 4 groups of 1st token:
+    #  [0.20, 0.10, 0.05, 0.10] - sum top2 = 0.7
+    #  [0.10, 0.60, 0.30, 0.10] - sum top2 = 0.9 (selected group) - index from 4 to 7
+    #  [0.80, 0.01, 0.01, 0.01] - sum top2 = 0.81
+    #  [0.05, 0.80, 0.20, 0.10] - sum top2 = 1.0 (selected group) - index from 12 to 15
+    #
+    # 4 groups of 2st token
+    #  [0.68, 0.20, 0.06, 0.03] - sum top2 = 0.88 (selected group) - index from 0 to 3
+    #  [0.32, 0.10, 0.05, 0.02] - sum top2 = 0.42
+    #  [0.65, 0.20, 0.04, 0.01] - sum top2 = 0.85 (selected group) - index from 8 to 11
+    #  [0.32, 0.10, 0.05, 0.02] - sum top2 = 0.42
+    #
+    # From selected groups to choice top4 for each token
+    expected_top_k_indices = jnp.array([[[13, 5, 6, 14], [0, 8, 1, 9]]])
+    expected_top_k_weights = jnp.take_along_axis(pre_bias_logits, expected_top_k_indices, axis=-1)
+    actual_top_k_weights, actual_top_k_indices = self.model.deepseek_routing(gate_logits, pre_bias_logits)
+    self.assertTrue(
+        jax.numpy.allclose(expected_top_k_indices, actual_top_k_indices, rtol=1e-05, atol=1e-05, equal_nan=False)
+    )
+    self.assertTrue(
+        jax.numpy.allclose(expected_top_k_weights, actual_top_k_weights, rtol=1e-05, atol=1e-05, equal_nan=False)
+    )
+
+
 class MoeLoopBlock(nn.Module):
   """Reference implemetnation from https://github.com/mistralai/mistral-inference.
   This is not included anymore in our repo,
@@ -176,9 +243,14 @@ class MoeLoopBlock(nn.Module):
 
   @nn.compact
   def __call__(self, inputs, deterministic: bool = False):
-    gate_logits = linears.DenseGeneral(
-        self.num_experts, dtype=self.dtype, kernel_init=self.kernel_init, kernel_axes=self.kernel_axes, name="gate"
-    )(inputs)
+    gate_logits = moe.GateLogit(
+        self.num_experts,
+        self.config.model_name,
+        dtype=self.dtype,
+        kernel_init=self.kernel_init,
+        kernel_axes=self.kernel_axes,
+        name="gate",
+    )(inputs)[0]
 
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
     weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.weight_dtype)
@@ -223,7 +295,7 @@ class MoeBlockTest(unittest.TestCase):
     return variables, output
 
   def get_moe_output(self, variables, hidden_states, cfg, mesh):
-    model = linears.MoeBlock(
+    model = moe.MoeBlock(
         config=cfg,
         num_experts=cfg.num_experts,
         num_experts_per_tok=cfg.num_experts_per_tok,
@@ -266,7 +338,7 @@ class MoeBlockTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_megablox(self):
     cfg = pyconfig.initialize(
-        [None, os.path.join(PKG_ROOT, "configs", "base.yml")],
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
         run_name="moe_block_megablox_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -291,7 +363,7 @@ class MoeBlockTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_ragged_dot(self):
     cfg = pyconfig.initialize(
-        [None, os.path.join(PKG_ROOT, "configs", "base.yml")],
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
         run_name="moe_block_ragged_dot_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -316,7 +388,7 @@ class MoeBlockTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_dense(self):
     cfg = pyconfig.initialize(
-        [None, os.path.join(PKG_ROOT, "configs", "base.yml")],
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
         run_name="moe_block_dense_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -341,7 +413,7 @@ class MoeBlockTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_megablox_expert_parallelism(self):
     cfg = pyconfig.initialize(
-        [None, os.path.join(PKG_ROOT, "configs", "base.yml")],
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
         run_name="moe_block_megablox_ep_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",

@@ -38,9 +38,11 @@ def normalize_features(x, column_name):
   return {"inputs": x[column_name], "targets": x[column_name]}
 
 
-def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=""):
+def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None, dataset_type="tfds"):
   # Load tokenizer
-  tokenizer_model = tokenizer.build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token)
+  tokenizer_model = tokenizer.build_tokenizer(
+      tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token, dataset_type
+  )
   return tokenizer_model
 
 
@@ -54,9 +56,9 @@ def shift_data_by_truncation(x):
   return x
 
 
-def add_segmentation_and_position(x, data_columns):
+def add_segmentation_and_position(x, data_columns, padding_token=0):
   for data_column in data_columns:
-    x[f"{data_column}_segmentation"] = tf.cast(x[data_column] != 0, tf.int32)
+    x[f"{data_column}_segmentation"] = tf.cast(x[data_column] != padding_token, tf.int32)
     x[f"{data_column}_position"] = tf.broadcast_to(
         tf.range(x[data_column].shape[-1], dtype=np.int32)[None, :], x[data_column].shape
     )
@@ -66,36 +68,34 @@ def add_segmentation_and_position(x, data_columns):
 ########## Functions used by HF pipeline
 
 
-def combine_columns(example, columns):
+def combine_columns(example, columns, data_column):
   """Combine columns such as 'prompt' and 'completion' for sft training"""
   assert len(columns) > 1
   combined = []
   for i in range(len(example[columns[0]])):
     for c in columns:
       combined.append(example[c][i])
-  example["messages"] = combined
+  example[data_column] = combined
   return example
 
 
-def is_conversational(example):
+def is_conversational(features, data_columns):
   """Check if data is in a conversational format.
   Examples:
 
-  example = {'prompt': [{'content': 'question', 'role': 'user'}], 'completion': [{'content': 'answer', 'role': 'assistant'}]}
-  is_conversational(example) return True.
+  features = {'prompt': [{'content': Value(dtype='string', id=None), 'role': Value(dtype='string', id=None)}], 'completion': [{'content': Value(dtype='string', id=None), 'role': Value(dtype='string', id=None)}]}
+  data_columns = ["prompt", "completion"]
+  is_conversational(features, data_columns) return True.
 
-  example = {"prompt": "I love to"})
-  is_conversational(example) returns False.
+  features = {'prompt': [Value(dtype='string', id=None)], 'completion': [Value(dtype='string', id=None)]}
+  data_columns = ["prompt", "completion"]
+  is_conversational(features, data_columns) returns False.
   """
-  supported_columns = ["prompt", "completion", "messages"]
-  data_columns = [column for column in example.keys() if column in supported_columns]
-
-  if data_columns:
-    for column in data_columns:
-      messages = example[column]
-      if isinstance(messages, list):
-        if isinstance(messages[0], dict) and "role" in messages[0] and "content" in messages[0]:
-          return True
+  for column in data_columns:
+    messages = features[column]
+    if isinstance(messages, list):
+      if isinstance(messages[0], dict) and "role" in messages[0] and "content" in messages[0]:
+        return True
 
   return False
 
@@ -289,17 +289,6 @@ class ParseFeatures(grain.MapTransform):
 
 
 @dataclasses.dataclass
-class InputsTargetsFeatures(grain.MapTransform):
-  """Normalize text feature keys."""
-
-  def __init__(self, column_name):
-    self.column_name = column_name
-
-  def map(self, features):
-    return {"inputs": features[self.column_name], "targets": features[self.column_name]}
-
-
-@dataclasses.dataclass
 class NormalizeFeatures(grain.MapTransform):
   """Normalize text feature keys."""
 
@@ -312,6 +301,25 @@ class NormalizeFeatures(grain.MapTransform):
       return {col: features[col].numpy()[0].decode() for col in self.column_names}
     else:
       return {col: features[col].numpy() for col in self.column_names}
+
+
+@dataclasses.dataclass
+class Rekey(grain.MapTransform):
+  """Rname keys according to a mappign dict"""
+
+  def __init__(self, mapping_dict, keep_old_keys=False):
+    self.mapping_dict = mapping_dict
+    self.keep_old_keys = keep_old_keys
+
+  def map(self, features):
+    old_keys = set()
+    for new_key, old_key in self.mapping_dict.items():
+      features[new_key] = features[old_key]
+      old_keys.add(old_key)
+    if not self.keep_old_keys:
+      for key in old_keys:
+        del features[key]
+    return features
 
 
 @dataclasses.dataclass
@@ -331,8 +339,10 @@ class ReformatPacking(grain.MapTransform):
 
 
 @dataclasses.dataclass
-class PadToMaxLength(grain.MapTransform):
-  """Pads each input to the specified length"""
+class PadOrTrimToMaxLength(grain.MapTransform):
+  """Pads/Trims each input to the specified length
+  and returns true_length of input
+  """
 
   def __init__(self, max_length):
     self.max_length = max_length
@@ -340,17 +350,56 @@ class PadToMaxLength(grain.MapTransform):
   def map(self, data: dict[str, np.ndarray]):
     """map to each element"""
 
+    def _max_true_length(prompts, pad_token_id):
+      true_lengths = []
+      for prompt in prompts:
+        matches = np.where(prompt == pad_token_id)[0]
+        if matches.size != 0:
+          true_lengths.append(matches[0])
+        else:
+          true_lengths.append(prompts.shape[0])
+      return true_lengths
+
     def _pad(x, max_length):
       pad_amount = max(max_length - x.shape[0], 0)
       pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
-      return np.pad(x, pad_amount)
+      return np.pad(x, pad_amount)[:max_length]
 
     data_columns = list(data.keys())
     for data_column in data_columns:
       data[f"{data_column}_segmentation"] = (data[data_column] != 0).astype(np.int32)
       data[f"{data_column}_position"] = np.arange(data[data_column].shape[0], dtype=np.int32)
+      data[f"{data_column}_true_length"] = np.array(data[data_column].shape[0], dtype=np.int32)
     for key, _ in data.items():
-      data[key] = _pad(data[key], self.max_length)
+      if "true_length" not in key:
+        data[key] = _pad(data[key], self.max_length)
+    # for data_column in data_columns:
+    #   data[f"{data_column}_true_length"] = _max_true_length(data[data_column], 0)
+    return data
+
+
+@dataclasses.dataclass
+class PadToMaxLength(grain.MapTransform):
+  """Pads each input to the specified length"""
+
+  def __init__(self, max_length, pad_id):
+    self.max_length = max_length
+    self.pad_id = pad_id
+
+  def map(self, data: dict[str, np.ndarray]):
+    """map to each element"""
+
+    def _pad(x, max_length, pad_id):
+      pad_amount = max(max_length - x.shape[0], 0)
+      pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
+      return np.pad(x, pad_amount, constant_values=pad_id)
+
+    data_columns = list(data.keys())
+    for data_column in data_columns:
+      data[f"{data_column}_segmentation"] = (data[data_column] != self.pad_id).astype(np.int32)
+      data[f"{data_column}_position"] = np.arange(data[data_column].shape[0], dtype=np.int32)
+    for key, _ in data.items():
+      data[key] = _pad(data[key], self.max_length, self.pad_id)
     return data
 
 
@@ -366,7 +415,7 @@ def shift_right(x, axis=1):
   return padded[tuple(slices)]
 
 
-def shift_left(x, axis=1):
+def shift_left(x, pad_id, axis=1):
   """Shift to the left and pad."""
   pad_widths = [(0, 0)] * len(x.shape)
   pad_widths[axis] = (0, 1)
@@ -374,17 +423,15 @@ def shift_left(x, axis=1):
       slice(None),
   ] * len(x.shape)
   slices[axis] = slice(1, None)
-  padded = np.pad(x, pad_widths, mode="constant", constant_values=x.dtype.type(0))
+  padded = np.pad(x, pad_widths, mode="constant", constant_values=x.dtype.type(pad_id))
   return padded[tuple(slices)]
 
 
-def shift_and_refine(x, bos_id=None, unk_id=0, axis=1):
-  """Shift inputs, set segmentation to 0 when target element is unk_id and bos_id if provided"""
-  x["targets"] = shift_left(x["targets"], axis=axis)
-  if bos_id:
-    x["targets_segmentation"] = np.where((x["targets"] != unk_id) & (x["targets"] != bos_id), x["targets_segmentation"], 0)
-  else:
-    x["targets_segmentation"] = np.where(x["targets"] != unk_id, x["targets_segmentation"], 0)
+def shift_and_refine(x, ignored_ids, axis=1):
+  """Shift inputs, set segmentation to 0 when target element is in ignored_ids if provided"""
+  x["targets"] = shift_left(x["targets"], ignored_ids[0], axis=axis)
+  for ignore_id in ignored_ids:
+    x["targets_segmentation"] = np.where(x["targets"] != ignore_id, x["targets_segmentation"], 0)
 
   return x
 
@@ -393,10 +440,9 @@ def shift_and_refine(x, bos_id=None, unk_id=0, axis=1):
 class ShiftData(grain.MapTransform):
   """Shift inputs and refine annotations."""
 
-  def __init__(self, bos_id=None, unk_id=0, axis=1):
+  def __init__(self, ignored_ids, axis=1):
+    self.ignored_ids = ignored_ids
     self.axis = axis
-    self.bos_id = bos_id
-    self.unk_id = unk_id
 
   def map(self, data):
-    return shift_and_refine(data, bos_id=self.bos_id, unk_id=self.unk_id, axis=self.axis)
+    return shift_and_refine(data, ignored_ids=self.ignored_ids, axis=self.axis)

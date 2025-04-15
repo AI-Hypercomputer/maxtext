@@ -11,9 +11,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import tempfile
 import unittest
-from tempfile import gettempdir
-
 import pytest
 import os
 import shutil
@@ -21,7 +20,7 @@ import hashlib
 import sys
 import subprocess
 
-from MaxText.constants import PKG_ROOT
+from MaxText.globals import PKG_DIR
 
 
 class AotHloIdenticalTest(unittest.TestCase):
@@ -39,6 +38,7 @@ class AotHloIdenticalTest(unittest.TestCase):
           stdout=sys.stdout,  # Stream to stdout
           stderr=sys.stdout,  # Stream to stdout
           text=True,  # Decode output and error as text
+          cwd=os.path.dirname(PKG_DIR),
       )
       return result
     except subprocess.CalledProcessError as e:
@@ -85,14 +85,14 @@ class AotHloIdenticalTest(unittest.TestCase):
 
   def assert_compile_and_real_match_hlo(self, test_name, extra_config_args):
     hlo_filename_substring = "jit_train_step.after_optimizations_after_buffer_assignment.txt"
-    tmp_dir = gettempdir()
-    compile_dump_dir = os.path.join(tmp_dir, "compile_test_xla_dump", test_name, "aot", "")
-    train_dump_dir = os.path.join(tmp_dir, "compile_test_xla_dump", test_name, "real", "")
+    temp_dir = tempfile.gettempdir()
+    compile_dump_dir = os.path.join(temp_dir, "compile_test_xla_dump", test_name, "aot", "")
+    train_dump_dir = os.path.join(temp_dir, "compile_test_xla_dump", test_name, "real", "")
     self.delete_dir(compile_dump_dir)  # Ensure directories empty before use
     self.delete_dir(train_dump_dir)
 
     self.run_compile_and_real(
-        os.path.join(PKG_ROOT, "tests", "aot_hlo_identical_script.sh"), compile_dump_dir, train_dump_dir, extra_config_args
+        os.path.join(PKG_DIR, "tests", "aot_hlo_identical_script.sh"), compile_dump_dir, train_dump_dir, extra_config_args
     )
 
     compile_hlo_file = self.find_file_by_substring(compile_dump_dir, hlo_filename_substring)

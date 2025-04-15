@@ -16,26 +16,25 @@
 Runs SFT trainer correctness with TRL implementation.
 
 Usage:
-python3 -m MaxText.tests.sft_trainer_correctness \
-  --model-name=llama3.1-8b --tokenizer-path=meta-llama/Llama-3.1-8B \
-  --model-ckpt-path=gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items
+python3 -m MaxText.tests.sft_trainer_correctness --model-name=llama3.1-8b --tokenizer-path=meta-llama/Llama-3.1-8B --model-ckpt-path=gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items
 """
 
 import argparse
-import os.path
-import sys
-
 import jax
 import jax.numpy as jnp
 import jsonlines
 import numpy as np
+import os
+import sys
 
 from jax.sharding import Mesh
 from transformers import AutoTokenizer
 
-from MaxText import max_utils, max_logging
+from MaxText.globals import PKG_DIR
+
+from MaxText import max_logging
+from MaxText import max_utils
 from MaxText import pyconfig
-from MaxText.constants import PKG_ROOT
 from MaxText.input_pipeline import _input_pipeline_utils
 from MaxText.layers import models
 from MaxText.layers import quantizations
@@ -43,7 +42,7 @@ from MaxText.layers import quantizations
 
 def initialize_config(config):
   return pyconfig.initialize(
-      [sys.argv[0], os.path.join(PKG_ROOT, "configs", "sft.yml")],
+      [sys.argv[0], os.path.join(PKG_DIR, "configs", "sft.yml")],
       run_name="test-sft-trainer-correctness",
       model_name=config.model_name,
       tokenizer_path=config.tokenizer_path,
@@ -62,7 +61,7 @@ def initialize_config(config):
 
 def get_golden_data(config):
   """Get the golden data for SFTTrainer in TRL."""
-  golden_data_path = os.path.join(PKG_ROOT, "test_assets", f"golden_data_sft_{config.model_name}.jsonl")
+  golden_data_path = os.path.join(PKG_DIR, "test_assets", f"golden_data_sft_{config.model_name}.jsonl")
   with jsonlines.open(golden_data_path, "r") as f:
     golden_data = list(f)
   return golden_data[0]
@@ -135,7 +134,7 @@ def get_kl_div(maxtext_logits, hf_logits):
   return kl_div
 
 
-def main(config):
+def main(config, test_args):
   golden_data = get_golden_data(config)
   inputs, inputs_segmentation, inputs_position = prepare_maxtext_inputs(golden_data["data"], config)
   maxtext_data = {
@@ -154,22 +153,30 @@ def main(config):
   assert jax.numpy.allclose(
       maxtext_logits[0],
       trl_logits,
-      rtol=1e-05,
-      atol=0.06,
+      rtol=float(test_args.rtol),
+      atol=float(test_args.atol),
       equal_nan=False,
   )
 
   kl_div = get_kl_div(maxtext_logits, trl_logits)
   max_logging.log(f"KL divergence: {kl_div}, max KL divergence: {jnp.max(kl_div)}")
-  assert jax.numpy.all(kl_div < 7e-5)
+  assert jax.numpy.all(kl_div < float(test_args.kl_div))
+
+
+def get_argument_parser():
+  argument_parser = argparse.ArgumentParser()
+  argument_parser.add_argument("--model-name", type=str, required=True)
+  argument_parser.add_argument("--tokenizer-path", type=str, required=True)
+  argument_parser.add_argument("--model-ckpt-path", type=str, required=True)
+  argument_parser.add_argument("--max-target-length", type=int, required=False, default=64)
+  argument_parser.add_argument("--atol", type=float, required=True)
+  argument_parser.add_argument("--rtol", type=float, required=True)
+  argument_parser.add_argument("--kl-div", type=float, required=True)
+  return argument_parser
 
 
 if __name__ == "__main__":
-  parser = argparse.ArgumentParser()
-  parser.add_argument("--model-name", type=str, required=True)
-  parser.add_argument("--tokenizer-path", type=str, required=True)
-  parser.add_argument("--model-ckpt-path", type=str, required=True)
-  parser.add_argument("--max-target-length", type=int, required=False, default=64)
-  parser_config = parser.parse_args(sys.argv[1:])
-  config_initialized = initialize_config(parser_config)
-  main(config_initialized)
+  parser = get_argument_parser()
+  test_args = parser.parse_args(sys.argv[1:])
+  config = initialize_config(test_args)
+  main(config, test_args)

@@ -15,22 +15,21 @@ limitations under the License.
 """
 
 """ Tests for GPT3 """
-import os.path
 import sys
-import unittest
-
-import pytest
-
-from jax.sharding import Mesh
 import jax
-import jax.numpy as jnp
-
-from MaxText.constants import PKG_ROOT
+import unittest
+import os.path
+from MaxText import max_utils
+from MaxText.globals import PKG_DIR
+from jax.sharding import Mesh
 from MaxText.layers import models
 from MaxText.layers import embeddings
 from MaxText.layers import quantizations
-from MaxText import max_utils
+
+import jax.numpy as jnp
+
 from MaxText import pyconfig
+import pytest
 
 
 Mesh = jax.sharding.Mesh
@@ -64,7 +63,7 @@ class GPT3(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.cfg = pyconfig.initialize(
-        [sys.argv[0], os.path.join(PKG_ROOT, "configs", "base.yml")],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         run_name="test",
         enable_checkpointing=False,
         model_name="gpt3-52k",

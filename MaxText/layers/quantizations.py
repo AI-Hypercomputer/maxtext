@@ -17,27 +17,22 @@
 import functools
 import json
 import re
-from typing import Optional, Union
-from typing import Tuple, Sequence
-from dataclasses import dataclass
-
+from typing import Optional
 from aqt.jax.v2 import config as aqt_config
 from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2.flax import aqt_flax
 from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
-
-import jax
-import jax.numpy as jnp
-from jax.tree_util import tree_flatten_with_path, tree_unflatten
-
+from MaxText import common_types
+from dataclasses import dataclass
 from flax.linen import fp8_ops
 from flax.linen import initializers as flax_initializers
 import flax.linen as nn
-
+import jax
+import jax.numpy as jnp
+from jax.tree_util import tree_flatten_with_path, tree_unflatten
+from typing import Tuple, Sequence
 from MaxText.inference import kvcache
-from MaxText import common_types
-
 
 # Params used to define mixed precision quantization configs
 DEFAULT = "__default__"  # default config
@@ -64,9 +59,11 @@ class Quantization:
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Placeholder for dot_general implementation in subclasses."""
+    pass
 
   def einsum(self, dtype: DType = jnp.float32):
     """Placeholder for einsum implementation in subclasses."""
+    pass
 
 
 def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
@@ -98,7 +95,7 @@ def _rhs_axis_metadata_wrapper(
     # TODO: remove the replication once the 2d sharding quantization
     # works as expected.
     if len(x.shape) == 1:
-      return nn.with_logical_partitioning((lambda: x), tuple((None for _ in mesh_axes)))()
+      return nn.with_logical_partitioning((lambda: x), tuple([None for _ in mesh_axes]))()
 
   mesh_axes = list(mesh_axes)
   if is_tiled:
@@ -133,7 +130,6 @@ class AqtQuantization:
     is_tiled = False
     tiling_fn = None
     module_path = "/".join(nn.module._context.module_stack[-1].path)
-    tile_size = -1
     for layer_name_re, layer_quant_dg in self.quant_dg.items():
       if re.fullmatch(layer_name_re, module_path):
         quant_dg, tile_size = layer_quant_dg
@@ -208,7 +204,7 @@ class Fp8Quantization(Quantization):
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
-    return nn.Fp8DotGeneralOp
+    return nn.Fp8DirectDotGeneralOp
 
   def einsum(self, dtype: DType = jnp.float32):
     return Fp8Einsum(dtype=dtype)
@@ -309,7 +305,8 @@ def _get_int8_quant_config(config):
 
 
 def _get_aqt_fp8_quant_config(config):
-  return aqt_config.config_fwd_fp8()
+  cfg = aqt_config.config_v4(fwd_bits="e4m3", dlhs_bits=None, drhs_bits=None, fwd_accumulator_dtype=jnp.bfloat16)
+  return cfg
 
 
 def _dot_general_make(quant_cfg):
@@ -328,7 +325,7 @@ def _dot_general_make(quant_cfg):
 def _get_default_mp_config(default=None):
   default_config = {_W_BITS: None, _A_BITS: None, _W_SCALE: 1.0, _A_SCALE: 1.0, _TILE_SIZE: -1}
   if default:
-    for k in default_config:
+    for k in default_config.keys():
       default_config[k] = default.get(k, default_config[k])
   return default_config
 
@@ -340,10 +337,9 @@ def _get_mixed_precision_quant_config(mixed_precision_config):
   for layer_name_re, layer_quantization_config in mixed_precision_config.items():
     # Make a copy of default_mp_config to avoid updaing original dict
     quant_config = default_mp_config.copy()
-    # print(f"Mixed precision config: processing {layer_name_re} - {layer_quantization_config},
-    #       default config - {quant_config}")
+    # print(f"Mixed precision config: processing {layer_name_re} - {layer_quantization_config}, default config - {quant_config}")
     if layer_name_re != DEFAULT:
-      for k in quant_config:
+      for k in quant_config.keys():
         quant_config[k] = layer_quantization_config.get(k, default_mp_config[k])
     ret_config[layer_name_re] = [_dot_general_make(quant_config), quant_config["tile_size"]]
   return ret_config
@@ -357,7 +353,7 @@ def _get_quant_config(config):
     return _get_int8_quant_config(config)
   if config.quantization == "intmp":
     assert config.quant_cfg_path, "Must specify quant_cfg for mixed precision quantization"
-    with open(config.quant_cfg_path, "rt", encoding="utf8") as config_file:
+    with open(config.quant_cfg_path, "r") as config_file:
       mixed_precision_config = json.load(config_file)
     return _get_mixed_precision_quant_config(mixed_precision_config)
   if config.quantization == "fp8":
@@ -390,9 +386,7 @@ def get_quant_mode(quant_mode_str: str = "train"):
   return None
 
 
-def configure_quantization(
-    config: Config, quant_mode_str: str = "train"
-) -> Optional[Union[AqtQuantization, Fp8Quantization, NANOOFp8Quantization]]:
+def configure_quantization(config: Config, quant_mode_str: str = "train"):
   """Configure quantization based on user config and quant mode."""
   quant_cfg = _get_quant_config(config)
   if quant_cfg:
@@ -416,7 +410,6 @@ def match_aqt_and_unquantized_param(aqt_params, params):
   param_paths = []
 
   for aqt_k, _ in aqt_param_flat:
-    index = None
     for index, (k, _) in enumerate(param_tree_flat):
       path_depth = len(k)
       # every quantized parameter has AQT.. as the leaf node
@@ -427,8 +420,7 @@ def match_aqt_and_unquantized_param(aqt_params, params):
         param_paths.append(k)
         break
     # since the parameter is already added, we can delete it.
-    if index is not None:
-      param_tree_flat.pop(index)
+    param_tree_flat.pop(index)
   return jax.tree_util.tree_unflatten(aqt_tree_def, param_paths)
 
 

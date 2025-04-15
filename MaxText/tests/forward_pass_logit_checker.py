@@ -33,20 +33,25 @@ import argparse
 import sys
 import os
 
-from MaxText.constants import PKG_ROOT
+from MaxText.globals import PKG_DIR
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+maxtext_parent_dir = os.path.dirname(current_dir)
+sys.path.append(maxtext_parent_dir)
+
+from MaxText import max_logging
+
+max_logging.log(f"Added parent directory = {maxtext_parent_dir}")
 
 from MaxText import common_types
+import jax
+import jax.numpy as jnp
+import numpy as np
 from MaxText import pyconfig
+import jsonlines
 from MaxText import max_utils
 from MaxText.layers import models
 from MaxText.layers import quantizations
-from MaxText import max_logging
-
-import jax
-import jax.numpy as jnp
-import jax.experimental.multihost_utils
-import numpy as np
-import jsonlines
 
 import torch
 from transformers import AutoModelForCausalLM
@@ -90,7 +95,7 @@ def main(config, test_args):  # pylint: disable=W0621
     state, _ = max_utils.setup_decode_state(model, config, rng1, mesh, None)
 
   if test_args.golden_logits_path == "":
-    input_golden_data_path = os.path.join(PKG_ROOT, "test_assets", f"golden_data_{config.model_name}.jsonl")
+    input_golden_data_path = os.path.join(PKG_DIR, "test_assets", f"golden_data_{config.model_name}.jsonl")
   else:
     input_golden_data_path = test_args.golden_logits_path
   with jsonlines.open(input_golden_data_path, "r") as f:
@@ -101,7 +106,7 @@ def main(config, test_args):  # pylint: disable=W0621
 
     if test_args.hf_model_path != "":
       with torch.no_grad():
-        full_train_logits = model(torch.tensor(ids.tolist()), decoder_positions).logits.cpu().numpy().astype("float32")
+        full_train_logits = model(torch.tensor(ids.tolist())).logits.cpu().numpy().astype("float32")
     else:
       full_train_logits = model.apply(
           state.params,

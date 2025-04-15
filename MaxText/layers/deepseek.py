@@ -20,20 +20,21 @@ limitations under the License.
 
 
 from typing import Optional
-
+from MaxText.layers import quantizations
+from MaxText.layers import linears
+from MaxText.layers import moe
+from MaxText.layers import initializers
+import jax
 from jax.ad_checkpoint import checkpoint_name
-import jax.numpy as jnp
+from jax.sharding import Mesh
 from flax import linen as nn
-
+import jax.numpy as jnp
 from MaxText.layers import attentions
 from MaxText.layers import embeddings
 from MaxText.layers import normalizations
 from MaxText.layers import models
-from MaxText.layers import quantizations
-from MaxText.layers import linears
-from MaxText.layers import initializers
 from MaxText import common_types
-
+from MaxText import max_logging
 
 Array = common_types.Array
 Config = common_types.Config
@@ -150,6 +151,7 @@ class DeepSeekDenseLayer(nn.Module):
       model_mode,
       previous_chunk=None,
       page_state=None,
+      slot=None,
   ):
     cfg = self.config
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
@@ -199,6 +201,7 @@ class DeepSeekMoELayer(nn.Module):
       model_mode,
       previous_chunk=None,
       page_state=None,
+      slot=None,
   ):
     cfg = self.config
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
@@ -208,7 +211,7 @@ class DeepSeekMoELayer(nn.Module):
         inputs, self.config, self.mesh, self.quant, decoder_segment_ids, decoder_positions, deterministic, model_mode
     )
 
-    mlp_lnx = linears.DeepSeekMoeBlock(
+    mlp_lnx = moe.DeepSeekMoeBlock(
         config=cfg,
         mesh=self.mesh,
         kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),

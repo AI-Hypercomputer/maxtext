@@ -130,7 +130,6 @@ def get_process_loading_real_data(
 
 def make_mixed_iterator(config, mesh, process_indices_train, process_indices_eval, train_iterator_fn, eval_iterator_fn):
   """Return iterators according to dataset_type"""
-  # train_iterator, eval_iterator = make_tfds_iterator(config, mesh, process_indices_train, process_indices_eval)
   if jax.process_index() in process_indices_train:
     train_iterator = train_iterator_fn()
   else:
@@ -182,6 +181,7 @@ def create_data_iterator(config, mesh):
     train_iterator_fn = functools.partial(make_hf_train_iterator, config, mesh, process_indices_train)
     eval_iterator_fn = functools.partial(make_hf_eval_iterator, config, mesh, process_indices_eval)
   elif config.dataset_type == "c4_mlperf":
+    assert config.packing, "c4_mlperf dataloader only works with packing. For padded version, use tfds dataloader"
     train_iterator_fn = functools.partial(make_c4_mlperf_train_iterator, config, mesh, process_indices_train)
     eval_iterator_fn = functools.partial(make_c4_mlperf_eval_iterator, config, mesh, process_indices_eval)
   else:

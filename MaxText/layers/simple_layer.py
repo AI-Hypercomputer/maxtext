@@ -13,14 +13,10 @@ limitations under the License.
 
 """ Simple decoder layers for testing and debugging purposes."""
 
-from typing import Optional
-
 from jax import numpy as jnp
-from jax.sharding import Mesh
-
 from flax import linen as nn
-from flax.linen import LogicallyPartitioned
-
+from jax.sharding import Mesh
+from typing import Optional
 from MaxText.layers import quantizations
 from MaxText import common_types
 
@@ -32,7 +28,6 @@ class SimpleDecoderLayer(nn.Module):
 
   config: common_types.Config
   mesh: Mesh
-  weight_mat: LogicallyPartitioned
   quant: Optional[quantizations.AqtQuantization] = None
 
   def setup(self):
@@ -56,8 +51,6 @@ class SimpleMlpDecoderLayer(nn.Module):
 
   config: common_types.Config
   mesh: Mesh
-  ff_1: LogicallyPartitioned
-  ff_2: LogicallyPartitioned
   quant: Optional[quantizations.AqtQuantization] = None
 
   def setup(self):
@@ -73,7 +66,15 @@ class SimpleMlpDecoderLayer(nn.Module):
     )
 
   def __call__(
-      self, inputs: jnp.ndarray, positions, segmentation, deterministic, model_mode, previous_chunk=None, page_state=None
+      self,
+      inputs: jnp.ndarray,
+      positions,
+      segmentation,
+      deterministic,
+      model_mode,
+      previous_chunk=None,
+      page_state=None,
+      slot=0,
   ):
     intermediate = inputs @ self.ff_1.astype(inputs.dtype)
     output = intermediate @ self.ff_2.astype(inputs.dtype)

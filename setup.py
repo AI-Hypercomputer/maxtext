@@ -1,58 +1,38 @@
 # -*- coding: utf-8 -*-
+"""
+Copyright 2025 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+  https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+"""
 
 """
 setup.py implementation, interesting because it parsed the first __init__.py and
     extracts the `__author__` and `__version__`
 """
 
-import sys
-from ast import Assign, Name, parse
-from functools import partial
-from itertools import chain
+from ast import Assign, Constant, Name, parse
 from operator import attrgetter
-from os import listdir, path
+from os import path
 from os.path import extsep
 
 from setuptools import find_packages, setup
 
-if sys.version_info[:2] >= (3, 12):
-    from ast import Del as Str
-else:
-    from ast import Str
-
-    if sys.version_info[0] == 2:
-        from itertools import ifilter as filter
-        from itertools import imap as map
-
-if sys.version_info[:2] > (3, 7):
-    from ast import Constant
-else:
-    from ast import expr
-
-    # Constant. Will never be used in Python =< 3.8
-    Constant = type("Constant", (expr,), {})
-
-
-package_name_verbatim = "MaxText"
-package_name = package_name_verbatim.replace("-", "_")
+package_name = "MaxText"
 
 with open(
-    path.join(path.dirname(__file__), "README{extsep}md".format(extsep=extsep)), "rt"
+    path.join(path.dirname(__file__), f"README{extsep}md"), "rt"
 ) as fh:
     long_description = fh.read()
-
-
-def gen_join_on_pkg_name(*paths):
-    """
-    Create a function that joins on `os.path.join` from the package name onward
-
-    :param paths: one or more str, referring to relative folder names
-    :type paths: ```*paths```
-
-    :return: function that joins on `os.path.join` from the package name onward
-    :rtype: ```Callable[tuple[str, ...], str]```
-    """
-    return partial(path.join, path.dirname(__file__), package_name, *paths)
 
 
 def main():
@@ -61,7 +41,7 @@ def main():
         path.join(
             path.abspath(path.dirname(__file__)),
             package_name,
-            "__init__{extsep}py".format(extsep=extsep),
+            f"__init__{extsep}py",
         )
     ) as f:
         parsed_init = parse(f.read())
@@ -69,7 +49,7 @@ def main():
     __author__, __version__, __description__ = map(
         lambda node: node.value if isinstance(node, Constant) else node.s,
         filter(
-            lambda node: isinstance(node, (Constant, Str)),
+            lambda node: isinstance(node, Constant),
             map(
                 attrgetter("value"),
                 filter(
@@ -91,7 +71,7 @@ def main():
     )
 
     setup(
-        name=package_name_verbatim,
+        name=package_name,
         author=__author__,
         version=__version__,
         url="https://github.com/AI-Hypercomputer/maxtext",
@@ -101,15 +81,17 @@ def main():
         classifiers=[
             "Intended Audience :: Developers",
             "License :: OSI Approved :: Apache Software License",
+            "Programming Language :: Python :: 3 :: Only",
             "Programming Language :: Python :: 3.10",
             "Programming Language :: Python :: 3.11",
             "Programming Language :: Python :: 3.12",
             "Programming Language :: Python :: 3.13",
+            "Programming Language :: ML"
         ],
         license="Apache-2.0",
         license_files=["LICENSE"],
         install_requires=[],
-        test_suite="{}{}tests".format(package_name, path.extsep),
+        test_suite=f"{package_name}{path.extsep}tests",
         packages=find_packages()
     )
 

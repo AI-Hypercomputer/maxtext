@@ -14,25 +14,26 @@ limitations under the License.
 """
 
 """ Smoke test for inference microbenchmark"""
+import os.path
+from MaxText import pyconfig
+from MaxText.globals import PKG_DIR
 import pytest
 import unittest
-import os.path
 from absl.testing import absltest
-
-from MaxText import pyconfig
-from MaxText.constants import PKG_ROOT
 from MaxText.inference_microbenchmark import run_benchmarks
+from MaxText.tests.globals import TEST_DISABLE_SUBPROCESS_STR, TEST_DISABLE_SUBPROCESS
 
 
 class Inference_Microbenchmark(unittest.TestCase):
 
   @pytest.mark.tpu_only
+  @pytest.mark.skipif(TEST_DISABLE_SUBPROCESS, reason=TEST_DISABLE_SUBPROCESS_STR)
   def test(self):
     config = pyconfig.initialize(
         [
             None,
-            os.path.join(PKG_ROOT, "configs", "tpu_smoke_test.yml"),
-            f"tokenizer_path={os.path.join(os.path.dirname(PKG_ROOT), 'assets', 'tokenizer.llama2')}",
+            os.path.join(PKG_DIR, "configs", "tpu_smoke_test.yml"),
+            rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
             "ici_autoregressive_parallelism=-1",
             "ici_fsdp_parallelism=1",
             "max_prefill_predict_length=1024",

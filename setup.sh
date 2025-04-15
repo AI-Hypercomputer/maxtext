@@ -42,6 +42,9 @@ apt update -y && apt -y install gcsfuse
 rm -rf /var/lib/apt/lists/*
 EOF
 
+# We need to pin specific versions of setuptools, see b/402501203 for more.
+python3 -m pip install setuptools==65.5.0 wheel==0.45.1
+
 # Set environment variables
 for ARGUMENT in "$@"; do
     IFS='=' read -r KEY VALUE <<< "$ARGUMENT"
@@ -88,7 +91,7 @@ fi
 run_name_folder_path=$(pwd)
 
 # Install dependencies from requirements.txt
-python3 -m pip install --upgrade pip
+cd "$run_name_folder_path" && python3 -m pip install --upgrade pip
 if [[ "$MODE" == "pinned" ]]; then
     python3 -m pip install --no-cache-dir -U -r requirements.txt -c constraints_gpu.txt
 else

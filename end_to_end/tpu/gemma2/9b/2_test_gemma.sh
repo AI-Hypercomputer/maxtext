@@ -17,7 +17,7 @@
 set -ex
 export MODEL_VARIATION='9b'
 
-# Installing torch for deps in forward_pass_logit_chekcker.py
+# Installing torch for deps in forward_pass_logit_checker.py
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 if [ -z "${BASE_OUTPUT_PATH}" ]; then
@@ -47,4 +47,4 @@ python3 -m MaxText.decode MaxText/configs/base.yml tokenizer_path=assets/tokeniz
 
 # We also test whether the forward pass logits match the golden logits for Gemma2-9b
 # to get higher precision (eg. float32) run on CPU with `JAX_PLATFORMS=cpu`
-python3 -m MaxText.tests.forward_pass_logit_checker  MaxText/configs/base.yml tokenizer_path=assets/tokenizer.gemma load_parameters_path=${UNSCANNED_CKPT_PATH} run_name=forward_pass_test_gemma2_9b per_device_batch_size=1 model_name=gemma2-9b max_prefill_predict_length=4 max_target_length=4 dataset_type=synthetic scan_layers=false dtype='float32' --atol=1.0 --rtol=1.0 --max_kl_div=0.15
+python3 -m MaxText.tests.forward_pass_logit_checker MaxText/configs/base.yml tokenizer_path=assets/tokenizer.gemma load_parameters_path=${UNSCANNED_CKPT_PATH} run_name=forward_pass_test_gemma2_9b per_device_batch_size=1 model_name=gemma2-9b max_prefill_predict_length=4 max_target_length=4 dataset_type=synthetic scan_layers=false dtype='float32' --atol=1.0 --rtol=1.0 --max_kl_div=0.15

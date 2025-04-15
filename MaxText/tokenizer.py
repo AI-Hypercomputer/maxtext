@@ -24,6 +24,7 @@ from MaxText import max_logging
 import transformers
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
+from sentencepiece import SentencePieceProcessor
 
 
 Features = Dict[str, tf.Tensor]
@@ -185,7 +186,7 @@ class TikTokenTokenizer:
 
 class SentencePieceTokenizer:
   """
-  Tokenizing and encoding/decoding text using the Sentencepiece tokenizer.
+  Tokenizing and encoding/decoding text using the Sentencepiece tokenizer loaded with tensorflow_text
   """
 
   def __init__(self, model_path: str, add_bos: bool, add_eos: bool):
@@ -193,12 +194,42 @@ class SentencePieceTokenizer:
     with tf.io.gfile.GFile(model_path, "rb") as model_fp:
       sp_model = model_fp.read()
     self.sp_tokenizer = tftxt.SentencepieceTokenizer(model=sp_model, add_bos=add_bos, add_eos=add_eos, reverse=False)
+    self.pad_id = self.sp_tokenizer.string_to_id("<pad>")
+    self.unk_id = self.sp_tokenizer.string_to_id("<unk>")
 
   def encode(self, s: str) -> List[int]:
     return self.sp_tokenizer.tokenize(s)
 
   def decode(self, t: Sequence[int]) -> str:
     return self.sp_tokenizer.detokenize(t)
+
+
+class SentencePieceTokenizerGrain:
+  """
+  Tokenizing and encoding/decoding text using the Sentencepiece tokenizer loaded with sentencepiece
+  """
+
+  def __init__(self, model_path: str, add_bos: bool, add_eos: bool):
+    max_logging.log(f"Loading sentencepiece tokenizer: {model_path}")
+    self._tokenizer_model = SentencePieceProcessor()
+    self._tokenizer_model.Load(model_path)
+    self.pad_id = self._tokenizer_model.pad_id()
+    self.unk_id = self._tokenizer_model.unk_id()
+    self.bos_id = self._tokenizer_model.bos_id()
+    self.eos_id = self._tokenizer_model.eos_id()
+    self.add_bos = add_bos
+    self.add_eos = add_eos
+
+  def encode(self, s: str) -> List[int]:
+    token_ids = self._tokenizer_model.EncodeAsIds(s)
+    if self.add_bos:
+      token_ids = [self.bos_id] + token_ids
+    if self.add_eos:
+      token_ids += [self.eos_id]
+    return token_ids
+
+  def decode(self, t: Sequence[int]) -> str:
+    return self._tokenizer_model.DecodeIds(t)
 
 
 class HFTokenizer:
@@ -214,6 +245,10 @@ class HFTokenizer:
         add_eos_token=add_eos,
         token=hf_access_token,
     )
+    self.pad_id = self.tokenizer.pad_token_id
+    self.unk_id = self.tokenizer.unk_token_id
+    self.bos_id = self.tokenizer.bos_token_id
+    self.eos_id = self.tokenizer.eos_token_id
 
   def encode(self, s: str) -> List[int]:
     return self.tokenizer.encode(s)
@@ -222,7 +257,7 @@ class HFTokenizer:
     return self.tokenizer.decode(t)
 
 
-def build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token):
+def build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token, dataset_type):
   """Loads the tokenizer at `tokenizer_path`"""
   max_logging.log(f"Tokenizer path: {tokenizer_path}")
   if tokenizer_type == "tiktoken":
@@ -231,7 +266,10 @@ def build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_
   elif tokenizer_type == "huggingface":
     return HFTokenizer(tokenizer_path, add_bos, add_eos, hf_access_token)
   elif tokenizer_type == "sentencepiece":
-    return SentencePieceTokenizer(tokenizer_path, add_bos, add_eos)
+    if dataset_type == "tfds":
+      return SentencePieceTokenizer(tokenizer_path, add_bos, add_eos)
+    else:
+      return SentencePieceTokenizerGrain(tokenizer_path, add_bos, add_eos)
   else:
     raise ValueError(f"Invalid tokenizer_type:{tokenizer_type} chosen in config")
 

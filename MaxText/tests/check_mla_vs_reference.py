@@ -15,16 +15,13 @@ limitations under the License.
 """
 
 """ Tests for DeepSeek """
-
 import math
-import unittest
-
 import torch
 import jax
+import unittest
 import jax.numpy as jnp
-import numpy as np
-
 from MaxText.layers import embeddings
+import numpy as np
 
 
 """  

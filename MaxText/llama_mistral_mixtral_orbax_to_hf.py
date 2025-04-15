@@ -32,22 +32,19 @@ Note that we are saving the converted HuggingFace model to a local path. You can
 the GCS bucket as a local path using `setup_gcsfuse.sh`, but remember to mount as read+write.
 """
 
-from typing import Sequence, Any, Tuple, Union
-
+from typing import Sequence
 import torch
 from tqdm import tqdm
 from absl import app
 import numpy as np
-from jax.sharding import Mesh
-
-from transformers import LlamaForCausalLM, MistralForCausalLM, AutoModelForCausalLM, AutoConfig
-
 from MaxText import pyconfig
 from MaxText import max_utils
+from jax.sharding import Mesh
 from MaxText import max_logging
 from MaxText import checkpointing
 from MaxText.generate_param_only_checkpoint import _read_train_checkpoint
 from MaxText import llama_or_mistral_ckpt
+from transformers import LlamaForCausalLM, MistralForCausalLM, AutoModelForCausalLM, AutoConfig
 from MaxText.max_utils import unpermute_from_match_maxtext_rope
 
 
@@ -249,7 +246,7 @@ def convert_orbax_hf(hf_model_path, config):
   hf_model.save_pretrained(hf_model_path, state_dict=new_hf_model_params)
 
 
-def main(argv: Union[Sequence[str], Tuple[Any, ...]]):
+def main(argv: Sequence[str]):
   config = pyconfig.initialize(argv[:-1])
   hf_model_path = argv[-1].split("=")[1]
   print(f"Will save converted HuggingFace checkpoint to path = {hf_model_path}")
