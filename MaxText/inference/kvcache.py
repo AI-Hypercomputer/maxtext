@@ -356,16 +356,42 @@ class KVCache(nn.Module):
     value_vars = (cached_value_var, cached_value_scale_var)
     return key_vars, value_vars, cached_segment_id_var, cache_index_var, cached_lengths_var
 
-  def kv_cache_prefill_concatenated(self, key: Array, value: Array, decoder_segment_ids: Array, previous_chunk: Any):
-    """Return KV cache concatenating to existing prefix."""
+  def kv_cache_chunked_prefill(
+      self, key: Array, value: Array, decoder_segment_ids: Array, previous_chunk: Optional[Array] = None
+  ):
+    """Update the current kv cache into previous chunk and return needed length.
+
+    The previous chunk kv cache should be in the model's param.
+
+    Prefill cache need to be max prefill length to prevent different shape of kv cache.
+    Different shape of kv cache in previous chunk could produce different compiled graph.
+
+    Args:
+      key: in shape [b, s, n, d].
+      value: in shape [b, s, n, d].
+      decoder_segment_ids: [b, s] -- marking segment ids for tokens
+      previous_chunk:
+        In shape [b, s]. The tokens without padding in previous chunk.
+        Use to preserve the previous kv cache.
+
+    Returns:
+      key, value, decoder_segment_id.
+    """
 
     assert not self.kv_quant, "Not support kv_quant now."
-    batch, _, key_heads, key_head_size = key.shape
-    batch, _, value_heads, value_head_size = value.shape
+    batch, key_seq_len, key_heads, key_head_size = key.shape
+    batch, value_seq_len, value_heads, value_head_size = value.shape
+    if decoder_segment_ids is not None:
+      batch, segment_id_seq_len = decoder_segment_ids.shape
+      assert key_seq_len == segment_id_seq_len, f"{key_seq_len=}, {segment_id_seq_len=} should match."
 
     assert key.dtype == value.dtype, "Key and Value Dtypes should match."
+    assert key_seq_len == value_seq_len, f"{key_seq_len=}, {value_seq_len=} should match."
 
-    assert previous_chunk is not None
+    next_pos = 0
+    if previous_chunk is not None:
+      # We only have 1 prompt in prefill mode.
+      next_pos = previous_chunk.shape[1]
 
     cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
         batch, key_heads, value_heads, key_head_size, value_head_size, common_types.MODEL_MODE_PREFILL
@@ -378,7 +404,7 @@ class KVCache(nn.Module):
     key_shaped_for_cache = jnp.transpose(key, self.prefill_cache_axis_order)
     value_shaped_for_cache = jnp.transpose(value, self.prefill_cache_axis_order)
 
-    next_pos = previous_chunk.shape[1]
+    # For quantized kv cached. Could be get without transpose twice.
     cached_key = self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order)
     cached_value = self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order)
     cached_key_value = jnp.transpose(cached_key, self.prefill_cache_axis_order)
@@ -387,26 +413,48 @@ class KVCache(nn.Module):
     seq_axis = self.prefill_cache_logical_axis_names.index(CACHE_SEQUENCE)
     cache_seq_axis = self.prefill_cache_axis_order.index(seq_axis)
 
-    cached_prefill_key_vars[0].value = jnp.concatenate(
-        [cached_key_value[:next_pos], key_shaped_for_cache],
-        axis=cache_seq_axis,
+    assert next_pos + key_shaped_for_cache.shape[cache_seq_axis] <= self.max_prefill_length, (
+        f"Previous kv cache[{next_pos}] + "
+        f"current kv cache[{key_shaped_for_cache.shape[cache_seq_axis]}] "
+        f"> max length[{self.max_prefill_length}]"
     )
 
-    cached_prefill_value_vars[0].value = jnp.concatenate(
-        [cached_value_value[:next_pos], value_shaped_for_cache],
-        axis=cache_seq_axis,
+    # We don't zero out remain values. Use segment id to mask out.
+    cached_prefill_key_vars[0].value = jax.lax.dynamic_update_slice_in_dim(
+        cached_key_value, key_shaped_for_cache, next_pos, cache_seq_axis
+    )
+    cached_prefill_value_vars[0].value = jax.lax.dynamic_update_slice_in_dim(
+        cached_value_value, value_shaped_for_cache, next_pos, cache_seq_axis
     )
 
     if decoder_segment_ids is not None:
-      cached_prefill_segment_id_var.value = jnp.concatenate(
-          [cached_prefill_segment_id_var.value[:, :next_pos], decoder_segment_ids],
-          axis=1,
+      # Need zero out the remain values to prevent wrong mask in autoregressive.
+      previous_segment_id = cached_prefill_segment_id_var.value[:, :next_pos]
+      cached_prefill_segment_id_var.value = jnp.zeros_like(cached_prefill_segment_id_var.value, dtype=jnp.int32)
+      cached_prefill_segment_id_var.value = jax.lax.dynamic_update_slice_in_dim(
+          cached_prefill_segment_id_var.value, previous_segment_id, start_index=0, axis=1
+      )
+      cached_prefill_segment_id_var.value = jax.lax.dynamic_update_slice_in_dim(
+          cached_prefill_segment_id_var.value, decoder_segment_ids, next_pos, axis=1
+      )
+
+    # Return needed kv cache to reduce computation of attention.
+    needed_prefill_key_value = jax.lax.dynamic_slice_in_dim(
+        cached_prefill_key_vars[0].value, start_index=0, slice_size=(next_pos + key_seq_len), axis=cache_seq_axis
+    )
+    needed_prefill_value_value = jax.lax.dynamic_slice_in_dim(
+        cached_prefill_value_vars[0].value, start_index=0, slice_size=(next_pos + value_seq_len), axis=cache_seq_axis
+    )
+    needed_segment_id = None
+    if decoder_segment_ids is not None:
+      needed_segment_id = jax.lax.dynamic_slice_in_dim(
+          cached_prefill_segment_id_var.value, start_index=0, slice_size=(next_pos + segment_id_seq_len), axis=1
       )
 
     return (
-        jnp.transpose(cached_prefill_key_vars[0].value, self.key_axis_order),
-        jnp.transpose(cached_prefill_value_vars[0].value, self.key_axis_order),
-        cached_prefill_segment_id_var.value if decoder_segment_ids is not None else None,
+        jnp.transpose(needed_prefill_key_value, self.key_axis_order),
+        jnp.transpose(needed_prefill_value_value, self.key_axis_order),
+        needed_segment_id,
     )
 
   def kv_cache_prefill(
@@ -414,7 +462,6 @@ class KVCache(nn.Module):
       key: Array,
       value: Array,
       decoder_segment_ids: Array,
-      previous_chunk: Any = None,
   ):
     """In prefill mode, we zero out the existing cache, run the computation and
     prepare the cache as necessary.
@@ -428,8 +475,6 @@ class KVCache(nn.Module):
       key, value, decoder_segment_id.
 
     """
-    if previous_chunk is not None:
-      return self.kv_cache_prefill_concatenated(key, value, decoder_segment_ids, previous_chunk)
 
     batch, _, key_heads, key_head_size = key.shape
     batch, _, value_heads, value_head_size = value.shape
@@ -667,7 +712,10 @@ class KVCache(nn.Module):
 
     """
     if model_mode == common_types.MODEL_MODE_PREFILL:
-      return self.kv_cache_prefill(key, value, decoder_segment_ids, previous_chunk), None
+      if self.use_chunked_prefill:
+        return self.kv_cache_chunked_prefill(key, value, decoder_segment_ids, previous_chunk), None
+      else:
+        return self.kv_cache_prefill(key, value, decoder_segment_ids), None
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       return self.kv_cache_autoregressive(key, value, use_ragged_attention)
     else:
