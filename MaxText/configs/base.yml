@@ -677,3 +677,5 @@ enable_padding_causal_mask: True
 use_qk_norm: False
 # Every `X` layers will NOT use RoPE
 nope_layer_interval: -1
+# Every `X` layers is MoE layer 
+interleave_moe_layer_step: 1

@@ -521,7 +521,10 @@ class Decoder(nn.Module):
             if cfg.decoder_block == "llama4":
               from MaxText.layers import llama4
 
-              layer_kwargs = {"is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval)}
+              layer_kwargs = {
+                  "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
+                  "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
+              }
             layer = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, **layer_kwargs)
             y = layer(
                 y,

@@ -133,6 +133,19 @@ MODEL_PARAMS_DICT = {
         "num_experts": 16,
         "rope_type": "llama3.1",
         "scale_query": False,
+        "interleave_moe_layer_step": 1,
+    },
+    "llama4-17b-128e": {
+        "num_layers": 48,
+        "num_heads": 40,
+        "num_kv_heads": 8,
+        "dims_per_head": 128,
+        "vocab": 202048,
+        "base_emb_dim": 5120,
+        "num_experts": 128,
+        "rope_type": "default",
+        "scale_query": False,
+        "interleave_moe_layer_step": 2,
     },
     "mistral-7b": {
         "num_layers": 32,
@@ -1419,6 +1432,10 @@ if __name__ == "__main__":
 
   if args.model_size not in MODEL_PARAMS_DICT:
     raise NotImplementedError
+
+  llama4_17b_128e = "llama4-17b-128e"
+  if args.model_size == llama4_17b_128e:
+    raise NotImplementedError(f"Currenlty, model {llama4_17b_128e} only supports unscanned ckpt conversion.")
 
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={SIMULATED_CPU_DEVICES_COUNT}"
   base_weights_path = args.maxtext_model_path
