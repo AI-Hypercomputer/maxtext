@@ -99,15 +99,6 @@ def _incoming_ckpt_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1,
       f"layers.{layer_idx}.feed_forward.w1.weight": f"model.layers.{layer_idx}.mlp.gate_proj.weight",
       f"layers.{layer_idx}.feed_forward.w2.weight": f"model.layers.{layer_idx}.mlp.down_proj.weight",
       f"layers.{layer_idx}.feed_forward.w3.weight": f"model.layers.{layer_idx}.mlp.up_proj.weight",
-      # LoRA Adapter
-      f"layers.{layer_idx}.attention.wq.lora_A.weights": f"base_model.model.model.layers.{layer_idx}.self_attn.q_proj.lora_A.weight",
-      f"layers.{layer_idx}.attention.wq.lora_B.weights": f"base_model.model.model.layers.{layer_idx}.self_attn.q_proj.lora_B.weight",
-      f"layers.{layer_idx}.attention.wk.lora_A.weights": f"base_model.model.model.layers.{layer_idx}.self_attn.k_proj.lora_A.weight",
-      f"layers.{layer_idx}.attention.wk.lora_B.weights": f"base_model.model.model.layers.{layer_idx}.self_attn.k_proj.lora_B.weight",
-      f"layers.{layer_idx}.attention.wv.lora_A.weights": f"base_model.model.model.layers.{layer_idx}.self_attn.v_proj.lora_A.weight",
-      f"layers.{layer_idx}.attention.wv.lora_B.weights": f"base_model.model.model.layers.{layer_idx}.self_attn.v_proj.lora_B.weight",
-      f"layers.{layer_idx}.attention.wo.lora_A.weights": f"base_model.model.model.layers.{layer_idx}.self_attn.o_proj.lora_A.weight",
-      f"layers.{layer_idx}.attention.wo.lora_B.weights": f"base_model.model.model.layers.{layer_idx}.self_attn.o_proj.lora_B.weight",
   }
 
   if model_size.startswith("llama4"):
@@ -168,6 +159,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
   head_dim = model_params["dims_per_head"]
   base_num_kv_heads = model_params["num_kv_heads"]
   vocab_size = model_params["vocab"]
+  interleave_moe_layer = model_params["interleave_moe_layer_step"]
   num_experts = model_params["num_experts"] if "num_experts" in model_params else None
   rope_type = model_params.get("rope_type")
   scale_query = model_params.get("scale_query", True)
@@ -234,10 +226,17 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
 
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
     layer_name = f"layers_{layer_idx}"
-    jax_weights["decoder"].update(
-        {
-            layer_name: {
-                "DeepSeekMoeBlock_0": {
+    is_dense_layer = (layer_idx+1) % interleave_moe_layer != 0
+    if is_dense_layer:
+        mlp_dict = {
+                    "mlp":{
+        "wi_0": {"kernel": None},
+        "wi_1": {"kernel": None},
+        "wo": {"kernel": None},
+                    },
+        }
+    else:
+      mlp_dict = {"DeepSeekMoeBlock_0": {
                     "MoeBlock_0": {
                         "wi_0": None,
                         "wi_1": None,
@@ -249,7 +248,12 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
                         "wi_1": {"kernel": None},
                         "wo": {"kernel": None},
                     },
-                },
+                },}
+
+    jax_weights["decoder"].update(
+        {
+            layer_name: {
+                mlp_dict,
                 "self_attention": {
                     "query": {"kernel": None},
                     "key": {"kernel": None},
@@ -382,11 +386,9 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
   max_logging.log("Processing layer weights")
 
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
-    # TODO: get rid of layer_weight support for the `num_experts is None` branch
     layer_name = f"layers_{layer_idx}"
-    if num_experts is None:
-      if is_llama4_model:
-        raise NotImplementedError("Non-MoE model conversion logic for Llama4 is not yet supported!")
+    is_dense_layer = (layer_idx+1) % interleave_moe_layer != 0
+    if is_dense_layer:
       wi_0 = np.concatenate(
           [
               var[f"layers.{layer_idx}.feed_forward.w1.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
@@ -408,17 +410,11 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
           ],
           axis=1,
       ).transpose()
-      if layer_weight["mlp"]["wi_0"]["kernel"] is None:
-        stack_shape = (base_num_decoder_layers,)
-        layer_weight["mlp"]["wi_0"]["kernel"] = np.zeros(stack_shape + wi_0.shape, dtype=CAST_DTYPE)
-        layer_weight["mlp"]["wi_1"]["kernel"] = np.zeros(stack_shape + wi_1.shape, dtype=CAST_DTYPE)
-        layer_weight["mlp"]["wo"]["kernel"] = np.zeros(stack_shape + wo.shape, dtype=CAST_DTYPE)
 
-      layer_weight["mlp"]["wi_0"]["kernel"][layer_idx, ...] = wi_0  # pytype: disable=unsupported-operands
-      layer_weight["mlp"]["wi_1"]["kernel"][layer_idx, ...] = wi_1  # pytype: disable=unsupported-operands
-      layer_weight["mlp"]["wo"]["kernel"][layer_idx, ...] = wo  # pytype: disable=unsupported-operands
+      jax_weights["decoder"][layer_name]["mlp"]["wi_0"]["kernel"] = wi_0
+      jax_weights["decoder"][layer_name]["mlp"]["wi_1"]["kernel"] = wi_1
+      jax_weights["decoder"][layer_name]["mlp"]["wo"]["kernel"] = wo
     else:
-
       gate = chkpt_vars[0][f"layers.{layer_idx}.feed_forward.router_DE"].type(torch.float32).numpy().astype(CAST_DTYPE)
       jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["gate"]["kernel"] = gate
       base_emb_dim = model_params["base_emb_dim"]

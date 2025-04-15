@@ -139,6 +139,7 @@ megablox: True
 sparse_matmul: True
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
 load_balance_loss_weight: 0.01 # weight for the load balance loss
+interleave_moe_layer_step: 1 # every X layer is MoE layer 
 
 # deepseek moe
 base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer (use base_mlp_dim if not DeepSeek style)

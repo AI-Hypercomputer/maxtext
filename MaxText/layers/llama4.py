@@ -26,6 +26,7 @@ from MaxText.layers import attentions
 from MaxText.layers import embeddings
 from MaxText.layers import initializers
 from MaxText.layers import moe
+from MaxText.layers import linears
 from MaxText.layers import normalizations
 from MaxText.layers import models
 from MaxText.layers import quantizations
@@ -68,6 +69,28 @@ def determine_is_nope_layer(layer_id: int, nope_layer_interval: int) -> bool:
     True if the layer should use NoPE, False otherwise.
   """
   return nope_layer_interval is not None and nope_layer_interval > 0 and (layer_id + 1) % nope_layer_interval == 0
+
+
+def determine_is_moe_layer(layer_id: int, interleave_moe_layer_step: int) -> bool:
+  """
+  Determines whether the given layer at `layer_id` is MoE layer.
+
+  This function implements a striding pattern. For example:
+  - If moe_layer_stride is 1, all layers are MoE layers.
+  - If moe_layer_stride is 2, layers with index 1, 3, 5, ... are MoE layers.
+
+  Args:
+    layer_id: The 0-based index of the layer being checked.
+    interleave_moe_layer_step: The interval or stride for placing MoE layers.
+
+  Returns:
+    True if the layer is MoE layer, False otherwise.
+  """
+  return (
+      interleave_moe_layer_step is not None
+      and interleave_moe_layer_step > 0
+      and (layer_id + 1) % interleave_moe_layer_step == 0
+  )
 
 
 # -----------------------------------------
@@ -184,15 +207,27 @@ class Llama4DecoderLayer(nn.Module):
     )
 
     load_balance_loss = None
-    mlp_lnx = moe.DeepSeekMoeBlock(
-        config=cfg,
-        mesh=self.mesh,
-        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
-        kernel_axes=("embed", None),
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        quant=self.quant,
-    )(hidden_states)
+    if self.is_moe_layer:
+      mlp_lnx = moe.DeepSeekMoeBlock(
+          config=cfg,
+          mesh=self.mesh,
+          kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", None),
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          quant=self.quant,
+      )(hidden_states)
+    else:
+      mlp_lnx = linears.MlpBlock(
+          intermediate_dim=cfg.mlp_dim,
+          activations=cfg.mlp_activations,
+          intermediate_dropout_rate=cfg.dropout_rate,
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          name="mlp",
+          config=cfg,
+          quant=self.quant,
+      )(hidden_states, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
     layer_output = mlp_lnx + intermediate_inputs
