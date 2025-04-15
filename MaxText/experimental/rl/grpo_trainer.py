@@ -22,7 +22,6 @@ updating policy gradients based on reward functions
 """
 
 
-from collections import defaultdict
 import datetime
 import os
 import sys
@@ -117,7 +116,8 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 
   This function performs the following steps:
 
-    1. Compute the per-token log-probabilities for the full sequence (prompt + completion) both with the current model (policy) and the reference model.
+    1. Compute the per-token log-probabilities for the full sequence (prompt + completion) both with
+         the current model (policy) and the reference model.
     2. Compute a per-token KL divergence:
          kl = exp(ref_logp - policy_logp) - (ref_logp - policy_logp) - 1.
     3. Compute a scalar reward for each generated completion via reward_fn.
@@ -344,9 +344,7 @@ def concatenate_prompt_with_completions(config, tokenizer_model, prompts, true_l
 
     return full_seq, eos_index
 
-  batched_concat_and_eos = jax.vmap(
-      lambda prompt, true_len, completion: _concat_and_find_eos(prompt, true_len, completion), in_axes=(0, 0, 0)
-  )
+  batched_concat_and_eos = jax.vmap(_concat_and_find_eos, in_axes=(0, 0, 0))
   prompts = jnp.repeat(prompts, config.num_generations, axis=0)
   true_length = jnp.repeat(true_length, config.num_generations, axis=0)
   prompt_completions, eos_positions = batched_concat_and_eos(prompts, true_length, completions)
@@ -371,7 +369,7 @@ def generate_completions(config, tokenizer_model, engine, data, params, rng):
   """
   # decimate proportion of data when per_device_batch_size<1
   for k, v in data.items():
-    assert v.ndim == 1 or v.ndim == 2, f"Invalid {v.shape=} found for key={k}"
+    assert v.ndim in (1, 2), f"Invalid {v.shape=} found for key={k}"
     if v.ndim == 2:
       data[k] = v[: config.micro_batch_size_to_train_on, :]
     else:
