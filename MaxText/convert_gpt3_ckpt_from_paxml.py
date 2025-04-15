@@ -56,6 +56,7 @@ from MaxText.layers.models import Transformer
 from MaxText.layers import quantizations
 from MaxText import checkpointing
 
+
 def fmt_size(num_bytes: int) -> str:
   assert num_bytes > 0
   for unit in ["B", "KiB", "MiB", "GiB"]:

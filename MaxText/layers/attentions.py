@@ -363,10 +363,8 @@ class AttentionOp(nn.Module):
         raise NotImplementedError(platform)
       return impl(query, key, value, lengths, self.ragged_block_size)
 
-    elif (
-        self.attention_kernel in ("dot_product", "paged")
-        or (self.attention_kernel == "autoselected" and (
-            model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE or length < 128))
+    elif self.attention_kernel in ("dot_product", "paged") or (
+        self.attention_kernel == "autoselected" and (model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE or length < 128)
     ):
       return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode, previous_chunk)
     elif self.attention_kernel in ("flash", "autoselected"):
@@ -626,7 +624,7 @@ class AttentionOp(nn.Module):
 
     _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
 
-    using_context_parallelism = self.mesh.shape['context'] > 1
+    using_context_parallelism = self.mesh.shape["context"] > 1
 
     if self.attention_type == AttentionType.LOCAL_SLIDING and using_context_parallelism:
       raise AssertionError("Sliding window attention is not supported when context parallelism is enabled")

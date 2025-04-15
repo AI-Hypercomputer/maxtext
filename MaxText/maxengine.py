@@ -1400,21 +1400,24 @@ def set_engine_vars_from_base_engine(
   )
 
 
-def create_engine_from_config_flags(maxengine_config_filepath, batch_size, max_prefill_predict_length,
-                                    max_target_length, args_str):
+def create_engine_from_config_flags(
+    maxengine_config_filepath, batch_size, max_prefill_predict_length, max_target_length, args_str
+):
   """Create new MaxEngine instance with given batch_size, prefill and target lengths, and any config
   params provided through `args_str`.
   """
-  args = {"scan_layers": "false",
-          "async_checkpointing": "false",
-          "ici_fsdp_parallelism": "1",
-          "ici_autoregressive_parallelism": "1",
-          "ici_tensor_parallelism": "-1",
-          "weight_dtype": "bfloat16",
-          "attention": "dot_product",
-          "max_prefill_predict_length": f"{max_prefill_predict_length}",
-          "max_target_length": f"{max_target_length}",
-          "per_device_batch_size": f"{batch_size}"}
+  args = {
+      "scan_layers": "false",
+      "async_checkpointing": "false",
+      "ici_fsdp_parallelism": "1",
+      "ici_autoregressive_parallelism": "1",
+      "ici_tensor_parallelism": "-1",
+      "weight_dtype": "bfloat16",
+      "attention": "dot_product",
+      "max_prefill_predict_length": f"{max_prefill_predict_length}",
+      "max_target_length": f"{max_target_length}",
+      "per_device_batch_size": f"{batch_size}",
+  }
 
   # batch and cache related
   print(f"Command line args: {args_str}")

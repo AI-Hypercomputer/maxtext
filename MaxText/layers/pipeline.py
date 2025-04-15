@@ -174,9 +174,7 @@ class Pipeline(nn.Module):
     # For early loop iterations we grab a new input for stage 0 from the state_io. Once each microbatch has left
     # state_io we instead grab from the last stage's output (possibly buffered when num_microbatches > num_stages, e.g.
     # from circ_storage).
-    first_stage_in = jnp.where(
-        loop_iteration < self.config.num_pipeline_microbatches, state_io_slice, circular_stage_in
-    )
+    first_stage_in = jnp.where(loop_iteration < self.config.num_pipeline_microbatches, state_io_slice, circular_stage_in)
 
     # Note that first_stage_in may correspond to bubble computation during the last few iterations.
     # However, these bubble computation results remain in the shift buffer (do not make it back to state_io) and are
@@ -209,7 +207,7 @@ class Pipeline(nn.Module):
 
   def get_microbatch_and_repeat_ids(self, loop_iteration):
     """Gets the microbatch_ids and repeat_ids for all stages on this loop_iteration. Works for both circular and
-     non-circular"""
+    non-circular"""
     # Stage 0 has processed one microbatch every loop_iter, but Stage 1 is 1 behind due to bubble, etc for other stages
     microbatches_processed = jnp.maximum(loop_iteration - self.forwarding_delay * jnp.arange(self.num_stages), 0)
     microbatch_ids = microbatches_processed % self.config.num_pipeline_microbatches
@@ -231,9 +229,7 @@ class Pipeline(nn.Module):
     """
 
     def _gather_one(x, repeat_id):
-      return jnp.squeeze(jax.lax.dynamic_slice_in_dim(
-          x, repeat_id, 1, repeat_dim_in_weights), repeat_dim_in_weights
-      )
+      return jnp.squeeze(jax.lax.dynamic_slice_in_dim(x, repeat_id, 1, repeat_dim_in_weights), repeat_dim_in_weights)
 
     gathered_weights_stage_dim = 0
     repeat_ids = self.shard_dim_by_stages(repeat_ids, 0)
@@ -342,12 +338,9 @@ class Pipeline(nn.Module):
     def _update_state_io(state_in, stream_slice, output):
       # Shift the current slice to the left, then fill the last stage with the final output.
       padding = [[0, 1]] + [[0, 0]] * (stream_slice.ndim - 1)
-      stream_slice = jax.lax.slice_in_dim(
-          jnp.pad(stream_slice, padding), 1, stream_slice.shape[0] + 1, axis=0
-      )
+      stream_slice = jax.lax.slice_in_dim(jnp.pad(stream_slice, padding), 1, stream_slice.shape[0] + 1, axis=0)
       stream_slice = jnp.where(
-          jax.lax.broadcasted_iota("int32", stream_slice.shape, 0) == self.num_stages - 1, output,
-          stream_slice
+          jax.lax.broadcasted_iota("int32", stream_slice.shape, 0) == self.num_stages - 1, output, stream_slice
       )
       stream_slice = jnp.expand_dims(stream_slice, 1)
       return jax.lax.dynamic_update_slice_in_dim(state_in, stream_slice, stream_buf_idx, axis=1)
@@ -436,11 +429,9 @@ class Pipeline(nn.Module):
   def get_main_vmap_func_for_iterations(self):
     # Returns the main stage function vmapped by number of stages. This will be a vmap over a single layer instance
     # if body_instance is a single layer, else a set of layers if body_instance is a set of layers.
-    def func_to_vmap(body_instance, weights, stages_inputs, stages_segment_ids, stages_positions,
-                     deterministic, model_mode):
+    def func_to_vmap(body_instance, weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
       # nn.vmap requires either a nn.module class or a function whose first argument is a nn.module instance.
-      return body_instance.apply(weights, stages_inputs, stages_segment_ids, stages_positions,
-                                 deterministic, model_mode)
+      return body_instance.apply(weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
     vmap_func = nn.vmap(
         func_to_vmap,
@@ -513,8 +504,7 @@ class Pipeline(nn.Module):
 
     stage_weights = self.get_current_stage_weights(pipeline_weights, loop_iteration)
     stages_output = vmap_func(
-        decoder_layer_instance, stage_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic,
-        model_mode
+        decoder_layer_instance, stage_weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode
     )
     if self.config.scan_layers:
       stages_output = stages_output[0]
@@ -687,8 +677,7 @@ class Pipeline(nn.Module):
             else None
         )
         example_position = (
-            jax.lax.broadcast(example_position, [self.config.num_pipeline_repeats])
-            if example_position is not None else None
+            jax.lax.broadcast(example_position, [self.config.num_pipeline_repeats]) if example_position is not None else None
         )
       # We only need to run one set of stages to initialize the variables, instead of looping over all microbatches for
       # the full total_iterations.
@@ -768,9 +757,7 @@ class Pipeline(nn.Module):
 
     # reshape outputs to match input shape of total batch instead of microbatches [batch, sequence, embed]
     final_output = jnp.reshape(
-        final_output, (
-            self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim
-        )
+        final_output, (self.config.micro_batch_size_to_train_on, self.config.max_target_length, self.config.emb_dim)
     )
 
     return final_output

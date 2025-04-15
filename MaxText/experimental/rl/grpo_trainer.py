@@ -344,9 +344,7 @@ def concatenate_prompt_with_completions(config, tokenizer_model, prompts, true_l
 
     return full_seq, eos_index
 
-  batched_concat_and_eos = jax.vmap(
-      _concat_and_find_eos, in_axes=(0, 0, 0)
-  )
+  batched_concat_and_eos = jax.vmap(_concat_and_find_eos, in_axes=(0, 0, 0))
   prompts = jnp.repeat(prompts, config.num_generations, axis=0)
   true_length = jnp.repeat(true_length, config.num_generations, axis=0)
   prompt_completions, eos_positions = batched_concat_and_eos(prompts, true_length, completions)

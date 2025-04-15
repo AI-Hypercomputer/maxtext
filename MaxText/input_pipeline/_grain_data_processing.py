@@ -58,11 +58,11 @@ def get_datasets(
       dataset = dataset.shuffle(seed=shuffle_seed)
     dataset = dataset.repeat(num_epoch)
     dataset = dataset[dataloading_host_index::dataloading_host_count]  # sharding
-    assert grain_worker_count <= len(
-        dataset
-    ), (f"grain worker count is currently {grain_worker_count}, exceeding the max allowable value {len(dataset)} "
+    assert grain_worker_count <= len(dataset), (
+        f"grain worker count is currently {grain_worker_count}, exceeding the max allowable value {len(dataset)} "
         f"(file shard count of a data loading host) for your dataset. "
-        f"Please lower grain_worker_count or increase file shard count.")
+        f"Please lower grain_worker_count or increase file shard count."
+    )
     dataset = dataset.map(grain.experimental.ParquetIterDataset)
     dataset = grain.experimental.InterleaveIterDataset(dataset, cycle_length=len(dataset))
     dataset = grain.experimental.WindowShuffleIterDataset(dataset, window_size=100, seed=shuffle_seed)

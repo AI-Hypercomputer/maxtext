@@ -165,8 +165,7 @@ class GRPOTest(unittest.TestCase):
     with torch.no_grad():
       hf_per_token_logps = self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep)  # pylint: disable=protected-access
 
-    max_diff = np.max(np.abs(np.trim_zeros(
-        np.asarray(maxtext_per_token_logps)[0]) - hf_per_token_logps.detach().numpy()[0]))
+    max_diff = np.max(np.abs(np.trim_zeros(np.asarray(maxtext_per_token_logps)[0]) - hf_per_token_logps.detach().numpy()[0]))
     print("Max Diff", max_diff)
     self.assertTrue(
         jax.numpy.allclose(

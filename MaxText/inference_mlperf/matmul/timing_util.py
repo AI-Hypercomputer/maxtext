@@ -43,4 +43,3 @@ def simple_timeit(f, *args, tries=10, task=None, enable_profile=False):
   average_time_ms = sum(outcomes_ms) / len(outcomes_ms)
   print(f"Average time ms for mm for {task} is {round(average_time_ms, 3)}")
   return average_time_ms / 1000
-

@@ -93,10 +93,10 @@ def validate_train_config(config):
 
   if config.quantization in ("fp8", "nanoo_fp8"):
     # pylint: disable=line-too-long
-    assert (
-        config.gradient_accumulation_steps == 1
-    ), ("fp8 can't be used with gradient_accumulation_steps right now. Please use other quantization or set "
-        "gradient_accumulation_steps to 1")
+    assert config.gradient_accumulation_steps == 1, (
+        "fp8 can't be used with gradient_accumulation_steps right now. Please use other quantization or set "
+        "gradient_accumulation_steps to 1"
+    )
 
   # Check if GPU Flash Attention is being used with sequence packing
   if config.attention == "cudnn_flash_te" and config.packing and config.dataset_type != "synthetic":
@@ -173,8 +173,7 @@ def save_checkpoint(
   ):
     return checkpoint_manager.save(
         step,
-        args=orbax.checkpoint.args.PyTreeSave(item=state, save_args=save_args,
-                                              ocdbt_target_data_file_size=chunk_byte_size),
+        args=orbax.checkpoint.args.PyTreeSave(item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size),
         force=force,
     )
 
@@ -213,8 +212,9 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
     metrics_dict = intermediate_outputs["intermediates"]["decoder"]["decoder"]
 
     for layer_num in range(config.num_decoder_layers):
-      output_metrics["scalar"][f"activ_fraction_zero/layer_{layer_num:03d}"] = metrics_dict[
-          "activation_fraction_zero"][0][layer_num]
+      output_metrics["scalar"][f"activ_fraction_zero/layer_{layer_num:03d}"] = metrics_dict["activation_fraction_zero"][0][
+          layer_num
+      ]
       output_metrics["scalar"][f"activ_mean/layer_{layer_num:03d}"] = metrics_dict["activation_mean"][0][layer_num]
       output_metrics["scalar"][f"activ_stdev/layer_{layer_num:03d}"] = metrics_dict["activation_stdev"][0][layer_num]
   else:
@@ -467,12 +467,10 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     aux = jax.tree_map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
   else:
     if config.optimizer_memory_host_offload:
-      cast_params = jax.device_put(state.params, max_utils.with_memory_kind(
-          state_mesh_shardings.params, "device"))
+      cast_params = jax.device_put(state.params, max_utils.with_memory_kind(state_mesh_shardings.params, "device"))
       state = state.replace(params=cast_params)
       if config.use_dpo:
-        reference_params = jax.device_put(reference_params, max_utils.with_memory_kind(
-            reference_params_sharding, "device"))
+        reference_params = jax.device_put(reference_params, max_utils.with_memory_kind(reference_params_sharding, "device"))
         extra_dpo_args = [reference_params]
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
@@ -668,7 +666,7 @@ def setup_train_loop(config):
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
 
-  context_parallel_size = mesh.shape['context']
+  context_parallel_size = mesh.shape["context"]
   # Check if context parallelism is being used with sequence packing
   if context_parallel_size > 1 and config.packing and config.dataset_type != "synthetic":
     raise ValueError(

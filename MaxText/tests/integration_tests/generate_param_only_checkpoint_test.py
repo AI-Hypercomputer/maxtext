@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-
 """Integration tests for test_generate_param_only_checkpoint.sh"""
 from datetime import datetime
 import subprocess
