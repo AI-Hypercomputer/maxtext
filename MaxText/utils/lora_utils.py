@@ -132,7 +132,7 @@ def load_adapter(config, base_abstract_state_params, adapter_config_path, adapte
 
     with nn_partitioning.axis_rules(config.logical_axis_rules):
       lora_params = checkpointing.load_params_from_path(
-          adapter_weights_path, lora_state.params, config.checkpoint_storage_concurrent_gb
+          adapter_weights_path, lora_state.params, config.checkpoint_storage_concurrent_gb, config.checkpoint_storage_use_ocdbt, config.checkpoint_storage_use_zarr3
       )
 
   return lora_params, lora_config
@@ -185,6 +185,8 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
           lora_state,
           config.enable_single_replica_ckpt_restoring,
           config.dataset_type,
+          use_ocdbt=config.checkpoint_storage_use_ocdbt,
+          use_zarr3=config.checkpoint_storage_use_zarr3,
       )
 
       if restored_lora:

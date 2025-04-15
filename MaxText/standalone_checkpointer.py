@@ -64,6 +64,8 @@ def checkpoint_loop(config, state=None):
         config.load_full_state_path,
         config.checkpoint_storage_concurrent_gb,
         unboxed_abstract_state,
+        use_ocdbt=config.checkpoint_storage_use_ocdbt,
+        use_zarr3=config.checkpoint_storage_use_zarr3,
     )
     if state:
       state = state["items"]

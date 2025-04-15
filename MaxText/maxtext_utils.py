@@ -467,7 +467,7 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
     unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(model, None, config, rng, mesh, False)
     with nn_partitioning.axis_rules(config.logical_axis_rules):
       params = checkpointing.load_params_from_path(
-          config.load_parameters_path, unboxed_abstract_state.params, config.checkpoint_storage_concurrent_gb
+          config.load_parameters_path, unboxed_abstract_state.params, config.checkpoint_storage_concurrent_gb, config.checkpoint_storage_use_ocdbt, config.checkpoint_storage_use_zarr3
       )
     state = init_decode_state(None, params)
 
@@ -531,6 +531,8 @@ def setup_initial_state(
         unboxed_abstract_state,
         config.enable_single_replica_ckpt_restoring,
         config.dataset_type,
+        use_ocdbt=config.checkpoint_storage_use_ocdbt,
+        use_zarr3=config.checkpoint_storage_use_zarr3,
     )
 
     if restored:
