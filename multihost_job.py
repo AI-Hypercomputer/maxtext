@@ -18,7 +18,7 @@
                           ***** IMPORTANT *****
 This script provisions new TPUs! You cannot run jobs on existing TPUs with this script,
 we recommend trying multihost_runner instead for this purpose. In addition you must include all
-of your installation commands inside of the --COMMAND arg, e.g. --COMMAND="bash setup.sh && python3 -m MaxText.train"
+of your installation commands inside of the --COMMAND arg, e.g. --COMMAND="bash setup.sh && python3 train.py"
 
 This script:
   1) Creates specified TPU(s)
@@ -147,7 +147,7 @@ tar xzf {zip_name}
 gsutil cp {log_name} "{bucket_path}/"
 (({create_kill_command_str(args)}) 2>&1 ) >> {log_name}"""
 
-  with open(startup_script_file, "w", encoding="utf-8") as f:
+  with open(startup_script_file, "wt", encoding="utf-8") as f:
     f.write(startup_script)
   return startup_script
 
@@ -271,7 +271,7 @@ def main(raw_args=None) -> None:
                       help='Main command to run on each TPU. \
                         This command is run from a copied version of SCRIPT_DIR on each TPU worker. \
                         You must include your dependency installations here, \
-                        e.g. --COMMAND=\'bash setup.sh && python3 -m MaxText.train\'')
+                        e.g. --COMMAND=\'bash setup.sh && python3 train.py\'')
   parser.add_argument('--BUCKET_NAME', type=str, default=None, required=True,
                       help='Name of GCS bucket, e.g. my-bucket')
   parser.add_argument('--BUCKET_DIR', type=str, default="",
@@ -308,7 +308,7 @@ def main(raw_args=None) -> None:
   tmp_dir = os.path.join(args.SCRIPT_DIR, tmp_dir_relative_to_script)
   zip_name = f"script_dir_zip_{args.RUN_NAME}.tar.gz"
   bucket_dir = os.path.join(args.BUCKET_DIR, args.RUN_NAME)
-  bucket_path = f"gs://{args.BUCKET_NAME}/{bucket_dir.replace(os.path.sep, '/')}"
+  bucket_path = os.path.join(f"gs://{args.BUCKET_NAME}", bucket_dir)
   startup_script_file = os.path.join(tmp_dir, "startup_script.txt")
 
   print(f"Moving {args.SCRIPT_DIR} to {bucket_path}...")

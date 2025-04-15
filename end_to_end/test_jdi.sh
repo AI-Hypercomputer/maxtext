@@ -1,7 +1,8 @@
-#!/bin/sh
+#!/bin/bash
 
 echo "Running the jax.distributed.initialize test";
-if python3 -c "import jax; jax.distributed.initialize()"; then
+python3 -c "import jax; jax.distributed.initialize()";
+if [[ "$?" -eq "0" ]]; then
   echo "Test exit status 0, success!"
 else
   echo "Non-zero exit status, test failed!"

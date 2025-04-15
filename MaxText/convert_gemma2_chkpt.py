@@ -27,11 +27,11 @@ from flax.training import train_state
 
 from typing import Any
 import sys
-from MaxText import max_logging
 
 
 import orbax
 
+from MaxText import max_logging
 from MaxText import checkpointing
 from MaxText.train import save_checkpoint
 

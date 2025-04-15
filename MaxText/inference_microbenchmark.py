@@ -339,7 +339,7 @@ def write_results(results, filename, flatten_microbenchmark_results):
   if flatten_microbenchmark_results:
     results["flattened_results"] = flatten_dict(results)
   if filename:
-    with open(filename, "w", encoding="utf-8") as f:
+    with open(filename, "wt", encoding="utf-8") as f:
       json.dump(results, f, indent=2)
   return results
 
@@ -547,9 +547,9 @@ def run_benchmarks(config):
   return results
 
 
-def main(config, **kwargs):
+def main(argv):
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  return run_benchmarks(pyconfig.initialize(config, **kwargs))
+  return run_benchmarks(pyconfig.initialize(argv))
 
 
 if __name__ == "__main__":

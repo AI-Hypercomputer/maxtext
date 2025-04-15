@@ -35,7 +35,7 @@ def write_config_raw_keys_for_gcs(raw_keys):
 
   raw_keys_dict = dict(raw_keys)
   filename = "config.yml"
-  with open(filename, "w", encoding="utf8") as config_for_gcs:
+  with open(filename, "wt", encoding="utf8") as config_for_gcs:
     yaml.dump(raw_keys_dict, config_for_gcs)
   config_for_gcs.close()
 

@@ -21,7 +21,7 @@ import os
 
 from MaxText import max_logging
 
-from typing import Sequence, Union, Tuple, Any
+from typing import Sequence
 import datetime
 from absl import app
 import numpy as np
@@ -57,7 +57,7 @@ def data_load_loop(config, state=None):
   return state
 
 
-def main(argv: Union[Sequence[str], Tuple[Any, ...]]) -> None:
+def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_cpu_enable_gloo_collectives", True)
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   config = pyconfig.initialize(argv)

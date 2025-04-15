@@ -26,9 +26,9 @@ class TestGradientClipping(unittest.TestCase):
   def test_grad_clipping_with_no_fp8_stats(self):
     raw_grads = {"params": jnp.array([3.0, -4.0]), "wi_0": jnp.array([5.0, -6.0])}
     clipped_grads = maxtext_utils.apply_gradient_clipping(raw_grads, None, 1.0)
-    for param_name in raw_grads:
+    for param_name, param_val in raw_grads.items():
       # The grads should all be clipped and not equal to what they were before
-      self.assertFalse(jnp.array_equal(raw_grads[param_name], clipped_grads[param_name]))
+      self.assertFalse(jnp.array_equal(param_val, clipped_grads[param_name]))
 
   def test_fp8_stats_not_clipped_but_others_are(self):
     raw_grads = {"params": {"wi_0": jnp.array([5.0, -6.0]), "wi_1": jnp.array([7.0, -8.0])}}

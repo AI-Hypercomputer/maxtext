@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+Analyse ShareGPT
+"""
+
 import argparse
 import json
 
@@ -65,10 +69,10 @@ def get_conversations_from_file(filename, max_input_tokens, max_output_tokens):
   return kept_convos
 
 
-def compute_times(convos, prefill_bucket_size_to_ms, system_time_per_decode_token_ms, verbose=False):
+def compute_times(conversations, prefill_bucket_size_to_ms, system_time_per_decode_token_ms, verbose=False):
   total_prefill_system_ms = 0
   total_generate_system_ms = 0
-  for convo in convos:
+  for convo in conversations:
     input_tok, output_tok = convo
     bucket = max(128, next_power_of_2(input_tok))
     generate_system_ms = output_tok * system_time_per_decode_token_ms
@@ -90,9 +94,9 @@ def compute_times(convos, prefill_bucket_size_to_ms, system_time_per_decode_toke
   return total_time_s, total_prefill_time_seconds, total_generate_time_seconds
 
 
-def get_num_tokens_in_convos(convos):
-  num_input_tokens = sum(c[0] for c in convos)
-  num_output_tokens = sum(c[1] for c in convos)
+def get_num_tokens_in_convos(conversations):
+  num_input_tokens = sum(c[0] for c in conversations)
+  num_output_tokens = sum(c[1] for c in conversations)
   return num_input_tokens, num_output_tokens
 
 

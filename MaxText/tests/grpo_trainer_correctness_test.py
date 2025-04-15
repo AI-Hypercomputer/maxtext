@@ -13,10 +13,11 @@
 #  limitations under the License.
 
 """
-Runs GRPO trainer unit test correctness with golden logits generated from maxtext/MaxText/scratch_code/generate_grpo_golden_logits.py
+Runs GRPO trainer unit test correctness with golden logits generated
+  from maxtext/MaxText/scratch_code/generate_grpo_golden_logits.py
 
 Usage:
-pytest MaxText/tests/grpo_trainer_correctness_test.py
+  pytest MaxText/tests/grpo_trainer_correctness_test.py
 """
 
 import functools
@@ -145,8 +146,10 @@ class GrpoTrainerTest(unittest.TestCase):
       is_train=False,
       rngs=self.rng,
     )
-    jax.debug.print("maxtext_per_token_logps={maxtext_per_token_logps}",maxtext_per_token_logps=maxtext_per_token_logps)
-    jax.debug.print("golden_per_token_logps={golden_per_token_logps}",golden_per_token_logps=golden_data["maxtext_per_token_logps_no_ckpt_loading"])
+    jax.debug.print("maxtext_per_token_logps={maxtext_per_token_logps}",
+                    maxtext_per_token_logps=maxtext_per_token_logps)
+    jax.debug.print("golden_per_token_logps={golden_per_token_logps}",
+                    golden_per_token_logps=golden_data["maxtext_per_token_logps_no_ckpt_loading"])
     golden_maxtext_logits = np.array(golden_data["maxtext_per_token_logps_no_ckpt_loading"])
     self.assertTrue(
       jnp.all(np.array(golden_data["input_ids"]) == np.array(input_ids[0]))

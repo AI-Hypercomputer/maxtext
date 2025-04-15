@@ -15,40 +15,43 @@ limitations under the License.
 """
 
 """ Common Max Utils needed by multiple modules"""
-import numpy as np
-import jax
-import jax.numpy as jnp
-from jax.experimental import mesh_utils
-from MaxText.inference.page_manager import PageState
-from MaxText import checkpointing
-from MaxText import common_types
+
 import functools
 import time
-import optax
 import os
-import psutil
 import socket
 import subprocess
-from etils import epath
 from collections.abc import Sequence
 import collections
 from typing import Any, Optional, Tuple
 from functools import partial
 
-from MaxText import max_logging
+import numpy as np
 
-
-import orbax.checkpoint as ocp
-import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
-import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
-
+import jax
+import jax.numpy as jnp
+from jax.experimental import mesh_utils
 
 import flax
 from flax.training import train_state
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
+import orbax.checkpoint as ocp
+import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
+import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
+
 from tensorboardX import writer
+
+import optax
+import psutil
+
+from etils import epath
+
+from MaxText import max_logging
+from MaxText import checkpointing
+from MaxText import common_types
+from MaxText.inference.page_manager import PageState
 
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
 HYBRID_RING_32X8 = "hybrid_ring_32x8"
@@ -61,7 +64,7 @@ def with_memory_kind(t, memory_kind):
 
 
 def cast_dtype_from_to(nest, src, dst):
-  """All items in nest with dtype src are casted to dtype dst."""
+  """All items in nest with dtype src are cast to dtype dst."""
   return jax.tree_util.tree_map(lambda t: t.astype(dst) if t.dtype == src else t, nest)
 
 
@@ -278,7 +281,8 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
       my_process_index = jax.process_index()
       processIndex_to_nodeRank = ocp.multihost.runtime_to_distributed_ids()
       max_logging.log(
-          f"Mapping of IDs: jax-init-info.txt={process_id}, NodeRank={node_rank}, ProcessIndex={my_process_index}, ProcessIndex->NodeRank={processIndex_to_nodeRank}"
+          f"Mapping of IDs: jax-init-info.txt={process_id}, NodeRank={node_rank}, ProcessIndex={my_process_index},"
+          f" ProcessIndex->NodeRank={processIndex_to_nodeRank}"
       )
 
       my_in_pipeline_index = my_process_index % nodes_per_slice

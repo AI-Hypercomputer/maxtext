@@ -95,12 +95,14 @@ def validate_train_config(config):
     # pylint: disable=line-too-long
     assert (
         config.gradient_accumulation_steps == 1
-    ), "fp8 can't be used with gradient_accumulation_steps right now. Please use other quantization or set gradient_accumulation_steps to 1"
+    ), ("fp8 can't be used with gradient_accumulation_steps right now. Please use other quantization or set "
+        "gradient_accumulation_steps to 1")
 
   # Check if GPU Flash Attention is being used with sequence packing
   if config.attention == "cudnn_flash_te" and config.packing and config.dataset_type != "synthetic":
     raise ValueError(
-        "cudnn_flash_te only supports BSHD format. The THD (seq packing) support is going to be available in Transformer Engine 2.0 release. "
+        "cudnn_flash_te only supports BSHD format. The THD (seq packing) support is going to be available in "
+        "Transformer Engine 2.0 release. "
         "Please disable sequence packing (set packing=False) or use a different attention mechanism. "
         "With synthetic data, the format is not important as packing is not applied."
     )
@@ -171,7 +173,8 @@ def save_checkpoint(
   ):
     return checkpoint_manager.save(
         step,
-        args=orbax.checkpoint.args.PyTreeSave(item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size),
+        args=orbax.checkpoint.args.PyTreeSave(item=state, save_args=save_args,
+                                              ocdbt_target_data_file_size=chunk_byte_size),
         force=force,
     )
 
@@ -210,9 +213,8 @@ def record_activation_metrics(output_metrics, intermediate_outputs, config):
     metrics_dict = intermediate_outputs["intermediates"]["decoder"]["decoder"]
 
     for layer_num in range(config.num_decoder_layers):
-      output_metrics["scalar"][f"activ_fraction_zero/layer_{layer_num:03d}"] = metrics_dict["activation_fraction_zero"][0][
-          layer_num
-      ]
+      output_metrics["scalar"][f"activ_fraction_zero/layer_{layer_num:03d}"] = metrics_dict[
+          "activation_fraction_zero"][0][layer_num]
       output_metrics["scalar"][f"activ_mean/layer_{layer_num:03d}"] = metrics_dict["activation_mean"][0][layer_num]
       output_metrics["scalar"][f"activ_stdev/layer_{layer_num:03d}"] = metrics_dict["activation_stdev"][0][layer_num]
   else:
@@ -293,7 +295,8 @@ def dpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_t
   rejected_segmentation = data["rejected_segmentation"][..., 1:]
   n_logits = logits.shape[-3] // 2  # [B, S, E] - [batch, sequence, embedding/vocab]
   chosen_logits, rejected_logits = logits[:n_logits, :, :], logits[n_logits:, :, :]  # [B, S, E], [B, S, E]
-  chosen_ref_logits, rejected_ref_logits = ref_logits[:n_logits, :, :], ref_logits[n_logits:, :, :]  # [B, S, E], [B, S, E]
+  chosen_ref_logits, rejected_ref_logits = ref_logits[:n_logits, :, :], ref_logits[n_logits:, :, :]
+  # ^ [B, S, E], [B, S, E]
 
   # common subsequence and padding mask
   common_prefix_mask = jnp.cumsum(chosen_ids != rejected_ids, axis=-1) == 0  # [B, S]
@@ -464,10 +467,12 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     aux = jax.tree_map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
   else:
     if config.optimizer_memory_host_offload:
-      cast_params = jax.device_put(state.params, max_utils.with_memory_kind(state_mesh_shardings.params, "device"))
+      cast_params = jax.device_put(state.params, max_utils.with_memory_kind(
+          state_mesh_shardings.params, "device"))
       state = state.replace(params=cast_params)
       if config.use_dpo:
-        reference_params = jax.device_put(reference_params, max_utils.with_memory_kind(reference_params_sharding, "device"))
+        reference_params = jax.device_put(reference_params, max_utils.with_memory_kind(
+            reference_params_sharding, "device"))
         extra_dpo_args = [reference_params]
     grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
     (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)

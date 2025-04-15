@@ -83,7 +83,8 @@ def is_conversational(features, data_columns):
   """Check if data is in a conversational format.
   Examples:
 
-  features = {'prompt': [{'content': Value(dtype='string', id=None), 'role': Value(dtype='string', id=None)}], 'completion': [{'content': Value(dtype='string', id=None), 'role': Value(dtype='string', id=None)}]}
+  features = {'prompt': [{'content': Value(dtype='string', id=None), 'role': Value(dtype='string', id=None)}],
+              'completion': [{'content': Value(dtype='string', id=None), 'role': Value(dtype='string', id=None)}]}
   data_columns = ["prompt", "completion"]
   is_conversational(features, data_columns) return True.
 
@@ -149,11 +150,11 @@ class SFTPromptMasking(grain.MapTransform):
       self.eos_id = eos_id
     self.unk_id = unk_id
 
-  def map(self, features):
+  def map(self, element):
     inputs, targets = [], []
-    for i, text in enumerate(features[self.text_column_name]):
+    for i, text in enumerate(element[self.text_column_name]):
       inputs += text
-      targets += [self.unk_id] * len(text) if self.completion_only and features["is_prompt"][i] else text
+      targets += [self.unk_id] * len(text) if self.completion_only and element["is_prompt"][i] else text
     if self.add_bos:
       inputs = [self.bos_id] + inputs
       targets = [self.bos_id] + targets
@@ -173,10 +174,10 @@ class HFNormalizeFeatures(grain.MapTransform):
   def __init__(self, column_name):
     self.column_name = column_name
 
-  def map(self, features):
+  def map(self, element):
     return {
-        "inputs": np.asarray(features[self.column_name], dtype=np.int32),
-        "targets": np.asarray(features[self.column_name], dtype=np.int32),
+        "inputs": np.asarray(element[self.column_name], dtype=np.int32),
+        "targets": np.asarray(element[self.column_name], dtype=np.int32),
     }
 
 
@@ -214,8 +215,8 @@ class HFDataSource(grain.RandomAccessDataSource):
     if self.n_shards < (self.dataloading_host_count * self.num_threads):
       warnings.warn(
           f"WARNING: Inefficient dataloading. Your train or eval dataset contains {self.n_shards} shards, "
-          "smaller than number of host loading data. This is known to lead to inefficient dataloading. "
-          "see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#multihost-dataloading-best-practice"
+          "smaller than number of host loading data. This is known to lead to inefficient dataloading. See"
+          "github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#multihost-dataloading-best-practice"
       )
       self.n_shards = self.dataloading_host_count * self.num_threads
 
@@ -277,7 +278,7 @@ class ParseFeatures(grain.MapTransform):
     else:
       self.dtype = tf.int64
 
-  def map(self, features):
+  def map(self, element):
     def _parse(example):
       parsed = tf.io.parse_example(
           example,
@@ -285,7 +286,7 @@ class ParseFeatures(grain.MapTransform):
       )
       return parsed
 
-    return _parse(features)
+    return _parse(element)
 
 
 @dataclasses.dataclass
@@ -296,11 +297,11 @@ class NormalizeFeatures(grain.MapTransform):
     self.column_names = column_names
     self.tokenize = tokenize
 
-  def map(self, features):
+  def map(self, element):
     if self.tokenize:
-      return {col: features[col].numpy()[0].decode() for col in self.column_names}
+      return {col: element[col].numpy()[0].decode() for col in self.column_names}
     else:
-      return {col: features[col].numpy() for col in self.column_names}
+      return {col: element[col].numpy() for col in self.column_names}
 
 
 @dataclasses.dataclass
@@ -311,15 +312,15 @@ class Rekey(grain.MapTransform):
     self.mapping_dict = mapping_dict
     self.keep_old_keys = keep_old_keys
 
-  def map(self, features):
+  def map(self, element):
     old_keys = set()
     for new_key, old_key in self.mapping_dict.items():
-      features[new_key] = features[old_key]
+      element[new_key] = element[old_key]
       old_keys.add(old_key)
     if not self.keep_old_keys:
       for key in old_keys:
-        del features[key]
-    return features
+        del element[key]
+    return element
 
 
 @dataclasses.dataclass
@@ -329,12 +330,12 @@ class ReformatPacking(grain.MapTransform):
   def __init__(self, column_names):
     self.column_names = column_names
 
-  def map(self, data):
+  def map(self, element):
     ret = {}
     for col in self.column_names:
-      ret[f"{col}"] = data[0][col]
-      ret[f"{col}_segmentation"] = data[1][col]
-      ret[f"{col}_position"] = data[2][col]
+      ret[f"{col}"] = element[0][col]
+      ret[f"{col}_segmentation"] = element[1][col]
+      ret[f"{col}_position"] = element[2][col]
     return ret
 
 
@@ -347,35 +348,25 @@ class PadOrTrimToMaxLength(grain.MapTransform):
   def __init__(self, max_length):
     self.max_length = max_length
 
-  def map(self, data: dict[str, np.ndarray]):
+  def map(self, element: dict[str, np.ndarray]):
     """map to each element"""
-
-    def _max_true_length(prompts, pad_token_id):
-      true_lengths = []
-      for prompt in prompts:
-        matches = np.where(prompt == pad_token_id)[0]
-        if matches.size != 0:
-          true_lengths.append(matches[0])
-        else:
-          true_lengths.append(prompts.shape[0])
-      return true_lengths
 
     def _pad(x, max_length):
       pad_amount = max(max_length - x.shape[0], 0)
       pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
       return np.pad(x, pad_amount)[:max_length]
 
-    data_columns = list(data.keys())
+    data_columns = list(element.keys())
     for data_column in data_columns:
-      data[f"{data_column}_segmentation"] = (data[data_column] != 0).astype(np.int32)
-      data[f"{data_column}_position"] = np.arange(data[data_column].shape[0], dtype=np.int32)
-      data[f"{data_column}_true_length"] = np.array(data[data_column].shape[0], dtype=np.int32)
-    for key, _ in data.items():
+      element[f"{data_column}_segmentation"] = (element[data_column] != 0).astype(np.int32)
+      element[f"{data_column}_position"] = np.arange(element[data_column].shape[0], dtype=np.int32)
+      element[f"{data_column}_true_length"] = np.array(element[data_column].shape[0], dtype=np.int32)
+    for key, _ in element.items():
       if "true_length" not in key:
-        data[key] = _pad(data[key], self.max_length)
+        element[key] = _pad(element[key], self.max_length)
     # for data_column in data_columns:
     #   data[f"{data_column}_true_length"] = _max_true_length(data[data_column], 0)
-    return data
+    return element
 
 
 @dataclasses.dataclass
@@ -386,7 +377,7 @@ class PadToMaxLength(grain.MapTransform):
     self.max_length = max_length
     self.pad_id = pad_id
 
-  def map(self, data: dict[str, np.ndarray]):
+  def map(self, element: dict[str, np.ndarray]):
     """map to each element"""
 
     def _pad(x, max_length, pad_id):
@@ -394,13 +385,13 @@ class PadToMaxLength(grain.MapTransform):
       pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
       return np.pad(x, pad_amount, constant_values=pad_id)
 
-    data_columns = list(data.keys())
+    data_columns = list(element.keys())
     for data_column in data_columns:
-      data[f"{data_column}_segmentation"] = (data[data_column] != self.pad_id).astype(np.int32)
-      data[f"{data_column}_position"] = np.arange(data[data_column].shape[0], dtype=np.int32)
-    for key, _ in data.items():
-      data[key] = _pad(data[key], self.max_length, self.pad_id)
-    return data
+      element[f"{data_column}_segmentation"] = (element[data_column] != self.pad_id).astype(np.int32)
+      element[f"{data_column}_position"] = np.arange(element[data_column].shape[0], dtype=np.int32)
+    for key, _ in element.items():
+      element[key] = _pad(element[key], self.max_length, self.pad_id)
+    return element
 
 
 def shift_right(x, axis=1):
@@ -444,5 +435,5 @@ class ShiftData(grain.MapTransform):
     self.ignored_ids = ignored_ids
     self.axis = axis
 
-  def map(self, data):
-    return shift_and_refine(data, ignored_ids=self.ignored_ids, axis=self.axis)
+  def map(self, element):
+    return shift_and_refine(element, ignored_ids=self.ignored_ids, axis=self.axis)

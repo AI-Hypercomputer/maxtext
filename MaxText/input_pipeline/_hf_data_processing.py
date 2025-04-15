@@ -79,7 +79,7 @@ def preprocessing_pipeline(
           _input_pipeline_utils.combine_columns,
           fn_kwargs={"columns": data_column_names, "data_column": combined_column_name},
           remove_columns=data_column_names,
-          features=dataset_features,
+          element=dataset_features,
       )
 
     data_column_names = list(dataset.features.keys())
@@ -140,7 +140,10 @@ def preprocessing_pipeline(
     )
     data_column_names = ("inputs", "targets")
   elif use_dpo:
-    lists2array = lambda x: jax.tree.map(np.asarray, x, is_leaf=lambda x: isinstance(x, (list, tuple)))
+    def lists2array(x):
+      """Convert lists/tuples to array"""
+      return jax.tree.map(np.asarray, x, is_leaf=lambda y: isinstance(y, (list, tuple)))
+
     operations.append(grain.MapOperation(lists2array))
   else:
     assert len(data_column_names) == 1
@@ -243,7 +246,7 @@ def make_hf_eval_iterator(
       token=config.hf_access_token,
   )
 
-  eval_generate_padding_example = bool(config.eval_steps)
+  eval_generate_padding_example = config.eval_steps > 0
   eval_iter = preprocessing_pipeline(
       dataloading_host_index=process_indices_eval.index(jax.process_index()),
       dataloading_host_count=len(process_indices_eval),

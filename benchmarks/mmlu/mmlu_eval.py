@@ -28,14 +28,21 @@ python3 -m MaxText.benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
   tokenizer_path=assets/tokenizer_llama3.tiktoken \
   load_parameters_path=check_point_path model_name=llama3.1-8b \
   max_prefill_predict_length=1024 max_target_length=2048 ici_tensor_parallelism=4 per_device_batch_size=1 \
-  prompt_template="The following are multiple choice questions (with answers) about {subject}.\n\n{question}\n{choices}\nAnswer: Let's think step by step."
+  prompt_template="The following are multiple choice questions (with answers) about {subject}.\n\n{question}\n
+  {choices}\nAnswer: Let's think step by step."
 
 # Example of using the prompt_template flag for 5-shot prompting (replace with actual examples):
 python3 -m MaxText.benchmarks.mmlu.mmlu_eval MaxText/configs/base.yml \
   tokenizer_path=assets/tokenizer_llama3.tiktoken \
   load_parameters_path=check_point_path model_name=llama3.1-8b \
   max_prefill_predict_length=1024 max_target_length=2048 ici_tensor_parallelism=4 per_device_batch_size=1 \
-  prompt_template='Example 1:\nQuestion: What is the capital of France?\nChoices:\nA. London\nB. Paris\nC. Rome\nD. Berlin\nAnswer: B\n\nExample 2:\nQuestion: What is the highest mountain in the world?\nChoices:\nA. K2\nB. Kangchenjunga\nC. Mount Everest\nD. Lhotse\nAnswer: C\n\nExample 3:\nQuestion: What is the chemical symbol for water?\nChoices:\nA. H2O\nB. CO2\nC. O2\nD. NaCl\nAnswer: A\n\nExample 4:\nQuestion: Who painted the Mona Lisa?\nChoices:\nA. Michelangelo\nB. Leonardo da Vinci\nC. Raphael\nD. Donatello\nAnswer: B\n\nExample 5:\nQuestion: Which planet is known as the Red Planet?\nChoices:\nA. Venus\nB. Mars\nC. Jupiter\nD. Saturn\nAnswer: B\n\nThe following are multiple choice questions (with answers) about {subject}.\n\n{question}\n{choices}\nAnswer:'
+  prompt_template='Example 1:\nQuestion: What is the capital of France?\nChoices:\nA. London\nB. Paris\nC. Rome\nD.
+  Berlin\nAnswer: B\n\nExample 2:\nQuestion: What is the highest mountain in the world?\nChoices:\nA. K2\nB.
+  Kangchenjunga\nC. Mount Everest\nD. Lhotse\nAnswer: C\n\nExample 3:\nQuestion: What is the chemical symbol for water?
+  \nChoices:\nA. H2O\nB. CO2\nC. O2\nD. NaCl\nAnswer: A\n\nExample 4:\nQuestion: Who painted the Mona Lisa?\nChoices:\n
+  A. Michelangelo\nB. Leonardo da Vinci\nC. Raphael\nD. Donatello\nAnswer: B\n\nExample 5:\nQuestion: Which planet is
+  known as the Red Planet?\nChoices:\nA. Venus\nB. Mars\nC. Jupiter\nD. Saturn\nAnswer: B\n\nThe following are multiple
+  choice questions (with answers) about {subject}.\n\n{question}\n{choices}\nAnswer:'
 """
 
 import collections
@@ -43,16 +50,20 @@ import re
 import sys
 
 from absl import flags
+
 import datasets
+
 import jax
+
+from mmlu_categories import categories
+from mmlu_categories import subcategories
+
+from tqdm import tqdm
+
+from MaxText import pyconfig
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxengine
-from mmlu_categories import categories
-from mmlu_categories import subcategories
-from MaxText import pyconfig
-from tqdm import tqdm
-
 
 ASCII_UPPERCASE_A = ord("A")  # ASCII value for uppercase 'A'
 

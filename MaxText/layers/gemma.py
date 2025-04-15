@@ -15,10 +15,10 @@ limitations under the License.
 """
 
 from flax import linen as nn
-from MaxText import common_types
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 
+from MaxText import common_types
 from MaxText.layers import normalizations
 from MaxText.layers import attentions
 from MaxText.layers import initializers

@@ -91,7 +91,6 @@ class DisruptionHandler(abc.ABC):
       disruption_config, target_pod_regex: str
   ) -> None:
     """Triggers workload recovery. Subclasses may implement this method."""
-    pass
 
 
 class SIGILLHandler(DisruptionHandler):

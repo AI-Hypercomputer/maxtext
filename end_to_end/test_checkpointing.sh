@@ -11,16 +11,16 @@ if [ -f "restored_metrics.txt" ]; then
     echo "removed existing restored_metrics.txt"
 fi
 
-RUN_NAME="${1}-${4}"
-OUTPUT_PATH="${2}"
-DATASET_PATH="${3}"
-COLLECT_STACK_TRACE="${4}"
-DATASET_TYPE="${5}"
-ATTENTION="${6}"
+RUN_NAME=${1}-${4}
+OUTPUT_PATH=${2}
+DATASET_PATH=${3}
+COLLECT_STACK_TRACE=${4}
+DATASET_TYPE=${5}
+ATTENTION=${6}
 if [ -z "${6}" ]; then
     ATTENTION='autoselected'
 fi
-ASYNC_CHECKPOINTING="${7:-true}"
+ASYNC_CHECKPOINTING=${7:-true}
 eval_metrics=checkpoint_save_restore
 model_params=" base_emb_dim=384 base_num_query_heads=8 base_num_kv_heads=8 base_mlp_dim=192 base_num_decoder_layers=8 head_dim=128"
 CMD_DATA=""
@@ -30,7 +30,7 @@ then
     eval_metrics=grain_checkpoint_save_restore
     echo "Using grain dataset type"
     echo "Mounting $DATASET_PATH to /tmp/gcsfuse/"
-    bash setup_gcsfuse.sh DATASET_GCS_BUCKET="$DATASET_PATH" MOUNT_PATH=/tmp/gcsfuse/
+    bash setup_gcsfuse.sh DATASET_GCS_BUCKET=$DATASET_PATH MOUNT_PATH=/tmp/gcsfuse/
     DATASET_PATH=/tmp/gcsfuse/
     CMD_DATA=" grain_worker_count=0 dataset_type=grain grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*"
 fi
@@ -65,4 +65,4 @@ echo $CMD2
 
 $CMD2
 
-python3 -m end_to_end.tpu.eval_assert $eval_metrics metrics.txt learning/loss
+python3 end_to_end/tpu/eval_assert.py $eval_metrics metrics.txt learning/loss

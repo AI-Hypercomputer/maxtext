@@ -15,7 +15,7 @@
 """CLI utility for running inference on a single/multi stream(s)"""
 
 import os
-from typing import Sequence, Any, Tuple, Union
+from typing import Sequence
 
 import jax
 import jax.numpy as jnp
@@ -77,7 +77,7 @@ def _batch_first_result_token(first_tokens: list[engine_api.ResultTokens], batch
   return result_tokens
 
 
-def main(argv: Union[Sequence[str], Tuple[Any, ...]]) -> None:
+def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
