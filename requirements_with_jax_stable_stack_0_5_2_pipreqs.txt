@@ -7,7 +7,7 @@ cloud_tpu_diagnostics==0.1.5
 datasets==3.5.0
 etils==1.12.2
 evaluate==0.4.3
-flax==0.10.4
+flax==0.10.6
 # Replacing with specific git commit due to conflicts during build
 # google_jetstream==0.3.0
 # Adding manually
