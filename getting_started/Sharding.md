@@ -85,7 +85,7 @@ Constructing a hierarchical mesh and specifying shardings is very similar to a �
 
 The simplest parallelization is data parallelization. Each chip works on a different batch of data, and the forward pass is embarrassingly parallel. No communication is needed in the forward pass. The gradients are synchronized in the backward pass (averaged or summed) - which is typically achieved with an all reduce.
 
-## DP Arithmetic Intensity
+## DP Arithmetic Intensity (Dense)
 
 Roughly approximate the entire backward pass:
 
@@ -97,7 +97,7 @@ We saw above that each matmul performs `2 * batch * params` flops, in turns out 
 
 **Ratio (arithmetic intensity)**: `local_batch`
 
-Note: this analysis ignores attention however this approximation `local_batch` is still accurate for attention (would require a separate analysis to see why)
+*Note*: For sparse models, the ratio of compute to communication shrinks by the sparsity factor = `experts / experts_per_token`, since the compute only grows by `experts_per_token` whereas the communication is still the full params which has grown by a size of `expert`.
 
 # Fully Sharded Data Parallelism (FSDP)
 Similar to data parallelism, except the model weights are also sharded to save memory. Generally the weights must get all-gathered before computation.
@@ -106,7 +106,7 @@ In addition to the weights all-gathering the gradient communications are synchro
 
 Fully sharded data parallelism (aka zero3) is used when the full model weights do not fit into HBM memory and thus they should be sharded as well. Generally we recommend using FSDP on TPU ICI or GPU NVLINK and DP across slices for TPUs or across hosts for NVLINK (for sparse models anyway)
 
- ## FSDP Arithmetic Intensity:
+ ## FSDP Arithmetic Intensity (Dense):
 
  Approximate a typical weight @ activation = activation matmul:
  
@@ -246,5 +246,55 @@ With a true all-to-all network this takes `2BEX_x` bytes. Over TPU ICI, an all-t
 **Ratio (arithmetic intensity)**: `2BEMX_x / 2BEX_x = M`
 
 Note: The batch `B` cancels in above arithmetic intensity, so although I didn’t define exactly what I mean by this (e.g. batch per expert or total batch) - the batch dimension is present in both the compute and communication since we are communicating activations so cancels from the arithmetic intensity ratio.
+
+# Pipeline Parallelism (PP)
+Shard the weights and computation by layers. There are many flavors of pipelining, MaxText current supports `gPipe` and `circular pipelines`, which are discussed below
+
+## Why Pipeline Parallelism?
+Pipeline parallel is generally needed when the `per_device_batch` size is too small for data parallelism to be efficient. Recall above the arithmetic intensity of data parallelism is given by the `local_batch/sparsity`, so when this becomes too small then the communications associated with data parallelism will be very costly. This occurs either for very sparse models (e.g. DeepSeek), or when scaling to a large number of chips and maintaining a fixed global batch size (and thus the per device batch size is small).
+
+## gPipe
+gPipe style pipelining ([reference](https://arxiv.org/abs/1811.06965)) shards layers across stages, where each stage can have multiple layers. E.g. if there are four stages and twelve layers, stage 0 will perform layers 0, 1, and 2, then pass the results to stage 1 which will perform layers 3, 4, and 5, etc. Naively implemented this isn’t parallel since stage 1 has to wait for stage 0 to finish, however we can break the batch into microbatches to enable parallelism. E.g. as stage 1 works on microbatch 0, stage 0 can start working a new microbatch 1. There is still a “bubble” - an amount of time each stage is idle while either waiting for the first microbatch or once it has finished all of its microbatches. This “bubble” time goes down with the amount of microbatches: 
+
+`Bubble = (PP - 1) / (Microbatches + PP - 1)`
+
+## Circular Pipelining
+Circular pipelining also shards layers across stages, but the layers “wrap” back around. E.g. if we have 24 layers, 4 stages, and 2 repeats, then stage 0 will perform layers 0, 1, 2 and also layers 12, 13, 14. Stage 1 will perform layers 3, 4, 5 and also 15, 16, 17 etc. This pattern helps to reduce the bubble: stage 1 is able to start its set of layers earlier (only need to wait for a microbatch to finish 3 layers instead of 6 since there are two repeats).
+
+`Bubble = (PP - 1) / (repeats * Microbatches + PP - 1)`
+
+There is a tradeoff of using many `repeats` - more `repeats` creates a schedule with a smaller bubble, however also requires more `PP` comms between stages. Ideally the `PP` comms are overlapped as long as there is enough compute, however achieving overlap is a challenging problem for the compiler. To break the data dependency of the circular transfer (last stage to first), the number of microbatches must exceed the number of stages, and thus we generally recommend `num_pipeline_microbatches = 2 * PP`.
+
+## Other Pipeline schedules
+We are actively investing in Multiple Program Multiple Data (MPMD) style jax to support fancier pipeline schedules such as 1F1B and dualpipe which can achieve smaller bubbles while using less `PP` comms. Currently we only support gPipe and ciruclar pipelines
+
+## PP + FSDP/DP
+Pipelining and FSDP/DP interactions have to be considered together to achieve optimal performance. Generally we want to reduce the gradients across DP replicas only once outside of the pipeline loop as opposed to every microbatch (we want the gradient reduction performed locally across microbatches first and only once across DP replicas). We rely on the XLA compiler for this optimization. Similarly for FSDP we want to all-gather the weights across FSDP only once before the pipeline loop as opposed to every microbatch- we have implemented this in maxtext with `pipeline_fsdp_ag_once` and generally recommend this with small batch sizes. However this comes with a huge memory cost - the weights and gradients are not sharded by FSDP, and thus a significant amount of other sharding (PP, EP, TP) must be used. This is roughly equivalent  0-1 sharding, FSDP only shards the optimizer state, not the weights and gradients. 
+
+## PP Arithmetic Intensity:
+
+The arithmetic intensity is a bit harder to define for PP, and depends on the pipeline flavor. We analyze the circular pipeline below.
+
+**Compute**
+
+ One stage worth. A stage can consist of multiple layers, if `layers_per_pipeline_stage > 1`. Each layer generally comprises of a fully connected feed forward block and an attention block. Let's ignore attention since it's generally significantly smaller than the `FF` (for sequence length of `8k`). A typical `FF` has 3 matmuls (2 in for silu, 1 out), for a total of `6 * B * M * E`. Thus there are `layers_per_pipeline_stage * 6 * B * M * E` flops
+
+**Communicate**
+
+The layer outputs between stages of size `BE`. These are collectively permuted (stage 0 &rarr; 1 &rarr; 2 &rarr; 3 &rarr; 0). Our current implementation of pipelining also rotates the inputs to stage 0 around so there are two collective permutes per stage, so `4BE` bytes per stage.
+
+**Ratio (arithmetic intensity)**
+
+`3/2 * layers_per_pipeline_stage * M` 
+
+
+# Context Autoregressive
+
+Context Autoregressive shards the KV cache on the sequence dimension. It shards feed forward layer by experts for both activations and weights. This is used for inference only, see [inference.yml](https://github.com/AI-Hypercomputer/maxtext/blob/353a45d57eb1f1cc02e5c8d9e7b18eaf634d7edc/MaxText/configs/inference.yml#L4) for the modified logical axis rules for inference. 
+
+# Autoregressive
+Autoregressive shards weights, but not activations. This is used for inference only. See [inference.yml](https://github.com/AI-Hypercomputer/maxtext/blob/353a45d57eb1f1cc02e5c8d9e7b18eaf634d7edc/MaxText/configs/inference.yml#L4) for the modified logical axis rules for inference.
+
+
 
 
