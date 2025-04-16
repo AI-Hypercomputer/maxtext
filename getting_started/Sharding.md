@@ -171,6 +171,7 @@ Analyze one pattern of TP as given above
 BM<sub>x</sub> @ M<sub>x</sub>E = BE (local partial result) -> Reduce-Scatter (RS) over x -> BE<sub>x</sub>
 
 **Compute**
+
 `2 * B * M_x * E` FLOPS
 
 **Commnicate**
@@ -218,22 +219,32 @@ Reduce scatter  `BM` (`bf16`): `2BM` bytes
 
 
 
-# Expert Parallelism
+# Expert Parallelism (EP)
 Shard expert feed forward computation (both weights and activations) by expert!
 
-Arithmetic Intensity:
-An all-to-all is needed to move between data sharding prior to the FF and the expert sharding during the feed forward
-Compute: Lets say 1 feed forward matmul
-[batch_per_exp, seq, embed] @ [exp, embed, mlp] = [exp, batch_per_exp, seq, embed, mlp]
-2 * This has batch_per_exp * seq * embed * mlp * exp / EP flops
-Communicate:
-[batch_per_exp/EP, seq, embed, exp] -> (a2a) [batch_per_exp, seq, embed, exp/EP]
-Ideally this only requires batch_per_exp, seq, embed, exp/EP, but it depends on if the hardware is connected with an a2a network (true for GPUs and TPU DCN but not for TPU ICI)
-With an a2a network this takes 2 * batch_per_exp * seq * embed * exp / EP 
-Ratio (arithmetic intensity): MLP
+The feedforward layer is the only one that has experts - for this layer we shard the weights and the activations on the experts dimensions by `EP`. For attention operations (including projections) the `EP` dimension acts like `FSDP`. This is a choice by maxtext, we may implement more options in the future where instead `EP` could act like `DP` or `CP/SP` as well.
 
-Note that batch_per_exp cancels, so although I didn’t define exactly what I mean by this it doesn’t really matter how the batch is shaped - the batch dimension is present in both the compute and communication since we are communicating activations so cancels from the ratio.
+When using dropless strategies you may want to ensure that the shards are balanced. The balance can be improved by using less `EP` so that each shard is averaged over more experts. For instance imagine a scenario where expert 1 gets 10x more tokens routed to it than the rest. If `EP = # experts = 64`  than we will get terrible performance waiting for this one expert to finish its computation which is 3x slower. However if we set `EP = 1/4 * # experts` than the EP rank with expert 1 will have 4 experts, so will have 3 + 1 + 1 + 1 = 6 compute to do compared to the average of `1 + 1 + 1 + 1 = 4`, a ratio of `6/4 = 1.5x` slower, which is a huge improvement over the `3x` slower.
 
-The feedforward layer is the only one that has experts - for this layer we shard the weights and the activations on the experts dimensions by EP. For attention the EP dimension acts like FSDP. This is a choice by maxtext, we may implement future choices where instead EP could act like DP or SP/CP as well.
+## EP Arithmetic Intensity:
+An all-to-all (A2A) is needed to move between data sharding (fsdp) prior to the feed forward and the expert sharding during the feed forward. We denote `X` as the expert tensor axis, and keep `x` as the mesh axes
+**Compute**
 
-When using dropless strategies you may want to ensure that the shards are balanced. The balance can be improved by using less EP so that each shard is averaged over more experts. For instance imagine a scenario where expert 1 gets 10x more tokens routed to it than the rest. If EP = # experts = 64  than we will get terrible performance waiting for this one expert to finish its computation which is 3x slower. However if we set EP = 1/4 * # experts than the EP rank with expert 1 will have 4 experts, so will have 3 + 1 + 1 + 1 = 6 compute to do compared to the average of 1 + 1 + 1 + 1 = 4, a ratio of 6/4 = 1.5x slower, which is a huge improvement over the 3x slower.
+Analyze only 1 feed forward matmul
+
+BEX<sub>x</sub> @ EMX<sub>x</sub> = BMX<sub>x</sub>
+
+`2 * B * E * X_x` Flops
+
+**Communicate**
+
+B<sub>x</sub>EX &rarr; (A2A) &rarr; BEX<sub>x</sub> 
+
+Ideally this `A2A` only requires moving around `BEX_x` elements per shard, but it depends on if the hardware is connected with an all to all network (true for `GPUs` and `TPU DCN` but not for `TPU ICI`)
+With a true all-to-all network this takes `2BEX_x` bytes. Over TPU ICI, an all-to-all is instead as costly as `1/4` of all gathering the entire activation as nicely drawn [here](https://jax-ml.github.io/scaling-book/sharding/#our-final-communication-primitive-the-alltoall) in jax's sharding doc.
+
+**Ratio (arithmetic intensity)**: `2BEMX_x / 2BEX_x = M`
+
+Note: The batch `B` cancels in above arithmetic intensity, so although I didn’t define exactly what I mean by this (e.g. batch per expert or total batch) - the batch dimension is present in both the compute and communication since we are communicating activations so cancels from the arithmetic intensity ratio.
+
+
