@@ -161,3 +161,79 @@ The extra all-to-all as an arithmetic intensity propriotnal to sequence dimensio
 
 **Ratio (Arithmetic Intensity)**: Proprtional to `seq_len`
 The exact ratio depends on MHA vs GQA, how many kv heads there are and the efficiency of an all-to-all on the given hardware.
+
+# Tensor Parallelism  (TP)
+Shard the activations along the feature dimensions instead of the batch dimension. Tensor parallelism communicates the activations as opposed to the weights as in DP/FSDP. Tensor parallelism can be used to replace some amount of DP/FSDP when the batch size is small and/or when the model is large (when the mlp dim is large). Tensor parallelism is needed to run with small batches, such as fraction `per_device_batch_size` < 1. For instance if use `TP=4` then we can use the rest with FSDP and set `per_device_batch_size=0.25` since the `global_batch = per_device_batch_size * TP * FSDP = 0.25 * 4 * FSDP = FSDP`, and this is shardable among `FSDP` devices (each device will get a shard of `FSDP/FSDP = 1` of the batch axis in this case). For the attention activations (query, key, value), we shard the heads on `TP` since that is the easiest dimension to shard on and use an attention kernel like flash attention (the heads are not a contracting dimension during the attention computation).
+
+## TP Arithmetic Intensity
+Analyze one pattern of TP as given above
+
+BM<sub>x</sub> @ M<sub>x</sub>E = BE (local partial result) -> Reduce-Scatter (RS) over x -> BE<sub>x</sub>
+
+**Compute**
+`2 * B * M_x * E` FLOPS
+
+**Commnicate**
+
+Reduce scatter  `BE` (`bf16`): `2BE` bytes
+
+**Ratio (arithmetic intensity)**
+`M_x` = `M/TP`
+
+Note this is one pattern of TP where the contracting dimension is sharded. By contrast for the initial feed forward matmul the non-contracting weight dimension is sharded:
+
+BE<sub>x</sub> @ EM<sub>x</sub> = AG activations -> BE @ EM<sub>x</sub> = BMM<sub>x</sub>
+
+This is the same amount of compute, and also the same amount of communication - again activations of `BE` are communicated, but in this case it is an initial all-gathering instead of secondary all-reduce. Ideally these activations (all-gather or reduce scatter) can be overlaped with the compute by the XLA compiler - an idea called a *collective matmul*. This is fairly challenging for the compiler since the comms and compute do depend on each other - to achieve overlap the computation and communication have to be chunked into smaller pieces and pipelined. 
+
+
+# Tensor Sequence Parallelism
+Similar to tensor parallelism, except for shading the initial feed forward (FF) activations on the feature dimension shard on the sequence dimension. The activations have to get all-gathered at the start of the FF and reduce-scattered at the end on this dimension, but its the same amount of total comms, just a different axis (see above analysis for TP). The intermediate activations of shape [batch, sequence, mlp] are still sharded by mlp (since the weights are sharded on mlp). The benefits are explained in more detail in this [paper](https://arxiv.org/pdf/2205.05198), TL;DR is that all-reduces for small normalizations are not needed since the feature dimension is not sharded with `TP sequence` as opposed to when its sharded with regular `TP`. This is generally recommended for GPUs over tensor parallelism. See [PR #1136](https://github.com/AI-Hypercomputer/maxtext/pull/1136) which introduces this parallelism.
+
+## Tensor Sequence Arithmetic Intensity:
+Near identical to tensor parallelism above except a different axis gets all gathered and reduce-scattered on:  thus `MLP/TP`
+
+# Tensor Parallelism Transpose (TP Transpose)
+Similar to tensor parallelism, but instead of sharding the feed forward weights along the `mlp_dim`, shard them along the `embed_dim`. This will require communicating activations of the `mlp_dim` as opposed to the `embed_dim`, and thus is useful when the `mlp_dim` < `embed_dim` which is unusual but is true for some models such as DeepSeek V3.
+
+Tensor and tensor parallelism can used together called "2D TP" which can be more efficient than using purely one of them for inference decoding, although this is still a work in progress/ largely untested.
+
+## TP Transpose Arithmetic Intensity:
+This is really just swapping `E` and `M` of the TP analysis above, but we will include it here:
+
+BE<sub>x</sub> @ E<sub>x</sub>M = BM_<sub>x</sub> 
+
+
+**Compute** 
+
+`2 * B * E_x * M FLOPS`
+
+**Comunicate**
+
+Reduce scatter  `BM` (`bf16`): `2BM` bytes
+
+**Ratio (arithmetic intensity)**
+
+`E_x`
+
+
+
+# Expert Parallelism
+Shard expert feed forward computation (both weights and activations) by expert!
+
+Arithmetic Intensity:
+An all-to-all is needed to move between data sharding prior to the FF and the expert sharding during the feed forward
+Compute: Lets say 1 feed forward matmul
+[batch_per_exp, seq, embed] @ [exp, embed, mlp] = [exp, batch_per_exp, seq, embed, mlp]
+2 * This has batch_per_exp * seq * embed * mlp * exp / EP flops
+Communicate:
+[batch_per_exp/EP, seq, embed, exp] -> (a2a) [batch_per_exp, seq, embed, exp/EP]
+Ideally this only requires batch_per_exp, seq, embed, exp/EP, but it depends on if the hardware is connected with an a2a network (true for GPUs and TPU DCN but not for TPU ICI)
+With an a2a network this takes 2 * batch_per_exp * seq * embed * exp / EP 
+Ratio (arithmetic intensity): MLP
+
+Note that batch_per_exp cancels, so although I didn’t define exactly what I mean by this it doesn’t really matter how the batch is shaped - the batch dimension is present in both the compute and communication since we are communicating activations so cancels from the ratio.
+
+The feedforward layer is the only one that has experts - for this layer we shard the weights and the activations on the experts dimensions by EP. For attention the EP dimension acts like FSDP. This is a choice by maxtext, we may implement future choices where instead EP could act like DP or SP/CP as well.
+
+When using dropless strategies you may want to ensure that the shards are balanced. The balance can be improved by using less EP so that each shard is averaged over more experts. For instance imagine a scenario where expert 1 gets 10x more tokens routed to it than the rest. If EP = # experts = 64  than we will get terrible performance waiting for this one expert to finish its computation which is 3x slower. However if we set EP = 1/4 * # experts than the EP rank with expert 1 will have 4 experts, so will have 3 + 1 + 1 + 1 = 6 compute to do compared to the average of 1 + 1 + 1 + 1 = 4, a ratio of 6/4 = 1.5x slower, which is a huge improvement over the 3x slower.
