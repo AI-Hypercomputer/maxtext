@@ -119,3 +119,9 @@ Fully sharded data parallelism (aka zero3) is used when the full model weights d
  **Communicate**: All gather params `EM` in (`bf16`): `2 * EM` bytes
  
  **Ratio (arithmetic intensity)** `B_x` = `local_batch` flops/byte
+
+ *Note*: You may notice that in the DP arithmetic intensity we analyzed the *entire* backward pass whereas here we analzed a single matmul. Both approaches should give the same answer, it is useful to understand both ways. Certain shardings are easier to analyze with a global view, whereas others are better analyzed with a local view, it is useful to practice switching between them. The local view is closer to what is really happening on the chip, but is sometimes harder to analyze.
+
+# Fully Sharded Data Parallelism (transpose)
+This is nearly identical to FSDP above except we choose the shard the main feedforward weights on the larger mlp dim instead of embed dim. This can be useful when the embed dim cannot be sharded further or does not have enough powers of 2 for efficient reduce scatter algorithms on TPUs. You may try swapping between `FSDP` and `FSDP_transpose`, their performance should be very similar, but one may offer a ~1% MFU improvement.
+
