@@ -33,7 +33,14 @@ RUN if [ "$DEVICE" = "tpu" ] && ([ "$JAX_STABLE_STACK_BASEIMAGE" = "us-docker.pk
 
 # Install Maxtext requirements with Jax Stable Stack
 RUN apt-get update && apt-get install --yes google-cloud-cli && apt-get install --yes dnsutils
-RUN python3 -m pip install -r /deps/requirements_with_jax_stable_stack.txt
+
+# Install requirements file generated with pipreqs for JSS 0.5.2. 
+# Othewise use general requirements_with_jax_stable_stack.txt
+RUN if [ "$DEVICE" = "tpu" ] && [ "$JAX_STABLE_STACK_BASEIMAGE" = "us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:jax0.5.2-rev1" ]; then \
+        python3 -m pip install -r /deps/requirements_with_jax_stable_stack_0_5_2_pipreqs.txt; \
+  else \
+        python3 -m pip install -r /deps/requirements_with_jax_stable_stack.txt; \
+  fi
 
 # Run the script available in JAX Stable Stack base image to generate the manifest file
 RUN bash /jax-stable-stack/generate_manifest.sh PREFIX=maxtext COMMIT_HASH=$COMMIT_HASH
