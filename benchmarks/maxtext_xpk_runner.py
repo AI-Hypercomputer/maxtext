@@ -630,9 +630,10 @@ def generate_xpk_workload_cmd(
   all_xpk_storage = ""
   if wl_config.xpk_storage:
     all_xpk_storage = " ".join(f"--storage={storage_test}" for storage_test in wl_config.xpk_storage)
-  HLO_FOLDER=f"gs:// mazumdera-test-bucket-us-central2/logs/context-parallelism/{name}"
   now = datetime.datetime.now()
-  timestamp = now.strftime("%Y-%m-%d-%H:%M")
+  timestamp = now.strftime("%Y-%m-%d-%H-%M")
+  HLO_FOLDER=f"gs://mazumdera-test-bucket-us-central2/logs/context-parallelism/{wl_config.model.model_name}_{timestamp}_{wl_config.num_slices}_{temp_post_fix}"
+
 
   return (
       (
@@ -810,7 +811,7 @@ def main() -> int:
   list_of_models = [
     # model_configs.llama2_70b_4096_sc,
     # model_configs.default_128
-    # model_configs.llama3_1_70b_131072,
+    model_configs.llama3_1_70b_131072,
     # model_configs.llama3_1_70b_129024_context,
   ]
 

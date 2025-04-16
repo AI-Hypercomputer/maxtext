@@ -1236,6 +1236,7 @@ llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds = _add_to_model_dictiona
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
+            "tokenizer_type": "tiktoken",
             "tokenizer_path": "assets/tokenizer_llama3.tiktoken",
         },
         xla_flags=(
@@ -1299,6 +1300,7 @@ llama3_1_70b_8192_iter_synth_data_and_checkpointing = _add_to_model_dictionary(
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
+            "tokenizer_type": "tiktoken",
             "tokenizer_path": "assets/tokenizer_llama3.tiktoken",
         },
         xla_flags=(
@@ -1349,7 +1351,7 @@ llama3_1_70b_129024_context = _add_to_model_dictionary(
             "enable_checkpointing": False,
             "sa_block_q": 2048,
             # "sa_block_kv": 2048,
-            "sa_block_kv": 4096,
+            "sa_block_kv": 2048,
             "sa_block_kv_compute": 2048,
             "sa_block_q_dkv": 2048,
             "sa_block_kv_dkv": 2048,
@@ -1360,8 +1362,8 @@ llama3_1_70b_129024_context = _add_to_model_dictionary(
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
-            "allow_split_physical_axes": True,
-            "custom_mesh": "hybrid_ring_32x8",
+            # "allow_split_physical_axes": True,
+            # "custom_mesh": "hybrid_ring_32x8",
         },
         xla_flags=(
             xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -1751,6 +1753,7 @@ llama3_1_70b_131072 = _add_to_model_dictionary(
         "profiler_steps": 5,
         # "allow_split_physical_axes": True,
         # "custom_mesh": "hybrid_ring_32x8",
+        "tokenizer_type": "tiktoken",
         "tokenizer_path": "assets/tokenizer_llama3.tiktoken", 
         "steps": 30,
     },
@@ -1761,6 +1764,20 @@ llama3_1_70b_131072 = _add_to_model_dictionary(
         + xla_flags_library.HOST_OFFLOAD_FLAGS
         
     ),
+    pathways_xla_flag_options={
+        xla_flags_library.REMOVE: [
+            "--2a886c8_chip_config_name=megachip_tccontrol"
+        ],
+        xla_flags_library.ADD_SERVER: (
+            xla_flags_library.ENHANCED_LAUNCH_BARRIER
+        ),
+        xla_flags_library.ADD_PROXY: (
+            xla_flags_library.ENHANCED_LAUNCH_BARRIER
+        ),
+        xla_flags_library.ADD_WORKER: (
+            xla_flags_library.ENHANCED_LAUNCH_BARRIER
+        ),
+    },
   )
 )
 
