@@ -29,9 +29,6 @@ class ModuleTests(unittest.TestCase):
   """Tests train.py with various invokation methods"""
 
   def test_get_informative_error(self):
-    # cwd is MaxText so step up a level
-    os.chdir("..")
-
     command = [
         sys.executable,  # use the same interpreter instance
         "MaxText/train.py",
