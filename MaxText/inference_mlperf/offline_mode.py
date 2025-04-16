@@ -172,6 +172,13 @@ flags.DEFINE_string(
     required=False,
 )
 
+flags.DEFINE_string(
+    "maxengine_config_filepath",
+    None,
+    "Base config filepath for initializing MaxEngine.",
+    required=False,
+)
+
 scenario_map = {
     "offline": lg.TestScenario.Offline,
     "server": lg.TestScenario.Server,
@@ -456,7 +463,7 @@ def main(argv):
     target_length = 2 * length
     log.info("Using batch size: %d and length: %d", batch, length)
     engine = create_engine_from_config_flags(
-        maxengine_config_filepath=None,
+        maxengine_config_filepath=FLAGS.maxengine_config_filepath,
         batch_size=batch,
         max_prefill_predict_length=length,
         max_target_length=target_length,
