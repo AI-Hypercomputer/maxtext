@@ -663,7 +663,7 @@ def setup_train_loop(config):
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
 
-  context_parallel_size = mesh.shape['context']
+  context_parallel_size = mesh.shape["context"]
   # Check if context parallelism is being used with sequence packing
   if context_parallel_size > 1 and config.packing and config.dataset_type != "synthetic":
     raise ValueError(

@@ -237,7 +237,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
     jax_weights["decoder"].update(
         {
             layer_name: {
-                "DeepSeekMoeBlock_0": {
+                "Llama4MoEBlock_0": {
                     "MoeBlock_0": {
                         "wi_0": None,
                         "wi_1": None,
@@ -420,7 +420,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
     else:
 
       gate = chkpt_vars[0][f"layers.{layer_idx}.feed_forward.router_DE"].type(torch.float32).numpy().astype(CAST_DTYPE)
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["gate"]["kernel"] = gate
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["MoeBlock_0"]["gate"]["kernel"] = gate
       base_emb_dim = model_params["base_emb_dim"]
 
       wi_0 = np.concatenate(
@@ -461,9 +461,9 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
 
       # ei, li = k, layer_idx
       # routed experts
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_0"] = wi_0
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_1"] = wi_1
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wo"] = wo
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_0"] = wi_0
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_1"] = wi_1
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["MoeBlock_0"]["wo"] = wo
 
       # shared experts
       # TODO: make this optional for setups that don't use shared experts
@@ -490,9 +490,9 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       ).transpose()
 
       # TODO: make this optional for setups that don't use shared experts
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_0"]["kernel"] = wi_0
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_1"]["kernel"] = wi_1
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["shared_experts"]["wo"]["kernel"] = wo
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["shared_experts"]["wi_0"]["kernel"] = wi_0
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["shared_experts"]["wi_1"]["kernel"] = wi_1
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["shared_experts"]["wo"]["kernel"] = wo
 
       gc.collect()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))

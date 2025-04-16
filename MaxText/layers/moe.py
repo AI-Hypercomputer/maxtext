@@ -142,7 +142,7 @@ class GateLogit(nn.Module):
     return output, pre_bias_logits
 
 
-class MoeBlock(nn.Module):
+class RoutedMoE(nn.Module):
   """Mixture of Experts (MoE) block.
 
   Attributes:
@@ -308,6 +308,13 @@ class MoeBlock(nn.Module):
     inputs_2d = jnp.reshape(inputs, (inputs_shape[0] * inputs_shape[1], inputs_shape[2]))
     weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits)
 
+    if self.config.decoder_block == "llama4":
+      # weights will be of shape (batch_size, seq_len, num_experts_per_tok)
+      router_scores = jax.nn.sigmoid(weights.astype(jnp.float32))  # weights are top_k_weights here
+      assert router_scores.shape[-1] == 1, "Only top-1 routing is supported for Llama4 for now!"
+      # Squeeze router_scores to (batch_size * seq_len, num_experts_per_tok)
+      inputs_2d = inputs_2d * router_scores.squeeze(0)
+
     flatten_selected_experts = jnp.ravel(selected_experts)
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
     sorted_indices = sorted_selected_experts // self.num_experts_per_tok
@@ -327,6 +334,9 @@ class MoeBlock(nn.Module):
     )
     with jax.named_scope("weight_sum"):
       matmul_precision = lax.Precision(self.config.matmul_precision)
+      if self.config.decoder_block == "llama4":
+        # For Llama4, combine using weights of 1 for selected experts
+        reshaped_weights = jnp.ones_like(reshaped_weights)
       output = jnp.einsum(
           "BKE,BK -> BE",
           reshaped_intermediate.astype(jnp.float32),
@@ -941,7 +951,7 @@ class MoeBlock(nn.Module):
       return self.dense_matmul(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)
 
 
-class DeepSeekMoeBlock(nn.Module):
+class RoutedAndSharedMoE(nn.Module):
   """DeepSeek MoE block, combining shared and routed experts.
 
   Attributes:
@@ -965,7 +975,8 @@ class DeepSeekMoeBlock(nn.Module):
   @nn.compact
   def __call__(self, inputs):
     cfg = self.config
-    routed_experts, _ = MoeBlock(
+    routed_experts, _ = RoutedMoE(
+        name="MoeBlock_0",
         config=cfg,
         num_experts=cfg.num_experts,
         num_experts_per_tok=cfg.num_experts_per_tok,

@@ -135,7 +135,8 @@ class MixtralDecoderLayer(nn.Module):
     )
 
     load_balance_loss = None
-    mlp_lnx, load_balance_loss = moe.MoeBlock(
+    mlp_lnx, load_balance_loss = moe.RoutedMoE(
+        name="MoeBlock_0",
         config=cfg,
         num_experts=cfg.num_experts,
         num_experts_per_tok=cfg.num_experts_per_tok,

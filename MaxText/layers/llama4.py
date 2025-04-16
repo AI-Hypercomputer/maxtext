@@ -184,7 +184,8 @@ class Llama4DecoderLayer(nn.Module):
     )
 
     load_balance_loss = None
-    mlp_lnx = moe.DeepSeekMoeBlock(
+    mlp_lnx = moe.RoutedAndSharedMoE(
+        name="Llama4MoEBlock_0",
         config=cfg,
         mesh=self.mesh,
         kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
