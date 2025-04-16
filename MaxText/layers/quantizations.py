@@ -415,7 +415,8 @@ def match_aqt_and_unquantized_param(aqt_params, params):
       # every quantized parameter has AQT.. as the leaf node
       # AqtDotGeneral and AqtEinsum replace leaf node.
       # Therefore, leaf node should be ignored for path matching
-      if k[: path_depth - 1] == aqt_k[: path_depth - 1]:
+      # Note: Aqt only operates on kernels so don't pop bias parameters.
+      if k[: path_depth - 1] == aqt_k[: path_depth - 1] and k[-1].key != 'bias':
         aqt_paths.append(aqt_k)
         param_paths.append(k)
         break
