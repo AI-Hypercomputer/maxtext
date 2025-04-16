@@ -50,6 +50,7 @@ D_KV = common_types.D_KV
 EMBED = common_types.EMBED
 
 DenseGeneral = linears.DenseGeneral
+dense_general = linears.dense_general
 NdInitializer = initializers.NdInitializer
 Initializer = initializers.Initializer
 nd_dense_init = initializers.nd_dense_init
@@ -158,7 +159,8 @@ class Gpt3MultiHeadAttention(nn.Module):
   def qkv_projection(self, inputs: Array, proj_name: str):
     """Fused QKV projection"""
 
-    qkv_proj = DenseGeneral(
+    qkv_proj = dense_general(
+        inputs_shape=inputs.shape,
         features=(3, self.num_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
@@ -176,7 +178,8 @@ class Gpt3MultiHeadAttention(nn.Module):
 
   def projection(self, inputs: Array, proj_name: str) -> Array:
     """individual projection for one of q, k and v."""
-    proj = DenseGeneral(
+    proj = dense_general(
+        inputs_shape=inputs.shape,
         features=(self.num_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
@@ -192,7 +195,8 @@ class Gpt3MultiHeadAttention(nn.Module):
 
   def out_projection(self, output_dim: int, out: Array) -> Array:
     """output projection"""
-    out_proj = DenseGeneral(
+    out_proj = dense_general(
+        inputs_shape=out.shape,
         features=output_dim,
         axis=(-2, -1),
         kernel_init=self.kernel_init,
