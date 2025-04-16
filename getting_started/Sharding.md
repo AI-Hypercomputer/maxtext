@@ -142,3 +142,22 @@ The extra cost of all gathering of keys and values is small, especially for long
 **Communicate (KV all gather)**: All-gather keys and values  (`4 * batch * seq_len * kv_heads * head_dim`)
 
 **Ratio**: `seq_len * query_heads / kv_heads`
+
+# Sequence Parallelism
+Sequence parallelism is very similar to context parallelism - we shard the layer inputs and feed forward activations along the sequence dimension. The difference is for attention - we shard the queries, keys, and values along the head dimension instead of sequence dimension. This is because the head dimension is easy to shard on for attention (it is not a contracting dimension), and thus can be more efficient than context parallelism as long as there are enough heads. Both sequence parallelism and tensor parallelism shard the heads, so we are constrained by `tensor_parallelism * sequence_parallelism < kv_heads`. E.g. if there are only 8 `kv_heads` as for llama3 and we use `tensor_parallelism=8`, then we cannot use any `sequence_parallelism` (e.g. `sequence_parallelism=1`) 
+
+Sequence parallelism is currently only supported with TPUs attention kernel, for GPUs we recommend context parallelism above.
+
+**Arithmetic Intensity**
+
+The main communications are the same as `FSDP` (all gather weights and synchronize gradients), with an arithmetic intensity of `local_batch`
+
+Sequence parallelism has an additional cost of transfering the sharding from sequence to heads (and back again) for attention. This is executed via and all-to-all which are generally cheap operations, analyzed below:
+The extra all-to-all as an arithmetic intensity propriotnal to sequence dimension:
+
+**Compute**: Attention (`4 * batch * seq_len^2 * heads * head_dim`)
+
+**Communicate** (All-to-all): all-to-all qkv activations and output activations (roughly `4 * batch * seq * heads * head_dim`)
+
+**Ratio (Arithmetic Intensity)**: Proprtional to `seq_len`
+The exact ratio depends on MHA vs GQA, how many kv heads there are and the efficiency of an all-to-all on the given hardware.
