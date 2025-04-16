@@ -407,7 +407,7 @@ def run_benchmarks(config):
 
   text = config.prompt
   metadata = engine.get_tokenizer()
-  vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
+  tokenizer_model = engine.build_tokenizer(metadata)
   rng, rng_init_decode = jax.random.split(rng)
 
   generate_executable, params, decode_state_executable = engine.aot_compile(params, pass_rng_shape=True)
@@ -429,8 +429,8 @@ def run_benchmarks(config):
     rng_shape = jax.ShapeDtypeStruct([4], jax.numpy.dtype("uint32"))
 
     for prefill_length in prefill_lengths:
-      prefill_tokens[prefill_length], prefill_true_lengths[prefill_length] = token_utils.tokenize_and_pad(
-          text, vocab, is_bos=True, prefill_lengths=[prefill_length]
+      prefill_tokens[prefill_length], prefill_true_lengths[prefill_length] = tokenizer_model.encode(
+          text, is_bos=True, prefill_lengths=[prefill_length]
       )
 
       key_shape = jax.ShapeDtypeStruct([prefill_length], jax.numpy.dtype("int32"))
