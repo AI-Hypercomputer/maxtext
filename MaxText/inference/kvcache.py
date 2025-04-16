@@ -49,8 +49,8 @@ def reverse_transpose(transposed_array, transpose_axis_order):
   return jax.numpy.moveaxis(transposed_array, (0, 1, 2, 3), transpose_axis_order)
 
 
-def transpose_tuple(items: tuple[Any, Any, Any, Any], axis_order: AxisIdxes) -> tuple[Any, Any, Any, Any]:
-  return tuple([items[i] for i in axis_order])
+def transpose_tuple(items: tuple[Any, ...], axis_order: AxisIdxes) -> tuple[Any, ...]:
+  return tuple((items[i] for i in axis_order))
 
 
 class KVQuant:
@@ -260,6 +260,10 @@ class KVCache(nn.Module):
   def _get_ar_cache_vars(self, batch, key_heads, value_heads, key_head_size, value_head_size, model_mode):
 
     dtype = self._get_cached_kv_dtype()
+    if self.max_target_length <= self.max_prefill_length:
+      raise ValueError(
+          f"max_target_length: {self.max_target_length} should be greater than max_prefill_length: {self.max_prefill_length}!"
+      )
     cache_length = self.max_target_length - self.max_prefill_length
 
     if model_mode == common_types.MODEL_MODE_PREFILL:
@@ -550,7 +554,6 @@ class KVCache(nn.Module):
           ar_cache_update_idx,
           ar_cache_scale_update_axis,
       )
-    return
 
   def get_cached_values(self, cache_vars, target_dtype, cache_axis_order) -> jax.Array | KVTensor:
     cache_var, cache_scale_var = cache_vars

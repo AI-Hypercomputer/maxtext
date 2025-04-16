@@ -132,7 +132,7 @@ class Gemma3DecoderLayer(nn.Module):
         attention_type=self.attention_type,
         sliding_window_size=cfg.sliding_window_size,
         attn_logits_soft_cap=cfg.attn_logits_soft_cap,
-        use_qk_norm=True,  # Gemma 3 models use querry, key normalizations
+        use_qk_norm=True,  # Gemma 3 models use query, key normalizations
         query_pre_attn_scalar=query_pre_attn_scalar,
     )
 

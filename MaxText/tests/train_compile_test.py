@@ -549,10 +549,28 @@ class TrainCompile(unittest.TestCase):
             "megablox=False",
             "per_device_batch_size=1",
             "max_target_length=1024",
-            "attention=dot_product",  # Change to flush attention once it works for MLA
+            "attention=dot_product",  # Change to flash attention once it works for MLA
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
             "n_routing_groups=-1",
             "topk_routing_group=-1",
+        )
+    )
+
+  @pytest.mark.tpu_only
+  def test_moe_llama4_17b_16e(self):
+    compiled_trainstep_file = "/tmp/test_moe_llama4_17b_16e.pickle"
+    train_compile_main(
+        (
+            None,
+            os.path.join(PKG_DIR, "configs", "base.yml"),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v6e-256",
+            "compile_topology_num_slices=1",
+            "model_name=llama4-17b-16e",
+            "per_device_batch_size=1",
+            "max_target_length=1024",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
         )
     )

@@ -31,7 +31,6 @@ from MaxText.input_pipeline import input_pipeline_interface
 from MaxText.globals import PKG_DIR
 
 
-
 class GrainArrayRecordProcessingTest(unittest.TestCase):
 
   @classmethod
@@ -125,8 +124,7 @@ class GrainParquetProcessingTest(unittest.TestCase):
     if not os.path.isfile(script_path):
       raise FileNotFoundError(script_path)
     exit_code = subprocess.call(
-        ["bash", script_path,
-        "DATASET_GCS_BUCKET=maxtext-dataset", f"MOUNT_PATH={os.path.join(temp_dir, 'gcsfuse')}"]
+        ["bash", script_path, "DATASET_GCS_BUCKET=maxtext-dataset", f"MOUNT_PATH={os.path.join(temp_dir, 'gcsfuse')}"]
     )
     if exit_code != 0:
       raise ValueError(f"Running setup_gcsfuse.sh failed with exit code: {exit_code}")
@@ -204,10 +202,10 @@ class GrainParquetProcessingTest(unittest.TestCase):
 if __name__ == "__main__":
   temp_dir = tempfile.gettempdir()
   script_path = os.path.join(os.path.dirname(PKG_DIR), "setup_gcsfuse.sh")
-  if not os.path.isfile(script_path): raise FileNotFoundError(script_path)
+  if not os.path.isfile(script_path):
+    raise FileNotFoundError(script_path)
   exit_code = subprocess.call(
-      ["bash", script_path,
-        "DATASET_GCS_BUCKET=maxtext-dataset", f"MOUNT_PATH={os.path.join(temp_dir, 'gcsfuse')}"]
+      ["bash", script_path, "DATASET_GCS_BUCKET=maxtext-dataset", f"MOUNT_PATH={os.path.join(temp_dir, 'gcsfuse')}"]
   )
   if exit_code != 0:
     raise ValueError(f"Running setup_gcsfuse.sh failed with exit code: {exit_code}")

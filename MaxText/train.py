@@ -85,7 +85,7 @@ def validate_train_config(config):
   """Validates the configuration is set correctly for train.py"""
 
   assert config.run_name, "Erroring out, need a real run_name"
-  if not config.dataset_path.startswith("gs://"):
+  if config.dataset_path and not config.dataset_path.startswith("gs://"):
     max_logging.log("WARNING: 'dataset_path' might be pointing your local file system")
   if not config.base_output_directory.startswith("gs://"):
     max_logging.log("WARNING: 'base_output_directory' might be pointing your local file system")
@@ -96,6 +96,14 @@ def validate_train_config(config):
     assert (
         config.gradient_accumulation_steps == 1
     ), "fp8 can't be used with gradient_accumulation_steps right now. Please use other quantization or set gradient_accumulation_steps to 1"
+
+  # Check if GPU Flash Attention is being used with sequence packing
+  if config.attention == "cudnn_flash_te" and config.packing and config.dataset_type != "synthetic":
+    raise ValueError(
+        "cudnn_flash_te only supports BSHD format. The THD (seq packing) support is going to be available in Transformer Engine 2.0 release. "
+        "Please disable sequence packing (set packing=False) or use a different attention mechanism. "
+        "With synthetic data, the format is not important as packing is not applied."
+    )
 
 
 def get_first_step(state):
@@ -655,6 +663,21 @@ def setup_train_loop(config):
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
 
+  context_parallel_size = mesh.shape['context']
+  # Check if context parallelism is being used with sequence packing
+  if context_parallel_size > 1 and config.packing and config.dataset_type != "synthetic":
+    raise ValueError(
+        "Context parallelism cannot be used with sequence packing except for synthetic data where packing is not applied. "
+        "Either disable sequence packing (set packing=False) or disable context parallelism. "
+        "Context parallelism with packing support will be added soon."
+    )
+
+  # Apply reordering wrapper to data iterators if context parallelism is enabled
+  if context_parallel_size > 1 and config.context_parallel_load_balance:
+    data_iterator = map(max_utils.get_reorder_callable(context_parallel_size), data_iterator)
+    if eval_data_iterator:
+      eval_data_iterator = map(max_utils.get_reorder_callable(context_parallel_size), eval_data_iterator)
+
   state, _, state_mesh_shardings, data_iterator = max_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
@@ -916,14 +939,14 @@ def train_loop(config, state=None):
         state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
         if save_checkpoint(
             checkpoint_manager,
-            int(state_to_save) - 1,
+            int(state.step) - 1,
             state_to_save,
             config.dataset_type,
             data_iterator,
             config,
             force=True,
         ):
-          checkpointing.print_save_message(int(state_to_save) - 1, config.async_checkpointing)
+          checkpointing.print_save_message(int(state.step) - 1, config.async_checkpointing)
       except Exception:  # pylint: disable=broad-except
         max_logging.log(f"Checkpoint is already saved for step {int(state.step)-1}.")
 
@@ -957,7 +980,7 @@ def main(argv: Sequence[str]) -> None:
   config = pyconfig.initialize(argv)
   max_utils.print_system_information()
   validate_train_config(config)
-  os.environ["TFDS_DATA_DIR"] = config.dataset_path
+  os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
   vertex_tensorboard_manager = VertexTensorboardManager()
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)

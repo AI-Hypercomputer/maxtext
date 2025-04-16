@@ -277,11 +277,7 @@ def ragged_mqa(
           ],
           grid=(batch_size, seq_len // block_size),
       ),
-      compiler_params=dict(
-          mosaic=dict(
-              dimension_semantics=("parallel", "arbitrary"),
-          )
-      ),
+      compiler_params={"mosaic": {"dimension_semantics": ("parallel", "arbitrary")}},
       out_shape=[
           jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),
           jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),

@@ -234,7 +234,7 @@ class MoeBlock(nn.Module):
 
     if self.config.decoder_block == "deepseek":
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
-    else:
+    elif self.config.decoder_block != "llama4":
       top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
     return top_k_weights, top_k_indices
 
@@ -738,7 +738,12 @@ class MoeBlock(nn.Module):
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits = nn.with_logical_constraint(pre_bias_logits, ("activation_batch", "activation_length", None))
     top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits)
-    weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
+    is_llama4_decoder_layer = self.config.decoder_block == "llama4"
+    if is_llama4_decoder_layer:
+      router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(jnp.bfloat16)
+      inputs = inputs * router_scores
+    else:
+      weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
     matmul_precision = lax.Precision(self.config.matmul_precision)
 
     if self.config.model_call_mode != "inference":
@@ -751,7 +756,13 @@ class MoeBlock(nn.Module):
 
     cp, sub_seq = self.get_context_partition_and_sub_seq(seq_len)
 
+    # TODO @jacobplatin: allow Llama4 MoE to handle capacity factor > 0
     if self.config.capacity_factor > 0:
+      if is_llama4_decoder_layer:
+        # TODO @jacobplatin
+        raise ValueError(
+            "Llama4 decoder has not been tested with capacity_factor > 0 -- please set that value to -1 for now!"
+        )
       # token dropping if needed
       if self.config.model_call_mode != "inference":
         dispatch_mask, combine_mask = self.generate_masks(top_k_indices, weights)
@@ -876,6 +887,8 @@ class MoeBlock(nn.Module):
           intermediate_layer = intermediate_layer.astype(jnp.float32)
         intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("w_sum"):
+        if is_llama4_decoder_layer:
+          weights = self.reshape_and_update_weights(jnp.ones_like(top_k_weights), top_k_indices)
         output = jnp.einsum(
             "BSEM,BSE -> BSM",
             intermediate_layer,
@@ -903,7 +916,6 @@ class MoeBlock(nn.Module):
   def __call__(self, inputs):
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
-
     gate_logits, pre_bias_logits = GateLogit(
         self.num_experts,
         model_name=cfg.model_name,
