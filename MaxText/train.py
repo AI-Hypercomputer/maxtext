@@ -26,7 +26,7 @@ if not __package__:
     "`python3 -m MaxText.module <args>`, e.g., "
     "`python3 -m MaxText.train <args>`.",
     file=sys.stderr)
-    sys.exit(1)
+  sys.exit(1)
 
 import datetime
 import os
