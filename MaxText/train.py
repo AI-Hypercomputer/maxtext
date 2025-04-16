@@ -21,13 +21,11 @@ limitations under the License.
 import sys
 
 if not __package__:
-    print(
-        "Error: The MaxText API has changed. MaxText entry-points are now "
-        "invoked as modules, with syntax of the form "
-        "`python3 -m MaxText.module <args>`, e.g., "
-        "`python3 -m MaxText.train <args>`.",
-        file=sys.stderr
-    )
+  print("Error: The MaxText API has changed. MaxText entry-points are now "
+    "invoked as modules, with syntax of the form "
+    "`python3 -m MaxText.module <args>`, e.g., "
+    "`python3 -m MaxText.train <args>`.",
+    file=sys.stderr)
     sys.exit(1)
 
 import datetime
