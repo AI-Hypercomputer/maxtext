@@ -31,7 +31,7 @@ class ModuleTests(unittest.TestCase):
   def test_get_informative_error(self):
     # cwd is MaxText so step up a level
     os.chdir("..")
-    
+
     command = [
         sys.executable,  # use the same interpreter instance
         "MaxText/train.py",
@@ -42,12 +42,12 @@ class ModuleTests(unittest.TestCase):
     ]
 
     with self.assertRaises(subprocess.CalledProcessError) as context:
-        subprocess.run(command, check=True, text=True, capture_output=True)
-  
+      subprocess.run(command, check=True, text=True, capture_output=True)
+
     ex = context.exception
     self.assertEqual(ex.returncode, 64)
     self.assertIn("The MaxText API has changed", ex.stderr)
 
 if __name__ == "__main__":
   absltest.main()
-  
+
