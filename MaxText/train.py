@@ -28,7 +28,8 @@ if not __package__:
         "`python3 -m MaxText.train <args>`.",
         file=sys.stderr
     )
-    sys.exit(1)
+    # EX_USAGE
+    sys.exit(64)
 
 import datetime
 import os
