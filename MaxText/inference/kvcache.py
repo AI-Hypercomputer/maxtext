@@ -711,7 +711,7 @@ class MlaKVCache(KVCache):
       Optional[Tuple[Array, Array, Array, Array]],
   ]:
     assert model_mode != common_types.MODEL_MODE_TRAIN, "incorrectly updating kvcache in train mode."
-    assert self.kv_quant == None, "kvcache quantization not supported with mla."
+    assert self.kv_quant is None, "kvcache quantization not supported with mla."
     key_latent = self.key_latent_add_head_dim(key_latent)
     prefill_cache, ar_cache = super().__call__(key_latent, key_rope, decoder_segment_ids, model_mode)
     if prefill_cache:

@@ -1451,7 +1451,7 @@ if __name__ == "__main__":
         max_logging.log(f"Ignoring {lora_id} adapter because its directory doesn't have adapter_config.json.")
         continue
 
-      with open(lora_config_path, "r", encoding="utf8") as file:
+      with open(lora_config_path, "rt", encoding="utf8") as file:
         lora_config_dict = json.load(file)
 
         if lora_config_dict is not None:

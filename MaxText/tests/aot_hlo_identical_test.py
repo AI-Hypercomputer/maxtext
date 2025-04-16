@@ -45,6 +45,7 @@ class AotHloIdenticalTest(unittest.TestCase):
       print(f"Error running script: {e.returncode}")
       print(f"Output: {e.stdout}")
       print(f"Error: {e.stderr}")
+      return None
 
   def find_file_by_substring(self, directory, substring):
     for filename in os.listdir(directory):

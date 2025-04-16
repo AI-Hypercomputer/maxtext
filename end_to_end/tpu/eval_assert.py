@@ -25,7 +25,7 @@ import json
 
 def get_last_n_data(metrics_file, target, n=10):
   last_n_data = []
-  with open(metrics_file, 'r', encoding='utf8') as file:
+  with open(metrics_file, 'rt', encoding='utf8') as file:
     lines = file.readlines()
     for line in lines[::-1]:
       metrics = json.loads(line)
@@ -47,7 +47,7 @@ def assert_metric_average(metrics_file, threshold, target):
 
 def test_final_loss(metrics_file, target_loss):
   target_loss = float(target_loss)
-  with open(metrics_file, 'r', encoding='utf8') as metrics:
+  with open(metrics_file, 'rt', encoding='utf8') as metrics:
     use_last_n_data = 10
     last_n_data = get_last_n_data(metrics_file, 'learning/loss', use_last_n_data)
     avg_last_n_data = sum(last_n_data) / len(last_n_data)
@@ -61,8 +61,8 @@ def test_checkpointing(metrics_file, target, dataset_type):
   metrics_file_saved = 'saved_' + metrics_file
   metrics_file_restored = 'restored_' + metrics_file
 
-  with open(metrics_file_saved, 'r', encoding='utf8') as saved,\
-    open(metrics_file_restored, 'r', encoding='utf8') as restored:
+  with open(metrics_file_saved, 'rt', encoding='utf8') as saved,\
+    open(metrics_file_restored, 'rt', encoding='utf8') as restored:
     saved_loss = json.loads(saved.readlines()[-1])[target]
     restored_loss = json.loads(restored.readlines()[0])[target]
     # Checks that checkpoint restore was successful by comparing loss of last
@@ -82,8 +82,8 @@ def test_determinism(metrics_file, target):
   run_1 = 'run_1_' + metrics_file
   run_2 = 'run_2_' + metrics_file
 
-  with open(run_1, 'r', encoding='utf8') as run_1_file,\
-    open(run_2, 'r', encoding='utf8') as run_2_file:
+  with open(run_1, 'rt', encoding='utf8') as run_1_file,\
+    open(run_2, 'rt', encoding='utf8') as run_2_file:
     run_1_loss = json.loads(run_1_file.readlines()[-1])[target]
     run_2_loss = json.loads(run_2_file.readlines()[-1])[target]
     # Check that the two runs have the same loss
@@ -100,7 +100,7 @@ def test_vocab_creation(target):
   print('vocab creation test passed.')
 
 def test_start_step(metrics_file, start_step_target):
-  with open(metrics_file, 'r', encoding='utf8') as metrics:
+  with open(metrics_file, 'rt', encoding='utf8') as metrics:
     start_step = json.loads(metrics.readlines()[0])["step"]
   print(f"Start step is {start_step}, start step target is {start_step_target}")
   assert start_step==float(start_step_target)

@@ -24,13 +24,12 @@ similar to virtual memory systems.
 
 # TODO Need to update unit tests for this file under Maxtext/tests/page_manager.py.
 
-from typing import Optional, Tuple
-
-from MaxText import common_types
 import jax
 import jax.numpy as jnp
-from flax import linen as nn
+
 from flax import struct
+
+from MaxText import common_types
 
 Array = common_types.Array
 DType = common_types.DType

@@ -20,21 +20,16 @@ python -m MaxText.scratch_code.generate_grpo_golden_logits
 """
 
 import functools
-import jax
 import os
 import unittest
 
 import jsonlines
-from MaxText.layers import models
-from MaxText.layers import initializers
+import jax
 import jax.numpy as jnp
-import numpy as np
-
-from MaxText import pyconfig
-from MaxText import max_utils
 from jax.sharding import Mesh
 from flax import linen as nn
-from MaxText import common_types
+import numpy as np
+
 import torch
 # from datasets import Dataset
 from trl import GRPOConfig, GRPOTrainer
@@ -42,9 +37,14 @@ import transformers
 
 from datasets import load_dataset
 
+from MaxText import maxengine
+from MaxText import pyconfig
+from MaxText import max_utils
+from MaxText import common_types
 from MaxText.experimental.rl.grpo_trainer import compute_log_probs, grpo_loss_fn, _merge_grpo_state, generate_completions
 from MaxText.tests.grpo_trainer_correctness_test import prepare_maxtext_inputs
-from MaxText import maxengine
+from MaxText.layers import models
+from MaxText.layers import initializers
 from MaxText.globals import PKG_DIR
 
 Array = common_types.Array
@@ -162,7 +162,9 @@ class GRPOTest(unittest.TestCase):
         # using the same model as the ref model,
         # which is equivalent of step 0 of GRPO training when
         # the on-policy params are the same as the ref model
-        "ref_per_token_logps": self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep),  # pylint: disable=protected-access
+        "ref_per_token_logps": self.trainer._get_per_token_logps(
+            self.hf_model, hf_input_ids, attention_mask, logits_to_keep
+        ),  # pylint: disable=protected-access
         # using only one advantage because we have just one sequence
         "advantages": advantages[0][0].unsqueeze(0),
     }

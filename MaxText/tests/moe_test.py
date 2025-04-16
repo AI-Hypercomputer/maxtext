@@ -12,23 +12,26 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-import jax
 import os.path
 import unittest
+from typing import Tuple
+
+import pytest
+
+import jax
+import jax.numpy as jnp
+from jax.sharding import Mesh
+
+import flax.linen as nn
+from flax.linen import partitioning as nn_partitioning
+
 from MaxText.layers import linears
 from MaxText.layers import initializers
 from MaxText.layers import moe
-import jax.numpy as jnp
-
 from MaxText import pyconfig
 from MaxText import max_utils
 from MaxText.globals import PKG_DIR
-from jax.sharding import Mesh
-import flax.linen as nn
-from typing import Tuple
 from MaxText import common_types
-import pytest
-from flax.linen import partitioning as nn_partitioning
 
 
 Array = common_types.Array

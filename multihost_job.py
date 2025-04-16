@@ -147,7 +147,7 @@ tar xzf {zip_name}
 gsutil cp {log_name} "{bucket_path}/"
 (({create_kill_command_str(args)}) 2>&1 ) >> {log_name}"""
 
-  with open(startup_script_file, "w", encoding="utf-8") as f:
+  with open(startup_script_file, "wt", encoding="utf-8") as f:
     f.write(startup_script)
   return startup_script
 

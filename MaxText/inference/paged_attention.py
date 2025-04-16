@@ -20,15 +20,14 @@ WARNING: THIS FILE IS A WORK IN PROGRESS.
 import functools
 from typing import Optional
 
-import jax
-
-from MaxText import common_types
 import jax.numpy as jnp
-from flax import linen as nn
 from jax.experimental import shard_map
 from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention_kernel
 from jax.sharding import PartitionSpec as P
 
+from flax import linen as nn
+
+from MaxText import common_types
 from MaxText.inference import page_manager
 from MaxText.inference import paged_attention_kernel_v2
 
@@ -288,9 +287,10 @@ class PagedAttentionOp(nn.Module):
     ), f"prefill_step key/value should have the same shape, but getting {key.shape=} and {value.shape=} instead"
     batch_size, seq_len, n_kv_head, head_dim = key.shape
     assert seq_len % self.tokens_per_page == 0, f"seq_length {seq_len} and  tokens_per_page {self.tokens_per_page}"
-    assert (
-        key_pages_var.value.shape == value_pages_var.value.shape
-    ), f"prefill_step key/value_pages_var should have the same shape, but getting {key_pages_var.shape=} and {value_pages_var.shape=} instead"
+    assert key_pages_var.value.shape == value_pages_var.value.shape, (
+        f"prefill_step key/value_pages_var should have the same shape, but "
+        f"getting {key_pages_var.shape=} and {value_pages_var.shape=} instead"
+    )
 
     v_n_kv, v_n_p, v_p, v_d = key_pages_var.value.shape
     assert v_n_kv == n_kv_head, f"{v_n_kv=} {n_kv_head=}"

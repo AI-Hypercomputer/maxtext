@@ -12,30 +12,28 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-import jax
 import os
 import unittest
-from MaxText.layers import models
-from MaxText.layers import initializers
+
+import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh
 import numpy as np
 
+from MaxText.layers import models
+from MaxText.layers import initializers
+from MaxText.globals import PKG_DIR
+from MaxText.experimental.rl.grpo_trainer import compute_log_probs, grpo_loss_fn, _merge_grpo_state
 from MaxText import pyconfig
 from MaxText import max_utils
-from jax.sharding import Mesh
-import flax.linen as nn
-from typing import Tuple
-import sys
 from MaxText import common_types
-from MaxText.globals import PKG_DIR
+
 import torch
 # from datasets import Dataset
 from trl import GRPOConfig, GRPOTrainer
 import transformers
 
 from datasets import load_dataset
-
-from MaxText.experimental.rl.grpo_trainer import compute_log_probs, grpo_loss_fn, _merge_grpo_state
 
 
 Array = common_types.Array
@@ -167,9 +165,8 @@ class GRPOTest(unittest.TestCase):
     with torch.no_grad():
       hf_per_token_logps = self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep)  # pylint: disable=protected-access
 
-    print(
-        f"Max Diff {np.max(np.abs(np.trim_zeros(np.asarray(maxtext_per_token_logps)[0]) - hf_per_token_logps.detach().numpy()[0]))}"
-    )
+    max_diff = np.max(np.abs(np.trim_zeros(np.asarray(maxtext_per_token_logps)[0]) - hf_per_token_logps.detach().numpy()[0]))
+    print("Max Diff", max_diff)
     self.assertTrue(
         jax.numpy.allclose(
             np.trim_zeros(np.asarray(maxtext_per_token_logps)[0]),
@@ -209,13 +206,17 @@ class GRPOTest(unittest.TestCase):
         # using the same model as the ref model,
         # which is equivalent of step 0 of GRPO training when
         # the on-policy params are the same as the ref model
-        "ref_per_token_logps": self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep),  # pylint: disable=protected-access
+        "ref_per_token_logps": self.trainer._get_per_token_logps(
+            self.hf_model, hf_input_ids, attention_mask, logits_to_keep
+        ),  # pylint: disable=protected-access
         # using only one advantage because we have just one sequence
         "advantages": advantages[0][0].unsqueeze(0),
     }
     hf_loss = self.trainer.compute_loss(self.hf_model, inputs)
 
-    hf_per_token_logps = self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep)  # pylint: disable=protected-access
+    # hf_per_token_logps = self.trainer._get_per_token_logps(
+    #  self.hf_model, hf_input_ids, attention_mask, logits_to_keep
+    # )  # pylint: disable=protected-access
 
     input_ids, input_segmentation, input_position, completion_segmentation = self._prepare_maxtext_inputs()
     maxtext_per_token_logps, _ = compute_log_probs(

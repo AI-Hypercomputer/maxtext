@@ -70,5 +70,5 @@ def upload_blob(bucket_name, source_file_name, destination_blob_name):
   blob.upload_from_filename(source_file_name)
 
 
-upload_blob("maxtext-llama", output_path, "llama2-70b/golden-logits/" + output_path)
-print("File {} uploaded to {}.".format(output_path, "llama2-70b/golden-logits/" + output_path))
+upload_blob("maxtext-llama", output_path, f"llama2-70b/golden-logits/{output_path}")
+print("File", repr(output_path), "uploaded to", f"llama2-70b/golden-logits/{output_path}.")

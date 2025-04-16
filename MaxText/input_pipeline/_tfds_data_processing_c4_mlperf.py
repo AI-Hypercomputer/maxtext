@@ -41,7 +41,7 @@ AUTOTUNE = tf.data.experimental.AUTOTUNE
 # data processing functions:
 #   _shift_left_and_pad, rekey, reduce_concat_tokens and split_tokens_to_targets_length
 # Adapted from:
-#   https://github.com/google-research/text-to-text-transfer-transformer/blob/ba171b6f94eafcee60d0714fd6d60749b572d1f2/t5/data/preprocessors.py
+#   https://github.com/google-research/text-to-text-transfer-transformer/blob/ba171b6/t5/data/preprocessors.py
 # -----------------------------------------------------------------------------
 def _shift_left_and_pad(tensor, pad_val):
   """Shift the input to the left with pad_val"""

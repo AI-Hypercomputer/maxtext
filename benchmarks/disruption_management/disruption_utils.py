@@ -82,6 +82,7 @@ def get_pod_name_from_regex(workload_name: str, pod_regex: str) -> str | None:
         f"Workload '{workload_name}': Error getting pod information:"
         f" {e}"
     )
+  return None
 
 
 def get_pod_status(workload_name: str, pod_name: str) -> str | None:

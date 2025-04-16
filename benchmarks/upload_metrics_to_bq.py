@@ -15,22 +15,25 @@
  """
 import argparse
 from typing import Any, Dict, Sequence
+import json
+import os
+import sys
+
 from statistics import median
 
 import omegaconf
+
 from command_utils import run_command_with_updates
+
+import fnmatch
+
 # from benchmark_db_utils import install_mantaray_locally
 from benchmark_db_utils import write_run
 from benchmark_db_utils import DEFAULT_LOCAL_DIR
 from benchmark_db_utils import recover_tuning_params
 from benchmark_db_utils import Metrics
+
 from MaxText.inference_utils import str2bool
-import dataclasses
-import fnmatch
-import getpass
-import json
-import os
-import sys
 
 
 hardware_id_to_bf16_tflops = {"v4": 275,
@@ -181,7 +184,7 @@ def download_metrics_file_locally(metrics_gcs_file: str, local_file: str) -> int
 # Get the last n datapoints for a target metric
 def get_last_n_data(metrics_file, target, n=10):
   last_n_data = []
-  with open(metrics_file, 'r', encoding='utf8') as file:
+  with open(metrics_file, 'rt', encoding='utf8') as file:
     lines = file.readlines()
     for line in lines[::-1]:
       metrics = json.loads(line)
@@ -206,9 +209,15 @@ def get_metrics_sum(metrics_file, target, n=10):
   return sum(last_n_data)
 
 # metric file example:
-# {"learning/grad_norm": 1.0000004768371582, "learning/loss": 10.8693265914917, "learning/moe_lb_loss": 0.0, "learning/param_norm": 8122.166015625, "learning/raw_grad_norm": 5.087409973144531, "learning/total_weights": 79694.0, "perf/step_time_seconds": 4.986376, "perf/per_device_tflops": 172.941153140736, "perf/per_device_tflops_per_sec": 34.6827341421377, "perf/per_device_tokens": 24576.0, "perf/per_device_tokens_per_sec": 4928.629529742643, "learning/current_learning_rate": 2.9999999242136255e-05, "step": 0.0, "run_name": "mattdavidow-train-base"}
+# {"learning/grad_norm": 1.0000004768371582, "learning/loss": 10.8693265914917, "learning/moe_lb_loss": 0.0,
+#  "learning/param_norm": 8122.166015625, "learning/raw_grad_norm": 5.087409973144531,
+#  "learning/total_weights": 79694.0, "perf/step_time_seconds": 4.986376, "perf/per_device_tflops": 172.941153140736,
+#  "perf/per_device_tflops_per_sec": 34.6827341421377, "perf/per_device_tokens": 24576.0,
+#  "perf/per_device_tokens_per_sec": 4928.629529742643, "learning/current_learning_rate": 2.9999999242136255e-05,
+#  "step": 0.0, "run_name": "mattdavidow-train-base"}
 
-# It is important to parse the last n steps avoiding steps that have tracing turned on, by default last_n_steps should be total_steps - 10 to avoid initial tracing settings.
+# It is important to parse the last n steps avoiding steps that have tracing turned on, by default last_n_steps should
+# be total_steps - 10 to avoid initial tracing settings.
 # TODO() Support avoiding tracing when the user explicitly enables tracing for other steps.
 def parse_metrics(local_metrics_file, total_steps, last_n_steps=10) -> Metrics:
   avg_tflops = get_metric_average(local_metrics_file, "perf/per_device_tflops_per_sec", n=last_n_steps)
@@ -253,9 +262,9 @@ def main(argv: Sequence[str]) -> None:
   local_metrics_file = local_dir
   print(f"Attempting metrics download from {options.metrics_gcs_file} to {local_metrics_file}.",flush=True)
   rc = download_metrics_file_locally(metrics_gcs_file=options.metrics_gcs_file, local_file=local_metrics_file)
-  if rc != 0:
+  if rc != os.EX_OK:
     print("metrics download FAIL")
-    exit(rc)
+    sys.exit(rc)
   print("metrics download SUCCESS")
 
   # Parse Metrics

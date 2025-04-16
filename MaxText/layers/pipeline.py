@@ -36,8 +36,8 @@ class Pipeline(nn.Module):
 
   Attributes:
     config: Importantly contains num_pipeline_microbatches, num_pipeline_repeats.
-    layers: A module instance that each stage can execute. It can either be a single layer such as a LlamaDecoderLayer instance
-      or scanned/looped set of decoder layers to execute multiple layers per stage.
+    layers: A module instance that each stage can execute. It can either be a single layer such as a
+      LlamaDecoderLayer instance or scanned/looped set of decoder layers to execute multiple layers per stage.
     mesh:  The device mesh of the system.
     remat_policy: Remat policy to use for the loop iterations
   """
@@ -107,7 +107,8 @@ class Pipeline(nn.Module):
     else:
       prev_outputs = None
 
-    # state_io (state input output) at first holds all of the input batches, but also will hold the outputs as the pipeline runs/finishes
+    # state_io (state input output) at first holds all of the input batches, but also will hold the outputs
+    #   as the pipeline runs/finishes
     # state_io has shape [num_stages, microbatches/stages, micro_size, sequence, embed]
     state_io = jnp.reshape(inputs, (self.num_stages, self.microbatches_per_stage) + inputs.shape[1:])
     # We shard the pipeline_microbatch_size axis by data/fsdp, not num_microbatches since those are looped over.
@@ -118,20 +119,22 @@ class Pipeline(nn.Module):
         mesh=self.mesh,
     )
 
-    # circ_storage is used to hold the final pipeline stage outputs before it is used for the next repeat. It is only needed
-    # when num_microbatches > num_stages, else instead the final stage will immediately pass to the first without additional storage.
+    # circ_storage is used to hold the final pipeline stage outputs before it is used for the next repeat. It is only
+    # needed when num_microbatches > num_stages, else instead the final stage will immediately pass to the first without
+    # additional storage.
     # circ_storage has shape [num_stages, microbatches, micro_size, sequence, embed].
-    # Note that this shape is a factor of num_stages larger than necessary - each stage holds the global batch, but only stage 0 holds the
-    # real activations (since it will use them), the rest hold dummy ones. This amount of storage [global_batch, sequence, embed] is
-    # fine as long as there is some amount of additional sharding axes, e.g. FSDP, TP, DP (e.g. there are many devices that shard stage 0)
+    # Note that this shape is a factor of num_stages larger than necessary - each stage holds the global batch, but only
+    # stage 0 holds the real activations (since it will use them), the rest hold dummy ones. This amount of storage
+    # [global_batch, sequence, embed] is fine as long as there is some amount of additional sharding axes, e.g. FSDP,
+    # TP, DP (e.g. there are many devices that shard stage 0)
     # We may look into alternatives using less storage if this becomes an issue (ideas in b/347603101).
     if self.use_circ_storage:
       circ_storage = jnp.zeros((self.num_stages,) + inputs.shape, dtype=inputs.dtype)
     else:
       circ_storage = None
 
-    # circ_storage_mover is used to push the microbatches from the pipeline into circ_storage with one buffer iteration of delay
-    # circ_storage_mover shape is same as shift: [num_stages, micro_size, sequence, embed]
+    # circ_storage_mover is used to push the microbatches from the pipeline into circ_storage with one buffer iteration
+    # of delay circ_storage_mover shape is same as shift: [num_stages, micro_size, sequence, embed]
     if self.use_circ_storage:
       circ_storage_mover = shift
     else:
@@ -149,8 +152,10 @@ class Pipeline(nn.Module):
 
   def get_iteration_inputs(self, loop_iteration, state_io, circ_storage, shift):
     """
-    Construct stages_in: the global array that is operated on for this iteration, shape same as shift=[stages, micro_size, sequence, embed]
-    This is almost a rotated version of the last outputs, except for the first stage which must grab a new batch from state_io or an old one from circ_storage
+    Construct stages_in: the global array that is operated on for this iteration, shape same as
+    shift=[stages, micro_size, sequence, embed]
+    This is almost a rotated version of the last outputs, except for the first stage which must grab a new batch from
+    state_io or an old one from circ_storage
     """
 
     # Setup potential input from state_io, which has a rotating microbatch index (size of microbatches_per_stage)
@@ -158,21 +163,24 @@ class Pipeline(nn.Module):
     state_io_slice = state_io[:, state_io_batch_idx]
 
     if self.use_circ_storage:
-      # Setup potential input from circ_storage, which also has a rotating index for microbatch, size of num_microbatches
+      # Setup potential input from circ_storage, which also has a rotating index for microbatch,
+      # size of num_microbatches
       circ_storage_batch_idx = loop_iteration % self.config.num_pipeline_microbatches
       circular_stage_in = circ_storage[:, circ_storage_batch_idx]
     else:
       # The last stage immediately flows into the first stage, use this rotated shift instead of circular storage
       circular_stage_in = shift
 
-    # For early loop iterations we grab a new input for stage 0 from the state_io. Once each microbatch has left state_io
-    # we instead grab from the last stage's output (possibly buffered when num_microbatches > num_stages, e.g. from circ_storage).
+    # For early loop iterations we grab a new input for stage 0 from the state_io. Once each microbatch has left
+    # state_io we instead grab from the last stage's output (possibly buffered when num_microbatches > num_stages, e.g.
+    # from circ_storage).
     first_stage_in = jnp.where(loop_iteration < self.config.num_pipeline_microbatches, state_io_slice, circular_stage_in)
 
     # Note that first_stage_in may correspond to bubble computation during the last few iterations.
-    # However these bubble computation results remain in the shift buffer (do not make it back to state_io) and are thus discarded / not returned.
-    # The final returned output is stored in the state_io, which has the appropriate total size of num_microbatches. The state_io will not contain bubble results
-    # at the end of the last iteration.
+    # However, these bubble computation results remain in the shift buffer (do not make it back to state_io) and are
+    # thus discarded / not returned.
+    # The final returned output is stored in the state_io, which has the appropriate total size of num_microbatches. The
+    # state_io will not contain bubble results at the end of the last iteration.
 
     def select_state_or_input(first_stage_in, shift):
       # Selects input for stage 0, shift for other stages
@@ -189,7 +197,7 @@ class Pipeline(nn.Module):
     return stages_in
 
   def shard_dim_by_stages(self, x, dim: int):
-    # Shards a dimension by stages. Currently the sharding of other dimensions are left up the compiler, alternatively
+    # Shards a dimension by stages. Currently, the sharding of other dimensions are left up the compiler, alternatively
     # we may want to copy over the sharding from the other input axes.
     dims_mapping = [jax.sharding.PartitionSpec.UNCONSTRAINED] * x.ndim
     dims_mapping[dim] = "stage"
@@ -198,8 +206,9 @@ class Pipeline(nn.Module):
     return jax.lax.with_sharding_constraint(x, sharding)
 
   def get_microbatch_and_repeat_ids(self, loop_iteration):
-    """Gets the microbatch_ids and repeat_ids for all stages on this loop_iteration. Works for both circular and non-circular"""
-    # Stage 0 has processed one microbatch every loop_iter, but Stage 1 is one behind due to bubble, etc for other stages
+    """Gets the microbatch_ids and repeat_ids for all stages on this loop_iteration. Works for both circular and
+    non-circular"""
+    # Stage 0 has processed one microbatch every loop_iter, but Stage 1 is 1 behind due to bubble, etc for other stages
     microbatches_processed = jnp.maximum(loop_iteration - self.forwarding_delay * jnp.arange(self.num_stages), 0)
     microbatch_ids = microbatches_processed % self.config.num_pipeline_microbatches
     repeat_ids = microbatches_processed // self.config.num_pipeline_microbatches
@@ -260,7 +269,8 @@ class Pipeline(nn.Module):
     * state_io: rotates left/up by 1 (the whole created in the last slot is filled with the most recent pipeline output)
        * Pushing inputs up from top of state_io into first stage of shift
        * Pulling outputs up from last stage of shift into bottom of state_io
-    * shift: rotate output (or prev_outputs if using delay) right/down by 1 - we imagine the pipeline moves to right/down
+    * shift: rotate output (or prev_outputs if using delay) right/down by 1 - we imagine the pipeline moves to
+               right/down
     * circ_storage: pushes circ_storage_mover (the output of the previous iteration) into rotating index of circ_storage
     * circ_storage_mover: assigned to rotated output and pushed into circ_storage on the next iteration
     * prev_outputs: is set to the current output
@@ -302,14 +312,16 @@ class Pipeline(nn.Module):
 
     if self.use_circ_storage:
       # Insert the circ_storage_mover into new_circ_storage at a microbatch-rotating index.
-      # circ_storage_mover still points to the output of PREVIOUS iteration, which should aid in allowing overlapped compute/async transfers
+      # circ_storage_mover still points to the output of PREVIOUS iteration, which should aid in allowing overlapped
+      # compute/async transfers
       def _rotate_right_and_update(circ_storage_mover_in, circ_storage_in):
         rotated = _rotate_right(circ_storage_mover_in)
         rotated = jnp.expand_dims(rotated, 1)
         # We rotate the pushing index into circ storage, and ensure that microbatch 0 lands in index 0
         offset = (
             loop_iteration - self.iterations_to_complete_first_microbatch_one_repeat() - 1
-        ) % self.config.num_pipeline_microbatches  # Note extra -1 b/c grabbing from the previous output - using circ_storage_mover before it is updated
+        ) % self.config.num_pipeline_microbatches  # Note extra -1 b/c grabbing from the
+        # previous output - using circ_storage_mover before it is updated
         return jax.lax.dynamic_update_slice_in_dim(circ_storage_in, rotated, offset, axis=1)
 
       new_circ_storage = _rotate_right_and_update(old_circ_storage_mover, old_circ_storage)
@@ -318,7 +330,8 @@ class Pipeline(nn.Module):
       new_circ_storage = None
       new_circ_storage_mover = None
 
-    # Rotate stream_io left/up by 1 on rotating micro/stage index (stream_buf_idx), replacing the last/bottom with the last stage output
+    # Rotate stream_io left/up by 1 on rotating micro/stage index (stream_buf_idx), replacing the last/bottom with the
+    # last stage output
     stream_buf_idx = loop_iteration % self.microbatches_per_stage
     stream_slice = old_state_io[:, stream_buf_idx]
 
@@ -345,11 +358,13 @@ class Pipeline(nn.Module):
     return new_loop_state
 
   def permute_output_micro_per_stage_dim(self, output):
-    # The first real output (microbatch 0) takes a certain amount of loop iterations to finish and be pushed to state_io - it will land on a different index of state_io depending on the number of iterations.
+    # The first real output (microbatch 0) takes a certain amount of loop iterations to finish and be pushed to
+    # state_io - it will land on a different index of state_io depending on the number of iterations.
     microbatch_0_idx = self.iterations_to_complete_first_microbatch() % self.microbatches_per_stage
     permutation = (
         np.arange(self.microbatches_per_stage) + microbatch_0_idx
-    ) % self.microbatches_per_stage  # permute so the value in land_idx is moved into idx 0, and (land_idx + 1) appear in idx 1, etc
+    ) % self.microbatches_per_stage  # permute so the value in land_idx is moved into idx 0, and (land_idx + 1) appear
+    # in idx 1, etc
     output = output[:, permutation]
     return output
 
@@ -385,7 +400,8 @@ class Pipeline(nn.Module):
     }
     weights = meta.remove_axis(
         weights, 0, circular_metadata_params
-    )  # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
+    )  # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular
+    # entry per stage.
     weights = gather_weights_for_stages_in(weights)
     return weights
 
@@ -435,7 +451,8 @@ class Pipeline(nn.Module):
   def run_one_iteration(
       self, loop_state, pipeline_weights, positions, segment_ids, deterministic, model_mode, decoder_layer_instance
   ):
-    """Run one loop iteration - gets weights and inputs for each stage, run the stages in parallel, and update the loop state."""
+    """Run one loop iteration - gets weights and inputs for each stage, run the stages in parallel,
+    and update the loop state."""
     state_io = loop_state["state_io"]
     shift = loop_state["shift"]
     circ_storage = loop_state["circ_storage"]
@@ -444,7 +461,8 @@ class Pipeline(nn.Module):
     microbatch_ids, _ = self.get_microbatch_and_repeat_ids(loop_iteration)
 
     stages_inputs = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
-    # We checkpoint stages_inputs since we are grabbing only one slice of the state_io, don't need to save the entire buffer.
+    # We checkpoint stages_inputs since we are grabbing only one slice of the state_io, don't need to save the entire
+    # buffer.
     stages_inputs = jax.ad_checkpoint.checkpoint_name(stages_inputs, "iteration_input")
     stages_positions = self.vmap_gather(positions, microbatch_ids, 0) if positions is not None else None
     stages_segment_ids = self.vmap_gather(segment_ids, microbatch_ids, 0) if segment_ids is not None else None
@@ -472,7 +490,8 @@ class Pipeline(nn.Module):
         }
         weights = meta.remove_axis(
             weights, 0, circular_metadata_params
-        )  # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one circular entry per stage.
+        )  # Remove the circular metadata axis, this axis will be removed when passed to the main vmap, only one
+        # circular entry per stage.
         weights = gather_weights_for_stages_in(weights)
         return weights
 
@@ -523,8 +542,7 @@ class Pipeline(nn.Module):
       return partition_spec_tree
 
     partition_spec_with_extra_layer = get_partition_spec(weights)
-    partition_spec = dict()
-    partition_spec["params"] = partition_spec_with_extra_layer["params"]["layers"]
+    partition_spec = {"params": partition_spec_with_extra_layer["params"]["layers"]}
     return partition_spec
 
   def get_physical_spec_no_fsdp(self, full_logical):
@@ -540,7 +558,7 @@ class Pipeline(nn.Module):
             if axis is None:
               new_spec.append(None)
             elif isinstance(axis, str):
-              if axis != "fsdp" and axis != "fsdp_transpose":
+              if axis not in ("fsdp", "fsdp_transpose"):
                 new_spec.append(axis)
               else:
                 new_spec.append(None)
@@ -573,8 +591,8 @@ class Pipeline(nn.Module):
       partition_spec=None,  # Pytree of sharding specifications of the weights (aka self.layers.variables)
   ) -> jnp.ndarray:
     """The main method that maps the series of decoder layer inputs to final layer outputs.
-    Has the same signature of a single decoder layer, and expects the same shapes, e.g. the inputs should have shape [global_batch], and internally
-    this will be reshapped into microbatches.
+    Has the same signature of a single decoder layer, and expects the same shapes, e.g. the inputs should have shape
+    [global_batch], and internally this will be reshapped into microbatches.
     """
     # Reshape inputs of [global_batch, ...] to [microbatches, pipeline_microbatch_sizes, ...]
     inputs = inputs.reshape(
@@ -585,7 +603,8 @@ class Pipeline(nn.Module):
             self.config.emb_dim,
         )
     )
-    example_inputs = jax.lax.broadcast(inputs[0], [self.num_stages])  # dummy inputs fed to initialize the module weights.
+    example_inputs = jax.lax.broadcast(inputs[0], [self.num_stages])  # dummy inputs fed to initialize the module
+    # weights.
     ag_sharding = jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(None, None))
     if positions is not None:
       # AG positions
@@ -612,11 +631,14 @@ class Pipeline(nn.Module):
 
     loop_state = self.init_states(inputs)
 
-    # Each microbatch should go through each stage (with repeats) - so there is num_micro * (num_stages * repeats) compute to perform
-    # Each iteration is vmapped by num_stages, so the number of iterations should be num_micro * num_stages * repeats / num_stages = num_micro * repeats
+    # Each microbatch should go through each stage (with repeats) - so there is num_micro * (num_stages * repeats)
+    # compute to perform
+    # Each iteration is vmapped by num_stages, so the number of iterations should be
+    # num_micro * num_stages * repeats / num_stages = num_micro * repeats
     # However due to the pipeline bubble some iterations process less than num_stages microbatches. It takes
-    # num_micro * repeat iterations for the last microbatch to start the final repeat, then an additional num_stages - 1 to finish the final repeat.
-    # Thus the total iterations is num_micro * repeat + num_stages - 1, and we may consider the num_stages - 1 as bubble.
+    # num_micro * repeat iterations for the last microbatch to start the final repeat, then an additional
+    # num_stages - 1 to finish the final repeat.
+    # Thus the total iterations is num_micro * repeat + num_stages - 1, & we may consider the num_stages - 1 as bubble.
     # The bubble doubles when we use forwarding delay.
     bubble_iterations = self.forwarding_delay * (self.num_stages - 1)
     real_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats
@@ -657,15 +679,16 @@ class Pipeline(nn.Module):
         example_position = (
             jax.lax.broadcast(example_position, [self.config.num_pipeline_repeats]) if example_position is not None else None
         )
-      # We only need to run one set of stages to initialize the variables, instead of looping over all microbatches for the full total_iterations.
+      # We only need to run one set of stages to initialize the variables, instead of looping over all microbatches for
+      # the full total_iterations.
       stage_outputs = vmap_func(
           self.layers, example_inputs, example_segmentation, example_position, deterministic, model_mode
       )
       if self.config.scan_layers:
         stage_outputs = stage_outputs[0]
 
-      # We return something of the correct shape (global_batch, sequence, embed) by reshaping a single stages output which has
-      # shape [pipeline_microbatch_size, sequence, embed]
+      # We return something of the correct shape (global_batch, sequence, embed) by reshaping a single stages output
+      # which has shape [pipeline_microbatch_size, sequence, embed]
       if self.config.num_pipeline_repeats > 1:
         stage_outputs = stage_outputs[0]  # Remove extra dimension created for the circular vmap
       broadcasted_stage_outpus = jax.lax.broadcast(
@@ -682,8 +705,8 @@ class Pipeline(nn.Module):
       all_pipeline_weights = self.layers.variables
 
     def run_iteration_scannable(model, loop_state, xs):
-      # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we explicitly wrap
-      # the run_one_iteration in this method - the first argument model (i.e. self) is a nn.module instance.
+      # flax transforms like nn.scan and nn.remat can only be applied to nn.module classes or nn.module instances, so we
+      # explicitly wrap the run_one_iteration in this method - the 1st argument model (`self`) is a nn.module instance.
       return (
           model.run_one_iteration(
               loop_state, all_pipeline_weights, positions, segment_ids, deterministic, model_mode, model.layers
@@ -728,7 +751,8 @@ class Pipeline(nn.Module):
       for loop_iteration in range(total_iterations):
         loop_state, _ = run_iteration_scannable(self, loop_state, None)
 
-    # The final output is located in the input/output array, however the output microbatches may be permuted relative to the input
+    # The final output is located in the input/output array, however the output microbatches may be permuted relative to
+    # the input
     final_output = self.permute_output_micro_per_stage_dim(loop_state["state_io"])
 
     # reshape outputs to match input shape of total batch instead of microbatches [batch, sequence, embed]

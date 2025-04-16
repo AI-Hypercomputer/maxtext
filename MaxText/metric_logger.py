@@ -103,7 +103,7 @@ class MetricLogger:
     if is_training and (step + 1) % self.config.log_period == 0 or step == self.config.steps - 1:
       start_step = (step // self.config.log_period) * self.config.log_period
       metrics_filename = f"metrics_step_{start_step:06}_to_step_{step:06}.txt"
-      with open(metrics_filename, "w", encoding="utf8") as metrics_for_gcs:
+      with open(metrics_filename, "wt", encoding="utf8") as metrics_for_gcs:
         for metrics_step in running_metrics:
           metrics_for_gcs.write(str(json.dumps(metrics_step)) + "\n")
 

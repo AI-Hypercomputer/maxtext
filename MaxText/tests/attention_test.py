@@ -22,14 +22,13 @@ import os.path
 import numpy as np
 from absl.testing import parameterized
 
-from MaxText import common_types
-
 from flax.core import freeze
 import jax
 import jax.numpy as jnp
-from MaxText import max_utils
 import pytest
 
+from MaxText import common_types
+from MaxText import max_utils
 from MaxText import pyconfig
 from MaxText.globals import PKG_DIR
 from MaxText.layers import attentions
@@ -404,7 +403,7 @@ class AttentionTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_dot_product_cache_axis_order(self):
-    all_axis_orders = [axis_order for axis_order in itertools.permutations(range(4))]
+    all_axis_orders = list(itertools.permutations(range(4)))
     for axis_order in random.choices(all_axis_orders, k=4):
       self.dot_product_attention_helper(prefill_cache_axis_order=axis_order, ar_cache_axis_order=axis_order)
       print(f"passed test for {axis_order=}")

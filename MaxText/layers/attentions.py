@@ -354,20 +354,20 @@ class AttentionOp(nn.Module):
       if lengths is None:
         lengths = jnp.sum(decoder_segment_ids, axis=-1)
 
-      if jax.devices()[0].platform == "tpu":
+      platform = jax.devices()[0].platform
+      if platform == "tpu":
         impl = self.tpu_ragged_attention
-      elif jax.devices()[0].platform == "gpu":
+      elif platform == "gpu":
         impl = self.gpu_ragged_attention
+      else:
+        raise NotImplementedError(platform)
       return impl(query, key, value, lengths, self.ragged_block_size)
 
-    elif (
-        self.attention_kernel == "dot_product"
-        or (self.attention_kernel == "autoselected" and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE)
-        or (self.attention_kernel == "autoselected" and length < 128)
-        or (self.attention_kernel == "paged")
+    elif self.attention_kernel in ("dot_product", "paged") or (
+        self.attention_kernel == "autoselected" and (model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE or length < 128)
     ):
       return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode, previous_chunk)
-    elif self.attention_kernel == "flash" or self.attention_kernel == "autoselected":
+    elif self.attention_kernel in ("flash", "autoselected"):
       if jax.devices()[0].platform == "tpu":
         if isinstance(key, KVTensor):
           key = key.dequant()
@@ -478,7 +478,7 @@ class AttentionOp(nn.Module):
       self, query: Array, key: Array | KVTensor, value: Array | KVTensor, lengths: Array, block_size: int
   ) -> tuple[Array, Array, Array]:
     """Ragged Attention."""
-    if isinstance(query, KVTensor) or isinstance(query, KVTensor):
+    if isinstance(query, (KVTensor, KVTensor)):
       raise TypeError("Ragged attention does not currently support quantized tensors.")
     b = nn.logical_to_mesh_axes(self.ragged_lengths_names)
     bsnd = nn.logical_to_mesh_axes(self.cache_logical_axis_names)
@@ -866,7 +866,7 @@ class AttentionOp(nn.Module):
     # Based on https://github.com/google-research/google-research/blob/master/scaling_transformer_inference_efficiency/attention.py
     global_max = functools.reduce(jnp.maximum, local_maxes)
     global_sum = sum(
-        [jnp.exp(local_max - global_max) * local_sum for (local_sum, local_max) in zip(local_sums, local_maxes)]
+        (jnp.exp(local_max - global_max) * local_sum for (local_sum, local_max) in zip(local_sums, local_maxes))
     )
 
     attn_out = 0
@@ -1266,7 +1266,7 @@ class Attention(nn.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
-    if model_mode == common_types.MODEL_MODE_PREFILL or model_mode == common_types.MODEL_MODE_TRAIN:
+    if model_mode in (common_types.MODEL_MODE_PREFILL, common_types.MODEL_MODE_TRAIN):
       inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
     else:
@@ -1345,7 +1345,7 @@ class Attention(nn.Module):
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
       out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk)
 
-    if model_mode == common_types.MODEL_MODE_PREFILL or model_mode == common_types.MODEL_MODE_TRAIN:
+    if model_mode in (common_types.MODEL_MODE_PREFILL, common_types.MODEL_MODE_TRAIN):
       out = nn.with_logical_constraint(out, self.out_axis_names)
     else:
       out = nn.with_logical_constraint(out, self.decode_out_axis_names)

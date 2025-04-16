@@ -44,17 +44,17 @@ class TokenizeAndTrim(grain.MapTransform):
     if isinstance(self.sequence_length, int):
       self.sequence_length = [self.sequence_length] * len(self.feature_names)
 
-  def map(self, features: dict[str, Any]) -> dict[str, Any]:
+  def map(self, element: dict[str, Any]) -> dict[str, Any]:
     """Maps to each element."""
     if self._processor is None:
       with self._initialize_processor_lock:
         if self._processor is None:  # Ensures only one thread initializes SPP.
           self._processor = self.tokenizer
     for feature_name, sequence_length in zip(self.feature_names, self.sequence_length, strict=True):
-      text = features[feature_name]
+      text = element[feature_name]
       token_ids = self._processor.encode(text)[:sequence_length]
-      features[feature_name] = np.asarray(token_ids, dtype=np.int32)
-    return features
+      element[feature_name] = np.asarray(token_ids, dtype=np.int32)
+    return element
 
   def __getstate__(self):
     state = self.__dict__.copy()
