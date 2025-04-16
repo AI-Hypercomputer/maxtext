@@ -273,8 +273,6 @@ class AttentionOp(nn.Module):
   use_ragged_attention: bool = False
   ragged_block_size: int = 256
 
-  query_pre_attn_scalar: float = 1 # scaling factor for query in attention. currently used in cudnn only.
-
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
     """Check attention inputs."""
 
@@ -634,12 +632,6 @@ class AttentionOp(nn.Module):
       mask_type = "padding_causal"  # only padding_causal mask type can take a created mask
       attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
 
-    # scaling factor for fused query weight or not
-    if self.query_pre_attn_scalar is None:
-      query_pre_attn_scalar = 1.0 / jnp.sqrt(query.shape[-1])
-    else:
-      query_pre_attn_scalar = self.query_pre_attn_scalar
-
     dpa_layer = DotProductAttention(
         head_dim=head_dim,
         num_attention_heads=self.num_query_heads,
@@ -651,7 +643,7 @@ class AttentionOp(nn.Module):
         dtype=self.dtype,
         float32_logits=self.float32_logits,
         qkv_layout="BSHD_BSHD_BSHD",  # 'BS3HD', 'BSHD_BS2HD' or 'BSHD_BSHD_BSHD'
-        scale_factor=query_pre_attn_scalar,
+        scale_factor=1.0,
         transpose_batch_sequence=False,
         window_size=sliding_window_size,
     )
@@ -1020,7 +1012,6 @@ class Attention(nn.Module):
         chunk_attn_window_size=self.config.chunk_attn_window_size,
         use_ragged_attention=self.use_ragged_attention,
         ragged_block_size=self.ragged_block_size,
-        query_pre_attn_scalar=self.query_pre_attn_scalar,
     )
     # When paged attention is enabled, paged attention op is used for all model modes except TRAIN,
     # which uses default attention op.
