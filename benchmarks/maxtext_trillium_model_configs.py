@@ -1755,7 +1755,8 @@ llama3_1_70b_131072 = _add_to_model_dictionary(
         # "custom_mesh": "hybrid_ring_32x8",
         "tokenizer_type": "tiktoken",
         "tokenizer_path": "assets/tokenizer_llama3.tiktoken", 
-        "steps": 30,
+        "packing": False,
+        "steps": 20,
     },
     xla_flags=(xla_flags_library.DENSE_VMEM_LIMIT_FLAG
         + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
