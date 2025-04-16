@@ -125,3 +125,20 @@ Fully sharded data parallelism (aka zero3) is used when the full model weights d
 # Fully Sharded Data Parallelism (transpose)
 This is nearly identical to FSDP above except we choose the shard the main feedforward weights on the larger mlp dim instead of embed dim. This can be useful when the embed dim cannot be sharded further or does not have enough powers of 2 for efficient reduce scatter algorithms on TPUs. You may try swapping between `FSDP` and `FSDP_transpose`, their performance should be very similar, but one may offer a ~1% MFU improvement.
 
+# Context Parallelism (CP)
+Context parallelism is similar to FSDP except we shard the sequence dimension of activations instead of batch to allow for smaller batch dimensions (correspondingly smaller per device batch, including fractional per device batch sizes). A smaller per device batch dimension is often  needed for large sequence lengths so that the activations fit into memory. Also a smaller per device batch size is needed so that the global token count (global batch size) stays under some desired global batch size limit for optimal training - generally smaller global batch sizes can achieve better loses given a fixed number of total tokens (e.g. Llama3 used 16M global batch in tokens, DeepSeek uses 61M).
+
+Care needs to be taken to shard the sequence dimension for attention - only the queries are sharded by sequence, the keys and values need to be all-gathered to perform the full computation. Additionally if we naively shard the sequence dimension than the attention computation is not evenly distributed due to the lower triangular casual mask - shards corresponding to later queries have more non-zero mask and thus become the bottleneck. Instead we “stripe” the inputs, so that the first shard has the first and last chunk of the sequence, the second shard has the second and second to last, etc. This striping is done on the initial data inputs (instead of every layer), so it is a small cost.
+
+Currently Context Parallelism is only supported for GPUs (Sequence parallelism below is supported on TPUs). We plan to land context parallelism on TPUs shortly.
+
+## CP Arithmetic Intensity: 
+The main communications are the same as FSDP (all gather weights and synchronize gradients), with an arithmetic intensity of `local_batch`.
+
+The extra cost of all gathering of keys and values is small, especially for long sequence, analyzed below assuming group query attention:
+
+**Compute**: Attention (`4 * batch * seq_len^2 * query_heads * head_dim`)
+
+**Communicate (KV all gather)**: All-gather keys and values  (`4 * batch * seq_len * kv_heads * head_dim`)
+
+**Ratio**: `seq_len * query_heads / kv_heads`
