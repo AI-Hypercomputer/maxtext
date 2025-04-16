@@ -41,6 +41,7 @@ from MaxText.layers import embeddings
 from MaxText.layers import initializers
 from MaxText.layers import linears
 from MaxText.layers import quantizations
+from MaxText.common_types import DecoderBlockType
 
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
@@ -244,6 +245,7 @@ def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int)
   chunk_mask = same_chunk & (row_ids >= col_ids)
   return chunk_mask
 
+
 def _make_block_mask_indices(bidirectional_mask):
   """Creates block mask identifying segments based on a bidirectional mask.
 
@@ -258,6 +260,7 @@ def _make_block_mask_indices(bidirectional_mask):
   boundary = padded_mask[..., 1:] > padded_mask[..., :-1]
   numbered_boundary = jnp.cumsum(boundary, axis=-1)
   return bidirectional_mask * numbered_boundary
+
 
 def _make_bidirectional_block_mask(bidirectional_mask):
   """Creates bidirectional block mask from bidirectional_mask, where True corresponds to image tokens.
@@ -321,7 +324,13 @@ class AttentionOp(nn.Module):
   # https://github.com/jax-ml/jax/blob/main/jax/experimental/pallas/ops/tpu/flash_attention.py
   # This mask models (1) separate sequences (decoder_segment_ids) and (2) causality
   def generate_attention_mask(
-      self, query, key, decoder_segment_ids: Array | None, model_mode: str, previous_chunk: Any = None, bidirectional_mask: Any = None,
+      self,
+      query,
+      key,
+      decoder_segment_ids: Array | None,
+      model_mode: str,
+      previous_chunk: Any = None,
+      bidirectional_mask: Any = None,
   ) -> Array | None:
     mask = None
     if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
@@ -358,6 +367,8 @@ class AttentionOp(nn.Module):
     elif causal_mask is not None:
       output_mask = causal_mask
 
+    is_seq_len_greater_than_chunk_window = output_mask.shape[-1] > self.chunk_attn_window_size
+
     if self.attention_type == AttentionType.LOCAL_SLIDING and output_mask is not None:
       if self.sliding_window_size is None:
         raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
@@ -365,7 +376,7 @@ class AttentionOp(nn.Module):
       all_ones = jnp.ones_like(output_mask)
       sliding_mask = jnp.triu(all_ones, -1 * self.sliding_window_size + 1) * jnp.tril(all_ones, self.sliding_window_size - 1)
       output_mask = sliding_mask * output_mask
-    elif self.attention_type == AttentionType.CHUNK and output_mask is not None:
+    elif self.attention_type == AttentionType.CHUNK and output_mask is not None and is_seq_len_greater_than_chunk_window:
       mask_shape = (q_seq_len, kv_seq_len)
       chunk_mask = _generate_chunk_attention_mask(mask_shape=(q_seq_len, kv_seq_len), chunk_size=self.chunk_attn_window_size)
       output_mask = chunk_mask * output_mask
@@ -1004,11 +1015,12 @@ class Attention(nn.Module):
       should be divisible by the number of heads.
     num_kv_heads: number of kv attention heads.
     head_dim: dimension of each head.
+    max_target_length: maximum sequence (target) length.
     mesh: Mesh, device mesh
-    attention_kernel: str, guidance on if we should use an attention kernel
+    attention_kernel: str, guidance on if we should use an attention kernel.
+      Can be one of autoselected, dot_product, flash or cudnn_flash_te.
     dtype: the dtype of the computation.
     weight_dtype: the dtype of the weights.
-    max_target_length: maximum target length
     max_prefill_predict_length: size of the maximum prefill
     dropout_rate: dropout rate
     kernel_init: initializer for the kernel of the Dense layers.
@@ -1018,6 +1030,19 @@ class Attention(nn.Module):
       numerical issues with bfloat16.
     quant: Quant, stores quantization parameters, defaults to None implying no quantization.
     kv_quant: KVQuant, stores KV cache quantization parameters, defaults to None
+    attention_type: Type of attention to use.
+      Can be one of GLOBAL, LOCAL_SLIDING, CHUNK, MLA.
+    use_qk_norm: whether to apply query/key normalization.  Note that non-Llama4 models
+      do RMSNorm before RoPE whereas llama 4 does L2 normalization after RoPE.
+    query_pre_attn_scalar: scaling factor to apply to query before attention.
+      Usually, this is something like sqrt(head_dim).
+    temperature_tuning: whether to dynamically scale the attention temperature for each query token
+      based on sequence length.  See https://arxiv.org/abs/2501.19399 for more details.
+      Only used for Llama4 right now.
+    temperature_tuning_scale: scaling factor to apply to attention temperature, see `temperature_tuning`
+      for more details.
+    temperature_tuning_floor_scale: scaling factor to apply to attention temperature, see `temperature_tuning`
+      for more details.
     is_nope_layer: bool, whether to skip RoPE on this Attention layer
   """
 
@@ -1337,7 +1362,7 @@ class Attention(nn.Module):
       key = self.kv_projection(inputs_kv, proj_name="key")
       value = self.kv_projection(inputs_kv, proj_name="value")
 
-    is_llama4_decoder_block = self.config.decoder_block == "llama4"
+    is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
     # NOTE: llama 4 does L2 normalization after RoPE
     if self.use_qk_norm and not is_llama4_decoder_block:
       query = RMSNorm(
@@ -1373,7 +1398,7 @@ class Attention(nn.Module):
     if self.query_pre_attn_scalar and self.query_pre_attn_scalar != 1.0:
       query = query * self.query_pre_attn_scalar
 
-    if self.temperature_tuning and not self.use_rope:
+    if self.temperature_tuning and not use_rope:
       attn_scales = (
           jnp.log(jnp.floor((inputs_positions.astype(self.dtype) + 1.0) / self.temperature_tuning_floor_scale) + 1.0)
           * self.temperature_tuning_scale

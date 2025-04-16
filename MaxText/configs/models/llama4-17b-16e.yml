@@ -38,6 +38,7 @@ use_qk_norm: True # Llama4 models apply an L2Norm to the Query and Keys after Ro
 nope_layer_interval: 4 # Every fourth layer should NOT use RoPE
 interleave_moe_layer_step: 1 # Every layer is MoE layer
 
-# TODO: delete the following variables once we add support for dropless with megablox/ragged_dot
-sparse_matmul: False
-megablox: False
+temperature_tuning: True
+# Chunk attention is used on all RoPE layers
+# otherwise, on NoPE layers, use global attention
+chunk_attn_window_size: 8192

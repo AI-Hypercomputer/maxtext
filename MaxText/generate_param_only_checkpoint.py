@@ -38,6 +38,7 @@ from jax.sharding import Mesh
 from jax import random
 from typing import Sequence
 from MaxText.layers import models, quantizations
+from MaxText.common_types import DecoderBlockType
 from MaxText.train import save_checkpoint
 from MaxText.utils import gcs_utils
 from MaxText.utils import lora_utils
@@ -81,7 +82,7 @@ def _possibly_unroll_params(config, training_state, training_state_annotations, 
 
     jax.tree_util.tree_map(lambda x: x.delete(), layers)
 
-  if config.decoder_block == "deepseek":
+  if config.decoder_block == DecoderBlockType.DEEPSEEK:
     # Unroll dense and MoE layers separately
     unroll_layer_group(config.first_num_dense_layers, layer_name="dense_layers")
     unroll_layer_group(config.num_decoder_layers - config.first_num_dense_layers, layer_name="moe_layers")

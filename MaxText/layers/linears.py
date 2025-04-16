@@ -16,19 +16,18 @@
 
 import functools
 import operator
-from typing import Any, Callable, Iterable, Sequence, Tuple, Union, Optional
+from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
 
 import flax.linen as nn
-from jax import lax
 import jax.numpy as jnp
-from MaxText import common_types
-from MaxText.layers import initializers
-from MaxText.layers import normalizations
-from MaxText.layers import quantizations
 import numpy as np
-from jax.ad_checkpoint import checkpoint_name
 from aqt.jax.v2 import aqt_tensor
+from jax import lax
+from jax.ad_checkpoint import checkpoint_name
 
+from MaxText import common_types
+from MaxText.layers import initializers, normalizations, quantizations
+from MaxText.common_types import DecoderBlockType
 
 Array = common_types.Array
 Config = common_types.Config
@@ -187,14 +186,22 @@ class MlpBlock(nn.Module):
   quant: Optional[Quant] = None
 
   def get_norm_layer(self):
-    if self.config.decoder_block in ("default", "llama2", "mistral", "mixtral", "gemma", "deepseek", "llama4"):
+    if self.config.decoder_block in (
+        DecoderBlockType.DEFAULT,
+        DecoderBlockType.LLAMA2,
+        DecoderBlockType.MISTRAL,
+        DecoderBlockType.MIXTRAL,
+        DecoderBlockType.GEMMA,
+        DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.LLAMA4,
+    ):
       return RMSNorm
-    elif self.config.decoder_block == "gpt3":
+    elif self.config.decoder_block == DecoderBlockType.GPT3:
       from MaxText.layers import gpt3
 
       return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=self.use_bias)
     else:
-      raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
+      raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
   @nn.compact
   def __call__(self, inputs, decode: bool = False, deterministic: bool = False):

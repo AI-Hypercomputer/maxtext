@@ -111,7 +111,7 @@ model_call_mode: ""
 # Shard the range finding operation for quantization. By default this is set to number of slices.
 quantization_local_shard_count: -1
 
-decoder_block: "llama2" # which style of DecoderBlock to use.
+decoder_block: "llama2" # which style of DecoderBlock to use.  NOTE: pyconfig will turn this into an enum.
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes
 # then you should explicitly set base_embed_dim, base_num_query_heads, base_num_kv_heads,
 # base_mlp_dim, base_num_decoder_layers and/or head_dim.
@@ -163,7 +163,7 @@ num_layers_per_pipeline_stage: 1
 # The number of repeats will be set to num_decoder_layers / (num_pipeline_stages * num_layers_per_pipeline_stage)
 num_pipeline_repeats: -1
 pipeline_parallel_layers: -1 # Pipeline only this number of layers - for the remaining layers the "stage" mesh axes will act like data parallelism.
-# This option helps when the number of layers does not have friendly divisors since SPMD pipelining requires that the 
+# This option helps when the number of layers does not have friendly divisors since SPMD pipelining requires that the
 # PP degree divides the number of layers.
 # By default (when set to -1) we pipeline all of the decoder layers.
 
@@ -690,6 +690,10 @@ use_qk_norm: False
 nope_layer_interval: -1
 # Every `X` layers is MoE layer
 interleave_moe_layer_step: 1
+# dynamically scale the attention temperature for each query token based on sequence length
+# Recommended for long sequences (e.g., >32k tokens) to maintain stable output results
+# See (https://arxiv.org/abs/2501.19399) for more details
+temperature_tuning: False
 
 # Multimodal flags
 use_multimodal: False

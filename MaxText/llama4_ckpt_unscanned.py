@@ -302,7 +302,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
               "wo": {"kernel": None},
           },
       }
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"] = moe_dict
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"] = moe_dict
 
     self_attention = jax_weights["decoder"][layer_name]["self_attention"]
     wq = chkpt_vars[f"layers.{layer_idx}.attention.wq.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
@@ -378,7 +378,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
           .astype(CAST_DTYPE)
           .transpose()
       )
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["gate"]["kernel"] = gate
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["MoeBlock_0"]["gate"]["kernel"] = gate
 
       # routed experts
       wi_0_1 = (
@@ -389,9 +389,9 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
       del wi_0_1
 
       wo = chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.down_proj"].type(torch.float32).numpy().astype(CAST_DTYPE)
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_0"] = wi_0
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_1"] = wi_1
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wo"] = wo
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_0"] = wi_0
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_1"] = wi_1
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["MoeBlock_0"]["wo"] = wo
 
       # shared experts
       wi_0 = (
@@ -418,9 +418,9 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
           .transpose()
       )
 
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_0"]["kernel"] = wi_0
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_1"]["kernel"] = wi_1
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["shared_experts"]["wo"]["kernel"] = wo
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["shared_experts"]["wi_0"]["kernel"] = wi_0
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["shared_experts"]["wi_1"]["kernel"] = wi_1
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["shared_experts"]["wo"]["kernel"] = wo
 
     gc.collect()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
@@ -553,7 +553,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
               "wo": {"kernel": None},
           },
       }
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"] = moe_dict
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"] = moe_dict
 
     self_attention = jax_weights["decoder"][layer_name]["self_attention"]
 
@@ -682,6 +682,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       wi_1 = []
       # NOTE: it's very important that we do the splitting first and then concat!
       for var in chkpt_vars:
+        # pylint: disable=unbalanced-tuple-unpacking
         wi_0_chunk, wi_1_chunk = np.split(
             var[f"layers.{layer_idx}.feed_forward.mlp.fc1_weight"].type(torch.float32).numpy(), 2, axis=0
         )
@@ -710,7 +711,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       jax_weights["decoder"][layer_name]["mlp"]["wo"]["kernel"] = wo
     else:
       gate = chkpt_vars[0][f"layers.{layer_idx}.feed_forward.router_DE"].type(torch.float32).numpy().astype(CAST_DTYPE)
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["gate"]["kernel"] = gate
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["MoeBlock_0"]["gate"]["kernel"] = gate
       base_emb_dim = model_params["base_emb_dim"]
 
       wi_0 = np.concatenate(
@@ -750,9 +751,9 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       )
 
       # routed experts
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_0"] = wi_0
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_1"] = wi_1
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wo"] = wo
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_0"] = wi_0
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["MoeBlock_0"]["wi_1"] = wi_1
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["MoeBlock_0"]["wo"] = wo
 
       # shared experts
       wi_0 = np.concatenate(
@@ -777,9 +778,9 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
           axis=1,
       ).transpose()
 
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_0"]["kernel"] = wi_0
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_1"]["kernel"] = wi_1
-      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["shared_experts"]["wo"]["kernel"] = wo
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["shared_experts"]["wi_0"]["kernel"] = wi_0
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["shared_experts"]["wi_1"]["kernel"] = wi_1
+      jax_weights["decoder"][layer_name]["Llama4MoEBlock_0"]["shared_experts"]["wo"]["kernel"] = wo
 
     gc.collect()
 

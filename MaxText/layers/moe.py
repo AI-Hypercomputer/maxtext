@@ -17,27 +17,23 @@
 
 
 import functools
-from typing import Any, Iterable, Tuple, Union, Optional
+import math
+from enum import Enum, auto
+from typing import Any, Iterable, Optional, Tuple, Union
 
 import flax.linen as nn
 import jax
-from jax import lax
 import jax.numpy as jnp
-from MaxText import common_types
-from MaxText.layers import initializers
-from MaxText.layers import normalizations
-from MaxText.layers import quantizations
-from MaxText.layers import linears
 import numpy as np
+from aqt.jax.v2 import aqt_tensor
+from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
-import math
-from MaxText import max_logging
-from MaxText import max_utils
-from aqt.jax.v2 import aqt_tensor
-from MaxText.kernels import megablox as mblx
-from enum import Enum, auto
 
+from MaxText import common_types, max_logging, max_utils
+from MaxText.kernels import megablox as mblx
+from MaxText.layers import initializers, linears, normalizations, quantizations
+from MaxText.common_types import DecoderBlockType
 
 Array = common_types.Array
 Config = common_types.Config
@@ -142,8 +138,8 @@ class GateLogit(nn.Module):
     return output, pre_bias_logits
 
 
-class MoeBlock(nn.Module):
-  """Mixture of Experts (MoE) block.
+class RoutedMoE(nn.Module):
+  """Implements a routed MoE block.
 
   Attributes:
     num_experts: Number of experts.
@@ -241,9 +237,9 @@ class MoeBlock(nn.Module):
     else:
       top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
-    if self.config.decoder_block == "deepseek":
+    if self.config.decoder_block == DecoderBlockType.DEEPSEEK:
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
-    elif self.config.decoder_block != "llama4":
+    elif self.config.decoder_block != DecoderBlockType.LLAMA4:
       top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
     return top_k_weights, top_k_indices
 
@@ -314,8 +310,15 @@ class MoeBlock(nn.Module):
     """Permute tokens to group by expert to fit gmm call."""
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
     inputs_shape = inputs.shape
-    inputs_2d = jnp.reshape(inputs, (inputs_shape[0] * inputs_shape[1], inputs_shape[2]))
+    bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
+    inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[2]))
     weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits)
+
+    if self.config.decoder_block == DecoderBlockType.LLAMA4:
+      # weights will be of shape (batch_size, seq_len, num_experts_per_tok)
+      router_scores = jax.nn.sigmoid(weights.astype(jnp.float32))  # weights are top_k_weights here
+      # Squeeze router_scores to (batch_size * seq_len, num_experts_per_tok)
+      inputs_2d = inputs_2d * router_scores.reshape(bsz_times_seq_len, -1)
 
     flatten_selected_experts = jnp.ravel(selected_experts)
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
@@ -336,6 +339,9 @@ class MoeBlock(nn.Module):
     )
     with jax.named_scope("weight_sum"):
       matmul_precision = lax.Precision(self.config.matmul_precision)
+      if self.config.decoder_block == DecoderBlockType.LLAMA4:
+        # For Llama4, combine using weights of 1 for selected experts
+        reshaped_weights = jnp.ones_like(reshaped_weights)
       output = jnp.einsum(
           "BKE,BK -> BE",
           reshaped_intermediate.astype(jnp.float32),
@@ -743,7 +749,7 @@ class MoeBlock(nn.Module):
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits = nn.with_logical_constraint(pre_bias_logits, ("activation_batch", "activation_length", None))
     top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits)
-    is_llama4_decoder_layer = self.config.decoder_block == "llama4"
+    is_llama4_decoder_layer = self.config.decoder_block == DecoderBlockType.LLAMA4
     if is_llama4_decoder_layer:
       router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(jnp.bfloat16)
       inputs = inputs * router_scores
@@ -763,11 +769,6 @@ class MoeBlock(nn.Module):
 
     # TODO @jacobplatin: allow Llama4 MoE to handle capacity factor > 0
     if self.config.capacity_factor > 0:
-      if is_llama4_decoder_layer:
-        # TODO @jacobplatin
-        raise ValueError(
-            "Llama4 decoder has not been tested with capacity_factor > 0 -- please set that value to -1 for now!"
-        )
       # token dropping if needed
       if self.config.model_call_mode != "inference":
         dispatch_mask, combine_mask = self.generate_masks(top_k_indices, weights)
@@ -946,8 +947,8 @@ class MoeBlock(nn.Module):
       return self.dense_matmul(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)
 
 
-class DeepSeekMoeBlock(nn.Module):
-  """DeepSeek MoE block, combining shared and routed experts.
+class RoutedAndSharedMoE(nn.Module):
+  """Implements a block which combines shared and routed experts,
 
   Attributes:
     config: Model configs.
@@ -970,7 +971,11 @@ class DeepSeekMoeBlock(nn.Module):
   @nn.compact
   def __call__(self, inputs):
     cfg = self.config
-    routed_experts, _ = MoeBlock(
+    # NOTE: the naming mismatch here is to ensure reverse compatibility with existing checkpoints.
+    # The `name` represents the weight name in JAX/checkpoints and so the class name
+    # is just for readability.
+    routed_experts, _ = RoutedMoE(
+        name="MoeBlock_0",
         config=cfg,
         num_experts=cfg.num_experts,
         num_experts_per_tok=cfg.num_experts_per_tok,

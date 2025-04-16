@@ -39,11 +39,12 @@ import optax
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
-from MaxText import max_logging
 from MaxText import checkpointing
-from MaxText.inference.page_manager import PageState
 from MaxText import common_types
+from MaxText.inference.page_manager import PageState
+from MaxText import max_logging
 from MaxText import max_utils
+from MaxText.common_types import DecoderBlockType
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
@@ -220,7 +221,7 @@ def calculate_tflops_training_per_device(config, log=True):
   # MLP flops
   if config.num_experts > 1:
     # calculation based on dropless implementation
-    if config.decoder_block == "deepseek":
+    if config.decoder_block == DecoderBlockType.DEEPSEEK:
       total_ffn_flops = calculate_deepseek_ffn_tflops_per_device(config)
     else:
       gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
@@ -258,11 +259,11 @@ def calculate_tflops_training_per_device(config, log=True):
   embedding_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.vocab_size
 
   # Combine flops with number of decoder layers
-  if config.decoder_block == "gemma2":
+  if config.decoder_block == DecoderBlockType.GEMMA2:
     attention_tflops, learnable_weight_tflops = calculate_gemma2_tflops_training_per_device(
         config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops
     )
-  elif config.decoder_block == "deepseek":
+  elif config.decoder_block == DecoderBlockType.DEEPSEEK:
     learnable_weight_tflops = (
         (total_ffn_flops + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
     )
@@ -694,6 +695,7 @@ def add_config_to_summary_writer(config, summary_writer):
   if jax.process_index() == 0:
     for key, value in config.get_keys().items():
       max_utils.add_text_to_summary_writer(key, str(value), summary_writer)
+
 
 def logical_axis_rules_pp_act_as_dp(logical_rules):
   """Add stage as a physical axes before data for each rule, so stage acts just like data instead of PP.

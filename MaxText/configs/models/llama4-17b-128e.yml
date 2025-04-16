@@ -41,3 +41,8 @@ interleave_moe_layer_step: 2 # Every 2nd layer is MoE layer, and 1st layer is de
 # TODO: delete the following variables once we add support for dropless with megablox/ragged_dot
 sparse_matmul: False
 megablox: False
+
+temperature_tuning: True
+# Chunk attention is used on all RoPE layers
+# otherwise, on NoPE layers, use global attention
+chunk_attn_window_size: 8192

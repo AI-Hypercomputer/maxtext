@@ -58,7 +58,8 @@ class TokenDroppingTest(unittest.TestCase):
     )
     self.rng = jax.random.PRNGKey(42)
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
-    self.model = moe.MoeBlock(
+    self.model = moe.RoutedMoE(
+        name="MoeBlock",
         config=self.cfg,
         num_experts=self.cfg.num_experts,
         num_experts_per_tok=self.cfg.num_experts_per_tok,
@@ -184,7 +185,8 @@ class DeepSeekRoutingTest(unittest.TestCase):
     )
     self.rng = jax.random.PRNGKey(42)
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
-    self.model = moe.MoeBlock(
+    self.model = moe.RoutedMoE(
+        name="MoeBlock",
         config=self.cfg,
         num_experts=self.cfg.num_experts,
         num_experts_per_tok=self.cfg.num_experts_per_tok,
@@ -279,7 +281,7 @@ class MoeLoopBlock(nn.Module):
     return mlp_lnx
 
 
-class MoeBlockTest(unittest.TestCase):
+class RoutedMoeTest(unittest.TestCase):
 
   def get_expected_output(self, rng, hidden_states, cfg):
     model = MoeLoopBlock(
@@ -298,7 +300,8 @@ class MoeBlockTest(unittest.TestCase):
     return variables, output
 
   def get_moe_output(self, variables, hidden_states, cfg, mesh):
-    model = moe.MoeBlock(
+    model = moe.RoutedMoE(
+        name="MoeBlock",
         config=cfg,
         num_experts=cfg.num_experts,
         num_experts_per_tok=cfg.num_experts_per_tok,

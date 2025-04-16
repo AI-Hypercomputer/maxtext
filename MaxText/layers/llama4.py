@@ -51,8 +51,9 @@ D_KV = common_types.D_KV
 KV_HEAD_DIM = common_types.KV_HEAD_DIM
 
 
-Embed = embeddings.Embed
 Attention = attentions.Attention
+AttentionType = attentions.AttentionType
+Embed = embeddings.Embed
 RMSNorm = normalizations.RMSNorm
 Quant = quantizations.AqtQuantization
 
@@ -177,6 +178,11 @@ class Llama4DecoderLayer(nn.Module):
         is_nope_layer=self.is_nope_layer,
         use_qk_norm=cfg.use_qk_norm,
         query_pre_attn_scalar=query_pre_attn_scalar,
+        temperature_tuning=cfg.temperature_tuning,
+        temperature_tuning_scale=0.1,
+        temperature_tuning_floor_scale=8192.0,
+        # note: chunk_attn_window_size is set in the config
+        attention_type=AttentionType.GLOBAL if self.is_nope_layer else AttentionType.CHUNK,
     )
 
     attention_lnx = attention_layer(
@@ -210,7 +216,11 @@ class Llama4DecoderLayer(nn.Module):
 
     load_balance_loss = None
     if self.is_moe_layer:
-      mlp_lnx = moe.DeepSeekMoeBlock(
+      # NOTE: the naming mismatch here is to ensure reverse compatibility with existing checkpoints.
+      # The `name` represents the weight name in JAX/checkpoints and so the class name
+      # is just for readability.
+      mlp_lnx = moe.RoutedAndSharedMoE(
+          name="Llama4MoEBlock_0",
           config=cfg,
           mesh=self.mesh,
           kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
