@@ -21,7 +21,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 
 from MaxText import max_logging, pyconfig
-from MaxText import max_utils
+from MaxText import maxtext_utils
 from MaxText.globals import PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import multi_token_prediction  # The class under test
@@ -39,7 +39,7 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
         skip_jax_distributed_system=True,
     )
     self.rng = jax.random.PRNGKey(42)  # Base RNG for setup
-    devices_array = max_utils.create_device_mesh(self.cfg)
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
 
     # Instantiate the Layer

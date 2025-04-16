@@ -31,7 +31,7 @@ from jax.sharding import Mesh
 
 from MaxText import common_types
 from MaxText import pyconfig
-from MaxText import max_utils
+from MaxText import maxtext_utils
 from flax.core import meta
 
 import jax.numpy as jnp
@@ -59,7 +59,7 @@ def assert_same_output_and_grad(f1, f2, *inputs):
 class PipelineParallelismTest(unittest.TestCase):
 
   def assert_pipeline_same_output_and_grad(self, config):
-    devices_array = max_utils.create_device_mesh(config)
+    devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
 
     def get_inputs(batch_size, sequence, features):

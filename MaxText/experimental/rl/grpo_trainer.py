@@ -16,8 +16,8 @@ limitations under the License.
 
 # pylint: disable=g-bad-todo, abstract-method, consider-using-with, ungrouped-imports, attribute-error
 """
-This script implements Group Relative Policy Optimization (GRPO) training 
-using JAX. It optimizes a language model with reinforcement learning by 
+This script implements Group Relative Policy Optimization (GRPO) training
+using JAX. It optimizes a language model with reinforcement learning by
 updating policy gradients based on reward functions
 """
 
@@ -651,7 +651,7 @@ def setup_train_loop(config):
   record_goodput(recorder, config, recorder.record_tpu_init_end_time if recorder else None)
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
   data_iterator, eval_data_iterator = grpo_input_pipeline.create_data_iterator(config, mesh)
-  state, _, state_mesh_shardings, data_iterator = max_utils.setup_training_state(
+  state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
 
@@ -747,7 +747,7 @@ def train_loop(config, config_inference, state=None):
   # Write train config params, num model params, and XLA flags to tensorboard
   max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
   max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], writer)
-  max_utils.add_config_to_summary_writer(config, writer)
+  maxtext_utils.add_config_to_summary_writer(config, writer)
 
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
   if config.compiled_trainstep_file != "":

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-""" 
+"""
 Save a Cross Ahead of Time Compiled (XAOT) version of train.py's train step
 Generates shaped versions of state and data without ever constructing them, so its possible
 to compile with target hardware (e.g. hundreds/thousands of chips), without using the hardware.
@@ -74,7 +74,7 @@ def get_topology_mesh(config):
         num_slices=config.compile_topology_num_slices,
         wrap=target_hardware.wrap,
     ).devices
-  topology_device_mesh = max_utils.create_device_mesh(config, topology_devices)
+  topology_device_mesh = maxtext_utils.create_device_mesh(config, topology_devices)
   topology_mesh = Mesh(topology_device_mesh, config.mesh_axes)
   return topology_mesh
 
@@ -85,7 +85,7 @@ def get_shaped_inputs(topology_mesh, config):
   quant = quantizations.configure_quantization(config)
   model = Transformer(config, topology_mesh, quant=quant)
   # The learning_rate_schedule is baked into the compiled object.
-  learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
+  learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
 
   # Shaped RNG keys
@@ -93,10 +93,10 @@ def get_shaped_inputs(topology_mesh, config):
   shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
 
   # Shaped state
-  abstract_state, _, state_mesh_shardings = max_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
+  abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(model, tx, config, example_rng, topology_mesh)
 
   # Shaped batch
-  shaped_batch = input_pipeline_interface.get_shaped_batch(config)
+  shaped_batch = maxtext_utils.get_shaped_batch(config)
 
   shaped_train_args = (abstract_state, shaped_batch, shaped_rng)
   shaped_train_kwargs = {}

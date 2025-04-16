@@ -587,16 +587,16 @@ def setup_mesh_and_model(config):
   """
 
   init_rng = random.PRNGKey(config.init_weights_seed)
-  writer = max_utils.initialize_summary_writer(config)
+  writer = max_utils.initialize_summary_writer(config.tensorboard_dir, config.run_name)
 
   # Mesh definition
-  devices_array = max_utils.create_device_mesh(config)
+  devices_array = maxtext_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
 
   # Model and Optimizer definition
   quant = quantizations.configure_quantization(config)
   model = Transformer(config, mesh, quant=quant)
-  learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
+  learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
   logger = checkpointing.setup_checkpoint_logger(config)
   if config.enable_emergency_checkpoint:
@@ -607,7 +607,7 @@ def setup_mesh_and_model(config):
           mesh,
       )
     else:
-      abstract_state, _, _ = max_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
+      abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
       checkpoint_manager = checkpointing.create_orbax_emergency_checkpoint_manager(
           config.local_checkpoint_directory,
           config.checkpoint_dir,
@@ -678,7 +678,7 @@ def setup_train_loop(config):
     if eval_data_iterator:
       eval_data_iterator = map(max_utils.get_reorder_callable(context_parallel_size), eval_data_iterator)
 
-  state, _, state_mesh_shardings, data_iterator = max_utils.setup_training_state(
+  state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
 
@@ -687,7 +687,7 @@ def setup_train_loop(config):
     maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
 
   if config.use_dpo:
-    abstract_state, _, _ = max_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
+    abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
     max_logging.log(f"Restoring reference parameters for DPO from '{os.path.join(str(config.checkpoint_dir), str(0))}'")
     try:
       step0_restored, _ = checkpointing.load_state_if_possible(
@@ -784,7 +784,7 @@ def train_loop(config, state=None):
   # Write train config params, num model params, and XLA flags to tensorboard
   max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
   max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], writer)
-  max_utils.add_config_to_summary_writer(config, writer)
+  maxtext_utils.add_config_to_summary_writer(config, writer)
 
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
   if config.compiled_trainstep_file != "":

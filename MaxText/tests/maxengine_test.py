@@ -29,7 +29,7 @@ import numpy as np
 from MaxText import common_types
 from MaxText.layers import models
 from MaxText.layers import quantizations
-from MaxText import max_utils
+from MaxText import maxtext_utils
 from MaxText.maxengine import MaxEngine
 from MaxText import pyconfig, maxengine
 from MaxText.globals import PKG_DIR
@@ -103,7 +103,7 @@ class MaxEngineTest(unittest.TestCase):
     jax.tree.map(np.testing.assert_array_equal, got_unstacked, input)
 
   def test_basic_prefill(self):
-    devices_array = max_utils.create_device_mesh(self.cfg)
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     quant = quantizations.configure_quantization(self.cfg)
     model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant)

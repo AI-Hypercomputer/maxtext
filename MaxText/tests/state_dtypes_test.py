@@ -17,14 +17,13 @@ limitations under the License.
 """ Test that all weights are expected dtype (default float32) """
 import unittest
 import os.path
-from absl.testing import absltest
 
 from MaxText import pyconfig
 
 from MaxText import optimizers
 from MaxText.layers import models
 from MaxText.layers import quantizations
-from MaxText import max_utils
+from MaxText import maxtext_utils
 from MaxText.globals import PKG_DIR
 import jax
 from jax.sharding import Mesh
@@ -42,14 +41,14 @@ class StateDtypes(unittest.TestCase):
     # Setup necessary inputs to build a model state
     config = pyconfig.initialize(argv)
     quant = quantizations.configure_quantization(config)
-    devices_array = max_utils.create_device_mesh(config)
+    devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
     model = Transformer(config, mesh, quant=quant)
-    learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
+    learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
     tx = optimizers.get_optimizer(config, learning_rate_schedule)
     _, example_rng = jax.random.split(jax.random.PRNGKey(0), 2)
 
-    abstract_state, _, _ = max_utils.get_abstract_state(model, tx, config, example_rng, mesh)
+    abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, example_rng, mesh)
     return abstract_state
 
   def get_weights(self, argv):

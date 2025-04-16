@@ -26,7 +26,7 @@ python3 -m MaxText.convert_gpt3_ckpt_from_paxml \
 True cmd for gpt3-175b:
 
 The script is memory demanding, requires at least 250 GiB in cpu and cumulative TPU memory of all devices should be
-  above ~4.2 TiB (175 billion param * 4 byte/param * 3 (model var and 2 opt momentums) * 2 copies in converting) 
+  above ~4.2 TiB (175 billion param * 4 byte/param * 3 (model var and 2 opt momentums) * 2 copies in converting)
 
 python3 -m MaxText.convert_gpt3_ckpt_from_paxml \
   --paxml-ckpt-path=gs://mlperf-llm-public2/gpt3_spmd1x64x24_tpuv4-3072_v84_20221101/checkpoints/checkpoint_00004000 \
@@ -35,6 +35,7 @@ python3 -m MaxText.convert_gpt3_ckpt_from_paxml \
   --base-output-directory=$BASE_OUTPUT_DIR
 """
 from MaxText import max_utils
+from MaxText import maxtext_utils
 from MaxText import optimizers
 from MaxText import pyconfig
 import os
@@ -93,12 +94,12 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   ]
   cfg = pyconfig.initialize(base_args)
   init_rng, _ = random.split(random.PRNGKey(cfg.init_weights_seed), 2)
-  devices_array = max_utils.create_device_mesh(cfg)
+  devices_array = maxtext_utils.create_device_mesh(cfg)
   mesh = Mesh(devices_array, cfg.mesh_axes)
 
   quant = quantizations.configure_quantization(cfg)
   model = Transformer(cfg, mesh, quant=quant)
-  learning_rate_schedule = max_utils.create_learning_rate_schedule(cfg)
+  learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(cfg)
   tx = optimizers.get_optimizer(cfg, learning_rate_schedule)
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
@@ -108,7 +109,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
       cfg.checkpoint_period,
   )
 
-  state, _, _, _ = max_utils.setup_training_state(model, None, tx, cfg, init_rng, mesh, checkpoint_manager)
+  state, _, _, _ = maxtext_utils.setup_training_state(model, None, tx, cfg, init_rng, mesh, checkpoint_manager)
   max_logging.log("start")
   check_memory()
 
