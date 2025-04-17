@@ -650,7 +650,7 @@ class Transformer(nn.Module):
           f" which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}."
       )
 
-    if self.config.use_multimodal:
+    if self.config.use_multimodal and encoder_images is not None:
       image_embeddings = self.vision_encoder(input_images=encoder_images)
       # TODO(hengtaoguo, aireen): merge image_embeddings with decoder_input_tokens.
 

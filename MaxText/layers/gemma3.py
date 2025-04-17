@@ -90,9 +90,8 @@ class Gemma3VisionEncoderLayer(nn.Module):
     Returns:
       jnp.array for image embeddings, shaped [B, N, P, D], e.g. [4, 1, 256, 2560]
     """
-    cfg = self.config
-    print(f"Gemma3VisionEncoderLayer input: {inputs.shape}")
-    x = inputs.squeeze(axis=1)
+    b, n, h, w, c = inputs.shape
+    x = jnp.reshape(inputs, [b * n, h, w, c])
     x = nn.Conv(features=1152,
         kernel_size=(14, 14),
         strides=14,
