@@ -90,6 +90,12 @@ def main(argv: Sequence[str]) -> None:
   rng, rng_load_params = jax.random.split(rng)
   params = engine.load_params(rng_load_params)
 
+  bias = params["params"]["vision_encoder"]["Gemma3VisionEncoderLayer_0"]["embedding"]["bias"]
+  kernel = params["params"]["vision_encoder"]["Gemma3VisionEncoderLayer_0"]["embedding"]["kernel"]
+  print(f"bias shape: {bias.shape}; mean: {bias.mean()}")
+  print(f"kernel shape: {kernel.shape}; mean: {kernel.mean()}")
+  # print(f"params: {params.keys()}")
+
   text = config.prompt
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)

@@ -58,6 +58,10 @@ def main(raw_args=None) -> None:
   checkpointer = orbax.checkpoint.PyTreeCheckpointer()
   params = checkpointer.restore(args.base_model_path)
   params = nest_params(params)
+  bias = params["SigLiPFromPatches_0"]["siglip_encoder"]["embedding"]["bias"]
+  kernel = params["SigLiPFromPatches_0"]["siglip_encoder"]["embedding"]["kernel"]
+  print(f"bias shape: {bias.shape}; mean: {bias.mean()}")
+  print(f"kernel shape: {kernel.shape}; mean: {kernel.mean()}")
   num_layers = max((int(k.split("_")[1]) for k in params["transformer"].keys() if "layer_" in k)) + 1
   hidden_dim, embed_dim = params["transformer"]["layer_0"]["mlp"]["linear"]["w"].shape
   num_heads, head_dim, _ = params["transformer"]["layer_0"]["attn"]["attn_vec_einsum"]["w"].shape
@@ -76,6 +80,14 @@ def main(raw_args=None) -> None:
           "decoder_norm": {"scale": params["transformer"]["final_norm"]["scale"] + 1},
       },
       "token_embedder": {"embedding": params["transformer"]["embedder"]["input_embedding"] * jnp.sqrt(embed_dim)},
+      "vision_encoder": {
+        "Gemma3VisionEncoderLayer_0": {
+          "embedding": {
+            "bias": params["SigLiPFromPatches_0"]["siglip_encoder"]["embedding"]["bias"],
+            "kernel": params["SigLiPFromPatches_0"]["siglip_encoder"]["embedding"]["kernel"],
+          }
+        }
+      }
   }
   self_attention = dict(
       {

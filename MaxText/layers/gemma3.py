@@ -265,6 +265,8 @@ class Gemma3VisionEncoderLayer(nn.Module):
     Returns:
       jnp.array for image embeddings, shaped [B, N, P, D], e.g. [4, 1, 256, 2560]
     """
+    image_shape = (4, 1, 896, 896, 3)
+    inputs = jnp.ones(image_shape, dtype=jnp.int32)
     print(f"Gemma3VisionEncoderLayer input: {inputs.shape}")
     b, n, h, w, c = inputs.shape
     x = jnp.reshape(inputs, [b * n, h, w, c])
