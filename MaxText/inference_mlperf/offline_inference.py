@@ -438,7 +438,7 @@ class OfflineInference:
       prefill_buckets_len = {k: len(self.prefill_buckets[k]) for k in self.prefill_buckets}
       log.debug("prefill buckets %d", prefill_buckets_len)
       if len(self.prefill_buckets[padded_len]) * padded_len >= self.max_prefill_length:
-        total_true_len = sum([row.true_length for (slot, row) in self.prefill_buckets[padded_len]])
+        total_true_len = sum((row.true_length for (slot, row) in self.prefill_buckets[padded_len]))
         # Can't hold another buffer, prefill right away
         if self.max_prefill_length - padded_len // 2 < total_true_len <= self.max_prefill_length:
           log.debug(
