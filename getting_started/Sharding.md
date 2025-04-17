@@ -257,7 +257,7 @@ With a true all-to-all network this takes `2BEX_x` bytes. Over TPU ICI, an all-t
 
 **Ratio (arithmetic intensity)**: `2BEMX_x / 2BEX_x = M`
 
-Note: The batch `B` cancels in above arithmetic intensity, so although I didn’t define exactly what I mean by this (e.g. batch per expert or total batch) - the batch dimension is present in both the compute and communication since we are communicating activations so cancels from the arithmetic intensity ratio.
+Note: The batch `B` cancels in above arithmetic intensity - the batch dimension is present in both the compute and communication since we are communicating activations so cancels from the arithmetic intensity ratio regardless of how it is shaped (e.g.`batch` or `batch_per_exp`)
 
 # Pipeline Parallelism (PP)
 Shard the weights and computation by layers. There are many flavors of pipelining, MaxText current supports `gPipe` and `circular pipelines`, which are discussed below
@@ -275,7 +275,7 @@ Circular pipelining also shards layers across stages, but the layers “wrap” 
 
 `Bubble = (PP - 1) / (repeats * Microbatches + PP - 1)`
 
-There is a tradeoff of using many `repeats` - more `repeats` creates a schedule with a smaller bubble, however also requires more `PP` comms between stages. Ideally the `PP` comms are overlapped as long as there is enough compute, however achieving overlap is a challenging problem for the compiler. To break the data dependency of the circular transfer (last stage to first), the number of microbatches must exceed the number of stages, and thus we generally recommend `num_pipeline_microbatches = 2 * PP`.
+There is a tradeoff of using many `repeats` - more `repeats` creates a schedule with a smaller bubble, however also requires more `PP` comms between stages. The limiting case `repeats=1` is a gPipe schedule with minimal communication overhead, but maximal bubble. Ideally the `PP` comms are overlapped as long as there is enough compute, however achieving overlap is a challenging problem for the compiler. To break the data dependency of the circular transfer (last stage to first), the number of microbatches must exceed the number of stages, and thus we generally recommend `num_pipeline_microbatches = 2 * PP`.
 
 ## Other Pipeline schedules
 We are actively investing in Multiple Program Multiple Data (MPMD) style jax to support fancier pipeline schedules such as 1F1B and dualpipe which can achieve smaller bubbles while using less `PP` comms. Currently we only support gPipe and ciruclar pipelines
