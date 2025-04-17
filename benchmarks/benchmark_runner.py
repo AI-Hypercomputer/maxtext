@@ -63,9 +63,9 @@ def add_pathways_arguments(parser: argparse.ArgumentParser):
       help='version of pathways runner image to be benchmarked command.',
   )
   parser.add_argument(
-      '--remote_python_sidecar_image',
+      '--colocated_python_sidecar_image',
       type=str,
-      help='version of remote python sidecar image to be benchmarked command.',
+      help='version of colocated python sidecar image to be benchmarked command.',
   )
   parser.add_argument(
       '--use_pathways',
@@ -264,7 +264,7 @@ def main() -> None:
       server_image=options.pathways_server_image,
       proxy_server_image=options.pathways_proxy_server_image,
       runner_image=options.pathways_runner_image,
-      remote_python_sidecar_image=options.remote_python_sidecar_image,
+      colocated_python_sidecar_image=options.colocated_python_sidecar_image,
     )
 
   if options.runner == "xpk":
