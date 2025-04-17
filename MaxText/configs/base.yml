@@ -681,3 +681,4 @@ nope_layer_interval: -1
 # Multimodal flags
 use_multimodal: False
 image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
+image_path: "" # Local image path used for decoding

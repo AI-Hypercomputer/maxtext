@@ -25,6 +25,7 @@ from jetstream.engine import engine_api
 from MaxText import max_utils
 from MaxText import maxengine
 from MaxText import pyconfig
+from MaxText import multimodal_utils
 
 # Number of text sequences to process in a single batch.
 _NUM_STREAMS = 1
@@ -91,6 +92,12 @@ def main(argv: Sequence[str]) -> None:
   params = engine.load_params(rng_load_params)
 
   text = config.prompt
+  images = None
+  if config.use_multimodal:
+    # TODO(hengtaoguo): Support multiple images as input.
+    images = multimodal_utils.load_image_from_path(config.image_path)
+    images = multimodal_utils.pre_process_image(images, model_name=config.model_name)
+
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
   try:
@@ -116,7 +123,7 @@ def main(argv: Sequence[str]) -> None:
   rng, rng_prefill = jax.random.split(rng)  # Split RNG before calling prefill
   for i in range(_NUM_STREAMS):
     prefill_result, first_token = engine.prefill(
-        params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill, slot=i
+        params=params, padded_tokens=tokens, images=images, true_length=true_length, rng=rng_prefill, slot=i
     )
     prefill_result_list.append(prefill_result)
     first_token_list.append(first_token)

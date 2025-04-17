@@ -578,6 +578,7 @@ class Decoder(nn.Module):
 
 class VisionEncoder(nn.Module):
   """Vision encoder to encode images into soft tokens."""
+
   config: Config
 
   def setup(self):
@@ -586,6 +587,7 @@ class VisionEncoder(nn.Module):
   def get_vision_encoder_layers(self):
     if self.config.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
       from MaxText.layers import gemma3
+
       return [gemma3.Gemma3VisionEncoderLayer]
     else:
       raise ValueError(f"No VisionEncoder implemented for {self.config.model_name} yet")
@@ -628,7 +630,7 @@ class Transformer(nn.Module):
       decoder_input_tokens: jnp.ndarray,
       decoder_positions: jnp.ndarray,
       decoder_segment_ids=None,
-      encoder_images: Optional[jnp.ndarray]=None,
+      encoder_images: Optional[jnp.ndarray] = None,
       enable_dropout=True,
       model_mode=common_types.MODEL_MODE_TRAIN,
       previous_chunk=None,
@@ -650,7 +652,7 @@ class Transformer(nn.Module):
           f" which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}."
       )
 
-    if self.config.use_multimodal:
+    if self.config.use_multimodal and encoder_images is not None:
       image_embeddings = self.vision_encoder(input_images=encoder_images)
       # TODO(hengtaoguo, aireen): merge image_embeddings with decoder_input_tokens.
 
