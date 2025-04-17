@@ -57,7 +57,7 @@ To get started, follow the instructions at HuggingFace ([V3](https://huggingface
 
 ## Fine-tuning
 
-After you have a MaxText compatible checkpoint, you could fine-tune it with different datasets.
+After you have a MaxText compatible checkpoint, you could fine-tune it with different datasets. 
 
 One example command to run general finetuning with V3 on v5p-256.
 
