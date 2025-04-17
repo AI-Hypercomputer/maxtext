@@ -1,6 +1,6 @@
 Understanding sharding strategies is key to acheiving good performance, especially at scale. In general there are other related knobs to optimize performance - you should make use of all your HBM (by tuning batch size and rematerialization policies), but here we discuss the various sharding strategies we support in maxtext.
 
-When considering different sharding strategies, the main concern is the amount of communication executed between chips. Different sharding strategies will require different patterns of communication - how often communication is needed and the amount of data needed to communicate. A very helpful tool to understand the performance implications of these communications is arithmetic intensity - which roughly gives the ratio of useful computation to the communication cost. We highly recommend understanding arithmetic intensity if you are serious about optimizing performance - we recommend both the [“Jax Train your LLM”](https://jax-ml.github.io/scaling-book/sharding/) document and a MaxText HighPerformanceLLM [class](https://github.com/rwitten/HighPerfLLMs2024) (specifically classes 1-4). We briefly describe how to compute arithmetic intensities, and then explain the various sharding strategies we support in maxtext below, starting with some notation:
+When considering different sharding strategies, the main concern is the amount of communication executed between chips. Different sharding strategies will require different patterns of communication - how often communication is needed and the amount of data needed to communicate. A very helpful tool to understand the performance implications of these communications is arithmetic intensity - which roughly gives the ratio of useful computation to the communication cost. We highly recommend understanding arithmetic intensity if you are serious about optimizing performance - we recommend both the [“Jax Train your LLM”](https://jax-ml.github.io/scaling-book/sharding/) document and a MaxText HighPerformanceLLM [class](https://github.com/rwitten/HighPerfLLMs2024) (specifically classes 1-4). We briefly describe how to compute arithmetic intensities, and then explain the various sharding strategies we support in maxtext below, starting with some notation
 
 # Sharding notation: 
 We illustrate our sharding notation with an example matmul:
@@ -38,14 +38,14 @@ The required communication is the RS from `BE` to `BE_x`. It turns out an optima
 
 **Comm time** = comms bytes / comm speed = `2 * B * E` bytes / comm speed
 
-We want to be compute bound, so we want 
+We want to be compute bound, so we want: 
 
 ```
 Compute time > Communication time
 Compute Flops / compute speed > Comm bytes / comm speed
 ```
 
-Arithmetic Intensity simplifies and generlizes this analysis by re-arranging this inequality to put everything about the model on one side, and everything about the hardware on the other: 
+Arithmetic Intensity simplifies and generalizes this analysis by re-arranging this inequality to put everything about the model on one side, and everything about the hardware on the other: 
 ```
 Compute Flops / Comm bytes > Compute Speed / comm speed
 Operation Arithmetic Intensity > Hardware Arithmetic Intensity
@@ -60,7 +60,7 @@ Hardware Arithmetic Intensity: Compute speed / comm speed
 Example hardware for trillium (See https://cloud.google.com/tpu/docs/v6e), compute speed = `917` TFLOPs, and comm speed of 1 ICI axis is `180` GB/s so the ratio `917 * 10^12 / 180 * 10^ 9 = 5100`. Thus we would need `M_x > 5100` (Operational AI > Hardware AI) to be compute bound for this operation (Note `M_x = M/|x|`, the degree of sharding). This is an example of key insights that arithmetic intensity gives us - it tells us we need a large `M` dimension to achieve high utilization for model parallelism because the operational intensity is proportional to `M`.
 
 # Arithmetic Intensity: Mixed sharding strategies
-When we use multiple sharding strategies together it seems intractable to keep track of all of the compute vs communication ratios. However it turns out (not obvious at first), that the arithmetic intensity analysis of a “pure” sharding strategy generalizes to when it's used in a mix. For instance if we added data parallelism to the above tensor parallelism example then  the batch dimension `B` would also be sharded by a new mesh axes `y`. Both the compute and communication would decrease by this sharding factor `|y|`, and thus the ratio of compute to comms for tensor parallelism would remain the same (`M/|x|`, independent of `y`). Concretely this would look like
+When we use multiple sharding strategies together it seems intractable to keep track of all of the compute vs communication ratios. However it turns out (not obvious at first), that the arithmetic intensity analysis of a “pure” sharding strategy generalizes to when it's used in a mix. For instance, if we added data parallelism to the above tensor parallelism example then  the batch dimension `B` would also be sharded by a new mesh axes `y`. Both the compute and communication would decrease by this sharding factor `|y|`, and thus the ratio of compute to comms for tensor parallelism would remain the same (`M/|x|`, independent of `y`). Concretely this would look like
 
 B<sub>y</sub>M<sub>x</sub> @ M<sub>x</sub>E = B<sub>y</sub>E &rarr; RS over x &rarr; B<sub>y</sub> E<sub>x</sub>   
 
