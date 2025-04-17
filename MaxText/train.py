@@ -107,8 +107,7 @@ def validate_train_config(config):
 
 
 def get_first_step(state):
-  with jax.spmd_mode("allow_all"):
-    return int(state.step)
+  return int(state.step)
 
 
 def load_next_batch(train_iter, example_batch, config):
