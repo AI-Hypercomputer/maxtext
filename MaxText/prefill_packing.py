@@ -179,10 +179,11 @@ class PrefillProcessor:
 class BatchedPrefillProcessor:
   """A wrapper around the APIs used by MaxEngine to do prefill and insert, provides prefill packing feature."""
 
-  def __init__(self, engine: MaxEngine):
+  def __init__(self, engine: MaxEngine, max_batch_size: int):
     self.engine = engine
     self.process_batch_func = {}
     self.buckets = {}
+    self.max_batch_size = max_batch_size
 
   def aot_compile(
     self,
@@ -275,9 +276,9 @@ class BatchedPrefillProcessor:
         arr.extend([0] * (padding - len(arr)))
       return jnp.array(arr)
 
-    slots   = zero_padded(slots,   16)
-    offsets = zero_padded(offsets, 16)
-    lengths = zero_padded(lengths, 16)
+    slots   = zero_padded(slots,   self.max_batch_size)
+    offsets = zero_padded(offsets, self.max_batch_size)
+    lengths = zero_padded(lengths, self.max_batch_size)
 
     prefill_fn = self._process_batch_compiled(model_params,
                                               input_padding,
@@ -321,13 +322,13 @@ class BatchedPrefillProcessor:
         .lower(
             params,
             jax.ShapeDtypeStruct((capacity,), jnp.dtype("int32")),
-            jnp.arange(0, 16, dtype=int),
+            jnp.arange(0, self.max_batch_size, dtype=int),
             num_prompts,
             jnp.arange(0, capacity, dtype=int),
             jnp.ones(capacity, dtype=int),
-            jnp.arange(0, capacity, 64, dtype=int),
+            jnp.arange(0, capacity, capacity // self.max_batch_size, dtype=int),
             padded_length,
-            jnp.full(16, padded_length, dtype=int),
+            jnp.full(self.max_batch_size, padded_length, dtype=int),
             self.engine.decode_state_shapes,
         )
         .compile(compiler_options=None)

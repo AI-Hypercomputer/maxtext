@@ -77,7 +77,7 @@ class PrefillHelper:
     if type == "default":
       self._processor = PrefillProcessor(engine)
     elif type == "batch":
-      self._batch_processor = BatchedPrefillProcessor(engine)
+      self._batch_processor = BatchedPrefillProcessor(engine=engine, max_batch_size=16)
       self._processor = PrefillProcessor(engine)  # for fallback
     elif type == "dummy":
       pass
