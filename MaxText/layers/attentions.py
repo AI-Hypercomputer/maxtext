@@ -622,7 +622,7 @@ class AttentionOp(nn.Module):
 
     _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
 
-    sliding_window_size = self.sliding_window_size
+    sliding_window_size = None
     if self.attention_type == AttentionType.LOCAL_SLIDING or not self.config.enable_padding_causal_mask:
       sliding_window_size = [self.sliding_window_size, 0]
       mask_type = "causal"  # SWA only works with causal masking
