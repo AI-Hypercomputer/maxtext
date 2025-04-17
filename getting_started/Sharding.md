@@ -13,6 +13,18 @@ BM<sub>x</sub> @ M<sub>x</sub>E = BE (local partial result) -> Reduce-Scatter (R
 
 Explanation: Both the activations (`BM`) and weights (`ME`) are sharded on the M dimension. Thus each device is able to perform the matmul locally with its shard of the M<sub>x</sub> dimension, the local result is of the right global shape (`BE`) but is only a partial result - it needs to be summed with the other shards to get the full result. This is achieved with a reduce scatter (which does the summation and additionally shards the activations).
 
+## Axis labels
+
+| Symbol | Description                                                                       |
+| :----- | :-------------------------------------------------------------------------------- |
+| B      | batch (either in tokens or sequences) |
+| S      | sequence                                                                          |
+| E      | emb_dim (aka model dim)                                                                           |
+| M      | mlp_dim  (aka intermediate dim)                                                                         |
+| X      | expert
+
+Note for the feed forward computation the batch and sequence dimensions act the same and thus we use only one `B` axis (which you can think of as a token batch dimension, a reshaping of batch and sequence into one axis), but for context and sequence parallelism they act differently and thus we use both a `B` and `S` dimension and the `B` dimension is really batch in sequences.
+
 # Arithmetic Intensity whirlwind introduction example:
 Arithmetic intensity is a key tool for understanding performance. We want to be compute bound (because there is a fixed amount of compute to perform), which means we want the compute to take longer than the communication. Consider the above example (model parallelism aka tensor parallelism)
 
@@ -45,7 +57,7 @@ Operation Arithmetic Intensity for this example: `2 * B * M_x * E` flops / `2 * 
 
 Hardware Arithmetic Intensity: Compute speed / comm speed
 
-Example hardware for trillium, compute speed = `917` TFLOPs, and comm speed of 1 ICI axis is `180` GB/s so the ratio `917 * 10^12 / 180 * 10^ 9 = 5100`. Thus we would need `M_x > 5100` (Operational AI > Hardware AI) to be compute bound for this operation (Note `M_x = M/|x|`, the degree of sharding). This is an example of key insights that arithmetic intensity gives us - it tells us we need a large `M` dimension to achieve high utilization for model parallelism because the operational intensity is proportional to `M`.
+Example hardware for trillium (See https://cloud.google.com/tpu/docs/v6e), compute speed = `917` TFLOPs, and comm speed of 1 ICI axis is `180` GB/s so the ratio `917 * 10^12 / 180 * 10^ 9 = 5100`. Thus we would need `M_x > 5100` (Operational AI > Hardware AI) to be compute bound for this operation (Note `M_x = M/|x|`, the degree of sharding). This is an example of key insights that arithmetic intensity gives us - it tells us we need a large `M` dimension to achieve high utilization for model parallelism because the operational intensity is proportional to `M`.
 
 # Arithmetic Intensity: Mixed sharding strategies
 When we use multiple sharding strategies together it seems intractable to keep track of all of the compute vs communication ratios. However it turns out (not obvious at first), that the arithmetic intensity analysis of a “pure” sharding strategy generalizes to when it's used in a mix. For instance if we added data parallelism to the above tensor parallelism example then  the batch dimension `B` would also be sharded by a new mesh axes `y`. Both the compute and communication would decrease by this sharding factor `|y|`, and thus the ratio of compute to comms for tensor parallelism would remain the same (`M/|x|`, independent of `y`). Concretely this would look like
@@ -93,7 +105,7 @@ Roughly approximate the entire backward pass:
 
 We saw above that each matmul performs `2 * batch * params` flops, in turns out that the backward pass requires twice as many flops as the forward pass. We don't derive this here but highly recommend reading these [slides](https://www.cs.toronto.edu/~rgrosse/courses/csc321_2017/slides/lec6.pdf) from university of tornto to explain the mathematics and implementation of backprop
 
-**Communicate**: All reduce size of params (`bf16`) : `4 * params` (`2*` since `bf16`, another `2*` since an optimal all reduce algorithm turns out to require two passes of communicating data)
+**Communicate**: All reduce size of params (`bf16`) : `4 * params` (`2*` since `bf16`, another `2*` since an optimal all reduce algorithm turns out to require two passes of communicating data (generally a reduce scatter followed by an all-gather))
 
 **Ratio (arithmetic intensity)**: `local_batch`
 
@@ -144,7 +156,7 @@ The extra cost of all gathering of keys and values is small, especially for long
 **Ratio**: `seq_len * query_heads / kv_heads`
 
 # Sequence Parallelism
-Sequence parallelism is very similar to context parallelism - we shard the layer inputs and feed forward activations along the sequence dimension. The difference is for attention - we shard the queries, keys, and values along the head dimension instead of sequence dimension. This is because the head dimension is easy to shard on for attention (it is not a contracting dimension), and thus can be more efficient than context parallelism as long as there are enough heads. Both sequence parallelism and tensor parallelism shard the heads, so we are constrained by `tensor_parallelism * sequence_parallelism < kv_heads`. E.g. if there are only 8 `kv_heads` as for llama3 and we use `tensor_parallelism=8`, then we cannot use any `sequence_parallelism` (e.g. `sequence_parallelism=1`) 
+Sequence parallelism is very similar to context parallelism - we shard the layer inputs and feed forward activations along the sequence dimension. The difference is for attention - we shard the queries, keys, and values along the head dimension instead of sequence dimension (this is fairly MaxText specific, you might not see this in other codebases). This is because the head dimension is easy to shard on for attention (it is not a contracting dimension), and thus can be more efficient than context parallelism as long as there are enough heads. Both sequence parallelism and tensor parallelism shard the heads, so we are constrained by `tensor_parallelism * sequence_parallelism < kv_heads`. E.g. if there are only 8 `kv_heads` as for llama3 and we use `tensor_parallelism=8`, then we cannot use any `sequence_parallelism` (e.g. `sequence_parallelism=1`) 
 
 Sequence parallelism is currently only supported with TPUs attention kernel, for GPUs we recommend context parallelism above.
 
@@ -183,7 +195,7 @@ Reduce scatter  `BE` (`bf16`): `2BE` bytes
 
 Note this is one pattern of TP where the contracting dimension is sharded. By contrast for the initial feed forward matmul the non-contracting weight dimension is sharded:
 
-BE<sub>x</sub> @ EM<sub>x</sub> = AG activations -> BE @ EM<sub>x</sub> = BMM<sub>x</sub>
+BE<sub>x</sub> @ EM<sub>x</sub> = AG activations over x-> BE @ EM<sub>x</sub> = BM<sub>x</sub>
 
 This is the same amount of compute, and also the same amount of communication - again activations of `BE` are communicated, but in this case it is an initial all-gathering instead of secondary all-reduce. Ideally these activations (all-gather or reduce scatter) can be overlaped with the compute by the XLA compiler - an idea called a *collective matmul*. This is fairly challenging for the compiler since the comms and compute do depend on each other - to achieve overlap the computation and communication have to be chunked into smaller pieces and pipelined. 
 
@@ -197,7 +209,7 @@ Near identical to tensor parallelism above except a different axis gets all gath
 # Tensor Parallelism Transpose (TP Transpose)
 Similar to tensor parallelism, but instead of sharding the feed forward weights along the `mlp_dim`, shard them along the `embed_dim`. This will require communicating activations of the `mlp_dim` as opposed to the `embed_dim`, and thus is useful when the `mlp_dim` < `embed_dim` which is unusual but is true for some models such as DeepSeek V3.
 
-Tensor and tensor parallelism can used together called "2D TP" which can be more efficient than using purely one of them for inference decoding, although this is still a work in progress/ largely untested.
+`TP` and `TP transpose` can used together called "2D TP" which can be more efficient than using purely one of them for inference decoding, although this is still a work in progress / largely untested.
 
 ## TP Transpose Arithmetic Intensity:
 This is really just swapping `E` and `M` of the TP analysis above, but we will include it here:
