@@ -19,6 +19,7 @@ import operator
 from typing import Any, Callable, Iterable, Sequence, Tuple, Union, Optional
 
 import flax.linen as nn
+from flax import nnx
 from jax import lax
 import jax.numpy as jnp
 from MaxText import common_types
@@ -82,80 +83,152 @@ def _compute_dot_general(inputs, kernel, kernel_axes, axis, contract_ind, matmul
   return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision)
 
 
-class DenseGeneral(nn.Module):
-  """A linear transformation with flexible axes.
+class DenseGeneral(nnx.Module):
+  """A linear transformation with flexible axes."""
 
-  Attributes:
-    features: tuple with numbers of output features.
-    axis: tuple with axes to apply the transformation on.
-    weight_dtype: the dtype of the weights (default: float32).
-    dtype: the dtype of the computation (default: float32).
-    kernel_init: initializer function for the weight matrix.
-    use_bias: whether to add bias in linear transformation.
-    quant: quantization config, defaults to None implying no quantization.
-  """
-
-  features: Union[Iterable[int], int]
-  axis: Union[Iterable[int], int] = -1
-  weight_dtype: DType = jnp.float32
-  dtype: DType = jnp.float32
-  kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal")
-  kernel_axes: Tuple[Optional[str], ...] = ()
-  quant: Optional[Quant] = None
-  use_bias: bool = False
-  matmul_precision: str = "default"
-
-  @nn.compact
-  def __call__(self, inputs: Array) -> Array:
-    """Applies a linear transformation to the inputs along multiple dimensions.
+  def __init__(
+    self,
+    in_features: Union[Iterable[int], int],
+    out_features: Union[Iterable[int], int],
+    axis: Union[Iterable[int], int] = -1,
+    weight_dtype: DType = jnp.float32,
+    dtype: DType = jnp.float32,
+    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
+    kernel_axes: Tuple[Optional[str], ...] = (),
+    quant: Optional[Quant] = None,
+    use_bias: bool = False,
+    matmul_precision: str = "default",
+    *,  # Following arguments are keyword-only
+    rngs: nnx.Rngs,
+  ):
+    """Initializes the DenseGeneral module.
 
     Args:
-      inputs: The nd-array to be transformed.
-
-    Returns:
-      The transformed input.
+      features: tuple with numbers of output features.
+      in_features: tuple with numbers of input features for axes specified in 'axis'.
+      axis: tuple with axes to apply the transformation on.
+      weight_dtype: the dtype of the weights (default: float32).
+      dtype: the dtype of the computation (default: float32).
+      kernel_init: initializer function for the weight matrix.
+      kernel_axes: logical axes for partitioning the kernel.
+      quant: quantization config, defaults to None implying no quantization.
+      use_bias: whether to add bias in linear transformation.
+      matmul_precision: Precision for matrix multiplication.
+      rngs: RNG state for initialization in nnx.
     """
+    self.in_features = _canonicalize_tuple(in_features)
+    self.out_features = _canonicalize_tuple(out_features)
+    self.axis = _canonicalize_tuple(axis)
+    self.weight_dtype = weight_dtype
+    self.dtype = dtype
+    self.kernel_init = kernel_init
+    self.kernel_axes = kernel_axes
+    self.quant = quant
+    self.use_bias = use_bias
+    self.matmul_precision = matmul_precision
 
-    features = _canonicalize_tuple(self.features)
-    axis = _canonicalize_tuple(self.axis)
+    # Parameter initialization
+    kernel_shape = self.in_features + self.out_features
+    kernel_in_axis = np.arange(len(self.axis))
+    kernel_out_axis = np.arange(
+        len(self.axis), len(self.axis) + len(self.out_features)
+    )
 
-    inputs = jnp.asarray(inputs, self.dtype)
-    axis = _normalize_axes(axis, inputs.ndim)
-
-    kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
-    kernel_in_axis = np.arange(len(axis))
-    kernel_out_axis = np.arange(len(axis), len(axis) + len(features))
-    if quantizations.in_serve_mode(self.quant):
-      # During aqt convert state we delete kernel weight from params to save memory.
-      # Instead they are retrieved from the tensors stored in the 'aqt' collection.
-      kernel = jnp.zeros(kernel_shape)
-    else:
-      kernel = self.param(
-          "kernel",
-          nn.with_logical_partitioning(self.kernel_init, self.kernel_axes),
-          kernel_shape,
-          self.weight_dtype,
-          kernel_in_axis,
-          kernel_out_axis,
-      )
-    kernel = jnp.asarray(kernel, self.dtype)
-    contract_ind = tuple(range(0, len(axis)))
-    output = _compute_dot_general(inputs, kernel, self.kernel_axes, axis, contract_ind, self.matmul_precision, self.quant)
+    self.kernel = nnx.Param(
+      self.kernel_init(
+        rngs.params(),
+        kernel_shape,
+        self.weight_dtype,
+        kernel_in_axis,
+        kernel_out_axis,
+      ),
+      sharding=self.kernel_axes,
+    )
 
     if self.use_bias:
-      bias_axes, bias_shape = (
-          self.kernel_axes[-len(features) :],
-          kernel_shape[-len(features) :],
+      bias_axes = self.kernel_axes[-len(self.out_features) :]
+      bias_shape = kernel_shape[-len(self.out_features) :]
+      self.bias = nnx.Param(
+        bias_init(rngs.params(), bias_shape, self.weight_dtype),
+        sharding=bias_axes,
       )
-      bias = self.param(
-          "bias",
-          nn.with_logical_partitioning(bias_init, bias_axes),
-          bias_shape,
-          self.weight_dtype,
+    else:
+      self.bias = None
+
+  def __call__(self, inputs: Array) -> Array:
+      """Applies a linear transformation to the inputs along multiple dimensions.
+
+      Args:
+        inputs: The nd-array to be transformed.
+
+      Returns:
+        The transformed input.
+      """
+      inputs = jnp.asarray(inputs, self.dtype)
+      norm_axis = _normalize_axes(self.axis, inputs.ndim)
+
+      for i, ax in enumerate(norm_axis):
+        if inputs.shape[ax] != self.in_features[i]:
+          raise ValueError(
+            f"Input dimension {inputs.shape[ax]} at axis {ax} "
+            f"does not match expected input feature size {self.in_features[i]}"
+          )
+
+      if quantizations.in_serve_mode(self.quant):
+        kernel_shape = self.in_features + self.out_features
+        kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
+      else:
+        kernel = jnp.asarray(self.kernel[...], self.dtype)
+
+      contract_ind = tuple(range(0, len(self.axis)))
+      output = _compute_dot_general(
+        inputs,
+        kernel,
+        self.kernel_axes,
+        norm_axis,
+        contract_ind,
+        self.matmul_precision,
+        self.quant,
       )
-      bias = jnp.asarray(bias, self.dtype)
-      output += bias
-    return output
+
+      if self.bias is not None:
+        bias = jnp.asarray(self.bias[...], self.dtype)
+        output += bias
+      return output
+
+
+def dense_general(
+  inputs_shape: tuple[int, ...],
+  features: Union[Iterable[int], int],
+  *,
+  axis: Union[Iterable[int], int] = -1,
+  weight_dtype: DType = jnp.float32,
+  dtype: DType = jnp.float32,
+  kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
+  kernel_axes: Tuple[Optional[str], ...] = (),
+  quant: Optional[Quant] = None,
+  use_bias: bool = False,
+  matmul_precision: str = "default",
+  name: Optional[str] = None,
+):
+  axis = _canonicalize_tuple(axis)
+  in_features = tuple(inputs_shape[ax] for ax in _normalize_axes(axis, len(inputs_shape)))
+  out_features = _canonicalize_tuple(features)
+  module = nnx.bridge.to_linen(
+    DenseGeneral,
+    in_features,
+    out_features,
+    axis=axis,
+    weight_dtype=weight_dtype,
+    dtype=dtype,
+    kernel_init=kernel_init,
+    kernel_axes=kernel_axes,
+    quant=quant,
+    use_bias=use_bias,
+    matmul_precision=matmul_precision,
+    name=name,
+  )
+  return module
 
 
 class MlpBlock(nn.Module):
