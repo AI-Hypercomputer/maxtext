@@ -279,7 +279,7 @@ Circular pipelining also shards layers across stages, but the layers “wrap” 
 There is a tradeoff of using many `repeats` - more `repeats` creates a schedule with a smaller bubble, however it also requires more `PP` comms between stages. The limiting case `repeats=1` is a gPipe schedule with minimal communication overhead, but maximal bubble. Ideally the `PP` comms are overlapped as long as there is enough compute, however achieving overlap is a challenging problem for the compiler. To break the data dependency of the circular transfer (last stage to first), the number of microbatches must exceed the number of stages, and thus we generally recommend `num_pipeline_microbatches = 2 * PP`.
 
 ## Other Pipeline Schedules
-We are actively investing in Multiple Program Multiple Data (MPMD) style jax to support fancier pipeline schedules such as 1F1B and dualpipe which can achieve smaller bubbles while using less `PP` comms. Currently we only support gPipe and ciruclar pipelines
+We are actively investing in Multiple Program Multiple Data (MPMD) style jax to support fancier pipeline schedules such as 1F1B and dualpipe which can achieve smaller bubbles while using less `PP` comms. Currently we only support gPipe and circular pipelines
 
 ## PP + FSDP/DP
 Pipelining and FSDP/DP interactions have to be considered together to achieve optimal performance. Generally we want to reduce the gradients across DP replicas only once outside of the pipeline loop as opposed to every microbatch (we want the gradient reduction performed locally across microbatches first and only once across DP replicas). We rely on the XLA compiler for this optimization. Similarly for FSDP we want to all-gather the weights across FSDP only once before the pipeline loop as opposed to every microbatch - we have implemented this in maxtext with `pipeline_fsdp_ag_once` and generally recommend this with small batch sizes. However this comes with a huge memory cost - the weights and gradients are not sharded by FSDP, and thus a significant amount of other sharding (PP, EP, TP) must be used. This is roughly equivalent  0-1 sharding, FSDP only shards the optimizer state, not the weights and gradients. 
@@ -300,6 +300,7 @@ The layer outputs between stages of size `BE`. These are collectively permuted (
 
 `3/2 * layers_per_pipeline_stage * M` 
 
+Note that for MoE models, this arithmetic intensity grows by a factor of `experts_per_token` since the compute grows by this factor, but the communication is independent of this factor.
 
 # Context Autoregressive
 
