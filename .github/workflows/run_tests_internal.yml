@@ -57,4 +57,4 @@ jobs:
       - name: Run Tests
         run: |
           python3 -m pip install -e .
-          python3 -m pytest --pyargs MaxText.tests -m "${{ inputs.pytest_marker }}"
+          python3 -m pytest --pyargs MaxText.tests -m "${{ inputs.pytest_marker }}" --durations=0
