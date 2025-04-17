@@ -14,12 +14,7 @@
 
 """Implementation of Prefill Packing feature"""
 
-import common_types
-import functools
-from collections import defaultdict
-from typing import Any, List, Optional, Tuple, Callable
-
-from flax.linen import partitioning as nn_partitioning
+from typing import Any, List, Tuple, Callable
 
 import jax
 import jax.numpy as jnp
@@ -27,9 +22,7 @@ import numpy as np
 
 from jetstream.engine import engine_api
 
-import max_utils
-import inference_utils
-from maxengine import MaxEngine
+from MaxText.maxengine import MaxEngine
 
 import warnings
 import logging
