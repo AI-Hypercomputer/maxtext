@@ -187,6 +187,9 @@ def validate_keys(keys):
     validate_sparse_matmul_parallelism(keys)
     validate_deepseek_moe(keys)
 
+  if keys["use_multimodal"]:
+    validate_multimodal_model_name(keys["model_name"])
+
 
 def validate_tokenizer(keys):
   assert keys[
@@ -277,6 +280,16 @@ def validate_model_name(s: str) -> bool:
   )
   if s not in valid_model_names:
     raise ValueError(f"Invalid model name was passed. Got {s}, Valid options {valid_model_names}")
+
+
+def validate_multimodal_model_name(s: str) -> bool:
+  valid_model_names = (
+      "gemma3-4b",
+      "gemma3-12b",
+      "gemma3-27b",
+  )
+  if s not in valid_model_names:
+    raise ValueError(f"Invalid multimodal model name was passed. Got {s}. Valid options which support multimodal inputs are: {valid_model_names}")
 
 
 def validate_no_keys_overwritten_twice(keys1: list[str], keys2: list[str]):

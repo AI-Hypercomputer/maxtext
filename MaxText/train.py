@@ -378,6 +378,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       data["inputs"],
       data["inputs_position"],
       decoder_segment_ids=data["inputs_segmentation"],
+      encoder_images=data["images"] if config.use_multimodal else None,
       enable_dropout=config.enable_dropout if is_train else False,
       rngs={"dropout": rng1, "params": aqt_rng},
       mutable="intermediates",
