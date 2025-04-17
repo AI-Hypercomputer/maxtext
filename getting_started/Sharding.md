@@ -240,6 +240,7 @@ When using dropless strategies you may want to ensure that the shards are balanc
 
 ## EP Arithmetic Intensity:
 An all-to-all (A2A) is needed to move between data sharding (fsdp) prior to the feed forward and the expert sharding during the feed forward. We denote `X` as the expert tensor axis, and keep `x` as the mesh axes
+
 **Compute**
 
 Analyze only 1 feed forward matmul
@@ -263,7 +264,7 @@ Note: The batch `B` cancels in above arithmetic intensity - the batch dimension 
 Shard the weights and computation by layers. There are many flavors of pipelining, MaxText current supports `gPipe` and `circular pipelines`, which are discussed below
 
 ## Why Pipeline Parallelism?
-Pipeline parallel is generally needed when the `per_device_batch` size is too small for data parallelism to be efficient. Recall above the arithmetic intensity of data parallelism is given by the `local_batch/sparsity`, so when this becomes too small then the communications associated with data parallelism will be very costly. This occurs either for very sparse models (e.g. DeepSeek), or when scaling to a large number of chips and maintaining a fixed global batch size (and thus the per device batch size is small).
+Pipeline parallelism is generally needed when the `per_device_batch` size is too small for data parallelism to be efficient. Recall above the arithmetic intensity of data parallelism is given by the `local_batch/sparsity`, so when this becomes too small then the communications associated with data parallelism will be very costly. This occurs either for very sparse models (e.g. DeepSeek), or when scaling to a large number of chips and maintaining a fixed global batch size (and thus the per device batch size is small).
 
 ## gPipe
 gPipe style pipelining ([reference](https://arxiv.org/abs/1811.06965)) shards layers across stages, where each stage can have multiple layers. E.g. if there are four stages and twelve layers, stage 0 will perform layers 0, 1, and 2, then pass the results to stage 1 which will perform layers 3, 4, and 5, etc. Naively implemented this isn’t parallel since stage 1 has to wait for stage 0 to finish, however we can break the batch into microbatches to enable parallelism. E.g. as stage 1 works on microbatch 0, stage 0 can start working a new microbatch 1. There is still a “bubble” - an amount of time each stage is idle while either waiting for the first microbatch or once it has finished all of its microbatches. This “bubble” time goes down with the amount of microbatches: 
@@ -275,13 +276,13 @@ Circular pipelining also shards layers across stages, but the layers “wrap” 
 
 `Bubble = (PP - 1) / (repeats * Microbatches + PP - 1)`
 
-There is a tradeoff of using many `repeats` - more `repeats` creates a schedule with a smaller bubble, however also requires more `PP` comms between stages. The limiting case `repeats=1` is a gPipe schedule with minimal communication overhead, but maximal bubble. Ideally the `PP` comms are overlapped as long as there is enough compute, however achieving overlap is a challenging problem for the compiler. To break the data dependency of the circular transfer (last stage to first), the number of microbatches must exceed the number of stages, and thus we generally recommend `num_pipeline_microbatches = 2 * PP`.
+There is a tradeoff of using many `repeats` - more `repeats` creates a schedule with a smaller bubble, however it also requires more `PP` comms between stages. The limiting case `repeats=1` is a gPipe schedule with minimal communication overhead, but maximal bubble. Ideally the `PP` comms are overlapped as long as there is enough compute, however achieving overlap is a challenging problem for the compiler. To break the data dependency of the circular transfer (last stage to first), the number of microbatches must exceed the number of stages, and thus we generally recommend `num_pipeline_microbatches = 2 * PP`.
 
-## Other Pipeline schedules
+## Other Pipeline Schedules
 We are actively investing in Multiple Program Multiple Data (MPMD) style jax to support fancier pipeline schedules such as 1F1B and dualpipe which can achieve smaller bubbles while using less `PP` comms. Currently we only support gPipe and ciruclar pipelines
 
 ## PP + FSDP/DP
-Pipelining and FSDP/DP interactions have to be considered together to achieve optimal performance. Generally we want to reduce the gradients across DP replicas only once outside of the pipeline loop as opposed to every microbatch (we want the gradient reduction performed locally across microbatches first and only once across DP replicas). We rely on the XLA compiler for this optimization. Similarly for FSDP we want to all-gather the weights across FSDP only once before the pipeline loop as opposed to every microbatch- we have implemented this in maxtext with `pipeline_fsdp_ag_once` and generally recommend this with small batch sizes. However this comes with a huge memory cost - the weights and gradients are not sharded by FSDP, and thus a significant amount of other sharding (PP, EP, TP) must be used. This is roughly equivalent  0-1 sharding, FSDP only shards the optimizer state, not the weights and gradients. 
+Pipelining and FSDP/DP interactions have to be considered together to achieve optimal performance. Generally we want to reduce the gradients across DP replicas only once outside of the pipeline loop as opposed to every microbatch (we want the gradient reduction performed locally across microbatches first and only once across DP replicas). We rely on the XLA compiler for this optimization. Similarly for FSDP we want to all-gather the weights across FSDP only once before the pipeline loop as opposed to every microbatch - we have implemented this in maxtext with `pipeline_fsdp_ag_once` and generally recommend this with small batch sizes. However this comes with a huge memory cost - the weights and gradients are not sharded by FSDP, and thus a significant amount of other sharding (PP, EP, TP) must be used. This is roughly equivalent  0-1 sharding, FSDP only shards the optimizer state, not the weights and gradients. 
 
 ## PP Arithmetic Intensity:
 
