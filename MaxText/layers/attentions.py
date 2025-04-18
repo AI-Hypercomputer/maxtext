@@ -629,7 +629,8 @@ class AttentionOp(nn.Module):
     if self.attention_type == AttentionType.LOCAL_SLIDING and using_context_parallelism:
       raise AssertionError("Sliding window attention is not supported when context parallelism is enabled")
 
-    sliding_window_size = self.sliding_window_size
+    sliding_window_size = None
+
     if self.attention_type == AttentionType.LOCAL_SLIDING or not self.config.enable_padding_causal_mask:
       sliding_window_size = [self.sliding_window_size, 0]
 
@@ -652,7 +653,7 @@ class AttentionOp(nn.Module):
         dtype=self.dtype,
         float32_logits=self.float32_logits,
         qkv_layout="BSHD_BSHD_BSHD",  # 'BS3HD', 'BSHD_BS2HD' or 'BSHD_BSHD_BSHD'
-        scale_factor=1.0 / math.sqrt(head_dim),
+        scale_factor=1.0,
         transpose_batch_sequence=False,
         window_size=sliding_window_size,
         context_parallel_causal_load_balanced=self.config.context_parallel_load_balance,
