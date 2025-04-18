@@ -16,6 +16,7 @@ limitations under the License.
 
 """ Tests for the maxengine """
 
+import functools
 import pytest
 import sys
 import unittest
@@ -140,13 +141,28 @@ class MaxEngineTest(unittest.TestCase):
     true_length = tokens.shape[0]
     assert padding_tokens.shape[0] == prefill_length
 
+    def array_equal_valid_tokens(x, y, *, compare_length):
+      if len(x.shape) > 1:
+        # containing sequence
+        if x.shape[0] > 1:
+          # Assume batch size is 1
+          # sequence is the first axis for kv cache
+          return jnp.array_equal(x[:compare_length], y[:compare_length])
+        else:
+          # sequence is the second axis for decoder segment id
+          return jnp.array_equal(x[:, :compare_length], y[:, :compare_length])
+      else:
+        # single integer
+        return jnp.array_equal(x, y)
+
     model_config_args = {
         "max_target_length": prefill_length * 4,
         "max_prefill_predict_length": prefill_length * 2,
         "model_call_mode": "inference",
-        "capacity_factor": 1,
+        "capacity_factor": -1,
         "decoder_block": "mistral",
         "scan_layers": False,
+        "per_device_batch_size": 1.0,
     }
 
     # Model without chunked prefill
@@ -177,8 +193,20 @@ class MaxEngineTest(unittest.TestCase):
         true_length=true_length,
     )
 
-    assert jax.tree.all(jax.tree.map(jnp.array_equal, one_chunk_prefill_result, expected_prefill_result))
-    assert jax.tree.all(jax.tree.map(jnp.array_equal, one_chunk_first_token, expected_first_token))
+    assert jax.tree.all(
+        jax.tree.map(
+            functools.partial(array_equal_valid_tokens, compare_length=true_length),
+            one_chunk_prefill_result,
+            expected_prefill_result,
+        )
+    )
+    assert jax.tree.all(
+        jax.tree.map(
+            functools.partial(array_equal_valid_tokens, compare_length=true_length),
+            one_chunk_first_token,
+            expected_first_token,
+        )
+    )
 
     # Two chunks
     two_chunk_prefill_result = None
@@ -205,10 +233,34 @@ class MaxEngineTest(unittest.TestCase):
     # Delete extra contents only used in chunked prefill
     assert two_chunk_prefill_result is not None
 
-    assert jax.tree.all(jax.tree.map(jnp.array_equal, one_chunk_prefill_result, two_chunk_prefill_result))
-    assert jax.tree.all(jax.tree.map(jnp.array_equal, one_chunk_first_token, two_chunk_first_token))
-    assert jax.tree.all(jax.tree.map(jnp.array_equal, expected_prefill_result, two_chunk_prefill_result))
-    assert jax.tree.all(jax.tree.map(jnp.array_equal, expected_first_token, two_chunk_first_token))
+    assert jax.tree.all(
+        jax.tree.map(
+            functools.partial(array_equal_valid_tokens, compare_length=true_length),
+            one_chunk_prefill_result,
+            two_chunk_prefill_result,
+        )
+    )
+    assert jax.tree.all(
+        jax.tree.map(
+            functools.partial(array_equal_valid_tokens, compare_length=true_length),
+            one_chunk_first_token,
+            two_chunk_first_token,
+        )
+    )
+    assert jax.tree.all(
+        jax.tree.map(
+            functools.partial(array_equal_valid_tokens, compare_length=true_length),
+            expected_prefill_result,
+            two_chunk_prefill_result,
+        )
+    )
+    assert jax.tree.all(
+        jax.tree.map(
+            functools.partial(array_equal_valid_tokens, compare_length=true_length),
+            expected_first_token,
+            two_chunk_first_token,
+        )
+    )
 
 
 if __name__ == "__main__":
