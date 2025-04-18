@@ -34,11 +34,11 @@ import torch
 import psutil
 from tqdm import tqdm
 
+from MaxText import convert_deepseek_ckpt as ds_ckpt
+from MaxText import llama_or_mistral_ckpt
 from MaxText import max_logging
 from MaxText.inference_utils import str2bool
 from safetensors import safe_open
-import llama_or_mistral_ckpt
-import convert_deepseek_ckpt as ds_ckpt
 
 
 def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info) -> dict:
