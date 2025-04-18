@@ -599,11 +599,19 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: Optio
         config.global_batch_size_to_load,
         config.max_prefill_predict_length,
     )
+    image_shape = (
+        config.global_batch_size_to_load,
+        1,
+        config.image_size_for_vit,
+        config.image_size_for_vit,
+        3,
+    )
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
         jnp.ones(input_shape),
         jnp.ones(input_shape),
+        encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
         model_mode=common_types.MODEL_MODE_PREFILL,
         slot=0,
         page_state=page_state,
@@ -627,11 +635,19 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[Page
         config.global_batch_size_to_load,
         1,
     )
+    image_shape = (
+        config.global_batch_size_to_load,
+        1,
+        config.image_size_for_vit,
+        config.image_size_for_vit,
+        3,
+    )
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
         jnp.ones(input_shape),
         jnp.ones(input_shape),
+        encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
         model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
         slot=0,
         page_state=page_state,
