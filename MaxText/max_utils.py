@@ -22,6 +22,7 @@ from jax.experimental import mesh_utils
 from MaxText.inference.page_manager import PageState
 from MaxText import checkpointing
 from MaxText import common_types
+from MaxText import max_logging
 import functools
 import time
 import optax
@@ -34,9 +35,6 @@ from collections.abc import Sequence
 import collections
 from typing import Any, Optional, Tuple
 from functools import partial
-
-from MaxText import max_logging
-
 
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
@@ -1104,24 +1102,24 @@ def unpermute_from_match_maxtext_rope(arr, model_size):
   odds = arr[..., 1::2]
   return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
 
-@partial(jax.jit, static_argnames=('cp_size','seq_dim','to_contiguous'))
+
+@partial(jax.jit, static_argnames=("cp_size", "seq_dim", "to_contiguous"))
 def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool = False):
   """Reorders the sequence of the tensor. For example, with cp_size=2,
   [0, 1, 2, 3, 4, 5, 6, 7] -> [0, 1, 6, 7, 2, 3, 4, 5]
   and backward
-  [0, 1, 6, 7, 2, 3, 4, 5] -> [0, 1, 2, 3, 4, 5, 6, 7]  
+  [0, 1, 6, 7, 2, 3, 4, 5] -> [0, 1, 2, 3, 4, 5, 6, 7]
   """
 
   if tensor is None:
-      return tensor
-  
-  batch_size = tensor.shape[0]
+    return tensor
+
   seq_len = tensor.shape[seq_dim]
   group_size = seq_len // (2 * cp_size)
 
   if cp_size % 2 != 0:
-      raise ValueError(f"{cp_size=} must be a multiple of 2.")
-  
+    raise ValueError(f"{cp_size=} must be a multiple of 2.")
+
   # Need to ensure we have 2 pairs to swap for balancing between cp ranks
   if seq_len % (cp_size * 2) != 0:
     raise ValueError(f"{tensor.shape=} is not a multiple of {cp_size*2=}")
@@ -1130,11 +1128,11 @@ def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool
   # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
   ori_tensor_shape = tensor.shape
   reshaped = tensor.reshape(
-          *ori_tensor_shape[:seq_dim],
-          2 * cp_size,
-          group_size,
-          *ori_tensor_shape[seq_dim + 1 :],
-    )
+      *ori_tensor_shape[:seq_dim],
+      2 * cp_size,
+      group_size,
+      *ori_tensor_shape[seq_dim + 1 :],
+  )
 
   if not to_contiguous:
     # Create first and second halves
@@ -1144,27 +1142,23 @@ def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool
     # Stack and reshape to interleave
     src_indices = jnp.stack([first_half, second_half], axis=1).reshape(-1)
 
-
   else:
 
     half = cp_size // 2
 
     # Build the 1st and 2nd groups of contiguous‑pair indices:
-    first_pair  = [4 * r         for r in range(half)]            # [0, 4, 8, …]
-    second_pair = [4 * r + 2     for r in range(half)]            # [2, 6, 10, …]
-    third_pair  = [2*cp_size-1-4*r for r in range(half)]          # [2*cp_size-1, 2*cp_size-5, …]
-    fourth_pair = [i - 2         for i in third_pair]             # [2*cp_size-3, 2*cp_size-7, …]
+    first_pair = [4 * r for r in range(half)]  # [0, 4, 8, …]
+    second_pair = [4 * r + 2 for r in range(half)]  # [2, 6, 10, …]
+    third_pair = [2 * cp_size - 1 - 4 * r for r in range(half)]  # [2*cp_size-1, 2*cp_size-5, …]
+    fourth_pair = [i - 2 for i in third_pair]  # [2*cp_size-3, 2*cp_size-7, …]
 
     # Concatenate so each rank’s two indices sit next to each other:
     # e.g. [0,2, 4,6, …, (2cp‑1),(2cp‑3), …]
-    first_block  = first_pair  + third_pair
+    first_block = first_pair + third_pair
     second_block = second_pair + fourth_pair
 
     # Stack into shape (2*cp_size//2, 2) → then flatten → length=2*cp_size
-    src_indices = jnp.stack(
-      [jnp.array(first_block), jnp.array(second_block)],
-      axis=1
-    ).reshape(-1)
+    src_indices = jnp.stack([jnp.array(first_block), jnp.array(second_block)], axis=1).reshape(-1)
 
   # One gather and one reshape
   reordered = jnp.take(reshaped, src_indices, axis=seq_dim)
@@ -1172,7 +1166,6 @@ def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool
   # Reshape back to original dimensions
   return reordered.reshape(ori_tensor_shape)
 
-    
 
 @partial(jax.jit, static_argnums=1)
 def reorder_causal_load_balanced(batch, cp_size):
@@ -1222,11 +1215,11 @@ def reorder_mask_load_balancing(tensor, cp_size: int, seq_dim: int):
   # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
   ori_tensor_shape = tensor.shape
   reshaped = tensor.reshape(
-          *ori_tensor_shape[:seq_dim],
-          2 * cp_size,
-          group_size,
-          *ori_tensor_shape[seq_dim + 1 :],
-    )
+      *ori_tensor_shape[:seq_dim],
+      2 * cp_size,
+      group_size,
+      *ori_tensor_shape[seq_dim + 1 :],
+  )
 
   # Create first and second halves
   first_half = np.arange(cp_size)
@@ -1235,7 +1228,7 @@ def reorder_mask_load_balancing(tensor, cp_size: int, seq_dim: int):
   # Stack and reshape to interleave
   src_indices = np.stack([first_half, second_half], axis=1).reshape(-1)
 
-    # One gather and one reshape
+  # One gather and one reshape
   reordered = np.take(reshaped, src_indices, axis=seq_dim)
 
   # Reshape back to original dimensions

@@ -669,7 +669,12 @@ class AttentionOp(nn.Module):
         )
 
       if decoder_segment_ids_q is not None:
-        decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(decoder_segment_ids_q, decoder_segment_ids_unpermuted)
+        if cp_size > 1 and load_balanced_context_parallel:
+          decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(
+              decoder_segment_ids_q, decoder_segment_ids_unpermuted
+          )
+        else:
+          decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(decoder_segment_ids_q, decoder_segment_ids_q)
       else:
         decoder_segment_ids_tuple = None
       attention_output = jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids_tuple)
@@ -683,7 +688,6 @@ class AttentionOp(nn.Module):
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
 
     return x
-
 
   def cudnn_flash_attention(
       self,
