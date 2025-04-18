@@ -27,28 +27,7 @@ from collections.abc import Iterable
 from MaxText.input_pipeline import input_pipeline_interface
 from MaxText.input_pipeline import _input_pipeline_utils
 
-
-class SingleHostDataLoader:
-
-  def __init__(self, dataloader: grain.DataLoader, global_mesh: Mesh):
-    self.global_mesh = global_mesh
-    self.dataloader = dataloader
-    if not isinstance(self.dataloader, Iterable):
-      raise ValueError("Type error: dataloader should be an Iterable.")
-    self.local_iterator = iter(self.dataloader)
-
-  def reset(self):
-    if not isinstance(self.dataloader, Iterable):
-      raise ValueError("Type error: dataloader should be a grain.DataLoader.")
-    self.local_iterator = iter(self.dataloader)
-
-  def __iter__(self):
-    self.reset()
-    return self
-
-  def __next__(self):
-    local_data = next(self.local_iterator)
-    return local_data
+from MaxText import multihost_dataloading
 
 
 def preprocessing_pipeline(
@@ -140,8 +119,7 @@ def preprocessing_pipeline(
       read_options=grain.ReadOptions(num_threads=num_threads, prefetch_buffer_size=128),
   )
 
-  # single_host_gen = SingleHostDataLoader(dataloader, global_mesh)
-  return iter(dataloader)
+  return multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh)
 
 
 def make_hf_train_iterator(

@@ -938,7 +938,13 @@ def main(argv: Sequence[str]) -> None:
     )
   config_inference = pyconfig.initialize(
       list(argv)
-      + ["ici_tensor_parallelism=4", "per_device_batch_size=" + str(config.per_device_batch_size * config.num_generations)]
+      + [
+        "ici_fsdp_parallelism=1",
+        "ici_tensor_parallelism=128",
+        "ici_context_parallelism=2",
+        "attention=dot_product",
+        "per_device_batch_size=" + str(config.per_device_batch_size * config.num_generations)
+        ]
   )
   max_utils.print_system_information()
   validate_train_config(config)
