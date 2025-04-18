@@ -52,7 +52,7 @@ def get_mha_cost_estimate(shape_dtype):
   return pl.CostEstimate(
       flops=flops,
       transcendentals=batch_size * num_heads * seq_len,
-      bytes_accessed=sum(np.prod(s.shape) * s.dtype.itemsize for s in shape_dtype),
+      bytes_accessed=int(sum(np.prod(s.shape) * s.dtype.itemsize for s in shape_dtype)),
   )
 
 
