@@ -44,6 +44,7 @@ os.environ["JAX_PLATFORMS"] = "cpu"
 import ml_dtypes
 import numpy as np
 import psutil
+from safetensors import safe_open
 import torch
 from tqdm import tqdm
 
@@ -142,6 +143,322 @@ class _NamespaceMapper:
     return self.collection[new_key]
 
 
+def convert_to_jax_weights(base_model_path: str, model_size: str, huggingface_ckpt: bool):
+  """
+  Function to convert the checkpoint at base_model_path into Orbax checkpoint
+  for MaxText and output jax_weights ready for MaxText
+
+  Attributes:
+    base_model_path: checkpoint path
+    model_size: llama2-7b to 70b, mistral-7b, or mixtral-8x7b, mixtral-8x22b
+  """
+  model_params = MODEL_PARAMS_DICT[model_size]
+  mem_info = psutil.Process()
+  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+
+  max_logging.log(f"Loading the base model from {base_model_path}")
+
+  if huggingface_ckpt:
+    return _convert_huggingface_to_jax_weights(base_model_path, model_size, model_params, mem_info)
+
+  return _convert_pytorch_to_jax_weights(base_model_path, model_size, model_params, mem_info)
+
+# TODO: just import?
+def _hf_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1) -> dict:
+  """
+  Returns a mapping from HuggingFace model weight names to MaxText model weight names.
+
+  Args:
+    layer_idx (int): Layer index.
+    expert_idx (int): Expert index.
+
+  Returns:
+    dict [str, str]: Mapping from HuggingFace model weight names to MaxText model weight names.
+  """
+  # pylint: disable=line-too-long
+  return {
+      "language_model.model.embed_tokens.weight": "tok_embeddings.weight",
+      "language_model.model.norm.weight": "norm.weight",
+      "language_model.lm_head.weight": "output.weight",
+      f"language_model.model.layers.{layer_idx}.input_layernorm.weight": f"layers.{layer_idx}.attention_norm.weight",
+      f"language_model.model.layers.{layer_idx}.post_attention_layernorm.weight": f"layers.{layer_idx}.ffn_norm.weight",
+      f"language_model.model.layers.{layer_idx}.self_attn.q_proj.weight": f"layers.{layer_idx}.attention.wq.weight",
+      f"language_model.model.layers.{layer_idx}.self_attn.k_proj.weight": f"layers.{layer_idx}.attention.wk.weight",
+      f"language_model.model.layers.{layer_idx}.self_attn.v_proj.weight": f"layers.{layer_idx}.attention.wv.weight",
+      f"language_model.model.layers.{layer_idx}.self_attn.o_proj.weight": f"layers.{layer_idx}.attention.wo.weight",
+      # MoE
+      f"language_model.model.layers.{layer_idx}.feed_forward.router.weight": f"layers.{layer_idx}.feed_forward.gate.weight",
+      f"language_model.model.layers.{layer_idx}.feed_forward.experts.down_proj": f"layers.{layer_idx}.feed_forward.experts.down_proj",
+      # Note that this contains up_proj and gate_proj concated together (we'll split/chunk them later)
+      f"language_model.model.layers.{layer_idx}.feed_forward.experts.gate_up_proj": f"layers.{layer_idx}.feed_forward.experts.gate_up_proj",
+      f"language_model.model.layers.{layer_idx}.feed_forward.shared_expert.gate_proj.weight": f"layers.{layer_idx}.feed_forward.shared_experts.up_proj.weight",
+      f"language_model.model.layers.{layer_idx}.feed_forward.shared_expert.down_proj.weight": f"layers.{layer_idx}.feed_forward.shared_experts.gate_proj.weight",
+      f"language_model.model.layers.{layer_idx}.feed_forward.shared_expert.up_proj.weight": f"layers.{layer_idx}.feed_forward.shared_experts.down_proj.weight",
+      # FFN
+      f"language_model.model.layers.{layer_idx}.feed_forward.up_proj.weight": f"layers.{layer_idx}.feed_forward.w1.weight",
+      f"language_model.model.layers.{layer_idx}.feed_forward.gate_proj.weight": f"layers.{layer_idx}.feed_forward.w3.weight",
+      f"language_model.model.layers.{layer_idx}.feed_forward.down_proj.weight": f"layers.{layer_idx}.feed_forward.w2.weight",
+
+
+  }
+
+
+def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, model_params: dict, mem_info: psutil.Process):
+  """Convert a Huggingface Checkpoint to a dictionary of Numpy arrays representing the weights.
+
+  Args:
+    base_model_path (str): Path to the base model checkpoint.
+    model_size (str): Size of the base model.
+    model_params (dict): Dictionary containing model parameters.
+    mem_info (psutil.Process): Process object to track memory usage.
+
+  Returns:
+    jax_weights (dict): Dictionary containing the converted weights.
+  """
+  base_num_decoder_layers = model_params["num_layers"]
+  base_num_query_heads = model_params["num_heads"]
+  head_dim = model_params["dims_per_head"]
+  base_num_kv_heads = model_params["num_kv_heads"]
+  vocab_size = model_params["vocab"]
+  interleave_moe_layer = model_params["interleave_moe_layer_step"]
+  num_experts = model_params["num_experts"] if "num_experts" in model_params else None
+  rope_type = model_params.get("rope_type")
+  scale_query = model_params.get("scale_query", True)
+
+  max_logging.log(f"Loading the base model from {base_model_path}")
+  ckpt_paths = sorted(pathlib.Path(base_model_path).glob("[!.]*.safetensors"))
+  chkpt_vars = {}
+  for i, ckpt_path in enumerate(ckpt_paths):
+    max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
+
+    with safe_open(ckpt_path, framework="pt", device="cpu") as f:
+      for key in f.keys():
+        parts = key.split(".")
+        layer = int(parts[3]) if "layers" in key else 0
+        # TODO: update when mutli-modality support is added
+        if "vision" in key or "multi_modal_projector" in key:
+          print("WARNING: skipping key", key)
+        else:
+          mapped_key = _hf_to_maxtext_mapping(layer)[key]
+          chkpt_vars[mapped_key] = f.get_tensor(key)
+  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+
+  # initialize the data structure for storing jax_weights
+  is_llama4_model = model_size[:6] == "llama4"
+  jax_weights = {
+      "decoder": {
+          "decoder_norm": {"scale": None},
+          "logits_dense": {"kernel": None},
+      },
+      "token_embedder": {"embedding": None},
+  }
+
+  # decoder norm scale ###########################################
+  max_logging.log("Processing decoder norm scale")
+  decoder_norm_scale = chkpt_vars["norm.weight"].to(torch.float32).numpy().astype(CAST_DTYPE)
+  jax_weights["decoder"]["decoder_norm"]["scale"] = decoder_norm_scale
+
+  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+
+  # logits dense #################################################
+  max_logging.log("Processing logits dense")
+
+  jax_weights["decoder"]["logits_dense"]["kernel"] = (
+      chkpt_vars["output.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()[:, :vocab_size]
+  )
+
+  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+
+  # token embedding ##############################################
+  max_logging.log("Processing token embeddings")
+
+  if model_size[:6] in ["llama3", "llama4"]:
+    jax_weights["token_embedder"]["embedding"] = (
+        chkpt_vars["tok_embeddings.weight"].to(torch.float32).numpy().astype(CAST_DTYPE)
+    )
+  else:
+    jax_weights["token_embedder"]["embedding"] = (
+        chkpt_vars["tok_embeddings.weight"].to(torch.float32).numpy().astype(CAST_DTYPE)[:vocab_size, :]
+    )
+
+  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+
+  # self attention ###############################################
+  max_logging.log("Processing self attention")
+  has_printed_warning = False
+  for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
+    layer_name = f"layers_{layer_idx}"
+    jax_weights["decoder"].update(
+        {
+            layer_name: {
+                "self_attention": {
+                    "query": {"kernel": None},
+                    "key": {"kernel": None},
+                    "value": {"kernel": None},
+                    "out": {"kernel": None},
+                },
+                "pre_self_attention_layer_norm": {"scale": None},
+                "post_self_attention_layer_norm": {"scale": None},
+            },
+        }
+    )
+    is_dense_layer = (layer_idx + 1) % interleave_moe_layer != 0
+    if is_dense_layer:
+      mlp_dict = {
+          "wi_0": {"kernel": None},
+          "wi_1": {"kernel": None},
+          "wo": {"kernel": None},
+      }
+      jax_weights["decoder"][layer_name]["mlp"] = mlp_dict
+    else:
+      moe_dict = {
+          "MoeBlock_0": {
+              "wi_0": None,
+              "wi_1": None,
+              "wo": None,
+              "gate": {"kernel": None},
+          },
+          "shared_experts": {
+              "wi_0": {"kernel": None},
+              "wi_1": {"kernel": None},
+              "wo": {"kernel": None},
+          },
+      }
+      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"] = moe_dict
+
+    self_attention = jax_weights["decoder"][layer_name]["self_attention"]
+    wq = chkpt_vars[f"layers.{layer_idx}.attention.wq.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+    wk = chkpt_vars[f"layers.{layer_idx}.attention.wk.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+    wv = chkpt_vars[f"layers.{layer_idx}.attention.wv.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+
+    wq = np.reshape(wq, [base_num_query_heads * head_dim, base_num_query_heads, head_dim])
+    wk = np.reshape(wk, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
+    wv = np.reshape(wv, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
+
+    # TODO: check this
+    if rope_type.startswith("llama3.1"):
+      wq = permute_to_match_maxtext_rope(wq)
+      wk = permute_to_match_maxtext_rope(wk)
+    else:
+      if not has_printed_warning:
+        max_logging.log("Skipping permute_to_match_maxtext_rope because model is a Llama3 variant or has RoPE Type Llama3.1")
+        has_printed_warning = True
+
+    w_post = chkpt_vars[f"layers.{layer_idx}.attention.wo.weight"].to(torch.float32).numpy().astype(CAST_DTYPE)
+
+    w_post = w_post = np.reshape(w_post, [base_num_query_heads, head_dim, base_num_query_heads * head_dim])
+
+    # scale the query weights
+    # NOTE: the np.sqrt here will silently cast to float64, so we add a manual cast to ensure the CAST_DTYPE is respected
+    self_attention["query"]["kernel"] = wq / (np.sqrt(head_dim).astype(CAST_DTYPE)) if scale_query else wq  # pylint: disable=E1137
+
+    self_attention["key"]["kernel"] = wk  # pylint: disable=E1137
+    self_attention["value"]["kernel"] = wv  # pylint: disable=E1137
+    self_attention["out"]["kernel"] = w_post  # pylint: disable=E1137
+
+    jax_weights["decoder"][layer_name]["self_attention"] = self_attention
+
+  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+
+  # layer weight pre and post self attention norm ################
+  max_logging.log("Processing pre and post self attention norms")
+  layer_weight = {"pre_self_attention_layer_norm": {"scale": None}, "post_self_attention_layer_norm": {"scale": None}}
+
+  # self attention layer norm and swap the layer index
+  for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
+    is_dense_layer = (layer_idx + 1) % interleave_moe_layer != 0
+    layer_name = f"layers_{layer_idx}"
+    pre_self_attention_layernorm = (
+        chkpt_vars[f"layers.{layer_idx}.attention_norm.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
+    )
+    post_self_attention_layernorm = (
+        chkpt_vars[f"layers.{layer_idx}.ffn_norm.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
+    )
+    jax_weights["decoder"][layer_name]["pre_self_attention_layer_norm"]["scale"] = pre_self_attention_layernorm
+    jax_weights["decoder"][layer_name]["post_self_attention_layer_norm"]["scale"] = post_self_attention_layernorm
+
+  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+
+  # layer weights ################################################
+  max_logging.log("Processing layer weights")
+  for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
+    layer_name = f"layers_{layer_idx}"
+    is_dense_layer = (layer_idx + 1) % interleave_moe_layer != 0
+    if is_dense_layer:
+      wi_0 = (
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.w1.weight"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+      )
+      wi_1 = (
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.w3.weight"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+      )
+      wo = (
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.w2.weight"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+      )
+      jax_weights["decoder"][layer_name]["mlp"]["wi_0"]["kernel"] = wi_0
+      jax_weights["decoder"][layer_name]["mlp"]["wi_1"]["kernel"] = wi_1
+      jax_weights["decoder"][layer_name]["mlp"]["wo"]["kernel"] = wo
+
+    else:
+      gate = chkpt_vars[f"layers.{layer_idx}.feed_forward.gate.weight"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["gate"]["kernel"] = gate
+
+      # routed experts
+      wi_0_1 = (
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.gate_up_proj"]
+          .type(torch.float32)
+          .numpy()
+          .astype(CAST_DTYPE)
+      )
+      wi_0, wi_1 = np.split(wi_0_1, 2, axis=-1)
+      del wi_0_1
+
+      wo = (
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.down_proj"]
+          .type(torch.float32)
+          .numpy()
+          .astype(CAST_DTYPE)
+      )
+      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_0"] = wi_0
+      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_1"] = wi_1
+      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wo"] = wo
+
+      # shared experts
+      wi_0 = (
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.up_proj.weight"]
+          .type(torch.float32)
+          .numpy()
+          .astype(CAST_DTYPE)
+          .transpose()
+      )
+
+      wi_1 = (
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.gate_proj.weight"]
+          .type(torch.float32)
+          .numpy()
+          .astype(CAST_DTYPE)
+      )
+
+      wo = (
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.down_proj.weight"]
+          .type(torch.float32)
+          .numpy()
+          .astype(CAST_DTYPE)
+      )
+
+      # TODO: make this optional for setups that don't use shared experts
+      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_0"]["kernel"] = wi_0
+      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_1"]["kernel"] = wi_1
+      jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["shared_experts"]["wo"]["kernel"] = wo
+
+    gc.collect()
+  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+
+  del chkpt_vars
+  gc.collect()
+  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+  return jax_weights
+
+
 def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model_params: dict, mem_info: psutil.Process):
   """Convert a PyTorch checkpoint to a dictionary of Numpy arrays representing the weights.
 
@@ -221,7 +538,6 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
 
   # llama3.1-405b kv weight is replicated within every two files.
   wkv_step = 1 if model_size != "llama3.1-405b" else 2
-  is_llama4_model = model_size[:6] == "llama4"
   has_printed_warning = False
 
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
@@ -325,7 +641,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
     wk = np.reshape(wk, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
     wv = np.reshape(wv, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
 
-    if not rope_type.startswith("llama3.1"):
+    if rope_type.startswith("llama3.1"):
       wq = permute_to_match_maxtext_rope(wq)
       wk = permute_to_match_maxtext_rope(wk)
     else:
@@ -457,7 +773,6 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
           axis=1,
       )
 
-      # ei, li = k, layer_idx
       # routed experts
       jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_0"] = wi_0
       jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_1"] = wi_1
@@ -487,12 +802,12 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
           axis=1,
       ).transpose()
 
-      # TODO: make this optional for setups that don't use shared experts
       jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_0"]["kernel"] = wi_0
       jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_1"]["kernel"] = wi_1
       jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["shared_experts"]["wo"]["kernel"] = wo
 
-      gc.collect()
+    gc.collect()
+
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
@@ -503,33 +818,15 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
   return jax_weights
 
 
-def convert_to_jax_weights(base_model_path: str, model_size: str):
-  """
-  Function to convert the checkpoint at base_model_path into Orbax checkpoint
-  for MaxText and output jax_weights ready for MaxText
-
-  Attributes:
-    base_model_path: checkpoint path
-    model_size: llama2-7b to 70b, mistral-7b, or mixtral-8x7b, mixtral-8x22b
-  """
-  model_params = MODEL_PARAMS_DICT[model_size]
-  mem_info = psutil.Process()
-  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
-
-  max_logging.log(f"Loading the base model from {base_model_path}")
-
-  return _convert_pytorch_to_jax_weights(base_model_path, model_size, model_params, mem_info)
-
-
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
   parser.add_argument("--base-model-path", type=str, required=True)
   parser.add_argument("--maxtext-model-path", type=str, required=True)
   parser.add_argument("--model-size", type=str, required=True)
+  parser.add_argument("--huggingface-checkpoint", type=str2bool, required=False, default=False)
   parser.add_argument("--use-ocdbt", type=str2bool, required=False, default=True)
   parser.add_argument("--use-zarr3", type=str2bool, required=False, default=True)
   args = parser.parse_args()
-  logging.basicConfig(level=logging.DEBUG)
 
   if args.model_size not in MODEL_PARAMS_DICT or not args.model_size.startswith("llama4"):
     raise NotImplementedError("Currently, we only support llama4 models but got " + args.model_size)
@@ -539,7 +836,7 @@ if __name__ == "__main__":
 
   save_weights_to_checkpoint(
       args.maxtext_model_path,
-      convert_to_jax_weights(args.base_model_path, args.model_size),
+      convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint),
       SIMULATED_CPU_DEVICES_COUNT,
       args.use_ocdbt,
       args.use_zarr3,

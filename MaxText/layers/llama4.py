@@ -129,6 +129,10 @@ class Llama4DecoderLayer(nn.Module):
   ):
     cfg = self.config
     mesh = self.mesh
+    import jax
+    jax.debug.print("inputs {lnx}", lnx=inputs)
+    jax.debug.print("inputs {lnx}", lnx=inputs.shape)
+    jax.debug.print("inputs {lnx}", lnx=inputs.mean())
 
     assert (
         cfg.num_experts > 1
@@ -144,6 +148,11 @@ class Llama4DecoderLayer(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
     )
     lnx = lnx_rms(inputs)
+
+    jax.debug.print("pre_self_attention_norm {lnx}", lnx=lnx)
+    jax.debug.print("pre_self_attention_norm {lnx}", lnx=lnx.shape)
+    jax.debug.print("pre_self_attention_norm {lnx}", lnx=lnx.mean())
+
 
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
     # Instead of scaling the query values in the checkpoint conversion (`llama_or_mistral_ckpt`)
@@ -190,6 +199,10 @@ class Llama4DecoderLayer(nn.Module):
         page_state=page_state,
         previous_chunk=previous_chunk,
     )
+
+    jax.debug.print("attention_lnx {lnx}", lnx=attention_lnx)
+    jax.debug.print("attention_lnx {lnx}", lnx=attention_lnx.shape)
+    jax.debug.print("attention_lnx {lnx}", lnx=attention_lnx.mean())
 
     attention_lnx = nn.with_logical_constraint(
         attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")

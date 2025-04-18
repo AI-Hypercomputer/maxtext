@@ -21,8 +21,7 @@
 # Llama4 JAX cmd:
 # JAX_PLATFORMS=cuda,cpu python -m MaxText.tests.llama4_logit_verification_script jax MaxText/configs/base.yml hardware=gpu
 # scan_layers=false base_output_directory=llama4 run_name=temp-testing-only model_name=llama4-17b-16e
-# force_unroll=false weight_dtype=float32 sparse_matmul=false megablox=false tokenizer_path="meta-llama/Llama-4-Scout-17B-16E"
-# max_target_length=16 max_prefill_predict_length=4 per_device_batch_size=1 dtype=float32
+# force_unroll=false weight_dtype=float32 max_target_length=16 max_prefill_predict_length=4 per_device_batch_size=1 dtype=float32
 # load_parameters_path=...
 
 # Llama4 HF cmd:
@@ -104,7 +103,7 @@ def run_l4_hf_forward_pass():
     full_train_logits (numpy array): logits from the forward pass
       of shape [batch_size, seq_len, vocab_size]
   """
-  model_id = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
+  model_id = "/mnt/disks/jacobplatin/models/llama4/maverick/4-layer-debug-hf/HF-4layers/"
 
   hf_model = AutoModelForCausalLM.from_pretrained(
       model_id,
@@ -116,7 +115,7 @@ def run_l4_hf_forward_pass():
   with torch.inference_mode():
     with torch.no_grad():
       ids = torch.tensor(ids.tolist())
-      outputs = hf_model(ids)
+      outputs = hf_model(ids, use_cache=False)
       logits = outputs.logits
   print(logits)
   print(

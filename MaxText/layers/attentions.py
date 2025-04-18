@@ -143,6 +143,12 @@ def apply_mask_to_logits(logits: Array, mask: Array):
   return jnp.where((mask >= DEFAULT_MASK_VALUE * 0.5), logits, DEFAULT_MASK_VALUE)
 
 
+def save_np_array(name, arr):
+  np.save(name, arr)
+  if name == "query_after_rope_same_input":
+    raise ValueError
+
+
 # TODO(agagik): change splash_attention_mask._ComputableMask to be non protected
 class ChunkedCausalMask(splash_attention_mask._ComputableMask):
   """Lazy chunked causal mask.
@@ -1168,6 +1174,7 @@ class Attention(nn.Module):
     Returns:
       The input tensor with rotary embeddings applied.
     """
+    jax.debug.print("inputs_positions {lnx}", lnx=inputs_positions)
     if self.config.attention_type == AttentionType.MLA.value:
       # For MLA attention RoPE is applied to only `self.qk_rope_head_dim` portion the heads.
       rope_embedding_dims = self.qk_rope_head_dim
@@ -1281,6 +1288,8 @@ class Attention(nn.Module):
       key = self.kv_projection(inputs_kv, proj_name="key")
       value = self.kv_projection(inputs_kv, proj_name="value")
       is_llama4_decoder_block = self.config.decoder_block == "llama4"
+
+
       # NOTE: llama 4 does L2 normalization after RoPE
       if self.use_qk_norm and not is_llama4_decoder_block:
         query = RMSNorm(
@@ -1302,15 +1311,37 @@ class Attention(nn.Module):
     # NOTE: is_nope_layer should be used in attention mask and also used in attention tuning
     use_rope = not self.is_nope_layer
     use_qk_norm = self.use_qk_norm and use_rope
+    print(self.use_qk_norm, use_rope, use_qk_norm)
+
+    # jax.debug.print("before norm q {lnx}", lnx=query)
+    # jax.debug.print("before norm q shape {lnx}", lnx=query.shape)
+    # jax.debug.print("before norm q mean {lnx}", lnx=query.mean())
+
+    # jax.debug.print("before norm k {lnx}", lnx=key)
+    # jax.debug.print("before norm k shape {lnx}", lnx=key.shape)
+    # jax.debug.print("before norm k mean {lnx}", lnx=key.mean())
+
+    # jax.debug.print("before norm v {lnx}", lnx=value)
+    # jax.debug.print("before norm v shape {lnx}", lnx=value.shape)
+    # jax.debug.print("before norm v mean {lnx}", lnx=value.mean())
+
 
     if use_rope:
+      if query.shape[1] != 16:
+        query = np.load("query_before_rope_hf.npy")
       query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
       key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
+
+    # jax.debug.callback(save_np_array, "query_after_rope_same_input", query)
 
     if use_qk_norm and is_llama4_decoder_block:
       l2_norm = L2Norm(self.config.normalization_layer_epsilon)
       query = l2_norm(query)
       key = l2_norm(key)
+
+    jax.debug.print("midwayq {lnx}", lnx=query)
+    jax.debug.print("midwayk {lnx}", lnx=key)
+    jax.debug.print("midwayv {lnx}", lnx=value)
 
     # apply query_pre_attn_scalar if it's present.
     if self.query_pre_attn_scalar and self.query_pre_attn_scalar != 1.0:

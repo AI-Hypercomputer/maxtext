@@ -21,7 +21,7 @@ tokenizer_type: "huggingface"
 tokenizer_path: "meta-llama/Llama-4-Maverick-17B-128E"
 
 base_emb_dim: 5120
-base_num_decoder_layers: 48
+base_num_decoder_layers: 4
 base_num_query_heads: 40
 base_num_kv_heads: 8
 base_mlp_dim: 16384
@@ -29,7 +29,7 @@ base_moe_mlp_dim: 8192
 vocab_size: 202048
 normalization_layer_epsilon: 1e-05
 rope_max_timescale: 500000
-rope_type: "default"
+rope_type: "llama3.1"
 num_experts: 128
 capacity_factor: -1.0 # TODO: this will be removed once we support dropless with megablox/ragged_dot
 shared_experts: 1
