@@ -29,7 +29,8 @@ ADD_WORKER = "add_worker"
 # xla tpu scoped vmem defines the amount of vmem used for the current hlo op.
 # The remaining vmem is used for prefetching latter op needs.
 # These limits are experimentally recommended values for compute bound models.
-_DENSE_VMEM_LIMIT = 98304
+# _DENSE_VMEM_LIMIT = 98304
+_DENSE_VMEM_LIMIT = 106496
 _MOE_VMEM_LIMIT = 81920
 
 DENSE_VMEM_LIMIT_FLAG = f" --xla_tpu_scoped_vmem_limit_kib={_DENSE_VMEM_LIMIT}"
