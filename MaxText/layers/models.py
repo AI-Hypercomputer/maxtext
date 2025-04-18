@@ -332,6 +332,10 @@ class Decoder(nn.Module):
       from MaxText.layers import simple_layer
 
       return [simple_layer.SimpleMlpDecoderLayer]
+    elif self.config.decoder_block == "llama4":
+      from MaxText.layers import llama4
+
+      return [llama4.Llama4DecoderLayer]
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
@@ -347,6 +351,7 @@ class Decoder(nn.Module):
         "gemma3",
         "simple",
         "simple_mlp",
+        "llama4",
     ):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
@@ -513,6 +518,10 @@ class Decoder(nn.Module):
               from MaxText.layers import gemma3
               # Gemma3 uses both global and sliding window attention depending on the layer index.
               layer_kwargs = {"attention_type": gemma3.get_attention_type(layer_id=lyr)}
+            if cfg.decoder_block == "llama4":
+              from MaxText.layers import llama4
+
+              layer_kwargs = {"is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval)}
             layer = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, **layer_kwargs)
             y = layer(
                 y,
@@ -567,6 +576,26 @@ class Decoder(nn.Module):
     return logits
 
 
+class VisionEncoder(nn.Module):
+  """Vision encoder to encode images into soft tokens."""
+  config: Config
+
+  def setup(self):
+    self.vision_encoder_layer = self.get_vision_encoder_layers()
+
+  def get_vision_encoder_layers(self):
+    if self.config.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
+      from MaxText.layers import gemma3
+      return [gemma3.Gemma3VisionEncoderLayer]
+    else:
+      raise ValueError(f"No VisionEncoder implemented for {self.config.model_name} yet")
+
+  @nn.compact
+  def __call__(self, input_images):
+    embeddings = self.vision_encoder_layer[0](config=self.config)(input_images)
+    return embeddings
+
+
 class Transformer(nn.Module):
   """An decoder-only Transformer model."""
 
@@ -591,6 +620,7 @@ class Transformer(nn.Module):
         config=cfg,
     )
 
+    self.vision_encoder = VisionEncoder(config=cfg) if cfg.use_multimodal else None
     self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant)
 
   def __call__(
@@ -598,6 +628,7 @@ class Transformer(nn.Module):
       decoder_input_tokens: jnp.ndarray,
       decoder_positions: jnp.ndarray,
       decoder_segment_ids=None,
+      encoder_images: Optional[jnp.ndarray]=None,
       enable_dropout=True,
       model_mode=common_types.MODEL_MODE_TRAIN,
       previous_chunk=None,
@@ -618,6 +649,10 @@ class Transformer(nn.Module):
           f"During autoregressive decoding we assume the tokens are in the active sequence"
           f" which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}."
       )
+
+    if self.config.use_multimodal:
+      image_embeddings = self.vision_encoder(input_images=encoder_images)
+      # TODO(hengtaoguo, aireen): merge image_embeddings with decoder_input_tokens.
 
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,

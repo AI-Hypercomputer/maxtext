@@ -15,16 +15,13 @@ limitations under the License.
 """
 
 """ Common Max Utils needed by multiple modules"""
+""" All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
 import numpy as np
 import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
-from MaxText.inference.page_manager import PageState
-from MaxText import checkpointing
-from MaxText import common_types
 import functools
 import time
-import optax
 import os
 import psutil
 import socket
@@ -32,21 +29,16 @@ import subprocess
 from etils import epath
 from collections.abc import Sequence
 import collections
-from typing import Any, Optional, Tuple
+from typing import Any, Tuple
+from functools import partial
 
 from MaxText import max_logging
 
 
 import orbax.checkpoint as ocp
-import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
-import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
 
 import flax
-from flax.training import train_state
-from flax import linen as nn
-from flax.linen import partitioning as nn_partitioning
-
 from tensorboardX import writer
 
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
@@ -108,21 +100,14 @@ def summarize_size_from_pytree(params):
   return num_params, num_bytes, num_bytes / num_params
 
 
-def initialize_summary_writer(config):
-  summary_writer_path = os.path.join(config.tensorboard_dir, config.run_name)
+def initialize_summary_writer(tensorboard_dir, run_name):
+  summary_writer_path = os.path.join(tensorboard_dir, run_name)
   return writer.SummaryWriter(summary_writer_path) if jax.process_index() == 0 else None
 
 
 def close_summary_writer(summary_writer):
   if jax.process_index() == 0:
     summary_writer.close()
-
-
-def add_config_to_summary_writer(config, summary_writer):
-  """Writes config params to tensorboard"""
-  if jax.process_index() == 0:
-    for key, value in config.get_keys().items():
-      add_text_to_summary_writer(key, str(value), summary_writer)
 
 
 def add_text_to_summary_writer(key, value, summary_writer):
@@ -254,6 +239,10 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
         process_id=int(process_id),
         initialization_timeout=raw_keys["jax_distributed_initialization_timeout"],
     )
+
+    ocp.multihost.initialize_runtime_to_distributed_ids()
+    ocp.multihost.initialize_distributed_to_device_ids()
+
     if raw_keys["use_replicator_service"]:
       REPLICATOR_FILE = "replicator.yaml"
       TEMP_FILE = REPLICATOR_FILE + ".tmp"
@@ -268,12 +257,24 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
       num_nodes = jax.process_count()
       nodes_per_slice = num_nodes // num_slices
       max_logging.log(f"num_slices: {num_slices}, num_nodes: {num_nodes}, nodes_per_slice: {nodes_per_slice}")
+
       node_rank = jax._src.distributed.global_state.process_id  # pylint: disable=protected-access
+      my_process_index = jax.process_index()
+      processIndex_to_nodeRank = ocp.multihost.runtime_to_distributed_ids()
+      max_logging.log(
+          f"Mapping of IDs: jax-init-info.txt={process_id}, NodeRank={node_rank}, ProcessIndex={my_process_index}, ProcessIndex->NodeRank={processIndex_to_nodeRank}"
+      )
+
+      my_in_pipeline_index = my_process_index % nodes_per_slice
       peer_ranks = []
       for i in range(num_slices):
-        peer = node_rank % nodes_per_slice + i * nodes_per_slice
-        if peer != node_rank:
-          peer_ranks.append(peer)
+        peer_process_index = i * nodes_per_slice + my_in_pipeline_index
+        if peer_process_index != my_process_index:
+          peer_process_rank = processIndex_to_nodeRank[peer_process_index]
+          peer_ranks.append(peer_process_rank)
+
+      max_logging.log(f"Peers for NodeRank {node_rank}: {peer_ranks}")
+
       run_name = raw_keys["run_name"]
       if run_name == "":
         run_name = os.environ.get("JOBSET_NAME")  # using XPK default
@@ -283,7 +284,6 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
       assume-data-parallelism: {num_slices}
       node-rank: {node_rank}
       nodes: {num_nodes}
-      workers-per-node: 1
       peer-ranks: {peer_ranks}
       backup-interval-minutes: {raw_keys["replicator_backup_interval_minutes"]}"""
 
@@ -301,8 +301,8 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
     )
     jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
 
-  ocp.multihost.initialize_runtime_to_distributed_ids()
-  ocp.multihost.initialize_distributed_to_device_ids()
+    ocp.multihost.initialize_runtime_to_distributed_ids()
+    ocp.multihost.initialize_distributed_to_device_ids()
 
 
 def _retrieve_jax_init_info(raw_keys):
@@ -519,63 +519,6 @@ def optimize_mesh_for_tpu_v6e(mesh, devices):
   return new_mesh
 
 
-def create_device_mesh(config, devices=None):
-  """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
-  if devices is None:
-    devices = jax.devices()
-  num_devices = len(devices)
-  num_slices = 1 if config.inference_benchmark_test else config.num_slices
-  num_devices_per_slice = num_devices // num_slices
-
-  multi_slice_env = num_slices > 1
-
-  # Find possible unspecified parallelisms
-  ici_parallelism = fill_unspecified_mesh_axes(config.ici_parallelism.copy(), num_devices_per_slice, "ICI")
-
-  allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
-
-  if multi_slice_env:
-    dcn_parallelism = fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN")
-    if is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
-      mesh = create_custom_device_mesh(ici_parallelism, dcn_parallelism, devices, config.custom_mesh)
-    else:
-      mesh = mesh_utils.create_hybrid_device_mesh(
-          ici_parallelism,
-          dcn_parallelism,
-          devices,
-          allow_split_physical_axes=allow_split_physical_axes,
-      )
-  else:
-    if allow_split_physical_axes:
-      if is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
-        mesh = mesh_utils.create_device_mesh(
-            [16, 16],
-            devices,
-            contiguous_submeshes=False,
-            allow_split_physical_axes=False,
-        )
-        mesh = reshape_mesh_to_rings(mesh, config.custom_mesh)
-        mesh = np.reshape(mesh, ici_parallelism)
-      else:
-        mesh = mesh_utils.create_device_mesh(
-            ici_parallelism,
-            devices,
-            contiguous_submeshes=False,
-            allow_split_physical_axes=allow_split_physical_axes,
-        )
-    else:
-      mesh = mesh_utils.create_device_mesh(
-          ici_parallelism,
-          devices,
-      )
-      if config.optimize_mesh_for_tpu_v6e:
-        mesh = optimize_mesh_for_tpu_v6e(mesh, devices)
-
-  max_logging.log(f"Num_devices: {num_devices}, shape {mesh.shape}")
-
-  return mesh
-
-
 def unbox_logicallypartioned(boxed_pytree):
   """Unboxes the flax.LogicallyPartitioned pieces
 
@@ -590,205 +533,6 @@ def unbox_logicallypartioned(boxed_pytree):
       boxed_pytree,
       is_leaf=lambda k: isinstance(k, flax.linen.spmd.LogicallyPartitioned),
   )
-
-
-def init_decode_state(apply_fn, params):
-  """Init train state with null opt state for decode."""
-  state = train_state.TrainState(step=0, apply_fn=apply_fn, params=params, tx=None, opt_state={})  # type: ignore
-  return state
-
-
-def init_training_state(apply_fn, params, tx):
-  """Init train state with null opt state for decode."""
-  state = train_state.TrainState.create(apply_fn=apply_fn, params=params, tx=tx)
-  return state
-
-
-def init_initial_state(model, tx, config, is_training, key):
-  """
-  We pass in "static" objects like model, tx, config as JAX compares them by
-  object hash, and instantiating them inside causes pjit top-level annotations
-  to fail to match as pytree prefixes if we re-instantiate.
-
-  Args: model, tx, config, is_training, key
-  """
-  input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-  model_vars = model.init(
-      {"params": key, "dropout": key, "aqt": key},
-      np.ones(input_shape, dtype=jnp.int32),
-      np.ones(input_shape, dtype=jnp.int32),
-  )
-  if is_training:
-    return init_training_state(model.apply, model_vars, tx)
-  return init_decode_state(model.apply, model_vars)
-
-
-def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
-  """Setup decode state by loading params from a checkpoint.
-  Args:
-    model: the flax model to initialize
-    config: config object
-    rng: jax.prng key
-    mesh: jax.devices() mesh
-    checkpoint_manager: Checkpoint manager
-
-  Returns:
-    state: state with decode params loaded from the checkpoint
-    state_mesh_annotations: the mesh annotations for the state
-  """
-  if not config.load_parameters_path:
-    # generate random params
-    max_logging.log("No decode checkpoint specified - generating random weights.")
-    state, state_mesh_annotations, _, _ = setup_initial_state(
-        model, None, None, config, rng, mesh, checkpoint_manager, False
-    )
-  else:
-    # Load params from checkpoint
-    max_logging.log(f"Loading decode params from {config.load_parameters_path}")
-    unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(model, None, config, rng, mesh, False)
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
-      params = checkpointing.load_params_from_path(
-          config.load_parameters_path, unboxed_abstract_state.params, config.checkpoint_storage_concurrent_gb
-      )
-    state = init_decode_state(None, params)
-
-  state = unbox_logicallypartioned(state)
-  return state, state_mesh_annotations
-
-
-def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager):
-  is_training = True
-  return setup_initial_state(
-      model,
-      data_iterator,
-      tx,
-      config,
-      rng,
-      mesh,
-      checkpoint_manager,
-      is_training,
-  )
-
-
-def setup_initial_state(
-    model,
-    data_iterator,
-    tx,
-    config,
-    rng,
-    mesh,
-    checkpoint_manager,
-    is_training=True,
-):
-  """We initialize the model and optimizer state, and optionally load from a
-  checkpoint as necessary.
-
-  Args:
-    model: the flax model to initialize
-    tx: the optax.GradientTransformation
-    config: config object
-    rng: jax.prng key
-    mesh: jax.devices() mesh
-    checkpoint_manager: an Orbax checkpointing.CheckpointManager object
-    is_training: True to initialize training state, False for decode state
-
-  Returns:
-    state: the initialized train state
-    state_mesh_annotations: the mesh annotations for the train state
-  """
-
-  unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
-      model, tx, config, rng, mesh, is_training
-  )
-
-  # Initialization
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
-    restored, raw_params = checkpointing.load_state_if_possible(
-        checkpoint_manager,
-        data_iterator,
-        config.load_parameters_path,
-        config.load_full_state_path,
-        config.checkpoint_storage_concurrent_gb,
-        unboxed_abstract_state,
-        config.enable_single_replica_ckpt_restoring,
-        config.dataset_type,
-    )
-
-    if restored:
-      if isinstance(
-          checkpoint_manager,
-          (
-              emergency_checkpoint_manager.CheckpointManager,
-              emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
-          ),
-      ):
-        state = restored
-      else:
-        if "iter" in restored and restored["iter"] is not None:
-          data_iterator.local_iterator = restored["iter"]
-        state = restored["items"]
-    else:
-      init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
-      init_state_partial.__name__ = "initialize_state"
-      # pylint: disable=not-callable
-      state = jax.jit(
-          init_state_partial,
-          in_shardings=None,
-          out_shardings=state_mesh_shardings,
-      )(rng)
-      if raw_params:  # If we loaded a partial state, we need to merge it.
-        state = state.replace(params=raw_params)
-
-  state = unbox_logicallypartioned(state)
-
-  return state, state_mesh_annotations, state_mesh_shardings, data_iterator
-
-
-# Learning Rate Schedule
-# -----------------------------------------------------------------------------
-
-
-def create_learning_rate_schedule(config):
-  """Creates a warmup and cosine decay learning rate schedule:
-  We take inspiration from Llama2's learning rate (LR) schedule, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
-  Learning rate schedule has either two or three parts:
-  1) Linear warmup from 0 to [learning_rate] over steps 0 to [learning_rate_schedule_steps * warmup_steps_fraction]
-  2) Cosine from [learning_rate] to [learning_rate * cosine_learning_rate_final_fraction] until learning_rate_schedule_steps
-  3) Constant learning rate of 0 from learning_rate_schedule_steps to steps.
-  The zero learning rate section can be used to more accurately measure the fully trained model's performance.
-  """
-
-  def make_cos_schedule(init_lr, final_lr, len_steps):
-    def schedule(step):
-      pct = (step) / len_steps
-      a = 0.5 * (jnp.cos(jnp.pi * pct) + 1)
-      lr = init_lr * a + final_lr * (1 - a)
-      return lr
-
-    return schedule
-
-  lr = config.learning_rate
-  cos_final_lr = lr * config.cosine_learning_rate_final_fraction
-
-  warmup_steps = int(config.learning_rate_schedule_steps * config.warmup_steps_fraction)
-  cos_steps = config.learning_rate_schedule_steps - warmup_steps
-  constant_zero_steps = config.steps - config.learning_rate_schedule_steps
-
-  warmup_schedule = optax.linear_schedule(init_value=0.0, end_value=lr, transition_steps=warmup_steps)
-  cos_schedule = make_cos_schedule(lr, cos_final_lr, cos_steps)
-  constant_schedule = optax.constant_schedule(0.0)
-
-  pieces = [warmup_schedule, cos_schedule]
-  boundaries = [
-      warmup_steps,
-      warmup_steps + cos_steps,
-  ]
-
-  if constant_zero_steps > 0:
-    pieces.append(constant_schedule)
-    boundaries.append(warmup_steps + cos_steps + constant_zero_steps)
-
-  return optax.join_schedules(pieces, boundaries)
 
 
 # Cross entropy implementation is taken from original T5X codebase:
@@ -886,90 +630,6 @@ def _cross_entropy_with_logits_bwd(
 cross_entropy_with_logits.defvjp(_cross_entropy_with_logits_fwd, _cross_entropy_with_logits_bwd)
 
 
-def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
-  """Get a shaped abstraction of the state (including optimizer)"""
-  init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
-
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
-    abstract_state = jax.eval_shape(init_state_partial)
-
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-
-  state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
-  if is_training and config.optimizer_memory_host_offload:
-    opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)
-    params = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.params)
-    state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state, params=params)
-
-  abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape()
-
-  unboxed_abstract_sharded_state = unbox_logicallypartioned(abstract_sharded_state)
-  # Initialization
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  return (
-      unboxed_abstract_sharded_state,
-      state_mesh_annotations,
-      state_mesh_shardings,
-  )
-
-
-def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[PageState] = None):
-  """Get a shaped abstraction of the state (including optimizer)"""
-
-  def init_kv_cache(model, config):
-    input_shape = (
-        config.global_batch_size_to_load,
-        config.max_prefill_predict_length,
-    )
-
-    model_vars = model.init(
-        {"params": rng, "dropout": rng, "aqt": rng},
-        jnp.ones(input_shape),
-        jnp.ones(input_shape),
-        model_mode=common_types.MODEL_MODE_PREFILL,
-        slot=0,
-        page_state=page_state,
-    )
-    return model_vars["cache"]
-
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
-    init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
-    abstract_state = jax.eval_shape(init_kv_cache_partial)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  return state_mesh_annotations
-
-
-def get_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[PageState] = None):
-  """Get a shaped abstraction of the state (including optimizer)"""
-
-  def init_kv_cache(model, config):
-    input_shape = (
-        config.global_batch_size_to_load,
-        1,
-    )
-
-    model_vars = model.init(
-        {"params": rng, "dropout": rng, "aqt": rng},
-        jnp.ones(input_shape),
-        jnp.ones(input_shape),
-        model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-        slot=0,
-        page_state=page_state,
-    )
-    return model_vars["cache"]
-
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
-    init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
-    abstract_state = jax.eval_shape(init_kv_cache_partial)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  return state_mesh_annotations
-
-
 def print_pytree_shape(print_str, ptree):
   print("\n")
   print(print_str)
@@ -1021,14 +681,6 @@ def summarize_pytree_data(params, name="Params", raw=False):
         f"\tAvg size: {avg_param_size:.3f} bytes\n"
     )
   return num_params, total_param_size, avg_param_size
-
-
-def save_quantized_checkpoint_if_configured(config, params):
-  assert config.quantization, "quantization must be configured"
-  if config.save_quantized_params_path:
-    checkpointing.save_params_to_path(config.save_quantized_params_path, params)
-  else:
-    "Skipping saving quantized checkpoint as save_quantized_params_path is null."
 
 
 def print_mem_stats(label: str):
@@ -1085,3 +737,49 @@ def unpermute_from_match_maxtext_rope(arr, model_size):
   evens = arr[..., ::2]
   odds = arr[..., 1::2]
   return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
+
+
+@partial(jax.jit, static_argnums=1)
+def reorder_sequence(tensor, cp_size: int):
+  """Reorders the sequence of the tensor. For example, with cp_size=2,
+  [0, 1, 2, 3, 4, 5, 6, 7] -> [0, 1, 6, 7, 2, 3, 4, 5]"""
+
+  # Assumption is the tensor is of shape [B,S]
+  # Reshape [B,S] -> [B, 2*cp_size, S/(2*cp_size)]
+  batch_size = tensor.shape[0]
+  seq_len = tensor.shape[1]
+  group_size = seq_len // (2 * cp_size)
+
+  reshaped = tensor.reshape(batch_size, 2 * cp_size, group_size)
+
+  # Create first and second halves
+  first_half = jnp.arange(cp_size)
+  second_half = jnp.arange(2 * cp_size - 1, cp_size - 1, -1)
+
+  # Stack and reshape to interleave
+  src_indices = jnp.stack([first_half, second_half], axis=1).reshape(-1)
+
+  # Indexing the reshaped tensor using JAX take operation
+  reordered = jnp.take(reshaped, src_indices, axis=1)
+
+  # Reshape back to original dimensions
+  return reordered.reshape(batch_size, seq_len)
+
+
+@partial(jax.jit, static_argnums=1)
+def reorder_causal_load_balanced(batch, cp_size):
+  """Reorders the example batch sequences"""
+  return {
+      key: reorder_sequence(
+          value,  # Pass each key's value inside batch separately
+          cp_size=cp_size,
+      )
+      if key in ["inputs", "targets", "inputs_position", "targets_position", "inputs_segmentation", "targets_segmentation"]
+      else value
+      for key, value in batch.items()
+  }
+
+
+def get_reorder_callable(cp_size):
+  """Creates a callable that can be used with map() to reorder batches."""
+  return functools.partial(reorder_causal_load_balanced, cp_size=cp_size)

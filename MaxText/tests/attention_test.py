@@ -27,7 +27,7 @@ from MaxText import common_types
 from flax.core import freeze
 import jax
 import jax.numpy as jnp
-from MaxText import max_utils
+from MaxText import maxtext_utils
 import pytest
 
 from MaxText import pyconfig
@@ -145,7 +145,7 @@ class AttentionTest(unittest.TestCase):
     self.cfg = config
     self.rng = jax.random.PRNGKey(0)
 
-    devices_array = max_utils.create_device_mesh(self.cfg)
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
 
     self.global_batch_size = self.cfg.global_batch_size_to_train_on
@@ -829,7 +829,7 @@ class MLATest(parameterized.TestCase):
     )
     rng = jax.random.PRNGKey(0)
 
-    devices_array = max_utils.create_device_mesh(cfg)
+    devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
 
     global_batch_size = cfg.global_batch_size_to_train_on

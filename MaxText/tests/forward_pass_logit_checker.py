@@ -50,6 +50,7 @@ import numpy as np
 from MaxText import pyconfig
 import jsonlines
 from MaxText import max_utils
+from MaxText import maxtext_utils
 from MaxText.layers import models
 from MaxText.layers import quantizations
 
@@ -68,12 +69,12 @@ def get_data(golden_data, golden_data_index, config):
   logits = np.asarray(golden_data[golden_data_index]["logits"], dtype=np.float32)
   max_logging.log(f" prompt=\"{golden_data[golden_data_index]['prompt']}\" raw ids={ids}, logits.shape = {logits.shape}")
 
-  decoder_segment_ids = jax.numpy.zeros(s) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
-  decoder_positions = jnp.stack(
-      [jnp.arange(config.max_target_length, dtype=jnp.int32) for _ in range(config.global_batch_size_to_train_on)]
+  decoder_segment_ids = np.zeros(s) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+  decoder_positions = np.stack(
+      [np.arange(config.max_target_length, dtype=np.int32) for _ in range(config.global_batch_size_to_train_on)]
   )
 
-  ids = jnp.stack([ids for _ in range(config.global_batch_size_to_train_on)])
+  ids = np.stack([ids for _ in range(config.global_batch_size_to_train_on)])
   max_logging.log(f"ids={ids}, decoder_segment_ids = {decoder_segment_ids}, decoder_positions= {decoder_positions}")
 
   return ids, decoder_segment_ids, decoder_positions, logits
@@ -88,11 +89,11 @@ def main(config, test_args):  # pylint: disable=W0621
   else:  # Initialize MaxText model
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
     init_rng, rng1 = jax.random.split(init_rng)
-    devices_array = max_utils.create_device_mesh(config)
+    devices_array = maxtext_utils.create_device_mesh(config)
     mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
     quant = quantizations.configure_quantization(config)
     model = models.Transformer(config, mesh=mesh, quant=quant)
-    state, _ = max_utils.setup_decode_state(model, config, rng1, mesh, None)
+    state, _ = maxtext_utils.setup_decode_state(model, config, rng1, mesh, None)
 
   if test_args.golden_logits_path == "":
     input_golden_data_path = os.path.join(PKG_DIR, "test_assets", f"golden_data_{config.model_name}.jsonl")

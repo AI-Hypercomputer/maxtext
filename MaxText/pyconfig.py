@@ -187,6 +187,9 @@ def validate_keys(keys):
     validate_sparse_matmul_parallelism(keys)
     validate_deepseek_moe(keys)
 
+  if keys["use_multimodal"]:
+    validate_multimodal_model_name(keys["model_name"])
+
 
 def validate_tokenizer(keys):
   assert keys[
@@ -211,6 +214,7 @@ def validate_data_input(keys):
       keys["hf_eval_split"] = "train"
     if keys["eval_interval"] > 0:
       assert keys["hf_eval_split"], "Please specify hf_eval_split or set eval_interval to <=0."
+    assert keys["num_epoch"] == 1, f"hf pipeline only supports num_epoch=1, but num_epoch={keys['num_epoch']} is given."
 
   elif keys["dataset_type"] == "grain":
     max_logging.log(
@@ -272,9 +276,20 @@ def validate_model_name(s: str) -> bool:
       "gpt3-22b",
       "gpt3-6b",
       "gpt3-52k",
+      "llama4-17b-16e",
   )
   if s not in valid_model_names:
     raise ValueError(f"Invalid model name was passed. Got {s}, Valid options {valid_model_names}")
+
+
+def validate_multimodal_model_name(s: str) -> bool:
+  valid_model_names = (
+      "gemma3-4b",
+      "gemma3-12b",
+      "gemma3-27b",
+  )
+  if s not in valid_model_names:
+    raise ValueError(f"Invalid multimodal model name was passed. Got {s}. Valid options which support multimodal inputs are: {valid_model_names}")
 
 
 def validate_no_keys_overwritten_twice(keys1: list[str], keys2: list[str]):
@@ -584,6 +599,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["ici_fsdp_parallelism"],
       raw_keys["ici_fsdp_transpose_parallelism"],
       raw_keys["ici_sequence_parallelism"],
+      raw_keys["ici_context_parallelism"],
       raw_keys["ici_context_autoregressive_parallelism"],
       raw_keys["ici_tensor_parallelism"],
       raw_keys["ici_tensor_transpose_parallelism"],
@@ -597,6 +613,7 @@ def create_parallelisms_list(raw_keys):
       raw_keys["dcn_fsdp_parallelism"],
       raw_keys["dcn_fsdp_transpose_parallelism"],
       raw_keys["dcn_sequence_parallelism"],
+      raw_keys["dcn_context_parallelism"],
       raw_keys["dcn_context_autoregressive_parallelism"],
       raw_keys["dcn_tensor_parallelism"],
       raw_keys["dcn_tensor_transpose_parallelism"],
@@ -650,6 +667,7 @@ def validate_multiple_slices(raw_keys):
                   raw_keys["dcn_fsdp_parallelism"],
                   raw_keys["dcn_fsdp_transpose_parallelism"],
                   raw_keys["dcn_sequence_parallelism"],
+                  raw_keys["dcn_context_parallelism"],
                   raw_keys["dcn_tensor_parallelism"],
                   raw_keys["dcn_tensor_sequence_parallelism"],
                   raw_keys["dcn_expert_parallelism"],
@@ -687,6 +705,7 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["ici_fsdp_parallelism"],
           raw_keys["ici_fsdp_transpose_parallelism"],
           raw_keys["ici_sequence_parallelism"],
+          raw_keys["ici_context_parallelism"],
           raw_keys["ici_context_autoregressive_parallelism"],
           raw_keys["ici_tensor_parallelism"],
           raw_keys["ici_tensor_transpose_parallelism"],
@@ -700,6 +719,7 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["dcn_fsdp_parallelism"],
           raw_keys["dcn_fsdp_transpose_parallelism"],
           raw_keys["dcn_sequence_parallelism"],
+          raw_keys["dcn_context_parallelism"],
           raw_keys["dcn_context_autoregressive_parallelism"],
           raw_keys["dcn_tensor_parallelism"],
           raw_keys["dcn_tensor_transpose_parallelism"],
@@ -713,6 +733,7 @@ def set_and_validate_pipeline_config(raw_keys):
           "fsdp",
           "fsdp_transpose",
           "sequence",
+          "context",
           "context_autoregressive",
           "tensor",
           "tensor_transpose",
@@ -727,6 +748,7 @@ def set_and_validate_pipeline_config(raw_keys):
               "fsdp",
               "fsdp_transpose",
               "sequence",
+              "context",
               "context_autoregressive",
               "tensor",
               "tensor_transpose",

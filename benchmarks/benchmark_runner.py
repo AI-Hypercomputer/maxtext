@@ -13,7 +13,6 @@
  See the License for the specific language governing permissions and
  limitations under the License.
  """
-from benchmarks.globals import PKG_DIR
 
 """ Script to run a benchmark/benchmarks on existing xpk or QR nodes (to be implemented)
                           ***** IMPORTANT *****
@@ -26,15 +25,15 @@ import argparse
 import os
 import time
 
-from inference_utils import str2bool
-from maxtext_trillium_model_configs import trillium_model_dict
-from maxtext_v5e_model_configs import v5e_model_dict
-from maxtext_xpk_runner import PathwaysConfig
-from maxtext_xpk_runner import WorkloadConfig
-from maxtext_xpk_runner import xpk_benchmark_runner
-from maxtext_xpk_runner import on_device_benchmark_runner
-from xpk_configs import XpkClusterConfig
-from maxtext_xpk_runner import LibTpuType
+from MaxText.inference_utils import str2bool
+from benchmarks.maxtext_trillium_model_configs import trillium_model_dict
+from benchmarks.maxtext_v5e_model_configs import v5e_model_dict
+from benchmarks.maxtext_xpk_runner import PathwaysConfig
+from benchmarks.maxtext_xpk_runner import WorkloadConfig
+from benchmarks.maxtext_xpk_runner import xpk_benchmark_runner
+from benchmarks.maxtext_xpk_runner import on_device_benchmark_runner
+from benchmarks.xpk_configs import XpkClusterConfig
+from benchmarks.maxtext_xpk_runner import LibTpuType
 
 def add_pathways_arguments(parser: argparse.ArgumentParser):
   """Add pathways arguments to arg parsers that need it.
@@ -64,9 +63,9 @@ def add_pathways_arguments(parser: argparse.ArgumentParser):
       help='version of pathways runner image to be benchmarked command.',
   )
   parser.add_argument(
-      '--remote_python_sidecar_image',
+      '--colocated_python_sidecar_image',
       type=str,
-      help='version of remote python sidecar image to be benchmarked command.',
+      help='version of colocated python sidecar image to be benchmarked command.',
   )
   parser.add_argument(
       '--use_pathways',
@@ -152,7 +151,7 @@ def add_xpk_runner_arguments(custom_parser: argparse.ArgumentParser):
   custom_parser.add_argument(
       '--xpk_path',
       type=str,
-      default=os.path.join(os.path.dirname(PKG_DIR), os.path.join("~", "xpk")),
+      default=os.path.join("~", "xpk"),
       help='path to xpk dir.',
   )
   custom_parser.add_argument(
@@ -265,7 +264,7 @@ def main() -> None:
       server_image=options.pathways_server_image,
       proxy_server_image=options.pathways_proxy_server_image,
       runner_image=options.pathways_runner_image,
-      remote_python_sidecar_image=options.remote_python_sidecar_image,
+      colocated_python_sidecar_image=options.colocated_python_sidecar_image,
     )
 
   if options.runner == "xpk":
@@ -315,7 +314,9 @@ def main() -> None:
       libtpu_type=libtpu_type,
       libtpu_nightly_version=options.libtpu_version,
       run_name=options.run_name,
-      pathways_config=pw_config
+      pathways_config=pw_config,
+      # Internal only support, not for customers
+      generate_metrics_and_upload_to_big_query=False,
     )
     on_device_benchmark_runner(workload_configs=[workload_config])
 

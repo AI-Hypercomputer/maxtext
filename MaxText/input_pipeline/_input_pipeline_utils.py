@@ -38,9 +38,11 @@ def normalize_features(x, column_name):
   return {"inputs": x[column_name], "targets": x[column_name]}
 
 
-def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None):
+def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None, dataset_type="tfds"):
   # Load tokenizer
-  tokenizer_model = tokenizer.build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token)
+  tokenizer_model = tokenizer.build_tokenizer(
+      tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token, dataset_type
+  )
   return tokenizer_model
 
 
@@ -287,17 +289,6 @@ class ParseFeatures(grain.MapTransform):
 
 
 @dataclasses.dataclass
-class InputsTargetsFeatures(grain.MapTransform):
-  """Normalize text feature keys."""
-
-  def __init__(self, column_name):
-    self.column_name = column_name
-
-  def map(self, features):
-    return {"inputs": features[self.column_name], "targets": features[self.column_name]}
-
-
-@dataclasses.dataclass
 class NormalizeFeatures(grain.MapTransform):
   """Normalize text feature keys."""
 
@@ -310,6 +301,25 @@ class NormalizeFeatures(grain.MapTransform):
       return {col: features[col].numpy()[0].decode() for col in self.column_names}
     else:
       return {col: features[col].numpy() for col in self.column_names}
+
+
+@dataclasses.dataclass
+class Rekey(grain.MapTransform):
+  """Rname keys according to a mappign dict"""
+
+  def __init__(self, mapping_dict, keep_old_keys=False):
+    self.mapping_dict = mapping_dict
+    self.keep_old_keys = keep_old_keys
+
+  def map(self, features):
+    old_keys = set()
+    for new_key, old_key in self.mapping_dict.items():
+      features[new_key] = features[old_key]
+      old_keys.add(old_key)
+    if not self.keep_old_keys:
+      for key in old_keys:
+        del features[key]
+    return features
 
 
 @dataclasses.dataclass
@@ -326,6 +336,46 @@ class ReformatPacking(grain.MapTransform):
       ret[f"{col}_segmentation"] = data[1][col]
       ret[f"{col}_position"] = data[2][col]
     return ret
+
+
+@dataclasses.dataclass
+class PadOrTrimToMaxLength(grain.MapTransform):
+  """Pads/Trims each input to the specified length
+  and returns true_length of input
+  """
+
+  def __init__(self, max_length):
+    self.max_length = max_length
+
+  def map(self, data: dict[str, np.ndarray]):
+    """map to each element"""
+
+    def _max_true_length(prompts, pad_token_id):
+      true_lengths = []
+      for prompt in prompts:
+        matches = np.where(prompt == pad_token_id)[0]
+        if matches.size != 0:
+          true_lengths.append(matches[0])
+        else:
+          true_lengths.append(prompts.shape[0])
+      return true_lengths
+
+    def _pad(x, max_length):
+      pad_amount = max(max_length - x.shape[0], 0)
+      pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
+      return np.pad(x, pad_amount)[:max_length]
+
+    data_columns = list(data.keys())
+    for data_column in data_columns:
+      data[f"{data_column}_segmentation"] = (data[data_column] != 0).astype(np.int32)
+      data[f"{data_column}_position"] = np.arange(data[data_column].shape[0], dtype=np.int32)
+      data[f"{data_column}_true_length"] = np.array(data[data_column].shape[0], dtype=np.int32)
+    for key, _ in data.items():
+      if "true_length" not in key:
+        data[key] = _pad(data[key], self.max_length)
+    # for data_column in data_columns:
+    #   data[f"{data_column}_true_length"] = _max_true_length(data[data_column], 0)
+    return data
 
 
 @dataclasses.dataclass

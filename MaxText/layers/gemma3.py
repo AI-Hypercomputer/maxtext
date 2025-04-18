@@ -79,6 +79,33 @@ def get_query_pre_attn_scalar(config) -> float:
     raise ValueError(f"Unsupported model name: {config.model_name}")
 
 
+class Gemma3VisionEncoderLayer(nn.Module):
+  config: Config
+
+  @nn.compact
+  def __call__(self, inputs, train=False):
+    """ViT model that transforms image inputs to image embeddings.
+    Args:
+      inputs: jnp.array shaped [B, N, H, W, C], e.g. [4, 1, 896, 896, 3]
+    Returns:
+      jnp.array for image embeddings, shaped [B, N, P, D], e.g. [4, 1, 256, 2560]
+    """
+    cfg = self.config
+    print(f"Gemma3VisionEncoderLayer input: {inputs.shape}")
+    x = inputs.squeeze(axis=1)
+    x = nn.Conv(features=1152,
+        kernel_size=(14, 14),
+        strides=14,
+        padding="VALID",
+        name="embedding")(x)
+    n, h, w, c = x.shape
+    x = jnp.reshape(x, [n, h * w, c])
+    # TODO(hengtaoguo): finish the ViT with posemb, dropout and transformation layers.
+    # Currently it is only a placeholder with one Conv layer.
+    # Placeholder x shape (B, 4096, 1152).
+    return x
+
+
 # Gemma3 Decoder Layer
 class Gemma3DecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
@@ -132,7 +159,7 @@ class Gemma3DecoderLayer(nn.Module):
         attention_type=self.attention_type,
         sliding_window_size=cfg.sliding_window_size,
         attn_logits_soft_cap=cfg.attn_logits_soft_cap,
-        use_qk_norm=True,  # Gemma 3 models use querry, key normalizations
+        use_qk_norm=True,  # Gemma 3 models use query, key normalizations
         query_pre_attn_scalar=query_pre_attn_scalar,
     )
 

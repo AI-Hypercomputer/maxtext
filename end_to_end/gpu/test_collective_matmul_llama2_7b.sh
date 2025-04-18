@@ -40,7 +40,7 @@ export XLA_FLAGS="--xla_dump_hlo_as_text
     --xla_gpu_threshold_for_windowed_einsum_mib=0
     --xla_gpu_multi_streamed_windowed_einsum=true"
 
-python3 MaxText/train.py \
+python3 -m MaxText.train \
     MaxText/configs/base.yml \
     model_name=${MODEL} \
     per_device_batch_size=0.125 \
@@ -80,4 +80,4 @@ fi
 EXPECTED_UNROLLED_AG=$((34))
 EXPECTED_UNROLLED_RS=$((18))
 
-python3 end_to_end/gpu/test_feature.py collective_matmul $HLO_FILE $((EXPECTED_UNROLLED_AG)) $((EXPECTED_UNROLLED_RS))
+python3 -m end_to_end.gpu.test_feature collective_matmul $HLO_FILE $((EXPECTED_UNROLLED_AG)) $((EXPECTED_UNROLLED_RS))

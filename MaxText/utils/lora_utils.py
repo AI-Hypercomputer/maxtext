@@ -25,6 +25,7 @@ from flax.training import train_state
 from flax.linen import partitioning as nn_partitioning
 
 from MaxText import max_utils
+from MaxText import maxtext_utils
 from MaxText import max_logging
 from MaxText.utils import gcs_utils
 
@@ -162,7 +163,7 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
 
   if lora_adapter_path:
     max_logging.log(f"Setting initial state of LoRA with lora_adapter_path = {lora_adapter_path}")
-    unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = max_utils.get_abstract_state(
+    unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = maxtext_utils.get_abstract_state(
         model, tx, config, rng, mesh, True
     )
 

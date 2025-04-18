@@ -17,6 +17,8 @@ multiple hosts.
 2. Clone MaxText onto that TPUVM.
 3. Within the root directory of that `git` repo, install dependencies and pre-commit hook by running:
 ```
+python3 -m venv ~/venv-maxtext
+source ~/venv-maxtext/bin/activate
 bash setup.sh
 pre-commit install
 ```

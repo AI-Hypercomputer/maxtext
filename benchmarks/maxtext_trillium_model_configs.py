@@ -19,9 +19,7 @@ import dataclasses
 import os.path
 import typing
 from tempfile import gettempdir
-import xla_flags_library
-
-from benchmarks.globals import PKG_DIR
+from benchmarks import xla_flags_library
 
 # TODO(vbarr@) Abstract software features like checkpointing,
 # real data / synthetic data out of this config
@@ -417,7 +415,7 @@ llama2_70b_4096_sc = _add_to_model_dictionary(
         model_name="llama2-70b-4096-sc",
         model_type="llama2-70b",
         tuning_params={
-            "per_device_batch_size": 2,
+            "per_device_batch_size": 3,
             "ici_fsdp_parallelism": 1,
             "ici_fsdp_transpose_parallelism": -1,
             "ici_tensor_parallelism": 1,
@@ -629,7 +627,7 @@ llama2_70b_4096_real_data_long_run = _add_to_model_dictionary(
             "profiler": "xplane",
             "dataset_path": "gs://max-datasets-rogue",
             "dataset_type": "tfds",
-            "tokenizer_path": os.path.join(os.path.dirname(PKG_DIR), "assets", "tokenizer.llama2"),
+            "tokenizer_path": os.path.join("assets", "tokenizer.llama2"),
             "sa_block_q": 1024,
             "sa_block_q_dkv": 2048,
             "sa_block_q_dq": 2048,
@@ -939,7 +937,7 @@ llama3_1_70b_8192 = _add_to_model_dictionary(
         model_name="llama3_1-70b-8192",
         model_type="llama3.1-70b",
         tuning_params={
-            "per_device_batch_size": 4,
+            "per_device_batch_size": 5,
             "ici_fsdp_parallelism": -1,
             "remat_policy": "custom",
             "decoder_layer_input": "offload",
@@ -1605,7 +1603,7 @@ gemma2_9b_8192 = _add_to_model_dictionary(
             "reuse_example_batch": 1,
             "enable_checkpointing": False,
             "profiler": "xplane",
-            "tokenizer_path": os.path.join(os.path.dirname(PKG_DIR), "assets", "tokenizer.llama2"),
+            "tokenizer_path": os.path.join("assets", "tokenizer.llama2"),
             "sa_block_q": 2048,
             "sa_block_q_dkv": 2048,
             "sa_block_q_dq": 2048,
@@ -1638,7 +1636,7 @@ gemma2_27b_8192 = _add_to_model_dictionary(
             "reuse_example_batch": 1,
             "enable_checkpointing": False,
             "profiler": "xplane",
-            "tokenizer_path": os.path.join(os.path.dirname(PKG_DIR), "assets", "tokenizer.llama2"),
+            "tokenizer_path": os.path.join("assets", "tokenizer.llama2"),
             "sa_block_q": 2048,
             "sa_block_q_dkv": 2048,
             "sa_block_q_dq": 2048,

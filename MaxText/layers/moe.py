@@ -172,6 +172,15 @@ class MoeBlock(nn.Module):
   wi_kernel_axes = ("exp", "embed_no_exp", "mlp")
   wo_kernel_axes = ("exp", "mlp", "embed_no_exp")
 
+  def get_expert_parallelism_size(self):
+    return self.mesh.shape["expert"]
+
+  def get_tensor_parallelism_size(self):
+    return self.mesh.shape["tensor"]
+
+  def get_context_autoregressive_parallelism_size(self):
+    return self.mesh.shape["context_autoregressive"]
+
   def generate_kernels(self, num_experts, emb_dim, mlp_dim):
 
     kernel_in_axis = np.arange(1)
@@ -234,7 +243,7 @@ class MoeBlock(nn.Module):
 
     if self.config.decoder_block == "deepseek":
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
-    else:
+    elif self.config.decoder_block != "llama4":
       top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
     return top_k_weights, top_k_indices
 
@@ -463,22 +472,22 @@ class MoeBlock(nn.Module):
       batch_size, sequence_length, _ = x.shape
       x, sorted_selected_experts, weights, group_sizes = self.permute(x, logits, pre_bias_logits)
 
-      if self.get_expert_parallelism() > 1:
+      if self.get_expert_parallelism_size() > 1:
         axis_name = "expert"
         # get group sizes for all shards
-        local_expert_size = self.config.num_experts // self.get_expert_parallelism()
+        local_expert_size = self.config.num_experts // self.get_expert_parallelism_size()
         reshaped_group_sizes = jnp.sum(group_sizes.reshape(-1, local_expert_size), axis=1)
         all_shards_group_sizes = lax.all_gather(reshaped_group_sizes, axis_name=axis_name)
         # calculate offsets and sizes for ragged_all_to_all operation
         input_offsets, send_sizes, output_offsets, recv_sizes = get_all_to_all_params(
-            all_shards_group_sizes, local_expert_size, self.get_expert_parallelism()
+            all_shards_group_sizes, local_expert_size, self.get_expert_parallelism_size()
         )
         # TODO(ranran): For better performance, we could update output buffer to a smaller
-        # size to replace self.get_expert_parallelism() for efficiency,
+        # size to replace self.get_expert_parallelism_size() for efficiency,
         # Or we could apply capacity_factor for excessive experts.
         # Note: Reducing buffer increase the risk of token dropping under unbalanced distribution.
         buffer_size = int(
-            self.get_expert_parallelism()
+            self.get_expert_parallelism_size()
             * self.config.per_device_batch_size
             * self.config.max_target_length
             * self.config.num_experts_per_tok
@@ -504,18 +513,17 @@ class MoeBlock(nn.Module):
       intermediate_layer = jnp.multiply(layer_act, layer_w1)
       intermediate_output = gmm(intermediate_layer, wo, group_sizes)
       intermediate_output = checkpoint_name(intermediate_output, "mlpwo")
-      tensor_parallelism = self.config.ici_tensor_parallelism * self.config.dcn_tensor_parallelism
-      if tensor_parallelism > 1:
+      if self.get_tensor_parallelism_size() > 1:
         intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
 
-      if self.get_expert_parallelism() > 1:
+      if self.get_expert_parallelism_size() > 1:
         axis_name = "expert"
         # locally unpermute back to the original order
         local_output = jnp.take(intermediate_output, indices=jnp.argsort(local_sorted_indices), axis=0)
         original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
         output_shape = jnp.zeros((original_inputs_first_dim, self.config.emb_dim), dtype=local_output.dtype)
         input_offsets, send_sizes, output_offsets, recv_sizes = get_all_to_all_params(
-            jnp.transpose(all_shards_group_sizes), local_expert_size, self.get_expert_parallelism()
+            jnp.transpose(all_shards_group_sizes), local_expert_size, self.get_expert_parallelism_size()
         )
         intermediate_output = jax.lax.ragged_all_to_all(
             local_output,
@@ -546,7 +554,7 @@ class MoeBlock(nn.Module):
     return update_weights
 
   def get_context_partition_and_sub_seq(self, seq_len):
-    cp = self.config.ici_context_autoregressive_parallelism
+    cp = self.get_context_autoregressive_parallelism_size()
     if seq_len % cp != 0:
       cp = 1
     sub_seq = seq_len // cp
@@ -719,11 +727,8 @@ class MoeBlock(nn.Module):
       einsum_op = jnp.einsum
     return einsum_op
 
-  def get_expert_parallelism(self):
-    return self.config.ici_expert_parallelism * self.config.dcn_expert_parallelism
-
   def maybe_all_gather_kernel_weight_in_expert_parallelism(self, kernel, kernel_axes):
-    if self.get_expert_parallelism() > 1:
+    if self.get_expert_parallelism_size() > 1:
       # This will trigger all-gather using weight_dtype
       # relax it unless really necessary in expert parallelism only
       # Otherwise compiler will handle communication automatically
@@ -738,7 +743,12 @@ class MoeBlock(nn.Module):
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits = nn.with_logical_constraint(pre_bias_logits, ("activation_batch", "activation_length", None))
     top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits)
-    weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
+    is_llama4_decoder_layer = self.config.decoder_block == "llama4"
+    if is_llama4_decoder_layer:
+      router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(jnp.bfloat16)
+      inputs = inputs * router_scores
+    else:
+      weights = self.reshape_and_update_weights(top_k_weights, top_k_indices)
     matmul_precision = lax.Precision(self.config.matmul_precision)
 
     if self.config.model_call_mode != "inference":
@@ -751,7 +761,13 @@ class MoeBlock(nn.Module):
 
     cp, sub_seq = self.get_context_partition_and_sub_seq(seq_len)
 
+    # TODO @jacobplatin: allow Llama4 MoE to handle capacity factor > 0
     if self.config.capacity_factor > 0:
+      if is_llama4_decoder_layer:
+        # TODO @jacobplatin
+        raise ValueError(
+            "Llama4 decoder has not been tested with capacity_factor > 0 -- please set that value to -1 for now!"
+        )
       # token dropping if needed
       if self.config.model_call_mode != "inference":
         dispatch_mask, combine_mask = self.generate_masks(top_k_indices, weights)
@@ -766,7 +782,7 @@ class MoeBlock(nn.Module):
         # todo: try replace softmax_probs with padded weights and verify with decode acc tests
         softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
         dispatch_mask, combine_mask = self.generate_masks_subgroup(top_k_indices, softmax_probs)
-        if self.config.ici_context_autoregressive_parallelism > 0 and cp == 1:
+        if self.get_context_autoregressive_parallelism_size() > 0 and cp == 1:
           mask_axes = ("activation_length", "activation_batch", None, None, None)
           input_axis = ("activation_length", "activation_batch", None, "activation_embed")
           dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_embed")
@@ -876,6 +892,8 @@ class MoeBlock(nn.Module):
           intermediate_layer = intermediate_layer.astype(jnp.float32)
         intermediate_layer = checkpoint_name(intermediate_layer, "mlpwo")
       with jax.named_scope("w_sum"):
+        if is_llama4_decoder_layer:
+          weights = self.reshape_and_update_weights(jnp.ones_like(top_k_weights), top_k_indices)
         output = jnp.einsum(
             "BSEM,BSE -> BSM",
             intermediate_layer,
@@ -903,7 +921,6 @@ class MoeBlock(nn.Module):
   def __call__(self, inputs):
     cfg = self.config
     inputs = inputs.astype(cfg.dtype)
-
     gate_logits, pre_bias_logits = GateLogit(
         self.num_experts,
         model_name=cfg.model_name,

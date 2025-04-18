@@ -33,7 +33,7 @@ from transformers import AutoTokenizer
 from MaxText.globals import PKG_DIR
 
 from MaxText import max_logging
-from MaxText import max_utils
+from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.input_pipeline import _input_pipeline_utils
 from MaxText.layers import models
@@ -71,10 +71,10 @@ def setup_maxtext_model(config):
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
   init_rng, rng1 = jax.random.split(init_rng)
   quant = quantizations.configure_quantization(config)
-  devices_array = max_utils.create_device_mesh(config)
+  devices_array = maxtext_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
   maxtext_model = models.Transformer(config=config, mesh=mesh, quant=quant)
-  state, _ = max_utils.setup_decode_state(maxtext_model, config, rng1, mesh, None)
+  state, _ = maxtext_utils.setup_decode_state(maxtext_model, config, rng1, mesh, None)
   return maxtext_model, state, init_rng
 
 

@@ -36,15 +36,15 @@ import tempfile
 import threading
 import time
 
-import maxtext_trillium_model_configs as model_configs
-from command_utils import run_command_with_updates
-from benchmark_db_utils import DEFAULT_TUNING_PARAMS_FILE
+import benchmarks.maxtext_trillium_model_configs as model_configs
+from benchmarks.command_utils import run_command_with_updates
+from benchmarks.benchmark_db_utils import DEFAULT_TUNING_PARAMS_FILE
 
-import xla_flags_library as xla_flags
-from disruption_management.disruption_handler import DisruptionConfig
-from disruption_management.disruption_manager import DisruptionManager
+import benchmarks.xla_flags_library as xla_flags
+from benchmarks.disruption_management.disruption_handler import DisruptionConfig
+from benchmarks.disruption_management.disruption_manager import DisruptionManager
 from typing import Optional, List
-from xpk_configs import XpkClusterConfig
+from benchmarks.xpk_configs import XpkClusterConfig
 
 from MaxText.globals import PKG_DIR
 
@@ -78,7 +78,7 @@ class PathwaysConfig:
   server_image: str = None
   proxy_server_image: str = None
   runner_image: str = None
-  remote_python_sidecar_image: str = None
+  colocated_python_sidecar_image: str = None
   server_flags: str = ''
   proxy_flags: str = ''
   worker_flags: str = ''
@@ -99,13 +99,13 @@ class WorkloadConfig:
   num_steps: int = 20
   max_restarts: int = 0
   priority: str = 'medium'
-  xpk_path: str = os.path.join(os.path.dirname(PKG_DIR), os.path.join("~", "xpk"))
+  xpk_path: str = os.path.join("~", "xpk")
   pathways_config: PathwaysConfig = None
   run_name: str = None
   generate_metrics_and_upload_to_big_query: bool = True
   hardware_id: str = 'v6e'
   metrics_gcs_file: str = ''
-  base_config: str = os.path.join(PKG_DIR, "configs", "base.yml")
+  base_config: str = os.path.join("MaxText", "configs", "base.yml")
   topology: str = dataclasses.field(init=False)
   num_devices_per_slice: int = dataclasses.field(init=False)
   db_project: str = ""
@@ -116,6 +116,10 @@ class WorkloadConfig:
 
   def __post_init__(self):
     """Initializes num_devices_per_slice and topology for recording the run into BigQuery"""
+    if not self.generate_metrics_and_upload_to_big_query:
+      return
+    if self.device_type is None:
+      raise ValueError(f"device_type is None and generate_metrics_and_upload_to_big_query is enabled. Device_type is required for uploading run results to BigQuery")
     if self.device_type.startswith("v6e") or self.device_type.startswith("v5e") or self.device_type.startswith("v5litepod"):
       size = int(self.device_type.split("-")[-1])
       if size == 256:
@@ -345,7 +349,7 @@ def _build_args_from_config(wl_config: WorkloadConfig) -> dict:
   args["xla_flags"] = f"'{xla_flags_str}'"
   args["dataset"] = dataset
   args["run_type"] = "maxtext-xpk"
-  args["config_file"] = os.path.join(PKG_DIR, "configs", "base.yml")
+  args["config_file"] = os.path.join("MaxText", "configs", "base.yml")
   args["topology"] = wl_config.topology
   args["tuning_params"] = f"'{tuning_params_str}'"
   args["db_project"] = wl_config.db_project
@@ -409,7 +413,7 @@ def build_user_command(
       'export ENABLE_PATHWAYS_PERSISTENCE=1 &&',
       f'export JAX_PLATFORMS={jax_platforms} &&',
       'export ENABLE_PJRT_COMPATIBILITY=true &&',
-      f'python3 -m MaxText.train {os.path.join(PKG_DIR, "configs", "base.yml")}',
+      f'python3 -m MaxText.train {os.path.join("MaxText", "configs", "base.yml")}',
       f'{config_tuning_params}',
       f'steps={wl_config.num_steps}',
       f'model_name={wl_config.model.model_type}',
@@ -514,9 +518,9 @@ def _get_pathways_specific_flags(wl_config: WorkloadConfig):
   if pw_config is None:
     return ''
 
-  remote_python_sidecar_image_flag = (
-      f' --remote-python-sidecar-image={pw_config.remote_python_sidecar_image}'
-      if pw_config.remote_python_sidecar_image is not None
+  colocated_python_sidecar_image_flag = (
+      f' --colocated-python-sidecar-image={pw_config.colocated_python_sidecar_image}'
+      if pw_config.colocated_python_sidecar_image is not None
       else ''
   )
   server_image_flag = (
@@ -537,7 +541,7 @@ def _get_pathways_specific_flags(wl_config: WorkloadConfig):
   pathways_specific_flags = (
       f' {server_image_flag} '
       f' {proxy_server_image_flag} '
-      f' {remote_python_sidecar_image_flag} '
+      f' {colocated_python_sidecar_image_flag} '
       f' --termination-grace-period-seconds=300 '
       f' --pathways-gcs-location={wl_config.base_output_directory} '
       f' --custom-pathways-server-args="{server_flags}" '
@@ -832,8 +836,8 @@ def main() -> int:
   #     batch=1,  # Parallel execution of workloads is not supported in XPK yet.
   #     dry_run=False,
   # )
- # print(f'Return_codes: {return_codes}')
-
+  # print(f'Return_codes: {return_codes}')
+  return os.EX_OK
 
 
 if __name__ == '__main__':

@@ -262,6 +262,7 @@ def make_hf_eval_iterator(
       data_shuffle_seed=config.data_shuffle_seed,
       add_bos=config.add_bos,
       add_eos=config.add_eos,
+      packing=config.packing,
       generate_padding_example=eval_generate_padding_example,
       use_dpo=config.use_dpo,
       use_sft=config.use_sft,

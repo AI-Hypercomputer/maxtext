@@ -19,7 +19,7 @@ import sys
 import jax
 import unittest
 import os.path
-from MaxText import max_utils
+from MaxText import maxtext_utils
 from MaxText.globals import PKG_DIR
 from jax.sharding import Mesh
 from MaxText.layers import models
@@ -71,7 +71,7 @@ class GPT3(unittest.TestCase):
     )
     self.rng = jax.random.PRNGKey(1234)
 
-    devices_array = max_utils.create_device_mesh(self.cfg)
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     quant = quantizations.configure_quantization(self.cfg)
     self.model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant)
