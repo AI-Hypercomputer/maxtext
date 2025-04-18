@@ -132,14 +132,14 @@ def add_xpk_runner_arguments(custom_parser: argparse.ArgumentParser):
   custom_parser.add_argument(
       '--libtpu_version',
       type=str,
-      default='20241009',
+      default='',
       help='version of libtpu-nightly to be benchmarked command.',
   )
   custom_parser.add_argument(
       '--libtpu_type',
       type=str,
       choices=[t.value for t in LibTpuType],
-      default='nightly',
+      default='maxtext-docker',
       help='type of libtpu to be benchmarked command.',
   )
   custom_parser.add_argument(
@@ -211,14 +211,14 @@ def add_on_device_runner_arguments(custom_parser: argparse.ArgumentParser):
   custom_parser.add_argument(
       '--libtpu_version',
       type=str,
-      default='20241009',
+      default='',
       help='version of libtpu-nightly to be benchmarked command.',
   )
   custom_parser.add_argument(
       '--libtpu_type',
       type=str,
       choices=[t.value for t in LibTpuType],
-      default='nightly',
+      default='maxtext-docker',
       help='type of libtpu to be benchmarked command.',
   )
   custom_parser.add_argument(

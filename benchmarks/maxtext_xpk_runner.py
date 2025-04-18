@@ -375,10 +375,17 @@ def build_user_command(
     jax_platforms = 'proxy'
   else:
     if wl_config.libtpu_type == LibTpuType.NIGHTLY:
-      install_libtpu_cmd += (
-          f' python3 -m pip install libtpu-nightly==0.1.dev{wl_config.libtpu_nightly_version} -f'
-          ' https://storage.googleapis.com/libtpu-releases/index.html &&'
-      )
+      if wl_config.libtpu_nightly_version:
+        install_libtpu_cmd += (
+            f' python3 -m pip install libtpu=={wl_config.libtpu_nightly_version} -f'
+            ' https://storage.googleapis.com/libtpu-wheels/index.html &&'
+        )
+      else:
+        # If no version is specified, install the latest stable libtpu.
+        install_libtpu_cmd += (
+            ' python3 -m pip install libtpu --pre -f'
+            ' https://storage.googleapis.com/libtpu-wheels/index.html &&'
+        )
     elif wl_config.libtpu_type == LibTpuType.CUSTOM:
       # In order to use a custom libtpu, put a libtpu.so file in your local
       # working directory.
