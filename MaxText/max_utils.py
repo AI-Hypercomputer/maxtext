@@ -278,7 +278,9 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
       my_process_index = jax.process_index()
       processIndex_to_nodeRank = ocp.multihost.runtime_to_distributed_ids()
       max_logging.log(
-          f"Mapping of IDs: jax-init-info.txt={process_id}, NodeRank={node_rank}, ProcessIndex={my_process_index}, ProcessIndex->NodeRank={processIndex_to_nodeRank}"
+          f"Mapping of IDs: jax-init-info.txt={process_id}, \
+            NodeRank={node_rank}, ProcessIndex={my_process_index}, \
+            ProcessIndex->NodeRank={processIndex_to_nodeRank}"
       )
 
       my_in_pipeline_index = my_process_index % nodes_per_slice
@@ -1142,9 +1144,9 @@ def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool
     # Stack and reshape to interleave
     src_indices = jnp.stack([first_half, second_half], axis=1).reshape(-1)
 
-    
+
   else:
-    
+
     half = cp_size // 2
 
     # Build the 1st and 2nd groups of contiguous‑pair indices:
@@ -1166,7 +1168,7 @@ def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool
 
   # One gather and one reshape
   reordered = jnp.take(reshaped, src_indices, axis=seq_dim)
-  
+
   # Reshape back to original dimensions
   return reordered.reshape(ori_tensor_shape)
 
@@ -1206,13 +1208,12 @@ def reorder_mask_load_balancing(tensor, cp_size: int, seq_dim: int):
     seq_dim: The dimension of the sequence.
   """
 
-  batch_size = tensor.shape[0]
   seq_len = tensor.shape[seq_dim]
   group_size = seq_len // (2 * cp_size)
 
   if cp_size % 2 != 0:
-      raise ValueError(f"{cp_size=} must be a multiple of 2.")
-  
+    raise ValueError(f"{cp_size=} must be a multiple of 2.")
+
   # Need to ensure we have 2 pairs to swap for balancing between cp ranks
   if seq_len % (cp_size * 2) != 0:
     raise ValueError(f"{tensor.shape=} is not a multiple of {cp_size*2=}")
@@ -1236,6 +1237,6 @@ def reorder_mask_load_balancing(tensor, cp_size: int, seq_dim: int):
 
     # One gather and one reshape
   reordered = np.take(reshaped, src_indices, axis=seq_dim)
-  
+
   # Reshape back to original dimensions
   return reordered.reshape(ori_tensor_shape)

@@ -42,8 +42,8 @@ from MaxText.layers import initializers
 from MaxText.layers import linears
 from MaxText.layers import quantizations
 
-import MaxText.max_logging as max_logging
-import MaxText.max_utils as max_utils
+from MaxText import max_logging
+from MaxText import max_utils
 import numpy as np
 
 partial = functools.partial
