@@ -14,6 +14,7 @@
 
 """CLI utility for running inference with interleaved prefill and generate."""
 
+# TODO(patemotter): Move file into MaxText/inference/
 import os
 from typing import Sequence, List
 
