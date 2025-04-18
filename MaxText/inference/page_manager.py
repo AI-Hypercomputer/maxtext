@@ -22,11 +22,12 @@ fixed-size pages, similar to virtual memory systems. Pages are managed globally
 represents an individual request or sequence.
 """
 
+from functools import partial
 import jax
 import jax.numpy as jnp
 from flax import struct
 from typing import Tuple
-from jaxtyping import Array, Integer, Bool, Shaped
+from jaxtyping import Array, Integer, Bool
 
 from MaxText import common_types
 
@@ -38,8 +39,8 @@ PagesInt1d = Integer[Array, "num_pages"]
 GroupsPagesInt2d = Integer[Array, "max_page_groups max_pages_per_group"]
 GroupsInt1d = Integer[Array, "max_page_groups"]
 GroupsBool1d = Bool[Array, "max_page_groups"]
-ScalarInt = Shaped[Integer[Array, ""], ""]
-ScalarBool = Shaped[Bool[Array, ""], ""]
+ScalarInt = Integer[Array, ""]
+ScalarBool = Bool[Array, ""]
 
 
 @struct.dataclass
@@ -109,6 +110,7 @@ def initialize_page_state(
   Returns:
     An initialized `PageState` object with all values set to their defaults (zeros/False).
   """
+  # TODO(patemotter): garbage output for any request that uses page 0
   initial_page_status = jnp.zeros((num_pages,), dtype=jnp.int32)
   initial_page_status = initial_page_status.at[0].set(1)  # Workaround page 0
   return PageState(
@@ -137,6 +139,7 @@ def _find_next_free_page_index(page_status: PagesInt1d) -> ScalarInt:
     (the lowest index >= 1 where `page_status` is 0).
     Returns -1 if no free pages (at index >= 1) are found.
   """
+  # TODO(patemotter): garbage output for any request that uses page 0
   search_status = page_status[1:]
   overall_free_mask = search_status == 0
   next_free_relative = jnp.argmax(overall_free_mask)
@@ -294,6 +297,7 @@ def _update_prefill_pages_for_group(
     return handle_normal_case(None)
 
 
+@partial(jax.jit, static_argnames=("tokens_per_page", "max_pages_per_group"))
 def _update_decode_pages_global(
     page_state: PageState,
     tokens_per_page: int,
