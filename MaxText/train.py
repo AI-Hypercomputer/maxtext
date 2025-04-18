@@ -845,7 +845,7 @@ def train_loop(config, state=None):
       record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
       try:
         example_batch = load_next_batch(data_iterator, example_batch, config)
-        
+
       except Exception as e:  # pylint: disable=broad-except
         max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
         break
