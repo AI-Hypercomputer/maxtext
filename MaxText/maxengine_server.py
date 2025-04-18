@@ -17,7 +17,7 @@
 import jax
 import os
 import sys
-import pathwaysutils  # pylint: disable=unused-import
+# import pathwaysutils  # pylint: disable=unused-import
 from MaxText import pyconfig
 
 from MaxText import maxengine_config
@@ -35,7 +35,7 @@ from jetstream.core import server_lib, config_lib
 
 
 def main(config):
-  pathwaysutils.initialize()
+  # pathwaysutils.initialize()
 
   # No devices for local cpu test. A None for prefill and a None for generate.
   devices = server_lib.get_devices()

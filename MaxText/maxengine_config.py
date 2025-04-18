@@ -69,6 +69,18 @@ def get_server_config(config_str: str, config: Any) -> Type[config_lib.ServerCon
           generate_engine_create_fns=(functools.partial(create_exp_maxengine, config=config),),
           interleaved_engine_create_fns=(),
       )
+    case "ExperimentalMaxtextDisaggregatedServer_8GPU":
+      # ExperimentalMaxtextDisaggregatedServer is still under development.
+      # Its dependencies IFRT Proxy and other components are not publicly available
+      # either.
+      server_config = config_lib.ServerConfig(
+          prefill_slices=("gpu-4",),
+          generate_slices=("gpu-4",),
+          interleaved_slices=(),
+          prefill_engine_create_fns=(functools.partial(create_exp_maxengine, config=config),),
+          generate_engine_create_fns=(functools.partial(create_exp_maxengine, config=config),),
+          interleaved_engine_create_fns=(),
+      )
     case _:
       raise NotImplementedError
   return server_config
