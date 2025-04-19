@@ -14,11 +14,14 @@
 
 import unittest
 
-from MaxText import common_types
+import pytest
+
+import numpy as np
+
 import jax
 import jax.numpy as jnp
-import numpy as np
-import pytest
+
+from MaxText import common_types
 from MaxText.inference.page_manager import PageState
 from MaxText.inference.paged_attention import PagedAttentionOp
 
@@ -1545,11 +1548,11 @@ class PagedAttentionTest(unittest.TestCase):
     outputs = []
 
     # Do prefill
-    output_tuple, vars = self.attention_op.apply(
+    output_tuple, _variables = self.attention_op.apply(
         variables, x1, x1, x1, None, common_types.MODEL_MODE_PREFILL, None, slot=0, page_state=page_state, mutable=["cache"]
     )
     outputs.append(output_tuple[0])
-    variables = vars
+    variables = _variables
 
     # Generate sequence of 16 tokens
     # In real runs we see 16-token sequences repeating

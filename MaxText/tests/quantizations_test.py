@@ -15,19 +15,23 @@ limitations under the License.
 """
 
 """ Tests for the quantizations """
-from jax import numpy as jnp
-from jax import random, lax
-from flax import linen as nn
-import functools
-import numpy as np
-from MaxText import pyconfig
-import pytest
-from MaxText.layers import quantizations
 import unittest
 import os.path
+
+import pytest
+
+import numpy as np
+
+from jax import numpy as jnp
+from jax import random, lax
+
+from flax import linen as nn
+
 from aqt.jax.v2 import aqt_tensor
-from aqt.jax.v2 import calibration
+
 from MaxText.globals import PKG_DIR
+from MaxText import pyconfig
+from MaxText.layers import quantizations
 
 _QUERY_REGEX = ".*/query"
 _VALUE_REGEX = ".*/value"

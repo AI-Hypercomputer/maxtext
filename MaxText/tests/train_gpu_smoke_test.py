@@ -16,7 +16,10 @@ limitations under the License.
 """ Smoke test """
 import os
 import unittest
+from tempfile import gettempdir
+
 from absl.testing import absltest
+
 from MaxText.train import main as train_main
 from MaxText.globals import PKG_DIR
 
@@ -25,12 +28,12 @@ class Train(unittest.TestCase):
   """Smoke test for GPUs."""
 
   def test_tiny_config(self):
-    test_tmpdir = os.environ.get("TEST_TMPDIR")
+    test_tmpdir = os.environ.get("TEST_TMPDIR")  # pylint: disable=unused-variable
     train_main(
         [
             None,
             os.path.join(PKG_DIR, "configs", "gpu_smoke_test.yml"),
-            f"base_output_directory=gs://runner-maxtext-logs",
+            "base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_test",
             r"dataset_path=gs://maxtext-dataset",
             "enable_checkpointing=False",

@@ -15,11 +15,12 @@ limitations under the License.
 
 """ Smoke test for inference microbenchmark"""
 import os.path
-from MaxText import pyconfig
-from MaxText.globals import PKG_DIR
 import pytest
 import unittest
 from absl.testing import absltest
+
+from MaxText import pyconfig
+from MaxText.globals import PKG_DIR
 from MaxText.inference_microbenchmark import run_benchmarks
 from MaxText.tests.globals import TEST_DISABLE_SUBPROCESS_STR, TEST_DISABLE_SUBPROCESS
 
