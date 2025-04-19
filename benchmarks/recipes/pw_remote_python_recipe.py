@@ -34,7 +34,7 @@ def main() -> int:
       device_type="v6e-256",
   )
 
-  xpk_path = "xpk"
+  xpk_path = os.path.join(os.path.expanduser("~"), "xpk")
 
   # Handle command line arguments using args_helper
   should_continue = helper.handle_cmd_args(
