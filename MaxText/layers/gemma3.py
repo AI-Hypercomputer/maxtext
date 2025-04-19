@@ -93,11 +93,7 @@ class Gemma3VisionEncoderLayer(nn.Module):
     cfg = self.config
     print(f"Gemma3VisionEncoderLayer input: {inputs.shape}")
     x = inputs.squeeze(axis=1)
-    x = nn.Conv(features=1152,
-        kernel_size=(14, 14),
-        strides=14,
-        padding="VALID",
-        name="embedding")(x)
+    x = nn.Conv(features=1152, kernel_size=(14, 14), strides=14, padding="VALID", name="embedding")(x)
     n, h, w, c = x.shape
     x = jnp.reshape(x, [n, h * w, c])
     # TODO(hengtaoguo): finish the ViT with posemb, dropout and transformation layers.
