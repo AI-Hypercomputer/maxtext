@@ -1174,7 +1174,6 @@ class Attention(nn.Module):
     Returns:
       The input tensor with rotary embeddings applied.
     """
-    jax.debug.print("inputs_positions {lnx}", lnx=inputs_positions)
     if self.config.attention_type == AttentionType.MLA.value:
       # For MLA attention RoPE is applied to only `self.qk_rope_head_dim` portion the heads.
       rope_embedding_dims = self.qk_rope_head_dim
@@ -1327,8 +1326,6 @@ class Attention(nn.Module):
 
 
     if use_rope:
-      if query.shape[1] != 16:
-        query = np.load("query_before_rope_hf.npy")
       query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
       key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
 
@@ -1338,10 +1335,6 @@ class Attention(nn.Module):
       l2_norm = L2Norm(self.config.normalization_layer_epsilon)
       query = l2_norm(query)
       key = l2_norm(key)
-
-    jax.debug.print("midwayq {lnx}", lnx=query)
-    jax.debug.print("midwayk {lnx}", lnx=key)
-    jax.debug.print("midwayv {lnx}", lnx=value)
 
     # apply query_pre_attn_scalar if it's present.
     if self.query_pre_attn_scalar and self.query_pre_attn_scalar != 1.0:

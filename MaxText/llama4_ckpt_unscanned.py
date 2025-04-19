@@ -191,9 +191,9 @@ def _hf_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1) -> dict:
       f"language_model.model.layers.{layer_idx}.feed_forward.experts.down_proj": f"layers.{layer_idx}.feed_forward.experts.down_proj",
       # Note that this contains up_proj and gate_proj concated together (we'll split/chunk them later)
       f"language_model.model.layers.{layer_idx}.feed_forward.experts.gate_up_proj": f"layers.{layer_idx}.feed_forward.experts.gate_up_proj",
-      f"language_model.model.layers.{layer_idx}.feed_forward.shared_expert.gate_proj.weight": f"layers.{layer_idx}.feed_forward.shared_experts.up_proj.weight",
-      f"language_model.model.layers.{layer_idx}.feed_forward.shared_expert.down_proj.weight": f"layers.{layer_idx}.feed_forward.shared_experts.gate_proj.weight",
-      f"language_model.model.layers.{layer_idx}.feed_forward.shared_expert.up_proj.weight": f"layers.{layer_idx}.feed_forward.shared_experts.down_proj.weight",
+      f"language_model.model.layers.{layer_idx}.feed_forward.shared_expert.gate_proj.weight": f"layers.{layer_idx}.feed_forward.shared_experts.gate_proj.weight",
+      f"language_model.model.layers.{layer_idx}.feed_forward.shared_expert.down_proj.weight": f"layers.{layer_idx}.feed_forward.shared_experts.down_proj.weight",
+      f"language_model.model.layers.{layer_idx}.feed_forward.shared_expert.up_proj.weight": f"layers.{layer_idx}.feed_forward.shared_experts.up_proj.weight",
       # FFN
       f"language_model.model.layers.{layer_idx}.feed_forward.up_proj.weight": f"layers.{layer_idx}.feed_forward.w1.weight",
       f"language_model.model.layers.{layer_idx}.feed_forward.gate_proj.weight": f"layers.{layer_idx}.feed_forward.w3.weight",
@@ -344,7 +344,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
         max_logging.log("Skipping permute_to_match_maxtext_rope because model is a Llama3 variant or has RoPE Type Llama3.1")
         has_printed_warning = True
 
-    w_post = chkpt_vars[f"layers.{layer_idx}.attention.wo.weight"].to(torch.float32).numpy().astype(CAST_DTYPE)
+    w_post = chkpt_vars[f"layers.{layer_idx}.attention.wo.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
 
     w_post = w_post = np.reshape(w_post, [base_num_query_heads, head_dim, base_num_query_heads * head_dim])
 
@@ -386,10 +386,10 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     is_dense_layer = (layer_idx + 1) % interleave_moe_layer != 0
     if is_dense_layer:
       wi_0 = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.w1.weight"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.w3.weight"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
       )
       wi_1 = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.w3.weight"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.w1.weight"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
       )
       wo = (
           chkpt_vars[f"layers.{layer_idx}.feed_forward.w2.weight"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
@@ -436,6 +436,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
           .type(torch.float32)
           .numpy()
           .astype(CAST_DTYPE)
+          .transpose()
       )
 
       wo = (
@@ -443,6 +444,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
           .type(torch.float32)
           .numpy()
           .astype(CAST_DTYPE)
+          .transpose()
       )
 
       # TODO: make this optional for setups that don't use shared experts

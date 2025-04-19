@@ -28,7 +28,7 @@ We have used MaxText to [demonstrate high-performance, well-converging training 
 Key supported features:
 * TPUs and GPUs
 * Training and Inference
-* Models: Llama 2, Llama 3, Mistral and Mixtral family, Gemma, Gemma 2, Gemma 3, and DeepSeek family
+* Models: Llama 2, Llama 3, Llama 4, Mistral and Mixtral family, Gemma, Gemma 2, Gemma 3, and DeepSeek family
 
 ## Announcements
 * [Apr 14, 2025] Llama 4 Scout models are now supported. Context length is currently limited to 8k and we have many ideas for optimization but we're working on both these things.  Note that models are text-only for now, but we're working on full multi-modal support!
