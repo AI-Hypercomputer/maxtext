@@ -199,7 +199,7 @@ class GrainParquetProcessingTest(unittest.TestCase):
     self.assertTrue((train_batch1["targets"] == train_batch2["targets"]).all())  # pytype: disable=unsupported-operands
 
 
-if __name__ == "__main__":
+def main():
   temp_dir = tempfile.gettempdir()
   script_path = os.path.join(os.path.dirname(PKG_DIR), "setup_gcsfuse.sh")
   if not os.path.isfile(script_path):
@@ -210,3 +210,7 @@ if __name__ == "__main__":
   if exit_code != 0:
     raise ValueError(f"Running setup_gcsfuse.sh failed with exit code: {exit_code}")
   unittest.main()
+
+
+if __name__ == "__main__":
+  main()

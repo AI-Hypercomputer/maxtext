@@ -14,14 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from MaxText.tests.globals import TEST_DISABLE_SUBPROCESS, TEST_DISABLE_SUBPROCESS_STR
-
-"""Integraion tests for test_generate_param_only_checkpoint.sh"""
+"""Integration tests for test_generate_param_only_checkpoint.sh"""
 from datetime import datetime
 import subprocess
 import os.path
 import pytest
+
 from MaxText.globals import PKG_DIR
+from MaxText.tests.globals import TEST_DISABLE_SUBPROCESS, TEST_DISABLE_SUBPROCESS_STR
 
 
 def run_generate_param_only_checkpoint(attention_type, quantization):

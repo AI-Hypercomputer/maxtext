@@ -14,8 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-"""Integraion test for pedagogical_examples/shmap_collective_matmul.py"""
-import subprocess
+"""Integration test for pedagogical_examples/shmap_collective_matmul.py"""
+
 import os.path
 import sys
 import pytest
