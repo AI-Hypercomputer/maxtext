@@ -147,7 +147,7 @@ def apply_mask_to_logits(logits: Array, mask: Array):
 class ChunkedCausalMask(splash_attention_mask._ComputableMask):
   """Lazy chunked causal mask.
 
-  Attention is causal within each chunk (0, K), (K, 2K), (2K, 3K), ... tokens attend to each other but not accross chunks.
+  Attention is causal within each chunk (0, K), (K, 2K), (2K, 3K), ... tokens attend to each other but not across chunks.
   Llama4 models use interleaved chunk attention along with global attention.
 
   This mask class inherits from splash_attention_mask._ComputableMask and is designed to be used with Splash Attention.
@@ -521,6 +521,7 @@ class AttentionOp(nn.Module):
     if decoder_segment_ids is not None:
       decoder_segment_ids = splash_attention_kernel.SegmentIds(decoder_segment_ids, decoder_segment_ids)
     axis_names = nn.logical_to_mesh_axes(self.flash_axis_names)
+    breakpoint()
     segment_axis_names = nn.logical_to_mesh_axes((BATCH, "activation_length_no_heads"))
 
     global_block_q = self.config.sa_block_q

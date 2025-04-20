@@ -203,7 +203,7 @@ class Decoder(nn.Module):
       pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer[0])
       remat_policy = self.get_remat_policy()
       self.pipeline_module = pipeline.Pipeline(
-          config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
+          config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy, logical_axis_rules_pp=self.config.pipeline_logical_axis_rules
       )
 
   def get_remat_policy(self):
