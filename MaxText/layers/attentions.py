@@ -521,7 +521,6 @@ class AttentionOp(nn.Module):
     if decoder_segment_ids is not None:
       decoder_segment_ids = splash_attention_kernel.SegmentIds(decoder_segment_ids, decoder_segment_ids)
     axis_names = nn.logical_to_mesh_axes(self.flash_axis_names)
-    breakpoint()
     segment_axis_names = nn.logical_to_mesh_axes((BATCH, "activation_length_no_heads"))
 
     global_block_q = self.config.sa_block_q

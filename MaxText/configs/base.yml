@@ -189,6 +189,8 @@ scan_pipeline_iterations: True
 set_remat_policy_on_pipeline_iterations: True
 set_remat_policy_on_layers_per_stage: False
 
+pipeline_parallel_layers: -1 # pipeline only a subset of all of the decoder layers, useful when the total number of layers does not have friendly divisors.
+
 
 # Choose 'remat_policy' between 'minimal', 'save_dot_with_context_except_mlp', 'save_dot_except_mlpwi', 'save_dot_except_mlp',
 # 'save_qkv_proj', 'qkv_proj_offloaded', 'custom', 'minimal_offloaded', 'save_out_proj' and 'full'.
@@ -331,7 +333,7 @@ logical_axis_rules: [
 pipeline_logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
-                      ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']], # We always use this one now?
+                      ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']], # This isn't used inside the PP loop anyway, but probably you should remove stage (this axes should be removed completely)
                       ['activation_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence','autoregressive']],
                       ['activation_kv_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
                       ['activation_length', ['sequence', 'context']],
