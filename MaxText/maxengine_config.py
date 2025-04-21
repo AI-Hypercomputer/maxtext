@@ -21,11 +21,11 @@ from typing import Any, Type
 from jetstream.core import config_lib
 from jetstream.engine import engine_api
 from MaxText import maxengine
-
+from MaxText import common_types
 
 # TODO: merge it with the above create_maxengine().
-def create_exp_maxengine(devices: config_lib.Devices, config: Any) -> engine_api.Engine:
-  return maxengine.MaxEngine(config=config, devices=devices)
+def create_exp_maxengine(devices: config_lib.Devices, config: Any, disagg_model_mode=common_types.MODEL_MODE_PREFILL) -> engine_api.Engine:
+  return maxengine.MaxEngine(config=config, devices=devices, disagg_model_mode=disagg_model_mode)
 
 
 def create_maxengine(devices: config_lib.Devices, config: Any) -> engine_api.Engine:
@@ -67,6 +67,18 @@ def get_server_config(config_str: str, config: Any) -> Type[config_lib.ServerCon
           interleaved_slices=(),
           prefill_engine_create_fns=(functools.partial(create_exp_maxengine, config=config),),
           generate_engine_create_fns=(functools.partial(create_exp_maxengine, config=config),),
+          interleaved_engine_create_fns=(),
+      )
+    case "ExperimentalMaxtextDisaggregatedServer_8GPU":
+      # ExperimentalMaxtextDisaggregatedServer is still under development.
+      # Its dependencies IFRT Proxy and other components are not publicly available
+      # either.
+      server_config = config_lib.ServerConfig(
+          prefill_slices=("gpu-4",),
+          generate_slices=("gpu-4",),
+          interleaved_slices=(),
+          prefill_engine_create_fns=(functools.partial(create_exp_maxengine, config=config, disagg_model_mode=common_types.MODEL_MODE_PREFILL),),
+          generate_engine_create_fns=(functools.partial(create_exp_maxengine, config=config, disagg_model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE),),
           interleaved_engine_create_fns=(),
       )
     case _:

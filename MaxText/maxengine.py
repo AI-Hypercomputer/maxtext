@@ -102,12 +102,14 @@ class MaxEngine(engine_api.Engine):
   JetStream efficient serving infrastructure.
   """
 
-  def __init__(self, config: Any, devices: config_lib.Devices | None = None):
+  def __init__(self, config: Any, devices: config_lib.Devices | None = None, disagg_model_mode = common_types.MODEL_MODE_PREFILL):
     self.config = config
 
     # Mesh definition
     devices_array = maxtext_utils.create_device_mesh(config=config, devices=devices)
     self._mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
+
+    self.global_batch_size = int(self.config.per_device_batch_size * self._mesh.size)
 
     # Model and Optimizer definition
     quant = quantizations.configure_quantization(config)
@@ -144,6 +146,10 @@ class MaxEngine(engine_api.Engine):
           max_prefill_length=1,
       )
     self.page_state = self.page_manager.get_initial_page_state()
+    if disagg_model_mode == common_types.MODEL_MODE_PREFILL:
+      self.disagg_model_mode=0
+    else:
+      self.disagg_model_mode=1
 
   def print_stats(self, label: str):
     max_utils.print_mem_stats(label)
@@ -325,31 +331,63 @@ class MaxEngine(engine_api.Engine):
     lora_scale_factor = float(adapter_config["lora_alpha"]) / lora_rank
     lora_utils.unapply_lora_from_base_params(base_params, adapter_params, lora_scale_factor)
 
-  def quantize_params(self, state, rng: Optional[PRNGKeyType] = None):
+  def quantize_params(self, state, rng: Optional[PRNGKeyType] = None, ):
     """Forward pass to quantize decode params."""
     if rng is None:
       rng = jax.random.PRNGKey(0)
 
     self.model.quant.quant_mode = quantizations.get_quant_mode("convert")
 
-    @jax.jit
-    def model_apply(_p, _rng):
-      return self.model.apply(
-          _p | {"aqt": {}},
-          jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-          jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-          decoder_segment_ids=jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
-          enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_PREFILL,
-          rngs={"params": _rng},
-          mutable=True,
-      )
+    # if self.disagg_model_mode == common_types.MODEL_MODE_PREFILL:
+    #   batch_size = 1
+    #   sequence_length = self.config.max_prefill_predict_length
+    # else:
+    #   batch_size = self.global_batch_size
+    #   sequence_length = 1
 
-    _, new_vars = model_apply(state.params, rng)
+    batch_size = 1
+    sequence_length = self.config.max_prefill_predict_length
+
+    print(f'YYY {batch_size=}, {sequence_length=}')
+    input_id = jax.device_put(jnp.ones((batch_size, sequence_length), dtype=jnp.int32), self.replicated_sharding)
+    position_id = jax.device_put(jnp.ones((batch_size, sequence_length), dtype=jnp.int32), self.replicated_sharding)
+    decoder_segment_id = jax.device_put(jnp.zeros((batch_size, sequence_length), dtype=jnp.int32), self.replicated_sharding)
+
+    rng = jax.device_put(rng, self.replicated_sharding)
+    with self._mesh:
+      def model_apply(_p, _rng, input_id, position_id, decoder_segment_id, compilation_key):
+        return self.model.apply(
+            _p | {"aqt": {}},
+            input_id,
+            position_id,
+            decoder_segment_ids=decoder_segment_id,
+            enable_dropout=False,
+            model_mode=common_types.MODEL_MODE_PREFILL,
+            rngs={"params": _rng},
+            mutable=True,
+        ), compilation_key
+
+    param_shardings = jax.tree_util.tree_map(lambda x: x.sharding, state.params)
+    in_shardings = (
+        param_shardings,
+        self.replicated_sharding,
+        self.replicated_sharding,
+        self.replicated_sharding,
+        self.replicated_sharding,
+    )
+    print(f"input_id shape: {input_id.shape}, devices: {input_id.devices()}")
+    print(f"position_id shape: {position_id.shape}, devices: {position_id.devices()}")
+    print(f"decoder_segment_id shape: {decoder_segment_id.shape}, devices: {decoder_segment_id.devices()}")
+
+    with self._mesh:
+      model_apply = jax.jit(model_apply, in_shardings=in_shardings, out_shardings=None, static_argnums=(5,), static_argnames=("compilation_key",))
+      (_, new_vars), _ = model_apply(state.params, rng, input_id, position_id, decoder_segment_id, self.disagg_model_mode)
+
     # Remove param values which have corresponding qtensors in aqt to save memory.
     params = {}
     params["aqt"] = new_vars["aqt"]
     params["params"] = quantizations.remove_quantized_params(state.params["params"], new_vars["aqt"])
+
     self.abstract_params = jax.tree_util.tree_map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding),
         params,
@@ -1281,7 +1319,7 @@ class MaxEngine(engine_api.Engine):
     # pylint: disable=unused-argument
     def init(abstract_params, page_state):
       x = jnp.ones(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
+          (self.global_batch_size, 1),
           dtype=jnp.int32,
       )
       _, cache = self.model.apply(
@@ -1297,21 +1335,21 @@ class MaxEngine(engine_api.Engine):
       )
 
       next_pos = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
+          (self.global_batch_size, 1),
           dtype=jnp.int32,
       )
       generated_tokens = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
+          (self.global_batch_size, 1),
           dtype=jnp.int32,
       )
       tokens = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
+          (self.global_batch_size, 1),
           dtype=jnp.int32,
       )
       return {
           "logits": jnp.zeros(
               (
-                  int(self.config.per_device_batch_size * jax.device_count()),
+                  self.global_batch_size,
                   1,
                   self.config.vocab_size,
               )
@@ -1351,7 +1389,7 @@ class MaxEngine(engine_api.Engine):
   @property
   def max_concurrent_decodes(self) -> int:
     """Free slots."""
-    return int(self.config.per_device_batch_size * jax.device_count())
+    return self.global_batch_size
 
   @property
   def max_prefill_length(self) -> int:
