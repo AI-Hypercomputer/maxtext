@@ -424,7 +424,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
 
       # shared experts
       wi_0 = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.up_proj.weight"]
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.gate_proj.weight"]
           .type(torch.float32)
           .numpy()
           .astype(CAST_DTYPE)
@@ -432,7 +432,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
       )
 
       wi_1 = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.gate_proj.weight"]
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.shared_experts.up_proj.weight"]
           .type(torch.float32)
           .numpy()
           .astype(CAST_DTYPE)

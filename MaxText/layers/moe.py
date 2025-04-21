@@ -978,6 +978,8 @@ class DeepSeekMoeBlock(nn.Module):
         quant=self.quant,
     )(inputs)
 
+    jax.debug.print("shared_experts")
+
     shared_experts = linears.MlpBlock(
         intermediate_dim=cfg.shared_experts * cfg.moe_mlp_dim,
         activations=cfg.mlp_activations,
