@@ -83,11 +83,11 @@ class MaxEngineTest(unittest.TestCase):
     )
     engine = MaxEngine(config, jax.devices())
     num_layers = engine.config.num_decoder_layers
-    input = {
+    input_d = {
         "decoder": {},
     }
     for i in range(num_layers):
-      input["decoder"][f"layers_{i}"] = {
+      input_d["decoder"][f"layers_{i}"] = {
           "a": jnp.ones((1, 10)),
           "b": jnp.ones((1, 9)),
       }
@@ -96,11 +96,11 @@ class MaxEngineTest(unittest.TestCase):
         "a": jnp.ones((num_layers, 1, 10)),
         "b": jnp.ones((num_layers, 1, 9)),
     }
-    got_stacked = engine._maybe_stack_prefill_result_cache(input)
+    got_stacked = engine._maybe_stack_prefill_result_cache(input_d)
     jax.tree.map(np.testing.assert_array_equal, got_stacked, expected_stacked)
 
     got_unstacked = engine._maybe_unstack_prefill_result_cache(got_stacked)
-    jax.tree.map(np.testing.assert_array_equal, got_unstacked, input)
+    jax.tree.map(np.testing.assert_array_equal, got_unstacked, input_d)
 
   def test_basic_prefill(self):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)

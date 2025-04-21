@@ -30,7 +30,7 @@ class DecodeTests(unittest.TestCase):
       "base": [  # tests decode
           None,
           os.path.join(PKG_DIR, "configs", "base.yml"),
-          r"base_output_directory=gs://runner-maxtext-logs",
+          rf"base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           r"dataset_path=gs://maxtext-dataset",
           "steps=2",
@@ -43,7 +43,7 @@ class DecodeTests(unittest.TestCase):
       "int8": [  # tests decode with int8 quantization
           None,
           os.path.join(PKG_DIR, "configs", "base.yml"),
-          r"base_output_directory=gs://runner-maxtext-logs",
+          rf"base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           r"dataset_path=gs://maxtext-dataset",
           "steps=2",
@@ -58,7 +58,7 @@ class DecodeTests(unittest.TestCase):
       "pdb_lt_1": [  # tests decode with per_device_batch_size < 1
           None,
           os.path.join(PKG_DIR, "configs", "base.yml"),
-          r"base_output_directory=gs://runner-maxtext-logs",
+          rf"base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
           r"dataset_path=gs://maxtext-dataset",
           "steps=2",

@@ -44,7 +44,7 @@ class GradientAccumulationTest(unittest.TestCase):
     shared_maxtext_args = [
         None,
         os.path.join(PKG_DIR, "configs", "base.yml"),
-        r"base_output_directory=gs://runner-maxtext-logs",
+        rf"base_output_directory=gs://runner-maxtext-logs",
         r"dataset_path=gs://maxtext-dataset",
         "gradient_clipping_threshold=0",  # Ensures we are testing raw scales of gradients (clipping off)
         "enable_checkpointing=False",
@@ -77,8 +77,8 @@ class GradientAccumulationTest(unittest.TestCase):
 
     # Assert losses roughly equal
     with (
-        open(run_accumulate_metrics_file, "r", encoding="utf8") as accum_run,
-        open(run_regular_metrics_file, "r", encoding="utf8") as regular_run,
+        open(run_accumulate_metrics_file, "rt", encoding="utf8") as accum_run,
+        open(run_regular_metrics_file, "rt", encoding="utf8") as regular_run,
     ):
       accum_run_loss = json.loads(accum_run.readlines()[-1])["learning/loss"]
       regular_run_loss = json.loads(regular_run.readlines()[-1])["learning/loss"]
@@ -89,8 +89,8 @@ class GradientAccumulationTest(unittest.TestCase):
 
     # Assert grad norms roughly equal
     with (
-        open(run_accumulate_metrics_file, "r", encoding="utf8") as accum_run,
-        open(run_regular_metrics_file, "r", encoding="utf8") as regular_run,
+        open(run_accumulate_metrics_file, "rt", encoding="utf8") as accum_run,
+        open(run_regular_metrics_file, "rt", encoding="utf8") as regular_run,
     ):
       accum_run_grad_norm = json.loads(accum_run.readlines()[-1])["learning/raw_grad_norm"]
       regular_run_grad_norm = json.loads(regular_run.readlines()[-1])["learning/raw_grad_norm"]
@@ -101,8 +101,8 @@ class GradientAccumulationTest(unittest.TestCase):
 
     # Assert per device tflops are the same (10x smaller microbatch size, but 10x more microbatches)
     with (
-        open(run_accumulate_metrics_file, "r", encoding="utf8") as accum_run,
-        open(run_regular_metrics_file, "r", encoding="utf8") as regular_run,
+        open(run_accumulate_metrics_file, "rt", encoding="utf8") as accum_run,
+        open(run_regular_metrics_file, "rt", encoding="utf8") as regular_run,
     ):
       accum_device_tflops = json.loads(accum_run.readlines()[-1])["perf/per_device_tflops"]
       regular_device_tflops = json.loads(regular_run.readlines()[-1])["perf/per_device_tflops"]

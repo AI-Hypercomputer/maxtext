@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-"""Integraion tests for test_checkpointing.sh"""
+"""Integration tests for test_checkpointing.sh"""
 from datetime import datetime
 import subprocess
 import os.path

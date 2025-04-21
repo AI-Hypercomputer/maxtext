@@ -16,25 +16,29 @@
 Runs SFT trainer correctness with TRL implementation.
 
 Usage:
-python3 -m MaxText.tests.sft_trainer_correctness --model-name=llama3.1-8b --tokenizer-path=meta-llama/Llama-3.1-8B --model-ckpt-path=gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items
+python3 -m MaxText.tests.sft_trainer_correctness \
+  --model-name=llama3.1-8b \
+  --tokenizer-path=meta-llama/Llama-3.1-8B \
+  --model-ckpt-path=gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items
 """
 
 import argparse
-import jax
-import jax.numpy as jnp
 import jsonlines
-import numpy as np
 import os
 import sys
 
-from jax.sharding import Mesh
-from transformers import AutoTokenizer
+import numpy as np
 
-from MaxText.globals import PKG_DIR
+from jax.sharding import Mesh
+import jax
+import jax.numpy as jnp
+
+from transformers import AutoTokenizer
 
 from MaxText import max_logging
 from MaxText import maxtext_utils
 from MaxText import pyconfig
+from MaxText.globals import PKG_DIR
 from MaxText.input_pipeline import _input_pipeline_utils
 from MaxText.layers import models
 from MaxText.layers import quantizations
@@ -176,7 +180,7 @@ def get_argument_parser():
 
 
 if __name__ == "__main__":
-  parser = get_argument_parser()
-  test_args = parser.parse_args(sys.argv[1:])
-  config = initialize_config(test_args)
-  main(config, test_args)
+  _parser = get_argument_parser()
+  _test_args = _parser.parse_args(sys.argv[1:])
+  _config = initialize_config(_test_args)
+  main(_config, _test_args)

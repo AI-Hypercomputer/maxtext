@@ -229,7 +229,7 @@ class PipelineParallelismTest(unittest.TestCase):
         [
             None,
             os.path.join(PKG_DIR, "configs", "base.yml"),
-            r"base_output_directory=gs://runner-maxtext-logs",
+            rf"base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_pipeline_parallelism_test",
             r"dataset_path=gs://maxtext-dataset",
             "base_emb_dim=28",
@@ -276,7 +276,7 @@ class PipelineParallelismTest(unittest.TestCase):
         [
             None,
             os.path.join(PKG_DIR, "configs", "base.yml"),
-            r"base_output_directory=gs://runner-maxtext-logs",
+            rf"base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_pipeline_parallelism_test",
             r"dataset_path=gs://maxtext-dataset",
             "base_emb_dim=28",
@@ -306,7 +306,7 @@ class PipelineParallelismTest(unittest.TestCase):
         [
             None,
             os.path.join(PKG_DIR, "configs", "base.yml"),
-            r"base_output_directory=gs://runner-maxtext-logs",
+            rf"base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_pipeline_parallelism_fp8_test",
             r"dataset_path=gs://maxtext-dataset",
             "base_emb_dim=28",
@@ -336,7 +336,7 @@ class PipelineParallelismTest(unittest.TestCase):
         [
             None,
             os.path.join(PKG_DIR, "configs", "base.yml"),
-            r"base_output_directory=gs://runner-maxtext-logs",
+            rf"base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_pipeline_parallelism_nanoo_fp8_test",
             r"dataset_path=gs://maxtext-dataset",
             "base_emb_dim=28",
