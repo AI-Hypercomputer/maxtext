@@ -15,12 +15,14 @@ limitations under the License.
 """
 
 """ Tests for the common Max Utils """
+
 import unittest
 import os.path
-import pytest
 from tempfile import gettempdir
+
+import pytest
+
 from MaxText.train_compile import main as train_compile_main
-from MaxText.train import main as train_main
 from MaxText.globals import PKG_DIR
 
 
@@ -477,7 +479,7 @@ class TrainCompile(unittest.TestCase):
             "megablox=False",
             "per_device_batch_size=2",
             "max_target_length=1024",
-            "attention=dot_product",  # Change to flush attention once it works for MLA
+            "attention=dot_product",  # Change to flash attention once it works for MLA
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
             "scan_layers=True",
@@ -502,7 +504,7 @@ class TrainCompile(unittest.TestCase):
             "megablox=False",
             "per_device_batch_size=1",
             "max_target_length=1024",
-            "attention=dot_product",  # Change to flush attention once it works for MLA
+            "attention=dot_product",  # Change to flash attention once it works for MLA
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
             "scan_layers=False",
@@ -525,7 +527,7 @@ class TrainCompile(unittest.TestCase):
             "megablox=False",
             "per_device_batch_size=1",
             "max_target_length=1024",
-            "attention=dot_product",  # Change to flush attention once it works for MLA
+            "attention=dot_product",  # Change to flash attention once it works for MLA
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
             "n_routing_groups=8",

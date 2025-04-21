@@ -13,10 +13,11 @@
 #  limitations under the License.
 
 """
-Runs GRPO trainer unit test correctness with golden logits generated from maxtext/MaxText/scratch_code/generate_grpo_golden_logits.py
+Runs GRPO trainer unit test correctness with golden logits generated
+  from maxtext/MaxText/scratch_code/generate_grpo_golden_logits.py
 
 Usage:
-pytest MaxText/tests/grpo_trainer_correctness_test.py
+  pytest MaxText/tests/grpo_trainer_correctness_test.py
 """
 
 import functools
