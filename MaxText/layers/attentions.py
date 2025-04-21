@@ -997,6 +997,10 @@ class Attention(nn.Module):
   ragged_block_size: int = 256
   use_qk_norm: bool = False
   query_pre_attn_scalar: float | None = None
+  # Temperature tuning parameters used for Llama4
+  temperature_tuning: bool = False
+  temperature_tuning_scale: float = 0.1
+  temperature_tuning_floor_scale: float = 8192.0
 
   # Shard the query activation as the same as the key and value.
   # TODO: Find a better sharding axis name.
@@ -1281,24 +1285,25 @@ class Attention(nn.Module):
       query = self.query_projection(inputs_q)
       key = self.kv_projection(inputs_kv, proj_name="key")
       value = self.kv_projection(inputs_kv, proj_name="value")
-      is_llama4_decoder_block = self.config.decoder_block == "llama4"
-      # NOTE: llama 4 does L2 normalization after RoPE
-      if self.use_qk_norm and not is_llama4_decoder_block:
-        query = RMSNorm(
-            dtype=self.config.dtype,
-            weight_dtype=self.config.weight_dtype,
-            name="query_norm",
-            epsilon=self.config.normalization_layer_epsilon,
-            kernel_axes=("norm",),
-        )(query)
 
-        key = RMSNorm(
-            dtype=self.config.dtype,
-            weight_dtype=self.config.weight_dtype,
-            name="key_norm",
-            epsilon=self.config.normalization_layer_epsilon,
-            kernel_axes=("norm",),
-        )(key)
+    is_llama4_decoder_block = self.config.decoder_block == "llama4"
+    # NOTE: llama 4 does L2 normalization after RoPE
+    if self.use_qk_norm and not is_llama4_decoder_block:
+      query = RMSNorm(
+          dtype=self.config.dtype,
+          weight_dtype=self.config.weight_dtype,
+          name="query_norm",
+          epsilon=self.config.normalization_layer_epsilon,
+          kernel_axes=("norm",),
+      )(query)
+
+      key = RMSNorm(
+          dtype=self.config.dtype,
+          weight_dtype=self.config.weight_dtype,
+          name="key_norm",
+          epsilon=self.config.normalization_layer_epsilon,
+          kernel_axes=("norm",),
+      )(key)
 
     # NOTE: is_nope_layer should be used in attention mask and also used in attention tuning
     use_rope = not self.is_nope_layer
@@ -1316,6 +1321,14 @@ class Attention(nn.Module):
     # apply query_pre_attn_scalar if it's present.
     if self.query_pre_attn_scalar and self.query_pre_attn_scalar != 1.0:
       query = query * self.query_pre_attn_scalar
+
+    if self.temperature_tuning and not self.use_rope:
+      attn_scales = (
+          jnp.log(jnp.floor((inputs_positions.astype(self.dtype) + 1.0) / self.temperature_tuning_floor_scale) + 1.0)
+          * self.temperature_tuning_scale
+          + 1.0
+      )
+      query = (query * attn_scales[:, :, jnp.newaxis, jnp.newaxis]).astype(self.dtype)
 
     if model_mode == common_types.MODEL_MODE_PREFILL:
       query = nn.with_logical_constraint(query, self.prefill_query_axis_names)
