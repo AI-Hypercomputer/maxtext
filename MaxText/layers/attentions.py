@@ -143,12 +143,6 @@ def apply_mask_to_logits(logits: Array, mask: Array):
   return jnp.where((mask >= DEFAULT_MASK_VALUE * 0.5), logits, DEFAULT_MASK_VALUE)
 
 
-def save_np_array(name, arr):
-  np.save(name, arr)
-  if name == "query_after_rope_same_input":
-    raise ValueError
-
-
 # TODO(agagik): change splash_attention_mask._ComputableMask to be non protected
 class ChunkedCausalMask(splash_attention_mask._ComputableMask):
   """Lazy chunked causal mask.
@@ -1181,6 +1175,7 @@ class Attention(nn.Module):
       rope_embedding_dims = self.head_dim
 
     rope_type = self.config.rope_type.lower()
+    rope_use_scale = self.config.rope_use_scale
     if self.config.model_name.startswith("llama3.1") or rope_type.startswith("llama3.1"):
       rotary_embedding = embeddings.LLaMARotaryEmbedding(
           min_timescale=self.config.rope_min_timescale,
@@ -1188,6 +1183,7 @@ class Attention(nn.Module):
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
           name=name,
+          use_scale=rope_use_scale,
       )
     elif rope_type.startswith("yarn"):
       rotary_embedding = YarnRotaryEmbedding(
@@ -1287,8 +1283,6 @@ class Attention(nn.Module):
       key = self.kv_projection(inputs_kv, proj_name="key")
       value = self.kv_projection(inputs_kv, proj_name="value")
       is_llama4_decoder_block = self.config.decoder_block == "llama4"
-
-
       # NOTE: llama 4 does L2 normalization after RoPE
       if self.use_qk_norm and not is_llama4_decoder_block:
         query = RMSNorm(
@@ -1324,12 +1318,9 @@ class Attention(nn.Module):
     # jax.debug.print("before norm v shape {lnx}", lnx=value.shape)
     # jax.debug.print("before norm v mean {lnx}", lnx=value.mean())
 
-
     if use_rope:
       query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
       key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
-
-    # jax.debug.callback(save_np_array, "query_after_rope_same_input", query)
 
     if use_qk_norm and is_llama4_decoder_block:
       l2_norm = L2Norm(self.config.normalization_layer_epsilon)

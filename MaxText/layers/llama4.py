@@ -130,6 +130,7 @@ class Llama4DecoderLayer(nn.Module):
     cfg = self.config
     mesh = self.mesh
     import jax
+
     assert (
         cfg.num_experts > 1
     ), "Expected the Llama4 config to have num_experts > 1.  Note that MaxText only supports Llama4 Scout (MoE-only) for now!"
@@ -144,7 +145,6 @@ class Llama4DecoderLayer(nn.Module):
         epsilon=cfg.normalization_layer_epsilon,
     )
     lnx = lnx_rms(inputs)
-
 
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
     # Instead of scaling the query values in the checkpoint conversion (`llama_or_mistral_ckpt`)

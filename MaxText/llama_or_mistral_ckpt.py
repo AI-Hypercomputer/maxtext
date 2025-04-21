@@ -136,7 +136,7 @@ MODEL_PARAMS_DICT = {
         "interleave_moe_layer_step": 1,
     },
     "llama4-17b-128e": {
-        "num_layers": 4, # TODO
+        "num_layers": 48,
         "num_heads": 40,
         "num_kv_heads": 8,
         "dims_per_head": 128,

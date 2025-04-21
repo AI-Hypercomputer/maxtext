@@ -30,6 +30,7 @@ vocab_size: 202048
 normalization_layer_epsilon: 1e-05
 rope_max_timescale: 500000
 rope_type: "llama3.1"
+rope_use_scale: False # NOTE: this
 num_experts: 128
 capacity_factor: -1.0 # TODO: this will be removed once we support dropless with megablox/ragged_dot
 shared_experts: 1

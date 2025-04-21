@@ -163,6 +163,7 @@ def convert_to_jax_weights(base_model_path: str, model_size: str, huggingface_ck
 
   return _convert_pytorch_to_jax_weights(base_model_path, model_size, model_params, mem_info)
 
+
 # TODO: just import?
 def _hf_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1) -> dict:
   """
@@ -198,8 +199,6 @@ def _hf_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1) -> dict:
       f"language_model.model.layers.{layer_idx}.feed_forward.up_proj.weight": f"layers.{layer_idx}.feed_forward.w1.weight",
       f"language_model.model.layers.{layer_idx}.feed_forward.gate_proj.weight": f"layers.{layer_idx}.feed_forward.w3.weight",
       f"language_model.model.layers.{layer_idx}.feed_forward.down_proj.weight": f"layers.{layer_idx}.feed_forward.w2.weight",
-
-
   }
 
 
@@ -399,25 +398,24 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
       jax_weights["decoder"][layer_name]["mlp"]["wo"]["kernel"] = wo
 
     else:
-      gate = chkpt_vars[f"layers.{layer_idx}.feed_forward.gate.weight"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+      gate = (
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.gate.weight"]
+          .type(torch.float32)
+          .numpy()
+          .astype(CAST_DTYPE)
+          .transpose()
+      )
       jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["gate"]["kernel"] = gate
 
       # routed experts
       wi_0_1 = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.gate_up_proj"]
-          .type(torch.float32)
-          .numpy()
-          .astype(CAST_DTYPE)
+          chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.gate_up_proj"].type(torch.float32).numpy().astype(CAST_DTYPE)
       )
+      # pylint: disable=unbalanced-tuple-unpacking
       wi_0, wi_1 = np.split(wi_0_1, 2, axis=-1)
       del wi_0_1
 
-      wo = (
-          chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.down_proj"]
-          .type(torch.float32)
-          .numpy()
-          .astype(CAST_DTYPE)
-      )
+      wo = chkpt_vars[f"layers.{layer_idx}.feed_forward.experts.down_proj"].type(torch.float32).numpy().astype(CAST_DTYPE)
       jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_0"] = wi_0
       jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_1"] = wi_1
       jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wo"] = wo

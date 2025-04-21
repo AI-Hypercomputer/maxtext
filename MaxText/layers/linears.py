@@ -141,6 +141,7 @@ class DenseGeneral(nn.Module):
     kernel = jnp.asarray(kernel, self.dtype)
     if self.name in ["wi_0", "wi_1", "wo"]:
       import jax
+
       jax.debug.print("{lnx} paramweight", lnx=self.name)
       jax.debug.print("{kernel}", kernel=kernel)
       jax.debug.print("{kernel}", kernel=kernel.shape)
@@ -253,6 +254,7 @@ class MlpBlock(nn.Module):
         if cfg.activations_in_float32:
           x = x.astype(jnp.float32)
         import jax
+
         jax.debug.print("before act {selfa} {lnx}", selfa=dense_name, lnx=inputs)
         jax.debug.print("{selfa} {lnx}", selfa=dense_name, lnx=x)
         jax.debug.print("{selfa} {lnx}", selfa=dense_name, lnx=act_fn)
@@ -261,6 +263,7 @@ class MlpBlock(nn.Module):
         x = _convert_to_activation_function(act_fn)(x)
 
         import jax
+
         jax.debug.print("after act {selfa} {lnx}", selfa=dense_name, lnx=x)
         jax.debug.print("{selfa} {lnx}", selfa=dense_name, lnx=act_fn)
         jax.debug.print("{lnx}", lnx=x.shape)

@@ -103,7 +103,8 @@ def run_l4_hf_forward_pass():
     full_train_logits (numpy array): logits from the forward pass
       of shape [batch_size, seq_len, vocab_size]
   """
-  model_id = "/mnt/disks/jacobplatin/models/llama4/maverick/4-layer-debug-hf/HF-4layers/"
+  model_id = "meta-llama/Llama-4-Maverick-17B-128E"
+  # model_id = "/mnt/disks/jacobplatin/models/llama4/maverick/4-layer-debug-hf/HF-4layers/"
 
   hf_model = AutoModelForCausalLM.from_pretrained(
       model_id,
