@@ -573,7 +573,7 @@ class Pipeline(nn.Module):
       model_mode=common_types.MODEL_MODE_TRAIN,
       partition_spec=None,  # Pytree of sharding specifications of the weights (aka self.layers.variables)
   ) -> jnp.ndarray:
-    with self.mesh, nn.partitioning.axis_rules(self.logical_axis_rules_pp):
+    with self.mesh, nn.partitioning.axis_rules(self.config.logical_axis_rules):
       """The main method that maps the series of decoder layer inputs to final layer outputs.
       Has the same signature of a single decoder layer, and expects the same shapes, e.g. the inputs should have shape [global_batch], and internally
       this will be reshapped into microbatches.

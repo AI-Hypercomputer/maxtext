@@ -203,7 +203,7 @@ class Decoder(nn.Module):
       pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer[0])
       remat_policy = self.get_remat_policy()
       self.pipeline_module = pipeline.Pipeline(
-          config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy, logical_axis_rules_pp=self.config.pipeline_logical_axis_rules
+          config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy, logical_axis_rules_pp=self.config.logical_axis_rules
       )
 
   def get_remat_policy(self):
@@ -466,13 +466,14 @@ class Decoder(nn.Module):
         pp_layers = stages * self.config.num_layers_per_pipeline_stage * self.config.num_pipeline_repeats
         remaining_layers = self.config.num_decoder_layers - pp_layers
         RemattedBlockLayer = RemattedBlockLayers[0]
-        y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, remaining_layers, "layers", mesh)(
-            y,
-            decoder_segment_ids,
-            decoder_positions,
-            deterministic,
-            model_mode,
-        )
+        with self.mesh, nn.partitioning.axis_rules(self.config.logical_axis_rules_pp_as_dp):
+          y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, remaining_layers, "layers", mesh)(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+          )
     else:
       if cfg.scan_layers:
         if cfg.decoder_block == "deepseek":
