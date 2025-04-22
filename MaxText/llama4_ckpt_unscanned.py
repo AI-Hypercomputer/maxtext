@@ -143,35 +143,12 @@ class _NamespaceMapper:
     return self.collection[new_key]
 
 
-def convert_to_jax_weights(base_model_path: str, model_size: str, huggingface_ckpt: bool):
-  """
-  Function to convert the checkpoint at base_model_path into Orbax checkpoint
-  for MaxText and output jax_weights ready for MaxText
-
-  Attributes:
-    base_model_path: checkpoint path
-    model_size: llama2-7b to 70b, mistral-7b, or mixtral-8x7b, mixtral-8x22b
-  """
-  model_params = MODEL_PARAMS_DICT[model_size]
-  mem_info = psutil.Process()
-  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
-
-  max_logging.log(f"Loading the base model from {base_model_path}")
-
-  if huggingface_ckpt:
-    return _convert_huggingface_to_jax_weights(base_model_path, model_size, model_params, mem_info)
-
-  return _convert_pytorch_to_jax_weights(base_model_path, model_size, model_params, mem_info)
-
-
-# TODO: just import?
-def _hf_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1) -> dict:
+def _hf_to_maxtext_mapping(layer_idx: int = -1) -> dict:
   """
   Returns a mapping from HuggingFace model weight names to MaxText model weight names.
 
   Args:
     layer_idx (int): Layer index.
-    expert_idx (int): Expert index.
 
   Returns:
     dict [str, str]: Mapping from HuggingFace model weight names to MaxText model weight names.
@@ -190,7 +167,7 @@ def _hf_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1) -> dict:
       # MoE
       f"language_model.model.layers.{layer_idx}.feed_forward.router.weight": f"layers.{layer_idx}.feed_forward.gate.weight",
       f"language_model.model.layers.{layer_idx}.feed_forward.experts.down_proj": f"layers.{layer_idx}.feed_forward.experts.down_proj",
-      # Note that this contains up_proj and gate_proj concated together (we'll split/chunk them later)
+      # NOTE: this contains up_proj and gate_proj concated together (we'll split/chunk them later)
       f"language_model.model.layers.{layer_idx}.feed_forward.experts.gate_up_proj": f"layers.{layer_idx}.feed_forward.experts.gate_up_proj",
       f"language_model.model.layers.{layer_idx}.feed_forward.shared_expert.gate_proj.weight": f"layers.{layer_idx}.feed_forward.shared_experts.gate_proj.weight",
       f"language_model.model.layers.{layer_idx}.feed_forward.shared_expert.down_proj.weight": f"layers.{layer_idx}.feed_forward.shared_experts.down_proj.weight",
@@ -220,7 +197,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
   base_num_kv_heads = model_params["num_kv_heads"]
   vocab_size = model_params["vocab"]
   interleave_moe_layer = model_params["interleave_moe_layer_step"]
-  num_experts = model_params["num_experts"] if "num_experts" in model_params else None
   rope_type = model_params.get("rope_type")
   scale_query = model_params.get("scale_query", True)
 
@@ -236,14 +212,13 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
         layer = int(parts[3]) if "layers" in key else 0
         # TODO: update when mutli-modality support is added
         if "vision" in key or "multi_modal_projector" in key:
-          print("WARNING: skipping key", key)
+          print("WARNING: skipping vision or multi-modal key: ", key)
         else:
           mapped_key = _hf_to_maxtext_mapping(layer)[key]
           chkpt_vars[mapped_key] = f.get_tensor(key)
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   # initialize the data structure for storing jax_weights
-  is_llama4_model = model_size[:6] == "llama4"
   jax_weights = {
       "decoder": {
           "decoder_norm": {"scale": None},
@@ -360,7 +335,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
 
   # layer weight pre and post self attention norm ################
   max_logging.log("Processing pre and post self attention norms")
-  layer_weight = {"pre_self_attention_layer_norm": {"scale": None}, "post_self_attention_layer_norm": {"scale": None}}
 
   # self attention layer norm and swap the layer index
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
@@ -382,6 +356,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
     layer_name = f"layers_{layer_idx}"
     is_dense_layer = (layer_idx + 1) % interleave_moe_layer != 0
+    # NOTE: llama4 alternates between dense (MLP) and sparse (MoE) layers, hence the dual logic here
     if is_dense_layer:
       wi_0 = (
           chkpt_vars[f"layers.{layer_idx}.feed_forward.w3.weight"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
@@ -444,7 +419,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
           .transpose()
       )
 
-      # TODO: make this optional for setups that don't use shared experts
       jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_0"]["kernel"] = wi_0
       jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_1"]["kernel"] = wi_1
       jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["shared_experts"]["wo"]["kernel"] = wo
@@ -640,6 +614,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
     wk = np.reshape(wk, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
     wv = np.reshape(wv, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
 
+    # TODO
     if rope_type.startswith("llama3.1"):
       wq = permute_to_match_maxtext_rope(wq)
       wk = permute_to_match_maxtext_rope(wk)
@@ -678,7 +653,6 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
     is_dense_layer = (layer_idx + 1) % interleave_moe_layer != 0
     layer_name = f"layers_{layer_idx}"
-    layer_weight = {"pre_self_attention_layer_norm": {"scale": None}, "post_self_attention_layer_norm": {"scale": None}}
     pre_self_attention_layernorm_name = (
         f"layers.{layer_idx}.attention.wqkv.layer_norm_weight"
         if is_llama4_model
@@ -778,7 +752,6 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       jax_weights["decoder"][layer_name]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wo"] = wo
 
       # shared experts
-      # TODO: make this optional for setups that don't use shared experts
       wi_0 = np.concatenate(
           [
               var[f"layers.{layer_idx}.feed_forward.w_in_shared_FD.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
@@ -807,14 +780,31 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
 
     gc.collect()
 
-  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
-
-  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
-
   del chkpt_vars
   gc.collect()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
   return jax_weights
+
+
+def convert_to_jax_weights(base_model_path: str, model_size: str, huggingface_ckpt: bool):
+  """
+  Function to convert the checkpoint at base_model_path into Orbax checkpoint
+  for MaxText and output jax_weights ready for MaxText
+
+  Attributes:
+    base_model_path: checkpoint path
+    model_size: llama2-7b to 70b, mistral-7b, or mixtral-8x7b, mixtral-8x22b
+  """
+  model_params = MODEL_PARAMS_DICT[model_size]
+  mem_info = psutil.Process()
+  logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
+
+  max_logging.log(f"Loading the base model from {base_model_path}")
+
+  if huggingface_ckpt:
+    return _convert_huggingface_to_jax_weights(base_model_path, model_size, model_params, mem_info)
+
+  return _convert_pytorch_to_jax_weights(base_model_path, model_size, model_params, mem_info)
 
 
 if __name__ == "__main__":

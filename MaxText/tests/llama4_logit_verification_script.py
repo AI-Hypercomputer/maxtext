@@ -19,13 +19,13 @@
 # NOTE: please run this script from root, using the following commands for each backend type:
 
 # Llama4 JAX cmd:
-# JAX_PLATFORMS=cuda,cpu python -m MaxText.tests.llama4_logit_verification_script jax MaxText/configs/base.yml hardware=gpu
-# scan_layers=false base_output_directory=llama4 run_name=temp-testing-only model_name=llama4-17b-16e
-# force_unroll=false weight_dtype=float32 max_target_length=16 max_prefill_predict_length=4 per_device_batch_size=1 dtype=float32
+# JAX_PLATFORMS=cuda,cpu python -m MaxText.tests.llama4_logit_verification_script jax [scout/maverick] MaxText/configs/base.yml model_name=llama4-17b-[16e/128e]
+# scan_layers=false base_output_directory=llama4 run_name=temp-testing-only hardware=gpu force_unroll=false weight_dtype=float32 max_target_length=16
+# max_prefill_predict_length=4 per_device_batch_size=1 dtype=float32
 # load_parameters_path=...
 
 # Llama4 HF cmd:
-# python -m MaxText.tests.llama4_logit_verification_script hf
+# python -m MaxText.tests.llama4_logit_verification_script hf [scout/maverick]
 
 
 import argparse
@@ -60,9 +60,12 @@ class MockConfigForForwardPass:
     self.max_target_length = 4
 
 
-def setup_golden_data():
+def setup_golden_data(model_size: str):
   """
   Sets up the data to run on for both PT/MaxText forward pass.
+
+  Args:
+    model_size (str): type of Llama4 model (i.e. Scout (16E) or Maverick (128E))
 
   Returns:
     ids: tokenized ids to feed as input to the forward pass
@@ -70,7 +73,8 @@ def setup_golden_data():
     decoder_positions: position ids to feed as input to the forward pass (used for MaxText / JAX only)
     golden_logits: pre-computed logits from the forward pass to serve as reference
   """
-  llama_4_data = "llama4-17b-16e-instruct"
+  model_size = model_size.lower()
+  llama_4_data = "llama4-17b-16e-instruct" if model_size == "scout" else "llama4-17b-128e"
   input_golden_data_path = "MaxText/test_assets/golden_data_" + llama_4_data + ".jsonl"
   with jsonlines.open(input_golden_data_path, "r") as f:
     golden_data = list(f)
@@ -91,19 +95,18 @@ def setup_golden_data():
   return ids, decoder_segment_ids, decoder_positions, golden_logits
 
 
-def run_l4_hf_forward_pass():
+def run_l4_hf_forward_pass(model_size: str):
   """
   Run the Llama4 HF forward pass on the golden data.
 
   Args:
-    config: Typical MaxText config.
-    test_args: any additional command line args (unused for now)
+    model_size (str): type of Llama4 model (i.e. Scout (16E) or Maverick (128E))
 
   Returns:
     full_train_logits (numpy array): logits from the forward pass
       of shape [batch_size, seq_len, vocab_size]
   """
-  model_id = "meta-llama/Llama-4-Maverick-17B-128E"
+  model_id = "meta-llama/Llama-4-Scout-17B-16E-Instruct" if model_size == "scout" else "meta-llama/Llama-4-Maverick-17B-128E"
 
   hf_model = AutoModelForCausalLM.from_pretrained(
       model_id,
@@ -111,7 +114,7 @@ def run_l4_hf_forward_pass():
       torch_dtype="float32",
   )
 
-  ids, _, _, golden_logits = setup_golden_data()
+  ids, _, _, golden_logits = setup_golden_data(model_size)
   with torch.inference_mode():
     with torch.no_grad():
       ids = torch.tensor(ids.tolist())
@@ -124,12 +127,13 @@ def run_l4_hf_forward_pass():
   )
 
 
-def run_l4_jax_forward_pass(config):
+def run_l4_jax_forward_pass(config, model_size):
   """
   Run the Llama4 JAX forward pass on the golden data.
 
   Args:
     config: Typical MaxText config.
+    model_size (str): type of Llama4 model (i.e. Scout (16E) or Maverick (128E))
 
   Returns:
     full_train_logits (numpy array): logits from the forward pass
@@ -143,7 +147,7 @@ def run_l4_jax_forward_pass(config):
   model = models.Transformer(config, mesh=mesh, quant=quant)
   state, _ = max_utils.setup_decode_state(model, config, rng1, mesh, None)
 
-  ids, decoder_segment_ids, decoder_positions, golden_logits = setup_golden_data()
+  ids, decoder_segment_ids, decoder_positions, golden_logits = setup_golden_data(model_size)
   full_train_logits = model.apply(
       state.params,
       ids,
@@ -162,14 +166,16 @@ def run_l4_jax_forward_pass(config):
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
   parser.add_argument("backend_type", type=str, choices=["jax", "pt", "hf"])
+  parser.add_argument("model_size", type=str, choices=["scout", "maverick"])
   test_args, _ = parser.parse_known_args()
 
   model_args = sys.argv
   backend_type = model_args.pop(1).lower()
+  model_size = model_args.pop(1).lower()
   if backend_type == "jax":
     cfg = pyconfig.initialize(model_args)
-    run_l4_jax_forward_pass(cfg)
+    run_l4_jax_forward_pass(cfg, model_size)
   elif backend_type == "hf":
-    run_l4_hf_forward_pass()
+    run_l4_hf_forward_pass(model_size)
   else:
     raise NotImplementedError("Currently, we only support jax and hf as backend types but got " + backend_type)
