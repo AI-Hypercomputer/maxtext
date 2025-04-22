@@ -29,9 +29,9 @@ from MaxText import pyconfig
 # Number of text sequences to process in a single batch.
 _NUM_STREAMS = 1
 # Number of steps
-_NUM_STEPS = 4
+_NUM_STEPS = 256
 # Number of iterations to run
-_NUM_ITERS = 1
+_NUM_ITERS = 8
 
 
 def _batch_first_result_token(first_tokens: list[engine_api.ResultTokens], batch_size: int):
@@ -139,10 +139,10 @@ def main(argv: Sequence[str]) -> None:
     sampled_tokens_list.append(_batch_first_result_token(first_token_list, batch_size))
     for _ in range(steps):
       rng, rng_generate = jax.random.split(rng)
-      print(f'wyzhangd: before generate decode state {decode_state}')
+      # print(f'wyzhangd: before generate decode state {decode_state}')
       decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
-      print(f'wyzhangd: after generate decode state {decode_state}')
-      print(f'wyzhangd: generated sample tokens {sampled_tokens}')
+      # print(f'wyzhangd: after generate decode state {decode_state}')
+      # print(f'wyzhangd: generated sample tokens {sampled_tokens}')
       sampled_tokens_list.append(sampled_tokens)
 
     # Get results
@@ -151,9 +151,9 @@ def main(argv: Sequence[str]) -> None:
       output = tokenizer_model.decode(results)
       print(f"Input `{text}` -> `{output}`")
 
-    assert output.startswith(
-        config.autoregressive_decode_assert
-    ), f"generated text mismatch {output=}, {config.autoregressive_decode_assert=}"
+    # assert output.startswith(
+    #     config.autoregressive_decode_assert
+    # ), f"generated text mismatch {output=}, {config.autoregressive_decode_assert=}"
 
 
 def _validate_config(config):

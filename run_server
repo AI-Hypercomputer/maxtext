@@ -32,5 +32,5 @@ python MaxText/maxengine_server.py \
   stack_prefill_result_cache=False \
   inference_benchmark_test=True \
   inference_server=${INFERENCE_SERVER} \
-  attention=paged pagedattn_num_pages=64 pagedattn_tokens_per_page=32 \
+  attention=paged pagedattn_num_pages=128 pagedattn_tokens_per_page=32 \
   pagedattn_pages_per_compute_block=8
