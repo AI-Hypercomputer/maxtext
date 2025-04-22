@@ -184,6 +184,8 @@ def load_state_if_possible(
     enable_single_replica_ckpt_restoring: Optional[bool] = False,
     dataset_type: Optional[str] = "tfds",
     step: int = -1,  # -1 means latest
+    use_ocdbt = True,
+    use_zarr3 = True,
 ):
   """Loads TrainState as possible from the inputs.
 
@@ -291,7 +293,7 @@ def load_state_if_possible(
 
   if load_parameters_from_path != "":
     restored_params = load_params_from_path(
-        load_parameters_from_path, abstract_unboxed_pre_state.params, checkpoint_storage_concurrent_gb
+        load_parameters_from_path, abstract_unboxed_pre_state.params, checkpoint_storage_concurrent_gb, use_ocdbt=use_ocdbt, use_zarr3=use_zarr3
     )
     return None, restored_params
   elif load_full_state_from_path != "":
@@ -327,7 +329,7 @@ def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-
   return orbax_cloud_logger
 
 
-def load_params_from_path(load_parameters_from_path, abstract_unboxed_params, checkpoint_storage_concurrent_gb):
+def load_params_from_path(load_parameters_from_path, abstract_unboxed_params, checkpoint_storage_concurrent_gb, use_ocdbt=True, use_zarr3=True):
   """Load decode params from checkpoint at specified path."""
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
   max_logging.log(f"restoring params from {load_parameters_from_path}")
@@ -336,7 +338,7 @@ def load_params_from_path(load_parameters_from_path, abstract_unboxed_params, ch
   # *_concurrent_gb should be set for large models, the default is 96.
   ckptr = ocp.Checkpointer(
       ocp.PyTreeCheckpointHandler(
-          restore_concurrent_gb=checkpoint_storage_concurrent_gb, save_concurrent_gb=checkpoint_storage_concurrent_gb
+          restore_concurrent_gb=checkpoint_storage_concurrent_gb, save_concurrent_gb=checkpoint_storage_concurrent_gb, use_ocdbt=use_ocdbt, use_zarr3=use_zarr3
       )
   )
 
@@ -351,9 +353,9 @@ def load_params_from_path(load_parameters_from_path, abstract_unboxed_params, ch
   return restored["params"]
 
 
-def save_params_to_path(checkpoint_dir, params):
+def save_params_to_path(checkpoint_dir, params, use_ocdbt=True, use_zarr3=True):
   """Save decode params in checkpoint at specified path."""
   assert checkpoint_dir, "checkpoint_dir is not defined."
-  orbax_checkpointer = ocp.PyTreeCheckpointer()
+  orbax_checkpointer = ocp.PyTreeCheckpointer(use_ocdbt=use_ocdbt, use_zarr3=use_zarr3)
   orbax_checkpointer.save(checkpoint_dir, {"params": params}, force=True)
   print(f"Quantized params checkpoint saved at: {checkpoint_dir}")

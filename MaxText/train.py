@@ -701,6 +701,8 @@ def setup_train_loop(config):
           enable_single_replica_ckpt_restoring=False,
           dataset_type=config.dataset_type,
           step=0,
+          use_ocdbt=config.checkpoint_storage_use_ocdbt,
+          use_zarr3=config.checkpoint_storage_use_zarr3,
       )
     except FileNotFoundError:
       step0_restored = None
