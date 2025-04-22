@@ -334,7 +334,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     wk = np.reshape(wk, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
     wv = np.reshape(wv, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
 
-    # TODO: check this
     if rope_type.startswith("llama3.1"):
       wq = permute_to_match_maxtext_rope(wq)
       wk = permute_to_match_maxtext_rope(wk)

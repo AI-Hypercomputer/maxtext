@@ -129,7 +129,6 @@ class Llama4DecoderLayer(nn.Module):
   ):
     cfg = self.config
     mesh = self.mesh
-    import jax
 
     assert (
         cfg.num_experts > 1
@@ -192,10 +191,6 @@ class Llama4DecoderLayer(nn.Module):
         previous_chunk=previous_chunk,
     )
 
-    jax.debug.print("attention_lnx {lnx}", lnx=attention_lnx, ordered=True)
-    jax.debug.print("attention_lnx {lnx}", lnx=attention_lnx.shape, ordered=True)
-    jax.debug.print("attention_lnx {lnx}", lnx=attention_lnx.mean(), ordered=True)
-
     attention_lnx = nn.with_logical_constraint(
         attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
     )
@@ -212,10 +207,6 @@ class Llama4DecoderLayer(nn.Module):
     hidden_states = nn.with_logical_constraint(
         hidden_states, ("activation_batch", "activation_norm_length", "activation_embed")
     )
-
-    jax.debug.print("post_attention_layernorm {lnx}", lnx=hidden_states, ordered=True)
-    jax.debug.print("post_attention_layernorm {lnx}", lnx=hidden_states.shape, ordered=True)
-    jax.debug.print("post_attention_layernorm {lnx}", lnx=hidden_states.mean(), ordered=True)
 
     load_balance_loss = None
     if self.is_moe_layer:
@@ -241,10 +232,6 @@ class Llama4DecoderLayer(nn.Module):
       )(hidden_states, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
-    jax.debug.print("mlp_lnx {lnx}", lnx=mlp_lnx, ordered=True)
-    jax.debug.print("mlp_lnx {lnx}", lnx=mlp_lnx.shape, ordered=True)
-    jax.debug.print("mlp_lnx {lnx}", lnx=mlp_lnx.mean(), ordered=True)
-
     layer_output = mlp_lnx + intermediate_inputs
 
     layer_output = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(layer_output, deterministic=deterministic)
@@ -266,10 +253,6 @@ class Llama4DecoderLayer(nn.Module):
           "activation_fraction_zero",
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
-
-    jax.debug.print("layer_output {lnx}", lnx=layer_output, ordered=True)
-    jax.debug.print("layer_output {lnx}", lnx=layer_output.shape, ordered=True)
-    jax.debug.print("layer_output {lnx}", lnx=layer_output.mean(), ordered=True)
 
     if cfg.scan_layers:
       return layer_output, None

@@ -1304,19 +1304,6 @@ class Attention(nn.Module):
     # NOTE: is_nope_layer should be used in attention mask and also used in attention tuning
     use_rope = not self.is_nope_layer
     use_qk_norm = self.use_qk_norm and use_rope
-    print(self.use_qk_norm, use_rope, use_qk_norm)
-
-    # jax.debug.print("before norm q {lnx}", lnx=query)
-    # jax.debug.print("before norm q shape {lnx}", lnx=query.shape)
-    # jax.debug.print("before norm q mean {lnx}", lnx=query.mean())
-
-    # jax.debug.print("before norm k {lnx}", lnx=key)
-    # jax.debug.print("before norm k shape {lnx}", lnx=key.shape)
-    # jax.debug.print("before norm k mean {lnx}", lnx=key.mean())
-
-    # jax.debug.print("before norm v {lnx}", lnx=value)
-    # jax.debug.print("before norm v shape {lnx}", lnx=value.shape)
-    # jax.debug.print("before norm v mean {lnx}", lnx=value.mean())
 
     if use_rope:
       query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")

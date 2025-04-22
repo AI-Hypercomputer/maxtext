@@ -427,10 +427,7 @@ class Decoder(nn.Module):
     assert decoder_input_tokens.ndim == 2  # [batch, len]
 
     # [batch, length] -> [batch, length, emb_dim]
-    jax.debug.print("ids {lnx}", lnx=decoder_input_tokens)
     y = self.shared_embedding(decoder_input_tokens.astype("int32"))
-    jax.debug.print("token embed shape {lnx}", lnx=y.shape)
-    jax.debug.print("token embed {lnx}", lnx=y)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
 
