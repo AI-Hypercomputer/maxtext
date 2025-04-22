@@ -162,6 +162,12 @@ topk_routing_group: -1 # number of top groups to route inputs. For EP,
 num_layers_per_pipeline_stage: 1
 # The number of repeats will be set to num_decoder_layers / (num_pipeline_stages * num_layers_per_pipeline_stage)
 num_pipeline_repeats: -1
+pipeline_parallel_layers: -1 # Pipeline only this number of layers - for the remaining layers the "stage" mesh axes will act like data parallelism.
+# This option helps when the number of layers does not have friendly divisors since SPMD pipelining requires that the 
+# PP degree divides the number of layers.
+# By default (when set to -1) we pipeline all of the decoder layers.
+
+
 # num_pipeline_microbatches must be a multiple of the number of pipeline stages. By default it is set to the number of stages.
 # Note the microbatch_size is given by global_batch_size / num_pipeline_microbatches, where global_batch_size = per_device_batch_size * num_devices
 num_pipeline_microbatches: -1
@@ -185,7 +191,7 @@ pipeline_fsdp_ag_once: False # If set to true then all gather all of the weights
 # It may be useful to do the reverse when the layers_per_stage is very large.
 # The below settings only have effect when using pipeline parallelism.
 scan_pipeline_iterations: True
-# The layers per stage scanning option is set by scan_layers, we recommend setting scan_layers=False
+scan_layers_per_stage: False
 set_remat_policy_on_pipeline_iterations: True
 set_remat_policy_on_layers_per_stage: False
 

@@ -248,7 +248,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "num_layers_per_pipeline_stage=2",
             "num_pipeline_microbatches=8",
             rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
-            "scan_layers=False",  # We see better performance only scanning the pipeline iterations.
+            "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
         ]
     )
 
@@ -295,7 +295,39 @@ class PipelineParallelismTest(unittest.TestCase):
             "num_layers_per_pipeline_stage=8",
             "num_pipeline_microbatches=8",
             rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
-            "scan_layers=False",  # We see better performance only scanning the pipeline iterations.
+            "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
+        ]
+    )
+
+  @pytest.mark.tpu_only
+  def test_subset_layers(self):
+    # Run a full train.py call with 4 stages, 16 layers - 8 in pipeline, 8 ran outside of pipeline
+    train_main(
+        [
+            None,
+            os.path.join(PKG_DIR, "configs", "base.yml"),
+            rf"base_output_directory=gs://runner-maxtext-logs",
+            "run_name=runner_pipeline_parallelism_test",
+            r"dataset_path=gs://maxtext-dataset",
+            "base_emb_dim=28",
+            "base_num_query_heads=4",
+            "base_num_kv_heads=4",
+            "base_mlp_dim=32",
+            "base_num_decoder_layers=16",
+            "head_dim=128",
+            "per_device_batch_size=2",
+            "max_target_length=1024",
+            "vocab_size=32",
+            "dataset_type=synthetic",
+            "steps=3",
+            "enable_checkpointing=False",
+            "ici_pipeline_parallelism=4",
+            "num_layers_per_pipeline_stage=1",
+            "num_pipeline_repeats=2",
+            "pipeline_parallel_layers=8",
+            "num_pipeline_microbatches=8",
+            rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
+            "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
         ]
     )
 
@@ -324,7 +356,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "ici_pipeline_parallelism=4",
             rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
             "quantization=fp8",
-            "scan_layers=False",
+            "scan_layers_per_stage=False",
             "attention=dot_product",
         ]
     )
@@ -354,7 +386,7 @@ class PipelineParallelismTest(unittest.TestCase):
             "ici_pipeline_parallelism=4",
             rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
             "quantization=nanoo_fp8",
-            "scan_layers=False",
+            "scan_layers_per_stage=False",
             "attention=dot_product",
         ]
     )

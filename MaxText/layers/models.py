@@ -31,6 +31,7 @@ from MaxText.layers import embeddings
 from MaxText.layers import linears
 from MaxText.layers import normalizations, quantizations
 from MaxText.layers import pipeline
+from MaxText import maxtext_utils
 
 Array = common_types.Array
 Config = common_types.Config
@@ -184,7 +185,12 @@ class SequentialBlockDecoderLayers(nn.Module):
           slot=slot,
           page_state=page_state,
       )
-    return inputs
+      if self.config.scan_layers:
+        inputs = inputs[0] #  When scan_layers is True the decoder layers return (outputs, None).
+    if self.config.scan_layers:
+      return inputs, None
+    else:
+      return inputs
 
 
 class Decoder(nn.Module):
@@ -396,7 +402,7 @@ class Decoder(nn.Module):
       base_stage = self.set_remat_policy([base_stage], policy)[0]
     if cfg.num_layers_per_pipeline_stage == 1:
       stage_module = base_stage(config=cfg, mesh=self.mesh, quant=self.quant)
-    elif cfg.scan_layers:
+    elif cfg.scan_layers_per_stage:
       stage_module = self.scan_decoder_layers(
           cfg, base_stage, cfg.num_layers_per_pipeline_stage, "layers_per_stage", self.mesh
       )
@@ -457,6 +463,17 @@ class Decoder(nn.Module):
       y = self.pipeline_module(
           y, decoder_segment_ids, decoder_positions, deterministic, model_mode, partition_spec=partition_spec
       )
+      remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
+      if remaining_layers > 0:
+        logical_axis_rules_pp_as_dp = maxtext_utils.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)
+        with self.mesh, nn.partitioning.axis_rules(logical_axis_rules_pp_as_dp):
+          y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayers[0], remaining_layers, "layers", mesh)(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+          )
     else:
       if cfg.scan_layers:
         if cfg.decoder_block == "deepseek":

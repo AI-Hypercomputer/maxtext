@@ -689,6 +689,23 @@ def add_config_to_summary_writer(config, summary_writer):
     for key, value in config.get_keys().items():
       max_utils.add_text_to_summary_writer(key, str(value), summary_writer)
 
+def logical_axis_rules_pp_act_as_dp(logical_rules):
+  """Add stage as a physical axes before data for each rule, so stage acts just like data instead of PP.
+  This is used when we want to pipeline only a subset of layers, and leave the rest like DP.
+  """
+  new_rules = []
+  for key, physical_axes in logical_rules:
+    if isinstance(physical_axes, str):
+      physical_axes = (physical_axes,)
+    else:
+      physical_axes = tuple(physical_axes)
+    new_physical_axes = tuple(axis for axis in physical_axes if axis != "stage")
+    if "data" in new_physical_axes:
+      data_idx = new_physical_axes.index("data")
+      new_physical_axes = new_physical_axes[0:data_idx] + ("stage",) + new_physical_axes[data_idx:]
+    new_rules.append((key, new_physical_axes))
+  return tuple(new_rules)
+
 
 def create_device_mesh(config, devices=None):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
