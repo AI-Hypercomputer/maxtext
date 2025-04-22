@@ -314,7 +314,7 @@ class SUT:
     num_queries = len(self._queries)
     num_skipped_queries = 0
     num_grouped_queries = [len(self._query_batches[b]) for b in self._query_batches]
-    log.info("Before Issue %d queries - classified queries %d", num_queries, num_grouped_queries)
+    log.info("Before Issue %d queries - classified queries %s", num_queries, num_grouped_queries)
     self._query_batches = _init_query_batches()
     for q in queries:
       group_idx = _classify_query(self.pandas_rows, q.index, self._query_batches)
@@ -327,7 +327,7 @@ class SUT:
         self._query_batches[group_idx].append(input_data)
     num_grouped_queries = [len(self._query_batches[b]) for b in self._query_batches]
     log.info(
-        "Issue %d queries - classified queries %d num_skipped %d", num_queries, num_grouped_queries, num_skipped_queries
+        "Issue %d queries - classified queries %s num_skipped %d", num_queries, num_grouped_queries, num_skipped_queries
     )
 
     assert len(self._queries) - num_skipped_queries == sum(
