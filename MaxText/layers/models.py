@@ -454,29 +454,9 @@ class Decoder(nn.Module):
         )
       else:
         partition_spec = None  # This partition spec is only used for the fsdp_ag_once feature.
-      if self.config.pipeline_parallel_layers == -1: #TODO: or equal to total layers 
-        y = self.pipeline_module(
-            y, decoder_segment_ids, decoder_positions, deterministic, model_mode, partition_spec=partition_spec
-        )
-      else:
-        y = self.pipeline_module(
-            y, decoder_segment_ids, decoder_positions, deterministic, model_mode, partition_spec=partition_spec
-        )
-        stages = self.config.ici_pipeline_parallelism * self.config.dcn_pipeline_parallelism
-        pp_layers = stages * self.config.num_layers_per_pipeline_stage * self.config.num_pipeline_repeats
-        remaining_layers = self.config.num_decoder_layers - pp_layers
-        RemattedBlockLayer = RemattedBlockLayers[0]
-        logical_axis_rules_pp_as_dp = maxtext_utils.logical_axis_rules_pp_as_dp(self.config.logical_axis_rules)
-        breakpoint()
-        with self.mesh, nn.partitioning.axis_rules(logical_axis_rules_pp_as_dp):
-          y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, remaining_layers, "layers", mesh)(
-              y,
-              decoder_segment_ids,
-              decoder_positions,
-              deterministic,
-              model_mode,
-          )
-
+      y = self.pipeline_module(
+          y, decoder_segment_ids, decoder_positions, deterministic, model_mode, partition_spec=partition_spec
+      )
     else:
       if cfg.scan_layers:
         if cfg.decoder_block == "deepseek":

@@ -162,9 +162,6 @@ topk_routing_group: -1 # number of top groups to route inputs. For EP,
 num_layers_per_pipeline_stage: 1
 # The number of repeats will be set to num_decoder_layers / (num_pipeline_stages * num_layers_per_pipeline_stage)
 num_pipeline_repeats: -1
-pipeline_parallel_layers: -1 # By default with SPMD we pipeline all of the decoder layers (we don't pipeline the vocab embed or unembed).
-# You may pipeline only a subset of the decoder layers by setting this.
-
 # num_pipeline_microbatches must be a multiple of the number of pipeline stages. By default it is set to the number of stages.
 # Note the microbatch_size is given by global_batch_size / num_pipeline_microbatches, where global_batch_size = per_device_batch_size * num_devices
 num_pipeline_microbatches: -1

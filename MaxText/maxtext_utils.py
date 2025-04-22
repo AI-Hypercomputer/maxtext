@@ -687,21 +687,6 @@ def add_config_to_summary_writer(config, summary_writer):
     for key, value in config.get_keys().items():
       max_utils.add_text_to_summary_writer(key, str(value), summary_writer)
 
-def logical_rules_pp_act_like_dp(logical_rules):
-  """ Returns a list of rules such that the physical stage axis acts like data """
-  new_rules = list()
-  for rule in logical_rules:
-    key = rule[0]
-    physical_axes = rule[1]
-    new_physical_axes = physical_axes[:] #create a deepcopy
-    if "stage" in new_physical_axes:
-        new_physical_axes.remove("stage")
-    if "data" in new_physical_axes:
-      data_idx = new_physical_axes.index("data")
-      new_physical_axes = new_physical_axes[0:data_idx] + ["stage"] + new_physical_axes[data_idx:]
-    new_rules.append([key, new_physical_axes])
-  return new_rules
-
 
 def create_device_mesh(config, devices=None):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
