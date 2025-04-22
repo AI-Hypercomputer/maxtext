@@ -289,7 +289,9 @@ def validate_multimodal_model_name(s: str) -> bool:
       "gemma3-27b",
   )
   if s not in valid_model_names:
-    raise ValueError(f"Invalid multimodal model name was passed. Got {s}. Valid options which support multimodal inputs are: {valid_model_names}")
+    raise ValueError(
+        f"Invalid multimodal model name was passed. Got {s}. Valid options which support multimodal inputs are: {valid_model_names}"
+    )
 
 
 def validate_no_keys_overwritten_twice(keys1: list[str], keys2: list[str]):

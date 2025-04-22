@@ -408,6 +408,7 @@ class MaxEngine(engine_api.Engine):
       params: Params,
       existing_prefix: Optional[ExistingPrefix] = None,
       padded_tokens: jax.Array,
+      images: Optional[jax.Array] = None,
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
@@ -448,6 +449,9 @@ class MaxEngine(engine_api.Engine):
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
 
+    if self.config.use_multimodal:
+      input_images = images[jnp.newaxis, jnp.newaxis, ...]  # Add batch and sequence dimension [B, N, H, W, C]
+
     # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
     start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
     ones_to_keep = start_to_n < full_true_length
@@ -460,6 +464,7 @@ class MaxEngine(engine_api.Engine):
           input_params,
           input_tokens,
           positions,
+          encoder_images=input_images if self.config.use_multimodal else None,
           decoder_segment_ids=sequence_indicator,
           enable_dropout=False,
           model_mode=common_types.MODEL_MODE_PREFILL,
@@ -520,6 +525,7 @@ class MaxEngine(engine_api.Engine):
       params: Params,
       existing_prefix: Optional[ExistingPrefix] = None,
       padded_tokens: jax.Array,
+      images: Optional[jax.Array] = None,
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
@@ -540,6 +546,7 @@ class MaxEngine(engine_api.Engine):
         params=params,
         existing_prefix=existing_prefix,
         padded_tokens=padded_tokens,
+        images=images,
         sampler=sampler,
         true_length=true_length,
         page_state=self.page_state,  # Pass current page state
@@ -1284,10 +1291,20 @@ class MaxEngine(engine_api.Engine):
           (int(self.config.per_device_batch_size * jax.device_count()), 1),
           dtype=jnp.int32,
       )
+      dummy_image = jnp.ones(
+          (
+              int(self.config.per_device_batch_size * jax.device_count()),
+              maxtext_utils.NUM_IMAGES_PER_SEQUENCE,
+              self.config.image_size_for_vit,
+              self.config.image_size_for_vit,
+              maxtext_utils.NUM_IMAGE_CHANNELS,
+          ),
+      )
       _, cache = self.model.apply(
           abstract_params,
           x,
           x,
+          encoder_images=dummy_image if self.config.use_multimodal else None,
           enable_dropout=False,
           model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
           rngs={"params": rng},

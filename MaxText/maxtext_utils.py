@@ -45,6 +45,10 @@ from jax.experimental import mesh_utils
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
+# Multimodal constants
+NUM_IMAGES_PER_SEQUENCE = 1
+NUM_IMAGE_CHANNELS = 3
+
 
 def get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config):
   """Get the shardings (both state and data) for train_step"""
@@ -430,7 +434,13 @@ def init_initial_state(model, tx, config, is_training, key):
   Args: model, tx, config, is_training, key
   """
   input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-  image_shape = (config.micro_batch_size_to_train_on, 1, config.image_size_for_vit, config.image_size_for_vit, 3)
+  image_shape = (
+      config.micro_batch_size_to_train_on,
+      NUM_IMAGES_PER_SEQUENCE,
+      config.image_size_for_vit,
+      config.image_size_for_vit,
+      NUM_IMAGE_CHANNELS,
+  )
   model_vars = model.init(
       {"params": key, "dropout": key, "aqt": key},
       np.ones(input_shape, dtype=jnp.int32),
@@ -599,11 +609,19 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: Optio
         config.global_batch_size_to_load,
         config.max_prefill_predict_length,
     )
+    image_shape = (
+        config.global_batch_size_to_load,
+        NUM_IMAGES_PER_SEQUENCE,
+        config.image_size_for_vit,
+        config.image_size_for_vit,
+        NUM_IMAGE_CHANNELS,
+    )
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
         jnp.ones(input_shape),
         jnp.ones(input_shape),
+        encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
         model_mode=common_types.MODEL_MODE_PREFILL,
         slot=0,
         page_state=page_state,
@@ -627,11 +645,19 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[Page
         config.global_batch_size_to_load,
         1,
     )
+    image_shape = (
+        config.global_batch_size_to_load,
+        NUM_IMAGES_PER_SEQUENCE,
+        config.image_size_for_vit,
+        config.image_size_for_vit,
+        NUM_IMAGE_CHANNELS,
+    )
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},
         jnp.ones(input_shape),
         jnp.ones(input_shape),
+        encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
         model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
         slot=0,
         page_state=page_state,
