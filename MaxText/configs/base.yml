@@ -453,11 +453,8 @@ learning_rate_schedule_steps: -1 # By default the length of the schedule is set 
 
 max_target_length: 2048 # Maximum sequence length
 max_prefill_predict_length: 64 # Maximum length for the prefill when doing autoregression
-prompt: "I love to" # Prompt for language model sampling.
-load_from_prefill_dir: False # If true, decode.py doesn't "prefill" but just reads from directory
-prefill_cache_dir: "" # If set and load_from_prefill_dir, decode.py reads from directory. If set, decode.py writes to directory
-autoregressive_decode_assert: ""
-
+# prompt: '<s>[INST] <<SYS>>\nYou are a helpful assistant, who always provide explanation. Think like you are answering to a five year old.\n<</SYS>>\n\nWrite the next sentence.\n\nKayla decided to trim their hair but Monica did not as  [/INST]'
+prompt: '<s>[INST] <<SYS>>\nYou are an AI assistant. User will you give you a task. Your goal is to complete the task as faithfully as you can. While performing the task think step-by-step and justify your steps.\n<</SYS>>\n\nSentence: "Who did that Plato loved seem to be known by everyone."\nWould a linguist rate this sentence to be acceptable linguistically? [/INST]'
 # For nsys profiler, pass the training command to nsys command
 # e.g. nsys profile -s none --force-overwrite true --capture-range=cudaProfilerApi --capture-range-end=stop {training command}
 profiler: "" # Supported profiler: '', xplane, nsys
