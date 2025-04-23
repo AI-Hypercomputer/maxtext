@@ -5,6 +5,7 @@ base_config: "inference_jetstream.yml"
 # per_device_batch_size=1
 # weight bf16, kv cache bf16
 
+model_name: "llama4-17b-128e"
 sharding_strategy: "experimental"
 attention: 'dot_product'
 allow_split_physical_axes: True
@@ -18,7 +19,7 @@ logical_axis_rules: [
                       ['activation_length', []],
                       ['activation_embed', []],
                       ['activation_vocab', ['tensor', 'autoregressive']],
-                      ['heads', ['tensor', 'autoregressive']],
+                      ['heads', ['tensor']],
                       ['kv', []],
                       ['kv_heads', ['tensor']],
                       ['q_heads', ['tensor']],
