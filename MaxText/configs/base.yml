@@ -524,6 +524,7 @@ use_untrainable_positional_embedding: False
 trainable_position_size: -1  # enable gpt3 position embedding with a positive trainable_position_size
 # RoPE parameters
 rope_type: "default" # one of "default", "llama3.1" or "yarn"
+rope_use_scale: True # apply rope scaling for llama3.1 (see class `LLaMARotaryEmbedding` for more)
 rope_min_timescale: 1
 rope_max_timescale: 10_000 # Timescale For global Attention
 local_rope_max_timescale: -1 # If positive used for local window Attention, otherwise `rope_max_timescale` is used for both local and global
@@ -657,7 +658,7 @@ context_parallel_load_balance: True
 ### Paged Attention ###
 # These settings take effect only when `attention=paged`.
 # They should be adjusted based on the available HBM and model config.
-# Note: one page group corresponds to one request/slot 
+# Note: one page group corresponds to one request/slot
 pagedattn_num_pages: 64  # total number of pages to allocate
 pagedattn_tokens_per_page: 32  # number of tokens each page can hold
 pagedattn_pages_per_compute_block: 4  # number of pages processed together in pallas kernels
@@ -683,8 +684,11 @@ enable_padding_causal_mask: True
 use_qk_norm: False
 # Every `X` layers will NOT use RoPE
 nope_layer_interval: -1
+# Every `X` layers is MoE layer
+interleave_moe_layer_step: 1
 
 # Multimodal flags
 use_multimodal: False
 image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
 image_path: "" # Local image path used for decoding
+
