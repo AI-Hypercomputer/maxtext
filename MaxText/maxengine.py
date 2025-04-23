@@ -439,6 +439,8 @@ class MaxEngine(engine_api.Engine):
     previous_chunk = None
     input_params = params
     if existing_prefix is not None:
+      if not self.use_chunked_prefill:
+        raise ValueError("Using chunked prefill is needed for existing_prefix.")
       input_params = params | {"cache": existing_prefix.cache}
       start_position = existing_prefix.common_prefix_tokens.shape[0]
       # TODO(yuyanpeng): rename previous_chunk

@@ -667,6 +667,11 @@ pagedattn_pages_per_compute_block: 8
 prefill_chunk_size: 256
 use_chunked_prefill: False
 
+# Prefix Caching parameters in jetstream
+enable_prefix_caching: False
+prefix_caching_hbm_byte: 10_000_000_000 # 10 GB
+prefix_caching_dram_byte: 100_000_000_000 # 100 GB
+
 # This is a temporary flag that will removed soon after the fix lands in TE
 enable_padding_causal_mask: True
 
