@@ -421,6 +421,7 @@ class Decoder(nn.Module):
       previous_chunk=None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
+      bidirectional_mask: Optional[Any] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -479,6 +480,9 @@ class Decoder(nn.Module):
               model_mode,
           )
         else:
+          layer_call_kwargs = {}
+          if cfg.decoder_block == "gemma3":
+            layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
           RemattedBlockLayer = RemattedBlockLayers[0]
           y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
               y,
@@ -486,6 +490,7 @@ class Decoder(nn.Module):
               decoder_positions,
               deterministic,
               model_mode,
+              **layer_call_kwargs,
           )
       else:
         if cfg.decoder_block == "deepseek":
@@ -514,13 +519,14 @@ class Decoder(nn.Module):
           for lyr in range(cfg.num_decoder_layers):
             RemattedBlockLayer = RemattedBlockLayers[0]
             layer_kwargs = {}
+            layer_call_kwargs = {}
             if cfg.decoder_block == "gemma3":
               from MaxText.layers import gemma3
               # Gemma3 uses both global and sliding window attention depending on the layer index.
               layer_kwargs = {"attention_type": gemma3.get_attention_type(layer_id=lyr)}
+              layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
             if cfg.decoder_block == "llama4":
               from MaxText.layers import llama4
-
               layer_kwargs = {"is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval)}
             layer = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, **layer_kwargs)
             y = layer(
@@ -532,6 +538,7 @@ class Decoder(nn.Module):
                 previous_chunk=previous_chunk,
                 page_state=page_state,
                 slot=slot,
+                **layer_call_kwargs,
             )
     y = self.get_norm_layer()(
         dtype=cfg.dtype,
@@ -652,9 +659,14 @@ class Transformer(nn.Module):
           f" which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}."
       )
 
+    bidirectional_mask = None
     if self.config.use_multimodal and encoder_images is not None:
       image_embeddings = self.vision_encoder(input_images=encoder_images)
       # TODO(hengtaoguo, aireen): merge image_embeddings with decoder_input_tokens.
+
+      if self.config.decoder_block == "gemma3":
+        from MaxText.layers import gemma3
+        bidirectional_mask = decoder_input_tokens == gemma3.TOKEN_PLACEHOLDER
 
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
@@ -665,5 +677,6 @@ class Transformer(nn.Module):
         previous_chunk=previous_chunk,
         slot=slot,
         page_state=page_state,
+        bidirectional_mask=bidirectional_mask,
     )
     return logits

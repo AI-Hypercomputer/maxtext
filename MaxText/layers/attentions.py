@@ -244,6 +244,41 @@ def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int)
   chunk_mask = same_chunk & (row_ids >= col_ids)
   return chunk_mask
 
+def _make_block_mask_indices(bidirectional_mask):
+  """Creates block mask identifying segments based on a bidirectional mask.
+
+  Args:
+    bidirectional_mask: boolean mask, e.g. [011110011010].
+
+  Returns:
+    block mask for segments, e.g. [011110022030].
+  """
+  # Left pad 0.
+  padded_mask = jnp.pad(bidirectional_mask, [(0, 0), (1, 0)], constant_values=0)
+  boundary = padded_mask[..., 1:] > padded_mask[..., :-1]
+  numbered_boundary = jnp.cumsum(boundary, axis=-1)
+  return bidirectional_mask * numbered_boundary
+
+def _make_bidirectional_block_mask(bidirectional_mask):
+  """Creates bidirectional block mask from bidirectional_mask, where True corresponds to image tokens.
+  bidirectional_mask shape: [B, L]
+  bidirectional_block_mask shape: [B, L, L]
+  Examples:
+  bidirectional_mask = [[0, 1, 1, 1, 0, 0]]
+  bidirectional_block_mask = [[
+      [False, False, False, False, False, False],
+      [False,  True,  True,  True, False, False],
+      [False,  True,  True,  True, False, False],
+      [False,  True,  True,  True, False, False],
+      [False, False, False, False, False, False],
+      [False, False, False, False, False, False],
+  ]]
+  """
+  q_block_indices = _make_block_mask_indices(bidirectional_mask)
+  kv_block_indices = q_block_indices
+  bidirectional_block_mask = (kv_block_indices[:, None, :] == q_block_indices[..., None]) & (q_block_indices[..., None] > 0)
+  return bidirectional_block_mask
+
 
 class AttentionOp(nn.Module):
   config: Config
@@ -286,7 +321,7 @@ class AttentionOp(nn.Module):
   # https://github.com/jax-ml/jax/blob/main/jax/experimental/pallas/ops/tpu/flash_attention.py
   # This mask models (1) separate sequences (decoder_segment_ids) and (2) causality
   def generate_attention_mask(
-      self, query, key, decoder_segment_ids: Array | None, model_mode: str, previous_chunk: Any = None
+      self, query, key, decoder_segment_ids: Array | None, model_mode: str, previous_chunk: Any = None, bidirectional_mask: Any = None,
   ) -> Array | None:
     mask = None
     if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
@@ -335,6 +370,10 @@ class AttentionOp(nn.Module):
       chunk_mask = _generate_chunk_attention_mask(mask_shape=(q_seq_len, kv_seq_len), chunk_size=self.chunk_attn_window_size)
       output_mask = chunk_mask * output_mask
 
+    if bidirectional_mask is not None:
+      image_mask = _make_bidirectional_block_mask(bidirectional_mask)
+      output_mask = output_mask | image_mask[:, None, None, ...]
+
     return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
 
   def apply_attention(
@@ -347,6 +386,7 @@ class AttentionOp(nn.Module):
       model_mode: str,
       use_ragged_attention: bool = False,
       previous_chunk: Any = None,
+      bidirectional_mask: Any = None,
   ):
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
@@ -366,7 +406,9 @@ class AttentionOp(nn.Module):
         or (self.attention_kernel == "autoselected" and length < 128)
         or (self.attention_kernel == "paged")
     ):
-      return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode, previous_chunk)
+      return self.apply_attention_dot(
+          query, key, value, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask=bidirectional_mask
+      )
     elif self.attention_kernel == "flash" or self.attention_kernel == "autoselected":
       if jax.devices()[0].platform == "tpu":
         if isinstance(key, KVTensor):
@@ -383,7 +425,9 @@ class AttentionOp(nn.Module):
       else:
         if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
           # fallback to dot_product as pallas gpu flash attention doesn't support decode stage
-          return self.apply_attention_dot(query, key, value, decoder_segment_ids, model_mode)
+          return self.apply_attention_dot(
+              query, key, value, decoder_segment_ids, model_mode, bidirectional_mask=bidirectional_mask
+          )
         else:
           head_axis = -2
           num_query_heads = query.shape[head_axis]
@@ -718,6 +762,7 @@ class AttentionOp(nn.Module):
       decoder_segment_ids: Array | None,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
       previous_chunk: Any = None,
+      bidirectional_mask: Any = None,
   ):
     """Apply Attention."""
     validate_compute_axis_order(self.compute_axis_order)
@@ -764,7 +809,7 @@ class AttentionOp(nn.Module):
     # Casting softmaxt computation for float32 for model stability.
     if self.float32_logits:
       attn_weights = attn_weights.astype(jnp.float32)
-    attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode, previous_chunk)
+    attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask)
     if self.is_partition_in_decode(q_seq_len):
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
     elif model_mode == common_types.MODEL_MODE_PREFILL:
@@ -886,6 +931,7 @@ class AttentionOp(nn.Module):
       model_mode,
       cached_values=[None, None],
       previous_chunk=None,
+      bidirectional_mask=None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
   ):
@@ -905,6 +951,7 @@ class AttentionOp(nn.Module):
         model_mode=model_mode,
         use_ragged_attention=self.use_ragged_attention,
         previous_chunk=previous_chunk,
+        bidirectional_mask=bidirectional_mask,
     )
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
@@ -922,6 +969,7 @@ class AttentionOp(nn.Module):
         lengths=lengths,
         model_mode=model_mode,
         use_ragged_attention=self.use_ragged_attention,
+        bidirectional_mask=bidirectional_mask,
     )
 
     if ar_unnormalized_output is not None:
@@ -1248,6 +1296,7 @@ class Attention(nn.Module):
       previous_chunk: Any = None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
+      bidirectional_mask: Any = None,
   ):
     """Applies Attention on the input data.
 
@@ -1357,7 +1406,9 @@ class Attention(nn.Module):
       cached_values = [None, None]
       if model_mode != common_types.MODEL_MODE_TRAIN:
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
-      out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk)
+      out = self.attention_op(
+          query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk, bidirectional_mask
+      )
 
     if model_mode == common_types.MODEL_MODE_PREFILL or model_mode == common_types.MODEL_MODE_TRAIN:
       out = nn.with_logical_constraint(out, self.out_axis_names)
@@ -1588,6 +1639,7 @@ class MLA(Attention):
       previous_chunk: Any = None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
+      bidirectional_mask: Optional[Any] = None,
   ) -> Array:
     """Forward pass for MLA, reusing `AttentionOp` for the actual attention.
 
