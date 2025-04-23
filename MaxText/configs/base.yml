@@ -63,11 +63,12 @@ checkpoint_storage_use_zarr3: True
 checkpoint_storage_concurrent_gb: 96
 ############################### END CHECKPOINTING ##################################
 
-
+############################### BEGIN TESTING ##################################
 reuse_example_batch: 0 # for testing TPU performance, this options repeated uses the same batch.
-
-
 metrics_file: "" # for testing, local file that stores scalar metrics. If empty, no metrics are written.
+disalbe_key_validation: False # for testing, if true, skip the key validation.
+############################### END TESTING ##################################
+
 # If true save metrics such as loss and TFLOPS to GCS in {base_output_directory}/{run_name}/metrics/
 gcs_metrics: False
 

@@ -42,24 +42,74 @@ from MaxText import max_utils
 import ml_collections
 
 
-def _build_global_shape(local_shape: tuple[int, ...]) -> tuple[int, ...]:
+def _construct_parallelism_name(mesh_axis: str, prefix: str) -> str:
+  if mesh_axis == "stage":
+    return f"{prefix}_pipeline_parallelism"
+  return f"{prefix}_{mesh_axis}_parallelism"
+
+
+def _get_mesh_axes_prod(config, default_num: int, prefix: str, mesh_axes: list[str]) -> int:
+  """Get the mesh axes parallelism product from the config.
+  E.g. for mesh_axes = ["data", "fsdp"], and *_data_parallelism = 2 and *_fsdp_parallelism = 3 it will return 6
+  """
+  mesh_prod = 1
+  for mesh_axis in mesh_axes:
+    parallelism_name = _construct_parallelism_name(mesh_axis, prefix)
+    try:
+      scale_val = getattr(config, parallelism_name)
+    except AttributeError:
+      raise ValueError(f"Config does not have {parallelism_name}, " f"but it is needed for logical axes {mesh_axes}")
+    if scale_val == -1:
+      scale_val = default_num
+    assert scale_val > 0, f"Scale value for {parallelism_name} must be positive, got {scale_val}"
+    mesh_prod *= scale_val
+  return mesh_prod
+
+
+def _get_input_data_parallelisms(
+    config: ml_collections.ConfigDict, prefix: str, default_mesh_parallelism: int
+) -> tuple[int, ...]:
+  """Get the global input data scale from the config.
+  prefix: either "dcn" or "ici"
+  default_mesh_parallelism: the default mesh scale to use if the config does not specify it, for dcn it is the number of slices, for ici it is the number of devices
+  Returns a tuple of integers representing the parallelism for each logical axis.
+
+      E.g. if input_data_sharding_logical_axes = ["batch", "length"] and logical_axes_rules = [["batch", ["data"]], ["length", ["sequence"]]]
+  ici_data_parallelism = 2 and ici_sequence_parallelism = 3, it will return (2, 3)
+  """
+  input_data_prod = []
+  for i, logical_axis in enumerate(config.input_data_sharding_logical_axes):
+    # Find matching rule from the list
+    mesh_axes = []
+    for rule in config.logical_axis_rules:
+      if rule[0] == logical_axis:
+        mesh_axes = [rule[1]] if isinstance(rule[1], str) else rule[1]
+        break
+
+    assert len(mesh_axes) > 0, f"No matching rule found for logical axis {logical_axis}"
+    mesh_prod = _get_mesh_axes_prod(config, default_mesh_parallelism, prefix, mesh_axes)
+
+    input_data_prod.append(mesh_prod)
+  if len(input_data_prod) == 1:
+    input_data_prod.append(1)
+  return tuple(input_data_prod)
+
+
+# def _build_global_shape(local_shape: tuple[int, ...], input_data_dcn_parallelisms: tuple[int, ...]) -> tuple[int, ...]:
+#   """Builds the global shape from the local shape."""
+#   assert len(local_shape) == len(input_data_dcn_parallelisms), (
+#       f"Shape mismatch: local_shape has {len(local_shape)} dims, "
+#       f"but input_data_dcn_parallelisms has {len(input_data_dcn_parallelisms)} axes"
+#   )
+#   global_shape = []
+#   for local_dim, global_scale in zip(local_shape, input_data_dcn_parallelisms):
+#     global_shape.append(local_dim * global_scale)
+#   return tuple(global_shape)
+
+
+def _build_global_shape(local_shape: tuple[int, ...], input_data_dcn_parallelisms: tuple[int, ...]) -> tuple[int, ...]:
   global_shape = (jax.process_count() * local_shape[0],) + local_shape[1:]
   return global_shape
-
-
-def _calculate_input_data_sharding_prod(mesh: Mesh, input_data_shardings: NamedSharding) -> tuple[int, ...]:
-  """Calculate the product of the mesh sizes for input data sharding."""
-  try:
-    spec = input_data_shardings.spec
-  except AttributeError:
-    raise ValueError(
-        f"input_data_shardings does not have a .spec attribute (expected a PartitionSpec), got: {type(input_data_shardings)}"
-    )
-
-  batch_product = max_utils.compute_axis_product(spec[0], mesh.shape)
-  sequence_product = max_utils.compute_axis_product(spec[1], mesh.shape) if len(spec) > 1 else 1
-
-  return (batch_product, sequence_product)
 
 
 def _form_global_array(
@@ -67,19 +117,19 @@ def _form_global_array(
     array: np.ndarray,
     global_mesh: Mesh,
     input_data_shardings: NamedSharding,
-    input_data_sharding_prods: tuple[int, ...],  # e.g., (4, 1)
+    input_data_dcn_parallelisms: tuple[int, ...],
+    input_data_ici_parallelisms: tuple[int, ...],
 ) -> jax.Array:
-  """Put local sharded array into devices using ND sharding, with replication on leftover devices."""
+  print(f"YYY local array shape: {array.shape}")
+  """Put local sharded array into devices sharding, and return global array."""
+  global_shape = _build_global_shape(array.shape, input_data_dcn_parallelisms)
 
-  global_shape = _build_global_shape(array.shape)
-
-  if len(input_data_sharding_prods) != array.ndim:
+  if len(global_shape) != array.ndim:
     raise ValueError(
-        f"Sharding factor {input_data_sharding_prods} must match array rank {array.ndim} "
-        f"for array of shape {array.shape}"
+        f"Sharding factor {global_shape} must match array rank {array.ndim} " f"for array of shape {array.shape}"
     )
 
-  # Split the array into subarrays based on the 2D (B, S) input data sharding
+  # Split the array into subarrays based on the 2D (B, S) ici data sharding
   def recursive_split(arr, factors, axis=0):
     if axis >= len(factors):
       return [arr]
@@ -89,9 +139,9 @@ def _form_global_array(
     return [s for chunk in split_chunks for s in recursive_split(chunk, factors, axis + 1)]
 
   # Shard the array into subarrays
-  local_shards = recursive_split(array, input_data_sharding_prods)
+  local_shards = recursive_split(array, input_data_ici_parallelisms)
 
-  num_shards = np.prod(input_data_sharding_prods)
+  num_shards = np.prod(input_data_ici_parallelisms)
   num_devices = len(global_mesh.local_devices)
 
   if num_devices % num_shards != 0:
@@ -112,7 +162,8 @@ def get_next_batch_sharded(
     local_iterator: Iterator,
     global_mesh: Mesh,
     input_data_shardings: NamedSharding,
-    input_data_sharding_prods: tuple[int, ...],
+    input_data_dcn_parallelisms: tuple[int, ...],
+    input_data_ici_parallelisms: tuple[int, ...],
 ) -> jax.Array:
   """Splits the host loaded data equally over all devices."""
 
@@ -138,7 +189,8 @@ def get_next_batch_sharded(
           _form_global_array,
           global_mesh=global_mesh,
           input_data_shardings=input_data_shardings,
-          input_data_sharding_prods=input_data_sharding_prods,
+          input_data_dcn_parallelisms=input_data_dcn_parallelisms,
+          input_data_ici_parallelisms=input_data_ici_parallelisms,
       ),
       local_data,
   )
@@ -152,9 +204,25 @@ class MultiHostDataLoadIterator:
   def __init__(self, dataloader: Union[tf.data.Dataset, Iterable], global_mesh: Mesh, config: ml_collections.ConfigDict):
     self.global_mesh = global_mesh
     self.dataloader = dataloader
+
+    num_devices = jax.device_count()
+    num_slices = 1 if config.inference_benchmark_test else config.num_slices
+    num_devices_per_slice = int(num_devices // num_slices)
+
+    default_dcn_parallelism = max_utils.get_unspecified_mesh_axes_value(config.dcn_parallelism, num_slices, "DCN")
+    default_ici_parallelism = max_utils.get_unspecified_mesh_axes_value(config.ici_parallelism, num_devices_per_slice, "ICI")
+
+    self.input_data_dcn_parallelisms = _get_input_data_parallelisms(
+        config, prefix="dcn", default_mesh_parallelism=default_dcn_parallelism
+    )
+    self.input_data_ici_parallelisms = _get_input_data_parallelisms(
+        config, prefix="ici", default_mesh_parallelism=default_ici_parallelism
+    )
+
+    print(f"YYY {self.input_data_dcn_parallelisms=} {self.input_data_ici_parallelisms=}")
     data_pspec = PartitionSpec(*config.input_data_sharding_logical_axes)
     self.input_data_shardings = nn.logical_to_mesh_sharding(data_pspec, global_mesh, config.logical_axis_rules)
-    self.input_data_sharding_prods = _calculate_input_data_sharding_prod(global_mesh, self.input_data_shardings)
+
     if isinstance(self.dataloader, tf.data.Dataset):
       self.local_iterator = self.dataloader.as_numpy_iterator()
     elif isinstance(self.dataloader, Iterable):
@@ -176,7 +244,11 @@ class MultiHostDataLoadIterator:
 
   def __next__(self):
     return get_next_batch_sharded(
-        self.local_iterator, self.global_mesh, self.input_data_shardings, self.input_data_sharding_prods
+        self.local_iterator,
+        self.global_mesh,
+        self.input_data_shardings,
+        self.input_data_dcn_parallelisms,
+        self.input_data_ici_parallelisms,
     )
 
 

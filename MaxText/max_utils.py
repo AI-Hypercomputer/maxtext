@@ -373,21 +373,27 @@ def get_coordinator_ip_address():
   return coordinator_ip_address
 
 
+def get_unspecified_mesh_axes_value(parallelism_vals, target_product, parallelism_type):
+  """Evaluates unspecified DCN/ICI parallelism values"""
+  assert (
+      parallelism_vals.count(-1) == 1
+  ), f"Found unspecified values (-1) for more than one {parallelism_type}\
+    parallelism axis. At most one axis can be unspecified."
+
+  determined_val = target_product / np.prod(parallelism_vals) * -1
+
+  assert (
+      determined_val >= 1 and determined_val.is_integer
+  ), f"Unspecified value unable to be determined with the given\
+    {parallelism_type} parallelism values"
+
+  return int(determined_val)
+
+
 def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):
   """Evaluates unspecified DCN/ICI parallelism values"""
   if -1 in parallelism_vals:
-    assert (
-        parallelism_vals.count(-1) == 1
-    ), f"Found unspecified values (-1) for more than one {parallelism_type}\
-      parallelism axis. At most one axis can be unspecified."
-
-    determined_val = target_product / np.prod(parallelism_vals) * -1
-
-    assert (
-        determined_val >= 1 and determined_val.is_integer
-    ), f"Unspecified value unable to be determined with the given\
-      {parallelism_type} parallelism values"
-
+    determined_val = get_unspecified_mesh_axes_value(parallelism_vals, target_product, parallelism_type)
     parallelism_vals[parallelism_vals.index(-1)] = int(determined_val)
 
   target_type = "slices" if parallelism_type == "DCN" else "devices per slice"

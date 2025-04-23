@@ -115,6 +115,8 @@ class SFTDataProcessingTest(unittest.TestCase):
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
         input_data_sharding_logical_axes=["batch"],
+        ici_data_parallelism=-1,
+        ici_fsdp_parallelism=1,
         base_output_directory="gs://max-experiments/",
         tokenizer_path=os.path.join(os.path.dirname(PKG_DIR), "assets", "llama2-tokenizer"),
         train_split="train",

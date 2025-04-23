@@ -33,6 +33,7 @@ from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
 from MaxText import max_logging
+import ml_collections
 import numpy as np
 import jax.numpy as jnp
 from MaxText import checkpointing
@@ -694,14 +695,36 @@ def add_config_to_summary_writer(config, summary_writer):
       max_utils.add_text_to_summary_writer(key, str(value), summary_writer)
 
 
-def create_device_mesh(config, devices=None):
-  """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
+def get_ici_parallelism(config, devices=None):
+  """Get the ICI parallelism for the model."""
   if devices is None:
     devices = jax.devices()
   num_devices = len(devices)
   num_slices = 1 if config.inference_benchmark_test else config.num_slices
   num_devices_per_slice = num_devices // num_slices
 
+  return max_utils.fill_unspecified_mesh_axes(config.ici_parallelism.copy(), num_devices_per_slice, "ICI")
+
+
+def get_dcn_parallelism(config):
+  """Get the DCN parallelism for the model."""
+  num_slices = 1 if config.inference_benchmark_test else config.num_slices
+  return max_utils.fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN")
+
+
+def get_slices_and_devices(config, devices=None):
+  if devices is None:
+    devices = jax.devices()
+  num_devices = len(devices)
+  num_slices = 1 if config.inference_benchmark_test else config.num_slices
+  num_devices_per_slice = num_devices // num_slices
+  return num_slices, num_devices_per_slice
+
+
+def create_device_mesh(config, devices=None):
+  """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
+  num_slices, num_devices_per_slice = get_slices_and_devices(config, devices)
+  num_devices = num_devices_per_slice * num_slices
   multi_slice_env = num_slices > 1
 
   # Find possible unspecified parallelisms
