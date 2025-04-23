@@ -314,7 +314,7 @@ class SUT:
     num_queries = len(self._queries)
     num_skipped_queries = 0
     num_grouped_queries = [len(self._query_batches[b]) for b in self._query_batches]
-    log.info("Before Issue %d queries - classified queries %d", num_queries, num_grouped_queries)
+    log.info("Before Issue %d queries - classified queries %s", num_queries, str(num_grouped_queries))
     self._query_batches = _init_query_batches()
     for q in queries:
       group_idx = _classify_query(self.pandas_rows, q.index, self._query_batches)
@@ -327,7 +327,7 @@ class SUT:
         self._query_batches[group_idx].append(input_data)
     num_grouped_queries = [len(self._query_batches[b]) for b in self._query_batches]
     log.info(
-        "Issue %d queries - classified queries %d num_skipped %d", num_queries, num_grouped_queries, num_skipped_queries
+        "Issue %d queries - classified queries %s num_skipped %d", num_queries, str(num_grouped_queries), num_skipped_queries
     )
 
     assert len(self._queries) - num_skipped_queries == sum(
@@ -342,7 +342,7 @@ class SUT:
     start = time.perf_counter()
     for group_idx in self._query_batches:
       group = self._query_batches[group_idx]
-      log.info("Flush queries processing %d with %d samples", group_idx, len(group))
+      log.info("Flush queries processing %s with %d samples", str(group_idx), len(group))
       self.offline_inf_instances[group_idx].init_decode_state()
       result = self.offline_inf_instances[group_idx].batch_inference(group, desc=f"batch-{group_idx}")
       self.offline_inf_instances[group_idx].decode_state = None
@@ -516,7 +516,7 @@ def main(argv):
   )
   log.info("Starting Benchmark run")
   lg.StartTestWithLogSettings(lgSUT, qsl, settings, log_settings, FLAGS.audit_conf)
-  log.info("query counts %s", [len(sut._query_batches[q]) for q in sut._query_batches])
+  log.info("query counts %s", str([len(sut._query_batches[q]) for q in sut._query_batches]))
   log.info("Run Completed!")
   log.info("Destroying SUT...")
   lg.DestroySUT(lgSUT)
