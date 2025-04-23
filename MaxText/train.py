@@ -17,8 +17,18 @@ limitations under the License.
 # pylint: disable=g-bad-todo, abstract-method, consider-using-with, ungrouped-imports
 """Training loop and Decoding of the model."""
 
-# Calling jax.device_count here prevents a "TPU platform already registered" error.
-# See github.com/google/maxtext/issues/20 for more
+import sys
+
+if not __package__:
+  print(
+      "Error: The MaxText API has changed. MaxText entry-points are now "
+      "invoked as modules, with syntax of the form "
+      "`python3 -m MaxText.module <args>`, e.g., "
+      "`python3 -m MaxText.train <args>`.",
+      file=sys.stderr,
+  )
+  # EX_USAGE
+  sys.exit(64)
 
 import datetime
 import os
