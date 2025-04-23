@@ -175,6 +175,7 @@ class SequentialBlockDecoderLayers(nn.Module):
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
   ) -> jnp.ndarray:
+    
     for lyr in range(self.num_decoder_layers):
       inputs = self.decoder_layer(config=self.config, mesh=self.mesh, name=f"layers_{lyr}", quant=self.quant)(
           inputs,
@@ -185,7 +186,10 @@ class SequentialBlockDecoderLayers(nn.Module):
           slot=slot,
           page_state=page_state,
       )
-    return inputs
+      if self.config.scan_layers:
+        inputs = inputs[0]
+    #breakpoint()
+    return inputs, None
 
 
 class Decoder(nn.Module):
