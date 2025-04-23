@@ -74,9 +74,8 @@ CF_FOR_ALL_REDUCE_AND_ALL_GATHER = (
 ENABLE_SPARSECORE_OFFLOADING_BASE_FLAGS = (
     " --xla_tpu_use_tc_device_shape_on_sc=true"
     " --xla_sc_enable_instruction_fusion=false"
-    " --xla_sc_disjoint_spmem=false"
     " --xla_sc_disable_megacore_partitioning=true"
-    " --2a886c8_chip_config_name=megachip_tccontrol"
+    " --2a886c8_chip_config_name=megachip_tccontrol"  # Should be set by default but leaving here just in case.
 )
 
 
