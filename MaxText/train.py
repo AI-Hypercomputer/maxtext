@@ -170,7 +170,13 @@ def save_checkpoint(
   ):
     return checkpoint_manager.save(
         step,
-        args=orbax.checkpoint.args.PyTreeSave(item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size),
+        args=orbax.checkpoint.args.Composite(
+            state=orbax.checkpoint.args.PyTreeSave(
+                item=state,
+                save_args=save_args,
+                ocdbt_target_data_file_size=chunk_byte_size,
+            )
+        ),
         force=force,
     )
 
