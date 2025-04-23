@@ -553,16 +553,16 @@ def setup_mesh_and_model(config, config_inference):
     max_logging.log(f"Global mesh used for the workload")
     devices_array = max_utils.create_device_mesh(config)
     flat_devices = devices_array.flatten()
-    training_devices = flat_devices[config.num_inference_devices:].reshape(config.ici_parallelism)
-    max_logging.log(f"Training: Num_devices: {jax.device_count() - config.num_inference_devices}, shape {training_devices.shape}")
-    inference_devices = flat_devices[:config.num_inference_devices].reshape(config_inference.ici_parallelism)
-    max_logging.log(f"Inference: Num_devices: {config.num_inference_devices}, shape {inference_devices.shape}")
+    training_devices = flat_devices[config.num_inference_devices * config.num_inference_replicas:].reshape(config.ici_parallelism)
     mesh = Mesh(training_devices, config.mesh_axes)
-    inference_mesh = Mesh(inference_devices, config_inference.mesh_axes)
+    max_logging.log(f"Training Mesh: Num_devices: {jax.device_count() - config.num_inference_devices}, shape {training_devices.shape}")
+    reshaped_devices = flat_devices[:config.num_inference_devices * config.num_inference_replicas].reshape((config.num_inference_replicas, config.num_inference_devices))
+    inference_meshes = [Mesh(devices_per_replica, config_inference.mesh_axes) for devices_per_replica in reshaped_devices]
+    max_logging.log(f"Inference Mesh: Replicas={config.num_inference_replicas}, Num_devices: {config.num_inference_devices}, shape {inference_meshes[0].shape}")
   else:
     training_devices_array = max_utils.create_device_mesh(config)
     mesh = Mesh(training_devices_array, config.mesh_axes)
-    inference_mesh = mesh
+    inference_meshes = [mesh]
 
   # Model and Optimizer definition
   quant = quantizations.configure_quantization(config)
@@ -605,7 +605,7 @@ def setup_mesh_and_model(config, config_inference):
         use_zarr3,
     )
 
-  return init_rng, writer, checkpoint_manager, mesh, inference_mesh, model, learning_rate_schedule, tx
+  return init_rng, writer, checkpoint_manager, mesh, inference_meshes, model, learning_rate_schedule, tx
 
 def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   """
@@ -761,7 +761,7 @@ def setup_train_loop(config, config_inference):
   """
   recorder = create_goodput_recorder(config)
   record_goodput(recorder, config, recorder.record_tpu_init_start_time if recorder else None)
-  init_rng, writer, checkpoint_manager, mesh, inference_mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config, config_inference)
+  init_rng, writer, checkpoint_manager, mesh, inference_meshes, model, learning_rate_schedule, tx = setup_mesh_and_model(config, config_inference)
 
   record_goodput(recorder, config, recorder.record_tpu_init_end_time if recorder else None)
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
@@ -784,7 +784,7 @@ def setup_train_loop(config, config_inference):
       inference_state_mesh_shardings,
       model,
       mesh,
-      inference_mesh,
+      inference_meshes,
       learning_rate_schedule,
       data_iterator,
       eval_data_iterator,
@@ -812,7 +812,7 @@ def train_loop(config, config_inference, state=None):
       inference_state_mesh_shardings,
       model,
       mesh,
-      inference_mesh,
+      inference_meshes,
       learning_rate_schedule,
       data_iterator,
       eval_data_iterator,
@@ -843,10 +843,10 @@ def train_loop(config, config_inference, state=None):
 
   # Initializing maxengine and everything related from decode.py
   # TODO: Creating an engine here but might have two model compilation, need to initialize engine while passing model object
-  engine = maxengine.MaxEngine(config_inference, devices=np.squeeze(inference_mesh.devices))
+  engines = [maxengine.MaxEngine(config_inference, devices=np.squeeze(mesh.devices)) for mesh in inference_meshes]
   init_rng, rng_load_params = jax.random.split(init_rng)
   # TODO: loading parameters from GCS here, need to pass in the same params to engine which already loaded
-  _ = engine.load_params(rng_load_params)
+  _ = [engine.load_params(rng_load_params) for engine in engines]
 
   if eval_data_iterator:
     # pylint: disable=line-too-long
@@ -897,16 +897,18 @@ def train_loop(config, config_inference, state=None):
     else:
       p_eval_step = None
 
-  inference_data_sharding = jax.sharding.NamedSharding(mesh=inference_mesh, spec=P(*config.data_sharding))
+  inference_data_shardings = [jax.sharding.NamedSharding(mesh=inference_mesh, spec=P(*config.data_sharding)) for inference_mesh in inference_meshes]
   param_sharding = inference_state_mesh_shardings.params
-  functional_generate_completions = functools.partial(generate_completions, config, tokenizer_model, engine)
-  functional_generate_completions.__name__ = "generate_completions"
-  p_generate_completions = jax.jit(
-      functional_generate_completions,
-      in_shardings=(inference_data_sharding, param_sharding, None),
-      out_shardings=inference_data_sharding,
-      donate_argnums=(0,),
-  )
+  p_generate_completions = []
+  for inference_data_sharding, engine in zip(inference_data_shardings, engines):
+    functional_generate_completions = functools.partial(generate_completions, config, tokenizer_model, engine)
+    functional_generate_completions.__name__ = "generate_completions"
+    p_generate_completions.append(jax.jit(
+        functional_generate_completions,
+        in_shardings=(inference_data_sharding, param_sharding, None),
+        out_shardings=inference_data_sharding,
+        donate_argnums=(0,),
+    ))
 
   running_gcs_metrics = [] if config.gcs_metrics else None
 

@@ -23,4 +23,5 @@ decode_sampling_temperature: 0.9
 async_checkpointing: false
 
 # Pathways inference
-num_inference_devices: 4
+num_inference_devices: -1 # if set to -1 then all the devices used for training will be used for inference
+num_inference_replicas: 1
