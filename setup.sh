@@ -31,14 +31,6 @@ export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_SUSPEND=1
 export NEEDRESTART_MODE=l
 
-# Enable automatic restart of services without the need for prompting 
-if command -v sudo &> /dev/null
-then
-   sudo sed -i "s/#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/" /etc/needrestart/needrestart.conf
-else
-   echo "Unable to find sudo. Skipping editing needrestart.conf" 
-fi
-
 apt-get update && apt-get install -y sudo
 (sudo bash || bash) <<'EOF'
 apt update && \
