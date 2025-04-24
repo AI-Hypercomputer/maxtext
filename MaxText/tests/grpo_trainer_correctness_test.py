@@ -36,6 +36,7 @@ from MaxText.globals import PKG_DIR
 
 
 from MaxText import maxtext_utils
+from MaxText import maxtext_state_initialization_utils
 from MaxText import pyconfig
 from MaxText.layers import models
 from MaxText.layers import quantizations
@@ -60,7 +61,7 @@ def setup_maxtext_model(config):
   devices_array = maxtext_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
   maxtext_model = models.Transformer(config=config, mesh=mesh, quant=quant)
-  state, state_mesh_annotations = maxtext_utils.setup_decode_state(maxtext_model, config, init_rng, mesh, None)
+  state, state_mesh_annotations = maxtext_state_initialization_utils.setup_decode_state(maxtext_model, config, init_rng, mesh, None)
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_mesh_annotations, mesh, config.logical_axis_rules)
   data_sharding = jax.NamedSharding(mesh, jax.sharding.PartitionSpec(None))
   reference_params = jax.tree.map(jnp.copy, state.params["params"])

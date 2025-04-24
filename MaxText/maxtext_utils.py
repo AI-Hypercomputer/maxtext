@@ -37,10 +37,6 @@ from jax.experimental.serialize_executable import deserialize_and_load
 
 import optax
 
-import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
-import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
-
-from MaxText import checkpointing
 from MaxText import common_types
 from MaxText.inference.page_manager import PageState
 from MaxText import max_logging
@@ -459,129 +455,6 @@ def init_initial_state(model, tx, config, is_training, key):
   return init_decode_state(model.apply, model_vars)
 
 
-def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
-  """Setup decode state by loading params from a checkpoint.
-  Args:
-    model: the flax model to initialize
-    config: config object
-    rng: jax.prng key
-    mesh: jax.devices() mesh
-    checkpoint_manager: Checkpoint manager
-
-  Returns:
-    state: state with decode params loaded from the checkpoint
-    state_mesh_annotations: the mesh annotations for the state
-  """
-  if not config.load_parameters_path:
-    # generate random params
-    max_logging.log("No decode checkpoint specified - generating random weights.")
-    state, state_mesh_annotations, _, _ = setup_initial_state(
-        model, None, None, config, rng, mesh, checkpoint_manager, False
-    )
-  else:
-    # Load params from checkpoint
-    max_logging.log(f"Loading decode params from {config.load_parameters_path}")
-    unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(model, None, config, rng, mesh, False)
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
-      params = checkpointing.load_params_from_path(
-          config.load_parameters_path, unboxed_abstract_state.params, config.checkpoint_storage_concurrent_gb, config.checkpoint_storage_use_ocdbt, config.checkpoint_storage_use_zarr3
-      )
-    state = init_decode_state(None, params)
-
-  state = max_utils.unbox_logicallypartioned(state)
-  return state, state_mesh_annotations
-
-
-def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager):
-  is_training = True
-  return setup_initial_state(
-      model,
-      data_iterator,
-      tx,
-      config,
-      rng,
-      mesh,
-      checkpoint_manager,
-      is_training,
-  )
-
-
-def setup_initial_state(
-    model,
-    data_iterator,
-    tx,
-    config,
-    rng,
-    mesh,
-    checkpoint_manager,
-    is_training=True,
-):
-  """We initialize the model and optimizer state, and optionally load from a
-  checkpoint as necessary.
-
-  Args:
-    model: the flax model to initialize
-    tx: the optax.GradientTransformation
-    config: config object
-    rng: jax.prng key
-    mesh: jax.devices() mesh
-    checkpoint_manager: an Orbax checkpointing.CheckpointManager object
-    is_training: True to initialize training state, False for decode state
-
-  Returns:
-    state: the initialized train state
-    state_mesh_annotations: the mesh annotations for the train state
-  """
-
-  unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
-      model, tx, config, rng, mesh, is_training
-  )
-
-  # Initialization
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
-    restored, raw_params = checkpointing.load_state_if_possible(
-        checkpoint_manager,
-        data_iterator,
-        config.load_parameters_path,
-        config.load_full_state_path,
-        config.checkpoint_storage_concurrent_gb,
-        unboxed_abstract_state,
-        config.enable_single_replica_ckpt_restoring,
-        config.dataset_type,
-        use_ocdbt=config.checkpoint_storage_use_ocdbt,
-        use_zarr3=config.checkpoint_storage_use_zarr3,
-    )
-
-    if restored:
-      if isinstance(
-          checkpoint_manager,
-          (
-              emergency_checkpoint_manager.CheckpointManager,
-              emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
-          ),
-      ):
-        state = restored
-      else:
-        if "iter" in restored and restored["iter"] is not None:
-          data_iterator.local_iterator = restored["iter"]
-        state = restored["items"]
-    else:
-      init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
-      init_state_partial.__name__ = "initialize_state"
-      # pylint: disable=not-callable
-      state = jax.jit(
-          init_state_partial,
-          in_shardings=None,
-          out_shardings=state_mesh_shardings,
-      )(rng)
-      if raw_params:  # If we loaded a partial state, we need to merge it.
-        state = state.replace(params=raw_params)
-
-  state = max_utils.unbox_logicallypartioned(state)
-
-  return state, state_mesh_annotations, state_mesh_shardings, data_iterator
-
-
 def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   """Get a shaped abstraction of the state (including optimizer)"""
   init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
@@ -681,13 +554,6 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[Page
     state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
   return state_mesh_annotations
 
-
-def save_quantized_checkpoint_if_configured(config, params):
-  assert config.quantization, "quantization must be configured"
-  if config.save_quantized_params_path:
-    checkpointing.save_params_to_path(config.save_quantized_params_path, params)
-  else:
-    "Skipping saving quantized checkpoint as save_quantized_params_path is null."
 
 
 def add_config_to_summary_writer(config, summary_writer):
@@ -822,3 +688,52 @@ def create_learning_rate_schedule(config):
     boundaries.append(warmup_steps + cos_steps + constant_zero_steps)
 
   return optax.join_schedules(pieces, boundaries)
+
+
+def get_mesh_axes_prod(config, default_num: int, prefix: str, mesh_axes: list[str]) -> int:
+  """Get the mesh axes parallelism product from the config.
+  E.g. for mesh_axes = ["data", "fsdp"], and *_data_parallelism = 2 and *_fsdp_parallelism = 3 it will return 6
+  """
+  mesh_prod = 1
+  for mesh_axis in mesh_axes:
+    parallelism_name = max_utils.construct_parallelism_name(mesh_axis, prefix)
+    try:
+      scale_val = getattr(config, parallelism_name)
+    except AttributeError:
+      raise ValueError(f"Config does not have {parallelism_name}, " f"but it is needed for logical axes {mesh_axes}")
+    if scale_val == -1:
+      scale_val = default_num
+    assert scale_val > 0, f"Scale value for {parallelism_name} must be positive, got {scale_val}"
+    mesh_prod *= scale_val
+  return mesh_prod
+
+
+def get_input_data_parallelisms(
+    config: ml_collections.ConfigDict, prefix: str, default_mesh_parallelism: int
+) -> tuple[int, ...]:
+  """Get the global input data scale from the config.
+  prefix: either "dcn" or "ici"
+  default_mesh_parallelism: fills the -1 in the parallelism config
+  Returns a tuple of integers representing the parallelism for each logical axis.
+
+  E.g. for input_data_sharding_logical_axes = ["batch", "length"]
+  logical_axes_rules = [["batch", ["data"]], ["length", ["sequence"]]]
+  ici_data_parallelism = 2
+  ici_sequence_parallelism = 3, it will return (2, 3)
+  """
+  input_data_prod = []
+  for i, logical_axis in enumerate(config.input_data_sharding_logical_axes):
+    # Find matching rule from the list
+    mesh_axes = []
+    for rule in config.logical_axis_rules:
+      if rule[0] == logical_axis:
+        mesh_axes = [rule[1]] if isinstance(rule[1], str) else rule[1]
+        break
+
+    assert len(mesh_axes) > 0, f"No matching rule found for logical axis {logical_axis}"
+    mesh_prod = get_mesh_axes_prod(config, default_mesh_parallelism, prefix, mesh_axes)
+
+    input_data_prod.append(mesh_prod)
+  if len(input_data_prod) == 1:
+    input_data_prod.append(1)
+  return tuple(input_data_prod)

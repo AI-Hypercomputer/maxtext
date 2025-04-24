@@ -39,56 +39,8 @@ import jax.numpy as jnp
 
 from MaxText import max_logging
 from MaxText import max_utils
+from MaxText import maxtext_utils
 import ml_collections
-
-
-def _get_mesh_axes_prod(config, default_num: int, prefix: str, mesh_axes: list[str]) -> int:
-  """Get the mesh axes parallelism product from the config.
-  E.g. for mesh_axes = ["data", "fsdp"], and *_data_parallelism = 2 and *_fsdp_parallelism = 3 it will return 6
-  """
-  mesh_prod = 1
-  for mesh_axis in mesh_axes:
-    parallelism_name = max_utils.construct_parallelism_name(mesh_axis, prefix)
-    try:
-      scale_val = getattr(config, parallelism_name)
-    except AttributeError:
-      raise ValueError(f"Config does not have {parallelism_name}, " f"but it is needed for logical axes {mesh_axes}")
-    if scale_val == -1:
-      scale_val = default_num
-    assert scale_val > 0, f"Scale value for {parallelism_name} must be positive, got {scale_val}"
-    mesh_prod *= scale_val
-  return mesh_prod
-
-
-def _get_input_data_parallelisms(
-    config: ml_collections.ConfigDict, prefix: str, default_mesh_parallelism: int
-) -> tuple[int, ...]:
-  """Get the global input data scale from the config.
-  prefix: either "dcn" or "ici"
-  default_mesh_parallelism: fills the -1 in the parallelism config
-  Returns a tuple of integers representing the parallelism for each logical axis.
-
-  E.g. for input_data_sharding_logical_axes = ["batch", "length"]
-  logical_axes_rules = [["batch", ["data"]], ["length", ["sequence"]]]
-  ici_data_parallelism = 2
-  ici_sequence_parallelism = 3, it will return (2, 3)
-  """
-  input_data_prod = []
-  for i, logical_axis in enumerate(config.input_data_sharding_logical_axes):
-    # Find matching rule from the list
-    mesh_axes = []
-    for rule in config.logical_axis_rules:
-      if rule[0] == logical_axis:
-        mesh_axes = [rule[1]] if isinstance(rule[1], str) else rule[1]
-        break
-
-    assert len(mesh_axes) > 0, f"No matching rule found for logical axis {logical_axis}"
-    mesh_prod = _get_mesh_axes_prod(config, default_mesh_parallelism, prefix, mesh_axes)
-
-    input_data_prod.append(mesh_prod)
-  if len(input_data_prod) == 1:
-    input_data_prod.append(1)
-  return tuple(input_data_prod)
 
 
 def _build_global_shape(local_shape: tuple[int, ...], input_data_dcn_parallelisms: tuple[int, ...]) -> tuple[int, ...]:
@@ -202,10 +154,10 @@ class MultiHostDataLoadIterator:
     default_dcn_parallelism = max_utils.get_unspecified_mesh_axes_value(config.dcn_parallelism, num_slices, "DCN")
     default_ici_parallelism = max_utils.get_unspecified_mesh_axes_value(config.ici_parallelism, num_devices_per_slice, "ICI")
 
-    self.input_data_dcn_parallelisms = _get_input_data_parallelisms(
+    self.input_data_dcn_parallelisms = maxtext_utils.get_input_data_parallelisms(
         config, prefix="dcn", default_mesh_parallelism=default_dcn_parallelism
     )
-    self.input_data_ici_parallelisms = _get_input_data_parallelisms(
+    self.input_data_ici_parallelisms = maxtext_utils.get_input_data_parallelisms(
         config, prefix="ici", default_mesh_parallelism=default_ici_parallelism
     )
 

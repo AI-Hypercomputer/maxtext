@@ -28,6 +28,7 @@ from MaxText import checkpointing
 import jax
 from MaxText import max_logging
 from MaxText import max_utils
+from MaxText import maxtext_state_initialization_utils
 from MaxText import maxtext_utils
 from MaxText import optimizers
 from MaxText import pyconfig
@@ -98,7 +99,7 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
   rng = random.PRNGKey(0)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
-  state, state_mesh_notations, _, _ = maxtext_utils.setup_training_state(
+  state, state_mesh_notations, _, _ = maxtext_state_initialization_utils.setup_training_state(
       model, None, tx, config, rng, mesh, checkpoint_manager
   )
   num_params = max_utils.calculate_num_params_from_pytree(state.params)

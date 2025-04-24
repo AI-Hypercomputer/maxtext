@@ -22,6 +22,7 @@ import numpy as np
 
 from MaxText import pyconfig
 from MaxText import maxtext_utils
+from MaxText import maxtext_state_initialization_utils
 from jax.sharding import Mesh
 import flax.linen as nn
 from typing import Tuple
@@ -67,7 +68,7 @@ class GRPOTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     self.model = models.Transformer(config=self.cfg, mesh=mesh, quant=None)
-    self.state, _ = maxtext_utils.setup_decode_state(self.model, self.cfg, self.rng, mesh, None)
+    self.state, _ = maxtext_state_initialization_utils.setup_decode_state(self.model, self.cfg, self.rng, mesh, None)
     self.tokenizer_model = transformers.AutoTokenizer.from_pretrained(
         "meta-llama/Llama-3.1-8B",
         add_bos_token=False,

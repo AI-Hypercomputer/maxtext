@@ -37,7 +37,9 @@ import numpy as np
 import torch
 from transformers import AutoModelForCausalLM
 
-from MaxText import maxtext_utils, pyconfig
+from MaxText import maxtext_utils
+from MaxText import maxtext_state_initialization_utils
+from MaxText import pyconfig
 from MaxText.layers import models, quantizations
 from MaxText.tests.forward_pass_logit_checker import get_data
 
@@ -139,7 +141,7 @@ def run_l4_jax_forward_pass(config, model_size):
   mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
   quant = quantizations.configure_quantization(config)
   model = models.Transformer(config, mesh=mesh, quant=quant)
-  state, _ = maxtext_utils.setup_decode_state(model, config, rng1, mesh, None)
+  state, _ = maxtext_state_initialization_utils.setup_decode_state(model, config, rng1, mesh, None)
 
   ids, decoder_segment_ids, decoder_positions, golden_logits = setup_golden_data(model_size)
   full_train_logits = model.apply(
