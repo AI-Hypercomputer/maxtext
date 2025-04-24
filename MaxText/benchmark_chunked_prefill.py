@@ -224,7 +224,7 @@ def main(argv: Sequence[str]) -> None:
       prefix_cache_inst.save(
           tuple(tokens_list),
           prefix_cache.Value(
-              prefix=jax.tree_map(lambda x: x.copy(), prefill_result["cache"]),
+              prefix=jax.tree.map(lambda x: x.copy(), prefill_result["cache"]),
               true_length=len(tokens_list),
               padded_length=len(tokens_list),
               tokens=tuple(tokens_list),
