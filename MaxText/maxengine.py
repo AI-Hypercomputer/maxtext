@@ -325,6 +325,9 @@ class MaxEngine(engine_api.Engine):
           _p | {"aqt": {}},
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
+          encoder_images=jnp.ones((1, 1, self.config.image_size_for_vit, self.config.image_size_for_vit, 3), dtype=jnp.int32)
+          if self.config.use_multimodal
+          else None,
           decoder_segment_ids=jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           enable_dropout=False,
           model_mode=common_types.MODEL_MODE_PREFILL,
