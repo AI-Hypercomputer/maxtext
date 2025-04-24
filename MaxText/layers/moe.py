@@ -377,18 +377,19 @@ class MoeBlock(nn.Module):
       return sorted_inputs, sorted_indices, group_size
       
 
-    def gmm(inputs, kernel, group_sizes, expert_assignments):
+    # def gmm(inputs, kernel, group_sizes, expert_assignments):
+    def gmm(inputs, kernel, group_sizes):
       debug = False
       hs_shape = inputs.shape
       # breakpoint()
       # pad length is the 1st dimension of tiling size in gmm call
       PAD_LENGTH=512
-      if debug:
-        jax.debug.print("min expert_assignments = {}", expert_assignments.min())
-        jax.debug.print("max expert_assignments = {}", expert_assignments.max())
-        jax.debug.print("input_shape (line 371): {}", inputs.shape)
-        jax.debug.print("expert_assignments (line 362): {}", expert_assignments.shape)
-      assert inputs.shape[0] == expert_assignments.shape[0], "The number of input tokens must match the number of expert assignments!"
+      # if debug:
+      #   jax.debug.print("min expert_assignments = {}", expert_assignments.min())
+      #   jax.debug.print("max expert_assignments = {}", expert_assignments.max())
+      #   jax.debug.print("input_shape (line 371): {}", inputs.shape)
+      #   jax.debug.print("expert_assignments (line 362): {}", expert_assignments.shape)
+      # assert inputs.shape[0] == expert_assignments.shape[0], "The number of input tokens must match the number of expert assignments!"
       # jax.debug.breakpoint()
       pad_length = PAD_LENGTH
       if hs_shape[0] % PAD_LENGTH:
@@ -437,7 +438,7 @@ class MoeBlock(nn.Module):
             jax.debug.print("kernel.scale[0].shape {}", kernel.scale[0].shape)
             jax.debug.print("kernel.scale[0].squeeze()[0, :10] {}", kernel.scale[0].squeeze()[0, :10])
             jax.debug.print("kernel.scale[0].squeeze()[0, :10] {}", kernel.scale[0].squeeze()[-1, :10])
-          scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0).astype(self.dtype)
+          # scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0).astype(self.dtype)
           if debug:
             jax.debug.print("scales shape: {}", scales.shape)
           if hs_shape[0] % PAD_LENGTH:
@@ -446,7 +447,7 @@ class MoeBlock(nn.Module):
               jax.debug.print("scales post-padding shape: {}", scales.shape)
           if debug:
             jax.debug.print("output (pre-scale multiply) shape: {}", output.shape)
-          output *= scales
+          # output *= scales
       # TODO: is this needed?
       # breakpoint()
       if hs_shape[0] % PAD_LENGTH:
@@ -475,10 +476,12 @@ class MoeBlock(nn.Module):
         elif strategy == TransformStrategy.SEND_SIZE:
           # Size of input array for the send (i.e. number of datapoints routed to the specific shard containing the coresponding expert group)
           return input_array[shard_id]
+        # tells receiving shard at what offset (in shard's receive buffer) the data sent by shard_id should be placed. 
         elif strategy == TransformStrategy.OUTPUT_OFFSET:
           # Received index in the target output
-          zero_row = jnp.zeros((1,) + input_array.shape[1:], dtype=input_array.dtype)
+          zero_row = jnp.zeros((1,) + input_array.shape[1:], dtype=input_array.dtype) # creates a single row of the same shape as input_array
           array_with_zeros = jnp.concatenate((zero_row, input_array), axis=0)
+          # cumsum the number of data points assigned, down the columns to provide the start_idx of each shard's contribution to that expert group.
           cumulated_array = jnp.cumsum(array_with_zeros, axis=0, dtype=input_array.dtype)
           return cumulated_array[shard_id]
         elif strategy == TransformStrategy.RECV_SIZE:
@@ -487,7 +490,7 @@ class MoeBlock(nn.Module):
         else:
           raise ValueError(f"Unknown tranform array strategy: {strategy}")
 
-      local_id = jax.lax.axis_index("expert")
+      local_id = jax.lax.axis_index("expert") # returns the index of the current replica or device along a mapped axis
       # Returns the start_index in the 
       input_offsets = transform_array(all_shards_group_sizes, local_id, TransformStrategy.INPUT_OFFSET)
       send_sizes = transform_array(all_shards_group_sizes, local_id, TransformStrategy.SEND_SIZE)
@@ -538,7 +541,7 @@ class MoeBlock(nn.Module):
         reshaped_group_sizes = jnp.sum(group_sizes.reshape(-1, local_expert_size), axis=1)
         # Returns the total number of experts assignemnts across all EP shards. This will create a matrix of [num_shards x num_shards] where each row is duplicated, containing reshaped_group_sizes counts.
         all_shards_group_sizes = lax.all_gather(reshaped_group_sizes, axis_name=axis_name)
-        # calculate offsets and sizes for ragged_all_to_all operation
+        # calculate offsets and sizes required to run ragged_all_to_all operation
         input_offsets, send_sizes, output_offsets, recv_sizes = get_all_to_all_params(
             all_shards_group_sizes, local_expert_size, self.get_expert_parallelism_size()
         )
@@ -553,6 +556,8 @@ class MoeBlock(nn.Module):
             * self.config.num_experts_per_tok
         )
         output_shape = jnp.zeros((buffer_size, self.config.emb_dim), dtype=x.dtype)
+        # Ship data from local shard to the shards containing respective group experts.
+        # Since the data on the current shard may belong to one (up to all) of the groups, it requires all-to-all.
         x = jax.lax.ragged_all_to_all(
             x,
             output_shape,
@@ -566,28 +571,31 @@ class MoeBlock(nn.Module):
         # x, local_sorted_indices, group_sizes, selected_experts = local_permute(x, global_group_sizes, local_expert_size)
         x, local_sorted_indices, group_sizes = local_permute(x, global_group_sizes, local_expert_size)
         local_expert_id_range = jnp.arange(local_expert_size)
-        selected_experts = jnp.repeat(
-            local_expert_id_range,
-            repeats=group_sizes, # These are now local group sizes
-            total_repeat_length=x.shape[0]
-        )
+        # selected_experts = jnp.repeat(
+        #     local_expert_id_range,
+        #     repeats=group_sizes, # These are now local group sizes
+        #     total_repeat_length=x.shape[0]
+        # )
         # selected_experts = jnp.take(selected_experts, indices=local_sorted_indices, axis=0)
-      else:
-        global_expert_id_range = jnp.arange(self.num_experts)
-        selected_experts = jnp.repeat(
-            global_expert_id_range,
-            repeats=group_sizes, # These are global group sizes
-            total_repeat_length=x.shape[0]
-        )
+      # else:
+      #   global_expert_id_range = jnp.arange(self.num_experts)
+      #   selected_experts = jnp.repeat(
+      #       global_expert_id_range,
+      #       repeats=group_sizes, # These are global group sizes
+      #       total_repeat_length=x.shape[0]
+      #   )
 
       # breakpoint()
-      layer_w0 = gmm(x, w0, group_sizes, selected_experts)
+      # layer_w0 = gmm(x, w0, group_sizes, selected_experts)
+      layer_w0 = gmm(x, w0, group_sizes)
       layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
-      layer_w1 = gmm(x, w1, group_sizes, selected_experts)
+      # layer_w1 = gmm(x, w1, group_sizes, selected_experts)
+      layer_w1 = gmm(x, w1, group_sizes)
       layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
       layer_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       intermediate_layer = jnp.multiply(layer_act, layer_w1)
-      intermediate_output = gmm(intermediate_layer, wo, group_sizes, selected_experts)
+      # intermediate_output = gmm(intermediate_layer, wo, group_sizes, selected_experts)
+      intermediate_output = gmm(intermediate_layer, wo, group_sizes)
       intermediate_output = checkpoint_name(intermediate_output, "mlpwo")
       if self.get_tensor_parallelism_size() > 1:
         intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
