@@ -329,7 +329,7 @@ def initialize_self_attention_lora_kernels(
     reshape_b: bool = False,
     shape_b: bool = None,
 ):
-  """Helper function to intialize LoRA kernels for given target module.
+  """Helper function to initialize LoRA kernels for given target module.
 
   Args:
     self_attention_lora (dict): Intermediate dictionary to store LoRA kernels.
@@ -826,7 +826,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
   base_num_kv_heads = model_params["num_kv_heads"]
   vocab_size = model_params["vocab"]
   num_experts = model_params["num_experts"] if "num_experts" in model_params else None
-  rope_type = model_params.get("rope_type")
+  rope_type = model_params.get("rope_type", "")
   scale_query = model_params.get("scale_query", True)
 
   chkpt_vars = {}
