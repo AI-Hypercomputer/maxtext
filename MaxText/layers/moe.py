@@ -334,9 +334,11 @@ class MoeBlock(nn.Module):
 
     # Unravel the bincounts so that each (sorted) data point is assigned to it's respective (sorted) expert.
     # This will be used to look up the quantization scaling (which has different scalings per expert).
-    sorted_experts = jnp.repeat(expert_indices, repeats=group_size, total_repeat_length=flatten_selected_experts.shape[0])
+    # sorted_experts = jnp.repeat(expert_indices, repeats=group_size, total_repeat_length=flatten_selected_experts.shape[0])
     # breakpoint()
-    return sorted_inputs, sorted_selected_experts, weights, group_size, sorted_experts
+    # return sorted_inputs, sorted_selected_experts, weights, group_size, sorted_experts
+    return sorted_inputs, sorted_selected_experts, weights, group_size,
+  
 
   def unpermute(self, intermediate, sorted_selected_experts, weights, batch_size, sequence_length):
     """Unpermute tokens to original order and combine weights."""
@@ -371,8 +373,8 @@ class MoeBlock(nn.Module):
       sorted_indices = jnp.argsort(expert_indices)
       sorted_inputs = jnp.take(inputs, indices=sorted_indices, axis=0)
       group_size = jnp.bincount(expert_indices, length=local_expert_size)
-      local_sorted_experts_ids = expert_indices[sorted_indices]
-      return sorted_inputs, sorted_indices, group_size, local_sorted_experts_ids
+      # local_sorted_experts_ids = expert_indices[sorted_indices]
+      return sorted_inputs, sorted_indices, group_size
       
 
     def gmm(inputs, kernel, group_sizes, expert_assignments):
@@ -466,10 +468,12 @@ class MoeBlock(nn.Module):
         """
         if strategy == TransformStrategy.INPUT_OFFSET:
           # Index of input array for the send
+          # all_shards_group_sizes[shard_id, :] are the send sizes from the current shard to all other shards.
+          # cumsum_i produces the start_index of the data packet that needs to be sent to all_shards_group_sizes[shard_id, i]
           local_array = input_array[shard_id]
           return jnp.concatenate((jnp.array([0]), jnp.cumsum(local_array)[:-1]))
         elif strategy == TransformStrategy.SEND_SIZE:
-          # Size of input array for the send
+          # Size of input array for the send (i.e. number of datapoints routed to the specific shard containing the coresponding expert group)
           return input_array[shard_id]
         elif strategy == TransformStrategy.OUTPUT_OFFSET:
           # Received index in the target output
@@ -484,6 +488,7 @@ class MoeBlock(nn.Module):
           raise ValueError(f"Unknown tranform array strategy: {strategy}")
 
       local_id = jax.lax.axis_index("expert")
+      # Returns the start_index in the 
       input_offsets = transform_array(all_shards_group_sizes, local_id, TransformStrategy.INPUT_OFFSET)
       send_sizes = transform_array(all_shards_group_sizes, local_id, TransformStrategy.SEND_SIZE)
       output_offsets = transform_array(all_shards_group_sizes, local_id, TransformStrategy.OUTPUT_OFFSET)
@@ -523,7 +528,8 @@ class MoeBlock(nn.Module):
       # Reorder the inputs so that all the ones assigned to expert 0 are at the beginning and all the ones assigned to expert K-1 are at the end.
       # Return their original indices to undo this later (sorted_selected_experts), the number of data points assigned to each expert (group_sizes), and the expert assignments (selected_experts).
       
-      x, sorted_selected_experts, weights, group_sizes, selected_experts = self.permute(x, logits, pre_bias_logits)
+      # x, sorted_selected_experts, weights, group_sizes, selected_experts = self.permute(x, logits, pre_bias_logits)
+      x, sorted_selected_experts, weights, group_sizes = self.permute(x, logits, pre_bias_logits)
       if self.get_expert_parallelism_size() > 1:
         axis_name = "expert"
         # get group sizes for all shards
@@ -557,8 +563,22 @@ class MoeBlock(nn.Module):
             axis_name=axis_name,
         )
         global_group_sizes = lax.all_gather(group_sizes, axis_name=axis_name)
-        x, local_sorted_indices, group_sizes, selected_experts = local_permute(x, global_group_sizes, local_expert_size)
+        # x, local_sorted_indices, group_sizes, selected_experts = local_permute(x, global_group_sizes, local_expert_size)
+        x, local_sorted_indices, group_sizes = local_permute(x, global_group_sizes, local_expert_size)
+        local_expert_id_range = jnp.arange(local_expert_size)
+        selected_experts = jnp.repeat(
+            local_expert_id_range,
+            repeats=group_sizes, # These are now local group sizes
+            total_repeat_length=x.shape[0]
+        )
         # selected_experts = jnp.take(selected_experts, indices=local_sorted_indices, axis=0)
+      else:
+        global_expert_id_range = jnp.arange(self.num_experts)
+        selected_experts = jnp.repeat(
+            global_expert_id_range,
+            repeats=group_sizes, # These are global group sizes
+            total_repeat_length=x.shape[0]
+        )
 
       # breakpoint()
       layer_w0 = gmm(x, w0, group_sizes, selected_experts)
