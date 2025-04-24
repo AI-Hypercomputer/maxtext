@@ -14,7 +14,7 @@
  limitations under the License.
  """
 
-"""  This file contains data classes and runner logic to execute the XPK runs triggered by benchmarks/benchmark_runner.py"
+"""  This file contains data classes and runner logic to execute the XPK runs triggered by benchmarks.benchmark_runner"
 
 """
 # Improvements:
@@ -623,7 +623,7 @@ def generate_xpk_workload_cmd(
     args_str = ""
     for k,v in args.items():
       args_str += f'--{k}={v} '
-    upload_metrics_to_bq_cmd = f"&& python3 benchmarks/upload_metrics_to_bq.py {args_str}"
+    upload_metrics_to_bq_cmd = f"&& python3 -m benchmarks.upload_metrics_to_bq {args_str}"
 
   print(f'User command: {user_command}')
   all_xpk_storage = ""
