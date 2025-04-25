@@ -311,32 +311,18 @@ class MoeBlock(nn.Module):
     return top_k_weights, top_k_indices
 
   def permute(self, inputs, gate_logits, pre_bias_logits):
-    """Reorder the tokens so that they are assorted by expert assignment - i.e. all tokens asigned to expert 0 in the beginning. All assigned to expert K-1 at the end.
-    Return the reordering indices so that you can later reorder them back to their original order."""
+    """Permute tokens to group by expert to fit gmm call."""
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
     inputs_shape = inputs.shape
     inputs_2d = jnp.reshape(inputs, (inputs_shape[0] * inputs_shape[1], inputs_shape[2]))
-    # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
     weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits)
-    # shape is batch * sequence * num_expert_per_tok‰
     flatten_selected_experts = jnp.ravel(selected_experts)
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
-    # max(sorted_indices) = batch*sequence. It's used to map back multiple expert assignments to the same data point's index.
     sorted_indices = sorted_selected_experts // self.num_experts_per_tok
-    # Select/reorder inputs such that they are ordered by chronological assignment to experts (e.g. inputs assigned to 1st expert are in the front).
-    # Each example will be duplicated self.num_experts_per_tok (from get_topk()) so to get the original index from inputs, you need // self.num_experts_per_tok (i.e. this is just bookkeeping)
     sorted_inputs = jnp.take(inputs_2d, indices=sorted_indices, axis=0).astype(self.dtype)
-    
-    # 1D array of length num_experts. group_size[k] is the total number of tokens assigned to expert k on this batch (shard) of data.
     group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
-
-    expert_indices = jnp.arange(self.num_experts)
-
-    # Unravel the bincounts so that each (sorted) data point is assigned to it's respective (sorted) expert.
-    # This will be used to look up the quantization scaling (which has different scalings per expert).
-    sorted_experts = jnp.repeat(expert_indices, repeats=group_size, total_repeat_length=flatten_selected_experts.shape[0])
-    # breakpoint()
-    return sorted_inputs, sorted_selected_experts, weights, group_size, sorted_experts
+    return sorted_inputs, sorted_selected_experts, weights, group_size
+  
 
   def unpermute(self, intermediate, sorted_selected_experts, weights, batch_size, sequence_length):
     """Unpermute tokens to original order and combine weights."""
@@ -371,30 +357,18 @@ class MoeBlock(nn.Module):
       sorted_indices = jnp.argsort(expert_indices)
       sorted_inputs = jnp.take(inputs, indices=sorted_indices, axis=0)
       group_size = jnp.bincount(expert_indices, length=local_expert_size)
-      local_sorted_experts_ids = expert_indices[sorted_indices]
-      return sorted_inputs, sorted_indices, group_size, local_sorted_experts_ids
+      return sorted_inputs, sorted_indices, group_size
       
 
     def gmm(inputs, kernel, group_sizes, expert_assignments):
-      debug = False
       hs_shape = inputs.shape
-      # breakpoint()
       # pad length is the 1st dimension of tiling size in gmm call
       PAD_LENGTH=512
-      if debug:
-        jax.debug.print("min expert_assignments = {}", expert_assignments.min())
-        jax.debug.print("max expert_assignments = {}", expert_assignments.max())
-        jax.debug.print("input_shape (line 371): {}", inputs.shape)
-        jax.debug.print("expert_assignments (line 362): {}", expert_assignments.shape)
       assert inputs.shape[0] == expert_assignments.shape[0], "The number of input tokens must match the number of expert assignments!"
-      # jax.debug.breakpoint()
       pad_length = PAD_LENGTH
       if hs_shape[0] % PAD_LENGTH:
         pad_length = PAD_LENGTH - hs_shape[0] % PAD_LENGTH
         inputs = jax.lax.pad(inputs.astype(jnp.float32), 0.0, [(0, pad_length, 0), (0, 0, 0)])
-        if debug:
-          jax.debug.print("input_shape (line 370): {}", inputs.shape)
-          jax.debug.print("hs_shape (line 380): {}", hs_shape)
 
       inputs = inputs.astype(self.dtype)
       kernel = kernel.astype(self.dtype)
@@ -429,24 +403,10 @@ class MoeBlock(nn.Module):
         )
         if isinstance(kernel, QTensor):
           # Multiply outputs by the kernely scale
-          # TODO: Confirm that padding is being properly used and that you don't need a jnp.where in here.
-          # breakpoint()
-          if debug:
-            jax.debug.print("kernel.scale[0].shape {}", kernel.scale[0].shape)
-            jax.debug.print("kernel.scale[0].squeeze()[0, :10] {}", kernel.scale[0].squeeze()[0, :10])
-            jax.debug.print("kernel.scale[0].squeeze()[0, :10] {}", kernel.scale[0].squeeze()[-1, :10])
           scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0).astype(self.dtype)
-          if debug:
-            jax.debug.print("scales shape: {}", scales.shape)
           if hs_shape[0] % PAD_LENGTH:
             scales = jax.lax.pad(scales.astype(jnp.float32), 0.0, [(0, pad_length, 0), (0, 0, 0)])
-            if debug:
-              jax.debug.print("scales post-padding shape: {}", scales.shape)
-          if debug:
-            jax.debug.print("output (pre-scale multiply) shape: {}", output.shape)
           output *= scales
-      # TODO: is this needed?
-      # breakpoint()
       if hs_shape[0] % PAD_LENGTH:
         output = output[: hs_shape[0]]
       return output
@@ -520,19 +480,13 @@ class MoeBlock(nn.Module):
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo):
       batch_size, sequence_length, _ = x.shape
-      # Reorder the inputs so that all the ones assigned to expert 0 are at the beginning and all the ones assigned to expert K-1 are at the end.
-      # Return their original indices to undo this later (sorted_selected_experts), the number of data points assigned to each expert (group_sizes), and the expert assignments (selected_experts).
-      
-      x, sorted_selected_experts, weights, group_sizes, selected_experts = self.permute(x, logits, pre_bias_logits)
+      x, sorted_selected_experts, weights, group_sizes = self.permute(x, logits, pre_bias_logits)
       if self.get_expert_parallelism_size() > 1:
         axis_name = "expert"
         # get group sizes for all shards
         local_expert_size = self.config.num_experts // self.get_expert_parallelism_size()
-        # Returns the total number of experts assignments in an EP shard
         reshaped_group_sizes = jnp.sum(group_sizes.reshape(-1, local_expert_size), axis=1)
-        # Returns the total number of experts assignemnts across all EP shards. This will create a matrix of [num_shards x num_shards] where each row is duplicated, containing reshaped_group_sizes counts.
         all_shards_group_sizes = lax.all_gather(reshaped_group_sizes, axis_name=axis_name)
-        # calculate offsets and sizes for ragged_all_to_all operation
         input_offsets, send_sizes, output_offsets, recv_sizes = get_all_to_all_params(
             all_shards_group_sizes, local_expert_size, self.get_expert_parallelism_size()
         )
@@ -557,10 +511,21 @@ class MoeBlock(nn.Module):
             axis_name=axis_name,
         )
         global_group_sizes = lax.all_gather(group_sizes, axis_name=axis_name)
-        x, local_sorted_indices, group_sizes, selected_experts = local_permute(x, global_group_sizes, local_expert_size)
-        # selected_experts = jnp.take(selected_experts, indices=local_sorted_indices, axis=0)
+        x, local_sorted_indices, group_sizes = local_permute(x, global_group_sizes, local_expert_size)
+        local_expert_id_range = jnp.arange(local_expert_size)
+        selected_experts = jnp.repeat(
+            local_expert_id_range,
+            repeats=group_sizes,
+            total_repeat_length=x.shape[0]
+        )
+      else:
+        global_expert_id_range = jnp.arange(self.num_experts)
+        selected_experts = jnp.repeat(
+            global_expert_id_range,
+            repeats=group_sizes,
+            total_repeat_length=x.shape[0]
+        )
 
-      # breakpoint()
       layer_w0 = gmm(x, w0, group_sizes, selected_experts)
       layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
       layer_w1 = gmm(x, w1, group_sizes, selected_experts)
