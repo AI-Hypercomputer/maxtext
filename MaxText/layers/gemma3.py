@@ -47,7 +47,7 @@ BATCH = common_types.BATCH
 LENGTH = common_types.LENGTH
 HEAD = common_types.HEAD
 D_KV = common_types.D_KV
-
+TOKEN_PLACEHOLDER = -2
 
 nd_dense_init = initializers.nd_dense_init
 Quant = quantizations.AqtQuantization
@@ -122,6 +122,7 @@ class Gemma3DecoderLayer(nn.Module):
       previous_chunk=None,
       page_state=None,
       slot=None,
+      bidirectional_mask=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -166,6 +167,7 @@ class Gemma3DecoderLayer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        bidirectional_mask=bidirectional_mask,
     )
     if cfg.use_post_attn_norm:
       attention_lnx = RMSNorm(
