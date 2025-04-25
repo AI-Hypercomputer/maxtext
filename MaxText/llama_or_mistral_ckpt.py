@@ -133,6 +133,19 @@ MODEL_PARAMS_DICT = {
         "num_experts": 16,
         "rope_type": "llama3.1",
         "scale_query": False,
+        "interleave_moe_layer_step": 1,
+    },
+    "llama4-17b-128e": {
+        "num_layers": 48,
+        "num_heads": 40,
+        "num_kv_heads": 8,
+        "dims_per_head": 128,
+        "vocab": 202048,
+        "base_emb_dim": 5120,
+        "num_experts": 128,
+        "rope_type": "llama3.1",
+        "scale_query": False,
+        "interleave_moe_layer_step": 2,
     },
     "mistral-7b": {
         "num_layers": 32,
@@ -273,6 +286,7 @@ def _hf_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1) -> dict:
       f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.w1.weight": f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w1.weight",
       f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.w2.weight": f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w2.weight",
       f"model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}.w3.weight": f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w3.weight",
+      # FFN
       f"model.layers.{layer_idx}.mlp.gate_proj.weight": f"layers.{layer_idx}.feed_forward.w1.weight",
       f"model.layers.{layer_idx}.mlp.down_proj.weight": f"layers.{layer_idx}.feed_forward.w2.weight",
       f"model.layers.{layer_idx}.mlp.up_proj.weight": f"layers.{layer_idx}.feed_forward.w3.weight",
@@ -1427,6 +1441,12 @@ if __name__ == "__main__":
 
   if args.model_size not in MODEL_PARAMS_DICT:
     raise NotImplementedError
+
+  llama4_17b_128e = "llama4-17b-128e"
+  if args.model_size == llama4_17b_128e:
+    raise NotImplementedError(
+        f"Currently, the `{llama4_17b_128e}` model only supports unscanned checkpoint conversion.  Please use `MaxText/llama4_ckpt_unscanned.py` instead!"
+    )
 
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={SIMULATED_CPU_DEVICES_COUNT}"
   base_weights_path = args.maxtext_model_path

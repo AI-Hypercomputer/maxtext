@@ -1228,6 +1228,7 @@ class Attention(nn.Module):
       rope_embedding_dims = self.head_dim
 
     rope_type = self.config.rope_type.lower()
+    rope_use_scale = self.config.rope_use_scale
     if self.config.model_name.startswith("llama3.1") or rope_type.startswith("llama3.1"):
       rotary_embedding = embeddings.LLaMARotaryEmbedding(
           min_timescale=self.config.rope_min_timescale,
@@ -1235,6 +1236,7 @@ class Attention(nn.Module):
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
           name=name,
+          use_scale=rope_use_scale,
       )
     elif rope_type.startswith("yarn"):
       rotary_embedding = YarnRotaryEmbedding(

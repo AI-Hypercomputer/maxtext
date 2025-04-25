@@ -28,9 +28,10 @@ We have used MaxText to [demonstrate high-performance, well-converging training 
 Key supported features:
 * TPUs and GPUs
 * Training and Inference
-* Models: Llama 2, Llama 3, Mistral and Mixtral family, Gemma, Gemma 2, Gemma 3, and DeepSeek family
+* Models: Llama 2, Llama 3, Llama 4, Mistral and Mixtral family, Gemma, Gemma 2, Gemma 3, and DeepSeek family
 
 ## Announcements
+* [Apr 24, 2025] Llama 4 Maverick models are now supported!
 * [Apr 14, 2025] Llama 4 Scout models are now supported. Context length is currently limited to 8k and we have many ideas for optimization but we're working on both these things.  Note that models are text-only for now, but we're working on full multi-modal support!
 * **[April 7, 2025] 🚨🚨🚨 We support modular imports. This comes with an API change for `train.py`: Now you should invoke the script via `python3 -m MaxText.train MaxText/configs/base.yml run_name=...`. If you want the old behavior you can stick to an older commit `git checkout pre-module-v0.1.0` and use the older API `python MaxText/train.py MaxText/configs/base.yml run_name=...`.**
 * [March 24, 2025] We are excited to announce support for DeepSeek v3 (671B) and v2-Lite (16B), compatible with both TPUs and GPUs. We are actively working on further optimization.
