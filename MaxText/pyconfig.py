@@ -20,7 +20,7 @@ from collections import OrderedDict
 import math
 import os
 import sys
-
+import datetime
 from typing import Any, Union
 
 import jax
@@ -498,6 +498,10 @@ class _HyperParameters:
     """Transformations between the config data and configs used at runtime"""
     if raw_keys["run_name"] == "":
       raw_keys["run_name"] = os.environ.get("JOBSET_NAME")  # using XPK default
+      if raw_keys["run_name"] == "":
+        now = datetime.datetime.now()
+        timestamp = now.strftime("%Y-%m-%d-%H-%M")
+        raw_keys["run_name"] = f'{raw_keys["model_name"]}_{timestamp}'
     run_name = raw_keys["run_name"]
     base_output_directory = raw_keys["base_output_directory"]
     if run_name:

@@ -74,9 +74,11 @@ from MaxText.layers import quantizations
 from ml_goodput_measurement import goodput
 from ml_goodput_measurement import monitoring
 
+import MaxText as mt
+
 # pylint: disable=too-many-positional-arguments
 
-Transformer = models.Transformer
+
 EPS = 1e-8
 _DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE = 2 * 1024**3
 
@@ -572,73 +574,73 @@ def check_example_batch(config, example_batch):
     err.throw()
 
 
-def setup_mesh_and_model(config, devices=None):
-  """Set up the mesh and the model for training
+# def setup_mesh_and_model(config, devices=None):
+#   """Set up the mesh and the model for training
 
-  Args:
-    config
-    devices
+#   Args:
+#     config
+#     devices
 
-  Returns:
-    init_rng: RNG key
-    writer: Summary writer for tensorboard
-    checkpoint_manager: Orbax checkpointer
-    state_mesh_annotations: the mesh annotations for the train state
-    model:
-    mesh:
-    learning_rate_schedule:
-    tx:
-  """
+#   Returns:
+#     init_rng: RNG key
+#     writer: Summary writer for tensorboard
+#     checkpoint_manager: Orbax checkpointer
+#     state_mesh_annotations: the mesh annotations for the train state
+#     model:
+#     mesh:
+#     learning_rate_schedule:
+#     tx:
+#   """
 
-  init_rng = random.PRNGKey(config.init_weights_seed)
-  writer = max_utils.initialize_summary_writer(config.tensorboard_dir, config.run_name)
+#   init_rng = random.PRNGKey(config.init_weights_seed)
+#   writer = max_utils.initialize_summary_writer(config.tensorboard_dir, config.run_name)
 
-  # Mesh definition
-  devices_array = maxtext_utils.create_device_mesh(config, devices)
-  mesh = Mesh(devices_array, config.mesh_axes)
+#   # Mesh definition
+#   devices_array = maxtext_utils.create_device_mesh(config, devices)
+#   mesh = Mesh(devices_array, config.mesh_axes)
 
-  # Model and Optimizer definition
-  quant = quantizations.configure_quantization(config)
-  model = Transformer(config, mesh, quant=quant)
-  learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
-  tx = optimizers.get_optimizer(config, learning_rate_schedule)
-  logger = checkpointing.setup_checkpoint_logger(config)
-  if config.enable_emergency_checkpoint:
-    if config.use_replicator_service:
-      checkpoint_manager = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
-          config.local_checkpoint_directory,
-          config.local_checkpoint_period,
-          mesh,
-      )
-    else:
-      abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
-      checkpoint_manager = checkpointing.create_orbax_emergency_checkpoint_manager(
-          config.local_checkpoint_directory,
-          config.checkpoint_dir,
-          mesh,
-          abstract_state,
-          config.local_checkpoint_period,
-          config.checkpoint_period,
-          logger,
-      )
-  else:
-    # TODO(b/368121306): Remove this once zarr3 support is plumbed on the backend
-    use_ocdbt = config.checkpoint_storage_use_ocdbt
-    use_zarr3 = config.checkpoint_storage_use_zarr3
-    if config.enable_single_controller:
-      use_ocdbt, use_zarr3 = False, False
-    checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-        config.checkpoint_dir,
-        config.enable_checkpointing,
-        config.async_checkpointing,
-        config.checkpoint_period,
-        config.dataset_type,
-        logger,
-        use_ocdbt,
-        use_zarr3,
-    )
+#   # Model and Optimizer definition
+#   quant = quantizations.configure_quantization(config)
+#   model = Transformer(config, mesh, quant=quant)
+#   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
+#   tx = optimizers.get_optimizer(config, learning_rate_schedule)
+#   logger = checkpointing.setup_checkpoint_logger(config)
+#   if config.enable_emergency_checkpoint:
+#     if config.use_replicator_service:
+#       checkpoint_manager = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
+#           config.local_checkpoint_directory,
+#           config.local_checkpoint_period,
+#           mesh,
+#       )
+#     else:
+#       abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
+#       checkpoint_manager = checkpointing.create_orbax_emergency_checkpoint_manager(
+#           config.local_checkpoint_directory,
+#           config.checkpoint_dir,
+#           mesh,
+#           abstract_state,
+#           config.local_checkpoint_period,
+#           config.checkpoint_period,
+#           logger,
+#       )
+#   else:
+#     # TODO(b/368121306): Remove this once zarr3 support is plumbed on the backend
+#     use_ocdbt = config.checkpoint_storage_use_ocdbt
+#     use_zarr3 = config.checkpoint_storage_use_zarr3
+#     if config.enable_single_controller:
+#       use_ocdbt, use_zarr3 = False, False
+#     checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
+#         config.checkpoint_dir,
+#         config.enable_checkpointing,
+#         config.async_checkpointing,
+#         config.checkpoint_period,
+#         config.dataset_type,
+#         logger,
+#         use_ocdbt,
+#         use_zarr3,
+#     )
 
-  return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
+#   return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
 
 
 def setup_train_loop(config):
@@ -662,7 +664,7 @@ def setup_train_loop(config):
   """
   recorder = create_goodput_recorder(config)
   record_goodput(recorder, config, recorder.record_tpu_init_start_time if recorder else None)
-  init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
+  model, mesh, init_rng, writer, checkpoint_manager, learning_rate_schedule, tx = mt(config)
   record_goodput(recorder, config, recorder.record_tpu_init_end_time if recorder else None)
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
@@ -983,6 +985,8 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+  # TODO: Anisha: ensure missing mandatory fields in base.yml are filled in in argv, 
+  # or fill in here
   config = pyconfig.initialize(argv)
   max_utils.print_system_information()
   validate_train_config(config)
