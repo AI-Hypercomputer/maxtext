@@ -670,6 +670,7 @@ class Transformer(nn.Module):
 
       if self.config.decoder_block == "gemma3":
         from MaxText.layers import gemma3
+
         bidirectional_mask = decoder_input_tokens == gemma3.TOKEN_PLACEHOLDER
 
     logits = self.decoder(

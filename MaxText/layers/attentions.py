@@ -147,7 +147,7 @@ def apply_mask_to_logits(logits: Array, mask: Array):
 class ChunkedCausalMask(splash_attention_mask._ComputableMask):
   """Lazy chunked causal mask.
 
-  Attention is causal within each chunk (0, K), (K, 2K), (2K, 3K), ... tokens attend to each other but not accross chunks.
+  Attention is causal within each chunk (0, K), (K, 2K), (2K, 3K), ... tokens attend to each other but not across chunks.
   Llama4 models use interleaved chunk attention along with global attention.
 
   This mask class inherits from splash_attention_mask._ComputableMask and is designed to be used with Splash Attention.
@@ -244,6 +244,7 @@ def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int)
   chunk_mask = same_chunk & (row_ids >= col_ids)
   return chunk_mask
 
+
 def _make_block_mask_indices(bidirectional_mask):
   """Creates block mask identifying segments based on a bidirectional mask.
 
@@ -258,6 +259,7 @@ def _make_block_mask_indices(bidirectional_mask):
   boundary = padded_mask[..., 1:] > padded_mask[..., :-1]
   numbered_boundary = jnp.cumsum(boundary, axis=-1)
   return bidirectional_mask * numbered_boundary
+
 
 def _make_bidirectional_block_mask(bidirectional_mask):
   """Creates bidirectional block mask from bidirectional_mask, where True corresponds to image tokens.
@@ -321,7 +323,13 @@ class AttentionOp(nn.Module):
   # https://github.com/jax-ml/jax/blob/main/jax/experimental/pallas/ops/tpu/flash_attention.py
   # This mask models (1) separate sequences (decoder_segment_ids) and (2) causality
   def generate_attention_mask(
-      self, query, key, decoder_segment_ids: Array | None, model_mode: str, previous_chunk: Any = None, bidirectional_mask: Any = None,
+      self,
+      query,
+      key,
+      decoder_segment_ids: Array | None,
+      model_mode: str,
+      previous_chunk: Any = None,
+      bidirectional_mask: Any = None,
   ) -> Array | None:
     mask = None
     if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
