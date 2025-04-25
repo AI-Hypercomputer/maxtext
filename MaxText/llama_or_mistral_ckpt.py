@@ -826,7 +826,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
   base_num_kv_heads = model_params["num_kv_heads"]
   vocab_size = model_params["vocab"]
   num_experts = model_params["num_experts"] if "num_experts" in model_params else None
-  rope_type = model_params.get("rope_type")
+  rope_type = model_params.get("rope_type", "")
   scale_query = model_params.get("scale_query", True)
 
   chkpt_vars = {}
@@ -1071,7 +1071,6 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_0"] = {}
       jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_1"] = {}
       jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["shared_experts"]["wo"] = {}
-      # TODO: need to remove if no shared experts
       layer_weight["shared_experts"] = {
           "wi_0": {"kernel": None},
           "wi_1": {"kernel": None},
@@ -1105,7 +1104,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       ).transpose()
       wo = np.concatenate(
           [
-              var[f"layers.{layer_idx}.feed_forward.w1.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
+              var[f"layers.{layer_idx}.feed_forward.w2.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
               for var in chkpt_vars
           ],
           axis=1,
@@ -1120,10 +1119,12 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       layer_weight["mlp"]["wi_1"]["kernel"][layer_idx, ...] = wi_1  # pytype: disable=unsupported-operands
       layer_weight["mlp"]["wo"]["kernel"][layer_idx, ...] = wo  # pytype: disable=unsupported-operands
     else:
-      router_weight_name = (
-          f"layers.{layer_idx}.feed_forward.router_DE" if is_llama4_model else f"layers.{layer_idx}.feed_forward.gate.weight"
-      )
-      gate = chkpt_vars[0][router_weight_name].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+      if is_llama4_model:
+        gate = chkpt_vars[0][f"layers.{layer_idx}.feed_forward.router_DE"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+      else:
+        gate = np.concatenate(
+            [var[f"layers.{layer_idx}.feed_forward.gate.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0
+        ).transpose()
       if layer_weight["gate"]["kernel"] is None:
         stack_shape = (base_num_decoder_layers,)
         layer_weight["gate"]["kernel"] = np.zeros(stack_shape + gate.shape, dtype=CAST_DTYPE)
@@ -1225,21 +1226,21 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
         for k in tqdm(range(num_experts), desc="experts", leave=False):
           wi_0 = np.concatenate(
               [
-                  var[f"layers.{layer_idx}.feed_forward.experts.{k}.w1.weight"].type(torch.float16).numpy()
+                  var[f"layers.{layer_idx}.feed_forward.experts.{k}.w1.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
                   for var in chkpt_vars
               ],
               axis=0,
           ).transpose()
           wi_1 = np.concatenate(
               [
-                  var[f"layers.{layer_idx}.feed_forward.experts.{k}.w3.weight"].type(torch.float16).numpy()
+                  var[f"layers.{layer_idx}.feed_forward.experts.{k}.w3.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
                   for var in chkpt_vars
               ],
               axis=0,
           ).transpose()
           wo = np.concatenate(
               [
-                  var[f"layers.{layer_idx}.feed_forward.experts.{k}.w2.weight"].type(torch.float16).numpy()
+                  var[f"layers.{layer_idx}.feed_forward.experts.{k}.w2.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
                   for var in chkpt_vars
               ],
               axis=1,
@@ -1265,23 +1266,30 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
 
     jax_weights["decoder"]["layers"]["mlp"] = layer_weight["mlp"]
   else:
-    layer_weight["gate"]["kernel"] = np.transpose(layer_weight["gate"]["kernel"], axes=(2, 0, 1))
-    jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["gate"]["kernel"] = layer_weight["gate"]["kernel"]
-    # routed experts
-    jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_0"] = layer_weight["mlp"]["wi_0"]["kernel"]
-    jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_1"] = layer_weight["mlp"]["wi_1"]["kernel"]
-    jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wo"] = layer_weight["mlp"]["wo"]["kernel"]
-    # TODO: make this optional for setups that don't use shared experts
-    # shared experts
-    jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_0"]["kernel"] = layer_weight[
-        "shared_experts"
-    ]["wi_0"]["kernel"]
-    jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_1"]["kernel"] = layer_weight[
-        "shared_experts"
-    ]["wi_1"]["kernel"]
-    jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["shared_experts"]["wo"]["kernel"] = layer_weight[
-        "shared_experts"
-    ]["wo"]["kernel"]
+    gate_kernel_axes = (2, 0, 1) if is_llama4_model else (1, 0, 2)
+    layer_weight["gate"]["kernel"] = np.transpose(layer_weight["gate"]["kernel"], axes=gate_kernel_axes)
+    if is_llama4_model:
+      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["gate"]["kernel"] = layer_weight["gate"]["kernel"]
+      # routed experts
+      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_0"] = layer_weight["mlp"]["wi_0"]["kernel"]
+      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_1"] = layer_weight["mlp"]["wi_1"]["kernel"]
+      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wo"] = layer_weight["mlp"]["wo"]["kernel"]
+      # if "shared_experts" in layer_weight:
+      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_0"]["kernel"] = layer_weight[
+          "shared_experts"
+      ]["wi_0"]["kernel"]
+      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_1"]["kernel"] = layer_weight[
+          "shared_experts"
+      ]["wi_1"]["kernel"]
+      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["shared_experts"]["wo"]["kernel"] = layer_weight[
+          "shared_experts"
+      ]["wo"]["kernel"]
+    else:
+      jax_weights["decoder"]["layers"]["MoeBlock_0"]["gate"]["kernel"] = layer_weight["gate"]["kernel"]
+
+      jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_0"] = layer_weight["mlp"]["wi_0"]["kernel"]
+      jax_weights["decoder"]["layers"]["MoeBlock_0"]["wi_1"] = layer_weight["mlp"]["wi_1"]["kernel"]
+      jax_weights["decoder"]["layers"]["MoeBlock_0"]["wo"] = layer_weight["mlp"]["wo"]["kernel"]
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
