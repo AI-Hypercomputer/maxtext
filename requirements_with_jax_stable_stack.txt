@@ -25,3 +25,4 @@ google-cloud-monitoring
 google-api-core
 google-api-python-client
 omegaconf
+jaxtyping
