@@ -32,21 +32,21 @@ Configuration options like `use_chunked_prefill`, `prefill_chunk_size`,
 """
 
 
-# pylint: disable=ungrouped-imports
-import datetime
 import os
 from typing import Any, Sequence
+import datetime
 
 import jax
-from absl import app
-from jetstream.core import prefix_cache
+
 from jetstream.engine import chunked_prefill
 from jetstream.engine import engine_api
+from jetstream.engine import prefix_cache
+
+from absl import app
 
 from MaxText import max_utils
 from MaxText import maxengine
 from MaxText import pyconfig
-
 
 _WARMUP_ITERS = 2
 _BENCHMARK_ITERS = 5
@@ -81,7 +81,7 @@ def fill_prefix_cache(
     return jax.tree.map(lambda x: x.copy(), prefix)
 
   # --- Fill the cache with dummy entries ---
-  print(f"Filling cache with {cache_num} dummy entries...")
+  print("Filling cache with", cache_num, "dummy entries...")
   for i in range(cache_num):
     # Create a unique dummy key, ensuring it's different from key_to_hit
     # and has the same length for consistency (though not strictly required by Trie).
@@ -105,10 +105,10 @@ def fill_prefix_cache(
     jax.block_until_ready(load_result.prefix)
     del load_result
 
-  print(f"Finished filling cache with {cache_num} dummy entries.")
+  print("Finished filling cache with", cache_num, "dummy entries.")
 
   # --- Add the actual target entry ---
-  print(f"Adding the target entry with key length {len(key_to_hit)}...")
+  print("Adding the target entry with key length ", len(key_to_hit), "...", sep="")
 
   value_to_hit = prefix_cache.Value(
       prefix=copy_prefix(),
@@ -171,7 +171,7 @@ def main(argv: Sequence[str]) -> None:
     prefill_result = run_chunked_prefill_utility()
     jax.block_until_ready(prefill_result)
     end = datetime.datetime.now()
-    print(f"  Warmup iteration {i+1} time: {end - start}")
+    print("  Warmup iteration", i + 1, "time:", end - start)
 
   print("\nStarting benchmark...")
   total_time = datetime.timedelta()
@@ -182,10 +182,10 @@ def main(argv: Sequence[str]) -> None:
     end = datetime.datetime.now()
     iter_time = end - start
     total_time += iter_time
-    print(f"  Benchmark iteration {i+1} time: {iter_time}")
+    print("  Benchmark iteration", i + 1, "time:", iter_time)
 
   average_time = total_time / _BENCHMARK_ITERS
-  print(f"\nAverage time taken for chunked prefill over {_BENCHMARK_ITERS} iterations: {average_time}")
+  print("\nAverage time taken for chunked prefill over", _BENCHMARK_ITERS, "iterations:", average_time)
 
   # Run prefix caching benchmark
   prefill_result = run_chunked_prefill_utility()
@@ -235,13 +235,13 @@ def main(argv: Sequence[str]) -> None:
 
   for cache_hit_chunk in range(len(chunked_tokens_list)):
     for need_save in [True, False]:
-      print(f"\nBenchmark prefix caching {cache_hit_chunk=}, {need_save=}")
+      print("\nBenchmark prefix caching cache_hit_chunk=", cache_hit_chunk, " need_save=", need_save, sep="")
       for i in range(_WARMUP_ITERS):
         start = datetime.datetime.now()
         prefill_result = run_chunked_prefill_with_prefix_caching(cache_hit_chunk, need_save)
         jax.block_until_ready(prefill_result)
         end = datetime.datetime.now()
-        print(f"  Warmup iteration {i+1} time: {end - start}")
+        print("  Warmup iteration", i + 1, "time:", end - start)
 
       total_time = datetime.timedelta()
       for i in range(_BENCHMARK_ITERS):
@@ -251,10 +251,10 @@ def main(argv: Sequence[str]) -> None:
         end = datetime.datetime.now()
         iter_time = end - start
         total_time += iter_time
-        print(f"  Benchmark iteration {i+1} time: {iter_time}")
+        print("  Benchmark iteration", i + 1, "time:", iter_time)
 
       average_time = total_time / _BENCHMARK_ITERS
-      print(f"\nAverage time taken for prefix caching chunked prefill: {average_time}")
+      print("\nAverage time taken for prefix caching chunked prefill:", average_time)
 
 
 if __name__ == "__main__":

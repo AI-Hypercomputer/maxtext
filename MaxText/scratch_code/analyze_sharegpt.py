@@ -35,7 +35,7 @@ def get_prefill_and_generate_times(filename=""):
     return PREFILL_BUCKET_SIZE_TO_MS, SYSTEM_TIME_PER_DECODE_TOKEN_MS
 
   prefill_bucket_size_to_ms = {}
-  with open(filename, "r") as f:
+  with open(filename, "rt", encoding="utf8") as f:
     microbenchmark_results = json.load(f)
   for k, v in microbenchmark_results["Prefill"].items():
     prefill_bucket_size_to_ms[int(k)] = round(v["prefill_time_in_ms"], 3)
@@ -45,7 +45,7 @@ def get_prefill_and_generate_times(filename=""):
 
 def get_conversations_from_file(filename, max_input_tokens, max_output_tokens):
   convo_token_numbers = []
-  with open(filename, "r") as f:
+  with open(filename, "rt", encoding="utf8") as f:
     loaded_share_gpt = json.load(f)
   for example in loaded_share_gpt:
     if len(example["conversations"]) < 2:

@@ -14,16 +14,16 @@
 
 """CLI utility for loading and quantizing a checkpoint."""
 
+import os
+from typing import Sequence
+
+from absl import app
+
 import jax
 
 from MaxText import max_utils
 from MaxText import maxengine
-
-import os
 from MaxText import pyconfig
-
-from typing import Sequence
-from absl import app
 
 
 def main(argv: Sequence[str]) -> None:

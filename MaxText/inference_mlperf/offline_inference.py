@@ -12,24 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Callable, List, Tuple, Callable
-import dataclasses
+from typing import Any, List, Tuple, Callable
 from collections import defaultdict
-import jax
-from jax import numpy as jnp
-from jax.experimental import layout
-import numpy as np
-import queue
-import os
+import dataclasses
 import functools
+import logging
+import os
+import queue
+import random
+import signal
 import threading
 import traceback
-import signal
-import random
+
+import numpy as np
+
+import jax
+from jax.experimental import layout
 
 from jetstream.engine import engine_api
 
-import logging
 # pylint: disable=no-name-in-module
 from MaxText.maxengine import MaxEngine
 from MaxText.maxengine import set_engine_vars_from_base_engine
@@ -84,12 +85,13 @@ class PrefillHelper:
     else:
       raise ValueError(f"Invalid type: {type}")
 
-  def aot_compile(self,
-                  max_length: int,
-                  params: Params,
-                  params_layout: layout.Layout,
-                  decode_state_layout: layout.Layout,
-                  decode_state_shape: jax.ShapeDtypeStruct
+  def aot_compile(
+      self,
+      max_length: int,
+      params: Params,
+      params_layout: layout.Layout,
+      decode_state_layout: layout.Layout,
+      decode_state_shape: jax.ShapeDtypeStruct,
   ) -> None:
     if max_length > 4096:
       raise ValueError(f"Max length exceeds 4096. {max_length=}")
@@ -98,7 +100,7 @@ class PrefillHelper:
       # lengths has at least one bucket.
       # bucket limits are aligned to exponential of 2.
       # the last bucket is the only one that can hold `max_length`.
-      buckets = [2**i for i in range(6, max(6, (max_length-1).bit_length()) + 1)]
+      buckets = [2**i for i in range(6, max(6, (max_length - 1).bit_length()) + 1)]
       for bucket in buckets:
         self._processor.aot_compile(params, bucket)
     elif self._type == "batch":
@@ -106,7 +108,7 @@ class PrefillHelper:
       # lengths has at least one item.
       # each item aligns to exponential of 2.
       # the last bucket is the only one that can hold `max_length`.
-      buckets = [2**i for i in range(7, max(7, (max_length-1).bit_length()) + 1)]
+      buckets = [2**i for i in range(7, max(7, (max_length - 1).bit_length()) + 1)]
       for bucket in buckets:
         for num_prompts in range(1, 2 * max_length // bucket):
           self._batch_processor.aot_compile(params, bucket, max_length, num_prompts)
@@ -116,56 +118,51 @@ class PrefillHelper:
     else:
       assert self._type == "dummy", f"type: {self._type}"
 
-  def process(self,
-              model_params: Params,
-              decode_state: DecodeState,
-              decode_slot: int,
-              input_id: int,
-              input_tokens_padded: jax.Array,
-              input_true_length: int,
-              max_length: int,
-              prefill_done: Callable[[List[Tuple[engine_api.ResultTokens, int]], List[int], DecodeState], None]
+  def process(
+      self,
+      model_params: Params,
+      decode_state: DecodeState,
+      decode_slot: int,
+      input_id: int,
+      input_tokens_padded: jax.Array,
+      input_true_length: int,
+      max_length: int,
+      prefill_done: Callable[[List[Tuple[engine_api.ResultTokens, int]], List[int], DecodeState], None],
   ) -> None:
     padded_length = len(input_tokens_padded)
     if self._type == "default":
       first_token, decode_state = self._processor.process(
-        model_params,
-        decode_state,
-        decode_slot,
-        input_tokens_padded,
-        input_true_length
+          model_params, decode_state, decode_slot, input_tokens_padded, input_true_length
       )
       prefill_done([(first_token, decode_slot)], [input_id], decode_state)
     elif self._type == "batch":
       if padded_length == max_length:
         # fallback to default mode
         first_token, decode_state = self._processor.process(
-          model_params,
-          decode_state,
-          decode_slot,
-          input_tokens_padded,
-          input_true_length
+            model_params, decode_state, decode_slot, input_tokens_padded, input_true_length
         )
         prefill_done([(first_token, decode_slot)], [input_id], decode_state)
       else:
         self._batch_processor.process(
-          model_params=model_params,
-          decode_state=decode_state,
-          decode_slot=decode_slot,
-          input_id=input_id,
-          input_prompt=input_tokens_padded[:input_true_length],
-          input_padding=padded_length,
-          capacity=max_length,
-          prefill_done=prefill_done)
+            model_params=model_params,
+            decode_state=decode_state,
+            decode_slot=decode_slot,
+            input_id=input_id,
+            input_prompt=input_tokens_padded[:input_true_length],
+            input_padding=padded_length,
+            capacity=max_length,
+            prefill_done=prefill_done,
+        )
     else:
       assert self._type == "dummy", f"type: {self._type}"
       log.debug("dummy prefill")
       prefill_done([(123, decode_slot)], [input_id], decode_state)
 
-  def finalize(self,
-               model_params: Params,
-               decode_state: DecodeState,
-               prefill_done: Callable[[List[Tuple[engine_api.ResultTokens, int]], List[int], DecodeState], None]
+  def finalize(
+      self,
+      model_params: Params,
+      decode_state: DecodeState,
+      prefill_done: Callable[[List[Tuple[engine_api.ResultTokens, int]], List[int], DecodeState], None],
   ) -> None:
     if self._type == "default":
       pass
@@ -222,11 +219,9 @@ class OfflineInference:
 
     self.init_decode_state()
 
-    self.prefill.aot_compile(max_length,
-                             self.params,
-                             self.engine.param_layouts,
-                             self.engine.decode_state_layouts,
-                             self.engine.decode_state_shapes)
+    self.prefill.aot_compile(
+        max_length, self.params, self.engine.param_layouts, self.engine.decode_state_layouts, self.engine.decode_state_shapes
+    )
 
     self.batch_inference(warmup_samples, desc="warmup")
 
@@ -255,7 +250,7 @@ class OfflineInference:
       for i in range(len(prefill_result)):
         first_token, slot = prefill_result[i]
         counter.prefill += 1
-        log.debug(f"prefill done: {slot=} ({counter.prefill})")
+        log.debug("prefill done: slot=%d (%d)", slot, counter.prefill)
         self.detokenize_backlog.put((first_token, True, ids[i], slot), block=True)
 
     def decode():
@@ -344,14 +339,9 @@ class OfflineInference:
       slot = empty_slots.pop()
 
       # Do prefill when there are free slots
-      self.prefill.process(self.params,
-                           self.decode_state,
-                           slot,
-                           row.id,
-                           row.tokens,
-                           row.true_length,
-                           self.max_prefill_length,
-                           prefill_done)
+      self.prefill.process(
+          self.params, self.decode_state, slot, row.id, row.tokens, row.true_length, self.max_prefill_length, prefill_done
+      )
     self.prefill.finalize(self.params, self.decode_state, prefill_done)
 
     while slot_to_id:
@@ -359,7 +349,9 @@ class OfflineInference:
 
     self.live = False
     detokenize_thread.join()
-    log.info("summary-%s-prefills-%d-decodes-%d-detokens-%d completed.", desc, counter.prefill, counter.decode, counter.detokenize)
+    log.info(
+        "summary-%s-prefills-%d-decodes-%d-detokens-%d completed.", desc, counter.prefill, counter.decode, counter.detokenize
+    )
 
   def batch_inference(self, data: List[InputData], desc="") -> dict[str, List[int]]:
     """data is list of obj with id, tokens, and true length"""

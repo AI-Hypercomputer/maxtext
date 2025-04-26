@@ -17,31 +17,33 @@ limitations under the License.
 # pylint: disable=bare-except, consider-using-generator
 """Utils that are only interesting to MaxText. """
 
-import jax
-import optax
-import os
-from MaxText import max_utils
-from jax.sharding import PartitionSpec as P
-from jax.experimental.serialize_executable import deserialize_and_load
+from typing import Optional
 
-import pickle
 import functools
+import pickle
 
 from flax.training import train_state
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
-from MaxText import max_logging
 import numpy as np
+
+import jax
 import jax.numpy as jnp
-from MaxText import checkpointing
-from MaxText.inference.page_manager import PageState
-from MaxText import common_types
-from typing import Optional
+from jax.experimental import mesh_utils
+from jax.sharding import PartitionSpec as P
+from jax.experimental.serialize_executable import deserialize_and_load
+
+import optax
+
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
-from jax.experimental import mesh_utils
+from MaxText import max_logging
+from MaxText import checkpointing
+from MaxText.inference.page_manager import PageState
+from MaxText import common_types
+from MaxText import max_utils
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
@@ -477,7 +479,11 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
     unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(model, None, config, rng, mesh, False)
     with nn_partitioning.axis_rules(config.logical_axis_rules):
       params = checkpointing.load_params_from_path(
-          config.load_parameters_path, unboxed_abstract_state.params, config.checkpoint_storage_concurrent_gb, config.checkpoint_storage_use_ocdbt, config.checkpoint_storage_use_zarr3
+          config.load_parameters_path,
+          unboxed_abstract_state.params,
+          config.checkpoint_storage_concurrent_gb,
+          config.checkpoint_storage_use_ocdbt,
+          config.checkpoint_storage_use_zarr3,
       )
     state = init_decode_state(None, params)
 
