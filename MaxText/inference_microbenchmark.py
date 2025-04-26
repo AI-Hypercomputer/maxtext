@@ -538,9 +538,9 @@ def run_benchmarks(config):
   return results
 
 
-def main(argv):
+def main(config, **kwargs):
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  run_benchmarks(pyconfig.initialize(argv))
+  return run_benchmarks(pyconfig.initialize(config, **kwargs))
 
 
 if __name__ == "__main__":

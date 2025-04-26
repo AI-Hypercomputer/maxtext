@@ -19,7 +19,9 @@ from typing import Sequence
 
 import jax
 import jax.numpy as jnp
+
 from absl import app
+
 from jetstream.engine import engine_api
 
 from MaxText import max_utils

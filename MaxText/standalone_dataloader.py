@@ -16,16 +16,17 @@ limitations under the License.
 
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
-import jax
 import os
-
-from MaxText import max_logging
-
 from typing import Sequence
 import datetime
+
 from absl import app
+
 import numpy as np
 
+import jax
+
+from MaxText import max_logging
 from MaxText import pyconfig
 from MaxText.train import validate_train_config, get_first_step, load_next_batch, setup_train_loop
 
