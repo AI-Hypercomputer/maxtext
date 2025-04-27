@@ -23,11 +23,10 @@ import pytest
 import jsonlines
 
 from MaxText import pyconfig
-from MaxText import maxtext_utils
 from MaxText import multimodal_utils
 from MaxText.layers import models
-from MaxText.layers import quantizations
 from MaxText.globals import PKG_DIR
+from MaxText import maxengine
 
 
 class VisionEncoderEmbeddingTest(unittest.TestCase):
@@ -54,8 +53,31 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
   }
 
   @pytest.mark.tpu_only
-  def test_image_embedding_tpu(self):
-    # Load golden data from HuggingFace Gemma3-4b
+  def test_gemma3_4b_image_embedding_tpu(self):
+    """Correctness test for the gemma3-4b image embedding."""
+    # Load weights from reference checkpoint
+    config = pyconfig.initialize(VisionEncoderEmbeddingTest.CONFIGS["gemma3-4b"])
+    engine = maxengine.MaxEngine(config)
+    rng = jax.random.PRNGKey(1234)
+    rng, rng_load_params = jax.random.split(rng)
+    params = engine.load_params(rng_load_params)
+
+    # Initialize only the vision encoder part and extract the corresponding params
+    vision_encoder_model = models.VisionEncoder(config)
+    vision_encoder_params = params["params"]["vision_encoder"]
+
+    # Load and preprocess the image
+    images = multimodal_utils.load_image_from_path(config.image_path)
+    images = multimodal_utils.pre_process_image(images, model_name=config.model_name)
+    input_images = images[jnp.newaxis, jnp.newaxis, ...]
+
+    # Apply the vision encoder to get the image embeddings
+    def apply_vision_encoder_fn(params, images_input):
+      return vision_encoder_model.apply({"params": params}, images_input)
+    jitted_apply_vision_encoder_fn = jax.jit(apply_vision_encoder_fn)
+    image_embeddings = jitted_apply_vision_encoder_fn(vision_encoder_params, input_images)
+
+    # Load golden image embeddings generated from HuggingFace Gemma3-4b
     golden_data_path = os.path.join(os.path.dirname(PKG_DIR), "MaxText", "test_assets", "golden_data_gemma3_vit.jsonl")
     loaded_data = []
     with jsonlines.open(golden_data_path, mode="r") as reader:
@@ -63,33 +85,10 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
         loaded_data.append(line)
     golden_image_embeddings = np.asarray(loaded_data[0]["soft_embeddings"], dtype=np.float32)
 
-    # Initialize the model with weights from reference checkpoint
-    config = pyconfig.initialize(VisionEncoderEmbeddingTest.CONFIGS["gemma3-4b"])
-    init_rng = jax.random.PRNGKey(config.init_weights_seed)
-    init_rng, rng1 = jax.random.split(init_rng)
-    devices_array = maxtext_utils.create_device_mesh(config)
-    mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
-    quant = quantizations.configure_quantization(config)
-    model = models.Transformer(config, mesh=mesh, quant=quant)
-    state, _ = maxtext_utils.setup_decode_state(model, config, rng1, mesh, None)
-
-    # Load and preprocess the image
-    images = multimodal_utils.load_image_from_path(config.image_path)
-    images = multimodal_utils.pre_process_image(images, model_name=config.model_name)
-    input_images = images[jnp.newaxis, jnp.newaxis, ...]
-
-    # Fetch the image embeddings
-    image_embeddings = model.apply(
-        {"params": state.params["params"]},  # Pass the *entire* params dict for the Transformer
-        input_images,
-        method=model.encode_images,  # Specify the method to run
-    )
-    image_embeddings = np.asarray(image_embeddings, dtype=np.float32)
-
     # Compare the image embeddings with golden data
     mse = np.mean((image_embeddings - golden_image_embeddings) ** 2)
     print(f"MSE between image_embedding and golden data: {mse}")
-    self.assertLess(mse, 1e-2, f"Image embedding mismatch with golden data, MSE {mse} exceeds threshold 1e-2")
+    self.assertLess(mse, 1e-2, f"Image embedding mismatch with golden data, MSE {mse} exceeds threshold 1e-2")    
 
 
 if __name__ == "__main__":
