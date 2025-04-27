@@ -53,7 +53,7 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
   }
 
   @pytest.mark.tpu_only
-  def test_gemma3_4b_image_embedding_tpu(self):
+  def test_image_embedding_gemma3_4b_tpu(self):
     """Correctness test for the gemma3-4b image embedding."""
     # Load weights from reference checkpoint
     config = pyconfig.initialize(VisionEncoderEmbeddingTest.CONFIGS["gemma3-4b"])
@@ -74,6 +74,7 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
     # Apply the vision encoder to get the image embeddings
     def apply_vision_encoder_fn(params, images_input):
       return vision_encoder_model.apply({"params": params}, images_input)
+
     jitted_apply_vision_encoder_fn = jax.jit(apply_vision_encoder_fn)
     image_embeddings = jitted_apply_vision_encoder_fn(vision_encoder_params, input_images)
 
@@ -88,7 +89,7 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
     # Compare the image embeddings with golden data
     mse = np.mean((image_embeddings - golden_image_embeddings) ** 2)
     print(f"MSE between image_embedding and golden data: {mse}")
-    self.assertLess(mse, 1e-2, f"Image embedding mismatch with golden data, MSE {mse} exceeds threshold 1e-2")    
+    self.assertLess(mse, 1e-2, f"Image embedding mismatch with golden data, MSE {mse} exceeds threshold 1e-2")
 
 
 if __name__ == "__main__":
