@@ -34,8 +34,6 @@ jobs:
       run: which gsutil >/dev/null 2>&1 || { echo >&2 "gsutil is required but not installed. Aborting"; exit 24;}
     - name: Cleanup old docker images
       run: docker system prune --all --force
-    - name: Authenticate gcloud
-      run: gcloud auth configure-docker us-docker.pkg.dev --quiet
 
   tpu_image:
     needs: prelim
@@ -112,6 +110,8 @@ jobs:
       contents: read
       issues: write  # for failed-build-issue
     steps:
+    - name: Authenticate gcloud
+      run: gcloud auth configure-docker us-docker.pkg.dev --quiet
     - name: Delete GPU image
       run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:gpu --force-delete-tags --quiet
     - name: Delete TPU image
