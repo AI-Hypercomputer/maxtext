@@ -256,6 +256,7 @@ def _make_block_mask_indices(bidirectional_mask):
   # Left pad 0.
   padded_mask = jnp.pad(bidirectional_mask, [(0, 0), (1, 0)], constant_values=0)
   boundary = padded_mask[..., 1:] > padded_mask[..., :-1]
+  #boundary = jnp.where(padded_mask[..., 1:] > padded_mask[..., :-1], 1, 0)
   numbered_boundary = jnp.cumsum(boundary, axis=-1)
   return bidirectional_mask * numbered_boundary
 
@@ -277,8 +278,136 @@ def _make_bidirectional_block_mask(bidirectional_mask):
   q_block_indices = _make_block_mask_indices(bidirectional_mask)
   kv_block_indices = q_block_indices
   bidirectional_block_mask = (kv_block_indices[:, None, :] == q_block_indices[..., None]) & (q_block_indices[..., None] > 0)
+  #bidirectional_block_mask = jnp.where((kv_block_indices[:, None, :] == q_block_indices[..., None]) & (q_block_indices[..., None] > 0), 1, 0)
   return bidirectional_block_mask
 
+class BidirectionalBlockMask(splash_attention_mask._ComputableMask):
+  bidirectional_mask: Array | np.ndarray
+
+  def __init__(
+      self,
+      shape: tuple[int, int],
+      bidirectional_mask: Array | np.ndarray,
+      shard_count: int = 1,
+  ):
+    if bidirectional_mask.size == 0:
+      raise ValueError("bidirectional_mask must have size > 0")
+    self.bidirectional_mask = bidirectional_mask
+    def mask_function(q_ids, kv_ids):
+      #assert q_ids.shape[0] == kv_ids.shape[1] == self.bidirectional_mask.shape[1]
+      #return _make_bidirectional_block_mask(self.bidirectional_mask)
+      return self.bidirectional_mask
+
+    # Initialize the parent _ComputableMask with this function
+    super().__init__(
+        shape=shape,
+        mask_function=mask_function,
+        shard_count=shard_count,
+    )
+
+  # Implement equality and hashing based on relevant attributes
+  def __eq__(self, other: object):
+    if not isinstance(other, type(self)):
+      return NotImplemented
+    # Compare shape, bidirectional_mask, and the underlying q_sequence array
+    return (
+        self.shape == other.shape
+        and np.array_equal(self.bidirectional_mask, other.bidirectional_mask)
+        and np.array_equal(self.q_sequence, other.q_sequence)
+    )
+
+  def __hash__(self):
+    # Hash relevant attributes including the content of q_sequence
+    if isinstance(self.bidirectional_mask, jax.core.Tracer):
+      bidirectional_mask_hash_val = (self.bidirectional_mask.shape, self.bidirectional_mask.dtype)
+    else:
+      bidirectional_mask_hash_val = self.bidirectional_mask.tobytes()
+    return hash((
+        type(self),
+        self.shape,
+        bidirectional_mask_hash_val,
+        self.q_sequence.tobytes() if self.q_sequence is not None else None,
+    ))
+
+def _make_bidirectional_block_mask_splash(q_ids, kv_ids, bidirectional_mask):
+    #print(f"{q_ids=}, {kv_ids=}")
+    assert q_ids.shape[0] == kv_ids.shape[1] == bidirectional_mask.shape[1]
+    return _make_bidirectional_block_mask(bidirectional_mask)
+
+class DynamicMask(splash_attention_mask._ComputableMask):
+  """Fully dynamic mask evaluated at run time.
+
+  The value of the mask is determined by the callable in input to the
+  constructor.
+
+  Attributes:
+    _shape: Shape of the 2-dim mask: (q_seq_len, kv_seq_len).
+    q_sequence: Indices of Q sequence, which are possibly interleaved.
+      q_sequence is reused across __getitem__ calls which is important for
+      compile-time performance.
+    mask_function: Function used by the SplashAttention kernel to compute the
+      mask rather than loading it.
+  """
+
+  def __init__(
+      self,
+      shape: tuple[int, int],
+      mask_function,
+      *,
+      # interleave_q = None,
+      # interleave_kv = None,
+      shard_count: int = 1,
+  ):
+    super().__init__(
+        shape=shape,
+        mask_function=mask_function,
+        # interleave_q=interleave_q,
+        # interleave_kv=interleave_kv,
+        shard_count=shard_count,
+    )
+
+  def __eq__(self, other: 'DynamicMask'):
+    if not isinstance(other, type(self)):
+      return NotImplemented
+
+    if isinstance(self.mask_function, functools.partial):
+      if not isinstance(other.mask_function, functools.partial):
+        return False
+
+      are_functions_equal = (
+          self.mask_function.func == other.mask_function.func
+          and self.mask_function.args == other.mask_function.args  # pytype: disable=attribute-error
+          and self.mask_function.keywords == self.mask_function.keywords
+      )
+
+    else:
+      are_functions_equal = self.mask_function == other.mask_function
+
+    return (
+        self.shape == other.shape
+        and are_functions_equal
+        and np.array_equal(self.q_sequence, other.q_sequence)
+        # and np.array_equal(self.kv_sequence, other.kv_sequence)
+    )
+
+  def __hash__(self):
+    if isinstance(self.mask_function, functools.partial):
+      return hash((
+          self.shape,
+          self.mask_function.args,
+          tuple(
+              sorted(self.mask_function.keywords.items(), key=lambda kv: kv[0])
+          ),
+          self.q_sequence.tobytes(),
+          # self.kv_sequence.tobytes(),
+      ))
+    else:
+      return hash((
+          type(self),
+          self.shape,
+          self.q_sequence.tobytes(),
+          # self.kv_sequence.tobytes(),
+      ))
 
 class AttentionOp(nn.Module):
   config: Config
@@ -386,7 +515,7 @@ class AttentionOp(nn.Module):
       model_mode: str,
       use_ragged_attention: bool = False,
       previous_chunk: Any = None,
-      bidirectional_mask: Any = None,
+      bidirectional_mask: Array = None,
   ):
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
@@ -421,7 +550,7 @@ class AttentionOp(nn.Module):
               """Decode not supported with flash attention.
                               Use `dot_product` instead."""
           )
-        return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap), None, None
+        return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap, bidirectional_mask=bidirectional_mask), None, None
       else:
         if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
           # fallback to dot_product as pallas gpu flash attention doesn't support decode stage
@@ -555,6 +684,7 @@ class AttentionOp(nn.Module):
       value: Array,
       decoder_segment_ids: Array | None,
       attn_logits_soft_cap: float | None = None,
+      bidirectional_mask: Array | None = None,
   ) -> Array:
     """TPU Flash Attention."""
     # Transpose to ('batch', 'heads', 'length', 'kv')
@@ -628,7 +758,12 @@ class AttentionOp(nn.Module):
           raise ValueError("chunk_attn_window_size must be set for chunk attention type")
 
         mask &= ChunkedCausalMask(shape=(query.shape[2], key.shape[2]), chunk_size=self.chunk_attn_window_size)
-
+      # if bidirectional_mask is not None:
+        # _make_bidirectional_mask_fn = functools.partial(_make_bidirectional_block_mask_splash, bidirectional_mask=bidirectional_mask)
+        # mask |= DynamicMask(shape=(query.shape[2], key.shape[2]), mask_function=_make_bidirectional_mask_fn)
+        #mask2 = mask | BidirectionalBlockMask(shape=(query.shape[2], key.shape[2]), bidirectional_mask=bidirectional_mask)
+      # mha_input = (mask,) * query.shape[1]
+      # jax.debug.breakpoint()
       # Create multi-head mask
       multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
       splash_kernel = splash_attention_kernel.make_splash_mha(
@@ -762,7 +897,7 @@ class AttentionOp(nn.Module):
       decoder_segment_ids: Array | None,
       model_mode: str = common_types.MODEL_MODE_TRAIN,
       previous_chunk: Any = None,
-      bidirectional_mask: Any = None,
+      bidirectional_mask: Array | None = None,
   ):
     """Apply Attention."""
     validate_compute_axis_order(self.compute_axis_order)

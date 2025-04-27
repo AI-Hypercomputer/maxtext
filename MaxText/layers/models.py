@@ -19,6 +19,7 @@
 from typing import Any, Callable, Optional
 
 
+import numpy as np
 from flax import linen as nn
 import functools
 import jax
@@ -608,6 +609,42 @@ class VisionEncoder(nn.Module):
     embeddings = self.vision_encoder_layer[0](config=self.config)(input_images)
     return embeddings
 
+def _make_block_mask_indices(bidirectional_mask):
+  """Creates block mask identifying segments based on a bidirectional mask.
+
+  Args:
+    bidirectional_mask: boolean mask, e.g. [011110011010].
+
+  Returns:
+    block mask for segments, e.g. [011110022030].
+  """
+  # Left pad 0.
+  padded_mask = np.pad(bidirectional_mask, [(0, 0), (1, 0)], constant_values=0)
+  #boundary = padded_mask[..., 1:] > padded_mask[..., :-1]
+  boundary = np.where(padded_mask[..., 1:] > padded_mask[..., :-1], 1, 0)
+  numbered_boundary = np.cumsum(boundary, axis=-1)
+  return bidirectional_mask * numbered_boundary
+
+def _make_bidirectional_block_mask(bidirectional_mask):
+  """Creates bidirectional block mask from bidirectional_mask, where True corresponds to image tokens.
+  bidirectional_mask shape: [B, L]
+  bidirectional_block_mask shape: [B, L, L]
+  Examples:
+  bidirectional_mask = [[0, 1, 1, 1, 0, 0]]
+  bidirectional_block_mask = [[
+      [False, False, False, False, False, False],
+      [False,  True,  True,  True, False, False],
+      [False,  True,  True,  True, False, False],
+      [False,  True,  True,  True, False, False],
+      [False, False, False, False, False, False],
+      [False, False, False, False, False, False],
+  ]]
+  """
+  q_block_indices = _make_block_mask_indices(bidirectional_mask)
+  kv_block_indices = q_block_indices
+  #bidirectional_block_mask = (kv_block_indices[:, None, :] == q_block_indices[..., None]) & (q_block_indices[..., None] > 0)
+  bidirectional_block_mask = np.where((kv_block_indices[:, None, :] == q_block_indices[..., None]) & (q_block_indices[..., None] > 0), 1, 0)
+  return bidirectional_block_mask
 
 class Transformer(nn.Module):
   """An decoder-only Transformer model."""
@@ -668,9 +705,10 @@ class Transformer(nn.Module):
       image_embeddings = self.vision_encoder(input_images=encoder_images)
       # TODO(hengtaoguo, aireen): merge image_embeddings with decoder_input_tokens.
 
-      if self.config.decoder_block == "gemma3":
-        from MaxText.layers import gemma3
-        bidirectional_mask = decoder_input_tokens == gemma3.TOKEN_PLACEHOLDER
+    if self.config.decoder_block == "gemma3":
+      from MaxText.layers import gemma3
+      bidirectional_mask = decoder_input_tokens == gemma3.TOKEN_PLACEHOLDER
+      #bidirectional_mask = _make_bidirectional_block_mask(bidirectional_mask)
 
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,

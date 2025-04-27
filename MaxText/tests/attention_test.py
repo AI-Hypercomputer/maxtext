@@ -27,6 +27,7 @@ from MaxText import common_types
 from flax.core import freeze
 import jax
 import jax.numpy as jnp
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 from MaxText import maxtext_utils
 import pytest
 
@@ -45,7 +46,10 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
 
   def test_one_block_mask(self):
     bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0]])
-    block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    block_mask_dot = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    shape = (bidirectional_mask.shape[1], bidirectional_mask.shape[1])
+    block_mask_splash = attentions.BidirectionalBlockMask(shape, bidirectional_mask)
+    block_mask_splash = block_mask_splash[:, :]  # Get the actual mask by slicing
     expected_mask = np.asarray(
         [
             [
@@ -58,11 +62,15 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
             ]
         ]
     )
-    np.testing.assert_array_equal(block_mask, expected_mask)
+    np.testing.assert_array_equal(block_mask_dot, expected_mask)
+    np.testing.assert_array_equal(block_mask_splash, expected_mask)
 
   def test_two_blocks_mask(self):
     bidirectional_mask = np.asarray([[0, 1, 1, 0, 1, 1]])
-    block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    block_mask_dot = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    shape = (bidirectional_mask.shape[1], bidirectional_mask.shape[1])
+    block_mask_splash = attentions.BidirectionalBlockMask(shape, bidirectional_mask)
+    block_mask_splash = block_mask_splash[:, :]  # Get the actual mask by slicing
     expected_mask = np.asarray(
         [
             [
@@ -75,11 +83,15 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
             ]
         ]
     )
-    np.testing.assert_array_equal(block_mask, expected_mask)
+    np.testing.assert_array_equal(block_mask_dot, expected_mask)
+    np.testing.assert_array_equal(block_mask_splash, expected_mask)
 
   def test_batch_block_masks(self):
     bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0], [0, 1, 1, 0, 1, 1]])
-    block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    block_mask_dot = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    shape = (bidirectional_mask.shape[1], bidirectional_mask.shape[1])
+    block_mask_splash = attentions.BidirectionalBlockMask(shape, bidirectional_mask)
+    block_mask_splash = block_mask_splash[:, :]  # Get the actual mask by slicing
     expected_mask = np.asarray(
         [
             [
@@ -100,32 +112,41 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
             ]
         ]
     )
-    np.testing.assert_array_equal(block_mask, expected_mask)
+    np.testing.assert_array_equal(block_mask_dot, expected_mask)
+    np.testing.assert_array_equal(block_mask_splash, expected_mask)
 
   def test_empty_block_mask(self):
     bidirectional_mask = np.asarray([[0, 0, 0, 0, 0, 0]])
-    block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    block_mask_dot = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    shape = (bidirectional_mask.shape[1], bidirectional_mask.shape[1])
+    block_mask_splash = attentions.BidirectionalBlockMask(shape, bidirectional_mask)
+    block_mask_splash = block_mask_splash[:, :]  # Get the actual mask by slicing
     expected_mask = np.zeros(
         (bidirectional_mask.shape[0], bidirectional_mask.shape[1], bidirectional_mask.shape[1]), dtype=bool
     )
-    np.testing.assert_array_equal(block_mask, expected_mask)
+    np.testing.assert_array_equal(block_mask_dot, expected_mask)
+    np.testing.assert_array_equal(block_mask_splash, expected_mask)
 
   def test_full_block_mask(self):
     bidirectional_mask = np.asarray([[1, 1, 1, 1, 1, 1]])
-    block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    block_mask_dot = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    shape = (bidirectional_mask.shape[1], bidirectional_mask.shape[1])
+    block_mask_splash = attentions.BidirectionalBlockMask(shape, bidirectional_mask)
+    block_mask_splash = block_mask_splash[:, :]  # Get the actual mask by slicing
     expected_mask = np.ones(
         (bidirectional_mask.shape[0], bidirectional_mask.shape[1], bidirectional_mask.shape[1]), dtype=bool
     )
-    np.testing.assert_array_equal(block_mask, expected_mask)
+    np.testing.assert_array_equal(block_mask_dot, expected_mask)
+    np.testing.assert_array_equal(block_mask_splash, expected_mask)
 
-  def test_combine_with_causal_mask(self):
-    seq_len = 6
+  def test_combine_with_causal_mask_dot(self):
+    bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0], [0, 1, 1, 0, 1, 1]])
+    seq_len = bidirectional_mask.shape[1]
     row_ids = np.arange(seq_len, dtype=np.int32)[:, None]
     col_ids = np.arange(seq_len, dtype=np.int32)[None, :]
-    causal_mask = (col_ids <= row_ids)[None, None, None, :, :]
-    bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0], [0, 1, 1, 0, 1, 1]])
-    image_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
-    combined_mask = causal_mask | image_mask[:, None, None, ...]
+    causal_mask_dot = (col_ids <= row_ids)[None, None, None, :, :]
+    image_mask_dot = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    combined_mask_dot = causal_mask_dot | image_mask_dot[:, None, None, ...]
     expected_mask = np.asarray(
         [
             [[[
@@ -146,8 +167,37 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
             ]]]
         ]
     )
-    np.testing.assert_array_equal(combined_mask, expected_mask)
+    np.testing.assert_array_equal(combined_mask_dot, expected_mask)
 
+  def test_combine_with_causal_mask_splash(self):
+    bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0], [0, 1, 1, 0, 1, 1]])
+    seq_len = bidirectional_mask.shape[1]
+    shape = (seq_len, seq_len)
+    causal_mask_splash = splash_attention_mask.CausalMask(shape=shape)
+    image_mask_splash = attentions.BidirectionalBlockMask(shape, bidirectional_mask)
+    combined_mask_splash = causal_mask_splash | image_mask_splash
+    combined_mask_splash = combined_mask_splash[:, :]  # Get the actual mask by slicing
+    expected_mask = np.asarray(
+        [
+            [
+                [True, False, False, False, False, False],
+                [True, True, True, True, False, False],
+                [True, True, True, True, False, False],
+                [True, True, True, True, False, False],
+                [True, True, True, True, True, False],
+                [True, True, True, True, True, True],
+            ],
+            [
+                [True, False, False, False, False, False],
+                [True, True, True, False, False, False],
+                [True, True, True, False, False, False],
+                [True, True, True, True, False, False],
+                [True, True, True, True, True, True],
+                [True, True, True, True, True, True],
+            ]
+        ]
+    )
+    np.testing.assert_array_equal(combined_mask_splash, expected_mask)
 
 class ChunkedCausalMaskTest(unittest.TestCase):
   """Test for the ChunkedCausalMask."""

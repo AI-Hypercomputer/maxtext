@@ -47,7 +47,7 @@ BATCH = common_types.BATCH
 LENGTH = common_types.LENGTH
 HEAD = common_types.HEAD
 D_KV = common_types.D_KV
-TOKEN_PLACEHOLDER = -2
+TOKEN_PLACEHOLDER = 255999 #-2
 
 nd_dense_init = initializers.nd_dense_init
 Quant = quantizations.AqtQuantization
