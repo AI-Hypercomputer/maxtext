@@ -37,6 +37,8 @@ jobs:
     name: Build and upload image (${{ inputs.device_name }})
     runs-on: ["self-hosted", "${{ inputs.device_type }}", "${{ inputs.device_name }}"]
     steps:
+      - name: Authenticate gcloud
+        run: gcloud auth configure-docker us-docker.pkg.dev --quiet
       - uses: actions/checkout@v4
       - name: Build an image
         run: |
