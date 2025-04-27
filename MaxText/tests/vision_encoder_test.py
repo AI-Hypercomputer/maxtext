@@ -62,14 +62,14 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
     rng, rng_load_params = jax.random.split(rng)
     params = engine.load_params(rng_load_params)
 
-    # Initialize only the vision encoder part and extract the corresponding params
-    vision_encoder_model = models.VisionEncoder(config)
-    vision_encoder_params = params["params"]["vision_encoder"]
-
     # Load and preprocess the image
     images = multimodal_utils.load_image_from_path(config.image_path)
     images = multimodal_utils.pre_process_image(images, model_name=config.model_name)
     input_images = images[jnp.newaxis, jnp.newaxis, ...]
+
+    # Initialize only the vision encoder part and extract the corresponding params
+    vision_encoder_model = models.VisionEncoder(config)
+    vision_encoder_params = params["params"]["vision_encoder"]
 
     # Apply the vision encoder to get the image embeddings
     def apply_vision_encoder_fn(params, images_input):
