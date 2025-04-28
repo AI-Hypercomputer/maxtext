@@ -414,6 +414,7 @@ class MaxEngine(engine_api.Engine):
       request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
       slot: Optional[int] = None,
       page_state: Optional[PageState] = None,
+      temp: Optional[jax.Array] = None,  # pylint: disable=unused-argument  
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -475,6 +476,7 @@ class MaxEngine(engine_api.Engine):
           true_length=true_length,
           slot=slot,
           page_state=page_state,
+          temp=temp,
       )
     generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
     selected_logits = jax.lax.dynamic_slice(
@@ -532,6 +534,7 @@ class MaxEngine(engine_api.Engine):
       rng: Optional[PRNGKeyType] = None,
       request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
       slot: Optional[int] = None,
+      temp: Optional[jax.Array] = None,  # pylint: disable=unused-argument
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Public API for prefill that updates page state outside JIT."""
     # Update page state before JIT call
@@ -554,6 +557,7 @@ class MaxEngine(engine_api.Engine):
         slot=slot,
         rng=rng,
         request_id=request_id,
+        temp=temp,
     )
 
   def prefill_multisampling_aot(  # pylint: disable=too-many-positional-arguments

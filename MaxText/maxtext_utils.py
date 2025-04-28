@@ -441,11 +441,17 @@ def init_initial_state(model, tx, config, is_training, key):
       config.image_size_for_vit,
       NUM_IMAGE_CHANNELS,
   )
+  combined_embeddings_shape = (config.micro_batch_size_to_train_on, config.max_target_length, 2560)
+  temp = {
+    "combined_embeddings": np.ones(combined_embeddings_shape, dtype=jnp.int32),
+    "bidirectional_mask": np.ones(input_shape, dtype=jnp.int32)
+  }
   model_vars = model.init(
       {"params": key, "dropout": key, "aqt": key},
       np.ones(input_shape, dtype=jnp.int32),
       np.ones(input_shape, dtype=jnp.int32),
       encoder_images=np.ones(image_shape, dtype=jnp.int32),
+      temp=temp,
   )
   if is_training:
     return init_training_state(model.apply, model_vars, tx)

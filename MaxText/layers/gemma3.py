@@ -396,6 +396,7 @@ class Gemma3DecoderLayer(nn.Module):
       page_state=None,
       slot=None,
       bidirectional_mask=None,
+      combined_embeddings=None,
   ):
     cfg = self.config
     mesh = self.mesh

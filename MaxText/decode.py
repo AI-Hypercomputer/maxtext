@@ -27,6 +27,9 @@ from MaxText import maxengine
 from MaxText import pyconfig
 from MaxText import multimodal_utils
 
+import jsonlines
+import numpy as np
+
 # Number of text sequences to process in a single batch.
 _NUM_STREAMS = 1
 
@@ -79,6 +82,30 @@ def _batch_first_result_token(first_tokens: list[engine_api.ResultTokens], batch
 
 
 def main(argv: Sequence[str]) -> None:
+  # Load golden image embeddings generated from HuggingFace Gemma3-4b
+  golden_data_path = "/home/hengtaoguo/projects/golden_data_gemma3_vit_full.jsonl"
+  loaded_data = []
+  with jsonlines.open(golden_data_path, mode="r") as reader:
+    for line in reader:
+      loaded_data.append(line)
+  # golden_image_embeddings = np.asarray(loaded_data[0]["soft_embeddings"], dtype=np.float32)
+  combined_embeddings = np.asarray(loaded_data[0]["embeddings"], dtype=np.float32)
+  attention_mask = np.asarray(loaded_data[0]["attention_mask"], dtype=np.float32)
+  inputs_mask = np.asarray(loaded_data[0]["inputs_mask"], dtype=np.float32)
+  positions = np.asarray(loaded_data[0]["positions"], dtype=np.float32)
+  bidirectional_mask = np.asarray(loaded_data[0]["bidirectional_mask"], dtype=np.float32)
+
+  combined_embeddings = np.repeat(combined_embeddings, repeats=8, axis=0)
+  bidirectional_mask = np.repeat(bidirectional_mask, repeats=8, axis=0)
+
+  temp = {
+      "combined_embeddings": combined_embeddings,
+      "bidirectional_mask": bidirectional_mask,
+      # "attention_mask": attention_mask,
+      # "inputs_mask": inputs_mask,
+      # "positions": positions,
+  }
+
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
@@ -123,6 +150,7 @@ def main(argv: Sequence[str]) -> None:
   rng, rng_prefill = jax.random.split(rng)  # Split RNG before calling prefill
   for i in range(_NUM_STREAMS):
     prefill_result, first_token = engine.prefill(
+        # params=params, padded_tokens=tokens, images=images, true_length=true_length, rng=rng_prefill, slot=i, temp=temp
         params=params, padded_tokens=tokens, images=images, true_length=true_length, rng=rng_prefill, slot=i
     )
     prefill_result_list.append(prefill_result)

@@ -422,6 +422,7 @@ class Decoder(nn.Module):
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
       bidirectional_mask: Optional[Any] = None,
+      combined_embeddings: Optional[jnp.ndarray] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -429,6 +430,7 @@ class Decoder(nn.Module):
 
     # [batch, length] -> [batch, length, emb_dim]
     y = self.shared_embedding(decoder_input_tokens.astype("int32"))
+    y = combined_embeddings if combined_embeddings is not None else y
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
 
@@ -648,6 +650,7 @@ class Transformer(nn.Module):
       true_length: Optional[int] = None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
+      temp: Optional[jnp.ndarray] = None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target.
 
@@ -673,6 +676,9 @@ class Transformer(nn.Module):
 
         bidirectional_mask = decoder_input_tokens == gemma3.TOKEN_PLACEHOLDER
 
+    input_bi_mask = jnp.ones_like(bidirectional_mask, dtype=bool)
+    
+
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
@@ -683,5 +689,6 @@ class Transformer(nn.Module):
         slot=slot,
         page_state=page_state,
         bidirectional_mask=bidirectional_mask,
+        combined_embeddings=temp["combined_embeddings"] if temp is not None else None,
     )
     return logits
