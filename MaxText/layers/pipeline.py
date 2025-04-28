@@ -358,7 +358,7 @@ class Pipeline(nn.Module):
     Gets the current weights used for one iteration. Outputs a pytree whose arrays have leading dimension of stages, e.g.
     {'mlp': 'wo': [stages, mlp, embed]}. Stage 0 will use the 0th index of this pytree, Stage 1 the 1st index, etc.
     For non-circular pipelines, this simply returns all weights - every weight is used in every iteraiton. However
-    for ciruclar pipelines each stage grabs only the weights correpsonding to the current repeat.
+    for circular pipelines each stage grabs only the weights corresponding to the current repeat.
     """
     if self.config.num_pipeline_repeats > 1:
       return self.get_current_repeat_from_stages(pipeline_weights, loop_iteration)
