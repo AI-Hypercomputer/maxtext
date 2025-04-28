@@ -111,6 +111,7 @@ jobs:
       issues: write  # for failed-build-issue
     steps:
     - name: Authenticate gcloud
+      continue-on-error: true
       run: |
           # configure registries as root and as runner
           sudo gcloud auth configure-docker --quiet
