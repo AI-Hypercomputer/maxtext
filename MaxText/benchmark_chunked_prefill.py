@@ -132,7 +132,6 @@ def main(argv: Sequence[str]) -> None:
 
   prefix_caching_hbm_byte = config.prefix_caching_hbm_byte
   prefix_caching_dram_byte = config.prefix_caching_dram_byte
-  inference_microbenchmark_prefix_cache_entries_num = config.inference_microbenchmark_prefix_cache_entries_num
 
   engine = maxengine.MaxEngine(config)
 
@@ -190,10 +189,17 @@ def main(argv: Sequence[str]) -> None:
   # Run prefix caching benchmark
   prefill_result = run_chunked_prefill_utility()
   prefix_cache_inst = prefix_cache.PrefixCache(prefix_caching_hbm_byte, prefix_caching_dram_byte)
+  # Fill cache to the max dram size
+  prefill_result_cache_byte_size = jax.tree.reduce(
+      lambda acc, array: acc + array.nbytes,
+      prefill_result["cache"],
+      0,
+  )
+  cache_entries_num = prefix_caching_dram_byte // prefill_result_cache_byte_size
   fill_prefix_cache(
       prefix_cache_inst,
       prefill_result["cache"],
-      inference_microbenchmark_prefix_cache_entries_num,
+      cache_entries_num,
       tokens,
       max_prefill_length,
   )

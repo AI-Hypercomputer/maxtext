@@ -22,13 +22,10 @@ import json
 from absl import app
 from collections.abc import MutableMapping
 
-from jetstream.engine import token_utils
-
 from MaxText import max_utils
 from MaxText import maxengine
 from MaxText import maxtext_utils
 from MaxText import prefill_packing
-from MaxText import prefix_cache
 from MaxText import profiler
 from MaxText import pyconfig
 
@@ -39,119 +36,6 @@ warnings.simplefilter("ignore", category=FutureWarning)
 _WARMUP_ITERS = 2
 _FLATTEN_MICROBENCHMARK_RESULTS = False
 # pylint: disable=too-many-positional-arguments
-
-
-def prefix_cache_benchmark(
-    prefix, prefill_length: int, true_length: int, common_prefix_proportion: float, prefix_cache_entries_num: int, iters: int
-):
-  """Handles running prefix cache benchmark, and printing results.
-
-  Create different key with half of prefill_length common prefix insert into cache.
-  The value is not relevant to the cache for now. Just copy the prefix for every cache entry.
-  1. Fill the prefix cache to full capacity.
-  2. Benchmark save prefix cache with evicting time average by prefix_cache_entries_num.
-  3. Benchmark fetch_longest_common_prefix_key average by iters.
-  4. Benchmark load prefix cache time average by iters.
-
-  Args:
-    prefix: prefix return from prefill function
-    prefill_length: prefill token length after padding
-    true_length: true prefill token length
-    common_prefix_proportion: [0., 1.] common prefix proportion to the prefill_length
-    prefix_cache_entries_num: number of prefix cache entries insert into PrefixCache
-    iters: repeat time to test fetch_longest_common_prefix_key and load from cache
-  """
-
-  print(f"Prefix Cache benchmark results for prefill length {prefill_length}:\n")
-
-  value: prefix_cache.Value = prefix_cache.Value(
-      prefix=prefix,
-      true_length=true_length,
-      padded_length=prefill_length,
-      tokens=tuple(i for i in range(prefill_length)),
-  )
-
-  def copy_jax_array(x):
-    return x.copy()
-
-  def clone_value():
-    return prefix_cache.Value(
-        prefix=jax.tree.map(copy_jax_array, value.prefix),
-        true_length=value.true_length,
-        padded_length=value.padded_length,
-        tokens=value.tokens,
-        prefix_size_bytes=value.prefix_size_bytes,
-        device=value.device,
-    )
-
-  prefix_size_bytes_gb = value.prefix_size_bytes / 1024 / 1024 / 1024
-  max_bytes = prefix_cache_entries_num * value.prefix_size_bytes
-  # TODO(yuyanpeng): test hierarchical cache
-  prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=max_bytes, dram_bytes=max_bytes)
-  common_len = int(prefill_length * common_prefix_proportion)
-  remain_len = prefill_length - common_len
-  common_prefix_key = tuple(i for i in range(common_len))
-
-  # Fill the prefix caching
-  new_value_list = []
-  for c_idx in range(prefix_cache_entries_num):
-    # Add 100 to make sure filled prefix caching will not share the common_prefix_key.
-    # The later save prefix part will evict all of them.
-    key = tuple(100 + i + c_idx * prefill_length for i in range(prefill_length))
-    new_value = clone_value()
-    prefix_cache_inst.save(key, new_value)
-    new_value_list.append(new_value)
-  jax.block_until_ready(new_value_list)
-  del new_value_list
-
-  # Save prefix
-  new_value = None
-  save_sec = 0
-  for c_idx in range(iters):
-    key = common_prefix_key + tuple(i + c_idx * remain_len for i in range(remain_len))
-    # values are not relevant for caching now, just clone the same tokens and values for test
-    new_value = clone_value()
-    jax.block_until_ready(new_value)
-    start = datetime.datetime.now()
-    prefix_cache_inst.save(key, new_value)
-    end = datetime.datetime.now()
-    save_sec += (end - start).total_seconds()
-  del new_value
-  save_avg_ms = save_sec * 1000 / iters
-
-  # Fetch longest prefix key
-  key_load = common_prefix_key + tuple(i + prefix_cache_entries_num * remain_len for i in range(remain_len))
-  matched_key = None
-  fetch_sec = 0
-  for _ in range(iters):
-    start = datetime.datetime.now()
-    matched_key = prefix_cache_inst.fetch_longest_common_prefix_key(key_load)
-    end = datetime.datetime.now()
-    fetch_sec += (end - start).total_seconds()
-  fetch_avg_ms = fetch_sec * 1000 / iters
-
-  assert matched_key is not None
-
-  # Load prefix
-  load_sec = 0
-  value_load = None
-  for _ in range(iters):
-    start = datetime.datetime.now()
-    loaded_value = prefix_cache_inst.load(matched_key)
-    jax.block_until_ready(loaded_value)
-    end = datetime.datetime.now()
-    load_sec += (end - start).total_seconds()
-  del value_load
-  load_avg_ms = load_sec * 1000 / iters
-
-  print(
-      f"PrefixCaching results:\n"
-      f"\tPer prefix size bytes: {prefix_size_bytes_gb:.3f} GB\n"
-      f"\tAverage save cache time: {save_avg_ms:.3f} ms\n"
-      f"\tAverage fetch longest prefix time: {fetch_avg_ms:.3f} ms\n"
-      f"\tAverage load cache time: {load_avg_ms:.3f} ms\n\n\n"
-  )
-  del prefix_cache_inst
 
 
 def prefill_benchmark_loop(engine_prefill, params, tokens, true_length, iters, num_samples: int | None = None):
@@ -444,22 +328,6 @@ def run_benchmarks(config):
       benchmark_results["prefill-result-sizes"][prefill_length] = summarize_prefill_result(
           prefill_executable[prefill_length], params, prefill_tokens[prefill_length], prefill_true_lengths[prefill_length]
       )
-
-    if "prefix_cache" in stages_to_benchmark:
-      for prefill_length in prefill_lengths:
-        rng_cache = jax.random.PRNGKey(1234)
-        prefill_result, _ = prefill_executable[prefill_length](
-            params, prefill_tokens[prefill_length], prefill_true_lengths[prefill_length], rng_cache
-        )
-        prefix_cache_benchmark(
-            prefill_result,
-            prefill_length,
-            prefill_true_lengths[prefill_length],
-            config.inference_microbenchmark_prefix_cache_common_prefix_proportion,
-            config.inference_microbenchmark_prefix_cache_entries_num,
-            benchmark_loop_iters,
-        )
-        del prefill_result
 
     for prefill_length in prefill_lengths:
       benchmark_results["prefill"][prefill_length] = prefill_benchmark(

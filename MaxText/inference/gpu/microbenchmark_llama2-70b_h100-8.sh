@@ -24,7 +24,7 @@ helpFunction()
    echo "Usage: $0 [-p] [-s stages] [-r run_name]"
    echo -e "\t-p Enable profiler"
    echo -e "\t-r Specify run name"
-   echo -e "\t-s Specify comma-separated benchmark stages [prefill|prefix_cache|prefill-multisampling|generate] (default: prefill,generate)"
+   echo -e "\t-s Specify comma-separated benchmark stages [prefill|prefill-multisampling|generate] (default: prefill,generate)"
    exit 1
 }
 
@@ -44,8 +44,8 @@ done
 IFS=',' read -ra stage <<< "$stages"
 for i in "${stage[@]}"; do
     case "$i" in
-        prefill|prefix_cache|prefill-multisampling|generate) ;;
-        *) echo "Invalid benchmark stage '$i'. Must be: prefill, prefix_cache, prefill-multisampling, or generate."; exit 1 ;;
+        prefill|prefill-multisampling|generate) ;;
+        *) echo "Invalid benchmark stage '$i'. Must be: prefill, prefill-multisampling, or generate."; exit 1 ;;
     esac
 done
 
