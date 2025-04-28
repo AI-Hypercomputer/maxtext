@@ -23,10 +23,12 @@ Example command:
   python3 -m MaxText.generate_distillation_data \
     --dataset-path HuggingFaceH4/ultrachat_200k --data-split train_sft --data-columns messages \
     --tokenizer-path deepseek-ai/DeepSeek-V2-Lite-chat \
-    --hf-access-token <access token> --hf-repo-id <hf repository id> \
+    --hf-access-token <access token> \
     --batch-size 1024 --num-batches 100 \
     --num-generations 2 \
-    --max-output-length 128 --max-target-length 256 --use-chat-template
+    --max-output-length 128 --max-target-length 256 \
+    --use-chat-template --remove-local-dataset-files \
+    upload-to-hf --hf-repo-id <hf repository id>
 
 Running this command executes 100 processing steps.
 In each step, it generates completions for a batch of 40 prompts.
@@ -44,6 +46,7 @@ import argparse
 import asyncio
 import grpc
 import json
+import os
 import transformers
 
 from datasets import Dataset
@@ -51,6 +54,7 @@ from huggingface_hub import create_repo, get_full_repo_name, repo_exists, upload
 
 from MaxText import max_logging
 from MaxText.input_pipeline import _distillation_data_processing
+from MaxText.utils import gcs_utils
 
 from jetstream.core.proto import jetstream_pb2
 from jetstream.core.proto import jetstream_pb2_grpc
@@ -157,35 +161,65 @@ def generate_completions(config, requests, tokenizer):  # pylint: disable=redefi
   return [output for output_per_prompt_list in outputs for output in output_per_prompt_list]
 
 
-def upload_data_to_hf(distillation_data, batch_num, hf_repo_id, hf_access_token):
+def upload_data_to_hf(config, parquet_file_name, batch_num):  # pylint: disable=redefined-outer-name
   """Upload dataset to Hugging Face."""
-  full_repo_name = get_full_repo_name(model_id=hf_repo_id, token=hf_access_token)
-  if not repo_exists(repo_id=full_repo_name, repo_type="dataset", token=hf_access_token):
+  full_repo_name = get_full_repo_name(model_id=config.hf_repo_id, token=config.hf_access_token)
+  if not repo_exists(repo_id=full_repo_name, repo_type="dataset", token=config.hf_access_token):
     max_logging.log("Repository doesn't exist on Hugging Face, creating a new one.")
     try:
-      repo_url = create_repo(repo_id=hf_repo_id, repo_type="dataset", private=True, token=hf_access_token)
+      repo_url = create_repo(repo_id=config.hf_repo_id, repo_type="dataset", private=True, token=config.hf_access_token)
       max_logging.log(f"Successfully created repository on Hugging Face: {repo_url}.")
     except Exception as e:  # pylint: disable=broad-except
       max_logging.log(f"Error in creating repository on Hugging Face: {e}")
       raise e
 
-  distillation_dataset = Dataset.from_list(distillation_data)
   max_logging.log(f"Pushing dataset to Hugging Face: https://huggingface.co/datasets/{full_repo_name}")
   try:
-    parquet_file_name = f"distillation-data-{batch_num}.parquet"
-    distillation_dataset.to_parquet(parquet_file_name)
     upload_file(
         repo_id=full_repo_name,
         repo_type="dataset",
         path_or_fileobj=parquet_file_name,
         path_in_repo=f"data/{parquet_file_name}",
         commit_message=f"Uploading dataset batch number {batch_num}",
-        token=hf_access_token,
+        token=config.hf_access_token,
     )
     max_logging.log(f"Successfully pushed dataset to Hugging Face: https://huggingface.co/datasets/{full_repo_name}")
   except Exception as e:  # pylint: disable=broad-except
     max_logging.log(f"Error in pushing dataset to Hugging Face: {e}")
     raise e
+
+
+def upload_data_to_gcs(config, source_file_name):  # pylint: disable=redefined-outer-name
+  """Uploads dataset to Google Cloud Storage bucket."""
+  data_path = gcs_utils.add_trailing_slash(config.gcs_data_path)
+  destination_name = f"gs://{config.gcs_bucket}/{data_path}{source_file_name}"
+  max_logging.log(f"Pushing dataset to GCS: {destination_name}")
+  try:
+    gcs_utils.upload_blob(destination_name, source_file_name)
+    max_logging.log(f"Successfully pushed dataset to GCS: {destination_name}")
+  except FileNotFoundError as e:
+    max_logging.log(f"Error in pushing dataset to GCS: '{source_file_name}' not found during upload attempt.")
+    raise e
+  except Exception as e:
+    max_logging.log(f"Error in pushing dataset to GCS: {e}")
+    raise e
+
+
+def upload_data(config, data, batch_num):  # pylint: disable=redefined-outer-name
+  """Uploads dataset to Google Cloud Storage or Hugging Face."""
+  distillation_dataset = Dataset.from_list(data)
+  parquet_file_name = f"distillation-data-{batch_num}.parquet"
+  distillation_dataset.to_parquet(parquet_file_name)
+  if config.upload == "upload-to-hf":
+    upload_data_to_hf(config, parquet_file_name, batch_num)
+  elif config.upload == "upload-to-gcs":
+    upload_data_to_gcs(config, parquet_file_name)
+  # remove local dataset files after upload
+  if config.remove_local_dataset_files and os.path.exists(parquet_file_name):
+    try:
+      os.remove(parquet_file_name)
+    except Exception as e:
+      max_logging.log(f"Unable to remove local dataset file {parquet_file_name}: {e}")
 
 
 def generate_data(config):  # pylint: disable=redefined-outer-name
@@ -206,7 +240,7 @@ def generate_data(config):  # pylint: disable=redefined-outer-name
     sampled_dataset = _distillation_data_processing.process_dataset(config, sampled_dataset)
     requests = _distillation_data_processing.filter_dataset(config, sampled_dataset, tokenizer)
     distillation_data = generate_completions(config, requests, tokenizer)
-    upload_data_to_hf(distillation_data, batch_num, config.hf_repo_id, config.hf_access_token)
+    upload_data(config, distillation_data, batch_num)
 
 
 if __name__ == "__main__":
@@ -230,12 +264,32 @@ if __name__ == "__main__":
   parser.add_argument(
       "--num-generations", type=int, required=False, default=1, help="Number of samples to generate per prompt."
   )
-  parser.add_argument(
-      "--hf-repo-id", type=str, required=True, help="Name of Hugging Face repository to upload generated dataset."
-  )
   parser.add_argument("--batch-size", type=int, required=True, help="Number of prompts to process in a batch.")
   parser.add_argument("--num-batches", type=int, required=True, help="Total number of batches of prompts to process.")
-  config, _ = parser.parse_known_args()
+  parser.add_argument(
+      "--remove-local-dataset-files", action="store_true", help="Set to remove local dataset files after upload."
+  )
+
+  # Subparser for available upload commands (upload to GCS, upload to Hugging Face)
+  subparsers = parser.add_subparsers(dest="upload", title="Available upload commands", required=True)
+
+  # Subparser to upload dataset to Google Cloud Storage
+  upload_to_gcs_parser = subparsers.add_parser("upload-to-gcs", help="Upload dataset to Google Cloud Storage.")
+  upload_to_gcs_parser.add_argument(
+      "--gcs-bucket", type=str, required=True, help="Name of GCS bucket to upload generated dataset."
+  )
+  upload_to_gcs_parser.add_argument("--gcs-data-path", type=str, required=True, help="Path to store dataset in GCS bucket.")
+
+  # Subparser to upload dataset to Hugging Face
+  upload_to_hf_parser = subparsers.add_parser(
+      "upload-to-hf",
+      help="Upload dataset to Hugging Face.",
+  )
+  upload_to_hf_parser.add_argument(
+      "--hf-repo-id", type=str, required=True, help="Name of Hugging Face repository to upload generated dataset."
+  )
+
+  config = parser.parse_args()
 
   assert (
       config.max_output_length < config.max_target_length
