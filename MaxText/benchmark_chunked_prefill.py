@@ -38,9 +38,9 @@ import datetime
 
 import jax
 
+from jetstream.core import prefix_cache
 from jetstream.engine import chunked_prefill
 from jetstream.engine import engine_api
-from jetstream.engine import prefix_cache
 
 from absl import app
 
