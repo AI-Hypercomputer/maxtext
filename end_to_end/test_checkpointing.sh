@@ -35,14 +35,16 @@ then
     CMD_DATA=" grain_worker_count=0 dataset_type=grain grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*"
 fi
 
-#Train
+# This command runs training for some steps and saves a checkpoint.
 CMD1="python3 -m MaxText.train MaxText/configs/base.yml run_name=$RUN_NAME steps=5 max_target_length=128 per_device_batch_size=1\
     metrics_file=saved_metrics.txt checkpoint_period=3 base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH\
     async_checkpointing=$ASYNC_CHECKPOINTING collect_stack_trace=$COLLECT_STACK_TRACE attention=$ATTENTION"
 CMD1+=$model_params
 CMD1+=$CMD_DATA
 
-CMD2="python3 -m MaxText.train MaxText/configs/base.yml run_name=$RUN_NAME steps=5 max_target_length=128 per_device_batch_size=1\
+# This command restores the checkpoint from the previous run and continue training from the restored checkpoint.
+# This ensures actual new training steps are executed after restoring checkpoint from the above training run.
+CMD2="python3 -m MaxText.train MaxText/configs/base.yml run_name=$RUN_NAME steps=10 max_target_length=128 per_device_batch_size=1\
     metrics_file=restored_metrics.txt base_output_directory=$OUTPUT_PATH dataset_path=$DATASET_PATH\
     async_checkpointing=$ASYNC_CHECKPOINTING collect_stack_trace=$COLLECT_STACK_TRACE attention=$ATTENTION"
 CMD2+=$model_params
@@ -54,9 +56,7 @@ echo "Command is:"
 echo $CMD1
 
 $CMD1
-# Wait for first train to finish
-# process_id=$!
-# wait $process_id
+
 echo
 echo "First training run done"
 echo "Start the second training run"
