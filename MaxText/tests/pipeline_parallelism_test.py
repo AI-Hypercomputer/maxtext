@@ -222,6 +222,7 @@ class PipelineParallelismTest(unittest.TestCase):
     )
     self.assert_pipeline_same_output_and_grad(config)
 
+  @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test_full_train_circular(self):
     # Run a full train.py call with 4 stages, 32 layers (2 layers per stage, 4 circular repeats), 8 microbatches
@@ -269,6 +270,7 @@ class PipelineParallelismTest(unittest.TestCase):
     )
     self.assert_pipeline_same_output_and_grad(config)
 
+  @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test_full_train_non_circular(self):
     # Run a full train.py call with 4 stages, 32 layers (8 layers per stage), 8 microbatches
@@ -299,6 +301,7 @@ class PipelineParallelismTest(unittest.TestCase):
         ]
     )
 
+  @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test_subset_layers(self):
     # Run a full train.py call with 4 stages, 16 layers - 8 in pipeline, 8 ran outside of pipeline
@@ -331,6 +334,7 @@ class PipelineParallelismTest(unittest.TestCase):
         ]
     )
 
+  @pytest.mark.integration_test
   def test_full_train_fp8(self):
     # Run a full train.py call with fp8 quantization, which adds extra
     # variable collections that need to be handled
@@ -361,6 +365,7 @@ class PipelineParallelismTest(unittest.TestCase):
         ]
     )
 
+  @pytest.mark.integration_test
   def test_full_train_nanoo_fp8(self):
     # Run a full train.py call with NANOO fp8 quantization, which adds extra
     # variable collections that need to be handled

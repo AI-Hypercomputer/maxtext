@@ -130,66 +130,82 @@ class TrainTests(unittest.TestCase):
       ],
   }
 
+  @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test_tpu_base(self):
     train_main(TrainTests.CONFIGS["base"])
 
+  @pytest.mark.integration_test
   @pytest.mark.gpu_only
   def test_gpu_base(self):
     train_main(TrainTests.CONFIGS["base"] + ["attention=dot_product"])
 
+  @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test_tpu_synthetic(self):
     train_main(TrainTests.CONFIGS["synthetic"])
 
+  @pytest.mark.integration_test
   @pytest.mark.gpu_only
   def test_gpu_synthetic(self):
     train_main(TrainTests.CONFIGS["synthetic"] + ["attention=dot_product"])
 
+  @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test_tpu_pdb_lt_1(self):
     train_main(TrainTests.CONFIGS["pdb_lt_1"])
 
+  @pytest.mark.integration_test
   @pytest.mark.gpu_only
   def test_gpu_pdb_lt_1(self):
     train_main(TrainTests.CONFIGS["pdb_lt_1"] + ["attention=dot_product"])
 
+  @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test_tpu_int8(self):
     train_main(TrainTests.CONFIGS["int8"])
 
+  @pytest.mark.integration_test
   @pytest.mark.gpu_only
   def test_gpu_int8(self):
     train_main(TrainTests.CONFIGS["int8"] + ["attention=dot_product"])
 
+  @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test_tpu_fp8(self):
     train_main(TrainTests.CONFIGS["fp8"])
 
+  @pytest.mark.integration_test
   @pytest.mark.gpu_only
   def test_gpu_fp8(self):
     train_main(TrainTests.CONFIGS["fp8"] + ["attention=dot_product"])
 
+  @pytest.mark.integration_test
   @pytest.mark.gpu_only
   def test_gpu_nanoo_fp8(self):
     train_main(TrainTests.CONFIGS["nanoo_fp8"] + ["attention=dot_product"])
 
+  @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test_tpu_dropout(self):
     train_main(TrainTests.CONFIGS["dropout"])
 
+  @pytest.mark.integration_test
   @pytest.mark.gpu_only
   def test_gpu_dropout(self):
     train_main(TrainTests.CONFIGS["dropout"] + ["attention=dot_product"])
 
+  @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test_tpu_hf_input_pipeline(self):
     train_main(TrainTests.CONFIGS["hf_input_pipeline"])
 
+  @pytest.mark.integration_test
   @pytest.mark.gpu_only
   def test_gpu_hf_input_pipeline(self):
     train_main(TrainTests.CONFIGS["hf_input_pipeline"] + ["attention=dot_product"])
 
+  @pytest.mark.integration_test
   @pytest.mark.gpu_only
   def test_gpu_cudnn_flash_te(self):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
@@ -207,6 +223,7 @@ class TrainTests(unittest.TestCase):
     ]
     train_main(cudnn_flash_te)
 
+  @pytest.mark.integration_test
   @pytest.mark.gpu_only
   def test_gpu_context_parallelism(self):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
