@@ -27,7 +27,7 @@ omegaconf==2.3.0
 optax==0.2.4
 orbax==0.1.9
 pandas==2.2.3
-pathwaysutils==0.1.0
+pathwaysutils==0.1.1
 # Removing due to conflicts during build
 # protobuf==3.20.3
 protobuf

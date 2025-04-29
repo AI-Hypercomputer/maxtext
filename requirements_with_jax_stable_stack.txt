@@ -18,7 +18,7 @@ transformers
 mlperf-logging@git+https://github.com/mlperf/logging.git
 google-jetstream@git+https://github.com/AI-Hypercomputer/JetStream.git
 jsonlines
-pathwaysutils@git+https://github.com/AI-Hypercomputer/pathways-utils.git
+pathwaysutils==0.1.1
 google-api-python-client
 omegaconf
 jaxtyping
