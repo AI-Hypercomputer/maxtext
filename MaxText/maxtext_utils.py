@@ -20,6 +20,7 @@ limitations under the License.
 from typing import Optional
 
 import functools
+import ml_collections
 import pickle
 
 from flax.training import train_state
@@ -52,12 +53,16 @@ NUM_IMAGES_PER_SEQUENCE = 1
 NUM_IMAGE_CHANNELS = 3
 
 
+def get_input_data_sharding(mesh, input_data_sharding_logical_axes, logical_axis_rules):
+  data_pspec = P(*input_data_sharding_logical_axes)
+  return nn.logical_to_mesh_sharding(data_pspec, mesh, logical_axis_rules)
+
+
 def get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config):
   """Get the shardings (both state and data) for train_step"""
   functional_train = get_functional_train_step(train_step, model, config, state_mesh_shardings)
   functional_train.__name__ = "train_step"
-  data_pspec = P(*config.data_sharding)
-  data_sharding = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
+  data_sharding = get_input_data_sharding(mesh, config.input_data_sharding_logical_axes, config.logical_axis_rules)
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = (state_mesh_shardings, None)  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
@@ -73,8 +78,7 @@ def get_functional_eval_with_signature(eval_step, mesh, state_mesh_shardings, mo
   """Get the shardings (both state and data) for eval_step"""
   functional_eval = get_functional_eval_step(eval_step, model, config)
   functional_eval.__name__ = "eval_step"
-  data_pspec = P(*config.data_sharding)
-  data_sharding = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
+  data_sharding = get_input_data_sharding(mesh, config.input_data_sharding_logical_axes, config.logical_axis_rules)
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = None  # metrics
   static_argnums = ()  # We partial out the static argnums of model, config
@@ -479,11 +483,7 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
     unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(model, None, config, rng, mesh, False)
     with nn_partitioning.axis_rules(config.logical_axis_rules):
       params = checkpointing.load_params_from_path(
-          config.load_parameters_path,
-          unboxed_abstract_state.params,
-          config.checkpoint_storage_concurrent_gb,
-          config.checkpoint_storage_use_ocdbt,
-          config.checkpoint_storage_use_zarr3,
+          config.load_parameters_path, unboxed_abstract_state.params, config.checkpoint_storage_concurrent_gb, config.checkpoint_storage_use_ocdbt, config.checkpoint_storage_use_zarr3
       )
     state = init_decode_state(None, params)
 
@@ -713,14 +713,19 @@ def logical_axis_rules_pp_act_as_dp(logical_rules):
   return tuple(new_rules)
 
 
-def create_device_mesh(config, devices=None):
-  """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
+def get_slices_and_devices(config, devices=None):
   if devices is None:
     devices = jax.devices()
   num_devices = len(devices)
   num_slices = 1 if config.inference_benchmark_test else config.num_slices
   num_devices_per_slice = num_devices // num_slices
+  return num_slices, num_devices_per_slice
 
+
+def create_device_mesh(config, devices=None):
+  """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
+  num_slices, num_devices_per_slice = get_slices_and_devices(config, devices)
+  num_devices = num_devices_per_slice * num_slices
   multi_slice_env = num_slices > 1
 
   # Find possible unspecified parallelisms

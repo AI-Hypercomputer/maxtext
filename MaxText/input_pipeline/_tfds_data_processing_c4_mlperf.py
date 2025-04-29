@@ -330,7 +330,7 @@ def make_c4_mlperf_train_iterator(
       shuffle_buffer_size=128,
       data_shuffle_seed=config.data_shuffle_seed,
   )
-  train_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(train_ds, global_mesh)
+  train_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(train_ds, global_mesh, config)
   return train_multihost_gen
 
 
@@ -360,7 +360,7 @@ def make_c4_mlperf_eval_iterator(
       max_target_length=config.max_target_length,
   )
 
-  eval_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(eval_ds, global_mesh)
+  eval_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(eval_ds, global_mesh, config)
 
   # Return multi-host jax.Array prep iterator
   return eval_multihost_gen
