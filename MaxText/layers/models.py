@@ -676,11 +676,17 @@ class Transformer(nn.Module):
 
         bidirectional_mask = decoder_input_tokens == gemma3.TOKEN_PLACEHOLDER
 
-    input_bi_mask = jnp.ones_like(bidirectional_mask, dtype=bool)
-    input_bi_mask = input_bi_mask.at[:].set(temp["bidirectional_mask"][0,:])
+    if temp is not None:
+      input_bi_mask = jnp.ones_like(bidirectional_mask, dtype=bool)
+      input_bi_mask = input_bi_mask.at[:].set(temp["bidirectional_mask"])
+      bidirectional_mask = input_bi_mask
 
-    combined_embeddings = jnp.ones((decoder_input_tokens.shape[0], decoder_input_tokens.shape[1], 2560), dtype=jnp.float32)
-    combined_embeddings = combined_embeddings.at[:].set(temp["bidirectional_mask"][0,:,:])
+      combined_embeddings = jnp.ones((decoder_input_tokens.shape[0], decoder_input_tokens.shape[1], 2560), dtype=jnp.float32)
+      combined_embeddings = combined_embeddings.at[:].set(temp["combined_embeddings"])
+
+      jax.debug.print("decoder_positions {}", decoder_positions.mean())
+      jax.debug.print("mask {}", bidirectional_mask.mean())
+      jax.debug.print("combined_embeddings {}", combined_embeddings.mean())
 
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
@@ -691,7 +697,7 @@ class Transformer(nn.Module):
         previous_chunk=previous_chunk,
         slot=slot,
         page_state=page_state,
-        bidirectional_mask=input_bi_mask,
+        bidirectional_mask=bidirectional_mask,
         combined_embeddings=temp["combined_embeddings"] if temp is not None else None,
     )
     return logits
