@@ -38,6 +38,7 @@ jobs:
     runs-on: ["self-hosted", "${{ inputs.device_type }}", "${{ inputs.device_name }}"]
     steps:
       - name: Authenticate gcloud
+        continue-on-error: true
         run: |
           # configure registries as root and as runner
           sudo gcloud auth configure-docker --quiet
