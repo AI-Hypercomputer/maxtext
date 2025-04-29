@@ -33,6 +33,7 @@ def generate_random_string(length=10):
 
 class GradientAccumulationTest(unittest.TestCase):
 
+  @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test_grad_accumulate_same_loss(self):
     random_suffix = generate_random_string()

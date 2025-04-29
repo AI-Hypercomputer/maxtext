@@ -27,6 +27,7 @@ from MaxText.tests.globals import TEST_DISABLE_SUBPROCESS_STR, TEST_DISABLE_SUBP
 
 class Inference_Microbenchmark(unittest.TestCase):
 
+  @pytest.mark.integration_test
   @pytest.mark.tpu_only
   @pytest.mark.skipif(TEST_DISABLE_SUBPROCESS, reason=TEST_DISABLE_SUBPROCESS_STR)
   def test(self):

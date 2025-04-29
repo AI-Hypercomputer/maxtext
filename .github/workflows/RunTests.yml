@@ -26,6 +26,10 @@ on:
     # Run the job every 4 hours
     - cron:  '0 */4 * * *'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   prelim:
     runs-on: ["self-hosted"]

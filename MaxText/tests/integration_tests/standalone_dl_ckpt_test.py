@@ -36,6 +36,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
     random_run_name = test_name + date_time + random_string
     return random_run_name
 
+  @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test_standalone_dataloader(self):
     random_run_name = self._get_random_test_name("standalone_dataloader")
@@ -52,6 +53,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
         )
     )  # need to pass relative path to tokenizer
 
+  @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test_standalone_checkpointer(self):
     random_run_name = self._get_random_test_name("standalone_checkpointer")
