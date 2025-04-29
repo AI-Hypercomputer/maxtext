@@ -93,7 +93,7 @@ class GateLogit(nn.Module):
 
     features = linears._canonicalize_tuple(self.features)
     axis = linears._canonicalize_tuple(self.axis)
-
+    # breakpoint()
     inputs = jnp.asarray(inputs, self.dtype)
     axis = linears._normalize_axes(axis, inputs.ndim)
 
@@ -186,7 +186,6 @@ class MoeBlock(nn.Module):
     kernel_in_axis = np.arange(1)
     kernel_out_axis = np.arange(1, 2)
     kernel_init = nd_dense_init(1.0, "fan_in", "truncated_normal")
-
     if quantizations.in_serve_mode(self.quant):
       # During aqt convert state we delete kernel weight from params to save memory.
       # Instead they are retrieved from the tensors stored in the 'aqt' collection.
@@ -466,19 +465,27 @@ class MoeBlock(nn.Module):
         """
         if strategy == TransformStrategy.INPUT_OFFSET:
           # Index of input array for the send
+          # all_shards_group_sizes[shard_id] specifies how much data is sent ot each shard.
+          # So the start index of the data to send to each shard is specified by the cumsum of all_shards_group_sizes[shard_id].
           local_array = input_array[shard_id]
           return jnp.concatenate((jnp.array([0]), jnp.cumsum(local_array)[:-1]))
         elif strategy == TransformStrategy.SEND_SIZE:
           # Size of input array for the send
+          # The amount of data to send is just specified by the current row of all_shards_group_sizes[shard_id].
           return input_array[shard_id]
         elif strategy == TransformStrategy.OUTPUT_OFFSET:
           # Received index in the target output
+          # The index of where to insert each sending shard's data into a particular output shard is specified by 
+          # the cumulative sum of the output shard's column (each elemnt of that column specifies how much data is sent by 
+          # each sending shard).
           zero_row = jnp.zeros((1,) + input_array.shape[1:], dtype=input_array.dtype)
           array_with_zeros = jnp.concatenate((zero_row, input_array), axis=0)
           cumulated_array = jnp.cumsum(array_with_zeros, axis=0, dtype=input_array.dtype)
           return cumulated_array[shard_id]
         elif strategy == TransformStrategy.RECV_SIZE:
           # Received size in the traget output
+          # The receiving size is just the column of all_shards_group_sizes[:, shard_id] which specifies the data packets it will 
+          # receive from each shard (row).
           return input_array[:, shard_id]
         else:
           raise ValueError(f"Unknown tranform array strategy: {strategy}")
@@ -504,6 +511,7 @@ class MoeBlock(nn.Module):
     w1_pspec = nn.logical_to_mesh_axes(("exp", None, "mlp"))
     wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp", None))
 
+    # breakpoint()
     if isinstance(w0_kernel, QTensor):
       w0_pspec = aqt_tensor.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
     if isinstance(w1_kernel, QTensor):
@@ -594,8 +602,8 @@ class MoeBlock(nn.Module):
           intermediate_output, sorted_selected_experts, weights, batch_size=batch_size, sequence_length=sequence_length
       )
       return output, None
-
-    return wrapper(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)
+    foo = wrapper(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)
+    return foo
 
   def reshape_and_update_weights(self, weights, indices):
     # input of weights & indices: (batch_size, seq_len, num_experts_per_tok)

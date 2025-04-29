@@ -141,7 +141,6 @@ class DenseGeneral(nn.Module):
     kernel = jnp.asarray(kernel, self.dtype)
     contract_ind = tuple(range(0, len(axis)))
     output = _compute_dot_general(inputs, kernel, self.kernel_axes, axis, contract_ind, self.matmul_precision, self.quant)
-
     if self.use_bias:
       bias_axes, bias_shape = (
           self.kernel_axes[-len(features) :],
