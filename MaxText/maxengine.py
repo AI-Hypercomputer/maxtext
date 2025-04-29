@@ -483,6 +483,10 @@ class MaxEngine(engine_api.Engine):
     )
 
     all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
+    if self.config.return_log_prob:
+      token_logp = inference_utils.log_prob_of_chosen_token(selected_logits, first_generated_token)
+    else:
+      token_logp = None
     result = engine_api.ResultTokens(
         data=jnp.concatenate((first_generated_token, all_valid, generated_tokens), axis=1),
         # Tokens are shape [batch, speculations], so when we concatenate
@@ -493,6 +497,7 @@ class MaxEngine(engine_api.Engine):
         valid_idx=(1, 2),
         # And lengths is rank 1.
         length_idx=(2, 3),
+        log_prob=token_logp,
         samples_per_slot=1,
     )
 
@@ -614,6 +619,7 @@ class MaxEngine(engine_api.Engine):
 
     # sampling first tokens
     first_generated_tokens = []
+    token_logps = [] if self.config.return_log_prob else None
     for _ in range(num_samples):
       rng, new_rng = jax.random.split(rng)
       first_generated_token = inference_utils.sampling(
@@ -625,7 +631,12 @@ class MaxEngine(engine_api.Engine):
           temperature=self.config.decode_sampling_temperature,
       )
       first_generated_tokens.append(first_generated_token)
+      if self.config.return_log_prob:
+        # pytype: disable=attribute-error
+        token_logps.append(inference_utils.log_prob_of_chosen_token(selected_logits, first_generated_token))
     first_generated_tokens = jnp.concatenate(first_generated_tokens, axis=0)
+    if self.config.return_log_prob:
+      token_logps = jnp.concatenate(token_logps, axis=0)
 
     all_valid = jnp.ones((num_samples, 1), dtype=jnp.int8)
     generated_tokens = jnp.zeros((num_samples, 1), dtype=jnp.int32)
@@ -639,6 +650,7 @@ class MaxEngine(engine_api.Engine):
         valid_idx=(1, 2),
         # And lengths is rank 1.
         length_idx=(2, 3),
+        log_prob=token_logps,
         samples_per_slot=num_samples,
     )
 
@@ -730,6 +742,10 @@ class MaxEngine(engine_api.Engine):
           temperature=self.config.decode_sampling_temperature,
       )
       all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
+      if self.config.return_log_prob:
+        token_logp = inference_utils.log_prob_of_chosen_token(selected_logits, first_generated_token)
+      else:
+        token_logp = None
       result = engine_api.ResultTokens(
           data=jnp.concatenate((first_generated_token, all_valid, generated_tokens), axis=1),
           # Tokens are shape [batch, speculations], so when we concatenate
@@ -740,6 +756,7 @@ class MaxEngine(engine_api.Engine):
           valid_idx=(1, 2),
           # And lengths is rank 1.
           length_idx=(2, 3),
+          log_prob=token_logp,
           samples_per_slot=1,
       )
       return {
@@ -824,6 +841,10 @@ class MaxEngine(engine_api.Engine):
         temperature=self.config.decode_sampling_temperature,
     )
     all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
+    if self.config.return_log_prob:
+      token_logp = inference_utils.log_prob_of_chosen_token(out_logits, new_token)
+    else:
+      token_logp = None
     result = engine_api.ResultTokens(
         data=jnp.concatenate((new_token, all_valid, decode_state["generated_tokens"]), axis=1),
         # Tokens are shape [batch, speculations], so when we concatenate
@@ -834,6 +855,7 @@ class MaxEngine(engine_api.Engine):
         valid_idx=(1, 2),
         # And lengths is rank 1.
         length_idx=(2, 3),
+        log_prob=token_logp,
         samples_per_slot=1,
     )
 

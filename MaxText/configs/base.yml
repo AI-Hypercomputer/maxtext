@@ -598,6 +598,7 @@ inference_benchmark_test: False
 enable_model_warmup: False
 enable_llm_inference_pool: False          # Bool to launch inference server for llm_inference_gateway with their specified APIs
 multi_sampling: False
+return_log_prob: False
 
 # Stack prefill cache across the layer to reduce the
 # Python layer latency.
