@@ -186,5 +186,6 @@ def create_data_iterator(config, meshes):
   train_iterators = []
   for mesh in meshes:
     train_iterator_fn = functools.partial(make_hf_train_iterator, config, mesh, process_indices_train)
-    train_iterators.append(input_pipeline_interface.make_mixed_iterator(config, mesh, process_indices_train, [], train_iterator_fn, None))
+    # just append train_iterators from input_pipeline_interface.make_mixed_iterator
+    train_iterators.append(input_pipeline_interface.make_mixed_iterator(config, mesh, process_indices_train, [], train_iterator_fn, None)[0])
   return train_iterators

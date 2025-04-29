@@ -117,6 +117,7 @@ class Buffer:
   def __init__(self, maxsize=1):
     self.queue = Queue(maxsize=maxsize)
     self.lock = threading.Lock()
+    self.internal_buffer = []
 
   def push(self, data, data_sharding):
     def _put():
@@ -130,11 +131,30 @@ class Buffer:
         self.queue.put(device_data)
     threading.Thread(target=_put).start()
 
-  def pull(self):
+  def pull(self, desired_batch_size=None):
     with self.lock:
-      try:
-        return self.queue.get_nowait()
-      except:
+      # Fill internal buffer
+      while not self.queue.empty():
+        self.internal_buffer.append(self.queue.get_nowait())
+
+      if not self.internal_buffer:
+        return None
+
+      if desired_batch_size is None:
+        # Default behavior: return one batch
+        return self.internal_buffer.pop(0)
+
+      # Aggregate until you reach the desired_batch_size
+      combined = []
+      count = 0
+      while self.internal_buffer and count < desired_batch_size:
+        batch = self.internal_buffer.pop(0)
+        combined.append(batch)
+        count += batch.shape[0]  # assuming batch has shape (batch_size, ...)
+
+      if combined:
+        return jax.tree_util.tree_map(lambda *xs: jnp.concatenate(xs, axis=0), *combined)
+      else:
         return None
 
 
@@ -560,7 +580,7 @@ def setup_mesh_and_model(config, config_inference):
     mesh = Mesh(training_devices, config.mesh_axes)
     inference_devices = flat_devices[:num_inference_devices].reshape((config.inference_replicas, config.inference_devices_per_replica))
     inference_meshes = [Mesh(devices.reshape(config_inference.ici_parallelism), config_inference.mesh_axes) for devices in inference_devices]
-    max_logging.log(f"Inference: Num_devices: {num_inference_devices}, replicas: {config.inference_replicas} with shape {inference_meshes[0].shape.values()}")
+    max_logging.log(f"Inference: Num_devices: {num_inference_devices}, replicas: {config.inference_replicas} with shape {tuple(inference_meshes[0].shape.values())}")
   else:
     training_devices_array = max_utils.create_device_mesh(config)
     mesh = Mesh(training_devices_array, config.mesh_axes)
@@ -817,7 +837,7 @@ def train_loop(config, config_inference, state=None):
       mesh,
       inference_meshes,
       learning_rate_schedule,
-      data_iterator,
+      data_iterators,
       eval_data_iterator,
       state,
   ) = setup_train_loop(config, config_inference)
@@ -930,7 +950,6 @@ def train_loop(config, config_inference, state=None):
   # initialize inference_params from the state before step=0
   # inference_params = [transfer_data({'params':state.params['params']}, {'params':state_mesh_shardings.params['params']}, inference_state_mesh_sharding.params) for inference_state_mesh_sharding in inference_state_mesh_shardings]
   inference_params = [jax.device_put({'params':state.params['params']}, inference_state_mesh_sharding.params) for inference_state_mesh_sharding in inference_state_mesh_shardings]
-  breakpoint()
   performance_metric_queue = None
   if config.report_heartbeat_metric_for_gcp_monitoring or config.report_performance_metric_for_gcp_monitoring:
     gcp_workload_monitor = GCPWorkloadMonitor(config.run_name)
@@ -941,15 +960,17 @@ def train_loop(config, config_inference, state=None):
       gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
 
   # do K rollouts of inference
-  for k in range(config.inference_rollouts):
-    example_batch = load_next_batch(data_iterator, example_batch, config)
-    rng = jax.jit(jax.random.fold_in)(init_rng, k)
-    rng, rng_gen = random.split(rng)
-    example_batch = jax.device_put(example_batch, inference_data_sharding)
-    example_batch = p_generate_completions(example_batch, inference_params, rng_gen)
-    data_buffer.push(example_batch, in_shard_train[1])
-
-
+  if config.inference_rollouts != 1:
+    for k in range(config.inference_rollouts):
+      for data_iterator, inference_data_sharding, inference_param, p_generate in zip(data_iterators, inference_data_shardings, inference_params, p_generate_completions):
+        example_batch = load_next_batch(data_iterator, example_batch, config)
+        rng = jax.jit(jax.random.fold_in)(init_rng, k)
+        rng, rng_gen = random.split(rng)
+        example_batch = jax.device_put(example_batch, inference_data_sharding)
+        example_batch = p_generate(example_batch, inference_param, rng_gen)
+        data_buffer.push(example_batch, in_shard_train[1])
+        max_logging.log(f"example batch shape {example_batch.shape}")
+  # max_logging.log(f"data buffer: {len(data_buffer.queue)}")
   metric_logger = MetricLogger(writer, config)
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step or prof.should_activate_periodic_profile(step):
@@ -957,24 +978,26 @@ def train_loop(config, config_inference, state=None):
       prof.activate(blocking_object=state, optional_postfix=optional_postfix)
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
-      record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
-      example_batch = load_next_batch(data_iterator, example_batch, config)
-      record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
-      check_example_batch(config, example_batch=example_batch)
-      # pylint: disable=not-callable
-      rng = jax.jit(jax.random.fold_in)(init_rng, step)
-      record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
-      rng, rng_gen = random.split(rng)
-      example_batch = jax.device_put(example_batch, inference_data_sharding)
-      inference_params = param_buffer.pull() or inference_params
-      example_batch = p_generate_completions(example_batch, inference_params, rng_gen)
-      data_buffer.push(example_batch, in_shard_train[1])
+      for data_iterator, inference_param, p_generate in zip(data_iterators, inference_params, p_generate_completions):
+        record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
+        example_batch = load_next_batch(data_iterator, example_batch, config)
+        record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
+        check_example_batch(config, example_batch=example_batch)
+        # pylint: disable=not-callable
+        rng = jax.jit(jax.random.fold_in)(init_rng, step)
+        record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
+        rng, rng_gen = random.split(rng)
+        example_batch = jax.device_put(example_batch, inference_data_sharding)
+        # inference_param = param_buffer.pull() or inference_param
+        example_batch = p_generate(example_batch, inference_param, rng_gen)
+        data_buffer.push(example_batch, in_shard_train[1])
 
-      training_batch = data_buffer.queue.get(block=True)
+      training_batch = data_buffer.pull(desired_batch_size=config.inference_replicas)
+      max_logging.log(f"This is training batch shape {training_batch.shape=}")
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, training_batch, rng)
-      if step != 0 and step % config.inference_rollouts == 0:
-        param_buffer.push({'params':state.params['params']}, inference_state_mesh_shardings.params)
+      # if step != 0 and step % config.inference_rollouts == 0:
+      #   param_buffer.push({'params':state.params['params']}, inference_state_mesh_shardings.params)
     step_time_delta = datetime.datetime.now() - last_step_completion
     last_step_completion = datetime.datetime.now()
     record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
