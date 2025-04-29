@@ -373,27 +373,21 @@ def get_coordinator_ip_address():
   return coordinator_ip_address
 
 
-def get_unspecified_mesh_axes_value(parallelism_vals, target_product, parallelism_type):
-  """Evaluates unspecified DCN/ICI parallelism values"""
-  assert (
-      parallelism_vals.count(-1) == 1
-  ), f"Found unspecified values (-1) for more than one {parallelism_type}\
-    parallelism axis. At most one axis can be unspecified."
-
-  determined_val = target_product / np.prod(parallelism_vals) * -1
-
-  assert (
-      determined_val >= 1 and determined_val.is_integer
-  ), f"Unspecified value unable to be determined with the given\
-    {parallelism_type} parallelism values"
-
-  return int(determined_val)
-
-
 def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):
   """Evaluates unspecified DCN/ICI parallelism values"""
   if -1 in parallelism_vals:
-    determined_val = get_unspecified_mesh_axes_value(parallelism_vals, target_product, parallelism_type)
+    assert (
+        parallelism_vals.count(-1) == 1
+    ), f"Found unspecified values (-1) for more than one {parallelism_type}\
+      parallelism axis. At most one axis can be unspecified."
+
+    determined_val = target_product / np.prod(parallelism_vals) * -1
+
+    assert (
+        determined_val >= 1 and determined_val.is_integer
+    ), f"Unspecified value unable to be determined with the given\
+      {parallelism_type} parallelism values"
+
     parallelism_vals[parallelism_vals.index(-1)] = int(determined_val)
 
   target_type = "slices" if parallelism_type == "DCN" else "devices per slice"
@@ -786,35 +780,6 @@ def reorder_causal_load_balanced(batch, cp_size):
   }
 
 
-def shard_reorder_causal_load_balanced(batch, cp_size):
-  """Shard the output of the reordered sequence."""
-  reordered = reorder_causal_load_balanced(batch, cp_size)
-  for _, v in batch.items():
-    if isinstance(v, jax.Array):
-      reordered = jax.lax.with_sharding_constraint(reordered, v.sharding)
-      break
-  return reordered
-
-
 def get_reorder_callable(cp_size):
   """Creates a callable that can be used with map() to reorder batches."""
-  return functools.partial(shard_reorder_causal_load_balanced, cp_size=cp_size)
-
-
-def compute_axis_product(axis_spec, mesh_dict):
-  """Computes the product of the axis specified in axis_spec."""
-  if isinstance(axis_spec, str):
-    axis_spec = (axis_spec,)
-  elif axis_spec is None:
-    return 1
-  product = 1
-  for dim_name in axis_spec:
-    if dim_name in mesh_dict:
-      product *= mesh_dict[dim_name]
-  return product
-
-
-def construct_parallelism_name(mesh_axis: str, prefix: str) -> str:
-  if mesh_axis == "stage":
-    return f"{prefix}_pipeline_parallelism"
-  return f"{prefix}_{mesh_axis}_parallelism"
+  return functools.partial(reorder_causal_load_balanced, cp_size=cp_size)
