@@ -34,9 +34,10 @@ import torch
 import psutil
 from tqdm import tqdm
 
+from safetensors import safe_open
+
 from MaxText import max_logging
 from MaxText.inference_utils import str2bool
-from safetensors import safe_open
 from MaxText import llama_or_mistral_ckpt
 
 

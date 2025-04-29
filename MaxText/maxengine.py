@@ -19,33 +19,32 @@ from collections import defaultdict
 import uuid
 import os.path
 
-import flax
-from flax import linen as nn
-from flax.linen import partitioning as nn_partitioning
-from flax import struct
-
-from MaxText.globals import PKG_DIR
-from MaxText.inference.page_manager import PageManager, PageState
-from MaxText.layers import models, quantizations
-
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 from jax.experimental import layout as jax_layout
 
-from MaxText import common_types
+import flax
+from flax import linen as nn
+from flax.linen import partitioning as nn_partitioning
+from flax import struct
+
 from jetstream.core import config_lib
 from jetstream.engine import engine_api
 from jetstream.engine.tokenizer_pb2 import TokenizerParameters
 from jetstream.engine.tokenizer_pb2 import TokenizerType
 from jetstream.engine import tokenizer_api
 from jetstream.engine import token_utils
-from MaxText.utils import lora_utils
 
 from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import inference_utils
 from MaxText import pyconfig
+from MaxText import common_types
+from MaxText.utils import lora_utils
+from MaxText.globals import PKG_DIR
+from MaxText.inference.page_manager import PageManager, PageState
+from MaxText.layers import models, quantizations
 
 import warnings
 
@@ -1430,19 +1429,20 @@ def create_engine_from_config_flags(
   """Create new MaxEngine instance with given batch_size, prefill and target lengths, and any config
   params provided through `args_str`.
   """
-  args = {}
-  args["scan_layers"] = "false"
-  args["async_checkpointing"] = "false"
-  args["ici_fsdp_parallelism"] = "1"
-  args["ici_autoregressive_parallelism"] = "1"
-  args["ici_tensor_parallelism"] = "-1"
-  args["weight_dtype"] = "bfloat16"
-  args["attention"] = "dot_product"
-
   # batch and cache related
-  args["max_prefill_predict_length"] = f"{max_prefill_predict_length}"
-  args["max_target_length"] = f"{max_target_length}"
-  args["per_device_batch_size"] = f"{batch_size}"
+  args = {
+      "scan_layers": "false",
+      "async_checkpointing": "false",
+      "ici_fsdp_parallelism": "1",
+      "ici_autoregressive_parallelism": "1",
+      "ici_tensor_parallelism": "-1",
+      "weight_dtype": "bfloat16",
+      "attention": "dot_product",
+      "max_prefill_predict_length": f"{max_prefill_predict_length}",
+      "max_target_length": f"{max_target_length}",
+      "per_device_batch_size": f"{batch_size}",
+  }
+
   print(f"Command line args: {args_str}")
   cmd_args = args_str.split(" ")
   for cmd_arg in cmd_args:

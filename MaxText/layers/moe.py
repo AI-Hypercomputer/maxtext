@@ -17,26 +17,30 @@
 
 
 import functools
-from typing import Any, Iterable, Tuple, Union, Optional
+from typing import Iterable, Tuple, Union, Optional
+from enum import Enum, auto
+import math
 
-import flax.linen as nn
+import numpy as np
+
 import jax
 from jax import lax
 import jax.numpy as jnp
+from jax.ad_checkpoint import checkpoint_name
+from jax.experimental import shard_map
+
+import flax.linen as nn
+
+from aqt.jax.v2 import aqt_tensor
+
 from MaxText import common_types
 from MaxText.layers import initializers
 from MaxText.layers import normalizations
 from MaxText.layers import quantizations
 from MaxText.layers import linears
-import numpy as np
-from jax.ad_checkpoint import checkpoint_name
-from jax.experimental import shard_map
-import math
 from MaxText import max_logging
 from MaxText import max_utils
-from aqt.jax.v2 import aqt_tensor
 from MaxText.kernels import megablox as mblx
-from enum import Enum, auto
 
 
 Array = common_types.Array
@@ -711,7 +715,7 @@ class MoeBlock(nn.Module):
 
     # the check is to prevent aqteinsum as einsum op for dispatch and combine einsums in ase when capacity_factor > 0
     # this is necessary to load pre-quantized weights in case of inference
-    if self.config.model_call_mode == "inference" and (einsum_name == DISPATCH or einsum_name == COMBINE):
+    if self.config.model_call_mode == "inference" and einsum_name in (DISPATCH, COMBINE):
       return jnp.einsum
 
     if self.quant:
@@ -775,9 +779,9 @@ class MoeBlock(nn.Module):
         input_axis = ("activation_batch", "activation_length", "activation_embed")
         dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, "activation_embed")
         mlp_axis = ("activation_exp", "activation_batch_no_exp", None, "activation_mlp")
-        dispatch_eimsum = f"BSM,BSEC -> EBCM"
-        mlp_einsum = f"EBCM,EMH -> EBCH"
-        output_einsum = f"EBCM,BSEC -> BSM"
+        dispatch_eimsum = "BSM,BSEC -> EBCM"
+        mlp_einsum = "EBCM,EMH -> EBCH"
+        output_einsum = "EBCM,BSEC -> BSM"
       else:
         # todo: try replace softmax_probs with padded weights and verify with decode acc tests
         softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
@@ -792,9 +796,9 @@ class MoeBlock(nn.Module):
           input_axis = ("activation_batch", "activation_length", None, "activation_embed")
           dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_embed")
           mlp_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_mlp")
-        dispatch_eimsum = f"BNSM,BNSEC -> EBNCM"
-        mlp_einsum = f"EBNCM,EMH -> EBNCH"
-        output_einsum = f"EBNCM,BNSEC -> BNSM"
+        dispatch_eimsum = "BNSM,BNSEC -> EBNCM"
+        mlp_einsum = "EBNCM,EMH -> EBNCH"
+        output_einsum = "EBNCM,BNSEC -> BNSM"
 
         inputs = jnp.reshape(inputs, (batch_size, cp, sub_seq, inputs.shape[2]))
         inputs = nn.with_logical_constraint(inputs, input_axis)
@@ -989,7 +993,7 @@ class DeepSeekMoeBlock(nn.Module):
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
-        name=f"shared_experts",
+        name="shared_experts",
         config=cfg,
         quant=self.quant,
     )(inputs)

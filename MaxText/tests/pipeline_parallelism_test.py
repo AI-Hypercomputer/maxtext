@@ -13,31 +13,25 @@ limitations under the License.
 
 # pylint: disable=missing-module-docstring, missing-function-docstring
 import sys
-
-import jax
-from jax.sharding import Mesh
-
 import os.path
 import unittest
+
 import pytest
 
-from MaxText import pyconfig
-from MaxText.globals import PKG_DIR
-
-from MaxText.layers import pipeline
 import jax
-from jax import numpy as jnp
 from jax.sharding import Mesh
+import jax.numpy as jnp
 
+from flax.core import meta
+from flax import linen as nn
+
+from MaxText.globals import PKG_DIR
+from MaxText.layers import pipeline
+from MaxText.layers import simple_layer
+from MaxText.train import main as train_main
 from MaxText import common_types
 from MaxText import pyconfig
 from MaxText import maxtext_utils
-from flax.core import meta
-
-import jax.numpy as jnp
-from flax import linen as nn
-from MaxText.layers import simple_layer
-from MaxText.train import main as train_main
 
 
 def assert_same_output_and_grad(f1, f2, *inputs):

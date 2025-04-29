@@ -215,34 +215,41 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
     self.assertEqual(state.tx, tx)
     self.assertNotEqual(state.opt_state, {})
 
+
 class MaxUtilsPpAsDp(unittest.TestCase):
   """Tests logical_axis_rules_pp_act_as_dp converts rules so stage is added before data."""
 
   def test_stage_added_before_data(self):
-    input_rules = (("activation_batch", ("data","fsdp")),)
-    expected_transform = (("activation_batch", ("stage", "data","fsdp")),)
+    input_rules = (("activation_batch", ("data", "fsdp")),)
+    expected_transform = (("activation_batch", ("stage", "data", "fsdp")),)
     transformed_rules = maxtext_utils.logical_axis_rules_pp_act_as_dp(input_rules)
     self.assertEqual(transformed_rules, expected_transform)
 
   def test_stage_removed(self):
     input_rules = (("layers", "stage"),)
-    expected_transform = (("layers", (),),)
+    expected_transform = (
+        (
+            "layers",
+            (),
+        ),
+    )
     transformed_rules = maxtext_utils.logical_axis_rules_pp_act_as_dp(input_rules)
     self.assertEqual(transformed_rules, expected_transform)
 
   def multiple_rules(self):
     input_rules = (
-      ("activation_batch", ("data","fsdp")),
-      ("layers", "stage"),
-      ("experts", "expert"),
+        ("activation_batch", ("data", "fsdp")),
+        ("layers", "stage"),
+        ("experts", "expert"),
     )
     expected_transform = (
-      ("activation_batch", ("stage", "data","fsdp")),
-      ("layers", ()),
-      ("experts", "expert"),
+        ("activation_batch", ("stage", "data", "fsdp")),
+        ("layers", ()),
+        ("experts", "expert"),
     )
     transformed_rules = maxtext_utils.logical_axis_rules_pp_act_as_dp(input_rules)
     self.assertEqual(transformed_rules, expected_transform)
+
 
 if __name__ == "__main__":
   unittest.main()

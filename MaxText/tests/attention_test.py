@@ -97,7 +97,7 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
                 [False, False, False, False, False, False],
                 [False, False, False, False, True, True],
                 [False, False, False, False, True, True],
-            ]
+            ],
         ]
     )
     np.testing.assert_array_equal(block_mask, expected_mask)
@@ -128,22 +128,30 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
     combined_mask = causal_mask | image_mask[:, None, None, ...]
     expected_mask = np.asarray(
         [
-            [[[
-                [True, False, False, False, False, False],
-                [True, True, True, True, False, False],
-                [True, True, True, True, False, False],
-                [True, True, True, True, False, False],
-                [True, True, True, True, True, False],
-                [True, True, True, True, True, True],
-            ]]],
-            [[[
-                [True, False, False, False, False, False],
-                [True, True, True, False, False, False],
-                [True, True, True, False, False, False],
-                [True, True, True, True, False, False],
-                [True, True, True, True, True, True],
-                [True, True, True, True, True, True],
-            ]]]
+            [
+                [
+                    [
+                        [True, False, False, False, False, False],
+                        [True, True, True, True, False, False],
+                        [True, True, True, True, False, False],
+                        [True, True, True, True, False, False],
+                        [True, True, True, True, True, False],
+                        [True, True, True, True, True, True],
+                    ]
+                ]
+            ],
+            [
+                [
+                    [
+                        [True, False, False, False, False, False],
+                        [True, True, True, False, False, False],
+                        [True, True, True, False, False, False],
+                        [True, True, True, True, False, False],
+                        [True, True, True, True, True, True],
+                        [True, True, True, True, True, True],
+                    ]
+                ]
+            ],
         ]
     )
     np.testing.assert_array_equal(combined_mask, expected_mask)

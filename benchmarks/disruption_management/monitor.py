@@ -105,8 +105,7 @@ class StepMonitor(Monitor):
           match = re.search(STANDARD_STEP_LOG_REGEX, line)
           if match:
             step_number = int(match.group(1))
-            if step_number > last_step:
-              last_step = step_number  # Update last seen step
+            last_step = max(last_step, step_number)  # Update last seen step
             if step_number >= self.disruption_config.trigger_value:
               print(
                   f"Workload '{self.workload_name}', Pod '{pod_name}': STEP"

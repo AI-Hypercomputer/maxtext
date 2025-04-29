@@ -1143,7 +1143,6 @@ llama3_1_70b_8192_iter_real_data_and_checkpointing = _add_to_model_dictionary(
   )
 )
 
-
 llama3_1_70b_8192_lr_real_data = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
@@ -1651,7 +1650,7 @@ gemma2_9b_8192 = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
         },
         xla_flags=(
-            xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(114688)
+            xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(vmem_limit=114688)
             + xla_flags_library.REDUCE_SCATTER_FUSION
             + xla_flags_library.CF_FOR_ALL_GATHER
             + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
@@ -1684,7 +1683,7 @@ gemma2_27b_8192 = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
         },
         xla_flags=(
-            xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(122880)
+            xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(vmem_limit=122880)
             + xla_flags_library.REDUCE_SCATTER_FUSION
             + xla_flags_library.CF_FOR_ALL_GATHER
             + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER

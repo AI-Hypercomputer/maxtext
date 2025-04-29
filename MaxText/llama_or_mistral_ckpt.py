@@ -1134,7 +1134,13 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       layer_weight["mlp"]["wo"]["kernel"][layer_idx, ...] = wo  # pytype: disable=unsupported-operands
     else:
       if is_llama4_model:
-        gate = chkpt_vars[0][f"layers.{layer_idx}.feed_forward.router_DE"].type(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+        gate = (
+            chkpt_vars[0][f"layers.{layer_idx}.feed_forward.router_DE"]
+            .type(torch.float32)
+            .numpy()
+            .astype(CAST_DTYPE)
+            .transpose()
+        )
       else:
         gate = np.concatenate(
             [var[f"layers.{layer_idx}.feed_forward.gate.weight"].type(torch.float16).numpy() for var in chkpt_vars], axis=0
@@ -1240,21 +1246,30 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
         for k in tqdm(range(num_experts), desc="experts", leave=False):
           wi_0 = np.concatenate(
               [
-                  var[f"layers.{layer_idx}.feed_forward.experts.{k}.w1.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
+                  var[f"layers.{layer_idx}.feed_forward.experts.{k}.w1.weight"]
+                  .type(torch.float32)
+                  .numpy()
+                  .astype(CAST_DTYPE)
                   for var in chkpt_vars
               ],
               axis=0,
           ).transpose()
           wi_1 = np.concatenate(
               [
-                  var[f"layers.{layer_idx}.feed_forward.experts.{k}.w3.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
+                  var[f"layers.{layer_idx}.feed_forward.experts.{k}.w3.weight"]
+                  .type(torch.float32)
+                  .numpy()
+                  .astype(CAST_DTYPE)
                   for var in chkpt_vars
               ],
               axis=0,
           ).transpose()
           wo = np.concatenate(
               [
-                  var[f"layers.{layer_idx}.feed_forward.experts.{k}.w2.weight"].type(torch.float32).numpy().astype(CAST_DTYPE)
+                  var[f"layers.{layer_idx}.feed_forward.experts.{k}.w2.weight"]
+                  .type(torch.float32)
+                  .numpy()
+                  .astype(CAST_DTYPE)
                   for var in chkpt_vars
               ],
               axis=1,
@@ -1479,7 +1494,7 @@ if __name__ == "__main__":
         max_logging.log(f"Ignoring {lora_id} adapter because its directory doesn't have adapter_config.json.")
         continue
 
-      with open(lora_config_path, "r", encoding="utf8") as file:
+      with open(lora_config_path, "rt", encoding="utf8") as file:
         lora_config_dict = json.load(file)
 
         if lora_config_dict is not None:
