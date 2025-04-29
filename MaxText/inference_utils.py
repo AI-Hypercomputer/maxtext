@@ -52,6 +52,16 @@ def str2bool(v: str) -> bool:
     raise ValueError(f"Invalid value '{v}'!")
 
 
+def log_prob_of_chosen_token(logits, chosen_index):
+  """
+  logits: unnormalized logits, shape [batch, seq, vocab]
+  chosen_index: index of the chosen token, shape [batch, seq]
+  """
+  logps = jax.nn.log_softmax(logits, axis=-1)  # [batch, seq, vocab]
+  chosen_prob = jnp.take_along_axis(logps, chosen_index[..., None], axis=-1)  # [batch, seq, 1]
+  return chosen_prob[..., 0]  # [batch, seq]
+
+
 def sampling(logits, rng, algorithm, topk=0, nucleus_topp=0, temperature=1.0):
   """
   logits: unnormalized logits to sample, shaped [YOUR_LEADING_DIMS, Vocab], before logit

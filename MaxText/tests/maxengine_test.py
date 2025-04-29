@@ -58,6 +58,7 @@ class MaxEngineTest(unittest.TestCase):
         "base_num_query_heads": 2,
         "base_num_kv_heads": 2,
         "max_prefill_predict_length": 4,
+        "return_log_prob": True,
     } | kwargs
     config = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -125,6 +126,30 @@ class MaxEngineTest(unittest.TestCase):
     self.assertEqual(prefill_result["tokens"].size, 1)
     self.assertNotEqual(prefill_result["tokens"], jnp.array([0]))
     self.assertTrue(jnp.array_equal(first_token.data.size, 3))
+    self.assertEqual(first_token.log_prob.shape, (1, 1))
+
+  def test_basic_decode(self):
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    mesh = Mesh(devices_array, self.cfg.mesh_axes)
+    quant = quantizations.configure_quantization(self.cfg)
+    model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant)
+    ids, decoder_segment_ids, decoder_positions = self.get_data()
+
+    transformer_vars = model.init(
+        {"params": self.rng, "aqt": self.rng}, ids, decoder_positions, decoder_segment_ids, enable_dropout=False
+    )
+    input_tokens = jnp.array([1, 306, 5360, 304])
+    engine = MaxEngine(self.cfg, jax.devices())
+    params = engine.load_params(params=transformer_vars)
+    decode_state = engine.init_decode_state()
+    prefill_result, _ = engine.prefill(params=params, padded_tokens=input_tokens, true_length=4)
+    decode_state = engine.insert(prefill_result, decode_state, slot=0)
+    decode_state, result_token = engine.generate(params=params, decode_state=decode_state)
+
+    self.assertEqual(result_token.log_prob.ndim, 2)
+    self.assertEqual(result_token.log_prob.shape[1], 1)
+    self.assertEqual(result_token.data.ndim, 2)
+    self.assertEqual(result_token.data.shape[1], 3)
 
   @pytest.mark.skip(reason="Can only pass on CPU.")
   def test_chunked_prefill(self):
