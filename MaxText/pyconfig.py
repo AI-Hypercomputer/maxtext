@@ -40,7 +40,7 @@ OmegaConf = omegaconf.OmegaConf
 
 _MAX_PREFIX = "M_"
 
-# YAML attribute to specify inheritance.
+# YAML attribute to specify inheritance
 _BASE_CONFIG_ATTR = "base_config"
 
 
