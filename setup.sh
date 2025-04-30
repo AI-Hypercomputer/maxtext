@@ -163,10 +163,10 @@ elif [[ $MODE == "nightly" ]]; then
         # Install jax-nightly
         if [[ -n "$JAX_VERSION" ]]; then
             echo "Installing jax-nightly, jaxlib-nightly ${JAX_VERSION}"
-            python3 -m pip install -U --pre jax==${JAX_VERSION} jaxlib==${JAX_VERSION} jax-cuda12-plugin[with-cuda] jax-cuda12-pjrt -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+            python3 -m pip install -U --pre jax==${JAX_VERSION} jaxlib==${JAX_VERSION} jax-cuda12-plugin[with-cuda] jax-cuda12-pjrt -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
         else
             echo "Installing latest jax-nightly, jaxlib-nightly"
-            python3 -m pip install -U --pre jax jaxlib jax-cuda12-plugin[with-cuda] jax-cuda12-pjrt -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+            python3 -m pip install -U --pre jax jaxlib jax-cuda12-plugin[with-cuda] jax-cuda12-pjrt -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
         fi
         # Install Transformer Engine
         export NVTE_FRAMEWORK=jax
@@ -174,9 +174,9 @@ elif [[ $MODE == "nightly" ]]; then
     elif [[ $DEVICE == "tpu" ]]; then
         echo "Installing jax-nightly, jaxlib-nightly"
         # Install jax-nightly
-        python3 -m pip install --pre -U jax -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
+        python3 -m pip install --pre -U jax -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
         # Install jaxlib-nightly
-        python3 -m pip install --pre -U jaxlib -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
+        python3 -m pip install --pre -U jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
 
         if [[ -n "$LIBTPU_GCS_PATH" ]]; then
             # Install custom libtpu
