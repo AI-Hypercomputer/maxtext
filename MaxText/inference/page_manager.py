@@ -192,9 +192,12 @@ def _release_pages_for_group(
     return jax.lax.cond(should_release, lambda s: s.at[page_idx].set(0), lambda s: s, status)
 
   new_page_status = jax.lax.fori_loop(0, max_pages_per_group, release_page, current_page_status)
+  cleared_group_map_row = jnp.zeros((max_pages_per_group,), dtype=page_state.page_map.dtype)
+  new_page_map = page_state.page_map.at[page_group_id].set(cleared_group_map_row)
 
   return page_state.replace(
       page_status=new_page_status,
+      page_map=new_page_map,
       num_pages_used=page_state.num_pages_used.at[page_group_id].set(0),
       sequence_lengths=page_state.sequence_lengths.at[page_group_id].set(0),
       active_page=page_state.active_page.at[page_group_id].set(0),
