@@ -21,7 +21,6 @@
 # Toggle Vertex AI Experiment on/off.
 # Group libtpu / jax / jaxlib dependencies instead of just libtpu.
 # Split out maxtext command generation and xpk runner from this file.
-# Enable hlo dumps.
 
 import dataclasses
 import enum
@@ -110,6 +109,7 @@ class WorkloadConfig:
   db_is_test: bool = True
   disruption_configs: DisruptionConfig = None
   xpk_storage: Optional[List[str]] = None
+  hlo_dump: Optional[bool] = None
 
   def __post_init__(self):
     """Initializes num_devices_per_slice and topology for recording the run into BigQuery"""
@@ -630,6 +630,12 @@ def generate_xpk_workload_cmd(
   all_xpk_storage = ""
   if wl_config.xpk_storage:
     all_xpk_storage = " ".join(f"--storage={storage_test}" for storage_test in wl_config.xpk_storage)
+  
+  hlo_dump = "" 
+  if wl_config.hlo_dump:
+    # HLO dump gets saved in a subdirectory called "hlo_dump" of the base output directory. 
+    hlo_dump = f'--debug-dump-gcs={wl_config.base_output_directory}/{wl_config.run_name}/hlo_dump'
+
   return (
       (
           f'{workload_create_command}'
@@ -646,6 +652,7 @@ def generate_xpk_workload_cmd(
           f' --workload={name}'
           f' --priority={wl_config.priority}'
           f' --max-restarts={wl_config.max_restarts}'
+          f' {hlo_dump}'
           # ' --use-vertex-tensorboard'
           # f' --experiment-name={test_purpose_name}'
           f' {additional_flags}'
@@ -763,8 +770,9 @@ def main() -> int:
   xpk_workload_names = []
 
   list_of_models = [
-    model_configs.llama2_70b_4096_sc,
+    # model_configs.llama2_70b_4096_sc,
     # model_configs.default_128
+    model_configs.llama3_1_70b_131072,
   ]
 
   # Loop possibilities:
@@ -788,8 +796,7 @@ def main() -> int:
     # Run workloads on the below clusters
     for cluster_config in [
       # v5e_cluster_config,
-      # v6e_cluster_config,
-      v6e_cluster_config_yucmhab,
+      v6e_cluster_config,
       # another_config,
     ]:
       # Run workloads in the following slice configurations
