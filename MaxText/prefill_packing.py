@@ -116,11 +116,10 @@ class PrefillProcessor:
       input_true_length: int,
   ) -> Tuple[engine_api.ResultTokens, DecodeState]:
     """Process a new input."""
-
-    process_fn = self._process_compiled(model_params, len(input_tokens_padded))
+    process_fn = self._process_compiled(model_params, decode_state, len(input_tokens_padded))
     return process_fn(model_params, input_tokens_padded, decode_slot, input_true_length, decode_state)
 
-  def _process_compiled(self, params: Params, padded_length: int):
+  def _process_compiled(self, params: Params, decode_state, padded_length: int):
     """Ahead-of-time compilation wrapper of _process()."""
 
     if padded_length not in self.process_func:
@@ -140,9 +139,9 @@ class PrefillProcessor:
               jax.ShapeDtypeStruct((padded_length,), jnp.dtype("int32")),
               jax.ShapeDtypeStruct((), int),
               jax.ShapeDtypeStruct((), int),
-              self.engine.decode_state_shapes,
+              decode_state,
           )
-          .compile(compiler_options=None)
+          .compile()
       )
     return self.process_func[padded_length]
 
@@ -265,7 +264,7 @@ class BatchedPrefillProcessor:
     offsets = zero_padded(offsets, self.max_batch_size)
     lengths = zero_padded(lengths, self.max_batch_size)
 
-    prefill_fn = self._process_batch_compiled(model_params, input_padding, bucket.capacity, bucket.count)
+    prefill_fn = self._process_batch_compiled(model_params, decode_state, input_padding, bucket.capacity, bucket.count)
     first_tokens, decode_state = prefill_fn(
         model_params,
         tok_ids,
@@ -282,9 +281,8 @@ class BatchedPrefillProcessor:
       prefill_result.append((first_tokens[i], bucket.slots[i]))
     return prefill_result, decode_state
 
-  def _process_batch_compiled(self, params: Params, padded_length: int, capacity: int, num_prompts: int):
+  def _process_batch_compiled(self, params: Params, decode_state, padded_length: int, capacity: int, num_prompts: int):
     """Ahead-of-time compilation wrapper of _process_batch()."""
-
     if (padded_length, num_prompts) not in self.process_batch_func:
       log.info("compile prefill process_batch{(%d, %d)} capacity=%d", padded_length, num_prompts, capacity)
       self.process_batch_func[(padded_length, num_prompts)] = (
@@ -305,7 +303,7 @@ class BatchedPrefillProcessor:
               jnp.arange(0, capacity, capacity // self.max_batch_size, dtype=int),
               padded_length,
               jnp.full(self.max_batch_size, padded_length, dtype=int),
-              self.engine.decode_state_shapes,
+              decode_state,
           )
           .compile(compiler_options=None)
       )

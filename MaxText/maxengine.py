@@ -193,7 +193,12 @@ class MaxEngine(engine_api.Engine):
   def aot_compile(
       self, params: Params, pass_rng_shape: bool, xla_flags: dict[str, Any] | None = None
   ) -> Tuple[Any, Params, Any]:
-    """Ahead of time compilation of generate with auto layout, relayout parameters."""
+    """Ahead of time compilation of generate with auto layout, relayout parameters.
+    Returns:
+      generate_executable: The compiled generate function.
+      params: The relayouted params.
+      decode_state_executable: The compiled init_decode_state function.
+    """
     if pass_rng_shape:
       rng_shape = jax.ShapeDtypeStruct([4], jax.numpy.dtype("uint32"))
     else:
