@@ -14,22 +14,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+from typing import Optional
+
 from flax import linen as nn
-from MaxText import common_types
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-import jax
+import jax.debug
 
+from MaxText import common_types
 from MaxText.layers import normalizations
 from MaxText.layers import attentions
 from MaxText.layers import initializers
 from MaxText.layers import embeddings
 from MaxText.layers import linears
 from MaxText.layers import quantizations
-
-from typing import Optional
-
-from MaxText import max_logging
 
 Embed = embeddings.Embed
 RMSNorm = normalizations.RMSNorm

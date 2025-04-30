@@ -140,7 +140,11 @@ def preprocessing_pipeline(
     )
     data_column_names = ("inputs", "targets")
   elif use_dpo:
-    lists2array = lambda x: jax.tree.map(np.asarray, x, is_leaf=lambda x: isinstance(x, (list, tuple)))
+
+    def lists2array(x):
+      """Convert lists/tuples to array"""
+      return jax.tree.map(np.asarray, x, is_leaf=lambda y: isinstance(y, (list, tuple)))
+
     operations.append(grain.MapOperation(lists2array))
   else:
     assert len(data_column_names) == 1

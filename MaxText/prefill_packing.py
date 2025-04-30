@@ -206,7 +206,12 @@ class BatchedPrefillProcessor:
 
     log.debug(
         "prefill: slot=%d, id=%d, length=%d, padding=%d, capacity=%d, unallocated=%d",
-        decode_slot, input_id, length, input_padding, capacity, bucket.unallocated()
+        decode_slot,
+        input_id,
+        length,
+        input_padding,
+        capacity,
+        bucket.unallocated(),
     )
 
   def flush(
@@ -281,8 +286,7 @@ class BatchedPrefillProcessor:
     """Ahead-of-time compilation wrapper of _process_batch()."""
 
     if (padded_length, num_prompts) not in self.process_batch_func:
-      log.info("compile prefill process_batch{(%d, %d)} capacity=%d",
-               padded_length, num_prompts, capacity)
+      log.info("compile prefill process_batch{(%d, %d)} capacity=%d", padded_length, num_prompts, capacity)
       self.process_batch_func[(padded_length, num_prompts)] = (
           jax.jit(
               self._process_batch,

@@ -220,7 +220,7 @@ def write_results(results, filename, flatten_microbenchmark_results):
   if flatten_microbenchmark_results:
     results["flattened_results"] = flatten_dict(results)
   if filename:
-    with open(filename, "w", encoding="utf-8") as f:
+    with open(filename, "wt", encoding="utf-8") as f:
       json.dump(results, f, indent=2)
   return results
 

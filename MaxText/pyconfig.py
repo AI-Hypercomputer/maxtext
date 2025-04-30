@@ -780,9 +780,15 @@ def set_and_validate_pipeline_config(raw_keys):
     if raw_keys["pipeline_parallel_layers"] == -1:
       raw_keys["pipeline_parallel_layers"] = raw_keys["num_decoder_layers"]
     else:
-      assert (raw_keys["pipeline_parallel_layers"] <= raw_keys["num_decoder_layers"]), f"You can only pipeline a subset of the decoder layers, but you requested to pipeline {raw_keys['pipeline_parallel_layers']} with pipeline_parallel_layers and there are only {raw_keys['num_decoder_layers']} decoder layers."
-    assert raw_keys["scan_layers"] or raw_keys["pipeline_parallel_layers"]==raw_keys["num_decoder_layers"], "Currently we only support scan_layers=True when pipelining a subset of layers."
-    assert raw_keys["pipeline_parallel_layers"] > 0, "You must set pipeline_parallel_layers to a positive integer less than or equal to the number of layers"
+      assert (
+          raw_keys["pipeline_parallel_layers"] <= raw_keys["num_decoder_layers"]
+      ), f"You can only pipeline a subset of the decoder layers, but you requested to pipeline {raw_keys['pipeline_parallel_layers']} with pipeline_parallel_layers and there are only {raw_keys['num_decoder_layers']} decoder layers."
+    assert (
+        raw_keys["scan_layers"] or raw_keys["pipeline_parallel_layers"] == raw_keys["num_decoder_layers"]
+    ), "Currently we only support scan_layers=True when pipelining a subset of layers."
+    assert (
+        raw_keys["pipeline_parallel_layers"] > 0
+    ), "You must set pipeline_parallel_layers to a positive integer less than or equal to the number of layers"
 
     if raw_keys["num_pipeline_repeats"] == -1:
       num_pipeline_repeats, remainder = divmod(

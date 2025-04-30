@@ -29,19 +29,20 @@ Each pass, load and save partial weights (subset of all weight variables).
 """
 # pylint: disable=g-line-too-long
 import argparse
+import sys
+import os
 import pathlib
 
 import numpy as np
 
-from MaxText import checkpointing
 import jax
 from flax.training import train_state
+import torch
+import psutil
+
+from MaxText import checkpointing
 from MaxText import max_logging
 from MaxText.train import save_checkpoint
-import torch
-import sys
-import os
-import psutil
 
 jax.config.update("jax_platform_name", "cpu")
 

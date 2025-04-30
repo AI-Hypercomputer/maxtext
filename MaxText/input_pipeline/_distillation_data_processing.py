@@ -21,11 +21,11 @@ The conversational dataset should conform to one of the two schemas:
     query [{'role': 'user', 'content': '...'}] from the target output [{'role': 'assistant', 'content': '...'}].
 """
 
-import datasets
-import transformers
-
 from dataclasses import dataclass, field
 from typing import List
+
+import datasets
+
 from MaxText import max_logging
 from MaxText.input_pipeline import _input_pipeline_utils
 
