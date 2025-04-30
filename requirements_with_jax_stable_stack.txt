@@ -13,8 +13,10 @@ pre-commit
 pytype
 pillow>=11.1.0
 sentencepiece==0.1.97
+seqio==0.0.16
 tensorflow-text>=2.13.0
-tensorflow-datasets
+tensorflow-datasets>=4.9.8
+tensorboard-plugin-profile>=2.17.0
 tensorboardx>=2.6.2.2
 tiktoken
 transformers
