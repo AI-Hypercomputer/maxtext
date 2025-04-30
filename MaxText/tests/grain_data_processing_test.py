@@ -21,10 +21,12 @@ import tempfile
 
 import jax
 from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 from jax.experimental import mesh_utils
 
 import unittest
 
+from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.input_pipeline import _grain_data_processing
 from MaxText.input_pipeline import input_pipeline_interface
@@ -56,6 +58,9 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
         mesh_axes=["data"],
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
+        input_data_sharding_logical_axes=["batch"],
+        ici_data_parallelism=-1,
+        ici_fsdp_parallelism=1,
         base_output_directory="gs://max-experiments/",
         dataset_type="grain",
         grain_train_files=os.path.join(temp_dir, "gcsfuse", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*"),
@@ -64,8 +69,10 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
     )
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
+    data_pspec = P(*self.config.data_sharding)
+    data_sharding = jax.sharding.NamedSharding(self.mesh, data_pspec)
     self.process_indices = input_pipeline_interface.get_process_loading_real_data(
-        self.config.data_sharding,
+        data_sharding,
         self.config.global_batch_size_to_load,
         self.config.global_batch_size_to_train_on,
         self.config.max_target_length,
@@ -138,7 +145,10 @@ class GrainParquetProcessingTest(unittest.TestCase):
         run_name="test",
         mesh_axes=["data"],
         logical_axis_rules=[["batch", "data"]],
+        input_data_sharding_logical_axes=["batch"],
         data_sharding=["data"],
+        ici_data_parallelism=-1,
+        ici_fsdp_parallelism=1,
         base_output_directory="gs://max-experiments/",
         dataset_type="grain",
         grain_file_type="parquet",
@@ -149,8 +159,10 @@ class GrainParquetProcessingTest(unittest.TestCase):
     )
     self.mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
+    data_pspec = P(*self.config.data_sharding)
+    data_sharding = jax.sharding.NamedSharding(self.mesh, data_pspec)
     self.process_indices = input_pipeline_interface.get_process_loading_real_data(
-        self.config.data_sharding,
+        data_sharding,
         self.config.global_batch_size_to_load,
         self.config.global_batch_size_to_train_on,
         self.config.max_target_length,
