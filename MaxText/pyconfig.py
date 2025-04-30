@@ -60,7 +60,7 @@ _yaml_types_to_parser = {str: str, int: int, float: float, bool: string_to_bool}
 def validate_compute_axis_order(s: str) -> None:
   valid_compute_axis_order = ("0,1,2,3", "0,2,1,3")
   if s not in valid_compute_axis_order:  # currently supported compute_axis_order
-    raise ValueError("Invalid compute_axis_order was passed. Valid options ", valid_compute_axis_order)
+    raise ValueError("Invalid compute_axis_order was passed. Valid options are ", valid_compute_axis_order)
 
 
 def validate_kv_quant_axis(s: str, quantize_kvcache: bool) -> None:
