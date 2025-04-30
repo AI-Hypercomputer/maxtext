@@ -20,16 +20,17 @@ from collections import OrderedDict
 import math
 import os
 import sys
+
 from typing import Any, Union
 
 import jax
-from jax.experimental.compilation_cache import compilation_cache
-from MaxText.layers.attentions import AttentionType
-from MaxText.utils import gcs_utils
-from MaxText import accelerator_to_spec_map
-from MaxText import max_logging
-from MaxText import max_utils
 import omegaconf
+from jax.experimental.compilation_cache import compilation_cache
+
+from maxtext import accelerator_to_spec_map, max_logging, max_utils
+from MaxText.layers.attentions import AttentionType
+from MaxText.common_types import DecoderBlockType
+from MaxText.utils import gcs_utils
 
 OmegaConf = omegaconf.OmegaConf
 
@@ -190,6 +191,9 @@ def validate_keys(keys):
   if keys["use_multimodal"]:
     validate_multimodal_model_name(keys["model_name"])
 
+  if keys["decoder_block"] == "llama4":
+    validate_llama4_config(keys)
+
 
 def validate_tokenizer(keys):
   assert keys[
@@ -242,6 +246,20 @@ def validate_data_input(keys):
     max_logging.log(
         "WARNING: 'sharding_tolerance: allowed percentage of non-sharded parameters' should be between 0.0 and 1.0"
     )
+
+
+def validate_llama4_config(keys: dict):
+  """
+  Validates the following checks for Llama4 models:
+
+  Args:
+    keys: the raw config in dict form
+
+  """
+  if keys["capacity_factor"] >= 0:
+    raise ValueError("Llama4 decoder has not been tested with capacity_factor >= 0 -- please set that value to -1 for now!")
+  if keys["num_experts_per_tok"] > 1:
+    raise ValueError("Only top-1 routing is supported for Llama4 for now!")
 
 
 def validate_model_name(s: str) -> bool:
@@ -561,6 +579,8 @@ class _HyperParameters:
       validate_keys(raw_keys)
     validate_tokenizer(raw_keys)
     validate_data_input(raw_keys)
+
+    raw_keys["decoder_block"] = DecoderBlockType(raw_keys["decoder_block"])
 
   @staticmethod
   def configure_gpt3_task(raw_keys):

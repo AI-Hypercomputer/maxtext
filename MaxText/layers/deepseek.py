@@ -211,7 +211,11 @@ class DeepSeekMoELayer(nn.Module):
         inputs, self.config, self.mesh, self.quant, decoder_segment_ids, decoder_positions, deterministic, model_mode
     )
 
-    mlp_lnx = moe.DeepSeekMoeBlock(
+    # NOTE: the naming mismatch here is to ensure reverse compatibility with existing checkpoints.
+    # The `name` represents the weight name in JAX/checkpoints and so the class name
+    # is just for readability.
+    mlp_lnx = moe.RoutedAndSharedMoE(
+        name="DeepSeekMoeBlock_0",
         config=cfg,
         mesh=self.mesh,
         kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),

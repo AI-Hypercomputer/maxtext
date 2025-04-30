@@ -858,7 +858,8 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
 
   # initialize the data structure for storing jax_weights
   layer_key = "MoeBlock_0" if num_experts else "mlp"
-  deepseek_layer_key = "DeepSeekMoeBlock_0"
+  is_llama4_model = model_size[:6] == "llama4"
+  routed_and_shared_layer_key = "Llama4MoEBlock_0" if is_llama4_model else "DeepSeekMoeBlock_0"
   jax_weights = {
       "decoder": {
           "layers": {
@@ -872,10 +873,9 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
       },
       "token_embedder": {"embedding": None},
   }
-  is_llama4_model = model_size[:6] == "llama4"
   if is_llama4_model:
     del jax_weights["decoder"]["layers"][layer_key]
-    jax_weights["decoder"]["layers"][deepseek_layer_key] = {
+    jax_weights["decoder"]["layers"][routed_and_shared_layer_key] = {
         layer_key: {},
         "shared_experts": {},
     }
@@ -1081,10 +1081,10 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
     layer_weight["gate"] = {"kernel": None}
 
     if is_llama4_model:
-      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["gate"] = {}
-      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_0"] = {}
-      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_1"] = {}
-      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["shared_experts"]["wo"] = {}
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["MoeBlock_0"]["gate"] = {}
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["shared_experts"]["wi_0"] = {}
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["shared_experts"]["wi_1"] = {}
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["shared_experts"]["wo"] = {}
       layer_weight["shared_experts"] = {
           "wi_0": {"kernel": None},
           "wi_1": {"kernel": None},
@@ -1298,19 +1298,25 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
     gate_kernel_axes = (2, 0, 1) if is_llama4_model else (1, 0, 2)
     layer_weight["gate"]["kernel"] = np.transpose(layer_weight["gate"]["kernel"], axes=gate_kernel_axes)
     if is_llama4_model:
-      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["gate"]["kernel"] = layer_weight["gate"]["kernel"]
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["MoeBlock_0"]["gate"]["kernel"] = layer_weight["gate"][
+          "kernel"
+      ]
       # routed experts
-      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_0"] = layer_weight["mlp"]["wi_0"]["kernel"]
-      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_1"] = layer_weight["mlp"]["wi_1"]["kernel"]
-      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wo"] = layer_weight["mlp"]["wo"]["kernel"]
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["MoeBlock_0"]["wi_0"] = layer_weight["mlp"]["wi_0"][
+          "kernel"
+      ]
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["MoeBlock_0"]["wi_1"] = layer_weight["mlp"]["wi_1"][
+          "kernel"
+      ]
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["MoeBlock_0"]["wo"] = layer_weight["mlp"]["wo"]["kernel"]
       # if "shared_experts" in layer_weight:
-      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_0"]["kernel"] = layer_weight[
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["shared_experts"]["wi_0"]["kernel"] = layer_weight[
           "shared_experts"
       ]["wi_0"]["kernel"]
-      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["shared_experts"]["wi_1"]["kernel"] = layer_weight[
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["shared_experts"]["wi_1"]["kernel"] = layer_weight[
           "shared_experts"
       ]["wi_1"]["kernel"]
-      jax_weights["decoder"]["layers"]["DeepSeekMoeBlock_0"]["shared_experts"]["wo"]["kernel"] = layer_weight[
+      jax_weights["decoder"]["layers"][routed_and_shared_layer_key]["shared_experts"]["wo"]["kernel"] = layer_weight[
           "shared_experts"
       ]["wo"]["kernel"]
     else:
