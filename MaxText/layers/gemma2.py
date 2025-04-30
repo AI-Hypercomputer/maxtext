@@ -22,7 +22,7 @@ import jax.numpy as jnp
 
 from flax import linen as nn
 
-from MaxText.common_types import Config
+from MaxText.common_types import MODEL_MODE_PREFILL, Config
 from MaxText.layers import attentions
 from MaxText.layers import quantizations
 from MaxText.layers.attentions import Attention
@@ -53,14 +53,18 @@ class Gemma2DecoderLayer(nn.Module):
   ):
     cfg = self.config
     mesh = self.mesh
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    if model_mode == MODEL_MODE_PREFILL:
+      activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
+    else:
+      activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+
+    inputs = nn.with_logical_constraint(inputs, activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
     lnx = RMSNorm(
         dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_self_attention_norm_local", kernel_axes=("norm",)
     )(inputs)
-
-    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+    lnx = nn.with_logical_constraint(lnx, activation_axis_names)
 
     attention_layer = Attention(
         config=cfg,
@@ -96,10 +100,7 @@ class Gemma2DecoderLayer(nn.Module):
       attention_lnx = RMSNorm(
           dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="post_self_attention_norm_local", kernel_axes=("norm",)
       )(attention_lnx)
-
-    attention_lnx = nn.with_logical_constraint(
-        attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
-    )
+    attention_lnx = nn.with_logical_constraint(attention_lnx, activation_axis_names)
     attention_lnx += inputs
     residual = attention_lnx
 
@@ -115,6 +116,7 @@ class Gemma2DecoderLayer(nn.Module):
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="mlp_local",
+        model_mode=model_mode,
         config=cfg,
         quant=self.quant,
     )(attn_output, deterministic=deterministic)
@@ -123,7 +125,7 @@ class Gemma2DecoderLayer(nn.Module):
       mlp_lnx = RMSNorm(dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="post_ffw_norm_local", kernel_axes=("norm",))(
           mlp_lnx
       )
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, activation_axis_names)
 
     next_layer_addition = mlp_lnx + residual
 
@@ -132,20 +134,15 @@ class Gemma2DecoderLayer(nn.Module):
     )
 
     layer_output = next_layer_addition_dropped_out
-    layer_output = nn.with_logical_constraint(
-        layer_output,
-        ("activation_batch", "activation_norm_length", "activation_embed"),
-    )
+    layer_output = nn.with_logical_constraint(layer_output, activation_axis_names)
 
     ### global part
-    inputs = nn.with_logical_constraint(layer_output, ("activation_batch", "activation_norm_length", "activation_embed"))
-
+    inputs = nn.with_logical_constraint(layer_output, activation_axis_names)
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
     lnx = RMSNorm(
         dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_self_attention_norm_global", kernel_axes=("norm",)
     )(inputs)
-
-    lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+    lnx = nn.with_logical_constraint(lnx, activation_axis_names)
 
     attention_layer = Attention(
         config=cfg,
@@ -181,9 +178,7 @@ class Gemma2DecoderLayer(nn.Module):
           dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="post_self_attention_norm_global", kernel_axes=("norm",)
       )(attention_lnx)
 
-    attention_lnx = nn.with_logical_constraint(
-        attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
-    )
+    attention_lnx = nn.with_logical_constraint(attention_lnx, activation_axis_names)
     attention_lnx += inputs
     residual = attention_lnx
 
@@ -199,6 +194,7 @@ class Gemma2DecoderLayer(nn.Module):
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="mlp_global",
+        model_mode=model_mode,
         config=cfg,
         quant=self.quant,
     )(attn_output, deterministic=deterministic)
@@ -207,7 +203,7 @@ class Gemma2DecoderLayer(nn.Module):
           mlp_lnx
       )
 
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+    mlp_lnx = nn.with_logical_constraint(mlp_lnx, activation_axis_names)
 
     next_layer_addition = mlp_lnx + residual
 
@@ -216,10 +212,7 @@ class Gemma2DecoderLayer(nn.Module):
     )
 
     layer_output = next_layer_addition_dropped_out
-    layer_output = nn.with_logical_constraint(
-        layer_output,
-        ("activation_batch", "activation_norm_length", "activation_embed"),
-    )
+    layer_output = nn.with_logical_constraint(layer_output, activation_axis_names)
 
     if cfg.record_internal_nn_metrics:
       self.sow("intermediates", "activation_mean", jnp.mean(layer_output))

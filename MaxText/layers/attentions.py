@@ -37,7 +37,7 @@ from flax import linen as nn
 from flax.linen import partitioning
 
 from MaxText import max_utils
-from MaxText.common_types import DecoderBlockType, DEFAULT_MASK_VALUE, BATCH, HEAD, KV_LENGTH, D_KV, CACHE_BATCH_PREFILL, CACHE_SEQUENCE, AxisNames, CACHE_BATCH, CACHE_HEADS, CACHE_SCALE_BATCH, CACHE_KV, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV, AxisIdxes, LENGTH, DType, Config, Array, Q_LENGTH, DECODE_LENGTH, DECODE_BATCH, PREFILL_KV_BATCH, KV_HEAD, KV_HEAD_DIM, KV_BATCH, EMBED, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL
+from MaxText.common_types import DecoderBlockType, DEFAULT_MASK_VALUE, BATCH, HEAD, KV_LENGTH, PREFILL_LENGTH, D_KV, CACHE_BATCH_PREFILL, CACHE_SEQUENCE, AxisNames, CACHE_BATCH, CACHE_HEADS, CACHE_SCALE_BATCH, CACHE_KV, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV, AxisIdxes, LENGTH, DType, Config, Array, Q_LENGTH, DECODE_LENGTH, DECODE_BATCH, PREFILL_KV_BATCH, KV_HEAD, KV_HEAD_DIM, KV_BATCH, EMBED, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL
 from MaxText.inference import kvcache
 from MaxText.inference import page_manager
 from MaxText.inference import paged_attention
@@ -874,13 +874,12 @@ class AttentionOp(nn.Module):
       decoder_segment_ids: Array | None,
       model_mode: str = MODEL_MODE_TRAIN,
   ) -> tuple[Array, Array]:
-    """CUDNN Flash Attention with JAX SDPA API.
-    """
+    """CUDNN Flash Attention with JAX SDPA API."""
     # These imports are only meant to work in a GPU build.
     # pylint: disable=import-outside-toplevel
     from jax._src.cudnn.fused_attention_stablehlo import (
-      dot_product_attention,
-      MaskType,
+        dot_product_attention,
+        MaskType,
     )
 
     _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
@@ -898,7 +897,7 @@ class AttentionOp(nn.Module):
           scale=1.0,
           dropout_rate=self.dropout_rate,
           qkv_layout="BTNH",
-          return_residual=True
+          return_residual=True,
       )
     else:
       output, lse = dot_product_attention(
@@ -909,7 +908,7 @@ class AttentionOp(nn.Module):
           scale=1.0 / math.sqrt(head_dim),
           dropout_rate=self.dropout_rate,
           qkv_layout="BTNH",
-          return_residual=True
+          return_residual=True,
       )
     output = checkpoint_name(output, "context")
     lse = checkpoint_name(lse, "context")
@@ -985,7 +984,7 @@ class AttentionOp(nn.Module):
 
     # special sharding for decode
     q_seq_len = query.shape[1]
-    prefill_qkv_sharding = (BATCH, LENGTH, HEAD, D_KV)
+    prefill_qkv_sharding = (BATCH, PREFILL_LENGTH, HEAD, D_KV)
     decode_qkv_sharding = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV)
     if self.is_partition_in_decode(q_seq_len):
       query = partitioning.with_sharding_constraint(query, decode_qkv_sharding)
@@ -1010,7 +1009,7 @@ class AttentionOp(nn.Module):
     if self.is_partition_in_decode(q_seq_len):
       attn_weights = partitioning.with_sharding_constraint(attn_weights, (KV_LENGTH, HEAD, None, None, None))
     elif model_mode == MODEL_MODE_PREFILL:
-      attn_weights = partitioning.with_sharding_constraint(attn_weights, (BATCH, HEAD, None, LENGTH, KV_LENGTH))
+      attn_weights = partitioning.with_sharding_constraint(attn_weights, (BATCH, HEAD, None, PREFILL_LENGTH, KV_LENGTH))
 
     if self.attn_logits_soft_cap:
       attn_weights = jnp.tanh(attn_weights / self.attn_logits_soft_cap)
@@ -1023,7 +1022,7 @@ class AttentionOp(nn.Module):
     if self.is_partition_in_decode(q_seq_len):
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
     elif model_mode == MODEL_MODE_PREFILL:
-      attn_mask = partitioning.with_sharding_constraint(attn_mask, (BATCH, HEAD, None, LENGTH, KV_LENGTH))
+      attn_mask = partitioning.with_sharding_constraint(attn_mask, (BATCH, HEAD, None, PREFILL_LENGTH, KV_LENGTH))
     if attn_mask is not None:
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
     return self.compute_local_attention(attn_weights, value, q_seq_len, model_mode)
@@ -1127,8 +1126,9 @@ class AttentionOp(nn.Module):
     stat1 = local_stats[1].reshape((*local_stats[1].shape, 1))
     global_stat = jnp.log(jnp.exp(stat0) + jnp.exp(stat1))
     # # transpose stat to have shape [b, t, n, 1] for elemenwise multiplication
-    attn_out = local_outs[0].astype(jnp.float32) * jnp.exp(stat0 - global_stat).transpose((0, 2, 1, 3)) \
-      + local_outs[1].astype(jnp.float32) * jnp.exp(stat1 - global_stat).transpose((0, 2, 1, 3))
+    attn_out = local_outs[0].astype(jnp.float32) * jnp.exp(stat0 - global_stat).transpose((0, 2, 1, 3)) + local_outs[
+        1
+    ].astype(jnp.float32) * jnp.exp(stat1 - global_stat).transpose((0, 2, 1, 3))
     return attn_out.astype(local_stats[0].dtype)
 
   def normalize_attention(self, local_outs, local_maxes, local_sums):
@@ -1308,15 +1308,17 @@ class Attention(nn.Module):
   # Shard the query activation as the same as the key and value.
   # TODO: Find a better sharding axis name.
   # TODO: Further break down the Training and Inference axes for the q, k, v.
-  prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
+  prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM)
+  prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM)
+  prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM)
   query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   input_axis_names: AxisNames = (BATCH, LENGTH, EMBED)
+  prefill_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED)
   decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED)
   key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+  prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV)
   decode_out_axis_names = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV)
 
   prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
@@ -1359,8 +1361,10 @@ class Attention(nn.Module):
           mesh=self.mesh,
           num_pages=self.config.pagedattn_num_pages,
           tokens_per_page=self.config.pagedattn_tokens_per_page,
-          max_pages_per_slot=(self.config.max_target_length + self.config.pagedattn_tokens_per_page - 1) // self.config.pagedattn_tokens_per_page,
-          max_pages_per_prefill=(self.config.max_prefill_predict_length + self.config.pagedattn_tokens_per_page - 1) // self.config.pagedattn_tokens_per_page,
+          max_pages_per_slot=(self.config.max_target_length + self.config.pagedattn_tokens_per_page - 1)
+          // self.config.pagedattn_tokens_per_page,
+          max_pages_per_prefill=(self.config.max_prefill_predict_length + self.config.pagedattn_tokens_per_page - 1)
+          // self.config.pagedattn_tokens_per_page,
           pages_per_compute_block=self.config.pagedattn_pages_per_compute_block,
           num_kv_heads=self.num_kv_heads,
           kv_head_dim_size=self.head_dim,
@@ -1596,7 +1600,10 @@ class Attention(nn.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
-    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_TRAIN):
+    if model_mode == MODEL_MODE_PREFILL:
+      inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_axis_names)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_axis_names)
+    elif model_mode == MODEL_MODE_TRAIN:
       inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
     else:
@@ -1686,7 +1693,9 @@ class Attention(nn.Module):
           query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk, bidirectional_mask
       )
 
-    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_TRAIN):
+    if model_mode == MODEL_MODE_PREFILL:
+      out = nn.with_logical_constraint(out, self.prefill_out_axis_names)
+    elif model_mode == MODEL_MODE_TRAIN:
       out = nn.with_logical_constraint(out, self.out_axis_names)
     else:
       out = nn.with_logical_constraint(out, self.decode_out_axis_names)
@@ -1940,8 +1949,12 @@ class MLA(Attention):
       A tensor of shape [batch, length, embed_dim] containing the
       MLA-attended outputs.
     """
-    inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
-    inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+    if model_mode == MODEL_MODE_PREFILL:
+      inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_input_axis_names)
+    else:
+      inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
 
     query = self.mla_query_projection(inputs_q, inputs_positions, model_mode)
     key, value, cached_values = self.mla_kv_projection(
@@ -1953,7 +1966,10 @@ class MLA(Attention):
     value = checkpoint_name(value, "value_proj")
 
     out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values)
-    out = nn.with_logical_constraint(out, self.out_axis_names)
+    if model_mode == MODEL_MODE_PREFILL:
+      out = nn.with_logical_constraint(out, self.prefill_out_axis_names)
+    else:
+      out = nn.with_logical_constraint(out, self.out_axis_names)
     out = self.out_projection(inputs_q.shape[-1], out)
     return out
 
@@ -2011,4 +2027,3 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
             self.q_sequence.tobytes() if self.q_sequence is not None else None,
         )
     )
-  

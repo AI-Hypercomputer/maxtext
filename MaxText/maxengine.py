@@ -399,7 +399,7 @@ class MaxEngine(engine_api.Engine):
         rng=rng,
     )
 
-  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("request_id",))
+  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("request_id", "return_prompt_logp"))
   def _prefill_jit(
       self,
       *,
@@ -413,6 +413,7 @@ class MaxEngine(engine_api.Engine):
       request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
       slot: Optional[int] = None,
       page_state: Optional[PageState] = None,
+      return_prompt_logp: bool = False,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -474,6 +475,11 @@ class MaxEngine(engine_api.Engine):
           slot=slot,
           page_state=page_state,
       )
+    if return_prompt_logp:
+      prompt_logp = inference_utils.log_prob_of_chosen_token(flat_logits, input_tokens)
+    else:
+      prompt_logp = None
+
     generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
     selected_logits = jax.lax.dynamic_slice(
         flat_logits,
@@ -521,6 +527,7 @@ class MaxEngine(engine_api.Engine):
         "next_pos": next_pos,
         "generated_tokens": generated_tokens,
         "tokens": first_generated_token,
+        "prompt_logp": prompt_logp,
     }, result
 
   # Public non-JIT prefill method that updates page state
@@ -536,6 +543,7 @@ class MaxEngine(engine_api.Engine):
       rng: Optional[PRNGKeyType] = None,
       request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
       slot: Optional[int] = None,
+      return_prompt_logp: bool = False,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Public API for prefill that updates page state outside JIT."""
     # Update page state before JIT call
@@ -564,6 +572,7 @@ class MaxEngine(engine_api.Engine):
         slot=slot,
         rng=rng,
         request_id=request_id,
+        return_prompt_logp=return_prompt_logp,
     )
 
   def prefill_multisampling_aot(  # pylint: disable=too-many-positional-arguments
@@ -707,7 +716,7 @@ class MaxEngine(engine_api.Engine):
         "tokens": first_generated_tokens,
     }, result
 
-  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_prompts",))
+  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_prompts", "return_prompt_logp"))
   def prefill_concat(
       self,
       *,
@@ -721,6 +730,7 @@ class MaxEngine(engine_api.Engine):
       num_prompts: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
+      return_prompt_logp: bool = False,
   ) -> Tuple[Any, PackedPrefix, List[engine_api.ResultTokens]]:
     """Computes a kv-cache for a new packed generate request, which is a
     concatenation of several shorter prompts. Experimentation shows that
@@ -765,8 +775,13 @@ class MaxEngine(engine_api.Engine):
       )
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
+    if return_prompt_logp:
+      prompt_logp = inference_utils.log_prob_of_chosen_token(flat_logits, input_tokens)
+    else:
+      prompt_logp = None
 
     def process_packed_logits_and_caches(packed_flat_logits, idx):
+
       next_pos = jnp.full((1, 1), true_lengths[idx], dtype=jnp.int32)
       generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
       selected_logits = jax.lax.dynamic_slice(
@@ -801,6 +816,7 @@ class MaxEngine(engine_api.Engine):
           log_prob=token_logp,
           samples_per_slot=1,
       )
+
       return {
           "logits": selected_logits,
           "next_pos": next_pos,
@@ -816,6 +832,7 @@ class MaxEngine(engine_api.Engine):
         prefill_results[k].append(v)
       first_tokens.append(first_token)
     prefill_results = {k: jnp.stack(v) for k, v in prefill_results.items()}
+    prefill_results["prompt_logp"] = prompt_logp
     return cache, prefill_results, first_tokens
 
   # Public non-JIT generate method that updates page state
@@ -892,8 +909,13 @@ class MaxEngine(engine_api.Engine):
       token_logp = inference_utils.log_prob_of_chosen_token(out_logits, new_token)
     else:
       token_logp = None
+
+    # Increment index by 1 as prefill returns first token
+    next_pos = decode_state["next_pos"] + 1
+    generated_tokens = decode_state["generated_tokens"] + 1
+
     result = engine_api.ResultTokens(
-        data=jnp.concatenate((new_token, all_valid, decode_state["generated_tokens"]), axis=1),
+        data=jnp.concatenate((new_token, all_valid, generated_tokens), axis=1),
         # Tokens are shape [batch, speculations], so when we concatenate
         # tokens, validity and length along their index 1 dimension then they
         # occupy 0:speculations.
@@ -909,8 +931,8 @@ class MaxEngine(engine_api.Engine):
     return {
         "logits": out_logits,
         "cache": new_cache,
-        "next_pos": decode_state["next_pos"] + 1,
-        "generated_tokens": decode_state["generated_tokens"] + 1,
+        "next_pos": next_pos,
+        "generated_tokens": generated_tokens,
         "tokens": new_token,
     }, result
 
@@ -1362,12 +1384,12 @@ class MaxEngine(engine_api.Engine):
     # pylint: disable=unused-argument
     def init(abstract_params, page_state):
       x = jnp.ones(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
+          (int(self.config.per_device_batch_size * self.mesh.size), 1),
           dtype=jnp.int32,
       )
       dummy_image = jnp.ones(
           (
-              int(self.config.per_device_batch_size * jax.device_count()),
+              int(self.config.per_device_batch_size * self.mesh.size),
               maxtext_utils.NUM_IMAGES_PER_SEQUENCE,
               self.config.image_size_for_vit,
               self.config.image_size_for_vit,
@@ -1388,21 +1410,21 @@ class MaxEngine(engine_api.Engine):
       )
 
       next_pos = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
+          (int(self.config.per_device_batch_size * self.mesh.size), 1),
           dtype=jnp.int32,
       )
       generated_tokens = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
+          (int(self.config.per_device_batch_size * self.mesh.size), 1),
           dtype=jnp.int32,
       )
       tokens = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
+          (int(self.config.per_device_batch_size * self.mesh.size), 1),
           dtype=jnp.int32,
       )
       return {
           "logits": jnp.zeros(
               (
-                  int(self.config.per_device_batch_size * jax.device_count()),
+                  int(self.config.per_device_batch_size * self.mesh.size),
                   1,
                   self.config.vocab_size,
               )
@@ -1442,7 +1464,7 @@ class MaxEngine(engine_api.Engine):
   @property
   def max_concurrent_decodes(self) -> int:
     """Free slots."""
-    return int(self.config.per_device_batch_size * jax.device_count())
+    return int(self.config.per_device_batch_size * self.mesh.size)
 
   @property
   def max_prefill_length(self) -> int:
