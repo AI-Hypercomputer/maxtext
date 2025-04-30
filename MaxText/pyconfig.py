@@ -186,6 +186,10 @@ def validate_data_input(keys):
         "WARNING: 'sharding_tolerance: allowed percentage of non-sharded parameters' should be between 0.0 and 1.0"
     )
 
+def validate_tokenizer(keys):
+  assert keys[
+      "tokenizer_path"
+  ], "Please provide tokenizer_path. Even if using pre-tokenized data, tokenizer is required to process special tokens."
 
 def validate_model_name(s: str) -> bool:
   """Validate provided model name."""

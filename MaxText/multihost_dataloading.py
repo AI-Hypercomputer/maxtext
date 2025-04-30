@@ -37,8 +37,10 @@ from jax.sharding import Mesh
 from jax.experimental import colocated_python
 import jax.numpy as jnp
 
-from MaxText import max_logging
-from MaxText import max_utils
+from typing import Sequence, Optional
+
+import max_logging
+import max_utils
 import ml_collections
 
 

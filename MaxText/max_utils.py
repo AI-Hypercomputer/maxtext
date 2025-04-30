@@ -23,6 +23,7 @@ from jax.experimental import mesh_utils
 import checkpointing
 import common_types
 import functools
+from functools import partial
 import time
 import optax
 import os

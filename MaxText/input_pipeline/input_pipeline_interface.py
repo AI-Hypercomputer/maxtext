@@ -22,12 +22,12 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
-from MaxText.input_pipeline._tfds_data_processing import make_tfds_train_iterator, make_tfds_eval_iterator
-from MaxText.input_pipeline._grain_data_processing import make_grain_train_iterator, make_grain_eval_iterator
-from MaxText.input_pipeline._tfds_data_processing_c4_mlperf import make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator
-from MaxText.input_pipeline._hf_data_processing import make_hf_train_iterator, make_hf_eval_iterator
-from MaxText import maxtext_utils
-from MaxText import multihost_dataloading
+from input_pipeline._tfds_data_processing import make_tfds_train_iterator, make_tfds_eval_iterator
+from input_pipeline._grain_data_processing import make_grain_train_iterator, make_grain_eval_iterator
+from input_pipeline._tfds_data_processing_c4_mlperf import make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator
+from input_pipeline._hf_data_processing import make_hf_train_iterator, make_hf_eval_iterator
+import maxtext_utils
+import multihost_dataloading
 
 
 class SyntheticDataIterator:

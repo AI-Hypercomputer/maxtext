@@ -23,11 +23,11 @@ from jax.experimental import mesh_utils
 
 import unittest
 
-from MaxText import maxtext_utils
-from MaxText import pyconfig
-from MaxText.input_pipeline import _grain_data_processing
-from MaxText.input_pipeline import input_pipeline_interface
-from MaxText.globals import PKG_DIR
+import maxtext_utils
+import pyconfig
+from input_pipeline import _grain_data_processing
+from input_pipeline import input_pipeline_interface
+from globals import PKG_DIR
 
 
 class GrainDataProcessingTest(unittest.TestCase):

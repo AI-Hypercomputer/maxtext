@@ -31,13 +31,12 @@ from flax.training import train_state
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 
-from MaxText import max_logging
+import max_logging
 import ml_collections
 import numpy as np
 import jax.numpy as jnp
-from MaxText import checkpointing
-from MaxText.inference.page_manager import PageState
-from MaxText import common_types
+import checkpointing
+import common_types
 from typing import Optional
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
@@ -518,7 +517,7 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   )
 
 
-def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[PageState] = None):
+def get_prefill_kv_cache_annotations(model, config, rng, mesh):
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_kv_cache(model, config):
@@ -554,7 +553,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: Optio
   return state_mesh_annotations
 
 
-def get_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[PageState] = None):
+def get_kv_cache_annotations(model, config, rng, mesh):
   """Get a shaped abstraction of the state (including optimizer)"""
 
   def init_kv_cache(model, config):
