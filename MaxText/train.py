@@ -942,10 +942,6 @@ def train_loop(config, state=None):
   example_batch = None
   last_step_completion = datetime.datetime.now()
   p_random_next = jax.jit(jax.random.fold_in).lower(init_rng, start_step).compile()
-  mllog_utils.init_print(config, start_step)
-  mllog_utils.init_stop()
-  mllog_utils.run_start()
-  mllog_utils.block_start(config)
 
   performance_metric_queue = None
   if config.report_heartbeat_metric_for_gcp_monitoring or config.report_performance_metric_for_gcp_monitoring:
@@ -956,6 +952,11 @@ def train_loop(config, state=None):
       performance_metric_queue = queue.Queue()
       gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
 
+  mllog_utils.init_print(config, start_step)
+  mllog_utils.init_stop()
+  mllog_utils.run_start()
+  mllog_utils.block_start(config)
+  
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step or prof.should_activate_periodic_profile(step):
       optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
