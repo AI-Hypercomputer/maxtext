@@ -1,6 +1,8 @@
 base_config: "base.yml"
 
 logical_axis_rules: [
+                      ['prefill_activation_length', ['data']],
+                      ['prefill_activation_norm_length', ['data']],
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
