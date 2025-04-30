@@ -29,7 +29,7 @@ from flax import nnx
 import flax.linen as nn
 
 from MaxText import max_logging
-from MaxText.common_types import DecoderBlockType, DType, Array, Config
+from MaxText.common_types import MODEL_MODE_PREFILL, DecoderBlockType, DType, Array, Config
 from MaxText.layers import quantizations
 from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
@@ -84,9 +84,7 @@ class DenseGeneral(nnx.Module):
       axis: Union[Iterable[int], int] = -1,
       weight_dtype: DType = jnp.float32,
       dtype: DType = jnp.float32,
-      kernel_init: NdInitializer = nd_dense_init(
-          1.0, "fan_in", "truncated_normal"
-      ),
+      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
       kernel_axes: Tuple[Optional[str], ...] = (),
       quant: Optional[Quant] = None,
       use_bias: bool = False,
@@ -127,9 +125,7 @@ class DenseGeneral(nnx.Module):
     # Parameter initialization
     kernel_shape = self.in_features_shape + self.out_features_shape
     kernel_in_axis = np.arange(len(self.axis))
-    kernel_out_axis = np.arange(
-        len(self.axis), len(self.axis) + len(self.out_features_shape)
-    )
+    kernel_out_axis = np.arange(len(self.axis), len(self.axis) + len(self.out_features_shape))
 
     if not quantizations.in_serve_mode(self.quant):
       self.kernel = nnx.Param(
@@ -208,9 +204,7 @@ def dense_general(
     axis: Union[Iterable[int], int] = -1,
     weight_dtype: DType = jnp.float32,
     dtype: DType = jnp.float32,
-    kernel_init: NdInitializer = nd_dense_init(
-        1.0, "fan_in", "truncated_normal"
-    ),
+    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
     kernel_axes: Tuple[Optional[str], ...] = (),
     quant: Optional[Quant] = None,
     use_bias: bool = False,
@@ -237,15 +231,11 @@ def dense_general(
     name: name passed to the ToLinen Module
   """
   if not (inputs_shape is not None) ^ (in_features_shape is not None):
-    raise ValueError(
-        "Exactly one of inputs_shape or in_features must be specified."
-    )
+    raise ValueError("Exactly one of inputs_shape or in_features must be specified.")
 
   if inputs_shape is not None:
     axis = _canonicalize_tuple(axis)
-    in_features_shape = tuple(
-        inputs_shape[ax] for ax in _normalize_axes(axis, len(inputs_shape))
-    )
+    in_features_shape = tuple(inputs_shape[ax] for ax in _normalize_axes(axis, len(inputs_shape)))
   else:
     assert in_features_shape is not None
   module = nnx.bridge.to_linen(
@@ -294,6 +284,7 @@ class MlpBlock(nn.Module):
   use_bias: bool = False
   use_pre_norm: bool = False
   quant: Optional[Quant] = None
+  model_mode: Optional[str] = None
 
   def get_norm_layer(self, num_features: int):
     """get normalization layer."""
@@ -375,7 +366,12 @@ class MlpBlock(nn.Module):
     x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
         x, deterministic=deterministic
     )  # Broadcast along length.
-    x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
+
+    if self.model_mode == MODEL_MODE_PREFILL:
+      x = nn.with_logical_constraint(x, ("activation_batch", "prefill_activation_length", "activation_mlp"))
+    else:
+      x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
+
     output = dense_general(
         inputs_shape=x.shape,
         out_features_shape=inputs.shape[-1],
