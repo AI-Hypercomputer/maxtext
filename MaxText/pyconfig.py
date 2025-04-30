@@ -27,7 +27,9 @@ import jax
 import omegaconf
 from jax.experimental.compilation_cache import compilation_cache
 
-from maxtext import accelerator_to_spec_map, max_logging, max_utils
+from MaxText import accelerator_to_spec_map
+from MaxText import max_logging
+from MaxText import max_utils
 from MaxText.layers.attentions import AttentionType
 from MaxText.common_types import DecoderBlockType
 from MaxText.utils import gcs_utils
