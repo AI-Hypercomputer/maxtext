@@ -321,7 +321,9 @@ class MoeBlock(nn.Module):
     sorted_indices = sorted_selected_experts // self.num_experts_per_tok
     sorted_inputs = jnp.take(inputs_2d, indices=sorted_indices, axis=0).astype(self.dtype)
     group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
-    return sorted_inputs, sorted_selected_experts, weights, group_size
+    expert_indices = jnp.arange(self.num_experts)
+    sorted_experts = jnp.repeat(expert_indices, repeats=group_size, total_repeat_length=flatten_selected_experts.shape[0])
+    return sorted_inputs, sorted_selected_experts, weights, group_size, sorted_experts
   
 
   def unpermute(self, intermediate, sorted_selected_experts, weights, batch_size, sequence_length):
@@ -349,15 +351,17 @@ class MoeBlock(nn.Module):
     def local_permute(inputs, global_group_sizes, local_expert_size):
       """Sort inputs by expert within each shard."""
       local_id = jax.lax.axis_index("expert")
-      local_sizes = jax.lax.dynamic_slice_in_dim(
+      all_shard_local_sizes = jax.lax.dynamic_slice_in_dim(
           global_group_sizes, local_id * local_expert_size, local_expert_size, axis=1
-      ).reshape(-1)
+      )
+      local_sizes = all_shard_local_sizes.reshape(-1)
       base_indices = jnp.mod(jnp.arange(local_sizes.shape[0]), local_expert_size)
+      local_group_size = jnp.sum(all_shard_local_sizes, axis=0) # all shards have the same value?
       expert_indices = jnp.repeat(base_indices, local_sizes, total_repeat_length=inputs.shape[0])
       sorted_indices = jnp.argsort(expert_indices)
       sorted_inputs = jnp.take(inputs, indices=sorted_indices, axis=0)
-      group_size = jnp.bincount(expert_indices, length=local_expert_size)
-      return sorted_inputs, sorted_indices, group_size
+      sorted_experts_ids = expert_indices[sorted_indices]
+      return sorted_inputs, sorted_indices, local_group_size, sorted_experts_ids, 
       
 
     def gmm(inputs, kernel, group_sizes, expert_assignments):
@@ -453,10 +457,21 @@ class MoeBlock(nn.Module):
     # Currently, we only support data and tensor parallelism with Megablox.
     # We all gather the input activations over tensor parallelism to follow strategy
     # in https://parsa.epfl.ch/course-info/cs723/papers/Megatron.pdf.
-    input_partition_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
-    gate_logits_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
+    # breakpoint()
+    try:
+      is_batch_sharded_by_expert = 'expert' in tuple(filter(
+        lambda tup: tup[0] == "activation_batch_moe", self.config.logical_axis_rules)
+        )[0][1]
+    except:
+      is_batch_sharded_by_expert = False
+    if is_batch_sharded_by_expert and inputs.shape[0] > 1:
+      batch_logical_axis = "activation_batch_moe"
+    else:
+      batch_logical_axis = "activation_batch_no_exp"
+    input_partition_pspec = nn.logical_to_mesh_axes((batch_logical_axis, None, None))
+    gate_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, None, None))
     if self.config.model_name.startswith("deepseek3"):
-      pre_bias_logits_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
+      pre_bias_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, None, None))
     else:
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits_pspec = None
@@ -480,7 +495,8 @@ class MoeBlock(nn.Module):
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo):
       batch_size, sequence_length, _ = x.shape
-      x, sorted_selected_experts, weights, group_sizes = self.permute(x, logits, pre_bias_logits)
+      x, sorted_selected_experts, weights, group_sizes, selected_experts = self.permute(x, logits, pre_bias_logits)
+      # breakpoint()
       if self.get_expert_parallelism_size() > 1:
         axis_name = "expert"
         # get group sizes for all shards
@@ -511,20 +527,22 @@ class MoeBlock(nn.Module):
             axis_name=axis_name,
         )
         global_group_sizes = lax.all_gather(group_sizes, axis_name=axis_name)
-        x, local_sorted_indices, group_sizes = local_permute(x, global_group_sizes, local_expert_size)
-        local_expert_id_range = jnp.arange(local_expert_size)
-        selected_experts = jnp.repeat(
-            local_expert_id_range,
-            repeats=group_sizes,
-            total_repeat_length=x.shape[0]
-        )
-      else:
-        global_expert_id_range = jnp.arange(self.num_experts)
-        selected_experts = jnp.repeat(
-            global_expert_id_range,
-            repeats=group_sizes,
-            total_repeat_length=x.shape[0]
-        )
+        # if batch_logical_axis == "activation_batch_moe":
+          # jax.debug.print("inputs.shape = {inputs_shape},\nx head = {x_head},\nx tail = {x_tail}", inputs_shape=inputs.shape, x_head=x[:3, :5], x_tail=x[-3:, :5])
+        x, local_sorted_indices, group_sizes, selected_experts = local_permute(x, global_group_sizes, local_expert_size)
+        # local_expert_id_range = jnp.arange(local_expert_size)
+      #   selected_experts = jnp.repeat(
+      #       local_expert_id_range,
+      #       repeats=group_sizes,
+      #       total_repeat_length=x.shape[0]
+      #   )
+      # else:
+      #   global_expert_id_range = jnp.arange(self.num_experts)
+      #   selected_experts = jnp.repeat(
+      #       global_expert_id_range,
+      #       repeats=group_sizes,
+      #       total_repeat_length=x.shape[0]
+      #   )
 
       layer_w0 = gmm(x, w0, group_sizes, selected_experts)
       layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
