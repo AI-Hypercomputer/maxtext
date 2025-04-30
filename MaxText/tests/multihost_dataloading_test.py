@@ -34,8 +34,7 @@ from MaxText.globals import PKG_DIR
 
 class MultihostDataloadingTest(unittest.TestCase):
 
-  def setUp(self):
-    super().setUp()
+  def setUpConfig(self, ici_data_parallelism):
     batch_size = 8
     self.config = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -45,7 +44,7 @@ class MultihostDataloadingTest(unittest.TestCase):
         logical_axis_rules=[["batch", "data"]],
         data_sharding=["data"],
         input_data_sharding_logical_axes=["batch"],
-        ici_data_parallelism=-1,
+        ici_data_parallelism=ici_data_parallelism,
         ici_fsdp_parallelism=1,
         base_output_directory="gs://max-experiments/",
         dataset_path="gs://maxtext-dataset/",
@@ -65,7 +64,24 @@ class MultihostDataloadingTest(unittest.TestCase):
     dataset = dataset.repeat()
     self.dataset = dataset.batch(batch_size)
 
-  @pytest.mark.tpu_only
+  def test_batch_sharded_data_pipeline(self):
+    super().setUp()
+    self.setUpConfig(ici_data_parallelism=-1)
+    self.multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(self.dataset, self.mesh, self.config)
+    first_batch = next(self.multihost_gen)
+    sec_batch = next(self.multihost_gen)
+    self.assertTrue(not np.array_equal(first_batch, sec_batch, equal_nan=True))
+
+  # GPU github runners has 4 GPUs
+  @pytest.mark.gpu_only
+  def test_batch_sharded_data_pipeline_without_unspecified_value(self):
+    super().setUp()
+    self.setUpConfig(ici_data_parallelism=4)
+    self.multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(self.dataset, self.mesh, self.config)
+    first_batch = next(self.multihost_gen)
+    sec_batch = next(self.multihost_gen)
+    self.assertTrue(not np.array_equal(first_batch, sec_batch, equal_nan=True))
+
   def test_batch_sharded_data_pipeline(self):
     self.multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(self.dataset, self.mesh, self.config)
     first_batch = next(self.multihost_gen)
