@@ -817,9 +817,19 @@ def reorder_causal_load_balanced(batch, cp_size):
   }
 
 
+def shard_reorder_causal_load_balanced(batch, cp_size):
+  """Shard the output of the reordered sequence."""
+  reordered = reorder_causal_load_balanced(batch, cp_size)
+  for _, v in batch.items():
+    if isinstance(v, jax.Array):
+      reordered = jax.lax.with_sharding_constraint(reordered, v.sharding)
+      break
+  return reordered
+
+
 def get_reorder_callable(cp_size):
   """Creates a callable that can be used with map() to reorder batches."""
-  return functools.partial(reorder_causal_load_balanced, cp_size=cp_size)
+  return functools.partial(shard_reorder_causal_load_balanced, cp_size=cp_size)
 
 
 @staticmethod

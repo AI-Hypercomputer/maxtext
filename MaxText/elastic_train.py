@@ -267,6 +267,7 @@ def train_loop(config, elastic_manager, state=None):
       block=True,
   )
 
+  input_data_shardings = maxtext_utils.get_input_data_shardings(config, mesh)
   # Using while loop instead of a for loop because with elasticity
   # the step is restored back to the latest snapshot when a slice is lost
   while step < config.steps:
@@ -281,6 +282,7 @@ def train_loop(config, elastic_manager, state=None):
           record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
           try:
             example_batch = load_next_batch(data_iterator, example_batch, config)
+            example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
           except Exception as e:  # pylint: disable=broad-except
             max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
             break
