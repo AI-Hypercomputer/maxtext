@@ -94,7 +94,7 @@ mccabe==0.7.0
 mdurl==0.1.2
 ml-collections==0.1.1
 ml-dtypes==0.4.1
-ml-goodput-measurement==0.0.8
+ml-goodput-measurement==0.0.10
 more-itertools==10.5.0
 msgpack==1.1.0
 msgspec==0.18.6

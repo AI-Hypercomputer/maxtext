@@ -4,7 +4,7 @@ absl-py
 aqtp==0.8.2
 datasets
 grain[parquet]>=0.2.6
-ml-goodput-measurement==0.0.8
+ml-goodput-measurement==0.0.10
 orbax-checkpoint>=0.10.3
 pylint
 pytest
