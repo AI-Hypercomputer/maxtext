@@ -150,8 +150,8 @@ def main(argv: Sequence[str]) -> None:
   rng, rng_prefill = jax.random.split(rng)  # Split RNG before calling prefill
   for i in range(_NUM_STREAMS):
     prefill_result, first_token = engine.prefill(
-        params=params, padded_tokens=tokens, images=images, true_length=true_length, rng=rng_prefill, slot=i, temp=temp
-        # params=params, padded_tokens=tokens, images=images, true_length=true_length, rng=rng_prefill, slot=i
+        # params=params, padded_tokens=tokens, images=images, true_length=true_length, rng=rng_prefill, slot=i, temp=temp
+        params=params, padded_tokens=tokens, images=images, true_length=true_length, rng=rng_prefill, slot=i
     )
     prefill_result_list.append(prefill_result)
     first_token_list.append(first_token)
