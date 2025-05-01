@@ -178,6 +178,8 @@ def load_state_if_possible(
     dataset_type: Optional[str] = "tfds",
     step: int = -1,  # -1 means latest
     strict = False,
+    use_ocdbt=True,
+    use_zarr3=True,
 ):
   """Loads TrainState as possible from the inputs.
 

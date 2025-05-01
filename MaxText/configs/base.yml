@@ -229,6 +229,7 @@ base_output_directory: ""
 # See more details on https://github.com/google/orbax/tree/main/checkpoint/orbax/checkpoint/experimental/emergency.
 enable_emergency_checkpoint: False
 
+checkpoint_storage_concurrent_gb: 96
 # It should be specified when and only when `enable_emergency_checkpoint` is True.
 local_checkpoint_directory: ""
 
