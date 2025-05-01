@@ -51,6 +51,7 @@ from MaxText import pyconfig
 import jsonlines
 from MaxText import max_utils
 from MaxText import maxtext_utils
+from MaxText import maxtext_state_initialization_utils
 from MaxText.layers import models
 from MaxText.layers import quantizations
 
@@ -93,7 +94,7 @@ def main(config, test_args):  # pylint: disable=W0621
     mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
     quant = quantizations.configure_quantization(config)
     model = models.Transformer(config, mesh=mesh, quant=quant)
-    state, _ = maxtext_utils.setup_decode_state(model, config, rng1, mesh, None)
+    state, _ = maxtext_state_initialization_utils.setup_decode_state(model, config, rng1, mesh, None)
 
   if test_args.golden_logits_path == "":
     input_golden_data_path = os.path.join(PKG_DIR, "test_assets", f"golden_data_{config.model_name}.jsonl")

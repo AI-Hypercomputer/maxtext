@@ -28,6 +28,7 @@ import unittest
 import pytest
 
 from MaxText import pyconfig
+from MaxText import maxtext_utils
 from MaxText import multihost_dataloading
 from MaxText.globals import PKG_DIR
 
@@ -90,9 +91,9 @@ class MultihostDataloadingTest(unittest.TestCase):
     )
     default_num = 2
     prefix = "dcn"
-    prod = multihost_dataloading._get_mesh_axes_prod(config, default_num, prefix, config.mesh_axes)
+    prod = maxtext_utils.get_mesh_axes_prod(config, default_num, prefix, config.mesh_axes)
     assert prod == 30, f"{prod=} != 30"
-    input_data_scale = multihost_dataloading._get_input_data_parallelisms(config, prefix, default_num)
+    input_data_scale = maxtext_utils.get_input_data_parallelisms(config, prefix, default_num)
     assert input_data_scale == (30, 1), f"{input_data_scale=} != (30,1)"
 
   def test_get_dcn_partial_mesh_axes_prod(self):
@@ -113,9 +114,9 @@ class MultihostDataloadingTest(unittest.TestCase):
     )
     default_num = 2
     prefix = "dcn"
-    prod = multihost_dataloading._get_mesh_axes_prod(config, default_num, prefix, config.mesh_axes)
+    prod = maxtext_utils.get_mesh_axes_prod(config, default_num, prefix, config.mesh_axes)
     assert prod == 6, f"{prod=} != 6"
-    input_data_scale = multihost_dataloading._get_input_data_parallelisms(config, prefix, default_num)
+    input_data_scale = maxtext_utils.get_input_data_parallelisms(config, prefix, default_num)
     assert input_data_scale == (6, 1), f"{input_data_scale=} != (6,1)"
 
   def test_get_2d_dcn_mesh_axes_prod(self):
@@ -138,7 +139,7 @@ class MultihostDataloadingTest(unittest.TestCase):
     )
     default_num = 2
     prefix = "dcn"
-    input_data_scale = multihost_dataloading._get_input_data_parallelisms(config, prefix, default_num)
+    input_data_scale = maxtext_utils.get_input_data_parallelisms(config, prefix, default_num)
     assert input_data_scale == (30, 42), f"{input_data_scale=} != (30,42)"
 
   def test_get_default_ici_mesh_axes_prod(self):
@@ -158,9 +159,9 @@ class MultihostDataloadingTest(unittest.TestCase):
     )
     default_num = 2
     prefix = "ici"
-    prod = multihost_dataloading._get_mesh_axes_prod(config, default_num, prefix, config.mesh_axes)
+    prod = maxtext_utils.get_mesh_axes_prod(config, default_num, prefix, config.mesh_axes)
     assert prod == 30
-    input_data_scale = multihost_dataloading._get_input_data_parallelisms(config, prefix, default_num)
+    input_data_scale = maxtext_utils.get_input_data_parallelisms(config, prefix, default_num)
     assert input_data_scale == (30, 1), f"{input_data_scale=} != (30,1)"
 
   def test_get_2d_dcn_ici_scale(self):
@@ -186,10 +187,10 @@ class MultihostDataloadingTest(unittest.TestCase):
         ici_sequence_parallelism=-1,
         disalbe_key_validation=True,  # We don't have that many slices
     )
-    input_data_dcn_parallelisms = multihost_dataloading._get_input_data_parallelisms(
+    input_data_dcn_parallelisms = maxtext_utils.get_input_data_parallelisms(
         config, "dcn", default_mesh_parallelism=2
     )
-    input_data_ici_parallelisms = multihost_dataloading._get_input_data_parallelisms(
+    input_data_ici_parallelisms = maxtext_utils.get_input_data_parallelisms(
         config, "ici", default_mesh_parallelism=7
     )
     assert input_data_dcn_parallelisms == (30, 42), f"{input_data_dcn_parallelisms=} != (30,42)"

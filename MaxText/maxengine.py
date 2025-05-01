@@ -38,6 +38,7 @@ from jetstream.engine import token_utils
 
 from MaxText import max_utils
 from MaxText import maxtext_utils
+from MaxText import maxtext_state_initialization_utils
 from MaxText import inference_utils
 from MaxText import pyconfig
 from MaxText import common_types
@@ -233,7 +234,7 @@ class MaxEngine(engine_api.Engine):
       state = maxtext_utils.init_decode_state(None, params)
       state = max_utils.unbox_logicallypartioned(state)
     else:
-      state, self.state_mesh_annotations = maxtext_utils.setup_decode_state(self.model, self.config, rng1, self._mesh, None)
+      state, self.state_mesh_annotations = maxtext_state_initialization_utils.setup_decode_state(self.model, self.config, rng1, self._mesh, None)
     # pylint: disable=isinstance-second-argument-not-valid-type
     self.abstract_params = jax.tree_util.tree_map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
@@ -340,7 +341,7 @@ class MaxEngine(engine_api.Engine):
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding),
         params,
     )
-    maxtext_utils.save_quantized_checkpoint_if_configured(self.config, params)
+    maxtext_state_initialization_utils.save_quantized_checkpoint_if_configured(self.config, params)
     self.model.quant.quant_mode = quantizations.get_quant_mode("serve")
     return params
 

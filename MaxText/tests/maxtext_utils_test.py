@@ -20,7 +20,7 @@ import jax.numpy as jnp
 
 from MaxText import maxtext_utils
 from MaxText import max_utils
-
+from MaxText import maxtext_state_initialization_utils
 
 from flax import linen as nn
 from flax.training import train_state
@@ -204,14 +204,14 @@ class MaxUtilsInitTransformerState(unittest.TestCase):
 
   def test_setup_decode_state(self):
     rng = random.PRNGKey(0)
-    state, _ = maxtext_utils.setup_decode_state(self.model, self.config, rng, self.mesh, None)
+    state, _ = maxtext_state_initialization_utils.setup_decode_state(self.model, self.config, rng, self.mesh, None)
     self.assertEqual(state.tx, None)
     self.assertEqual(state.opt_state, {})
 
   def test_setup_initial_state(self):
     rng = random.PRNGKey(0)
     tx = optax.adam(learning_rate=0.001)
-    state, _, _, _ = maxtext_utils.setup_initial_state(self.model, None, tx, self.config, rng, self.mesh, None)
+    state, _, _, _ = maxtext_state_initialization_utils.setup_initial_state(self.model, None, tx, self.config, rng, self.mesh, None)
     self.assertEqual(state.tx, tx)
     self.assertNotEqual(state.opt_state, {})
 

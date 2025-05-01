@@ -61,6 +61,7 @@ import tensorflow as tf
 from MaxText import checkpointing
 from MaxText import max_utils
 from MaxText import maxtext_utils
+from MaxText import maxtext_state_initialization_utils
 from MaxText import max_logging
 from MaxText import profiler
 from MaxText import pyconfig
@@ -133,7 +134,7 @@ def elastic_handler(
           max_logging.log(f"Deleting checkpoint from step {latest_step} since we are rewinding to step {step}.")
           checkpoint_manager.delete(latest_step)
 
-      state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
+      state, _, state_mesh_shardings, data_iterator = maxtext_state_initialization_utils.setup_training_state(
           model,
           data_iterator,
           tx,

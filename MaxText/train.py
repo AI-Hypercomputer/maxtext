@@ -41,6 +41,7 @@ import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as 
 from MaxText import checkpointing
 from MaxText import max_utils
 from MaxText import maxtext_utils
+from MaxText import maxtext_state_initialization_utils
 from MaxText import max_logging
 from MaxText import optimizers
 from MaxText import profiler
@@ -683,7 +684,7 @@ def setup_train_loop(config):
       if eval_data_iterator:
         eval_data_iterator = map(max_utils.get_reorder_callable(context_parallel_size), eval_data_iterator)
 
-  state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
+  state, _, state_mesh_shardings, data_iterator = maxtext_state_initialization_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
 

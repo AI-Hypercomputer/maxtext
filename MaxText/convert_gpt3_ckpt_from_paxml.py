@@ -52,6 +52,7 @@ import sys
 import jax
 import gc
 from MaxText import max_logging
+from MaxText import maxtext_state_initialization_utils
 from psutil import Process
 from MaxText.train import save_checkpoint
 import argparse
@@ -109,7 +110,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
       cfg.checkpoint_period,
   )
 
-  state, _, _, _ = maxtext_utils.setup_training_state(model, None, tx, cfg, init_rng, mesh, checkpoint_manager)
+  state, _, _, _ = maxtext_state_initialization_utils.setup_training_state(model, None, tx, cfg, init_rng, mesh, checkpoint_manager)
   max_logging.log("start")
   check_memory()
 
