@@ -803,11 +803,21 @@ def set_and_validate_pipeline_config(raw_keys):
     raw_keys = pipeline_first_axis(raw_keys)
     num_stages = int(raw_keys["ici_pipeline_parallelism"] * raw_keys["dcn_pipeline_parallelism"])
     if raw_keys["pipeline_parallel_layers"] == -1:
-      raw_keys["pipeline_parallel_layers"] = raw_keys["num_decoder_layers"]
+      if raw_keys["decoder_block"]=="deepseek":
+        moe_layers = raw_keys["num_decoder_layers"] - raw_keys["first_num_dense_layers"]
+        raw_keys["pipeline_parallel_layers"] = moe_layers
+      else:
+        raw_keys["pipeline_parallel_layers"] = raw_keys["num_decoder_layers"]
     else:
-      assert (
-          raw_keys["pipeline_parallel_layers"] <= raw_keys["num_decoder_layers"]
-      ), f"You can only pipeline a subset of the decoder layers, but you requested to pipeline {raw_keys['pipeline_parallel_layers']} with pipeline_parallel_layers and there are only {raw_keys['num_decoder_layers']} decoder layers."
+      if raw_keys["decoder_block"]=="deepseek":
+        moe_layers = raw_keys["num_decoder_layers"] - raw_keys["first_num_dense_layers"]
+        assert (
+          raw_keys["pipeline_parallel_layers"] <= moe_layers
+      ), f"You can only pipeline a subset of the moe decoder layers for deepseek, but you requested to pipeline {raw_keys['pipeline_parallel_layers']} with pipeline_parallel_layers and there are only {moe_layers} decoder layers."
+      else:
+        assert (
+            raw_keys["pipeline_parallel_layers"] <= raw_keys["num_decoder_layers"]
+        ), f"You can only pipeline a subset of the decoder layers, but you requested to pipeline {raw_keys['pipeline_parallel_layers']} with pipeline_parallel_layers and there are only {raw_keys['num_decoder_layers']} decoder layers."
     assert (
         raw_keys["scan_layers"] or raw_keys["pipeline_parallel_layers"] == raw_keys["num_decoder_layers"]
     ), "Currently we only support scan_layers=True when pipelining a subset of layers."
@@ -848,8 +858,6 @@ def set_and_validate_pipeline_config(raw_keys):
 
 
 def validate_deepseek_moe(raw_keys):
-  if raw_keys["decoder_block"] == "deepseek" and using_pipeline_parallelism(raw_keys):
-    raise ValueError("Currently we do not support DeepSeek MoE with pipeline parallelism.")
   if raw_keys["n_routing_groups"] != -1:
     if raw_keys["topk_routing_group"] == -1:
       raise ValueError(f'config topk_routing_group: {raw_keys["topk_routing_group"]} is not defined')
@@ -864,8 +872,8 @@ def validate_deepseek_moe(raw_keys):
 
 
 def validate_sparse_matmul_parallelism(raw_keys):
-  if raw_keys["sparse_matmul"] and (using_sequence_parallelism(raw_keys) or using_pipeline_parallelism(raw_keys)):
-    raise ValueError("Currently we only support Megablox and Ragged dot with data, tensor, and expert parallelism.")
+  if raw_keys["sparse_matmul"] and using_sequence_parallelism(raw_keys):
+    raise ValueError("Currently Megablox and Ragged Dot are not supported with sequence parallelism.")
   tensor_parallelism = (
       raw_keys["ici_tensor_parallelism"]
       * raw_keys["dcn_tensor_parallelism"]
