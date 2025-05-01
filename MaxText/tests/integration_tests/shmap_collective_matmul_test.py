@@ -22,12 +22,15 @@ import pytest
 from MaxText.globals import PKG_DIR
 
 sys.path.append(os.path.join(os.path.dirname(PKG_DIR), "pedagogical_examples"))
-from pedagogical_examples.shmap_collective_matmul import main
+
+# Uncomment the import when b/415022795 is fixed
+#from pedagogical_examples.shmap_collective_matmul import main
 
 
+@pytest.mark.skip(reason="Enable when b/415022795 is fixed")
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
 def test_shmap_collective_matmul_example():
   """Validate Pedagogical Example, Shmap_collective_matmul."""
-
-  assert main() is True
+  # Uncomment main() assertion when b/415022795 is fixed
+  #assert main() is True
