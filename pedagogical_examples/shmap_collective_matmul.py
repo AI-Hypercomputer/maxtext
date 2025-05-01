@@ -35,6 +35,7 @@ MESH_DATA_AXIS = "dp"
 MESH_FSDP_AXIS = "fsdp"
 MESH_TENSOR_AXIS = "tp"
 
+# We should not call jax.devices() when this file is imported b/415022795.
 d = jax.devices()
 outd = [[[d[0], d[1], d[3], d[2]]]]
 global_mesh = Mesh(outd, (MESH_DATA_AXIS, MESH_FSDP_AXIS, MESH_TENSOR_AXIS))
