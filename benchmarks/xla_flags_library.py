@@ -154,6 +154,18 @@ HOST_OFFLOAD_FLAGS = (
     " --xla_latency_hiding_scheduler_rerun=2"
 )
 
+PREMAP_PATCH = (
+    " --megascale_grpc_premap_memory_bytes=17179869184"
+    " --xla_tpu_spmd_rng_bit_generator_unsafe=1"
+    " --xla_tpu_enable_latency_hiding_scheduler=true"
+)
+
+MOE_FLAGS = (
+    " --xla_tpu_megacore_fusion_allow_ags=false"
+    " --xla_enable_async_collective_permute=true"
+    " --xla_tpu_enable_ag_backward_pipelining=true"
+    " --xla_tpu_enable_async_all_to_all=true"
+)
 # Flags to optimize pipeline parallelism over DCN with large host offloading.
 PIPELINING_FLAGS = (
     " --xla_tpu_iova_dma_chunk_size_bytes=16777216" # breaks DMA to/from host into 16M chunks
