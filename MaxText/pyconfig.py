@@ -577,8 +577,7 @@ class _HyperParameters:
 
     if raw_keys["remat_policy"] == "custom":
       raw_keys = validate_and_assign_remat_tensors(raw_keys)
-    if not raw_keys["disalbe_key_validation"]:
-      validate_keys(raw_keys)
+    validate_keys(raw_keys)
     validate_tokenizer(raw_keys)
     validate_data_input(raw_keys)
 

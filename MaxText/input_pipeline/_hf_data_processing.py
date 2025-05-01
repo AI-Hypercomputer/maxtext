@@ -189,7 +189,10 @@ def preprocessing_pipeline(
       read_options=grain.ReadOptions(num_threads=num_threads, prefetch_buffer_size=128),
   )
 
-  return dataloader
+  multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh)
+
+  # Return multi-host jax.Array prep iterator
+  return multihost_gen
 
 
 def make_hf_train_iterator(
@@ -206,7 +209,7 @@ def make_hf_train_iterator(
       streaming=True,
       token=config.hf_access_token,
   )
-  train_data_loader = preprocessing_pipeline(
+  train_iter = preprocessing_pipeline(
       dataloading_host_index=process_indices_train.index(jax.process_index()),
       dataloading_host_count=len(process_indices_train),
       global_mesh=global_mesh,
@@ -227,7 +230,6 @@ def make_hf_train_iterator(
       use_sft=config.use_sft,
       sft_train_on_completion_only=config.sft_train_on_completion_only,
   )
-  train_iter = multihost_dataloading.MultiHostDataLoadIterator(train_data_loader, global_mesh, config)
   return train_iter
 
 
@@ -246,7 +248,7 @@ def make_hf_eval_iterator(
   )
 
   eval_generate_padding_example = config.eval_steps > 0
-  eval_data_loader = preprocessing_pipeline(
+  eval_iter = preprocessing_pipeline(
       dataloading_host_index=process_indices_eval.index(jax.process_index()),
       dataloading_host_count=len(process_indices_eval),
       global_mesh=global_mesh,
@@ -267,5 +269,4 @@ def make_hf_eval_iterator(
       use_sft=config.use_sft,
       sft_train_on_completion_only=config.sft_train_on_completion_only,
   )
-  eval_iter = multihost_dataloading.MultiHostDataLoadIterator(eval_data_loader, global_mesh, config)
   return eval_iter
