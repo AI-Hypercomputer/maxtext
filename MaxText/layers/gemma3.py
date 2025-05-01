@@ -45,7 +45,12 @@ BATCH = common_types.BATCH
 LENGTH = common_types.LENGTH
 HEAD = common_types.HEAD
 D_KV = common_types.D_KV
+BEGIN_IMAGE_TOKEN = 255999
+END_IMAGE_TOKEN = 262144
+NEW_LINE_TOKEN = 108
 TOKEN_PLACEHOLDER = -2
+NUM_PLACEHOLDER_TOKENS_PER_IMAGE = 256
+NUM_TOKENS_PER_MEDIA = NUM_PLACEHOLDER_TOKENS_PER_IMAGE + 4
 
 nd_dense_init = initializers.nd_dense_init
 Quant = quantizations.AqtQuantization
