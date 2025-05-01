@@ -262,6 +262,10 @@ def validate_llama4_config(keys: dict):
     raise ValueError("Llama4 decoder has not been tested with capacity_factor >= 0 -- please set that value to -1 for now!")
   if keys["num_experts_per_tok"] > 1:
     raise ValueError("Only top-1 routing is supported for Llama4 for now!")
+  if keys["base_num_decoder_layers"] % keys["interleave_moe_layer_step"] != 0:
+    raise ValueError(
+        f"The number of decoder layers ({keys['base_num_decoder_layers']}) must be divisible by interleave moe layer step ({keys['interleave_moe_layer_step']})"
+    )
 
 
 def validate_model_name(s: str) -> bool:
