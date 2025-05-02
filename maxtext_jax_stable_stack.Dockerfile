@@ -34,6 +34,9 @@ RUN if [ "$DEVICE" = "tpu" ] && ([ "$JAX_STABLE_STACK_BASEIMAGE" = "us-docker.pk
 # Install Maxtext requirements with Jax Stable Stack
 RUN apt-get update && apt-get install --yes && apt-get install --yes dnsutils
 
+# TODO(bvandermoon, parambole): Remove this when it's added to JAX AI Image
+RUN pip install google-cloud-monitoring
+
 # Install requirements file generated with pipreqs for JSS 0.5.2. 
 # Othewise use general requirements_with_jax_stable_stack.txt
 RUN if [ "$DEVICE" = "tpu" ] && [ "$JAX_STABLE_STACK_BASEIMAGE" = "us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:jax0.5.2-rev1" ]; then \
