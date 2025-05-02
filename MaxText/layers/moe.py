@@ -466,7 +466,7 @@ class MoeBlock(nn.Module):
     # We all gather the input activations over tensor parallelism to follow strategy
     # in https://parsa.epfl.ch/course-info/cs723/papers/Megatron.pdf.
     # input_partition_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
-    input_partition_pspec = nn.logical_to_mesh_axes(("moe_activation_batch", None, None))
+    input_partition_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
     gate_logits_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
     if self.config.model_name.startswith("deepseek3"):
       pre_bias_logits_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
@@ -548,72 +548,8 @@ class MoeBlock(nn.Module):
           global_group_sizes = lax.all_gather(group_sizes, axis_name=axis_name)
           x, local_sorted_indices, group_sizes, selected_experts = local_permute(x, global_group_sizes, local_expert_size)
         else:
-          breakpoint()
-          local_expert_size = self.config.num_experts // self.get_expert_parallelism_size()
-          x, sorted_selected_experts, weights, group_sizes, selected_experts
-          group_sizes = jnp.sum(reshaped_group_sizes, axis=0)
-
-          @jax.jit(static_argnums=1)
-          def _index_dynamic(arr, index):
-            return arr[index]
-          
-          sharded_group_sizes = jnp.split(group_sizes, local_expert_size)[index]
-
-          local_id = jax.lax.axis_index("expert")
-          global_group_sizes = global_group_sizes[None, :]
-          prefix_local_size = jnp.sum(global_group_sizes[0, :local_id * local_expert_size])
-          # prefix_indices = jnp.repeat(local_expert_size+1, repeats=prefix_local_size)
-          all_shard_local_sizes = jax.lax.dynamic_slice_in_dim(
-            global_group_sizes, local_id * local_expert_size, local_expert_size, axis=1
-          )
-          
-          jnp.where(selected_experts <= (local_id+1) * local_expert_size)
-          local_sizes = all_shard_local_sizes.reshape(-1)
-          group_sizes = jnp.sum(all_shard_local_sizes, axis=0)
-          base_indices = jnp.mod(-local_expert_size + jnp.arange(local_sizes.shape[0]), local_expert_size)
-          expert_indices = jnp.repeat(base_indices, local_sizes, total_repeat_length=inputs.shape[0])
-          expert_indices = jnp.concat(prefix_indices, expert_indices)
-          local_sorted_indices = jnp.argsort(expert_indices)
-          expert_indices = jnp.where(expert_indices <= local_expert_size,
-                                     expert_indices,
-                                     jnp.ones_like(expert_indices)*local_expert_size)
-          selected_experts = expert_indices[local_sorted_indices]
-          x = jnp.take(x, indices=local_sorted_indices, axis=0)
-
-          # buffer_size = int(
-          #   self.config.per_device_batch_size
-          #     * self.config.max_target_length
-          #     * self.config.num_experts_per_tok
-          # )
-          # local_id = jax.lax.axis_index("expert")
-          # num_assigned_experts = reshaped_group_sizes[local_id]
-          # # x should already be pre-sorted from permute() so the resulting slice should be contiguous
-          # slice_condition = jnp.logical_and(local_id * local_expert_size  <= selected_experts, selected_experts < (local_id + 1) * local_expert_size)
-          # x = jnp.where(slice_condition, x[slice_condition])
-          # jax.where(local_id * local_expert_size  <= selected_experts < (local_id + 1) * local_expert_size,
-          #               x, 
-          #               jnp.zeros_like(x)
-          # )
-          # local_sorted_indices = jax.lax.dynamic_index_in_dim(
-
-          # )
-          # x = jax.lax.dynamic_slice_in_dim(
-          #   x, local_id * num_assigned_experts, num_assigned_experts, axis=0
-          # )
-        
-        # local_expert_id_range = jnp.arange(local_expert_size)
-      #   selected_experts = jnp.repeat(
-      #       local_expert_id_range,
-      #       repeats=group_sizes,
-      #       total_repeat_length=x.shape[0]
-      #   )
-      # else:
-      #   global_expert_id_range = jnp.arange(self.num_experts)
-      #   selected_experts = jnp.repeat(
-      #       global_expert_id_range,
-      #       repeats=group_sizes,
-      #       total_repeat_length=x.shape[0]
-      #   )
+          # breakpoint()
+          x, local_sorted_indices, group_sizes, selected_experts = local_permute(x, global_group_sizes[None, :], local_expert_size)
 
       layer_w0 = gmm(x, w0, group_sizes, selected_experts)
       layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
@@ -627,12 +563,14 @@ class MoeBlock(nn.Module):
         intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
 
       if self.get_expert_parallelism_size() > 1:
+        axis_name = "expert"
+        # locally unpermute back to the original order
+        local_output = jnp.take(intermediate_output, indices=jnp.argsort(local_sorted_indices), axis=0)
+        original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
+        assert sorted_selected_experts.shape[0] == original_inputs_first_dim, "original_inputs_first_dim does not match the original tensor shape!"
+        output_shape = jnp.zeros((original_inputs_first_dim, self.config.emb_dim), dtype=local_output.dtype)
+        # is_batch_sharded_by_expert = True
         if is_batch_sharded_by_expert:
-          axis_name = "expert"
-          # locally unpermute back to the original order
-          local_output = jnp.take(intermediate_output, indices=jnp.argsort(local_sorted_indices), axis=0)
-          original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
-          output_shape = jnp.zeros((original_inputs_first_dim, self.config.emb_dim), dtype=local_output.dtype)
           input_offsets, send_sizes, output_offsets, recv_sizes = get_all_to_all_params(
               jnp.transpose(all_shards_group_sizes), local_expert_size, self.get_expert_parallelism_size()
           )
@@ -645,9 +583,48 @@ class MoeBlock(nn.Module):
               recv_sizes,
               axis_name=axis_name,
           )
+        else:
+          # breakpoint()
+          shard_id = jax.lax.axis_index(axis_name)
+          output_offsets = jnp.concatenate((jnp.array([0]), jnp.cumsum(reshaped_group_sizes[:-1])))
+          input_offsets = jnp.repeat(output_offsets[shard_id], self.get_expert_parallelism_size())
+          send_sizes = jnp.repeat(reshaped_group_sizes[shard_id], self.get_expert_parallelism_size())
+          recv_sizes = reshaped_group_sizes
+          # jax.debug.print("shard_id = {shard_id},\nreshaped_group_sizes = {reshaped_group_sizes},\ninput_offsets = {input_offsets},\n"\
+          #                 "send_sizes = {send_sizes},\noutput_offsets = {output_offsets},\n"\
+          #                 "recv_sizes = {recv_sizes}, sum(recv_sizes) = {sum_recv_sizes}", 
+          #                 shard_id=shard_id, reshaped_group_sizes=reshaped_group_sizes, input_offsets=input_offsets, send_sizes=send_sizes,
+          #                 output_offsets=output_offsets, recv_sizes=recv_sizes, sum_recv_sizes=jnp.sum(recv_sizes))
+          # TODO: asssert that original_inputs_first_dim == x.shape[0]
+          intermediate_output = jax.lax.ragged_all_to_all(
+              local_output,
+              output_shape,
+              input_offsets,
+              send_sizes,
+              output_offsets,
+              recv_sizes,
+              axis_name=axis_name,
+          )
       output = self.unpermute(
           intermediate_output, sorted_selected_experts, weights, batch_size=batch_size, sequence_length=sequence_length
       )
+      # Debugging:
+      if False:
+        all_outputs = lax.all_gather(output, axis_name=axis_name)
+        # Iterate through jnp.cumsum(reshaped_group_sizes) and check whether the first 5 elements each row 2 indices after each cumsum are equal. 
+        offsets = jnp.cumsum(reshaped_group_sizes).shape[0]
+        def check_all_rows_equal(tensor: jnp.ndarray) -> bool:
+          """Checks if all rows of a JAX tensor are identical."""
+          if tensor.ndim < 1 or tensor.shape[0] <= 1:
+            # A tensor with 0 or 1 row trivially has all rows equal
+            return True
+          # Compare the first row with all other rows
+          are_equal = (tensor[0] == tensor[1:])
+          # Check if all comparisons resulted in True
+          return jnp.all(are_equal).item() # .item() converts the 0-dim JAX array to a Python bool
+        if check_all_rows_equal(all_outputs[offsets+2, :5]):
+          jax.debug.print("Not all rows are equal after unpermute:\n{value}", value=all_outputs[offsets+2, :5])
+
       return output, None
 
     return wrapper(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)
