@@ -47,20 +47,19 @@ def add_pathways_arguments(parser: argparse.ArgumentParser):
       '--pathways_server_image',
       type=str,
       default=(
-          'us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/server:latest'
+          'us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server'
       ),
       help='version of pathways server image to be benchmarked command.',
   )
   parser.add_argument(
       '--pathways_proxy_server_image',
       type=str,
-      default='us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/proxy_server:latest',
+      default='us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server',
       help='version of pathways proxy image to be benchmarked command.',
   )
   parser.add_argument(
       '--pathways_runner_image',
       type=str,
-      default='us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest',
       help='version of pathways runner image to be benchmarked command.',
   )
   parser.add_argument(
