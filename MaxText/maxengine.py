@@ -1226,6 +1226,12 @@ class MaxEngine(engine_api.Engine):
         "generated_tokens": inserted_generated_tokens,
         "tokens": inserted_tokens,
     }
+  
+  def free_resource(self, slot: int):
+    """Frees resources associated with a slot, including KV cache pages."""
+    if self.config.attention == "paged":
+      print(f"Releasing pages for {slot=}")
+      self.release_pages(slot)
 
   def release_pages(self, slot: int):
     """Releases pages associated with a specific slot (page group) via the PageManager."""

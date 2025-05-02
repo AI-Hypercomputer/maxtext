@@ -277,7 +277,6 @@ class PagedAttentionOp(nn.Module):
         key.shape == value.shape
     ), f"prefill_step key/value should have the same shape, but getting {key.shape=} and {value.shape=} instead"
     batch_size, seq_len, n_kv_head, head_dim = key.shape
-    assert seq_len % self.tokens_per_page == 0, f"seq_length {seq_len} and  tokens_per_page {self.tokens_per_page}"
     assert key_pages_var.value.shape == value_pages_var.value.shape, (
         f"prefill_step key/value_pages_var should have the same shape, but "
         f"getting {key_pages_var.shape=} and {value_pages_var.shape=} instead"
@@ -300,8 +299,8 @@ class PagedAttentionOp(nn.Module):
     key = jnp.transpose(key, axes=(1, 0, 2))
     value = jnp.transpose(value, axes=(1, 0, 2))
 
-    key = jnp.reshape(key, shape=(n_kv_head, max(1, seq_len // self.tokens_per_page), self.tokens_per_page, head_dim))
-    value = jnp.reshape(value, shape=(n_kv_head, max(1, seq_len // self.tokens_per_page), self.tokens_per_page, head_dim))
+    key = jnp.reshape(key, shape=(n_kv_head, (seq_len + self.tokens_per_page - 1) // self.tokens_per_page, self.tokens_per_page, head_dim))
+    value = jnp.reshape(value, shape=(n_kv_head, (seq_len + self.tokens_per_page - 1) // self.tokens_per_page, self.tokens_per_page, head_dim))
 
     key_pages_var.value = nn.with_logical_constraint(key, self.kv_pages_axis_names)
     value_pages_var.value = nn.with_logical_constraint(value, self.kv_pages_axis_names)
