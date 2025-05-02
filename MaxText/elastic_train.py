@@ -118,7 +118,7 @@ def elastic_handler(
     with mesh:
       data_iterator, _ = create_data_iterator(config, mesh)
 
-      step, snapshot = elastic_manager.get_resharded_snapshot(mesh)
+      step, snapshot_jax_arrays, _ = elastic_manager.get_resharded_snapshot(mesh)
 
       # We do not want to restore from the previous checkpoint but instead
       # restore from the host offloaded snapshot.
@@ -143,7 +143,7 @@ def elastic_handler(
           checkpoint_manager=None,
       )
 
-      state = state.replace(**snapshot)
+      state = state.replace(**snapshot_jax_arrays)
       state = state.replace(step=state.step.at[None].set(step))
 
       (
@@ -259,7 +259,7 @@ def train_loop(config, elastic_manager, state=None):
 
   elastic_manager.maybe_snapshot(
       step,
-      snapshot={
+      snapshot_jax_arrays={
           "params": state.params,
           "opt_state": state.opt_state,
       },
@@ -314,7 +314,7 @@ def train_loop(config, elastic_manager, state=None):
 
       elastic_manager.maybe_snapshot(
           step=step,
-          snapshot={
+          snapshot_jax_arrays={
               "params": state.params,
               "opt_state": state.opt_state,
           },
@@ -323,7 +323,7 @@ def train_loop(config, elastic_manager, state=None):
 
       ret = elastic_manager.maybe_reshard_up(
           step=step,
-          snapshot={
+          snapshot_jax_arrays={
               "params": state.params,
               "opt_state": state.opt_state,
           },
