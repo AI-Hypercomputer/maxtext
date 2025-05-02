@@ -135,6 +135,7 @@ def main():
         model_max_length=2048,
         padding_side="left",
         use_fast=False,
+        token="",
     )
   elif args.tokenizer_path:
     print(f"Loading tokenizer from {args.tokenizer_path}")
@@ -143,7 +144,8 @@ def main():
     raise ValueError("Either --checkpoint-path or --tokenizer-path must be provided")
 
   metric = evaluate.load("rouge")
-  nltk.download("punkt", quiet=True)
+  nltk.download("punkt")
+  nltk.download("punkt_tab")
 
   print(f"Getting groundtruth from {args.dataset_file}")
   targets = get_groundtruth(args.dataset_file)

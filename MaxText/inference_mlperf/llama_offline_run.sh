@@ -27,6 +27,7 @@ for arg in "$@"; do
     -d) audit=true ;;
     -a) accuracy=true ;;
     -f) fast_eval=true ;;
+    -g) paged=true ;;
     -r=*|--run=*) run_name="${arg#*=}" ;;
     -r|--run)
       shift
@@ -58,9 +59,10 @@ if "$enable_batch_prefill"; then
     BATCH_PREFILL_OPTION="--enable_batch_prefill"
 fi
 
-if [ -z "$TOKENIZER_PATH" ]; then
-  TOKENIZER_PATH=/home/${USER}/maxtext/assets/tokenizer.llama2
-fi
+# if [ -z "$TOKENIZER_PATH" ]; then
+TOKENIZER_PATH=/mnt/disks/persist/maxtext/assets/tokenizer.llama2
+echo "TOKENIZER_PATH: ${TOKENIZER_PATH}"
+# fi
 
 BATCH_STR=""
 if [ -z "$PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES" ];
@@ -84,17 +86,24 @@ then
 fi
 
 if [[ -z ${MAXENGINE_CONFIG_FILEPATH} ]] ; then
-    MAXENGINE_CONFIG_FILEPATH="./MaxText/configs/base.yml"
+    MAXENGINE_CONFIG_FILEPATH="/mnt/disks/persist/maxtext/MaxText/configs/base.yml"
 fi
 
 
-if [ -z "$MAXENGINE_ARGS" ];
-then
-  CHECKPOINT="gs://msingh-bkt/checkpoints/quant_${MODEL_NAME}-chat/mlperf_070924/int8_"
-  BASE_CFG="model_name=${MODEL_NAME} tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT}"
-  QUANT_CFG="quantization=int8 quantize_kvcache=True checkpoint_is_quantized=True"
-  MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG}"
+# if [ -z "$MAXENGINE_ARGS" ];
+# then
+CHECKPOINT="gs://msingh-bkt/checkpoints/quant_${MODEL_NAME}-chat/mlperf_070924/int8_"
+BASE_CFG="model_name=${MODEL_NAME} tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT}"
+QUANT_CFG="quantization=int8 quantize_kvcache=True checkpoint_is_quantized=True"
+PAGED_ATTN_CFG=""
+if "$paged"; then
+    PAGED_ATTN_CFG="attention=paged pagedattn_num_pages=16384 pagedattn_tokens_per_page=32 pagedattn_pages_per_compute_block=4"
 fi
+
+MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${PAGED_ATTN_CFG}"
+# fi
+echo "BASE_CFG: ${BASE_CFG}"
+echo "paged: ${paged}"
 
 if [ -z "$BASEDIR" ];
 then
@@ -103,7 +112,7 @@ fi
 
 if [ -z "$DATA_DISK_DIR" ];
 then
-  DATA_DISK_DIR=/home/${USER}/loadgen_run_data
+  DATA_DISK_DIR=/mnt/disks/persist/openorca
 fi
 
 export LOADGEN_RUN_TIMESTAMP=$(TZ=America/Los_Angeles date +%Y%m%d%H%M%S%Z)
@@ -111,13 +120,13 @@ export API_URL=0.0.0.0:9000
 if "$test_run"; then
   export DATASET_TYPE=test
   export DATASET_PATH=${DATA_DISK_DIR}/processed-data.pkl
-  export TOTAL_SAMPLE_COUNT=1000
-  export USER_CONFIG=user${TOTAL_SAMPLE_COUNT}.conf
+  export TOTAL_SAMPLE_COUNT=100
+  export USER_CONFIG=/mnt/disks/persist/maxtext/MaxText/inference_mlperf/trillium/user${TOTAL_SAMPLE_COUNT}.conf
 else
   export DATASET_TYPE=full
   export DATASET_PATH=${DATA_DISK_DIR}/processed-data.pkl
   export TOTAL_SAMPLE_COUNT=24576
-  export USER_CONFIG=user.conf
+  export USER_CONFIG=/mnt/disks/persist/maxtext/MaxText/inference_mlperf/trillium/user.conf
 fi
 
 # LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"

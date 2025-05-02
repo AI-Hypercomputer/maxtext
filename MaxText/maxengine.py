@@ -137,11 +137,29 @@ class MaxEngine(engine_api.Engine):
     max_utils.print_cpu_ram_stats(label)
 
   def generate_aot(
-      self, params: Params, decode_state: DecodeState, rng: Optional[PRNGKeyType] = None
+    self, params: Params, decode_state: DecodeState, rng: Optional[PRNGKeyType] = None
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
     """Wrapper to generate for ahead of time compilation."""
+    aot_page_state_snapshot: Optional[PageState] = self.page_state
 
-    return self.generate(params=params, decode_state=decode_state, rng=rng)
+    if self.config.attention == "paged" and self.page_manager is not None:
+        if aot_page_state_snapshot is None:
+            # If self.page_state is None at AOT compile time, use a fresh initial state.
+            aot_page_state_snapshot = self.page_manager.get_initial_page_state()
+        # IMPORTANT: We are NOT calling self.page_manager.update_decode_pages() here.
+        # This 'generate_aot' is only for AOT-compiling the _generate_jit call
+        # with *a* representative PageState. The actual page update logic for runtime
+        # is handled by the public self.generate() method.
+    
+    # Call the already JITted core generation kernel (_generate_jit)
+    new_slot_decode_state, result_tokens = self._generate_jit(
+        params=params,
+        decode_state=decode_state,
+        sampler=None, # Assuming no sampler or default behavior for AOT
+        rng=rng,
+        page_state=aot_page_state_snapshot # Pass the PageState determined for AOT
+    )
+    return new_slot_decode_state, result_tokens
 
   def _compile_generate_and_get_layouts(
       self, params: Any, decode_state: Any, rng_shape: Any, xla_flags: dict[str, Any] | None = None
@@ -523,12 +541,16 @@ class MaxEngine(engine_api.Engine):
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Public API for prefill that updates page state outside JIT."""
     # Update page state before JIT call
+
     if self.config.attention == "paged" and self.page_manager is not None and self.page_state is not None:
+      print(f"\nprefill: {request_id=}, {slot=}")
+      # print("Before prefill:", self.page_state)
       self.page_state = self.page_manager.update_prefill_pages(  # pytype: disable=attribute-error
           page_state=self.page_state,
           page_group_id=slot,
           true_length=true_length,
       )
+      # print("After prefill:", self.page_state)
 
     # Call JIT-compiled version with current state
     return self._prefill_jit(
@@ -836,6 +858,8 @@ class MaxEngine(engine_api.Engine):
         length_idx=(2, 3),
         samples_per_slot=1,
     )
+    # jax.debug.print("DEBUG: _generate_jit slot={slot_id} new_token={t}", t=new_token, slot_id=decode_state["next_pos"][:,0]-1)
+
 
     return {
         "logits": out_logits,

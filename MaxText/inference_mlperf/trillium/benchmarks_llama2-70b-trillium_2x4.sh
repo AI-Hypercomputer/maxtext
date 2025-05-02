@@ -4,6 +4,8 @@
 # bash benchmarks_llama2-70b-trillium_2x4.sh [-b benchmark_type]
 # benchmark_type can be: performance, audit, accuracy, or all (default)
 
+set -x
+
 run_name="trillium_llama2-70b"
 dry_run=false
 enable_profiler=false
@@ -28,6 +30,7 @@ for arg in "$@"; do
         -n) dry_run=true ;;
         -p) enable_profiler=true ;;
         -t) test_mode=true ;;
+        -g|--paged) paged=true ;;
         -r=*|--run=*) run_name="${arg#*=}" ;;
         -r|--run) shift; run_name="$1" ;;
         -b=*|--benchmark=*) benchmark_type="${arg#*=}" ;;
@@ -57,6 +60,10 @@ fi
 
 if "$test_mode"; then
     RUN_OPTIONS="${RUN_OPTIONS} -t "
+fi
+
+if "$paged"; then
+    RUN_OPTIONS="${RUN_OPTIONS} -g "
 fi
 
 enable_xla_flags=true
@@ -98,7 +105,11 @@ fi
 BASE_CFG="model_name=llama2-70b tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT}"
 QUANT_CFG="quantization=${QUANTIZATION} quant_cfg_path=${QUANT_PATH} checkpoint_is_quantized=True"
 KV_QUANT_CFG="quantize_kvcache=True kv_quant_dtype=${KV_QUANT_DTYPE}"
-export MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${KV_QUANT_CFG} optimize_mesh_for_tpu_v6e=True"
+PAGED_ATTN_CFG=""
+if "$paged"; then
+    PAGED_ATTN_CFG="attention=paged pagedattn_num_pages=128 pagedattn_tokens_per_page=32 pagedattn_pages_per_compute_block=4"
+fi
+export MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${KV_QUANT_CFG} ${PAGED_ATTN_CFG} optimize_mesh_for_tpu_v6e=True"
 echo
 echo $MAXENGINE_ARGS
 echo
