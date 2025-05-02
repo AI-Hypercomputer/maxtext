@@ -53,8 +53,8 @@ jobs:
     with:
       device_type: gpu
       device_name: a100-40gb-4
-      build_mode: pinned
-      base_image: gcr.io/tpu-prod-env-multipod/maxtext_gpu_jax_pinned:latest
+      build_mode: stable_stack
+      base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/gpu:latest
 
   tpu_unit_tests:
     needs: tpu_image
