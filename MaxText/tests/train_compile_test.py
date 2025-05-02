@@ -567,12 +567,15 @@ class TrainCompile(unittest.TestCase):
             None,
             os.path.join(PKG_DIR, "configs", "base.yml"),
             f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v6e-256",
+            "compile_topology=v5p-256",
             "compile_topology_num_slices=1",
             "model_name=llama4-17b-16e",
             "per_device_batch_size=1",
             "max_target_length=1024",
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
+            "scan_layers=False",
+            "ici_fsdp_parallelism=32",
+            "ici_tensor_parallelism=4",
         )
     )
