@@ -61,7 +61,7 @@ def create_orbax_checkpoint_manager(
   if not enable_checkpointing:
     max_logging.log("Checkpointing disabled, not creating checkpoint manager.")
     return None
-  max_logging.log("Creating checkpoint manager...")
+  max_logging.log(f"Creating checkpoint manager with ocdbt={use_ocdbt} and zarr3={use_zarr3}")
   p = epath.Path(checkpoint_dir)
 
   if dataset_type == "grain":
@@ -342,6 +342,7 @@ def load_params_from_path(
   ckpt = epath.Path(load_parameters_from_path)
 
   # *_concurrent_gb should be set for large models, the default is 96.
+  max_logging.log(f"Creating checkpoint manager with ocdbt={use_ocdbt} and zarr3={use_zarr3}")
   ckptr = ocp.Checkpointer(
       ocp.PyTreeCheckpointHandler(
           restore_concurrent_gb=checkpoint_storage_concurrent_gb,
@@ -365,6 +366,7 @@ def load_params_from_path(
 def save_params_to_path(checkpoint_dir, params, use_ocdbt=True, use_zarr3=True):
   """Save decode params in checkpoint at specified path."""
   assert checkpoint_dir, "checkpoint_dir is not defined."
+  print(f"Saving quantized params checkpoint with use_ocdbt = {use_ocdbt} and use_zarr3 = {use_zarr3}")
   orbax_checkpointer = ocp.PyTreeCheckpointer(use_ocdbt=use_ocdbt, use_zarr3=use_zarr3)
   orbax_checkpointer.save(checkpoint_dir, {"params": params}, force=True)
   print(f"Quantized params checkpoint saved at: {checkpoint_dir}")
