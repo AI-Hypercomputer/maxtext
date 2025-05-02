@@ -35,14 +35,15 @@ class RaggedAttentionTest(unittest.TestCase):
   head_dim = 128
 
   dtype = jnp.float32
-  key = jax.random.key(0)
-  k1, k2, k3 = jax.random.split(key, 3)
 
   @pytest.mark.tpu_only
   def test_ragged_mqa(self):
-    q = jax.random.normal(self.k1, (self.batch_size, 1, self.head_dim), dtype=self.dtype)
-    k = jax.random.normal(self.k2, (self.batch_size, self.max_target_length, self.head_dim), dtype=self.dtype)
-    v = jax.random.normal(self.k3, (self.batch_size, self.max_target_length, self.head_dim), dtype=self.dtype)
+    key = jax.random.key(0)
+    k1, k2, k3 = jax.random.split(key, 3)
+
+    q = jax.random.normal(k1, (self.batch_size, 1, self.head_dim), dtype=self.dtype)
+    k = jax.random.normal(k2, (self.batch_size, self.max_target_length, self.head_dim), dtype=self.dtype)
+    v = jax.random.normal(k3, (self.batch_size, self.max_target_length, self.head_dim), dtype=self.dtype)
     lengths = jnp.array(np.random.randint(1, self.max_target_length, self.batch_size), dtype=jnp.int32)
 
     ragged_out, ragged_max, ragged_denom = ragged_mqa(q, k, v, lengths)
@@ -58,12 +59,15 @@ class RaggedAttentionTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_ragged_mha(self):
-    q = jax.random.normal(self.k1, (self.batch_size, 1, self.num_query_heads, self.head_dim), dtype=self.dtype)
+    key = jax.random.key(0)
+    k1, k2, k3 = jax.random.split(key, 3)
+
+    q = jax.random.normal(k1, (self.batch_size, 1, self.num_query_heads, self.head_dim), dtype=self.dtype)
     k = jax.random.normal(
-        self.k2, (self.batch_size, self.max_target_length, self.num_query_heads, self.head_dim), dtype=self.dtype
+        k2, (self.batch_size, self.max_target_length, self.num_query_heads, self.head_dim), dtype=self.dtype
     )
     v = jax.random.normal(
-        self.k3, (self.batch_size, self.max_target_length, self.num_query_heads, self.head_dim), dtype=self.dtype
+        k3, (self.batch_size, self.max_target_length, self.num_query_heads, self.head_dim), dtype=self.dtype
     )
     lengths = jnp.array(np.random.randint(1, self.max_target_length, self.batch_size), dtype=jnp.int32)
 
@@ -81,12 +85,15 @@ class RaggedAttentionTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_ragged_gqa(self):
-    q = jax.random.normal(self.k1, (self.batch_size, 1, self.num_query_heads, self.head_dim), dtype=self.dtype)
+    key = jax.random.key(0)
+    k1, k2, k3 = jax.random.split(key, 3)
+
+    q = jax.random.normal(k1, (self.batch_size, 1, self.num_query_heads, self.head_dim), dtype=self.dtype)
     k = jax.random.normal(
-        self.k2, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype
+        k2, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype
     )
     v = jax.random.normal(
-        self.k3, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype
+        k3, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype
     )
     lengths = jnp.array(np.random.randint(1, self.max_target_length, self.batch_size), dtype=jnp.int32)
 
