@@ -20,6 +20,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
+from MaxText import max_logging
 import functools
 import time
 import os
@@ -31,9 +32,6 @@ from collections.abc import Sequence
 import collections
 from typing import Any, Tuple
 from functools import partial
-
-from MaxText import max_logging
-
 
 import orbax.checkpoint as ocp
 
@@ -262,7 +260,9 @@ def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):
       my_process_index = jax.process_index()
       processIndex_to_nodeRank = ocp.multihost.runtime_to_distributed_ids()
       max_logging.log(
-          f"Mapping of IDs: jax-init-info.txt={process_id}, NodeRank={node_rank}, ProcessIndex={my_process_index}, ProcessIndex->NodeRank={processIndex_to_nodeRank}"
+          f"Mapping of IDs: jax-init-info.txt={process_id}, \
+            NodeRank={node_rank}, ProcessIndex={my_process_index}, \
+            ProcessIndex->NodeRank={processIndex_to_nodeRank}"
       )
 
       my_in_pipeline_index = my_process_index % nodes_per_slice
@@ -739,31 +739,68 @@ def unpermute_from_match_maxtext_rope(arr, model_size):
   return jax.numpy.concatenate((evens, odds), axis=arr.ndim - 1)
 
 
-@partial(jax.jit, static_argnums=1)
-def reorder_sequence(tensor, cp_size: int):
+@partial(jax.jit, static_argnames=("cp_size", "seq_dim", "to_contiguous"))
+def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool = False):
   """Reorders the sequence of the tensor. For example, with cp_size=2,
-  [0, 1, 2, 3, 4, 5, 6, 7] -> [0, 1, 6, 7, 2, 3, 4, 5]"""
+  [0, 1, 2, 3, 4, 5, 6, 7] -> [0, 1, 6, 7, 2, 3, 4, 5]
+  and backward
+  [0, 1, 6, 7, 2, 3, 4, 5] -> [0, 1, 2, 3, 4, 5, 6, 7]
+  """
 
-  # Assumption is the tensor is of shape [B,S]
-  # Reshape [B,S] -> [B, 2*cp_size, S/(2*cp_size)]
-  batch_size = tensor.shape[0]
-  seq_len = tensor.shape[1]
+  if tensor is None:
+    return tensor
+
+  seq_len = tensor.shape[seq_dim]
   group_size = seq_len // (2 * cp_size)
 
-  reshaped = tensor.reshape(batch_size, 2 * cp_size, group_size)
+  if cp_size % 2 != 0:
+    raise ValueError(f"{cp_size=} must be a multiple of 2.")
 
-  # Create first and second halves
-  first_half = jnp.arange(cp_size)
-  second_half = jnp.arange(2 * cp_size - 1, cp_size - 1, -1)
+  # Need to ensure we have 2 pairs to swap for balancing between cp ranks
+  if seq_len % (cp_size * 2) != 0:
+    raise ValueError(f"{tensor.shape=} is not a multiple of {cp_size*2=}")
 
-  # Stack and reshape to interleave
-  src_indices = jnp.stack([first_half, second_half], axis=1).reshape(-1)
+  # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
+  # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
+  ori_tensor_shape = tensor.shape
+  reshaped = tensor.reshape(
+      *ori_tensor_shape[:seq_dim],
+      2 * cp_size,
+      group_size,
+      *ori_tensor_shape[seq_dim + 1 :],
+  )
 
-  # Indexing the reshaped tensor using JAX take operation
-  reordered = jnp.take(reshaped, src_indices, axis=1)
+  if not to_contiguous:
+    # Create first and second halves
+    first_half = jnp.arange(cp_size)
+    second_half = jnp.arange(2 * cp_size - 1, cp_size - 1, -1)
+
+    # Stack and reshape to interleave
+    src_indices = jnp.stack([first_half, second_half], axis=1).reshape(-1)
+
+  else:
+
+    half = cp_size // 2
+
+    # Build the 1st and 2nd groups of contiguous‑pair indices:
+    first_pair = [4 * r for r in range(half)]  # [0, 4, 8, …]
+    second_pair = [4 * r + 2 for r in range(half)]  # [2, 6, 10, …]
+    third_pair = [2 * cp_size - 1 - 4 * r for r in range(half)]  # [2*cp_size-1, 2*cp_size-5, …]
+    fourth_pair = [i - 2 for i in third_pair]  # [2*cp_size-3, 2*cp_size-7, …]
+
+    # Concatenate so each rank’s two indices sit next to each other:
+    # e.g. [0,2, 4,6, …, (2cp‑1),(2cp‑3), …]
+    first_block = first_pair + third_pair
+    second_block = second_pair + fourth_pair
+
+    # Stack into shape (2*cp_size//2, 2) → then flatten → length=2*cp_size
+    src_indices = jnp.stack([jnp.array(first_block), jnp.array(second_block)], axis=1).reshape(-1)
+
+  # One gather and one reshape
+  reordered = jnp.take(reshaped, src_indices, axis=seq_dim)
 
   # Reshape back to original dimensions
-  return reordered.reshape(batch_size, seq_len)
+  return reordered.reshape(ori_tensor_shape)
 
 
 @partial(jax.jit, static_argnums=1)
@@ -783,3 +820,52 @@ def reorder_causal_load_balanced(batch, cp_size):
 def get_reorder_callable(cp_size):
   """Creates a callable that can be used with map() to reorder batches."""
   return functools.partial(reorder_causal_load_balanced, cp_size=cp_size)
+
+
+@staticmethod
+def reorder_mask_load_balancing(tensor, cp_size: int, seq_dim: int):
+  """
+  Reorders a tensor for load balancing the compute of causal attention.
+  This function works on numpy arrays instead of jax.numpy arrays.
+  This is needed because we need the mask to be statically computable.
+  So, we need to redefine the same logic as reorder_causal_load_balancing.
+  We are still doing [0, 1, 2, 3, 4, 5, 6, 7] -> [0, 1, 6, 7, 2, 3, 4, 5]
+
+  Args:
+    tensor: The tensor to reorder.
+    cp_size: The size of the compute parallelism.
+    seq_dim: The dimension of the sequence.
+  """
+
+  seq_len = tensor.shape[seq_dim]
+  group_size = seq_len // (2 * cp_size)
+
+  if cp_size % 2 != 0:
+    raise ValueError(f"{cp_size=} must be a multiple of 2.")
+
+  # Need to ensure we have 2 pairs to swap for balancing between cp ranks
+  if seq_len % (cp_size * 2) != 0:
+    raise ValueError(f"{tensor.shape=} is not a multiple of {cp_size*2=}")
+
+  # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
+  # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
+  ori_tensor_shape = tensor.shape
+  reshaped = tensor.reshape(
+      *ori_tensor_shape[:seq_dim],
+      2 * cp_size,
+      group_size,
+      *ori_tensor_shape[seq_dim + 1 :],
+  )
+
+  # Create first and second halves
+  first_half = np.arange(cp_size)
+  second_half = np.arange(2 * cp_size - 1, cp_size - 1, -1)
+
+  # Stack and reshape to interleave
+  src_indices = np.stack([first_half, second_half], axis=1).reshape(-1)
+
+  # One gather and one reshape
+  reordered = np.take(reshaped, src_indices, axis=seq_dim)
+
+  # Reshape back to original dimensions
+  return reordered.reshape(ori_tensor_shape)

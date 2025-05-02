@@ -1235,6 +1235,7 @@ llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds = _add_to_model_dictiona
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
+            "tokenizer_type": "tiktoken",
             "tokenizer_path": "assets/tokenizer_llama3.tiktoken",
         },
         xla_flags=(
@@ -1298,6 +1299,7 @@ llama3_1_70b_8192_iter_synth_data_and_checkpointing = _add_to_model_dictionary(
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
+            "tokenizer_type": "tiktoken",
             "tokenizer_path": "assets/tokenizer_llama3.tiktoken",
         },
         xla_flags=(
@@ -1660,33 +1662,97 @@ gemma2_9b_8192 = _add_to_model_dictionary(
 
 
 gemma2_27b_8192 = _add_to_model_dictionary(
-    trillium_model_dict,
-    MaxTextModel(
-        model_name="gemma2-27b-8192",
-        model_type="gemma2-27b",
-        tuning_params={
-            "per_device_batch_size": 2,
-            "ici_fsdp_transpose_parallelism": 256,
-            "remat_policy": "full",
-            "max_target_length": 8192,
-            "attention": "flash",
-            "gcs_metrics": True,
-            "use_iota_embed": True,
-            "dataset_path": "gs://max-datasets-rogue",
-            "dataset_type": "synthetic",
-            "reuse_example_batch": 1,
-            "enable_checkpointing": False,
-            "profiler": "xplane",
-            "tokenizer_path": os.path.join("assets", "tokenizer.llama2"),
-            "sa_block_q": 2048,
-            "sa_block_q_dkv": 2048,
-            "sa_block_q_dq": 2048,
-        },
-        xla_flags=(
-            xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(vmem_limit=122880)
-            + xla_flags_library.REDUCE_SCATTER_FUSION
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-        ),
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="gemma2-27b-8192",
+    model_type="gemma2-27b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_transpose_parallelism": 256,
+        "remat_policy": "full",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "tokenizer_path": os.path.join("assets", "tokenizer.llama2"),
+        "sa_block_q": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+    },
+    xla_flags=(
+        xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(vmem_limit=122880)
+        + xla_flags_library.REDUCE_SCATTER_FUSION
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
     ),
+    )
 )
+
+# Config for Llama3.1 70B model with 131072 max target length aka context length
+llama3_1_70b_131072 = _add_to_model_dictionary(
+  trillium_model_dict,
+    MaxTextModel(
+    model_name="llama3_1_70b_131072",
+    model_type="llama3.1-70b",
+    tuning_params={
+        "per_device_batch_size": 0.125,
+        "ici_fsdp_parallelism": -1,
+        "ici_context_parallelism": 16,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "out_proj": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "max_target_length": 131072,
+        "attention": "flash",
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "enable_checkpointing": False,
+        "sa_block_q": 2048,
+        "sa_block_kv": 2048,
+        "sa_block_kv_compute": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_kv_dkv": 2048,
+        "sa_block_kv_dkv_compute": 2048,
+        "sa_block_q_dq": 2048,
+        "sa_block_kv_dq": 2048,
+        "sa_use_fused_bwd_kernel": True,
+        "profiler": "xplane",
+        "skip_first_n_steps_for_profiler": 10,
+        "profiler_steps": 5,
+        "tokenizer_type": "tiktoken",
+        "tokenizer_path": "assets/tokenizer_llama3.tiktoken", 
+        "packing": False,
+    },
+    xla_flags=(xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+        
+    ),
+    pathways_xla_flag_options={
+        xla_flags_library.REMOVE: [
+            "--2a886c8_chip_config_name=megachip_tccontrol"
+        ],
+        xla_flags_library.ADD_SERVER: (
+            xla_flags_library.ENHANCED_LAUNCH_BARRIER
+        ),
+        xla_flags_library.ADD_PROXY: (
+            xla_flags_library.ENHANCED_LAUNCH_BARRIER
+        ),
+        xla_flags_library.ADD_WORKER: (
+            xla_flags_library.ENHANCED_LAUNCH_BARRIER
+        ),
+    },
+  )
+)
+
+

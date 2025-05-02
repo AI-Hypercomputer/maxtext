@@ -43,6 +43,11 @@ from MaxText.layers import linears
 from MaxText.layers import quantizations
 from MaxText.common_types import DecoderBlockType
 
+from MaxText import max_logging
+from MaxText import max_utils
+import numpy as np
+
+partial = functools.partial
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -76,6 +81,7 @@ KV_BATCH = common_types.KV_BATCH
 DECODE_BATCH = common_types.DECODE_BATCH
 DECODE_LENGTH = common_types.DECODE_LENGTH
 LENGTH = common_types.LENGTH
+Q_LENGTH = common_types.Q_LENGTH
 KV_LENGTH = common_types.KV_LENGTH
 HEAD = common_types.HEAD
 EMBED = common_types.EMBED
@@ -293,7 +299,12 @@ class AttentionOp(nn.Module):
   float32_qk_product: bool = False
   max_prefill_predict_length: int = -1
   float32_logits: bool = False
-  flash_axis_names: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
+  flash_axis_names_kv: AxisNames = (BATCH, HEAD, KV_LENGTH, D_KV)
+  flash_axis_names_q: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
+  flash_axis_names_splash_kernel: AxisNames = (HEAD, LENGTH)
+  prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
+  cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
+  cache_scale_logical_axis_names: AxisNames = (CACHE_SCALE_BATCH, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV)
   ragged_qkv_axis_names: AxisNames = (CACHE_BATCH, CACHE_HEADS, CACHE_SEQUENCE, CACHE_KV)
   ragged_lengths_names: AxisNames = (CACHE_BATCH,)
   compute_axis_order: AxisIdxes = (0, 1, 2, 3)
@@ -568,15 +579,25 @@ class AttentionOp(nn.Module):
       attn_logits_soft_cap: float | None = None,
   ) -> Array:
     """TPU Flash Attention."""
+
+    cp_size = self.mesh.shape["context"]
+    load_balanced_context_parallel = self.config.context_parallel_load_balance
+
     # Transpose to ('batch', 'heads', 'length', 'kv')
     query = jnp.transpose(query, axes=(0, 2, 1, 3))
     key = jnp.transpose(key, axes=(0, 2, 1, 3))
     value = jnp.transpose(value, axes=(0, 2, 1, 3))
-
+    segment_axis_names_q = None
+    segment_axis_names_kv = None
     if decoder_segment_ids is not None:
-      decoder_segment_ids = splash_attention_kernel.SegmentIds(decoder_segment_ids, decoder_segment_ids)
-    axis_names = nn.logical_to_mesh_axes(self.flash_axis_names)
-    segment_axis_names = nn.logical_to_mesh_axes((BATCH, "activation_length_no_heads"))
+      segment_axis_names_q = nn.logical_to_mesh_axes((BATCH, Q_LENGTH))
+      segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH, KV_LENGTH))
+    axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
+    axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
+    axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
+    max_logging.log(f"axis_names_q: {axis_names_q}")
+    max_logging.log(f"axis_names_kv: {axis_names_kv}")
+    max_logging.log(f"axis_names_splash_kernel: {axis_names_splash_kernel}")
 
     global_block_q = self.config.sa_block_q
     global_block_kv = self.config.sa_block_kv
@@ -591,40 +612,46 @@ class AttentionOp(nn.Module):
     global_k_layout = self.config.sa_k_layout
     global_v_layout = self.config.sa_v_layout
 
-    @functools.partial(
-        shard_map,
-        mesh=self.mesh,
-        in_specs=(
-            axis_names,
-            axis_names,
-            axis_names,
-            segment_axis_names,
-        ),
-        out_specs=axis_names,
-        check_rep=False,
+    devices_in_data_fsdp = self.mesh.shape["data"] * self.mesh.shape["fsdp"]
+    assert (query.shape[0] / devices_in_data_fsdp).is_integer(), (
+        "Batch dimension should be shardable among the devices in data and fsdp"
+        " axis"
+        f" got {query.shape[0]=}/{devices_in_data_fsdp=}"
     )
-    def wrap_flash_attention(query, key, value, decoder_segment_ids):
-      if decoder_segment_ids is not None:
-        assert (
-            query.shape[2] == decoder_segment_ids.q.shape[1]
-        ), "Sharding along sequence dimension not allowed in tpu kernel attention"
-      block_sizes = splash_attention_kernel.BlockSizes(
-          block_q=min(global_block_q, query.shape[2]),
-          block_kv=min(global_block_kv, key.shape[2]),
-          block_kv_compute=min(global_block_kv_compute, key.shape[2]),
-          block_q_dkv=min(global_block_q_dkv, query.shape[2]),
-          block_kv_dkv=min(global_block_kv_dkv, key.shape[2]),
-          block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
-          block_q_dq=None if global_use_fused_bwd_kernel else min(global_block_q_dq, query.shape[2]),
-          block_kv_dq=None if global_use_fused_bwd_kernel else min(global_block_kv_dq, query.shape[2]),
-          use_fused_bwd_kernel=global_use_fused_bwd_kernel,
-          q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
-          k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
-          v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
+
+    # create_splash_attention kernel
+    block_sizes = splash_attention_kernel.BlockSizes(
+        block_q=min(global_block_q, query.shape[2]),
+        block_kv=min(global_block_kv, key.shape[2]),
+        block_kv_compute=min(global_block_kv_compute, key.shape[2]),
+        block_q_dkv=min(global_block_q_dkv, query.shape[2]),
+        block_kv_dkv=min(global_block_kv_dkv, key.shape[2]),
+        block_kv_dkv_compute=min(global_block_kv_dkv_compute, query.shape[2]),
+        block_q_dq=None if global_use_fused_bwd_kernel else min(global_block_q_dq, query.shape[2]),
+        block_kv_dq=None if global_use_fused_bwd_kernel else min(global_block_kv_dq, query.shape[2]),
+        use_fused_bwd_kernel=global_use_fused_bwd_kernel,
+        q_layout=splash_attention_kernel.QKVLayout[global_q_layout],
+        k_layout=splash_attention_kernel.QKVLayout[global_k_layout],
+        v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
+    )
+
+    mask_shape = (self.config.max_target_length, self.config.max_target_length)
+    mask = splash_attention_mask.CausalMask(shape=mask_shape)
+
+    # Create LoadBalancedCausalMask if cp and load_balancing
+    if cp_size > 1 and load_balanced_context_parallel:
+      mask = LoadBalancedCausalMask(shape=mask_shape, cp_size=cp_size)
+
+    # TODO: figure out local_sliding attention + load_balancing, default is global
+    # Apply local masking if local sliding attention is enabled.
+    if self.attention_type == AttentionType.LOCAL_SLIDING:
+      if self.sliding_window_size is None:
+        raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
+      mask &= splash_attention_mask.LocalMask(
+          shape=(query.shape[2], key.shape[2]),
+          window_size=(self.sliding_window_size, self.sliding_window_size),
+          offset=0,
       )
-
-      mask = splash_attention_mask.CausalMask(shape=(query.shape[2], query.shape[2]))
-
       # Apply local masking if local sliding attention is enabled.
       if self.attention_type == AttentionType.LOCAL_SLIDING:
         if self.sliding_window_size is None:
@@ -640,26 +667,100 @@ class AttentionOp(nn.Module):
 
         mask &= ChunkedCausalMask(shape=(query.shape[2], key.shape[2]), chunk_size=self.chunk_attn_window_size)
 
-      # Create multi-head mask
-      multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
+    # Create multi-head mask
+    multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
+
+    # Create the splash attention kernel object separately, jit it for performance
+    @partial(
+        jax.jit,
+        static_argnames=[
+            "multi_head_mask",
+            "shard_head_size",
+        ],
+    )
+    def wrap_splash_kernel(multi_head_mask, shard_head_size=1):
       splash_kernel = splash_attention_kernel.make_splash_mha(
           mask=multi_head_mask,
-          head_shards=1,
-          q_seq_shards=1,
+          head_shards=shard_head_size,  # the size of the axis if sharding over heads
+          q_seq_shards=cp_size,  # axis for sequence sharding
           block_sizes=block_sizes,
           attn_logits_soft_cap=attn_logits_soft_cap,
       )
+      return splash_kernel
 
-      return jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids)
-
-    devices_in_data_fsdp = self.mesh.shape["data"] * self.mesh.shape["fsdp"]
-    assert (query.shape[0] / devices_in_data_fsdp).is_integer(), (
-        "Batch dimension should be shardable among the devices in data and fsdp"
-        " axis"
-        f" got {query.shape[0]=}/{devices_in_data_fsdp=}"
+    logical_axis_rules_head = np.array(
+        [self.mesh.shape[physical_axes] for physical_axes in dict(self.config.logical_axis_rules)[HEAD]]
     )
-    x = wrap_flash_attention(query, key, value, decoder_segment_ids)
+    shard_head_size = np.prod(logical_axis_rules_head)
+    splash_kernel = wrap_splash_kernel(multi_head_mask, int(shard_head_size))
+    named_sharding = jax.sharding.NamedSharding(self.mesh, axis_names_splash_kernel)
+    segment_axis_names_splash_kernel = splash_kernel.manual_sharding_spec(named_sharding)
+
+    # Now call the function wrap_flash_attention which does the actual computation.
+    # The splash kernel is passed as a parameter to the function. Since we have the shard map
+    # decorating the wrap_flash_attention function, the data will be correctly sharded
+    # meaning q will be sharded over sequence aka context length but K and V will be duplicated
+    # The shardings are specified in the in_specs and out_specs of the shard_map decorator:
+    # 'segment_axis_names_q' maps to ['activation_q_length', ['context']] meaning that q is sharded over the context axis
+    #  'segment_axis_names_kv' maps to ['activation_kv_length', []] meaning that K and V are not sharded
+    # splash_kernel is sharded over (HEAD, LENGTH)
+    @functools.partial(
+        shard_map,
+        mesh=self.mesh,
+        in_specs=(
+            axis_names_q,
+            axis_names_kv,
+            axis_names_kv,
+            segment_axis_names_q,
+            segment_axis_names_kv,
+            segment_axis_names_splash_kernel,
+            None, # no sharding for cp_size
+            None, # no sharding for load_balanced_context_parallel
+        ),
+        out_specs=axis_names_q,
+        check_rep=False,
+    )
+    def wrap_flash_attention(
+        query,
+        key,
+        value,
+        decoder_segment_ids_q,
+        decoder_segment_ids_kv,
+        splash_kernel,
+        cp_size,
+        load_balanced_context_parallel,
+    ):
+      # If load_balanced_context_parallel is enabled, reorder the key and value tensors
+      # to ensure that they are contiguous in memory.
+      # This is necessary for the splash attention kernel to work correctly because it expects
+      # the K and V  to be contiguous. Note that K and V are not sharded over the sequence aka context axis
+      # This was we get the unsharded unpermuted key and value tensors
+      if cp_size > 1 and load_balanced_context_parallel:
+        key = max_utils.reorder_sequence(tensor=key, cp_size=cp_size, seq_dim=2, to_contiguous=True)
+        value = max_utils.reorder_sequence(tensor=value, cp_size=cp_size, seq_dim=2, to_contiguous=True)
+        decoder_segment_ids_unpermuted = max_utils.reorder_sequence(
+            tensor=decoder_segment_ids_kv, cp_size=cp_size, seq_dim=1, to_contiguous=True
+        )
+
+      if decoder_segment_ids_q is not None:
+        if cp_size > 1 and load_balanced_context_parallel:
+          decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(
+              decoder_segment_ids_q, decoder_segment_ids_unpermuted
+          )
+        else:
+          decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(decoder_segment_ids_q, decoder_segment_ids_q)
+      else:
+        decoder_segment_ids_tuple = None
+      attention_output = jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids_tuple)
+
+      return attention_output
+
+    x = wrap_flash_attention(
+        query, key, value, decoder_segment_ids, decoder_segment_ids, splash_kernel, cp_size, load_balanced_context_parallel
+    )
+
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
+
     return x
 
   def cudnn_flash_attention(
@@ -1698,3 +1799,57 @@ class MLA(Attention):
     out = nn.with_logical_constraint(out, self.out_axis_names)
     out = self.out_projection(inputs_q.shape[-1], out)
     return out
+
+
+class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
+  """Lazy causal mask, prevents the model from attending to future tokens.
+  Attributes:
+    offset: Offset of q start wrt kv. A positive offset shifts the bottom
+      triangle upward, a negative one shifts it downward. A negative offset
+      makes the first 'offset' rows of the attention matrix all 0s which leads
+      to undefined softmax.
+  """
+
+  offset: int
+  shape: tuple[int, int]
+  cp_size: int
+
+  def __init__(self, shape: tuple[int, int], offset: int = 0, shard_count: int = 1, cp_size: int = 4):
+    self.offset = offset
+
+    def causal_mask_function(q_ids, kv_ids):
+      if self.offset == 0:
+        return q_ids >= kv_ids
+      else:
+        return q_ids + self.offset >= kv_ids
+
+    arr = np.arange(shape[0])
+    # we reorder the mask to be load balanced following the same approach as
+    # used to reorder the input tokens
+    out = max_utils.reorder_mask_load_balancing(arr[None, :, None, None], cp_size, 1)
+    q_sequence = out[0, :, 0, 0]
+
+    mask_function = causal_mask_function
+
+    super().__init__(
+        shape=shape,
+        mask_function=mask_function,
+        shard_count=shard_count,
+    )
+    self.q_sequence = q_sequence
+
+  def __eq__(self, other: object):
+    if not isinstance(other, type(self)):
+      return NotImplemented
+
+    return self.shape == other.shape and self.offset == other.offset and np.array_equal(self.q_sequence, other.q_sequence)
+
+  def __hash__(self):
+    return hash(
+        (
+            type(self),
+            self.shape,
+            self.offset,
+            self.q_sequence.tobytes() if self.q_sequence is not None else None,
+        )
+    )
