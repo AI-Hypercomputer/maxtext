@@ -66,6 +66,6 @@ jobs:
             ${{ inputs.container_resource_option }} \
             gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:${{ inputs.device_type }} \
             bash -c "
-              python3 -m pip install -e . &&
+              python3 -m pip install -e . --no-dependencies &&
               python3 -m pytest --pyargs MaxText.tests -m '${{ inputs.pytest_marker }}' --durations=0
             "

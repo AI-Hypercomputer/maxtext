@@ -32,7 +32,7 @@ RUN if [ "$DEVICE" = "tpu" ] && ([ "$JAX_STABLE_STACK_BASEIMAGE" = "us-docker.pk
         python3 -m pip install --no-cache-dir --upgrade jax[tpu]; fi
 
 # Install Maxtext requirements with Jax Stable Stack
-RUN apt-get update && apt-get install --yes google-cloud-cli && apt-get install --yes dnsutils
+RUN apt-get update && apt-get install --yes && apt-get install --yes dnsutils
 
 # Install requirements file generated with pipreqs for JSS 0.5.2. 
 # Othewise use general requirements_with_jax_stable_stack.txt
