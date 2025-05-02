@@ -444,7 +444,6 @@ def setup_initial_state(
         data_iterator,
         config.load_parameters_path,
         config.load_full_state_path,
-        config.checkpoint_storage_concurrent_gb,
         unboxed_abstract_state,
         config.enable_single_replica_ckpt_restoring,
         config.dataset_type,
@@ -474,8 +473,10 @@ def setup_initial_state(
           in_shardings=None,
           out_shardings=state_mesh_shardings,
       )(rng)
+
       if raw_params:  # If we loaded a partial state, we need to merge it.
-        state = state.replace(params=raw_params)
+        raw_params = raw_params["params"]
+        state = state.replace(params=dict(state.params, params=raw_params))
 
   state = max_utils.unbox_logicallypartioned(state)
 

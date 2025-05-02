@@ -201,8 +201,16 @@ class MultiHostDataLoadIterator:
     num_slices = 1 if config.inference_benchmark_test else config.num_slices
     num_devices_per_slice = int(num_devices // num_slices)
 
-    default_dcn_parallelism = max_utils.get_unspecified_mesh_axes_value(config.dcn_parallelism, num_slices, "DCN")
-    default_ici_parallelism = max_utils.get_unspecified_mesh_axes_value(config.ici_parallelism, num_devices_per_slice, "ICI")
+    default_dcn_parallelism = (
+        max_utils.get_unspecified_mesh_axes_value(config.dcn_parallelism, num_slices, "DCN")
+        if config.dcn_parallelism.count(-1) == 1
+        else 0
+    )
+    default_ici_parallelism = (
+        max_utils.get_unspecified_mesh_axes_value(config.ici_parallelism, num_devices_per_slice, "ICI")
+        if config.ici_parallelism.count(-1) == 1
+        else 0
+    )
 
     self.input_data_dcn_parallelisms = _get_input_data_parallelisms(
         config, prefix="dcn", default_mesh_parallelism=default_dcn_parallelism

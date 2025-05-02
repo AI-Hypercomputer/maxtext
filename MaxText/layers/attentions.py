@@ -423,7 +423,7 @@ class AttentionOp(nn.Module):
         dtype=self.dtype,
         float32_logits=self.float32_logits,
         qkv_layout="BSHD_BSHD_BSHD",  # 'BS3HD', 'BSHD_BS2HD' or 'BSHD_BSHD_BSHD'
-        scale_factor=1.0 / math.sqrt(head_dim),
+        scale_factor=1.0,
         transpose_batch_sequence=False,
         window_size=sliding_window_size,
     )

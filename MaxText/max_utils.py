@@ -462,6 +462,7 @@ def get_unspecified_mesh_axes_value(parallelism_vals, target_product, parallelis
 def fill_unspecified_mesh_axes(parallelism_vals, target_product, parallelism_type):
   """Evaluates unspecified DCN/ICI parallelism values"""
   if -1 in parallelism_vals:
+    print(parallelism_vals)
     determined_val = get_unspecified_mesh_axes_value(parallelism_vals, target_product, parallelism_type)
     parallelism_vals[parallelism_vals.index(-1)] = int(determined_val)
 
@@ -802,8 +803,9 @@ def setup_initial_state(
           in_shardings=None,
           out_shardings=state_mesh_shardings,
       )(rng)
-      raw_params = raw_params["params"]
+      
       if raw_params:  # If we loaded a partial state, we need to merge it.
+        raw_params = raw_params["params"]
         state = state.replace(params=dict(state.params, params=raw_params))
       max_logging.log("after restore",state.params)
 
