@@ -16,7 +16,7 @@ concurrency:
 jobs:
   cpu:
     name: "CPU tests"
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         os: [ubuntu-22.04]
