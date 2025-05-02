@@ -26,7 +26,7 @@ import jax
 from MaxText.train import main as train_main
 from MaxText.globals import PKG_DIR
 
-print(jax.devices())
+#print(jax.devices())
 
 
 def generate_random_string(length=10):

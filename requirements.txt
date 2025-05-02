@@ -17,7 +17,7 @@ grain[parquet]>=0.2.6
 flax>=0.8.0
 jaxtyping
 ml-collections
-ml-goodput-measurement==0.0.10
+ml-goodput-measurement==0.0.8
 numpy
 optax
 protobuf==3.20.3
