@@ -96,7 +96,8 @@ def main(argv: Sequence[str]) -> None:
   text = config.prompt
   prefill_length = config.max_prefill_predict_length
   if config.use_multimodal:
-    text = multimodal_utils.reformat_prompt(text, config.model_name)
+    # text = multimodal_utils.reformat_prompt(text, config.model_name)
+    text = f'<start_of_turn>user\n{text}<end_of_turn>\n<start_of_turn>model\n'
     prefill_length -= multimodal_utils.get_image_offsets(config.model_name)
 
   metadata = engine.get_tokenizer()

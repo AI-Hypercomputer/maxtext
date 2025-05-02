@@ -23,6 +23,7 @@ import jax
 import jax.numpy as jnp
 from PIL import Image
 
+import einops
 
 _GEMMA_DEFAULT_IMAGE_SIZE = 896
 _GEMMA_IMAGE_MEAN = (127.5,) * 3
@@ -338,3 +339,43 @@ def _get_new_mm_tokens_inner(
   row = row.at[new_positions].set(mm_tokens_to_insert)
   row = row.at[0].set(0)
   return row
+
+
+def merge_mm_embeddings(
+    text_embeddings: np.ndarray | jnp.ndarray,
+    vision_embeddings: np.ndarray | jnp.ndarray,
+    mask,
+) -> np.ndarray | jnp.ndarray:
+  """Merge the text and MM tokens.
+
+  Args:
+    tokens: The text tokens.
+    mm_tokens: The MM tokens.
+
+  Returns:
+    The merged tokens.
+  """
+  return jax.vmap(_merge_mm_embeddings_inner, in_axes=(0, 0, 0))(
+      text_embeddings, vision_embeddings, mask
+  )
+
+
+def _merge_mm_embeddings_inner(text_embeddings, vision_embeddings, mask):
+  """`merge_embeddings` without batch dimension."""
+
+  vision_embeddings = einops.rearrange(
+      vision_embeddings,
+      'num_images num_toks_per_image d -> (num_images num_toks_per_image) d',
+  )
+
+  # len(vision_embeddings) == max_num_images * num_tokens_per_image
+  target_pos = jnp.nonzero(mask, size=len(vision_embeddings))
+
+  # Save and restore the first position overwritten if there's no MM tokens.
+  first_pos = text_embeddings[0]
+
+  merged = text_embeddings.at[target_pos, :].set(vision_embeddings)
+
+  merged = merged.at[0].set(first_pos)
+
+  return merged

@@ -34,6 +34,7 @@ from MaxText.layers import linears
 from MaxText.layers import normalizations, quantizations
 from MaxText.layers import pipeline
 from MaxText import maxtext_utils
+from MaxText import multimodal_utils
 
 Array = common_types.Array
 Config = common_types.Config
@@ -430,13 +431,30 @@ class Decoder(nn.Module):
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
       bidirectional_mask: Optional[Any] = None,
+      image_embeddings: Optional[jnp.ndarray] = None,
   ):
     cfg = self.config
     mesh = self.mesh
     assert decoder_input_tokens.ndim == 2  # [batch, len]
 
+    jax.debug.print("*decoder_input_tokens {}", decoder_input_tokens.mean())
+    jax.debug.print("*decoder_input_tokens {}", decoder_input_tokens.shape)
+    if image_embeddings is not None:
+      jax.debug.print("*image_embeddings {}", image_embeddings.mean())
+      jax.debug.print("*image_embeddings {}", image_embeddings.shape)
+
     # [batch, length] -> [batch, length, emb_dim]
     y = self.shared_embedding(decoder_input_tokens.astype("int32"))
+
+    # Let's do the merge_mm_tokens here
+    if image_embeddings is not None:
+      mm_token_mask = decoder_input_tokens == -2
+      y = multimodal_utils.merge_mm_embeddings(
+        text_embeddings=y,
+        vision_embeddings=image_embeddings,
+        mask=mm_token_mask,
+      )
+
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
 
@@ -684,6 +702,7 @@ class Transformer(nn.Module):
       )
 
     bidirectional_mask = None
+    image_embeddings = None
     if self.config.use_multimodal and encoder_images is not None:
       image_embeddings = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
       # TODO(hengtaoguo, aireen): merge image_embeddings with decoder_input_tokens.
@@ -703,5 +722,6 @@ class Transformer(nn.Module):
         slot=slot,
         page_state=page_state,
         bidirectional_mask=bidirectional_mask,
+        image_embeddings=image_embeddings if self.config.use_multimodal else None,
     )
     return logits
