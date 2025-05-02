@@ -120,22 +120,23 @@ class Buffer:
     self.internal_buffer = []
 
   def push(self, data, data_sharding):
-    def _put():
-      device_data = jax.device_put(data, data_sharding)
-      with self.lock:
-        if self.queue.full():
-          try:
-            self.queue.get_nowait()
-          except:
-            pass
-        self.queue.put(device_data)
-    threading.Thread(target=_put).start()
+    device_data = jax.device_put(data, data_sharding)
+    with self.lock:
+      if self.queue.full():
+        try:
+          self.queue.get_nowait()
+        except:
+          pass
+      self.queue.put(device_data)
 
   def pull(self, desired_batch_size=None):
     with self.lock:
       # Fill internal buffer
-      while not self.queue.empty():
-        self.internal_buffer.append(self.queue.get_nowait())
+      while True:
+        try:
+          self.internal_buffer.append(self.queue.get_nowait())
+        except queue.Empty:
+          break
 
       if not self.internal_buffer:
         return None
@@ -150,7 +151,7 @@ class Buffer:
       while self.internal_buffer and count < desired_batch_size:
         batch = self.internal_buffer.pop(0)
         combined.append(batch)
-        count += batch.shape[0]  # assuming batch has shape (batch_size, ...)
+        count += 1
 
       if combined:
         return jax.tree_util.tree_map(lambda *xs: jnp.concatenate(xs, axis=0), *combined)
@@ -393,8 +394,9 @@ def concatenate_prompt_with_completions(config, tokenizer_model, prompts, true_l
     return full_seq, eos_index
 
   batched_concat_and_eos = jax.vmap(_concat_and_find_eos, in_axes=(0, 0, 0))
-  prompts = jnp.repeat(prompts, config.num_generations, axis=0)
-  true_length = jnp.repeat(true_length, config.num_generations, axis=0)
+  # prompts = jnp.repeat(prompts, config.num_generations, axis=0)
+  # true_length = jnp.repeat(true_length, config.num_generations, axis=0)
+  max_logging.log(f"Inside concatenate {prompts.shape=} {completions.shape=}")
   prompt_completions, eos_positions = batched_concat_and_eos(prompts, true_length, completions)
   return prompt_completions, eos_positions
 
@@ -436,7 +438,7 @@ def generate_completions(config, tokenizer_model, engine, data, params, rng):
   completions = jax.jit(
       functools.partial(generate, engine, params, config.max_target_length - config.max_prefill_predict_length)
   )(decode_state, rng)
-  max_logging.log(f"{completions.shape=}")
+  max_logging.log(f"{prompts.shape=} {completions.shape=}")
   data[f"{config.train_data_columns}_completions"], eos_positions = concatenate_prompt_with_completions(
       config, tokenizer_model, prompts, true_length, completions
   )
@@ -449,7 +451,6 @@ def generate_completions(config, tokenizer_model, engine, data, params, rng):
       jnp.arange(data[f"{config.train_data_columns}_completions"].shape[1]),
       0,
   )
-  true_length = jnp.repeat(true_length, config.num_generations, axis=0)
   completion_mask = data[f"{config.train_data_columns}_completions_position"] >= true_length[:, None] - 1
   data["ar_completions_segmentation"] = data[
       f"{config.train_data_columns}_completions_segmentation"
@@ -786,7 +787,7 @@ def setup_train_loop(config, config_inference):
   init_rng, writer, checkpoint_manager, mesh, inference_meshes, model, learning_rate_schedule, tx = setup_mesh_and_model(config, config_inference)
   record_goodput(recorder, config, recorder.record_tpu_init_end_time if recorder else None)
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
-  data_iterators = grpo_input_pipeline.create_data_iterator(config, inference_meshes)
+  data_iterators = grpo_input_pipeline.create_data_iterator(config_inference, inference_meshes)
   #TODO: setup_training_state may not need to return dataset_iterator, find out why it needs it
   state, _, state_mesh_shardings, _ = maxtext_utils.setup_training_state(
       model, data_iterators[0], tx, config, init_rng, mesh, checkpoint_manager
@@ -945,11 +946,13 @@ def train_loop(config, config_inference, state=None):
   example_batch = None
   last_step_completion = datetime.datetime.now()
 
-  param_buffer = Buffer(maxsize=1)
+  param_buffer = Buffer(maxsize=config.inference_replicas)
   data_buffer = Buffer(maxsize=-1)
   # initialize inference_params from the state before step=0
   # inference_params = [transfer_data({'params':state.params['params']}, {'params':state_mesh_shardings.params['params']}, inference_state_mesh_sharding.params) for inference_state_mesh_sharding in inference_state_mesh_shardings]
   inference_params = [jax.device_put({'params':state.params['params']}, inference_state_mesh_sharding.params) for inference_state_mesh_sharding in inference_state_mesh_shardings]
+  # for inference_state_mesh_sharding in inference_state_mesh_shardings:
+    # param_buffer.push({'params':state.params['params']}, inference_state_mesh_sharding.params)
   performance_metric_queue = None
   if config.report_heartbeat_metric_for_gcp_monitoring or config.report_performance_metric_for_gcp_monitoring:
     gcp_workload_monitor = GCPWorkloadMonitor(config.run_name)
@@ -961,13 +964,15 @@ def train_loop(config, config_inference, state=None):
 
   # do K rollouts of inference
   if config.inference_rollouts != 1:
+    max_logging.log(f"Doing {config.inference_rollouts} Inference rollouts before training starts")
     for k in range(config.inference_rollouts):
-      for data_iterator, inference_data_sharding, inference_param, p_generate in zip(data_iterators, inference_data_shardings, inference_params, p_generate_completions):
+      for data_iterator, inference_data_sharding, inference_param, p_generate, inference_mesh in zip(data_iterators, inference_data_shardings, inference_params, p_generate_completions, inference_meshes):
         example_batch = load_next_batch(data_iterator, example_batch, config)
         rng = jax.jit(jax.random.fold_in)(init_rng, k)
         rng, rng_gen = random.split(rng)
         example_batch = jax.device_put(example_batch, inference_data_sharding)
-        example_batch = p_generate(example_batch, inference_param, rng_gen)
+        with inference_mesh, nn_partitioning.axis_rules(config_inference.logical_axis_rules):
+          example_batch = p_generate(example_batch, inference_param, rng_gen)
         data_buffer.push(example_batch, in_shard_train[1])
         max_logging.log(f"example batch shape {example_batch.shape}")
   # max_logging.log(f"data buffer: {len(data_buffer.queue)}")
@@ -976,9 +981,9 @@ def train_loop(config, config_inference, state=None):
     if step == first_profiling_step or prof.should_activate_periodic_profile(step):
       optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
       prof.activate(blocking_object=state, optional_postfix=optional_postfix)
-
+    # inference_params = [param_buffer.pull() for _ in range(len(inference_data_shardings))]
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
-      for data_iterator, inference_param, p_generate in zip(data_iterators, inference_params, p_generate_completions):
+      for data_iterator, inference_data_sharding, inference_param, p_generate, inference_mesh in zip(data_iterators, inference_data_shardings, inference_params, p_generate_completions, inference_meshes):
         record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
         example_batch = load_next_batch(data_iterator, example_batch, config)
         record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
@@ -989,15 +994,19 @@ def train_loop(config, config_inference, state=None):
         rng, rng_gen = random.split(rng)
         example_batch = jax.device_put(example_batch, inference_data_sharding)
         # inference_param = param_buffer.pull() or inference_param
-        example_batch = p_generate(example_batch, inference_param, rng_gen)
+        with inference_mesh, nn_partitioning.axis_rules(config_inference.logical_axis_rules):
+          example_batch = p_generate(example_batch, inference_param, rng_gen)
+        max_logging.log("example batch shapes: " + ", ".join(f"{k}: {v.shape}" for k, v in example_batch.items()))
         data_buffer.push(example_batch, in_shard_train[1])
 
       training_batch = data_buffer.pull(desired_batch_size=config.inference_replicas)
-      max_logging.log(f"This is training batch shape {training_batch.shape=}")
+      max_logging.log("Training batch shapes: " + ", ".join(f"{k}: {v.shape}" for k, v in training_batch.items()))
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, training_batch, rng)
-      # if step != 0 and step % config.inference_rollouts == 0:
-      #   param_buffer.push({'params':state.params['params']}, inference_state_mesh_shardings.params)
+      if step != 0 and step % config.inference_rollouts == 0:
+        inference_params = [jax.device_put({'params':state.params['params']}, inference_state_mesh_sharding.params) for inference_state_mesh_sharding in inference_state_mesh_shardings]
+        # for inference_state_mesh_sharding in inference_state_mesh_shardings:
+        #   param_buffer.push({'params':state.params['params']}, inference_state_mesh_sharding.params)
     step_time_delta = datetime.datetime.now() - last_step_completion
     last_step_completion = datetime.datetime.now()
     record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
@@ -1081,7 +1090,7 @@ def train_loop(config, config_inference, state=None):
   max_utils.close_summary_writer(writer)
   record_goodput(recorder, config, recorder.record_job_end_time if recorder else None)
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    compiled = p_train_step.lower(state, example_batch, rng).compile()
+    compiled = p_train_step.lower(state, training_batch, rng).compile()
     compiled_stats = compiled.memory_analysis()
     if compiled_stats is not None:
       max_logging.log(
@@ -1115,7 +1124,7 @@ def main(argv: Sequence[str]) -> None:
       + [
         "ici_fsdp_parallelism=1",
         f"ici_tensor_parallelism={config.inference_devices_per_replica}",
-        "per_device_batch_size=" + str(config.per_device_batch_size * config.num_generations)
+        "per_device_batch_size=" + str(config.per_device_batch_size * config.num_generations / config.inference_replicas)
         ]
   )
   max_utils.print_system_information()
