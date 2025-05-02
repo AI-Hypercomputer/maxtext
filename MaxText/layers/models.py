@@ -623,8 +623,8 @@ class VisionEncoder(nn.Module):
       raise ValueError(f"No VisionEncoder implemented for {self.config.model_name} yet")
 
   @nn.compact
-  def __call__(self, input_images):
-    embeddings = self.vision_encoder_layer[0](config=self.config)(input_images)
+  def __call__(self, input_images, deterministic=False):
+    embeddings = self.vision_encoder_layer[0](config=self.config)(input_images, deterministic=deterministic)
     return embeddings
 
 
@@ -685,7 +685,7 @@ class Transformer(nn.Module):
 
     bidirectional_mask = None
     if self.config.use_multimodal and encoder_images is not None:
-      image_embeddings = self.vision_encoder(input_images=encoder_images)
+      image_embeddings = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
       # TODO(hengtaoguo, aireen): merge image_embeddings with decoder_input_tokens.
 
       if self.config.decoder_block == DecoderBlockType.GEMMA3:
