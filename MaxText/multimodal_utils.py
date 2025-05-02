@@ -26,11 +26,21 @@ import jax.numpy as jnp
 
 from PIL import Image
 
+NUM_IMAGE_CHANNELS = 3
 
-_GEMMA_DEFAULT_IMAGE_SIZE = 896
-_GEMMA_IMAGE_MEAN = (127.5,) * 3
-_GEMMA_IMAGE_STD = (127.5,) * 3
-_NUM_IMAGE_CHANNELS = 3
+# Constants for Gemma3-specific processing
+GEMMA_DEFAULT_IMAGE_SIZE = 896
+GEMMA_IMAGE_MEAN = (127.5,) * 3
+GEMMA_IMAGE_STD = (127.5,) * 3
+GEMMA_BEGIN_IMAGE_TOKEN = 255999
+GEMMA_END_IMAGE_TOKEN = 262144
+GEMMA_NEW_LINE_TOKEN = 108
+GEMMA_TOKEN_PLACEHOLDER = -2
+# The number of GEMMA_TOKEN_PLACEHOLDER tokens per image in Gemma3
+GEMMA_NUM_PLACEHOLDER_TOKENS_PER_IMAGE = 256
+# +4 means 4 extra tokens to pad around image: \n\n, <start_of_image>, <end_of_image>, \n\n
+# One MEDIA means one image or multiple images in one video, but now we only support one image
+GEMMA_NUM_TOKENS_PER_MEDIA = GEMMA_NUM_PLACEHOLDER_TOKENS_PER_IMAGE + 4
 
 
 def load_image_from_path(image_path):
@@ -62,14 +72,14 @@ def _normalize_images(images, mean, std):
 
 def pre_process_gemma3_image(image):
   """Performs a bi-linear resize (with anti-aliasing) and normalizes the image."""
-  image_shape = (_GEMMA_DEFAULT_IMAGE_SIZE, _GEMMA_DEFAULT_IMAGE_SIZE, _NUM_IMAGE_CHANNELS)
+  image_shape = (GEMMA_DEFAULT_IMAGE_SIZE, GEMMA_DEFAULT_IMAGE_SIZE, NUM_IMAGE_CHANNELS)
   image = jax.image.resize(
       image,
       shape=image_shape,
       method="bilinear",
       antialias=True,
   )
-  image = _normalize_images(image, mean=_GEMMA_IMAGE_MEAN, std=_GEMMA_IMAGE_STD)
+  image = _normalize_images(image, mean=GEMMA_IMAGE_MEAN, std=GEMMA_IMAGE_STD)
   image = jnp.clip(image, -1, 1)
   return image
 
@@ -91,12 +101,8 @@ def pre_process_image(image, model_name):
 def reformat_prompt(prompt, model_name):
   """Reformat prompt for different models."""
   if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
-    PROMPT = """\
-    <start_of_turn>user
-    {}<end_of_turn>
-    <start_of_turn>model
-    """
-    return PROMPT.format(prompt)
+    formatted_prompt = f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
+    return formatted_prompt
   else:
     return prompt
 
@@ -104,9 +110,7 @@ def reformat_prompt(prompt, model_name):
 def get_image_offsets(model_name):
   """Get the increase in total token count after inserting image token placeholders"""
   if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
-    from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
-
-    return gemma3.NUM_TOKENS_PER_MEDIA - 1  # -1 because <start_of_image> is already present in the input tokens.
+    return GEMMA_NUM_TOKENS_PER_MEDIA - 1  # -1 because <start_of_image> is already present in the input tokens.
   else:
     return 0
 
@@ -150,19 +154,17 @@ def add_extra_tokens_for_images_gemma3(
     The text tokens with the extra image tokens.
   """
 
-  from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
-
   # New tokens which will be inserted for each image.
   mm_tokens = [
-      gemma3.NEW_LINE_TOKEN,
-      gemma3.BEGIN_IMAGE_TOKEN,
-      *[gemma3.TOKEN_PLACEHOLDER] * gemma3.NUM_PLACEHOLDER_TOKENS_PER_IMAGE,
-      gemma3.END_IMAGE_TOKEN,
-      gemma3.NEW_LINE_TOKEN,
+      GEMMA_NEW_LINE_TOKEN,
+      GEMMA_BEGIN_IMAGE_TOKEN,
+      *[GEMMA_TOKEN_PLACEHOLDER] * GEMMA_NUM_PLACEHOLDER_TOKENS_PER_IMAGE,
+      GEMMA_END_IMAGE_TOKEN,
+      GEMMA_NEW_LINE_TOKEN,
   ]
 
   return insert_sequence(
-      at=gemma3.BEGIN_IMAGE_TOKEN,
+      at=GEMMA_BEGIN_IMAGE_TOKEN,
       sequence=mm_tokens,
       tokens=tokens,
       max_num_images=max_num_images,
@@ -343,3 +345,40 @@ def _get_new_mm_tokens_inner(
   row = row.at[new_positions].set(mm_tokens_to_insert)
   row = row.at[0].set(0)
   return row
+
+
+def merge_mm_embeddings(
+    text_embeddings: np.ndarray | jnp.ndarray,
+    vision_embeddings: np.ndarray | jnp.ndarray,
+    mask,
+) -> np.ndarray | jnp.ndarray:
+  """Merge the text and MM tokens.
+
+  Args:
+    tokens: The text tokens.
+    mm_tokens: The MM tokens.
+
+  Returns:
+    The merged tokens.
+  """
+  return jax.vmap(_merge_mm_embeddings_inner, in_axes=(0, 0, 0))(text_embeddings, vision_embeddings, mask)
+
+
+def _merge_mm_embeddings_inner(text_embeddings, vision_embeddings, mask):
+  """`merge_embeddings` without batch dimension."""
+
+  # Rearrange the vision embeddings from [num_images, num_toks_per_image, d] to [num_images * num_toks_per_image, d]
+  num_images, num_toks_per_image, d = vision_embeddings.shape
+  vision_embeddings = jnp.reshape(vision_embeddings, (num_images * num_toks_per_image, d))
+
+  # len(vision_embeddings) == max_num_images * num_tokens_per_image
+  target_pos = jnp.nonzero(mask, size=len(vision_embeddings))
+
+  # Save and restore the first position overwritten if there's no MM tokens.
+  first_pos = text_embeddings[0]
+
+  merged = text_embeddings.at[target_pos, :].set(vision_embeddings)
+
+  merged = merged.at[0].set(first_pos)
+
+  return merged

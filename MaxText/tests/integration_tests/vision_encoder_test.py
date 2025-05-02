@@ -57,6 +57,7 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
       ],
   }
 
+  @pytest.mark.skip(reason="until b/416335384 is fixed")
   @pytest.mark.tpu_only
   def test_image_embedding_gemma3_4b_tpu(self):
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"

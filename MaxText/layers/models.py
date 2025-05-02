@@ -34,6 +34,7 @@ from MaxText.layers import linears
 from MaxText.layers import normalizations, quantizations
 from MaxText.layers import pipeline
 from MaxText import maxtext_utils
+from MaxText import multimodal_utils
 
 Array = common_types.Array
 Config = common_types.Config
@@ -436,6 +437,7 @@ class Decoder(nn.Module):
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
       bidirectional_mask: Optional[Any] = None,
+      image_embeddings: Optional[jnp.ndarray] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -443,6 +445,19 @@ class Decoder(nn.Module):
 
     # [batch, length] -> [batch, length, emb_dim]
     y = self.shared_embedding(decoder_input_tokens.astype("int32"))
+
+    # Merge the image embeddings with the text embeddings for multimodal models
+    if image_embeddings is not None and cfg.use_multimodal:
+      if cfg.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
+        y = multimodal_utils.merge_mm_embeddings(
+            text_embeddings=y,
+            vision_embeddings=image_embeddings,
+            mask=bidirectional_mask,
+        )
+      # TODO(hengtaoguo): Add support for other multimodal models such as Llama4, refactor if needed
+      else:
+        raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")
+
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
 
@@ -690,14 +705,12 @@ class Transformer(nn.Module):
       )
 
     bidirectional_mask = None
+    image_embeddings = None
     if self.config.use_multimodal and encoder_images is not None:
       image_embeddings = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
-      # TODO(hengtaoguo, aireen): merge image_embeddings with decoder_input_tokens.
 
       if self.config.decoder_block == DecoderBlockType.GEMMA3:
-        from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
-
-        bidirectional_mask = decoder_input_tokens == gemma3.TOKEN_PLACEHOLDER
+        bidirectional_mask = decoder_input_tokens == multimodal_utils.GEMMA_TOKEN_PLACEHOLDER
 
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
@@ -709,5 +722,6 @@ class Transformer(nn.Module):
         slot=slot,
         page_state=page_state,
         bidirectional_mask=bidirectional_mask,
+        image_embeddings=image_embeddings,
     )
     return logits

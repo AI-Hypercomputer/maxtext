@@ -109,6 +109,7 @@ def main(config, test_args):  # pylint: disable=W0621
       with torch.no_grad():
         full_train_logits = model(torch.tensor(ids.tolist())).logits.cpu().numpy().astype("float32")
     else:
+      # TODO(hengtaoguo): Add support for multimodal full prompt decoding check
       full_train_logits = model.apply(
           state.params,
           ids,
