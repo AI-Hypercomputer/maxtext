@@ -21,6 +21,23 @@ on:
   schedule:
     # Run the job daily at 12AM UTC
     - cron:  '0 0 * * *'
+  workflow_dispatch:
+    # Trigger Manual run
+    branches:
+      - main
+    inputs:
+      target_device:
+        description: 'Specify target device (tpu or gpu)'
+        required: false
+        type: choice
+        options:
+          - tpu
+          - gpu
+      run_all_jobs:
+        description: 'Run all TPU and GPU build jobs (overrides target_device)'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   tpu:
