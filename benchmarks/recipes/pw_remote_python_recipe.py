@@ -48,11 +48,11 @@ def main() -> int:
   user = os.environ["USER"]
   region = "-".join(cluster_config.zone.split("-")[:-1])
   proxy_image = (
-      f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/{user}/"
+      f"us-docker.pkg.dev/cloud-tpu-v2-images/pathways/gke/{user}/"
       "proxy_server:latest"
   )
   server_image = (
-      f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/{user}/"
+      f"us-docker.pkg.dev/cloud-tpu-v2-images/pathways/gke/{user}/"
       "server:latest"
   )
   colocated_python_image = f"gcr.io/{cluster_config.project}/{user}/colocated_python_sidecar_latest:latest"

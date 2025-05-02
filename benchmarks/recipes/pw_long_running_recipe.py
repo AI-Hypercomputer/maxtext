@@ -26,9 +26,9 @@ import maxtext_trillium_model_configs as model_configs
 import maxtext_xpk_runner as mxr
 from xpk_configs import XpkClusterConfig
 
-PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_proxy_server:latest"
-SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_server:latest"
-RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest"
+PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
+SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
+RUNNER = "us-docker.pkg.dev/path/to/maxtext_runner"
 
 # Cluster Params
 CLUSTER = "v6e-256-cluster"

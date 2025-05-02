@@ -19,9 +19,9 @@ python3 -m benchmarks.benchmark_runner xpk --project $PROJECT --zone $ZONE --clu
 
 ```shell
 # Pathways with XPK
-export RUNNER=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable
-export PROXY_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/proxy_server:latest
-export SERVER_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/server:latest
+export RUNNER=us-docker.pkg.dev/path/to/maxtext_runner
+export PROXY_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server
+export SERVER_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server
 
 python3 -m benchmarks.benchmark_runner xpk --project $PROJECT --zone $ZONE --cluster_name $CLUSTER --device_type v6e-256 --base_output_directory gs://maxtext-experiments-tpem/ --num_steps=5 --pathways_server_image="${SERVER_IMAGE}" --pathways_proxy_server_image="${PROXY_IMAGE}" --pathways_runner_image="${RUNNER}"
 ```
