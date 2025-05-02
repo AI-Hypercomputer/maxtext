@@ -49,6 +49,7 @@ class GradientAccumulationTest(unittest.TestCase):
         r"dataset_path=gs://maxtext-dataset",
         "gradient_clipping_threshold=0",  # Ensures we are testing raw scales of gradients (clipping off)
         "enable_checkpointing=False",
+        "enable_goodput_recording=False",
         "base_emb_dim=256",
         "base_num_decoder_layers=4",
         rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
