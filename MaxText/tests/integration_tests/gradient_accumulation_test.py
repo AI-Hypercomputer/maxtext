@@ -21,6 +21,7 @@ import pytest
 import string
 import random
 import os.path
+import jax
 
 from MaxText.train import main as train_main
 from MaxText.globals import PKG_DIR
