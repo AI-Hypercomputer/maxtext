@@ -25,6 +25,8 @@ import os.path
 from MaxText.train import main as train_main
 from MaxText.globals import PKG_DIR
 
+print(jax.devices())
+
 
 def generate_random_string(length=10):
   characters = string.ascii_letters  # Include letters, digits, and punctuation
