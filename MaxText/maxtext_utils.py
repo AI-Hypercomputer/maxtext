@@ -700,7 +700,7 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[Page
 def save_quantized_checkpoint_if_configured(config, params):
   assert config.quantization, "quantization must be configured"
   if config.save_quantized_params_path:
-    checkpointing.save_params_to_path(config.save_quantized_params_path, params)
+    checkpointing.save_params_to_path(config.save_quantized_params_path, params, config.checkpoint_storage_use_ocdbt, config.checkpoint_storage_use_zarr3)
   else:
     "Skipping saving quantized checkpoint as save_quantized_params_path is null."
 
