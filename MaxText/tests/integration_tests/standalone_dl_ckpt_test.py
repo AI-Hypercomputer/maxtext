@@ -49,6 +49,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
             "dataset_path=gs://maxtext-dataset",
             "steps=100",
             "enable_checkpointing=false",
+            "enable_goodput_recording=False",
             rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
         )
     )  # need to pass relative path to tokenizer
@@ -74,6 +75,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
             "enable_checkpointing=True",
             "checkpoint_period=50",
             "async_checkpointing=False",
+            "enable_goodput_recording=False",
         )
     )
     # restore at 50 and checkpoint at 100
@@ -93,6 +95,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
             "enable_checkpointing=True",
             "checkpoint_period=50",
             "async_checkpointing=False",
+            "enable_goodput_recording=False",
         )
     )
 
