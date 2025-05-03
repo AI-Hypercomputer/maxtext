@@ -559,6 +559,7 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
+  @pytest.mark.skip(reason="b/415132665: Enable it once scan is supported in training for shorter compiler time")
   @pytest.mark.tpu_only
   def test_moe_llama4_17b_16e(self):
     compiled_trainstep_file = "/tmp/test_moe_llama4_17b_16e.pickle"
