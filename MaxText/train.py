@@ -76,7 +76,7 @@ from ml_goodput_measurement import monitoring
 
 import MaxText as mt
 
-# Transformer = models.Transformer
+Transformer = models.Transformer
 
 
 # pylint: disable=too-many-positional-arguments
