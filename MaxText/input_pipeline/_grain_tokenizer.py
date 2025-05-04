@@ -20,13 +20,14 @@ from collections.abc import Sequence
 import dataclasses
 import threading
 from typing import Any
-import grain.python as grain
+#import grain.python as grain
+import grain
 import numpy as np
 from MaxText import tokenizer
 
 
 @dataclasses.dataclass
-class TokenizeAndTrim(grain.MapTransform):
+class TokenizeAndTrim(grain.transforms.Map):
   """Tokenize and trim features to sequence length."""
 
   # pylint: disable=attribute-defined-outside-init

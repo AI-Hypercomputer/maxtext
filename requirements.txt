@@ -13,7 +13,7 @@ google-cloud-storage
 google-cloud-monitoring
 google-api-core
 google-api-python-client
-grain[parquet]>=0.2.6
+grain[parquet]>=0.2.8
 flax>=0.8.0
 jaxtyping
 ml-collections

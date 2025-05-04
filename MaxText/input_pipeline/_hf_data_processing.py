@@ -20,7 +20,8 @@ import ml_collections
 import jax
 import datasets
 import transformers
-import grain.python as grain
+#import grain.python as grain
+import grain
 import numpy as np
 
 from MaxText.input_pipeline import _input_pipeline_utils

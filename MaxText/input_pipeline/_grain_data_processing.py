@@ -22,7 +22,8 @@ from pathlib import Path
 import functools
 import ml_collections
 import jax
-import grain.python as grain
+#import grain.python as grain
+import grain
 from MaxText.input_pipeline import _input_pipeline_utils
 from MaxText.input_pipeline import _grain_tokenizer
 
@@ -40,18 +41,21 @@ def get_datasets(
     dataloading_host_index,
     dataloading_host_count,
     grain_worker_count,
+    elastic=False,
 ):
   """Load dataset from array_record files for using with grain"""
   data_files = glob.glob(str(Path(data_file_pattern).expanduser().resolve()))
   assert len(data_files) > 0, f"No file found with pattern {data_file_pattern}."
   max_logging.log(f"Found {len(data_files)} files for train/eval with grain")
   if data_file_type == "arrayrecord":
-    dataset = grain.MapDataset.source(grain.ArrayRecordDataSource(data_files))
+    dataset = grain.MapDataset.source(grain.sources.ArrayRecordDataSource(data_files))
     if shuffle:
       dataset = dataset.shuffle(seed=shuffle_seed)
     dataset = dataset.repeat(num_epoch)
-    dataset = dataset[dataloading_host_index::dataloading_host_count]  # sharding
-    dataset = dataset.to_iter_dataset()
+    
+    if not elastic:
+      dataset = dataset[dataloading_host_index::dataloading_host_count]  # sharding
+      dataset = dataset.to_iter_dataset()
   elif data_file_type == "parquet":
     dataset = grain.MapDataset.source(data_files)
     if shuffle:
@@ -72,7 +76,8 @@ def get_datasets(
   return dataset
 
 
-def pretrain_preprocessing_pipeline(dataset, config, data_columns, tokenize, grain_worker_count):
+def pretrain_preprocessing_pipeline(dataset, config, data_columns, tokenize, grain_worker_count, elastic=False,
+                                    dataloading_host_index=None, dataloading_host_count=None):
   """Use grain pipeline to pre-process the dataset and return iterators for pretrain"""
   if config.grain_file_type == "arrayrecord":
     dataset = dataset.map(_input_pipeline_utils.ParseFeatures(data_columns, tokenize))
@@ -118,16 +123,27 @@ def pretrain_preprocessing_pipeline(dataset, config, data_columns, tokenize, gra
     dataset = dataset.map(_input_pipeline_utils.Rekey(rekey_dict))
   else:
     dataset = dataset.map(_input_pipeline_utils.PadToMaxLength(config.max_target_length, pad_id))
-  dataset = dataset.batch(batch_size=config.global_batch_size_to_load // jax.process_count(), drop_remainder=False)
+    
+  if elastic:
+    dataset = dataset.map(_input_pipeline_utils.ShiftLeftBeforeBatch(pad_id, ["targets"]))
+    dataset = dataset.map(_input_pipeline_utils.MaskTargetTokens(ignored_ids=[pad_id]))
+    dataset = grain.experimental.ElasticIterator(dataset,
+                                                  global_batch_size=config.global_batch_size_to_load,
+                                                  shard_options=grain.sharding.ShardOptions(shard_index=dataloading_host_index,
+                                                                                          shard_count=dataloading_host_count))
+    max_logging.log("##### Created ElasticIterator")
+  else:
+    dataset = dataset.batch(batch_size=config.global_batch_size_to_load // jax.process_count(), drop_remainder=False)
 
-  # Shift inputs for teacher-forced training
-  dataset = dataset.map(
-      _input_pipeline_utils.ShiftData(
-          ignored_ids=[pad_id],
-          axis=1,
-      )
-  )
-  dataset = dataset.mp_prefetch(grain.MultiprocessingOptions(num_workers=grain_worker_count))
+    # Shift inputs for teacher-forced training
+    dataset = dataset.map(
+        _input_pipeline_utils.ShiftData(
+            ignored_ids=[pad_id],
+            axis=1,
+        )
+    )
+    dataset = dataset.mp_prefetch(grain.multiprocessing.MultiprocessingOptions(num_workers=grain_worker_count))
+
   return dataset
 
 
@@ -160,7 +176,7 @@ def dpo_preprocessing_pipeline(dataset, config, data_columns, tokenize, grain_wo
 
   dataset = dataset.map(_input_pipeline_utils.PadToMaxLength(config.max_target_length, pad_id))
   dataset = dataset.batch(batch_size=config.global_batch_size_to_load // jax.process_count(), drop_remainder=False)
-  dataset = dataset.mp_prefetch(grain.MultiprocessingOptions(num_workers=grain_worker_count))
+  dataset = dataset.mp_prefetch(grain.multiprocessing.MultiprocessingOptions(num_workers=grain_worker_count))
   return dataset
 
 
@@ -168,9 +184,14 @@ def make_grain_train_iterator(
     config: ml_collections.ConfigDict,
     global_mesh,
     process_indices,
+    elastic=False,
 ):
   """Load, preprocess dataset and return iterators"""
   assert config.global_batch_size_to_load % global_mesh.size == 0, "Batch size should be divisible number of global devices."
+  elastic_kwargs={}
+  if elastic:
+    elastic_kwargs["dataloading_host_index"] = process_indices.index(jax.process_index())
+    elastic_kwargs["dataloading_host_count"] = len(process_indices)
   if not config.colocated_python_data_input:
     train_ds = get_datasets(
         config.grain_train_files,
@@ -181,6 +202,7 @@ def make_grain_train_iterator(
         dataloading_host_index=process_indices.index(jax.process_index()),
         dataloading_host_count=len(process_indices),
         grain_worker_count=config.grain_worker_count,
+        elastic=elastic,
     )
     if config.use_dpo:
       train_dataloader = dpo_preprocessing_pipeline(
@@ -197,6 +219,8 @@ def make_grain_train_iterator(
           data_columns=config.train_data_columns,
           tokenize=config.tokenize_train_data,
           grain_worker_count=config.grain_worker_count,
+          elastic=elastic,
+          **elastic_kwargs,
       )
     return multihost_dataloading.MultiHostDataLoadIterator(train_dataloader, global_mesh)
   else:
@@ -233,6 +257,7 @@ def make_grain_eval_iterator(
     config: ml_collections.ConfigDict,
     global_mesh,
     process_indices,
+    elastic=False,
 ):
   """Load, preprocess dataset and return iterators"""
   assert (
