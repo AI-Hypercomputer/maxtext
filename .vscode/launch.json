@@ -60,6 +60,42 @@
                "enable_checkpointing=false"]
     },
     {
+      "name": "Debug MaxText SFT with eval",
+      "type": "debugpy",
+      "request": "launch",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "variablePresentation": {
+        "all":       "hide",   // hide every category
+        "class":     "hide",   // hide class‐level vars
+        "function":  "hide",   // hide callables
+        "special":   "hide",   // hide __dunder__ names
+        "protected": "hide"    // hide _protected names
+      },
+      "python": "python3",
+      "module": "MaxText.sft_trainer",
+      "args": ["MaxText/configs/sft.yml", 
+                "base_output_directory=gs://runner-maxtext-logs",
+                "load_parameters_path=gs://runner-maxtext-logs/matmul_fine_tuning/checkpoints/0",
+                "run_name=matmul_fine_tuning",
+                "per_device_batch_size=1",
+                "model_name=deepseek2-16b",
+                "steps=8",
+                "max_target_length=1024",
+                "enable_checkpointing=true",
+                "tokenizer_type=huggingface",
+                "tokenizer_path=deepseek-ai/DeepSeek-V3",
+                "attention=flash",
+                "dtype=bfloat16",
+                "weight_dtype=bfloat16",
+                "megablox=False",
+                "sparse_matmul=False",
+                "ici_fsdp_parallelism=4",
+                "eval_interval=1",
+                "eval_steps=1",
+                "dump_hlo=true"],
+    },
+    {
       "name": "Debug MaxText Inference Microbenchmark",
       "type": "python",
       "request": "launch",

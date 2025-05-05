@@ -345,7 +345,7 @@ def calculate_prefill_tflops_per_device(num_model_parameters, prefill_length, co
 def assert_params_sufficiently_sharded(params, mesh, tolerance):
   """Checks whether most params are sharded across sharding axis.
 
-  This function determines whether the majority of parameters  are distributed
+  This function determines whether the majority of parameters are distributed
   across a specified sharding axes with an acceptable tolerance. It compares the
   current distribution to a scenario where all parameters are fully sharded
   across the 'fsdp', 'fsdp_transpose', 'sequence', and 'tensor' axes.

@@ -16,6 +16,15 @@ limitations under the License.
 
 """Stub for logging utilities. Right now just meant to avoid raw prints"""
 
+from absl import logging
+
+def warn(user_str):
+  logging.warn(user_str)
+
+
+def error(user_str):
+  logging.error(user_str)
+  
 
 def log(user_str):
-  print(user_str, flush=True)
+  logging.info(user_str)
