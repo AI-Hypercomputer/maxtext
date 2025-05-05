@@ -35,6 +35,7 @@ class TrainTests(unittest.TestCase):
           r"dataset_path=gs://maxtext-dataset",
           "steps=2",
           "enable_checkpointing=False",
+          "enable_goodput_recording=False",
           rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
       ],
       "synthetic": [  # tests base config with synthtic dataset
@@ -225,6 +226,7 @@ class TrainTests(unittest.TestCase):
         r"dataset_path=gs://maxtext-dataset",
         "steps=2",
         "enable_checkpointing=False",
+        "enable_goodput_recording=False",
         "attention=cudnn_flash_te",
         "packing=False",
         rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
