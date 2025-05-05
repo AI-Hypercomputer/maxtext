@@ -71,6 +71,9 @@ jobs:
               mitalisi: "",
               gpolovets1: "",
               mailvijayasingh: "",
+              jrplatin: "",
+              patemotter: "",
+              lumosis: "",
             }
             const reviews = await github.rest.pulls.listReviews({
               owner,
