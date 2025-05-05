@@ -550,6 +550,20 @@ def transfer_data(py_tree, source_shardings, dest_shardings):
     return jax.make_array_from_single_device_arrays(arr.shape, dest_sharding, shards)
   return jax.tree_util.tree_map(_transfer_array, py_tree, source_shardings, dest_shardings)
 
+def reshard(config, params, destination_shardings, meshes):
+  inference_params = []
+  for destination_sharding, mesh in zip(destination_shardings, meshes):
+    @functools.partial(jax.jit)
+    def _reshard(x):
+      return jax.tree_util.tree_map(
+        lambda arr, target_sh: jax.lax.with_sharding_constraint(arr, target_sh),
+        x,
+        destination_sharding.params
+      )
+    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      inference_params.append(_reshard(params))
+  return inference_params
+
 def setup_mesh_and_model(config, config_inference):
   """Set up the mesh and the model for training
 
@@ -949,8 +963,9 @@ def train_loop(config, config_inference, state=None):
   param_buffer = Buffer(maxsize=config.inference_replicas)
   data_buffer = Buffer(maxsize=-1)
   # initialize inference_params from the state before step=0
-  # inference_params = [transfer_data({'params':state.params['params']}, {'params':state_mesh_shardings.params['params']}, inference_state_mesh_sharding.params) for inference_state_mesh_sharding in inference_state_mesh_shardings]
   inference_params = [jax.device_put({'params':state.params['params']}, inference_state_mesh_sharding.params) for inference_state_mesh_sharding in inference_state_mesh_shardings]
+  # inference_params = reshard(config_inference, {'params':state.params['params']}, inference_state_mesh_shardings, inference_meshes)
+  
   # for inference_state_mesh_sharding in inference_state_mesh_shardings:
     # param_buffer.push({'params':state.params['params']}, inference_state_mesh_sharding.params)
   performance_metric_queue = None
@@ -982,7 +997,7 @@ def train_loop(config, config_inference, state=None):
       optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
       prof.activate(blocking_object=state, optional_postfix=optional_postfix)
     # inference_params = [param_buffer.pull() for _ in range(len(inference_data_shardings))]
-    with jax.profiler.StepTraceAnnotation("train", step_num=step):
+    with jax.profiler.StepTraceAnnotation("inference", step_num=step):
       for data_iterator, inference_data_sharding, inference_param, p_generate, inference_mesh in zip(data_iterators, inference_data_shardings, inference_params, p_generate_completions, inference_meshes):
         record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
         example_batch = load_next_batch(data_iterator, example_batch, config)
@@ -996,15 +1011,15 @@ def train_loop(config, config_inference, state=None):
         # inference_param = param_buffer.pull() or inference_param
         with inference_mesh, nn_partitioning.axis_rules(config_inference.logical_axis_rules):
           example_batch = p_generate(example_batch, inference_param, rng_gen)
-        max_logging.log("example batch shapes: " + ", ".join(f"{k}: {v.shape}" for k, v in example_batch.items()))
         data_buffer.push(example_batch, in_shard_train[1])
-
+    with jax.profiler.StepTraceAnnotation("train", step_num=step):
       training_batch = data_buffer.pull(desired_batch_size=config.inference_replicas)
-      max_logging.log("Training batch shapes: " + ", ".join(f"{k}: {v.shape}" for k, v in training_batch.items()))
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, training_batch, rng)
+    with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
       if step != 0 and step % config.inference_rollouts == 0:
         inference_params = [jax.device_put({'params':state.params['params']}, inference_state_mesh_sharding.params) for inference_state_mesh_sharding in inference_state_mesh_shardings]
+        # inference_params = reshard(config_inference, {'params':state.params['params']}, inference_state_mesh_shardings, inference_meshes)
         # for inference_state_mesh_sharding in inference_state_mesh_shardings:
         #   param_buffer.push({'params':state.params['params']}, inference_state_mesh_sharding.params)
     step_time_delta = datetime.datetime.now() - last_step_completion
