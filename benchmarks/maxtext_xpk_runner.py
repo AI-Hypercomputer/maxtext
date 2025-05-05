@@ -14,36 +14,35 @@
  limitations under the License.
  """
 
-"""  This file contains data classes and runner logic to execute the XPK runs triggered by benchmarks/benchmark_runner.py"
+"""  This file contains data classes and runner logic to execute the XPK runs triggered by benchmarks.benchmark_runner"
 
 """
 # Improvements:
 # Toggle Vertex AI Experiment on/off.
 # Group libtpu / jax / jaxlib dependencies instead of just libtpu.
 # Split out maxtext command generation and xpk runner from this file.
-# Enable hlo dumps.
 
 import dataclasses
 import enum
 import json
-import omegaconf
 import os
 import queue
 import random
 import string
 import subprocess
-import tempfile
 import threading
 import time
+from typing import Optional, List
 
-import maxtext_trillium_model_configs as model_configs
-from command_utils import run_command_with_updates
-from benchmark_db_utils import DEFAULT_TUNING_PARAMS_FILE
+import omegaconf
 
-import xla_flags_library as xla_flags
-from disruption_management.disruption_handler import DisruptionConfig
-from disruption_management.disruption_manager import DisruptionManager
-from xpk_configs import XpkClusterConfig
+import benchmarks.maxtext_trillium_model_configs as model_configs
+from benchmarks.command_utils import run_command_with_updates
+import benchmarks.xla_flags_library as xla_flags
+from benchmarks.disruption_management.disruption_handler import DisruptionConfig
+from benchmarks.disruption_management.disruption_manager import DisruptionManager
+from benchmarks.xpk_configs import XpkClusterConfig
+
 
 # Assumes you built maxtext dep image.
 # Assumes you have xpk installed in a git clone repo of ~/{wl_config.xpk_path}/xpk.py
@@ -75,7 +74,7 @@ class PathwaysConfig:
   server_image: str = None
   proxy_server_image: str = None
   runner_image: str = None
-  remote_python_sidecar_image: str = None
+  colocated_python_sidecar_image: str = None
   server_flags: str = ''
   proxy_flags: str = ''
   worker_flags: str = ''
@@ -96,22 +95,29 @@ class WorkloadConfig:
   num_steps: int = 20
   max_restarts: int = 0
   priority: str = 'medium'
-  xpk_path: str = '~/xpk'
+  xpk_path: str = os.path.join("~", "xpk")
   pathways_config: PathwaysConfig = None
   run_name: str = None
   generate_metrics_and_upload_to_big_query: bool = True
   hardware_id: str = 'v6e'
   metrics_gcs_file: str = ''
-  base_config: str = 'MaxText/configs/base.yml'
+  base_config: str = os.path.join("MaxText", "configs", "base.yml")
   topology: str = dataclasses.field(init=False)
   num_devices_per_slice: int = dataclasses.field(init=False)
   db_project: str = ""
   db_dataset: str = ""
   db_is_test: bool = True
   disruption_configs: DisruptionConfig = None
+  xpk_storage: Optional[List[str]] = None
+  hlo_dump: Optional[bool] = None
 
   def __post_init__(self):
     """Initializes num_devices_per_slice and topology for recording the run into BigQuery"""
+    if not self.generate_metrics_and_upload_to_big_query:
+      return
+    if self.device_type is None:
+      raise ValueError("device_type is None and generate_metrics_and_upload_to_big_query is enabled. "
+                       "Device_type is required for uploading run results to BigQuery")
     if self.device_type.startswith("v6e") or self.device_type.startswith("v5e") or self.device_type.startswith("v5litepod"):
       size = int(self.device_type.split("-")[-1])
       if size == 256:
@@ -322,33 +328,29 @@ def _build_args_from_config(wl_config: WorkloadConfig) -> dict:
 
   # Extract xla_flags arg
   xla_flags_str = wl_config.model.xla_flags.strip().replace(" ",",")
-  
+
   # Extract tuning_params arg
   tuning_params_str = json.dumps(wl_config.model.tuning_params)
-  
-  args = {}
-  args["metrics_gcs_file"] = wl_config.metrics_gcs_file
-  args["model_id"] = wl_config.model.model_type
-  args["hardware_id"] = wl_config.hardware_id
-  args["software_id"] = "jax_maxtext"
-  args["number_of_chips"] = wl_config.num_devices_per_slice*wl_config.num_slices
-  args["container_image_name"] = wl_config.base_docker_image
-  args["global_batch_size"] = per_device_batch_size * wl_config.num_devices_per_slice * wl_config.num_slices
-  args["precision"] = precision
-  args["optimizer"] = optimizer
-  args["seq_length"] = sequence_length
-  args["number_of_steps"] = wl_config.num_steps
-  args["xla_flags"] = f"'{xla_flags_str}'"
-  args["dataset"] = dataset
-  args["run_type"] = "maxtext-xpk"
-  args["config_file"] = "MaxText/configs/base.yml"
-  args["topology"] = wl_config.topology
-  args["tuning_params"] = f"'{tuning_params_str}'"
-  args["db_project"] = wl_config.db_project
-  args["db_dataset"] = wl_config.db_dataset
-  args["is_test"] = wl_config.db_is_test
-
-  return args
+  return {"metrics_gcs_file": wl_config.metrics_gcs_file,
+          "model_id": wl_config.model.model_type,
+          "hardware_id": wl_config.hardware_id,
+          "software_id": "jax_maxtext",
+          "number_of_chips": wl_config.num_devices_per_slice * wl_config.num_slices,
+          "container_image_name": wl_config.base_docker_image,
+          "global_batch_size": per_device_batch_size * wl_config.num_devices_per_slice * wl_config.num_slices,
+          "precision": precision,
+          "optimizer": optimizer,
+          "seq_length": sequence_length,
+          "number_of_steps": wl_config.num_steps,
+          "xla_flags": f"'{xla_flags_str}'",
+          "dataset": dataset,
+          "run_type": "maxtext-xpk",
+          "config_file": os.path.join("MaxText", "configs", "base.yml"),
+          "topology": wl_config.topology,
+          "tuning_params": f"'{tuning_params_str}'",
+          "db_project": wl_config.db_project,
+          "db_dataset": wl_config.db_dataset,
+          "is_test": wl_config.db_is_test}
 
 
 def build_user_command(
@@ -367,10 +369,17 @@ def build_user_command(
     jax_platforms = 'proxy'
   else:
     if wl_config.libtpu_type == LibTpuType.NIGHTLY:
-      install_libtpu_cmd += (
-          f' pip install libtpu-nightly==0.1.dev{wl_config.libtpu_nightly_version} -f'
-          ' https://storage.googleapis.com/libtpu-releases/index.html &&'
-      )
+      if wl_config.libtpu_nightly_version:
+        install_libtpu_cmd += (
+            f' python3 -m pip install libtpu=={wl_config.libtpu_nightly_version} -f'
+            ' https://storage.googleapis.com/libtpu-wheels/index.html &&'
+        )
+      else:
+        # If no version is specified, install the latest stable libtpu.
+        install_libtpu_cmd += (
+            ' python3 -m pip install libtpu --pre -f'
+            ' https://storage.googleapis.com/libtpu-wheels/index.html &&'
+        )
     elif wl_config.libtpu_type == LibTpuType.CUSTOM:
       # In order to use a custom libtpu, put a libtpu.so file in your local
       # working directory.
@@ -405,7 +414,7 @@ def build_user_command(
       'export ENABLE_PATHWAYS_PERSISTENCE=1 &&',
       f'export JAX_PLATFORMS={jax_platforms} &&',
       'export ENABLE_PJRT_COMPATIBILITY=true &&',
-      'python3 MaxText/train.py MaxText/configs/base.yml',
+      f'python3 -m MaxText.train {os.path.join("MaxText", "configs", "base.yml")}',
       f'{config_tuning_params}',
       f'steps={wl_config.num_steps}',
       f'model_name={wl_config.model.model_type}',
@@ -510,9 +519,9 @@ def _get_pathways_specific_flags(wl_config: WorkloadConfig):
   if pw_config is None:
     return ''
 
-  remote_python_sidecar_image_flag = (
-      f' --remote-python-sidecar-image={pw_config.remote_python_sidecar_image}'
-      if pw_config.remote_python_sidecar_image is not None
+  colocated_python_sidecar_image_flag = (
+      f' --colocated-python-sidecar-image={pw_config.colocated_python_sidecar_image}'
+      if pw_config.colocated_python_sidecar_image is not None
       else ''
   )
   server_image_flag = (
@@ -533,7 +542,7 @@ def _get_pathways_specific_flags(wl_config: WorkloadConfig):
   pathways_specific_flags = (
       f' {server_image_flag} '
       f' {proxy_server_image_flag} '
-      f' {remote_python_sidecar_image_flag} '
+      f' {colocated_python_sidecar_image_flag} '
       f' --termination-grace-period-seconds=300 '
       f' --pathways-gcs-location={wl_config.base_output_directory} '
       f' --custom-pathways-server-args="{server_flags}" '
@@ -615,9 +624,18 @@ def generate_xpk_workload_cmd(
     args_str = ""
     for k,v in args.items():
       args_str += f'--{k}={v} '
-    upload_metrics_to_bq_cmd = f"&& python3 benchmarks/upload_metrics_to_bq.py {args_str}"
+    upload_metrics_to_bq_cmd = f"&& python3 -m benchmarks.upload_metrics_to_bq {args_str}"
 
   print(f'User command: {user_command}')
+  all_xpk_storage = ""
+  if wl_config.xpk_storage:
+    all_xpk_storage = " ".join(f"--storage={storage_test}" for storage_test in wl_config.xpk_storage)
+  
+  hlo_dump = "" 
+  if wl_config.hlo_dump:
+    # HLO dump gets saved in a subdirectory called "hlo_dump" of the base output directory. 
+    hlo_dump = f'--debug-dump-gcs={wl_config.base_output_directory}/{wl_config.run_name}/hlo_dump'
+
   return (
       (
           f'{workload_create_command}'
@@ -626,6 +644,7 @@ def generate_xpk_workload_cmd(
           f' --project={cluster_config.project}'
           f' --zone={cluster_config.zone}'
           f' {device_type}'
+          f' {all_xpk_storage}'
           f' --num-slices={wl_config.num_slices}'
           f' --command="{user_command} {upload_metrics_to_bq_cmd}"'
           f' {docker_image_flag}'
@@ -633,6 +652,7 @@ def generate_xpk_workload_cmd(
           f' --workload={name}'
           f' --priority={wl_config.priority}'
           f' --max-restarts={wl_config.max_restarts}'
+          f' {hlo_dump}'
           # ' --use-vertex-tensorboard'
           # f' --experiment-name={test_purpose_name}'
           f' {additional_flags}'
@@ -665,7 +685,9 @@ def run_xpk_workload(
   )
   return_code = run_command_with_updates(command, 'Run XPK workload')
   if return_code == 0 and wait_for_completion:
-    return_code = wait_for_xpk_workload_completion(cluster_config, workload_name, wl_config.xpk_path) # Wait for completion after successful run
+    return_code = wait_for_xpk_workload_completion(
+        cluster_config, workload_name, wl_config.xpk_path
+    ) # Wait for completion after successful run
   return return_code
 
 
@@ -748,8 +770,9 @@ def main() -> int:
   xpk_workload_names = []
 
   list_of_models = [
-    model_configs.llama2_70b_4096_sc,
+    # model_configs.llama2_70b_4096_sc,
     # model_configs.default_128
+    model_configs.llama3_1_70b_131072,
   ]
 
   # Loop possibilities:
@@ -773,8 +796,7 @@ def main() -> int:
     # Run workloads on the below clusters
     for cluster_config in [
       # v5e_cluster_config,
-      # v6e_cluster_config,
-      v6e_cluster_config_yucmhab,
+      v6e_cluster_config,
       # another_config,
     ]:
       # Run workloads in the following slice configurations
@@ -824,8 +846,8 @@ def main() -> int:
   #     batch=1,  # Parallel execution of workloads is not supported in XPK yet.
   #     dry_run=False,
   # )
- # print(f'Return_codes: {return_codes}')
-
+  # print(f'Return_codes: {return_codes}')
+  return os.EX_OK
 
 
 if __name__ == '__main__':

@@ -22,11 +22,11 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
-from input_pipeline._tfds_data_processing import make_tfds_train_iterator, make_tfds_eval_iterator
-from input_pipeline._grain_data_processing import make_grain_train_iterator, make_grain_eval_iterator
-from input_pipeline._tfds_data_processing_c4_mlperf import make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator
-from input_pipeline._hf_data_processing import make_hf_train_iterator, make_hf_eval_iterator
-import multihost_dataloading
+from MaxText.input_pipeline._tfds_data_processing import make_tfds_train_iterator, make_tfds_eval_iterator
+from MaxText.input_pipeline._grain_data_processing import make_grain_train_iterator, make_grain_eval_iterator
+from MaxText.input_pipeline._tfds_data_processing_c4_mlperf import make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator
+from MaxText.input_pipeline._hf_data_processing import make_hf_train_iterator, make_hf_eval_iterator
+from MaxText import multihost_dataloading
 
 
 class SyntheticDataIterator:
@@ -181,22 +181,9 @@ def create_data_iterator(config, mesh):
     train_iterator_fn = functools.partial(make_hf_train_iterator, config, mesh, process_indices_train)
     eval_iterator_fn = functools.partial(make_hf_eval_iterator, config, mesh, process_indices_eval)
   elif config.dataset_type == "c4_mlperf":
+    assert config.packing, "c4_mlperf dataloader only works with packing. For padded version, use tfds dataloader"
     train_iterator_fn = functools.partial(make_c4_mlperf_train_iterator, config, mesh, process_indices_train)
     eval_iterator_fn = functools.partial(make_c4_mlperf_eval_iterator, config, mesh, process_indices_eval)
   else:
     assert False, f"Unknown dataset_type {config.dataset_type}, dataset_type must be synthetic, tfds, grain, hf or c4_mlperf"
   return make_mixed_iterator(config, mesh, process_indices_train, process_indices_eval, train_iterator_fn, eval_iterator_fn)
-
-
-def get_shaped_batch(config):
-  """Return the shape of the batch - this is what eval_shape would return for the
-  output of create_data_iterator, but eval_shape doesn't work, see b/306901078."""
-  batch_shape = (config.global_batch_size_to_load, config.max_target_length)
-  shaped_batch = {}
-  shaped_batch["inputs"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  shaped_batch["inputs_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  shaped_batch["inputs_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  shaped_batch["targets"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  shaped_batch["targets_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  shaped_batch["targets_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
-  return shaped_batch

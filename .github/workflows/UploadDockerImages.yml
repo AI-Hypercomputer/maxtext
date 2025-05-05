@@ -21,6 +21,23 @@ on:
   schedule:
     # Run the job daily at 12AM UTC
     - cron:  '0 0 * * *'
+  workflow_dispatch:
+    # Trigger Manual run
+    branches:
+      - main
+    inputs:
+      target_device:
+        description: 'Specify target device (tpu or gpu)'
+        required: false
+        type: choice
+        options:
+          - tpu
+          - gpu
+      run_all_jobs:
+        description: 'Run all TPU and GPU build jobs (overrides target_device)'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   tpu:
@@ -73,3 +90,6 @@ jobs:
     - name: build image with stable stack nightly jax
       run: |
         bash .github/workflows/build_and_upload_images.sh CLOUD_IMAGE_NAME=maxtext_gpu_stable_stack_nightly_jax MODE=stable_stack DEVICE=gpu PROJECT=tpu-prod-env-multipod LOCAL_IMAGE_NAME=maxtext_gpu_jax_stable_stack_nightly BASEIMAGE=us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/gpu/jax_nightly:latest MAXTEXT_REQUIREMENTS_FILE=requirements_with_jax_stable_stack.txt
+    - name: build image with jax stable stack release candidate image
+      run: |
+        bash .github/workflows/build_and_upload_images.sh CLOUD_IMAGE_NAME=maxtext_stable_stack_candidate_gpu MODE=stable_stack DEVICE=gpu PROJECT=tpu-prod-env-multipod LOCAL_IMAGE_NAME=maxtext_stable_stack_candidate_gpu BASEIMAGE=us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/gpu:latest MAXTEXT_REQUIREMENTS_FILE=requirements_with_jax_stable_stack.txt

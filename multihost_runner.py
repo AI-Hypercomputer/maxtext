@@ -13,6 +13,9 @@
  See the License for the specific language governing permissions and
  limitations under the License.
  """
+from tempfile import gettempdir
+
+from MaxText.globals import PKG_DIR
 
 # pylint: disable=consider-using-with
 """ Script to run a command in a multislice/multihost environment
@@ -158,7 +161,7 @@ def filter_instances(instance_list, tpu_prefix):
 
 def write_kill_script(kill_processes_script_name):
   kill_processes_script = os.path.join(args.SCRIPT_DIR, kill_processes_script_name)
-  with open(kill_processes_script, "w", encoding="utf-8") as f:
+  with open(kill_processes_script, "wt", encoding="utf-8") as f:
     f.write(kill_existing_processes_str())
 
 def kill_existing_processes_str():
@@ -195,7 +198,7 @@ def scps(slices, run_name_dir, zip_name):
   os.makedirs(run_name_dir, exist_ok=True)
   zip_path = os.path.join(run_name_dir, zip_name)
   command = ["tar","--exclude=tmp", "-czf", zip_path, "./"]
-  subprocess.run(command, check=True)
+  subprocess.run(command, check=True, cwd=args.SCRIPT_DIR)
 
   # Move zip file to each tpuvm worker
   commands = []
@@ -277,16 +280,17 @@ def run_commands(commands, id_to_print, jobname, worker_list, is_shell=False, ou
   start_time = datetime.now()
   for i, command in enumerate(commands):
     if output_logs and i == id_to_print:
-      persistent_log = open(output_logs[i], "w", encoding="utf-8")
+      persistent_log = open(output_logs[i], "wt", encoding="utf-8")
       output_log = Tee(sys.stdout, persistent_log)
     elif output_logs:
-      output_log = open(output_logs[i], "w", encoding="utf-8")
+      output_log = open(output_logs[i], "wt", encoding="utf-8")
     elif i == id_to_print:
       output_log = None
     else:
       output_log = subprocess.DEVNULL
 
-    children.append(subprocess.Popen(command, stdout=output_log, stderr=output_log, shell=is_shell))
+    children.append(subprocess.Popen(command, stdout=output_log, stderr=output_log, shell=is_shell,
+      cwd=os.path.dirname(PKG_DIR)))
 
   while True:
     returncodes = [child.poll() for child in children]
@@ -378,8 +382,9 @@ def main() -> None:
     print(f"Failed to retrieve slices {args.TPU_PREFIX} in project {args.PROJECT} zone {args.ZONE}", flush=True)
     return 1
 
-  local_log_dir = os.path.join("/tmp", args.RUN_NAME, "")
-  zip_name = "script_dir_zip_" + args.RUN_NAME + ".tar.gz"
+  temp_dir = gettempdir()
+  local_log_dir = os.path.join(temp_dir, args.RUN_NAME, "")
+  zip_name = f"script_dir_zip_{args.RUN_NAME}.tar.gz"
 
   if args.USE_EXISTING_FOLDER is False:
     ##### Step 2 when using a new folder: Zip code and move it to the TPUs #####

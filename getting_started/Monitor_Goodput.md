@@ -67,12 +67,19 @@ project, then do the following:
    > **_NOTE:_** Access Scopes are immutable and workloads can only be migrated
   to new node pools with required access scopes. Access scopes on already created clusters cannot be updated.
 
+
+## Monitoring
+
+**__IMPORTANT__:** Ensure unique `run_name` for each new experiment or run
+
+Please use a unique workload name, unless you intend to monitor cumulative Goodput/Badput metrics of a previous workload along with your current workload
+
 ### How to Monitor Goodput and Badput
 
 MaxText enables Goodput recording and monitoring by default with `enable_goodput_recording=True` and `monitor_goodput=True`. You can configure the goodput upload frequency by setting `goodput_upload_interval_seconds`.
 
 ```Python
-python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=$OUTPUT_PATH dataset_path=$DATA_PATH run_name=goodput-test-run steps=200 goodput_upload_interval_seconds=30
+python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=$OUTPUT_PATH dataset_path=$DATA_PATH run_name=goodput-test-run steps=200 goodput_upload_interval_seconds=30
 ```
 
 ### How to Monitor Step Time Deviation
@@ -80,7 +87,7 @@ python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=$OUTPUT_
 MaxText enables step time deviation monitoring by default with `monitor_step_time_deviation=True`. You can configure the upload frequency by setting `step_deviation_interval_seconds`.
 
 ```Python
-python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=$OUTPUT_PATH dataset_path=$DATA_PATH run_name=goodput-test-run steps=200 step_deviation_interval_seconds=30
+python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=$OUTPUT_PATH dataset_path=$DATA_PATH run_name=goodput-test-run steps=200 step_deviation_interval_seconds=30
 ```
 
 ### How to enable Pathways Goodput
@@ -90,10 +97,106 @@ MaxText disables Pathways by default for computation of all Goodput metrics with
 > **_NOTE:_** Enabling `enable_pathways_goodput` turns on Goodput measurement for Pathways workloads, and does not update any Pathways features.
 
 ```Python
-python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=$OUTPUT_PATH dataset_path=$DATA_PATH run_name=goodput-test-run steps=200 goodput_upload_interval_seconds=30 enable_pathways_goodput=True
+python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=$OUTPUT_PATH dataset_path=$DATA_PATH run_name=goodput-test-run steps=200 goodput_upload_interval_seconds=30 enable_pathways_goodput=True
 ```
+
+### How to enable Checkpoint Logging
+
+Checkpoint logging is currently supported through Orbax. The Goodput library reads these logs to compute checkpointing badput.
+To enable checkpoint logging set the `enable_checkpoint_cloud_logger` MaxText flag to `True`.
+
+If this flag is turned off, the badput due to checkpointing will incorrectly be computed as 0.
+
+If checkpointing is enabled, please enable the `enable_checkpoint_cloud_logger` flag for accurate results.
 
 ### Visualize on Tensorboard
 
 1. MaxText installs the required packages on setup: `tensorboard-plugin-profile`, `tensorflow` and `tensorboard`.
 2. Follow the Tensorboard URL on MaxText logs to view all metrics in one location.
+
+### Visualize Goodput, Badput and Step Deviation on Google Cloud Monitoring
+
+By default, performance data ([goodput](https://cloud.google.com/monitoring/api/metrics_gcp#:~:text=workload/goodput_time), [badput](https://cloud.google.com/monitoring/api/metrics_gcp#:~:text=workload/badput_time), and [step deviation](https://cloud.google.com/monitoring/api/metrics_gcp#:~:text=workload/performance)) is automatically sent to Google Cloud Monitoring, enabling visualization on dashboards.
+
+This feature leverages Google VM metadata (project ID, location, accelerator type)
+and supports replica IDs for uniquely identifying workloads in multi-replica
+deployments.
+
+This feature is enabled by default, and no changes to the Monitoring API call are needed if you want to keep it enabled.
+
+```python
+
+gcp_options = goodput_utils.GCPOptions(
+      project_id=None, # If None, the library will automatically identify from GCE internal metadata
+      location=None, # If None, the library will automatically identify from GCE internal metadata
+      replica_id='0', # Default is '0'
+      acc_type=None, # If None, the library will automatically identify from GCE internal metadata
+      enable_gcp_goodput_metrics=True,
+      enable_gcp_step_deviation_metrics=True,
+    )
+
+goodput_monitor = monitoring.GoodputMonitor(
+      job_name=config.run_name,
+      logger_name=logger_name,
+      tensorboard_dir=config.tensorboard_dir,
+      upload_interval=config.goodput_upload_interval_seconds,
+      monitoring_enabled=True,
+      include_badput_breakdown=True,
+      include_step_deviation=True,
+      configured_ideal_step_time=None, # Optional, the library will compute ideal step time if it is not provided
+      gcp_options=gcp_options
+    )
+```
+
+If you do not wish to send metrics to Google Cloud Monitoring then please set
+the flag `enable_gcp_goodput_metrics` to `False` for disabling goodput metrics
+and `enable_gcp_step_deviation_metrics` to `False` for disabling step deviation
+metrics while creating the GCPOptions object.
+
+Setting `monitoring_enabled` to `False` will disable both tensorboard and GCM
+monitoring.
+
+```python
+
+gcp_options = goodput_utils.GCPOptions(
+      project_id=None, # If None, the library will automatically identify from GCE internal metadata
+      location=None, # If None, the library will automatically identify from GCE internal metadata
+      replica_id='0', # Default is '0'
+      acc_type=None, # If None, the library will automatically identify from GCE internal metadata
+      enable_gcp_goodput_metrics=False,
+      enable_gcp_step_deviation_metrics=False,
+    )
+
+
+goodput_monitor = monitoring.GoodputMonitor(
+      job_name=config.run_name,
+      logger_name=logger_name,
+      tensorboard_dir=config.tensorboard_dir,
+      upload_interval=config.goodput_upload_interval_seconds,
+      monitoring_enabled=True,
+      include_badput_breakdown=True,
+      include_step_deviation=True,
+      configured_ideal_step_time=None,
+      gcp_options=gcp_options,
+    )
+```
+#### Monitoring Dashboards
+
+Goodput, Badput and Step Time Deviation metrics can be visualized using GCM dashboards:
+
+1. Navigate to your projects Google Cloud Monitoring `Dashboards` page.
+2. Create a Custom Dashboard if you do not have one already, and select the [metrics](https://cloud.google.com/monitoring/api/metrics_gcp) you want to monitor.
+   - compute.googleapis.com/workload/goodput_time (Goodput)
+   - compute.googleapis.com/workload/badput_time (Badput Breakdown)
+   - compute.googleapis.com/workload/performance (Step Time Deviation)
+
+
+#### Monitoring Raw Metrics
+
+Goodput, Badput and Step Time Deviation metrics can be monitored using GCM Metrics Explorer:
+
+1. Navigate to your projects Google Cloud Monitoring `Metrics Explorer` page.
+2. Select the [metrics](https://cloud.google.com/monitoring/api/metrics_gcp) you want to monitor:
+   - compute.googleapis.com/workload/goodput_time (Goodput)
+   - compute.googleapis.com/workload/badput_time (Badput Breakdown)
+   - compute.googleapis.com/workload/performance (Step Time Deviation)

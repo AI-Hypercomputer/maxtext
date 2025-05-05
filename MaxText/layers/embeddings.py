@@ -21,7 +21,7 @@ from flax import linen as nn
 import jax
 from jax import lax
 import jax.numpy as jnp
-from layers import initializers
+from MaxText.layers import initializers
 
 Config = Any
 Array = jnp.ndarray
@@ -102,7 +102,7 @@ class Embed(nn.Module):
       in NLP models.
     """
     dtype = self.attend_dtype if self.attend_dtype is not None else self.dtype
-    return jnp.dot(query, jnp.asarray(self.embedding, jnp.bfloat16).T)
+    return jnp.dot(query, jnp.asarray(self.embedding, jnp.bfloat16).T, preferred_element_type=dtype)
 
 
 class RotaryEmbedding(nn.Module):

@@ -16,35 +16,37 @@
 Runs SFT trainer correctness with TRL implementation.
 
 Usage:
-python3 MaxText/tests/sft_trainer_correctness.py --model-name=llama3.1-8b --tokenizer-path=meta-llama/Llama-3.1-8B --model-ckpt-path=gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items
+python3 -m MaxText.tests.sft_trainer_correctness \
+  --model-name=llama3.1-8b \
+  --tokenizer-path=meta-llama/Llama-3.1-8B \
+  --model-ckpt-path=gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items
 """
 
 import argparse
-import jax
-import jax.numpy as jnp
 import jsonlines
-import numpy as np
 import os
 import sys
 
+import numpy as np
+
 from jax.sharding import Mesh
+import jax
+import jax.numpy as jnp
+
 from transformers import AutoTokenizer
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-maxtext_parent_dir = os.path.dirname(current_dir)
-sys.path.append(maxtext_parent_dir)
-
-import max_logging
-import max_utils
-import pyconfig
-from input_pipeline import _input_pipeline_utils
-from layers import models
-from layers import quantizations
+from MaxText import max_logging
+from MaxText import maxtext_utils
+from MaxText import pyconfig
+from MaxText.globals import PKG_DIR
+from MaxText.input_pipeline import _input_pipeline_utils
+from MaxText.layers import models
+from MaxText.layers import quantizations
 
 
 def initialize_config(config):
   return pyconfig.initialize(
-      [sys.argv[0], "MaxText/configs/sft.yml"],
+      [sys.argv[0], os.path.join(PKG_DIR, "configs", "sft.yml")],
       run_name="test-sft-trainer-correctness",
       model_name=config.model_name,
       tokenizer_path=config.tokenizer_path,
@@ -63,7 +65,7 @@ def initialize_config(config):
 
 def get_golden_data(config):
   """Get the golden data for SFTTrainer in TRL."""
-  golden_data_path = "MaxText/test_assets/golden_data_sft_" + config.model_name + ".jsonl"
+  golden_data_path = os.path.join(PKG_DIR, "test_assets", f"golden_data_sft_{config.model_name}.jsonl")
   with jsonlines.open(golden_data_path, "r") as f:
     golden_data = list(f)
   return golden_data[0]
@@ -73,10 +75,10 @@ def setup_maxtext_model(config):
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
   init_rng, rng1 = jax.random.split(init_rng)
   quant = quantizations.configure_quantization(config)
-  devices_array = max_utils.create_device_mesh(config)
+  devices_array = maxtext_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
   maxtext_model = models.Transformer(config=config, mesh=mesh, quant=quant)
-  state, _ = max_utils.setup_decode_state(maxtext_model, config, rng1, mesh, None)
+  state, _ = maxtext_utils.setup_decode_state(maxtext_model, config, rng1, mesh, None)
   return maxtext_model, state, init_rng
 
 
@@ -165,15 +167,20 @@ def main(config, test_args):
   assert jax.numpy.all(kl_div < float(test_args.kl_div))
 
 
+def get_argument_parser():
+  argument_parser = argparse.ArgumentParser()
+  argument_parser.add_argument("--model-name", type=str, required=True)
+  argument_parser.add_argument("--tokenizer-path", type=str, required=True)
+  argument_parser.add_argument("--model-ckpt-path", type=str, required=True)
+  argument_parser.add_argument("--max-target-length", type=int, required=False, default=64)
+  argument_parser.add_argument("--atol", type=float, required=True)
+  argument_parser.add_argument("--rtol", type=float, required=True)
+  argument_parser.add_argument("--kl-div", type=float, required=True)
+  return argument_parser
+
+
 if __name__ == "__main__":
-  parser = argparse.ArgumentParser()
-  parser.add_argument("--model-name", type=str, required=True)
-  parser.add_argument("--tokenizer-path", type=str, required=True)
-  parser.add_argument("--model-ckpt-path", type=str, required=True)
-  parser.add_argument("--max-target-length", type=int, required=False, default=64)
-  parser.add_argument("--atol", type=float, required=True)
-  parser.add_argument("--rtol", type=float, required=True)
-  parser.add_argument("--kl-div", type=float, required=True)
-  test_args = parser.parse_args(sys.argv[1:])
-  config = initialize_config(test_args)
-  main(config, test_args)
+  _parser = get_argument_parser()
+  _test_args = _parser.parse_args(sys.argv[1:])
+  _config = initialize_config(_test_args)
+  main(_config, _test_args)

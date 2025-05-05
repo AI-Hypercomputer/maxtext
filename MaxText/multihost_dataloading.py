@@ -36,7 +36,7 @@ from jax.experimental import colocated_python
 import jax.numpy as jnp
 import grain.python as grain
 
-import max_logging
+from MaxText import max_logging
 
 
 def _build_global_shape_and_sharding(
@@ -95,7 +95,7 @@ def get_next_batch_sharded(local_iterator: Iterator, global_mesh: Mesh) -> jax.A
 class MultiHostDataLoadIterator:
   """fold get_next_batch_sharded into a iterator class"""
 
-  def __init__(self, dataloader: Union[tf.data.Dataset, grain.DataLoader], global_mesh: Mesh):
+  def __init__(self, dataloader: Union[tf.data.Dataset, Iterable], global_mesh: Mesh):
     self.global_mesh = global_mesh
     self.dataloader = dataloader
     if isinstance(self.dataloader, tf.data.Dataset):
@@ -175,32 +175,26 @@ def _get_cpu_mesh(mesh: Mesh):
 class RemoteIterator:
   "iterator class for using colocated python, iterator is initiated remotely and stored in the state of colocated python"
 
-  def __init__(self, get_ds_fn, preprocessing_fn, config, global_mesh):
-    self.config = config
+  def __init__(self, get_ds_fn, preprocessing_fn, global_mesh, global_shape):
     self.cpu_devices = _colocated_cpu_devices(jax.local_devices())
     self.tpu_devices = jax.local_devices()
-    self.global_mesh = global_mesh
     self.cpu_mesh = _get_cpu_mesh(global_mesh)
-    self.tpu_sharding = jax.sharding.NamedSharding(self.global_mesh, PartitionSpec(global_mesh.axis_names))
+    self.tpu_sharding = jax.sharding.NamedSharding(global_mesh, PartitionSpec(global_mesh.axis_names))
     self.cpu_sharding = jax.sharding.NamedSharding(self.cpu_mesh, PartitionSpec(self.cpu_mesh.axis_names))
-    global_shape = (config.global_batch_size_to_load, config.max_target_length)
     self.dummy_array = jnp.zeros((len(self.cpu_devices)))
     self.dummy_array = jax.device_put(self.dummy_array, self.cpu_sharding)
 
     @colocated_python.colocated_python
     def init(dummy_array):
-      colocated_python.config = config
       colocated_python.global_shape = global_shape
-      if config.dataset_type == "tfds":
-        ds = get_ds_fn(dataloading_host_index=jax.process_index(), dataloading_host_count=jax.process_count())
-        dataloader = preprocessing_fn(dataset=ds)
+      ds = get_ds_fn(dataloading_host_index=jax.process_index(), dataloading_host_count=jax.process_count())
+      dataloader = preprocessing_fn(dataset=ds)
+      if isinstance(dataloader, tf.data.Dataset):
         colocated_python.iterator = dataloader.as_numpy_iterator()
-      elif config.dataset_type == "grain":
-        ds = get_ds_fn()
-        dataloader = preprocessing_fn(
-            dataset=ds, dataloading_host_index=jax.process_index(), dataloading_host_count=jax.process_count()
-        )
+      elif isinstance(dataloader, Iterable):
         colocated_python.iterator = iter(dataloader)
+      else:
+        raise ValueError("Type error: dataloader should be either tf.data.Dataset or grain.DataLoader.")
       return dummy_array
 
     out = jax.device_get(init(self.dummy_array))

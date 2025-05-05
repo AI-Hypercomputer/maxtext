@@ -20,17 +20,16 @@ WARNING: THIS FILE IS A WORK IN PROGRESS.
 import functools
 from typing import Optional
 
-import jax
-
-import common_types
 import jax.numpy as jnp
-from flax import linen as nn
 from jax.experimental import shard_map
 from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention_kernel
 from jax.sharding import PartitionSpec as P
 
-from inference import page_manager
-from inference import paged_attention_kernel_v2
+from flax import linen as nn
+
+from MaxText import common_types
+from MaxText.inference import page_manager
+from MaxText.inference import paged_attention_kernel_v2
 
 # pytype: disable=attribute-error
 
@@ -75,15 +74,13 @@ class PagedAttentionOp(nn.Module):
       key_pages_var = self.variable("cache", "key_pages")
       value_pages_var = self.variable("cache", "value_pages")
 
+      required_ar_shape = (self.num_kv_heads, self.num_pages, self.tokens_per_page, self.kv_head_dim_size)
       # For AR mode, if shape doesn't match, reinitialize values but not variables
-      if model_mode != common_types.MODEL_MODE_PREFILL and key_pages_var.value.shape[1] != self.num_pages:
-        kv_pages_shape = (self.num_kv_heads, self.num_pages, self.tokens_per_page, self.kv_head_dim_size)
-        key_pages_var.value = jnp.zeros(kv_pages_shape, dtype=self.dtype)
-        value_pages_var.value = jnp.zeros(kv_pages_shape, dtype=self.dtype)
+      if key_pages_var.value.shape != required_ar_shape:
+        key_pages_var.value = jnp.zeros(required_ar_shape, dtype=self.dtype)
+        value_pages_var.value = jnp.zeros(required_ar_shape, dtype=self.dtype)
     else:
-      # Initial creation - choose size based on mode
-      num_pages = self.max_pages_per_prefill if model_mode == common_types.MODEL_MODE_PREFILL else self.num_pages
-      kv_pages_shape = (self.num_kv_heads, num_pages, self.tokens_per_page, self.kv_head_dim_size)
+      kv_pages_shape = (self.num_kv_heads, self.num_pages, self.tokens_per_page, self.kv_head_dim_size)
       key_pages_var = self.variable(
           "cache",
           "key_pages",
@@ -196,40 +193,34 @@ class PagedAttentionOp(nn.Module):
       page_state: page_manager.PageState,
   ) -> Array:
     """Apply Paged Attention v1 in decode only."""
-    bsnd = nn.logical_to_mesh_axes(self.query_axis_names)
-    kxpd = nn.logical_to_mesh_axes(self.kv_pages_axis_names)
-    batch_q, seqlen_q, num_heads_q, head_dim = query.shape
-    num_heads_kv, num_pages, tokens_per_page, head_dim = key_pages_var.value.shape
-
-    no_shard = P(None, None, None, None)
+    kv_pages_pspec = nn.logical_to_mesh_axes(("paged_kv_heads", None, None, None))
+    q_pspec = nn.logical_to_mesh_axes((None, None, "paged_kv_heads", None))
 
     @functools.partial(
         shard_map,
         mesh=self.mesh,
         in_specs=(
-            no_shard,
-            no_shard,
-            no_shard,
+            q_pspec,
+            kv_pages_pspec,
+            kv_pages_pspec,
             P(None),
             P(None, None),
             None,
         ),
-        out_specs=no_shard,
+        out_specs=q_pspec,
         check_rep=False,
     )
     def wrap_paged_attention(q, k_pages, v_pages, lengths, page_indices, pages_per_compute_block):
       q = jnp.squeeze(q, axis=1)
       result = paged_attention_kernel.paged_attention(
-          q=q,  # [batch_size, num_kv_heads, head_dim]
+          q=q,  # [batch_size, num_heads, head_dim]
           k_pages=k_pages,
           v_pages=v_pages,
           lengths=lengths,
           page_indices=page_indices,
           pages_per_compute_block=pages_per_compute_block,
       )
-      return jnp.expand_dims(
-          result, axis=1
-      )  # [batch_size, n_kv_head, head_dim] to [batch_size, seq_len, n_kv_head, head_dim]
+      return jnp.expand_dims(result, axis=1)  # [batch_size, n_kv_head, head_dim] to [batch_size, 1, n_kv_head, head_dim]
 
     return wrap_paged_attention(
         query,
@@ -282,20 +273,21 @@ class PagedAttentionOp(nn.Module):
       page_state: page_manager.PageState,
   ) -> None:
     """Update pages for prefill step."""
-
     assert (
         key.shape == value.shape
     ), f"prefill_step key/value should have the same shape, but getting {key.shape=} and {value.shape=} instead"
     batch_size, seq_len, n_kv_head, head_dim = key.shape
     assert seq_len % self.tokens_per_page == 0, f"seq_length {seq_len} and  tokens_per_page {self.tokens_per_page}"
-    assert (
-        key_pages_var.value.shape == value_pages_var.value.shape
-    ), f"prefill_step key/value_pages_var should have the same shape, but getting {key_pages_var.shape=} and {value_pages_var.shape=} instead"
+    assert key_pages_var.value.shape == value_pages_var.value.shape, (
+        f"prefill_step key/value_pages_var should have the same shape, but "
+        f"getting {key_pages_var.shape=} and {value_pages_var.shape=} instead"
+    )
 
     v_n_kv, v_n_p, v_p, v_d = key_pages_var.value.shape
     assert v_n_kv == n_kv_head, f"{v_n_kv=} {n_kv_head=}"
     assert v_p == self.tokens_per_page, f"{v_p=} {self.tokens_per_page=}"
     assert v_d == head_dim, f"{v_d=} {head_dim=}"
+    assert page_state.page_map.shape == (page_state.num_pages_used.shape[0], self.max_pages_per_slot)
 
     # Handle both init (b>1) and runtime (b=1) cases
     if batch_size == 1:
@@ -308,8 +300,8 @@ class PagedAttentionOp(nn.Module):
     key = jnp.transpose(key, axes=(1, 0, 2))
     value = jnp.transpose(value, axes=(1, 0, 2))
 
-    key = jnp.reshape(key, shape=(n_kv_head, seq_len // self.tokens_per_page, self.tokens_per_page, head_dim))
-    value = jnp.reshape(value, shape=(n_kv_head, seq_len // self.tokens_per_page, self.tokens_per_page, head_dim))
+    key = jnp.reshape(key, shape=(n_kv_head, max(1, seq_len // self.tokens_per_page), self.tokens_per_page, head_dim))
+    value = jnp.reshape(value, shape=(n_kv_head, max(1, seq_len // self.tokens_per_page), self.tokens_per_page, head_dim))
 
     key_pages_var.value = nn.with_logical_constraint(key, self.kv_pages_axis_names)
     value_pages_var.value = nn.with_logical_constraint(value, self.kv_pages_axis_names)
@@ -326,8 +318,9 @@ class PagedAttentionOp(nn.Module):
     new_value = value.reshape(batch_size, kv_heads, head_dim)[:, :, :]
     new_value = jnp.transpose(new_value, (1, 0, 2))  # [n_kv_heads, batch_size, head_dim]
 
-    broadcast_pages = jnp.tile(page_state.current_page, (kv_heads, 1))  # [n_kv_heads, batch_size]
-    broadcast_pos = jnp.tile(page_state.current_page_position, (kv_heads, 1))  # [n_kv_heads, batch_size]
+    broadcast_pages = jnp.tile(page_state.active_page, (kv_heads, 1))  # [n_kv_heads, batch_size]
+    broadcast_pos = jnp.tile(page_state.active_page_position, (kv_heads, 1))  # [n_kv_heads, batch_size]
+
     kv_indices = jnp.arange(kv_heads)[:, None]  # [n_kv_heads, 1]
     kv_indices = jnp.tile(kv_indices, (1, batch_size))  # [n_kv_heads, batch_size]
 
@@ -335,48 +328,6 @@ class PagedAttentionOp(nn.Module):
     key_pages_updated = key_pages.at[kv_indices, broadcast_pages, broadcast_pos].set(new_key)
     value_pages_updated = value_pages.at[kv_indices, broadcast_pages, broadcast_pos].set(new_value)
 
-    key_pages_updated = nn.with_logical_constraint(key_pages_updated, self.kv_pages_axis_names)
-    value_pages_updated = nn.with_logical_constraint(value_pages_updated, self.kv_pages_axis_names)
-
     key_pages_var.value = key_pages_updated
     value_pages_var.value = value_pages_updated
     return key_pages_var, value_pages_var
-
-  def release_slot(
-      self,
-      slot: int,
-      page_state: page_manager.PageState,
-  ) -> page_manager.PageState:
-    """Releases all pages assigned to a slot and updates page state.
-
-    Args:
-      slot: The slot number to release
-      page_state: Current page state
-
-    Returns:
-      Updated page state with released pages
-    """
-    # Reset page map entries for this slot
-    slot_pages = page_state.page_map[slot]
-    used_pages = slot_pages[slot_pages > 0]
-
-    # Update page status to mark pages as free
-    new_page_status = page_state.page_status.at[used_pages].set(0)
-
-    # Reset page map
-    new_page_map = page_state.page_map.at[slot].set(0)
-
-    # Reset other state
-    new_sequence_lengths = page_state.sequence_lengths.at[slot].set(0)
-    new_num_pages_used = page_state.num_pages_used.at[slot].set(0)
-    new_current_page = page_state.current_page.at[slot].set(0)
-    new_current_page_position = page_state.current_page_position.at[slot].set(0)
-
-    return page_manager.PageState(
-        page_status=new_page_status,
-        page_map=new_page_map,
-        sequence_lengths=new_sequence_lengths,
-        num_pages_used=new_num_pages_used,
-        current_page=new_current_page,
-        current_page_position=new_current_page_position,
-    )

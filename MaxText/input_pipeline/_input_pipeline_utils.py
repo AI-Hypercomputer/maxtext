@@ -25,8 +25,8 @@ from datasets.distributed import split_dataset_by_node
 import grain.python as grain
 import numpy as np
 import tensorflow as tf
-import max_logging
-import tokenizer
+from MaxText import max_logging
+from MaxText import tokenizer
 
 Features = Dict[str, tf.Tensor]
 AUTOTUNE = tf.data.experimental.AUTOTUNE
@@ -38,9 +38,11 @@ def normalize_features(x, column_name):
   return {"inputs": x[column_name], "targets": x[column_name]}
 
 
-def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None):
+def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None, dataset_type="tfds"):
   # Load tokenizer
-  tokenizer_model = tokenizer.build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token)
+  tokenizer_model = tokenizer.build_tokenizer(
+      tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token, dataset_type
+  )
   return tokenizer_model
 
 
@@ -66,36 +68,35 @@ def add_segmentation_and_position(x, data_columns, padding_token=0):
 ########## Functions used by HF pipeline
 
 
-def combine_columns(example, columns):
+def combine_columns(example, columns, data_column):
   """Combine columns such as 'prompt' and 'completion' for sft training"""
   assert len(columns) > 1
   combined = []
   for i in range(len(example[columns[0]])):
     for c in columns:
       combined.append(example[c][i])
-  example["messages"] = combined
+  example[data_column] = combined
   return example
 
 
-def is_conversational(example):
+def is_conversational(features, data_columns):
   """Check if data is in a conversational format.
   Examples:
 
-  example = {'prompt': [{'content': 'question', 'role': 'user'}], 'completion': [{'content': 'answer', 'role': 'assistant'}]}
-  is_conversational(example) return True.
+  features = {'prompt': [{'content': Value(dtype='string', id=None), 'role': Value(dtype='string', id=None)}],
+              'completion': [{'content': Value(dtype='string', id=None), 'role': Value(dtype='string', id=None)}]}
+  data_columns = ["prompt", "completion"]
+  is_conversational(features, data_columns) return True.
 
-  example = {"prompt": "I love to"})
-  is_conversational(example) returns False.
+  features = {'prompt': [Value(dtype='string', id=None)], 'completion': [Value(dtype='string', id=None)]}
+  data_columns = ["prompt", "completion"]
+  is_conversational(features, data_columns) returns False.
   """
-  supported_columns = ["prompt", "completion", "messages"]
-  data_columns = [column for column in example.keys() if column in supported_columns]
-
-  if data_columns:
-    for column in data_columns:
-      messages = example[column]
-      if isinstance(messages, list):
-        if isinstance(messages[0], dict) and "role" in messages[0] and "content" in messages[0]:
-          return True
+  for column in data_columns:
+    messages = features[column]
+    if isinstance(messages, list):
+      if isinstance(messages[0], dict) and "role" in messages[0] and "content" in messages[0]:
+        return True
 
   return False
 
@@ -149,11 +150,11 @@ class SFTPromptMasking(grain.MapTransform):
       self.eos_id = eos_id
     self.unk_id = unk_id
 
-  def map(self, features):
+  def map(self, element):
     inputs, targets = [], []
-    for i, text in enumerate(features[self.text_column_name]):
+    for i, text in enumerate(element[self.text_column_name]):
       inputs += text
-      targets += [self.unk_id] * len(text) if self.completion_only and features["is_prompt"][i] else text
+      targets += [self.unk_id] * len(text) if self.completion_only and element["is_prompt"][i] else text
     if self.add_bos:
       inputs = [self.bos_id] + inputs
       targets = [self.bos_id] + targets
@@ -173,10 +174,10 @@ class HFNormalizeFeatures(grain.MapTransform):
   def __init__(self, column_name):
     self.column_name = column_name
 
-  def map(self, features):
+  def map(self, element):
     return {
-        "inputs": np.asarray(features[self.column_name], dtype=np.int32),
-        "targets": np.asarray(features[self.column_name], dtype=np.int32),
+        "inputs": np.asarray(element[self.column_name], dtype=np.int32),
+        "targets": np.asarray(element[self.column_name], dtype=np.int32),
     }
 
 
@@ -214,8 +215,8 @@ class HFDataSource(grain.RandomAccessDataSource):
     if self.n_shards < (self.dataloading_host_count * self.num_threads):
       warnings.warn(
           f"WARNING: Inefficient dataloading. Your train or eval dataset contains {self.n_shards} shards, "
-          "smaller than number of host loading data. This is known to lead to inefficient dataloading. "
-          "see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#multihost-dataloading-best-practice"
+          "smaller than number of host loading data. This is known to lead to inefficient dataloading. See"
+          "github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#multihost-dataloading-best-practice"
       )
       self.n_shards = self.dataloading_host_count * self.num_threads
 
@@ -277,7 +278,7 @@ class ParseFeatures(grain.MapTransform):
     else:
       self.dtype = tf.int64
 
-  def map(self, features):
+  def map(self, element):
     def _parse(example):
       parsed = tf.io.parse_example(
           example,
@@ -285,18 +286,7 @@ class ParseFeatures(grain.MapTransform):
       )
       return parsed
 
-    return _parse(features)
-
-
-@dataclasses.dataclass
-class InputsTargetsFeatures(grain.MapTransform):
-  """Normalize text feature keys."""
-
-  def __init__(self, column_name):
-    self.column_name = column_name
-
-  def map(self, features):
-    return {"inputs": features[self.column_name], "targets": features[self.column_name]}
+    return _parse(element)
 
 
 @dataclasses.dataclass
@@ -307,11 +297,30 @@ class NormalizeFeatures(grain.MapTransform):
     self.column_names = column_names
     self.tokenize = tokenize
 
-  def map(self, features):
+  def map(self, element):
     if self.tokenize:
-      return {col: features[col].numpy()[0].decode() for col in self.column_names}
+      return {col: element[col].numpy()[0].decode() for col in self.column_names}
     else:
-      return {col: features[col].numpy() for col in self.column_names}
+      return {col: element[col].numpy() for col in self.column_names}
+
+
+@dataclasses.dataclass
+class Rekey(grain.MapTransform):
+  """Rname keys according to a mappign dict"""
+
+  def __init__(self, mapping_dict, keep_old_keys=False):
+    self.mapping_dict = mapping_dict
+    self.keep_old_keys = keep_old_keys
+
+  def map(self, element):
+    old_keys = set()
+    for new_key, old_key in self.mapping_dict.items():
+      element[new_key] = element[old_key]
+      old_keys.add(old_key)
+    if not self.keep_old_keys:
+      for key in old_keys:
+        del element[key]
+    return element
 
 
 @dataclasses.dataclass
@@ -321,13 +330,43 @@ class ReformatPacking(grain.MapTransform):
   def __init__(self, column_names):
     self.column_names = column_names
 
-  def map(self, data):
+  def map(self, element):
     ret = {}
     for col in self.column_names:
-      ret[f"{col}"] = data[0][col]
-      ret[f"{col}_segmentation"] = data[1][col]
-      ret[f"{col}_position"] = data[2][col]
+      ret[f"{col}"] = element[0][col]
+      ret[f"{col}_segmentation"] = element[1][col]
+      ret[f"{col}_position"] = element[2][col]
     return ret
+
+
+@dataclasses.dataclass
+class PadOrTrimToMaxLength(grain.MapTransform):
+  """Pads/Trims each input to the specified length
+  and returns true_length of input
+  """
+
+  def __init__(self, max_length):
+    self.max_length = max_length
+
+  def map(self, element: dict[str, np.ndarray]):
+    """map to each element"""
+
+    def _pad(x, max_length):
+      pad_amount = max(max_length - x.shape[0], 0)
+      pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
+      return np.pad(x, pad_amount)[:max_length]
+
+    data_columns = list(element.keys())
+    for data_column in data_columns:
+      element[f"{data_column}_segmentation"] = (element[data_column] != 0).astype(np.int32)
+      element[f"{data_column}_position"] = np.arange(element[data_column].shape[0], dtype=np.int32)
+      element[f"{data_column}_true_length"] = np.array(element[data_column].shape[0], dtype=np.int32)
+    for key, _ in element.items():
+      if "true_length" not in key:
+        element[key] = _pad(element[key], self.max_length)
+    # for data_column in data_columns:
+    #   data[f"{data_column}_true_length"] = _max_true_length(data[data_column], 0)
+    return element
 
 
 @dataclasses.dataclass
@@ -338,7 +377,7 @@ class PadToMaxLength(grain.MapTransform):
     self.max_length = max_length
     self.pad_id = pad_id
 
-  def map(self, data: dict[str, np.ndarray]):
+  def map(self, element: dict[str, np.ndarray]):
     """map to each element"""
 
     def _pad(x, max_length, pad_id):
@@ -346,13 +385,13 @@ class PadToMaxLength(grain.MapTransform):
       pad_amount = [(0, pad_amount)] + [(0, 0)] * (len(x.shape) - 1)
       return np.pad(x, pad_amount, constant_values=pad_id)
 
-    data_columns = list(data.keys())
+    data_columns = list(element.keys())
     for data_column in data_columns:
-      data[f"{data_column}_segmentation"] = (data[data_column] != self.pad_id).astype(np.int32)
-      data[f"{data_column}_position"] = np.arange(data[data_column].shape[0], dtype=np.int32)
-    for key, _ in data.items():
-      data[key] = _pad(data[key], self.max_length, self.pad_id)
-    return data
+      element[f"{data_column}_segmentation"] = (element[data_column] != self.pad_id).astype(np.int32)
+      element[f"{data_column}_position"] = np.arange(element[data_column].shape[0], dtype=np.int32)
+    for key, _ in element.items():
+      element[key] = _pad(element[key], self.max_length, self.pad_id)
+    return element
 
 
 def shift_right(x, axis=1):
@@ -396,5 +435,5 @@ class ShiftData(grain.MapTransform):
     self.ignored_ids = ignored_ids
     self.axis = axis
 
-  def map(self, data):
-    return shift_and_refine(data, ignored_ids=self.ignored_ids, axis=self.axis)
+  def map(self, element):
+    return shift_and_refine(element, ignored_ids=self.ignored_ids, axis=self.axis)

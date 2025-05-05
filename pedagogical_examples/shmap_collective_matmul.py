@@ -35,6 +35,7 @@ MESH_DATA_AXIS = "dp"
 MESH_FSDP_AXIS = "fsdp"
 MESH_TENSOR_AXIS = "tp"
 
+# We should not call jax.devices() when this file is imported b/415022795.
 d = jax.devices()
 outd = [[[d[0], d[1], d[3], d[2]]]]
 global_mesh = Mesh(outd, (MESH_DATA_AXIS, MESH_FSDP_AXIS, MESH_TENSOR_AXIS))
@@ -177,34 +178,41 @@ def collective_matmul(activations, weights):  # pylint: disable=redefined-outer-
   return accum
 
 
-with global_mesh:
-  # pylint: disable=not-callable
-  activations, weights = data_fn()
+def main():
+  with global_mesh:
+    # pylint: disable=not-callable
+    activations, weights = data_fn()
 
-  jax.block_until_ready(activations)
-  jax.block_until_ready(weights)
+    jax.block_until_ready(activations)
+    jax.block_until_ready(weights)
 
-  @jax.jit
-  def run_naive(_activations, _weights):
-    with jax.named_scope("naive_matmul"):
-      outputs = jit_matmul(_activations, _weights)
-    return outputs
+    @jax.jit
+    def run_naive(_activations, _weights):
+      with jax.named_scope("naive_matmul"):
+        outputs = jit_matmul(_activations, _weights)
+      return outputs
 
-  @jax.jit
-  def run_collective(_activations, _weights):
-    with jax.named_scope("collective_matmul"):
-      manual_outputs = jax.jit(collective_matmul)(_activations, _weights)
-    return manual_outputs
+    @jax.jit
+    def run_collective(_activations, _weights):
+      with jax.named_scope("collective_matmul"):
+        manual_outputs = jax.jit(collective_matmul)(_activations, _weights)
+      return manual_outputs
 
-  naive_outputs = run_naive(activations, weights)
-  collective_outputs = run_collective(activations, weights)
+    naive_outputs = run_naive(activations, weights)
+    collective_outputs = run_collective(activations, weights)
 
-  print(f"input {activations.shape=} {activations.addressable_shards[0].data.shape=}")
-  print(f"input {weights.shape=} {weights.addressable_shards[0].data.shape=}")
-  print(f"naive_outputs {naive_outputs.shape=} {naive_outputs.addressable_shards[0].data.shape=}")
-  print(f"collective_outputs {collective_outputs.shape=} {collective_outputs.addressable_shards[0].data.shape=}")
+    print(f"input {activations.shape=} {activations.addressable_shards[0].data.shape=}")
+    print(f"input {weights.shape=} {weights.addressable_shards[0].data.shape=}")
+    print(f"naive_outputs {naive_outputs.shape=} {naive_outputs.addressable_shards[0].data.shape=}")
+    print(f"collective_outputs {collective_outputs.shape=} {collective_outputs.addressable_shards[0].data.shape=}")
 
-  assert jnp.allclose(naive_outputs, collective_outputs), "Two algorithms should match but don't"
+    assert jnp.allclose(naive_outputs, collective_outputs), "Two algorithms should match but don't"
 
-  simple_timeit(run_naive, activations, weights, task="naive")
-  simple_timeit(run_collective, activations, weights, task="collective")
+    simple_timeit(run_naive, activations, weights, task="naive")
+    simple_timeit(run_collective, activations, weights, task="collective")
+
+  return True
+
+
+if __name__ == "__main__":
+  main()

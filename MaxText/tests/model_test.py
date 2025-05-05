@@ -14,20 +14,22 @@
 
 import sys
 import unittest
+import os.path
 
-import common_types
+from MaxText import common_types
+from MaxText.globals import PKG_DIR
 
 from flax.core import freeze
 import jax
 import jax.numpy as jnp
-import max_utils
+from MaxText import maxtext_utils
 import numpy as np
 import pytest
 
-import pyconfig
+from MaxText import pyconfig
 
-from layers import models
-from layers import quantizations
+from MaxText.layers import models
+from MaxText.layers import quantizations
 
 Mesh = jax.sharding.Mesh
 MAX_PREFILL_PREDICT_LENGTH = 4
@@ -43,7 +45,7 @@ class TestModel(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,
@@ -75,7 +77,7 @@ class TestModel(unittest.TestCase):
     Does not perform any actual flops.
     """
     new_config = self.init_pyconfig(cast_logits_to_fp32=cast_logits_to_fp32, logits_dot_in_fp32=False)
-    devices_array = max_utils.create_device_mesh(new_config)
+    devices_array = maxtext_utils.create_device_mesh(new_config)
     mesh = Mesh(devices_array, new_config.mesh_axes)
     model = models.Transformer(config=new_config, mesh=mesh, quant=None)
 
@@ -109,7 +111,7 @@ class TestModel(unittest.TestCase):
   def test_train_vs_prefill_and_autoregress(self):
     PREFILL_RANGE = MAX_PREFILL_PREDICT_LENGTH
 
-    devices_array = max_utils.create_device_mesh(self.cfg)
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     quant = quantizations.configure_quantization(self.cfg)
     model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant)

@@ -18,15 +18,16 @@ limitations under the License.
 
 import functools
 
+import numpy as np
+
 import jax
 from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
-import numpy as np
-import common_types
-
 from jax.experimental import shard_map
+
+from MaxText import common_types
 
 
 BATCH = common_types.BATCH
@@ -51,7 +52,7 @@ def get_mha_cost_estimate(shape_dtype):
   return pl.CostEstimate(
       flops=flops,
       transcendentals=batch_size * num_heads * seq_len,
-      bytes_accessed=sum(np.prod(s.shape) * s.dtype.itemsize for s in shape_dtype),
+      bytes_accessed=int(sum(np.prod(s.shape) * s.dtype.itemsize for s in shape_dtype)),
   )
 
 
@@ -277,11 +278,7 @@ def ragged_mqa(
           ],
           grid=(batch_size, seq_len // block_size),
       ),
-      compiler_params=dict(
-          mosaic=dict(
-              dimension_semantics=("parallel", "arbitrary"),
-          )
-      ),
+      compiler_params=pltpu.TPUCompilerParams(dimension_semantics=("parallel", "arbitrary")),
       out_shape=[
           jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),
           jax.ShapeDtypeStruct((batch_size, num_heads, head_dim), jnp.float32),

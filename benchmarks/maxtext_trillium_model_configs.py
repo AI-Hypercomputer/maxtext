@@ -16,8 +16,10 @@
 """Shared Benchmark config for v6e orchestrations."""
 
 import dataclasses
+import os.path
 import typing
-import xla_flags_library
+from tempfile import gettempdir
+from benchmarks import xla_flags_library
 
 # TODO(vbarr@) Abstract software features like checkpointing,
 # real data / synthetic data out of this config
@@ -413,7 +415,7 @@ llama2_70b_4096_sc = _add_to_model_dictionary(
         model_name="llama2-70b-4096-sc",
         model_type="llama2-70b",
         tuning_params={
-            "per_device_batch_size": 2,
+            "per_device_batch_size": 3,
             "ici_fsdp_parallelism": 1,
             "ici_fsdp_transpose_parallelism": -1,
             "ici_tensor_parallelism": 1,
@@ -497,7 +499,7 @@ llama2_70b_4096_sc_real_data_tfds = _add_to_model_dictionary(
     ),
 )
 
-
+temp_dir = gettempdir()
 llama2_70b_4096_sc_real_data_grain = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
@@ -520,7 +522,7 @@ llama2_70b_4096_sc_real_data_grain = _add_to_model_dictionary(
             "enable_checkpointing": False,
             "dataset_type": "grain",
             "grain_train_files": (
-                "/tmp/dataset/array-record/c4/en/3.0.1/c4-train.array_record*"
+                os.path.join(temp_dir, "dataset", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*")
             ),
             "grain_worker_count": 24,
             "profiler": "xplane",
@@ -577,7 +579,7 @@ llama2_70b_4096_sc_real_data_grain_checkpoint = _add_to_model_dictionary(
             "async_checkpointing": True,
             "dataset_type": "grain",
             "grain_train_files": (
-                "/tmp/dataset/array-record/c4/en/3.0.1/c4-train.array_record*"
+                os.path.join(temp_dir, "dataset", "array-record", "c4", "en", "3.0.1", "c4-train.array_record*")
             ),
             "grain_worker_count": 24,
             "profiler": "xplane",
@@ -625,7 +627,7 @@ llama2_70b_4096_real_data_long_run = _add_to_model_dictionary(
             "profiler": "xplane",
             "dataset_path": "gs://max-datasets-rogue",
             "dataset_type": "tfds",
-            "tokenizer_path": "assets/tokenizer.llama2",
+            "tokenizer_path": os.path.join("assets", "tokenizer.llama2"),
             "sa_block_q": 1024,
             "sa_block_q_dkv": 2048,
             "sa_block_q_dq": 2048,
@@ -935,7 +937,7 @@ llama3_1_70b_8192 = _add_to_model_dictionary(
         model_name="llama3_1-70b-8192",
         model_type="llama3.1-70b",
         tuning_params={
-            "per_device_batch_size": 4,
+            "per_device_batch_size": 5,
             "ici_fsdp_parallelism": -1,
             "remat_policy": "custom",
             "decoder_layer_input": "offload",
@@ -971,6 +973,175 @@ llama3_1_70b_8192 = _add_to_model_dictionary(
     ),
 )
 
+llama3_1_70b_8192_iter_synthetic = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama3_1_70b_8192_synthetic",
+    model_type="llama3.1-70b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": -1,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "use_iota_embed": True,
+        "dataset_type": "synthetic",
+        "enable_checkpointing": False,
+        "sa_block_q": 2048,
+        "sa_block_kv": 2048,
+        "sa_block_kv_compute": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_kv_dkv": 2048,
+        "sa_block_kv_dkv_compute": 2048,
+        "sa_block_q_dq": 2048,
+        "sa_block_kv_dq": 2048,
+        "sa_use_fused_bwd_kernel": True,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+        +  " --xla_tpu_iova_dma_chunk_size_bytes=104857"
+    ),
+  )
+)
+
+llama3_1_70b_8192_iter_real_data_grain = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama3_1_70b_8192_rd_grain",
+    model_type="llama3.1-70b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": -1,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "use_iota_embed": True,
+        "dataset_path": "/tmp/dataset",
+        "dataset_type": "grain",
+        "grain_train_files": "/tmp/dataset/array-record/c4/en/3.0.1/c4-train.array_record*",
+        "grain_worker_count": 24,
+        "enable_checkpointing": False,
+        "sa_block_q": 2048,
+        "sa_block_kv": 2048,
+        "sa_block_kv_compute": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_kv_dkv": 2048,
+        "sa_block_kv_dkv_compute": 2048,
+        "sa_block_q_dq": 2048,
+        "sa_block_kv_dq": 2048,
+        "sa_use_fused_bwd_kernel": True,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+        +  " --xla_tpu_iova_dma_chunk_size_bytes=104857"
+    ),
+  )
+)
+
+llama3_1_70b_8192_iter_synthetic_ckpt = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama3_1_70b_8192_synthetic_ckpt",
+    model_type="llama3.1-70b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": -1,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "use_iota_embed": True,
+        "dataset_type": "synthetic",
+        "enable_checkpointing": True,
+        "async_checkpointing": True,
+        "checkpoint_period": 20,
+        "sa_block_q": 2048,
+        "sa_block_kv": 2048,
+        "sa_block_kv_compute": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_kv_dkv": 2048,
+        "sa_block_kv_dkv_compute": 2048,
+        "sa_block_q_dq": 2048,
+        "sa_block_kv_dq": 2048,
+        "sa_use_fused_bwd_kernel": True,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+        +  " --xla_tpu_iova_dma_chunk_size_bytes=104857"
+    ),
+  )
+)
+
+llama3_1_70b_8192_iter_real_data_and_checkpointing = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="llama3_1_70b_8192_rd_ckpt_grain",
+    model_type="llama3.1-70b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_parallelism": -1,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "use_iota_embed": True,
+        "dataset_path": "/tmp/dataset",
+        "dataset_type": "grain",
+        "grain_train_files": "/tmp/dataset/array-record/c4/en/3.0.1/c4-train.array_record*",
+        "grain_worker_count": 24,
+        "enable_checkpointing": True,
+        "async_checkpointing": True,
+        "checkpoint_period": 20,
+        "sa_block_q": 2048,
+        "sa_block_kv": 2048,
+        "sa_block_kv_compute": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_kv_dkv": 2048,
+        "sa_block_kv_dkv_compute": 2048,
+        "sa_block_q_dq": 2048,
+        "sa_block_kv_dq": 2048,
+        "sa_use_fused_bwd_kernel": True,
+    },
+    xla_flags=(
+        xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+        +  " --xla_tpu_iova_dma_chunk_size_bytes=104857"
+    ),
+  )
+)
 
 llama3_1_70b_8192_lr_real_data = _add_to_model_dictionary(
     trillium_model_dict,
@@ -1032,7 +1203,7 @@ llama3_1_70b_8192_lr_real_data = _add_to_model_dictionary(
 llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
-        model_name="llama3_1-70b-8192",
+        model_name="llama3_1-70b-8192-iter-real-data-and-checkpointing-tfds",
         model_type="llama3.1-70b",
         tuning_params={
             "per_device_batch_size": 2,
@@ -1064,6 +1235,7 @@ llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds = _add_to_model_dictiona
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
+            "tokenizer_type": "tiktoken",
             "tokenizer_path": "assets/tokenizer_llama3.tiktoken",
         },
         xla_flags=(
@@ -1127,6 +1299,7 @@ llama3_1_70b_8192_iter_synth_data_and_checkpointing = _add_to_model_dictionary(
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
+            "tokenizer_type": "tiktoken",
             "tokenizer_path": "assets/tokenizer_llama3.tiktoken",
         },
         xla_flags=(
@@ -1413,6 +1586,48 @@ mixtral_8x22b_dropped = _add_to_model_dictionary(
     ),
 )
 
+
+deepseek_v3_ep16 = _add_to_model_dictionary(
+    trillium_model_dict,
+    MaxTextModel(
+        model_name="deepseek_v3_ep16",
+        model_type="deepseek3-671b",
+        tuning_params={
+            "per_device_batch_size": 1,
+            "max_target_length": 8192,
+            "ici_fsdp_parallelism": 16,
+            "ici_expert_parallelism": 16,
+            "dcn_fsdp_parallelism": 2,
+            "remat_policy": "custom",
+            "decoder_layer_input": "offload",
+            "gcs_metrics": True,
+            "use_iota_embed": True,
+            "dataset_path": "gs://max-datasets-rogue",
+            "dataset_type": "synthetic",
+            "reuse_example_batch": 1,
+            "enable_checkpointing": False,
+            "profiler": "xplane",
+            "sa_block_q": 2048,
+            "sa_block_q_dkv": 2048,
+            "sa_block_q_dq": 2048,
+            "megablox": False,
+            "sparse_matmul": False,
+            "capacity_factor": 1.0,
+            "tokenizer_path": "assets/tokenizer.mistral-v3",
+            "dtype": "bfloat16",
+            "opt_type": "sgd",
+            "weight_dtype": "bfloat16",
+            "attention": "flash",
+        },
+        xla_flags=(
+            xla_flags_library.MOE_VMEM_LIMIT_FLAG
+            + xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.DATA_PARALLEL_OVERLAP
+        ),
+    ),
+)
+
+
 gemma2_9b_8192 = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
@@ -1431,13 +1646,13 @@ gemma2_9b_8192 = _add_to_model_dictionary(
             "reuse_example_batch": 1,
             "enable_checkpointing": False,
             "profiler": "xplane",
-            "tokenizer_path": "assets/tokenizer.llama2",
+            "tokenizer_path": os.path.join("assets", "tokenizer.llama2"),
             "sa_block_q": 2048,
             "sa_block_q_dkv": 2048,
             "sa_block_q_dq": 2048,
         },
         xla_flags=(
-            xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(114688)
+            xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(vmem_limit=114688)
             + xla_flags_library.REDUCE_SCATTER_FUSION
             + xla_flags_library.CF_FOR_ALL_GATHER
             + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
@@ -1447,33 +1662,97 @@ gemma2_9b_8192 = _add_to_model_dictionary(
 
 
 gemma2_27b_8192 = _add_to_model_dictionary(
-    trillium_model_dict,
-    MaxTextModel(
-        model_name="gemma2-27b-8192",
-        model_type="gemma2-27b",
-        tuning_params={
-            "per_device_batch_size": 2,
-            "ici_fsdp_transpose_parallelism": 256,
-            "remat_policy": "full",
-            "max_target_length": 8192,
-            "attention": "flash",
-            "gcs_metrics": True,
-            "use_iota_embed": True,
-            "dataset_path": "gs://max-datasets-rogue",
-            "dataset_type": "synthetic",
-            "reuse_example_batch": 1,
-            "enable_checkpointing": False,
-            "profiler": "xplane",
-            "tokenizer_path": "assets/tokenizer.llama2",
-            "sa_block_q": 2048,
-            "sa_block_q_dkv": 2048,
-            "sa_block_q_dq": 2048,
-        },
-        xla_flags=(
-            xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(122880)
-            + xla_flags_library.REDUCE_SCATTER_FUSION
-            + xla_flags_library.CF_FOR_ALL_GATHER
-            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
-        ),
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="gemma2-27b-8192",
+    model_type="gemma2-27b",
+    tuning_params={
+        "per_device_batch_size": 2,
+        "ici_fsdp_transpose_parallelism": 256,
+        "remat_policy": "full",
+        "max_target_length": 8192,
+        "attention": "flash",
+        "gcs_metrics": True,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+        "tokenizer_path": os.path.join("assets", "tokenizer.llama2"),
+        "sa_block_q": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_q_dq": 2048,
+    },
+    xla_flags=(
+        xla_flags_library.CUSTOM_VMEM_LIMIT_FLAG(vmem_limit=122880)
+        + xla_flags_library.REDUCE_SCATTER_FUSION
+        + xla_flags_library.CF_FOR_ALL_GATHER
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
     ),
+    )
 )
+
+# Config for Llama3.1 70B model with 131072 max target length aka context length
+llama3_1_70b_131072 = _add_to_model_dictionary(
+  trillium_model_dict,
+    MaxTextModel(
+    model_name="llama3_1_70b_131072",
+    model_type="llama3.1-70b",
+    tuning_params={
+        "per_device_batch_size": 0.125,
+        "ici_fsdp_parallelism": -1,
+        "ici_context_parallelism": 16,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+        "out_proj": "offload",
+        "query_proj": "offload",
+        "key_proj": "offload",
+        "value_proj": "offload",
+        "max_target_length": 131072,
+        "attention": "flash",
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "enable_checkpointing": False,
+        "sa_block_q": 2048,
+        "sa_block_kv": 2048,
+        "sa_block_kv_compute": 2048,
+        "sa_block_q_dkv": 2048,
+        "sa_block_kv_dkv": 2048,
+        "sa_block_kv_dkv_compute": 2048,
+        "sa_block_q_dq": 2048,
+        "sa_block_kv_dq": 2048,
+        "sa_use_fused_bwd_kernel": True,
+        "profiler": "xplane",
+        "skip_first_n_steps_for_profiler": 10,
+        "profiler_steps": 5,
+        "tokenizer_type": "tiktoken",
+        "tokenizer_path": "assets/tokenizer_llama3.tiktoken", 
+        "packing": False,
+    },
+    xla_flags=(xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+        + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR
+        + xla_flags_library.HOST_OFFLOAD_FLAGS
+        
+    ),
+    pathways_xla_flag_options={
+        xla_flags_library.REMOVE: [
+            "--2a886c8_chip_config_name=megachip_tccontrol"
+        ],
+        xla_flags_library.ADD_SERVER: (
+            xla_flags_library.ENHANCED_LAUNCH_BARRIER
+        ),
+        xla_flags_library.ADD_PROXY: (
+            xla_flags_library.ENHANCED_LAUNCH_BARRIER
+        ),
+        xla_flags_library.ADD_WORKER: (
+            xla_flags_library.ENHANCED_LAUNCH_BARRIER
+        ),
+    },
+  )
+)
+
+

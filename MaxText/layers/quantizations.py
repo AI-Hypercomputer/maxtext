@@ -17,22 +17,24 @@
 import functools
 import json
 import re
-from typing import Optional
+from typing import Tuple, Sequence
+from dataclasses import dataclass
+
 from aqt.jax.v2 import config as aqt_config
 from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2.flax import aqt_flax
 from aqt.jax.v2 import tiled_dot_general
 from aqt.jax.v2 import calibration
-import common_types
-from dataclasses import dataclass
-from flax.linen import fp8_ops
-from flax.linen import initializers as flax_initializers
-import flax.linen as nn
+
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_flatten_with_path, tree_unflatten
-from typing import Tuple, Sequence
-from inference import kvcache
+from flax.linen import fp8_ops
+from flax.linen import initializers as flax_initializers
+import flax.linen as nn
+
+from MaxText.inference import kvcache
+from MaxText import common_types
 
 # Params used to define mixed precision quantization configs
 DEFAULT = "__default__"  # default config
@@ -59,11 +61,9 @@ class Quantization:
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Placeholder for dot_general implementation in subclasses."""
-    pass
 
   def einsum(self, dtype: DType = jnp.float32):
     """Placeholder for einsum implementation in subclasses."""
-    pass
 
 
 def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
@@ -204,7 +204,7 @@ class Fp8Quantization(Quantization):
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
-    return nn.Fp8DotGeneralOp
+    return nn.Fp8DirectDotGeneralOp
 
   def einsum(self, dtype: DType = jnp.float32):
     return Fp8Einsum(dtype=dtype)
@@ -337,7 +337,8 @@ def _get_mixed_precision_quant_config(mixed_precision_config):
   for layer_name_re, layer_quantization_config in mixed_precision_config.items():
     # Make a copy of default_mp_config to avoid updaing original dict
     quant_config = default_mp_config.copy()
-    # print(f"Mixed precision config: processing {layer_name_re} - {layer_quantization_config}, default config - {quant_config}")
+    # print(f"Mixed precision config: processing
+    # {layer_name_re} - {layer_quantization_config}, default config - {quant_config}")
     if layer_name_re != DEFAULT:
       for k in quant_config.keys():
         quant_config[k] = layer_quantization_config.get(k, default_mp_config[k])
@@ -353,7 +354,7 @@ def _get_quant_config(config):
     return _get_int8_quant_config(config)
   if config.quantization == "intmp":
     assert config.quant_cfg_path, "Must specify quant_cfg for mixed precision quantization"
-    with open(config.quant_cfg_path, "r") as config_file:
+    with open(config.quant_cfg_path, "rt", encoding="utf8") as config_file:
       mixed_precision_config = json.load(config_file)
     return _get_mixed_precision_quant_config(mixed_precision_config)
   if config.quantization == "fp8":

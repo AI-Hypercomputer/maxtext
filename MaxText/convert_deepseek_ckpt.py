@@ -15,7 +15,7 @@ r"""Convert weights from a DeepSeek style model to a MaxText one.
 
 Example cmd:
 
-python3 MaxText/convert_deepseek_ckpt.py --base_model_path <path/to/meta/ckpt> \
+python3 -m MaxText.convert_deepseek_ckpt --base_model_path <path/to/meta/ckpt> \
     --maxtext_model_path <GCS/path/to/save/new/maxtext/ckpt> --model_size deepseek2-16b
 """
 
@@ -34,9 +34,11 @@ import torch
 import psutil
 from tqdm import tqdm
 
-import max_logging
 from safetensors import safe_open
-import llama_or_mistral_ckpt
+
+from MaxText import max_logging
+from MaxText.inference_utils import str2bool
+from MaxText import llama_or_mistral_ckpt
 
 
 MODEL_PARAMS_DICT = {
@@ -78,7 +80,7 @@ MTP_KEYS_SUFFIX = [
 ]
 
 
-def _is_key_ending_allowed(key, banned_endings) -> bool:
+def is_key_ending_allowed(key, banned_endings) -> bool:
   """
   Checks if a key's ending is NOT in a list of banned endings.
 
@@ -95,7 +97,7 @@ def _is_key_ending_allowed(key, banned_endings) -> bool:
   return True
 
 
-def _hf_to_maxtext_mapping(layer_idx, num_experts, first_num_dense_layers) -> dict:
+def hf_to_maxtext_mapping(layer_idx, num_experts, first_num_dense_layers) -> dict:
   """
   Generates a mapping between Hugging Face (HF) and MaxText model weight names.
   HF MLP is using self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x)).
@@ -189,8 +191,8 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info)
         layer = int(parts[2]) if "layers" in key else 0
         if key.endswith("_scale_inv"):
           raise ValueError("fp8 checkpoint is not supported.")
-        if _is_key_ending_allowed(key, MTP_KEYS_SUFFIX):
-          mapped_key = _hf_to_maxtext_mapping(layer, num_experts, first_num_dense_layers)[key]
+        if is_key_ending_allowed(key, MTP_KEYS_SUFFIX):
+          mapped_key = hf_to_maxtext_mapping(layer, num_experts, first_num_dense_layers)[key]
           chkpt_vars[mapped_key] = f.get_tensor(key)
 
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
@@ -499,6 +501,8 @@ def main() -> None:
   parser.add_argument("--maxtext_model_path", type=str, required=True)
   parser.add_argument("--model_size", type=str, required=True)
   parser.add_argument("--simulated_cpu_devices_count", type=int, required=False, default=16)
+  parser.add_argument("--use-ocdbt", type=str2bool, required=False, default=True)
+  parser.add_argument("--use-zarr3", type=str2bool, required=False, default=True)
   args = parser.parse_args()
 
   if args.model_size not in MODEL_PARAMS_DICT:
@@ -511,6 +515,8 @@ def main() -> None:
       args.maxtext_model_path,
       _convert_to_jax_weights(args.base_model_path, args.model_size, mem_info),
       args.simulated_cpu_devices_count,
+      args.use_ocdbt,
+      args.use_zarr3,
   )
 
 

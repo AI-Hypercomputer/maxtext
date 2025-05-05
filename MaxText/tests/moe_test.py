@@ -12,21 +12,26 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-import jax
-import sre_parse
+import os.path
 import unittest
-from layers import linears
-from layers import initializers
-import jax.numpy as jnp
-
-import pyconfig
-import max_utils
-from jax.sharding import Mesh
-import flax.linen as nn
 from typing import Tuple
-import common_types
+
 import pytest
+
+import jax
+import jax.numpy as jnp
+from jax.sharding import Mesh
+
+import flax.linen as nn
 from flax.linen import partitioning as nn_partitioning
+
+from MaxText.layers import linears
+from MaxText.layers import initializers
+from MaxText.layers import moe
+from MaxText import pyconfig
+from MaxText import maxtext_utils
+from MaxText.globals import PKG_DIR
+from MaxText import common_types
 
 
 Array = common_types.Array
@@ -40,7 +45,7 @@ class TokenDroppingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.cfg = pyconfig.initialize(
-        [None, "configs/base.yml"],
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
         run_name="token_dropping_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -52,8 +57,9 @@ class TokenDroppingTest(unittest.TestCase):
         capacity_factor=2,
     )
     self.rng = jax.random.PRNGKey(42)
-    devices_array = max_utils.create_device_mesh(self.cfg)
-    self.model = linears.MoeBlock(
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    self.model = moe.RoutedMoE(
+        name="MoeBlock",
         config=self.cfg,
         num_experts=self.cfg.num_experts,
         num_experts_per_tok=self.cfg.num_experts_per_tok,
@@ -163,7 +169,7 @@ class DeepSeekRoutingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.cfg = pyconfig.initialize(
-        [None, "configs/base.yml"],
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
         run_name="deepseek_routing_test",
         enable_checkpointing=False,
         decoder_block="deepseek",
@@ -178,8 +184,9 @@ class DeepSeekRoutingTest(unittest.TestCase):
         sparse_matmul=True,
     )
     self.rng = jax.random.PRNGKey(42)
-    devices_array = max_utils.create_device_mesh(self.cfg)
-    self.model = linears.MoeBlock(
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    self.model = moe.RoutedMoE(
+        name="MoeBlock",
         config=self.cfg,
         num_experts=self.cfg.num_experts,
         num_experts_per_tok=self.cfg.num_experts_per_tok,
@@ -241,9 +248,14 @@ class MoeLoopBlock(nn.Module):
 
   @nn.compact
   def __call__(self, inputs, deterministic: bool = False):
-    gate_logits = linears.DenseGeneral(
-        self.num_experts, dtype=self.dtype, kernel_init=self.kernel_init, kernel_axes=self.kernel_axes, name="gate"
-    )(inputs)
+    gate_logits = moe.GateLogit(
+        self.num_experts,
+        self.config.model_name,
+        dtype=self.dtype,
+        kernel_init=self.kernel_init,
+        kernel_axes=self.kernel_axes,
+        name="gate",
+    )(inputs)[0]
 
     weights, selected_experts = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
     weights = jax.nn.softmax(weights.astype(jnp.float32), axis=-1).astype(self.weight_dtype)
@@ -269,7 +281,7 @@ class MoeLoopBlock(nn.Module):
     return mlp_lnx
 
 
-class MoeBlockTest(unittest.TestCase):
+class RoutedMoeTest(unittest.TestCase):
 
   def get_expected_output(self, rng, hidden_states, cfg):
     model = MoeLoopBlock(
@@ -288,7 +300,8 @@ class MoeBlockTest(unittest.TestCase):
     return variables, output
 
   def get_moe_output(self, variables, hidden_states, cfg, mesh):
-    model = linears.MoeBlock(
+    model = moe.RoutedMoE(
+        name="MoeBlock",
         config=cfg,
         num_experts=cfg.num_experts,
         num_experts_per_tok=cfg.num_experts_per_tok,
@@ -331,7 +344,7 @@ class MoeBlockTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_megablox(self):
     cfg = pyconfig.initialize(
-        [None, "configs/base.yml"],
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
         run_name="moe_block_megablox_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -347,7 +360,7 @@ class MoeBlockTest(unittest.TestCase):
         rng_hidden_states, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
     )
 
-    devices_array = max_utils.create_device_mesh(cfg)
+    devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
     actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
@@ -356,7 +369,7 @@ class MoeBlockTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_ragged_dot(self):
     cfg = pyconfig.initialize(
-        [None, "configs/base.yml"],
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
         run_name="moe_block_ragged_dot_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -372,7 +385,7 @@ class MoeBlockTest(unittest.TestCase):
         rng_hidden_states, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
     )
 
-    devices_array = max_utils.create_device_mesh(cfg)
+    devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
     actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
@@ -381,7 +394,7 @@ class MoeBlockTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_dense(self):
     cfg = pyconfig.initialize(
-        [None, "configs/base.yml"],
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
         run_name="moe_block_dense_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -397,7 +410,7 @@ class MoeBlockTest(unittest.TestCase):
         rng_hidden_states, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
     )
 
-    devices_array = max_utils.create_device_mesh(cfg)
+    devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
     variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
     actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
@@ -406,7 +419,7 @@ class MoeBlockTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_megablox_expert_parallelism(self):
     cfg = pyconfig.initialize(
-        [None, "configs/base.yml"],
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
         run_name="moe_block_megablox_ep_test",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
@@ -423,7 +436,7 @@ class MoeBlockTest(unittest.TestCase):
         rng_hidden_states, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
     )
 
-    devices_array = max_utils.create_device_mesh(cfg)
+    devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
     with nn_partitioning.axis_rules(cfg.logical_axis_rules):
       variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)

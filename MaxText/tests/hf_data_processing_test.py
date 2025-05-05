@@ -15,16 +15,18 @@ limitations under the License.
 """
 
 import sys
+import os.path
+
 import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
 import unittest
 
-import pyconfig
-import pytest
-from input_pipeline import _hf_data_processing
-from input_pipeline import input_pipeline_interface
+from MaxText import pyconfig
+from MaxText.globals import PKG_DIR
+from MaxText.input_pipeline import _hf_data_processing
+from MaxText.input_pipeline import input_pipeline_interface
 
 
 class HfDataProcessingTest(unittest.TestCase):
@@ -32,7 +34,7 @@ class HfDataProcessingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1,
         run_name="test",
         mesh_axes=["data"],
@@ -96,8 +98,8 @@ class HfDataProcessingTest(unittest.TestCase):
 
     train_batch1 = get_first_batch(self.train_iter)
     train_batch2 = get_first_batch(self.train_iter)
-    self.assertTrue((train_batch1["inputs"] == train_batch2["inputs"]).all())
-    self.assertTrue((train_batch1["targets"] == train_batch2["targets"]).all())
+    self.assertTrue((train_batch1["inputs"] == train_batch2["inputs"]).all())  # pytype: disable=unsupported-operands
+    self.assertTrue((train_batch1["targets"] == train_batch2["targets"]).all())  # pytype: disable=unsupported-operands
 
 
 if __name__ == "__main__":

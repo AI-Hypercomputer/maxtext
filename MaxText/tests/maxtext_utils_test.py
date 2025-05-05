@@ -18,7 +18,23 @@ limitations under the License.
 import unittest
 import jax.numpy as jnp
 
-import maxtext_utils
+from MaxText import maxtext_utils
+from MaxText import max_utils
+
+
+from flax import linen as nn
+from flax.training import train_state
+
+from jax import random
+from jax.sharding import Mesh
+import optax
+from MaxText import pyconfig
+import os.path
+from MaxText.layers import quantizations
+from MaxText.globals import PKG_DIR
+from MaxText.layers import models
+
+Transformer = models.Transformer
 
 
 class TestGradientClipping(unittest.TestCase):
@@ -26,9 +42,9 @@ class TestGradientClipping(unittest.TestCase):
   def test_grad_clipping_with_no_fp8_stats(self):
     raw_grads = {"params": jnp.array([3.0, -4.0]), "wi_0": jnp.array([5.0, -6.0])}
     clipped_grads = maxtext_utils.apply_gradient_clipping(raw_grads, None, 1.0)
-    for param_name in raw_grads.keys():
+    for param_name, param_val in raw_grads.items():
       # The grads should all be clipped and not equal to what they were before
-      self.assertFalse(jnp.array_equal(raw_grads[param_name], clipped_grads[param_name]))
+      self.assertFalse(jnp.array_equal(param_val, clipped_grads[param_name]))
 
   def test_fp8_stats_not_clipped_but_others_are(self):
     raw_grads = {"params": {"wi_0": jnp.array([5.0, -6.0]), "wi_1": jnp.array([7.0, -8.0])}}
@@ -42,7 +58,7 @@ class TestGradientClipping(unittest.TestCase):
     clipped_grads = maxtext_utils.apply_gradient_clipping(raw_grads, None, 1.0)
 
     # Check all non-fp8 parameters have been clipped in a manner as if the fp8 stats were not present at all
-    for param_name in raw_grads["params"].keys():
+    for param_name in raw_grads["params"]:
       self.assertTrue(jnp.array_equal(expected_clipped_grads["params"][param_name], clipped_grads["params"][param_name]))
 
     # Then check all fp8 parameters were not clipped at all
@@ -79,6 +95,160 @@ class TestNestedValueRetrieval(unittest.TestCase):
     expected_value = None
     result = maxtext_utils.get_nested_value(self.test_dict, nested_key)
     self.assertEqual(result, expected_value)
+
+
+class MaxUtilsInitState(unittest.TestCase):
+  """Tests initialization of training and decode states in maxtext_utils.py"""
+
+  def setUp(self):
+    self.model = nn.Dense(features=5)
+    self.key1, self.key2 = random.split(random.key(0))
+    self.input = random.normal(self.key1, (10,))  # Dummy input data
+    self.params = self.model.init(self.key2, self.input)
+    self.output = self.model.apply(self.params, self.input)
+    self.tx = optax.adam(learning_rate=0.001)
+
+  def test_init_train_state(self):
+    state = train_state.TrainState(
+        step=0, apply_fn=self.model.apply, params=self.params, tx=None, opt_state={}  # type: ignore
+    )
+    self.assertEqual(state.tx, None)
+    self.assertEqual(state.step, 0)
+    self.assertEqual(state.opt_state, {})
+    self.assertEqual(state.apply_fn, self.model.apply)
+    self.assertEqual(
+        max_utils.calculate_num_params_from_pytree(state.params), max_utils.calculate_num_params_from_pytree(self.params)
+    )
+
+  def test_init_decode_state(self):
+    decode_state = maxtext_utils.init_decode_state(self.model.apply, self.params)
+    self.assertEqual(decode_state.apply_fn, self.model.apply)
+    output = decode_state.apply_fn(self.params, self.input)
+    self.assertEqual(output.tolist(), self.output.tolist())
+    self.assertEqual(decode_state.tx, None)
+    self.assertEqual(decode_state.opt_state, {})
+    self.assertEqual(decode_state.step, 0)
+    self.assertEqual(
+        max_utils.calculate_num_params_from_pytree(decode_state.params),
+        max_utils.calculate_num_params_from_pytree(self.params),
+    )
+
+  def test_init_training_state(self):
+    state = maxtext_utils.init_training_state(self.model.apply, self.params, self.tx)
+    self.assertEqual(state.apply_fn, self.model.apply)
+    self.assertEqual(state.tx, self.tx)
+    self.assertNotEqual(state.opt_state, {})
+    self.assertEqual(
+        max_utils.calculate_num_params_from_pytree(state.params), max_utils.calculate_num_params_from_pytree(self.params)
+    )
+
+
+class ModelWithMultipleCollections(nn.Module):
+  """
+  A simple model that has variables in multiple collections - "params" and "special_variables"
+  """
+
+  def setup(self):
+    self.dense = nn.Dense(4)
+    self.kernel = self.variable("special_variables", "my_first_kernel", lambda: jnp.ones((4, 5)))
+
+  def __call__(self, x, y, encoder_images=None):
+    x = self.dense(x)
+    x = x @ self.kernel.value
+    return x
+
+
+class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
+
+  def setUp(self):
+    self.config = pyconfig.initialize([None, os.path.join(PKG_DIR, "configs", "base.yml")], enable_checkpointing=False)
+    self.model = ModelWithMultipleCollections()
+    self.key1, self.key2, self.key3 = random.split(random.key(0), num=3)
+    self.input = random.normal(self.key1, (self.config.global_batch_size_to_load, self.config.max_target_length))
+    self.params = self.model.init(self.key2, self.input, self.input)
+    self.tx = optax.adam(learning_rate=0.001)
+
+  def _test_init_initial_state_driver(self, is_training):
+    state_under_test = maxtext_utils.init_initial_state(self.model, self.tx, self.config, is_training, self.key3)
+    self.assertEqual(state_under_test.apply_fn, self.model.apply)
+    if is_training:
+      self.assertEqual(state_under_test.tx, self.tx)
+      self.assertNotEqual(state_under_test.opt_state, {})
+    else:
+      self.assertIsNone(state_under_test.tx)
+      self.assertEqual(state_under_test.opt_state, {})
+    self.assertEqual(
+        max_utils.calculate_num_params_from_pytree(state_under_test.params),
+        max_utils.calculate_num_params_from_pytree(self.params),
+    )
+    self.assertEqual(len(self.params), len(state_under_test.params))
+    self.assertIn("special_variables", state_under_test.params)
+    self.assertIn("params", state_under_test.params)
+
+  def test_initial_train_state(self):
+    self._test_init_initial_state_driver(True)
+
+  def test_initial_decode_state(self):
+    self._test_init_initial_state_driver(False)
+
+
+class MaxUtilsInitTransformerState(unittest.TestCase):
+  """Tests initialization of transformer states in max_utils.py"""
+
+  def setUp(self):
+    self.config = pyconfig.initialize([None, os.path.join(PKG_DIR, "configs", "base.yml")], enable_checkpointing=False)
+    devices_array = maxtext_utils.create_device_mesh(self.config)
+    self.mesh = Mesh(devices_array, self.config.mesh_axes)
+    quant = quantizations.configure_quantization(self.config)
+    self.model = Transformer(self.config, mesh=self.mesh, quant=quant)
+
+  def test_setup_decode_state(self):
+    rng = random.PRNGKey(0)
+    state, _ = maxtext_utils.setup_decode_state(self.model, self.config, rng, self.mesh, None)
+    self.assertEqual(state.tx, None)
+    self.assertEqual(state.opt_state, {})
+
+  def test_setup_initial_state(self):
+    rng = random.PRNGKey(0)
+    tx = optax.adam(learning_rate=0.001)
+    state, _, _, _ = maxtext_utils.setup_initial_state(self.model, None, tx, self.config, rng, self.mesh, None)
+    self.assertEqual(state.tx, tx)
+    self.assertNotEqual(state.opt_state, {})
+
+
+class MaxUtilsPpAsDp(unittest.TestCase):
+  """Tests logical_axis_rules_pp_act_as_dp converts rules so stage is added before data."""
+
+  def test_stage_added_before_data(self):
+    input_rules = (("activation_batch", ("data", "fsdp")),)
+    expected_transform = (("activation_batch", ("stage", "data", "fsdp")),)
+    transformed_rules = maxtext_utils.logical_axis_rules_pp_act_as_dp(input_rules)
+    self.assertEqual(transformed_rules, expected_transform)
+
+  def test_stage_removed(self):
+    input_rules = (("layers", "stage"),)
+    expected_transform = (
+        (
+            "layers",
+            (),
+        ),
+    )
+    transformed_rules = maxtext_utils.logical_axis_rules_pp_act_as_dp(input_rules)
+    self.assertEqual(transformed_rules, expected_transform)
+
+  def multiple_rules(self):
+    input_rules = (
+        ("activation_batch", ("data", "fsdp")),
+        ("layers", "stage"),
+        ("experts", "expert"),
+    )
+    expected_transform = (
+        ("activation_batch", ("stage", "data", "fsdp")),
+        ("layers", ()),
+        ("experts", "expert"),
+    )
+    transformed_rules = maxtext_utils.logical_axis_rules_pp_act_as_dp(input_rules)
+    self.assertEqual(transformed_rules, expected_transform)
 
 
 if __name__ == "__main__":

@@ -17,18 +17,40 @@ limitations under the License.
 # pylint: disable=bare-except, consider-using-generator
 """Utils that are only interesting to MaxText. """
 
+from typing import Optional
+
+import functools
+import pickle
+
+from flax.training import train_state
+from flax import linen as nn
+from flax.linen import partitioning as nn_partitioning
+
+import numpy as np
+
 import jax
-import optax
-import max_utils
+import jax.numpy as jnp
+from jax.experimental import mesh_utils
 from jax.sharding import PartitionSpec as P
 from jax.experimental.serialize_executable import deserialize_and_load
 
+import optax
 
-import pickle
-import functools
-from input_pipeline import input_pipeline_interface
+import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
+import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
+
+from MaxText import checkpointing
+from MaxText import common_types
+from MaxText.inference.page_manager import PageState
+from MaxText import max_logging
+from MaxText import max_utils
+from MaxText.common_types import DecoderBlockType
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
+
+# Multimodal constants
+NUM_IMAGES_PER_SEQUENCE = 1
+NUM_IMAGE_CHANNELS = 3
 
 
 def get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config):
@@ -65,6 +87,20 @@ def get_functional_eval_step(eval_step, model, config):
   return functools.partial(eval_step, model, config)
 
 
+def get_shaped_batch(config):
+  """Return the shape of the batch - this is what eval_shape would return for the
+  output of create_data_iterator, but eval_shape doesn't work, see b/306901078."""
+  batch_shape = (config.global_batch_size_to_load, config.max_target_length)
+  shaped_batch = {}
+  shaped_batch["inputs"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  shaped_batch["inputs_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  shaped_batch["inputs_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  shaped_batch["targets"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  shaped_batch["targets_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  shaped_batch["targets_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  return shaped_batch
+
+
 def load_compiled(config, partial_train, state):
   """# Loading a serialized compiled train step function."""
 
@@ -83,7 +119,7 @@ def load_compiled(config, partial_train, state):
     return in_tree_recreated, out_tree_recreated
 
   serialized_compiled = load_serialized_compiled(config.compiled_trainstep_file)
-  shaped_batch = input_pipeline_interface.get_shaped_batch(config)
+  shaped_batch = get_shaped_batch(config)
   example_rng = jax.random.PRNGKey(0)
   shaped_input_args = (state, shaped_batch, example_rng)
   shaped_input_kwargs = {}
@@ -167,17 +203,32 @@ def calculate_ffn_mamtul_tflops_per_device(config, mlp_dim):
   return ffn1_flops + ffn2_flops
 
 
-def calculate_deepseek_ffn_tflops_per_device(config):
+def calculate_routed_and_shared_ffn_tflops_per_device(config):
   """Helper function to calculate DeepSeek-style ffn TFLOP"""
   gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
   # Due to the mixed decoder layers, the flops is multiplied by num of layers for both dense and moe
-  dense_ffn_flops = calculate_ffn_mamtul_tflops_per_device(config, config.mlp_dim) * config.first_num_dense_layers
+  num_dense_layers, num_moe_layers = get_dense_moe_layers(config)
+  dense_ffn_flops = calculate_ffn_mamtul_tflops_per_device(config, config.mlp_dim) * num_dense_layers
   shared_experts_flops = calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim) * config.shared_experts
   routed_experts_flops = calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim) * config.num_experts_per_tok
-  moe_layers = config.num_decoder_layers - config.first_num_dense_layers
-  moe_ffn_flops = (gate_flops + shared_experts_flops + routed_experts_flops) * moe_layers
+  moe_ffn_flops = (gate_flops + shared_experts_flops + routed_experts_flops) * num_moe_layers
   total_ffn_flops = dense_ffn_flops + moe_ffn_flops
   return total_ffn_flops
+
+
+def get_dense_moe_layers(config):
+  """Helper function to calculate number of dense and moe layers"""
+  if config.decoder_block == DecoderBlockType.DEEPSEEK:
+    num_dense_layers = config.first_num_dense_layers
+    num_moe_layers = config.num_decoder_layers - config.first_num_dense_layers
+    return num_dense_layers, num_moe_layers
+  elif config.decoder_block == DecoderBlockType.LLAMA4:
+    num_moe_layers = config.num_decoder_layers // config.interleave_moe_layer_step
+    num_dense_layers = config.num_decoder_layers - num_moe_layers
+  else:
+    raise ValueError("Currently we only support DeepSeek and Llama4 calculation.")
+
+  return num_dense_layers, num_moe_layers
 
 
 def calculate_tflops_training_per_device(config, log=True):
@@ -185,8 +236,8 @@ def calculate_tflops_training_per_device(config, log=True):
   # MLP flops
   if config.num_experts > 1:
     # calculation based on dropless implementation
-    if config.decoder_block == "deepseek":
-      total_ffn_flops = calculate_deepseek_ffn_tflops_per_device(config)
+    if config.decoder_block == DecoderBlockType.DEEPSEEK or config.decoder_block == DecoderBlockType.LLAMA4:
+      total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
     else:
       gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
       total_ffn_flops = (
@@ -223,11 +274,11 @@ def calculate_tflops_training_per_device(config, log=True):
   embedding_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.vocab_size
 
   # Combine flops with number of decoder layers
-  if config.decoder_block == "gemma2":
+  if config.decoder_block == DecoderBlockType.GEMMA2:
     attention_tflops, learnable_weight_tflops = calculate_gemma2_tflops_training_per_device(
         config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops
     )
-  elif config.decoder_block == "deepseek":
+  elif config.decoder_block == DecoderBlockType.DEEPSEEK or config.decoder_block == DecoderBlockType.LLAMA4:
     learnable_weight_tflops = (
         (total_ffn_flops + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
     )
@@ -313,6 +364,7 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
       "fsdp",
       "fsdp_transpose",
       "sequence",
+      "context",
       "context_autoregressive",
       "tensor",
       "tensor_transpose",
@@ -325,7 +377,7 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
   perfectly_sharded_params_per_chip = total_num_params / product_num_devices_for_weight_sharding
   assert total_num_params_per_chip >= perfectly_sharded_params_per_chip, (
       "Number of parameters per chip must not be less than in the ideal sharded "
-      "scenario across `fsdp`, `fsdp_transpose`,`sequence`, `tensor`, `tensor_transpose`, `tensor_sequence`, `expert` axes."
+      "scenario across `fsdp`, `fsdp_transpose`, `context`, `sequence`, `tensor`, `tensor_transpose`, `tensor_sequence`, `stage`, `expert` axes."
   )
   unsharded_param_perc = total_num_params_per_chip / perfectly_sharded_params_per_chip - 1
   assert unsharded_param_perc < tolerance, (
@@ -377,3 +429,406 @@ def get_nested_value(dictionary, nested_key, default=None):
       return default
     current_level = current_level[key]
   return current_level
+
+
+def init_decode_state(apply_fn, params):
+  """Init train state with null opt state for decode."""
+  state = train_state.TrainState(step=0, apply_fn=apply_fn, params=params, tx=None, opt_state={})  # type: ignore
+  return state
+
+
+def init_training_state(apply_fn, params, tx):
+  """Init train state with null opt state for decode."""
+  state = train_state.TrainState.create(apply_fn=apply_fn, params=params, tx=tx)
+  return state
+
+
+def init_initial_state(model, tx, config, is_training, key):
+  """
+  We pass in "static" objects like model, tx, config as JAX compares them by
+  object hash, and instantiating them inside causes pjit top-level annotations
+  to fail to match as pytree prefixes if we re-instantiate.
+
+  Args: model, tx, config, is_training, key
+  """
+  input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+  image_shape = (
+      config.micro_batch_size_to_train_on,
+      NUM_IMAGES_PER_SEQUENCE,
+      config.image_size_for_vit,
+      config.image_size_for_vit,
+      NUM_IMAGE_CHANNELS,
+  )
+  model_vars = model.init(
+      {"params": key, "dropout": key, "aqt": key},
+      np.ones(input_shape, dtype=jnp.int32),
+      np.ones(input_shape, dtype=jnp.int32),
+      encoder_images=np.ones(image_shape, dtype=jnp.int32),
+  )
+  if is_training:
+    return init_training_state(model.apply, model_vars, tx)
+  return init_decode_state(model.apply, model_vars)
+
+
+def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
+  """Setup decode state by loading params from a checkpoint.
+  Args:
+    model: the flax model to initialize
+    config: config object
+    rng: jax.prng key
+    mesh: jax.devices() mesh
+    checkpoint_manager: Checkpoint manager
+
+  Returns:
+    state: state with decode params loaded from the checkpoint
+    state_mesh_annotations: the mesh annotations for the state
+  """
+  if not config.load_parameters_path:
+    # generate random params
+    max_logging.log("No decode checkpoint specified - generating random weights.")
+    state, state_mesh_annotations, _, _ = setup_initial_state(
+        model, None, None, config, rng, mesh, checkpoint_manager, False
+    )
+  else:
+    # Load params from checkpoint
+    max_logging.log(f"Loading decode params from {config.load_parameters_path}")
+    unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(model, None, config, rng, mesh, False)
+    with nn_partitioning.axis_rules(config.logical_axis_rules):
+      params = checkpointing.load_params_from_path(
+          config.load_parameters_path,
+          unboxed_abstract_state.params,
+          config.checkpoint_storage_concurrent_gb,
+          config.checkpoint_storage_use_ocdbt,
+          config.checkpoint_storage_use_zarr3,
+      )
+    state = init_decode_state(None, params)
+
+  state = max_utils.unbox_logicallypartioned(state)
+  return state, state_mesh_annotations
+
+
+def setup_training_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager):
+  is_training = True
+  return setup_initial_state(
+      model,
+      data_iterator,
+      tx,
+      config,
+      rng,
+      mesh,
+      checkpoint_manager,
+      is_training,
+  )
+
+
+def setup_initial_state(
+    model,
+    data_iterator,
+    tx,
+    config,
+    rng,
+    mesh,
+    checkpoint_manager,
+    is_training=True,
+):
+  """We initialize the model and optimizer state, and optionally load from a
+  checkpoint as necessary.
+
+  Args:
+    model: the flax model to initialize
+    tx: the optax.GradientTransformation
+    config: config object
+    rng: jax.prng key
+    mesh: jax.devices() mesh
+    checkpoint_manager: an Orbax checkpointing.CheckpointManager object
+    is_training: True to initialize training state, False for decode state
+
+  Returns:
+    state: the initialized train state
+    state_mesh_annotations: the mesh annotations for the train state
+  """
+
+  unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
+      model, tx, config, rng, mesh, is_training
+  )
+
+  # Initialization
+  with nn_partitioning.axis_rules(config.logical_axis_rules):
+    restored, raw_params = checkpointing.load_state_if_possible(
+        checkpoint_manager,
+        data_iterator,
+        config.load_parameters_path,
+        config.load_full_state_path,
+        config.checkpoint_storage_concurrent_gb,
+        unboxed_abstract_state,
+        config.enable_single_replica_ckpt_restoring,
+        config.dataset_type,
+        use_ocdbt=config.checkpoint_storage_use_ocdbt,
+        use_zarr3=config.checkpoint_storage_use_zarr3,
+    )
+
+    if restored:
+      if isinstance(
+          checkpoint_manager,
+          (
+              emergency_checkpoint_manager.CheckpointManager,
+              emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
+          ),
+      ):
+        state = restored
+      else:
+        if "iter" in restored and restored["iter"] is not None:
+          data_iterator.local_iterator = restored["iter"]
+        state = restored["items"]
+    else:
+      init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
+      init_state_partial.__name__ = "initialize_state"
+      # pylint: disable=not-callable
+      state = jax.jit(
+          init_state_partial,
+          in_shardings=None,
+          out_shardings=state_mesh_shardings,
+      )(rng)
+      if raw_params:  # If we loaded a partial state, we need to merge it.
+        state = state.replace(params=raw_params)
+
+  state = max_utils.unbox_logicallypartioned(state)
+
+  return state, state_mesh_annotations, state_mesh_shardings, data_iterator
+
+
+def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
+  """Get a shaped abstraction of the state (including optimizer)"""
+  init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training, rng)
+
+  with nn_partitioning.axis_rules(config.logical_axis_rules):
+    abstract_state = jax.eval_shape(init_state_partial)
+
+  state_logical_annotations = nn.get_partition_spec(abstract_state)
+
+  state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
+  if is_training and config.optimizer_memory_host_offload:
+    opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)
+    params = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.params)
+    state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state, params=params)
+
+  abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape()
+
+  unboxed_abstract_sharded_state = max_utils.unbox_logicallypartioned(abstract_sharded_state)
+  # Initialization
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+  return (
+      unboxed_abstract_sharded_state,
+      state_mesh_annotations,
+      state_mesh_shardings,
+  )
+
+
+def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[PageState] = None):
+  """Get a shaped abstraction of the state (including optimizer)"""
+
+  def init_kv_cache(model, config):
+    input_shape = (
+        config.global_batch_size_to_load,
+        config.max_prefill_predict_length,
+    )
+    image_shape = (
+        config.global_batch_size_to_load,
+        NUM_IMAGES_PER_SEQUENCE,
+        config.image_size_for_vit,
+        config.image_size_for_vit,
+        NUM_IMAGE_CHANNELS,
+    )
+
+    model_vars = model.init(
+        {"params": rng, "dropout": rng, "aqt": rng},
+        jnp.ones(input_shape),
+        jnp.ones(input_shape),
+        encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
+        model_mode=common_types.MODEL_MODE_PREFILL,
+        slot=0,
+        page_state=page_state,
+    )
+    return model_vars["cache"]
+
+  with nn_partitioning.axis_rules(config.logical_axis_rules):
+    init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
+    abstract_state = jax.eval_shape(init_kv_cache_partial)
+  state_logical_annotations = nn.get_partition_spec(abstract_state)
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+  return state_mesh_annotations
+
+
+def get_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[PageState] = None):
+  """Get a shaped abstraction of the state (including optimizer)"""
+
+  def init_kv_cache(model, config):
+    input_shape = (
+        config.global_batch_size_to_load,
+        1,
+    )
+    image_shape = (
+        config.global_batch_size_to_load,
+        NUM_IMAGES_PER_SEQUENCE,
+        config.image_size_for_vit,
+        config.image_size_for_vit,
+        NUM_IMAGE_CHANNELS,
+    )
+
+    model_vars = model.init(
+        {"params": rng, "dropout": rng, "aqt": rng},
+        jnp.ones(input_shape),
+        jnp.ones(input_shape),
+        encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
+        model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+        slot=0,
+        page_state=page_state,
+    )
+    return model_vars["cache"]
+
+  with nn_partitioning.axis_rules(config.logical_axis_rules):
+    init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
+    abstract_state = jax.eval_shape(init_kv_cache_partial)
+  state_logical_annotations = nn.get_partition_spec(abstract_state)
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
+  return state_mesh_annotations
+
+
+def save_quantized_checkpoint_if_configured(config, params):
+  assert config.quantization, "quantization must be configured"
+  if config.save_quantized_params_path:
+    checkpointing.save_params_to_path(config.save_quantized_params_path, params, config.checkpoint_storage_use_ocdbt, config.checkpoint_storage_use_zarr3)
+  else:
+    "Skipping saving quantized checkpoint as save_quantized_params_path is null."
+
+
+def add_config_to_summary_writer(config, summary_writer):
+  """Writes config params to tensorboard"""
+  if jax.process_index() == 0:
+    for key, value in config.get_keys().items():
+      max_utils.add_text_to_summary_writer(key, str(value), summary_writer)
+
+
+def logical_axis_rules_pp_act_as_dp(logical_rules):
+  """Add stage as a physical axes before data for each rule, so stage acts just like data instead of PP.
+  This is used when we want to pipeline only a subset of layers, and leave the rest like DP.
+  """
+  new_rules = []
+  for key, physical_axes in logical_rules:
+    if isinstance(physical_axes, str):
+      physical_axes = (physical_axes,)
+    else:
+      physical_axes = tuple(physical_axes)
+    new_physical_axes = tuple(axis for axis in physical_axes if axis != "stage")
+    if "data" in new_physical_axes:
+      data_idx = new_physical_axes.index("data")
+      new_physical_axes = new_physical_axes[0:data_idx] + ("stage",) + new_physical_axes[data_idx:]
+    new_rules.append((key, new_physical_axes))
+  return tuple(new_rules)
+
+
+def create_device_mesh(config, devices=None):
+  """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
+  if devices is None:
+    devices = jax.devices()
+  num_devices = len(devices)
+  num_slices = 1 if config.inference_benchmark_test else config.num_slices
+  num_devices_per_slice = num_devices // num_slices
+
+  multi_slice_env = num_slices > 1
+
+  # Find possible unspecified parallelisms
+  ici_parallelism = max_utils.fill_unspecified_mesh_axes(config.ici_parallelism.copy(), num_devices_per_slice, "ICI")
+
+  allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
+
+  if multi_slice_env:
+    dcn_parallelism = max_utils.fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN")
+    if max_utils.is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
+      mesh = max_utils.create_custom_device_mesh(ici_parallelism, dcn_parallelism, devices, config.custom_mesh)
+    else:
+      mesh = mesh_utils.create_hybrid_device_mesh(
+          ici_parallelism,
+          dcn_parallelism,
+          devices,
+          allow_split_physical_axes=allow_split_physical_axes,
+      )
+  else:
+    if allow_split_physical_axes:
+      if max_utils.is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
+        mesh = mesh_utils.create_device_mesh(
+            [16, 16],
+            devices,
+            contiguous_submeshes=False,
+            allow_split_physical_axes=False,
+        )
+        mesh = max_utils.reshape_mesh_to_rings(mesh, config.custom_mesh)
+        mesh = np.reshape(mesh, ici_parallelism)
+      else:
+        mesh = mesh_utils.create_device_mesh(
+            ici_parallelism,
+            devices,
+            contiguous_submeshes=False,
+            allow_split_physical_axes=allow_split_physical_axes,
+        )
+    else:
+      mesh = mesh_utils.create_device_mesh(
+          ici_parallelism,
+          devices,
+      )
+      if config.optimize_mesh_for_tpu_v6e:
+        mesh = max_utils.optimize_mesh_for_tpu_v6e(mesh, devices)
+
+  max_logging.log(f"Num_devices: {num_devices}, shape {mesh.shape}")
+
+  return mesh
+
+
+# Learning Rate Schedule
+# -----------------------------------------------------------------------------
+
+
+def create_learning_rate_schedule(config):
+  """Creates a warmup and cosine decay learning rate schedule:
+  We take inspiration from Llama2's learning rate (LR) schedule, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
+  Learning rate schedule has either two or three parts:
+  1) Linear warmup from 0 to [learning_rate] over steps 0 to [learning_rate_schedule_steps * warmup_steps_fraction]
+  2) Cosine from [learning_rate] to [learning_rate * cosine_learning_rate_final_fraction] until learning_rate_schedule_steps
+  3) Constant learning rate of 0 from learning_rate_schedule_steps to steps.
+  The zero learning rate section can be used to more accurately measure the fully trained model's performance.
+  """
+
+  def make_cos_schedule(init_lr, final_lr, len_steps):
+    def schedule(step):
+      pct = (step) / len_steps
+      a = 0.5 * (jnp.cos(jnp.pi * pct) + 1)
+      lr = init_lr * a + final_lr * (1 - a)
+      return lr
+
+    return schedule
+
+  lr = config.learning_rate
+  cos_final_lr = lr * config.cosine_learning_rate_final_fraction
+
+  warmup_steps = int(config.learning_rate_schedule_steps * config.warmup_steps_fraction)
+  cos_steps = config.learning_rate_schedule_steps - warmup_steps
+  constant_zero_steps = config.steps - config.learning_rate_schedule_steps
+
+  warmup_schedule = optax.linear_schedule(init_value=0.0, end_value=lr, transition_steps=warmup_steps)
+  cos_schedule = make_cos_schedule(lr, cos_final_lr, cos_steps)
+  constant_schedule = optax.constant_schedule(0.0)
+
+  pieces = [warmup_schedule, cos_schedule]
+  boundaries = [
+      warmup_steps,
+      warmup_steps + cos_steps,
+  ]
+
+  if constant_zero_steps > 0:
+    pieces.append(constant_schedule)
+    boundaries.append(warmup_steps + cos_steps + constant_zero_steps)
+
+  return optax.join_schedules(pieces, boundaries)

@@ -37,6 +37,14 @@ jobs:
     name: Build and upload image (${{ inputs.device_name }})
     runs-on: ["self-hosted", "${{ inputs.device_type }}", "${{ inputs.device_name }}"]
     steps:
+      - name: Authenticate gcloud
+        continue-on-error: true
+        run: |
+          # configure registries as root and as runner
+          sudo gcloud auth configure-docker --quiet
+          gcloud auth configure-docker --quiet
+          sudo gcloud auth configure-docker us-docker.pkg.dev --quiet
+          gcloud auth configure-docker us-docker.pkg.dev --quiet
       - uses: actions/checkout@v4
       - name: Build an image
         run: |

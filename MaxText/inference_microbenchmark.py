@@ -22,14 +22,12 @@ import json
 from absl import app
 from collections.abc import MutableMapping
 
-from jetstream.engine import token_utils
-
-import max_utils
-import maxengine
-import maxtext_utils
-import prefix_cache
-import profiler
-import pyconfig
+from MaxText import max_utils
+from MaxText import maxengine
+from MaxText import maxtext_utils
+from MaxText import prefill_packing
+from MaxText import profiler
+from MaxText import pyconfig
 
 import warnings
 
@@ -38,119 +36,6 @@ warnings.simplefilter("ignore", category=FutureWarning)
 _WARMUP_ITERS = 2
 _FLATTEN_MICROBENCHMARK_RESULTS = False
 # pylint: disable=too-many-positional-arguments
-
-
-def prefix_cache_benchmark(
-    prefix, prefill_length: int, true_length: int, common_prefix_proportion: float, prefix_cache_entries_num: int, iters: int
-):
-  """Handles running prefix cache benchmark, and printing results.
-
-  Create different key with half of prefill_length common prefix insert into cache.
-  The value is not relevant to the cache for now. Just copy the prefix for every cache entry.
-  1. Fill the prefix cache to full capacity.
-  2. Benchmark save prefix cache with evicting time average by prefix_cache_entries_num.
-  3. Benchmark fetch_longest_common_prefix_key average by iters.
-  4. Benchmark load prefix cache time average by iters.
-
-  Args:
-    prefix: prefix return from prefill function
-    prefill_length: prefill token length after padding
-    true_length: true prefill token length
-    common_prefix_proportion: [0., 1.] common prefix proportion to the prefill_length
-    prefix_cache_entries_num: number of prefix cache entries insert into PrefixCache
-    iters: repeat time to test fetch_longest_common_prefix_key and load from cache
-  """
-
-  print(f"Prefix Cache benchmark results for prefill length {prefill_length}:\n")
-
-  value: prefix_cache.Value = prefix_cache.Value(
-      prefix=prefix,
-      true_length=true_length,
-      padded_length=prefill_length,
-      tokens=tuple(i for i in range(prefill_length)),
-  )
-
-  def copy_jax_array(x):
-    return x.copy()
-
-  def clone_value():
-    return prefix_cache.Value(
-        prefix=jax.tree.map(copy_jax_array, value.prefix),
-        true_length=value.true_length,
-        padded_length=value.padded_length,
-        tokens=value.tokens,
-        prefix_size_bytes=value.prefix_size_bytes,
-        device=value.device,
-    )
-
-  prefix_size_bytes_gb = value.prefix_size_bytes / 1024 / 1024 / 1024
-  max_bytes = prefix_cache_entries_num * value.prefix_size_bytes
-  # TODO(yuyanpeng): test hierarchical cache
-  prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=max_bytes, dram_bytes=max_bytes)
-  common_len = int(prefill_length * common_prefix_proportion)
-  remain_len = prefill_length - common_len
-  common_prefix_key = tuple(i for i in range(common_len))
-
-  # Fill the prefix caching
-  new_value_list = []
-  for c_idx in range(prefix_cache_entries_num):
-    # Add 100 to make sure filled prefix caching will not share the common_prefix_key.
-    # The later save prefix part will evict all of them.
-    key = tuple(100 + i + c_idx * prefill_length for i in range(prefill_length))
-    new_value = clone_value()
-    prefix_cache_inst.save(key, new_value)
-    new_value_list.append(new_value)
-  jax.block_until_ready(new_value_list)
-  del new_value_list
-
-  # Save prefix
-  new_value = None
-  save_sec = 0
-  for c_idx in range(iters):
-    key = common_prefix_key + tuple(i + c_idx * remain_len for i in range(remain_len))
-    # values are not relevant for caching now, just clone the same tokens and values for test
-    new_value = clone_value()
-    jax.block_until_ready(new_value)
-    start = datetime.datetime.now()
-    prefix_cache_inst.save(key, new_value)
-    end = datetime.datetime.now()
-    save_sec += (end - start).total_seconds()
-  del new_value
-  save_avg_ms = save_sec * 1000 / iters
-
-  # Fetch longest prefix key
-  key_load = common_prefix_key + tuple(i + prefix_cache_entries_num * remain_len for i in range(remain_len))
-  matched_key = None
-  fetch_sec = 0
-  for _ in range(iters):
-    start = datetime.datetime.now()
-    matched_key = prefix_cache_inst.fetch_longest_common_prefix_key(key_load)
-    end = datetime.datetime.now()
-    fetch_sec += (end - start).total_seconds()
-  fetch_avg_ms = fetch_sec * 1000 / iters
-
-  assert matched_key is not None
-
-  # Load prefix
-  load_sec = 0
-  value_load = None
-  for _ in range(iters):
-    start = datetime.datetime.now()
-    loaded_value = prefix_cache_inst.load(matched_key)
-    jax.block_until_ready(loaded_value)
-    end = datetime.datetime.now()
-    load_sec += (end - start).total_seconds()
-  del value_load
-  load_avg_ms = load_sec * 1000 / iters
-
-  print(
-      f"PrefixCaching results:\n"
-      f"\tPer prefix size bytes: {prefix_size_bytes_gb:.3f} GB\n"
-      f"\tAverage save cache time: {save_avg_ms:.3f} ms\n"
-      f"\tAverage fetch longest prefix time: {fetch_avg_ms:.3f} ms\n"
-      f"\tAverage load cache time: {load_avg_ms:.3f} ms\n\n\n"
-  )
-  del prefix_cache_inst
 
 
 def prefill_benchmark_loop(engine_prefill, params, tokens, true_length, iters, num_samples: int | None = None):
@@ -230,10 +115,8 @@ def prefill_insert_benchmark_loop(
   prof = profiler.Profiler(config)
   prof.activate(optional_postfix=profile_name)
   start = datetime.datetime.now()
-  rng = jax.random.PRNGKey(1234)
   for i in range(iters):
-    rng, rng_prefill = jax.random.split(rng)
-    decode_state = engine_insert(tokens, true_length, rng_prefill, decode_state, int(i % total_slots), params)
+    _, decode_state = engine_insert(params, tokens, int(i % total_slots), true_length, decode_state)
   jax.block_until_ready(decode_state)
   end = datetime.datetime.now()
   prof.deactivate()
@@ -242,10 +125,8 @@ def prefill_insert_benchmark_loop(
 
 def prefill_insert_benchmark(config, engine_insert, decode_state, params, total_slots, tokens, true_length, iters):
   """Handles warmup, running insert benchmark, and printing results."""
-  rng = jax.random.PRNGKey(1234)
   for i in range(_WARMUP_ITERS):
-    rng, rng_prefill = jax.random.split(rng)
-    decode_state = engine_insert(tokens, true_length, rng_prefill, decode_state, int(i % total_slots), params)
+    _, decode_state = engine_insert(params, tokens, int(i % total_slots), true_length, decode_state)
   jax.block_until_ready(decode_state)
 
   print(f"Prefill and insert benchmark results for length {tokens.size}:\n")
@@ -339,7 +220,7 @@ def write_results(results, filename, flatten_microbenchmark_results):
   if flatten_microbenchmark_results:
     results["flattened_results"] = flatten_dict(results)
   if filename:
-    with open(filename, "w", encoding="utf-8") as f:
+    with open(filename, "wt", encoding="utf-8") as f:
       json.dump(results, f, indent=2)
   return results
 
@@ -398,6 +279,7 @@ def summarize_prefill_result(engine_prefill, params, tokens, true_length):
 def run_benchmarks(config):
   """Run microbenchmarks."""
   engine = maxengine.MaxEngine(config)
+  prefill_processor = prefill_packing.PrefillProcessor(engine)
   rng = jax.random.PRNGKey(1234)
   rng, rng_load_params = jax.random.split(rng)
   params = engine.load_params(rng_load_params)
@@ -407,7 +289,7 @@ def run_benchmarks(config):
 
   text = config.prompt
   metadata = engine.get_tokenizer()
-  vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
+  tokenizer_model = engine.build_tokenizer(metadata)
   rng, rng_init_decode = jax.random.split(rng)
 
   generate_executable, params, decode_state_executable = engine.aot_compile(params, pass_rng_shape=True)
@@ -429,8 +311,8 @@ def run_benchmarks(config):
     rng_shape = jax.ShapeDtypeStruct([4], jax.numpy.dtype("uint32"))
 
     for prefill_length in prefill_lengths:
-      prefill_tokens[prefill_length], prefill_true_lengths[prefill_length] = token_utils.tokenize_and_pad(
-          text, vocab, is_bos=True, prefill_lengths=[prefill_length]
+      prefill_tokens[prefill_length], prefill_true_lengths[prefill_length] = tokenizer_model.encode(
+          text, is_bos=True, prefill_lengths=[prefill_length]
       )
 
       key_shape = jax.ShapeDtypeStruct([prefill_length], jax.numpy.dtype("int32"))
@@ -441,34 +323,11 @@ def run_benchmarks(config):
           ).lower(params, key_shape, i32_scalar, rng_shape)
       ).compile(compiler_options=None)
 
-      prefill_insert_executable[prefill_length] = (
-          jax.jit(
-              engine.prefill_insert,
-              in_shardings=(None, None, None, engine.decode_state_layouts, None, engine.param_layouts),
-              out_shardings=(engine.decode_state_layouts),
-              donate_argnames=("decode_state",),
-          ).lower(key_shape, i32_scalar, rng_shape, engine.decode_state_shapes, i32_scalar, params)
-      ).compile(compiler_options=None)
+      prefill_insert_executable[prefill_length] = prefill_processor.aot_compile(params, prefill_length)
 
       benchmark_results["prefill-result-sizes"][prefill_length] = summarize_prefill_result(
           prefill_executable[prefill_length], params, prefill_tokens[prefill_length], prefill_true_lengths[prefill_length]
       )
-
-    if "prefix_cache" in stages_to_benchmark:
-      for prefill_length in prefill_lengths:
-        rng_cache = jax.random.PRNGKey(1234)
-        prefill_result, _ = prefill_executable[prefill_length](
-            params, prefill_tokens[prefill_length], prefill_true_lengths[prefill_length], rng_cache
-        )
-        prefix_cache_benchmark(
-            prefill_result,
-            prefill_length,
-            prefill_true_lengths[prefill_length],
-            config.inference_microbenchmark_prefix_cache_common_prefix_proportion,
-            config.inference_microbenchmark_prefix_cache_entries_num,
-            benchmark_loop_iters,
-        )
-        del prefill_result
 
     for prefill_length in prefill_lengths:
       benchmark_results["prefill"][prefill_length] = prefill_benchmark(
@@ -547,9 +406,9 @@ def run_benchmarks(config):
   return results
 
 
-def main(argv):
+def main(config, **kwargs):
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  run_benchmarks(pyconfig.initialize(argv))
+  return run_benchmarks(pyconfig.initialize(config, **kwargs))
 
 
 if __name__ == "__main__":

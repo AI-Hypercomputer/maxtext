@@ -20,13 +20,13 @@ import torch
 import jax
 import unittest
 import jax.numpy as jnp
-from layers import embeddings
+from MaxText.layers import embeddings
 import numpy as np
 
 
 """  
 DeepSeek v3 PyTorch implementation of yarn rotary positional embedding.
-See https://github.com/deepseek-ai/DeepSeek-V3/blob/2f7b80eecebf3d1c84da5a0d465f6639ea175012/inference/model.py#L294 for details.
+Details https://github.com/deepseek-ai/DeepSeek-V3/blob/2f7b80eecebf3d1c84da5a0d465f6639ea175012/inference/model.py#L294
 
 """
 
@@ -76,22 +76,22 @@ def precompute_freqs_cis(dim, seqlen, beta_fast=32, beta_slow=1, base=10000.0, f
     high = math.ceil(find_correction_dim(high_rot, dim, base, max_seq_len))
     return max(low, 0), min(high, dim - 1)
 
-  def linear_ramp_factor(min, max, dim):
+  def linear_ramp_factor(min_ramp, max_ramp, dim_ramp):
     """
     Computes a linear ramp function used to smooth values between a minimum and maximum range.
 
     Args:
-        min (float): Minimum value for the ramp function.
-        max (float): Maximum value for the ramp function.
-        dim (int): Dimensionality of the ramp tensor.
+        min_ramp (float): Minimum value for the ramp function.
+        max_ramp (float): Maximum value for the ramp function.
+        dim_ramp (int): Dimensionality of the ramp tensor.
 
     Returns:
         torch.Tensor: A tensor of shape (dim,) with values linearly interpolated between 0 and 1,
             clamped to the range [0, 1].
     """
-    if min == max:
-      max += 0.001
-    linear_func = (torch.arange(dim, dtype=torch.float32) - min) / (max - min)
+    if min_ramp == max_ramp:
+      max_ramp += 0.001
+    linear_func = (torch.arange(dim_ramp, dtype=torch.float32) - min_ramp) / (max_ramp - min_ramp)
     ramp_func = torch.clamp(linear_func, 0, 1)
     return ramp_func
 

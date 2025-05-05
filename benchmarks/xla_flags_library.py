@@ -34,9 +34,7 @@ _MOE_VMEM_LIMIT = 81920
 
 DENSE_VMEM_LIMIT_FLAG = f" --xla_tpu_scoped_vmem_limit_kib={_DENSE_VMEM_LIMIT}"
 MOE_VMEM_LIMIT_FLAG = f" --xla_tpu_scoped_vmem_limit_kib={_MOE_VMEM_LIMIT}"
-CUSTOM_VMEM_LIMIT_FLAG = (
-    lambda vmem_limit: f"--xla_tpu_scoped_vmem_limit_kib={vmem_limit}"
-)
+CUSTOM_VMEM_LIMIT_FLAG = "--xla_tpu_scoped_vmem_limit_kib={vmem_limit}".format
 
 # Continuation Fusion (CF) for All Gather Collectives
 # Continuation Fusion is a form of parallelizing compute work with collectives.

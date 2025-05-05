@@ -45,6 +45,7 @@ import subprocess
 from datetime import datetime
 import os
 import shutil
+from inference_utils import str2bool
 
 
 
@@ -146,7 +147,7 @@ tar xzf {zip_name}
 gsutil cp {log_name} "{bucket_path}/"
 (({create_kill_command_str(args)}) 2>&1 ) >> {log_name}"""
 
-  with open(startup_script_file, "w", encoding="utf-8") as f:
+  with open(startup_script_file, "wt", encoding="utf-8") as f:
     f.write(startup_script)
   return startup_script
 
@@ -284,7 +285,7 @@ def main(raw_args=None) -> None:
   parser.add_argument('--CQR_EXTRA_ARGS', type=str, default=None,
                       help='Additional arguments to be passed verbatim to the CQR request, e.g. \
                       --CQR_EXTRA_ARGS="--reserved --service-account=my-service-account-email-address')
-  parser.add_argument('--ENABLE_AUTOCHECKPOINT', type=bool, default=False,
+  parser.add_argument('--ENABLE_AUTOCHECKPOINT', type=str2bool, default=False,
                       help='Whether to enable the Autocheckpoint feature')
   args = parser.parse_args(raw_args)
 
@@ -305,7 +306,7 @@ def main(raw_args=None) -> None:
   ##### Step 1: Zip code and move it to GCS #####
   tmp_dir_relative_to_script = os.path.join("tmp", args.RUN_NAME, "")
   tmp_dir = os.path.join(args.SCRIPT_DIR, tmp_dir_relative_to_script)
-  zip_name = "script_dir_zip_" + args.RUN_NAME + ".tar.gz"
+  zip_name = f"script_dir_zip_{args.RUN_NAME}.tar.gz"
   bucket_dir = os.path.join(args.BUCKET_DIR, args.RUN_NAME)
   bucket_path = os.path.join(f"gs://{args.BUCKET_NAME}", bucket_dir)
   startup_script_file = os.path.join(tmp_dir, "startup_script.txt")

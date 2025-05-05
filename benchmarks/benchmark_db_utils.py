@@ -20,15 +20,16 @@ from typing import Dict, Any, Type
 import logging
 import uuid
 import dataclasses
+from tempfile import gettempdir
 
-from command_utils import run_command_with_updates
 from argparse import Namespace
 
 BQ_WRITER_PATH = "/benchmark-automation/benchmark_db_writer/src"
-DEFAULT_LOCAL_DIR = "/tmp/"
+temp_dir = gettempdir()
+DEFAULT_LOCAL_DIR = os.path.join(temp_dir, "")
 # bq_writer_repo_root = get_bq_writer_path(DEFAULT_LOCAL_DIR)
 
-DEFAULT_TUNING_PARAMS_FILE = "/tmp/tuning_params.json"
+DEFAULT_TUNING_PARAMS_FILE = os.path.join(temp_dir, "tuning_params.json")
 
 
 @dataclasses.dataclass
@@ -56,7 +57,7 @@ def recover_tuning_params(tuning_params: str) -> Dict[str, Any]:
     key = key.strip()
     # Convert values to appropriate types
     try:
-      value = int(value.strip()) 
+      value = int(value.strip())
     except ValueError:
       try:
         value = float(value.strip())
@@ -119,7 +120,7 @@ def write_run(
     run_success: Whether the run succeeded or not.
     framework_config_in_json: A JSON string containing framework configurations.
     env_variables: A string containing environment variables.
-    run_release_status: possible values "local" ( code changes are done locally), "prep_release" ( all code code changes are present in the image)
+    run_release_status: "local": code changes are done locally; "prep_release": code changes present in the image
     other_metrics_in_json: A JSON string containing other metrics.
     comment: A comment about the run.
     nccl_driver_nickname: The nickname of the NCCL driver used.
@@ -136,7 +137,7 @@ def write_run(
   from benchmark_db_writer import dataclass_bigquery_writer
   from benchmark_db_writer.run_summary_writer import sample_run_summary_writer
   from benchmark_db_writer.schema.workload_benchmark_v2 import workload_benchmark_v2_schema
- 
+
   # pylint: enable=import-outside-toplevel
   logging.basicConfig(
       format="%(asctime)s %(levelname)-8s %(message)s",

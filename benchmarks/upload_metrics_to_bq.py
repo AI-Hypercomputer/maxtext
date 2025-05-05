@@ -14,22 +14,26 @@
  limitations under the License.
  """
 import argparse
-from typing import Any, Dict, Sequence
-from statistics import median
-
-import omegaconf
-from command_utils import run_command_with_updates
-# from benchmark_db_utils import install_mantaray_locally
-from benchmark_db_utils import write_run
-from benchmark_db_utils import DEFAULT_LOCAL_DIR
-from benchmark_db_utils import recover_tuning_params
-from benchmark_db_utils import Metrics
 import dataclasses
-import fnmatch
 import getpass
 import json
 import os
 import sys
+from typing import Any, Dict, Sequence
+
+import fnmatch
+
+from statistics import median
+
+import omegaconf
+
+from benchmarks.command_utils import run_command_with_updates
+from benchmarks.benchmark_db_utils import write_run
+from benchmarks.benchmark_db_utils import DEFAULT_LOCAL_DIR
+from benchmarks.benchmark_db_utils import recover_tuning_params
+from benchmarks.benchmark_db_utils import Metrics
+
+from MaxText.inference_utils import str2bool
 
 
 hardware_id_to_bf16_tflops = {"v4": 275,
@@ -165,7 +169,7 @@ def add_parser_arguments(parser: argparse.ArgumentParser):
   )
   parser.add_argument(
       '--is_test',
-      type=bool,
+      type=str2bool,
       required=False,
       default=True,
       help='Whether to use the testing project or production project',
@@ -180,7 +184,7 @@ def download_metrics_file_locally(metrics_gcs_file: str, local_file: str) -> int
 # Get the last n datapoints for a target metric
 def get_last_n_data(metrics_file, target, n=10):
   last_n_data = []
-  with open(metrics_file, 'r', encoding='utf8') as file:
+  with open(metrics_file, 'rt', encoding='utf8') as file:
     lines = file.readlines()
     for line in lines[::-1]:
       metrics = json.loads(line)
@@ -252,9 +256,9 @@ def main(argv: Sequence[str]) -> None:
   local_metrics_file = local_dir
   print(f"Attempting metrics download from {options.metrics_gcs_file} to {local_metrics_file}.",flush=True)
   rc = download_metrics_file_locally(metrics_gcs_file=options.metrics_gcs_file, local_file=local_metrics_file)
-  if rc != 0:
+  if rc != os.EX_OK:
     print("metrics download FAIL")
-    exit(rc)
+    sys.exit(rc)
   print("metrics download SUCCESS")
 
   # Parse Metrics
@@ -276,7 +280,7 @@ def main(argv: Sequence[str]) -> None:
   number_of_chips = int(options.number_of_chips)
   if options.hardware_id.startswith("v"):
     number_of_nodes = number_of_chips // 4
-  elif options.hardware_id == "a3mega" or options.hardware_id == "'a3ultra":
+  elif options.hardware_id in ("a3mega", "a3ultra"):
     number_of_nodes = number_of_chips // 8
   else:
     number_of_nodes = number_of_chips

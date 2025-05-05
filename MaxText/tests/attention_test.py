@@ -18,44 +18,281 @@ import itertools
 import random
 import sys
 import unittest
+import os.path
+import numpy as np
 from absl.testing import parameterized
 
-import common_types
+from MaxText import common_types
 
 from flax.core import freeze
 import jax
 import jax.numpy as jnp
-import max_utils
+from MaxText import maxtext_utils
 import pytest
 
-import pyconfig
+from MaxText import pyconfig
+from MaxText.globals import PKG_DIR
+from MaxText.layers import attentions
 
-from layers import attentions
-
+from jax.sharding import Mesh
 Mesh = jax.sharding.Mesh
 Attention = attentions.Attention
+ChunkedCausalMask = attentions.ChunkedCausalMask
 MLA = attentions.MLA
+
+
+class BidirectionalBlockMaskTest(unittest.TestCase):
+  """Test for make_bidirectional_block_mask"""
+
+  def test_one_block_mask(self):
+    bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0]])
+    block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    expected_mask = np.asarray(
+        [
+            [
+                [False, False, False, False, False, False],
+                [False, True, True, True, False, False],
+                [False, True, True, True, False, False],
+                [False, True, True, True, False, False],
+                [False, False, False, False, False, False],
+                [False, False, False, False, False, False],
+            ]
+        ]
+    )
+    np.testing.assert_array_equal(block_mask, expected_mask)
+
+  def test_two_blocks_mask(self):
+    bidirectional_mask = np.asarray([[0, 1, 1, 0, 1, 1]])
+    block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    expected_mask = np.asarray(
+        [
+            [
+                [False, False, False, False, False, False],
+                [False, True, True, False, False, False],
+                [False, True, True, False, False, False],
+                [False, False, False, False, False, False],
+                [False, False, False, False, True, True],
+                [False, False, False, False, True, True],
+            ]
+        ]
+    )
+    np.testing.assert_array_equal(block_mask, expected_mask)
+
+  def test_batch_block_masks(self):
+    bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0], [0, 1, 1, 0, 1, 1]])
+    block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    expected_mask = np.asarray(
+        [
+            [
+                [False, False, False, False, False, False],
+                [False, True, True, True, False, False],
+                [False, True, True, True, False, False],
+                [False, True, True, True, False, False],
+                [False, False, False, False, False, False],
+                [False, False, False, False, False, False],
+            ],
+            [
+                [False, False, False, False, False, False],
+                [False, True, True, False, False, False],
+                [False, True, True, False, False, False],
+                [False, False, False, False, False, False],
+                [False, False, False, False, True, True],
+                [False, False, False, False, True, True],
+            ],
+        ]
+    )
+    np.testing.assert_array_equal(block_mask, expected_mask)
+
+  def test_empty_block_mask(self):
+    bidirectional_mask = np.asarray([[0, 0, 0, 0, 0, 0]])
+    block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    expected_mask = np.zeros(
+        (bidirectional_mask.shape[0], bidirectional_mask.shape[1], bidirectional_mask.shape[1]), dtype=bool
+    )
+    np.testing.assert_array_equal(block_mask, expected_mask)
+
+  def test_full_block_mask(self):
+    bidirectional_mask = np.asarray([[1, 1, 1, 1, 1, 1]])
+    block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    expected_mask = np.ones(
+        (bidirectional_mask.shape[0], bidirectional_mask.shape[1], bidirectional_mask.shape[1]), dtype=bool
+    )
+    np.testing.assert_array_equal(block_mask, expected_mask)
+
+  def test_combine_with_causal_mask(self):
+    seq_len = 6
+    row_ids = np.arange(seq_len, dtype=np.int32)[:, None]
+    col_ids = np.arange(seq_len, dtype=np.int32)[None, :]
+    causal_mask = (col_ids <= row_ids)[None, None, None, :, :]
+    bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0], [0, 1, 1, 0, 1, 1]])
+    image_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
+    combined_mask = causal_mask | image_mask[:, None, None, ...]
+    expected_mask = np.asarray(
+        [
+            [
+                [
+                    [
+                        [True, False, False, False, False, False],
+                        [True, True, True, True, False, False],
+                        [True, True, True, True, False, False],
+                        [True, True, True, True, False, False],
+                        [True, True, True, True, True, False],
+                        [True, True, True, True, True, True],
+                    ]
+                ]
+            ],
+            [
+                [
+                    [
+                        [True, False, False, False, False, False],
+                        [True, True, True, False, False, False],
+                        [True, True, True, False, False, False],
+                        [True, True, True, True, False, False],
+                        [True, True, True, True, True, True],
+                        [True, True, True, True, True, True],
+                    ]
+                ]
+            ],
+        ]
+    )
+    np.testing.assert_array_equal(combined_mask, expected_mask)
+
+
+class ChunkedCausalMaskTest(unittest.TestCase):
+  """Test for the ChunkedCausalMask."""
+
+  def test_basic_chunking(self):
+    """Tests the mask with a simple chunk size."""
+    seq_len = 8
+    chunk_size = 4
+    mask = ChunkedCausalMask(shape=(seq_len, seq_len), chunk_size=chunk_size)
+
+    # Manually compute the expected mask
+    # Causal within chunks (0-3, 4-7)
+    expected_mask = np.zeros((seq_len, seq_len), dtype=np.bool_)
+    for r in range(seq_len):
+      for c in range(seq_len):
+        q_chunk = r // chunk_size
+        kv_chunk = c // chunk_size
+        if q_chunk == kv_chunk and r >= c:
+          expected_mask[r, c] = True
+
+    # Get the actual mask by slicing
+    actual_mask = mask[:, :]
+
+    np.testing.assert_array_equal(actual_mask, expected_mask)
+    # Make sure _generate_chunk_attention_mask also produces the same mask
+    actual_mask = attentions._generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
+    np.testing.assert_array_equal(actual_mask, expected_mask)
+
+  def test_full_length_chunk(self):
+    """Tests when chunk size equals sequence length (should be causal)."""
+    seq_len = 6
+    chunk_size = 6  # Same as seq_len
+    mask = ChunkedCausalMask(shape=(seq_len, seq_len), chunk_size=chunk_size)
+
+    # Expected mask is a standard lower triangular causal mask
+    expected_mask = np.tril(np.ones((seq_len, seq_len), dtype=np.bool_))
+
+    actual_mask = mask[:, :]
+    np.testing.assert_array_equal(actual_mask, expected_mask)
+    # Make sure _generate_chunk_attention_mask also produces the same mask
+    actual_mask = attentions._generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
+    np.testing.assert_array_equal(actual_mask, expected_mask)
+
+  def test_single_token_chunk(self):
+    """Tests when chunk size is 1 (only attend to self)."""
+    seq_len = 5
+    chunk_size = 1
+    mask = ChunkedCausalMask(shape=(seq_len, seq_len), chunk_size=chunk_size)
+
+    # Expected mask is just the identity matrix
+    expected_mask = np.eye(seq_len, dtype=np.bool_)
+
+    actual_mask = mask[:, :]
+    np.testing.assert_array_equal(actual_mask, expected_mask)
+    # Make sure _generate_chunk_attention_mask also produces the same mask
+    actual_mask = attentions._generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
+    np.testing.assert_array_equal(actual_mask, expected_mask)
+
+  def test_non_square_shape(self):
+    """Tests with different query and key sequence lengths."""
+    q_len = 6
+    kv_len = 8
+    chunk_size = 3
+    mask = ChunkedCausalMask(shape=(q_len, kv_len), chunk_size=chunk_size)
+
+    # Manually compute expected mask
+    expected_mask = np.zeros((q_len, kv_len), dtype=np.bool_)
+    for r in range(q_len):
+      for c in range(kv_len):
+        q_chunk = r // chunk_size
+        kv_chunk = c // chunk_size
+        if q_chunk == kv_chunk and r >= c:
+          expected_mask[r, c] = True
+
+    actual_mask = mask[:, :]
+    np.testing.assert_array_equal(actual_mask, expected_mask)
+    # Make sure _generate_chunk_attention_mask also produces the same mask
+    actual_mask = attentions._generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
+    np.testing.assert_array_equal(actual_mask, expected_mask)
+
+  def test_value_error_on_zero_chunk_size(self):
+    """Tests that a ValueError is raised for chunk_size <= 0."""
+    with self.assertRaises(ValueError):
+      ChunkedCausalMask(shape=(4, 4), chunk_size=0)
+    with self.assertRaises(ValueError):
+      ChunkedCausalMask(shape=(4, 4), chunk_size=-2)
+    with self.assertRaises(ValueError):
+      attentions._generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
 
 
 class AttentionTest(unittest.TestCase):
   """Test for the Attention"""
 
+  # Note: if you are changing these configs, please make sure to change the configs in
+  # context_parallelism.py as well, since we are using the same configs for both
+  # tests to get the same mesh and other config
+  config_arguments = {
+    "per_device_batch_size":1.0,
+    "run_name":"test",
+    "enable_checkpointing":False,
+    "max_prefill_predict_length":16,
+    "max_target_length":512,
+    "sa_block_q": 128,
+    "sa_block_kv": 128,
+    "sa_block_kv_compute": 128,
+    "sa_block_q_dkv": 128,
+    "sa_block_kv_dkv": 128,
+    "sa_block_kv_dkv_compute": 128,
+    "sa_block_q_dq": 128,
+    "sa_block_kv_dq": 128,
+  }
+
   def setUp(self):
     super().setUp()
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
-        per_device_batch_size=1.0,
-        run_name="test",
-        enable_checkpointing=False,
-        max_target_length=128,
-        max_prefill_predict_length=16,
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+        **self.config_arguments,
     )
     self.cfg = config
+
+    config_cp = pyconfig.initialize(
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+        **self.config_arguments,
+        ici_context_parallelism = 4, # use context parallelism of 4
+        context_parallel_load_balance = False, # set load_balancing to False such that
+        # there's no need for reordering the input/output
+    )
+
+
+    self.cfg_cp = config_cp
     self.rng = jax.random.PRNGKey(0)
 
-    devices_array = max_utils.create_device_mesh(self.cfg)
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
-
+    devices_array_cp = maxtext_utils.create_device_mesh(self.cfg_cp) # for context parallelism
+    self.mesh_cp = Mesh(devices_array_cp, self.cfg_cp.mesh_axes) # for context parallelism
     self.global_batch_size = self.cfg.global_batch_size_to_train_on
     self.num_kv_heads = self.cfg.num_kv_heads
     self.num_query_heads = self.cfg.num_query_heads
@@ -238,7 +475,7 @@ class AttentionTest(unittest.TestCase):
     self.tpu_kernel_attention_helper(1)
 
   def tpu_kernel_attention_helper(self, num_kv_heads):
-    """Test equalvant between dot_product and TPU accelerated"""
+    """Test equivalence between dot_product and TPU accelerated"""
 
     lnx, decoder_segment_ids, decoder_positions = self.get_data(self.dtype)
 
@@ -310,6 +547,53 @@ class AttentionTest(unittest.TestCase):
         jax.numpy.allclose(mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False)
     )
 
+    # Test with Context Parallelism
+    attention_as_mha_flash_cp = Attention(
+        config=self.cfg_cp, # we pass the context parallelism in the config
+        num_query_heads=self.cfg_cp.num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=self.cfg_cp.head_dim,
+        max_target_length=self.cfg_cp.max_target_length,
+        max_prefill_predict_length=self.cfg_cp.max_prefill_predict_length,
+        mesh=self.mesh_cp,
+        attention_kernel="flash",
+        dtype=self.dtype,
+        dropout_rate=self.cfg_cp.dropout_rate,
+        name="self_attention_cp",
+    )
+    attention_as_mha_flash_cp_variable = attention_as_mha_flash_cp.init(
+        {"params": self.rng, "aqt": self.rng},
+        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+        jnp.ones((self.global_batch_size, self.max_target_length)),
+    )
+
+    mha_generic_flash_cp_output = attention_as_mha_flash_cp.apply(
+        attention_as_mha_flash_cp_variable,
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_positions,
+        inputs_positions=decoder_segment_ids,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_TRAIN,
+        rngs={"aqt": self.rng},
+    )
+
+
+    # Assert that the logits generated by the generic flash and flash attention+context parallelism are close
+    self.assertTrue(
+        jax.numpy.allclose(mha_generic_flash_output, mha_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
+        msg="Logits from generic flash and flash attention+context parallelism are not close."
+    )
+
+    # Assert that the logits generated by the generic dot product and flash attention+context parallelism are close
+    self.assertTrue(
+        jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
+        msg="Logits from generic dot product and flash attention+context parallelism are not close."
+    )
+
+
+
   @pytest.mark.tpu_only
   def test_dot_product_cache_axis_order(self):
     all_axis_orders = [axis_order for axis_order in itertools.permutations(range(4))]
@@ -337,7 +621,7 @@ class AttentionTest(unittest.TestCase):
     rtol, atol = 1e-02, 1e-02
 
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,
@@ -437,7 +721,7 @@ class AttentionTest(unittest.TestCase):
     rtol, atol = 1e-02, 1e-02
 
     config = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,
@@ -726,7 +1010,7 @@ class MLATest(parameterized.TestCase):
   def init_mla(self, rope_type):
     """Helper function to initialize MLA with different model names."""
     cfg = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
         enable_checkpointing=False,
@@ -737,7 +1021,7 @@ class MLATest(parameterized.TestCase):
     )
     rng = jax.random.PRNGKey(0)
 
-    devices_array = max_utils.create_device_mesh(cfg)
+    devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
 
     global_batch_size = cfg.global_batch_size_to_train_on

@@ -14,22 +14,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from flax import linen as nn
-import common_types
-import jax.numpy as jnp
-from jax.ad_checkpoint import checkpoint_name
-import jax
-
-from layers import normalizations
-from layers import attentions
-from layers import initializers
-from layers import embeddings
-from layers import linears
-from layers import quantizations
-
 from typing import Optional
 
-import max_logging
+from flax import linen as nn
+import jax.numpy as jnp
+from jax.ad_checkpoint import checkpoint_name
+import jax.debug
+
+from MaxText import common_types
+from MaxText.layers import normalizations
+from MaxText.layers import attentions
+from MaxText.layers import initializers
+from MaxText.layers import embeddings
+from MaxText.layers import linears
+from MaxText.layers import quantizations
 
 Embed = embeddings.Embed
 RMSNorm = normalizations.RMSNorm
@@ -47,7 +45,12 @@ BATCH = common_types.BATCH
 LENGTH = common_types.LENGTH
 HEAD = common_types.HEAD
 D_KV = common_types.D_KV
-
+BEGIN_IMAGE_TOKEN = 255999
+END_IMAGE_TOKEN = 262144
+NEW_LINE_TOKEN = 108
+TOKEN_PLACEHOLDER = -2
+NUM_PLACEHOLDER_TOKENS_PER_IMAGE = 256
+NUM_TOKENS_PER_MEDIA = NUM_PLACEHOLDER_TOKENS_PER_IMAGE + 4
 
 nd_dense_init = initializers.nd_dense_init
 Quant = quantizations.AqtQuantization
@@ -79,6 +82,298 @@ def get_query_pre_attn_scalar(config) -> float:
     raise ValueError(f"Unsupported model name: {config.model_name}")
 
 
+def _posemb_sincos_2d(
+    h: int,
+    w: int,
+    *,
+    width: int,
+    temperature: float = 10_000.0,
+    dtype: jnp.dtype = jnp.float32,
+):
+  """Follows the MoCo v3 logic."""
+  y, x = jnp.mgrid[:h, :w]
+
+  assert width % 4 == 0, "Width must be mult of 4 for sincos posemb"
+  omega = jnp.arange(width // 4) / (width // 4 - 1)
+  omega = 1.0 / (temperature**omega)
+  y = jnp.einsum("m,d->md", y.flatten(), omega)
+  x = jnp.einsum("m,d->md", x.flatten(), omega)
+  pe = jnp.concatenate([jnp.sin(x), jnp.cos(x), jnp.sin(y), jnp.cos(y)], axis=1)
+  return jnp.asarray(pe, dtype)[None, :, :]
+
+
+class MlpBlockViT(nn.Module):
+  """Transformer MLP / feed-forward block."""
+
+  block_id: int
+  dtype_mm: str
+  mlp_dim: int | None = None  # Defaults to 4x input dim
+  dropout: float = 0.0
+
+  @nn.compact
+  def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
+    """Applies Transformer MlpBlock module."""
+    inits = dict(
+        kernel_init=nn.initializers.xavier_uniform(),
+        bias_init=nn.initializers.normal(stddev=1e-6),
+    )
+
+    d = x.shape[-1]
+    x = nn.Dense(features=self.mlp_dim or 4 * d, dtype=self.dtype_mm, **inits)(x)
+    x = nn.gelu(x)
+    x = nn.Dropout(rate=self.dropout)(x, deterministic)
+    x = nn.Dense(
+        features=d,
+        dtype=self.dtype_mm,
+        **inits,
+    )(x)
+    return x
+
+
+class Encoder1DBlock(nn.Module):
+  """Single transformer encoder block (MHSA + MLP)."""
+
+  block_id: int
+  dtype_mm: str
+  mlp_dim: int | None = None  # Defaults to 4x input dim
+  num_heads: int = 12
+  dropout: float = 0.0
+
+  @nn.compact
+  def __call__(self, x: jax.Array, deterministic: bool = True) -> tuple[jax.Array, dict[str, jax.Array]]:
+    x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_embed"))
+    y = nn.LayerNorm()(x)
+
+    y = nn.MultiHeadDotProductAttention(
+        num_heads=self.num_heads,
+        kernel_init=nn.initializers.xavier_uniform(),
+        deterministic=deterministic,
+        dtype=self.dtype_mm,
+    )(y, y)
+    y = nn.with_logical_constraint(y, ("activation_batch", "activation_length", "activation_embed"))
+    y = nn.Dropout(rate=self.dropout)(y, deterministic)
+    x = x + y
+
+    y = nn.LayerNorm()(x)
+    y = MlpBlockViT(
+        block_id=self.block_id,
+        mlp_dim=self.mlp_dim,
+        dropout=self.dropout,
+        dtype_mm=self.dtype_mm,
+    )(y, deterministic)
+    y = nn.with_logical_constraint(y, ("activation_batch", "activation_length", "activation_embed"))
+    y = nn.Dropout(rate=self.dropout)(y, deterministic)
+    x = x + y
+    x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_embed"))
+    return x
+
+
+class Encoder(nn.Module):
+  """Transformer Model Encoder for sequence to sequence translation."""
+
+  depth: int
+  dtype_mm: str
+  remat_policy: str
+  mlp_dim: int | None = None  # Defaults to 4x input dim
+  num_heads: int = 12
+  dropout: float = 0.0
+  scan: bool = False
+
+  @nn.compact
+  def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
+    if self.scan:
+      block = nn.remat(
+          Encoder1DBlock,
+          prevent_cse=False,
+          static_argnums=(2,),  # 0=self, 2=deterministic
+          policy=getattr(jax.checkpoint_policies, self.remat_policy, None),
+      )
+      x = nn.scan(
+          block,
+          variable_axes={"params": 0},
+          split_rngs={"params": True, "dropout": True},
+          in_axes=nn.broadcast,
+          length=self.depth,
+      )(
+          block_id=0,
+          name="encoderblock",
+          dtype_mm=self.dtype_mm,
+          mlp_dim=self.mlp_dim,
+          num_heads=self.num_heads,
+          dropout=self.dropout,
+      )(
+          x, deterministic
+      )
+    else:
+      # Input Encoder
+      for lyr in range(self.depth):
+        block_cur = Encoder1DBlock(
+            block_id=lyr,
+            name=f"encoderblock_{lyr}",
+            dtype_mm=self.dtype_mm,
+            mlp_dim=self.mlp_dim,
+            num_heads=self.num_heads,
+            dropout=self.dropout,
+        )
+        x = block_cur(x, deterministic)
+    x: jax.Array = nn.LayerNorm(name="encoder_norm")(x)
+    return x
+
+
+class Einsum(nn.Module):
+  """Einsum is a convenience module for parameterized tensor multiplication."""
+
+  shape: tuple[int, ...]
+  weight_name: str = "w"
+  initializer: nn.initializers.Initializer = nn.initializers.normal()
+  dtype: jnp.dtype | None = None
+
+  @nn.compact
+  def __call__(self, eqn: str, x: jax.Array) -> jax.Array:
+    w = self.param(
+        self.weight_name,
+        self.initializer,
+        self.shape,
+        self.dtype if self.dtype is not None else None,
+    )
+    return jnp.einsum(eqn, x, w)
+
+
+class VisionEmbedder(nn.Module):
+  """Projects image embeddings to the embedding space of the text encoder."""
+
+  embed_dim: int
+  vision_proj_dim: int | None = None
+
+  def setup(self):
+    if self.vision_proj_dim:
+      self.mm_soft_embedding_norm = RMSNorm()
+      self.mm_input_projection = Einsum((self.vision_proj_dim, self.embed_dim))
+
+  def encode_vision(self, x: jax.Array) -> jax.Array:
+    x = self.mm_soft_embedding_norm(x)
+    x = self.mm_input_projection("...tm,md->...td", x)
+    return x
+
+  def __call__(self, x: jax.Array) -> jax.Array:
+    return self.encode_vision(x)
+
+
+class VisionExit(nn.Module):
+  """The vision exit layer.
+
+  Possibly downsample the soft tokens to a required output length.
+
+  Attributes:
+    output_length: The embed will be spatially avg-pooled to this output length.
+  """
+
+  output_length: int = 256
+
+  def __call__(self, x):
+    cur_length = x.shape[1]
+    if cur_length == self.output_length:
+      return x
+    cur_width = int(cur_length**0.5)
+    assert cur_width**2 == cur_length
+    output_width = int(self.output_length**0.5)
+    assert output_width**2 == self.output_length, f"Cannot pool {x.shape=} to {self.output_length}=!"
+    batch_size = x.shape[0]
+    embed_dim = x.shape[-1]
+    x = jnp.reshape(x, (batch_size, cur_width, cur_width, embed_dim))
+    assert not cur_width % output_width, f"{cur_width=} {output_width=}"
+    window = cur_width // output_width
+    window_shape = (window, window)
+    x = nn.avg_pool(x, window_shape=window_shape, strides=window_shape)
+    batch_size, height, width, embed_dim = x.shape
+    return jnp.reshape(x, (batch_size, height * width, embed_dim))
+
+
+class Gemma3VisionEncoderLayer(nn.Module):
+  config: Config
+  patch_size: tuple[int, int] = (14, 14)
+  width: int = 1152
+  mlp_dim: int | None = 4304  # Defaults to 4x input dim
+  depth: int = 27
+  num_heads: int = 16
+  posemb: str = "learn"  # Can also be "sincos2d"
+  dropout: float = 0.0
+  # or "dots_with_no_batch_dims_saveable" for more speed (memory costly)
+
+  def _get_posemb(
+      self,
+      typ: str,
+      *,
+      seqshape: tuple[int, int],
+      width: int,
+      name: str,
+      dtype: jnp.dtype = jnp.float32,
+  ):
+    """Returns the position embedding."""
+    if typ == "learn":
+      shape_product = seqshape[0] * seqshape[1]
+      return self.param(
+          name,
+          nn.initializers.normal(stddev=1 / (width**0.5)),
+          (1, shape_product, width),
+          dtype,
+      )
+    elif typ == "sincos2d":
+      return _posemb_sincos_2d(*seqshape, width=width, dtype=dtype)
+    else:
+      raise ValueError(f"Unknown posemb type: {typ}")
+
+  @nn.compact
+  def __call__(self, inputs, deterministic, train=False):
+    """ViT model that transforms image inputs to image embeddings.
+    Args:
+      inputs: jnp.array shaped [B, N, H, W, C], e.g. [4, 1, 896, 896, 3]
+    Returns:
+      jnp.array for image embeddings, shaped [B, N, P, D], e.g. [4, 1, 256, 2560]
+    """
+    cfg = self.config
+    b, n, h, w, c = inputs.shape
+    x = jnp.reshape(inputs, [b * n, h, w, c])
+    # Gemma3 uses conv2d with stride 14 and kernel size 14 to extract patches.
+    x = nn.Conv(features=1152, kernel_size=(14, 14), strides=14, padding="VALID", name="embedding")(x)
+    bn, h, w, c = x.shape
+    x = jnp.reshape(x, [bn, h * w, c])
+
+    # Add posemb before adding extra token.
+    x = x + self._get_posemb(
+        self.posemb,
+        seqshape=(h, w),
+        width=c,
+        name="pos_embedding",
+        dtype=x.dtype,
+    )
+
+    x = nn.Dropout(rate=self.dropout)(x, not train)
+
+    # Transformer encoder to extract image features.
+    x = Encoder(
+        depth=self.depth,
+        mlp_dim=self.mlp_dim,
+        num_heads=self.num_heads,
+        dropout=self.dropout,
+        scan=cfg.scan_layers,
+        remat_policy=cfg.remat_policy_for_vit,
+        dtype_mm=cfg.dtype_mm,
+        name="Transformer",
+    )(x, deterministic=deterministic)
+
+    # Gemma3 use a vision exit layer to downsample the soft tokens to a required output length.
+    x = VisionExit(output_length=256)(x)
+    bn, l, c = x.shape
+    x = jnp.reshape(x, [b, n, l, c])
+
+    # VisionEmbedder is a projection layer that projects the image embeddings to align with text embeddings emb_dim.
+    x = VisionEmbedder(embed_dim=cfg.emb_dim, vision_proj_dim=self.width)(x)
+    if cfg.freeze_vision_encoder_params:
+      x = jax.lax.stop_gradient(x)
+    return x
+
+
 # Gemma3 Decoder Layer
 class Gemma3DecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
@@ -99,6 +394,7 @@ class Gemma3DecoderLayer(nn.Module):
       previous_chunk=None,
       page_state=None,
       slot=None,
+      bidirectional_mask=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -132,7 +428,7 @@ class Gemma3DecoderLayer(nn.Module):
         attention_type=self.attention_type,
         sliding_window_size=cfg.sliding_window_size,
         attn_logits_soft_cap=cfg.attn_logits_soft_cap,
-        use_qk_norm=True,  # Gemma 3 models use querry, key normalizations
+        use_qk_norm=True,  # Gemma 3 models use query, key normalizations
         query_pre_attn_scalar=query_pre_attn_scalar,
     )
 
@@ -143,6 +439,7 @@ class Gemma3DecoderLayer(nn.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        bidirectional_mask=bidirectional_mask,
     )
     if cfg.use_post_attn_norm:
       attention_lnx = RMSNorm(

@@ -29,11 +29,11 @@ import jax
 import jax.numpy as jnp
 from jax.experimental import multihost_utils
 
-import tokenizer
-import multihost_dataloading
-import sequence_packing
-from input_pipeline._input_pipeline_utils import get_tokenizer
-import max_logging
+from MaxText import tokenizer
+from MaxText import multihost_dataloading
+from MaxText import sequence_packing
+from MaxText.input_pipeline._input_pipeline_utils import get_tokenizer
+from MaxText import max_logging
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
@@ -41,7 +41,7 @@ AUTOTUNE = tf.data.experimental.AUTOTUNE
 # data processing functions:
 #   _shift_left_and_pad, rekey, reduce_concat_tokens and split_tokens_to_targets_length
 # Adapted from:
-#   https://github.com/google-research/text-to-text-transfer-transformer/blob/ba171b6f94eafcee60d0714fd6d60749b572d1f2/t5/data/preprocessors.py
+#   https://github.com/google-research/text-to-text-transfer-transformer/blob/ba171b6/t5/data/preprocessors.py
 # -----------------------------------------------------------------------------
 def _shift_left_and_pad(tensor, pad_val):
   """Shift the input to the left with pad_val"""

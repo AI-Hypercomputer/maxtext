@@ -83,6 +83,9 @@ then
   HF_CKPT="meta-llama/Llama-2-70b-chat-hf"
 fi
 
+if [[ -z ${MAXENGINE_CONFIG_FILEPATH} ]] ; then
+    MAXENGINE_CONFIG_FILEPATH="./MaxText/configs/base.yml"
+fi
 
 
 if [ -z "$MAXENGINE_ARGS" ];
@@ -122,6 +125,9 @@ fi
 export JAX_COMPILATION_CACHE_DIR="/tmp/jax_cache2"
 export LIBTPU_INIT_ARGS
 
+# Ensure working directory is at repository root.
+cd $(dirname $0)/../../
+
 run_loadgen() {
   OUTPUT_LOG_ID=llama70b-${run_name}-${DATASET_TYPE}-${LOADGEN_RUN_TYPE}-${LOADGEN_RUN_TYPE}_${LOADGEN_RUN_TIMESTAMP}
   OUTPUT_LOG_DIR=${DATA_DISK_DIR}/logs/${OUTPUT_LOG_ID}
@@ -136,7 +142,8 @@ run_loadgen() {
   echo "PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES: ${PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES}"
   echo "MAXENGINE_ARGS: ${MAXENGINE_ARGS}"
   echo
-  ${CMD} python -m offline_mode \
+  ${CMD} python3 -m MaxText.inference_mlperf.offline_mode \
+    --maxengine_config_filepath=${MAXENGINE_CONFIG_FILEPATH} \
     --mlperf_test_mode=${TEST_MODE} \
     --input_mode tokenized \
     --output_mode tokenized \
@@ -179,12 +186,12 @@ run_loadgen_accuracy () {
   # Eval Run
   if [ -e ${OUTPUT_ACCURACY_JSON_PATH} ]; then
     if [ "${FAST_EVAL:-false}" = "true" ] || "$fast_eval"; then
-      EVAL_SCRIPT="evaluate-accuracy-fast.py"
+      EVAL_SCRIPT="evaluate-accuracy-fast"
     else
-      EVAL_SCRIPT="evaluate-accuracy.py"
+      EVAL_SCRIPT="evaluate-accuracy"
     fi
     echo
-    ${CMD} python3 ${EVAL_SCRIPT} \
+    ${CMD} python3 -m MaxText.inference_mlperf.${EVAL_SCRIPT} \
       --checkpoint-path ${HF_CKPT} \
       --mlperf-accuracy-file ${OUTPUT_ACCURACY_JSON_PATH} \
       --dataset-file ${DATASET_PATH} 2>&1 | tee ${OUTPUT_LOG_DIR}/evaluate_offline_accuracy_log.log

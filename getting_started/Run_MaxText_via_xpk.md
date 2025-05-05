@@ -48,7 +48,7 @@ gcloud auth login
 
 * Run this command to configure docker to use docker-credential-gcloud for GCR registries:
 ```
-gcloud auth configure-docker us-docker.pkg.dev
+gcloud auth configure-docker
 ```
 
 * Test the installation by running
@@ -123,7 +123,7 @@ after which log out and log back in to the machine.
       DATASET_PATH=gs://dataset_bucket/
 
       # Install xpk
-      pip install xpk
+      python3 -m pip install xpk
 
       # Make sure you are still in the maxtext github root directory when running this command
       xpk workload create \
@@ -132,7 +132,7 @@ after which log out and log back in to the machine.
       --workload ${USER}-first-job \
       --tpu-type=v5litepod-256 \
       --num-slices=1  \
-      --command "python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100 per_device_batch_size=1"
+      --command "python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100 per_device_batch_size=1"
       ```
 
       __Using [xpk github repo](https://github.com/google/xpk.git)__
@@ -147,5 +147,5 @@ after which log out and log back in to the machine.
       --workload ${USER}-first-job \
       --tpu-type=v5litepod-256 \
       --num-slices=1  \
-      --command "python3 MaxText/train.py MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100 per_device_batch_size=1"
+      --command "python3 -m MaxText.train MaxText/configs/base.yml base_output_directory=${BASE_OUTPUT_DIR} dataset_path=${DATASET_PATH} steps=100 per_device_batch_size=1"
       ```

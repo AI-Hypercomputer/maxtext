@@ -25,10 +25,10 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 import jax
 
-import multihost_dataloading
-import tokenizer
-import sequence_packing
-from input_pipeline import _input_pipeline_utils
+from MaxText import multihost_dataloading
+from MaxText import tokenizer
+from MaxText import sequence_packing
+from MaxText.input_pipeline import _input_pipeline_utils
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 
@@ -63,9 +63,10 @@ def get_datasets(
     ds = ds_builder.as_dataset(split=data_split, read_config=read_config, shuffle_files=shuffle_files)
   else:
     warnings.warn(
-        f"WARNING: Inefficient dataloading. Your {dataset_name} contains {ds_builder.info.splits[data_split].num_shards} shards, "
-        f"smaller than {dataloading_host_count=}. This is known to lead to inefficient dataloading."
-        "see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#multihost-dataloading-best-practice"
+        f"WARNING: Inefficient dataloading. Your {dataset_name} contains {ds_builder.info.splits[data_split].num_shards}"
+        f"shards, smaller than {dataloading_host_count=}. This is known to lead to inefficient dataloading."
+        "see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md"
+        "#multihost-dataloading-best-practice"
     )
     ds = ds_builder.as_dataset(split=data_split, read_config=read_config, shuffle_files=shuffle_files)
     ds = ds.shard(num_shards=dataloading_host_count, index=dataloading_host_index)
@@ -192,6 +193,8 @@ def make_tfds_train_iterator(
         tokenize=config.tokenize_train_data,
         add_bos=config.add_bos,
         add_eos=config.add_eos,
+        num_epochs=config.num_epoch,
+        pack_examples=config.packing,
         use_dpo=config.use_dpo,
         hf_access_token=config.hf_access_token,
     )
@@ -217,6 +220,8 @@ def make_tfds_train_iterator(
         tokenize=config.tokenize_train_data,
         add_bos=config.add_bos,
         add_eos=config.add_eos,
+        num_epochs=config.num_epoch,
+        pack_examples=config.packing,
         use_dpo=config.use_dpo,
         hf_access_token=config.hf_access_token,
     )
@@ -253,6 +258,7 @@ def make_tfds_eval_iterator(
         tokenize=config.tokenize_eval_data,
         add_bos=config.add_bos,
         add_eos=config.add_eos,
+        pack_examples=config.packing,
         use_dpo=config.use_dpo,
         hf_access_token=config.hf_access_token,
     )
@@ -277,6 +283,7 @@ def make_tfds_eval_iterator(
         tokenize=config.tokenize_eval_data,
         add_bos=config.add_bos,
         add_eos=config.add_eos,
+        pack_examples=config.packing,
         use_dpo=config.use_dpo,
         hf_access_token=config.hf_access_token,
     )

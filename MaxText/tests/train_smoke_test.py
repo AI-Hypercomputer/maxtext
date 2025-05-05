@@ -17,19 +17,22 @@ limitations under the License.
 """ Smoke test """
 import os
 import unittest
-from train import main as train_main
+
 from absl.testing import absltest
+
+from MaxText.train import main as train_main
+from MaxText.globals import PKG_DIR
 
 
 class Train(unittest.TestCase):
   """Smoke test G3 only"""
 
   def test_tiny_config(self):
-    test_tmpdir = os.environ.get("TEST_TMPDIR")
+    test_tmpdir = os.environ.get("TEST_TMPDIR")  # pylint: disable=unused-variable
     train_main(
         [
             None,
-            "third_party/py/maxtext/configs/base.yml",
+            os.path.join(PKG_DIR, "configs", "base.yml"),
             f"base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_test",
             r"dataset_path=gs://maxtext-dataset",
@@ -44,7 +47,7 @@ class Train(unittest.TestCase):
             "dataset_type=synthetic",
             "steps=10",
             "enable_checkpointing=False",
-            "tokenizer_path=../assets/tokenizer.llama2",
+            rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
             "enable_goodput_recording=False",
             "enable_checkpoint_cloud_logger=False",
             "monitor_goodput=False",

@@ -22,8 +22,8 @@ from etils import epath
 from flax.training import train_state
 import grain.python as grain
 import jax
-import max_logging
-from multihost_dataloading import MultiHostDataLoadIterator
+from MaxText import max_logging
+from MaxText.multihost_dataloading import MultiHostDataLoadIterator
 import numpy as np
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
@@ -62,7 +62,7 @@ def create_orbax_checkpoint_manager(
   if not enable_checkpointing:
     max_logging.log("Checkpointing disabled, not creating checkpoint manager.")
     return None
-  max_logging.log("Creating checkpoint manager...")
+  max_logging.log(f"Creating checkpoint manager with ocdbt={use_ocdbt} and zarr3={use_zarr3}")
   p = epath.Path(checkpoint_dir)
 
   if dataset_type == "grain":
@@ -192,6 +192,8 @@ def load_state_if_possible(
     enable_single_replica_ckpt_restoring: Optional[bool] = False,
     dataset_type: Optional[str] = "tfds",
     step: int = -1,  # -1 means latest
+    use_ocdbt=True,
+    use_zarr3=True,
 ):
   """Loads TrainState as possible from the inputs.
 
@@ -299,7 +301,11 @@ def load_state_if_possible(
 
   if load_parameters_from_path != "":
     restored_params = load_params_from_path(
-        load_parameters_from_path, abstract_unboxed_pre_state.params, checkpoint_storage_concurrent_gb
+        load_parameters_from_path,
+        abstract_unboxed_pre_state.params,
+        checkpoint_storage_concurrent_gb,
+        use_ocdbt=use_ocdbt,
+        use_zarr3=use_zarr3,
     )
     return None, restored_params
   elif load_full_state_from_path != "":
@@ -335,16 +341,22 @@ def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-
   return orbax_cloud_logger
 
 
-def load_params_from_path(load_parameters_from_path, abstract_unboxed_params, checkpoint_storage_concurrent_gb):
+def load_params_from_path(
+    load_parameters_from_path, abstract_unboxed_params, checkpoint_storage_concurrent_gb, use_ocdbt=True, use_zarr3=True
+):
   """Load decode params from checkpoint at specified path."""
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
   max_logging.log(f"restoring params from {load_parameters_from_path}")
   ckpt = epath.Path(load_parameters_from_path)
 
   # *_concurrent_gb should be set for large models, the default is 96.
+  max_logging.log(f"Creating checkpoint manager with ocdbt={use_ocdbt} and zarr3={use_zarr3}")
   ckptr = ocp.Checkpointer(
       ocp.PyTreeCheckpointHandler(
-          restore_concurrent_gb=checkpoint_storage_concurrent_gb, save_concurrent_gb=checkpoint_storage_concurrent_gb
+          restore_concurrent_gb=checkpoint_storage_concurrent_gb,
+          save_concurrent_gb=checkpoint_storage_concurrent_gb,
+          use_ocdbt=use_ocdbt,
+          use_zarr3=use_zarr3,
       )
   )
 
@@ -359,9 +371,10 @@ def load_params_from_path(load_parameters_from_path, abstract_unboxed_params, ch
   return restored["params"]
 
 
-def save_params_to_path(checkpoint_dir, params):
+def save_params_to_path(checkpoint_dir, params, use_ocdbt=True, use_zarr3=True):
   """Save decode params in checkpoint at specified path."""
   assert checkpoint_dir, "checkpoint_dir is not defined."
-  orbax_checkpointer = ocp.PyTreeCheckpointer()
+  print(f"Saving quantized params checkpoint with use_ocdbt = {use_ocdbt} and use_zarr3 = {use_zarr3}")
+  orbax_checkpointer = ocp.PyTreeCheckpointer(use_ocdbt=use_ocdbt, use_zarr3=use_zarr3)
   orbax_checkpointer.save(checkpoint_dir, {"params": params}, force=True)
   print(f"Quantized params checkpoint saved at: {checkpoint_dir}")

@@ -10,10 +10,12 @@
  See the License for the specific language governing permissions and
  limitations under the License.
  """
+
 """Shared Benchmark config for v5e orchestrations."""
 
-import xla_flags_library
-from maxtext_trillium_model_configs import MaxTextModel, _add_to_model_dictionary
+import os.path
+from benchmarks import xla_flags_library
+from benchmarks.maxtext_trillium_model_configs import MaxTextModel, _add_to_model_dictionary
 
 
 v5e_model_dict = {}
@@ -159,7 +161,7 @@ llama2_7b_v5e_256 = _add_to_model_dictionary(
         "remat_policy": "save_qkv_proj",
         "max_target_length": 2048,
         "use_iota_embed": True,
-        "tokenizer_path": "assets/tokenizer.llama2",
+        "tokenizer_path": os.path.join("assets", "tokenizer.llama2"),
         "dataset_path": "gs://max-datasets-rogue",
         "dataset_type": "synthetic",
         "reuse_example_batch": 1,
@@ -184,7 +186,7 @@ llama2_13b_v5e_256 = _add_to_model_dictionary(
         "remat_policy": "qkv_proj_offloaded",
         "max_target_length": 2048,
         "use_iota_embed": True,
-        "tokenizer_path": "assets/tokenizer.llama2",
+        "tokenizer_path": os.path.join("assets", "tokenizer.llama2"),
         "dataset_path": "gs://max-datasets-rogue",
         "dataset_type": "synthetic",
         "reuse_example_batch": 1,

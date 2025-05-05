@@ -13,10 +13,11 @@ google-cloud-storage
 google-cloud-monitoring
 google-api-core
 google-api-python-client
-grain-nightly
+grain[parquet]>=0.2.6
 flax>=0.8.0
+jaxtyping
 ml-collections
-ml-goodput-measurement==0.0.5
+ml-goodput-measurement==0.0.10
 numpy
 optax
 protobuf==3.20.3
@@ -25,6 +26,7 @@ pytest
 pyink
 pre-commit
 pytype
+pillow>=11.1.0
 sentencepiece==0.1.97
 tensorflow-text>=2.13.0
 tensorflow>=2.13.0
@@ -36,5 +38,5 @@ transformers
 mlperf-logging@git+https://github.com/mlperf/logging.git
 google-jetstream@git+https://github.com/AI-Hypercomputer/JetStream.git
 jsonlines
-pathwaysutils@git+https://github.com/google/pathways-utils.git
+pathwaysutils==0.1.1
 omegaconf

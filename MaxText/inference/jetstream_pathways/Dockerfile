@@ -42,9 +42,9 @@ bash setup.sh
 
 RUN cd /JetStream && \
 git checkout ${JETSTREAM_VERSION} && \
-pip install -e .
+python3 -m pip install -e .
 
-RUN pip install setuptools fastapi uvicorn
+RUN python3 -m pip install setuptools fastapi uvicorn
 
 RUN apt -y update && apt-get -y install python3-dev && apt-get -y install build-essential
 

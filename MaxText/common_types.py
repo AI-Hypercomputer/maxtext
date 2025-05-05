@@ -13,7 +13,7 @@
 #  limitations under the License.
 
 """Common types."""
-
+import enum
 from typing import Any, Sequence
 
 from flax.linen import partitioning
@@ -36,6 +36,7 @@ AxisIdxes = tuple[int, ...]
 
 BATCH = "activation_batch"
 LENGTH = "activation_length"
+Q_LENGTH = "activation_q_length"
 KV_LENGTH = "activation_kv_length"
 EMBED = "activation_embed"
 HEAD = "activation_heads"
@@ -67,3 +68,18 @@ DECODING_ACTIVE_SEQUENCE_INDICATOR = 1
 # A large negative mask value is used for masking to ensure that the
 # softmax function assigns an extremely low probability to the masked positions.
 DEFAULT_MASK_VALUE = -0.7 * float(np.finfo(np.dtype("float32")).max)
+
+
+class DecoderBlockType(enum.Enum):
+  DEFAULT = "default"
+  LLAMA2 = "llama2"
+  MISTRAL = "mistral"
+  MIXTRAL = "mixtral"
+  DEEPSEEK = "deepseek"
+  GEMMA = "gemma"
+  GEMMA2 = "gemma2"
+  GEMMA3 = "gemma3"
+  GPT3 = "gpt3"
+  SIMPLE = "simple"
+  SIMPLE_MLP = "simple_mlp"
+  LLAMA4 = "llama4"

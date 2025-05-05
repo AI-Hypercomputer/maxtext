@@ -17,33 +17,37 @@ import functools
 from typing import Any, List, Optional, Tuple, Callable
 from collections import defaultdict
 import uuid
-
-import flax
-from flax import linen as nn
-from flax.linen import partitioning as nn_partitioning
-from flax import struct
-
-from inference.page_manager import PageManager, PageState
-from layers import models, quantizations
+import os.path
 
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 from jax.experimental import layout as jax_layout
 
-import common_types
+import flax
+from flax import linen as nn
+from flax.linen import partitioning as nn_partitioning
+from flax import struct
+
 from jetstream.core import config_lib
 from jetstream.engine import engine_api
 from jetstream.engine.tokenizer_pb2 import TokenizerParameters
 from jetstream.engine.tokenizer_pb2 import TokenizerType
 from jetstream.engine import tokenizer_api
 from jetstream.engine import token_utils
-from utils import lora_utils
 
-import max_utils
-import inference_utils
-import pyconfig
+from MaxText import max_utils
+from MaxText import maxtext_utils
+from MaxText import inference_utils
+from MaxText import pyconfig
+from MaxText import common_types
+from MaxText.utils import lora_utils
+from MaxText.globals import PKG_DIR
+from MaxText.inference.page_manager import PageManager, PageState
+from MaxText.layers import models, quantizations
+
 import warnings
+
 
 warnings.simplefilter("ignore", category=FutureWarning)
 DecodeState = Any
@@ -101,7 +105,7 @@ class MaxEngine(engine_api.Engine):
     self.config = config
 
     # Mesh definition
-    devices_array = max_utils.create_device_mesh(config=config, devices=devices)
+    devices_array = maxtext_utils.create_device_mesh(config=config, devices=devices)
     self._mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
     # Model and Optimizer definition
@@ -120,25 +124,12 @@ class MaxEngine(engine_api.Engine):
     self.decode_state_layouts = None
     self.param_layouts = None
 
+    # Initialize page manager and page state
+    self.page_manager = None
+    self.page_state = None
     if self.config.attention == "paged":
-      # Initialize page manager and page state
-      self.page_manager = PageManager(
-          num_pages=self.config.pagedattn_num_pages,
-          tokens_per_page=self.config.pagedattn_tokens_per_page,
-          max_target_length=self.config.max_target_length,
-          batch_size=self.config.per_device_batch_size,
-          max_prefill_length=self.config.max_prefill_predict_length,
-      )
-    else:
-      # Add a dummy object for page manager and page state to avoid tracing issue
-      self.page_manager = PageManager(
-          num_pages=1,
-          tokens_per_page=1,
-          max_target_length=2,
-          batch_size=1,
-          max_prefill_length=1,
-      )
-    self.page_state = self.page_manager.get_initial_page_state()
+      self.page_manager = PageManager(self.config)
+      self.page_state = self.page_manager.get_initial_page_state()
 
   def print_stats(self, label: str):
     max_utils.print_mem_stats(label)
@@ -234,15 +225,15 @@ class MaxEngine(engine_api.Engine):
     rng1, rng2, rng3 = jax.random.split(rng, 3)
     if params:
       print("Resharding given params")
-      _, self.state_mesh_annotations, state_mesh_shardings = max_utils.get_abstract_state(
+      _, self.state_mesh_annotations, state_mesh_shardings = maxtext_utils.get_abstract_state(
           self.model, None, self.config, rng, self._mesh, False
       )
       # reshard given params based on shardings from config in MaxEngine
       params = jax.device_put(params, state_mesh_shardings.params)
-      state = max_utils.init_decode_state(None, params)
+      state = maxtext_utils.init_decode_state(None, params)
       state = max_utils.unbox_logicallypartioned(state)
     else:
-      state, self.state_mesh_annotations = max_utils.setup_decode_state(self.model, self.config, rng1, self._mesh, None)
+      state, self.state_mesh_annotations = maxtext_utils.setup_decode_state(self.model, self.config, rng1, self._mesh, None)
     # pylint: disable=isinstance-second-argument-not-valid-type
     self.abstract_params = jax.tree_util.tree_map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
@@ -251,7 +242,7 @@ class MaxEngine(engine_api.Engine):
         state.params,
     )
 
-    self.prefill_kv_cache_annotations = max_utils.get_prefill_kv_cache_annotations(
+    self.prefill_kv_cache_annotations = maxtext_utils.get_prefill_kv_cache_annotations(
         self.model, self.config, rng2, self._mesh, self.page_state
     )
     self.prefill_kv_cache_shardings = jax.tree_util.tree_map(
@@ -267,7 +258,7 @@ class MaxEngine(engine_api.Engine):
       )
       self.prefill_kv_cache_shardings = self.prefill_kv_cache_shardings["decoder"]["layers_0"]
 
-    self.kv_cache_annotations = max_utils.get_kv_cache_annotations(
+    self.kv_cache_annotations = maxtext_utils.get_kv_cache_annotations(
         self.model, self.config, rng2, self._mesh, self.page_state
     )
     self.kv_cache_shardings = jax.tree_util.tree_map(
@@ -289,8 +280,8 @@ class MaxEngine(engine_api.Engine):
     Load Single adapter from adapter_path.
     Expect adapter_config.json and LoRA adapter weights at this path within subdirectory `/0/items`.
     """
-    adapter_config_path = f"{adapter_path}/adapter_config.json"
-    adapter_weights_path = f"{adapter_path}/0/items"
+    adapter_config_path = os.path.join(adapter_path, "adapter_config.json")
+    adapter_weights_path = os.path.join(adapter_path, "0", "items")
 
     params, config = lora_utils.load_adapter(self.config, self.abstract_params, adapter_config_path, adapter_weights_path)
 
@@ -333,6 +324,18 @@ class MaxEngine(engine_api.Engine):
           _p | {"aqt": {}},
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
+          encoder_images=jnp.ones(
+              (
+                  1,
+                  maxtext_utils.NUM_IMAGES_PER_SEQUENCE,
+                  self.config.image_size_for_vit,
+                  self.config.image_size_for_vit,
+                  maxtext_utils.NUM_IMAGE_CHANNELS,
+              ),
+              dtype=jnp.float32,
+          )
+          if self.config.use_multimodal
+          else None,
           decoder_segment_ids=jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           enable_dropout=False,
           model_mode=common_types.MODEL_MODE_PREFILL,
@@ -349,7 +352,7 @@ class MaxEngine(engine_api.Engine):
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding),
         params,
     )
-    max_utils.save_quantized_checkpoint_if_configured(self.config, params)
+    maxtext_utils.save_quantized_checkpoint_if_configured(self.config, params)
     self.model.quant.quant_mode = quantizations.get_quant_mode("serve")
     return params
 
@@ -398,11 +401,12 @@ class MaxEngine(engine_api.Engine):
 
   @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("request_id",))
   def _prefill_jit(
-      self,  # pytype: disable=signature-mismatch
+      self,
       *,
       params: Params,
       existing_prefix: Optional[ExistingPrefix] = None,
       padded_tokens: jax.Array,
+      images: Optional[jax.Array] = None,
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
@@ -433,6 +437,8 @@ class MaxEngine(engine_api.Engine):
     previous_chunk = None
     input_params = params
     if existing_prefix is not None:
+      if not self.use_chunked_prefill:
+        raise ValueError("Using chunked prefill is needed for existing_prefix.")
       input_params = params | {"cache": existing_prefix.cache}
       start_position = existing_prefix.common_prefix_tokens.shape[0]
       # TODO(yuyanpeng): rename previous_chunk
@@ -442,6 +448,9 @@ class MaxEngine(engine_api.Engine):
 
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
+
+    if self.config.use_multimodal:
+      input_images = images[jnp.newaxis, jnp.newaxis, ...]  # Add batch and sequence dimension [B, N, H, W, C]
 
     # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
     start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
@@ -455,6 +464,7 @@ class MaxEngine(engine_api.Engine):
           input_params,
           input_tokens,
           positions,
+          encoder_images=input_images if self.config.use_multimodal else None,
           decoder_segment_ids=sequence_indicator,
           enable_dropout=False,
           model_mode=common_types.MODEL_MODE_PREFILL,
@@ -484,6 +494,10 @@ class MaxEngine(engine_api.Engine):
     )
 
     all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
+    if self.config.return_log_prob:
+      token_logp = inference_utils.log_prob_of_chosen_token(selected_logits, first_generated_token)
+    else:
+      token_logp = None
     result = engine_api.ResultTokens(
         data=jnp.concatenate((first_generated_token, all_valid, generated_tokens), axis=1),
         # Tokens are shape [batch, speculations], so when we concatenate
@@ -494,6 +508,7 @@ class MaxEngine(engine_api.Engine):
         valid_idx=(1, 2),
         # And lengths is rank 1.
         length_idx=(2, 3),
+        log_prob=token_logp,
         samples_per_slot=1,
     )
 
@@ -515,6 +530,7 @@ class MaxEngine(engine_api.Engine):
       params: Params,
       existing_prefix: Optional[ExistingPrefix] = None,
       padded_tokens: jax.Array,
+      images: Optional[jax.Array] = None,
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
@@ -523,11 +539,11 @@ class MaxEngine(engine_api.Engine):
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Public API for prefill that updates page state outside JIT."""
     # Update page state before JIT call
-    if self.config.attention == "paged":
-      self.page_state = self.page_manager.reserve_prefix_slot_pages(
-          slot=slot,
-          true_length=true_length,
+    if self.config.attention == "paged" and self.page_manager is not None and self.page_state is not None:
+      self.page_state = self.page_manager.update_prefill_pages(  # pytype: disable=attribute-error
           page_state=self.page_state,
+          page_group_id=slot,
+          true_length=true_length,
       )
 
     # Call JIT-compiled version with current state
@@ -535,6 +551,7 @@ class MaxEngine(engine_api.Engine):
         params=params,
         existing_prefix=existing_prefix,
         padded_tokens=padded_tokens,
+        images=images,
         sampler=sampler,
         true_length=true_length,
         page_state=self.page_state,  # Pass current page state
@@ -613,6 +630,7 @@ class MaxEngine(engine_api.Engine):
 
     # sampling first tokens
     first_generated_tokens = []
+    token_logps = [] if self.config.return_log_prob else None
     for _ in range(num_samples):
       rng, new_rng = jax.random.split(rng)
       first_generated_token = inference_utils.sampling(
@@ -624,7 +642,12 @@ class MaxEngine(engine_api.Engine):
           temperature=self.config.decode_sampling_temperature,
       )
       first_generated_tokens.append(first_generated_token)
+      if self.config.return_log_prob:
+        # pytype: disable=attribute-error
+        token_logps.append(inference_utils.log_prob_of_chosen_token(selected_logits, first_generated_token))
     first_generated_tokens = jnp.concatenate(first_generated_tokens, axis=0)
+    if self.config.return_log_prob:
+      token_logps = jnp.concatenate(token_logps, axis=0)
 
     all_valid = jnp.ones((num_samples, 1), dtype=jnp.int8)
     generated_tokens = jnp.zeros((num_samples, 1), dtype=jnp.int32)
@@ -638,6 +661,7 @@ class MaxEngine(engine_api.Engine):
         valid_idx=(1, 2),
         # And lengths is rank 1.
         length_idx=(2, 3),
+        log_prob=token_logps,
         samples_per_slot=num_samples,
     )
 
@@ -729,6 +753,10 @@ class MaxEngine(engine_api.Engine):
           temperature=self.config.decode_sampling_temperature,
       )
       all_valid = jnp.ones(first_generated_token.shape, dtype=jnp.int8)
+      if self.config.return_log_prob:
+        token_logp = inference_utils.log_prob_of_chosen_token(selected_logits, first_generated_token)
+      else:
+        token_logp = None
       result = engine_api.ResultTokens(
           data=jnp.concatenate((first_generated_token, all_valid, generated_tokens), axis=1),
           # Tokens are shape [batch, speculations], so when we concatenate
@@ -739,6 +767,7 @@ class MaxEngine(engine_api.Engine):
           valid_idx=(1, 2),
           # And lengths is rank 1.
           length_idx=(2, 3),
+          log_prob=token_logp,
           samples_per_slot=1,
       )
       return {
@@ -758,20 +787,6 @@ class MaxEngine(engine_api.Engine):
     prefill_results = {k: jnp.stack(v) for k, v in prefill_results.items()}
     return cache, prefill_results, first_tokens
 
-  def prefill_insert(  # pylint: disable=too-many-positional-arguments
-      self,
-      padded_tokens: jax.Array,
-      true_length: int,
-      rng: Any,
-      decode_state: DecodeState,
-      slot: int,
-      params: Params,
-  ) -> DecodeState:
-    """Prefill and insert a single computed prefill cache into KV cache."""
-
-    prefix, _ = self.prefill(params=params, padded_tokens=padded_tokens, true_length=true_length, rng=rng)
-    return self.insert(prefix, decode_state, slot)
-
   # Public non-JIT generate method that updates page state
   def generate(
       self,
@@ -783,8 +798,8 @@ class MaxEngine(engine_api.Engine):
     """Public API for generate that updates page state outside JIT."""
     # Update page state before JIT call
 
-    if self.config.attention == "paged":
-      self.page_state = self.page_manager.reserve_decode_step_pages(self.page_state)
+    if self.page_manager is not None and self.page_state is not None:
+      self.page_state = self.page_manager.update_decode_pages(self.page_state)
 
     # Call JIT-compiled version with current state
     new_state, result = self._generate_jit(
@@ -837,6 +852,10 @@ class MaxEngine(engine_api.Engine):
         temperature=self.config.decode_sampling_temperature,
     )
     all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
+    if self.config.return_log_prob:
+      token_logp = inference_utils.log_prob_of_chosen_token(out_logits, new_token)
+    else:
+      token_logp = None
     result = engine_api.ResultTokens(
         data=jnp.concatenate((new_token, all_valid, decode_state["generated_tokens"]), axis=1),
         # Tokens are shape [batch, speculations], so when we concatenate
@@ -847,6 +866,7 @@ class MaxEngine(engine_api.Engine):
         valid_idx=(1, 2),
         # And lengths is rank 1.
         length_idx=(2, 3),
+        log_prob=token_logp,
         samples_per_slot=1,
     )
 
@@ -965,25 +985,17 @@ class MaxEngine(engine_api.Engine):
         "tokens": inserted_tokens,
     }
 
-  @functools.partial(
-      jax.jit,
-      static_argnums=(0,),
-      donate_argnums=(
-          1,
-          2,
-      ),
-      static_argnames=("request_id",),
-  )
-  def insert(
+  @functools.partial(jax.jit, static_argnums=(0,), donate_argnames=("prefix", "decode_state"))
+  def _insert_jit(
       self,
       prefix: Prefix,
       decode_state: DecodeState,
       slot: int,
       request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
+      page_state_in: Optional[PageState] = None,
   ) -> DecodeState:
     """Insert a single computed prefill cache into KV cache."""
     unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
-
     unboxed_prefix["cache"] = self._maybe_unstack_prefill_result_cache(unboxed_prefix["cache"])
 
     def copy(path, partial_cache, full_cache, annotations):
@@ -995,7 +1007,7 @@ class MaxEngine(engine_api.Engine):
           "cached_ar_key_scale",
           "cached_ar_value_scale",
       ]:
-        return full_cache  # we don't even zero these out because we can mask them out.
+        return full_cache
 
       batch_idx = -1
       if "cache_batch" in annotations:
@@ -1007,7 +1019,6 @@ class MaxEngine(engine_api.Engine):
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
 
       if path_key == "cache_ar_segment_id":
-        ### goal: zero this out in case there is existing data
         s = list(full_cache.shape)
         s[batch_idx] = 1
         zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
@@ -1016,9 +1027,9 @@ class MaxEngine(engine_api.Engine):
         s = list(full_cache.shape)
         s[batch_idx] = 1
         zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
-        ## zero out in case prefill cache is too small to cover
+        # zero out in case prefill cache is too small to cover
         full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
-        ## copy prefill cachce
+        # copy prefill cache
         full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
         return full_cache
       elif path_key == "cached_ar_lengths":
@@ -1038,20 +1049,21 @@ class MaxEngine(engine_api.Engine):
       def _copy_paged(path, prefix_cache, decode_state_cache):
         path_key = path[-1].key
         if path_key in ["key_pages", "value_pages"]:
+          page_map_for_slot = page_state_in.page_map[slot]  # pytype: disable=attribute-error
+          num_pages_to_copy = page_state_in.num_pages_used[slot]  # pytype: disable=attribute-error
 
           def _update_pages(prefix_page_idx, state):
-            decode_state_pages, prefix_pages, page_map = state
+            decode_state_pages, prefix_pages, current_page_map = state
             prefix_page = jax.lax.dynamic_index_in_dim(prefix_pages, prefix_page_idx, axis=1)
-            decode_state_pages = jax.lax.dynamic_update_slice_in_dim(
-                decode_state_pages, prefix_page, page_map[prefix_page_idx], axis=1
-            )
-            return decode_state_pages, prefix_pages, page_map
+            dest_page_idx = current_page_map[prefix_page_idx]
+            decode_state_pages = jax.lax.dynamic_update_slice_in_dim(decode_state_pages, prefix_page, dest_page_idx, axis=1)
+            return decode_state_pages, prefix_pages, current_page_map
 
           decode_state_cache, _, _ = jax.lax.fori_loop(
               0,
-              self.page_state.num_pages_used[slot],
+              num_pages_to_copy,
               _update_pages,
-              (decode_state_cache, prefix_cache, self.page_state.page_map[slot]),
+              (decode_state_cache, prefix_cache, page_map_for_slot),
           )
           return decode_state_cache
         else:
@@ -1093,6 +1105,34 @@ class MaxEngine(engine_api.Engine):
         "generated_tokens": inserted_generated_tokens,
         "tokens": inserted_tokens,
     }
+
+  def insert(
+      self,
+      prefix: Prefix,
+      decode_state: DecodeState,
+      slot: int,
+      request_id: Optional[uuid.UUID] = None,
+  ) -> DecodeState:
+    """Non-JIT wrapper for inserting prefill cache."""
+
+    current_page_state = None
+    if self.config.attention == "paged" and self.page_manager is not None:
+      if self.page_state is None:
+        self.page_state = self.page_manager.get_initial_page_state()
+      current_page_state = self.page_state
+
+    updated_decode_state = self._insert_jit(
+        prefix=prefix,
+        decode_state=decode_state,
+        slot=slot,
+        page_state_in=current_page_state,
+    )
+
+    # Update the PageState after the JIT call
+    if self.config.attention == "paged" and self.page_manager is not None and self.page_state is not None:
+      new_has_active_page = self.page_state.has_active_page.at[slot].set(True)
+      self.page_state = self.page_state.replace(has_active_page=new_has_active_page)
+    return updated_decode_state
 
   @functools.partial(
       jax.jit,
@@ -1220,6 +1260,16 @@ class MaxEngine(engine_api.Engine):
         "tokens": inserted_tokens,
     }
 
+  def release_pages(self, slot: int):
+    """Releases pages associated with a specific slot (page group) via the PageManager."""
+    if self.config.attention != "paged" or self.page_manager is None or self.page_state is None:
+      print(f"Warning: release_pages called for slot {slot} but paged attention is not configured or state is missing.")
+      return
+    new_page_state = self.page_manager.release_pages(
+        page_state=self.page_state, page_group_id=slot
+    )  # pytype: disable=attribute-error
+    self.page_state = new_page_state
+
   def get_prefix_destination_sharding(self) -> Any:
     return {
         "logits": self.replicated_sharding,
@@ -1250,7 +1300,13 @@ class MaxEngine(engine_api.Engine):
     elif metadata.tokenizer_type == TokenizerType.sentencepiece:
       return token_utils.SentencePieceTokenizer(metadata)
     elif metadata.tokenizer_type == TokenizerType.huggingface:
-      return token_utils.HuggingFaceTokenizer(metadata)
+      tokenizer_model = token_utils.HuggingFaceTokenizer(metadata)
+      if tokenizer_model.tokenizer.pad_token_id is None:
+        if tokenizer_model.tokenizer.unk_token_id is not None:
+          tokenizer_model.tokenizer.pad_token_id = tokenizer_model.tokenizer.unk_token_id
+        else:
+          tokenizer_model.tokenizer.pad_token_id = -1
+      return tokenizer_model
     else:
       raise ValueError(f"Unsupported tokenizer type: {metadata.tokenizer_type}")
 
@@ -1264,8 +1320,8 @@ class MaxEngine(engine_api.Engine):
     if rng is None:
       rng = jax.random.PRNGKey(0)
     page_state = None
-    if self.config.attention == "paged":
-      page_state = self.page_manager.get_initial_page_state()
+    if self.config.attention == "paged" and self.page_manager is not None:
+      page_state = self.page_manager.get_initial_page_state()  # pytype: disable=attribute-error
 
     # pylint: disable=unused-argument
     def init(abstract_params, page_state):
@@ -1273,10 +1329,20 @@ class MaxEngine(engine_api.Engine):
           (int(self.config.per_device_batch_size * jax.device_count()), 1),
           dtype=jnp.int32,
       )
+      dummy_image = jnp.ones(
+          (
+              int(self.config.per_device_batch_size * jax.device_count()),
+              maxtext_utils.NUM_IMAGES_PER_SEQUENCE,
+              self.config.image_size_for_vit,
+              self.config.image_size_for_vit,
+              maxtext_utils.NUM_IMAGE_CHANNELS,
+          ),
+      )
       _, cache = self.model.apply(
           abstract_params,
           x,
           x,
+          encoder_images=dummy_image if self.config.use_multimodal else None,
           enable_dropout=False,
           model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
           rngs={"params": rng},
@@ -1384,37 +1450,43 @@ def set_engine_vars_from_base_engine(
     engine.model.quant.quant_mode = base_engine.model.quant.quant_mode
   engine.state_mesh_annotations = base_engine.state_mesh_annotations
   engine.abstract_params = base_engine.abstract_params
-  engine.kv_cache_annotations = max_utils.get_kv_cache_annotations(engine.model, engine.config, rng, engine.mesh)  # pylint: disable=protected-access
+  engine.kv_cache_annotations = maxtext_utils.get_kv_cache_annotations(engine.model, engine.config, rng, engine.mesh)  # pylint: disable=protected-access
   engine.kv_cache_shardings = jax.tree_util.tree_map(
       lambda x: jax.sharding.NamedSharding(engine.mesh, x),
       engine.kv_cache_annotations,  # pylint: disable=protected-access
   )
 
 
-def create_engine_from_config_flags(batch_size, max_prefill_predict_length, max_target_length, args_str):
+def create_engine_from_config_flags(
+    maxengine_config_filepath, batch_size, max_prefill_predict_length, max_target_length, args_str
+):
   """Create new MaxEngine instance with given batch_size, prefill and target lengths, and any config
   params provided through `args_str`.
   """
-  args = {}
-  args["scan_layers"] = "false"
-  args["async_checkpointing"] = "false"
-  args["ici_fsdp_parallelism"] = "1"
-  args["ici_autoregressive_parallelism"] = "1"
-  args["ici_tensor_parallelism"] = "-1"
-  args["weight_dtype"] = "bfloat16"
-  args["attention"] = "dot_product"
-
   # batch and cache related
-  args["max_prefill_predict_length"] = f"{max_prefill_predict_length}"
-  args["max_target_length"] = f"{max_target_length}"
-  args["per_device_batch_size"] = f"{batch_size}"
+  args = {
+      "scan_layers": "false",
+      "async_checkpointing": "false",
+      "ici_fsdp_parallelism": "1",
+      "ici_autoregressive_parallelism": "1",
+      "ici_tensor_parallelism": "-1",
+      "weight_dtype": "bfloat16",
+      "attention": "dot_product",
+      "max_prefill_predict_length": f"{max_prefill_predict_length}",
+      "max_target_length": f"{max_target_length}",
+      "per_device_batch_size": f"{batch_size}",
+  }
+
   print(f"Command line args: {args_str}")
   cmd_args = args_str.split(" ")
   for cmd_arg in cmd_args:
-    k, v = cmd_arg.split("=")
-    args[k.strip()] = v.strip()
+    if cmd_arg:
+      k, v = cmd_arg.split("=")
+      args[k.strip()] = v.strip()
   assert "load_parameters_path" in args, "load_parameters_path must be defined"
-  updated_args = ["MaxText/maxengine_server.py", "../configs/base.yml"]
+  if maxengine_config_filepath is None:
+    maxengine_config_filepath = os.path.join(PKG_DIR, "configs", "base.yml")
+  updated_args = [os.path.join(PKG_DIR, "maxengine_server.py"), maxengine_config_filepath]
   for k, v in args.items():
     option = f"{k}={v}"
     updated_args.append(option)

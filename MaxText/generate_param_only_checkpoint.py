@@ -23,22 +23,25 @@ limitations under the License.
    The output "parameter state" is output to the checkpoint directory. Additionally it is cast down to bf16.
 """
 
-import checkpointing
+import os.path
+from MaxText import checkpointing
 import jax
-import max_logging
-import max_utils
-import optimizers
-import pyconfig
+from MaxText import max_logging
+from MaxText import max_utils
+from MaxText import maxtext_utils
+from MaxText import optimizers
+from MaxText import pyconfig
 
 from absl import app
 from etils import epath
 from jax.sharding import Mesh
 from jax import random
 from typing import Sequence
-from layers import models, quantizations
-from train import save_checkpoint
-from utils import gcs_utils
-from utils import lora_utils
+from MaxText.common_types import DecoderBlockType
+from MaxText.layers import models, quantizations
+from MaxText.train import save_checkpoint
+from MaxText.utils import gcs_utils
+from MaxText.utils import lora_utils
 
 Transformer = models.Transformer
 
@@ -79,7 +82,7 @@ def _possibly_unroll_params(config, training_state, training_state_annotations, 
 
     jax.tree_util.tree_map(lambda x: x.delete(), layers)
 
-  if config.decoder_block == "deepseek":
+  if config.decoder_block == DecoderBlockType.DEEPSEEK:
     # Unroll dense and MoE layers separately
     unroll_layer_group(config.first_num_dense_layers, layer_name="dense_layers")
     unroll_layer_group(config.num_decoder_layers - config.first_num_dense_layers, layer_name="moe_layers")
@@ -93,9 +96,11 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
   quant = quantizations.configure_quantization(config)
   model = Transformer(config, mesh, quant)
   rng = random.PRNGKey(0)
-  learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
+  learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
-  state, state_mesh_notations, _, _ = max_utils.setup_training_state(model, None, tx, config, rng, mesh, checkpoint_manager)
+  state, state_mesh_notations, _, _ = maxtext_utils.setup_training_state(
+      model, None, tx, config, rng, mesh, checkpoint_manager
+  )
   num_params = max_utils.calculate_num_params_from_pytree(state.params)
   max_logging.log(f"In input checkpoint Number of model params={num_params/1e9:.3f} billion")
   return state, state_mesh_notations
@@ -107,15 +112,15 @@ def _generate_lora_decode_checkpoints(config, mesh):
   quant = quantizations.configure_quantization(config)
   model = Transformer(config, mesh, quant)
   rng = random.PRNGKey(0)
-  learning_rate_schedule = max_utils.create_learning_rate_schedule(config)
+  learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
 
   lora_adapters = gcs_utils.gcs_list_directories(config.lora_input_adapters_path)
   for lora_id in lora_adapters:
     # Expected lora_checkpoint_dir = <checkpoint_dir>/loras/<lora_id>
-    lora_checkpoint_dir = f"{config.checkpoint_dir}loras/{lora_id}/"
+    lora_checkpoint_dir = os.path.join(config.checkpoint_dir, "loras", lora_id, "")
 
-    lora_adapter_path = f"{config.lora_input_adapters_path}/{lora_id}/"
+    lora_adapter_path = os.path.join(config.lora_input_adapters_path, lora_id, "")
 
     # Create a checkpoint manager to save decode checkpoint at lora_checkpoint_dir
     checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
@@ -131,19 +136,18 @@ def _generate_lora_decode_checkpoints(config, mesh):
 
     _possibly_unroll_params(config, lora_state, lora_state_annotations, mesh)
 
-    gcs_utils.write_dict_to_gcs_json(lora_config, lora_checkpoint_dir + "adapter_config.json")
+    gcs_utils.write_dict_to_gcs_json(lora_config, os.path.join(lora_checkpoint_dir, "adapter_config.json"))
 
     # Save decode state to config's checkpoint directory at step 0
     _save_decode_checkpoint(config, lora_state, checkpoint_manager)
-    max_logging.log(f"Successfully saved LoRA checkpoint at: {lora_checkpoint_dir}0/items")
+    max_logging.log(f"Successfully saved LoRA checkpoint at: {os.path.join(lora_checkpoint_dir, '0', 'items')}")
 
 
 def _save_decode_checkpoint(config, state, checkpoint_manager):
   """Generate checkpoint for decode from the training_state."""
-  with jax.spmd_mode("allow_all"):
-    decode_state = max_utils.init_decode_state(
-        None, jax.tree_util.tree_map(lambda x: x.astype(jax.numpy.bfloat16), state.params)
-    )
+  decode_state = maxtext_utils.init_decode_state(
+      None, jax.tree_util.tree_map(lambda x: x.astype(jax.numpy.bfloat16), state.params)
+  )
   if checkpoint_manager is not None:
     if save_checkpoint(checkpoint_manager, 0, decode_state):
       max_logging.log(f"saved an decode checkpoint at {config.checkpoint_dir}")
@@ -157,7 +161,7 @@ def generate_decode_checkpoint(config):
   - Inference checkpoint will be saved at the config's checkpoint directory.
   """
 
-  devices_array = max_utils.create_device_mesh(config)
+  devices_array = maxtext_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
 
   assert config.checkpoint_dir, "checkpoint_dir not configured"

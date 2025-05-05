@@ -12,13 +12,13 @@
 # bash MaxText/configs/v5p/llama2_70b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>" DATASET_PATH="gs://<your_dataset_path>"
 #
 # Example to AOT compile:
-# bash MaxText/configs/v5p/llama2_70b.sh EXECUTABLE=train_compile.py M_COMPILE_TOPOLOGY=v5p-512 M_COMPILE_TOPOLOGY_NUM_SLICES=1
+# bash MaxText/configs/v5p/llama2_70b.sh EXECUTABLE=train_compile M_COMPILE_TOPOLOGY=v5p-512 M_COMPILE_TOPOLOGY_NUM_SLICES=1
 
 
 # Stop execution if any command exits with error
 set -e
 
-export EXECUTABLE="train.py" # or train_compile.py
+export EXECUTABLE="train" # or train_compile
 export DATASET_TYPE="synthetic"
 export REUSE_EXAMPLE_BATCH=1
 
@@ -44,7 +44,7 @@ fi
 # Train
 export LIBTPU_INIT_ARGS="--xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_megacore_fusion_allow_ags=false --xla_enable_async_collective_permute=true --xla_tpu_enable_ag_backward_pipelining=true --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
 
-python MaxText/$EXECUTABLE MaxText/configs/base.yml model_name=llama2-70b\
+python3 -m MaxText.$EXECUTABLE MaxText/configs/base.yml model_name=llama2-70b\
   base_output_directory=$OUTPUT_PATH dataset_path=${DATASET_PATH}\
   tokenizer_path=assets/tokenizer.llama2 remat_policy=save_dot_except_mlpwi per_device_batch_size=4\
   steps=30 enable_checkpointing=false use_iota_embed=true max_target_length=4096\

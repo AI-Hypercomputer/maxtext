@@ -20,7 +20,7 @@ from typing import Any, Type
 
 from jetstream.core import config_lib
 from jetstream.engine import engine_api
-import maxengine
+from MaxText import maxengine
 
 
 # TODO: merge it with the above create_maxengine().

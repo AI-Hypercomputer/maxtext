@@ -19,10 +19,10 @@ Get MaxText model weights from a MaxText run
 
 Example cmd:
 To save a ckpt
-python3 MaxText/llama_or_mistral_ckpt.py --base-model-path <path/to/meta/ckpt> \
+python3 -m MaxText.llama_or_mistral_ckpt --base-model-path <path/to/meta/ckpt> \
     --maxtext-model-path <GCS/path/to/save/new/maxtext/ckpt> --model-size llama2-7b
 
-python3 MaxText/llama_mistral_mixtral_orbax_to_hf.py MaxText/configs/base.yml
+python3 -m MaxText.llama_mistral_mixtral_orbax_to_hf MaxText/configs/base.yml
             base_output_directory=path/to/saving/intermediate_MaxText_files
             load_parameters_path=/path/to/MaxText/checkpoint run_name=<your run name> model_name=<llama2 or mistral>
             hardware=gpu
@@ -37,15 +37,15 @@ import torch
 from tqdm import tqdm
 from absl import app
 import numpy as np
-import pyconfig
-import max_utils
+from MaxText import pyconfig
+from MaxText import maxtext_utils
 from jax.sharding import Mesh
-import max_logging
-import checkpointing
-from generate_param_only_checkpoint import _read_train_checkpoint
-import llama_or_mistral_ckpt
+from MaxText import max_logging
+from MaxText import checkpointing
+from MaxText.generate_param_only_checkpoint import _read_train_checkpoint
+from MaxText import llama_or_mistral_ckpt
 from transformers import LlamaForCausalLM, MistralForCausalLM, AutoModelForCausalLM, AutoConfig
-from max_utils import unpermute_from_match_maxtext_rope
+from MaxText.max_utils import unpermute_from_match_maxtext_rope
 
 
 def reverse_scale(arr, scale):
@@ -79,7 +79,7 @@ def load_model_state(config):
   """
   Loads the MaxText model's TrainState from the Orbax checkpoint
   """
-  devices_array = max_utils.create_device_mesh(config)
+  devices_array = maxtext_utils.create_device_mesh(config)
   mesh = Mesh(devices_array, config.mesh_axes)
 
   # Create a checkpoint manager to load decode checkpoint at config.checkpoint_dir

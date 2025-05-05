@@ -20,8 +20,8 @@ Currently MaxText has three data input pipelines:
 | Pipeline | Dataset formats | Features | Limitations |
 | -------- | --------------- | -------- | ----------- |
 | HuggingFace | datasets in HuggingFace Hub<br>local/Cloud Storage datasets in json, parquet, arrow, csv, txt | convenience<br>multiple formats | limit scalability using HuggingFace Hub<br>non-deterministic with preemption<br>(deterministic without preemption) |
-| Grain | ArrayRecord, available through Tensorflow Datasets | fully deterministic, regardless of preemption | only supports random access datasets |
-| TFDS | TFRecord, available through Tensorflow Datasets |  | only supports TFRecords<br>non-deterministic with preemption<br>(deterministic without preemption) |
+| Grain | ArrayRecord (available through Tensorflow Datasets), Parquet | fully deterministic, regardless of preemption; global shuffle with random access datasets; performant |  |
+| TFDS | TFRecord, available through Tensorflow Datasets | performant | only supports TFRecords<br>non-deterministic with preemption<br>(deterministic without preemption) |
 
 ### Performance
 * Perf data for all 3 input pipeline: https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Perf.md
@@ -90,11 +90,11 @@ Grain ensures determinism in data input pipelines by saving the pipeline's state
 * **Debug training anomalies.** When troubleshooting training spikes or anomalies, the ability to replay the exact data sequence helps distinguish between bad data batches and underlying hardware or software issues.
 
 #### Global shuffle in Grain
-In HF or TFDS data pipeline, global shuffle is performed by a shuffle buffer with limited size. Grain performs global shuffle of the indices in the beginning of each epoch and then reads the elements according to the random order. We have found this to be generally fast enough, even when using hard drives and distributed file systems.
+In HF or TFDS data pipeline, shuffle is performed by file shuffling, interleave from files, and windowshuffle using a fixed size buffer. Similar shuffle strategy applies if using Grain with [Parquet](https://arrow.apache.org/docs/python/parquet.html) format. The global shuffle feature is only available when using Grain with [ArrayRecord](https://github.com/google/array_record) (random access) format, achieved by shuffling indices globally at the beginning of each epoch and then reads the elements according to the random order. We have found this to be generally fast enough, even when using hard drives and distributed file systems.
 
 #### Using Grain
-1. Dataset needs to be in a format that supports random access. The default format is [ArrayRecord](https://github.com/google/array_record). For converting a dataset into ArrayRecord, see [instructions](https://github.com/google/array_record/tree/main/beam). Additionally, other random accessible data sources can be supported via a custom data source class ([docs](https://github.com/google/grain/blob/main/docs/data_sources.md)).
-2. ArrayRecord dataset, when hosted on GCS bucket, can only be read through [Cloud Storage FUSE](https://cloud.google.com/storage/docs/gcs-fuse). The installation of Cloud Storage FUSE is included in [setup.sh](https://github.com/google/maxtext/blob/main/setup.sh). User then needs to mount the GCS bucket to a local path for each worker, using the script [setup_gcsfuse.sh](https://github.com/google/maxtext/blob/main/setup_gcsfuse.sh). The script configs some parameters for the mount.
+1. Grain currently supports two data formats: [ArrayRecord](https://github.com/google/array_record) (random access) and [Parquet](https://arrow.apache.org/docs/python/parquet.html) (partial random-access through row group). Only ArrayRecord format supports global shuffle mentioned above. For converting a dataset into ArrayRecord, see [instructions](https://github.com/google/array_record/tree/main/beam). Additionally, other random accessible data sources can be supported via a custom data source class ([docs](https://github.com/google/grain/blob/main/docs/data_sources.md)).
+2. When the dataset is hosted on GCS bucket, grain can read it through [Cloud Storage FUSE](https://cloud.google.com/storage/docs/gcs-fuse). The installation of Cloud Storage FUSE is included in [setup.sh](https://github.com/google/maxtext/blob/main/setup.sh). User then needs to mount the GCS bucket to a local path for each worker, using the script [setup_gcsfuse.sh](https://github.com/google/maxtext/blob/main/setup_gcsfuse.sh). The script configs some parameters for the mount.
 ```
 bash setup_gcsfuse.sh DATASET_GCS_BUCKET=$BUCKET_NAME MOUNT_PATH=$MOUNT_PATH [FILE_PATH=$MOUNT_PATH/my_dataset]
 # FILE_PATH is optional, when provided, the script runs "ls -R" for pre-filling the metadata cache
@@ -107,9 +107,10 @@ bash setup_gcsfuse.sh DATASET_GCS_BUCKET=$BUCKET_NAME MOUNT_PATH=$MOUNT_PATH [FI
 bash setup_gcsfuse.sh \
 DATASET_GCS_BUCKET=maxtext-dataset \
 MOUNT_PATH=/tmp/gcsfuse && \
-python3 MaxText/train.py MaxText/configs/base.yml \
+python3 -m MaxText.train MaxText/configs/base.yml \
 run_name=<RUN_NAME> base_output_directory=gs://<MY_BUCKET>  \
 dataset_type=grain \
+grain_file_type=arrayrecord \
 grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record* \
 grain_worker_count=2
 ```

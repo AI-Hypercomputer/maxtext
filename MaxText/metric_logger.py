@@ -22,8 +22,8 @@ import json
 import os
 import numpy as np
 
-import max_logging
-from utils import gcs_utils
+from MaxText import max_logging
+from MaxText.utils import gcs_utils
 
 
 def _prepare_metrics_for_json(metrics, step, run_name):
@@ -103,7 +103,7 @@ class MetricLogger:
     if is_training and (step + 1) % self.config.log_period == 0 or step == self.config.steps - 1:
       start_step = (step // self.config.log_period) * self.config.log_period
       metrics_filename = f"metrics_step_{start_step:06}_to_step_{step:06}.txt"
-      with open(metrics_filename, "w", encoding="utf8") as metrics_for_gcs:
+      with open(metrics_filename, "wt", encoding="utf8") as metrics_for_gcs:
         for metrics_step in running_metrics:
           metrics_for_gcs.write(str(json.dumps(metrics_step)) + "\n")
 
@@ -116,16 +116,15 @@ class MetricLogger:
 
   def write_metrics_to_tensorboard(self, metrics, step, is_training):
     """Writes metrics to TensorBoard"""
-    with jax.spmd_mode("allow_all"):
-      if jax.process_index() == 0:
-        for metric_name in metrics.get("scalar", []):
-          self.writer.add_scalar(metric_name, np.array(metrics["scalar"][metric_name]), step)
-        for metric_name in metrics.get("scalars", []):
-          self.writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
+    if jax.process_index() == 0:
+      for metric_name in metrics.get("scalar", []):
+        self.writer.add_scalar(metric_name, np.array(metrics["scalar"][metric_name]), step)
+      for metric_name in metrics.get("scalars", []):
+        self.writer.add_scalars(metric_name, metrics["scalars"][metric_name], step)
 
-      if is_training:
-        full_log = step % self.config.log_period == 0
+    if is_training:
+      full_log = step % self.config.log_period == 0
 
-        if full_log and jax.process_index() == 0:
-          max_logging.log(f"To see full metrics 'tensorboard --logdir={self.config.tensorboard_dir}'")
-          self.writer.flush()
+      if full_log and jax.process_index() == 0:
+        max_logging.log(f"To see full metrics 'tensorboard --logdir={self.config.tensorboard_dir}'")
+        self.writer.flush()

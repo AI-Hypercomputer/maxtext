@@ -253,7 +253,7 @@ def ragged_paged_attention_kernel(
     return pltpu.bitcast(b, jnp.float32).astype(jnp.bfloat16)
 
   def fold_on_2nd_minor(vec):
-    assert vec.dtype == jnp.bfloat16 or vec.dtype == jnp.float32
+    assert vec.dtype in (jnp.bfloat16, jnp.float32)
     assert len(vec.shape) >= 2
     last_dim = vec.shape[-1]
     packing = get_dtype_packing(vec.dtype)

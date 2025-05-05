@@ -16,7 +16,7 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 
 from flax import linen as nn
@@ -24,13 +24,16 @@ import functools
 import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-import common_types
-from inference import page_manager
-from layers import attentions
-from layers import embeddings
-from layers import linears
-from layers import normalizations, quantizations
-from layers import pipeline
+
+from MaxText import common_types
+from MaxText.common_types import DecoderBlockType
+from MaxText.inference import page_manager
+from MaxText.layers import attentions
+from MaxText.layers import embeddings
+from MaxText.layers import linears
+from MaxText.layers import normalizations, quantizations
+from MaxText.layers import pipeline
+from MaxText import maxtext_utils
 
 Array = common_types.Array
 Config = common_types.Config
@@ -100,9 +103,9 @@ class DecoderLayer(nn.Module):
         float32_logits=cfg.float32_logits,
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
-        prefill_cache_axis_order=tuple([int(i) for i in cfg.prefill_cache_axis_order.split(",")]),
-        ar_cache_axis_order=tuple([int(i) for i in cfg.ar_cache_axis_order.split(",")]),
-        compute_axis_order=tuple([int(i) for i in cfg.compute_axis_order.split(",")]),
+        prefill_cache_axis_order=tuple(map(int, cfg.prefill_cache_axis_order.split(","))),
+        ar_cache_axis_order=tuple(map(int, cfg.ar_cache_axis_order.split(","))),
+        compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
         reshape_q=cfg.reshape_q,
     )
 
@@ -184,7 +187,12 @@ class SequentialBlockDecoderLayers(nn.Module):
           slot=slot,
           page_state=page_state,
       )
-    return inputs
+      if self.config.scan_layers:
+        inputs = inputs[0]  #  When scan_layers is True the decoder layers return (outputs, None).
+    if self.config.scan_layers:
+      return inputs, None  # pytype: disable=bad-return-type
+    else:
+      return inputs
 
 
 class Decoder(nn.Module):
@@ -289,67 +297,77 @@ class Decoder(nn.Module):
     return RemattedBlockLayers
 
   def get_decoder_layers(self):
-    if self.config.decoder_block == "default":
+    if self.config.decoder_block == DecoderBlockType.DEFAULT:
       return [DecoderLayer]
-    elif self.config.decoder_block == "llama2":
-      from layers import llama2
+    elif self.config.decoder_block == DecoderBlockType.LLAMA2:
+      from MaxText.layers import llama2
 
       return [llama2.LlamaDecoderLayer]
-    elif self.config.decoder_block == "mistral":
+    elif self.config.decoder_block == DecoderBlockType.MISTRAL:
       # TODO(ranran): update to Mistral with sliding window attention
-      from layers import mistral
+      from MaxText.layers import mistral
 
       return [mistral.MistralDecoderLayer]
-    elif self.config.decoder_block == "deepseek":
-      from layers import deepseek
+    elif self.config.decoder_block == DecoderBlockType.MIXTRAL:
+      from MaxText.layers import mixtral
+
+      return [mixtral.MixtralDecoderLayer]
+    elif self.config.decoder_block == DecoderBlockType.DEEPSEEK:
+      from MaxText.layers import deepseek
 
       return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
-    elif self.config.decoder_block == "gemma":
-      from layers import gemma
+    elif self.config.decoder_block == DecoderBlockType.GEMMA:
+      from MaxText.layers import gemma
 
       return [gemma.GemmaDecoderLayer]
-    elif self.config.decoder_block == "gemma2":
-      from layers import gemma2
+    elif self.config.decoder_block == DecoderBlockType.GEMMA2:
+      from MaxText.layers import gemma2
 
       return [gemma2.Gemma2DecoderLayer]
-    elif self.config.decoder_block == "gemma3":
-      from layers import gemma3
+    elif self.config.decoder_block == DecoderBlockType.GEMMA3:
+      from MaxText.layers import gemma3
 
       return [gemma3.Gemma3DecoderLayer]
-    elif self.config.decoder_block == "gpt3":
-      from layers import gpt3
+    elif self.config.decoder_block == DecoderBlockType.GPT3:
+      from MaxText.layers import gpt3
 
       return [gpt3.Gpt3DecoderLayer]
-    elif self.config.decoder_block == "simple":
-      from layers import simple_layer
+    elif self.config.decoder_block == DecoderBlockType.SIMPLE:
+      from MaxText.layers import simple_layer
 
       return [simple_layer.SimpleDecoderLayer]
-    elif self.config.decoder_block == "simple_mlp":
-      from layers import simple_layer
+    elif self.config.decoder_block == DecoderBlockType.SIMPLE_MLP:
+      from MaxText.layers import simple_layer
 
       return [simple_layer.SimpleMlpDecoderLayer]
+    elif self.config.decoder_block == DecoderBlockType.LLAMA4:
+      from MaxText.layers import llama4
+
+      return [llama4.Llama4DecoderLayer]
     else:
-      raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
+      raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
   def get_norm_layer(self):
     if self.config.decoder_block in (
-        "default",
-        "llama2",
-        "mistral",
-        "deepseek",
-        "gemma",
-        "gemma2",
-        "gemma3",
-        "simple",
-        "simple_mlp",
+        DecoderBlockType.DEFAULT,
+        DecoderBlockType.LLAMA2,
+        DecoderBlockType.MISTRAL,
+        DecoderBlockType.MIXTRAL,
+        DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.GEMMA,
+        DecoderBlockType.GEMMA2,
+        DecoderBlockType.GEMMA3,
+        DecoderBlockType.SIMPLE,
+        DecoderBlockType.SIMPLE_MLP,
+        DecoderBlockType.LLAMA4,
     ):
       return RMSNorm
-    elif self.config.decoder_block == "gpt3":
-      from layers import gpt3
+    elif self.config.decoder_block == DecoderBlockType.GPT3:
+      from MaxText.layers import gpt3
 
       return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=True)
     else:
-      raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
+      raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
   def scan_decoder_layers(self, cfg, decoder_layer, length, metdata_axis_name, mesh):
     initializing = self.is_mutable_collection("params")
@@ -386,7 +404,7 @@ class Decoder(nn.Module):
       base_stage = self.set_remat_policy([base_stage], policy)[0]
     if cfg.num_layers_per_pipeline_stage == 1:
       stage_module = base_stage(config=cfg, mesh=self.mesh, quant=self.quant)
-    elif cfg.scan_layers:
+    elif cfg.scan_layers_per_stage:
       stage_module = self.scan_decoder_layers(
           cfg, base_stage, cfg.num_layers_per_pipeline_stage, "layers_per_stage", self.mesh
       )
@@ -411,6 +429,7 @@ class Decoder(nn.Module):
       previous_chunk=None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
+      bidirectional_mask: Optional[Any] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -447,9 +466,20 @@ class Decoder(nn.Module):
       y = self.pipeline_module(
           y, decoder_segment_ids, decoder_positions, deterministic, model_mode, partition_spec=partition_spec
       )
+      remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
+      if remaining_layers > 0:
+        logical_axis_rules_pp_as_dp = maxtext_utils.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)
+        with self.mesh, nn.partitioning.axis_rules(logical_axis_rules_pp_as_dp):
+          y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayers[0], remaining_layers, "layers", mesh)(
+              y,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+          )
     else:
       if cfg.scan_layers:
-        if cfg.decoder_block == "deepseek":
+        if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
           assert len(RemattedBlockLayers) == 2, f"Scanned layers must have a length of 2 using deepseek."
           dense_layer = RemattedBlockLayers[0]
           moe_layer = RemattedBlockLayers[1]
@@ -469,6 +499,9 @@ class Decoder(nn.Module):
               model_mode,
           )
         else:
+          layer_call_kwargs = {}
+          if cfg.decoder_block == DecoderBlockType.GEMMA3:
+            layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
           RemattedBlockLayer = RemattedBlockLayers[0]
           y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
               y,
@@ -476,9 +509,10 @@ class Decoder(nn.Module):
               decoder_positions,
               deterministic,
               model_mode,
+              **layer_call_kwargs,
           )
       else:
-        if cfg.decoder_block == "deepseek":
+        if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
           assert len(RemattedBlockLayers) == 2, f"Unscanned layers must have a length of 2 using deepseek."
           dense_layer = RemattedBlockLayers[0]
           moe_layer = RemattedBlockLayers[1]
@@ -504,10 +538,19 @@ class Decoder(nn.Module):
           for lyr in range(cfg.num_decoder_layers):
             RemattedBlockLayer = RemattedBlockLayers[0]
             layer_kwargs = {}
-            if cfg.decoder_block == "gemma3":
-              from layers import gemma3
+            layer_call_kwargs = {}
+            if cfg.decoder_block == DecoderBlockType.GEMMA3:
+              from MaxText.layers import gemma3
               # Gemma3 uses both global and sliding window attention depending on the layer index.
               layer_kwargs = {"attention_type": gemma3.get_attention_type(layer_id=lyr)}
+              layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
+            if cfg.decoder_block == DecoderBlockType.LLAMA4:
+              from MaxText.layers import llama4
+
+              layer_kwargs = {
+                  "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
+                  "is_moe_layer": llama4.determine_is_moe_layer(lyr, self.config.interleave_moe_layer_step),
+              }
             layer = RemattedBlockLayer(config=cfg, mesh=mesh, name=f"layers_{lyr}", quant=self.quant, **layer_kwargs)
             y = layer(
                 y,
@@ -518,6 +561,7 @@ class Decoder(nn.Module):
                 previous_chunk=previous_chunk,
                 page_state=page_state,
                 slot=slot,
+                **layer_call_kwargs,
             )
     y = self.get_norm_layer()(
         dtype=cfg.dtype,
@@ -562,10 +606,33 @@ class Decoder(nn.Module):
     return logits
 
 
+class VisionEncoder(nn.Module):
+  """Vision encoder to encode images into soft tokens."""
+
+  config: Config
+
+  def setup(self):
+    self.vision_encoder_layer = self.get_vision_encoder_layers()
+
+  def get_vision_encoder_layers(self):
+    if self.config.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
+      from MaxText.layers import gemma3
+
+      return [gemma3.Gemma3VisionEncoderLayer]
+    else:
+      raise ValueError(f"No VisionEncoder implemented for {self.config.model_name} yet")
+
+  @nn.compact
+  def __call__(self, input_images, deterministic=False):
+    embeddings = self.vision_encoder_layer[0](config=self.config)(input_images, deterministic=deterministic)
+    return embeddings
+
+
 class Transformer(nn.Module):
   """An decoder-only Transformer model."""
 
-  # Make new attributes required, so that all Transformer dependencies (train, decode, compile, etc) will error instead of silently use defaults.
+  # Make new attributes required, so that all Transformer dependencies (train, decode, compile, etc) will error instead
+  #   of silently use defaults.
   # pylint: disable=attribute-defined-outside-init
   config: Config
   mesh: Mesh
@@ -586,6 +653,7 @@ class Transformer(nn.Module):
         config=cfg,
     )
 
+    self.vision_encoder = VisionEncoder(config=cfg) if cfg.use_multimodal else None
     self.decoder = Decoder(config=cfg, shared_embedding=self.shared_embedding, mesh=mesh, quant=self.quant)
 
   def __call__(
@@ -593,6 +661,7 @@ class Transformer(nn.Module):
       decoder_input_tokens: jnp.ndarray,
       decoder_positions: jnp.ndarray,
       decoder_segment_ids=None,
+      encoder_images: Optional[jnp.ndarray] = None,
       enable_dropout=True,
       model_mode=common_types.MODEL_MODE_TRAIN,
       previous_chunk=None,
@@ -614,6 +683,16 @@ class Transformer(nn.Module):
           f" which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}."
       )
 
+    bidirectional_mask = None
+    if self.config.use_multimodal and encoder_images is not None:
+      image_embeddings = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
+      # TODO(hengtaoguo, aireen): merge image_embeddings with decoder_input_tokens.
+
+      if self.config.decoder_block == DecoderBlockType.GEMMA3:
+        from MaxText.layers import gemma3
+
+        bidirectional_mask = decoder_input_tokens == gemma3.TOKEN_PLACEHOLDER
+
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,
@@ -623,5 +702,6 @@ class Transformer(nn.Module):
         previous_chunk=previous_chunk,
         slot=slot,
         page_state=page_state,
+        bidirectional_mask=bidirectional_mask,
     )
     return logits

@@ -14,19 +14,23 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-"""Integraion test for pedagogical_examples/shmap_collective_matmul.py"""
-import subprocess
+"""Integration test for pedagogical_examples/shmap_collective_matmul.py"""
+
+import os.path
+import sys
 import pytest
+from MaxText.globals import PKG_DIR
+
+sys.path.append(os.path.join(os.path.dirname(PKG_DIR), "pedagogical_examples"))
+
+# Uncomment the import when b/415022795 is fixed
+#from pedagogical_examples.shmap_collective_matmul import main
 
 
+@pytest.mark.skip(reason="Enable when b/415022795 is fixed")
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
 def test_shmap_collective_matmul_example():
   """Validate Pedagogical Example, Shmap_collective_matmul."""
-
-  command = [
-      "python3",
-      "pedagogical_examples/shmap_collective_matmul.py",
-  ]
-
-  subprocess.run(command, check=True, cwd="..")
+  # Uncomment main() assertion when b/415022795 is fixed
+  #assert main() is True

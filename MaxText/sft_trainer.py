@@ -18,25 +18,29 @@ import datetime
 import os
 import sys
 import queue
-
 from typing import Sequence
+
 from absl import app
-from flax.linen import partitioning as nn_partitioning
-import jax
+
 import numpy as np
 
-import checkpointing
-import max_utils
-import maxtext_utils
-import max_logging
-import profiler
-import pyconfig
 import tensorflow as tf
 
-from input_pipeline.input_pipeline_interface import create_data_iterator
-from gcp_workload_monitor import GCPWorkloadMonitor
-from metric_logger import MetricLogger
-from train import (
+import jax
+from flax.linen import partitioning as nn_partitioning
+
+from ml_goodput_measurement import monitoring
+
+from MaxText import checkpointing
+from MaxText import max_utils
+from MaxText import maxtext_utils
+from MaxText import max_logging
+from MaxText import profiler
+from MaxText import pyconfig
+from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
+from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
+from MaxText.metric_logger import MetricLogger
+from MaxText.train import (
     check_example_batch,
     create_goodput_recorder,
     eval_step,
@@ -50,7 +54,6 @@ from train import (
     train_step,
     validate_train_config,
 )
-from ml_goodput_measurement import monitoring
 
 
 def setup_train_loop(config):
@@ -80,7 +83,7 @@ def setup_train_loop(config):
 
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
-  state, _, state_mesh_shardings, data_iterator = max_utils.setup_training_state(
+  state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
   if not config.using_pipeline_parallelism:
@@ -150,7 +153,7 @@ def train_loop(config, state=None):
   # Write train config params, num model params, and XLA flags to tensorboard
   max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
   max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], writer)
-  max_utils.add_config_to_summary_writer(config, writer)
+  maxtext_utils.add_config_to_summary_writer(config, writer)
 
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
   if config.compiled_trainstep_file != "":
@@ -294,7 +297,7 @@ def train_loop(config, state=None):
       max_utils.print_mem_stats("After params initialized")
 
   if checkpoint_manager is not None:
-    if int(state.step) - 1 % config.checkpoint_period != 0:
+    if (int(state.step) - 1) % config.checkpoint_period != 0:
       try:
         if save_checkpoint(
             checkpoint_manager, int(state.step) - 1, state, config.dataset_type, data_iterator, config, force=True

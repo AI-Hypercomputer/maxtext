@@ -18,15 +18,17 @@ limitations under the License.
 import sys
 import jax
 import unittest
-import max_utils
+import os.path
+from MaxText import maxtext_utils
+from MaxText.globals import PKG_DIR
 from jax.sharding import Mesh
-from layers import models
-from layers import embeddings
-from layers import quantizations
+from MaxText.layers import models
+from MaxText.layers import embeddings
+from MaxText.layers import quantizations
 
 import jax.numpy as jnp
 
-import pyconfig
+from MaxText import pyconfig
 import pytest
 
 
@@ -61,7 +63,7 @@ class GPT3(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.cfg = pyconfig.initialize(
-        [sys.argv[0], "configs/base.yml"],
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         run_name="test",
         enable_checkpointing=False,
         model_name="gpt3-52k",
@@ -69,7 +71,7 @@ class GPT3(unittest.TestCase):
     )
     self.rng = jax.random.PRNGKey(1234)
 
-    devices_array = max_utils.create_device_mesh(self.cfg)
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     quant = quantizations.configure_quantization(self.cfg)
     self.model = models.Transformer(config=self.cfg, mesh=mesh, quant=quant)

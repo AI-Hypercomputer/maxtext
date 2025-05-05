@@ -27,6 +27,41 @@ NEG_INF = -1.0e7  # Masking purpose
 """
 
 
+def str2bool(v: str) -> bool:
+  """Convert a string of truth to True or False.
+
+  Args:
+    - v (str):
+      - True values are 'y', 'yes', 't', 'true', and '1';
+      - False values are 'n', 'no', 'f', 'false', and '0'.
+
+  Returns:
+    bool: True or False
+
+  Raises:
+    ValueError if v is anything else.
+  """
+  v = v.lower()
+  true_values = ["y", "yes", "t", "true", "1"]
+  false_values = ["n", "no", "f", "false", "0"]
+  if v in true_values:
+    return True
+  elif v in false_values:
+    return False
+  else:
+    raise ValueError(f"Invalid value '{v}'!")
+
+
+def log_prob_of_chosen_token(logits, chosen_index):
+  """
+  logits: unnormalized logits, shape [batch, seq, vocab]
+  chosen_index: index of the chosen token, shape [batch, seq]
+  """
+  logps = jax.nn.log_softmax(logits, axis=-1)  # [batch, seq, vocab]
+  chosen_prob = jnp.take_along_axis(logps, chosen_index[..., None], axis=-1)  # [batch, seq, 1]
+  return chosen_prob[..., 0]  # [batch, seq]
+
+
 def sampling(logits, rng, algorithm, topk=0, nucleus_topp=0, temperature=1.0):
   """
   logits: unnormalized logits to sample, shaped [YOUR_LEADING_DIMS, Vocab], before logit

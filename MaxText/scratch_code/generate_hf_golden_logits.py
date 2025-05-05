@@ -15,11 +15,12 @@ limitations under the License.
 
 Usage:
 
-python3 MaxText/scratch_code/generate_hf_golden_logits.py --model-id=deepseek-ai/DeepSeek-V2-Lite --output-path=golden_DeepSeek-V2-Lite.jsonl --prompts='I love to,Today is a,What is the', --gcs_bucket=my-gcs-bucket
+python3 -m MaxText.scratch_code.generate_hf_golden_logits --model-id=deepseek-ai/DeepSeek-V2-Lite \
+     --output-path=golden_DeepSeek-V2-Lite.jsonl --prompts='I love to,Today is a,What is the,' \
+     --gcs_bucket=my-gcs-bucket
 
 """
 
-import os
 import torch
 import argparse
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -80,7 +81,7 @@ def main(raw_args=None) -> None:
       "--gcs-bucket", type=str, required=False, default=None, help="A GCS bucket to store logits, without gs://."
   )
   args = parser.parse_args(raw_args)
-  prompts = [prompt for prompt in args.prompts.split(",")]
+  prompts = args.prompts.split(",")
   save_golden_logits(args.model_id, args.output_path, prompts, args.gcs_bucket)
 
 
