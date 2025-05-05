@@ -312,17 +312,14 @@ class MoeBlock(nn.Module):
 
   def permute(self, inputs, gate_logits, pre_bias_logits):
     """Permute tokens to group by expert to fit gmm call."""
-    # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
     inputs_shape = inputs.shape
     inputs_2d = jnp.reshape(inputs, (inputs_shape[0] * inputs_shape[1], inputs_shape[2]))
     weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits)
     flatten_selected_experts = jnp.ravel(selected_experts)
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
     sorted_indices = sorted_selected_experts // self.num_experts_per_tok
-    # breakpoint()
     sorted_inputs = jnp.take(inputs_2d, indices=sorted_indices, axis=0).astype(self.dtype)
     group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
-    # jax.debug.print("Num experts={num_experts},\nUnique selected experts = {unique_experts}", num_experts=self.num_experts, unique_experts=group_size)
     expert_indices = jnp.arange(self.num_experts)
     sorted_experts = jnp.repeat(expert_indices, repeats=group_size, total_repeat_length=flatten_selected_experts.shape[0])
     return sorted_inputs, sorted_selected_experts, weights, group_size, sorted_experts
@@ -354,62 +351,25 @@ class MoeBlock(nn.Module):
                       is_offset=False, global_sorted_experts=None, batch_is_sharded=False):
       """Sort inputs by expert within each shard."""
       local_id = jax.lax.axis_index("expert")
-      # EP_shards x expert_per_shard
       all_shard_local_sizes = jax.lax.dynamic_slice_in_dim(
           global_group_sizes, local_id * local_expert_size, local_expert_size, axis=1
       )
       local_sizes = all_shard_local_sizes.reshape(-1)
-      # local_sizes.shape[0] = EP_shards * expert_per_shards
-      # Each column will be assigned to the same base indice (same jnp.mod)
       local_group_size = jnp.sum(all_shard_local_sizes, axis=0)
       if is_offset:
-        # breakpoint()
-        # NOTE: global_sorted_experts should already be pre-sorted by expert index from 0..#experts-1.
-        # Find the indices that are between local_id * local_expert_size and (local_id+1) * local_expert_size
-        # Assign all other indices something higher than these and sort by new assigned index.
-        # breakpoint()
         divided_assignments = jnp.floor_divide(global_sorted_experts, local_expert_size)
         expert_indices = jnp.where(
           divided_assignments == local_id,
-          # jnp.logical_and(
-          #   global_sorted_experts < (local_id + 1) * local_expert_size
-          #   ),
           jnp.mod(global_sorted_experts, local_expert_size),
           local_expert_size
-          # jnp.ones_like(global_sorted_experts) * (local_expert_size)
         )
-        # expert_indices = jnp.mod(base_indices, local_expert_size+1)
-        # if False:
-        #   if batch_is_sharded:
-        #     batch_group_size = all_shard_local_sizes[local_id, :]
-        #   else:
-        #     batch_group_size = all_shard_local_sizes[0, :]
-        #   # breakpoint()
-        #   num_selected_experts = jnp.sum(expert_indices < local_expert_size)
-        #   num_expected_experts = jnp.sum(batch_group_size)
-        #   # assert num_selected_experts == num_experted_experts, f"#Selected experts {num_selected_experts} does not match the expected shard amount {num_experted_experts}!"
-        #   sorted_indices = jnp.argsort(expert_indices)
-        #   sorted_experts= jnp.take(global_sorted_experts, indices=sorted_indices, axis=0)
-          
-        #   jax.debug.print("local_id={local_id},\n#Selected experts {num_selected_experts};\nexpected shard amount {num_expected_experts},\nglobal_group_sizes = {global_group_sizes},\nall_shard_local_sizes = {all_shard_local_sizes},\n"\
-        #                   "first_sorted_indice={first_sorted_indice},\first_expert_value={first_expert_value} ",
-        #                   local_id=local_id,num_selected_experts=num_selected_experts, num_expected_experts=num_expected_experts, global_group_sizes=global_group_sizes, all_shard_local_sizes=all_shard_local_sizes,
-        #                   first_sorted_indice=sorted_indices[0], first_expert_value=global_sorted_experts[sorted_indices[0]])
       else:
         base_indices = jnp.mod(jnp.arange(local_sizes.shape[0]), local_expert_size)
-        # Since the local shard gets all of the data for respective experts, the number of assignments per expert
-        # is summing down the rows.
-        
-        # Base index has an associated count that is extracted from local_sizes
         expert_indices = jnp.repeat(base_indices, local_sizes, total_repeat_length=inputs.shape[0])
-      # TODO: consider sorting only if >0 experts chosen in for this shard.
       sorted_indices = jnp.argsort(expert_indices)
       # Sort the inputs by expert assignment ID in the batch.
       sorted_inputs = jnp.take(inputs, indices=sorted_indices, axis=0)
       sorted_experts_ids = expert_indices[sorted_indices]
-      # if False:
-      #   jax.debug.print("max expert ID = {max_id},\nmin expert ID = {min_id}", max_id=jnp.max(sorted_experts_ids), min_id=jnp.min(sorted_experts_ids))
-      #   jax.debug.print("unique_sorted_experts = {unique_sorted_experts}", unique_sorted_experts=jnp.bincount(sorted_experts_ids, length=self.num_experts))
       return sorted_inputs, sorted_indices, local_group_size, sorted_experts_ids, 
       
 
@@ -534,30 +494,20 @@ class MoeBlock(nn.Module):
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo):
       batch_size, sequence_length, _ = x.shape
-      # x: b*seq_len x emb
       x, sorted_selected_experts, weights, group_sizes, selected_experts = self.permute(x, logits, pre_bias_logits)
       if self.get_expert_parallelism_size() > 1:
-        # jax.debug.print("x.sharding = {sharding}\nx.sharding.spec={sharding_spec}", sharding=x.sharding,sharding_spec=x.sharding.spec)
         try:
           is_batch_sharded_by_expert = 'expert' in tuple(filter(
             lambda tup: tup[0] == "activation_batch", self.config.logical_axis_rules)
             )[0][1]
         except:
           is_batch_sharded_by_expert = False
-        # breakpoint()
-        # check if the data is sharded by batch otherwise add a palceholder.
         batch_axis = "expert" if is_batch_sharded_by_expert else "data"
         axis_name="expert"
         # get group sizes for all shards
         local_expert_size = self.config.num_experts // self.get_expert_parallelism_size()
-        # If the batch is sharded, this will calculate how many of inputs from the current sub-batch
-        # will be assigned to each of the expert shards (i.e. groups).
-        # Each shard will get local_expert_size #experts (axis=1). therefor
-        # reshaped_group_sizes will sum the assigned expert counts per shard producing shape=(#EP,)
         reshaped_group_sizes = jnp.sum(group_sizes.reshape(-1, local_expert_size), axis=1)
-        # Shape -> batch_parallelism x EP
         global_group_sizes = group_sizes
-        # if True:
         if is_batch_sharded_by_expert:
           all_shards_group_sizes = lax.all_gather(reshaped_group_sizes, axis_name=batch_axis)
           input_offsets, send_sizes, output_offsets, recv_sizes = get_all_to_all_params(
@@ -574,7 +524,6 @@ class MoeBlock(nn.Module):
               * self.config.num_experts_per_tok
           )
           output_shape = jnp.zeros((buffer_size, self.config.emb_dim), dtype=x.dtype)
-          # x is the same shape as output_shape/buffer_size
           
           x = jax.lax.ragged_all_to_all(
               x,
@@ -585,13 +534,9 @@ class MoeBlock(nn.Module):
               recv_sizes,
               axis_name=axis_name,
           )
-          # Number of assignments to each expert per shard's sub-batch.
-          # Allgather will result in E x num_experts if batches are sharded by expert. 
-          # Each row will show the count of each original sub-batch's to each expert.
           global_group_sizes = lax.all_gather(group_sizes, axis_name=axis_name)
           x, local_sorted_indices, group_sizes, selected_experts = local_permute(x, global_group_sizes, local_expert_size)
         else:
-          # breakpoint()
           x, local_sorted_indices, group_sizes, selected_experts = \
             local_permute(x, global_group_sizes[None, :],
                           local_expert_size,
@@ -612,13 +557,11 @@ class MoeBlock(nn.Module):
 
       if self.get_expert_parallelism_size() > 1:
         axis_name = "expert"
-        # locally unpermute back to the original order
-        local_output = jnp.take(intermediate_output, indices=jnp.argsort(local_sorted_indices), axis=0)
         original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
         assert sorted_selected_experts.shape[0] == original_inputs_first_dim, "original_inputs_first_dim does not match the original tensor shape!"
-        output_shape = jnp.zeros((original_inputs_first_dim, self.config.emb_dim), dtype=local_output.dtype)
-        # is_batch_sharded_by_expert = True
+        output_shape = jnp.zeros((original_inputs_first_dim, self.config.emb_dim), dtype=intermediate_output.dtype)
         if is_batch_sharded_by_expert:
+          local_output = jnp.take(intermediate_output, indices=jnp.argsort(local_sorted_indices), axis=0)
           input_offsets, send_sizes, output_offsets, recv_sizes = get_all_to_all_params(
               jnp.transpose(all_shards_group_sizes), local_expert_size, self.get_expert_parallelism_size()
           )
@@ -631,23 +574,19 @@ class MoeBlock(nn.Module):
               recv_sizes,
               axis_name=axis_name,
           )
+          output = self.unpermute(
+            intermediate_output, sorted_selected_experts, weights, batch_size=batch_size, sequence_length=sequence_length
+          )
         else:
-          # breakpoint()
           shard_id = jax.lax.axis_index(axis_name)
           output_offset = jnp.concatenate((jnp.array([0]), jnp.cumsum(reshaped_group_sizes[:-1])))[shard_id]
           output_offsets = jnp.repeat(output_offset, self.get_expert_parallelism_size())
-          input_offsets = output_offsets
+          input_offsets =  jnp.zeros(self.get_expert_parallelism_size(), dtype=jnp.int32)
           send_sizes = jnp.repeat(reshaped_group_sizes[shard_id], self.get_expert_parallelism_size())
-          # recv_sizes = reshaped_group_sizes
-          recv_sizes = send_sizes
-          # jax.debug.print("shard_id = {shard_id},\ninput_shape={input_shape},\nreshaped_group_sizes = {reshaped_group_sizes},\ninput_offsets = {input_offsets},\n"\
-          #                 "send_sizes = {send_sizes},\noutput_offsets = {output_offsets},\n"\
-          #                 "recv_sizes = {recv_sizes}, sum(recv_sizes) = {sum_recv_sizes}", 
-          #                 shard_id=shard_id, input_shape=logits.shape, reshaped_group_sizes=reshaped_group_sizes, input_offsets=input_offsets, send_sizes=send_sizes,
-          #                 output_offsets=output_offsets, recv_sizes=recv_sizes, sum_recv_sizes=jnp.sum(recv_sizes))
-          # TODO: revert back to `intermediate_output`
-          intermediate_output = jax.lax.ragged_all_to_all(
-              local_output,
+          recv_sizes = reshaped_group_sizes
+
+          new_intermediate_output = jax.lax.ragged_all_to_all(
+              intermediate_output,
               output_shape,
               input_offsets,
               send_sizes,
@@ -655,75 +594,9 @@ class MoeBlock(nn.Module):
               recv_sizes,
               axis_name=axis_name,
           )
-      output = self.unpermute(
-        intermediate_output, sorted_selected_experts, weights, batch_size=batch_size, sequence_length=sequence_length
-      )
-      # if False:
-      #   # offsets = jnp.cumsum(reshaped_group_sizes).shape[0]
-      #   local_group_start_vals = local_output[output_offsets, :5]
-      #   intermediate_group_start_vals = intermediate_output[output_offsets, :5]
-      #   output_vals = output_shape[output_offsets, :5]
-        
-      #   def match_and_index(tensor, arr):
-      #     match_indices = jnp.where(jnp.all(tensor == arr, axis=1), jnp.arange(tensor.shape[0]), jnp.inf)
-      #     min_index = jnp.min(match_indices)
-      #     min_index = jnp.where(
-      #         jnp.isinf(min_index),
-      #         jnp.array(-1.0),
-      #         min_index
-      #     ).astype(int)
-      #     return tensor[min_index], min_index
-
-      #   first_row_match, first_row_index = match_and_index(local_output, intermediate_output[0])
-      #   # first_row_match, first_row_index = match_and_index(intermediate_output, intermediate_output[5])
-
-      #   jax.debug.print("shard_id = {shard_id},\ninput_shape={input_shape},\nindex of row matching intermediate_output in local_output: {first_row_index},\n"\
-      #                   "\nrow matching intermediate_output in local_output: {first_row_match},\n"\
-      #                   "local_output[0, :5] = {start_local_output},\n"\
-      #                   "intermediate_output[0, :5] = {intermediate_output_offset},\n"\
-      #                   "local and intermediate outputs match = {local_and_intermediate_match},\n"\
-      #                   # "new_intermediate_output[0, :5] = {new_intermediate_output_offset},\n"\
-      #                   "reshaped_group_sizes = {reshaped_group_sizes},\nstart_local_sorted_indices={start_local_sorted_indices},\n"\
-      #                   "input_offsets = {input_offsets},\nsend_sizes = {send_sizes},\noutput_offsets = {output_offsets},\n"\
-      #                     "recv_sizes = {recv_sizes}, sum(recv_sizes) = {sum_recv_sizes},\nfirst_local_sorted_indices={first_local_sorted_indices},\n"\
-      #                       "\nlocal_equal_intermediate = {local_equal_intermediate},\nlocal_group_start_vals = {local_group_start_vals},\n"\
-      #                         "intermediate_group_start_vals= {intermediate_group_start_vals},\n"\
-      #                         "output_vals = {output_vals},\nargsort_local_index={argsort_local_index}",
-      #                       output_vals=output_vals, 
-      #                     shard_id=shard_id, input_shape=logits.shape,
-      #                     first_row_index=first_row_index, first_row_match=first_row_match,
-      #                     start_local_output=local_output[output_offsets[shard_id], :5],
-      #                     intermediate_output_offset=intermediate_output[output_offsets[shard_id], :5],
-      #                     local_and_intermediate_match=jnp.allclose(local_output[output_offsets[shard_id]], intermediate_output[output_offsets[shard_id]]),
-      #                     # new_intermediate_output_offset=new_intermediate_output[output_offsets[shard_id], :5],
-      #                     reshaped_group_sizes=reshaped_group_sizes,
-      #                     start_local_sorted_indices=local_sorted_indices[:5],
-      #                     input_offsets=input_offsets, send_sizes=send_sizes, output_offsets=output_offsets, recv_sizes=recv_sizes, sum_recv_sizes=jnp.sum(recv_sizes),
-      #                     first_local_sorted_indices=jnp.argsort(local_sorted_indices)[0],
-      #                     local_equal_intermediate=jnp.all(local_group_start_vals[shard_id] == intermediate_group_start_vals[shard_id]),
-      #                     local_group_start_vals=local_group_start_vals,
-      #                     intermediate_group_start_vals=intermediate_group_start_vals,
-      #                     argsort_local_index=jnp.argsort(local_sorted_indices)[0])
-        # jax.debug.print("shard_id = {shard_id},\nlocal_equal_intermediate = {local_equal_intermediate},\local_group_start_vals = {local_group_start_vals},\intermediate_group_start_vals= {intermediate_group_start_vals}",
-        #           shard_id=shard_id, local_equal_intermediate=jnp.all(local_group_start_vals[output_offsets[shard_id]] == intermediate_group_start_vals[output_offsets[shard_id]]),
-        #           local_group_start_vals=local_group_start_vals,
-        #           intermediate_group_start_vals=intermediate_group_start_vals)
-      # Debugging:
-      # if False:
-      #   all_outputs = lax.all_gather(output, axis_name=axis_name)
-      #   # Iterate through jnp.cumsum(reshaped_group_sizes) and check whether the first 5 elements each row 2 indices after each cumsum are equal. 
-      #   offsets = jnp.cumsum(reshaped_group_sizes).shape[0]
-      #   def check_all_rows_equal(tensor: jnp.ndarray) -> bool:
-      #     """Checks if all rows of a JAX tensor are identical."""
-      #     if tensor.ndim < 1 or tensor.shape[0] <= 1:
-      #       # A tensor with 0 or 1 row trivially has all rows equal
-      #       return True
-      #     # Compare the first row with all other rows
-      #     are_equal = (tensor[0] == tensor[1:])
-      #     # Check if all comparisons resulted in True
-      #     return jnp.all(are_equal).item() # .item() converts the 0-dim JAX array to a Python bool
-      #   if check_all_rows_equal(all_outputs[offsets+2, :5]):
-      #     jax.debug.print("Not all rows are equal after unpermute:\n{value}", value=all_outputs[offsets+2, :5])
+          output = self.unpermute(
+            new_intermediate_output, sorted_selected_experts, weights, batch_size=batch_size, sequence_length=sequence_length
+          )
 
       return output, None
 
