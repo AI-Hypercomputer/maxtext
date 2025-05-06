@@ -78,6 +78,7 @@ class PathwaysConfig:
   server_flags: str = ''
   proxy_flags: str = ''
   worker_flags: str = ''
+  headless: bool = False
 
 
 # TODO(@vbarr): Split out parameters related to XPK workload and a General workload
@@ -446,7 +447,7 @@ def _get_pathways_proxy_flags(wl_config: WorkloadConfig):
 
   # Get proxy and xla flag string from model config
   proxy_flags_string = pw_config.proxy_flags
-  xla_flags_string = wl_config.model.xla_flags
+  xla_flags_string = wl_config.model.xla_flags if not pw_config.headless else ''
 
   # Split both proxy_flags_string and xla_flags_string into lists of flags
   proxy_flags_list = proxy_flags_string.strip().split()
@@ -457,8 +458,8 @@ def _get_pathways_proxy_flags(wl_config: WorkloadConfig):
 
   # Remove the flags that are specified to be removed.
   if (
-      wl_config.model.pathways_xla_flag_options
-      and xla_flags.REMOVE in wl_config.model.pathways_xla_flag_options
+      not pw_config.headless and (wl_config.model.pathways_xla_flag_options
+      and xla_flags.REMOVE in wl_config.model.pathways_xla_flag_options)
   ):
     flags_to_remove = wl_config.model.pathways_xla_flag_options[
         xla_flags.REMOVE
@@ -471,8 +472,8 @@ def _get_pathways_proxy_flags(wl_config: WorkloadConfig):
 
   # Add the flags that are specified to be added.
   if (
-      wl_config.model.pathways_xla_flag_options
-      and xla_flags.ADD_PROXY in wl_config.model.pathways_xla_flag_options
+      not pw_config.headless and (wl_config.model.pathways_xla_flag_options
+      and xla_flags.ADD_PROXY in wl_config.model.pathways_xla_flag_options)
   ):
     flags_to_add = wl_config.model.pathways_xla_flag_options[
         xla_flags.ADD_PROXY
@@ -500,8 +501,8 @@ def _get_pathways_worker_flags(wl_config: WorkloadConfig):
 
   # Add the flags that are specified to be added.
   if (
-      wl_config.model.pathways_xla_flag_options
-      and xla_flags.ADD_WORKER in wl_config.model.pathways_xla_flag_options
+      not pw_config.headless and (wl_config.model.pathways_xla_flag_options
+      and xla_flags.ADD_WORKER in wl_config.model.pathways_xla_flag_options)
   ):
     flags_to_add = wl_config.model.pathways_xla_flag_options[
         xla_flags.ADD_WORKER
@@ -523,8 +524,8 @@ def _get_pathways_server_flags(wl_config: WorkloadConfig):
 
   # Add the flags that are specified to be added.
   if (
-      wl_config.model.pathways_xla_flag_options
-      and xla_flags.ADD_SERVER in wl_config.model.pathways_xla_flag_options
+      not pw_config.headless and (wl_config.model.pathways_xla_flag_options
+      and xla_flags.ADD_SERVER in wl_config.model.pathways_xla_flag_options)
   ):
     flags_to_add = wl_config.model.pathways_xla_flag_options[
         xla_flags.ADD_SERVER
@@ -569,6 +570,7 @@ def _get_pathways_specific_flags(wl_config: WorkloadConfig):
       f' --custom-pathways-server-args="{server_flags}" '
       f' --custom-pathways-proxy-server-args="{proxy_flags}" '
       f' --custom-pathways-worker-args="{worker_flags}" '
+      f' {"--headless" if pw_config.headless else ""}'
   )
   return pathways_specific_flags
 
@@ -582,6 +584,7 @@ def generate_xpk_workload_cmd(
   """Generates a command to run a maxtext model on XPK."""
 
   is_pathways_enabled = wl_config.pathways_config is not None
+  is_pathways_headless_enabled = wl_config.pathways_config and wl_config.pathways_config.headless
 
   time.localtime()
   length_of_random_str = 3
@@ -614,10 +617,12 @@ def generate_xpk_workload_cmd(
                                             wl_config.run_name,
                                             'metrics')
 
-  user_command = build_user_command(
-      name=name,
-      wl_config=wl_config
-  )
+  user_command = ''
+  if not is_pathways_headless_enabled:
+    user_command = build_user_command(
+        name=name,
+        wl_config=wl_config
+    )
 
   additional_flags = ''
   if not is_pathways_enabled and wl_config.libtpu_type == LibTpuType.CUSTOM:
@@ -641,7 +646,7 @@ def generate_xpk_workload_cmd(
     docker_image_flag = f'--docker-image="{wl_config.base_docker_image}"'
 
   upload_metrics_to_bq_cmd = ""
-  if wl_config.generate_metrics_and_upload_to_big_query:
+  if wl_config.generate_metrics_and_upload_to_big_query and not is_pathways_headless_enabled:
     # TODO (optionally) make it so that this upload step is done on local device instead of within the workload.
     args = _build_args_from_config(wl_config)
     args_str = ""
