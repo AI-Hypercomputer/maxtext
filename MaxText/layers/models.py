@@ -449,9 +449,9 @@ class Decoder(nn.Module):
     # Let's do the merge_mm_tokens here
     if image_embeddings is not None:
       y = multimodal_utils.merge_mm_embeddings(
-        text_embeddings=y,
-        vision_embeddings=image_embeddings,
-        mask=bidirectional_mask,
+          text_embeddings=y,
+          vision_embeddings=image_embeddings,
+          mask=bidirectional_mask,
       )
 
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)

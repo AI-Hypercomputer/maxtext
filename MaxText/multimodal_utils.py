@@ -355,9 +355,7 @@ def merge_mm_embeddings(
   Returns:
     The merged tokens.
   """
-  return jax.vmap(_merge_mm_embeddings_inner, in_axes=(0, 0, 0))(
-      text_embeddings, vision_embeddings, mask
-  )
+  return jax.vmap(_merge_mm_embeddings_inner, in_axes=(0, 0, 0))(text_embeddings, vision_embeddings, mask)
 
 
 def _merge_mm_embeddings_inner(text_embeddings, vision_embeddings, mask):
@@ -365,7 +363,7 @@ def _merge_mm_embeddings_inner(text_embeddings, vision_embeddings, mask):
 
   vision_embeddings = einops.rearrange(
       vision_embeddings,
-      'num_images num_toks_per_image d -> (num_images num_toks_per_image) d',
+      "num_images num_toks_per_image d -> (num_images num_toks_per_image) d",
   )
 
   # len(vision_embeddings) == max_num_images * num_tokens_per_image

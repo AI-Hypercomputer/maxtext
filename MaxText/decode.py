@@ -28,6 +28,7 @@ from MaxText import max_utils
 from MaxText import maxengine
 from MaxText import pyconfig
 from MaxText import multimodal_utils
+import numpy as np
 
 # Number of text sequences to process in a single batch.
 _NUM_STREAMS = 1
@@ -97,7 +98,7 @@ def main(argv: Sequence[str]) -> None:
   prefill_length = config.max_prefill_predict_length
   if config.use_multimodal:
     # text = multimodal_utils.reformat_prompt(text, config.model_name)
-    text = f'<start_of_turn>user\n{text}<end_of_turn>\n<start_of_turn>model\n'
+    text = f"<start_of_turn>user\n{text}<end_of_turn>\n<start_of_turn>model\n"
     prefill_length -= multimodal_utils.get_image_offsets(config.model_name)
 
   metadata = engine.get_tokenizer()
@@ -147,10 +148,15 @@ def main(argv: Sequence[str]) -> None:
   # Generate
   steps = range(config.max_prefill_predict_length, config.max_target_length)
   sampled_tokens_list.append(_batch_first_result_token(first_token_list, batch_size))
+  logits_list = [decode_state["logits"][0, 0, :]]
   for _ in steps:
     rng, rng_generate = jax.random.split(rng)
     decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
     sampled_tokens_list.append(sampled_tokens)
+    logits_list.append(decode_state["logits"][0, 0, :])
+
+  logits_array = np.array(logits_list, dtype=np.float32)
+  np.save("/home/hengtaoguo/projects/logits_mt.npy", logits_array[:10, :])
 
   # Get results
   for i in range(_NUM_STREAMS):
