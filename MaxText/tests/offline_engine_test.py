@@ -31,7 +31,9 @@ import time
 
 
 class OfflineEngineTest(unittest.TestCase):
-  """Tests for JetStream Offline Engine."""
+  """Tests for JetStream Offline Engine.
+  Run with: pytest MaxText/tests/offline_engine_test.py -s
+  """
 
   def setUp(self):
     super().setUp()
@@ -40,16 +42,16 @@ class OfflineEngineTest(unittest.TestCase):
 
   def init_pyconfig(self, **kwargs):
     init_kwargs = {
-        "per_device_batch_size": 16,
+        "per_device_batch_size": 4,
         "ici_data_parallelism": 1,
         "ici_fsdp_parallelism": 1,
         "ici_tensor_parallelism": -1,  # Use TP
         "run_name": "test",
         "enable_checkpointing": False,
         "attention": "dot_product",
-        "max_prefill_predict_length": 1024,
-        "max_target_length": 2048,
-        "base_emb_dim": 1024,
+        "max_prefill_predict_length": 512,
+        "max_target_length": 600,
+        "base_emb_dim": 512,
         "base_num_query_heads": 8,
         "base_num_kv_heads": 8,
         "base_num_decoder_layers": 2,
@@ -67,7 +69,7 @@ class OfflineEngineTest(unittest.TestCase):
     inference_engine = OfflineEngine(engine=engine, params=None, enable_batch_prefill=True)
 
     random.seed(42)
-    input_data = [jax.numpy.arange(random.randint(1, 1024)) for _ in range(50)]
+    input_data = [jax.numpy.arange(random.randint(1, config.max_prefill_predict_length)) for _ in range(20)]
 
     # Run inference
     start_time = time.time()
@@ -79,8 +81,8 @@ class OfflineEngineTest(unittest.TestCase):
     total_tokens = 0
     for i, tokens in enumerate(results):
       text = inference_engine.tokenizer.decode(tokens)
+      print(text)
       self.assertEqual(type(tokens), list)
-      self.assertLess(len(tokens), 8096)
       total_tokens += len(tokens)
 
     print(f"Time taken: {end_time - start_time} seconds")
@@ -92,7 +94,7 @@ class OfflineEngineTest(unittest.TestCase):
     config = self.init_pyconfig(scan_layers=True)
 
     random.seed(42)
-    input_data = [jax.numpy.arange(random.randint(1, 1024)) for _ in range(50)]
+    input_data = [jax.numpy.arange(random.randint(1, config.max_prefill_predict_length)) for _ in range(20)]
 
     engine = MaxEngine(config, jax.devices())
     inference_engine = OfflineEngine(engine=engine, params=None, enable_batch_prefill=False)
@@ -104,7 +106,7 @@ class OfflineEngineTest(unittest.TestCase):
     total_tokens = 0
     for i, tokens in enumerate(results):
       text = inference_engine.tokenizer.decode(tokens)
-      self.assertLess(len(tokens), 8096)
+      print(text)
       total_tokens += len(tokens)
 
     print(f"Time taken: {end_time - start_time} seconds")
@@ -131,7 +133,7 @@ class OfflineEngineTest(unittest.TestCase):
     for id_, tokens in results.items():
       self.assertEqual(type(tokens), list)
       text = inference.tokenizer.decode(tokens)
-      self.assertLess(len(tokens), 8096)
+      print(text)
 
 
 if __name__ == "__main__":

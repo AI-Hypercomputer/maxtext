@@ -310,6 +310,9 @@ class OfflineEngine:
     self.decode_state = None
     self.res = None  # Results storage
 
+    # Compiled functions
+    self.generate_fn = None
+
     self._init()
 
   def _init(self):
@@ -317,6 +320,7 @@ class OfflineEngine:
 
     Loads model parameters and tokenizer if not provided.
     """
+
     # Load model parameters if not provided
     if self.params is None:
       self.params = self.engine.load_params()
@@ -327,7 +331,8 @@ class OfflineEngine:
       self.tokenizer = self.engine.build_tokenizer(tokenizer_params)
 
     # Initialize decode state
-    self.decode_state = self.engine.init_decode_state()
+    self.generate_fn, self.params, init_decode_state_fn = self.engine.aot_compile(self.params, pass_rng_shape=False)
+    self.decode_state = init_decode_state_fn(None)
 
   def batch_inference(
       self,
@@ -521,7 +526,7 @@ class OfflineEngine:
     """
     for i in range(self.min_decode_steps):
       # Generate next tokens
-      self.decode_state, result_tokens = self.engine.generate(self.params, self.decode_state, None)
+      self.decode_state, result_tokens = self.generate_fn(self.params, self.decode_state, None)
       # Add results to detokenization queue
       self.detokenize_backlog.put((result_tokens.convert_to_numpy(), False, 0, 0), block=True)
 
