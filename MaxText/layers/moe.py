@@ -312,14 +312,18 @@ class MoeBlock(nn.Module):
 
   def permute(self, inputs, gate_logits, pre_bias_logits):
     """Permute tokens to group by expert to fit gmm call."""
+    # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
     inputs_shape = inputs.shape
     inputs_2d = jnp.reshape(inputs, (inputs_shape[0] * inputs_shape[1], inputs_shape[2]))
     weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits)
+
     flatten_selected_experts = jnp.ravel(selected_experts)
     sorted_selected_experts = jnp.argsort(flatten_selected_experts)
     sorted_indices = sorted_selected_experts // self.num_experts_per_tok
+    # sort inputs for number of selected experts
     sorted_inputs = jnp.take(inputs_2d, indices=sorted_indices, axis=0).astype(self.dtype)
     group_size = jnp.bincount(flatten_selected_experts, length=self.num_experts)
+    # Return the experts for each sorted input.
     expert_indices = jnp.arange(self.num_experts)
     sorted_experts = jnp.repeat(expert_indices, repeats=group_size, total_repeat_length=flatten_selected_experts.shape[0])
     return sorted_inputs, sorted_selected_experts, weights, group_size, sorted_experts
@@ -348,7 +352,7 @@ class MoeBlock(nn.Module):
     tile_size = (512, 1024, 1024)  # (m, k, n)
 
     def local_permute(inputs, global_group_sizes, local_expert_size,
-                      is_offset=False, global_sorted_experts=None, batch_is_sharded=False):
+                      is_offset=False, global_sorted_experts=None):
       """Sort inputs by expert within each shard."""
       local_id = jax.lax.axis_index("expert")
       all_shard_local_sizes = jax.lax.dynamic_slice_in_dim(
@@ -356,6 +360,11 @@ class MoeBlock(nn.Module):
       )
       local_sizes = all_shard_local_sizes.reshape(-1)
       local_group_size = jnp.sum(all_shard_local_sizes, axis=0)
+      
+      # In this case, the data that needs to be processed by the local shard
+      # does not start from row 0 but actually starts at
+      # jnp.concatenate((jnp.array([0]), jnp.cumsum(local_group_sizes[:-1]))[shard_id]
+      # This happens for instance if the data is not produced via a ragged_all_to_all.
       if is_offset:
         divided_assignments = jnp.floor_divide(global_sorted_experts, local_expert_size)
         expert_indices = jnp.where(
@@ -367,7 +376,6 @@ class MoeBlock(nn.Module):
         base_indices = jnp.mod(jnp.arange(local_sizes.shape[0]), local_expert_size)
         expert_indices = jnp.repeat(base_indices, local_sizes, total_repeat_length=inputs.shape[0])
       sorted_indices = jnp.argsort(expert_indices)
-      # Sort the inputs by expert assignment ID in the batch.
       sorted_inputs = jnp.take(inputs, indices=sorted_indices, axis=0)
       sorted_experts_ids = expert_indices[sorted_indices]
       return sorted_inputs, sorted_indices, local_group_size, sorted_experts_ids, 
@@ -466,18 +474,29 @@ class MoeBlock(nn.Module):
     # Currently, we only support data and tensor parallelism with Megablox.
     # We all gather the input activations over tensor parallelism to follow strategy
     # in https://parsa.epfl.ch/course-info/cs723/papers/Megatron.pdf.
-    # input_partition_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
-    input_partition_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
-    gate_logits_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
+    
+    # Check if the batch should be sharded by expert and whether the batch_size supports this.
+    try:
+      is_batch_sharded_by_expert = 'expert' in tuple(filter(
+        lambda tup: tup[0] == "activation_batch_moe", self.config.logical_axis_rules)
+        )[0][1]
+    except:
+      is_batch_sharded_by_expert = False
+    if is_batch_sharded_by_expert and inputs.shape[0] > 1:
+      batch_logical_axis = "activation_batch_moe"
+    else:
+      batch_logical_axis = "activation_batch_no_exp"
+
+    input_partition_pspec = nn.logical_to_mesh_axes((batch_logical_axis, None, None))
+    gate_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, None, None))
     if self.config.model_name.startswith("deepseek3"):
-      pre_bias_logits_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
+      pre_bias_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, None, None))
     else:
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits_pspec = None
     w0_pspec = nn.logical_to_mesh_axes(("exp", None, "mlp"))
     w1_pspec = nn.logical_to_mesh_axes(("exp", None, "mlp"))
     wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp", None))
-
     if isinstance(w0_kernel, QTensor):
       w0_pspec = aqt_tensor.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
     if isinstance(w1_kernel, QTensor):
@@ -496,14 +515,8 @@ class MoeBlock(nn.Module):
       batch_size, sequence_length, _ = x.shape
       x, sorted_selected_experts, weights, group_sizes, selected_experts = self.permute(x, logits, pre_bias_logits)
       if self.get_expert_parallelism_size() > 1:
-        try:
-          is_batch_sharded_by_expert = 'expert' in tuple(filter(
-            lambda tup: tup[0] == "activation_batch", self.config.logical_axis_rules)
-            )[0][1]
-        except:
-          is_batch_sharded_by_expert = False
         batch_axis = "expert" if is_batch_sharded_by_expert else "data"
-        axis_name="expert"
+        axis_name = "expert"
         # get group sizes for all shards
         local_expert_size = self.config.num_experts // self.get_expert_parallelism_size()
         reshaped_group_sizes = jnp.sum(group_sizes.reshape(-1, local_expert_size), axis=1)
@@ -540,9 +553,8 @@ class MoeBlock(nn.Module):
           x, local_sorted_indices, group_sizes, selected_experts = \
             local_permute(x, global_group_sizes[None, :],
                           local_expert_size,
-                          True,
-                          selected_experts,
-                          False)
+                          is_offset=True,
+                          global_sorted_experts=selected_experts)
 
       layer_w0 = gmm(x, w0, group_sizes, selected_experts)
       layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
@@ -559,8 +571,10 @@ class MoeBlock(nn.Module):
         axis_name = "expert"
         original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
         assert sorted_selected_experts.shape[0] == original_inputs_first_dim, "original_inputs_first_dim does not match the original tensor shape!"
-        output_shape = jnp.zeros((original_inputs_first_dim, self.config.emb_dim), dtype=intermediate_output.dtype)
+        output_shape = jnp.zeros((original_inputs_first_dim, self.config.emb_dim // self.get_tensor_parallelism_size()),
+                                 dtype=intermediate_output.dtype)
         if is_batch_sharded_by_expert:
+          # locally unpermute back to the original order
           local_output = jnp.take(intermediate_output, indices=jnp.argsort(local_sorted_indices), axis=0)
           input_offsets, send_sizes, output_offsets, recv_sizes = get_all_to_all_params(
               jnp.transpose(all_shards_group_sizes), local_expert_size, self.get_expert_parallelism_size()
@@ -578,6 +592,9 @@ class MoeBlock(nn.Module):
             intermediate_output, sorted_selected_experts, weights, batch_size=batch_size, sequence_length=sequence_length
           )
         else:
+          # If bach is replicated across EP shards then each shard should send
+          # 0..local_shard_size data to the other shards and receive the local_shard data from
+          # all of the other shards using ragged_all_to_all.
           shard_id = jax.lax.axis_index(axis_name)
           output_offset = jnp.concatenate((jnp.array([0]), jnp.cumsum(reshaped_group_sizes[:-1])))[shard_id]
           output_offsets = jnp.repeat(output_offset, self.get_expert_parallelism_size())
@@ -597,6 +614,11 @@ class MoeBlock(nn.Module):
           output = self.unpermute(
             new_intermediate_output, sorted_selected_experts, weights, batch_size=batch_size, sequence_length=sequence_length
           )
+      else:
+        # If not using EP then just unpermute the globally sorted expert assignments.
+        output = self.unpermute(
+          intermediate_output, sorted_selected_experts, weights, batch_size=batch_size, sequence_length=sequence_length
+      )
 
       return output, None
 
