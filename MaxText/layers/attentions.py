@@ -714,8 +714,8 @@ class AttentionOp(nn.Module):
             segment_axis_names_q,
             segment_axis_names_kv,
             segment_axis_names_splash_kernel,
-            None, # no sharding for cp_size
-            None, # no sharding for load_balanced_context_parallel
+            None,  # no sharding for cp_size
+            None,  # no sharding for load_balanced_context_parallel
         ),
         out_specs=axis_names_q,
         check_rep=False,

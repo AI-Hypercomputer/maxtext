@@ -13,6 +13,7 @@
  See the License for the specific language governing permissions and
  limitations under the License.
  """
+from MaxText.max_utils import get_xpk_path
 
 """Used to perf benchmarks between Pathways and McJax."""
 
@@ -42,7 +43,7 @@ COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
 # Other parameters (MUST BE SET BY USER)
-XPK_PATH = os.path.join("~", "xpk")  # We're running this script from the maxtext directory
+XPK_PATH = get_xpk_path()
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = (
     f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"

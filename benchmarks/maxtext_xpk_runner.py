@@ -13,6 +13,7 @@
  See the License for the specific language governing permissions and
  limitations under the License.
  """
+from MaxText.max_utils import get_xpk_path
 
 """  This file contains data classes and runner logic to execute the XPK runs triggered by benchmarks.benchmark_runner"
 
@@ -95,7 +96,7 @@ class WorkloadConfig:
   num_steps: int = 20
   max_restarts: int = 0
   priority: str = 'medium'
-  xpk_path: str = os.path.join("~", "xpk")
+  xpk_path: str = get_xpk_path()
   pathways_config: PathwaysConfig = None
   run_name: str = None
   generate_metrics_and_upload_to_big_query: bool = True

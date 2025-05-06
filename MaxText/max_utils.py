@@ -1,5 +1,5 @@
 """
-Copyright 2023 Google LLC
+Copyright 2023–2025 Google LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,31 +16,39 @@ limitations under the License.
 
 """ Common Max Utils needed by multiple modules"""
 """ All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
+
+from collections.abc import Sequence
+from functools import partial
+from typing import Any, Tuple
+import collections
+import functools
+import logging
+import os
+import socket
+import subprocess
+import time
+
+import psutil
+
+from etils import epath
+
 import numpy as np
+
 import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
-from MaxText import max_logging
-import functools
-import time
-import os
-import psutil
-import socket
-import subprocess
-from etils import epath
-from collections.abc import Sequence
-import collections
-from typing import Any, Tuple
-from functools import partial
 
 import orbax.checkpoint as ocp
-
 
 import flax
 from tensorboardX import writer
 
+from MaxText import max_logging
+
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
 HYBRID_RING_32X8 = "hybrid_ring_32x8"
+
+logger = logging.getLogger(__name__)
 
 # pylint: disable=too-many-positional-arguments
 
@@ -90,6 +98,15 @@ def calculate_bytes_from_pytree(params):
   params_bytes = jax.tree_util.tree_map(lambda x: x.nbytes, params)
   total_bytes = jax.tree_util.tree_reduce(lambda x, y: x + y, params_bytes)
   return total_bytes
+
+
+def get_xpk_path():
+  """Get XPK path. Defaults to `"$HOME/xpk"`."""
+  xpk_path = os.path.join(os.path.expanduser("~"), "xpk")
+  if not os.path.isdir(xpk_path):
+    logging.error("Could not find %s. Please install or move XPK to %s", xpk_path, xpk_path)
+    raise SystemExit(1)
+  return xpk_path
 
 
 def summarize_size_from_pytree(params):

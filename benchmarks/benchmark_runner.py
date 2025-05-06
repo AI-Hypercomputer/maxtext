@@ -13,6 +13,7 @@
  See the License for the specific language governing permissions and
  limitations under the License.
  """
+from MaxText.max_utils import get_xpk_path
 
 """ Script to run a benchmark/benchmarks on existing xpk or QR nodes (to be implemented)
                           ***** IMPORTANT *****
@@ -149,7 +150,7 @@ def add_xpk_runner_arguments(custom_parser: argparse.ArgumentParser):
   custom_parser.add_argument(
       '--xpk_path',
       type=str,
-      default=os.path.join("~", "xpk"),
+      default=get_xpk_path(),
       help='path to xpk dir.',
   )
   custom_parser.add_argument(
