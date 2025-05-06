@@ -198,6 +198,9 @@ class SamplerOutput:
   # Tokens corresponding to the generated samples.
   tokens: list[jax.Array]
 
+  # Left padded prompt tokens.
+  padded_prompt_tokens: jax.Array
+
 
 @dataclasses.dataclass(frozen=True)
 class CacheConfig:
@@ -671,6 +674,7 @@ class Sampler:
         text=decoded_outputs,
         logits=out_logits,
         tokens=out_tokens,
+        padded_prompt_tokens=all_input_ids,
     )
     return result
 

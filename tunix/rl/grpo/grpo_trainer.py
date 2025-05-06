@@ -205,20 +205,8 @@ class GrpoTrainer(peft_trainer.PeftTrainer):
   def _generate_and_compute_advantage(
       self, training_input: _TrainingInputT
   ) -> TrainExample:
-    # Tokenize prompts and pad them to `max_prompt_length`. We pad to
-    # `max_prompt_length` and not the in-batch max. length because
-    # different-shaped inputs will trigger recompilation.
     pad_value = self.sampler.vocab.pad_id()
     eos_value = self.sampler.vocab.eos_id()
-    tokenized_prompts = [
-        self.sampler.tokenize(prompt) for prompt in training_input["prompts"]
-    ]
-    prompt_ids = pad_inputs(
-        tokenized_prompts,
-        target_length=self.grpo_config.max_prompt_length,
-        pad_value=pad_value,
-        left=True,
-    )
 
     # Generate, and pad output.
     completion_output = self.sampler(
@@ -235,6 +223,7 @@ class GrpoTrainer(peft_trainer.PeftTrainer):
         pad_value=pad_value,
         left=False,
     )
+    prompt_ids = completion_output.padded_prompt_tokens
 
     (
         positions,
