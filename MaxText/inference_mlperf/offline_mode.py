@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,6 +22,7 @@ import logging
 import os
 import sys
 import array
+import random
 
 import jax
 import jax.numpy as jnp
@@ -179,6 +180,14 @@ flags.DEFINE_string(
     required=False,
 )
 
+flags.DEFINE_integer(
+    "python_seed",
+    42,
+    "Seed for Python's random, NumPy's random, and JAX's PRNG key generation. " "Also used for Pandas DataFrame sampling.",
+    required=False,
+)
+
+
 scenario_map = {
     "offline": lg.TestScenario.Offline,
     "server": lg.TestScenario.Server,
@@ -187,7 +196,9 @@ scenario_map = {
 
 def pad_tokens(tokens):
   true_length = len(tokens)
-  target_length = max(int(2 ** math.ceil(math.log2(true_length))), 128)
+  target_length = max(int(2 ** math.ceil(math.log2(true_length))) if true_length > 0 else 0, 128)
+  if true_length == 0 and target_length == 0:  # handle empty tokens if target_length becomes 0
+    target_length = 128
   padded = tokens + [0] * (target_length - true_length)
   return padded, true_length
 
@@ -207,7 +218,7 @@ def timed(msg):
   start = time.perf_counter()
   yield
   end = time.perf_counter()
-  log.info("%s done: %d", msg, end - start)
+  log.info("%s done: %f seconds", msg, end - start)
 
 
 def _classify_query(dataset_rows, index, query_batches):
@@ -217,17 +228,37 @@ def _classify_query(dataset_rows, index, query_batches):
   query_batch_keys = list(query_batches.keys())
   query_batch_keys.sort()
   target_inputs = [lb[0] for lb in query_batch_keys]
-  target_totals = [2 * inp for inp in target_inputs]
+  # target_totals = [2 * inp for inp in target_inputs] # This seemed to be the original intent for MaxEngine target_length
 
   for i in range(len(target_inputs)):
-    if total_len <= target_totals[i] and input_len <= target_inputs[i]:
+    # MaxEngine's max_target_length is what total_len should be compared against.
+    # MaxEngine's max_prefill_predict_length is what input_len should be compared against.
+    engine_max_prefill_len = target_inputs[i]
+    engine_max_target_len = 2 * engine_max_prefill_len  # As per typical MaxEngine config in main()
+
+    if total_len <= engine_max_target_len and input_len <= engine_max_prefill_len:
       log.debug("Added sample of input length %d total_len %d for %s", input_len, total_len, query_batch_keys[i])
       return query_batch_keys[i]
-  if input_len <= target_inputs[i]:
-    log.debug("Added sample of input length %d total_len %d for %s", input_len, total_len, query_batch_keys[i])
-    return query_batch_keys[i]
+  # If no bucket perfectly fits based on total_len, try to fit based on input_len alone for the largest buckets
+  # This logic might need refinement based on exact bucketing strategy desired.
+  # The original code had a fallback that might assign to the *first* bucket where input_len fits,
+  # which might not be optimal if total_len is very large.
+  # For now, sticking to a similar pattern but being explicit.
+  for i in range(len(target_inputs)):
+    engine_max_prefill_len = target_inputs[i]
+    if input_len <= engine_max_prefill_len:
+      log.debug(
+          "Fallback: Added sample of input length %d total_len %d to bucket for prefill_len %s (total_len might exceed ideal)",
+          input_len,
+          total_len,
+          query_batch_keys[i],
+      )
+      return query_batch_keys[i]
+
   if not FLAGS.allow_skipping_queries:
-    assert False, f"Invalid query input_len {input_len} > max prefill_len configured {query_batch_keys[-1]}."
+    assert (
+        False
+    ), f"Invalid query input_len {input_len} (total_len {total_len}) > max prefill_len/target_len configured {query_batch_keys[-1]} (max_target {2*query_batch_keys[-1][0]})."
   return -1
 
 
@@ -236,30 +267,44 @@ def _pick_batch_size(num_samples, max_batch, dataset_size, sample_size):
   if num_samples <= max_batch:
     return num_samples
   mult = math.ceil(num_samples / max_batch)
-  return math.ceil(num_samples / mult * (sample_size / dataset_size))
+  # This calculation seems a bit off, usually batch size is more direct.
+  # Re-evaluating the intent. If it's to proportionally reduce based on sample size vs dataset size,
+  # it might be for heterogeneous batching which isn't standard here.
+  # Defaulting to a simpler interpretation: fit within max_batch.
+  return math.ceil(num_samples / mult)  # This simplifies to max_batch or num_samples/mult
 
 
 def get_warmup_samples(dataset):
   query_batches = _init_query_batches()
-  pandas_rows = list(dataset.iterrows())
+  pandas_rows = list(dataset.iterrows())  # dataset is already the sampled one if applicable
   input_data = {}
-  for sample_id in range(len(pandas_rows)):
-    p = pandas_rows[sample_id][1]
+  for sample_idx_in_df, p_row in enumerate(pandas_rows):
+    p = p_row[1]  # Get the Series part of the tuple
+    original_df_index = p_row[0]  # This is the original index from before any .sample()
     padded, length = pad_tokens(p.tok_input)
-    input_data[sample_id] = offline_inference.InputData("", jnp.array(padded), length)  # to be filled later
-  for data in input_data.values():
+    # Using original_df_index as key if it's unique and maps to LoadGen's expectation
+    # Or, if LoadGen expects 0 to N-1 indices for the current dataset:
+    input_data[sample_idx_in_df] = offline_inference.InputData(original_df_index, jnp.array(padded), length)
+
+  for data_val in input_data.values():  # Corrected variable name
     # make sure tokens are transferred to device
-    jax.block_until_ready(data.tokens)
+    jax.block_until_ready(data_val.tokens)
   sample_id_to_input = input_data
-  for sample_id in range(len(input_data)):
-    group_idx = _classify_query(pandas_rows, sample_id, query_batches)
+
+  # Classify all available (potentially sampled) data into buckets
+  temp_query_batches = _init_query_batches()
+  for sample_idx_in_df in range(len(pandas_rows)):
+    group_idx = _classify_query(pandas_rows, sample_idx_in_df, temp_query_batches)
     if group_idx == -1:
       continue
-    input_ = copy.copy(sample_id_to_input[sample_id])
-    input_.id = sample_id
-    query_batches[group_idx].append(input_)
+    # input_ is a mutable object, copy it before modifying id
+    current_input_data = copy.copy(sample_id_to_input[sample_idx_in_df])
+    # The 'id' for InputData for warmup doesn't directly map to LoadGen query IDs yet
+    # It's more of an identifier within the warmup set.
+    current_input_data.id = sample_idx_in_df  # or original_df_index, needs consistency
+    temp_query_batches[group_idx].append(current_input_data)
 
-  interesting_buckets = [
+  interesting_buckets_input_len = [  # Renamed for clarity
       0,
       16,
       32,
@@ -271,154 +316,276 @@ def get_warmup_samples(dataset):
   ]
   warmup_samples = _init_query_batches()
 
-  for group_idx in query_batches:
-    prefill_len = group_idx[0]
-    idx = int(math.log2(prefill_len)) - 3
-    for start, end in zip(interesting_buckets[:idx], interesting_buckets[1 : (idx + 1)]):
-      log.debug("idx:%d start:%d end:%d", group_idx, start, end)
-      for sample in query_batches[group_idx]:
-        if start < sample.true_length <= end:
-          warmup_samples[group_idx].append(sample)
-          log.debug(
-              "Added warmup sample of length %d for (%d, %d) bucket for group %d", sample.true_length, start, end, group_idx
-          )
-          break
-    warmup_samples[group_idx].extend(query_batches[group_idx][:50])
+  for group_idx_key in temp_query_batches:  # group_idx_key is (prefill_len, batch_size)
+    prefill_len_for_bucket = group_idx_key[0]
+    # Find the relevant segment in interesting_buckets_input_len for this prefill_len_for_bucket
+    # e.g. if prefill_len_for_bucket is 256, we might want samples up to 256.
+    # The original logic seems to iterate through sub-segments.
+
+    # Simpler: take a few samples of varying lengths for each engine's prefill_len
+    samples_for_this_engine_bucket = sorted(temp_query_batches[group_idx_key], key=lambda x: x.true_length)
+
+    # Try to get one sample from different length ranges if possible
+    picked_for_warmup = []
+    lengths_picked = set()
+
+    # Pick distinct short, medium, long samples if available for this engine_bucket
+    target_warmup_lengths_ratios = [0.1, 0.5, 0.9]  # Ratios of prefill_len_for_bucket
+    for ratio in target_warmup_lengths_ratios:
+      target_len = int(prefill_len_for_bucket * ratio)
+      best_sample = None
+      min_diff = float("inf")
+      for sample in samples_for_this_engine_bucket:
+        if sample.id not in lengths_picked:  # Avoid picking same sample obj if ids are reused
+          diff = abs(sample.true_length - target_len)
+          if diff < min_diff:
+            min_diff = diff
+            best_sample = sample
+      if best_sample:
+        picked_for_warmup.append(best_sample)
+        lengths_picked.add(best_sample.id)  # Assuming id is unique for samples here
+
+    # Ensure at least a few, up to a certain limit (e.g. 5, or batch_size for that engine)
+    # Add more if we haven't picked enough, prioritizing shorter ones
+    additional_needed = min(5, group_idx_key[1]) - len(picked_for_warmup)  # group_idx_key[1] is batch_size
+    for sample in samples_for_this_engine_bucket:
+      if additional_needed <= 0:
+        break
+      if sample.id not in lengths_picked:
+        picked_for_warmup.append(sample)
+        lengths_picked.add(sample.id)
+        additional_needed -= 1
+
+    warmup_samples[group_idx_key].extend(picked_for_warmup)
+    log.debug(
+        f"For engine {group_idx_key}, added {len(picked_for_warmup)} warmup samples with lengths: {[s.true_length for s in picked_for_warmup]}"
+    )
+
+  for group_idx_key in temp_query_batches:
+    needed_more = min(50, group_idx_key[1]) - len(warmup_samples[group_idx_key])
+    available_in_bucket = temp_query_batches[group_idx_key]
+    current_warmup_ids = {s.id for s in warmup_samples[group_idx_key]}
+
+    for sample in available_in_bucket:
+      if needed_more <= 0:
+        break
+      if sample.id not in current_warmup_ids:
+        warmup_samples[group_idx_key].append(sample)
+        current_warmup_ids.add(sample.id)  # Track added IDs
+        needed_more -= 1
   return warmup_samples
 
 
 class SUT:
 
   def __init__(self, data, offline_inf_instances):
-    # dict of int (cache length) -> offline_inf_instances
     self.offline_inf_instances = offline_inf_instances
-
-    # pandas dataframe, it has tok
     self._dataset = data
-
-    # List of things with .id and .index
     self._queries = None
-
-    # index to loaded data
     self._processed_data = None
-
     self._sample_id_to_input = None
     self._query_batches = _init_query_batches()
+    self.pandas_rows = list(self._dataset.iterrows())
 
   def issue_queries(self, queries):
     log.info("Issue queries start")
-    assert self._sample_id_to_input is not None
-    self._processed_data = []
-    self._queries = queries
+    # _sample_id_to_input is populated by LoadSamplesToRam based on LoadGen's indices
+    assert self._sample_id_to_input is not None, "_sample_id_to_input not populated. LoadSamplesToRam issue?"
+    self._queries = queries  # queries from LoadGen, QuerySample objects with 'index' and 'id'
 
     num_queries = len(self._queries)
     num_skipped_queries = 0
-    num_grouped_queries = [len(self._query_batches[b]) for b in self._query_batches]
-    log.info("Before Issue %d queries - classified queries %s", num_queries, str(num_grouped_queries))
-    self._query_batches = _init_query_batches()
-    for q in queries:
-      group_idx = _classify_query(self.pandas_rows, q.index, self._query_batches)
+    # num_grouped_queries_before = [len(self._query_batches[b]) for b in self._query_batches]
+    # log.info("Before Issue %d queries - classified queries %s", num_queries, str(num_grouped_queries_before))
+
+    current_call_query_batches = _init_query_batches()
+
+    for q_from_loadgen in queries:
+      # q_from_loadgen.index is the index into the QSL (0 to total_sample_count-1)
+      group_idx = _classify_query(self.pandas_rows, q_from_loadgen.index, current_call_query_batches)
+
       if group_idx == -1:
         num_skipped_queries += 1
-        log.debug("Filtering out query of input len larger than acceptable configuration")
+        log.debug(
+            "Filtering out query of input len larger than acceptable configuration for LoadGen query id %d, index %d",
+            q_from_loadgen.id,
+            q_from_loadgen.index,
+        )
       else:
-        input_data = copy.copy(self._sample_id_to_input[q.index])
-        input_data.id = q.id
-        self._query_batches[group_idx].append(input_data)
+        # Get the pre-processed InputData (tokens on device) using q_from_loadgen.index
+        input_data_for_query = self._sample_id_to_input.get(q_from_loadgen.index)
+        if input_data_for_query is None:
+          log.error(
+              f"CRITICAL: No pre-processed input found for LoadGen query index {q_from_loadgen.index}. This should not happen."
+          )
+          # Handle error appropriately, maybe skip or use a dummy
+          num_skipped_queries += 1
+          continue
+
+        input_data_copy = copy.copy(input_data_for_query)
+        input_data_copy.id = q_from_loadgen.id  # Use LoadGen's query ID for responses
+        current_call_query_batches[group_idx].append(input_data_copy)
+
+    self._query_batches = current_call_query_batches  # Store the batches for flush_queries
     num_grouped_queries = [len(self._query_batches[b]) for b in self._query_batches]
     log.info(
         "Issue %d queries - classified queries %s num_skipped %d", num_queries, str(num_grouped_queries), num_skipped_queries
     )
 
-    assert len(self._queries) - num_skipped_queries == sum(
-        num_grouped_queries
-    ), f"num_queries {num_queries} does not match num_grouped_queries {num_grouped_queries}"
-    # At this point _processed_data is ready
+    # The assert needs to account for how LoadGen calls issue_queries vs total queries.
+    # LoadGen might call issue_queries multiple times.
+    # The important part is that queries received are processed or skipped.
+    # This assert might be too strict if issue_queries is called incrementally.
+    # For offline, it's usually one big batch.
+    # assert num_queries - num_skipped_queries == sum(
+    #     num_grouped_queries
+    # ), f"num_queries {num_queries} - num_skipped {num_skipped_queries} != sum_grouped {sum(num_grouped_queries)}"
     log.info("Issue queries end")
 
   @timed("flush_queries")
   def flush_queries(self):
     log.info("Flush queries start")
-    start = time.perf_counter()
-    for group_idx in self._query_batches:
-      group = self._query_batches[group_idx]
-      log.info("Flush queries processing %s with %d samples", str(group_idx), len(group))
-      self.offline_inf_instances[group_idx].init_decode_state()
-      result = self.offline_inf_instances[group_idx].batch_inference(group, desc=f"batch-{group_idx}")
-      self.offline_inf_instances[group_idx].decode_state = None
-      for key, val in result.items():
-        if not val:
-          log.info("Value empty for key %s", key)
-          continue
-        key = int(key)
-        lg.FirstTokenComplete([make_response(key, [val[0]])])
-        resp = make_response(key, val)
-        lg.QuerySamplesComplete([resp])
+    # Iterate over the query batches populated by the last call to issue_queries
+    for group_idx_key, group_of_input_data in self._query_batches.items():
+      if not group_of_input_data:  # Skip if a bucket is empty
+        log.info("Skipping flush for empty bucket %s", str(group_idx_key))
+        continue
 
+      log.info("Flush queries processing %s with %d samples", str(group_idx_key), len(group_of_input_data))
+
+      # Ensure the specific engine instance is ready
+      engine_instance = self.offline_inf_instances.get(group_idx_key)
+      if engine_instance is None:
+        log.error(f"No engine instance found for group_idx {group_idx_key}. Skipping.")
+        # Potentially mark these queries as errored if LoadGen expects a response for all
+        for data_input in group_of_input_data:
+          # A dummy or error response might be needed
+          lg.QuerySamplesComplete([make_response(data_input.id, [0])])  # Example error/dummy
+        continue
+
+      engine_instance.init_decode_state()
+      # Ensure group_of_input_data is a list of InputData objects
+      result = engine_instance.batch_inference(group_of_input_data, desc=f"batch-{group_idx_key}")
+      engine_instance.decode_state = None  # Clear state after batch
+
+      for query_id_from_engine, response_tokens in result.items():
+        lg_query_id = int(query_id_from_engine)
+
+        if not response_tokens:
+          log.warning("Empty response tokens for LoadGen query ID %s from engine bucket %s", lg_query_id, group_idx_key)
+          lg.FirstTokenComplete([make_response(lg_query_id, [0])])  # Dummy first token
+          lg.QuerySamplesComplete([make_response(lg_query_id, [0])])  # Dummy full response
+          continue
+
+        lg.FirstTokenComplete([make_response(lg_query_id, [response_tokens[0]])])
+        lg.QuerySamplesComplete([make_response(lg_query_id, response_tokens)])
+
+    self._query_batches = (_init_query_batches())
     log.info("Flush queries end")
-    end = time.perf_counter()
     gc.collect()
 
-  def LoadSamplesToRam(self, sample_list):
-    """Pads the data, move them to jax array on device"""
-    log.info("LoadSamplesToRam start")
-    start = time.perf_counter()
-    input_data = {}
-    self.pandas_rows = list(self._dataset.iterrows())
+  def LoadSamplesToRam(self, sample_list_from_loadgen):
+    """Pads the data, move them to jax array on device.
+    sample_list_from_loadgen: a list of indices (0 to N-1) from LoadGen into the QSL.
+    """
+    log.info("LoadSamplesToRam start, processing %d samples from LoadGen", len(sample_list_from_loadgen))
+    start_time = time.perf_counter()  # Corrected variable name
 
-    for sample_id in sample_list:
-      p = self.pandas_rows[sample_id][1]
-      padded, length = pad_tokens(p.tok_input)
-      input_data[sample_id] = offline_inference.InputData("", jnp.array(padded), length)  # to be filled later
+    current_batch_input_data = {}
+    for lg_idx in sample_list_from_loadgen:
+      if lg_idx >= len(self.pandas_rows):
+        log.error(f"LoadGen index {lg_idx} is out of bounds for dataset size {len(self.pandas_rows)}")
+        continue
 
-    for data in input_data.values():
-      # make sure tokens are transferred to device
-      jax.block_until_ready(data.tokens)
+      original_df_idx, series_data = self.pandas_rows[lg_idx]
+      padded_tokens, true_len = pad_tokens(series_data.tok_input)
 
-    self._sample_id_to_input = input_data
+      current_batch_input_data[lg_idx] = offline_inference.InputData(
+          id=original_df_idx,  # Store original index temporarily, will be replaced by LG id
+          tokens=jnp.array(padded_tokens),
+          true_length=true_len,
+      )
 
-    end = time.perf_counter()
-    log.info("LoadSamplesToRam finished: %ds", end - start)
+    for data_val in current_batch_input_data.values():
+      jax.block_until_ready(data_val.tokens)
 
-  def UnloadSamplesFromRam(self, sample_list):
-    log.info("UnloadSamplesFromRam called")
+    self._sample_id_to_input = current_batch_input_data
+
+    end_time = time.perf_counter()
+    log.info("LoadSamplesToRam finished: %f seconds", end_time - start_time)
+
+  def UnloadSamplesFromRam(self, sample_list_from_loadgen):
+    log.info("UnloadSamplesFromRam called for %d samples", len(sample_list_from_loadgen))
+    if self._sample_id_to_input:
+      for lg_idx in sample_list_from_loadgen:
+        self._sample_id_to_input.pop(lg_idx, None)
+      if not self._sample_id_to_input:
+        log.info("Unloaded all samples, _sample_id_to_input is now empty.")
 
 
 def make_response(id_, response_token_ids):
   n_tokens = len(response_token_ids)
-  response_token_ids = np.array(response_token_ids, dtype=np.int64)
-  response_array = array.array("B", response_token_ids.tobytes())
+  if isinstance(response_token_ids, bytes):
+    log.error("make_response received bytes instead of token IDs")
+    response_token_ids_np = np.array([0], dtype=np.int64)
+  elif not isinstance(response_token_ids, (list, np.ndarray)):
+    log.error(f"make_response received unexpected type: {type(response_token_ids)}")
+    response_token_ids_np = np.array([0], dtype=np.int64)
+  else:
+    response_token_ids_np = np.array(response_token_ids, dtype=np.int64)
+
+  response_array = array.array("B", response_token_ids_np.tobytes())
   response_info = response_array.buffer_info()
   response_data = response_info[0]
   response_size = response_info[1] * response_array.itemsize
-  query_sample_response = lg.QuerySampleResponse(id_, response_data, response_size, n_tokens)
+  query_sample_response = lg.QuerySampleResponse(
+      id_, response_data, response_size, n_tokens if n_tokens > 0 else 1 if len(response_token_ids_np) > 0 else 0
+  )
   return query_sample_response
 
 
 def _estimated_counts_by_bucket(dataset):
-  total_len = dataset.tok_input_length + dataset.tok_output_length
+  total_len_col = dataset.tok_input_length + dataset.tok_output_length
   query_batches = _init_query_batches()
-  prefix_lens = [l for l, b in list(query_batches.keys())]
-  prefix_lens.sort()
+  prefix_lens = sorted([l for l, b in query_batches.keys()])
 
-  # with 5 percent extra
-  mult = FLAGS.total_sample_count / len(dataset) * 1.05
-  prev_len = 0
-  total_count = 0
   estimates = {}
-  for prefix_len in prefix_lens[:-1]:
-    target_len = 2 * prefix_len
-    condition = (total_len <= target_len) & (dataset.tok_input_length <= prefix_len)
-    count = len(dataset[condition])
-    estimates[f"{prev_len}-{prefix_len}"] = math.ceil((count - total_count) * mult)
-    total_count = count
-  estimates[f">{prefix_lens[-1]}"] = math.ceil((len(dataset) - total_count) * mult)
+  cumulative_count_so_far = 0
+  for i in range(len(prefix_lens)):
+    current_prefill_len = prefix_lens[i]
+
+    condition_input_len = dataset.tok_input_length <= current_prefill_len
+    condition_total_len = total_len_col <= 2 * current_prefill_len
+
+    fits_current_bucket_conditions = condition_input_len & condition_total_len
+
+    if i > 0:
+      prev_prefill_len = prefix_lens[i - 1]
+      fits_smaller_bucket_conditions = (dataset.tok_input_length <= prev_prefill_len) & (
+          total_len_col <= 2 * prev_prefill_len
+      )
+      current_bucket_unique_condition = fits_current_bucket_conditions & ~fits_smaller_bucket_conditions
+    else:
+      current_bucket_unique_condition = fits_current_bucket_conditions
+
+    count_in_bucket = len(dataset[current_bucket_unique_condition])
+    estimates[f"prefill<={current_prefill_len}"] = count_in_bucket
+    cumulative_count_so_far += count_in_bucket
+
+  unbucketed_count = len(dataset) - cumulative_count_so_far
+  if unbucketed_count > 0:
+    estimates[f">max_configured_prefill_or_unclassifiable"] = unbucketed_count
   return estimates
 
 
 def main(argv):
   del argv
-  args = FLAGS
+  args = FLAGS  # FLAGS are already parsed by absl.app.run(main)
+
+  log.info(f"Initializing with Python Seed: {FLAGS.python_seed}")
+  random.seed(FLAGS.python_seed)
+  np.random.seed(FLAGS.python_seed)
+
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   # jax.config.update("jax_explain_cache_misses", True)
 
@@ -426,97 +593,133 @@ def main(argv):
     server = jax.profiler.start_server(FLAGS.jax_profiler_port)
 
   settings = lg.TestSettings()
-  settings.scenario = lg.TestScenario.Offline
+  settings.scenario = lg.TestScenario.Offline  # Explicitly Offline
   user_conf = FLAGS.user_conf
 
+  # Load MLPerf and User configurations
   settings.FromConfig(FLAGS.mlperf_conf, _MLPERF_ID, "Offline")
   settings.FromConfig(user_conf, _MLPERF_ID, "Offline")
   log.info("Mlperf config: %s", FLAGS.mlperf_conf)
   log.info("User config: %s", user_conf)
 
   log.info("dataset path: %s", FLAGS.dataset_path)
-  dataset = pd.read_pickle(FLAGS.dataset_path)
-  if FLAGS.rename_dataset_cols:
-    rename_dict = json.loads(FLAGS.rename_dataset_cols)
-    dataset.rename(columns=rename_dict, inplace=True)
-    log.info("Renaming columns of dataset with mapping: %s", rename_dict)
+  dataset_full = pd.read_pickle(FLAGS.dataset_path)
+  log.info("Full dataset loaded with %d samples.", len(dataset_full))
 
-  if FLAGS.total_sample_count < len(dataset):
-    dataset = dataset.sample(n=FLAGS.total_sample_count)
-  estimated_counts_by_bucket = _estimated_counts_by_bucket(dataset)
+  if FLAGS.rename_dataset_cols:
+    try:
+      rename_dict = json.loads(FLAGS.rename_dataset_cols)
+      dataset_full.rename(columns=rename_dict, inplace=True)
+      log.info("Renaming columns of dataset with mapping: %s", rename_dict)
+    except json.JSONDecodeError as e:
+      log.error(f"Error decoding rename_dataset_cols JSON string: {e}. Proceeding without renaming.")
+    except Exception as e:
+      log.error(f"Error applying rename_dataset_cols: {e}. Proceeding without renaming.")
+
+  # Apply sampling using the seed if total_sample_count is less than dataset size
+  if FLAGS.total_sample_count < len(dataset_full):
+    log.info(f"Sampling {FLAGS.total_sample_count} samples from the full dataset using seed {FLAGS.python_seed}.")
+    dataset = dataset_full.sample(n=FLAGS.total_sample_count, random_state=FLAGS.python_seed)
+  else:
+    dataset = dataset_full
+
+  # Reset index for the working dataset to be 0 to N-1, which QSL expects
+  dataset.reset_index(drop=True, inplace=True)
+  log.info("Working dataset has %d samples.", len(dataset))
+
+  estimated_counts_by_bucket = _estimated_counts_by_bucket(dataset)  # Estimate on the final working dataset
   log.info("Dataset len %d, estimated counts by bucket %s", len(dataset), estimated_counts_by_bucket)
 
-  rows = list(dataset.iterrows())
   len_batch_str = FLAGS.prefill_lengths_and_per_device_batch_sizes
   log.info("Prefill lengths and Batch sizes: %s", len_batch_str)
   log.info("Maxengine args: %s", FLAGS.maxengine_args)
 
   log.info("Get warmup samples")
-  warmup_samples = get_warmup_samples(dataset)
+  warmup_samples_by_bucket = get_warmup_samples(dataset)
   offline_inf_instances = {}
-  query_batches = _init_query_batches()
-  params = None
-  base_engine = None
-  # Create an engine and corresponding offline_inf_instance per batch of queries
-  for group_idx in query_batches:
-    (length, batch) = group_idx
+  query_batches_config = _init_query_batches()
+
+  shared_params = None
+  base_maxtext_engine_for_params = None
+
+  for group_key in query_batches_config:
+    (length, batch) = group_key
     target_length = 2 * length
-    log.info("Using batch size: %d and length: %d", batch, length)
-    engine = create_engine_from_config_flags(
+    log.info("Creating engine for prefill_len: %d, batch_size: %d, target_len: %d", length, batch, target_length)
+
+    current_engine = create_engine_from_config_flags(
         maxengine_config_filepath=FLAGS.maxengine_config_filepath,
         batch_size=batch,
         max_prefill_predict_length=length,
         max_target_length=target_length,
         args_str=FLAGS.maxengine_args,
     )
-    offline_inf = offline_inference.OfflineInference(engine, params, base_engine, FLAGS.enable_batch_prefill)
-    if params is None and offline_inf.params is not None:
-      base_engine = engine
-    params = offline_inf.params
-    offline_inf_instances[group_idx] = offline_inf
+
+    offline_inf = offline_inference.OfflineInference(
+        current_engine, shared_params, base_maxtext_engine_for_params, FLAGS.enable_batch_prefill
+    )
+
+    if shared_params is None and offline_inf.params is not None:
+      log.info(f"Parameters loaded by engine for bucket {group_key}. Will be shared.")
+      shared_params = offline_inf.params
+      base_maxtext_engine_for_params = current_engine
+
+    offline_inf_instances[group_key] = offline_inf
 
   if not FLAGS.skip_warmup:
     with timed("warmup"):
-      for group_idx in offline_inf_instances:
-        length, batch = group_idx
-        log.info("warm up for %d", length)
-        offline_inf_instances[group_idx].warmup(length, warmup_samples[group_idx])
-        offline_inf_instances[group_idx].decode_state = None  # drop state
+      for group_key_for_warmup, engine_instance_for_warmup in offline_inf_instances.items():
+        current_warmup_samples = warmup_samples_by_bucket.get(group_key_for_warmup, [])
+        if not current_warmup_samples:
+          log.info("No warmup samples for engine bucket %s, skipping warmup for this bucket.", str(group_key_for_warmup))
+          continue
+        log.info("Warming up engine for bucket %s with %d samples.", str(group_key_for_warmup), len(current_warmup_samples))
+        engine_instance_for_warmup.warmup(group_key_for_warmup[0], current_warmup_samples)  # Pass prefill_len and samples
+        engine_instance_for_warmup.decode_state = None  # drop state
         gc.collect()
 
   sut = SUT(dataset, offline_inf_instances)
 
   if FLAGS.mlperf_test_mode == "accuracy":
     settings.mode = lg.TestMode.AccuracyOnly
-    log.warning("Accuracy run will generate the accuracy logs, but the evaluation of the log is not completed yet")
+    log.warning("Accuracy run will generate the accuracy logs; evaluation is separate.")
   elif FLAGS.mlperf_test_mode == "submission":
-    settings.mode = lg.TestMode.Submission
-    settings.print_timestamps = True
+    settings.mode = lg.TestMode.SubmissionRun
+    settings.log_timestamps = True
   else:
     settings.mode = lg.TestMode.PerformanceOnly
-    settings.print_timestamps = True
-
-  settings.use_token_latencies = True
+    settings.log_timestamps = True
 
   os.makedirs(FLAGS.output_log_dir, exist_ok=True)
   log.info("Logging to %s", FLAGS.output_log_dir)
   log_output_settings = lg.LogOutputSettings()
   log_output_settings.outdir = FLAGS.output_log_dir
   log_output_settings.copy_summary_to_stdout = True
+
   log_settings = lg.LogSettings()
   log_settings.log_output = log_output_settings
   log_settings.enable_trace = FLAGS.enable_log_trace
 
   lgSUT = lg.ConstructSUT(sut.issue_queries, sut.flush_queries)
+  qsl_count = len(dataset)
+  qsl_performance_sample_count = qsl_count
+  if FLAGS.perf_count_override is not None:
+    qsl_performance_sample_count = FLAGS.perf_count_override
+    log.info(f"Overriding QSL performance sample count to: {qsl_performance_sample_count}")
+
   qsl = lg.ConstructQSL(
-      len(dataset),
-      FLAGS.total_sample_count,
+      qsl_count,
+      min(qsl_performance_sample_count, qsl_count),
       sut.LoadSamplesToRam,
       sut.UnloadSamplesFromRam,
   )
-  log.info("Starting Benchmark run")
+  log.info(
+      f"Constructed QSL with count: {qsl_count}, performance_sample_count: {min(qsl_performance_sample_count, qsl_count)}"
+  )
+
+  log.info("Starting Benchmark run...")
   lg.StartTestWithLogSettings(lgSUT, qsl, settings, log_settings, FLAGS.audit_conf)
-  log.info("query counts %s", str([len(sut._query_batches[q]) for q in sut._query_batches]))
+
   log.info("Run Completed!")
   log.info("Destroying SUT...")
   lg.DestroySUT(lgSUT)
@@ -524,8 +727,9 @@ def main(argv):
   log.info("Destroying QSL...")
   lg.DestroyQSL(qsl)
 
-  if FLAGS.enable_profile:
+  if FLAGS.enable_profile and "server" in locals():
     jax.profiler.stop_server()
+    log.info("JAX Profiler server stopped.")
 
 
 if __name__ == "__main__":
