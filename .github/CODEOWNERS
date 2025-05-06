@@ -1,2 +1,25 @@
 # Changes in this file should match with requiredReviewers in file .github/workflows/AddLabel.yml
 * @gobbleturk @khatwanimohit @bvandermoon @vipannalla @RissyRan @richjames0 @rni418 @gagika @shralex @yangyuwei @SurbhiJainUSC @hengtaoguo @A9isha @wang2yn84 @wyzhang @mitalisi @gpolovets1 @mailvijayasingh @jrplatin @patemotter @lumosis
+
+# Features
+MaxText/experimental/rl @A9isha @khatwanimohit @gagika
+MaxText/input_pipeline @aireenmei @SurbhiJainUSC
+MaxText/kernels/megablox @RissyRan @michelle-yooh
+MaxText/kernels/ragged_attention.py @patemotter @vipannalla
+MaxText/layers/pipeline.py @gobbleturk @richjames0
+MaxText/layers/moe.py @RissyRan @michelle-yooh @gagika
+MaxText/layers/multi_token_prediction.py @parambole @RissyRan @gagika
+
+# Inference
+MaxText/tests/inference @vipannalla @mitalisi @gpolovets1 @mailvijayasingh
+MaxText/inference @vipannalla @mitalisi @gpolovets1 @mailvijayasingh
+MaxText/inference_mlperf @vipannalla @mitalisi @gpolovets1 @mailvijayasingh
+
+# Benchmarks
+benchmarks/disruption_management @SujeethJinesh
+benchmarks/mmlu @gagika
+benchmarks/recipes @Obliviour @bvandermoon @raymondzouu @SujeethJinesh
+
+# JAX Stable Stack
+*jax_stable_stack.Dockerfile @parambole @Rohan-Bierneni
+*jax_stable_stack.txt @parambole @Rohan-Bierneni
