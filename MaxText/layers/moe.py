@@ -238,6 +238,16 @@ class RoutedMoE(nn.Module):
 
   def get_topk(self, gate_logits, pre_bias_logits):
     # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
+    if self.config.use_random_routing:
+      print("using random routing...")
+      bs, seq_len, num_experts = gate_logits.shape
+      indices = jnp.arange(num_experts).repeat(bs * seq_len)
+      rng = jax.random.PRNGKey(1234)
+      selected_num = bs * seq_len * self.num_experts_per_tok
+      top_k_indices = jax.random.choice(rng, indices, shape=(selected_num,)).reshape(bs, seq_len, self.num_experts_per_tok)
+      top_k_weights = jnp.take_along_axis(gate_logits, top_k_indices, axis=-1)
+      return top_k_weights, top_k_indices
+
     if self.config.model_name.startswith("deepseek3"):
       top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
     else:
@@ -357,6 +367,7 @@ class RoutedMoE(nn.Module):
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
 
   def sparse_matmul(self, inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel):
+    jax.debug.print("sparse_matmul inputs {x}", x=inputs)
     tile_size = (512, 1024, 1024)  # (m, k, n)
 
     def local_permute(inputs, global_group_sizes, local_expert_size):
@@ -365,11 +376,29 @@ class RoutedMoE(nn.Module):
       local_sizes = jax.lax.dynamic_slice_in_dim(
           global_group_sizes, local_id * local_expert_size, local_expert_size, axis=1
       ).reshape(-1)
+      jax.debug.print("local_id - {y}: local_sizes: {x}", y=local_id, x=local_sizes)
+
+      # TODO: added
+      local_count = jnp.sum(local_sizes, axis=0)
+      jax.debug.print("local_id - {y}: local_count: {x}", y=local_id, x=local_count)
+
       base_indices = jnp.mod(jnp.arange(local_sizes.shape[0]), local_expert_size)
+      jax.debug.print("local_id - {y}: base_indices: {x}", y=local_id, x=base_indices)
       expert_indices = jnp.repeat(base_indices, local_sizes, total_repeat_length=inputs.shape[0])
-      sorted_indices = jnp.argsort(expert_indices)
+      jax.debug.print("local_id - {y}: expert_indices: {x}", y=local_id, x=expert_indices)
+      sorted_indices = jnp.argsort(expert_indices)[:local_count]
+      jax.debug.print("local_id - {y}: sorted_indices: {x}", y=local_id, x=sorted_indices)
       sorted_inputs = jnp.take(inputs, indices=sorted_indices, axis=0)
-      group_size = jnp.bincount(expert_indices, length=local_expert_size)
+      jax.debug.print("local_id - {y}: sorted_inputs: {x}", y=local_id, x=sorted_inputs)
+
+      breakpoint()
+      group_size = jnp.bincount(sorted_indices, length=local_expert_size)
+      jax.debug.print("local_id - {y}: group_size: {x}", y=local_id, x=group_size)
+
+      # TODO: added
+      sorted_experts_ids = expert_indices[sorted_indices]
+      jax.debug.print("local_id - {y}: sorted_experts_ids: {x}", y=local_id, x=sorted_experts_ids)
+
       return sorted_inputs, sorted_indices, group_size
 
     def gmm(inputs, kernel, group_sizes):
@@ -413,7 +442,7 @@ class RoutedMoE(nn.Module):
         output = output[: hs_shape[0]]
       return output
 
-    def get_all_to_all_params(all_shards_group_sizes, local_expert_size, num_expert_shards):
+    def get_all_to_all_params(all_shards_group_sizes):
 
       class TransformStrategy(Enum):
         INPUT_OFFSET = auto()
@@ -440,7 +469,7 @@ class RoutedMoE(nn.Module):
           cumulated_array = jnp.cumsum(array_with_zeros, axis=0, dtype=input_array.dtype)
           return cumulated_array[shard_id]
         elif strategy == TransformStrategy.RECV_SIZE:
-          # Received size in the traget output
+          # Received size in the target output
           return input_array[:, shard_id]
         else:
           raise ValueError(f"Unknown tranform array strategy: {strategy}")
@@ -482,18 +511,20 @@ class RoutedMoE(nn.Module):
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo):
       batch_size, sequence_length, _ = x.shape
+      jax.debug.print("x before permute {x}", x=x)
       x, sorted_selected_experts, weights, group_sizes = self.permute(x, logits, pre_bias_logits)
+      jax.debug.print("original {x}", x=x)
 
       if self.get_expert_parallelism_size() > 1:
         axis_name = "expert"
         # get group sizes for all shards
         local_expert_size = self.config.num_experts // self.get_expert_parallelism_size()
         reshaped_group_sizes = jnp.sum(group_sizes.reshape(-1, local_expert_size), axis=1)
+        # jax.debug.print("reshaped_group_sizes: {x}", x=reshaped_group_sizes)
         all_shards_group_sizes = lax.all_gather(reshaped_group_sizes, axis_name=axis_name)
+        jax.debug.print("all_shards_group_sizes: {x}", x=all_shards_group_sizes)
         # calculate offsets and sizes for ragged_all_to_all operation
-        input_offsets, send_sizes, output_offsets, recv_sizes = get_all_to_all_params(
-            all_shards_group_sizes, local_expert_size, self.get_expert_parallelism_size()
-        )
+        input_offsets, send_sizes, output_offsets, recv_sizes = get_all_to_all_params(all_shards_group_sizes)
         # TODO(ranran): For better performance, we could update output buffer to a smaller
         # size to replace self.get_expert_parallelism_size() for efficiency,
         # Or we could apply capacity_factor for excessive experts.
@@ -515,27 +546,31 @@ class RoutedMoE(nn.Module):
             axis_name=axis_name,
         )
         global_group_sizes = lax.all_gather(group_sizes, axis_name=axis_name)
+        jax.debug.print("global_group_sizes: {x}", x=global_group_sizes)
         x, local_sorted_indices, group_sizes = local_permute(x, global_group_sizes, local_expert_size)
+        jax.debug.print("group_sizes: {x}", x=group_sizes)
 
-      layer_w0 = gmm(x, w0, group_sizes)
-      layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
-      layer_w1 = gmm(x, w1, group_sizes)
-      layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
-      layer_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
-      intermediate_layer = jnp.multiply(layer_act, layer_w1)
-      intermediate_output = gmm(intermediate_layer, wo, group_sizes)
-      intermediate_output = checkpoint_name(intermediate_output, "mlpwo")
-      if self.get_tensor_parallelism_size() > 1:
-        intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
+
+      # layer_w0 = gmm(x, w0, group_sizes)
+      # layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
+      # layer_w1 = gmm(x, w1, group_sizes)
+      # layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
+      # layer_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
+      # intermediate_layer = jnp.multiply(layer_act, layer_w1)
+      # intermediate_output = gmm(intermediate_layer, wo, group_sizes)
+      # intermediate_output = checkpoint_name(intermediate_output, "mlpwo")
+      # if self.get_tensor_parallelism_size() > 1:
+      #   intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
 
       if self.get_expert_parallelism_size() > 1:
         axis_name = "expert"
         # locally unpermute back to the original order
-        local_output = jnp.take(intermediate_output, indices=jnp.argsort(local_sorted_indices), axis=0)
+        # local_output = jnp.take(intermediate_output, indices=jnp.argsort(local_sorted_indices), axis=0)
+        local_output = jnp.take(x, indices=jnp.argsort(local_sorted_indices), axis=0)
         original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
         output_shape = jnp.zeros((original_inputs_first_dim, self.config.emb_dim), dtype=local_output.dtype)
         input_offsets, send_sizes, output_offsets, recv_sizes = get_all_to_all_params(
-            jnp.transpose(all_shards_group_sizes), local_expert_size, self.get_expert_parallelism_size()
+            jnp.transpose(all_shards_group_sizes)
         )
         intermediate_output = jax.lax.ragged_all_to_all(
             local_output,
@@ -546,9 +581,11 @@ class RoutedMoE(nn.Module):
             recv_sizes,
             axis_name=axis_name,
         )
+        jax.debug.print("intermediate_output {x}", x=intermediate_output)
       output = self.unpermute(
           intermediate_output, sorted_selected_experts, weights, batch_size=batch_size, sequence_length=sequence_length
       )
+      jax.debug.print("output after unpermute {x}", x=output)
       return output, None
 
     return wrapper(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)
