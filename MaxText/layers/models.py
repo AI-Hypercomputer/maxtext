@@ -437,22 +437,21 @@ class Decoder(nn.Module):
     mesh = self.mesh
     assert decoder_input_tokens.ndim == 2  # [batch, len]
 
-    jax.debug.print("*decoder_input_tokens {}", decoder_input_tokens.mean())
-    jax.debug.print("*decoder_input_tokens {}", decoder_input_tokens.shape)
-    if image_embeddings is not None:
-      jax.debug.print("*image_embeddings {}", image_embeddings.mean())
-      jax.debug.print("*image_embeddings {}", image_embeddings.shape)
+    # jax.debug.print("*decoder_input_tokens {}", decoder_input_tokens.mean())
+    # jax.debug.print("*decoder_input_tokens {}", decoder_input_tokens.shape)
+    # if image_embeddings is not None:
+    #   jax.debug.print("*image_embeddings {}", image_embeddings.mean())
+    #   jax.debug.print("*image_embeddings {}", image_embeddings.shape)
 
     # [batch, length] -> [batch, length, emb_dim]
     y = self.shared_embedding(decoder_input_tokens.astype("int32"))
 
     # Let's do the merge_mm_tokens here
     if image_embeddings is not None:
-      mm_token_mask = decoder_input_tokens == -2
       y = multimodal_utils.merge_mm_embeddings(
         text_embeddings=y,
         vision_embeddings=image_embeddings,
-        mask=mm_token_mask,
+        mask=bidirectional_mask,
       )
 
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
