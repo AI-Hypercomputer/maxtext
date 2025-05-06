@@ -202,6 +202,10 @@ class GrpoTrainer(peft_trainer.PeftTrainer):
   def _post_process_train_step(self, aux: Any) -> None:
     self._metrics_logger.log("kl", aux["kl"], self._mode, self._train_steps)
 
+  @override
+  def _post_process_eval_step(self, aux: Any) -> None:
+    self._metrics_logger.log("kl", aux["kl"], self._mode, self._train_steps)
+
   def _generate_and_compute_advantage(
       self, training_input: _TrainingInputT
   ) -> TrainExample:
