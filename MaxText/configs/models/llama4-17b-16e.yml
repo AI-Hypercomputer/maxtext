@@ -18,7 +18,7 @@ mlp_activations: ["silu","linear"]
 enable_dropout: False
 logits_via_embedding: False
 tokenizer_type: "huggingface"
-tokenizer_path: "meta-llama/Llama-4-Scout-17B-16E"
+tokenizer_path: "meta-llama/Llama-4-Scout-17B-16E-Instruct"
 
 base_emb_dim: 5120
 base_num_decoder_layers: 48
@@ -41,4 +41,4 @@ temperature_tuning: True
 # Chunk attention is used on all RoPE layers
 # otherwise, on NoPE layers, use global attention
 chunk_attn_window_size: 8192
-image_size_for_vit: 336 
+image_size_for_vit: 336
