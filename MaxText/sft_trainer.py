@@ -16,20 +16,16 @@
 
 from datetime import datetime
 import os
-import sys
 import queue
 from typing import Sequence
+from dataclasses import dataclass
+from typing import Any, Callable
+import contextlib
 
 from absl import app
-
-import numpy as np
-
 import tensorflow as tf
-
 import jax
 from flax.linen import partitioning as nn_partitioning
-
-from ml_goodput_measurement import monitoring
 
 from MaxText import checkpointing
 from MaxText import max_utils
@@ -41,47 +37,95 @@ from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
 from MaxText.metric_logger import MetricLogger
 from MaxText.train import (
-    check_example_batch,
-    train_step as inner_train_step,
-    eval_step as inner_eval_step,
-    EPS,
-    get_first_step,
-    load_next_batch,
-    record_scalar_metrics,
-    save_checkpoint,
-    setup_mesh_and_model,
-    train_step,
-    validate_train_config,
+  check_example_batch,
+  train_step as inner_train_step,
+  eval_step as inner_eval_step,
+  EPS,
+  get_first_step,
+  record_scalar_metrics,
+  save_checkpoint,
+  setup_mesh_and_model,
+  train_step,
+  validate_train_config,
 )
-
 from MaxText.utils import gcs_utils
 from MaxText.utils.goodput_utils import maybe_start_goodput_monitoring, create_goodput_recorder, maybe_record_goodput
 
-def rjx_logging(state, metrics, step):
-  jax.block_until_ready(state) # Ensure computation is finished before getting values
 
-  try:
-      params_on_host = jax.device_get(state.params)
-      weight_slice = params_on_host['params']['decoder']['logits_dense']['kernel'][42, 88]  
-      max_logging.log(f"rjx: State after step {step} - Sample weight: {weight_slice}")
-      # step 6: 6.34193e-05 (others steps: 5.60284e-05, 1.94311e-05)
-
-      metrics_on_host = jax.device_get(metrics)
-      max_logging.log(f"rjx: State after step {step} - Metrics: {metrics_on_host}")
-      # step 6: Metrics: {'scalar': {'learning/grad_norm': array(0.996094, dtype=bfloat16), 'learning/loss': array(9.86612, dtype=float32), 'learning/moe_lb_loss': array(0., dtype=float32), 'learning/param_norm': array(14464, dtype=bfloat16), 'learning/raw_grad_norm': array(7.5625, dtype=bfloat16), 'learning/total_weights': array(3615, dtype=int32)}, 'scalars': {}}
-  except Exception as e:
-      max_logging.log(f"rjx: Error logging state details after step {step}: {e}")
-  max_logging.log(f"rjx: ---------- End step {step} ----------")
+class StopTraining(Exception):
+  pass
 
 
-class TrainingMetrics:
-  def __init__(self, config, writer, learning_rate_schedule):
+class DataLoader:
+  def __init__(self, config, data_iterator, recorder):
+    self.reuse_example_batch = config.reuse_example_batch
+    self.data_iterator = data_iterator
+    self.recorder = recorder
+    self.last_batch = None
+
+  def try_load_next_batch(self):
+    with maybe_record_goodput(self.recorder, "data_loading"):
+      if self.reuse_example_batch and self.last_batch:
+        return self.last_batch
+      
+      try:
+        self.last_batch = next(self.data_iterator)
+      except Exception as e:  # pylint: disable=broad-except
+        max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
+        self.last_batch = None
+        raise StopTraining()
+
+      return self.last_batch
+
+
+class EvalMetrics:
+  def __init__(self):
+    self.all_eval_metrics = []
+
+  def __bool__(self):
+    return bool(self.all_eval_metrics)
+
+  def append(self, metrics):
+    self.all_eval_metrics.append(metrics)
+
+  def aggregate(self):
+    cumulative_eval_metrics = {
+          "eval/total_loss": 0.0,
+          "eval/total_weights": 0.0,
+          "eval/avg_loss": 0.0,
+          "eval/moe_lb_loss": 0.0,
+    }
+
+    for eval_metrics in self.all_eval_metrics:
+      cumulative_eval_metrics["eval/total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
+      cumulative_eval_metrics["eval/total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
+      cumulative_eval_metrics["eval/moe_lb_loss"] += float(eval_metrics["scalar"]["evaluation/moe_lb_loss"])
+
+    eval_loss = cumulative_eval_metrics["eval/total_loss"] / (
+      cumulative_eval_metrics["eval/total_weights"] + EPS
+    )
+
+    eval_step_count = len(self.all_eval_metrics)
+    cumulative_eval_metrics["eval/avg_loss"] = eval_loss
+    cumulative_eval_metrics["eval/avg_moe_lb_loss"] = (
+        cumulative_eval_metrics["eval/moe_lb_loss"] / (eval_step_count + EPS)
+    )
+
+    total_weights = cumulative_eval_metrics["eval/total_weights"]
+
+    return {"scalar": cumulative_eval_metrics}, eval_loss, total_weights
+
+
+# TODO: we likely should defer accessing metrics until the n+1th training step has completed
+# to not force blocking
+class MetricsRecorder:
+  def __init__(self, config, train_ctx):
     self.per_device_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(config)
     self.per_device_tokens = maxtext_utils.calculate_tokens_training_per_device(config)
     self.running_gcs_metrics = [] if config.gcs_metrics else None
     self.performance_metric_queue = self.get_performance_metric_queue(config)
-    self.metric_logger = MetricLogger(writer, config)
-    self.learning_rate_schedule = learning_rate_schedule
+    self.metric_logger = MetricLogger(train_ctx.writer, config)
+    self.learning_rate_schedule = train_ctx.learning_rate_schedule
     self.last_step_completion = datetime.now()
 
   def get_performance_metric_queue(self, config):
@@ -102,40 +146,15 @@ class TrainingMetrics:
     step_time_delta = now - self.last_step_completion
     self.last_step_completion = now
   
-    record_scalar_metrics(metrics, step_time_delta, self.per_device_tflops, self.learning_rate_schedule(step), self.per_device_tokens)
+    lr_schedule = self.learning_rate_schedule(step)
+    record_scalar_metrics(metrics, step_time_delta, self.per_device_tflops, lr_schedule, self.per_device_tokens)
     if self.performance_metric_queue:
       self.performance_metric_queue.put(step_time_delta.total_seconds())
 
     self.metric_logger.write_metrics(self.running_gcs_metrics, metrics, step)
 
-  def record_eval_metrics(self, all_eval_metrics, step):
-    cumulative_eval_metrics = {
-      "scalar": {
-          "eval/total_loss": 0.0,
-          "eval/total_weights": 0.0,
-          "eval/avg_loss": 0.0,
-          "eval/moe_lb_loss": 0.0,
-      }
-    }
-
-    for eval_metrics in all_eval_metrics:
-      cumulative_eval_metrics["scalar"]["eval/total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
-      cumulative_eval_metrics["scalar"]["eval/total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
-      cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] += float(eval_metrics["scalar"]["evaluation/moe_lb_loss"])
-
-    eval_loss = cumulative_eval_metrics["scalar"]["eval/total_loss"] / (
-      cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS
-    )
-
-    eval_step_count = len(all_eval_metrics)
-    cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
-    cumulative_eval_metrics["scalar"]["eval/avg_moe_lb_loss"] = (
-        cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
-    )
-
-    self.metric_logger.write_metrics(self.running_gcs_metrics, cumulative_eval_metrics, step, is_training=False)
-
-    return eval_loss, cumulative_eval_metrics['scalar']['eval/total_weights']
+  def record_eval_metrics(self, aggregated_metrics, step):
+    self.metric_logger.write_metrics(self.running_gcs_metrics, aggregated_metrics, step, is_training=False)
 
 
 class Profiler:
@@ -147,27 +166,77 @@ class Profiler:
     if config.profiler != "" and self.prof.start_initial_profile_step >= config.steps:
       raise ValueError("Profiling requested but initial profiling step set past training final step")
   
-  def start_train_step(self, step):
+  def _start_train_step(self, step):
     if step == self.prof.start_initial_profile_step or self.prof.should_activate_periodic_profile(step):
-      self.prof.activate(blocking_object=self.state, optional_postfix=f"step_{step}" if self.config.profile_periodically_period > 0 else "")
+      postfix = f"step_{step}" if self.config.profile_periodically_period > 0 else ""
+      self.prof.activate(blocking_object=self.state, optional_postfix=postfix)
 
 
-  def end_train_step(self, step):
+  def _end_train_step(self, step):
     if step == self.prof.finished_initial_profile_step or self.prof.should_deactivate_periodic_profile(step):
         self.prof.deactivate(blocking_object=self.state)
 
-  def end_train_loop(self):
+  @contextlib.contextmanager
+  def train_step(self, step):
+    try:
+      self._start_train_step(step)
+      yield
+    finally:
+      self._end_train_step(step)
+
+  @contextlib.contextmanager
+  def train_loop(self):
+    try:
+      yield
+    finally:
+      self._end_train_loop()
+
+  def _end_train_loop(self):
     self.prof.deactivate()
 
 
-def try_load_next_batch(recorder, config, data_iterator, example_batch):
-  with maybe_record_goodput(recorder, "data_loading"):
-    try:
-      return load_next_batch(data_iterator, example_batch, config)
-    except Exception as e:  # pylint: disable=broad-except
-      max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
-      return None
-    
+@dataclass
+class TrainingContext:
+  writer: Any
+  checkpoint_manager: Any
+  mesh: Any    
+  model: Any
+  learning_rate_schedule: Any
+  tx: Any
+  recorder: Any
+
+
+@dataclass
+class LoopContext:
+  # truly immutable objects
+  train_rng: jax.random.PRNGKey
+  p_train_step: Callable 
+  p_eval_step: Callable
+  start_step: int
+  # NOTE: when used, these objects are side-effecting
+  profiler: Profiler
+  metrics_recorder: MetricsRecorder
+  data_loader: Any
+  eval_data_iterator: Any
+  # NOTE: this field is mutable and will be updated by the inner train step function
+  state: Any
+
+
+def set_up_environment(config):
+  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+
+  # TF allocates extraneous GPU memory when using TFDS and this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
+  tf.config.set_visible_devices([], "GPU")
+  os.environ["TFDS_DATA_DIR"] = config.dataset_path
+
+  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+
+  if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
+    os.environ["LIBTPU_INIT_ARGS"] = (
+      os.environ.get("LIBTPU_INIT_ARGS", "") + 
+      " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+    )
+
 
 def get_step_rng(init_rng, step, eval_step = None):
   # we need to generate a unique key per train step in the case of training 
@@ -179,51 +248,27 @@ def get_step_rng(init_rng, step, eval_step = None):
     return jax.random.fold_in(interval_base_rng, eval_step)
 
 
-def train_step(step, config, mesh, recorder, data_iterator, init_rng, p_train_step, example_batch, state):
-  with jax.profiler.StepTraceAnnotation("train", step_num=step):
-    example_batch = try_load_next_batch(recorder, config, data_iterator, example_batch)
-    if example_batch:
-      check_example_batch(config, example_batch=example_batch)
-      # pylint: disable=not-callable
-      step_rng = get_step_rng(init_rng, step)
-      with maybe_record_goodput(recorder, "step", step):
-        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-          state, metrics = p_train_step(state, example_batch, step_rng)
-
-      rjx_logging(state, metrics, step)
-
-  return state, metrics, example_batch
+def print_compiled_train_step_stats(compiled_train):
+  compiled_stats = compiled_train.memory_analysis()
+  if compiled_stats is not None:
+    max_logging.log(
+        f"Output size: {compiled_stats.output_size_in_bytes}, "
+        f"temp size: {compiled_stats.temp_size_in_bytes}, "
+        f"argument size: {compiled_stats.argument_size_in_bytes}, "
+        f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
+    )
 
 
-def maybe_eval(config, step, start_step, eval_data_iterator, p_eval_step, mesh, init_rng, state):
-  all_eval_metrics = []
-  # FIXME: this should be >=?
-  if config.eval_interval > 0 and step >= start_step and (step + 1) % config.eval_interval == 0:
-    assert eval_data_iterator
-    
-    # pylint: disable=not-callable
-    for eval_step, eval_batch in enumerate(eval_data_iterator):
-      if config.eval_steps > 0 and eval_step >= config.eval_steps:
-        break
-      
-      step_rng = get_step_rng(init_rng, step, eval_step)
-      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        eval_metrics = p_eval_step(state, eval_batch, step_rng)
-        all_eval_metrics.append(eval_metrics)
+def get_and_compile_eval(config, train_ctx, state_mesh_shardings):
+  get_partial_eval = maxtext_utils.get_functional_eval_with_signature
 
-      max_logging.log(f"Completed eval step {eval_step}")
-    
-  return all_eval_metrics
-
-
-def get_and_compile_eval(config, mesh, state_mesh_shardings, model):
   (
       functional_eval,
       in_shard_eval,
       out_shard_eval,
       static_argnums_eval,
       donate_argnums_eval,
-  ) = maxtext_utils.get_functional_eval_with_signature(inner_eval_step, mesh, state_mesh_shardings, model, config)
+  ) = get_partial_eval(inner_eval_step, train_ctx.mesh, state_mesh_shardings, train_ctx.model, config)
 
   p_eval_step = jax.jit(
       functional_eval,
@@ -236,25 +281,17 @@ def get_and_compile_eval(config, mesh, state_mesh_shardings, model):
   return p_eval_step
 
 
-def get_and_compile_step_functions(config, state, mesh, state_mesh_shardings, model, do_eval, rng):
-  # get the compilation of functional_train and eval, either by loading the compiled version or wrapping a new one in a jit
+def get_and_compile_step_functions(config, train_ctx, state_mesh_shardings, do_eval, rng, state):
+  get_partial_train = maxtext_utils.get_functional_train_with_signature
+
   (
     functional_train,
     in_shard_train,
     out_shard_train,
     static_argnums_train,
     donate_argnums_train,
-  ) = maxtext_utils.get_functional_train_with_signature(inner_train_step, mesh, state_mesh_shardings, model, config)
-
-  if config.compiled_trainstep_file != "":
-    max_logging.log("Loading the compiled function...")
-    # Need to pass train signature and state to determine i/o shapes of train_state for now.
-    p_train_step = maxtext_utils.load_compiled(config, functional_train, state)
-    max_logging.log("Loaded compiled function")
-    # TODO: p_eval_step is not yet supported in load_compiled
-
-    return p_train_step, None
-
+  ) = get_partial_train(inner_train_step, train_ctx.mesh, state_mesh_shardings, train_ctx.model, config)
+  
   p_train_step = jax.jit(
     functional_train,
     in_shardings=in_shard_train,
@@ -263,12 +300,15 @@ def get_and_compile_step_functions(config, state, mesh, state_mesh_shardings, mo
     donate_argnums=donate_argnums_train,
   )
 
-  compiled_train = p_train_step.lower(state, create_dummy_batch_for_train(config), rng).compile()
+  # TODO: is this used when it's already JITted/compiled?
+  with train_ctx.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):  
+    compiled_train = p_train_step.lower(state, create_dummy_batch_for_train(config), rng).compile()
+    print_compiled_train_step_stats(compiled_train)
 
   if do_eval:
-    p_eval_step = get_and_compile_eval(config, mesh, state_mesh_shardings, model)
+    p_eval_step = get_and_compile_eval(config, train_ctx, state_mesh_shardings)
 
-  return p_train_step, compiled_train, p_eval_step
+  return p_train_step, p_eval_step
 
 
 # TODO: move to max_utils if not already there 
@@ -277,58 +317,50 @@ def create_dummy_batch_for_train(config):
   dummy_dtype = jax.numpy.int32
 
   batch_keys = [
-      'inputs', 'inputs_position', 'inputs_segmentation',
-      'targets', 'targets_position', 'targets_segmentation'
+    'inputs', 'inputs_position', 'inputs_segmentation',
+    'targets', 'targets_position', 'targets_segmentation'
   ]
 
   return {key: jax.numpy.zeros(dummy_shape, dtype=dummy_dtype) for key in batch_keys}
 
 
-def log_statistics(config, state, writer, mesh, compiled_train):
+def log_statistics(config, train_ctx, state):
   num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
   max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
 
   # write train config params, num model params, and XLA flags to tensorboard
-  max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
-  max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], writer)
-  maxtext_utils.add_config_to_summary_writer(config, writer)
-
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):  # TODO: is this used when it's already JITted/compiled?
-    compiled_stats = compiled_train.memory_analysis()
-    if compiled_stats is not None:
-      max_logging.log(
-          f"Output size: {compiled_stats.output_size_in_bytes}, "
-          f"temp size: {compiled_stats.temp_size_in_bytes}, "
-          f"argument size: {compiled_stats.argument_size_in_bytes}, "
-          f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
-      )
+  max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), train_ctx.writer)
+  max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], train_ctx.writer)
+  maxtext_utils.add_config_to_summary_writer(config, train_ctx.writer)
 
   max_utils.print_mem_stats("After params initialized")
 
-def maybe_write_final_checkpoint(checkpoint_manager, state, config, data_iterator):
-  checkpoint_not_written_on_final_step = (int(state.step) - 1) % config.checkpoint_period != 0
+
+def maybe_write_final_checkpoint(checkpoint_manager, state, config):
+  checkpoint_manager = checkpoint_manager
+  step = int(state.step) - 1
+  checkpoint_not_written_on_final_step = step % config.checkpoint_period != 0
 
   if checkpoint_manager is not None and checkpoint_not_written_on_final_step:
-    if save_checkpoint(checkpoint_manager, int(state.step) - 1, state, config.dataset_type, data_iterator, config, force=True):
-      checkpointing.print_save_message(int(state.step) - 1, config.async_checkpointing)
+    if save_checkpoint(checkpoint_manager, step, state, config.dataset_type, None, config, force=True):
+      checkpointing.print_save_message(step, config.async_checkpointing)
 
     checkpoint_manager.wait_until_finished()
 
 
-def maybe_write_checkpoint(checkpoint_manager, step, state, config, data_iterator):
+def maybe_write_checkpoint(checkpoint_manager, step, state, config):
+  checkpoint_manager = checkpoint_manager
   if checkpoint_manager is not None:
-    if save_checkpoint(checkpoint_manager, int(step), state, config.dataset_type, data_iterator, config):
+    if save_checkpoint(checkpoint_manager, int(step), state, config.dataset_type, None, config):
       checkpointing.print_save_message(step, config.async_checkpointing)
 
     # Upon preemption, exit when and only when all ongoing saves are complete.
     if checkpoint_manager.reached_preemption(step):
       checkpoint_manager.wait_until_finished()
-      return True
-    
-  return False
+      raise StopTraining()
 
 
-def maybe_dump_hlo(config, state):
+def maybe_upload_hlo(config, state):
   if config.dump_hlo:
     jax.block_until_ready(state)  # Ensure compilation has finished.
     gcs_utils.upload_dump(
@@ -340,74 +372,109 @@ def maybe_dump_hlo(config, state):
     )
 
 
-def assert_params_sufficiently_sharded(config, state, mesh):
+def assert_params_sufficiently_sharded(config, train_ctx, state):
+  # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage in PP
   if not config.using_pipeline_parallelism:
-    # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
-    maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
+    maxtext_utils.assert_params_sufficiently_sharded(state.params, train_ctx.mesh, config.sharding_tolerance)
 
 
-def train_loop(config, recorder):
-  # TODO: think abuot moving these lines out of here into caller
-  with maybe_record_goodput(recorder, "job"):  
+def train_step(step, config, train_ctx, loop_ctx):
+  with jax.profiler.StepTraceAnnotation("train", step_num=step):
+    example_batch = loop_ctx.data_loader.try_load_next_batch()
+    if example_batch:
+      check_example_batch(config, example_batch=example_batch)
+      # pylint: disable=not-callable
+      step_rng = get_step_rng(loop_ctx.train_rng, step)
+      with maybe_record_goodput(train_ctx.recorder, "step", step):
+        # FIXME: can we remove this since it's compiled
+        with train_ctx.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+          loop_ctx.state, metrics = loop_ctx.p_train_step(loop_ctx.state, example_batch, step_rng)
 
-    with maybe_record_goodput(recorder, "tpu_init"):
-      init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
+  return metrics
+
+
+def maybe_eval_step(config, train_ctx, loop_ctx, step):
+  eval_metrics = EvalMetrics()
+  if config.eval_interval > 0 and step >= loop_ctx.start_step and (step + 1) % config.eval_interval == 0:
+    assert loop_ctx.eval_data_iterator
     
-    with maybe_record_goodput(recorder, "training_preparation"):
-      data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
-      state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
-        model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
-      )
-      assert_params_sufficiently_sharded(config, state, mesh)
+    # pylint: disable=not-callable
+    for eval_step, eval_batch in enumerate(loop_ctx.eval_data_iterator):
+      if config.eval_steps > 0 and eval_step >= config.eval_steps:
+        break
+      
+      step_rng = get_step_rng(loop_ctx.init_rng, step, eval_step)
+      with train_ctx.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        step_metrics = loop_ctx.p_eval_step(loop_ctx.state, eval_batch, step_rng)
+        eval_metrics.append(step_metrics)
+
+      max_logging.log(f"Completed eval step {eval_step}")
+
+    loop_ctx.eval_data_iterator.reset()
     
-    do_eval = eval_data_iterator is not None
+  return eval_metrics
+
+
+def train_and_maybe_eval_step(config, train_ctx, loop_ctx, step):
+  with profiler.train_step(step):
+    metrics = train_step(step, config, train_ctx, loop_ctx)
+  loop_ctx.metrics_recorder.record_train_metrics(metrics, step)
+
+  maybe_write_checkpoint(train_ctx.checkpoint_manager, step, loop_ctx.state, config)
+
+  eval_metrics = maybe_eval_step(config, train_ctx, loop_ctx, step)
+  if eval_metrics:
+    aggregated_metrics, eval_loss, total_weights = eval_metrics.aggregate()
+    loop_ctx.metrics_recorder.record_eval_metrics(aggregated_metrics, step)
+    max_logging.log(f"Average loss after {step=}: {step=}, {eval_loss=},"f" {total_weights=}")
+
+    if eval_loss <= config.target_eval_loss:
+      max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
+      raise StopTraining()
+
+
+def train_loop(config, train_ctx, loop_ctx):
+    try:
+      for step in range(loop_ctx.start_step, config.steps):
+          train_and_maybe_eval_step(config, train_ctx, loop_ctx, step)
+    except StopTraining:
+      max_logging.log("Training stopped due to hitting loss target, pre-emption or end of training data")
+
+    maybe_write_final_checkpoint(train_ctx.checkpoint_manager, loop_ctx.state, config)
+
+
+def train(config, recorder):
+  with maybe_record_goodput(recorder, "tpu_init"):
+    init_rng, *train_ctx_args= setup_mesh_and_model(config)
+    train_ctx = TrainingContext(*train_ctx_args, recorder)
+  
+  with maybe_record_goodput(recorder, "training_preparation"):
+    data_it, eval_data_it = create_data_iterator(config, train_ctx.mesh)
+
+    state, _, shd, data_it = maxtext_utils.setup_training_state(
+      train_ctx.model, data_it, train_ctx.tx, config, init_rng, train_ctx.mesh, train_ctx.checkpoint_manager
+    )
+    assert_params_sufficiently_sharded(config, train_ctx, state)
+
     compile_rng, train_rng = jax.random.split(init_rng, 2)
-    # FIXME: should now use compiled_train only?
-    p_train_step, compiled_train, p_eval_step = get_and_compile_step_functions(config, state, mesh, state_mesh_shardings, model, do_eval, compile_rng)
-    # FIXME: will this include eval or should we compile that too?
-    maybe_dump_hlo(config, state)
-    log_statistics(config, state, writer, mesh, compiled_train)
+    p_train_step, p_eval_step = get_and_compile_step_functions(config, train_ctx, shd, eval_data_it is not None,
+                                                               compile_rng, state)
+
+    maybe_upload_hlo(config, state)
+    log_statistics(config, state, train_ctx)
 
     start_step = get_first_step(state)
     profiler = Profiler(config, state, start_step)    
-    training_metrics = TrainingMetrics(config, writer, learning_rate_schedule)
+    metrics_recorder = MetricsRecorder(config, train_ctx)
 
-    example_batch = None
-    for step in range(start_step, config.steps):
-      profiler.start_train_step(step)
+    data_loader = DataLoader(config, data_it, train_ctx.recorder)
+    loop_ctx = LoopContext(train_rng, p_train_step, p_eval_step, start_step, profiler,
+                          metrics_recorder, data_loader, eval_data_it, state)
 
-      state, metrics, example_batch = train_step(step, config, mesh, recorder, data_iterator, train_rng, p_train_step, example_batch, state)
-      if example_batch is None:
-        break
-      training_metrics.record_train_metrics(metrics, step)
+  with profiler.train_loop():
+    state = train_loop(config, train_ctx, loop_ctx)
 
-      if maybe_write_checkpoint(checkpoint_manager, step, state, config, data_iterator):
-        # we are being pre-empted; shut-down
-        break
-
-      all_eval_metrics = maybe_eval(config, step, start_step, eval_data_iterator, p_eval_step, mesh, init_rng, state)
-      if all_eval_metrics:
-        eval_loss, total_weights = training_metrics.record_eval_metrics(all_eval_metrics, step)
-        max_logging.log(f"Average loss after {step=}: {step=}, {eval_loss=},"f" {total_weights=}")
-
-        if eval_loss <= config.target_eval_loss:
-          max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
-          break
-    
-      profiler.end_train_step(step)
-
-    profiler.end_train_loop()
-    maybe_write_final_checkpoint(checkpoint_manager, state, config, data_iterator)
-    max_utils.close_summary_writer(writer)
-
-def set_up_environment(config):
-  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  # TF allocates extraneous GPU memory when using TFDS data and this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
-  tf.config.set_visible_devices([], "GPU")
-  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-  if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
-    os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-  os.environ["TFDS_DATA_DIR"] = config.dataset_path
+  max_utils.close_summary_writer(train_ctx.writer)
 
 
 def main(argv: Sequence[str]) -> None:
@@ -422,7 +489,8 @@ def main(argv: Sequence[str]) -> None:
   recorder = create_goodput_recorder(config)
   maybe_start_goodput_monitoring(config)
 
-  train_loop(config, recorder)
+  with maybe_record_goodput(recorder, "job"):  
+    train(config, recorder)
 
 
 if __name__ == "__main__":
