@@ -53,6 +53,7 @@ Quant = quantizations.AqtQuantization
 
 
 def self_attention_with_norm(inputs, cfg, mesh, quant, decoder_segment_ids, decoder_positions, deterministic, model_mode):
+  """self-attention with normalization"""
   # Normalization
   lnx_rms = models.RMSNorm(
       dtype=cfg.dtype,
@@ -119,6 +120,7 @@ def self_attention_with_norm(inputs, cfg, mesh, quant, decoder_segment_ids, deco
 
 
 def post_process(cfg, layer_output, sow):
+  """postprocessing."""
   if cfg.record_internal_nn_metrics:
     sow("intermediates", "activation_mean", jnp.mean(layer_output))
     sow("intermediates", "activation_stdev", jnp.std(layer_output))

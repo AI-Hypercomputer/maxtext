@@ -14,30 +14,37 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-""" Common Max Utils needed by multiple modules"""
-""" All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
-import numpy as np
-import jax
-import jax.numpy as jnp
-from jax.experimental import mesh_utils
-from MaxText import max_logging
+""" Common Max Utils needed by multiple modules.
+All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
+
 import functools
 import time
 import os
-import psutil
 import socket
 import subprocess
-from etils import epath
-from collections.abc import Sequence
 import collections
+from collections.abc import Sequence
 from typing import Any, Tuple
 from functools import partial
 
-import orbax.checkpoint as ocp
+import numpy as np
 
+import jax
+import jax.numpy as jnp
+from jax.experimental import mesh_utils
 
 import flax
+
+import psutil
+
+from etils import epath
+
+import orbax.checkpoint as ocp
+
 from tensorboardX import writer
+
+from MaxText import max_logging
+
 
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
 HYBRID_RING_32X8 = "hybrid_ring_32x8"
@@ -75,7 +82,7 @@ def calculate_num_params_from_pytree(params):
 
 
 def calculate_total_params_per_chip(params):
-  """Calculate total paramsper chip."""
+  """Calculate total params per chip."""
 
   def calculate_leaf_params_per_chip(arr):
     shard = arr.addressable_shards[0]
@@ -109,7 +116,7 @@ def close_summary_writer(summary_writer):
 
 
 def add_text_to_summary_writer(key, value, summary_writer):
-  """Writes given key-value pair to tensorboard as text/summary"""
+  """Writes given key-value pair to tensorboard as text/summary."""
   if jax.process_index() == 0:
     summary_writer.add_text(key, value)
 

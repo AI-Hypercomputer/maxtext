@@ -222,8 +222,7 @@ class BatchedPrefillProcessor:
   ) -> None:
     """Process all remaining items in buckets."""
 
-    for input_padding in self.buckets.keys():
-      bucket = self.buckets[input_padding]
+    for input_padding, bucket in self.buckets.items():
       if not bucket.is_empty():
         prefill_result, decode_state = self._process_bucket(model_params, bucket, input_padding, decode_state)
         if prefill_done:

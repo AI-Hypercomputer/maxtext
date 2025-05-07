@@ -123,6 +123,7 @@ class RotaryEmbedding(nn.Module):
   fprop_dtype: DType = jnp.bfloat16
 
   def setup(self) -> None:
+    """init with timescale"""
     if self.embedding_dims % 2:
       raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
 
@@ -183,6 +184,7 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
   use_scale: bool = True
 
   def _apply_scaling_factor(self, freq):
+    """apply scaling factor to rotary position embedding."""
     scale_factor = 8
     low_freq_factor = 1
     high_freq_factor = 4
@@ -307,6 +309,7 @@ class YarnRotaryEmbedding(nn.Module):
   fprop_dtype: DType = jnp.bfloat16
 
   def setup(self) -> None:
+    """init with freqs_cis"""
     if self.embedding_dims % 2:
       raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
 
@@ -412,6 +415,8 @@ class YarnRotaryEmbedding(nn.Module):
 
 
 class PositionalEmbedding(nn.Module):
+  """positional embedding layer."""
+
   embedding_dims: int
   max_wavelength: int = _MAX_WAVELENGTH
 

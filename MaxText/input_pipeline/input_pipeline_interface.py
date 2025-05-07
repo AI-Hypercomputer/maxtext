@@ -146,6 +146,7 @@ def make_mixed_iterator(config, mesh, process_indices_train, process_indices_eva
 
 
 def create_data_iterator(config, mesh):
+  """create data iterator"""
   if config.dataset_type == "synthetic":
     return SyntheticDataIterator(config, mesh), None
 

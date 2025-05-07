@@ -16,8 +16,10 @@
 
 from typing import Callable, Tuple, Union
 
-from flax import linen as nn
 import jax
+
+from flax import linen as nn
+
 from MaxText import common_types
 
 Array = common_types.Array

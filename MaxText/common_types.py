@@ -71,6 +71,8 @@ DEFAULT_MASK_VALUE = -0.7 * float(np.finfo(np.dtype("float32")).max)
 
 
 class DecoderBlockType(enum.Enum):
+  """Decoder block types."""
+
   DEFAULT = "default"
   LLAMA2 = "llama2"
   MISTRAL = "mistral"

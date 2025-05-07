@@ -55,6 +55,7 @@ def get_golden_data(config):
 
 
 def setup_maxtext_model(config):
+  """setup maxtext model"""
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
   quant = quantizations.configure_quantization(config)
   devices_array = maxtext_utils.create_device_mesh(config)
@@ -69,6 +70,7 @@ def setup_maxtext_model(config):
 
 
 def prepare_maxtext_inputs(input_str, tokenizer_model):
+  """prepare maxtext inputs"""
   prompt = tokenizer_model.encode(input_str)
   input_ids = jnp.pad(
       jnp.tile(jnp.concat([jnp.array(prompt), jnp.array(prompt)], axis=-1), (4, 1)),

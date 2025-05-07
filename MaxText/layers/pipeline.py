@@ -14,15 +14,19 @@
 
 """ Pipeline layer wrapping a decoder layer(s). Supports circular pipelining """
 
-import jax
-import jax.ad_checkpoint
-import numpy as np
-from jax import numpy as jnp
-from flax.core import meta
-from flax import linen as nn
-from MaxText import common_types
 import functools
 from typing import Any
+
+import numpy as np
+
+import jax
+import jax.ad_checkpoint
+from jax import numpy as jnp
+
+from flax.core import meta
+from flax import linen as nn
+
+from MaxText import common_types
 
 
 class Pipeline(nn.Module):
@@ -381,6 +385,7 @@ class Pipeline(nn.Module):
       return pipeline_weights
 
   def get_current_repeat_from_stages(self, weights, loop_iteration):
+    """get current repeat from stages"""
     _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
 
     def gather_weights_for_stages_in(weights):
@@ -406,9 +411,10 @@ class Pipeline(nn.Module):
     return weights
 
   def get_vmap_func_for_init(self):
-    # This vmap func is used to initialize the weights only on init.
+    """This vmap func is used to initialize the weights only on init."""
+
     def func_to_vmap(body_instance, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
-      # nn.vmap requires either a nn.module class or a function whose first argument is a nn.module instance.
+      """nn.vmap requires either a nn.module class or a function whose first argument is a nn.module instance."""
       return body_instance(stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
     vmap_func = nn.vmap(
@@ -427,10 +433,14 @@ class Pipeline(nn.Module):
     return vmap_func
 
   def get_main_vmap_func_for_iterations(self):
-    # Returns the main stage function vmapped by number of stages. This will be a vmap over a single layer instance
-    # if body_instance is a single layer, else a set of layers if body_instance is a set of layers.
+    """
+    Returns main stage function vmapped by number of stages.
+    This becomes a vmap over a single layer instance if body_instance is a single layer,
+    else a set of layers if body_instance is a set of layers.
+    """
+
     def func_to_vmap(body_instance, weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
-      # nn.vmap requires either a nn.module class or a function whose first argument is a nn.module instance.
+      """nn.vmap requires either a nn.module class or a function whose first argument is a nn.module instance."""
       return body_instance.apply(weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
 
     vmap_func = nn.vmap(
@@ -513,6 +523,7 @@ class Pipeline(nn.Module):
     return new_state
 
   def get_pipeline_remat_policy(self):
+    """Returns the pipeline remat policy for this pipeline."""
     # We ensure that the decoder layer inputs are saved, although we leave it to a custom
     # policy if they should be saved to device or offloaded.
     if self.config.remat_policy == "custom":
@@ -526,6 +537,7 @@ class Pipeline(nn.Module):
     return remat_policy
 
   def get_weight_sharding(self, *init_args):
+    """get weight sharding function for this pipeline."""
     # Returns a partition spec of all weights. Requires passing in arguments to init.
     key = jax.random.PRNGKey(0)
     keys = {"params": key, "dropout": key, "aqt": key}
@@ -546,10 +558,18 @@ class Pipeline(nn.Module):
     return partition_spec
 
   def get_physical_spec_no_fsdp(self, full_logical):
-    # Inputs: original logical partition specs of all weights
-    # Outputs: Modified physical spec with "fsdp" and "fsdp_transpose" removed
-    # We may want to remove the expert sharding on attention weights as well, since
-    # those act like FSDP
+    """
+    Get physical spec without fsdp.
+
+    TODO: Remove the expert sharding on attention weights as well, since those act like fsdp.
+
+    Args:
+      full_logical: original logical partition specs of all weights
+
+    Returns:
+      Modified physical spec with "fsdp" and "fsdp_transpose" removed
+    """
+
     def remove_fsdp_sharding(sharding_tree):
       def _remove_fsdp_from_partition_spec(named_sharding):
         if isinstance(named_sharding, jax.sharding.NamedSharding):
@@ -563,7 +583,7 @@ class Pipeline(nn.Module):
               else:
                 new_spec.append(None)
             elif isinstance(axis, (list, tuple)):
-              new_axis = [a for a in axis if (a != "fsdp" and a != "fsdp_transpose")]
+              new_axis = [a for a in axis if a not in ("fsdp", "fsdp_transpose")]
               new_spec.append(tuple(new_axis))
             else:
               raise ValueError(f"Unsupported axis type: {type(axis)}")

@@ -16,17 +16,12 @@
 
 import enum
 import functools
-import math
-import numpy as np
 from typing import Any, Optional, Tuple
 
-from MaxText import common_types
-from flax import linen as nn
-from flax.linen import partitioning
-from MaxText.inference import kvcache
-from MaxText.inference import page_manager
-from MaxText.inference import paged_attention
+import numpy as np
+
 import jax
+import jax.numpy as jnp
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
@@ -34,18 +29,23 @@ from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
-import jax.numpy as jnp
+
+from flax import linen as nn
+from flax.linen import partitioning
+
+from MaxText import common_types
+from MaxText.common_types import DecoderBlockType
+from MaxText.inference import kvcache
+from MaxText.inference import page_manager
+from MaxText.inference import paged_attention
 from MaxText.kernels.ragged_attention import ragged_gqa
 from MaxText.kernels.ragged_attention import ragged_mha
 from MaxText.layers import embeddings
 from MaxText.layers import initializers
 from MaxText.layers import linears
 from MaxText.layers import quantizations
-from MaxText.common_types import DecoderBlockType
-
 from MaxText import max_logging
 from MaxText import max_utils
-import numpy as np
 
 partial = functools.partial
 
@@ -290,6 +290,8 @@ def _make_bidirectional_block_mask(bidirectional_mask):
 
 
 class AttentionOp(nn.Module):
+  """Attention operation"""
+
   config: Config
   mesh: Mesh
   attention_kernel: str
@@ -331,9 +333,6 @@ class AttentionOp(nn.Module):
     assert key.shape[-3] == value.shape[-3], "k, v lengths must match."
     assert query.shape[-1] == key.shape[-1], "q, k depths must match."
 
-  # Following Pallas MHA Flash Attention Reference.
-  # https://github.com/jax-ml/jax/blob/main/jax/experimental/pallas/ops/tpu/flash_attention.py
-  # This mask models (1) separate sequences (decoder_segment_ids) and (2) causality
   def generate_attention_mask(
       self,
       query,
@@ -343,6 +342,77 @@ class AttentionOp(nn.Module):
       previous_chunk: Any = None,
       bidirectional_mask: Any = None,
   ) -> Array | None:
+    """Generates a combined attention mask for Transformer models.
+
+    This function constructs an attention mask by potentially combining
+    several types of masks based on the input parameters and model
+    configuration. The generated mask dictates which query-key pairs are
+    allowed to attend to each other.
+
+    The masking logic can enforce:
+    1.  **Sequence Separation:** Using `decoder_segment_ids`, attention is
+      confined within distinct sequences in a batch. This is crucial when
+      multiple unrelated sequences are packed together.
+    2.  **Causality:** Preventing attention to future positions. This is
+      standard for autoregressive decoding. For chunked prefill, as
+      described in the SARATHI paper [2], causality is adjusted based
+      on `previous_chunk` information.
+    3.  **Specialized Attention Patterns:** Depending on `self.attention_type`,
+      it can apply:
+      * Local Sliding Window Attention: Restricts attention to a
+          fixed-size window around each query position.
+      * Chunk Attention: Divides sequences into chunks and applies
+          masking at the chunk level.
+    4.  **Bidirectional Attention for Sub-sequences:** If `bidirectional_mask`
+      is provided (e.g., for image tokens in a multimodal model),
+      those parts of the sequence can attend bidirectionally, and this
+      mask is OR-ed with other generated masks.
+
+    The overall approach and specific masking techniques are influenced by
+    efficient attention mechanisms like those found in the Pallas MHA
+    Flash Attention reference [1].
+
+    Args:
+      query: The query tensor, typically of shape
+          `[batch_size, q_sequence_length, num_heads, head_dim]`.
+          Used primarily for deriving sequence length.
+      key: The key tensor, typically of shape
+          `[batch_size, kv_sequence_length, num_heads, head_dim]`.
+          Used primarily for deriving sequence length.
+      decoder_segment_ids: Optional `Array` of shape `[batch_size, q_sequence_length]`.
+          Identifies distinct sequences within the batch. Attention is
+          restricted to elements within the same segment ID. In autoregressive
+          mode, specific values (e.g., `common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR`)
+          can mark the currently active sequence for decoding.
+      model_mode: A string (e.g., `common_types.MODEL_MODE_AUTOREGRESSIVE`,
+          `common_types.MODEL_MODE_PREFILL`) indicating the operational
+          mode. This significantly influences mask generation, particularly
+          how causality and segment separation are handled.
+      previous_chunk: Optional. Information about previously processed
+          key/value chunks, often a tensor representing the previous keys/values.
+          Used to correctly offset causal masks in chunked attention or
+          streaming scenarios. Its shape might be
+          `[batch_size, prev_kv_sequence_length, ...]`.
+      bidirectional_mask: Optional `Array` of shape `[batch_size, kv_sequence_length]`.
+          If provided, this boolean mask indicates tokens (e.g., image tokens)
+          that are allowed to attend bidirectionally. The resulting
+          block-wise bidirectional mask is combined with other masks using a
+          logical OR.
+
+    Returns:
+      An `Array` representing the attention mask, broadcastable to the shape
+      `[batch_size, num_heads, q_sequence_length, kv_sequence_length]`.
+      Positions with `0.0` allow attention, while positions with
+      `DEFAULT_MASK_VALUE` (a large negative number) prevent it.
+      Returns `None` if no masking is determined to be necessary based on
+      the inputs and configuration.
+
+    References:
+      [1] JAX Pallas MHA Flash Attention:
+          https://github.com/jax-ml/jax/blob/main/jax/experimental/pallas/ops/tpu/flash_attention.py
+      [2] SARATHI: Efficient LLM Inference by Piggybacking Decodes with
+          Chunked Prefills - ArXiv:2308.16369 (https://arxiv.org/abs/2308.16369)
+    """
     mask = None
     if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       mask = decoder_segment_ids[:, None, None, None, :] == common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
@@ -410,6 +480,7 @@ class AttentionOp(nn.Module):
       previous_chunk: Any = None,
       bidirectional_mask: Any = None,
   ):
+    """Apply attention"""
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
     if use_ragged_attention and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
@@ -486,6 +557,7 @@ class AttentionOp(nn.Module):
       raise ValueError(f"Unexpected attention kernel {self.attention_kernel=}.")
 
   def gpu_ragged_attention(self, q: Array, k: Array | KVTensor, v: Array | KVTensor, lengths: Array, block_size: int):
+    """gpu ragged attention"""
     batch_size, q_length, q_heads, head_dim = q.shape
 
     # Reshape q to match gqa's expected shape
@@ -714,8 +786,8 @@ class AttentionOp(nn.Module):
             segment_axis_names_q,
             segment_axis_names_kv,
             segment_axis_names_splash_kernel,
-            None, # no sharding for cp_size
-            None, # no sharding for load_balanced_context_parallel
+            None,  # no sharding for cp_size
+            None,  # no sharding for load_balanced_context_parallel
         ),
         out_specs=axis_names_q,
         check_rep=False,
@@ -776,6 +848,7 @@ class AttentionOp(nn.Module):
     2. Head_dim = 256 is also supported from TE-1.12 stable release with CUDNN 12.6
     """
     # These imports are only meant to work in a GPU build.
+    # pylint: disable=import-outside-toplevel
     from transformer_engine.jax.flax.transformer import DotProductAttention  # pytype: disable=import-error
 
     _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
@@ -1198,6 +1271,7 @@ class Attention(nn.Module):
   is_nope_layer: bool = False
 
   def setup(self):
+    """init with attention_op and possibly paged_attention_op"""
     self.attention_op = AttentionOp(
         config=self.config,
         mesh=self.mesh,
@@ -1320,6 +1394,7 @@ class Attention(nn.Module):
     return query, key, value
 
   def out_projection(self, output_dim: int, out: Array) -> Array:
+    """out projection"""
     out_kernel_axis = (
         (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed")
     )
@@ -1684,6 +1759,7 @@ class MLA(Attention):
     return query
 
   def mla_get_key_value(self, low_rank_main, key_rope, model_mode):
+    """get (key,value) pair from mla"""
     kv_out = self.wkv_b(low_rank_main)
 
     # Split kv_out into key_nope and value parts.

@@ -11,23 +11,23 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
+"""
+Model test.
+"""
 
 import sys
 import unittest
 import os.path
 
-from MaxText import common_types
-from MaxText.globals import PKG_DIR
-
-from flax.core import freeze
-import jax
-import jax.numpy as jnp
-from MaxText import maxtext_utils
-import numpy as np
 import pytest
 
-from MaxText import pyconfig
+import jax
+import jax.numpy as jnp
 
+from MaxText import common_types
+from MaxText import maxtext_utils
+from MaxText import pyconfig
+from MaxText.globals import PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
 
@@ -36,14 +36,16 @@ MAX_PREFILL_PREDICT_LENGTH = 4
 
 
 class TestModel(unittest.TestCase):
-  """Test the Whole Model"""
+  """Test the Whole Model."""
 
   def setUp(self):
+    """Init the test model, call the super call, setup random seed, and init pyconfig."""
     super().setUp()
     self.cfg = self.init_pyconfig()
     self.rng = jax.random.PRNGKey(0)
 
   def init_pyconfig(self, **kwargs):
+    """Init pyconfig."""
     config = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1.0,
@@ -61,6 +63,7 @@ class TestModel(unittest.TestCase):
     return config
 
   def get_data(self):
+    """Get data."""
     s = (self.cfg.global_batch_size_to_train_on, self.cfg.max_target_length)
     ids = jax.random.randint(self.rng, s, 0, self.cfg.vocab_size)
 
@@ -102,13 +105,16 @@ class TestModel(unittest.TestCase):
     self.assertEqual(logits.dtype, expected_dtype)
 
   def test_logits_dtype_with_cast_to_fp32(self):
+    """Test logits datatype with cast to 32-bit floating point."""
     self._test_logits_cast_driver(cast_logits_to_fp32=True, expected_dtype=jnp.float32)
 
   def test_logits_dtype_without_cast(self):
+    """Test logits datatype without casting."""
     self._test_logits_cast_driver(cast_logits_to_fp32=False, expected_dtype=jnp.bfloat16)
 
   @pytest.mark.tpu_only
   def test_train_vs_prefill_and_autoregress(self):
+    """Test train versus prefill and autoregress."""
     PREFILL_RANGE = MAX_PREFILL_PREDICT_LENGTH
 
     devices_array = maxtext_utils.create_device_mesh(self.cfg)

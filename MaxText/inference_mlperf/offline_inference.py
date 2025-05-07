@@ -11,9 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+""" Offline inference for mlperf """
 
-from typing import Any, List, Tuple, Callable
 from collections import defaultdict
+from typing import Any, List, Tuple, Callable
 import dataclasses
 import functools
 import logging
@@ -93,6 +94,7 @@ class PrefillHelper:
       decode_state_layout: layout.Layout,
       decode_state_shape: jax.ShapeDtypeStruct,
   ) -> None:
+    """Ahead-of-Time compile"""
     if max_length > 4096:
       raise ValueError(f"Max length exceeds 4096. {max_length=}")
     if self._type == "default":
@@ -129,6 +131,7 @@ class PrefillHelper:
       max_length: int,
       prefill_done: Callable[[List[Tuple[engine_api.ResultTokens, int]], List[int], DecodeState], None],
   ) -> None:
+    """Prefill helper process runner"""
     padded_length = len(input_tokens_padded)
     if self._type == "default":
       first_token, decode_state = self._processor.process(
@@ -164,6 +167,7 @@ class PrefillHelper:
       decode_state: DecodeState,
       prefill_done: Callable[[List[Tuple[engine_api.ResultTokens, int]], List[int], DecodeState], None],
   ) -> None:
+    """Finalize helper process"""
     if self._type == "default":
       pass
     elif self._type == "batch":
@@ -173,6 +177,7 @@ class PrefillHelper:
 
 
 class OfflineInference:
+  """Offline inference for mlperf"""
 
   def __init__(self, engine: engine_api.Engine, params, base_engine: engine_api.Engine, enable_batch_prefill: bool):
     self.live = False
@@ -207,12 +212,13 @@ class OfflineInference:
     self._decode_state_executable = None
 
   def init_decode_state(self):
+    """Instantiate decode state"""
     if self.decode_state is None:
       assert self._decode_state_executable is not None, "Decode state executable is none"
       self.decode_state = self._decode_state_executable(None)
 
   def warmup(self, max_length, warmup_samples):
-
+    """Warmup (cache, AoT compile, batch_inference)"""
     self._cached_generate, self.params, self._decode_state_executable = self.engine.aot_compile(
         self.params, pass_rng_shape=False
     )
@@ -247,11 +253,10 @@ class OfflineInference:
       nonlocal self
       nonlocal counter
       self.decode_state = decode_state
-      for i in range(len(prefill_result)):
-        first_token, slot = prefill_result[i]
+      for i, (first_token, slot_) in enumerate(prefill_result):
         counter.prefill += 1
-        log.debug("prefill done: slot=%d (%d)", slot, counter.prefill)
-        self.detokenize_backlog.put((first_token, True, ids[i], slot), block=True)
+        log.debug("prefill done: slot=%d (%d)", slot_, counter.prefill)
+        self.detokenize_backlog.put((first_token, True, ids[i], slot_), block=True)
 
     def decode():
       nonlocal self

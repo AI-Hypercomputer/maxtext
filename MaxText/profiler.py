@@ -14,7 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-"""Dispatch to the chosen profiler"""
+"""Dispatch to the chosen profiler."""
+
 from ctypes import cdll
 import os
 import subprocess
@@ -26,7 +27,7 @@ import jax
 
 
 class Profiler:
-  """Activate/deactivate a profiler based on the 'profiler' config"""
+  """Activate/deactivate a profiler based on the 'profiler' config."""
 
   def __init__(self, config, offset_step=0):
     self.libcudart = None
@@ -42,7 +43,7 @@ class Profiler:
 
   def activate(self, blocking_object=None, optional_postfix=""):
     """Start the profiler.
-    nsys profiler becomes no-op when libcudart.so is not available on the system"""
+    nsys profiler becomes no-op when libcudart.so is not available on the system."""
     if self.profile_cleanly and blocking_object is not None:
       jax.block_until_ready(blocking_object)
     if not (self.upload_all_profiler_results or jax.process_index() == 0):
@@ -61,7 +62,7 @@ class Profiler:
 
   def deactivate(self, blocking_object=None):
     """End the profiler.
-    The result is uploaded to the output bucket"""
+    The result is uploaded to the output bucket."""
     if self.profile_cleanly and blocking_object is not None:
       jax.block_until_ready(blocking_object)
     if not (self.upload_all_profiler_results or jax.process_index() == 0):

@@ -151,6 +151,15 @@ class SFTPromptMasking(grain.MapTransform):
     self.unk_id = unk_id
 
   def map(self, element):
+    """
+    Maps a single dataset element to an SFT training instance.
+    It concatenates the prompt and completion to form the `inputs` sequence.
+    For the `targets` sequence:
+    - If `self.completion_only` is `True`, the prompt portion of the
+      concatenated sequence is masked using `self.unk_id`.
+    - If `self.completion_only` is `False`, the target sequence is
+      identical to the input sequence.
+    """
     inputs, targets = [], []
     for i, text in enumerate(element[self.text_column_name]):
       inputs += text
@@ -221,6 +230,7 @@ class HFDataSource(grain.RandomAccessDataSource):
       self.n_shards = self.dataloading_host_count * self.num_threads
 
   def _update_shard(self, idx):
+    """update shard"""
     new_shard = self.dataset_shards[idx] + self.dataloading_host_count * self.num_threads
     if new_shard < self.n_shards:
       max_logging.log(f"Updating host {self.dataloading_host_index} dataset {idx}, was on shard {self.dataset_shards[idx]}")

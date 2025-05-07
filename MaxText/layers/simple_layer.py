@@ -17,6 +17,7 @@ from typing import Optional
 
 from jax import numpy as jnp
 from jax.sharding import Mesh
+
 from flax import linen as nn
 
 from MaxText.layers import quantizations

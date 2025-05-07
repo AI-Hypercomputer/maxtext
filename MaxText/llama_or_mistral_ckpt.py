@@ -1466,7 +1466,8 @@ if __name__ == "__main__":
   llama4_17b_128e = "llama4-17b-128e"
   if args.model_size == llama4_17b_128e:
     raise NotImplementedError(
-        f"Currently, the `{llama4_17b_128e}` model only supports unscanned checkpoint conversion.  Please use `MaxText/llama4_ckpt_unscanned.py` instead!"
+        f"Currently, the `{llama4_17b_128e}` model only supports unscanned checkpoint conversion.  "
+        f"Please use `MaxText/llama4_ckpt_unscanned.py` instead!"
     )
 
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={SIMULATED_CPU_DEVICES_COUNT}"

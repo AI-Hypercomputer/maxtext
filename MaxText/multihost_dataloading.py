@@ -23,8 +23,10 @@ https://github.com/sholtodouglas/multihost_dataloading
 from functools import lru_cache, partial  # pylint: disable=g-importing-member
 from typing import Callable, Any, Union, Sequence
 from collections.abc import Iterator, Iterable
-import tensorflow as tf  # pylint: disable=g-import-not-at-top
 import time
+
+import tensorflow as tf  # pylint: disable=g-import-not-at-top
+
 import numpy as np
 
 import jax
@@ -34,6 +36,7 @@ from jax.sharding import NamedSharding
 from jax.sharding import Mesh
 from jax.experimental import colocated_python
 import jax.numpy as jnp
+
 import grain.python as grain
 
 from MaxText import max_logging

@@ -27,7 +27,7 @@ For example: `llama4-17b-16e.00.pth`
 If using a HF checkpoint, the base model checkpoints should be in the format `model-{idx}-of-{total}.safetensors`
 For example: `model-00020-of-00055.safetensors`.
 
-This script requires a large memory VM (a CPU instance with at least 500GB of memory for Scout and at least 1TB for Maverick).
+This script requires a large memory VM (a CPU instance with >= 500GB of memory for Scout and >= 1TB for Maverick).
 
 NOTE @jacobplatin: eventually, we'll want to merge this into the regular `llama_or_mistral` script
 since the logic is effectively the same.

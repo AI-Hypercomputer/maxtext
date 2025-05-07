@@ -82,7 +82,7 @@ _DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE = 2 * 1024**3
 
 
 def validate_train_config(config):
-  """Validates the configuration is set correctly for train.py"""
+  """Validates the configuration is set correctly for 'train.py'."""
 
   assert config.run_name, "Erroring out, need a real run_name"
   if config.dataset_path and not config.dataset_path.startswith("gs://"):

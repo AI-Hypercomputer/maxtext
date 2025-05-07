@@ -47,6 +47,7 @@ class MaxEngineTest(unittest.TestCase):
     self.rng = jax.random.PRNGKey(0)
 
   def init_pyconfig(self, **kwargs):
+    """init pyconfig"""
     init_kwargs = {
         "per_device_batch_size": 1.0,
         "run_name": "test",

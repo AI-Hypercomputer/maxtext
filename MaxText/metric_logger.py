@@ -15,7 +15,7 @@ limitations under the License.
 """
 
 # pylint: disable=bare-except, consider-using-generator
-"""Logger that saves metrics to a local file, GCS and TensorBoard. """
+"""Logger that saves metrics to a local file, GCS and TensorBoard."""
 
 import jax
 import json

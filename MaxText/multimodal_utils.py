@@ -18,9 +18,12 @@ limitations under the License.
 
 from typing import List
 import os
+
 import numpy as np
+
 import jax
 import jax.numpy as jnp
+
 from PIL import Image
 
 
@@ -101,7 +104,7 @@ def reformat_prompt(prompt, model_name):
 def get_image_offsets(model_name):
   """Get the increase in total token count after inserting image token placeholders"""
   if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
-    from MaxText.layers import gemma3
+    from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
 
     return gemma3.NUM_TOKENS_PER_MEDIA - 1  # -1 because <start_of_image> is already present in the input tokens.
   else:
@@ -147,7 +150,7 @@ def add_extra_tokens_for_images_gemma3(
     The text tokens with the extra image tokens.
   """
 
-  from MaxText.layers import gemma3
+  from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
 
   # New tokens which will be inserted for each image.
   mm_tokens = [
@@ -227,6 +230,7 @@ def _get_new_text_tokens(
     offset_by: int,
     length_with_mm: int,
 ) -> np.ndarray | jnp.ndarray:
+  """Get new text tokens."""
   # Jax vmap does not support positional arguments, so need the
   # _get_new_text_tokens_inner indirection.
   return jax.vmap(_get_new_text_tokens_inner, in_axes=(0, 0, None, None))(mm_start, text_tokens, offset_by, length_with_mm)
@@ -294,6 +298,7 @@ def _get_new_mm_tokens(
     offset_by: int,
     length_with_mm: int,
 ) -> np.ndarray | jnp.ndarray:
+  """batch dimension inclusive new mm_tokens"""
   # Jax vmap does not support positional argiments, so need the
   # _get_new_mm_tokens_inner indirection.
   return jax.vmap(_get_new_mm_tokens_inner, in_axes=(0, None, None, None, None))(

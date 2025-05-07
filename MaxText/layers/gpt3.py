@@ -18,10 +18,8 @@ limitations under the License.
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-
 from typing import Any, Optional, Tuple
 
-from jax.sharding import Mesh
 from jax import lax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
@@ -33,10 +31,10 @@ from MaxText.layers import initializers
 from MaxText.layers import linears
 from MaxText.layers import models
 from MaxText.layers import quantizations
+from MaxText import common_types
 
 AttentionOp = attentions.AttentionOp
 
-from MaxText import common_types
 
 Array = common_types.Array
 Config = common_types.Config

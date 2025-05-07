@@ -15,29 +15,31 @@ limitations under the License.
 """
 
 """ Tests for the common MaxText utilities """
+
 import unittest
+import os.path
+
+from jax import random
+from jax.sharding import Mesh
 import jax.numpy as jnp
-
-from MaxText import maxtext_utils
-from MaxText import max_utils
-
 
 from flax import linen as nn
 from flax.training import train_state
 
-from jax import random
-from jax.sharding import Mesh
 import optax
+
+from MaxText import max_utils
+from MaxText import maxtext_utils
 from MaxText import pyconfig
-import os.path
-from MaxText.layers import quantizations
 from MaxText.globals import PKG_DIR
 from MaxText.layers import models
+from MaxText.layers import quantizations
 
 Transformer = models.Transformer
 
 
 class TestGradientClipping(unittest.TestCase):
+  """test class for gradient clipping"""
 
   def test_grad_clipping_with_no_fp8_stats(self):
     raw_grads = {"params": jnp.array([3.0, -4.0]), "wi_0": jnp.array([5.0, -6.0])}
@@ -67,6 +69,7 @@ class TestGradientClipping(unittest.TestCase):
 
 
 class TestNestedValueRetrieval(unittest.TestCase):
+  """test class for NestedValueRetrieval"""
 
   def setUp(self):
     self.test_dict = {
@@ -159,6 +162,7 @@ class ModelWithMultipleCollections(nn.Module):
 
 
 class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
+  """test class for multiple collection state in maxutils"""
 
   def setUp(self):
     self.config = pyconfig.initialize([None, os.path.join(PKG_DIR, "configs", "base.yml")], enable_checkpointing=False)
@@ -169,6 +173,7 @@ class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
     self.tx = optax.adam(learning_rate=0.001)
 
   def _test_init_initial_state_driver(self, is_training):
+    """test initiating of the initial state driver"""
     state_under_test = maxtext_utils.init_initial_state(self.model, self.tx, self.config, is_training, self.key3)
     self.assertEqual(state_under_test.apply_fn, self.model.apply)
     if is_training:
@@ -237,6 +242,7 @@ class MaxUtilsPpAsDp(unittest.TestCase):
     self.assertEqual(transformed_rules, expected_transform)
 
   def multiple_rules(self):
+    """test multiple rules"""
     input_rules = (
         ("activation_batch", ("data", "fsdp")),
         ("layers", "stage"),
