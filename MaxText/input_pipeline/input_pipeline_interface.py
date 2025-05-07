@@ -83,6 +83,7 @@ class BadSyntheticDataIterator:
     self.mesh = mesh
     dataset = BadSyntheticDataIterator.get_bad_synthetic_data(config)
     self.data_generator = multihost_dataloading.MultiHostDataLoadIterator(dataset, self.mesh)
+    self.local_iterator = self.data_generator.local_iterator
 
   def __iter__(self):
     return self.data_generator
