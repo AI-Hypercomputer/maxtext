@@ -483,13 +483,15 @@ class AttentionOp(nn.Module):
     """Apply attention"""
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
+    target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
+
     if use_ragged_attention and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
       if lengths is None:
         lengths = jnp.sum(decoder_segment_ids, axis=-1)
 
-      if jax.devices()[0].platform == "tpu":
+      if target_hardware == "tpu":
         impl = self.tpu_ragged_attention
-      elif jax.devices()[0].platform == "gpu":
+      elif target_hardware == "gpu":
         impl = self.gpu_ragged_attention
       return impl(query, key, value, lengths, self.ragged_block_size)
 
@@ -503,7 +505,7 @@ class AttentionOp(nn.Module):
           query, key, value, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask=bidirectional_mask
       )
     elif self.attention_kernel == "flash" or self.attention_kernel == "autoselected":
-      if jax.devices()[0].platform == "tpu":
+      if target_hardware == "tpu":
         if isinstance(key, KVTensor):
           key = key.dequant()
         if isinstance(value, KVTensor):
