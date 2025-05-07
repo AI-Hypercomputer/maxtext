@@ -362,8 +362,10 @@ class Decoder(nn.Module):
       return [simple_layer.SimpleMlpDecoderLayer]
     elif self.config.decoder_block == DecoderBlockType.LLAMA4:
       from MaxText.layers import llama4  # pylint: disable=import-outside-toplevel
-
-      return [llama4.Llama4DecoderLayer]
+      if self.config.scan_layers:
+        return [llama4.Llama4ScannableBlock]
+      else:
+        return [llama4.Llama4DecoderLayer]
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
@@ -390,7 +392,7 @@ class Decoder(nn.Module):
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
-  def scan_decoder_layers(self, cfg, decoder_layer, length, metdata_axis_name, mesh):
+  def scan_decoder_layers(self, cfg, decoder_layer, length, metdata_axis_name, mesh, **kwargs):
     """scan decoder layers, calls `flax.linen.transforms.scan`"""
     initializing = self.is_mutable_collection("params")
     params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
@@ -417,7 +419,7 @@ class Decoder(nn.Module):
         length=length,
         metadata_params={nn.PARTITION_NAME: metdata_axis_name},
     )
-    return scan_fn(config=cfg, mesh=mesh, name=metdata_axis_name, quant=self.quant)
+    return scan_fn(config=cfg, mesh=mesh, name=metdata_axis_name, quant=self.quant, **kwargs)
 
   def get_pipeline_stage_module(self, base_stage):
     """get pipeline stage module"""
@@ -537,10 +539,17 @@ class Decoder(nn.Module):
           )
         else:
           layer_call_kwargs = {}
+          layer_kwargs = {}
           if cfg.decoder_block == DecoderBlockType.GEMMA3:
             layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
+          elif cfg.decoder_block == DecoderBlockType.LLAMA4:
+            layer_kwargs = {
+              "nope_layer_interval": self.config.nope_layer_interval,
+              "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
+            }
           RemattedBlockLayer = RemattedBlockLayers[0]
-          y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
+          scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
+          y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, scan_length, "layers", mesh, **layer_kwargs)(
               y,
               decoder_segment_ids,
               decoder_positions,
