@@ -246,7 +246,8 @@ def get_warmup_samples(dataset):
   for sample_id in range(len(pandas_rows)):
     p = pandas_rows[sample_id][1]
     padded, length = pad_tokens(p.tok_input)
-    input_data[sample_id] = offline_inference.InputData("", jnp.array(padded), length)  # to be filled later
+    padded = np.array(padded)
+    input_data[sample_id] = offline_inference.InputData("", jnp.array(padded), padded, length)  # to be filled later
   for data in input_data.values():
     # make sure tokens are transferred to device
     jax.block_until_ready(data.tokens)
@@ -369,7 +370,8 @@ class SUT:
     for sample_id in sample_list:
       p = self.pandas_rows[sample_id][1]
       padded, length = pad_tokens(p.tok_input)
-      input_data[sample_id] = offline_inference.InputData("", jnp.array(padded), length)  # to be filled later
+      padded = np.array(padded)
+      input_data[sample_id] = offline_inference.InputData("", jnp.array(padded), padded, length)  # to be filled later
 
     for data in input_data.values():
       # make sure tokens are transferred to device

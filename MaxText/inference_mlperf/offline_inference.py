@@ -47,6 +47,9 @@ log = logging.getLogger(__name__)
 class InputData:
   id: str
   tokens: jax.Array
+  # a copy of tokens.
+  # operate on this can be more performant than jax array (e.g. np.array, np.concatenate)
+  np_tokens: np.ndarray
   true_length: int
 
 
@@ -89,9 +92,6 @@ class PrefillHelper:
       self,
       max_length: int,
       params: Params,
-      params_layout: layout.Layout,
-      decode_state_layout: layout.Layout,
-      decode_state_shape: jax.ShapeDtypeStruct,
   ) -> None:
     if max_length > 4096:
       raise ValueError(f"Max length exceeds 4096. {max_length=}")
@@ -123,40 +123,38 @@ class PrefillHelper:
       model_params: Params,
       decode_state: DecodeState,
       decode_slot: int,
-      input_id: int,
-      input_tokens_padded: jax.Array,
-      input_true_length: int,
+      input: InputData,
       max_length: int,
       prefill_done: Callable[[List[Tuple[engine_api.ResultTokens, int]], List[int], DecodeState], None],
   ) -> None:
-    padded_length = len(input_tokens_padded)
+    padded_length = len(input.tokens)
     if self._type == "default":
       first_token, decode_state = self._processor.process(
-          model_params, decode_state, decode_slot, input_tokens_padded, input_true_length
+          model_params, decode_state, decode_slot, input.tokens, input.true_length
       )
-      prefill_done([(first_token, decode_slot)], [input_id], decode_state)
+      prefill_done([(first_token, decode_slot)], [input.id], decode_state)
     elif self._type == "batch":
       if padded_length == max_length:
         # fallback to default mode
         first_token, decode_state = self._processor.process(
-            model_params, decode_state, decode_slot, input_tokens_padded, input_true_length
+            model_params, decode_state, decode_slot, input.tokens, input.true_length
         )
-        prefill_done([(first_token, decode_slot)], [input_id], decode_state)
+        prefill_done([(first_token, decode_slot)], [input.id], decode_state)
       else:
         self._batch_processor.process(
             model_params=model_params,
             decode_state=decode_state,
             decode_slot=decode_slot,
-            input_id=input_id,
-            input_prompt=input_tokens_padded[:input_true_length],
+            input_id=input.id,
+            input_prompt=input.np_tokens[:input.true_length],
             input_padding=padded_length,
             capacity=max_length,
-            prefill_done=prefill_done,
+            prefill_done=prefill_done
         )
     else:
       assert self._type == "dummy", f"type: {self._type}"
       log.debug("dummy prefill")
-      prefill_done([(123, decode_slot)], [input_id], decode_state)
+      prefill_done([(123, decode_slot)], [input.id], decode_state)
 
   def finalize(
       self,
@@ -340,7 +338,7 @@ class OfflineInference:
 
       # Do prefill when there are free slots
       self.prefill.process(
-          self.params, self.decode_state, slot, row.id, row.tokens, row.true_length, self.max_prefill_length, prefill_done
+          self.params, self.decode_state, slot, row, self.max_prefill_length, prefill_done
       )
     self.prefill.finalize(self.params, self.decode_state, prefill_done)
 
