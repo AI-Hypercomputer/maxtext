@@ -268,3 +268,58 @@ class Llama4DecoderLayer(nn.Module):
       return layer_output, None
     else:
       return layer_output
+
+
+class Llama4ScannableBlock(nn.Module):
+'''
+A repeatable block given nope_layer_interval and interleave_moe_layer_step
+'''
+
+  config: models.Config
+  mesh: Mesh
+  quant: Optional[Quant] = None
+  nope_layer_interval: int = 1
+  interleave_moe_layer_step: int = 1
+
+  @nn.compact
+  def __call__(
+      self,
+      inputs,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      slot: Optional[int] = None,
+      page_state: Optional[page_manager.PageState] = None,
+      previous_chunk=None,
+  ):
+
+    cfg = self.config
+    mesh = self.mesh
+    # Is LCM a joke? Should we just hardcode maverick and scout as two separate blocks instead?
+    layers_to_repeat = numpy.lcm(nope_layer_interval, interleave_moe_layer_step)
+
+    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    inputs = checkpoint_name(inputs, "decoder_layer_input")
+    for layer_id in range(layers_to_repeat):
+      nope_layer = is_nope_layer(layer_id)
+      moe_layer = is_moe_layer(layer_id)
+      layer = Llama4DecoderLayer(config=cfg, mesh=mesh, name=f"layers_{layer_id}", quant=self.quant, is_nope_layer=nope_layer, is_moe_layer=moe_layer)
+      # TODO(mattdavidow): Add option for inner remat? Always? Never?
+      y = layer(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          previous_chunk=previous_chunk,
+          page_state=page_state,
+          slot=slot,
+      )
+      if cfg.scan_layers:
+        y=y[0]
+    if cfg.scan_layers:
+      return y, None
+    else:
+      return y
+
