@@ -11,6 +11,7 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
+""" Mixture of Experts (MoE) tests. """
 
 import os.path
 import unittest
@@ -233,9 +234,8 @@ class DeepSeekRoutingTest(unittest.TestCase):
 
 
 class MoeLoopBlock(nn.Module):
-  """Reference implemetnation from https://github.com/mistralai/mistral-inference.
-  This is not included anymore in our repo,
-  due to limitation of for-loop implementation in sharding.
+  """Reference implementation from https://github.com/mistralai/mistral-inference.
+  This is not included anymore in our repo, due to a limitation of for-loop implementation in sharding.
   """
 
   config: Config
@@ -282,8 +282,10 @@ class MoeLoopBlock(nn.Module):
 
 
 class RoutedMoeTest(unittest.TestCase):
+  """Routed Mixture of Experts test."""
 
   def get_expected_output(self, rng, hidden_states, cfg):
+    """Retrieve expected output from Routed Mixture of Experts."""
     model = MoeLoopBlock(
         config=cfg,
         num_experts=cfg.num_experts,
@@ -300,6 +302,7 @@ class RoutedMoeTest(unittest.TestCase):
     return variables, output
 
   def get_moe_output(self, variables, hidden_states, cfg, mesh):
+    """retrieve expected output from MoE"""
     model = moe.RoutedMoE(
         name="MoeBlock",
         config=cfg,

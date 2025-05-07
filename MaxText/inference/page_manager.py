@@ -23,10 +23,13 @@ represents an individual request or sequence.
 """
 
 from functools import partial
+from typing import Tuple
+
 import jax
 import jax.numpy as jnp
+
 from flax import struct
-from typing import Tuple
+
 from jaxtyping import Array, Integer, Bool
 
 from MaxText import common_types
@@ -477,7 +480,8 @@ class PageManager:
     min_required = (self.max_target_length + self.tokens_per_page - 1) // self.tokens_per_page
     if self.max_pages_per_group < min_required:
       raise ValueError(
-          f"`pagedattn_max_pages_per_group` ({self.max_pages_per_group}) is insufficient for `max_target_length` ({self.max_target_length}). Needs {min_required}."
+          f"`pagedattn_max_pages_per_group` ({self.max_pages_per_group}) is insufficient for `max_target_length` "
+          f"({self.max_target_length}). Needs {min_required}."
       )
     # Check > 1 due to potential page 0 workaround
     if self.num_pages <= 1:

@@ -35,6 +35,7 @@ def tokens_in_input_str(s):
 
 
 def get_prefill_and_generate_times(filename=""):
+  """get prefill and generate times"""
   if filename == "":
     return PREFILL_BUCKET_SIZE_TO_MS, SYSTEM_TIME_PER_DECODE_TOKEN_MS
 
@@ -48,6 +49,7 @@ def get_prefill_and_generate_times(filename=""):
 
 
 def get_conversations_from_file(filename, max_input_tokens, max_output_tokens):
+  """get conversations from file"""
   convo_token_numbers = []
   with open(filename, "rt", encoding="utf8") as f:
     loaded_share_gpt = json.load(f)
@@ -70,6 +72,7 @@ def get_conversations_from_file(filename, max_input_tokens, max_output_tokens):
 
 
 def compute_times(conversations, prefill_bucket_size_to_ms, system_time_per_decode_token_ms, verbose=False):
+  """compute times"""
   total_prefill_system_ms = 0
   total_generate_system_ms = 0
   for convo in conversations:

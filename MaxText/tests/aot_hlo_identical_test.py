@@ -85,6 +85,7 @@ class AotHloIdenticalTest(unittest.TestCase):
     return True
 
   def assert_compile_and_real_match_hlo(self, test_name, extra_config_args):
+    """check that AOT compiled and trained HLO files are identical for a given test"""
     hlo_filename_substring = "jit_train_step.after_optimizations_after_buffer_assignment.txt"
     temp_dir = tempfile.gettempdir()
     compile_dump_dir = os.path.join(temp_dir, "compile_test_xla_dump", test_name, "aot", "")

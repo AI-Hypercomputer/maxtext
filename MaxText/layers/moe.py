@@ -184,6 +184,7 @@ class RoutedMoE(nn.Module):
     return self.mesh.shape["context_autoregressive"]
 
   def generate_kernels(self, num_experts, emb_dim, mlp_dim):
+    """generates kernels"""
 
     kernel_in_axis = np.arange(1)
     kernel_out_axis = np.arange(1, 2)
@@ -237,7 +238,7 @@ class RoutedMoE(nn.Module):
     return w0_kernel, w1_kernel, wo_kernel
 
   def get_topk(self, gate_logits, pre_bias_logits):
-    # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
+    """get topk. shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)"""
     if self.config.model_name.startswith("deepseek3"):
       top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
     else:
@@ -357,6 +358,7 @@ class RoutedMoE(nn.Module):
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
 
   def sparse_matmul(self, inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel):
+    """sparse matrix multiplication"""
     tile_size = (512, 1024, 1024)  # (m, k, n)
 
     def local_permute(inputs, global_group_sizes, local_expert_size):
@@ -554,8 +556,12 @@ class RoutedMoE(nn.Module):
     return wrapper(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)
 
   def reshape_and_update_weights(self, weights, indices):
-    # input of weights & indices: (batch_size, seq_len, num_experts_per_tok)
-    # output of updated weights: (batch_size, seq_len, num_experts)
+    """
+    reshape and update weights.
+
+    input of weights and indices: (batch_size, seq_len, num_experts_per_tok)
+    output of updated weights: (batch_size, seq_len, num_experts)
+    """
     update_weights = jnp.zeros((weights.shape[0], weights.shape[1], self.num_experts), dtype=self.dtype)
     index_update = (
         jnp.arange(weights.shape[0])[:, None, None],
@@ -572,13 +578,13 @@ class RoutedMoE(nn.Module):
     sub_seq = seq_len // cp
     return cp, sub_seq
 
-  # sub group mask generation for inference only
   def generate_masks_subgroup(self, top_k_indices, softmax_probs):
+    """subgroup mask generation for inference only"""
     # calculate expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
     batch_size, seq_len, _ = top_k_indices.shape
     cp, sub_seq = self.get_context_partition_and_sub_seq(seq_len)
 
-    #  breaking the sequence into sub sequences. It is effectively grouping the tokens in a sequence into groups, and route only within each group.
+    # Break sequence into subsequences (groups) of tokens, and route only within each group.
     top_k_indices = jnp.reshape(top_k_indices, (batch_size, cp, sub_seq, top_k_indices.shape[2]))
 
     tokens_per_batch = sub_seq * self.num_experts_per_tok
@@ -648,6 +654,7 @@ class RoutedMoE(nn.Module):
     return dispatch_mask, combine_mask
 
   def generate_masks(self, top_k_indices, softmax_probs):
+    """generate masks"""
     # calculate expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
     batch_size, seq_len, _ = top_k_indices.shape
 
@@ -720,6 +727,7 @@ class RoutedMoE(nn.Module):
     return loss
 
   def get_einsum(self, rhs_mesh_axes: Tuple[Optional[str], ...] = (), einsum_name=None):
+    """get the Einstein summation"""
 
     # the check is to prevent aqteinsum as einsum op for dispatch and combine einsums in ase when capacity_factor > 0
     # this is necessary to load pre-quantized weights in case of inference
@@ -749,6 +757,7 @@ class RoutedMoE(nn.Module):
     return kernel
 
   def dense_matmul(self, inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel):
+    """dense matrix multiplication"""
     # gate_logits: batch, length, expert
     gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", None))
     if self.config.model_name.startswith("deepseek3"):
@@ -911,6 +920,7 @@ class RoutedMoE(nn.Module):
   def retrieve_quantized_weight(
       self, inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel
   ) -> tuple[QTensor, QTensor, QTensor]:
+    """retrieve quantized weight"""
     # This is called only during tracing. This is to invoke creation of quantized tensor inside AqtEinsum.
     # After jit, this will become no-op and will not affect performance.
     _ = self.dense_matmul(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)

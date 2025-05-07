@@ -11,31 +11,35 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
+"""
+GRPO correctness tests
+"""
 
-import jax
 import os
 import unittest
-from MaxText.layers import models
-from MaxText.layers import initializers
-import jax.numpy as jnp
+
 import numpy as np
 
-from MaxText import pyconfig
-from MaxText import maxtext_utils
+import jax
+import jax.numpy as jnp
 from jax.sharding import Mesh
-import flax.linen as nn
-from typing import Tuple
-import sys
-from MaxText import common_types
-from MaxText.globals import PKG_DIR
+
 import torch
 # from datasets import Dataset
+
 from trl import GRPOConfig, GRPOTrainer
+
 import transformers
 
 from datasets import load_dataset
 
+from MaxText import common_types
+from MaxText import maxtext_utils
+from MaxText import pyconfig
 from MaxText.experimental.rl.grpo_trainer import compute_log_probs, grpo_loss_fn, _merge_grpo_state
+from MaxText.globals import PKG_DIR
+from MaxText.layers import initializers
+from MaxText.layers import models
 
 
 Array = common_types.Array
@@ -103,6 +107,7 @@ class GRPOTest(unittest.TestCase):
     )
 
   def _prepare_maxtext_inputs(self):
+    """prepare maxtext inputs"""
     prompt = self.tokenizer_model.encode(self.input_str)
     input_ids = jnp.pad(
         jnp.tile(jnp.concat([jnp.array(prompt), jnp.array(prompt)], axis=-1), (4, 1)),
@@ -168,7 +173,8 @@ class GRPOTest(unittest.TestCase):
       hf_per_token_logps = self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep)  # pylint: disable=protected-access
 
     print(
-        f"Max Diff {np.max(np.abs(np.trim_zeros(np.asarray(maxtext_per_token_logps)[0]) - hf_per_token_logps.detach().numpy()[0]))}"
+        "Max Diff",
+        np.max(np.abs(np.trim_zeros(np.asarray(maxtext_per_token_logps)[0]) - hf_per_token_logps.detach().numpy()[0])),
     )
     self.assertTrue(
         jax.numpy.allclose(
@@ -209,7 +215,9 @@ class GRPOTest(unittest.TestCase):
         # using the same model as the ref model,
         # which is equivalent of step 0 of GRPO training when
         # the on-policy params are the same as the ref model
-        "ref_per_token_logps": self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep),  # pylint: disable=protected-access
+        "ref_per_token_logps": self.trainer._get_per_token_logps(
+            self.hf_model, hf_input_ids, attention_mask, logits_to_keep
+        ),  # pylint: disable=protected-access
         # using only one advantage because we have just one sequence
         "advantages": advantages[0][0].unsqueeze(0),
     }

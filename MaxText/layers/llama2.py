@@ -18,21 +18,23 @@ limitations under the License.
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from flax import linen as nn
-from jax.sharding import Mesh
+from typing import Optional
+
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 # from jax.experimental.pallas.ops.tpu import flash_attention
+
+from flax import linen as nn
+
 from MaxText.layers import attentions
 from MaxText.layers import embeddings
 from MaxText.layers import linears
 from MaxText.layers import normalizations
 from MaxText.layers import models
 from MaxText.layers import quantizations
-
 from MaxText import common_types
 from MaxText.inference import page_manager
-from typing import Optional
+
 
 Array = common_types.Array
 Config = common_types.Config

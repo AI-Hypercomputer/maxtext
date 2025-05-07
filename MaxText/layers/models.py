@@ -17,13 +17,13 @@
 # pylint: disable=no-name-in-module
 
 from typing import Any, Optional
-
-
-from flax import linen as nn
 import functools
+
 import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
+
+from flax import linen as nn
 
 from MaxText import common_types
 from MaxText.common_types import DecoderBlockType
@@ -215,6 +215,7 @@ class Decoder(nn.Module):
       )
 
   def get_remat_policy(self):
+    """Get remat policy"""
     cfg = self.config
     if cfg.remat_policy != "none":
       if cfg.remat_policy == "minimal":
@@ -285,6 +286,7 @@ class Decoder(nn.Module):
       return policy
 
   def set_remat_policy(self, block_layers, policy):
+    """Set remat policy"""
     RemattedBlockLayers = []
     for block_layer in block_layers:
       layer = nn.remat(  # pylint: disable=invalid-name
@@ -297,57 +299,59 @@ class Decoder(nn.Module):
     return RemattedBlockLayers
 
   def get_decoder_layers(self):
+    """Get decoder layers, one of `DecoderBlockType` discriminants or a direct `nn.Module` inheritor"""
     if self.config.decoder_block == DecoderBlockType.DEFAULT:
       return [DecoderLayer]
     elif self.config.decoder_block == DecoderBlockType.LLAMA2:
-      from MaxText.layers import llama2
+      from MaxText.layers import llama2  # pylint: disable=import-outside-toplevel
 
       return [llama2.LlamaDecoderLayer]
     elif self.config.decoder_block == DecoderBlockType.MISTRAL:
       # TODO(ranran): update to Mistral with sliding window attention
-      from MaxText.layers import mistral
+      from MaxText.layers import mistral  # pylint: disable=import-outside-toplevel
 
       return [mistral.MistralDecoderLayer]
     elif self.config.decoder_block == DecoderBlockType.MIXTRAL:
-      from MaxText.layers import mixtral
+      from MaxText.layers import mixtral  # pylint: disable=import-outside-toplevel
 
       return [mixtral.MixtralDecoderLayer]
     elif self.config.decoder_block == DecoderBlockType.DEEPSEEK:
-      from MaxText.layers import deepseek
+      from MaxText.layers import deepseek  # pylint: disable=import-outside-toplevel
 
       return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
     elif self.config.decoder_block == DecoderBlockType.GEMMA:
-      from MaxText.layers import gemma
+      from MaxText.layers import gemma  # pylint: disable=import-outside-toplevel
 
       return [gemma.GemmaDecoderLayer]
     elif self.config.decoder_block == DecoderBlockType.GEMMA2:
-      from MaxText.layers import gemma2
+      from MaxText.layers import gemma2  # pylint: disable=import-outside-toplevel
 
       return [gemma2.Gemma2DecoderLayer]
     elif self.config.decoder_block == DecoderBlockType.GEMMA3:
-      from MaxText.layers import gemma3
+      from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
 
       return [gemma3.Gemma3DecoderLayer]
     elif self.config.decoder_block == DecoderBlockType.GPT3:
-      from MaxText.layers import gpt3
+      from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
 
       return [gpt3.Gpt3DecoderLayer]
     elif self.config.decoder_block == DecoderBlockType.SIMPLE:
-      from MaxText.layers import simple_layer
+      from MaxText.layers import simple_layer  # pylint: disable=import-outside-toplevel
 
       return [simple_layer.SimpleDecoderLayer]
     elif self.config.decoder_block == DecoderBlockType.SIMPLE_MLP:
-      from MaxText.layers import simple_layer
+      from MaxText.layers import simple_layer  # pylint: disable=import-outside-toplevel
 
       return [simple_layer.SimpleMlpDecoderLayer]
     elif self.config.decoder_block == DecoderBlockType.LLAMA4:
-      from MaxText.layers import llama4
+      from MaxText.layers import llama4  # pylint: disable=import-outside-toplevel
 
       return [llama4.Llama4DecoderLayer]
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
   def get_norm_layer(self):
+    """get normalization layer (return type inherits from nn.Module)"""
     if self.config.decoder_block in (
         DecoderBlockType.DEFAULT,
         DecoderBlockType.LLAMA2,
@@ -363,13 +367,14 @@ class Decoder(nn.Module):
     ):
       return RMSNorm
     elif self.config.decoder_block == DecoderBlockType.GPT3:
-      from MaxText.layers import gpt3
+      from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
 
       return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=True)
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
   def scan_decoder_layers(self, cfg, decoder_layer, length, metdata_axis_name, mesh):
+    """scan decoder layers, calls `flax.linen.transforms.scan`"""
     initializing = self.is_mutable_collection("params")
     params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
     cache_spec = 0
@@ -398,6 +403,7 @@ class Decoder(nn.Module):
     return scan_fn(config=cfg, mesh=mesh, name=metdata_axis_name, quant=self.quant)
 
   def get_pipeline_stage_module(self, base_stage):
+    """get pipeline stage module"""
     cfg = self.config
     if cfg.set_remat_policy_on_layers_per_stage:
       policy = self.get_remat_policy()
@@ -540,12 +546,12 @@ class Decoder(nn.Module):
             layer_kwargs = {}
             layer_call_kwargs = {}
             if cfg.decoder_block == DecoderBlockType.GEMMA3:
-              from MaxText.layers import gemma3
+              from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
               # Gemma3 uses both global and sliding window attention depending on the layer index.
               layer_kwargs = {"attention_type": gemma3.get_attention_type(layer_id=lyr)}
               layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
             if cfg.decoder_block == DecoderBlockType.LLAMA4:
-              from MaxText.layers import llama4
+              from MaxText.layers import llama4  # pylint: disable=import-outside-toplevel
 
               layer_kwargs = {
                   "is_nope_layer": llama4.determine_is_nope_layer(lyr, self.config.nope_layer_interval),
@@ -616,7 +622,7 @@ class VisionEncoder(nn.Module):
 
   def get_vision_encoder_layers(self):
     if self.config.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
-      from MaxText.layers import gemma3
+      from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
 
       return [gemma3.Gemma3VisionEncoderLayer]
     else:
@@ -689,7 +695,7 @@ class Transformer(nn.Module):
       # TODO(hengtaoguo, aireen): merge image_embeddings with decoder_input_tokens.
 
       if self.config.decoder_block == DecoderBlockType.GEMMA3:
-        from MaxText.layers import gemma3
+        from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
 
         bidirectional_mask = decoder_input_tokens == gemma3.TOKEN_PLACEHOLDER
 

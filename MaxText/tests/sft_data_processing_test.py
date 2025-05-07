@@ -19,10 +19,14 @@ import unittest
 import os.path
 
 import numpy as np
+
 import jax
+
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
+
 from datasets import Dataset
+
 import transformers
 
 from MaxText import pyconfig
@@ -135,6 +139,7 @@ class SFTDataProcessingTest(unittest.TestCase):
     )
 
   def get_train_iterator(self, train_ds, data_columns):
+    """get train iterator"""
     self.train_iter = _hf_data_processing.preprocessing_pipeline(
         dataloading_host_index=self.process_indices.index(jax.process_index()),
         dataloading_host_count=len(self.process_indices),

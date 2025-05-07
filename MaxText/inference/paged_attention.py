@@ -52,6 +52,8 @@ _use_kernel_v2 = False
 
 
 class PagedAttentionOp(nn.Module):
+  """paged-attention op"""
+
   mesh: Mesh
   num_pages: int
   tokens_per_page: int
@@ -101,6 +103,7 @@ class PagedAttentionOp(nn.Module):
     return key_pages_var, value_pages_var
 
   def paged_dot_product_attention_with_max_and_sum(self, query, key, value):
+    """paged dot product attention with max & sum"""
     b, t, n, d = query.shape
     _, s, n_kv, _ = key.shape
     query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
@@ -307,6 +310,7 @@ class PagedAttentionOp(nn.Module):
     value_pages_var.value = nn.with_logical_constraint(value, self.kv_pages_axis_names)
 
   def update_decode_step_pages(self, key_pages_var, value_pages_var, key, value, page_state):
+    """Update decode-step pages"""
     key_pages = key_pages_var.value
     value_pages = value_pages_var.value
 

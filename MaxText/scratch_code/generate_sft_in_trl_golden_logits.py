@@ -105,6 +105,7 @@ def prepare_trl_inputs(tokenizer, max_target_length):
 
 
 def save_golden_logits(conf):
+  """save golden logits"""
   hf_model = get_hf_model(conf.tokenizer_path)
   tokenizer = get_tokenizer(conf.tokenizer_path, conf.max_target_length)
   trl_data = prepare_trl_inputs(tokenizer, conf.max_target_length)

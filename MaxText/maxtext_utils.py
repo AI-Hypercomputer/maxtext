@@ -15,7 +15,7 @@ limitations under the License.
 """
 
 # pylint: disable=bare-except, consider-using-generator
-"""Utils that are only interesting to MaxText. """
+""" Utils that are only interesting to MaxText. """
 
 from typing import Optional
 
@@ -54,7 +54,7 @@ NUM_IMAGE_CHANNELS = 3
 
 
 def get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config):
-  """Get the shardings (both state and data) for train_step"""
+  """Get the shardings (both state and data) for `train_step`."""
   functional_train = get_functional_train_step(train_step, model, config, state_mesh_shardings)
   functional_train.__name__ = "train_step"
   data_pspec = P(*config.data_sharding)
@@ -377,7 +377,8 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
   perfectly_sharded_params_per_chip = total_num_params / product_num_devices_for_weight_sharding
   assert total_num_params_per_chip >= perfectly_sharded_params_per_chip, (
       "Number of parameters per chip must not be less than in the ideal sharded "
-      "scenario across `fsdp`, `fsdp_transpose`, `context`, `sequence`, `tensor`, `tensor_transpose`, `tensor_sequence`, `stage`, `expert` axes."
+      "scenario across `fsdp`, `fsdp_transpose`, `context`, `sequence`, `tensor`, `tensor_transpose`, "
+      "`tensor_sequence`, `stage`, `expert` axes."
   )
   unsharded_param_perc = total_num_params_per_chip / perfectly_sharded_params_per_chip - 1
   assert unsharded_param_perc < tolerance, (
@@ -698,11 +699,17 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[Page
 
 
 def save_quantized_checkpoint_if_configured(config, params):
+  """Save quantized checkpoint if configured"""
   assert config.quantization, "quantization must be configured"
   if config.save_quantized_params_path:
-    checkpointing.save_params_to_path(config.save_quantized_params_path, params, config.checkpoint_storage_use_ocdbt, config.checkpoint_storage_use_zarr3)
+    checkpointing.save_params_to_path(
+        checkpoint_dir=config.save_quantized_params_path,
+        params=params,
+        use_ocdbt=config.checkpoint_storage_use_ocdbt,
+        use_zarr3=config.checkpoint_storage_use_zarr3,
+    )
   else:
-    "Skipping saving quantized checkpoint as save_quantized_params_path is null."
+    max_logging.log("Skipping saving quantized checkpoint as save_quantized_params_path is null.")
 
 
 def add_config_to_summary_writer(config, summary_writer):

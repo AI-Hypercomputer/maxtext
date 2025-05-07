@@ -29,6 +29,7 @@ from aqt.jax.v2 import calibration
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_flatten_with_path, tree_unflatten
+
 from flax.linen import fp8_ops
 from flax.linen import initializers as flax_initializers
 import flax.linen as nn
@@ -67,6 +68,7 @@ class Quantization:
 
 
 def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
+  """apply tiling function"""
   del lhs, rhs
 
   (lhs_ca, rhs_ca), _ = dimension_numbers
@@ -90,6 +92,7 @@ def _rhs_axis_metadata_wrapper(
     is_tiled: bool,
     replicate_scale: bool = False,
 ):
+  """right-hand-side axis metadata wrapper"""
   if replicate_scale:
     # Temporarily using the shape to identify the scale.
     # TODO: remove the replication once the 2d sharding quantization
@@ -126,6 +129,7 @@ class AqtQuantization:
   replicate_scale: bool = False
 
   def _get_mixed_precision_cfg(self):
+    """get configuration for mixed precision"""
     quant_dg = None
     is_tiled = False
     tiling_fn = None
@@ -226,6 +230,8 @@ class Fp8Einsum(nn.Module):
   dtype: DType = jnp.float32
 
   def setup(self) -> None:
+    """init with input_amax_history, kernel_amax_history, output_grad_amax_history,
+    input_scale, kernel_scale, output_grad_scale"""
     scale_args = (
         flax_initializers.ones_init(),
         jax.random.PRNGKey(0),
@@ -305,11 +311,13 @@ def _get_int8_quant_config(config):
 
 
 def _get_aqt_fp8_quant_config(config):
+  """get aqt for 8-bit floating point quantization configuration"""
   cfg = aqt_config.config_v4(fwd_bits="e4m3", dlhs_bits=None, drhs_bits=None, fwd_accumulator_dtype=jnp.bfloat16)
   return cfg
 
 
 def _dot_general_make(quant_cfg):
+  """Create quantization configs for input matrices to a matmul"""
   lhs_bits = quant_cfg[_A_BITS]
   lhs_scale = quant_cfg[_A_SCALE]
   rhs_bits = quant_cfg[_W_BITS]
@@ -325,8 +333,7 @@ def _dot_general_make(quant_cfg):
 def _get_default_mp_config(default=None):
   default_config = {_W_BITS: None, _A_BITS: None, _W_SCALE: 1.0, _A_SCALE: 1.0, _TILE_SIZE: -1}
   if default:
-    for k in default_config.keys():
-      default_config[k] = default.get(k, default_config[k])
+    default_config.update(default)
   return default_config
 
 
@@ -340,7 +347,7 @@ def _get_mixed_precision_quant_config(mixed_precision_config):
     # print(f"Mixed precision config: processing
     # {layer_name_re} - {layer_quantization_config}, default config - {quant_config}")
     if layer_name_re != DEFAULT:
-      for k in quant_config.keys():
+      for k in quant_config:
         quant_config[k] = layer_quantization_config.get(k, default_mp_config[k])
     ret_config[layer_name_re] = [_dot_general_make(quant_config), quant_config["tile_size"]]
   return ret_config
@@ -402,12 +409,13 @@ def configure_quantization(config: Config, quant_mode_str: str = "train"):
 
 
 def match_aqt_and_unquantized_param(aqt_params, params):
+  """match aqt and unquantized params"""
   aqt_param_flat, aqt_tree_def = jax.tree_util.tree_flatten_with_path(
       aqt_params, is_leaf=lambda x: isinstance(x, aqt_tensor.QTensor)
   )
   param_tree_flat, _ = jax.tree_util.tree_flatten_with_path(params)
   aqt_paths = []
-  # Orginal path of quantized AQT param path.
+  # Original path of quantized AQT param path.
   param_paths = []
 
   for aqt_k, _ in aqt_param_flat:

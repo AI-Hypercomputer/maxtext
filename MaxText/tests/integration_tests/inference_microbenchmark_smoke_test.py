@@ -26,6 +26,7 @@ from MaxText.tests.globals import TEST_DISABLE_SUBPROCESS_STR, TEST_DISABLE_SUBP
 
 
 class Inference_Microbenchmark(unittest.TestCase):
+  """integration test for inference microbenchmark"""
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only

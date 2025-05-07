@@ -16,13 +16,16 @@
 
 from typing import Any, Optional, Tuple
 
+import jax
+import jax.numpy as jnp
+
+from flax import linen as nn
+
 from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2 import config as aqt_config
 from aqt.jax.v2.flax import aqt_flax
+
 from MaxText import common_types
-from flax import linen as nn
-import jax
-import jax.numpy as jnp
 
 Array = common_types.Array
 AxisNames = common_types.AxisNames
@@ -104,6 +107,7 @@ class KVQuant:
       lhs_dequant_mode=None,
       lhs_calibration_mode=None,
   ):
+    """einsum function where QTensor is the right-hand-side"""
     # Assumes kv is already quantized.
     einsum = jnp.einsum
     if isinstance(kv, aqt_tensor.QTensor):
@@ -141,6 +145,7 @@ class KVQuant:
     return einsum
 
   def einsum_fn_with_rhs_qtensor_and_dequant(self, value):
+    """Get einstein summation for different dequant modes."""
     if self.dtype == jnp.float8_e4m3fn:
       return self.einsum_fn_with_rhs_qtensor(
           value,
@@ -184,6 +189,7 @@ class KVCache(nn.Module):
     raise f"Invalid config for kv_quant_axis:{self.kv_quant.axis_cfg}"
 
   def _get_prefill_cache_vars(self, batch, key_heads, value_heads, key_head_size, value_head_size, model_mode):
+    """Get a shaped abstraction of the state"""
 
     cache_length = self.max_prefill_length
     dtype = self._get_cached_kv_dtype()
@@ -258,6 +264,7 @@ class KVCache(nn.Module):
     return key_vars, value_vars, cached_segment_id_var
 
   def _get_ar_cache_vars(self, batch, key_heads, value_heads, key_head_size, value_head_size, model_mode):
+    """get ar cache vars"""
 
     dtype = self._get_cached_kv_dtype()
     if self.max_target_length <= self.max_prefill_length:
@@ -602,6 +609,7 @@ class KVCache(nn.Module):
       )
 
   def get_cached_values(self, cache_vars, target_dtype, cache_axis_order) -> jax.Array | KVTensor:
+    """get cached values"""
     cache_var, cache_scale_var = cache_vars
     cache_value = cache_var.value
     if cache_scale_var is not None:

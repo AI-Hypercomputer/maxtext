@@ -19,22 +19,29 @@
 # NOTE: please run this script from root, using the following commands for each backend type:
 
 # Llama4 JAX cmd:
-# JAX_PLATFORMS=cuda,cpu python -m MaxText.tests.llama4_logit_verification_script jax [scout/maverick] MaxText/configs/base.yml model_name=llama4-17b-[16e/128e]
-# scan_layers=false base_output_directory=llama4 run_name=temp-testing-only hardware=gpu force_unroll=false weight_dtype=float32 max_target_length=16
-# max_prefill_predict_length=4 per_device_batch_size=1 dtype=float32
-# load_parameters_path=...
+"""
+JAX_PLATFORMS=cuda,cpu python3 -m MaxText.tests.llama4_logit_verification_script jax [scout/maverick] \
+  MaxText/configs/base.yml model_name=llama4-17b-[16e/128e] \
+  scan_layers=false base_output_directory=llama4 run_name=temp-testing-only hardware=gpu force_unroll=false \
+  weight_dtype=float32 max_target_length=16 max_prefill_predict_length=4 per_device_batch_size=1 dtype=float32 \
+  load_parameters_path=...
+"""
 
 # Llama4 HF cmd:
-# python -m MaxText.tests.llama4_logit_verification_script hf [scout/maverick]
+# python3 -m MaxText.tests.llama4_logit_verification_script hf [scout/maverick]
 
 
 import argparse
 import sys
 
 import jax
+
 import jsonlines
+
 import numpy as np
+
 import torch
+
 from transformers import AutoModelForCausalLM
 
 from MaxText import maxtext_utils, pyconfig
@@ -157,7 +164,7 @@ def run_l4_jax_forward_pass(config, model_size):
   )
 
 
-if __name__ == "__main__":
+def main():
   parser = argparse.ArgumentParser()
   parser.add_argument("backend_type", type=str, choices=["jax", "hf"])
   parser.add_argument("model_size", type=str, choices=["scout", "maverick"])
@@ -172,4 +179,8 @@ if __name__ == "__main__":
   elif backend_type == "hf":
     run_l4_hf_forward_pass(model_size)
   else:
-    raise NotImplementedError("Currently, we only support jax and hf as backend types but got " + backend_type)
+    raise NotImplementedError(f"Currently, we only support jax and hf as backend types but got {backend_type}")
+
+
+if __name__ == "__main__":
+  main()

@@ -18,10 +18,13 @@ limitations under the License.
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from flax import linen as nn
-from jax.sharding import Mesh
+from typing import Optional
+
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
+
+from flax import linen as nn
+
 from MaxText.layers import attentions
 from MaxText.layers import embeddings
 from MaxText.layers import initializers
@@ -30,10 +33,8 @@ from MaxText.layers import linears
 from MaxText.layers import normalizations
 from MaxText.layers import models
 from MaxText.layers import quantizations
-
 from MaxText import common_types
 from MaxText.inference import page_manager
-from typing import Optional
 
 Array = common_types.Array
 Config = common_types.Config
@@ -131,9 +132,7 @@ class Llama4DecoderLayer(nn.Module):
     cfg = self.config
     mesh = self.mesh
 
-    assert (
-        cfg.num_experts >= 1
-    ), "Expected the Llama4 config to have num_experts > 1.  Note that MaxText only supports Llama4 Scout (MoE-only) for now!"
+    assert cfg.num_experts >= 1, "Expected the Llama4 config to have `num_experts > 1`."
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")

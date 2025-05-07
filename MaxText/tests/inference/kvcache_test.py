@@ -15,12 +15,12 @@ limitations under the License.
 
 import unittest
 
-from MaxText import common_types
-from MaxText.inference import kvcache
-
 import jax
 from jax import random
 import jax.numpy as jnp
+
+from MaxText import common_types
+from MaxText.inference import kvcache
 
 
 class MlaKVCacheTest(unittest.TestCase):

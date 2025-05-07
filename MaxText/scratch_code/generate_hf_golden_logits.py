@@ -39,6 +39,7 @@ def upload_blob(bucket_name, source_file_name, destination_blob_name):
 
 
 def save_golden_logits(model_id, output_path, prompt_texts, gcs_bucket):
+  """save golden logits"""
   tokenizer = AutoTokenizer.from_pretrained(model_id)
   model = AutoModelForCausalLM.from_pretrained(
       model_id,

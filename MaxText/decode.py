@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CLI utility for running inference on a single/multi stream(s)"""
+"""CLI utility for running inference on a single/multi stream(s)."""
 
 import os
 from typing import Sequence
@@ -65,7 +65,7 @@ def _batch_first_result_token(first_tokens: list[engine_api.ResultTokens], batch
   )
 
   def _all_equals(elements: Sequence[jax.Array], target: jax.Array):
-    """Checks if each element equals the given target"""
+    """Checks if each element equals the given target."""
     stacked = jnp.stack(elements)
     row_comparisons = stacked == target
     return jnp.all(row_comparisons)

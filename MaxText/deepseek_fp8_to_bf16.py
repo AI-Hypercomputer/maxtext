@@ -70,7 +70,7 @@ def weight_dequant_cpu(x: torch.Tensor, s: torch.Tensor, block_size: int = 128) 
   return y
 
 
-def convert_fp8_to_bf16(fp8_path: string, bf16_path: string, cache_file_num: int = 2):
+def convert_fp8_to_bf16(fp8_path: str, bf16_path: str, cache_file_num: int = 2):
   """
   Converts a FP8 model to a BF16 model and saves the converted weights.
 

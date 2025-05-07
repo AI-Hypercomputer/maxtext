@@ -14,13 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-""" Tests for kernels """
+""" Tests for kernels. """
+
+import unittest
+
+import pytest
 
 import numpy as np
-import pytest
-import unittest
+
 import jax
 import jax.numpy as jnp
+
 from MaxText.kernels.ragged_attention import ragged_mqa, reference_mqa, ragged_mha, reference_mha, ragged_gqa, reference_gqa
 
 
@@ -89,12 +93,8 @@ class RaggedAttentionTest(unittest.TestCase):
     k1, k2, k3 = jax.random.split(key, 3)
 
     q = jax.random.normal(k1, (self.batch_size, 1, self.num_query_heads, self.head_dim), dtype=self.dtype)
-    k = jax.random.normal(
-        k2, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype
-    )
-    v = jax.random.normal(
-        k3, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype
-    )
+    k = jax.random.normal(k2, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype)
+    v = jax.random.normal(k3, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype)
     lengths = jnp.array(np.random.randint(1, self.max_target_length, self.batch_size), dtype=jnp.int32)
 
     ragged_out, ragged_max, ragged_denom = ragged_gqa(q, k, v, lengths)

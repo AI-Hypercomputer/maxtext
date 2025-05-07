@@ -83,6 +83,7 @@ def setup_maxtext_model(config):
 
 
 def prepare_maxtext_inputs(maxtext_data, config):
+  """prepare maxtext inputs"""
   data = _input_pipeline_utils.extract_messages_and_mask(maxtext_data, "messages")
   tokenizer = AutoTokenizer.from_pretrained(
       config.tokenizer_path,
@@ -118,6 +119,7 @@ def prepare_maxtext_inputs(maxtext_data, config):
 
 
 def get_maxtext_logits(inputs, inputs_position, inputs_segmentation, config):
+  """get maxtext logits"""
   maxtext_model, state, rng = setup_maxtext_model(config)
   maxtext_logits, _ = maxtext_model.apply(
       state.params,

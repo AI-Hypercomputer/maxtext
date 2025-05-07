@@ -187,7 +187,7 @@ def train_loop(config, elastic_manager, state=None):
   Args:
     config:
     state:
-    ckpt_path:
+    elastic_manager:
   Returns:
   """
   # Create a GoodputRecorder to log information

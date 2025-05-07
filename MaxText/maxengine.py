@@ -12,12 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Implementation of Engine API for MaxText"""
+"""Implementation of Engine API for MaxText."""
+
 import functools
 from typing import Any, List, Optional, Tuple, Callable
 from collections import defaultdict
 import uuid
 import os.path
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -45,8 +47,6 @@ from MaxText.utils import lora_utils
 from MaxText.globals import PKG_DIR
 from MaxText.inference.page_manager import PageManager, PageState
 from MaxText.layers import models, quantizations
-
-import warnings
 
 
 warnings.simplefilter("ignore", category=FutureWarning)

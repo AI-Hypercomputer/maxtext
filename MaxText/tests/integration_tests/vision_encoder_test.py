@@ -12,7 +12,7 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-""" Tests for multimodal vision encoder """
+""" Tests for multimodal vision encoder. """
 
 import unittest
 import os
@@ -29,6 +29,10 @@ from MaxText.globals import PKG_DIR
 from MaxText import maxengine
 
 
+# 4b with vit
+DEFAULT_LOAD_PARAMETERS_PATH = "gs://maxtext-model-checkpoints/gemma3-4b/multimodal/2025-04-25-18-06-04/checkpoints/0/items"
+
+
 class VisionEncoderEmbeddingTest(unittest.TestCase):
 
   CONFIGS = {
@@ -39,7 +43,7 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
           rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.gemma3')}",
           "use_multimodal=True",
           "run_name=runner_test",
-          "load_parameters_path=gs://maxtext-model-checkpoints/gemma3-4b/multimodal/2025-04-25-18-06-04/checkpoints/0/items",  # 4b with vit
+          f"load_parameters_path={DEFAULT_LOAD_PARAMETERS_PATH}",
           "steps=1",
           "enable_checkpointing=False",
           "max_target_length=16",
