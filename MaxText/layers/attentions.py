@@ -474,12 +474,13 @@ class AttentionOp(nn.Module):
         if isinstance(value, KVTensor):
           value = value.dequant()
 
-        if model_mode == MODEL_MODE_AUTOREGRESSIVE:
-          raise ValueError(
-              """Decode not supported with flash attention.
-                              Use `dot_product` instead."""
-          )
-        return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap), None, None
+        attn_output = self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap, model_mode)
+        # TODO @jacobplatin: do these need to be the attn_weights?
+        local_max = jnp.max(attn_output, axis=-1, keepdims=True)
+        local_exps = jnp.exp(attn_output - local_max)
+        local_sum = jnp.sum(local_exps, axis=-1, keepdims=True)
+
+        return attn_output, local_max, local_sum
       else:
         if model_mode == MODEL_MODE_AUTOREGRESSIVE:
           # fallback to dot_product as pallas gpu flash attention doesn't support decode stage
@@ -614,6 +615,20 @@ class AttentionOp(nn.Module):
       value: Array,
       decoder_segment_ids: Array | None,
       attn_logits_soft_cap: float | None = None,
+      model_mode: str = common_types.MODEL_MODE_TRAIN,
+      global_block_q: int | None = None,
+      global_block_kv: int | None = None,
+      global_block_kv_compute: int | None = None,
+      global_block_q_dkv: int | None = None,
+      global_block_kv_dkv: int | None = None,
+      global_block_kv_dkv_compute: int | None = None,
+      global_block_q_dq: int | None = None,
+      global_block_kv_dq: int | None = None,
+      global_q_layout: str | None = None,
+      global_k_layout: str | None = None,
+      global_v_layout: str | None = None
+
+
   ) -> Array:
     """TPU Flash Attention."""
 
@@ -633,18 +648,18 @@ class AttentionOp(nn.Module):
     axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
     axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
 
-    global_block_q = self.config.sa_block_q
-    global_block_kv = self.config.sa_block_kv
-    global_block_kv_compute = self.config.sa_block_kv_compute
-    global_block_q_dkv = self.config.sa_block_q_dkv
-    global_block_kv_dkv = self.config.sa_block_kv_dkv
-    global_block_kv_dkv_compute = self.config.sa_block_kv_dkv_compute
-    global_block_q_dq = self.config.sa_block_q_dq
-    global_block_kv_dq = self.config.sa_block_kv_dq
-    global_use_fused_bwd_kernel = self.config.sa_use_fused_bwd_kernel
-    global_q_layout = self.config.sa_q_layout
-    global_k_layout = self.config.sa_k_layout
-    global_v_layout = self.config.sa_v_layout
+    # global_block_q = self.config.sa_block_q
+    # global_block_kv = self.config.sa_block_kv
+    # global_block_kv_compute = self.config.sa_block_kv_compute
+    # global_block_q_dkv = self.config.sa_block_q_dkv
+    # global_block_kv_dkv = self.config.sa_block_kv_dkv
+    # global_block_kv_dkv_compute = self.config.sa_block_kv_dkv_compute
+    # global_block_q_dq = self.config.sa_block_q_dq
+    # global_block_kv_dq = self.config.sa_block_kv_dq
+    # global_use_fused_bwd_kernel = self.config.sa_use_fused_bwd_kernel
+    # global_q_layout = self.config.sa_q_layout
+    # global_k_layout = self.config.sa_k_layout
+    # global_v_layout = self.config.sa_v_layout
 
     devices_in_data_fsdp = self.mesh.shape["data"] * self.mesh.shape["fsdp"]
     assert (query.shape[0] / devices_in_data_fsdp).is_integer(), (
@@ -669,7 +684,12 @@ class AttentionOp(nn.Module):
         v_layout=splash_attention_kernel.QKVLayout[global_v_layout],
     )
 
-    mask_shape = (self.config.max_target_length, self.config.max_target_length)
+    _, _, q_seq_len, _ = query.shape
+    _, _, kv_seq_len, _ = key.shape
+
+    mask_shape = (q_seq_len, kv_seq_len)
+    # if model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+    #   mask_shape = decoder_segment_ids[:, None, None, None, :].shape
     mask = splash_attention_mask.CausalMask(shape=mask_shape)
 
     # Create LoadBalancedCausalMask if cp and load_balancing
@@ -738,22 +758,22 @@ class AttentionOp(nn.Module):
     # 'segment_axis_names_q' maps to ['activation_q_length', ['context']] meaning that q is sharded over the context axis
     #  'segment_axis_names_kv' maps to ['activation_kv_length', []] meaning that K and V are not sharded
     # splash_kernel is sharded over (HEAD, LENGTH)
-    @functools.partial(
-        shard_map,
-        mesh=self.mesh,
-        in_specs=(
-            axis_names_q,
-            axis_names_kv,
-            axis_names_kv,
-            segment_axis_names_q,
-            segment_axis_names_kv,
-            segment_axis_names_splash_kernel,
-            None,  # no sharding for cp_size
-            None,  # no sharding for load_balanced_context_parallel
-        ),
-        out_specs=axis_names_q,
-        check_rep=False,
-    )
+    # @functools.partial(
+    #     shard_map,
+    #     mesh=self.mesh,
+    #     in_specs=(
+    #         axis_names_q,
+    #         axis_names_kv,
+    #         axis_names_kv,
+    #         segment_axis_names_q,
+    #         segment_axis_names_kv,
+    #         segment_axis_names_splash_kernel,
+    #         None,  # no sharding for cp_size
+    #         None,  # no sharding for load_balanced_context_parallel
+    #     ),
+    #     out_specs=axis_names_q,
+    #     check_rep=False,
+    # )
     def wrap_flash_attention(
         query,
         key,
@@ -776,21 +796,30 @@ class AttentionOp(nn.Module):
             tensor=decoder_segment_ids_kv, cp_size=cp_size, seq_dim=1, to_contiguous=True
         )
 
+      # TODO: I don't think we need decoder_segment_ids_q, since it's not used anywhere else?
       if decoder_segment_ids_q is not None:
         if cp_size > 1 and load_balanced_context_parallel:
+          # TODO
           decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(
               decoder_segment_ids_q, decoder_segment_ids_unpermuted
           )
         else:
-          decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(decoder_segment_ids_q, decoder_segment_ids_q)
+          decoder_segment_ids_tuple = splash_attention_kernel.SegmentIds(decoder_segment_ids_q, decoder_segment_ids_kv)
       else:
         decoder_segment_ids_tuple = None
+
       attention_output = jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids_tuple)
 
       return attention_output
 
+    bsz, _, q_len, _ = query.shape
+    decoder_segment_ids_q = None
+    decoder_segment_ids_kv = None
+    if decoder_segment_ids is not None:
+      decoder_segment_ids_q = jnp.zeros_like(decoder_segment_ids, shape=(bsz, q_len))
+      decoder_segment_ids_kv = decoder_segment_ids
     x = wrap_flash_attention(
-        query, key, value, decoder_segment_ids, decoder_segment_ids, splash_kernel, cp_size, load_balanced_context_parallel
+        query, key, value, decoder_segment_ids_q, decoder_segment_ids_kv, splash_kernel, cp_size, load_balanced_context_parallel
     )
 
     x = jnp.transpose(x, axes=(0, 2, 1, 3))
@@ -1249,8 +1278,8 @@ class Attention(nn.Module):
         num_query_heads=self.num_query_heads,
         num_kv_heads=self.num_kv_heads,
         dropout_rate=self.dropout_rate,
-        dtype=self.dtype,
-        compute_axis_order=self.compute_axis_order,
+        dtype=self.dtype, # bfloat16
+        compute_axis_order=self.compute_axis_order,#  "0,1,2,3"
         reshape_q=self.reshape_q,
         attention_type=self.attention_type,
         attn_logits_soft_cap=self.attn_logits_soft_cap,

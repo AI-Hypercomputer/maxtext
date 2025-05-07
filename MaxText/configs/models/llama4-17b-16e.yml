@@ -41,4 +41,4 @@ temperature_tuning: True
 # Chunk attention is used on all RoPE layers
 # otherwise, on NoPE layers, use global attention
 chunk_attn_window_size: 8192
-image_size_for_vit: 336 
+image_size_for_vit: 336

@@ -62,7 +62,7 @@ fi
 enable_xla_flags=true
 export LIBTPU_INIT_ARGS=""
 if "$enable_xla_flags"; then
-    TEST_FLAGS=$(python3 select_xla_flags.py)
+    TEST_FLAGS=$(python3 -m select_xla_flags)
     export LIBTPU_INIT_ARGS=${TEST_FLAGS}
 fi
 echo XLA_FLAGS: $LIBTPU_INIT_ARGS
@@ -90,7 +90,7 @@ fi
 if [ -z "$PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES" ];
 then
     PREFILL_LEN="1024"
-    BATCH_SIZE_PER_DEVICE="64" 
+    BATCH_SIZE_PER_DEVICE="64"
     export PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES="${PREFILL_LEN},${BATCH_SIZE_PER_DEVICE}"
 fi
 
@@ -117,7 +117,7 @@ run_benchmark() {
             ;;
         "accuracy")
             export HF_CKPT="meta-llama/Llama-2-70b-chat-hf"
-            $cmd bash llama_offline_run.sh ${RUN_OPTIONS} -r benchmarks_accuracy_${RUN_DESC} -a  
+            $cmd bash llama_offline_run.sh ${RUN_OPTIONS} -r benchmarks_accuracy_${RUN_DESC} -a
             ;;
     esac
 }
