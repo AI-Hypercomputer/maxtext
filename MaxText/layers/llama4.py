@@ -297,7 +297,8 @@ A repeatable block given nope_layer_interval and interleave_moe_layer_step
     cfg = self.config
     mesh = self.mesh
     # Is LCM a joke? Should we just hardcode maverick and scout as two separate blocks instead?
-    layers_to_repeat = numpy.lcm(nope_layer_interval, interleave_moe_layer_step)
+    #layers_to_repeat = numpy.lcm(nope_layer_interval, interleave_moe_layer_step)
+    layers_to_repeat = cfg.layer_repeat_length
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")

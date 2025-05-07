@@ -342,8 +342,10 @@ class Decoder(nn.Module):
       return [simple_layer.SimpleMlpDecoderLayer]
     elif self.config.decoder_block == DecoderBlockType.LLAMA4:
       from MaxText.layers import llama4
-
-      return [llama4.Llama4DecoderLayer]
+      if self.config.scan_layers:
+        return [llama4.Llama4ScannableBlock]
+      else:
+        return [llama4.Llama4DecoderLayer]
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
@@ -502,8 +504,11 @@ class Decoder(nn.Module):
           layer_call_kwargs = {}
           if cfg.decoder_block == DecoderBlockType.GEMMA3:
             layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
+          else if cfg.decoder_block == DecoderBlockType.Llama4ScannableBlock:
+            layer_kwargs = {"nope_layer_interval": self.config.nope_layer_interval, "interleave_moe_layer_step", self.config.interleave_moe_layer_step}
           RemattedBlockLayer = RemattedBlockLayers[0]
-          y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, cfg.num_decoder_layers, "layers", mesh)(
+          scan_length = cfg.num_decoder_layers / cfg.layer_repeat_length
+          y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, scan_length, "layers", mesh, **layer_kwargs)(
               y,
               decoder_segment_ids,
               decoder_positions,
