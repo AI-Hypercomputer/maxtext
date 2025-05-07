@@ -600,6 +600,8 @@ inference_microbenchmark_log_file_path: ""
 inference_microbenchmark_num_samples: [1, 2, 3, 4, 5]
 inference_metadata_file: "" # path to a json file
 inference_server: "MaxtextInterleavedServer"  # inference server to start
+prefill_slice: "v5e-16" # slice to use for prefill in disaggregation mode
+generate_slice: "v5e-16" # slice to use for generatation in disaggregation mode
 inference_benchmark_test: False
 enable_model_warmup: False
 enable_llm_inference_pool: False          # Bool to launch inference server for llm_inference_gateway with their specified APIs
