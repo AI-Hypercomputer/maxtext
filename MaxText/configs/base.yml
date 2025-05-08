@@ -153,7 +153,7 @@ topk_routing_group: -1 # number of top groups to route inputs. For EP,
 
 # For complex architectures like llama4 where layers are different e.g.
 # maverick uses [dense+rope, moe+rope, dense+rope, moe+nope]
-layer_repeat_length: 1 
+layers_to_repeat: 1 
 
 # pipeline parallelism
 # The number of decoder layers is equal to the product of num_stages, num_layers_per_pipeline_stage and num_pipeline_repeats.

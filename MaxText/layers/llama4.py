@@ -271,9 +271,9 @@ class Llama4DecoderLayer(nn.Module):
 
 
 class Llama4ScannableBlock(nn.Module):
-'''
-A repeatable block given nope_layer_interval and interleave_moe_layer_step
-'''
+  '''
+  A repeatable block given nope_layer_interval and interleave_moe_layer_step
+  '''
 
   config: models.Config
   mesh: Mesh

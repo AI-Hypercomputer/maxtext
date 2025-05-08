@@ -504,10 +504,11 @@ class Decoder(nn.Module):
           layer_call_kwargs = {}
           if cfg.decoder_block == DecoderBlockType.GEMMA3:
             layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
-          else if cfg.decoder_block == DecoderBlockType.Llama4ScannableBlock:
-            layer_kwargs = {"nope_layer_interval": self.config.nope_layer_interval, "interleave_moe_layer_step", self.config.interleave_moe_layer_step}
+          elif cfg.decoder_block == DecoderBlockType.LLAMA4:
+            layer_kwargs = {"nope_layer_interval": self.config.nope_layer_interval, "interleave_moe_layer_step": self.config.interleave_moe_layer_step}
           RemattedBlockLayer = RemattedBlockLayers[0]
-          scan_length = cfg.num_decoder_layers / cfg.layer_repeat_length
+          scan_length = cfg.num_decoder_layers / cfg.layers_to_repeat
+          # TODO!!!! Plumb in kwargs into the definition of scan_decoder_layers
           y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, scan_length, "layers", mesh, **layer_kwargs)(
               y,
               decoder_segment_ids,
