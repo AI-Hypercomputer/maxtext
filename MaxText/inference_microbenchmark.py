@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-     https://www.apache.org/licenses/LICENSE-2.0
+    https://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,9 +15,11 @@ limitations under the License.
 """
 
 """Inference microbenchmark for prefill and autoregressive steps."""
-import datetime
+import time
 import jax
 import json
+import statistics
+# import numpy as np 
 
 from absl import app
 from collections.abc import MutableMapping
@@ -27,8 +29,6 @@ from jetstream.engine import token_utils
 from MaxText import max_utils
 from MaxText import maxengine
 from MaxText import maxtext_utils
-from MaxText import prefill_packing
-from MaxText import prefix_cache
 from MaxText import profiler
 from MaxText import pyconfig
 
@@ -36,512 +36,564 @@ import warnings
 
 warnings.simplefilter("ignore", category=FutureWarning)
 
-_WARMUP_ITERS = 2
+_WARMUP_ITERS = 20
 _FLATTEN_MICROBENCHMARK_RESULTS = False
+
+# Define stage names as constants
+STAGE_PREFILL = "prefill"
+STAGE_INSERT = "insert"
+STAGE_PREFILL_INSERT = "prefill_insert"
+STAGE_GENERATE = "generate"
+
+
+def _get_iteration_stats(times_sec: list[float]) -> dict:
+    """Calculates statistics from a list of iteration times in seconds."""
+    if not times_sec:
+        return {
+            "mean_ms": 0, "median_ms": 0, "min_ms": 0, "max_ms": 0, "std_dev_ms": 0,
+            "iterations": 0, "total_time_s": 0,
+        }
+    
+    times_ms = [t * 1000 for t in times_sec]
+    stats_dict = {
+        "mean_ms": statistics.mean(times_ms) if times_ms else 0,
+        "median_ms": statistics.median(times_ms) if times_ms else 0,
+        "min_ms": min(times_ms) if times_ms else 0,
+        "max_ms": max(times_ms) if times_ms else 0,
+        "std_dev_ms": statistics.stdev(times_ms) if len(times_ms) > 1 else 0,
+        "iterations": len(times_ms),
+        "total_time_s": sum(times_sec),
+    }
+    return stats_dict
+
+
 # pylint: disable=too-many-positional-arguments
 
+# --- Prefill Benchmark ---
+def prefill_benchmark_loop(engine, params, tokens, true_length, iters, shared_rng_key):
+    """Inner loop for benchmarking prefill step, returns individual times."""
+    iter_times_s = []
+    current_rng = shared_rng_key
+    prefill_result = None
+    for _ in range(iters):
+        current_rng, rng_prefill = jax.random.split(current_rng)
+        start_time = time.perf_counter()
+        prefill_result, _ = engine.prefill(
+            params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill
+        )
+        jax.block_until_ready(prefill_result)
+        end_time = time.perf_counter()
+        iter_times_s.append(end_time - start_time)
+    del prefill_result 
+    return iter_times_s
 
-def prefix_cache_benchmark(
-    prefix, prefill_length: int, true_length: int, common_prefix_proportion: float, prefix_cache_entries_num: int, iters: int
-):
-  """Handles running prefix cache benchmark, and printing results.
 
-  Create different key with half of prefill_length common prefix insert into cache.
-  The value is not relevant to the cache for now. Just copy the prefix for every cache entry.
-  1. Fill the prefix cache to full capacity.
-  2. Benchmark save prefix cache with evicting time average by prefix_cache_entries_num.
-  3. Benchmark fetch_longest_common_prefix_key average by iters.
-  4. Benchmark load prefix cache time average by iters.
+def prefill_benchmark(config, engine, params, tokens, true_length, num_model_params, iters, shared_rng_key):
+    """Handles warmup, running prefill benchmark, and printing results."""
+    print(f"\nRunning Prefill Benchmark for length {tokens.size}...")
+    current_rng = shared_rng_key
+    prefill_result_warmup = None
+    for _ in range(_WARMUP_ITERS):
+        current_rng, rng_prefill_warmup = jax.random.split(current_rng)
+        prefill_result_warmup, _ = engine.prefill(
+            params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill_warmup
+        )
+    jax.block_until_ready(prefill_result_warmup)
+    del prefill_result_warmup
 
-  Args:
-    prefix: prefix return from prefill function
-    prefill_length: prefill token length after padding
-    true_length: true prefill token length
-    common_prefix_proportion: [0., 1.] common prefix proportion to the prefill_length
-    prefix_cache_entries_num: number of prefix cache entries insert into PrefixCache
-    iters: repeat time to test fetch_longest_common_prefix_key and load from cache
-  """
+    iter_times_s = prefill_benchmark_loop(engine, params, tokens, true_length, iters, current_rng)
+    stats = _get_iteration_stats(iter_times_s)
 
-  print(f"Prefix Cache benchmark results for prefill length {prefill_length}:\n")
-
-  value: prefix_cache.Value = prefix_cache.Value(
-      prefix=prefix,
-      true_length=true_length,
-      padded_length=prefill_length,
-      tokens=tuple(i for i in range(prefill_length)),
-  )
-
-  def copy_jax_array(x):
-    return x.copy()
-
-  def clone_value():
-    return prefix_cache.Value(
-        prefix=jax.tree.map(copy_jax_array, value.prefix),
-        true_length=value.true_length,
-        padded_length=value.padded_length,
-        tokens=value.tokens,
-        prefix_size_bytes=value.prefix_size_bytes,
-        device=value.device,
+    prefill_tflops_per_device, _, _ = maxtext_utils.calculate_prefill_tflops_per_device(
+        num_model_params, tokens.size, config
+    )
+    tflops_per_sec_per_device = (
+        (prefill_tflops_per_device / (stats["mean_ms"] / 1000.0)) if stats["mean_ms"] > 0 else 0
     )
 
-  prefix_size_bytes_gb = value.prefix_size_bytes / 1024 / 1024 / 1024
-  max_bytes = prefix_cache_entries_num * value.prefix_size_bytes
-  # TODO(yuyanpeng): test hierarchical cache
-  prefix_cache_inst = prefix_cache.PrefixCache(hbm_bytes=max_bytes, dram_bytes=max_bytes)
-  common_len = int(prefill_length * common_prefix_proportion)
-  remain_len = prefill_length - common_len
-  common_prefix_key = tuple(i for i in range(common_len))
+    print(f"Prefill Benchmark Results (length {tokens.size}):")
+    print(f"\tIterations: {stats['iterations']}")
+    print(f"\tMean time: {stats['mean_ms']:.3f} ms")
+    print(f"\tMedian time: {stats['median_ms']:.3f} ms")
+    print(f"\tMin time: {stats['min_ms']:.3f} ms")
+    print(f"\tMax time: {stats['max_ms']:.3f} ms")
+    print(f"\tStd Dev time: {stats['std_dev_ms']:.3f} ms")
+    print(f"\tTotal TFLOPs/device (for one prefill): {prefill_tflops_per_device:.3f}")
+    print(f"\tTFLOPs/sec/device: {tflops_per_sec_per_device:.3f}")
 
-  # Fill the prefix caching
-  new_value_list = []
-  for c_idx in range(prefix_cache_entries_num):
-    # Add 100 to make sure filled prefix caching will not share the common_prefix_key.
-    # The later save prefix part will evict all of them.
-    key = tuple(100 + i + c_idx * prefill_length for i in range(prefill_length))
-    new_value = clone_value()
-    prefix_cache_inst.save(key, new_value)
-    new_value_list.append(new_value)
-  jax.block_until_ready(new_value_list)
-  del new_value_list
-
-  # Save prefix
-  new_value = None
-  save_sec = 0
-  for c_idx in range(iters):
-    key = common_prefix_key + tuple(i + c_idx * remain_len for i in range(remain_len))
-    # values are not relevant for caching now, just clone the same tokens and values for test
-    new_value = clone_value()
-    jax.block_until_ready(new_value)
-    start = datetime.datetime.now()
-    prefix_cache_inst.save(key, new_value)
-    end = datetime.datetime.now()
-    save_sec += (end - start).total_seconds()
-  del new_value
-  save_avg_ms = save_sec * 1000 / iters
-
-  # Fetch longest prefix key
-  key_load = common_prefix_key + tuple(i + prefix_cache_entries_num * remain_len for i in range(remain_len))
-  matched_key = None
-  fetch_sec = 0
-  for _ in range(iters):
-    start = datetime.datetime.now()
-    matched_key = prefix_cache_inst.fetch_longest_common_prefix_key(key_load)
-    end = datetime.datetime.now()
-    fetch_sec += (end - start).total_seconds()
-  fetch_avg_ms = fetch_sec * 1000 / iters
-
-  assert matched_key is not None
-
-  # Load prefix
-  load_sec = 0
-  value_load = None
-  for _ in range(iters):
-    start = datetime.datetime.now()
-    loaded_value = prefix_cache_inst.load(matched_key)
-    jax.block_until_ready(loaded_value)
-    end = datetime.datetime.now()
-    load_sec += (end - start).total_seconds()
-  del value_load
-  load_avg_ms = load_sec * 1000 / iters
-
-  print(
-      f"PrefixCaching results:\n"
-      f"\tPer prefix size bytes: {prefix_size_bytes_gb:.3f} GB\n"
-      f"\tAverage save cache time: {save_avg_ms:.3f} ms\n"
-      f"\tAverage fetch longest prefix time: {fetch_avg_ms:.3f} ms\n"
-      f"\tAverage load cache time: {load_avg_ms:.3f} ms\n\n\n"
-  )
-  del prefix_cache_inst
-
-
-def prefill_benchmark_loop(engine_prefill, params, tokens, true_length, iters, num_samples: int | None = None):
-  """Inner loop for benchmarking prefill step."""
-  start = datetime.datetime.now()
-  rng = jax.random.PRNGKey(1234)
-  prefill_result = None
-  for _ in range(iters):
-    rng, rng_prefill = jax.random.split(rng)
-    if num_samples is None:
-      prefill_result, _ = engine_prefill(params, tokens, true_length, rng_prefill)
-    else:
-      prefill_result, _ = engine_prefill[num_samples](params, tokens, true_length, rng_prefill, None)
-  jax.block_until_ready(prefill_result)
-  end = datetime.datetime.now()
-  del prefill_result
-  return (end - start).total_seconds()
-
-
-def prefill_benchmark(config, engine_prefill, params, tokens, true_length, num_model_params, iters):
-  """Handles warmup, running prefill benchmark, and printing results."""
-  rng = jax.random.PRNGKey(1234)
-  prefill_result = None
-  for _ in range(_WARMUP_ITERS):
-    rng, rng_prefill = jax.random.split(rng)
-    prefill_result, _ = engine_prefill(params, tokens, true_length, rng_prefill)
-  jax.block_until_ready(prefill_result)
-  del prefill_result
-
-  print(f"Prefill benchmark results for length {tokens.size}:\n")
-  time_in_s = prefill_benchmark_loop(engine_prefill, params, tokens, true_length, iters)
-  prefill_average_ms = 1000 * time_in_s / iters
-  prefill_tflops_per_device, _, _ = maxtext_utils.calculate_prefill_tflops_per_device(num_model_params, tokens.size, config)
-  tflops_per_sec_per_device = prefill_tflops_per_device / prefill_average_ms * 1000.0
-  print(
-      f"\tPrefill step average time: {prefill_average_ms:.3f} ms\n"
-      f"\tPrefill total TFLOPs/device: {prefill_tflops_per_device:.3f}\n"
-      f"\tPrefill TFLOPs/sec/device: {tflops_per_sec_per_device:.3f}\n\n\n\n"
-  )
-  result_dict = {
-      "time_in_ms": prefill_average_ms,
-      "total_tflops_per_device": prefill_tflops_per_device,
-      "tflops_per_sec_per_device": tflops_per_sec_per_device,
-  }
-  return result_dict
-
-
-def prefill_multisampling_benchmark(config, engine_prefill_multisampling, params, tokens, true_length, iters):
-  """Handles warmup, running prefill benchmark, and printing results."""
-  rng = jax.random.PRNGKey(1234)
-  prefill_result = None
-  for _ in range(_WARMUP_ITERS):
-    rng, rng_prefill = jax.random.split(rng)
-    for num_samples in config.inference_microbenchmark_num_samples:
-      prefill_result, _ = engine_prefill_multisampling[num_samples](params, tokens, true_length, rng_prefill, None)
-  jax.block_until_ready(prefill_result)
-  del prefill_result
-
-  print(f"Multi-sampling prefill benchmark results for length {tokens.size}:\n")
-  result_dict = {}
-  for num_samples in config.inference_microbenchmark_num_samples:
-    time_in_s = prefill_benchmark_loop(engine_prefill_multisampling, params, tokens, true_length, iters, num_samples)
-    multisampling_prefill_average_ms = 1000 * time_in_s / iters
-    print(
-        f"\nNum samples: {num_samples}\n" f"\tPrefill step average time: {multisampling_prefill_average_ms:.3f} ms\n\n\n\n"
-    )
-    result_dict[num_samples] = {
-        "time_in_ms": multisampling_prefill_average_ms,
+    result_dict = {
+        "stats": stats,
+        "total_tflops_per_device": prefill_tflops_per_device,
+        "tflops_per_sec_per_device": tflops_per_sec_per_device,
     }
-  return result_dict
+    return result_dict
+
+# --- Insert Benchmark ---
+def insert_benchmark_loop(engine, prefill_result_for_insert, initial_decode_state, total_slots, iters, profile_config, profile_name_prefix):
+    iter_times_s = []
+    current_decode_state = initial_decode_state
+    
+    # prof = profiler.Profiler(profile_config) 
+    # prof.activate(optional_postfix=f"{profile_name_prefix}_insert_loop")
+
+    for i in range(iters):
+        slot_idx = int(i % total_slots)
+        start_time = time.perf_counter()
+        current_decode_state = engine.insert(prefill_result_for_insert, current_decode_state, slot_idx)
+        jax.block_until_ready(current_decode_state)
+        end_time = time.perf_counter()
+        iter_times_s.append(end_time - start_time)
+    
+    # prof.deactivate()
+    return iter_times_s, current_decode_state
 
 
-def prefill_insert_benchmark_loop(
-    config, engine_insert, decode_state, params, total_slots, tokens, true_length, iters, profile_name
+def insert_benchmark(config, engine, params, tokens, true_length, initial_decode_state, total_slots, iters, shared_rng_key):
+    print(f"\nRunning Insert Benchmark for prefill length {tokens.size}...")
+    
+    current_rng, rng_prefill_setup = jax.random.split(shared_rng_key)
+    prefill_result_for_insert, _ = engine.prefill(
+        params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill_setup
+    )
+    jax.block_until_ready(prefill_result_for_insert)
+
+    warmup_decode_state = initial_decode_state 
+    for i in range(_WARMUP_ITERS):
+        slot_idx = int(i % total_slots)
+        warmup_decode_state = engine.insert(prefill_result_for_insert, warmup_decode_state, slot_idx)
+    jax.block_until_ready(warmup_decode_state)
+
+    iter_times_s, final_decode_state = insert_benchmark_loop(
+        engine, prefill_result_for_insert, warmup_decode_state, 
+        total_slots, iters, config, f"insert_{tokens.size}"
+    )
+    del prefill_result_for_insert 
+    stats = _get_iteration_stats(iter_times_s)
+
+    print(f"Insert Benchmark Results (for prefill length {tokens.size}):")
+    print(f"\tIterations: {stats['iterations']}")
+    print(f"\tMean time: {stats['mean_ms']:.3f} ms")
+    print(f"\tMedian time: {stats['median_ms']:.3f} ms")
+    print(f"\tMin time: {stats['min_ms']:.3f} ms")
+    print(f"\tMax time: {stats['max_ms']:.3f} ms")
+    print(f"\tStd Dev time: {stats['std_dev_ms']:.3f} ms")
+    
+    result_dict = {"stats": stats}
+    return result_dict, final_decode_state
+
+
+# --- Prefill + Insert Benchmark ---
+def prefill_and_insert_benchmark_loop(
+    engine, params, tokens, true_length, initial_decode_state, total_slots, iters, shared_rng_key, profile_config, profile_name_prefix
 ):
-  """Inner loop for benchmarking prefill and insert step."""
-  prof = profiler.Profiler(config)
-  prof.activate(optional_postfix=profile_name)
-  start = datetime.datetime.now()
-  for i in range(iters):
-    _, decode_state = engine_insert(params, tokens, int(i % total_slots), true_length, decode_state)
-  jax.block_until_ready(decode_state)
-  end = datetime.datetime.now()
-  prof.deactivate()
-  return (end - start).total_seconds(), decode_state
+    iter_times_s = []
+    current_rng = shared_rng_key
+    current_decode_state = initial_decode_state
+    prefill_result = None
+
+    # prof = profiler.Profiler(profile_config)
+    # prof.activate(optional_postfix=f"{profile_name_prefix}_prefill_insert_loop")
+
+    for i in range(iters):
+        current_rng, rng_prefill = jax.random.split(current_rng)
+        slot_idx = int(i % total_slots)
+        start_time = time.perf_counter()
+        prefill_result, _ = engine.prefill(
+            params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill
+        )
+        current_decode_state = engine.insert(prefill_result, current_decode_state, slot_idx)
+        jax.block_until_ready(current_decode_state) 
+        end_time = time.perf_counter()
+        iter_times_s.append(end_time - start_time)
+        
+    del prefill_result 
+    # prof.deactivate()
+    return iter_times_s, current_decode_state
 
 
-def prefill_insert_benchmark(config, engine_insert, decode_state, params, total_slots, tokens, true_length, iters):
-  """Handles warmup, running insert benchmark, and printing results."""
-  for i in range(_WARMUP_ITERS):
-    _, decode_state = engine_insert(params, tokens, int(i % total_slots), true_length, decode_state)
-  jax.block_until_ready(decode_state)
+def prefill_and_insert_benchmark(
+    config, engine, params, tokens, true_length, initial_decode_state, total_slots, num_model_params, iters, shared_rng_key
+):
+    print(f"\nRunning Prefill+Insert Benchmark for length {tokens.size}...")
+    
+    current_rng = shared_rng_key
+    warmup_decode_state = initial_decode_state
+    prefill_result_warmup = None
+    for i in range(_WARMUP_ITERS):
+        current_rng, rng_prefill_warmup = jax.random.split(current_rng)
+        slot_idx = int(i % total_slots)
+        prefill_result_warmup, _ = engine.prefill(
+            params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill_warmup
+        )
+        warmup_decode_state = engine.insert(prefill_result_warmup, warmup_decode_state, slot_idx)
+    jax.block_until_ready(warmup_decode_state)
+    del prefill_result_warmup
 
-  print(f"Prefill and insert benchmark results for length {tokens.size}:\n")
-  time_in_s, decode_state = prefill_insert_benchmark_loop(
-      config, engine_insert, decode_state, params, total_slots, tokens, true_length, iters, f"prefill_insert_{tokens.size}"
-  )
-  prefill_insert_average_ms = time_in_s / iters * 1000.0
-  print(f"\tPrefill + Insert step average time: {prefill_insert_average_ms:.3f} ms\n\n\n\n")
-  result_dict = {"time_in_ms": prefill_insert_average_ms}
-  return result_dict, decode_state
+    iter_times_s, final_decode_state = prefill_and_insert_benchmark_loop(
+        engine, params, tokens, true_length, warmup_decode_state, 
+        total_slots, iters, current_rng, config, f"prefill_insert_{tokens.size}"
+    )
+    stats = _get_iteration_stats(iter_times_s)
 
+    prefill_tflops_per_device, _, _ = maxtext_utils.calculate_prefill_tflops_per_device(
+        num_model_params, tokens.size, config
+    )
+    tflops_per_sec_per_device = (
+        (prefill_tflops_per_device / (stats["mean_ms"] / 1000.0)) if stats["mean_ms"] > 0 else 0
+    )
+    
+    print(f"Prefill+Insert Benchmark Results (length {tokens.size}):")
+    print(f"\tIterations: {stats['iterations']}")
+    print(f"\tMean time: {stats['mean_ms']:.3f} ms")
+    print(f"\tMedian time: {stats['median_ms']:.3f} ms")
+    print(f"\tMin time: {stats['min_ms']:.3f} ms")
+    print(f"\tMax time: {stats['max_ms']:.3f} ms")
+    print(f"\tStd Dev time: {stats['std_dev_ms']:.3f} ms")
+    print(f"\tTotal TFLOPs/device (for prefill part): {prefill_tflops_per_device:.3f}")
+    print(f"\tTFLOPs/sec/device (based on combined time): {tflops_per_sec_per_device:.3f}")
 
-def ar_benchmark_loop(config, engine_generate, params, decode_state, iters, profile_name):
-  """Inner loop for benchmarking ar step."""
-  prof = profiler.Profiler(config)
-  prof.activate(optional_postfix=profile_name)
-  start = datetime.datetime.now()
-  rng = jax.random.PRNGKey(1234)
-  for _ in range(iters):
-    rng, rng_generate = jax.random.split(rng)
-    decode_state, _ = engine_generate(params, decode_state, rng_generate)
-  jax.block_until_ready(decode_state)
-  end = datetime.datetime.now()
-  prof.deactivate()
-  return (end - start).total_seconds(), decode_state
-
-
-def ar_benchmark(config, engine_generate, params, decode_state, global_batch_size, cache_size, model_size, iters):
-  """Handles warmup, running ar benchmark, and printing results."""
-  rng = jax.random.PRNGKey(1234)
-  for _ in range(_WARMUP_ITERS):
-    rng, rng_generate = jax.random.split(rng)
-    decode_state, _ = engine_generate(params, decode_state, rng_generate)
-  jax.block_until_ready(decode_state)
-
-  time_in_s, decode_state = ar_benchmark_loop(
-      config, engine_generate, params, decode_state, iters, profile_name="autoregress"
-  )
-  seconds_per_step = time_in_s / iters
-  ar_average_ms = seconds_per_step * 1000
-  total_throughput = global_batch_size / seconds_per_step
-
-  GB_per_step_per_device = (model_size + cache_size) / 1e9 / jax.device_count()
-  bw_per_device = GB_per_step_per_device / seconds_per_step
-  print(
-      f"AutoRegressive results:\n"
-      f"\tAR step average time: {ar_average_ms:.3f} ms\n"
-      f"\tAR step average time per seq: {ar_average_ms/global_batch_size:.3f} ms\n"
-      f"\tAR global batch size: {global_batch_size}\n"
-      f"\tAR throughput: {total_throughput:.3f} tokens/second\n"
-      f"\tAR memory bandwidth per device: {bw_per_device:.3f} GB/s\n\n\n"
-  )
-
-  result_dict = {
-      "step_in_ms": ar_average_ms,
-      "step_in_ms_per_seq": ar_average_ms / global_batch_size,
-      "global_batch_size": global_batch_size,
-      "total_throughput_tokens_per_second": total_throughput,
-      "bw_per_device_GB_per_second": bw_per_device,
-  }
-  return result_dict, decode_state
+    result_dict = {
+        "stats": stats,
+        "prefill_total_tflops_per_device": prefill_tflops_per_device,
+        "tflops_per_sec_per_device": tflops_per_sec_per_device,
+    }
+    return result_dict, final_decode_state
 
 
-def collate_results(config, results, model_size, cache_size, num_model_params, incl_config=False):
-  """Adds model/cache size info and optionally config info to results."""
-  results["sizes"] = {
-      "model_size_in_gb": model_size / 1e9,
-      "cache_size_in_gb": cache_size / 1e9,
-      "model_params_in_billions": num_model_params / 1e9,
-  }
-  if incl_config:
-    results["config"] = {}
-    for k, v in dict(config.get_keys()).items():
-      results["config"][k] = str(v) if k == "dtype" else v  # json fails with original dtype
-  return results
+# --- Autoregressive (Generate) Benchmark ---
+def ar_benchmark_loop(engine, params, initial_decode_state, iters, shared_rng_key, profile_config, profile_name):
+    iter_times_s = []
+    current_rng = shared_rng_key
+    current_decode_state = initial_decode_state
+    # prof = profiler.Profiler(profile_config)
+    # prof.activate(optional_postfix=profile_name)
+    
+    for _ in range(iters):
+        current_rng, rng_generate = jax.random.split(current_rng)
+        start_time = time.perf_counter()
+        current_decode_state, _ = engine.generate(params, current_decode_state, rng=rng_generate)
+        jax.block_until_ready(current_decode_state) 
+        end_time = time.perf_counter()
+        iter_times_s.append(end_time - start_time)
+        
+    # prof.deactivate()
+    return iter_times_s, current_decode_state
+
+
+def ar_benchmark(config, engine, params, initial_decode_state, global_batch_size, cache_byte_size, model_byte_size, iters, shared_rng_key):
+    print(f"\nRunning Autoregressive (Generate) Benchmark...")
+    
+    current_rng = shared_rng_key
+    warmup_decode_state = initial_decode_state
+    for _ in range(_WARMUP_ITERS):
+        current_rng, rng_generate_warmup = jax.random.split(current_rng)
+        warmup_decode_state, _ = engine.generate(params, warmup_decode_state, rng=rng_generate_warmup)
+    jax.block_until_ready(warmup_decode_state)
+
+    iter_times_s, final_decode_state = ar_benchmark_loop(
+        engine, params, warmup_decode_state, iters, current_rng, config, profile_name="autoregress"
+    )
+    stats = _get_iteration_stats(iter_times_s)
+    
+    mean_time_s_per_step = stats["mean_ms"] / 1000.0 if stats["mean_ms"] > 0 else float('inf')
+    
+    total_throughput_tps = global_batch_size / mean_time_s_per_step if mean_time_s_per_step > 0 else 0
+    
+    bytes_per_step_total = model_byte_size + cache_byte_size 
+    gb_per_step_per_device = (bytes_per_step_total / 1e9) / jax.device_count() if jax.device_count() > 0 else 0
+    bw_per_device_gb_s = gb_per_step_per_device / mean_time_s_per_step if mean_time_s_per_step > 0 else 0
+
+    print("Autoregressive (Generate) Benchmark Results:")
+    print(f"\tIterations: {stats['iterations']}")
+    print(f"\tMean step time: {stats['mean_ms']:.3f} ms")
+    print(f"\tMedian step time: {stats['median_ms']:.3f} ms")
+    print(f"\tMin step time: {stats['min_ms']:.3f} ms")
+    print(f"\tMax step time: {stats['max_ms']:.3f} ms")
+    print(f"\tStd Dev step time: {stats['std_dev_ms']:.3f} ms")
+    print(f"\tMean step time per sequence: {(stats['mean_ms']/global_batch_size if global_batch_size > 0 else 0):.3f} ms")
+    print(f"\tGlobal batch size (concurrent sequences): {global_batch_size}")
+    print(f"\tThroughput: {total_throughput_tps:.3f} tokens/sec (total)")
+    print(f"\tMemory Bandwidth per device: {bw_per_device_gb_s:.3f} GB/s (approx.)")
+
+    result_dict = {
+        "stats": stats,
+        "stats_per_seq": {
+            "mean_ms_per_seq": (stats['mean_ms']/global_batch_size if global_batch_size > 0 else 0),
+        },
+        "global_batch_size": global_batch_size,
+        "total_throughput_tokens_per_second": total_throughput_tps,
+        "bw_per_device_GB_per_second": bw_per_device_gb_s,
+    }
+    return result_dict, final_decode_state
+
+
+# --- Result Aggregation and Output ---
+def collate_results(config, results, model_size_bytes, cache_size_bytes, num_model_params, incl_config=False):
+    """Adds model/cache size info and optionally config info to results."""
+    results["model_and_cache_sizes"] = {
+        "model_size_in_gb": model_size_bytes / 1e9,
+        "cache_size_in_gb": cache_size_bytes / 1e9, 
+        "model_params_in_billions": num_model_params / 1e9,
+    }
+    if incl_config:
+        results["config_summary"] = {}
+        # Use config.get_keys() which is the method provided by MaxText's PyConfig
+        # to get a dictionary of configuration keys and values.
+        config_items = config.get_keys() # This returns a dict-like object or a dict
+        
+        for k, v in dict(config_items).items(): # Ensure it's a dict for .items()
+            # Ensure dtype is string, and other values are passed as is if simple
+            if k == "dtype":
+                results["config_summary"][k] = str(v)
+            elif isinstance(v, (int, float, str, bool, list, dict, type(None))):
+                 results["config_summary"][k] = v
+            else:
+                # For more complex objects, convert to string to avoid JSON serialization errors
+                results["config_summary"][k] = str(v)
+    return results
 
 
 def flatten_dict(dictionary, prefix="", sep="_"):
-  results = []
-  for k, v in dictionary.items():
-    new_key = str(prefix) + sep + str(k) if prefix else k
-    if isinstance(v, MutableMapping):
-      results.extend(flatten_dict(v, new_key, sep=sep).items())
-    else:
-      results.append((new_key, v))
-  return dict(results)
+    """Flattens a nested dictionary."""
+    results_list = [] 
+    for k, v in dictionary.items():
+        new_key = str(prefix) + sep + str(k) if prefix else str(k)
+        if isinstance(v, MutableMapping):
+            results_list.extend(flatten_dict(v, new_key, sep=sep).items())
+        else:
+            results_list.append((new_key, v))
+    return dict(results_list)
 
 
 def write_results(results, filename, flatten_microbenchmark_results):
-  """Write the results microbenchmark results to a json file."""
-  if flatten_microbenchmark_results:
-    results["flattened_results"] = flatten_dict(results)
-  if filename:
-    with open(filename, "w", encoding="utf-8") as f:
-      json.dump(results, f, indent=2)
-  return results
+    """Write the results microbenchmark results to a json file."""
+    if flatten_microbenchmark_results:
+        results["flattened_summary"] = flatten_dict(results) 
+    if filename:
+        print(f"\nWriting benchmark results to: {filename}")
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=2)
+    return results
 
 
 def print_results_for_analyze(results):
-  """Print results."""
-  print("\nFor usage in analyze_sharegpt.py :")
+    """Print results in a format potentially usable by other scripts (e.g., analyze_sharegpt.py)."""
+    print("\nSummary for analyze_sharegpt.py (using mean times):")
 
-  if "prefill" in results:
-    prefill_bucket_size_to_ms = {}
-    for k, v in results["prefill"].items():
-      prefill_bucket_size_to_ms[int(k)] = round(v["time_in_ms"], 3)
-    print(f"PREFILL_BUCKET_SIZE_TO_MS = {prefill_bucket_size_to_ms}")
+    if STAGE_PREFILL in results:
+        prefill_bucket_size_to_ms = {}
+        for k, v_dict in results[STAGE_PREFILL].items(): 
+             if isinstance(v_dict, dict) and "stats" in v_dict and "mean_ms" in v_dict["stats"]:
+                prefill_bucket_size_to_ms[int(k)] = round(v_dict["stats"]["mean_ms"], 3)
+        if prefill_bucket_size_to_ms:
+            print(f"PREFILL_BUCKET_SIZE_TO_MS = {prefill_bucket_size_to_ms}")
 
-  if "prefill-multisampling" in results:
-    multi_sampling_prefill_bucket_size_to_ms = {}
-    for prefill_length, result_dict in results["prefill-multisampling"].items():
-      multi_sampling_prefill_bucket_size_to_ms[int(prefill_length)] = {}
-      for num_samples, v in result_dict.items():
-        multi_sampling_prefill_bucket_size_to_ms[int(prefill_length)][num_samples] = round(v["time_in_ms"], 3)
-    print(f"MULTISAMPLING_PREFILL_BUCKET_SIZE_TO_MS = {multi_sampling_prefill_bucket_size_to_ms}")
-
-  if "insert" in results:
-    insert_bucket_size_to_ms = {}
-    for k, v in results["insert"].items():
-      insert_bucket_size_to_ms[int(k)] = round(v["time_in_ms"], 3)
-    print(f"INSERT_BUCKET_SIZE_TO_MS = {insert_bucket_size_to_ms}")
-
-  if "autoregressive" in results:
-    print(f"SYSTEM_TIME_PER_DECODE_TOKEN_MS = {results['autoregressive']['step_in_ms_per_seq']}")
-
-
-def summarize_prefill_result(engine_prefill, params, tokens, true_length):
-  """Summarize Prefill result."""
-  print(f"Prefill result of length {tokens.size}:\n")
-  rng = jax.random.PRNGKey(1234)
-  prefill_result, _ = engine_prefill(params, tokens, true_length, rng)
-  jax.block_until_ready(prefill_result)
-  num_prefill_logits_params, total_prefill_logits_size, avg_prefill_logits_param_size = max_utils.summarize_pytree_data(
-      prefill_result["logits"], name="Prefill Logits", raw=True
-  )
-  num_prefill_cache_params, total_prefill_cache_size, avg_prefill_cache_param_size = max_utils.summarize_pytree_data(
-      prefill_result["cache"], name="Prefill Cache"
-  )
-  del prefill_result
-  return {
-      "num_logits_params": num_prefill_logits_params,
-      "total_logits_size": total_prefill_logits_size,
-      "avg_logits_param_size": avg_prefill_logits_param_size,
-      "num_cache_params": num_prefill_cache_params,
-      "total_cache_size": total_prefill_cache_size,
-      "avg_cache_param_size": avg_prefill_cache_param_size,
-  }
+    if STAGE_INSERT in results:
+        insert_bucket_size_to_ms = {}
+        for k, v_dict in results[STAGE_INSERT].items(): 
+            if isinstance(v_dict, dict) and "stats" in v_dict and "mean_ms" in v_dict["stats"]:
+                insert_bucket_size_to_ms[int(k)] = round(v_dict["stats"]["mean_ms"], 3)
+        if insert_bucket_size_to_ms:
+            print(f"INSERT_BUCKET_SIZE_TO_MS = {insert_bucket_size_to_ms}")
+    elif STAGE_PREFILL_INSERT in results and STAGE_PREFILL in results:
+        print(f"Note: INSERT_BUCKET_SIZE_TO_MS derived from {STAGE_PREFILL_INSERT} and {STAGE_PREFILL} because {STAGE_INSERT} not run or has no results.")
+        derived_insert_bucket_size_to_ms = {}
+        for k_len_str, pi_v_dict in results[STAGE_PREFILL_INSERT].items():
+            if k_len_str in results[STAGE_PREFILL]:
+                p_v_dict = results[STAGE_PREFILL][k_len_str]
+                if (isinstance(pi_v_dict, dict) and "stats" in pi_v_dict and "mean_ms" in pi_v_dict["stats"] and
+                    isinstance(p_v_dict, dict) and "stats" in p_v_dict and "mean_ms" in p_v_dict["stats"]):
+                    derived_insert_ms = pi_v_dict["stats"]["mean_ms"] - p_v_dict["stats"]["mean_ms"]
+                    derived_insert_bucket_size_to_ms[int(k_len_str)] = round(max(0, derived_insert_ms), 3)
+        if derived_insert_bucket_size_to_ms:
+             print(f"DERIVED_INSERT_BUCKET_SIZE_TO_MS = {derived_insert_bucket_size_to_ms}")
 
 
-def run_benchmarks(config):
-  """Run microbenchmarks."""
-  engine = maxengine.MaxEngine(config)
-  prefill_processor = prefill_packing.PrefillProcessor(engine)
-  rng = jax.random.PRNGKey(1234)
-  rng, rng_load_params = jax.random.split(rng)
-  params = engine.load_params(rng_load_params)
-  prefill_lengths = [int(l) for l in config.inference_microbenchmark_prefill_lengths.split(",")]
-  stages_to_benchmark = config.inference_microbenchmark_stages.split(",")
-  benchmark_loop_iters = config.inference_microbenchmark_loop_iters
+    if STAGE_GENERATE in results:
+        ar_data = results[STAGE_GENERATE]
+        if isinstance(ar_data, dict):
+            ar_stats_per_seq = ar_data.get("stats_per_seq", {})
+            mean_ms_per_seq = ar_stats_per_seq.get("mean_ms_per_seq", 0)
+            print(f"SYSTEM_TIME_PER_DECODE_TOKEN_MS = {round(mean_ms_per_seq, 3)}")
 
-  text = config.prompt
-  metadata = engine.get_tokenizer()
-  tokenizer_model = engine.build_tokenizer(metadata)
-  rng, rng_init_decode = jax.random.split(rng)
 
-  generate_executable, params, decode_state_executable = engine.aot_compile(params, pass_rng_shape=True)
-  decode_state = decode_state_executable(rng_init_decode)
-
-  _, cache_size, _ = max_utils.summarize_pytree_data(decode_state["cache"], name="Cache")
-  num_model_params, model_size, _ = max_utils.summarize_pytree_data(params, name="Model")
-
-  benchmark_results = {}
-  if "prefill" in stages_to_benchmark:
-    benchmark_results["prefill-result-sizes"] = {}
-    benchmark_results["prefill"] = {}
-    benchmark_results["insert"] = {}
-    prefill_tokens = {}
-    prefill_true_lengths = {}
-    prefill_executable = {}
-    prefill_insert_executable = {}
-    i32_scalar = jax.ShapeDtypeStruct((), int)
-    rng_shape = jax.ShapeDtypeStruct([4], jax.numpy.dtype("uint32"))
-
-    for prefill_length in prefill_lengths:
-      prefill_tokens[prefill_length], prefill_true_lengths[prefill_length] = tokenizer_model.encode(
-          text, is_bos=True, prefill_lengths=[prefill_length]
-      )
-
-      key_shape = jax.ShapeDtypeStruct([prefill_length], jax.numpy.dtype("int32"))
-      prefill_executable[prefill_length] = (
-          jax.jit(
-              engine.prefill_aot,
-              in_shardings=(engine.param_layouts, None, None, None),
-          ).lower(params, key_shape, i32_scalar, rng_shape)
-      ).compile(compiler_options=None)
-
-      prefill_insert_executable[prefill_length] = prefill_processor.aot_compile(params, prefill_length)
-
-      benchmark_results["prefill-result-sizes"][prefill_length] = summarize_prefill_result(
-          prefill_executable[prefill_length], params, prefill_tokens[prefill_length], prefill_true_lengths[prefill_length]
-      )
-
-    if "prefix_cache" in stages_to_benchmark:
-      for prefill_length in prefill_lengths:
-        rng_cache = jax.random.PRNGKey(1234)
-        prefill_result, _ = prefill_executable[prefill_length](
-            params, prefill_tokens[prefill_length], prefill_true_lengths[prefill_length], rng_cache
-        )
-        prefix_cache_benchmark(
-            prefill_result,
-            prefill_length,
-            prefill_true_lengths[prefill_length],
-            config.inference_microbenchmark_prefix_cache_common_prefix_proportion,
-            config.inference_microbenchmark_prefix_cache_entries_num,
-            benchmark_loop_iters,
-        )
-        del prefill_result
-
-    for prefill_length in prefill_lengths:
-      benchmark_results["prefill"][prefill_length] = prefill_benchmark(
-          config,
-          prefill_executable[prefill_length],
-          params,
-          prefill_tokens[prefill_length],
-          prefill_true_lengths[prefill_length],
-          num_model_params,
-          benchmark_loop_iters,
-      )
-
-      prefill_insert_time, decode_state = prefill_insert_benchmark(
-          config,
-          prefill_insert_executable[prefill_length],
-          decode_state,
-          params,
-          engine.max_concurrent_decodes,
-          prefill_tokens[prefill_length],
-          prefill_true_lengths[prefill_length],
-          benchmark_loop_iters,
-      )
-      benchmark_results["insert"][prefill_length] = {}
-      benchmark_results["insert"][prefill_length]["time_in_ms"] = (
-          prefill_insert_time["time_in_ms"] - benchmark_results["prefill"][prefill_length]["time_in_ms"]
-      )
-
-  if "prefill-multisampling" in stages_to_benchmark:
-    benchmark_results["prefill-multisampling"] = {}
-    multisampling_prefill_executable = {}
-    i32_scalar = jax.ShapeDtypeStruct((), int)
-    rng_shape = jax.ShapeDtypeStruct([4], jax.numpy.dtype("uint32"))
-    # Compile the program in advance.
-    for prefill_length in prefill_lengths:
-      key_shape = jax.ShapeDtypeStruct([prefill_length], jax.numpy.dtype("int32"))
-      multisampling_prefill_executable[prefill_length] = {}
-      for num_samples in config.inference_microbenchmark_num_samples:
-        multisampling_prefill_executable[prefill_length][num_samples] = (
-            jax.jit(
-                engine.prefill_multisampling_aot,
-                in_shardings=(engine.param_layouts, None, None, None, None),
-                static_argnames=("num_samples",),
-            ).lower(params, key_shape, i32_scalar, rng_shape, num_samples, None)
-        ).compile(compiler_options=None)
-
-    for prefill_length in prefill_lengths:
-      benchmark_results["prefill-multisampling"][prefill_length] = prefill_multisampling_benchmark(
-          config,
-          multisampling_prefill_executable[prefill_length],
-          params,
-          prefill_tokens[prefill_length],
-          prefill_true_lengths[prefill_length],
-          benchmark_loop_iters,
-      )
-
-  if "generate" in stages_to_benchmark:
-    benchmark_results["autoregressive"], decode_state = ar_benchmark(
-        config,
-        generate_executable,
-        params,
-        decode_state,
-        engine.max_concurrent_decodes,
-        cache_size,
-        model_size,
-        benchmark_loop_iters,
+def summarize_prefill_result_data(engine, params, tokens, true_length, shared_rng_key):
+    """Summarize Prefill result (logits and cache sizes)."""
+    print(f"\nSummarizing Prefill Result Data for prefill length {tokens.size}:")
+    current_rng, rng_prefill_summary = jax.random.split(shared_rng_key)
+    prefill_result_obj, _ = engine.prefill(
+        params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill_summary
     )
+    jax.block_until_ready(prefill_result_obj)
+    
+    summary = {}
+    if "logits" in prefill_result_obj:
+        # raw=True: summarize_pytree_data returns values, doesn't print summary itself
+        num_logits_params, total_logits_size, avg_logits_param_size = max_utils.summarize_pytree_data(
+            prefill_result_obj["logits"], name="Prefill Logits", raw=True 
+        )
+        summary["logits_summary"] = {
+            "num_params": num_logits_params,
+            "total_size_bytes": total_logits_size,
+            "avg_param_size_bytes": avg_logits_param_size,
+        }
 
-  results = collate_results(config, benchmark_results, model_size, cache_size, num_model_params)
-  print_results_for_analyze(results)
-  if config.inference_microbenchmark_log_file_path:
-    write_results(
-        results,
-        filename=config.inference_microbenchmark_log_file_path,
-        flatten_microbenchmark_results=_FLATTEN_MICROBENCHMARK_RESULTS,
+    if "cache" in prefill_result_obj: 
+        # No raw=True: summarize_pytree_data will print its summary using the name
+        num_cache_params, total_cache_size, avg_cache_param_size = max_utils.summarize_pytree_data(
+            prefill_result_obj["cache"], name="Prefill Cache Output" 
+        )
+        summary["cache_output_summary"] = {
+            "num_params": num_cache_params,
+            "total_size_bytes": total_cache_size,
+            "avg_param_size_bytes": avg_cache_param_size,
+        }
+    del prefill_result_obj
+    return summary
+
+
+# --- Main Benchmark Runner ---
+def run_benchmarks(config): 
+    """Run microbenchmarks based on configuration."""
+    engine = maxengine.MaxEngine(config)
+    
+    master_rng_seed = 1234 
+    top_level_rng = jax.random.PRNGKey(master_rng_seed)
+
+    top_level_rng, rng_load_params = jax.random.split(top_level_rng)
+    params = engine.load_params(rng_load_params)
+    
+    prefill_lengths_str = config.inference_microbenchmark_prefill_lengths
+    prefill_lengths = [int(l) for l in prefill_lengths_str.split(",") if l.strip()] if prefill_lengths_str else []
+    
+    stages_to_benchmark_str = config.inference_microbenchmark_stages
+    stages_to_benchmark = [s.strip() for s in stages_to_benchmark_str.split(",") if s.strip()] if stages_to_benchmark_str else []
+    
+    benchmark_loop_iters = config.inference_microbenchmark_loop_iters
+    text_prompt = config.prompt
+
+    metadata = engine.get_tokenizer()
+    vocab = token_utils.load_vocab(metadata.path, metadata.extra_ids)
+
+    top_level_rng, rng_init_decode = jax.random.split(top_level_rng)
+    master_decode_state = engine.init_decode_state(rng=rng_init_decode)
+
+    print("\nSummarizing Model Parameters:")
+    _, model_byte_size, _ = max_utils.summarize_pytree_data(params, name="Model Parameters")
+    print("\nSummarizing Max Cache Capacity:")
+    _, max_cache_byte_size, _ = max_utils.summarize_pytree_data(master_decode_state["cache"], name="Max Cache Capacity")
+    
+    num_model_params = sum(p.size for p in jax.tree_util.tree_leaves(params))
+
+    benchmark_results = {}
+    tokenized_prompts = {}
+    if any(s in stages_to_benchmark for s in [STAGE_PREFILL, STAGE_INSERT, STAGE_PREFILL_INSERT]):
+        for length in prefill_lengths:
+            current_max_prefill_length = length 
+            padded_tokens, true_length = token_utils.tokenize_and_pad(
+                text_prompt, vocab, is_bos=True, prefill_lengths=[length], max_prefill_length=current_max_prefill_length
+            )
+            tokenized_prompts[length] = (padded_tokens, true_length)
+
+    if any(s in stages_to_benchmark for s in [STAGE_PREFILL, STAGE_INSERT, STAGE_PREFILL_INSERT]):
+        if prefill_lengths: 
+            benchmark_results["prefill_result_summaries"] = {}
+            for pl_length in prefill_lengths:
+                if pl_length in tokenized_prompts:
+                    tokens, true_len = tokenized_prompts[pl_length]
+                    top_level_rng, rng_for_summary = jax.random.split(top_level_rng)
+                    benchmark_results["prefill_result_summaries"][str(pl_length)] = summarize_prefill_result_data(
+                        engine, params, tokens, true_len, rng_for_summary
+                    )
+
+    current_run_rng = top_level_rng 
+
+    if STAGE_PREFILL in stages_to_benchmark:
+        benchmark_results[STAGE_PREFILL] = {}
+        for pl_length in prefill_lengths:
+            if pl_length in tokenized_prompts:
+                tokens, true_len = tokenized_prompts[pl_length]
+                current_run_rng, stage_rng = jax.random.split(current_run_rng)
+                benchmark_results[STAGE_PREFILL][str(pl_length)] = prefill_benchmark(
+                    config, engine, params, tokens, true_len,
+                    num_model_params, benchmark_loop_iters, stage_rng
+                )
+
+    temp_decode_state_for_stages = master_decode_state 
+
+    if STAGE_PREFILL_INSERT in stages_to_benchmark:
+        benchmark_results[STAGE_PREFILL_INSERT] = {}
+        for pl_length in prefill_lengths:
+            if pl_length in tokenized_prompts:
+                tokens, true_len = tokenized_prompts[pl_length]
+                current_run_rng, stage_rng = jax.random.split(current_run_rng)
+                results, temp_decode_state_for_stages = prefill_and_insert_benchmark(
+                    config, engine, params, tokens, true_len,
+                    temp_decode_state_for_stages, 
+                    engine.max_concurrent_decodes,
+                    num_model_params, benchmark_loop_iters, stage_rng
+                )
+                benchmark_results[STAGE_PREFILL_INSERT][str(pl_length)] = results 
+        master_decode_state = temp_decode_state_for_stages 
+
+    if STAGE_INSERT in stages_to_benchmark:
+        benchmark_results[STAGE_INSERT] = {}
+        for pl_length in prefill_lengths:
+            if pl_length in tokenized_prompts:
+                tokens, true_len = tokenized_prompts[pl_length]
+                current_run_rng, stage_rng = jax.random.split(current_run_rng)
+                results, temp_decode_state_for_stages = insert_benchmark(
+                    config, engine, params, tokens, true_len,
+                    temp_decode_state_for_stages, 
+                    engine.max_concurrent_decodes,
+                    benchmark_loop_iters, stage_rng
+                )
+                benchmark_results[STAGE_INSERT][str(pl_length)] = results 
+        master_decode_state = temp_decode_state_for_stages 
+
+    if STAGE_GENERATE in stages_to_benchmark:
+        current_run_rng, stage_rng = jax.random.split(current_run_rng)
+        ar_results, master_decode_state = ar_benchmark( 
+            config, engine, params, master_decode_state,
+            engine.max_concurrent_decodes, max_cache_byte_size, model_byte_size,
+            benchmark_loop_iters, stage_rng
+        )
+        benchmark_results[STAGE_GENERATE] = ar_results
+
+    final_results = collate_results(
+        config, benchmark_results, model_byte_size, max_cache_byte_size, num_model_params, incl_config=True
     )
-  return results
+    
+    print_results_for_analyze(final_results)
+    
+    log_file_path = config.inference_microbenchmark_log_file_path
+    if log_file_path: 
+        write_results(
+            final_results,
+            filename=log_file_path,
+            flatten_microbenchmark_results=_FLATTEN_MICROBENCHMARK_RESULTS,
+        )
+    
+    return final_results
 
 
 def main(argv):
-  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-  run_benchmarks(pyconfig.initialize(argv))
+    jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+    config = pyconfig.initialize(argv) 
+
+    print(f"JAX process index: {jax.process_index()}, host count: {jax.process_count()}")
+    print(f"JAX local devices: {jax.local_devices()}")
+    print(f"JAX global devices: {jax.devices()}")
+
+    if jax.process_count() > 1:
+       print("Multi-process JAX environment detected.")
+       jax.distributed.initialize() 
+    elif jax.device_count() > jax.local_device_count(): 
+       print("Multi-host JAX environment detected (single process per host).")
+       jax.distributed.initialize()
+
+    run_benchmarks(config)
 
 
 if __name__ == "__main__":
-  app.run(main)
+    app.run(main)
