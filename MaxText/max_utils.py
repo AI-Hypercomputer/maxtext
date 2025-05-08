@@ -129,6 +129,8 @@ def maybe_initialize_jax_distributed_system(raw_keys):
 
   For CPUs, we call jax.distributed.initialize() explicitly, with the specified arguments.
   """
+  max_logging.log("MAYBE initialize the jax distributed system...")
+  jax.distributed.initialize()
   if raw_keys["skip_jax_distributed_system"]:
     max_logging.log("Skipping jax distributed system due to skip_jax_distributed_system=True flag.")
     return
@@ -139,9 +141,16 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     max_logging.log("Jax distributed system is already initialized.")
     return
   if raw_keys["inference_benchmark_test"]:
+    max_logging.log(
+        "Skipping jax distributed system due to inference_benchmark_test=True"
+        " flag."
+    )
     # Disable initialization for inference benmark test.
     return
   if raw_keys["compile_topology"]:
+    max_logging.log(
+        "Skipping jax distributed system due to compile_topology=True flag."
+    )
     # Don't initialize jax distributed with AOT compilation
     return
   if is_gpu_backend(raw_keys):
@@ -156,11 +165,24 @@ def maybe_initialize_jax_distributed_system(raw_keys):
       "hardware"
   ] == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system...")
+    max_logging.log(
+        "Attempting to initialize the jax distributed system for TPU backend..."
+    )
+    coordinator_ip = str(os.getenv("JAX_COORDINATOR_IP"))
+    coordinator_port = str(os.getenv("JAX_COORDINATOR_PORT"))
+    max_logging.log(f"JAX_COORDINATOR_IP: {coordinator_ip}")
+    max_logging.log(f"JAX_COORDINATOR_PORT: {coordinator_port}")
     if not raw_keys["enable_emergency_checkpoint"]:
       jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
     else:
       initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
     max_logging.log("Jax distributed system initialized!")
+  else:
+    max_logging.log(
+        "Skipping jax distributed system due no CONDITION MATCHED, i.e no"
+        " checkpointing, async checkpointing, compile_topology_num_slices=-1,"
+        " enable_single_controller=False, hardware=gpu_multiprocess "
+    )
 
 
 def initialize_jax_for_gpu(raw_keys):
