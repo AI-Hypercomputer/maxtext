@@ -667,9 +667,6 @@ class AttentionOp(nn.Module):
     axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
     axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
     axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
-    max_logging.log(f"axis_names_q: {axis_names_q}")
-    max_logging.log(f"axis_names_kv: {axis_names_kv}")
-    max_logging.log(f"axis_names_splash_kernel: {axis_names_splash_kernel}")
 
     global_block_q = self.config.sa_block_q
     global_block_kv = self.config.sa_block_kv
