@@ -18,6 +18,7 @@ limitations under the License.
 import datetime
 import jax
 import json
+import os
 
 from absl import app
 from collections.abc import MutableMapping
@@ -28,6 +29,7 @@ from MaxText import maxtext_utils
 from MaxText import prefill_packing
 from MaxText import profiler
 from MaxText import pyconfig
+from MaxText.utils import gcs_utils
 
 import warnings
 
@@ -224,6 +226,9 @@ def write_results(results, filename, flatten_microbenchmark_results):
       json.dump(results, f, indent=2)
   return results
 
+def upload_results_to_gcs(results_file_name, destination_gcs_name):
+  """Upload the results file to destination GCS bucket."""
+  gcs_utils.upload_blob(destination_gcs_name, results_file_name)
 
 def print_results_for_analyze(results):
   """Print results."""
@@ -403,6 +408,15 @@ def run_benchmarks(config):
         filename=config.inference_microbenchmark_log_file_path,
         flatten_microbenchmark_results=_FLATTEN_MICROBENCHMARK_RESULTS,
     )
+  if config.gcs_metrics:
+    metrics_filename = f'{config.run_name}_results.txt'
+    write_results(
+        results,
+        filename=metrics_filename,
+        flatten_microbenchmark_results=_FLATTEN_MICROBENCHMARK_RESULTS,
+    )
+    gcs_filename = os.path.join(config.base_output_directory, metrics_filename)
+    upload_results_to_gcs(metrics_filename, gcs_filename)
   return results
 
 
