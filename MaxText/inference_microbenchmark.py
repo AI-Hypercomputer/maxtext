@@ -228,6 +228,7 @@ def write_results(results, filename, flatten_microbenchmark_results):
 
 def upload_results_to_gcs(results_file_name, destination_gcs_name):
   """Upload the results file to destination GCS bucket."""
+  print(f"Upload {results_file_name} to {destination_gcs_name}")
   gcs_utils.upload_blob(destination_gcs_name, results_file_name)
 
 def print_results_for_analyze(results):
