@@ -123,6 +123,7 @@ class MaxEngine(engine_api.Engine):
     self.decode_state_shapes = None
     self.decode_state_layouts = None
     self.param_layouts = None
+    self.rng = None
 
     # Initialize page manager and page state
     self.page_manager = None
@@ -430,9 +431,6 @@ class MaxEngine(engine_api.Engine):
       kv_cache: For the resulting text.
     """
 
-    if rng is None:
-      rng = jax.random.PRNGKey(0)
-
     start_position = 0
     previous_chunk = None
     input_params = params
@@ -484,9 +482,10 @@ class MaxEngine(engine_api.Engine):
     selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
 
     # sampling first token
+    rng, new_rng = jax.random.split(rng)
     first_generated_token = inference_utils.sampling(
         selected_logits,
-        rng,
+        new_rng,
         self.config.decode_sampling_strategy,
         topk=self.config.decode_sampling_top_k,
         nucleus_topp=self.config.decode_sampling_nucleus_p,
@@ -546,6 +545,12 @@ class MaxEngine(engine_api.Engine):
           true_length=true_length,
       )
 
+    # Sample rng before JIT call
+    if rng is None:
+      if self.rng is None:
+        self.rng = jax.random.PRNGKey(0)
+      self.rng, rng = jax.random.split(self.rng)
+
     # Call JIT-compiled version with current state
     return self._prefill_jit(
         params=params,
@@ -579,8 +584,36 @@ class MaxEngine(engine_api.Engine):
         num_samples=num_samples,
     )
 
-  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_samples",))
   def prefill_multisampling(
+      self,  # pytype: disable=signature-mismatch
+      *,
+      params: Params,
+      padded_tokens: jax.Array,
+      true_length: int,
+      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
+      rng: Optional[PRNGKeyType] = None,
+      num_samples: int = 1,
+  ) -> Tuple[Prefix, engine_api.ResultTokens]:
+    """Public API for prefill multisampling."""
+
+    # Sample rng before JIT call
+    if rng is None:
+      if self.rng is None:
+        self.rng = jax.random.PRNGKey(0)
+      self.rng, rng = jax.random.split(self.rng)
+
+    # Call JIT-compiled version
+    return self._prefill_multisampling_jit(
+        params=params,
+        padded_tokens=padded_tokens,
+        true_length=true_length,
+        sampler=sampler,
+        rng=rng,
+        num_samples=num_samples,
+    )
+
+  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_samples",))
+  def _prefill_multisampling_jit(
       self,
       *,
       params: Params,
@@ -595,9 +628,6 @@ class MaxEngine(engine_api.Engine):
     With multi-sampling, the engine will generate multiple first tokens in the
     prefilling stage. The number of tokens is specified by num_samples.
     """
-
-    if rng is None:
-      rng = jax.random.PRNGKey(0)
 
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
@@ -796,10 +826,16 @@ class MaxEngine(engine_api.Engine):
       rng: Optional[PRNGKeyType] = None,
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
     """Public API for generate that updates page state outside JIT."""
-    # Update page state before JIT call
 
+    # Update page state before JIT call
     if self.page_manager is not None and self.page_state is not None:
       self.page_state = self.page_manager.update_decode_pages(self.page_state)
+
+    # Sample rng before JIT call
+    if rng is None:
+      if self.rng is None:
+        self.rng = jax.random.PRNGKey(0)
+      self.rng, rng = jax.random.split(self.rng)
 
     # Call JIT-compiled version with current state
     new_state, result = self._generate_jit(
@@ -823,8 +859,6 @@ class MaxEngine(engine_api.Engine):
       page_state: Optional[PageState] = None,
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
     """Run one generate step"""
-    if rng is None:
-      rng = jax.random.PRNGKey(0)
 
     previous_token = decode_state["tokens"]
     rng, new_rng = jax.random.split(rng)
@@ -843,9 +877,10 @@ class MaxEngine(engine_api.Engine):
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
     # sampling tokens
+    rng, new_rng = jax.random.split(rng)
     new_token = inference_utils.sampling(
         out_logits,
-        rng,
+        new_rng,
         self.config.decode_sampling_strategy,
         topk=self.config.decode_sampling_top_k,
         nucleus_topp=self.config.decode_sampling_nucleus_p,

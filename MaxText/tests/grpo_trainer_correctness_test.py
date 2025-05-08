@@ -89,6 +89,7 @@ class GrpoTrainerTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
+    jax.config.update("jax_default_prng_impl", "unsafe_rbg")
     command = [
         "gsutil",
         "cp",

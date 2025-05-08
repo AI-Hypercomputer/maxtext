@@ -375,19 +375,19 @@ def generate_completions(config, tokenizer_model, engine, data, params, rng):
     else:
       data[k] = v[: config.micro_batch_size_to_train_on]
 
-  rng, rng_load_params = jax.random.split(rng)
-
-  rng, rng_init_decode = jax.random.split(rng_load_params)
+  rng, rng_init_decode = jax.random.split(rng)
   decode_state = engine.init_decode_state(rng_init_decode)
 
   prompts, true_length = data[f"{config.train_data_columns}"], data[f"{config.train_data_columns}_true_length"]
+  rng, rng_prefill = jax.random.split(rng)
   decode_state = jax.jit(
       functools.partial(prefill, engine, params, prompts, true_length, config.num_generations), donate_argnums=(0,)
-  )(decode_state, rng)
+  )(decode_state, rng_prefill)
 
+  rng, rng_generate = jax.random.split(rng)
   completions = jax.jit(
       functools.partial(generate, engine, params, config.max_target_length - config.max_prefill_predict_length)
-  )(decode_state, rng)
+  )(decode_state, rng_generate)
 
   data[f"{config.train_data_columns}_completions"], eos_positions = concatenate_prompt_with_completions(
       config, tokenizer_model, prompts, true_length, completions
