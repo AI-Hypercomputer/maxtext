@@ -20,8 +20,11 @@ classifiers = [
 ]
 dependencies = [
   "jax",
-  "jaxlib",
+  "jaxtyping",
   "flax",
+  "sentencepiece",
+  "tensorboardX",
+  "tqdm",
 ]
 
 [project.urls]
