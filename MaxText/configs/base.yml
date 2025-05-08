@@ -149,6 +149,7 @@ routed_score_func: "" # scoring function for routing
 routed_bias: False # a flag if a bias term is added for routing
 n_routing_groups: -1 # number of groups for routing, disabled by default
 topk_routing_group: -1 # number of top groups to route inputs. For EP,
+topk_type: ""
 # sending activations to a maximum of topk_routing_group distinct devices can yield performance benefits.
 
 # pipeline parallelism
