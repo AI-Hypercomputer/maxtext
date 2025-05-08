@@ -18,11 +18,10 @@ import os
 import sys
 import unittest
 
-import pyconfig
-
 import jax
 import jax.numpy as jnp
 
+from MaxText import pyconfig
 from MaxText.globals import PKG_DIR
 from MaxText.inference.page_manager import PageManager, PageState
 
