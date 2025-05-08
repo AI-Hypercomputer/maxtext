@@ -49,6 +49,15 @@ class RepeatTrainingInputIter:
       batch_repeat: int = 1,
       gradient_accumulation_steps: int = 1,
   ):
+    """Initializes `RepeatTrainingInputIter`.
+
+    Args:
+      data: The original iterable providing training input.
+      sample_repeat: Number of times to repeat each sample within a batch.
+      batch_repeat: Number of times to repeat each batch.
+      gradient_accumulation_steps: Number of steps over which gradients are
+        accumulated before an optimization step.
+    """
     assert sample_repeat > 0, f"sample repeat must be positive: {sample_repeat}"
     assert batch_repeat > 0, f"batch repeat must be positive: {batch_repeat}"
     assert gradient_accumulation_steps > 0, (
@@ -103,17 +112,39 @@ class TrainExample:
 
 @dataclasses.dataclass(slots=True, kw_only=True)
 class GrpoTrainingConfig(peft_trainer.TrainingConfig):
-  """Configuration for GRPO trainer."""
+  """Configuration for GRPO trainer.
+
+  Attributes:
+    total_generation_steps: The maximum number of tokens to generate for each
+      completion. This determines the length of the generated sequences.
+    num_generations: The number of times the policy generates multiple responses
+      for a given prompt within a single training step. This corresponds to 'G'
+      in Algorithm 1 in the paper. A higher value means more samples are used to
+      compute relative advantages.
+    num_iterations: The number of iterations per batch (𝜇 in GRPO algo 1).
+    beta: The coefficient for the KL divergence penalty (𝛽) in the GRPO loss
+      function. This term prevents policy updates from deviating too far from
+      the reference model. A value of 0.0 means no KL penalty is applied.
+    epsilon: Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to
+      PPO, it ensures stable updates.
+    temperature: The temperature parameter for generating completions.
+    top_p: The top-p parameter for next-token decoding during text generation.
+    max_prompt_length: The maximum length of the prompt. The prompt will be
+      padded/truncated to this length.
+
+  References:
+  - https://arxiv.org/abs/2402.03300
+  """
 
   total_generation_steps: int = 1
-  num_generations: int = 2  # G in GRPO algo 1 https://arxiv.org/pdf/2402.03300
-  num_iterations: int = 1  # 𝜇 in GRPO algo 1 https://arxiv.org/pdf/2402.03300
-  beta: float = 0.04  # 𝛽 in GRPO KL penalty https://arxiv.org/pdf/2402.03300
-  epsilon: float = 0.2  # 𝜀 in GRPO loss https://arxiv.org/pdf/2402.03300
-  temperature: float = 0.9  # temperature for sampling
-  top_p: float = 1.0  # top-p sampling threshold
+  num_generations: int = 2
+  num_iterations: int = 1
+  beta: float = 0.04
+  epsilon: float = 0.2
+  temperature: float = 0.9
+  top_p: float = 1.0
 
-  max_prompt_length: int = 256  # max prompt length
+  max_prompt_length: int = 256
 
   def __post_init__(self):
     assert self.num_generations > 1, (
@@ -123,7 +154,19 @@ class GrpoTrainingConfig(peft_trainer.TrainingConfig):
 
 
 class GrpoTrainer(peft_trainer.PeftTrainer):
-  """GRPO trainer."""
+  """GRPO (Group Relative Policy Optimization) trainer.
+
+  GRPO is a reinforcement learning algorithm designed to enhance the reasoning
+  abilities of large language models, like mathematical problem-solving. It is
+  a variant of Proximal Policy Optimization (PPO) that reduces memory usage by
+  eliminating the need for a separate value function model. GRPO works by
+  generating multiple responses for a given prompt, evaluating these responses
+  using a reward model, and then calculating a relative advantage based on the
+  group's performance to update the policy.
+
+  References:
+  - https://arxiv.org/abs/2402.03300
+  """
 
   def __init__(
       self,
@@ -134,6 +177,25 @@ class GrpoTrainer(peft_trainer.PeftTrainer):
       optimizer: optax.GradientTransformation,
       training_config: GrpoTrainingConfig,
   ):
+    """Initializes the `GrpoTrainer`.
+
+    Args:
+      model: The policy model to be trained.
+      ref_model: The reference model, kept fixed during training, and used for
+        computing KL divergence. The goal is to make sure `model` does not
+        deviate too much from `ref_model`.
+      sampler: The sampler to use for generating text completions from the
+        policy model, based on prompts. It should provide an interface
+        compatible with the `sampler` call inside
+        `_generate_and_compute_advantage`.
+      reward_fns: A single callable or a list of callables that compute a scalar
+        reward for given prompts and completions. Each function should accept
+        `prompts`, `completions` and optional keyword arguments, and return a
+        list of float rewards.
+      optimizer: The Optax optimizer to use for training.
+      training_config: An instance of `GrpoTrainingConfig` containing all
+        training-specific configuration options.
+    """
     self.model = model
     self.ref_model = ref_model
     self.sampler = sampler
@@ -209,6 +271,17 @@ class GrpoTrainer(peft_trainer.PeftTrainer):
   def _generate_and_compute_advantage(
       self, training_input: _TrainingInputT
   ) -> TrainExample:
+    """Generates text completions and computes the advantages for GRPO training.
+
+    Args:
+      training_input: A dictionary containing the training input data,
+        containing the key 'prompts'.
+
+    Returns:
+      A `TrainExample` instance containing the processed input data, including
+      prompt IDs, completion IDs, masks, advantages, and per-token log
+      probabilities from the reference and policy models.
+    """
     pad_value = self.sampler.vocab.pad_id()
     eos_value = self.sampler.vocab.eos_id()
 
@@ -305,6 +378,18 @@ class GrpoTrainer(peft_trainer.PeftTrainer):
   def _compute_rewards(
       self, prompts: List[str], completions: List[str], **kargs
   ):
+    """Computes the rewards for completions using the provided reward functions.
+
+    Args:
+      prompts: A list of input prompts.
+      completions: A list of generated text completions.
+      **kargs: Additional keyword arguments passed to the reward functions.
+
+    Returns:
+      A JAX array (shape `[num_prompts, num_reward_fns]`) of scalar rewards for
+      each prompt-completion pair. The rewards are computed using the provided
+      reward functions.
+    """
     rewards = jnp.zeros((len(prompts), len(self.reward_fns)))
     steps = self._get_metric_logging_steps()
     for i, reward_fn in enumerate(self.reward_fns):
@@ -360,7 +445,18 @@ def pad_inputs(
     pad_value: int,
     left: bool,
 ):
-  """Pads provided list of tensors to the same length."""
+  """Pads provided list of JAX arrays to the same length along the last axis.
+
+  Args:
+    inputs: A list of JAX arrays to be padded.
+    target_length: The desired length of each padded array along the last axis.
+    pad_value: The value to use for padding the arrays.
+    left: A boolean indicating whether to pad on the left side of the array.
+
+  Returns:
+    A JAX array where each original input array has been padded to
+    `target_length` along the last axis.
+  """
   padded_inputs = []
 
   for s in inputs:
@@ -418,7 +514,24 @@ def process_ids(
 
 
 def grpo_loss_fn(model, train_example, beta, epsilon):
-  """GRPO loss function."""
+  """GRPO loss function.
+
+  The loss aims to maximize the expected advantage of the chosen actions while
+  constraining the policy updates to stay within a certain range of the
+  reference policy.
+
+  Args:
+    model: The policy model to be trained.
+    train_example: A `TrainExample` instance containing the processed input
+      data, including prompt IDs, completion IDs, masks, advantages, and
+      per-token log probabilities from the reference and policy models.
+    beta: The coefficient for the KL divergence penalty. A value of 0.0 means no
+      KL penalty is applied.
+    epsilon: Epsilon value for clipping.
+
+  Returns:
+    A tuple containing the loss and an aux dictionary.
+  """
   prompt_ids, prompt_mask = (
       train_example.prompt_ids,
       train_example.prompt_mask,
