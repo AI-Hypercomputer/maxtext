@@ -204,6 +204,7 @@ def train_loop(config, state=None):
       gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
 
   metric_logger = MetricLogger(writer, config)
+  input_data_shardings = maxtext_utils.get_input_data_shardings(config, mesh)
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step or prof.should_activate_periodic_profile(step):
       optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
@@ -213,6 +214,7 @@ def train_loop(config, state=None):
       record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
       try:
         example_batch = load_next_batch(data_iterator, example_batch, config)
+        example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
       except Exception as e:  # pylint: disable=broad-except
         max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
         break

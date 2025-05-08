@@ -62,6 +62,7 @@ from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
 import jax.numpy as jnp
 from jax import random
 from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 from jax.experimental import checkify
 
 from cloud_tpu_diagnostics import diagnostic
@@ -677,10 +678,11 @@ def setup_train_loop(config):
     )
 
   # Apply reordering wrapper to data iterators if context parallelism is enabled
-  if context_parallel_size > 1 and config.context_parallel_load_balance:
-    data_iterator = map(max_utils.get_reorder_callable(context_parallel_size), data_iterator)
-    if eval_data_iterator:
-      eval_data_iterator = map(max_utils.get_reorder_callable(context_parallel_size), eval_data_iterator)
+  with mesh:
+    if context_parallel_size > 1 and config.context_parallel_load_balance:
+      data_iterator = map(max_utils.get_reorder_callable(context_parallel_size), data_iterator)
+      if eval_data_iterator:
+        eval_data_iterator = map(max_utils.get_reorder_callable(context_parallel_size), eval_data_iterator)
 
   state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
@@ -842,6 +844,7 @@ def train_loop(config, state=None):
       gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
 
   metric_logger = MetricLogger(writer, config)
+  input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step or prof.should_activate_periodic_profile(step):
       optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
@@ -851,6 +854,8 @@ def train_loop(config, state=None):
       record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
       try:
         example_batch = load_next_batch(data_iterator, example_batch, config)
+        # Reshard data from loaded sharding to performant activation sharding
+        example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
       except Exception as e:  # pylint: disable=broad-except
         max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
         break
