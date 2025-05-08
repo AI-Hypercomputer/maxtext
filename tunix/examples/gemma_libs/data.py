@@ -16,6 +16,7 @@
 
 from collections.abc import Iterable
 
+from etils import epath
 from grain import python as grain
 import numpy as np
 import tensorflow_datasets as tfds
@@ -37,13 +38,14 @@ INPUT_TEMPLATE_IT = {
 class GemmaTokenizer:
   """Tokenizing and encoding/decoding text using the Sentencepiece tokenizer."""
 
-  _GEMMA2_TOKENIZER_PATH = (
-      "/placer/prod/home/genai-gemma/public/tokenizer/tokenizer_gemma2.model"
+  _GEMMA2_TOKENIZER_PATH: epath.PathLike = (
+      'gs://gemma-data/tokenizers/tokenizer_gemma2.model'
   )
 
   def __init__(self, model_path: str = _GEMMA2_TOKENIZER_PATH):
     self._spm_processor = spm.SentencePieceProcessor()
-    self._spm_processor.Load(model_path)
+    model_proto = epath.Path(model_path).read_bytes()
+    self._spm_processor.LoadFromSerializedProto(model_proto)
 
   @property
   def pad_id(self) -> int:

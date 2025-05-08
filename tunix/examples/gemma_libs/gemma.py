@@ -187,7 +187,9 @@ class Attention(nnx.Module):
           einsum_str='BSD,CKDH->CBSKH',
           shape=(2, num_kv_heads, features, head_dim),
           rngs=rngs,
-          sharding=shd_config.kv_weight_cndh,
+          sharding=(None, None, 'fsdp', None)
+          if num_kv_heads == 1
+          else shd_config.kv_weight_cndh,
       )
 
   @jax.named_scope('attention')
