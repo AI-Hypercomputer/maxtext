@@ -371,7 +371,7 @@ class Decoder(nn.Module):
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
-  def scan_decoder_layers(self, cfg, decoder_layer, length, metdata_axis_name, mesh):
+  def scan_decoder_layers(self, cfg, decoder_layer, length, metdata_axis_name, mesh, **kwargs):
     initializing = self.is_mutable_collection("params")
     params_spec = cfg.param_scan_axis if initializing else ScanIn(cfg.param_scan_axis)
     cache_spec = 0
@@ -397,7 +397,7 @@ class Decoder(nn.Module):
         length=length,
         metadata_params={nn.PARTITION_NAME: metdata_axis_name},
     )
-    return scan_fn(config=cfg, mesh=mesh, name=metdata_axis_name, quant=self.quant)
+    return scan_fn(config=cfg, mesh=mesh, name=metdata_axis_name, quant=self.quant, **kwargs)
 
   def get_pipeline_stage_module(self, base_stage):
     cfg = self.config
@@ -507,7 +507,7 @@ class Decoder(nn.Module):
           elif cfg.decoder_block == DecoderBlockType.LLAMA4:
             layer_kwargs = {"nope_layer_interval": self.config.nope_layer_interval, "interleave_moe_layer_step": self.config.interleave_moe_layer_step}
           RemattedBlockLayer = RemattedBlockLayers[0]
-          scan_length = cfg.num_decoder_layers / cfg.layers_to_repeat
+          scan_length = int(cfg.num_decoder_layers / cfg.layers_to_repeat)
           # TODO!!!! Plumb in kwargs into the definition of scan_decoder_layers
           y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, scan_length, "layers", mesh, **layer_kwargs)(
               y,

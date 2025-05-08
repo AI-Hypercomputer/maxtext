@@ -298,13 +298,14 @@ class Llama4ScannableBlock(nn.Module):
     mesh = self.mesh
     # Is LCM a joke? Should we just hardcode maverick and scout as two separate blocks instead?
     #layers_to_repeat = numpy.lcm(nope_layer_interval, interleave_moe_layer_step)
-    layers_to_repeat = cfg.layer_repeat_length
+    layers_to_repeat = cfg.layers_to_repeat
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
+    y = inputs
     for layer_id in range(layers_to_repeat):
-      nope_layer = is_nope_layer(layer_id)
-      moe_layer = is_moe_layer(layer_id)
+      nope_layer = determine_is_nope_layer(layer_id, self.nope_layer_interval)
+      moe_layer = determine_is_moe_layer(layer_id, self.interleave_moe_layer_step)
       layer = Llama4DecoderLayer(config=cfg, mesh=mesh, name=f"layers_{layer_id}", quant=self.quant, is_nope_layer=nope_layer, is_moe_layer=moe_layer)
       # TODO(mattdavidow): Add option for inner remat? Always? Never?
       y = layer(
