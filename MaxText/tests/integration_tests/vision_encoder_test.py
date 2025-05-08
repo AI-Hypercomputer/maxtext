@@ -85,12 +85,10 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
     image_embeddings = jitted_apply_vision_encoder_fn(vision_encoder_params, input_images)
 
     # Load golden image embeddings generated from HuggingFace Gemma3-4b
-    golden_data_path = os.path.join(os.path.dirname(PKG_DIR), "MaxText", "test_assets", "golden_data_gemma3_vit.jsonl")
-    loaded_data = []
-    with jsonlines.open(golden_data_path, mode="r") as reader:
-      for line in reader:
-        loaded_data.append(line)
-    golden_image_embeddings = np.asarray(loaded_data[0]["soft_embeddings"], dtype=np.float32)
+    input_golden_data_path = os.path.join(PKG_DIR, "test_assets", "golden_data_gemma3_vit.jsonl")
+    with jsonlines.open(input_golden_data_path, mode="r") as reader:
+      loaded_data = next(iter(reader))
+    golden_image_embeddings = np.asarray(loaded_data["soft_embeddings"], dtype=np.float32)
 
     # Compare the image embeddings with golden data
     mse = np.mean((image_embeddings - golden_image_embeddings) ** 2)

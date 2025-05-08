@@ -65,10 +65,9 @@ def initialize_config(config):
 
 def get_golden_data(config):
   """Get the golden data for SFTTrainer in TRL."""
-  golden_data_path = os.path.join(PKG_DIR, "test_assets", f"golden_data_sft_{config.model_name}.jsonl")
-  with jsonlines.open(golden_data_path, "r") as f:
-    golden_data = list(f)
-  return golden_data[0]
+  input_golden_data_path = os.path.join(PKG_DIR, "test_assets", f"golden_data_sft_{config.model_name}.jsonl")
+  with jsonlines.open(input_golden_data_path, "r") as reader:
+    return next(iter(reader))
 
 
 def setup_maxtext_model(config):

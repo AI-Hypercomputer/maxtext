@@ -47,11 +47,10 @@ import transformers
 
 def get_golden_data(config):
   """Get the golden data for GrpoTrainer from maxtext/MaxText/scratch_code/generate_grpo_golden_logits.py."""
-  golden_data_path = os.path.join(PKG_DIR, "test_assets", f"golden_data_grpo_{config.model_name}.jsonl")
-  print(f"Loading {golden_data_path}")
-  with jsonlines.open(golden_data_path, "r") as f:
-    golden_data = list(f)
-  return golden_data[0]
+  input_golden_data_path = os.path.join(PKG_DIR, "test_assets", f"golden_data_grpo_{config.model_name}.jsonl")
+  print(f"Loading {input_golden_data_path}")
+  with jsonlines.open(input_golden_data_path, "r") as reader:
+    return next(iter(reader))
 
 
 def setup_maxtext_model(config):
