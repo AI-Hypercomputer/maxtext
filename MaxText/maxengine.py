@@ -740,7 +740,6 @@ class MaxEngine(engine_api.Engine):
       self,
       params: Params,
       decode_state: DecodeState,
-      lora_params: Params = None,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
   ) -> Tuple[DecodeState, engine_api.ResultTokens]:
@@ -750,6 +749,12 @@ class MaxEngine(engine_api.Engine):
 
     previous_token = decode_state["tokens"]
     rng, new_rng = jax.random.split(rng)
+
+    # Fetching lora_params from decode_state (if exists)
+    lora_params = None
+    if "lora_adapter_cache" in decode_state:
+      lora_params = decode_state["lora_adapter_cache"]
+
     # run one step generation
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       out_logits, new_vars = self.model.apply(

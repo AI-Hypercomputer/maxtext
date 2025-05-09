@@ -1123,7 +1123,7 @@ class Attention(nn.Module):
       inputs_kv: key/values of shape `[batch, kv_length, kv_features]`.
       model_mode: corresponding to train, prefill and decode.
       deterministic: Disables dropout if set to True.
-      lora_params: A dictionry of unified LoRA params.
+      lora_params: A dictionary of unified LoRA params.
 
     Returns:
       output of shape `[batch, length, q_features]`.
