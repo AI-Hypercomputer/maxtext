@@ -113,6 +113,7 @@ def main(argv: Sequence[str]) -> None:
     images = multimodal_utils.load_image_from_path(config.image_path)
     images = multimodal_utils.pre_process_image(images, model_name=config.model_name)
     tokens = multimodal_utils.prepare_text_for_image_fusion(tokens, model_name=config.model_name)
+    true_length += multimodal_utils.get_image_offsets(config.model_name)
 
   assert (
       true_length <= config.max_prefill_predict_length
