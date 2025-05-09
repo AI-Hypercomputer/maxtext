@@ -171,6 +171,7 @@ def save_checkpoint(
           emergency_replicator_checkpoint_manager.ReplicatorCheckpointManager,
       ),
   ):
+    checkpointing.replicator_error_handler(config)
     return checkpoint_manager.save(
         step,
         args=orbax.checkpoint.args.PyTreeSave(item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size),

@@ -141,6 +141,60 @@ def create_orbax_emergency_replicator_checkpoint_manager(
   return manager
 
 
+def replicator_error_handler(config: Any):
+  """Replicator error handler to handle errors in replicator service."""
+  if (
+      config.enable_emergency_checkpoint
+      and config.use_replicator_service
+      and config.local_checkpoint_directory
+  ):
+    local_dir = config.local_checkpoint_directory
+    replicator_errors_file = f"{local_dir}/replicator.errors"
+    replicator_failed_file = f"{local_dir}/replicator.failed"
+    process_replicator_error_file(replicator_errors_file)
+
+    # if the replicator.failed file exists, then we have a fatal error
+    is_fatal = process_replicator_error_file(replicator_failed_file)
+    if is_fatal:
+      raise ValueError(
+          "Replicator fatal error found in replicator.failed file."
+      )
+
+
+def process_replicator_error_file(error_file: str) -> bool:
+  """Handles replicator errors by reading, logging, cleaning the error file."""
+  error_file_path_exists = epath.Path(error_file).exists()
+  if error_file_path_exists:
+    max_logging.log(f"replicator_error_handler: file found: {error_file}.")
+    read_replicator_error_file(error_file)
+    cleanup_replicator_error_file(error_file)
+    return error_file_path_exists
+  return error_file_path_exists
+
+
+def read_replicator_error_file(error_file: str):
+  """Read replicator errors file."""
+  try:
+    error_data = epath.Path(error_file).read_text()
+    max_logging.log(f"Contents of replicator error file:\n{error_data}")
+  except (OSError, ValueError) as e:
+    max_logging.log(
+        "replicator_error_handler: Failed to read contents of failed"
+        f" file: {e}"
+    )
+
+
+def cleanup_replicator_error_file(error_file: str):
+  """Clean up replicator errors file."""
+  try:
+    epath.Path(error_file).unlink()
+  except (OSError, ValueError) as e:
+    max_logging.log(
+        "replicator_error_handler: Failed to remove replicator errors file:"
+        f" {e}"
+    )
+
+
 def print_save_message(step, async_checkpointing):
   if async_checkpointing:
     max_logging.log(f"Started an asynchronous checkpoint save for step {step}")
