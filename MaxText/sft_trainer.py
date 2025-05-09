@@ -341,6 +341,17 @@ def main(argv: Sequence[str]) -> None:
 
   if config.monitor_goodput and jax.process_index() == 0:
     logger_name = f"goodput_{config.run_name}"
+    # Workload monitoring and Goodput monitoring both uses /workload/performance
+    # GCM metric to publish step_time and step_deviation metrics. For now, we
+    # will disable publishing step deviation metrics to GCM if workload
+    # monitoring is enabled. Will reconcile this in the future.
+    if config.report_performance_metric_for_gcp_monitoring:
+      config.enable_gcp_step_deviation_metrics = False
+
+    gcp_options = monitoring.GCPOptions(
+        enable_gcp_goodput_metrics=config.enable_gcp_goodput_metrics,
+        enable_gcp_step_deviation_metrics=config.enable_gcp_step_deviation_metrics,
+    )
     goodput_monitor = monitoring.GoodputMonitor(
         job_name=config.run_name,
         logger_name=logger_name,
@@ -351,12 +362,13 @@ def main(argv: Sequence[str]) -> None:
         include_badput_breakdown=True,
         include_step_deviation=config.monitor_step_time_deviation,
         step_deviation_interval_seconds=config.step_deviation_interval_seconds,
+        gcp_options=gcp_options,
     )
     goodput_monitor.start_goodput_uploader()
-    max_logging.log("Started Goodput upload to Tensorboard in the background!")
+    max_logging.log("Started Goodput upload to Tensorboard & GCM in the background!")
     if config.monitor_step_time_deviation:
       goodput_monitor.start_step_deviation_uploader()
-      max_logging.log("Started step time deviation upload to Tensorboard in the background!")
+      max_logging.log("Started step time deviation upload to Tensorboard & GCM in the background!")
 
   train_loop(config)
 
