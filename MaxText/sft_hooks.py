@@ -1,6 +1,9 @@
 from datetime import datetime
 import queue
 import contextlib
+from typing import Any
+
+import jax
 
 from MaxText import profiler
 from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
@@ -40,7 +43,7 @@ class MetricsRecorder:
     now = datetime.now()
     step_time_delta = now - self.last_step_completion
     self.last_step_completion = now
-  
+
     lr_schedule = self.learning_rate_schedule(step)
     record_scalar_metrics(metrics, step_time_delta, self.per_device_tflops, lr_schedule, self.per_device_tokens)
     if self.performance_metric_queue:
@@ -60,7 +63,7 @@ class Profiler:
 
     if config.profiler != "" and self.prof.start_initial_profile_step >= config.steps:
       raise ValueError("Profiling requested but initial profiling step set past training final step")
-  
+
   def _start_train_step(self, step):
     if step == self.prof.start_initial_profile_step or self.prof.should_activate_periodic_profile(step):
       postfix = f"step_{step}" if self.config.profile_periodically_period > 0 else ""
@@ -123,16 +126,18 @@ def log_statistics(config, train_ctx, state):
 class TrainingHooks:
   # TODO: train_ctx or whatever we pass here should probably contain state and start_step
   #       we should also minimize train_ctx to what hooks need vs. training loop
-  def __init__(self, config, train_ctx, state, start_step):
+  def __init__(self, config):
     self.config = config
+    self.training_step_metrics = None
+    self.eval_step_metrics = None
+
+  def pre_training(self, train_ctx, state, start_step):
     self.train_ctx = train_ctx
     self.state = state
     self.start_step = start_step
 
-    self.profiler = Profiler(config, state, start_step)    
-    self.metrics_recorder = MetricsRecorder(config, train_ctx)
-    self.training_step_metrics = None
-    self.eval_step_metrics = None
+    self.profiler = Profiler(self.config, state, start_step)
+    self.metrics_recorder = MetricsRecorder(self.config, train_ctx)
 
   @contextlib.contextmanager
   def training_loop(self):
@@ -146,7 +151,11 @@ class TrainingHooks:
         finally:
           # TODO: this should be created in this class, not by setup_mesh_and_model
           max_utils.close_summary_writer(self.train_ctx.writer)
-          
+
+  @contextlib.contextmanager
+  def prepare_inputs(self, input_data: Any) -> Any:
+    return input_data
+
   @contextlib.context_manager
   def training_step(self, step):
     with self.profiler.train_step(step):
@@ -163,4 +172,4 @@ class TrainingHooks:
       pass
     finally:
       self.metrics_recorder.record_eval_metrics(self.eval_step_metrics, step)
-      
+
