@@ -19,10 +19,11 @@ import operator
 from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
 
 import numpy as np
+import jax
+import jax.numpy as jnp
 
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
-import jax.numpy as jnp
 
 from aqt.jax.v2 import aqt_tensor
 
@@ -30,6 +31,7 @@ from flax import nnx
 import flax.linen as nn
 
 from MaxText import common_types
+from MaxText import max_logging
 from MaxText.common_types import DecoderBlockType
 from MaxText.layers import initializers, normalizations, quantizations
 
@@ -102,6 +104,7 @@ class DenseGeneral(nnx.Module):
       quant: Optional[Quant] = None,
       use_bias: bool = False,
       matmul_precision: str = "default",
+      parameter_memory_host_offload: bool = False,
       *,  # Following arguments are keyword-only
       rngs: nnx.Rngs,
   ):
@@ -119,6 +122,7 @@ class DenseGeneral(nnx.Module):
       quant: quantization config, defaults to None implying no quantization.
       use_bias: whether to add bias in linear transformation.
       matmul_precision: Precision for matrix multiplication.
+      parameter_memory_host_offload: Determines whether to offload params to host
       rngs: RNG state for initialization in nnx.
     """
     self.in_features = _canonicalize_tuple(in_features)
@@ -131,6 +135,7 @@ class DenseGeneral(nnx.Module):
     self.quant = quant
     self.use_bias = use_bias
     self.matmul_precision = matmul_precision
+    self.parameter_memory_host_offload = parameter_memory_host_offload
 
     # Parameter initialization
     kernel_shape = self.in_features + self.out_features
@@ -185,6 +190,11 @@ class DenseGeneral(nnx.Module):
     else:
       kernel = jnp.asarray(self.kernel[...], self.dtype)
 
+    # Move logit_dense kernel to device if parameter offloading is enabled
+    if self.parameter_memory_host_offload:
+      max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
+      kernel = jax.device_put(kernel, jax._src.sharding_impls.TransferToMemoryKind("device"))
+
     contract_ind = tuple(range(0, len(self.axis)))
     output = _compute_dot_general(
         inputs,
@@ -227,6 +237,7 @@ def dense_general(
     quant: Optional[Quant] = None,
     use_bias: bool = False,
     matmul_precision: str = "default",
+    parameter_memory_host_offload: bool = False,
     name: Optional[str] = None,
 ):
   """Initializes the dense_general module.
@@ -244,6 +255,7 @@ def dense_general(
     quant: quantization config, defaults to None implying no quantization.
     use_bias: whether to add bias in linear transformation.
     matmul_precision: Precision for matrix multiplication.
+    parameter_memory_host_offload: Determines whether to offload params to host
     name: name passed to the ToLinen Module
   """
   if not (inputs_shape is not None) ^ (in_features is not None):
@@ -270,6 +282,7 @@ def dense_general(
       quant=quant,
       use_bias=use_bias,
       matmul_precision=matmul_precision,
+      parameter_memory_host_offload=parameter_memory_host_offload,
       name=name,
       metadata_fn=variable_to_logically_partitioned,
   )
