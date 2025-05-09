@@ -645,6 +645,7 @@ def setup_mesh_and_model(config, config_inference):
   # Model and Optimizer definition
   quant = quantizations.configure_quantization(config)
   model = Transformer(config, mesh, quant=quant)
+  inference_model = Transformer(config_inference, inference_meshes[0], quant=quant)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
   logger = checkpointing.setup_checkpoint_logger(config)
@@ -683,7 +684,7 @@ def setup_mesh_and_model(config, config_inference):
         use_zarr3,
     )
 
-  return init_rng, writer, checkpoint_manager, mesh, inference_meshes, model, learning_rate_schedule, tx
+  return init_rng, writer, checkpoint_manager, mesh, inference_meshes, model, inference_model, learning_rate_schedule, tx
 
 def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   """
@@ -839,7 +840,7 @@ def setup_train_loop(config, config_inference):
   """
   recorder = create_goodput_recorder(config)
   record_goodput(recorder, config, recorder.record_tpu_init_start_time if recorder else None)
-  init_rng, writer, checkpoint_manager, mesh, inference_meshes, model, learning_rate_schedule, tx = setup_mesh_and_model(config, config_inference)
+  init_rng, writer, checkpoint_manager, mesh, inference_meshes, model, inference_model, learning_rate_schedule, tx = setup_mesh_and_model(config, config_inference)
   record_goodput(recorder, config, recorder.record_tpu_init_end_time if recorder else None)
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
   data_iterators = grpo_input_pipeline.create_data_iterator(config_inference, inference_meshes)
@@ -849,7 +850,7 @@ def setup_train_loop(config, config_inference):
   )
 
   # create inference_state_mesh_shardings from multiple inference_mesh
-  inference_state_mesh_shardings = [maxtext_utils.get_abstract_state(model, tx, config_inference, init_rng, inference_mesh, is_training=False)[2] for inference_mesh in inference_meshes]
+  inference_state_mesh_shardings = [maxtext_utils.get_abstract_state(inference_model, tx, config_inference, init_rng, inference_mesh, is_training=False)[2] for inference_mesh in inference_meshes]
   if not config.using_pipeline_parallelism:
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
     maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
@@ -1170,6 +1171,8 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+  configs_argv = max_utils.parse_custom_args(argv)
+  breakpoint()
   config = pyconfig.initialize(argv)
   if not config.use_grpo:
     raise ValueError("Please set the value of use_grpo to True")

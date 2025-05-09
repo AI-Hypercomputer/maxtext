@@ -843,3 +843,18 @@ def reorder_causal_load_balanced(batch, cp_size):
 def get_reorder_callable(cp_size):
   """Creates a callable that can be used with map() to reorder batches."""
   return functools.partial(reorder_causal_load_balanced, cp_size=cp_size)
+
+def parse_custom_args(argv):
+    configs = []
+    current_argv = []
+    
+    for arg in argv:
+      if arg.endswith((".yaml", ".yml")):
+        if current_argv:
+          configs.append(current_argv)
+        current_argv = [arg]
+      else:
+        current_argv.append(arg)
+    if current_argv:
+      configs.append(current_argv)
+    return configs
