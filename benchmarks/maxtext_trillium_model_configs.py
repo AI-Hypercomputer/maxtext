@@ -19,7 +19,7 @@ import dataclasses
 import os.path
 import typing
 from tempfile import gettempdir
-from benchmarks import xla_flags_library
+import xla_flags_library
 
 # TODO(vbarr@) Abstract software features like checkpointing,
 # real data / synthetic data out of this config
@@ -1756,3 +1756,44 @@ llama3_1_70b_131072 = _add_to_model_dictionary(
 )
 
 
+matt_llama4_scout = _add_to_model_dictionary(
+    trillium_model_dict,
+    MaxTextModel(
+        model_name="matt_llama4_scout",
+        model_type="llama4-17b-16e",
+        tuning_params={
+            "per_device_batch_size": 1,
+            "max_target_length": 4096,
+            "ici_fsdp_parallelism": 4,
+            "ici_expert_parallelism": 16,
+            "remat_policy": "custom",
+            "decoder_layer_input": "offload",
+            # "out_proj": "offload",
+            # "query_proj": "offload",
+            # "key_proj": "offload",
+            # "value_proj": "offload",
+            "attention": "flash",
+            "gcs_metrics": True,
+            "use_iota_embed": True,
+            "dataset_path": "gs://max-datasets-rogue",
+            "dataset_type": "synthetic",
+            "reuse_example_batch": 1,
+            "enable_checkpointing": False,
+            "profiler": "xplane",
+            "sa_block_q": 2048,
+            "sa_block_q_dkv": 2048,
+            "sa_block_q_dq": 2048,
+            "megablox": False,
+            "sparse_matmul": False,
+            "capacity_factor": 1.25,
+            "tokenizer_path": "assets/tokenizer.mistral-v3",
+            "dtype": "bfloat16",
+            "weight_dtype": "float32",
+        },
+        xla_flags=(
+            xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.MOE_VMEM_LIMIT_FLAG
+        ),
+    ),
+)

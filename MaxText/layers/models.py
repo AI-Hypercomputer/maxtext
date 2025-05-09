@@ -502,6 +502,7 @@ class Decoder(nn.Module):
           )
         else:
           layer_call_kwargs = {}
+          layer_kwargs = {}
           if cfg.decoder_block == DecoderBlockType.GEMMA3:
             layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
           elif cfg.decoder_block == DecoderBlockType.LLAMA4:
