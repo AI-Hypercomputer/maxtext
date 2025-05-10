@@ -36,15 +36,7 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
-    temp_dir = tempfile.gettempdir()
-    script_path = os.path.join(os.path.dirname(PKG_DIR), "setup_gcsfuse.sh")
-    if not os.path.isfile(script_path):
-      raise FileNotFoundError(script_path)
-    exit_code = subprocess.call(
-        ["bash", script_path, "DATASET_GCS_BUCKET=maxtext-dataset", f"MOUNT_PATH={os.path.join(temp_dir, 'gcsfuse')}"]
-    )
-    if exit_code != os.EX_OK:
-      raise ValueError(f"Running setup_gcsfuse.sh failed with exit code: {exit_code}")
+    mount_gcsfuse()
 
   def setUp(self):
     super().setUp()
@@ -119,15 +111,7 @@ class GrainParquetProcessingTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
-    temp_dir = tempfile.gettempdir()
-    script_path = os.path.join(os.path.dirname(PKG_DIR), "setup_gcsfuse.sh")
-    if not os.path.isfile(script_path):
-      raise FileNotFoundError(script_path)
-    exit_code = subprocess.call(
-        ["bash", script_path, "DATASET_GCS_BUCKET=maxtext-dataset", f"MOUNT_PATH={os.path.join(temp_dir, 'gcsfuse')}"]
-    )
-    if exit_code != 0:
-      raise ValueError(f"Running setup_gcsfuse.sh failed with exit code: {exit_code}")
+    mount_gcsfuse()
 
   def setUp(self):
     super().setUp()
@@ -199,18 +183,27 @@ class GrainParquetProcessingTest(unittest.TestCase):
     self.assertTrue((train_batch1["targets"] == train_batch2["targets"]).all())  # pytype: disable=unsupported-operands
 
 
-def main():
+def mount_gcsfuse():
+  """
+  Mounts a GCS bucket (gs://maxtext-dataset) to a local directory (/tmp/gcsfuse)
+  using gcsfuse if not already mounted.
+  """
   temp_dir = tempfile.gettempdir()
-  script_path = os.path.join(os.path.dirname(PKG_DIR), "setup_gcsfuse.sh")
-  if not os.path.isfile(script_path):
-    raise FileNotFoundError(script_path)
-  exit_code = subprocess.call(
+  mount_path = os.path.join(temp_dir, "gcsfuse")
+
+  # Only mount if the directory is empty or not present
+  if not os.path.isdir(mount_path) or not os.listdir(mount_path):
+    script_path = os.path.join(os.path.dirname(PKG_DIR), "setup_gcsfuse.sh")
+    if not os.path.isfile(script_path):
+      raise FileNotFoundError(script_path)
+
+    exit_code = subprocess.call(
       ["bash", script_path, "DATASET_GCS_BUCKET=maxtext-dataset", f"MOUNT_PATH={os.path.join(temp_dir, 'gcsfuse')}"]
-  )
-  if exit_code != 0:
-    raise ValueError(f"Running setup_gcsfuse.sh failed with exit code: {exit_code}")
-  unittest.main()
+    )
+    if exit_code != os.EX_OK:
+      raise ValueError(f"Running setup_gcsfuse.sh failed with exit code: {exit_code}")
 
 
 if __name__ == "__main__":
-  main()
+  mount_gcsfuse()
+  unittest.main()
