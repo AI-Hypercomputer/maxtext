@@ -18,7 +18,6 @@ mlp_activations: ["silu","linear"]
 enable_dropout: False
 logits_via_embedding: False
 tokenizer_type: "huggingface"
-tokenizer_path: "meta-llama/Llama-4-Scout-17B-16E"
 
 base_emb_dim: 5120
 base_num_decoder_layers: 48
