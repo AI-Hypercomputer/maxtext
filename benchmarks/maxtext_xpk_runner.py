@@ -493,6 +493,22 @@ def main() -> int:
     device_type='v4-128',
   )
 
+  v6e_cluster_config = XpkClusterConfig(
+    cluster_name='bodaborg-v6e-256-ts',
+    project='tpu-prod-env-multipod',
+    zone='us-west1-c',
+    device_type='v6e-256',
+  )
+
+  v6e_cluster_config_lcscld = XpkClusterConfig(
+    cluster_name='bodaborg-v6e-256-lcscld-c',
+    project='tpu-prod-env-one-vm',
+    zone='southamerica-west1-a',
+    device_type='v6e-256',
+  )
+
+
+
 
   xpk_workload_cmds = []
   xpk_workload_names = []
@@ -500,7 +516,8 @@ def main() -> int:
   list_of_models = [
     #model_configs.deepseek_matt_a1
     #model_configs.deepseek_manual_matt_a1
-    model_configs.matt_llama4_scout
+    #model_configs.matt_llama4_scout_v4
+    model_configs.matt_llama4_maverick_trillium
   ]
 
   user = os.environ['USER']
@@ -509,7 +526,9 @@ def main() -> int:
   for model in list_of_models:
     # Run workloads on the below clusters
     for cluster_config in [
-        v4_config
+        #v4_config
+        #v6e_cluster_config
+        v6e_cluster_config_lcscld
     ]:
       # Run workloads in the following slice configurations
       for num_slices in [1,]:

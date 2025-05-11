@@ -1755,19 +1755,32 @@ llama3_1_70b_131072 = _add_to_model_dictionary(
   )
 )
 
+# Image build repro:
+# docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_runner"'
+# Built from an earlier commit 5/9 of branch mattdavidow-llama4-scan
+# #"llama4-17b-16e", is corrupted with 1k embed in this image, but maverick untouched
+# 
+# Runners commit:
+# commit 125e2c129434c570d5590e381ba783f99db114ae (HEAD -> mattdavidow-run-llama4-scan, origin/mattdavidow-run-llama4-scan)
+# Author: gobbleturk <mattdavidow@google.com>
+# Date:   Sat May 10 00:02:32 2025 +0000
 
-matt_llama4_scout = _add_to_model_dictionary(
+#     Back to maxtext_xpk_runner, life is good
+#
+
+matt_llama4_scout_v4 = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
-        model_name="matt_llama4_scout",
-        model_type="llama4-17b-16e",
+        model_name="matt_llama4_maverick",
+        model_type="llama4-17b-128e", #"llama4-17b-16e", is corrupted with 1k embed
         tuning_params={
             "per_device_batch_size": 1,
-            "max_target_length": 4096,
+            "max_target_length": 2048,
             "ici_fsdp_parallelism": 4,
             "ici_expert_parallelism": 16,
-            "remat_policy": "custom",
-            "decoder_layer_input": "offload",
+            "dcn_fsdp_parallelism": 3,
+            "remat_policy": "full",
+            #"decoder_layer_input": "offload",
             # "out_proj": "offload",
             # "query_proj": "offload",
             # "key_proj": "offload",
@@ -1788,7 +1801,51 @@ matt_llama4_scout = _add_to_model_dictionary(
             #"capacity_factor": 1.25,
             #"tokenizer_path": "assets/tokenizer.mistral-v3",
             "dtype": "bfloat16",
-            "weight_dtype": "float32",
+            "weight_dtype": "bfloat16",
+            "opt_type": "sgd"
+        },
+        xla_flags=(
+            xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.DATA_PARALLEL_OVERLAP
+            #+ xla_flags_library.MOE_VMEM_LIMIT_FLAG
+        ),
+    ),
+)
+
+matt_llama4_maverick_trillium = _add_to_model_dictionary(
+    trillium_model_dict,
+    MaxTextModel(
+        model_name="matt_llama4_maverick_trillium",
+        model_type="llama4-17b-128e", #"llama4-17b-16e", is corrupted with 1k embed
+        tuning_params={
+            "per_device_batch_size": 1,
+            "max_target_length": 2048,
+            "ici_fsdp_parallelism": 16,
+            "ici_expert_parallelism": 16,
+            "remat_policy": "custom",
+            "decoder_layer_input": "offload",
+            # "out_proj": "offload",
+            # "query_proj": "offload",
+            # "key_proj": "offload",
+            # "value_proj": "offload",
+            "attention": "flash",
+            "gcs_metrics": True,
+            "use_iota_embed": True,
+            "dataset_path": "gs://max-datasets-rogue",
+            "dataset_type": "synthetic",
+            "reuse_example_batch": 1,
+            "enable_checkpointing": False,
+            "profiler": "xplane",
+            "sa_block_q": 2048,
+            "sa_block_q_dkv": 2048,
+            "sa_block_q_dq": 2048,
+            "megablox": True,
+            "sparse_matmul": True,
+            #"capacity_factor": 1.25,
+            #"tokenizer_path": "assets/tokenizer.mistral-v3",
+            "dtype": "bfloat16",
+            "weight_dtype": "bfloat16",
+            "opt_type": "sgd"
         },
         xla_flags=(
             xla_flags_library.CF_FOR_ALL_GATHER
@@ -1797,3 +1854,6 @@ matt_llama4_scout = _add_to_model_dictionary(
         ),
     ),
 )
+
+# TODO: Create a custom maverick with halve layers or so fits into memory with less chips
+# we are poor here we don't fit 400B param models on the fly
