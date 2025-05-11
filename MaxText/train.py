@@ -25,7 +25,6 @@ import os
 import sys
 import functools
 import time
-import queue
 
 from typing import Sequence
 from absl import app
@@ -835,14 +834,14 @@ def train_loop(config, state=None):
   example_batch = None
   last_step_completion = datetime.datetime.now()
 
-  performance_metric_queue = None
+  gcp_workload_monitor = None
   if config.report_heartbeat_metric_for_gcp_monitoring or config.report_performance_metric_for_gcp_monitoring:
-    gcp_workload_monitor = GCPWorkloadMonitor(config.run_name)
-    if config.report_heartbeat_metric_for_gcp_monitoring:
-      gcp_workload_monitor.start_heartbeat_reporting_thread(config.heartbeat_reporting_interval_in_seconds)
-    if config.report_performance_metric_for_gcp_monitoring:
-      performance_metric_queue = queue.Queue()
-      gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
+    gcp_workload_monitor = GCPWorkloadMonitor(
+        config.run_name,
+        config.report_heartbeat_metric_for_gcp_monitoring,
+        config.heartbeat_reporting_interval_in_seconds,
+        config.report_performance_metric_for_gcp_monitoring,
+    )
 
   metric_logger = MetricLogger(writer, config)
   input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
@@ -871,8 +870,9 @@ def train_loop(config, state=None):
     step_time_delta = datetime.datetime.now() - last_step_completion
     last_step_completion = datetime.datetime.now()
     record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
-    if performance_metric_queue:
-      performance_metric_queue.put(step_time_delta.total_seconds())
+    if gcp_workload_monitor and config.report_performance_metric_for_gcp_monitoring:
+      gcp_workload_monitor.notify_new_performance_metric(step_time_delta.total_seconds())
+    last_step_completion = datetime.datetime.now()
 
     if checkpoint_manager is not None:
       state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]

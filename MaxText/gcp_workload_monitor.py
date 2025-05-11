@@ -37,53 +37,92 @@ _METADATA_HEADERS = {"Metadata-Flavor": "Google"}
 class GCPWorkloadMonitor:
   """Interface for reporting metrics to GCP for monitoring."""
 
-  def __init__(self, run_name: str):
+  def __init__(self, run_name: str, report_heartbeat: bool, heartbeat_interval: int, report_performance: bool):
+    # 0. keep track of configs/state
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d-%f")
     self.workload_id = f"{run_name if run_name else 'maxtext-unnamed'}-{timestamp}"
-    self.zone = get_node_zone()
-    self.project_id = get_gcp_project_id()
-    self.client = monitoring_v3.MetricServiceClient()
-    self.heartbeat_reporting_started = False
-    self.performance_reporting_started = False
+    self.should_report_heartbeat = report_heartbeat
+    self.heartbeat_reporting_interval = heartbeat_interval
+    self.should_report_performance = report_performance
+    self.performance_metric_queue = queue.Queue()
     self.termination_event = threading.Event()
+    # 1. start thread to perform environment check
+    self.env_check_done = threading.Event()
+    self.on_valid_gcp_environment = False
+    env_check_thread = threading.Thread(target=self._verify_env, daemon=True)
+    env_check_thread.start()
+    # 2. start thread which will report metrics if and only if we verify valid GCP environment
+    monitor_thread = threading.Thread(target=self._monitor, daemon=True)
+    monitor_thread.start()
 
   def __del__(self):
     self.termination_event.set()
 
-  def start_heartbeat_reporting_thread(self, interval: int):
-    """Starts a thread that reports heartbeat every {interval} seconds until termination event is set."""
-    if self.heartbeat_reporting_started:
-      raise RuntimeError("Heartbeat reporting thread already started")
-    max_logging.log("Starting background thread for reporting heartbeat for workload observability")
-    self.heartbeat_reporting_started = True
-    t = threading.Thread(target=self._report_heartbeat_thread, args=(interval,))
-    t.daemon = True
-    t.start()
+  def _verify_env(self):
+    """Verify that we are on GCP and can connect to the monitoring service.
+    If and only if both checks succeed, set self.on_valid_gcp_environment to True."""
+    # check we're on GCP
+    try:
+      response = requests.get(_METADATA_SERVER_URL, headers=_METADATA_HEADERS, timeout=2)
+      if response.status_code != 200:
+        max_logging.log(f"Not on GCP. Status code when reaching GCP metadata server: {response.status_code}")
+        self.env_check_done.set()
+        return
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      max_logging.log(f"Not on GCP. Failure when reaching GCP metadata server: {e}")
+      self.env_check_done.set()
+      return
 
-  def start_performance_reporting_thread(self, metrics_queue: queue.Queue):
-    """Starts a thread that reports performance metric sent to metrics_queue until termination event is set."""
-    if self.performance_reporting_started:
-      raise RuntimeError("Performance reporting thread already started")
-    max_logging.log("Starting background thread for reporting performance for workload observability")
-    self.performance_reporting_started = True
-    t = threading.Thread(target=self._report_performance_thread, args=(metrics_queue,))
-    t.daemon = True
-    t.start()
+    # check we can connect to the monitor service
+    try:
+      self.client = monitoring_v3.MetricServiceClient()  # pylint: disable=attribute-defined-outside-init
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      max_logging.log(f"Unable to connect GCP monitor service under current env: {e}")
+      self.env_check_done.set()
+      return
 
-  def _report_heartbeat_thread(self, interval: int):
-    """Reports heartbeat metric to GCP every {interval} seconds until termination event is set."""
+    self.on_valid_gcp_environment = True
+    self.env_check_done.set()
+
+  def _monitor(self):
+    """Wait for env check to complete, then report metrics if and only if on valid GCP environment."""
+    while not self.env_check_done.is_set():
+      time.sleep(2)
+
+    if not self.on_valid_gcp_environment:
+      return
+
+    self.zone = get_node_zone()  # pylint: disable=attribute-defined-outside-init
+    self.project_id = get_gcp_project_id()  # pylint: disable=attribute-defined-outside-init
+    if self.should_report_heartbeat:
+      max_logging.log("Starting background thread for reporting heartbeat for workload observability")
+      heartbeat_thread = threading.Thread(target=self._report_heartbeat_thread, daemon=True)
+      heartbeat_thread.start()
+    if self.should_report_performance:
+      max_logging.log("Starting background thread for reporting performance for workload observability")
+      performance_thread = threading.Thread(target=self._report_performance_thread, daemon=True)
+      performance_thread.start()
+
+  def notify_new_performance_metric(self, performance_metric):
+    """Method for external world to notify a new performance metric to be reported."""
+    if not self.should_report_performance or (self.env_check_done.is_set() and not self.on_valid_gcp_environment):
+      return
+    self.performance_metric_queue.put(performance_metric)
+
+  def _report_heartbeat_thread(self):
+    """Reports heartbeat metric to GCP until termination event is set."""
     local_rank = os.getenv("LOCAL_RANK", "0")
     global_rank = jax.process_index()
     while not self.termination_event.is_set():
       self._report_heartbeat(local_rank, str(global_rank))
-      time.sleep(interval)
+      time.sleep(self.heartbeat_reporting_interval)
 
-  def _report_performance_thread(self, metrics_queue: queue.Queue):
-    """Reports performance metric to GCP whenever new metric arrives at the metrics_queue until termination event is set."""
+  def _report_performance_thread(self):
+    """Reports performance metric to GCP whenever new metric arrives until termination event is set."""
     while not self.termination_event.is_set():
       try:
         # adding a timeout of 1s to ensure we don't block indefinitely and miss the stop event
-        performance_metric = metrics_queue.get(timeout=1)
+        performance_metric = self.performance_metric_queue.get(timeout=1)
         self._report_performance(performance_metric)
       except queue.Empty:
         continue
@@ -107,8 +146,8 @@ class GCPWorkloadMonitor:
           resource=monitored_resource_pb2.MonitoredResource(
               type="compute.googleapis.com/WorkloadProcess",
               labels={
-                  "project_id": self.project_id,
-                  "location": self.zone,
+                  "project_id": self.project_id,  # pytype: disable=attribute-error
+                  "location": self.zone,  # pytype: disable=attribute-error
                   "workload_id": self.workload_id,
                   "replica_id": "0",
                   "process_id": global_rank,
@@ -123,8 +162,8 @@ class GCPWorkloadMonitor:
       )
 
       # Send data to Google Cloud Monitoring
-      self.client.create_time_series(
-          request={"name": f"projects/{self.project_id}", "time_series": [series]},
+      self.client.create_time_series(  # pytype: disable=attribute-error
+          request={"name": f"projects/{self.project_id}", "time_series": [series]},  # pytype: disable=attribute-error
           timeout=30,
       )
       max_logging.log("Heartbeat metric successfully sent to GCP.")
@@ -148,7 +187,7 @@ class GCPWorkloadMonitor:
           resource=monitored_resource_pb2.MonitoredResource(
               type="compute.googleapis.com/Workload",
               labels={
-                  "location": self.zone,
+                  "location": self.zone,  # pytype: disable=attribute-error
                   "workload_id": self.workload_id,
                   "replica_id": "0",
               },
@@ -162,8 +201,8 @@ class GCPWorkloadMonitor:
       )
 
       # Send data to Google Cloud Monitoring
-      self.client.create_time_series(
-          request={"name": f"projects/{self.project_id}", "time_series": [series]},
+      self.client.create_time_series(  # pytype: disable=attribute-error
+          request={"name": f"projects/{self.project_id}", "time_series": [series]},  # pytype: disable=attribute-error
           timeout=30,
       )
       max_logging.log("Performance metric successfully sent to GCP.")
