@@ -152,10 +152,9 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     max_logging.log("Attempting to initialize the jax distributed system for CPU backend...")
     initialize_jax_for_cpu(raw_keys)
     max_logging.log("Jax distributed system initialized on CPUs!")
-  elif (
-      raw_keys["enable_checkpointing"]
-      and raw_keys["compile_topology_num_slices"] == -1
-  ) or raw_keys["hardware"] == "gpu_multiprocess":
+  elif (raw_keys["enable_checkpointing"] and raw_keys["compile_topology_num_slices"] == -1) or raw_keys[
+      "hardware"
+  ] == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system...")
     if not raw_keys["enable_emergency_checkpoint"]:
       jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
