@@ -239,6 +239,15 @@ class RoutedMoE(nn.Module):
 
   def get_topk(self, gate_logits, pre_bias_logits):
     """get topk. shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)"""
+    if self.config.use_random_routing:
+      print("using random routing...")
+      bs, seq_len, num_experts = gate_logits.shape
+      indices = jnp.arange(num_experts).repeat(bs * seq_len)
+      rng = jax.random.PRNGKey(1234)
+      selected_num = bs * seq_len * self.num_experts_per_tok
+      top_k_indices = jax.random.choice(rng, indices, shape=(selected_num,)).reshape(bs, seq_len, self.num_experts_per_tok)
+      top_k_weights = jnp.take_along_axis(gate_logits, top_k_indices, axis=-1)
+      return top_k_weights, top_k_indices
     if self.config.model_name.startswith("deepseek3"):
       top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
     else:
@@ -366,29 +375,51 @@ class RoutedMoE(nn.Module):
   def local_permute(inputs, global_group_sizes, local_expert_size,
                     shard_index, is_offset=False, global_sorted_experts=None):
     """Sort inputs by expert within each shard."""
+    local_id = jax.lax.axis_index("expert")
     all_shard_local_sizes = jax.lax.dynamic_slice_in_dim(
         global_group_sizes, shard_index * local_expert_size, local_expert_size, axis=1
     )
+    # jax.debug.print("global_group_sizes: {x}", x=global_group_sizes)
+    # jax.debug.print("local_id - {y}: all_shard_local_sizes: {x}", y=local_id, x=all_shard_local_sizes)
+
     local_sizes = all_shard_local_sizes.reshape(-1)
+    # jax.debug.print("local_id - {y}: local_sizes: {x}", y=local_id, x=local_sizes)
+
     local_group_size = jnp.sum(all_shard_local_sizes, axis=0)
+    # jax.debug.print("local_id - {y}: local_group_size: {x}", y=local_id, x=local_group_size)
     
     # In this case, the data that needs to be processed by the local shard
     # does not start from row 0 but actually starts at
     # jnp.concatenate((jnp.array([0]), jnp.cumsum(local_group_sizes[:-1]))[shard_id]
     # This happens for instance if the data is not produced via a ragged_all_to_all.
     if is_offset:
+      # jax.debug.print("is_offset")
       divided_assignments = jnp.floor_divide(global_sorted_experts, local_expert_size)
+      # jax.debug.print("local_id - {y}: global_sorted_experts: {x}", y=local_id, x=global_sorted_experts)
+      # jax.debug.print("local_id - {y}: divided_assignments: {x}", y=local_id, x=divided_assignments)
       expert_indices = jnp.where(
         divided_assignments == shard_index,
         jnp.mod(global_sorted_experts, local_expert_size),
         local_expert_size
       )
+      # jax.debug.print("local_id - {y}: expert_indices: {x}", y=local_id, x=expert_indices)
     else:
       base_indices = jnp.mod(jnp.arange(local_sizes.shape[0]), local_expert_size)
+      # jax.debug.print("local_id - {y}: base_indices: {x}", y=local_id, x=base_indices)
       expert_indices = jnp.repeat(base_indices, local_sizes, total_repeat_length=inputs.shape[0])
+      # jax.debug.print("local_id - {y}: expert_indices: {x}", y=local_id, x=expert_indices)
+      mask_indices = jnp.arange(expert_indices.shape[0])
+      mask = mask_indices < jnp.sum(local_sizes)
+      # jax.debug.print("local_id - {y}: mask: {x}", y=local_id, x=mask)
+      expert_indices = jnp.where(mask, expert_indices, local_expert_size)
+      # jax.debug.print("local_id - {y}: new expert_indices: {x}", y=local_id, x=expert_indices)
+
     sorted_indices = jnp.argsort(expert_indices)
     sorted_inputs = jnp.take(inputs, indices=sorted_indices, axis=0)
+    # jax.debug.print("local_id - {y}: sorted_indices: {x}", y=local_id, x=sorted_indices)
+    # jax.debug.print("local_id - {y}: sorted_inputs: {x}", y=local_id, x=sorted_inputs)
     sorted_experts_ids = expert_indices[sorted_indices]
+    # jax.debug.print("local_id - {y}: sorted_experts_ids: {x}", y=local_id, x=sorted_experts_ids)
     return sorted_inputs, sorted_indices, local_group_size, sorted_experts_ids,
 
 
@@ -461,6 +492,8 @@ class RoutedMoE(nn.Module):
     return input_offsets, send_sizes, output_offsets, recv_sizes
 
   def sparse_matmul(self, inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel):
+    # jax.debug.print("sparse_matmul inputs {x}", x=inputs)
+
     def gmm(inputs, kernel, group_sizes, expert_assignments):
       tile_size = (512, 1024, 1024)  # (m, k, n)
       PAD_LENGTH=512
@@ -522,12 +555,12 @@ class RoutedMoE(nn.Module):
     # can have batch_size > 1.
     try:
       is_batch_sharded_by_expert = 'expert' in tuple(filter(
-        lambda tup: tup[0] == "activation_batch_moe", self.config.logical_axis_rules)
+        lambda tup: tup[0] == "activation_batch", self.config.logical_axis_rules)
         )[0][1]
     except:
       is_batch_sharded_by_expert = False
     if is_batch_sharded_by_expert and inputs.shape[0] > 1:
-      batch_logical_axis = "activation_batch_moe"
+      batch_logical_axis = "activation_batch"
     else:
       batch_logical_axis = "activation_batch_no_exp"
 
@@ -596,6 +629,7 @@ class RoutedMoE(nn.Module):
           global_group_sizes = lax.all_gather(group_sizes, axis_name=expert_axis_name)
           x, local_sorted_indices, group_sizes, selected_experts = \
               RoutedMoE.local_permute(x, global_group_sizes, local_expert_size, shard_index=expert_shard_id)
+          # jax.debug.print("group_sizes: {x}", x=group_sizes)
         else:
           x, local_sorted_indices, group_sizes, selected_experts = \
             RoutedMoE.local_permute(x, global_group_sizes[None, :],
@@ -611,7 +645,7 @@ class RoutedMoE(nn.Module):
       intermediate_layer = jnp.multiply(layer_act, layer_w1)
       intermediate_output = gmm(intermediate_layer, wo, group_sizes, selected_experts)
       intermediate_output = checkpoint_name(intermediate_output, "mlpwo")
-      if num_expert_parallelism > 1:
+      if self.get_tensor_parallelism_size() > 1:
         intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
 
       if num_expert_parallelism > 1:

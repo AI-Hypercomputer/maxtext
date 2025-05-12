@@ -461,7 +461,7 @@ learning_rate_schedule_steps: -1 # By default the length of the schedule is set 
 # dropping fully down. Or you may choose a shorter schedule, where the unspecified steps will have a learning rate of 0.
 
 max_target_length: 2048 # Maximum sequence length
-max_prefill_predict_length: 64 # Maximum length for the prefill when doing autoregression
+max_prefill_predict_length: 6 # Maximum length for the prefill when doing autoregression
 prompt: "I love to" # Prompt for language model sampling.
 load_from_prefill_dir: False # If true, decode.py doesn't "prefill" but just reads from directory
 prefill_cache_dir: "" # If set and load_from_prefill_dir, decode.py reads from directory. If set, decode.py writes to directory
@@ -707,3 +707,4 @@ remat_policy_for_vit: "minimal"  # Remat policy for multimodal model's vision en
 image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
 image_path: "" # Local image path used for decoding
 
+use_random_routing: False
