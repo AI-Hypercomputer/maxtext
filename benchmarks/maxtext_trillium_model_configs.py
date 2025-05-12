@@ -1832,10 +1832,10 @@ matt_llama4_maverick_trillium = _add_to_model_dictionary(
         tuning_params={
             "per_device_batch_size": 1,
             "max_target_length": 8192,
-            "ici_tensor_parallelism": 4,
-            "ici_expert_parallelism": 64,
+            "ici_tensor_parallelism": 8,
+            "ici_fsdp_parallelism": 32,
             "allow_split_physical_axes": True,
-            "custom_mesh": "hybrid_ring_64x4",
+            "custom_mesh": "hybrid_ring_32x8",
             "remat_policy": "custom",
             "decoder_layer_input": "offload",
             # "out_proj": "offload",
