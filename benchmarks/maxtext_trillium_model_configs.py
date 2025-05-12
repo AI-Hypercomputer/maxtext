@@ -1812,6 +1812,18 @@ matt_llama4_scout_v4 = _add_to_model_dictionary(
     ),
 )
 
+
+# Image build repro:
+# docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_runner"'
+# Built from an earlier commit 5/9 of branch mattdavidow-llama4-scan
+# #"llama4-17b-16e", is corrupted with 1k embed in this image, but maverick untouched
+# 
+# Runner repro stage:
+# commit 6e3913850f6953e873edf8c28ddeb3c926eeae2e (HEAD -> mattdavidow-run-llama4-scan, origin/mattdavidow-run-llama4-scan)
+# Author: gobbleturk <mattdavidow@google.com>
+# Date:   Sun May 11 18:49:32 2025 +0000
+
+#     Back to maxtext_xpk_runner, life is good
 matt_llama4_maverick_trillium = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
@@ -1819,9 +1831,11 @@ matt_llama4_maverick_trillium = _add_to_model_dictionary(
         model_type="llama4-17b-128e", #"llama4-17b-16e", is corrupted with 1k embed
         tuning_params={
             "per_device_batch_size": 1,
-            "max_target_length": 2048,
-            "ici_fsdp_parallelism": 16,
-            "ici_expert_parallelism": 16,
+            "max_target_length": 8192,
+            "ici_tensor_parallelism": 4,
+            "ici_expert_parallelism": 64,
+            "allow_split_physical_axes": True,
+            "custom_mesh": "hybrid_ring_64x4",
             "remat_policy": "custom",
             "decoder_layer_input": "offload",
             # "out_proj": "offload",
