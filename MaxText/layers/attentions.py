@@ -449,7 +449,8 @@ class AttentionOp(nn.Module):
     elif causal_mask is not None:
       output_mask = causal_mask
 
-    is_seq_len_greater_than_chunk_window = output_mask.shape[-1] > self.chunk_attn_window_size
+    if output_mask is not None and self.chunk_attn_window_size is not None:
+      is_seq_len_greater_than_chunk_window = output_mask.shape[-1] > self.chunk_attn_window_size
 
     if self.attention_type == AttentionType.LOCAL_SLIDING and output_mask is not None:
       if self.sliding_window_size is None:
