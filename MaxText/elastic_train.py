@@ -267,7 +267,7 @@ def train_loop(config, elastic_manager, state=None):
       block=True,
   )
 
-  input_data_shardings = maxtext_utils.get_input_data_shardings(config, mesh)
+  input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
   # Using while loop instead of a for loop because with elasticity
   # the step is restored back to the latest snapshot when a slice is lost
   while step < config.steps:
