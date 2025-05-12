@@ -354,6 +354,23 @@ def benchmark_prefix_cache(
 
 
 def prepare_setting(argv: Sequence[str]):
+  """
+    Constructs the necessary components for benchmarking chunked prefill with prefix caching.
+  q
+    Args:
+      argv: The command-line arguments.
+
+    Returns:
+      engine (maxengine.MaxEngine): The MaxEngine instance.
+      params (Any): The model parameters.
+      tokens (jax.Array): The input token sequence.
+      chunked_tokens_list (list[chunked_prefill.ChunkedTokens]): A list of ChunkedTokens objects representing the
+        input sequence split into chunks.
+      prefix_caching_hbm_byte (int): The size of the HBM layer in the prefix cache.
+      prefix_caching_dram_byte (int): The size of the DRAM layer in the prefix cache.
+      chunk_size (int): The chunk size used for prefilling.
+      max_prefill_length (int): The maximum length of the prefill sequence.
+  """
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   config = pyconfig.initialize(argv)
