@@ -509,7 +509,6 @@ class Decoder(nn.Module):
             layer_kwargs = {"nope_layer_interval": self.config.nope_layer_interval, "interleave_moe_layer_step": self.config.interleave_moe_layer_step}
           RemattedBlockLayer = RemattedBlockLayers[0]
           scan_length = int(cfg.num_decoder_layers / cfg.layers_to_repeat)
-          # TODO!!!! Plumb in kwargs into the definition of scan_decoder_layers
           y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayer, scan_length, "layers", mesh, **layer_kwargs)(
               y,
               decoder_segment_ids,
