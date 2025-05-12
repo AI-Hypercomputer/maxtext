@@ -342,7 +342,7 @@ class Decoder(nn.Module):
       return [simple_layer.SimpleMlpDecoderLayer]
     elif self.config.decoder_block == DecoderBlockType.LLAMA4:
       from MaxText.layers import llama4
-      if self.config.scan_layers:
+      if self.config.scan_layers or self.config.using_pipeline_parallelism:
         return [llama4.Llama4ScannableBlock]
       else:
         return [llama4.Llama4DecoderLayer]
@@ -401,14 +401,17 @@ class Decoder(nn.Module):
 
   def get_pipeline_stage_module(self, base_stage):
     cfg = self.config
+    layer_kwargs = {}
+    if cfg.decoder_block == DecoderBlockType.LLAMA4:
+      layer_kwargs = {"nope_layer_interval": self.config.nope_layer_interval, "interleave_moe_layer_step": self.config.interleave_moe_layer_step}
     if cfg.set_remat_policy_on_layers_per_stage:
       policy = self.get_remat_policy()
       base_stage = self.set_remat_policy([base_stage], policy)[0]
     if cfg.num_layers_per_pipeline_stage == 1:
-      stage_module = base_stage(config=cfg, mesh=self.mesh, quant=self.quant)
+      stage_module = base_stage(config=cfg, mesh=self.mesh, quant=self.quant, **layer_kwargs)
     elif cfg.scan_layers_per_stage:
       stage_module = self.scan_decoder_layers(
-          cfg, base_stage, cfg.num_layers_per_pipeline_stage, "layers_per_stage", self.mesh
+          cfg, base_stage, cfg.num_layers_per_pipeline_stage, "layers_per_stage", self.mesh, **layer_kwargs
       )
     else:
       stage_module = SequentialBlockDecoderLayers(
@@ -417,6 +420,7 @@ class Decoder(nn.Module):
           config=cfg,
           mesh=self.mesh,
           quant=self.quant,
+          **layer_kwargs,
       )
     return stage_module
 
