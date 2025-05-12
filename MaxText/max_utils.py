@@ -132,6 +132,12 @@ def maybe_initialize_jax_distributed_system(raw_keys):
   if raw_keys["skip_jax_distributed_system"]:
     max_logging.log("Skipping jax distributed system due to skip_jax_distributed_system=True flag.")
     return
+  if raw_keys["enable_single_controller"]:
+    max_logging.log("Skipping jax distributed system since its not needed for single controller.")
+    return
+  if jax.distributed.is_initialized():
+    max_logging.log("Jax distributed system is already initialized.")
+    return
   if raw_keys["inference_benchmark_test"]:
     # Disable initialization for inference benmark test.
     return
@@ -148,9 +154,7 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     max_logging.log("Jax distributed system initialized on CPUs!")
   elif (
       raw_keys["enable_checkpointing"]
-      and raw_keys["async_checkpointing"]
       and raw_keys["compile_topology_num_slices"] == -1
-      and not raw_keys["enable_single_controller"]
   ) or raw_keys["hardware"] == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system...")
     if not raw_keys["enable_emergency_checkpoint"]:
