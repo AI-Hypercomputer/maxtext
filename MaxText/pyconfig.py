@@ -480,6 +480,9 @@ class _HyperParameters:
     if raw_keys["dataset_type"] == "c4_mlperf" and raw_keys["model_name"] == "gpt3-175b":
       _HyperParameters.configure_gpt3_task(raw_keys)
 
+    if raw_keys["dataset_type"] == "c4_mlperf" and raw_keys["model_name"] != "gpt3-175b":
+      _HyperParameters.configure_c4_mlperf_task(raw_keys)
+
     if not os.path.isfile(raw_keys["tokenizer_path"]):
       # Try and find the tokenizer path relative to the config file.
       tokenizer_path = os.path.join(
@@ -604,6 +607,25 @@ class _HyperParameters:
     raw_keys["learning_rate_schedule_steps"] = decay_end_step
     raw_keys["warmup_steps_fraction"] = warmup_steps / decay_end_step
     raw_keys["eval_interval"] = math.ceil(24567 / global_batch_size_to_train_on)
+
+  @staticmethod
+  def configure_c4_mlperf_task(raw_keys):
+    """dynamically configure based on training rules"""
+    # follow https://github.com/google/paxml/blob/19db52eed85ae0d2365339b83a97cd0b873bbf73/paxml/tasks/lm/params/c4.py#L280
+    #   according to training_rules of mlperf
+    global_batch_size_to_train_on = raw_keys["global_batch_size_to_train_on"]
+    global_batch_size_to_eval_on = raw_keys["global_batch_size_to_eval_on"]
+    max_target_length = raw_keys["max_target_length"]
+
+    learning_rate = (8.0e-5 * global_batch_size_to_train_on) / 1152
+    warmup_steps = math.ceil(8000.0 * 1152 / global_batch_size_to_train_on - 1e-6)
+    decay_end_step = math.ceil(1200000.0 * 1152 / global_batch_size_to_train_on - 1e-6)
+    raw_keys["learning_rate"] = learning_rate
+    raw_keys["learning_rate_schedule_steps"] = decay_end_step
+    raw_keys["warmup_steps_fraction"] = warmup_steps / decay_end_step
+
+    raw_keys["eval_steps"] = math.ceil(5760 * 8192 / max_target_length / global_batch_size_to_eval_on)
+    raw_keys["eval_interval"] = math.ceil(377487360 / max_target_length / global_batch_size_to_train_on)
 
   @staticmethod
   def update_model_vars(base_config_path, raw_keys, config_name: str):
