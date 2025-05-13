@@ -20,6 +20,7 @@ limitations under the License.
 
 from typing import Any, Optional, Tuple
 
+import jax
 from jax import lax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
@@ -32,6 +33,7 @@ from MaxText.layers import linears
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText import common_types
+from MaxText import max_logging
 
 AttentionOp = attentions.AttentionOp
 
@@ -70,6 +72,7 @@ class Gpt3LayerNorm(nn.Module):
   scale_init: Initializer = nn.initializers.zeros
   use_bias: bool = True
   reductions_in_fp32: bool = False
+  parameter_memory_host_offload: bool = False
 
   @nn.compact
   def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
@@ -86,6 +89,10 @@ class Gpt3LayerNorm(nn.Module):
     scale = self.param(
         "scale", nn.with_logical_partitioning(self.scale_init, self.kernel_axes), (features,), self.weight_dtype
     )
+    # Move scale to device if parameter offloading is enabled
+    if self.parameter_memory_host_offload:
+      max_logging.log("gpt3.py: Moving scale parameter to device")
+      scale = jax.device_put(scale, jax._src.sharding_impls.TransferToMemoryKind("device"))
 
     scale = jnp.asarray(scale, self.dtype)
     output = normed_inputs * (scale + 1)

@@ -580,3 +580,18 @@ class TrainCompile(unittest.TestCase):
             "ici_tensor_parallelism=4",
         )
     )
+
+  @pytest.mark.cpu_only
+  def test_gpt3_6b(self):
+    compiled_trainstep_file = "/tmp/test_gpt3_6b"
+    train_compile_main(
+        (
+            None,
+            os.path.join(PKG_DIR, "configs", "base.yml"),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "compile_topology_num_slices=1",
+            "model_name=gpt3-6b",
+            "per_device_batch_size=1",
+        )
+    )
