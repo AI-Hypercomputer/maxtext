@@ -267,6 +267,7 @@ class TrainTests(unittest.TestCase):
         r"dataset_path=gs://maxtext-dataset",
         "steps=10",
         "enable_checkpointing=False",
+        "enable_goodput_recording=False",
         "attention=cudnn_flash_te",
         "ici_fsdp_parallelism=-1",
         "ici_tensor_parallelism=2",
