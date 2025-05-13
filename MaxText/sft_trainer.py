@@ -204,7 +204,7 @@ def train_loop(config, state=None):
       gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
 
   metric_logger = MetricLogger(writer, config)
-  input_data_shardings = maxtext_utils.get_input_data_shardings(config, mesh)
+  input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step or prof.should_activate_periodic_profile(step):
       optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
