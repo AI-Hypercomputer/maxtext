@@ -59,6 +59,31 @@ DISPATCH = "dispatch"
 COMBINE = "combine"
 
 
+def random_routing(rng_key, gate_logits, num_experts_per_tok):
+  """
+  Performs random routing of tokens to experts.
+
+  Args:
+    rng_key: A JAX PRNGKey for randomness.
+    gate_logits: A JAX array of shape (batch_size, sequence_length, num_experts)
+                 representing the logits for each expert.
+    num_experts_per_tok: The number of experts to select for each token.
+
+  Returns:
+    A tuple containing:
+      - top_k_indices: JAX array of shape (batch_size, sequence_length, num_experts_per_tok)
+                       representing the indices of the selected experts for each token.
+      - top_k_weights: JAX array of shape (batch_size, sequence_length, num_experts_per_tok)
+                       representing the weights for the selected experts.
+  """
+  bs, seq_len, num_experts = gate_logits.shape
+  indices = jnp.arange(num_experts).repeat(bs * seq_len)
+  selected_num = bs * seq_len * num_experts_per_tok
+  top_k_indices = jax.random.choice(rng_key, indices, shape=(selected_num,)).reshape(bs, seq_len, num_experts_per_tok)
+  top_k_weights = jnp.take_along_axis(gate_logits, top_k_indices, axis=-1)
+  return top_k_weights, top_k_indices
+
+
 class GateLogit(nn.Module):
   """A layer used to compute gate logits, allowing to return the pre bias values for DeepSeek routing.
 
@@ -239,6 +264,13 @@ class RoutedMoE(nn.Module):
 
   def get_topk(self, gate_logits, pre_bias_logits):
     """get topk. shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)"""
+    if self.config.use_random_routing:
+      # For debug and test purpose:
+      # Ideally we should split a new key for each layer, but for simplicity re-use the key to mimic the random routing
+      rng = jax.random.PRNGKey(1234)
+      top_k_weights, top_k_indices = random_routing(rng, gate_logits, self.num_experts_per_tok)
+      return top_k_weights, top_k_indices
+
     if self.config.model_name.startswith("deepseek3"):
       top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
     else:
@@ -454,7 +486,7 @@ class RoutedMoE(nn.Module):
       recv_sizes = transform_array(all_shards_group_sizes, local_id, TransformStrategy.RECV_SIZE)
       return input_offsets, send_sizes, output_offsets, recv_sizes
 
-    # Currently, we only support data and tensor parallelism with Megablox.
+    # Currently, we support data, tensor, and expert parallelism with Megablox.
     # We all gather the input activations over tensor parallelism to follow strategy
     # in https://parsa.epfl.ch/course-info/cs723/papers/Megatron.pdf.
     input_partition_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
