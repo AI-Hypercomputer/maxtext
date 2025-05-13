@@ -22,6 +22,7 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 from MaxText.layers import initializers
+from MaxText import max_logging
 
 Config = Any
 Array = jnp.ndarray
@@ -54,12 +55,32 @@ class Embed(nn.Module):
   embedding_init: Initializer = default_embed_init
 
   def setup(self):
-    self.embedding = self.param(
+    """
+    Sets up the embedding parameters for the model.
+
+    This method initializes the embedding parameters with logical partitioning.
+    The embedding is represented as a parameter with the specified shape and data type.
+
+    Parameters:
+    - embedding: The embedding parameter initialized using the specified method,
+                 partitioned logically along the 'vocab' and 'embed' dimensions.
+
+    Returns:
+    None
+    """
+
+    embedding = self.param(
         "embedding",
         with_logical_partitioning(self.embedding_init, ("vocab", "embed")),
         (self.num_embeddings, self.features),
         self.config.weight_dtype,
     )
+    # Move embeddings to device if parameter offloading is enabled
+    if self.config.parameter_memory_host_offload:
+      max_logging.log("embeddings.py: Moving embedding parameter to device")
+      self.embedding = jax.device_put(embedding, jax._src.sharding_impls.TransferToMemoryKind("device"))
+    else:
+      self.embedding = embedding
 
   def __call__(self, inputs: Array) -> Array:
     """Embeds the inputs along the last dimension.
