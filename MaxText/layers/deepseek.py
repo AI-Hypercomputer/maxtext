@@ -45,6 +45,7 @@ ScanIn = common_types.ScanIn
 Embed = embeddings.Embed
 Attention = attentions.Attention
 RMSNorm = normalizations.RMSNorm
+rms_norm = normalizations.rms_norm
 Quant = quantizations.AqtQuantization
 
 # -----------------------------------------
@@ -54,7 +55,8 @@ Quant = quantizations.AqtQuantization
 
 def self_attention_with_norm(inputs, cfg, mesh, quant, decoder_segment_ids, decoder_positions, deterministic, model_mode):
   # Normalization
-  lnx_rms = models.RMSNorm(
+  lnx_rms = rms_norm(
+      features=inputs.shape[-1],
       dtype=cfg.dtype,
       weight_dtype=cfg.weight_dtype,
       name="pre_self_attention_layer_norm",
@@ -105,7 +107,8 @@ def self_attention_with_norm(inputs, cfg, mesh, quant, decoder_segment_ids, deco
   intermediate_inputs = inputs + attention_lnx
 
   # Normalization
-  hidden_states = models.RMSNorm(
+  hidden_states = models.rms_norm(
+      features=intermediate_inputs.shape[-1],
       dtype=cfg.dtype,
       weight_dtype=cfg.weight_dtype,
       name="post_self_attention_layer_norm",
@@ -160,14 +163,15 @@ class DeepSeekDenseLayer(nn.Module):
     hidden_states, intermediate_inputs = self_attention_with_norm(
         inputs, cfg, self.mesh, self.quant, decoder_segment_ids, decoder_positions, deterministic, model_mode
     )
-    mlp_lnx = linears.MlpBlock(
+    mlp_lnx = linears.mlp_block(
+        config=cfg,
+        in_features=hidden_states.shape[-1],
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="mlp",
-        config=cfg,
         quant=self.quant,
     )(hidden_states, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))

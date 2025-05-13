@@ -62,6 +62,7 @@ PRNGKey = common_types.PRNGKey
 DenseGeneral = linears.DenseGeneral
 dense_general = linears.dense_general
 RMSNorm = linears.RMSNorm
+rms_norm = linears.rms_norm
 RotaryEmbedding = embeddings.RotaryEmbedding
 YarnRotaryEmbedding = embeddings.YarnRotaryEmbedding
 NdInitializer = initializers.NdInitializer
@@ -1345,7 +1346,8 @@ class Attention(nn.Module):
     is_llama4_decoder_block = self.config.decoder_block == "llama4"
     # NOTE: llama 4 does L2 normalization after RoPE
     if self.use_qk_norm and not is_llama4_decoder_block:
-      query = RMSNorm(
+      query = rms_norm(
+          features=query.shape[-1],
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           name="query_norm",
@@ -1353,7 +1355,8 @@ class Attention(nn.Module):
           kernel_axes=("norm",),
       )(query)
 
-      key = RMSNorm(
+      key = rms_norm(
+          features=key.shape[-1],
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           name="key_norm",
@@ -1486,7 +1489,8 @@ class MLA(Attention):
           quant=self.quant,
           matmul_precision=self.config.matmul_precision,
       )
-      self.q_norm = RMSNorm(
+      self.q_norm = rms_norm(
+          features=self.q_lora_rank,
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           name="q_norm",
@@ -1519,7 +1523,8 @@ class MLA(Attention):
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
     )
-    self.kv_norm = RMSNorm(
+    self.kv_norm = rms_norm(
+        features=self.kv_lora_rank,
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
         name="kv_norm",

@@ -41,6 +41,7 @@ nd_dense_init = initializers.nd_dense_init
 bias_init = initializers.default_bias_init
 
 RMSNorm = normalizations.RMSNorm
+rms_norm = normalizations.rms_norm
 Quant = quantizations.AqtQuantization
 QTensor = aqt_tensor.QTensor
 
@@ -200,16 +201,6 @@ class DenseGeneral(nnx.Module):
     return output
 
 
-def variable_to_logically_partitioned(variable: nnx.VariableState):
-  metadata = variable.get_metadata()
-  return nn.LogicallyPartitioned(  # type: ignore[wrong-keyword-args]
-      variable.value,
-      variable.sharding,
-      mesh=metadata.get("mesh"),
-      rules=metadata.get("rules"),
-  )
-
-
 def dense_general(
     *,
     inputs_shape: tuple[int, ...] | None = None,
@@ -252,12 +243,12 @@ def dense_general(
       use_bias=use_bias,
       matmul_precision=matmul_precision,
       name=name,
-      metadata_fn=variable_to_logically_partitioned,
+      metadata_fn=initializers.variable_to_logically_partitioned,
   )
   return module
 
 
-class MlpBlock(nn.Module):
+class MlpBlock(nnx.Module):
   """Transformer MLP / feed-forward block.
 
   Attributes:
@@ -274,20 +265,87 @@ class MlpBlock(nn.Module):
     quant: Optional quantization config, no quantization if None.
   """
 
-  config: Config
-  intermediate_dim: int = 2048
-  activations: Sequence[Union[str, Callable[..., Any]]] = ("relu",)
-  kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal")
-  intermediate_dropout_rate: float = 0.1
-  dtype: Any = jnp.float32
-  weight_dtype: Any = jnp.float32
-  use_bias: bool = False
-  use_pre_norm: bool = False
-  quant: Optional[Quant] = None
+  def __init__(
+      self,
+      config: Config,
+      in_features: int,
+      intermediate_dim: int = 2048,
+      activations: Sequence[Union[str, Callable[..., Any]]] = ("relu",),
+      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
+      intermediate_dropout_rate: float = 0.1,
+      dtype: Any = jnp.float32,
+      weight_dtype: Any = jnp.float32,
+      use_bias: bool = False,
+      use_pre_norm: bool = False,
+      quant: Optional[Quant] = None,
+      *,
+      rngs: nnx.Rngs,
+  ) -> None:
+    self.config = config
+    self.in_features = in_features
+    self.intermediate_dim = intermediate_dim
+    self.activations = activations
+    self.kernel_init = kernel_init
+    self.intermediate_dropout_rate = intermediate_dropout_rate
+    self.dtype = dtype
+    self.weight_dtype = weight_dtype
+    self.use_bias = use_bias
+    self.use_pre_norm = use_pre_norm
+    self.quant = quant
 
-  def get_norm_layer(self):
+    self.mlp_layer_norm = self.get_norm_layer(features=in_features)(
+        name="mlp_layer_norm",
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        kernel_axes=("norm",),
+        epsilon=config.normalization_layer_epsilon,
+    )
+    if config.fused_mlp:
+      self.wi = DenseGeneral(
+          in_features=in_features,
+          out_features=(len(self.activations), self.intermediate_dim),
+          dtype=self.dtype,
+          weight_dtype=self.weight_dtype,
+          kernel_init=self.kernel_init,
+          kernel_axes=("embed", "num_activations", "mlp"),
+          quant=self.quant,
+          use_bias=self.use_bias,
+          matmul_precision=self.config.matmul_precision,
+          rngs=rngs,
+      )
+    else:
+      for idx in range(len(self.activations)):
+        dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
+        module = DenseGeneral(
+            in_features=in_features if idx == 0 else self.intermediate_dim,
+            out_features=self.intermediate_dim,
+            dtype=self.dtype,
+            weight_dtype=self.weight_dtype,
+            kernel_init=self.kernel_init,
+            kernel_axes=("embed", "mlp"),
+            quant=self.quant,
+            use_bias=self.use_bias,
+            matmul_precision=self.config.matmul_precision,
+            rngs=rngs,
+        )
+        setattr(self, dense_name, module)
+    self.Dropout_0 = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,), rngs=rngs)
+    self.wo = DenseGeneral(
+        in_features=self.intermediate_dim,
+        out_features=in_features,
+        dtype=self.dtype,
+        weight_dtype=self.weight_dtype,
+        kernel_init=self.kernel_init,
+        kernel_axes=("mlp", "embed"),
+        quant=self.quant,
+        use_bias=self.use_bias,
+        matmul_precision=self.config.matmul_precision,
+        rngs=rngs,
+    )
+
+  def get_norm_layer(self, features: int):
     if self.config.decoder_block in ("default", "llama2", "mistral", "mixtral", "gemma", "deepseek", "llama4"):
-      return RMSNorm
+      return functools.partial(rms_norm, features=features)
     elif self.config.decoder_block == "gpt3":
       from MaxText.layers import gpt3
 
@@ -295,36 +353,18 @@ class MlpBlock(nn.Module):
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
-  @nn.compact
   def __call__(self, inputs, decode: bool = False, deterministic: bool = False):
     """Applies Transformer MlpBlock module."""
     cfg = self.config
 
     if self.use_pre_norm:
-      inputs = self.get_norm_layer()(
-          name="mlp_layer_norm",
-          dtype=cfg.dtype,
-          weight_dtype=cfg.weight_dtype,
-          kernel_axes=("norm",),
-          epsilon=cfg.normalization_layer_epsilon,
-      )(inputs)
+      inputs = self.mlp_layer_norm(inputs)
 
     # Iterate over specified MLP input activation functions.
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
     activations = []
     if cfg.fused_mlp:
-      x = dense_general(
-          inputs_shape=inputs.shape,
-          features=(len(self.activations), self.intermediate_dim),
-          dtype=self.dtype,
-          weight_dtype=self.weight_dtype,
-          kernel_init=self.kernel_init,
-          kernel_axes=("embed", "num_activations", "mlp"),
-          name="wi",
-          quant=self.quant,
-          use_bias=self.use_bias,
-          matmul_precision=self.config.matmul_precision,
-      )(inputs)
+      x = self.wi(inputs)
       x = checkpoint_name(x, "mlpwi")
       for idx, act_fn in enumerate(self.activations):
         y = _convert_to_activation_function(act_fn)(x[:, :, idx, ...])
@@ -332,18 +372,8 @@ class MlpBlock(nn.Module):
     else:
       for idx, act_fn in enumerate(self.activations):
         dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
-        x = dense_general(
-            inputs_shape=inputs.shape,
-            features=self.intermediate_dim,
-            dtype=self.dtype,
-            weight_dtype=self.weight_dtype,
-            kernel_init=self.kernel_init,
-            kernel_axes=("embed", "mlp"),
-            name=dense_name,
-            quant=self.quant,
-            use_bias=self.use_bias,
-            matmul_precision=self.config.matmul_precision,
-        )(inputs)
+        module = getattr(self, dense_name)
+        x = module(inputs)
         x = checkpoint_name(x, "mlp" + dense_name)
         if cfg.activations_in_float32:
           x = x.astype(jnp.float32)
@@ -353,22 +383,43 @@ class MlpBlock(nn.Module):
     # Take elementwise product of above intermediate activations.
     x = functools.reduce(operator.mul, activations).astype(self.dtype)
     # Apply dropout and final dense output projection.
-    x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
+    x = self.Dropout_0(
         x, deterministic=deterministic
     )  # Broadcast along length.
     x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
-    output = dense_general(
-        inputs_shape=x.shape,
-        features=inputs.shape[-1],
-        dtype=self.dtype,
-        weight_dtype=self.weight_dtype,
-        kernel_init=self.kernel_init,
-        kernel_axes=("mlp", "embed"),
-        name="wo",
-        quant=self.quant,
-        use_bias=self.use_bias,
-        matmul_precision=self.config.matmul_precision,
-    )(x)
+    output = self.wo(x)
 
     output = checkpoint_name(output, "mlpwo")
     return output
+
+def mlp_block(
+    config: Config,
+    in_features: int,
+    intermediate_dim: int = 2048,
+    activations: Sequence[Union[str, Callable[..., Any]]] = ("relu",),
+    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
+    intermediate_dropout_rate: float = 0.1,
+    dtype: Any = jnp.float32,
+    weight_dtype: Any = jnp.float32,
+    use_bias: bool = False,
+    use_pre_norm: bool = False,
+    quant: Optional[Quant] = None,
+    name: Optional[str] = None,
+):
+  module = nnx.bridge.to_linen(
+      MlpBlock,
+      config=config,
+      in_features=in_features,
+      intermediate_dim=intermediate_dim,
+      activations=activations,
+      kernel_init=kernel_init,
+      intermediate_dropout_rate=intermediate_dropout_rate,
+      dtype=dtype,
+      weight_dtype=weight_dtype,
+      use_bias=use_bias,
+      use_pre_norm=use_pre_norm,
+      quant=quant,
+      name=name,
+      metadata_fn=initializers.variable_to_logically_partitioned,
+  )
+  return module

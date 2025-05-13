@@ -983,14 +983,15 @@ class DeepSeekMoeBlock(nn.Module):
         quant=self.quant,
     )(inputs)
 
-    shared_experts = linears.MlpBlock(
+    shared_experts = linears.mlp_block(
+        config=cfg,
+        in_features=inputs.shape[-1],
         intermediate_dim=cfg.shared_experts * cfg.moe_mlp_dim,
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name=f"shared_experts",
-        config=cfg,
         quant=self.quant,
     )(inputs)
 
