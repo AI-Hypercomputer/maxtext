@@ -75,9 +75,14 @@ from MaxText.layers import quantizations
 from ml_goodput_measurement import goodput
 from ml_goodput_measurement import monitoring
 
-# pylint: disable=too-many-positional-arguments
+import MaxText as mt
 
 Transformer = models.Transformer
+
+
+# pylint: disable=too-many-positional-arguments
+
+
 EPS = 1e-8
 _DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE = 2 * 1024**3
 
@@ -611,7 +616,7 @@ def setup_mesh_and_model(config, devices=None):
 
   # Model and Optimizer definition
   quant = quantizations.configure_quantization(config)
-  model = Transformer(config, mesh, quant=quant)
+  model = models.Transformer(config, mesh, quant=quant)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)
   logger = checkpointing.setup_checkpoint_logger(config)
@@ -674,7 +679,7 @@ def setup_train_loop(config):
   """
   recorder = create_goodput_recorder(config)
   record_goodput(recorder, config, recorder.record_tpu_init_start_time if recorder else None)
-  init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
+  model, mesh, init_rng, writer, checkpoint_manager, learning_rate_schedule, tx = mt(config)
   record_goodput(recorder, config, recorder.record_tpu_init_end_time if recorder else None)
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
@@ -999,6 +1004,8 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+  # TODO: Anisha: ensure missing mandatory fields in base.yml are filled in in argv, 
+  # or fill in here
   config = pyconfig.initialize(argv)
   max_utils.print_system_information()
   validate_train_config(config)
