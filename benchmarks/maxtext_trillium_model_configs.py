@@ -49,8 +49,8 @@ PATHWAYS_LONG_RUN_CHECKPOINTING_TUNING_PARAMS = {
 PATHWAYS_SHORT_RUN_CHECKPOINTING_TUNING_PARAMS = {
     "enable_checkpointing": True,
     "async_checkpointing": True,
-    "checkpoint_period": 20,
-    "enable_checkpoint_cloud_logger": True,
+    "checkpoint_period": 10,
+    # "enable_checkpoint_cloud_logger": True,
 }
 
 
