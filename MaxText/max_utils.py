@@ -847,12 +847,12 @@ def get_reorder_callable(cp_size):
 def parse_custom_args(argv):
     configs = []
     current_argv = []
-    
-    for arg in argv:
+    python_script = argv[0]
+    for arg in argv[1:]:
       if arg.endswith((".yaml", ".yml")):
         if current_argv:
           configs.append(current_argv)
-        current_argv = [arg]
+        current_argv = [python_script, arg]
       else:
         current_argv.append(arg)
     if current_argv:

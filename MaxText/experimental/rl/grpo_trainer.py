@@ -602,7 +602,7 @@ def pathways_reshard(config, params, destination_shardings, meshes):
   inference_params = []
   for destination_sharding, mesh in zip(destination_shardings, meshes):
     with (jax.transfer_guard_device_to_host("disallow_explicit"), jax.transfer_guard_host_to_device("disallow_explicit")):
-      inference_params.append(pathwaysutils_reshard.reshard(params, destination_sharding.params))
+      inference_params.append(pathwaysutils_reshard.reshard(params, destination_sharding.params, donate=True))
   return inference_params
 
 def setup_mesh_and_model(config, config_inference):
@@ -1172,8 +1172,7 @@ def main(argv: Sequence[str]) -> None:
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   configs_argv = max_utils.parse_custom_args(argv)
-  breakpoint()
-  config = pyconfig.initialize(argv)
+  config = pyconfig.initialize(configs_argv[0])
   if not config.use_grpo:
     raise ValueError("Please set the value of use_grpo to True")
   if config.decode_sampling_strategy == "greedy" or config.decode_sampling_temperature == 0.0:
@@ -1183,12 +1182,13 @@ def main(argv: Sequence[str]) -> None:
   if config.inference_devices_per_replica * config.inference_replicas >= jax.device_count():
     raise ValueError(f"Invalid value chosen for {config.num_inference_devices=}")
   config_inference = pyconfig.initialize(
-      list(argv)
-      + [
-        "ici_fsdp_parallelism=1",
-        f"ici_tensor_parallelism={config.inference_devices_per_replica}",
-        "per_device_batch_size=" + str(config.per_device_batch_size * config.num_generations / config.inference_replicas)
-        ]
+      # list(argv)
+      # + [
+      #   "ici_fsdp_parallelism=1",
+      #   f"ici_tensor_parallelism={config.inference_devices_per_replica}",
+      #   "per_device_batch_size=" + str(config.per_device_batch_size * config.num_generations / config.inference_replicas)
+      #   ]
+      configs_argv[1]
   )
   max_utils.print_system_information()
   validate_train_config(config)
