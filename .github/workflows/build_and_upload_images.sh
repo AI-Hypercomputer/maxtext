@@ -21,7 +21,7 @@
 # If you want to create and push your own images you should instead use docker_build_dependency_image and
 # docker_upload_runner in the maxtext root directory.
 
-# Example command: 
+# Example command:
 # bash build_and_upload_images.sh PROJECT=<project> MODE=stable DEVICE=tpu CLOUD_IMAGE_NAME=${USER}_runner
 
 
@@ -49,6 +49,8 @@ docker tag ${LOCAL_IMAGE_NAME} gcr.io/$PROJECT/${dependency_image_name}:latest
 docker push gcr.io/$PROJECT/${dependency_image_name}:latest
 docker tag ${LOCAL_IMAGE_NAME} gcr.io/$PROJECT/${dependency_image_name}:${image_date}
 docker push gcr.io/$PROJECT/${dependency_image_name}:${image_date}
+
+gsutil -m cp gs://maxtext-test-assets/* ./MaxText/test_assets
 
 # Build then upload "dependencies + code" image
 docker build --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} -f ./maxtext_runner.Dockerfile -t ${LOCAL_IMAGE_NAME}_runner .

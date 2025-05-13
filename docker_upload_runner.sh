@@ -44,6 +44,8 @@ if [[ ! -v CLOUD_IMAGE_NAME ]]; then
   exit 1
 fi
 
+gsutil -m cp gs://maxtext-test-assets/* ./MaxText/test_assets
+
 docker build --build-arg BASEIMAGE=${LOCAL_IMAGE_NAME} -f ./maxtext_runner.Dockerfile -t ${LOCAL_IMAGE_NAME_RUNNER} .
 
 docker tag ${LOCAL_IMAGE_NAME_RUNNER} gcr.io/$PROJECT/${CLOUD_IMAGE_NAME}:latest

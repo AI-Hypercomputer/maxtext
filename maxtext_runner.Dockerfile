@@ -12,6 +12,3 @@ WORKDIR /deps
 # MaxText/test_assets which contain some of the reference "golden" data.
 COPY . .
 
-# Download other test assets from GCS into /deps/MaxText/test_assets
-RUN gsutil -m cp gs://maxtext-test-assets/* MaxText/test_assets
-
