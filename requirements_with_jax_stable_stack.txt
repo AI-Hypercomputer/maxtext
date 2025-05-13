@@ -22,3 +22,4 @@ pathwaysutils==0.1.1
 google-api-python-client
 omegaconf
 jaxtyping
+ml-goodput-measurement==0.0.10
