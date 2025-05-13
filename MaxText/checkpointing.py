@@ -291,7 +291,7 @@ def load_state_if_possible(
             None,
         )
 
-  if load_parameters_from_path != "":
+  if load_parameters_from_path is not None and load_parameters_from_path != "":
     restored_params = load_params_from_path(
         load_parameters_from_path, abstract_unboxed_pre_state.params, checkpoint_storage_concurrent_gb, use_ocdbt=use_ocdbt, use_zarr3=use_zarr3
     )

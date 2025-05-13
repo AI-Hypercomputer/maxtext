@@ -48,7 +48,8 @@ esac
 
 
 cmd=''
-RUN_OPTIONS=" -c " # Enable prefill packing by default
+# RUN_OPTIONS=" -c " # Enable prefill packing by default
+RUN_OPTIONS=" "
 if "$dry_run"; then
     RUN_OPTIONS="${RUN_OPTIONS} -n "
 fi
@@ -97,7 +98,7 @@ fi
 if [ -z "$PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES" ];
 then
     PREFILL_LEN="1024"
-    BATCH_SIZE_PER_DEVICE="64" 
+    BATCH_SIZE_PER_DEVICE="23" 
     export PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES="${PREFILL_LEN},${BATCH_SIZE_PER_DEVICE}"
 fi
 
@@ -107,7 +108,7 @@ QUANT_CFG="quantization=${QUANTIZATION} quant_cfg_path=${QUANT_PATH} checkpoint_
 KV_QUANT_CFG="quantize_kvcache=True kv_quant_dtype=${KV_QUANT_DTYPE}"
 PAGED_ATTN_CFG=""
 if "$paged"; then
-    PAGED_ATTN_CFG="attention=paged pagedattn_num_pages=128 pagedattn_tokens_per_page=32 pagedattn_pages_per_compute_block=4"
+    PAGED_ATTN_CFG="attention=paged pagedattn_num_pages=16384 pagedattn_tokens_per_page=32 pagedattn_pages_per_compute_block=4"
 fi
 export MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${KV_QUANT_CFG} ${PAGED_ATTN_CFG} optimize_mesh_for_tpu_v6e=True"
 echo

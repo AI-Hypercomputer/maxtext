@@ -16,6 +16,7 @@
 
 from typing import Any, List, Tuple, Callable # Duplicate Callable
 
+import functools
 import jax
 import jax.numpy as jnp
 import numpy as np

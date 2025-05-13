@@ -685,10 +685,8 @@ def main(argv):
     log.warning("Accuracy run will generate the accuracy logs; evaluation is separate.")
   elif FLAGS.mlperf_test_mode == "submission":
     settings.mode = lg.TestMode.SubmissionRun
-    settings.log_timestamps = True
   else:
     settings.mode = lg.TestMode.PerformanceOnly
-    settings.log_timestamps = True
 
   os.makedirs(FLAGS.output_log_dir, exist_ok=True)
   log.info("Logging to %s", FLAGS.output_log_dir)

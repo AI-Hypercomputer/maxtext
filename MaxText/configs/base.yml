@@ -580,8 +580,8 @@ max_checkify: False
 inference_microbenchmark_prefix_cache_entries_num: 100
 inference_microbenchmark_prefix_cache_common_prefix_proportion: 0.5
 inference_microbenchmark_prefill_lengths: "64,128,256,512,1024"
-inference_microbenchmark_stages: "prefill,generate"
-inference_microbenchmark_loop_iters: 10
+inference_microbenchmark_stages: "generate"
+inference_microbenchmark_loop_iters: 100
 inference_microbenchmark_log_file_path: ""
 inference_microbenchmark_num_samples: [1, 2, 3, 4, 5]
 inference_metadata_file: "" # path to a json file
