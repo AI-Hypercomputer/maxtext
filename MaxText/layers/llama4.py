@@ -21,6 +21,7 @@ limitations under the License.
 from typing import Optional
 
 import jax.numpy as jnp
+from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 
 from flax import linen as nn
@@ -35,6 +36,8 @@ from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText import common_types
 from MaxText.inference import page_manager
+
+import math
 
 Array = common_types.Array
 Config = common_types.Config
@@ -57,6 +60,163 @@ AttentionType = attentions.AttentionType
 Embed = embeddings.Embed
 RMSNorm = normalizations.RMSNorm
 Quant = quantizations.AqtQuantization
+
+#### Multi modal model implementation
+
+
+class Llama4UnfoldConvolution(nn.Module):
+  """implementation of Llama4UnfoldConvolution for Llama4 Multi modal model.
+
+  This module extracts patches from input images and projects them to hidden dimension.
+
+  Attributes:
+    config: Config containing model parameters
+  """
+
+  config: Config
+
+  def setup(self):
+    cfg = self.config
+    # Linear projection layer using DenseGeneral
+    self.linear = linears.DenseGeneral(
+        features=cfg.hidden_size_for_vit, dtype=cfg.dtype_mm, name="vit_unfold_linear", use_bias=False
+    )
+
+  def __call__(self, inputs: Array) -> Array:
+    """Extract patches and project to hidden dimension.
+
+    Args:
+      inputs: Input tensor of shape [batch_size, channels, img, img]
+
+    Returns:
+      Tensor of shape [batch_size, num_patches*num_patches, hidden_size]
+    """
+    cfg = self.config
+    # Extract patches using conv_general_dilated_patches
+    batch_size, num_channels, img, _ = inputs.shape
+    num_patches = (img // cfg.patch_size_for_vit) ** 2
+
+    # Extract patches using conv_general_dilated_patches
+    patches = lax.conv_general_dilated_patches(
+        inputs,
+        filter_shape=[cfg.patch_size_for_vit, cfg.patch_size_for_vit],
+        window_strides=[cfg.patch_size_for_vit, cfg.patch_size_for_vit],
+        padding="VALID",
+        dimension_numbers=("NCHW", "HWIO", "NCHW"),
+    )
+
+    # reshape patches to [batch_size, num_patches, num_channels * patch_size * patch_size]
+    patches = patches.reshape(batch_size, num_channels * cfg.patch_size_for_vit * cfg.patch_size_for_vit, num_patches)
+    patches = patches.transpose(0, 2, 1)
+
+    # Project patches to hidden dimension using DenseGeneral
+    hidden_states = self.linear(patches)
+
+    return hidden_states
+
+
+def pixel_shuffle(input_tensor: Array, shuffle_ratio: float) -> Array:
+  """Apply pixel shuffle operation to the input tensor."""
+  batch_size, num_patches, channels = input_tensor.shape
+  patch_size = int(math.sqrt(num_patches))
+
+  # Reshape to [batch_size, patch_size, patch_size, channels]
+  input_tensor = input_tensor.reshape(batch_size, patch_size, patch_size, -1)
+  batch_size, height, width, channels = input_tensor.shape
+
+  # Reshape to [batch_size, height, width * shuffle_ratio, channels / shuffle_ratio]
+  reshaped_tensor = input_tensor.reshape(batch_size, height, int(width * shuffle_ratio), int(channels / shuffle_ratio))
+
+  # Transpose to [batch_size, width * shuffle_ratio, height, channels / shuffle_ratio]
+  reshaped_tensor = reshaped_tensor.transpose(0, 2, 1, 3)
+
+  # Reshape to [batch_size, height * shuffle_ratio, width * shuffle_ratio, channels / (shuffle_ratio^2)]
+  reshaped_tensor = reshaped_tensor.reshape(
+      batch_size, int(height * shuffle_ratio), int(width * shuffle_ratio), int(channels / (shuffle_ratio**2))
+  )
+
+  # Transpose to [batch_size, width * shuffle_ratio, height * shuffle_ratio, channels / (shuffle_ratio^2)]
+  reshaped_tensor = reshaped_tensor.transpose(0, 2, 1, 3)
+
+  # Reshape back to [batch_size, num_patches, channels]
+  output_tensor = reshaped_tensor.reshape(batch_size, -1, reshaped_tensor.shape[-1])
+  return output_tensor
+
+
+class Llama4VisionMLP2(nn.Module):
+  """MLP block for Llama4VisionPixelShuffleMLP.
+
+  Attributes:
+    config: Config containing model parameters
+  """
+
+  config: Config
+
+  def setup(self):
+    cfg = self.config
+    self.fc1 = linears.DenseGeneral(
+        features=cfg.projector_input_dim_for_vit, dtype=cfg.dtype_mm, name="vit_pixel_shuffle_mlp_fc1", use_bias=False
+    )
+    self.fc2 = linears.DenseGeneral(
+        features=cfg.projector_output_dim_for_vit, dtype=cfg.dtype_mm, name="vit_pixel_shuffle_mlp_fc2", use_bias=False
+    )
+    self.dropout = nn.Dropout(rate=cfg.projector_dropout_for_vit)
+
+  def __call__(self, hidden_states: Array, deterministic: bool = False) -> Array:
+    """Apply MLP transformation to hidden states.
+
+    Args:
+      hidden_states: Input tensor
+      deterministic: If True, disables dropout during inference
+    """
+    # First linear layer with GELU activation
+    hidden_states = self.fc1(hidden_states)
+    hidden_states = nn.gelu(hidden_states, approximate=False)
+
+    # Apply dropout
+    # in pytorch it's using default Dropout Rate of 0.5
+    hidden_states = self.dropout(hidden_states, deterministic=deterministic)
+
+    # Second linear layer with GELU activation
+    hidden_states = self.fc2(hidden_states)
+    hidden_states = nn.gelu(hidden_states, approximate=False)
+
+    return hidden_states
+
+
+class Llama4VisionPixelShuffleMLP(nn.Module):
+  """Implementation of Llama4VisionPixelShuffleMLP for Llama4 Multi modal model.
+
+  This module applies pixel shuffle operation and MLP to encoded patches.
+
+  Attributes:
+    config: Config containing model parameters
+  """
+
+  config: Config
+
+  def setup(self):
+    cfg = self.config
+    self.pixel_shuffle_ratio = cfg.pixel_shuffle_ratio_for_vit
+    self.pixel_shuffle_mlp = Llama4VisionMLP2(cfg)
+
+  def __call__(self, encoded_patches: Array, deterministic: bool = False) -> Array:
+    """Apply pixel shuffle and MLP to encoded patches.
+
+    Args:
+      encoded_patches: Input tensor of shape [batch_size, num_patches, hidden_size]
+      deterministic: If True, disables dropout during inference
+
+    Returns:
+      Tensor of shape [batch_size, num_patches, hidden_size]
+    """
+    # Apply pixel shuffle operation
+    encoded_patches = pixel_shuffle(encoded_patches, self.pixel_shuffle_ratio)
+
+    # Apply MLP transformation
+    result = self.pixel_shuffle_mlp(encoded_patches, deterministic=deterministic)
+
+    return result
 
 
 def determine_is_nope_layer(layer_id: int, nope_layer_interval: int) -> bool:
