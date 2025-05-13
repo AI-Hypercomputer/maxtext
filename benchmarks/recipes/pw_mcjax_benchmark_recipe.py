@@ -17,9 +17,11 @@
 """Used to perf benchmarks between Pathways and McJax."""
 
 import datetime
+import random
+import string
 import sys
 import os
-import args_helper as helper
+import benchmarks.recipes.args_helper as helper
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(parent_dir)
@@ -29,15 +31,36 @@ import maxtext_xpk_runner as mxr
 from xpk_configs import XpkClusterConfig
 
 
-PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
-SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
-RUNNER = "us-docker.pkg.dev/path/to/maxtext_runner"
+# PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
+# SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
+# RUNNER = "us-docker.pkg.dev/path/to/maxtext_runner"
+
+PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_proxy_server:latest"
+SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_server:latest"
+# RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest"
+RUNNER="gcr.io/tpu-prod-env-multipod/wstcliyu_latest:latest"
 
 # Cluster Params
-CLUSTER = "v6e-256-cluster"
-PROJECT = "tpu-prod-env-cluster"
-ZONE = "us-east5-b"
-REGION = "us-east5"
+# CLUSTER = "v6e-256-cluster"
+# PROJECT = "tpu-prod-env-cluster"
+# ZONE = "us-east5-b"
+# REGION = "us-east5"
+# COUNTRY = "us"
+# DEVICE_TYPE = "v6e-256"
+
+# Sustained Capacity
+# CLUSTER = "bodaborg-v6e-256-lcscld-c"
+# PROJECT = "tpu-prod-env-one-vm"
+# ZONE = "southamerica-west1-a"
+# REGION = "southamerica-west1"
+# COUNTRY = "southamerica"
+# DEVICE_TYPE = "v6e-256"
+
+# Main Testing Cluster
+CLUSTER = "bodaborg-v6e-256-tt-c"
+PROJECT = "tpu-prod-env-multipod"
+ZONE = "us-west1-c"
+REGION = "us-west1"
 COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
@@ -76,9 +99,9 @@ def main() -> int:
           # model_configs.llama2_70b_4096_real_data_long_run,
       ],
       "pathways": [
-          model_configs.llama3_1_8b_8192,
-          # model_configs.llama3_1_70b_8192,
-          # model_configs.llama3_1_405b_8192_fsdp_dcn,
+          # model_configs.llama3_1_8b_8192,
+        #   model_configs.llama3_1_70b_8192,
+          model_configs.llama3_1_405b_8192_fsdp_dcn,
           # model_configs.llama2_70b_4096_real_data_long_run,
       ]
   }
@@ -127,10 +150,15 @@ def main() -> int:
               pathways_config=pathways_config if infra == "pathways" else None,
               xpk_path=XPK_PATH,
               num_steps=BENCHMARK_STEPS,
-              priority="low",
+              priority="medium",
+              generate_metrics_and_upload_to_big_query=False
           )
+          temp_post_fix = ''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(3))
+          common_prefix = os.environ['USER'][:5]
           command, name = mxr.generate_xpk_workload_cmd(
-              cluster_config=cluster_config, wl_config=wl_config
+              cluster_config=cluster_config,
+              wl_config=wl_config,
+              workload_name=f"{common_prefix}-pw-{num_slices}-{temp_post_fix}",
           )
 
           print(f"Name of the workload is: {name} \n")

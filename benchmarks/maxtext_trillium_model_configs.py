@@ -50,7 +50,7 @@ PATHWAYS_SHORT_RUN_CHECKPOINTING_TUNING_PARAMS = {
     "enable_checkpointing": True,
     "async_checkpointing": True,
     "checkpoint_period": 20,
-    "enable_checkpoint_cloud_logger": True,
+    # "enable_checkpoint_cloud_logger": True,
 }
 
 
@@ -768,6 +768,7 @@ llama3_1_405b_8192_fsdp_dcn = _add_to_model_dictionary(
             "reuse_example_batch": 1,
             "enable_checkpointing": False,
             "profiler": "xplane",
+            "skip_first_n_steps_for_profiler": 10,
             "sa_block_q": 1024,
             "sa_block_q_dkv": 2048,
             "sa_block_q_dq": 2048,

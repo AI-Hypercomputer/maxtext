@@ -23,9 +23,11 @@
 
 import datetime
 import dataclasses
+import random
+import string
 import sys
 import os
-import args_helper as helper
+import benchmarks.recipes.args_helper as helper
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(parent_dir)
@@ -34,14 +36,32 @@ import maxtext_trillium_model_configs as model_configs
 import maxtext_xpk_runner as mxr
 from xpk_configs import XpkClusterConfig
 
-PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
-SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
-RUNNER = "us-docker.pkg.dev/path/to/maxtext_runner"
+# PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
+# SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
+# RUNNER = "us-docker.pkg.dev/path/to/maxtext_runner"
+
+PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_proxy_server:latest"
+SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_server:latest"
+RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest"
 
 # Cluster Params
-CLUSTER = "v6e-256-cluster"
-PROJECT = "tpu-prod-env-cluster"
-ZONE = "us-east5-b"
+# CLUSTER = "v6e-256-cluster"
+# PROJECT = "tpu-prod-env-cluster"
+# ZONE = "us-east5-b"
+# COUNTRY = "us"
+# DEVICE_TYPE = "v6e-256"
+
+# Sustained Capacity
+# CLUSTER = "bodaborg-v6e-256-lcscld-c"
+# PROJECT = "tpu-prod-env-one-vm"
+# ZONE = "southamerica-west1-a"
+# COUNTRY = "southamerica"
+# DEVICE_TYPE = "v6e-256"
+
+# Main Testing Cluster
+CLUSTER = "bodaborg-v6e-256-tt-c"
+PROJECT = "tpu-prod-env-multipod"
+ZONE = "us-west1-c"
 COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
@@ -53,17 +73,18 @@ BASE_OUTPUT_DIRECTORY = (
 )
 # This needs to be set to True to test restore and if you want to restore from
 # a previous run, you'll need to set RESUME_CHECKPOINT_NAMES below.
-TEST_RESTORE = False
-MAX_RESTARTS = 100
+TEST_RESTORE = True
+MAX_RESTARTS = 10
 
 BENCHMARK_STEPS = 41
+# BENCHMARK_STEPS = 11
 RESTORE_BENCHMARK_STEPS = 20  # Define steps for restore run
 
 RESUME_CHECKPOINT_NAMES = {
     "pathways": {
         # Key is number of slices, value is a dictionary of run_name,
         # base_output_directory, and num_steps.
-        32: {
+        4: {
             "run_name":  "restoring_run_name",
             "base_output_directory": f"gs://{BASE_OUTPUT_DIRECTORY}/...",
             "num_steps": BENCHMARK_STEPS + RESTORE_BENCHMARK_STEPS,
@@ -73,6 +94,13 @@ RESUME_CHECKPOINT_NAMES = {
         # 32: {}
     # },
 }
+
+def _get_run_name(
+    num_slices: int,
+):
+  temp_post_fix = ''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(3))
+  common_prefix = os.environ['USER'][:5]
+  return f"{common_prefix}-pw-{num_slices}-{temp_post_fix}"
 
 
 def _get_xpk_commands(
@@ -118,15 +146,17 @@ def _get_xpk_commands(
           )
           if infra in RESUME_CHECKPOINT_NAMES:
             if num_slices in RESUME_CHECKPOINT_NAMES[infra]:
-              run_name = RESUME_CHECKPOINT_NAMES[infra][num_slices][
-                  "run_name"
-              ]
-              base_output_directory = RESUME_CHECKPOINT_NAMES[infra][
-                  num_slices
-              ]["base_output_directory"]
-              num_steps = RESUME_CHECKPOINT_NAMES[infra][num_slices][
-                  "num_steps"
-              ]
+              # run_name = RESUME_CHECKPOINT_NAMES[infra][num_slices][
+              #     "run_name"
+              # ]
+              run_name = _get_run_name(num_slices)
+              # base_output_directory = RESUME_CHECKPOINT_NAMES[infra][
+              #     num_slices
+              # ]["base_output_directory"]
+              # num_steps = RESUME_CHECKPOINT_NAMES[infra][num_slices][
+              #     "num_steps"
+              # ]
+              num_steps = BENCHMARK_STEPS
 
           wl_config = mxr.WorkloadConfig(
               model=model,
@@ -142,6 +172,7 @@ def _get_xpk_commands(
               num_steps=num_steps,
               priority="medium",
               run_name=run_name,
+              generate_metrics_and_upload_to_big_query=False
           )
           command, name = mxr.generate_xpk_workload_cmd(
               cluster_config=config, wl_config=wl_config, workload_name=run_name
@@ -225,20 +256,21 @@ def main() -> int:
   models = {
       "pathways": {
           "models": [
-              model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
+              # model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
+              model_configs.llama3_1_405b_8192_fsdp_dcn,
           ],
           "num_slices_list": [
-              2,
+              4,
           ],
       },
-      "mcjax": {
-          "models": [
-              model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
-          ],
-          "num_slices_list": [
-              2,
-          ],
-      },
+    #   "mcjax": {
+    #       "models": [
+    #           model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
+    #       ],
+    #       "num_slices_list": [
+    #           2,
+    #       ],
+    #   },
   }
   pathways_config = mxr.PathwaysConfig(
       server_image=SERVER_IMAGE,
@@ -285,7 +317,8 @@ def main() -> int:
           f"--- Workload '{completed_workload_name}' FAILED, NOT restoring. ---"
       )
 
-    if TEST_RESTORE and return_code == 0:
+    # if TEST_RESTORE and return_code == 0:
+    if TEST_RESTORE:
       # --- Restore Run for Additional Steps ---
       print(f"\n--- Starting Restore Run for '{completed_workload_name}' ---")
 
