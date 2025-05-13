@@ -464,7 +464,8 @@ def _get_pathways_proxy_flags(wl_config: WorkloadConfig):
     flags_to_add = wl_config.model.pathways_xla_flag_options[
         xla_flags.ADD_PROXY
     ]
-    proxy_flags.append(flags_to_add)
+    flags_to_add_list = flags_to_add.strip().split()
+    proxy_flags += flags_to_add_list
 
   # Join the list of flags back into a single string, space-separated
   return ' '.join(proxy_flags)
@@ -486,7 +487,10 @@ def _get_pathways_worker_flags(wl_config: WorkloadConfig):
     flags_to_add = wl_config.model.pathways_xla_flag_options[
         xla_flags.ADD_WORKER
     ]
-    worker_flags += flags_to_add
+
+    worker_flags_list = worker_flags.strip().split()
+    flags_to_add_list = flags_to_add.strip().split()
+    worker_flags = ' '.join(worker_flags_list + flags_to_add_list)
 
   # Join the list of flags back into a single string, space-separated
   return worker_flags
@@ -508,7 +512,9 @@ def _get_pathways_server_flags(wl_config: WorkloadConfig):
     flags_to_add = wl_config.model.pathways_xla_flag_options[
         xla_flags.ADD_SERVER
     ]
-    server_flags += flags_to_add
+    server_flags_list = server_flags.strip().split()
+    flags_to_add_list = flags_to_add.strip().split()
+    server_flags = ' '.join(server_flags_list + flags_to_add_list)
 
   # Join the list of flags back into a single string, space-separated
   return server_flags
