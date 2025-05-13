@@ -41,6 +41,7 @@ nd_dense_init = initializers.nd_dense_init
 bias_init = initializers.default_bias_init
 
 RMSNorm = normalizations.RMSNorm
+rms_norm = normalizations.rms_norm
 Quant = quantizations.AqtQuantization
 QTensor = aqt_tensor.QTensor
 
@@ -200,16 +201,6 @@ class DenseGeneral(nnx.Module):
     return output
 
 
-def variable_to_logically_partitioned(variable: nnx.VariableState):
-  metadata = variable.get_metadata()
-  return nn.LogicallyPartitioned(  # type: ignore[wrong-keyword-args]
-      variable.value,
-      variable.sharding,
-      mesh=metadata.get("mesh"),
-      rules=metadata.get("rules"),
-  )
-
-
 def dense_general(
     *,
     inputs_shape: tuple[int, ...] | None = None,
@@ -252,7 +243,7 @@ def dense_general(
       use_bias=use_bias,
       matmul_precision=matmul_precision,
       name=name,
-      metadata_fn=variable_to_logically_partitioned,
+      metadata_fn=initializers.variable_to_logically_partitioned,
   )
   return module
 
@@ -285,9 +276,9 @@ class MlpBlock(nn.Module):
   use_pre_norm: bool = False
   quant: Optional[Quant] = None
 
-  def get_norm_layer(self):
+  def get_norm_layer(self, features: int):
     if self.config.decoder_block in ("default", "llama2", "mistral", "mixtral", "gemma", "deepseek", "llama4"):
-      return RMSNorm
+      return functools.partial(rms_norm, features=features)
     elif self.config.decoder_block == "gpt3":
       from MaxText.layers import gpt3
 
@@ -301,7 +292,7 @@ class MlpBlock(nn.Module):
     cfg = self.config
 
     if self.use_pre_norm:
-      inputs = self.get_norm_layer()(
+      inputs = self.get_norm_layer(features=inputs.shape[-1])(
           name="mlp_layer_norm",
           dtype=cfg.dtype,
           weight_dtype=cfg.weight_dtype,

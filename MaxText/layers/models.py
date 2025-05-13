@@ -42,6 +42,7 @@ ScanIn = common_types.ScanIn
 Embed = embeddings.Embed
 Attention = attentions.Attention
 RMSNorm = normalizations.RMSNorm
+rms_norm = normalizations.rms_norm
 PositionalEmbedding = embeddings.PositionalEmbedding
 Quant = quantizations.AqtQuantization
 
@@ -75,7 +76,8 @@ class DecoderLayer(nn.Module):
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
-    lnx = RMSNorm(
+    lnx = rms_norm(
+        features=inputs.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="pre_self_attention_norm",
@@ -204,7 +206,7 @@ class Decoder(nn.Module):
   def setup(self):
     """Initialize decoder layer."""
     self.decoder_layer = self.get_decoder_layers()
-    self.norm_layer = self.get_norm_layer()
+    self.norm_layer = self.get_norm_layer(features=self.config.emb_dim)
     if self.config.using_pipeline_parallelism:
       pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer[0])
       remat_policy = self.get_remat_policy()
@@ -345,7 +347,7 @@ class Decoder(nn.Module):
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
-  def get_norm_layer(self):
+  def get_norm_layer(self, features: int):
     if self.config.decoder_block in (
         "default",
         "llama2",
@@ -359,7 +361,7 @@ class Decoder(nn.Module):
         "simple_mlp",
         "llama4",
     ):
-      return RMSNorm
+      return functools.partial(rms_norm, features=features)
     elif self.config.decoder_block == "gpt3":
       from MaxText.layers import gpt3
 
@@ -561,7 +563,7 @@ class Decoder(nn.Module):
                 slot=slot,
                 **layer_call_kwargs,
             )
-    y = self.get_norm_layer()(
+    y = self.get_norm_layer(features=y.shape[-1])(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="decoder_norm",

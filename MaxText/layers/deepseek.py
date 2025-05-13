@@ -45,6 +45,7 @@ ScanIn = common_types.ScanIn
 Embed = embeddings.Embed
 Attention = attentions.Attention
 RMSNorm = normalizations.RMSNorm
+rms_norm = normalizations.rms_norm
 Quant = quantizations.AqtQuantization
 
 # -----------------------------------------
@@ -54,7 +55,8 @@ Quant = quantizations.AqtQuantization
 
 def self_attention_with_norm(inputs, cfg, mesh, quant, decoder_segment_ids, decoder_positions, deterministic, model_mode):
   # Normalization
-  lnx_rms = models.RMSNorm(
+  lnx_rms = rms_norm(
+      features=inputs.shape[-1],
       dtype=cfg.dtype,
       weight_dtype=cfg.weight_dtype,
       name="pre_self_attention_layer_norm",
@@ -105,7 +107,8 @@ def self_attention_with_norm(inputs, cfg, mesh, quant, decoder_segment_ids, deco
   intermediate_inputs = inputs + attention_lnx
 
   # Normalization
-  hidden_states = models.RMSNorm(
+  hidden_states = models.rms_norm(
+      features=intermediate_inputs.shape[-1],
       dtype=cfg.dtype,
       weight_dtype=cfg.weight_dtype,
       name="post_self_attention_layer_norm",

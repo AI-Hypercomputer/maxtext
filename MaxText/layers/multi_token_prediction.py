@@ -30,6 +30,7 @@ Config = common_types.Config
 DType = common_types.DType
 Mesh = common_types.Mesh
 RMSNorm = normalizations.RMSNorm
+rms_norm = normalizations.rms_norm
 DenseGeneral = linears.DenseGeneral
 dense_general = linears.dense_general
 TransformerLayerModuleType = models.DecoderLayer
@@ -94,7 +95,8 @@ class MultiTokenPredictionLayer(nn.Module):
     k = self.layer_number
 
     # --- 1. Normalize Hidden State and Embedding ---
-    embedding_norm_layer = RMSNorm(
+    embedding_norm_layer = rms_norm(
+        features=target_token_embedding.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name=f"mtp_{k}_embedding_norm",
@@ -103,7 +105,8 @@ class MultiTokenPredictionLayer(nn.Module):
     )
     embedding_norm = embedding_norm_layer(target_token_embedding)
 
-    hidden_state_norm_layer = RMSNorm(
+    hidden_state_norm_layer = rms_norm(
+        features=prev_hidden_state.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name=f"mtp_{k}_hidden_state_norm",

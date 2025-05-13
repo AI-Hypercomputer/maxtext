@@ -30,6 +30,7 @@ from typing import Optional
 
 Embed = embeddings.Embed
 RMSNorm = normalizations.RMSNorm
+rms_norm = normalizations.rms_norm
 NdInitializer = initializers.NdInitializer
 Attention = attentions.Attention
 MlpBlock = linears.MlpBlock
@@ -76,9 +77,9 @@ class GemmaDecoderLayer(nn.Module):
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
-    lnx = RMSNorm(dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_self_attention_norm", kernel_axes=("norm",))(
-        inputs
-    )
+    lnx = rms_norm(
+        features=inputs.shape[-1], dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_self_attention_norm", kernel_axes=("norm",)
+    )(inputs)
 
     lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
@@ -117,9 +118,9 @@ class GemmaDecoderLayer(nn.Module):
     )
     attention_lnx += inputs
     residual = attention_lnx
-    attn_output = RMSNorm(dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_ffw_norm", kernel_axes=("norm",))(
-        attention_lnx
-    )
+    attn_output = rms_norm(
+        features=attention_lnx.shape[-1], dtype=cfg.dtype, weight_dtype=cfg.weight_dtype, name="pre_ffw_norm", kernel_axes=("norm",)
+    )(attention_lnx)
 
     # MLP block.
     mlp_lnx = MlpBlock(
