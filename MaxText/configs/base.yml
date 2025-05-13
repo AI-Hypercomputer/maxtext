@@ -709,3 +709,17 @@ remat_policy_for_vit: "minimal"  # Remat policy for multimodal model's vision en
 image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
 image_path: "" # Local image path used for decoding
 
+
+### llama4 multi modal configs
+hidden_size_for_vit: 1408 
+intermediate_size_for_vit: 5632
+num_attention_heads_for_vit: 16
+num_channels_for_vit: 3
+patch_size_for_vit: 14
+num_hidden_layers_for_vit: 34
+projector_input_dim_for_vit: 4096
+projector_output_dim_for_vit: 4096
+rope_theta_for_vit: 10000
+vision_output_dim_for_vit: 4096
+pixel_shuffle_ratio_for_vit: 0.5
+projector_dropout_for_vit: 0.0
