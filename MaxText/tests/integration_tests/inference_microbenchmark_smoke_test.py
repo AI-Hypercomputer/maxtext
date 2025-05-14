@@ -14,6 +14,7 @@ limitations under the License.
 """
 
 """ Smoke test for inference microbenchmark"""
+import jax
 import os.path
 import pytest
 import unittest
@@ -22,7 +23,6 @@ from absl.testing import absltest
 from MaxText import pyconfig
 from MaxText.globals import PKG_DIR
 from MaxText.inference_microbenchmark import run_benchmarks
-from MaxText.tests.globals import TEST_DISABLE_SUBPROCESS_STR, TEST_DISABLE_SUBPROCESS
 
 
 class Inference_Microbenchmark(unittest.TestCase):
@@ -30,8 +30,8 @@ class Inference_Microbenchmark(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
-  @pytest.mark.skipif(TEST_DISABLE_SUBPROCESS, reason=TEST_DISABLE_SUBPROCESS_STR)
   def test(self):
+    jax.config.update("jax_default_prng_impl", "unsafe_rbg")
     config = pyconfig.initialize(
         [
             None,
@@ -43,6 +43,7 @@ class Inference_Microbenchmark(unittest.TestCase):
             "max_target_length=2048",
             "scan_layers=false",
             "weight_dtype=bfloat16",
+            "attention=dot_product",
         ]
     )
     run_benchmarks(config)
