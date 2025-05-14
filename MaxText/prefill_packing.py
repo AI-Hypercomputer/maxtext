@@ -15,17 +15,17 @@
 """Implementation of Prefill Packing feature"""
 
 from typing import Any, List, Tuple, Callable
-import warnings
-import logging
-
-from jetstream.engine import engine_api
-
-import numpy as np
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+
+from jetstream.engine import engine_api
 
 from MaxText.maxengine import MaxEngine
+
+import warnings
+import logging
 
 warnings.simplefilter("ignore", category=FutureWarning)
 DecodeState = Any
@@ -128,7 +128,7 @@ class PrefillProcessor:
       self.process_func[padded_length] = (
           jax.jit(
               self._process,
-              in_shardings=(self.engine.param_layouts, None, None, None, self.engine.decode_state_layouts),
+              in_shardings=(self.engine.param_layouts, None, None, None, self.engine.decode_state_layouts, None),
               out_shardings=(
                   None,
                   self.engine.decode_state_layouts,
@@ -141,6 +141,7 @@ class PrefillProcessor:
               jax.ShapeDtypeStruct((), int),
               jax.ShapeDtypeStruct((), int),
               self.engine.decode_state_shapes,
+              jax.ShapeDtypeStruct([4], jax.numpy.dtype("uint32")),
           )
           .compile(compiler_options=None)
       )
@@ -153,10 +154,11 @@ class PrefillProcessor:
       slot: int,
       true_length: int,
       decode_state: DecodeState,
+      rng: PRNGKeyType,
   ) -> Tuple[engine_api.ResultTokens, DecodeState]:
     """Prefill and insert a request."""
 
-    prefill_result, first_token = self.engine.prefill(params=params, padded_tokens=tokens, true_length=true_length)
+    prefill_result, first_token = self.engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng)
     decode_state = self.engine.insert(prefill_result, decode_state, slot)
     return first_token, decode_state
 
