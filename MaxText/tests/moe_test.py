@@ -446,6 +446,25 @@ class RoutedMoeTest(unittest.TestCase):
       actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
       self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
+  def test_random_routing(self):
+    bs, seq_len, num_experts, num_experts_per_tok = 12, 1024, 8, 2
+    rng = jax.random.PRNGKey(0)
+    rng, logits_key = jax.random.split(rng)
+    gate_logits = jax.random.normal(logits_key, (bs, seq_len, num_experts))
+
+    rng, run_key = jax.random.split(rng)
+    _, top_k_indices = moe.random_routing(run_key, gate_logits, num_experts_per_tok)
+
+    flat_indices = top_k_indices.flatten()
+    counts = jnp.bincount(flat_indices, length=num_experts)
+    expected_count = bs * seq_len * num_experts_per_tok // num_experts
+    tol = 0.05
+
+    lower_bound = expected_count - expected_count * tol
+    upper_bound = expected_count + expected_count * tol
+    is_with_tolerance = (counts >= lower_bound) & (counts <= upper_bound)
+    self.assertTrue(is_with_tolerance.all())
+
 
 if __name__ == "__main__":
   unittest.main()
