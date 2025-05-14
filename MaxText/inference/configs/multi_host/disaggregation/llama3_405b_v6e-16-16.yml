@@ -23,7 +23,7 @@ logical_axis_rules: [
                       ['q_heads', ['tensor']],
                       ['kv_head_dim', []],
                       ['activation_prefill_kv_batch', []],
-                      ['activation_kv_batch', []],
+                      ['activation_kv_batch', ['autoregressive']],
                       ['activation_kv_heads', ['tensor']],
                       ['activation_kv_head_dim', []],
                       ['activation_heads', ['tensor']],
