@@ -30,7 +30,7 @@ Config = common_types.Config
 DType = common_types.DType
 Mesh = common_types.Mesh
 RMSNorm = normalizations.RMSNorm
-DenseGeneral = linears.DenseGeneral
+dense_general = linears.dense_general
 TransformerLayerModuleType = models.DecoderLayer
 
 
@@ -118,7 +118,8 @@ class MultiTokenPredictionLayer(nn.Module):
 
     # --- 3. Project Concatenated Features ---
     # Projects from 2*H back down to H
-    projection_layer = DenseGeneral(
+    projection_layer = dense_general(
+        inputs_shape=concatenated_features.shape,
         features=cfg.base_emb_dim,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -140,3 +141,4 @@ class MultiTokenPredictionLayer(nn.Module):
     # Shape: [B, S, H]
     # --- Return Processed Hidden State ---
     return next_hidden_state
+  
