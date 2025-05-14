@@ -14,9 +14,10 @@
 """ Timing utility functions """
 
 import datetime
-import jax
 import os.path
 import tempfile
+
+import jax
 
 
 def simple_timeit(f, *args, tries=10, task=None, enable_profile=False):

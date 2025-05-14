@@ -21,9 +21,9 @@ import os
 import subprocess
 import shutil
 
-from MaxText import max_logging
-
 import jax
+
+from MaxText import max_logging
 
 
 class Profiler:

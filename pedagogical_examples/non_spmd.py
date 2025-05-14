@@ -26,12 +26,11 @@ An important limitation of this approach is that we cannot overlap communication
 kernel calls.
 """
 
+import numpy as np
 
 import jax
 from jax.sharding import PartitionSpec
 from jax.sharding import Mesh
-
-import numpy as np
 
 
 # Notice this is jax.local_devices(), not jax.devices(). Hence each process (on TPUVMs, each VM) will run separate programs

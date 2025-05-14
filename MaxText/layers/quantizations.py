@@ -134,6 +134,7 @@ class AqtQuantization:
     is_tiled = False
     tiling_fn = None
     module_path = "/".join(nn.module._context.module_stack[-1].path)
+    tile_size = -1
     for layer_name_re, layer_quant_dg in self.quant_dg.items():
       if re.fullmatch(layer_name_re, module_path):
         quant_dg, tile_size = layer_quant_dg

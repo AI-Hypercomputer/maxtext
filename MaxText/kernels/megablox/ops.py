@@ -16,11 +16,14 @@
 
 # pylint: disable=too-many-positional-arguments
 
+from typing import Literal
+
 import jax
 import jax.numpy as jnp
-from MaxText.kernels.megablox import gmm as backend
+
 from aqt.jax.v2 import aqt_tensor
-from typing import Literal
+
+from MaxText.kernels.megablox import gmm as backend
 
 gmm = jax.custom_vjp(
     backend.gmm,

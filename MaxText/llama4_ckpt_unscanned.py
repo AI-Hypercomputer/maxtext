@@ -121,6 +121,7 @@ def _pytorch_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1, model
     base_mapping[f"layers.{layer_idx}.feed_forward.experts.moe_w_swiglu_eD_F"] = base_mapping.pop(
         f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w3.weight"
     )
+  return base_mapping
 
 
 def _hf_to_maxtext_mapping(layer_idx: int = -1) -> dict:

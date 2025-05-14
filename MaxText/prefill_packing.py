@@ -15,17 +15,17 @@
 """Implementation of Prefill Packing feature"""
 
 from typing import Any, List, Tuple, Callable
-
-import jax
-import jax.numpy as jnp
-import numpy as np
+import warnings
+import logging
 
 from jetstream.engine import engine_api
 
-from MaxText.maxengine import MaxEngine
+import numpy as np
 
-import warnings
-import logging
+import jax
+import jax.numpy as jnp
+
+from MaxText.maxengine import MaxEngine
 
 warnings.simplefilter("ignore", category=FutureWarning)
 DecodeState = Any

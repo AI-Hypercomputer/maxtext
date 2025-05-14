@@ -23,11 +23,13 @@ from typing import Tuple
 from absl import app
 from absl import flags
 from absl import logging
-import jax
-import tensorflow as tf
-import tensorflow_datasets as tfds
 
 from sentencepiece import SentencePieceTrainer
+
+import jax
+
+import tensorflow as tf
+import tensorflow_datasets as tfds
 
 _DATASET_PATH = flags.DEFINE_string("dataset_path", None, "Path to the dataset", required=True)
 _DATASET_NAME = flags.DEFINE_string("dataset_name", None, "Name to the dataset", required=True)

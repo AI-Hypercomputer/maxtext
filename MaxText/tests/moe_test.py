@@ -26,13 +26,13 @@ from jax.sharding import Mesh
 import flax.linen as nn
 from flax.linen import partitioning as nn_partitioning
 
-from MaxText.layers import linears
-from MaxText.layers import initializers
-from MaxText.layers import moe
-from MaxText import pyconfig
-from MaxText import maxtext_utils
-from MaxText.globals import PKG_DIR
 from MaxText import common_types
+from MaxText import maxtext_utils
+from MaxText import pyconfig
+from MaxText.globals import PKG_DIR
+from MaxText.layers import initializers
+from MaxText.layers import linears
+from MaxText.layers import moe
 
 
 Array = common_types.Array
@@ -298,7 +298,7 @@ class RoutedMoeTest(unittest.TestCase):
         rng, jax.random.normal(rng, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim))
     )
 
-    output = jax.jit(model.apply)(variables, hidden_states)
+    output = jax.jit(model.apply)(variables, hidden_states)  # pylint: disable=not-callable
     return variables, output
 
   def get_moe_output(self, variables, hidden_states, cfg, mesh):
@@ -341,7 +341,7 @@ class RoutedMoeTest(unittest.TestCase):
 
     moe_variables = {"params": {"gate": {"kernel": kernel}, "wi_0": wi_0, "wi_1": wi_1, "wo": wo}}
 
-    output = jax.jit(model.apply)(moe_variables, hidden_states)
+    output = jax.jit(model.apply)(moe_variables, hidden_states)  # pylint: disable=not-callable
     return output
 
   @pytest.mark.tpu_only

@@ -18,9 +18,12 @@ limitations under the License.
 
 import os
 import sys
-import jax
 import json
+
 import jsonlines
+
+import jax
+
 from MaxText import inference_microbenchmark
 from MaxText import pyconfig
 

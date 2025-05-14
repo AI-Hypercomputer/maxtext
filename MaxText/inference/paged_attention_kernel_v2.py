@@ -25,6 +25,7 @@ during inference.
 """
 
 import functools
+
 import jax
 from jax import lax
 from jax.experimental import pallas as pl
