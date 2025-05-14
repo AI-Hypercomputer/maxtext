@@ -288,7 +288,7 @@ class TrainTests(unittest.TestCase):
         r"dataset_path=gs://maxtext-dataset",
         "steps=10",
         "attention=dot_product",
-        "optimizer_memory_host_offload=True", # enable optimizer state offload
+        "optimizer_memory_host_offload=True",  # enable optimizer state offload
         "dataset_type=synthetic",
         "enable_checkpointing=False",
         "enable_goodput_recording=False",
@@ -307,15 +307,16 @@ class TrainTests(unittest.TestCase):
         "run_name=runner_test",
         r"dataset_path=gs://maxtext-dataset",
         "steps=10",
-        "param_scan_axis=0", # scan axis 0 is required for parameter offload
+        "param_scan_axis=0",  # scan axis 0 is required for parameter offload
         "attention=dot_product",
-        "parameter_memory_host_offload=True", # enable parameter offload
+        "parameter_memory_host_offload=True",  # enable parameter offload
         "dataset_type=synthetic",
         "enable_checkpointing=False",
         "enable_goodput_recording=False",
         rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
     ]
     train_main(parameter_offload)
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -20,14 +20,17 @@ import time
 import queue
 import threading
 
-from MaxText import max_logging
 import requests  # type: ignore[pyi-error]
+
 import jax
 
 from google.api import metric_pb2, monitored_resource_pb2
 from google.api_core.exceptions import GoogleAPIError
 from google.cloud import monitoring_v3
+
 from urllib3.util.retry import Retry
+
+from MaxText import max_logging
 
 
 _METADATA_SERVER_URL = "http://metadata.google.internal/computeMetadata/v1/"

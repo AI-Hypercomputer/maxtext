@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-# pylint: disable=g-bad-todo, abstract-method, consider-using-with, ungrouped-imports
+# pylint: disable=g-bad-todo, abstract-method, consider-using-with
 """Training loop and Decoding of the model."""
 
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
@@ -26,17 +26,38 @@ import sys
 import functools
 import time
 import queue
-
 from typing import Sequence
+
 from absl import app
+
+import numpy as np
+
+import pathwaysutils  # pylint: disable=unused-import
+
+import tensorflow as tf
+
+import jax
+import jax.numpy as jnp
+from jax import random
+from jax.sharding import Mesh
+from jax.experimental import checkify
+
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
-import grain.python as grain
-import jax
-import numpy as np
+
 import orbax.checkpoint
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
+
+import grain.python as grain
+
+from cloud_tpu_diagnostics import diagnostic
+from cloud_tpu_diagnostics.configuration import debug_configuration
+from cloud_tpu_diagnostics.configuration import diagnostic_configuration
+from cloud_tpu_diagnostics.configuration import stack_trace_configuration
+
+from ml_goodput_measurement import goodput
+from ml_goodput_measurement import monitoring
 
 from MaxText import checkpointing
 from MaxText import max_utils
@@ -45,35 +66,14 @@ from MaxText import max_logging
 from MaxText import optimizers
 from MaxText import profiler
 from MaxText import pyconfig
-import pathwaysutils  # pylint: disable=unused-import
-import tensorflow as tf
-
 from MaxText.metric_logger import MetricLogger
 from MaxText.utils import gcs_utils
-
 from MaxText.vertex_tensorboard import VertexTensorboardManager
-# Placeholder: internal
-
 from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.layers import models
-
 from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
-
-import jax.numpy as jnp
-from jax import random
-from jax.sharding import Mesh
-from jax.sharding import PartitionSpec as P
-from jax.experimental import checkify
-
-from cloud_tpu_diagnostics import diagnostic
-from cloud_tpu_diagnostics.configuration import debug_configuration
-from cloud_tpu_diagnostics.configuration import diagnostic_configuration
-from cloud_tpu_diagnostics.configuration import stack_trace_configuration
-
 from MaxText.layers import quantizations
-
-from ml_goodput_measurement import goodput
-from ml_goodput_measurement import monitoring
+# Placeholder: internal
 
 # pylint: disable=too-many-positional-arguments
 
@@ -492,9 +492,11 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   # Move all parameters to device before optimizer update
   if config.parameter_memory_host_offload:
     max_logging.log("\nMoving all parameters to device before optimizer update")
+
     def move(path, value):
       max_logging.log(f"train.py: Moving f{path} to device")
       return value.with_memory_kind(kind="device")
+
     state = state.replace(
         params=jax.device_put(
             state.params,

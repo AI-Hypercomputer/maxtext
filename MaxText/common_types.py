@@ -16,10 +16,12 @@
 import enum
 from typing import Any, Sequence
 
-from flax.linen import partitioning
+import numpy as np
+
 import jax
 import jax.numpy as jnp
-import numpy as np
+
+from flax.linen import partitioning
 
 Config = Any
 

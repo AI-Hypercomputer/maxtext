@@ -125,6 +125,7 @@ class QuantizationTest(unittest.TestCase):
         quant_str="intmp", quant_cfg_path=os.path.join(PKG_DIR, "configs", "quantization", "int8_weight_only.json")
     )
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 1)
+    # pylint: disable=unsupported-membership-test
     self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
     quant_cfg, tile_size = quant.quant_dg[quantizations.DEFAULT]
     self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.dtype, None)
@@ -136,6 +137,7 @@ class QuantizationTest(unittest.TestCase):
         quant_cfg_path=os.path.join(PKG_DIR, "configs", "quantization", "dense_llm_weight_only_scale.json"),
     )
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7)
+    # pylint: disable=unsupported-membership-test
     self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
     quant_cfg, tile_size = quant.quant_dg[quantizations.DEFAULT]
     self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.dtype, None)
@@ -149,6 +151,7 @@ class QuantizationTest(unittest.TestCase):
         quant_str="intmp", quant_cfg_path=os.path.join(PKG_DIR, "configs", "quantization", "dense_llm_subchannel.json")
     )
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7)
+    # pylint: disable=unsupported-membership-test
     self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
     quant_cfg, tile_size = quant.quant_dg[quantizations.DEFAULT]
     self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.bits, 8)

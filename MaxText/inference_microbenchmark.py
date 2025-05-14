@@ -16,12 +16,14 @@ limitations under the License.
 
 """Inference microbenchmark for prefill and autoregressive steps."""
 import datetime
-import jax
 import json
 import os
+import warnings
+from collections.abc import MutableMapping
 
 from absl import app
-from collections.abc import MutableMapping
+
+import jax
 
 from MaxText import max_utils
 from MaxText import maxengine
@@ -30,8 +32,6 @@ from MaxText import prefill_packing
 from MaxText import profiler
 from MaxText import pyconfig
 from MaxText.utils import gcs_utils
-
-import warnings
 
 warnings.simplefilter("ignore", category=FutureWarning)
 
@@ -226,9 +226,11 @@ def write_results(results, filename, flatten_microbenchmark_results):
       json.dump(results, f, indent=2)
   return results
 
+
 def upload_results_to_gcs(results_file_name, destination_gcs_name):
   """Upload the results file to destination GCS bucket."""
   gcs_utils.upload_blob(destination_gcs_name, results_file_name)
+
 
 def print_results_for_analyze(results):
   """Print results."""
@@ -409,7 +411,7 @@ def run_benchmarks(config):
         flatten_microbenchmark_results=_FLATTEN_MICROBENCHMARK_RESULTS,
     )
   if config.gcs_metrics:
-    metrics_filename = f'{config.run_name}_results.txt'
+    metrics_filename = f"{config.run_name}_results.txt"
     write_results(
         results,
         filename=metrics_filename,

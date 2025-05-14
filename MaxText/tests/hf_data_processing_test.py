@@ -15,13 +15,12 @@ limitations under the License.
 """
 
 import sys
+import unittest
 import os.path
 
 import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
-
-import unittest
 
 from MaxText import pyconfig
 from MaxText.globals import PKG_DIR

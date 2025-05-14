@@ -18,18 +18,20 @@ limitations under the License.
 
 """This script is used to measure the performance of different sharding schemes on TPU."""
 
+import argparse
+import datetime
+from typing import Sequence
+
 from absl import app
 from absl import flags
+
 import jax
 from jax.sharding import PartitionSpec
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 from jax._src.pjit import with_sharding_constraint
 
-import argparse
-import datetime
 import numpy as np
-from typing import Sequence
 
 parser = argparse.ArgumentParser(
     description="Experiment different sharding techniques with a simple NN.\

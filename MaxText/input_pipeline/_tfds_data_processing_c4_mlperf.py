@@ -17,14 +17,15 @@ limitations under the License.
 """Input pipeline for gpt3 c4 mlperf dataset."""
 
 from typing import Optional
-
 import functools
 
 import numpy as np
 
 import ml_collections
+
 import tensorflow as tf
 import tensorflow_datasets as tfds
+
 import jax
 import jax.numpy as jnp
 from jax.experimental import multihost_utils
@@ -32,8 +33,8 @@ from jax.experimental import multihost_utils
 from MaxText import tokenizer
 from MaxText import multihost_dataloading
 from MaxText import sequence_packing
-from MaxText.input_pipeline._input_pipeline_utils import get_tokenizer
 from MaxText import max_logging
+from MaxText.input_pipeline._input_pipeline_utils import get_tokenizer
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 

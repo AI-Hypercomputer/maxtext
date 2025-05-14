@@ -22,10 +22,11 @@ import sys
 import unittest
 import os.path
 
+import numpy as np
+
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-import numpy as np
 
 from MaxText import common_types
 from MaxText.layers import models

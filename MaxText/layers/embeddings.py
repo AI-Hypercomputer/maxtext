@@ -17,10 +17,12 @@
 import math
 from typing import Any, Optional
 
-from flax import linen as nn
 import jax
 from jax import lax
 import jax.numpy as jnp
+
+from flax import linen as nn
+
 from MaxText.layers import initializers
 from MaxText import max_logging
 

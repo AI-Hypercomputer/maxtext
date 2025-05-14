@@ -15,16 +15,17 @@ limitations under the License.
 """
 
 """ Tests for the common Max Utils """
-import jax
-from MaxText import max_utils
-from flax import linen as nn
+import unittest
 
+import jax
 from jax import numpy as jnp
 from jax import random
 
+from flax import linen as nn
+
 import optax
 
-import unittest
+from MaxText import max_utils
 
 
 class MaxUtilsSummaryStats(unittest.TestCase):
