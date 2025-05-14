@@ -20,29 +20,34 @@ Usage:
   pytest MaxText/tests/grpo_trainer_correctness_test.py
 """
 
+from collections.abc import Callable
 import functools
-import subprocess
-import jax
-import jax.numpy as jnp
-import jsonlines
-import numpy as np
 import os
-import pytest
+import subprocess
 import unittest
 
+import pytest
+
+import jsonlines
+
+import numpy as np
+
+import jax
+import jax.numpy as jnp
 from jax.sharding import Mesh
+
 from flax import linen as nn
-from MaxText.globals import PKG_DIR
 
+import transformers
 
+from MaxText import maxengine
 from MaxText import maxtext_utils
 from MaxText import pyconfig
+from MaxText.common_types import Array
+from MaxText.experimental.rl.grpo_trainer import compute_log_probs, grpo_loss_fn, _merge_grpo_state, generate_completions
+from MaxText.globals import PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
-
-from MaxText.experimental.rl.grpo_trainer import compute_log_probs, grpo_loss_fn, _merge_grpo_state, generate_completions
-from MaxText import maxengine
-import transformers
 
 
 def get_golden_data(config):
@@ -192,12 +197,13 @@ class GrpoTrainerTest(unittest.TestCase):
     )
     prompt_true_length = jnp.array([len(prompt_tokens)] * 4)
     engine_data = {"prompt": prompt, "prompt_true_length": prompt_true_length}
-    p_generate_completions = jax.jit(
+    p_generate_completions: Callable[[dict, dict, Array], Array] = jax.jit(
         functools.partial(generate_completions, self.config, self.tokenizer_model, engine),
         in_shardings=(data_sharding, state_mesh_shardings.params, None),
         out_shardings=data_sharding,
         donate_argnums=(0,),
     )
+    # pylint: disable=not-callable
     engine_data = p_generate_completions(engine_data, {"params": state.params["params"]}, rng)
     # Assert that the generated completions match the golden reference.
     self.assertEqual(engine_data["prompt_completions"][0].tolist(), golden_data["generated_completions"])

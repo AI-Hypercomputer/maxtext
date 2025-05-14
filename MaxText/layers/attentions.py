@@ -44,7 +44,6 @@ from MaxText.layers import embeddings
 from MaxText.layers import initializers
 from MaxText.layers import linears
 from MaxText.layers import quantizations
-from MaxText import max_logging
 from MaxText import max_utils
 
 partial = functools.partial
@@ -449,6 +448,7 @@ class AttentionOp(nn.Module):
     elif causal_mask is not None:
       output_mask = causal_mask
 
+    is_seq_len_greater_than_chunk_window = False
     if output_mask is not None and self.chunk_attn_window_size is not None:
       is_seq_len_greater_than_chunk_window = output_mask.shape[-1] > self.chunk_attn_window_size
 
@@ -495,6 +495,8 @@ class AttentionOp(nn.Module):
         impl = self.tpu_ragged_attention
       elif target_hardware == "gpu":
         impl = self.gpu_ragged_attention
+      else:
+        raise NotImplementedError(target_hardware)
       return impl(query, key, value, lengths, self.ragged_block_size)
 
     elif (
@@ -1041,6 +1043,8 @@ class AttentionOp(nn.Module):
       if self.reshape_q and q_seq_len == 1:
         query = jnp.broadcast_to(query, (b, n_kv, n // n_kv, 2, d))
       result = einsum("bkgtd,bksd->bkgts", query, key)
+    else:
+      raise NotImplementedError(self.compute_axis_order)
     return result
 
   def wv_product(self, attn_weights: Array, value: Array | KVTensor, model_mode: str) -> Array:

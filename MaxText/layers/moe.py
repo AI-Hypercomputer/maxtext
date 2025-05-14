@@ -782,11 +782,13 @@ class RoutedMoE(nn.Module):
 
     cp, sub_seq = self.get_context_partition_and_sub_seq(seq_len)
 
-    # TODO @jacobplatin: allow Llama4 MoE to handle capacity factor > 0
     if self.config.capacity_factor > 0:
       # token dropping if needed
       if self.config.model_call_mode != "inference":
-        dispatch_mask, combine_mask = self.generate_masks(top_k_indices, weights)
+        # TODO: remove this pylint by refactoring the logic here
+        dispatch_mask, combine_mask = self.generate_masks(
+            top_k_indices, weights  # pylint: disable=possibly-used-before-assignment
+        )
         mask_axes = ("activation_batch", "activation_length", None, None)
         input_axis = ("activation_batch", "activation_length", "activation_embed")
         dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, "activation_embed")

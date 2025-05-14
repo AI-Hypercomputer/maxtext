@@ -45,7 +45,6 @@ from MaxText import pyconfig
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.utils import gcs_utils
-from MaxText.input_pipeline import input_pipeline_interface
 
 # pylint: disable=too-many-positional-arguments
 
