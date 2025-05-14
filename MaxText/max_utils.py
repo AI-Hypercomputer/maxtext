@@ -122,7 +122,7 @@ def maybe_initialize_jax_distributed_system(raw_keys):
 
   For CPUs, we call jax.distributed.initialize() explicitly, with the specified arguments.
   """
-  if raw_keys["skip_jax_distributed_system"]:
+  if raw_keys["skip_jax_distributed_system"] or True:
     max_logging.log("Skipping jax distributed system due to skip_jax_distributed_system=True flag.")
     return
   if raw_keys["inference_benchmark_test"]:
