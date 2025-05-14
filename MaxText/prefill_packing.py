@@ -117,11 +117,12 @@ class PrefillProcessor:
   ) -> Tuple[engine_api.ResultTokens, DecodeState]:
     """Process a new input."""
 
-    process_fn = self._process_compiled(model_params, len(input_tokens_padded), decode_state)
+    process_fn = self._process_compiled(model_params, len(input_tokens_padded))
     return process_fn(model_params, input_tokens_padded, decode_slot, input_true_length, decode_state)
 
-  def _process_compiled(self, params: Params, padded_length: int, decode_state):
+  def _process_compiled(self, params: Params, padded_length: int):
     """Ahead-of-time compilation wrapper of _process()."""
+
     if padded_length not in self.process_func:
       log.info("compile prefill process(%d)", padded_length)
       self.process_func[padded_length] = (
@@ -139,7 +140,7 @@ class PrefillProcessor:
               jax.ShapeDtypeStruct((padded_length,), jnp.dtype("int32")),
               jax.ShapeDtypeStruct((), int),
               jax.ShapeDtypeStruct((), int),
-              decode_state,
+              self.engine.decode_state_shapes,
           )
           .compile(compiler_options=None)
       )

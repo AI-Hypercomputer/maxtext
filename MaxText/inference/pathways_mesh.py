@@ -169,16 +169,18 @@ def init_pyconfig(**kwargs):
   )
   return config
 
-def test_no_batch_prefill():
 
-  config = init_pyconfig(scan_layers=True)
+config = init_pyconfig(scan_layers=True)
 
-  random.seed(42)
-  # input_data = [jax.numpy.arange(random.randint(1, config.max_prefill_predict_length)) for _ in range(20)]
-  input_data = [jax.numpy.arange(config.max_prefill_predict_length) for _ in range(2)]
+random.seed(42)
+# input_data = [jax.numpy.arange(random.randint(1, config.max_prefill_predict_length)) for _ in range(20)]
+input_data = [jax.numpy.arange(config.max_prefill_predict_length) for _ in range(20)]
+
+
+def test_dp1_no_batch_prefill():
 
   # engine = MaxEngine(config, jax.devices())
-  inference_engine = OfflineEngine(config, params=None, enable_batch_prefill=False, using_pathways=True)
+  inference_engine = OfflineEngine(config, params=None, enable_batch_prefill=False, auto_layout_supported=False)
 
   inference_engine.warm_up()
   start_time = time.time()
@@ -190,12 +192,61 @@ def test_no_batch_prefill():
 
   total_tokens = 0
   for i, tokens in enumerate(results):
-    text = inference_engine.tokenizer.decode(tokens)
-    print(text)
+    # text = inference_engine.tokenizer.decode(tokens)
+    # print(text)
     total_tokens += len(tokens)
 
   print(f"Time taken: {end_time - start_time} seconds")
   print(f"Total tokens: {total_tokens}")
   print(f"Tokens per second: {total_tokens / (end_time - start_time)}")
 
-test_no_batch_prefill()
+
+def test_dp2_no_batch_prefill():
+
+  inference_engine = OfflineEngine(config, params=None, enable_batch_prefill=False, auto_layout_supported=False, dp=2)
+
+  inference_engine.warm_up()
+  start_time = time.time()
+  # jax.profiler.start_trace("gs://wenxindong-vm/trace/pathways")
+  results = inference_engine.batch_inference(input_data, data_is_padded=True)
+  # jax.profiler.stop_trace()
+  end_time = time.time()
+  # print("results: ", results)
+
+  total_tokens = 0
+  for i, tokens in enumerate(results):
+    # text = inference_engine.tokenizer.decode(tokens)
+    # print(text)
+    total_tokens += len(tokens)
+
+  print(f"Time taken: {end_time - start_time} seconds")
+  print(f"Total tokens: {total_tokens}")
+  print(f"Tokens per second: {total_tokens / (end_time - start_time)}")
+
+print("test_dp1_no_batch_prefill #1")
+test_dp1_no_batch_prefill()
+
+# Time taken: 32.155704498291016 seconds
+# Total tokens: 2600
+# Tokens per second: 80.85657088116923
+
+print("test_dp1_no_batch_prefill #2")
+test_dp1_no_batch_prefill()
+
+# Time taken: 30.191761016845703 seconds
+# Total tokens: 2600
+# Tokens per second: 86.11620894022418
+
+print("test_dp2_no_batch_prefill #1")
+test_dp2_no_batch_prefill()
+
+# Time taken: 26.61563491821289 seconds
+# Total tokens: 2600
+# Tokens per second: 97.68694258053706
+
+print("test_dp2_no_batch_prefill #2")
+test_dp2_no_batch_prefill()
+
+# Time taken: 26.156818389892578 seconds
+# Total tokens: 2600
+# Tokens per second: 99.40046840729997
