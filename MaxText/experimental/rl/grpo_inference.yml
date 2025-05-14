@@ -1,0 +1,6 @@
+base_config: "inference.yml"
+
+use_grpo: True
+train_data_columns: 'prompt'
+
+dataset_type: hf # we currently only support Huggingface input pipeline with GRPO.

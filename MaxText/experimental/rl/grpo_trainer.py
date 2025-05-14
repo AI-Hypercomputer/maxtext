@@ -602,7 +602,7 @@ def pathways_reshard(config, params, destination_shardings, meshes):
   inference_params = []
   for destination_sharding, mesh in zip(destination_shardings, meshes):
     with (jax.transfer_guard_device_to_host("disallow_explicit"), jax.transfer_guard_host_to_device("disallow_explicit")):
-      inference_params.append(pathwaysutils_reshard.reshard(params, destination_sharding.params, donate=True))
+      inference_params.append(pathwaysutils_reshard.reshard(params, destination_sharding.params))
   return inference_params
 
 def setup_mesh_and_model(config, config_inference):

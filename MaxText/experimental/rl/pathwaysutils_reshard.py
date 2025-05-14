@@ -146,7 +146,6 @@ def reshard(
     if not isinstance(dst_sharding, jax.sharding.Sharding):
       raise ValueError("`sharding` must contain only `jax.sharding.Sharding`")
     if isinstance(arr, jax.Array):
-      max_logging.log(f"Debug resharding {arr.shape=} {arr.sharding} {dst_sharding}")
       jax_arrays.append(arr)
       jax_array_dst_shardings.append(dst_sharding)
     else:
