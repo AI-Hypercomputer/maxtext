@@ -45,7 +45,7 @@ def init_random_model_vars(model, rng, example_batch):
   def _replace_initialization(key, value):
     keystr = jax.tree_util.keystr(key)
     # replace zero initializer to ensure strong test cases
-    #   including Gpt3LayerNorm scale, Gpt3LayerNorm bias, and DenseGeneral bias
+    #   including Gpt3LayerNorm scale, Gpt3LayerNorm bias, and dense_general bias
     if "scale" in keystr or "bias" in keystr:
       value = jax.nn.initializers.normal(1.0)(rng, value.shape, dtype=value.dtype)
     return value

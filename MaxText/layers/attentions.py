@@ -47,7 +47,7 @@ from MaxText.kernels.ragged_attention import ragged_mha
 from MaxText.layers import embeddings
 from MaxText.layers.embeddings import YarnRotaryEmbedding, RotaryEmbedding
 from MaxText.layers.initializers import nd_dense_init, NdInitializer
-from MaxText.layers.linears import DenseGeneral
+from MaxText.layers.linears import dense_general
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
@@ -1382,7 +1382,8 @@ class Attention(nn.Module):
     kernel_axes = (
         (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("embed", "q_heads", "kv")
     )
-    query_proj = DenseGeneral(
+    query_proj = dense_general(
+        inputs_shape=inputs_q.shape,
         features=(self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=query_init,
@@ -1419,7 +1420,8 @@ class Attention(nn.Module):
         else ("embed", "kv_heads", "kv_head_dim")
     )
 
-    kv_proj = DenseGeneral(
+    kv_proj = dense_general(
+        inputs_shape=inputs_kv.shape,
         features=(self.num_kv_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
@@ -1436,7 +1438,8 @@ class Attention(nn.Module):
   def qkv_projection(self, inputs: Array, proj_name: str):
     """Fused QKV projection"""
 
-    qkv_proj = DenseGeneral(
+    qkv_proj = dense_general(
+        inputs_shape=inputs.shape,
         features=(3, self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
@@ -1457,7 +1460,8 @@ class Attention(nn.Module):
     out_kernel_axis = (
         (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed")
     )
-    out_proj = DenseGeneral(
+    out_proj = dense_general(
+        inputs_shape=out.shape,
         features=output_dim,
         axis=(-2, -1),
         kernel_init=self.kernel_init,
@@ -1729,7 +1733,8 @@ class MLA(Attention):
 
     if self.q_lora_rank == 0:
       # Standard Q projection (without LoRA).
-      self.query_proj = DenseGeneral(
+      self.query_proj = dense_general(
+          in_features=self.config.emb_dim,
           features=(self.num_query_heads, self.qk_head_dim),
           axis=-1,
           kernel_init=self.kernel_init,
@@ -1742,7 +1747,8 @@ class MLA(Attention):
       )
     else:
       # LoRA path for Q.
-      self.wq_a = DenseGeneral(
+      self.wq_a = dense_general(
+          in_features=self.config.emb_dim,
           features=self.q_lora_rank,
           axis=-1,
           kernel_init=self.kernel_init,
@@ -1760,7 +1766,8 @@ class MLA(Attention):
           epsilon=self.config.normalization_layer_epsilon,
           kernel_axes=("norm",),
       )
-      self.wq_b = DenseGeneral(
+      self.wq_b = dense_general(
+          in_features=self.q_lora_rank,
           features=(self.num_query_heads, self.qk_head_dim),
           axis=-1,
           kernel_init=self.kernel_init,
@@ -1773,7 +1780,8 @@ class MLA(Attention):
       )
 
     # KV LoRA path.
-    self.wkv_a = DenseGeneral(
+    self.wkv_a = dense_general(
+        in_features=self.config.emb_dim,
         features=self.kv_lora_rank + self.qk_rope_head_dim,
         axis=-1,
         kernel_init=self.kernel_init,
@@ -1791,8 +1799,12 @@ class MLA(Attention):
         epsilon=self.config.normalization_layer_epsilon,
         kernel_axes=("norm",),
     )
-    self.wkv_b = DenseGeneral(
-        features=(self.num_query_heads, (self.qk_nope_head_dim + self.v_head_dim)),
+    self.wkv_b = dense_general(
+        in_features=self.kv_lora_rank,
+        features=(
+            self.num_query_heads,
+            (self.qk_nope_head_dim + self.v_head_dim),
+        ),
         axis=-1,
         kernel_init=self.kernel_init,
         kernel_axes=("kv_lora", "kv_heads", "kv_head_dim"),
@@ -2010,3 +2022,4 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
             self.q_sequence.tobytes() if self.q_sequence is not None else None,
         )
     )
+  
