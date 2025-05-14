@@ -46,25 +46,13 @@ def get_server_config(config_str: str, config: Any) -> Type[config_lib.ServerCon
           generate_engine_create_fns=(),
           interleaved_engine_create_fns=(functools.partial(create_maxengine, config=config),),
       )
-    case "ExperimentalMaxtextDisaggregatedServer_16":
+    case "ExperimentalMaxtextDisaggregatedServer":
       # ExperimentalMaxtextDisaggregatedServer is still under development.
       # Its dependencies IFRT Proxy and other components are not publicly available
       # either.
       server_config = config_lib.ServerConfig(
-          prefill_slices=("v5e-16",),
-          generate_slices=("v5e-16",),
-          interleaved_slices=(),
-          prefill_engine_create_fns=(functools.partial(create_exp_maxengine, config=config),),
-          generate_engine_create_fns=(functools.partial(create_exp_maxengine, config=config),),
-          interleaved_engine_create_fns=(),
-      )
-    case "ExperimentalMaxtextDisaggregatedServer_8":
-      # ExperimentalMaxtextDisaggregatedServer is still under development.
-      # Its dependencies IFRT Proxy and other components are not publicly available
-      # either.
-      server_config = config_lib.ServerConfig(
-          prefill_slices=("v6e-8",),
-          generate_slices=("v6e-8",),
+          prefill_slices=(config.prefill_slice,),
+          generate_slices=(config.generate_slice,),
           interleaved_slices=(),
           prefill_engine_create_fns=(functools.partial(create_exp_maxengine, config=config),),
           generate_engine_create_fns=(functools.partial(create_exp_maxengine, config=config),),
