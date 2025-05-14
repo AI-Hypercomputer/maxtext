@@ -1,22 +1,26 @@
 """
 MaxText Offline Inference Engine
 
-Features
-- Continous batching
+Features:
+- Continuous batching
 - Prefill packing
-- Single and multihost with TP
-- DP with Pathways
+- Single and multihost with Tensor Parallelism (TP)
+- Data Parallelism (DP) with Pathways
 
 Example usage:
-
     offline_engine = OfflineEngine(
-        config=maxtext_config, params=None, enable_batch_prefill=True, dp = 1, dp_meshes = None
+        config=maxtext_config, 
+        params=None, 
+        enable_batch_prefill=True, 
+        dp=1, 
+        dp_meshes=None
     )
 
-    input_data = [jax.numpy.arange(80),
-                    jax.numpy.arange(90),
-                    jax.numpy.arange(100),
-                    ]
+    input_data = [
+        jax.numpy.arange(80),
+        jax.numpy.arange(90),
+        jax.numpy.arange(100),
+    ]
 
     results = offline_engine.batch_inference(input_data)
 
@@ -31,33 +35,36 @@ Notes:
       detokenization thread.
 """
 
-import pathwaysutils
-from typing import Any, List, Tuple, Callable, Optional, Dict, Union
-from collections import defaultdict
-import dataclasses
-import functools
-import logging
 import os
 import queue
 import signal
+import logging
 import threading
 import traceback
-import jax
-from jetstream.engine import engine_api
+import functools
+import dataclasses
 from enum import Enum
+from typing import Any, List, Tuple, Callable, Optional, Dict, Union
+from collections import defaultdict
 
-# pylint: disable=no-name-in-module
-from MaxText.maxengine import MaxEngine
-from MaxText.prefill_packing import PrefillProcessor, BatchedPrefillProcessor
-from jax.sharding import Mesh
-from jax.experimental import mesh_utils
+import jax
 import numpy as np
 import jax.numpy as jnp
+from jax.sharding import Mesh
+from jax.experimental import mesh_utils
+
+import pathwaysutils
+from jetstream.engine import engine_api
+from MaxText.maxengine import MaxEngine
+from MaxText.prefill_packing import PrefillProcessor, BatchedPrefillProcessor
 
 DecodeState = Any
 Params = Any
+MaxTextConfig = Any
 
+# Configure logging
 log = logging.getLogger(__name__)
+
 
 @dataclasses.dataclass
 class InputData:
@@ -68,7 +75,6 @@ class InputData:
         tokens: JAX array containing the tokenized input
         true_length: Actual length of the input before padding
     """
-
     id: str
     tokens: jax.Array
     true_length: int
@@ -76,16 +82,15 @@ class InputData:
 
 @dataclasses.dataclass
 class CompletionOutput:
-    """Class for returned output
+    """Class for returned output.
 
     Attributes:
-    index: The index of the output in the request.
-    token_ids: The token IDs of the generated output text.
-    logprobs: The log probabilities of the output tokens
+        index: The index of the output in the request.
+        token_ids: The token IDs of the generated output text.
+        logprobs: The log probabilities of the output tokens.
     """
-
     index: int
-    token_ids: jax.Array  # globally replicated or not?
+    token_ids: jax.Array
     logprobs: jax.Array
 
 
@@ -111,13 +116,14 @@ class JetThread(threading.Thread):
     def run(self):
         try:
             super().run()
-        except Exception as e:  # pylint: disable=broad-exception-caught
+        except Exception as e: # pylint: disable=broad-exception-caught
             traceback.print_exc()
             # Kill the process if a thread encounters an error
             os.kill(os.getpid(), signal.SIGKILL)
 
 
 class PrefillType(Enum):
+    """Enumeration of prefill processing types."""
     DEFAULT = "default"
     BATCH = "batch"
 
@@ -141,11 +147,15 @@ class PrefillHelper:
         Args:
             type: The type of prefill processor to use ("default" or "batch")
             engine: The MaxEngine instance to use for prefill operations
+            prefill_lengths: List of prefill lengths to support
+            batch_prefill_max_batch_size: Maximum number of inputs in one packed sequence for batch prefill
+            auto_layout_supported: Whether to use auto layout. 
         """
         self._type = type
         self.engine = engine
         self.prefill_lengths = prefill_lengths
         self.auto_layout_supported = auto_layout_supported
+        
         if type == PrefillType.DEFAULT:
             self._processor = PrefillProcessor(engine)
         elif type == PrefillType.BATCH:
@@ -155,14 +165,17 @@ class PrefillHelper:
             # Also create a standard processor for fallback cases
             self._processor = PrefillProcessor(engine)
         else:
-            raise ValueError(f"Invalid type: {type}")
+            raise ValueError(f"Invalid prefill type: {type}")
 
     def aot_compile(
         self,
         params: Params,
         decode_state: DecodeState,
-    ) -> None:
+    ) -> DecodeState:
+        """Ahead-of-time compile prefill functions for all supported lengths.
+        """
         max_length = self.prefill_lengths[-1]
+        
         if self._type == PrefillType.DEFAULT:
             for length in self.prefill_lengths:
                 print(f"AOT compiling prefill for length: {length}")
@@ -185,14 +198,14 @@ class PrefillHelper:
                         )
                     else:
                         tokens = jax.ShapeDtypeStruct((max_length,), jnp.dtype("int32"))
-                        slots = jnp.arange(0, self.max_batch_size, dtype=int)
+                        slots = jnp.arange(0, self.batch_prefill_max_batch_size, dtype=int)
                         decoder_positions = jnp.arange(0, max_length, dtype=int)
                         decoder_segment_ids = jnp.ones(max_length, dtype=int)
                         start_pos = jnp.arange(
-                            0, max_length, max_length // self.max_batch_size, dtype=int
+                            0, max_length, max_length // self.batch_prefill_max_batch_size, dtype=int
                         )
                         true_lengths = jnp.full(
-                            self.max_batch_size, padded_length, dtype=int
+                            self.batch_prefill_max_batch_size, padded_length, dtype=int
                         )
 
                         first_tokens, decode_state = (
@@ -209,7 +222,7 @@ class PrefillHelper:
                                 decode_state,
                             )
                         )
-            # for fallback
+            # For fallback
             print(f"AOT compiling prefill for length: {max_length}")
             if self.auto_layout_supported:
                 self._processor.aot_compile(params, max_length)
@@ -218,6 +231,7 @@ class PrefillHelper:
                 first_token, decode_state = self._processor._process(
                     params, tokens, 0, max_length, decode_state
                 )
+        
         return decode_state
 
     def process(
@@ -229,14 +243,9 @@ class PrefillHelper:
         input_tokens_padded: jax.Array,
         input_true_length: int,
         max_length: int,
-        prefill_done: Callable[
-            [List[Tuple[engine_api.ResultTokens, int]], List[int], DecodeState], None
-        ],
+        prefill_done: Callable[[List[Tuple[engine_api.ResultTokens, int]], List[int], DecodeState], None],
     ) -> None:
         """Process an input through the appropriate prefill processor.
-
-        This method routes the input to either the default processor or the
-        batch processor based on configuration and input characteristics.
 
         Args:
             model_params: Model parameters for inference
@@ -249,6 +258,7 @@ class PrefillHelper:
             prefill_done: Callback function called when prefill completes
         """
         padded_length = len(input_tokens_padded)
+        
         # Use default processor if configured or if input is already at max length
         if self._type == PrefillType.DEFAULT or padded_length == max_length:
             if self.auto_layout_supported:
@@ -305,21 +315,39 @@ class PrefillHelper:
 
 
 class ReplicaWorker:
+    """Worker class that manages inference on a single model replica."""
+    
     def __init__(
         self,
-        config,
-        params,
-        min_decode_steps,
-        enable_batch_prefill,
-        devices,
-        tokenizer,
-        eos_ids,
-        prefill_lengths,
-        batch_prefill_max_batch_size,
-        worker_id=0,
-        auto_layout_supported=False,
+        config: MaxTextConfig,
+        params: Params | None,
+        min_decode_steps: int,
+        enable_batch_prefill: bool,
+        devices: List[Any],
+        tokenizer: Any,
+        eos_ids: List[int],
+        prefill_lengths: List[int],
+        batch_prefill_max_batch_size: int,
+        worker_id: int = 0,
+        auto_layout_supported: bool = False,
         run_as_a_thread=False,
     ):
+        """Initialize a ReplicaWorker.
+        
+        Args:
+            config: MaxText configuration
+            params: Model parameters, if None, the params will be loaded from the config
+            min_decode_steps: Minimum number of decode steps to run at once
+            enable_batch_prefill: Whether to enable batch prefill
+            devices: JAX devices to use for this worker
+            tokenizer: Tokenizer to use
+            eos_ids: End-of-sequence token IDs
+            prefill_lengths: List of supported prefill lengths
+            batch_prefill_max_batch_size: Maximum batch size for batch prefill
+            worker_id: Worker identifier
+            auto_layout_supported: Whether auto layout is supported
+            run_as_a_thread: Whether to run in a separate thread
+        """
         # Configurations
         self.config = config
         self.params = params
@@ -367,7 +395,6 @@ class ReplicaWorker:
         self.res = None  # Results storage
 
         # Compiled functions
-
         if auto_layout_supported:
             self.generate_fn, self.params, init_decode_state_fn = (
                 self.engine.aot_compile(self.params, pass_rng_shape=False)
@@ -378,16 +405,28 @@ class ReplicaWorker:
             self.decode_state = self.engine.init_decode_state()
 
         self.worker_thread = None
+        self.warm_up_thread = None
         self.running = False
 
     def _init_engine(self, params):
-        """Initialize the MaxEngine."""
+        """Initialize the MaxEngine.
+        
+        Args:
+            params: Model parameters
+            
+        Returns:
+            Tuple of (params, engine)
+        """
         engine = MaxEngine(self.config, self.devices)
         params = engine.load_params(params)
         return params, engine
 
     def _init_tokenizer(self):
-        """Initialize the tokenizer."""
+        """Initialize the tokenizer.
+        
+        Returns:
+            Initialized tokenizer
+        """
         if self.eos_ids is None and self.tokenizer is None:
             tokenizer_params = self.engine.get_tokenizer()
             self.tokenizer = self.engine.build_tokenizer(tokenizer_params)
@@ -396,20 +435,20 @@ class ReplicaWorker:
         return self.tokenizer
 
     def warm_up_impl(self):
+        """Warm up the engine by compiling and running on dummy data."""
         self.decode_state = self.prefill_helper.aot_compile(
             self.params, self.decode_state
         )
         assert self.decode_state is not None
 
         for _ in range(3):
-            print("warm up generate fn")
+            print("Warming up generate function")
             self.decode_state, result_tokens = self.generate_fn(
                 self.params, self.decode_state, None
             )
 
-    def warm_up(
-        self,
-    ):
+    def warm_up(self):
+        """Start warm-up process, optionally in a separate thread."""
         if self.run_as_a_thread:
             self.warm_up_thread = JetThread(
                 target=self.warm_up_impl,
@@ -419,9 +458,11 @@ class ReplicaWorker:
         else:
             self.warm_up_impl()
 
-    def finish_warm_up(self):
-        if self.run_as_a_thread:
+    def ensure_warm_up_finished(self):
+        """Ensure the warm up thread is finished"""
+        if self.warm_up_thread is not None:
             self.warm_up_thread.join()
+            self.warm_up_thread = None
 
     def start_inference(
         self,
@@ -429,6 +470,14 @@ class ReplicaWorker:
         results,
         desc: str = "",
     ):
+        """Start the inference process.
+        
+        Args:
+            data_queue: Queue containing input data
+            results: Dictionary to store results
+            desc: Description for logging
+        """
+        self.ensure_warm_up_finished()
         self.res = results
         if self.run_as_a_thread:
             self.worker_thread = JetThread(
@@ -441,8 +490,10 @@ class ReplicaWorker:
             self._start_inference(data_queue, desc)
 
     def stop(self):
-        if self.run_as_a_thread:
+        """Stop the inference process and wait for completion."""
+        if self.worker_thread is not None:
             self.worker_thread.join()
+            self.worker_thread = None
 
     def _start_inference(
         self,
@@ -458,7 +509,7 @@ class ReplicaWorker:
         Returns:
             Dictionary mapping input ids to output token sequences
         """
-        print("start inference")
+        print("Starting inference")
         # Reset state
         self.counter = EventCounter(input=0, prefill=0, decode=0, detokenize=0)
         self.empty_decode_slots = list(range(self.batch_size))
@@ -509,7 +560,7 @@ class ReplicaWorker:
 
         # Log completion statistics
         log.info(
-            "summary-%s-prefills-%d-decodes-%d-detokens-%d completed.",
+            "Summary %s: prefills=%d, decodes=%d, detokens=%d completed.",
             desc,
             self.counter.prefill,
             self.counter.decode,
@@ -528,7 +579,6 @@ class ReplicaWorker:
         Returns:
             True if this token signals the end of generation, False otherwise
         """
-        # print("emit_token", prompt_id, token)
         already_reached_eos = (
             len(self.res[prompt_id]) > 0
             and self.res[prompt_id][-1] == self.tokenizer.eos_id
@@ -573,7 +623,6 @@ class ReplicaWorker:
             self.decode_state, result_tokens = self.generate_fn(
                 self.params, self.decode_state, None
             )
-            # print("putting result_tokens to detokenize_backlog")
             # Add results to detokenization queue
             self.detokenize_backlog.put(
                 (result_tokens.convert_to_numpy(), False, 0, 0), block=True
@@ -588,14 +637,11 @@ class ReplicaWorker:
         the detokenization queue, emit tokens, and free up
         decode slots when sequences complete.
         """
-        print("detokenize start")
-        # while self.counter.detokenize < self.counter.input:
         while self.running or not self.detokenize_backlog.empty():
             newly_empty = []
 
             # Get next item from queue with timeout
             result_tokens, is_first_token, row_id, slot = self.detokenize_backlog.get()
-            # print("got result_tokens from detokenize_backlog")
 
             # Process generated tokens
             if is_first_token:
@@ -626,16 +672,16 @@ class ReplicaWorker:
 class OfflineEngine:
     """Class for handling offline inference on batches of inputs.
 
-    The logic is the following:
+    The logic is as follows:
     1. Process input one at a time
     2. Pad the input data to the nearest power of 2
-    3. Prefill input and insert kv cache
+    3. Prefill input and insert KV cache
     4. Keep on processing inputs and prefilling until
-    there are enough samples to do batch decoding
+       there are enough samples to do batch decoding
     5. Decode until at least one of the samples is finished,
-    so there is room for new samples
+       so there is room for new samples
     6. Prefill to fill up the newly emptied decode slots
-    7. Repeat step 5 and 6 until all samples are finished
+    7. Repeat steps 5 and 6 until all samples are finished
     8. A background thread is used to detokenize the results
     9. Return the results
 
@@ -645,7 +691,7 @@ class OfflineEngine:
         doing the prefill.
 
         There are multiple buckets for packed sequences, where each bucket
-        contains inputs with same padded length. Only inputs with same
+        contains inputs with the same padded length. Only inputs with the same
         padded length will be packed together.
 
         It is important to sort the inputs by padded length so that the
@@ -675,7 +721,8 @@ class OfflineEngine:
         dp_meshes=None,
         auto_layout_supported=False,
     ):
-        """
+        """Initialize the OfflineEngine.
+        
         Args:
             config: The MaxText config object which will be used to
               create MaxEngine instance(s) and potentially, the tokenizer.
@@ -708,6 +755,7 @@ class OfflineEngine:
               option if you want to use only some of the devices for OfflineEngine and
               reserve the rest for other tasks. If None, OfflineEngine will create the meshes
               automatically.
+            auto_layout_supported: Whether auto layout is supported
         """
         # Configurations
         self.config = config
@@ -720,7 +768,6 @@ class OfflineEngine:
         self.eos_ids = eos_ids
         self.prefill_lengths = prefill_lengths
         self.batch_prefill_max_batch_size = batch_prefill_max_batch_size
-        # self.warm_up = warm_up
         self.max_prefill_length = self.config.max_prefill_predict_length
         self.max_decode_length = self.config.max_target_length - self.max_prefill_length
         self.auto_layout_supported = auto_layout_supported
@@ -744,16 +791,14 @@ class OfflineEngine:
             self.dp_meshes = []
             num_devices_per_replica = len(devices) // self.dp
             mesh_shape = self.config.ici_parallelism
-            # print(f"mesh_shape: {mesh_shape}")
-            # TODO: find the optimal devices for this mesh
+            
             for i in range(self.dp):
                 mesh_devices = np.array(
                     devices[
                         i * num_devices_per_replica : (i + 1) * num_devices_per_replica
                     ]
                 ).reshape(mesh_shape)
-                print(f"mesh_devices: {mesh_devices.shape}")
-                # optimized_mesh_devices = mesh_utils.create_device_mesh(mesh_shape, mesh_devices)
+                print(f"Mesh devices shape: {mesh_devices.shape}")
                 self.dp_meshes.append(Mesh(mesh_devices, self.config.mesh_axes))
 
         # Initialize ReplicaWorkers
@@ -775,47 +820,55 @@ class OfflineEngine:
             )
             for i in range(self.dp)
         ]
-        print("created replica workers")
+        print(f"Created {self.dp} replica workers")
         self.tokenizer = self.replica_workers[0].tokenizer
+        if self.warm_up:
+            self.warm_up()
 
     def warm_up(self):
+        """Warm up all replica workers."""
         for i in range(self.dp):
             self.replica_workers[i].warm_up()
         for i in range(self.dp):
-            self.replica_workers[i].finish_warm_up()
+            self.replica_workers[i].ensure_warm_up_finished()
 
     def batch_inference(
         self,
         data: Union[List[InputData], List[jax.Array]],
-        data_is_padded: bool = False,
         desc: str = "",
     ) -> Dict[str, List[int]]:
         """Run inference on a batch of inputs.
 
         Args:
-            data: List of InputData objects containing input sequences
+            data: List of InputData objects or JAX arrays containing input tokens (and no padding tokens).
             desc: Description string for logging
 
         Returns:
-            Dictionary mapping input ids to output token sequences
+            Dictionary mapping input ids to output token sequences or a list of token sequences
         """
-        # Prepare input data (pad, and sort if using batch prefill)
+        # Detect input type and prepare data
         data_is_jax_array = isinstance(data[0], jax.Array)
-        print("batch inference start")
-        data = self.prepare_data(data, data_is_padded)
-        print("prepared data")
+        print("Starting batch inference")
+        data = self.prepare_data(data)
+        print(f"Prepared {len(data)} inputs for inference")
 
-        # Thread-safe
+        # Create thread-safe queue and results container
         data_queue = queue.Queue()
         results = defaultdict(list)
 
+        # Add all data to the queue
         for row in data:
             data_queue.put(row)
+            
+        # Start inference on all replica workers
         for i in range(self.dp):
-            self.replica_workers[i].start_inference(data_queue, results)
+            self.replica_workers[i].start_inference(data_queue, results, desc)
+            
+        # Wait for all workers to complete
         for i in range(self.dp):
             self.replica_workers[i].stop()
 
+        # Return results in the appropriate format
         if data_is_jax_array:
             res = [results[input_data.id] for input_data in data]
             return res
@@ -825,6 +878,12 @@ class OfflineEngine:
     def sort_data(self, data: List[InputData]) -> List[InputData]:
         """Sort input data by padded length. This helps with batch prefilling by
         filling up the buckets quickly.
+        
+        Args:
+            data: List of input data objects
+            
+        Returns:
+            Sorted list of input data objects
         """
         data_dict = defaultdict(list)
         padded_lengths = []
@@ -834,9 +893,10 @@ class OfflineEngine:
             padded_lengths.append(row.tokens.shape[0])
             data_dict[row.tokens.shape[0]].append(row)
 
+        # Concatenate groups in order of increasing length
         data = []
         for padded_len in sorted(set(padded_lengths)):
-            log.info("padded len: %d, num: %d", padded_len, len(data_dict[padded_len]))
+            log.info("Padded length: %d, count: %d", padded_len, len(data_dict[padded_len]))
             data += data_dict[padded_len]
 
         return data
@@ -844,6 +904,12 @@ class OfflineEngine:
     def pad_data(self, data: List[InputData]) -> List[InputData]:
         """For each input, pad it to the next length in self.prefill_lengths
         that is greater than or equal to its true length.
+        
+        Args:
+            data: List of input data objects
+            
+        Returns:
+            List of padded input data objects
         """
         padded_data = []
 
@@ -859,6 +925,7 @@ class OfflineEngine:
             if target_length is None:
                 target_length = self.max_prefill_length
 
+            # Pad or truncate as needed
             if len(item.tokens) < target_length:
                 # Pad with zeros
                 padded_tokens = jax.numpy.zeros(target_length, dtype=item.tokens.dtype)
@@ -879,35 +946,48 @@ class OfflineEngine:
         return padded_data
 
     def prepare_data(
-        self, data: List[InputData], data_is_padded: bool = True
+        self, data: List[Union[InputData, jax.Array]]
     ) -> List[InputData]:
-        """Prepare input data for inference by padding and optionally sorting."""
+        """Prepare input data for inference by padding and optionally sorting.
+        
+        Args:
+            data: List of input data objects or JAX arrays
+            data_is_padded: Whether the input data is already padded
+            
+        Returns:
+            List of prepared input data objects
+        """
+        # Convert JAX arrays to InputData objects if needed
         if isinstance(data[0], jax.Array):
             data = [
                 InputData(id=i, tokens=array, true_length=len(array))
                 for i, array in enumerate(data)
             ]
 
-        if not data_is_padded:
-            data = self.pad_data(data)
+        # Pad data if needed
+        data = self.pad_data(data)
 
-        # Sort data by length if using batch prefill
+        # Sort data by length if using batch prefill for better efficiency
         if self.enable_batch_prefill:
-            # Sort data by length when doing batch prefilling so
-            # buckets fill up quickly
             return self.sort_data(data)
 
         return data
 
     def _validate_config(self):
-        if self.enable_batch_prefill and self.engine.config.scan_layers:
+        """Validate configuration parameters and check for incompatible settings."""
+        # Check if batch prefill is compatible with scan layers
+        if self.enable_batch_prefill and self.config.scan_layers:
             raise ValueError(
                 "scan_layers must be False if enable_batch_prefill is True"
             )
+            
+        # Ensure there's enough room for decoding
         if self.max_decode_length <= 0:
             raise ValueError(
                 "Make sure max_target_length - max_prefill_predict_length is greater than 0"
             )
+            
+        # Initialize Pathways if using data parallelism
         if self.dp > 1:
             # Initialize Pathways if not already initialized
             pathwaysutils.initialize()

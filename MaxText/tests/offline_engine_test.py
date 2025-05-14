@@ -24,7 +24,7 @@ from MaxText.globals import PKG_DIR
 import jax
 import jax.numpy as jnp
 from MaxText.maxengine import MaxEngine
-from MaxText.inference.offine_engine import OfflineEngine, InputData
+from MaxText.inference.offline_engine import OfflineEngine, InputData
 from MaxText import pyconfig
 import random
 import time
