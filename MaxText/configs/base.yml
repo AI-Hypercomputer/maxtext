@@ -457,7 +457,7 @@ max_prefill_predict_length: 64 # Maximum length for the prefill when doing autor
 prompt: '<s>[INST] <<SYS>>\nYou are an AI assistant. User will you give you a task. Your goal is to complete the task as faithfully as you can. While performing the task think step-by-step and justify your steps.\n<</SYS>>\n\nSentence: "Who did that Plato loved seem to be known by everyone."\nWould a linguist rate this sentence to be acceptable linguistically? [/INST]'
 # For nsys profiler, pass the training command to nsys command
 # e.g. nsys profile -s none --force-overwrite true --capture-range=cudaProfilerApi --capture-range-end=stop {training command}
-profiler: "" # Supported profiler: '', xplane, nsys
+profiler: "xplane" # Supported profiler: '', xplane, nsys
 # If set to true, upload all profiler results from all hosts. Otherwise, only upload the profiler result from the first host.
 upload_all_profiler_results: False
 # Skip first n steps for profiling, to omit things like compilation and to give
@@ -579,9 +579,9 @@ max_checkify: False
 # Inference
 inference_microbenchmark_prefix_cache_entries_num: 100
 inference_microbenchmark_prefix_cache_common_prefix_proportion: 0.5
-inference_microbenchmark_prefill_lengths: "64,128,256,512,1024"
-inference_microbenchmark_stages: "generate"
-inference_microbenchmark_loop_iters: 100
+inference_microbenchmark_prefill_lengths: "32,512,1024"
+inference_microbenchmark_stages: "prefill,prefill_insert,generate"
+inference_microbenchmark_loop_iters: 10
 inference_microbenchmark_log_file_path: ""
 inference_microbenchmark_num_samples: [1, 2, 3, 4, 5]
 inference_metadata_file: "" # path to a json file

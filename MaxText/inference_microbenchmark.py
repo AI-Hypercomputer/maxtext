@@ -79,7 +79,7 @@ def prefill_benchmark_loop(engine, params, tokens, true_length, iters, shared_rn
         current_rng, rng_prefill = jax.random.split(current_rng)
         start_time = time.perf_counter()
         prefill_result, _ = engine.prefill(
-            params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill
+            params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill, slot=0,
         )
         jax.block_until_ready(prefill_result)
         end_time = time.perf_counter()
@@ -96,7 +96,7 @@ def prefill_benchmark(config, engine, params, tokens, true_length, num_model_par
     for _ in range(_WARMUP_ITERS):
         current_rng, rng_prefill_warmup = jax.random.split(current_rng)
         prefill_result_warmup, _ = engine.prefill(
-            params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill_warmup
+            params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill_warmup, slot=0,
         )
     jax.block_until_ready(prefill_result_warmup)
     del prefill_result_warmup
@@ -133,18 +133,17 @@ def insert_benchmark_loop(engine, prefill_result_for_insert, initial_decode_stat
     iter_times_s = []
     current_decode_state = initial_decode_state
     
-    # prof = profiler.Profiler(profile_config) 
-    # prof.activate(optional_postfix=f"{profile_name_prefix}_insert_loop")
+    prof = profiler.Profiler(profile_config) 
+    prof.activate(optional_postfix=f"{profile_name_prefix}_insert_loop")
 
     for i in range(iters):
-        slot_idx = int(i % total_slots)
         start_time = time.perf_counter()
-        current_decode_state = engine.insert(prefill_result_for_insert, current_decode_state, slot_idx)
+        current_decode_state = engine.insert(prefill_result_for_insert, current_decode_state, slot=0)
         jax.block_until_ready(current_decode_state)
         end_time = time.perf_counter()
         iter_times_s.append(end_time - start_time)
     
-    # prof.deactivate()
+    prof.deactivate()
     return iter_times_s, current_decode_state
 
 
@@ -153,14 +152,13 @@ def insert_benchmark(config, engine, params, tokens, true_length, initial_decode
     
     current_rng, rng_prefill_setup = jax.random.split(shared_rng_key)
     prefill_result_for_insert, _ = engine.prefill(
-        params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill_setup
+        params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill_setup, slot=0,
     )
     jax.block_until_ready(prefill_result_for_insert)
 
     warmup_decode_state = initial_decode_state 
     for i in range(_WARMUP_ITERS):
-        slot_idx = int(i % total_slots)
-        warmup_decode_state = engine.insert(prefill_result_for_insert, warmup_decode_state, slot_idx)
+        warmup_decode_state = engine.insert(prefill_result_for_insert, warmup_decode_state, slot=0)
     jax.block_until_ready(warmup_decode_state)
 
     iter_times_s, final_decode_state = insert_benchmark_loop(
@@ -191,23 +189,22 @@ def prefill_and_insert_benchmark_loop(
     current_decode_state = initial_decode_state
     prefill_result = None
 
-    # prof = profiler.Profiler(profile_config)
-    # prof.activate(optional_postfix=f"{profile_name_prefix}_prefill_insert_loop")
+    prof = profiler.Profiler(profile_config)
+    prof.activate(optional_postfix=f"{profile_name_prefix}_prefill_insert_loop")
 
     for i in range(iters):
         current_rng, rng_prefill = jax.random.split(current_rng)
-        slot_idx = int(i % total_slots)
         start_time = time.perf_counter()
         prefill_result, _ = engine.prefill(
-            params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill
+            params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill, slot=0,
         )
-        current_decode_state = engine.insert(prefill_result, current_decode_state, slot_idx)
+        current_decode_state = engine.insert(prefill_result, current_decode_state, slot=0)
         jax.block_until_ready(current_decode_state) 
         end_time = time.perf_counter()
         iter_times_s.append(end_time - start_time)
         
     del prefill_result 
-    # prof.deactivate()
+    prof.deactivate()
     return iter_times_s, current_decode_state
 
 
@@ -221,11 +218,10 @@ def prefill_and_insert_benchmark(
     prefill_result_warmup = None
     for i in range(_WARMUP_ITERS):
         current_rng, rng_prefill_warmup = jax.random.split(current_rng)
-        slot_idx = int(i % total_slots)
         prefill_result_warmup, _ = engine.prefill(
-            params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill_warmup
+            params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill_warmup, slot=0,
         )
-        warmup_decode_state = engine.insert(prefill_result_warmup, warmup_decode_state, slot_idx)
+        warmup_decode_state = engine.insert(prefill_result_warmup, warmup_decode_state, slot=0)
     jax.block_until_ready(warmup_decode_state)
     del prefill_result_warmup
 
@@ -265,8 +261,8 @@ def ar_benchmark_loop(engine, params, initial_decode_state, iters, shared_rng_ke
     iter_times_s = []
     current_rng = shared_rng_key
     current_decode_state = initial_decode_state
-    # prof = profiler.Profiler(profile_config)
-    # prof.activate(optional_postfix=profile_name)
+    prof = profiler.Profiler(profile_config)
+    prof.activate(optional_postfix=profile_name)
     
     for _ in range(iters):
         current_rng, rng_generate = jax.random.split(current_rng)
@@ -276,7 +272,7 @@ def ar_benchmark_loop(engine, params, initial_decode_state, iters, shared_rng_ke
         end_time = time.perf_counter()
         iter_times_s.append(end_time - start_time)
         
-    # prof.deactivate()
+    prof.deactivate()
     return iter_times_s, current_decode_state
 
 
@@ -422,7 +418,7 @@ def summarize_prefill_result_data(engine, params, tokens, true_length, shared_rn
     print(f"\nSummarizing Prefill Result Data for prefill length {tokens.size}:")
     current_rng, rng_prefill_summary = jax.random.split(shared_rng_key)
     prefill_result_obj, _ = engine.prefill(
-        params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill_summary
+        params=params, padded_tokens=tokens, true_length=true_length, rng=rng_prefill_summary, slot=0,
     )
     jax.block_until_ready(prefill_result_obj)
     
