@@ -340,6 +340,7 @@ def make_c4_mlperf_eval_iterator(
     process_indices,
 ):
   """Make eval iterator of customized C4 dataset for mlperf gpt3 training."""
+  eval_slit = "None"
   if config.eval_dataset_name == "c4/en:3.0.5":
     is_tokenized_dataset = True
   elif config.eval_dataset_name == "c4/en:3.0.4":
@@ -350,6 +351,7 @@ def make_c4_mlperf_eval_iterator(
     eval_slit = "validation"
   else:
     raise ValueError(f"{config.eval_dataset_name=} should be one of ('c4/en:3.0.1', 'c4/en:3.0.4', 'c4/en:3.0.5')")
+  
   if is_tokenized_dataset:
     eval_ds = get_dataset(
         dataset_name=config.eval_dataset_name,
