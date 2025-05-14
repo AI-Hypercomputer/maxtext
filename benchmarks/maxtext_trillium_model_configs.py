@@ -1756,13 +1756,13 @@ llama3_1_70b_131072 = _add_to_model_dictionary(
 )
 
 
-c4_deepseek_v3_ep16 = _add_to_model_dictionary(
+c4_deepseek_v3_fsdp = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
-        model_name="c4_deepseek_v3_ep16",
+        model_name="c4_deepseek_v3_fsdp",
         model_type="deepseek3-671b",
         tuning_params={
-            "per_device_batch_size": 1,
+            "per_device_batch_size": 4,
             "max_target_length": 8192,
             "ici_fsdp_parallelism": 1,
             "ici_expert_parallelism": -1,
@@ -1771,8 +1771,8 @@ c4_deepseek_v3_ep16 = _add_to_model_dictionary(
             "gcs_metrics": True,
             "use_iota_embed": True,
             "enable_checkpointing": True,
-            "load_parameters_path": "gs://ranran-multipod-dev/deepseek3/conversion/bf16/1/0/items",
-            "dataset_path": "gs://trillium-scale-datasets-q1-25-west",
+            "load_parameters_path": "gs://maxtext-model-checkpoints/deepseek3-671B",
+            "dataset_path": "gs://max-datasets-rogue",
             "skip_first_n_steps_for_profiler": 5,
             "profiler_steps": 5,
             "profiler": "xplane",
@@ -1786,7 +1786,8 @@ c4_deepseek_v3_ep16 = _add_to_model_dictionary(
             "dataset_name": "c4/en:3.0.7",
             "eval_dataset_name": "c4/en:3.0.9",
             "opt_type": "adam_pax",
-            "tokenizer_path": "assets/tokenizer.mistral-v3",
+            "tokenizer_type": "huggingface",
+            "tokenizer_path": "deepseek-ai/DeepSeek-V3",
             "dtype": "bfloat16",
             "attention": "flash",
         },
