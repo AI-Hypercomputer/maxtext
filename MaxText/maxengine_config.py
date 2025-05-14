@@ -14,12 +14,13 @@
 
 """Configure MaxText For JetStream"""
 import functools
+from typing import Any, Type
 
 import jax
-from typing import Any, Type
 
 from jetstream.core import config_lib
 from jetstream.engine import engine_api
+
 from MaxText import maxengine
 
 

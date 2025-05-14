@@ -18,12 +18,11 @@ import subprocess
 import sys
 import os.path
 import tempfile
+import unittest
 
 import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
-
-import unittest
 
 from MaxText import pyconfig
 from MaxText.input_pipeline import _grain_data_processing
@@ -198,7 +197,7 @@ def mount_gcsfuse():
       raise FileNotFoundError(script_path)
 
     exit_code = subprocess.call(
-      ["bash", script_path, "DATASET_GCS_BUCKET=maxtext-dataset", f"MOUNT_PATH={os.path.join(temp_dir, 'gcsfuse')}"]
+        ["bash", script_path, "DATASET_GCS_BUCKET=maxtext-dataset", f"MOUNT_PATH={os.path.join(temp_dir, 'gcsfuse')}"]
     )
     if exit_code != os.EX_OK:
       raise ValueError(f"Running setup_gcsfuse.sh failed with exit code: {exit_code}")

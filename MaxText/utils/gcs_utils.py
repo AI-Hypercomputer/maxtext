@@ -16,15 +16,18 @@ limitations under the License.
 
 """ Common GCS Utils needed by multiple modules"""
 import shutil
-import jax
 import json
 import os
 import socket
-import yaml
 from pathlib import Path
 
-from MaxText import max_logging
+import yaml
+
 from google.cloud import storage
+
+import jax
+
+from MaxText import max_logging
 
 
 def write_config_raw_keys_for_gcs(raw_keys):

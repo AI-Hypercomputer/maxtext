@@ -86,7 +86,7 @@ def _posemb_sincos_2d(
     dtype: jnp.dtype = jnp.float32,
 ):
   """Follows the MoCo v3 logic."""
-  y, x = jnp.mgrid[:h, :w]
+  y, x = jnp.mgrid[:h, :w]  # pylint: disable=unpacking-non-sequence
 
   assert width % 4 == 0, "Width must be mult of 4 for sincos posemb"
   omega = jnp.arange(width // 4) / (width // 4 - 1)

@@ -17,15 +17,15 @@ limitations under the License.
 # pytype: skip-file
 # pylint: disable=missing-module-docstring, bare-except, consider-using-generator, missing-function-docstring
 from collections import OrderedDict
+from typing import Any, Union
 import math
 import os
 import sys
 
-from typing import Any, Union
-
 import jax
-import omegaconf
 from jax.experimental.compilation_cache import compilation_cache
+
+import omegaconf
 
 from MaxText import accelerator_to_spec_map
 from MaxText import max_logging

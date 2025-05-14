@@ -449,6 +449,8 @@ class MaxEngine(engine_api.Engine):
 
     if self.config.use_multimodal:
       input_images = images[jnp.newaxis, jnp.newaxis, ...]  # Add batch and sequence dimension [B, N, H, W, C]
+    else:
+      input_images = None
 
     # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
     start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
@@ -462,7 +464,7 @@ class MaxEngine(engine_api.Engine):
           input_params,
           input_tokens,
           positions,
-          encoder_images=input_images if self.config.use_multimodal else None,
+          encoder_images=input_images,
           decoder_segment_ids=sequence_indicator,
           enable_dropout=False,
           model_mode=common_types.MODEL_MODE_PREFILL,

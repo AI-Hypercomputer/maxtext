@@ -18,16 +18,16 @@ limitations under the License.
 import unittest
 import os.path
 
-from MaxText import pyconfig
+import jax
+from jax.sharding import Mesh
+import jax.numpy as jnp
 
+from MaxText import pyconfig
 from MaxText import optimizers
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText import maxtext_utils
 from MaxText.globals import PKG_DIR
-import jax
-from jax.sharding import Mesh
-import jax.numpy as jnp
 
 Transformer = models.Transformer
 

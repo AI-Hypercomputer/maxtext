@@ -18,14 +18,16 @@ limitations under the License.
 
 import glob
 from pathlib import Path
-
 import functools
+
 import ml_collections
+
 import jax
+
 import grain.python as grain
+
 from MaxText.input_pipeline import _input_pipeline_utils
 from MaxText.input_pipeline import _grain_tokenizer
-
 from MaxText import multihost_dataloading
 from MaxText import max_logging
 from MaxText import tokenizer

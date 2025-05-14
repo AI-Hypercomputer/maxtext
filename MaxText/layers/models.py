@@ -295,18 +295,15 @@ class Decoder(nn.Module):
         # Define parameter movement with mesh-based sharding
         def move_to_device(variables):
           """Move parameters to device with proper sharding."""
+
           def map_fn(path, value):
             max_logging.log(f"models.py: Moving parameter {path} to device")
             return jax.device_put(value, jax._src.sharding_impls.TransferToMemoryKind("device"))
+
           return jax.tree_util.tree_map_with_path(map_fn, variables)
 
         # Transform layer class before remat
-        block_layer = nn.map_variables(
-            block_layer,
-            ['params'],
-            move_to_device,
-            mutable=True
-        )
+        block_layer = nn.map_variables(block_layer, ["params"], move_to_device, mutable=True)
 
       # Apply remat policy to layer
       layer = nn.remat(
