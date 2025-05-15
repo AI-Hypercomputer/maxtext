@@ -22,10 +22,10 @@ from benchmarks.maxtext_trillium_model_configs import MaxTextModel, _add_to_mode
 
 v5p_model_dict = {}
 
-deepseek_v3_fsdp = _add_to_model_dictionary(
+deepseek_v3_fsdp_v5p_512  = _add_to_model_dictionary(
     v5p_model_dict,
     MaxTextModel(
-        model_name="deepseek_v3_fsdp",
+        model_name="deepseek_v3_fsdp_v5p_512",
         model_type="deepseek3-671b",
         tuning_params={
             "per_device_batch_size": 4,
@@ -63,10 +63,10 @@ deepseek_v3_fsdp = _add_to_model_dictionary(
     ),
 )
 
-c4_deepseek_v3_fsdp = _add_to_model_dictionary(
+c4_deepseek_v3_fsdp_v5p_512 = _add_to_model_dictionary(
     v5p_model_dict,
     MaxTextModel(
-        model_name="c4_deepseek_v3_fsdp",
+        model_name="c4_deepseek_v3_fsdp_v5p_512",
         model_type="deepseek3-671b",
         tuning_params={
             "per_device_batch_size": 4,
@@ -78,7 +78,7 @@ c4_deepseek_v3_fsdp = _add_to_model_dictionary(
             "gcs_metrics": True,
             "use_iota_embed": True,
             "enable_checkpointing": True,
-            "load_parameters_path": "gs://maxtext-model-checkpoints/deepseek3-671B",
+            "load_parameters_path": "gs://maxtext-model-checkpoints/deepseek3-671b/0/items",
             "dataset_path": "gs://max-datasets-rogue",
             "skip_first_n_steps_for_profiler": 5,
             "profiler_steps": 5,
