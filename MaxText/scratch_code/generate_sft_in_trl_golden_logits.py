@@ -16,8 +16,8 @@
 
 Usage:
 
-python3 -m MaxText.scratch_code.generate_sft_in_trl_golden_logits --model-name=llama3.1-8b \
-  --tokenizer-path=meta-llama/Llama-3.1-8B --max-target-length=64
+python3 -m MaxText.scratch_code.generate_sft_in_trl_golden_logits --model-name=llama2-7b \
+  --tokenizer-path=meta-llama/Llama-2-7b-chat-hf --max-target-length=32
 """
 
 import argparse
@@ -71,41 +71,26 @@ def setup_sft_trainer(data, hf_model, tokenizer, max_target_length):
   )
 
 
-def apply_chat_template():
-  messages = []
-  for message in DATA["messages"]:
-    if message["role"] == "user":
-      messages.append("<user>" + message["content"] + "</user>")
-    elif message["role"] == "assistant":
-      messages.append("<assistant>" + message["content"] + "</assistant>")
-  return messages
+def prepare_trl_inputs(tokenizer, max_target_length):
+  """Get tokenized inputs."""
+  data_in_chat_format = tokenizer.apply_chat_template(DATA["messages"], tokenize=False)
+  tokenized_data = tokenizer(data_in_chat_format, max_length=max_target_length, return_tensors="pt")
 
+  # masking prompt tokens in labels
+  prompt = DATA["messages"][0]
+  prompt_in_chat_template = tokenizer.apply_chat_template([prompt], tokenize=True)
+  labels = tokenized_data["input_ids"].clone()
+  labels[0][:len(prompt_in_chat_template)] = -100  # -100 is the masking value in Hugging Face
 
-def get_input_ids(data, tokenizer, max_target_length):
-  input_ids = []
-  attention_mask = []
-  for d in data:
-    input_ids += d["input_ids"]
-    attention_mask += d["attention_mask"]
-  labels = input_ids + [tokenizer.eos_token_id] + [0]
-  input_ids = [tokenizer.bos_token_id] + input_ids + [tokenizer.eos_token_id]
-  attention_mask = [1] + attention_mask + [1]
   return {
-      "input_ids": torch.tensor(input_ids[:max_target_length], dtype=torch.long).unsqueeze(0),
-      "labels": torch.tensor(labels[:max_target_length], dtype=torch.long).unsqueeze(0),
-      "attention_mask": torch.tensor(attention_mask[:max_target_length], dtype=torch.long).unsqueeze(0),
+    "input_ids": tokenized_data["input_ids"],
+    "attention_mask": tokenized_data["attention_mask"],
+    "labels": labels,
   }
 
 
-def prepare_trl_inputs(tokenizer, max_target_length):
-  data = apply_chat_template()
-  tokenized_data = [tokenizer(d) for d in data]
-  processed_data = get_input_ids(tokenized_data, tokenizer, max_target_length)
-  return processed_data
-
-
 def save_golden_logits(conf):
-  """save golden logits"""
+  """Save golden logits."""
   hf_model = get_hf_model(conf.tokenizer_path)
   tokenizer = get_tokenizer(conf.tokenizer_path, conf.max_target_length)
   trl_data = prepare_trl_inputs(tokenizer, conf.max_target_length)
@@ -127,8 +112,8 @@ def save_golden_logits(conf):
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
-  parser.add_argument("--model-name", type=str, required=False, default="llama3.1-8b")
-  parser.add_argument("--tokenizer-path", type=str, required=False, default="meta-llama/Llama-3.1-8B")
-  parser.add_argument("--max-target-length", type=int, required=False, default=64)
+  parser.add_argument("--model-name", type=str, required=False, default="llama2-7b")
+  parser.add_argument("--tokenizer-path", type=str, required=False, default="meta-llama/Llama-2-7b-chat-hf")
+  parser.add_argument("--max-target-length", type=int, required=False, default=32)
   config = parser.parse_args(sys.argv[1:])
   save_golden_logits(config)
