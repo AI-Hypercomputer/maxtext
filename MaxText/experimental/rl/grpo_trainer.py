@@ -599,10 +599,10 @@ def reshard(config, params, destination_shardings, meshes):
   return inference_params
 
 def pathways_reshard(config, params, destination_shardings, meshes):
-  inference_params = []
-  for destination_sharding, mesh in zip(destination_shardings, meshes):
-    with (jax.transfer_guard_device_to_host("disallow_explicit"), jax.transfer_guard_host_to_device("disallow_explicit")):
-      inference_params.append(pathwaysutils_reshard.reshard(params, destination_sharding.params))
+  with (jax.transfer_guard_device_to_host("disallow_explicit"), jax.transfer_guard_host_to_device("disallow_explicit")):
+    inference_params = [pathwaysutils_reshard.reshard(params, destination_shardings[0].params)]
+    for destination_sharding in destination_shardings[1:]:
+      inference_params.append(jax.device_put(inference_params[0], destination_sharding))
   return inference_params
 
 def setup_mesh_and_model(config, config_inference):

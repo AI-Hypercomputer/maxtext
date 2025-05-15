@@ -20,6 +20,8 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
+from jax.sharding import PartitionSpec as P
+from jax.sharding import NamedSharding
 import functools
 import time
 import os
@@ -858,3 +860,72 @@ def parse_custom_args(argv):
     if current_argv:
       configs.append(current_argv)
     return configs
+
+def unscan_train_state_params(train_state, mesh, scan_axis, layer_groups):
+  """
+  Unrolls scanned parameter groups into per-layer entries.
+
+  Args:
+    train_state: training state with scanned `params`
+    mesh: the mesh to use for sharding output
+    scan_axis: axis along which scanning was applied (usually 0)
+    layer_groups: list of tuples like:
+      [("dense_layers", 4), ("moe_layers", 12)]
+  """
+  decoder = train_state.params["params"]["decoder"]
+
+  for layer_name, num_layers in layer_groups:
+    scanned_layers = decoder[layer_name]
+
+    def strip_axis(pspec):
+      return P(*(pspec[:scan_axis] + pspec[scan_axis+1:]))
+
+    dummy_spec = jax.tree_util.tree_map(lambda _: P(), scanned_layers)
+    new_spec = jax.tree_util.tree_map(strip_axis, dummy_spec)
+    new_sharding = jax.tree_util.tree_map(lambda ps: NamedSharding(mesh, ps), new_spec)
+
+    def slice_layer(i):
+      return jax.tree_util.tree_map(lambda x: jnp.take(x, i, axis=scan_axis), scanned_layers)
+
+    for i in range(num_layers):
+      per_layer = jax.jit(slice_layer, out_shardings=new_sharding)(i)
+      decoder[f"{layer_name}_{i}"] = per_layer
+
+    del decoder[layer_name]
+    jax.tree_util.tree_map(lambda x: x.delete(), scanned_layers)  # Free memory
+
+def rescan_train_state_params(train_state, scan_axis, layer_groups, mesh):
+  """
+  Reconstruct scanned layers from per-layer entries using minimal HBM.
+  
+  Args:
+    train_state: training state with unrolled {layer_name}_{i} entries
+    scan_axis: axis to scan over (usually 0)
+    layer_groups: list of (layer_name, num_layers)
+    mesh: jax.sharding.Mesh for out_shardings
+  """
+  decoder = train_state.params["params"]["decoder"]
+
+  for layer_name, num_layers in layer_groups:
+    # Load first layer to get structure
+    base = decoder[f"{layer_name}_0"]
+
+    def stack_layers(*layers):
+      return jax.tree_util.tree_map(lambda *xs: jnp.stack(xs, axis=scan_axis), *layers)
+
+    # Create a wrapper that allows pjit + donation
+    compiled_stack = jax.jit(
+      stack_layers,
+      in_shardings=(None,) * num_layers,
+      out_shardings=None,  # Let JAX decide or use sharding inference
+      donate_argnums=tuple(range(num_layers)),
+    )
+
+    # Collect per-layer entries for stacking
+    layer_list = [decoder.pop(f"{layer_name}_{i}") for i in range(num_layers)]
+
+    # Stack them with donation
+    scanned = compiled_stack(*layer_list)
+
+    # Store result and clear temporary memory
+    decoder[layer_name] = scanned
