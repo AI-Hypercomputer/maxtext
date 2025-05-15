@@ -337,7 +337,6 @@ class RoutedMoE(nn.Module):
     expert_indices = jnp.arange(self.num_experts)
     sorted_experts = jnp.repeat(expert_indices, repeats=group_size, total_repeat_length=flatten_selected_experts.shape[0])
     return sorted_inputs, sorted_selected_experts, weights, group_size, sorted_experts
-  
 
   def unpermute(self, intermediate, sorted_selected_experts, weights, batch_size, sequence_length):
     """Unpermute tokens to original order and combine weights."""
@@ -361,46 +360,84 @@ class RoutedMoE(nn.Module):
       )
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
 
-
   @staticmethod
-  def local_permute(inputs, global_group_sizes, local_expert_size,
-                    shard_index, is_offset=False, global_sorted_experts=None):
-    """Sort inputs by expert within each shard."""
+  def local_permute(inputs, global_group_sizes, local_expert_size, shard_index, is_offset=False, global_sorted_experts=None):
+    """Permutes tokens locally within an expert shard.
+
+    This function prepares the input tokens for processing by the experts located
+    on the current shard. It groups the tokens by their assigned local expert
+    index (0 to local_expert_size - 1).
+
+    Args:
+      inputs: The input data (tokens) assigned to the experts on this shard.
+        Shape `[tokens, emb_dim]`.
+      global_group_sizes: The count of tokens assignments for each global expert across all the batch shards.
+        Shape `[num_batch_shards, num_experts].
+      local_expert_size: The number of experts handled by the current shard.
+      shard_index: The index of the current expert shard (0 to num_expert_parallelism - 1).
+      is_offset: If True, assumes `inputs` are pre-sorted by global expert ID
+        and selects the slice relevant to this shard's assigned experts. If False, assumes
+        that `inputs` corresponding to the shard's experts start from the beginning of the tensor
+        but need to be permuted by expert ID.
+      global_sorted_experts: Global expert IDs for the `inputs` used when `is_offset`
+        is True. Shape `[total_tokens_for_this_shard]`.
+
+    Returns:
+      A tuple containing:
+        sorted_inputs: Input data permuted local expert ID.
+        sorted_indices: Indices used to permute the inputs.
+        local_group_size: Number of tokens assigned to each local expert on this
+          shard.
+        sorted_experts_ids: expert ID corrsponding to each token of the permuted inputs.
+    """
+
+    # Slice the count of local expert IDs in each batch shard.
     all_shard_local_sizes = jax.lax.dynamic_slice_in_dim(
         global_group_sizes, shard_index * local_expert_size, local_expert_size, axis=1
     )
     local_sizes = all_shard_local_sizes.reshape(-1)
+
+    # Total count of the local expert IDs is the sum of the counts across all batch shards,
+    # since all batch shards will send their contributions to the current expert shard.
     local_group_size = jnp.sum(all_shard_local_sizes, axis=0)
-    
+
     # In this case, the data that needs to be processed by the local shard
     # does not start from row 0 but actually starts at
     # jnp.concatenate((jnp.array([0]), jnp.cumsum(local_group_sizes[:-1]))[shard_id]
-    # This happens for instance if the data is not produced via a ragged_all_to_all.
+    # This happens if batches (`inputs`) are replicated across expert shards and pre-sorted
+    # by global Expert ID (via permute()).
     if is_offset:
       divided_assignments = jnp.floor_divide(global_sorted_experts, local_expert_size)
       expert_indices = jnp.where(
-        divided_assignments == shard_index,
-        jnp.mod(global_sorted_experts, local_expert_size),
-        local_expert_size
+          divided_assignments == shard_index, jnp.mod(global_sorted_experts, local_expert_size), local_expert_size
       )
+
+    # In this case the `input` data has been received from the batch shards and needs to be
+    # reorganized in order of local Expert IDs.
     else:
       base_indices = jnp.mod(jnp.arange(local_sizes.shape[0]), local_expert_size)
       expert_indices = jnp.repeat(base_indices, local_sizes, total_repeat_length=inputs.shape[0])
+
     sorted_indices = jnp.argsort(expert_indices)
     sorted_inputs = jnp.take(inputs, indices=sorted_indices, axis=0)
     sorted_experts_ids = expert_indices[sorted_indices]
-    return sorted_inputs, sorted_indices, local_group_size, sorted_experts_ids,
-
+    return (
+        sorted_inputs,
+        sorted_indices,
+        local_group_size,
+        sorted_experts_ids,
+    )
 
   @staticmethod
   def get_all_to_all_params(all_shards_group_sizes, shard_id, num_expert_parallelism, is_batch_sharded=True):
-    """Generates input offsets, send sizes, output offsets, and receive sizes tensors which will be used for ragged_all_to_all."""
+    """Generates input offsets, send sizes, output offsets, and receive sizes used for ragged_all_to_all."""
+
     class TransformStrategy(Enum):
       INPUT_OFFSET = auto()
       SEND_SIZE = auto()
       OUTPUT_OFFSET = auto()
       RECV_SIZE = auto()
-    
+
     def transform_array(input_array, shard_id, strategy, is_batch_sharded):
       """This function transforms the input array based on the specified strategy,
       preparing it for the usage with `ragged_all_to_all` API. The transformation
@@ -425,23 +462,22 @@ class RoutedMoE(nn.Module):
           return input_array[:, shard_id]
         else:
           raise ValueError(f"Unknown tranform array strategy: {strategy}")
-      
-      # If the batch is unsharded then the we send the same information to all other shards.
-      # We also assume each shard will have the local processed inputs starting from index 0.
-      # Finally, len(input_array.shape) == 1 since the batch will be the same/replicated on 
-      # all of the shards.
+
+      # If the batch is unsharded then the we send the same data slice to all other shards.
+      # We also assume each shard will have the local processed inputs sorted to start from index 0.
+      # Finally, len(input_array.shape) == 1 since there is only one batch shard.
       else:
         if strategy == TransformStrategy.INPUT_OFFSET:
           # The data on each shard always starts at 0.
           return jnp.zeros(num_expert_parallelism, dtype=input_array.dtype)
         elif strategy == TransformStrategy.SEND_SIZE:
-          # The send amount is always the amount of data the current shard needs to process.
+          # The send amount is always the amount of data the current expert shard needs to process.
           return jnp.repeat(input_array[shard_id], num_expert_parallelism)
         elif strategy == TransformStrategy.OUTPUT_OFFSET:
           # The offset in each shard will just be the start of the group which that shard is
           # responsible for.
           output_offset = jnp.concatenate((jnp.array([0]), jnp.cumsum(input_array[:-1])))[shard_id]
-          return  jnp.repeat(output_offset, num_expert_parallelism)
+          return jnp.repeat(output_offset, num_expert_parallelism)
         # The amount that each shard receives from all other shards is equivalent to the group sizes
         # (aka input_array).
         elif strategy == TransformStrategy.RECV_SIZE:
@@ -450,23 +486,22 @@ class RoutedMoE(nn.Module):
         else:
           raise ValueError(f"Unknown tranform array strategy: {strategy}")
 
-    input_offsets = transform_array(
-      all_shards_group_sizes, shard_id, TransformStrategy.INPUT_OFFSET, is_batch_sharded)
-    send_sizes = transform_array(
-      all_shards_group_sizes, shard_id, TransformStrategy.SEND_SIZE, is_batch_sharded)
-    output_offsets = transform_array( 
-      all_shards_group_sizes, shard_id, TransformStrategy.OUTPUT_OFFSET, is_batch_sharded)
-    recv_sizes = transform_array(
-      all_shards_group_sizes, shard_id, TransformStrategy.RECV_SIZE, is_batch_sharded)
+    input_offsets = transform_array(all_shards_group_sizes, shard_id, TransformStrategy.INPUT_OFFSET, is_batch_sharded)
+    send_sizes = transform_array(all_shards_group_sizes, shard_id, TransformStrategy.SEND_SIZE, is_batch_sharded)
+    output_offsets = transform_array(all_shards_group_sizes, shard_id, TransformStrategy.OUTPUT_OFFSET, is_batch_sharded)
+    recv_sizes = transform_array(all_shards_group_sizes, shard_id, TransformStrategy.RECV_SIZE, is_batch_sharded)
     return input_offsets, send_sizes, output_offsets, recv_sizes
 
   def sparse_matmul(self, inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel):
+    """Perform sparse matrix multiplication of inputs and Experts."""
+
     def gmm(inputs, kernel, group_sizes, expert_assignments):
-      tile_size = (512, 1024, 1024)  # (m, k, n)
-      PAD_LENGTH=512
+      tile_size = (self.config.tile_batch_seq, self.config.tile_activation_dim, self.config.tile_weight_dim)
+      PAD_LENGTH = 512
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
-      assert inputs.shape[0] == expert_assignments.shape[0], "The number of input tokens must match the number of expert assignments!"
+      if inputs.shape[0] != expert_assignments.shape[0]:
+        raise ValueError("The number of input tokens must match the number of expert assignments!")
       pad_length = PAD_LENGTH
       if hs_shape[0] % PAD_LENGTH:
         pad_length = PAD_LENGTH - hs_shape[0] % PAD_LENGTH
@@ -495,7 +530,8 @@ class RoutedMoE(nn.Module):
       else:
         rhs_inputs = kernel
         if isinstance(kernel, QTensor):
-          assert not (kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1), "Unsupported usecase for ragged_dot with quantized kernel."
+          if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
+            raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
           rhs_inputs = kernel.qvalue
         output = jax.lax.ragged_dot(
             lhs=inputs,
@@ -516,15 +552,15 @@ class RoutedMoE(nn.Module):
     # Currently, we only support data and tensor parallelism with Megablox.
     # We all gather the input activations over tensor parallelism to follow strategy
     # in https://parsa.epfl.ch/course-info/cs723/papers/Megatron.pdf.
-    
+
     # Check if the batch should be sharded by expert and whether the batch_size supports this.
-    # Useful for Interleaved Inference where Prefill always has batch_size=1 while Decode
+    # E.g. for Interleaved Inference, Prefill always has batch_size=1 while Decode
     # can have batch_size > 1.
     try:
-      is_batch_sharded_by_expert = 'expert' in tuple(filter(
-        lambda tup: tup[0] == "activation_batch", self.config.logical_axis_rules)
-        )[0][1]
-    except:
+      is_batch_sharded_by_expert = (
+          "expert" in tuple(filter(lambda tup: tup[0] == "activation_batch", self.config.logical_axis_rules))[0][1]
+      )
+    except:  # pylint: disable=bare-except
       is_batch_sharded_by_expert = False
     if is_batch_sharded_by_expert and inputs.shape[0] > 1:
       batch_logical_axis = "activation_batch"
@@ -552,7 +588,7 @@ class RoutedMoE(nn.Module):
         shard_map.shard_map,
         mesh=self.mesh,
         in_specs=(input_partition_pspec, gate_logits_pspec, pre_bias_logits_pspec, w0_pspec, w1_pspec, wo_pspec),
-        out_specs=(nn.logical_to_mesh_axes(("activation_batch", None, "activation_embed"))),
+        out_specs=(nn.logical_to_mesh_axes((batch_logical_axis, None, "activation_embed"))),
         check_rep=False,
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo):
@@ -570,7 +606,7 @@ class RoutedMoE(nn.Module):
         if is_batch_sharded_by_expert:
           all_shards_group_sizes = lax.all_gather(reshaped_group_sizes, axis_name=batch_axis)
           input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
-            all_shards_group_sizes, expert_shard_id, num_expert_parallelism
+              all_shards_group_sizes, expert_shard_id, num_expert_parallelism
           )
           # TODO(ranran): For better performance, we could update output buffer to a smaller
           # size to replace self.get_expert_parallelism_size() for efficiency,
@@ -583,7 +619,7 @@ class RoutedMoE(nn.Module):
               * self.config.num_experts_per_tok
           )
           output_shape = jnp.zeros((buffer_size, self.config.emb_dim), dtype=x.dtype)
-          
+
           x = jax.lax.ragged_all_to_all(
               x,
               output_shape,
@@ -594,14 +630,18 @@ class RoutedMoE(nn.Module):
               axis_name=expert_axis_name,
           )
           global_group_sizes = lax.all_gather(group_sizes, axis_name=expert_axis_name)
-          x, local_sorted_indices, group_sizes, selected_experts = \
-              RoutedMoE.local_permute(x, global_group_sizes, local_expert_size, shard_index=expert_shard_id)
+          x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
+              x, global_group_sizes, local_expert_size, shard_index=expert_shard_id
+          )
         else:
-          x, local_sorted_indices, group_sizes, selected_experts = \
-            RoutedMoE.local_permute(x, global_group_sizes[None, :],
-                          local_expert_size, shard_index=expert_shard_id,
-                          is_offset=True,
-                          global_sorted_experts=selected_experts)
+          x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
+              x,
+              global_group_sizes[None, :],
+              local_expert_size,
+              shard_index=expert_shard_id,
+              is_offset=True,
+              global_sorted_experts=selected_experts,
+          )
 
       layer_w0 = gmm(x, w0, group_sizes, selected_experts)
       layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
@@ -611,14 +651,18 @@ class RoutedMoE(nn.Module):
       intermediate_layer = jnp.multiply(layer_act, layer_w1)
       intermediate_output = gmm(intermediate_layer, wo, group_sizes, selected_experts)
       intermediate_output = checkpoint_name(intermediate_output, "mlpwo")
-      if num_expert_parallelism > 1:
+
+      if self.get_tensor_parallelism_size() > 1:
         intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
 
       if num_expert_parallelism > 1:
         original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
-        assert sorted_selected_experts.shape[0] == original_inputs_first_dim, "original_inputs_first_dim does not match the original tensor shape!"
-        output_shape = jnp.zeros((original_inputs_first_dim, self.config.emb_dim // self.get_tensor_parallelism_size()),
-                                 dtype=intermediate_output.dtype)
+        if sorted_selected_experts.shape[0] != original_inputs_first_dim:
+          raise ValueError("original_inputs_first_dim does not match the original tensor shape!")
+        output_shape = jnp.zeros(
+            (original_inputs_first_dim, self.config.emb_dim // self.get_tensor_parallelism_size()),
+            dtype=intermediate_output.dtype,
+        )
         if is_batch_sharded_by_expert:
           # locally unpermute back to the original order
           local_output = jnp.take(intermediate_output, indices=jnp.argsort(local_sorted_indices), axis=0)
@@ -652,14 +696,14 @@ class RoutedMoE(nn.Module):
           )
 
         output = self.unpermute(
-          intermediate_output, sorted_selected_experts, weights, batch_size=batch_size, sequence_length=sequence_length
+            intermediate_output, sorted_selected_experts, weights, batch_size=batch_size, sequence_length=sequence_length
         )
-        
+
       else:
         # If not using EP then just unpermute the globally sorted expert assignments.
         output = self.unpermute(
-          intermediate_output, sorted_selected_experts, weights, batch_size=batch_size, sequence_length=sequence_length
-      )
+            intermediate_output, sorted_selected_experts, weights, batch_size=batch_size, sequence_length=sequence_length
+        )
 
       return output, None
 
