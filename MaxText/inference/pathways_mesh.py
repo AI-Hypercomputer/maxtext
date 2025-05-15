@@ -1,117 +1,3 @@
-# print("starting workload")
-# import pathwaysutils
-# import jax
-# from jax.sharding import PartitionSpec as P
-# from jax.sharding import Mesh
-# from jax.experimental import mesh_utils
-# import time
-# import threading
-# import os
-# import signal
-# import traceback
-
-
-# pathwaysutils.initialize()
-# print("pathwaysutils initialized")
-
-# devices = jax.devices()
-
-# mesh1 = mesh_utils.create_device_mesh([2, len(devices)//4], devices[:len(devices)//2])
-# mesh1 = Mesh(mesh1, ('x', 'y'))
-
-# mesh2 = mesh_utils.create_device_mesh([2, len(devices)//4], devices[len(devices)//2:])
-# mesh2 = Mesh(mesh2, ('x', 'y'))
-
-# print("mesh created")
-# print(mesh1)
-# print(mesh2)
-
-# spec = P('x', 'y')
-
-# sharding1 = jax.sharding.NamedSharding(mesh1, P('x', 'y'))
-# sharding2 = jax.sharding.NamedSharding(mesh2, P('x', 'y'))
-
-# def worker(weights):
-#     time.sleep(10)
-#     return weights+1
-
-# shardings = [sharding1, sharding2]
-
-# jitted_workers = [jax.jit(
-#       worker,
-#       in_shardings=sharding,
-#       out_shardings=sharding,
-#     ) for sharding in shardings]
-
-
-# weights_mesh1 = jax.device_put(jax.numpy.zeros((128, 128)), sharding1)
-# weights_mesh2 = jax.device_put(jax.numpy.zeros((128, 128)), sharding2)
-
-
-# # Thread one runs worker() every 2 seconds
-# # Thread two runs worker() every 3 seconds
-# # launch threads
-
-# class JetThread(threading.Thread):
-#   """Thread class with exception handling to prevent silent failures."""
-
-#   def run(self):
-#     try:
-#       super().run()
-#     except Exception as e:  # pylint: disable=broad-exception-caught
-#       traceback.print_exc()
-#       # Kill the process if a thread encounters an error
-#       os.kill(os.getpid(), signal.SIGKILL)
-
-# def thread_one():
-#     for _ in range(3):
-#         jitted_workers[0](weights_mesh1)
-#         time.sleep(5)
-#     print("thread one finished")
-
-# def thread_two():
-#     for _ in range(3):
-#         jitted_workers[1](weights_mesh2)
-#         time.sleep(5)
-#     print("thread two finished")
-
-# thread_one = JetThread(target=thread_one)
-# thread_two = JetThread(target=thread_two)
-
-# start_time = time.time()
-# thread_one.start()
-# thread_two.start()
-
-# thread_one.join()
-# thread_two.join()
-# end_time = time.time()
-# print("all threads finished")
-# print("time taken:", end_time-start_time)
-
-
-# # print("start time:", time.time())
-# # start_time = time.time()
-# # for jitted_worker in jitted_workers:
-# #     jitted_worker(weights_mesh1)
-# #     print("finished first worker")
-# #     jitted_worker(weights_mesh2)
-# #     print("finished second worker")
-# # print("end time:", time.time()-start_time)
-
-# #     # devices_array = max_utils.create_device_mesh(config)
-# #     # flat_devices = devices_array.flatten()
-# #     # num_inference_devices = config.inference_devices_per_replica * config.inference_replicas
-# #     # training_devices = flat_devices[num_inference_devices:].reshape(config.ici_parallelism)
-# #     # max_logging.log(f"Training: Num_devices: {jax.device_count() - num_inference_devices}, shape {training_devices.shape}")
-# #     # mesh = Mesh(training_devices, config.mesh_axes)
-# #     # inference_devices = flat_devices[:num_inference_devices].reshape((config.inference_replicas, config.inference_devices_per_replica))
-# #     # inference_meshes = [Mesh(devices.reshape(config_inference.ici_parallelism), config_inference.mesh_axes) for devices in inference_devices]
-# #     # max_logging.log(f"Inference: Num_devices: {num_inference_devices}, replicas: {config.inference_replicas} with shape {tuple(inference_meshes[0].shape.values())}")
-
-# # #   engines = [maxengine.MaxEngine(config_inference, devices=np.squeeze(inference_mesh.devices)) for inference_mesh in inference_meshes]
-# # #   _ = [engine.load_params(rng_load_params) for engine in engines]
-
-
 # Copyright 2024 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -142,26 +28,49 @@ from MaxText import pyconfig
 import random
 import time
 
-from MaxText.inference.offline_engine import OfflineEngine, InputData
+import numpy as np
+from jax.sharding import Mesh
+from MaxText.inference.offline_engine import OfflineEngine, InputData, CompletionOutput
+
+
+def get_metrics(results, start_time, end_time):
+    total_tokens = 0
+    for i, tokens in enumerate(results):
+        total_tokens += len(tokens)
+    print(f"Time taken: {end_time - start_time} seconds")
+    print(f"Total tokens: {total_tokens}")
+    print(f"Tokens per second: {total_tokens / (end_time - start_time)}")
 
 
 def init_pyconfig(**kwargs):
     init_kwargs = {
+        "run_name": "test",
+        # Parallelism
         "per_device_batch_size": 4,
         "ici_data_parallelism": 1,
         "ici_fsdp_parallelism": 1,
         "ici_tensor_parallelism": -1,  # Use TP
-        "run_name": "test",
-        "attention": "dot_product",
+        # Inference
         "max_prefill_predict_length": 128,
         "max_target_length": 256,
-        # "model_name": "gemma2-2b",
-        "base_emb_dim": 512,
-        "base_num_query_heads": 32,
-        "base_num_kv_heads": 32,
-        "base_num_decoder_layers": 2,
-        "skip_jax_distributed_system": True,
         "return_log_prob": True,
+        # Model
+        "model_name": "llama2-70b",
+        "attention": "dot_product",
+        "quantization": "int8",
+        "quant_cfg_path": "",
+        "checkpoint_is_quantized": True,
+        "quantize_kvcache": True,
+        "kv_quant_dtype": "int4",
+        "scan_layers": False,
+        # "base_emb_dim": 512,
+        # "base_num_query_heads": 32,
+        # "base_num_kv_heads": 32,
+        # "base_num_decoder_layers": 2,
+        # Checkpoint
+        "tokenizer_path": "./assets/tokenizer.llama2",
+        "load_parameters_path": "gs://inference-benchmarks/models/llama2-70b-chat/quant/int8_",
+        "skip_jax_distributed_system": True,
     } | kwargs
     config = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -170,101 +79,211 @@ def init_pyconfig(**kwargs):
     return config
 
 
-config = init_pyconfig(scan_layers=True)
-
+config = init_pyconfig()
 random.seed(42)
 # input_data = [jax.numpy.arange(random.randint(1, config.max_prefill_predict_length)) for _ in range(20)]
 input_data = [jax.numpy.arange(config.max_prefill_predict_length) for _ in range(2)]
 
 
-def test_dp1_no_batch_prefill(profile=False):
-    # engine = MaxEngine(config, jax.devices())
-    inference_engine = OfflineEngine(
-        config, params=None, enable_batch_prefill=False, auto_layout_supported=False
-    )
-
-    inference_engine.warm_up()
-    start_time = time.time()
-    if profile:
-        jax.profiler.start_trace("gs://wenxindong-multipod-dev/trace/pathways/dp1/2")
-    results = inference_engine.batch_inference(input_data)
-    if profile:
-        jax.profiler.stop_trace()
-    end_time = time.time()
-    # print("results: ", results)
-
-    total_tokens = 0
-    for i, tokens in enumerate(results):
-        # text = inference_engine.tokenizer.decode(tokens)
-        # print(text)
-        total_tokens += len(tokens)
-
-    print(f"Time taken: {end_time - start_time} seconds")
-    print(f"Total tokens: {total_tokens}")
-    print(f"Tokens per second: {total_tokens / (end_time - start_time)}")
-
-
-def test_dp2_no_batch_prefill(profile=False):
+def test_offline_engine_compare_warm_up():
     inference_engine = OfflineEngine(
         config,
         params=None,
         enable_batch_prefill=False,
         auto_layout_supported=False,
-        dp=2,
+        dp=1,
+        warm_up=True,
+    )
+    start_time = time.time()
+    results = inference_engine.batch_inference(input_data)
+    end_time = time.time()
+    get_metrics(results, start_time, end_time)
+
+    inference_engine = OfflineEngine(
+        config,
+        params=None,
+        enable_batch_prefill=False,
+        auto_layout_supported=False,
+        dp=1,
+        warm_up=False,
+    )
+    start_time = time.time()
+    results = inference_engine.batch_inference(input_data)
+    end_time = time.time()
+    get_metrics(results, start_time, end_time)
+
+
+def test_no_dp_no_batch_prefill(
+    profile=False, profile_path="gs://wenxindong-multipod-dev/trace/pathways/dp1/2"
+):
+    inference_engine = OfflineEngine(
+        config,
+        params=None,
+        enable_batch_prefill=False,
+        auto_layout_supported=False,
+        dp=1,
+        warm_up=True,
     )
 
-    inference_engine.warm_up()
-    
     if profile:
-        jax.profiler.start_trace("gs://wenxindong-multipod-dev/trace/pathways/dp2/6")
+        jax.profiler.start_trace(profile_path)
+
     start_time = time.time()
-    results: list["CompletionOutput"] = inference_engine.batch_inference(input_data)
+    results = inference_engine.batch_inference(input_data)
     end_time = time.time()
+
     if profile:
         jax.profiler.stop_trace()
-    
-    # print("results: ", results)
 
-    total_tokens = 0
-    for i, completion_output in enumerate(results):
-        print("tokens: ", completion_output.token_ids)
-        print("logprobs: ", completion_output.logprobs)
-        # text = inference_engine.tokenizer.decode(tokens)
-        # print(text)
-        total_tokens += len(completion_output.token_ids)
+    get_metrics(results, start_time, end_time)
 
-    print(f"Time taken: {end_time - start_time} seconds")
-    print(f"Total tokens: {total_tokens}")
-    print(f"Tokens per second: {total_tokens / (end_time - start_time)}")
+def test_no_dp_batch_prefill(
+    profile=False, profile_path="gs://wenxindong-multipod-dev/trace/pathways/dp1/2"
+):
+    inference_engine = OfflineEngine(
+        config,
+        params=None,
+        enable_batch_prefill=True,
+        auto_layout_supported=False,
+        dp=1,
+        warm_up=True,
+    )
 
+    if profile:
+        jax.profiler.start_trace(profile_path)
 
-# print("test_dp1_no_batch_prefill #1")
-# test_dp1_no_batch_prefill()
+    start_time = time.time()
+    results = inference_engine.batch_inference(input_data)
+    end_time = time.time()
 
-# Time taken: 32.155704498291016 seconds
-# Total tokens: 2600
-# Tokens per second: 80.85657088116923
+    if profile:
+        jax.profiler.stop_trace()
 
-# print("test_dp1_no_batch_prefill #2")
-# test_dp1_no_batch_prefill()
-
-# Time taken: 30.191761016845703 seconds
-# Total tokens: 2600
-# Tokens per second: 86.11620894022418
-
-# print("test_dp2_no_batch_prefill #1")
-# test_dp2_no_batch_prefill()
-
-# Time taken: 26.61563491821289 seconds
-# Total tokens: 2600
-# Tokens per second: 97.68694258053706
-
-# print("test_dp2_no_batch_prefill #2")
-test_dp2_no_batch_prefill(profile=True)
-
-# test_dp2_no_batch_prefill(profile=True)
+    get_metrics(results, start_time, end_time)
 
 
-# Time taken: 26.156818389892578 seconds
-# Total tokens: 2600
-# Tokens per second: 99.40046840729997
+def test_dp_no_batch_prefill(
+    profile=False, profile_path="gs://wenxindong-multipod-dev/trace/pathways/dp2/6"
+):
+    inference_engine = OfflineEngine(
+        config,
+        params=None,
+        enable_batch_prefill=False,
+        auto_layout_supported=False,
+        dp=8,
+        warm_up=True,
+    )
+
+    if profile:
+        jax.profiler.start_trace(profile_path)
+
+    start_time = time.time()
+    results: list[CompletionOutput] = inference_engine.batch_inference(input_data)
+    end_time = time.time()
+
+    if profile:
+        jax.profiler.stop_trace()
+
+    get_metrics(results, start_time, end_time)
+
+
+def test_dp_batch_prefill(
+    profile=False, profile_path="gs://wenxindong-multipod-dev/trace/pathways/dp2/6"
+):
+    inference_engine = OfflineEngine(
+        config,
+        params=None,
+        enable_batch_prefill=True,
+        auto_layout_supported=False,
+        dp=8,
+        warm_up=True,
+    )
+
+    if profile:
+        jax.profiler.start_trace(profile_path)
+
+    start_time = time.time()
+    results: list[CompletionOutput] = inference_engine.batch_inference(input_data)
+    end_time = time.time()
+
+    if profile:
+        jax.profiler.stop_trace()
+
+    get_metrics(results, start_time, end_time)
+
+
+def test_offline_engine_init_with_params():
+    maxengine = MaxEngine(config)
+    params = maxengine.params
+
+    inference_engine = OfflineEngine(
+        config,
+        params=params,
+        enable_batch_prefill=False,
+        auto_layout_supported=False,
+    )
+    inference_engine.batch_inference(input_data)
+
+
+def test_offline_engine_dp_init_with_params_and_dp_meshes():
+    maxengine = MaxEngine(config)
+    params = maxengine.params
+
+    dp_meshes = []
+    devices = jax.devices()
+    num_devices_per_replica = len(devices) // 8
+    mesh_shape = config.ici_parallelism
+
+    for i in range(8):
+        mesh_devices = np.array(
+            devices[
+                i * num_devices_per_replica : (i + 1) * num_devices_per_replica
+            ]
+        ).reshape(mesh_shape)
+        dp_meshes.append(Mesh(mesh_devices, config.mesh_axes))
+
+    inference_engine = OfflineEngine(
+        config,
+        params=params,
+        enable_batch_prefill=False,
+        auto_layout_supported=False,
+        dp=8,
+        dp_meshes=dp_meshes,
+    )
+    inference_engine.batch_inference(input_data)
+
+
+
+def test_offline_engine_update_params():
+    def reshard_params(params):
+        # TODO: implement resharding
+        return params
+
+    maxengine = MaxEngine(config)
+
+    inference_engine = OfflineEngine(
+        config,
+        params=maxengine.params,
+        enable_batch_prefill=False,
+        auto_layout_supported=False,
+    )
+
+    params = reshard_params(inference_engine.params)
+    inference_engine.update_params(params)
+
+    start_time = time.time()
+    results = inference_engine.batch_inference(input_data)
+    end_time = time.time()
+    get_metrics(results, start_time, end_time)
+
+
+def test_offline_engine_input_data():
+    inference_engine = OfflineEngine(
+        config,
+        params=None,
+        enable_batch_prefill=False,
+        auto_layout_supported=False,
+    )
+    input_data = [InputData(id=f"input_{i}", tokens=jax.numpy.arange(config.max_prefill_predict_length)) for i in range(2)]
+    results = inference_engine.batch_inference(input_data)
+    print(results)

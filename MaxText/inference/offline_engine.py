@@ -411,7 +411,7 @@ class ReplicaWorker:
             )
 
         # State management
-        self.detokenize_backlog = queue.Queue(maxsize=10)
+        self.detokenize_backlog = queue.Queue()
         self.counter = EventCounter(input=0, prefill=0, decode=0, detokenize=0)
         self.empty_decode_slots: List[int] = []
         self.slot_to_id: Dict[int, int] = {}
@@ -646,8 +646,8 @@ class ReplicaWorker:
             self.slot_to_id[slot] = prompt_ids[i]
 
             # Add token to detokenization queue
-            self.detokenize_backlog.put(
-                (first_token, True, prompt_ids[i], slot), block=True
+            self.detokenize_backlog.put_nowait(
+                (first_token, True, prompt_ids[i], slot)
             )
 
     def decode(self):
@@ -667,8 +667,8 @@ class ReplicaWorker:
         # Add results to detokenization queue
         # DO not merge this loop with the previous loop
         for result_tokens in buffer:
-            self.detokenize_backlog.put(
-                (result_tokens, False, 0, 0), block=True
+            self.detokenize_backlog.put_nowait(
+                (result_tokens, False, 0, 0)
             )       
             self.counter.decode += 1
 
@@ -811,6 +811,7 @@ class OfflineEngine:
         self.max_prefill_length = self.config.max_prefill_predict_length
         self.max_decode_length = self.config.max_target_length - self.max_prefill_length
         self.auto_layout_supported = auto_layout_supported
+        self.not_warmed_up = True
         self._validate_config()
 
         # Create prefill buckets: [0, 64], (64, 128], (128, 256], ..., [max_length//2, max_length]
@@ -866,11 +867,13 @@ class OfflineEngine:
             self.warm_up()
 
     def warm_up(self):
-        """Warm up all replica workers."""
-        for i in range(self.dp):
-            self.replica_workers[i].warm_up()
-        for i in range(self.dp):
-            self.replica_workers[i].ensure_warm_up_finished()
+        if self.not_warmed_up:
+            """Warm up all replica workers."""
+            for i in range(self.dp):
+                self.replica_workers[i].warm_up()
+            for i in range(self.dp):
+                self.replica_workers[i].ensure_warm_up_finished()
+            self.not_warmed_up = False
 
     def batch_inference(
         self,
@@ -894,7 +897,7 @@ class OfflineEngine:
 
         # Add all data to the queue
         for row in data:
-            data_queue.put(row)
+            data_queue.put_nowait(row)
 
         # Start inference on all replica workers
         for i in range(self.dp):
