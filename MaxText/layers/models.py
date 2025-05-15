@@ -400,8 +400,8 @@ class Decoder(nn.Module):
       deterministic=False,
       model_mode=common_types.MODEL_MODE_TRAIN,
       previous_chunk=None,
-      lora_params=None,
       page_state: Optional[page_manager.PageState] = None,
+      lora_state: Optional[dict] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -494,9 +494,11 @@ class Decoder(nn.Module):
           for lyr in range(cfg.num_decoder_layers):
             RemattedBlockLayer = RemattedBlockLayers[0]
 
-            lora_params_decoder = {}
-            if lora_params:
-              lora_params_decoder = lora_params["params"]["decoder"]
+            lora_state_with_decoder_params = None
+            if lora_state and "lora_params" in lora_state and "scale_factor" in lora_state:
+              lora_state_with_decoder_params = {}
+              lora_state_with_decoder_params["scale_factor"] = lora_state["scale_factor"]
+              lora_state_with_decoder_params["lora_params"] = lora_state["lora_params"]["params"]["decoder"]
 
             layer_kwargs = {}
             if cfg.decoder_block == "gemma3":
@@ -510,9 +512,9 @@ class Decoder(nn.Module):
                 decoder_positions,
                 deterministic,
                 model_mode,
-                lora_params_decoder,
                 previous_chunk=previous_chunk,
                 page_state=page_state,
+                lora_state=lora_state_with_decoder_params,
             )
     y = self.get_norm_layer()(
         dtype=cfg.dtype,
@@ -626,7 +628,7 @@ class Transformer(nn.Module):
       enable_dropout=True,
       model_mode=common_types.MODEL_MODE_TRAIN,
       previous_chunk=None,
-      lora_params=None,
+      lora_state: Optional[dict] = None,
       true_length: Optional[int] = None,
       slot: Optional[int] = None,
   ):
@@ -651,7 +653,7 @@ class Transformer(nn.Module):
         deterministic=not enable_dropout,
         model_mode=model_mode,
         previous_chunk=previous_chunk,
-        lora_params=lora_params,
         page_state=self._create_page_state(model_mode=model_mode, true_length=true_length, slot=slot),
+        lora_state=lora_state,
     )
     return logits

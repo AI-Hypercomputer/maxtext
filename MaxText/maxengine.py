@@ -751,9 +751,9 @@ class MaxEngine(engine_api.Engine):
     rng, new_rng = jax.random.split(rng)
 
     # Fetching lora_params from decode_state (if exists)
-    lora_params = None
-    if "lora_adapter_cache" in decode_state:
-      lora_params = decode_state["lora_adapter_cache"]
+    lora_state = None
+    if "lora_state" in decode_state:
+      lora_state = decode_state["lora_state"]
 
     # run one step generation
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -763,7 +763,7 @@ class MaxEngine(engine_api.Engine):
           decode_state["next_pos"],
           enable_dropout=False,
           model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-          lora_params=lora_params,
+          lora_state=lora_state,
           rngs={"params": new_rng},
           mutable=["cache"],
       )
