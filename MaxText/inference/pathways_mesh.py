@@ -1,13 +1,12 @@
-
 # print("starting workload")
 # import pathwaysutils
-# import jax 
+# import jax
 # from jax.sharding import PartitionSpec as P
 # from jax.sharding import Mesh
 # from jax.experimental import mesh_utils
 # import time
 # import threading
-# import os 
+# import os
 # import signal
 # import traceback
 
@@ -20,7 +19,7 @@
 # mesh1 = mesh_utils.create_device_mesh([2, len(devices)//4], devices[:len(devices)//2])
 # mesh1 = Mesh(mesh1, ('x', 'y'))
 
-# mesh2 = mesh_utils.create_device_mesh([2, len(devices)//4], devices[len(devices)//2:]) 
+# mesh2 = mesh_utils.create_device_mesh([2, len(devices)//4], devices[len(devices)//2:])
 # mesh2 = Mesh(mesh2, ('x', 'y'))
 
 # print("mesh created")
@@ -49,9 +48,9 @@
 # weights_mesh2 = jax.device_put(jax.numpy.zeros((128, 128)), sharding2)
 
 
-# # Thread one runs worker() every 2 seconds 
+# # Thread one runs worker() every 2 seconds
 # # Thread two runs worker() every 3 seconds
-# # launch threads 
+# # launch threads
 
 # class JetThread(threading.Thread):
 #   """Thread class with exception handling to prevent silent failures."""
@@ -88,7 +87,6 @@
 # end_time = time.time()
 # print("all threads finished")
 # print("time taken:", end_time-start_time)
-
 
 
 # # print("start time:", time.time())
@@ -129,6 +127,7 @@
 # limitations under the License.
 
 import pathwaysutils
+
 pathwaysutils.initialize()
 
 import sys
@@ -147,105 +146,124 @@ from MaxText.inference.offline_engine import OfflineEngine, InputData
 
 
 def init_pyconfig(**kwargs):
-  init_kwargs = {
-      "per_device_batch_size": 4,
-      "ici_data_parallelism": 1,
-      "ici_fsdp_parallelism": 1,
-      "ici_tensor_parallelism": -1,  # Use TP
-      "run_name": "test",
-      "attention": "dot_product",
-      "max_prefill_predict_length": 128,
-      "max_target_length": 256,
-      # "model_name": "gemma2-2b",
-      "base_emb_dim": 512,
-      "base_num_query_heads": 32,
-      "base_num_kv_heads": 32,
-      "base_num_decoder_layers": 2,
-      "skip_jax_distributed_system": True
-  } | kwargs
-  config = pyconfig.initialize(
-      [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
-      **init_kwargs,
-  )
-  return config
+    init_kwargs = {
+        "per_device_batch_size": 4,
+        "ici_data_parallelism": 1,
+        "ici_fsdp_parallelism": 1,
+        "ici_tensor_parallelism": -1,  # Use TP
+        "run_name": "test",
+        "attention": "dot_product",
+        "max_prefill_predict_length": 128,
+        "max_target_length": 256,
+        # "model_name": "gemma2-2b",
+        "base_emb_dim": 512,
+        "base_num_query_heads": 32,
+        "base_num_kv_heads": 32,
+        "base_num_decoder_layers": 2,
+        "skip_jax_distributed_system": True,
+        "return_log_prob": True,
+    } | kwargs
+    config = pyconfig.initialize(
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+        **init_kwargs,
+    )
+    return config
 
 
 config = init_pyconfig(scan_layers=True)
 
 random.seed(42)
 # input_data = [jax.numpy.arange(random.randint(1, config.max_prefill_predict_length)) for _ in range(20)]
-input_data = [jax.numpy.arange(config.max_prefill_predict_length) for _ in range(20)]
+input_data = [jax.numpy.arange(config.max_prefill_predict_length) for _ in range(2)]
 
 
-def test_dp1_no_batch_prefill():
+def test_dp1_no_batch_prefill(profile=False):
+    # engine = MaxEngine(config, jax.devices())
+    inference_engine = OfflineEngine(
+        config, params=None, enable_batch_prefill=False, auto_layout_supported=False
+    )
 
-  # engine = MaxEngine(config, jax.devices())
-  inference_engine = OfflineEngine(config, params=None, enable_batch_prefill=False, auto_layout_supported=False)
+    inference_engine.warm_up()
+    start_time = time.time()
+    if profile:
+        jax.profiler.start_trace("gs://wenxindong-multipod-dev/trace/pathways/dp1/2")
+    results = inference_engine.batch_inference(input_data)
+    if profile:
+        jax.profiler.stop_trace()
+    end_time = time.time()
+    # print("results: ", results)
 
-  inference_engine.warm_up()
-  start_time = time.time()
-  # jax.profiler.start_trace("gs://wenxindong-vm/trace/pathways")
-  results = inference_engine.batch_inference(input_data)
-  # jax.profiler.stop_trace()
-  end_time = time.time()
-  # print("results: ", results)
+    total_tokens = 0
+    for i, tokens in enumerate(results):
+        # text = inference_engine.tokenizer.decode(tokens)
+        # print(text)
+        total_tokens += len(tokens)
 
-  total_tokens = 0
-  for i, tokens in enumerate(results):
-    # text = inference_engine.tokenizer.decode(tokens)
-    # print(text)
-    total_tokens += len(tokens)
-
-  print(f"Time taken: {end_time - start_time} seconds")
-  print(f"Total tokens: {total_tokens}")
-  print(f"Tokens per second: {total_tokens / (end_time - start_time)}")
+    print(f"Time taken: {end_time - start_time} seconds")
+    print(f"Total tokens: {total_tokens}")
+    print(f"Tokens per second: {total_tokens / (end_time - start_time)}")
 
 
-def test_dp2_no_batch_prefill():
+def test_dp2_no_batch_prefill(profile=False):
+    inference_engine = OfflineEngine(
+        config,
+        params=None,
+        enable_batch_prefill=False,
+        auto_layout_supported=False,
+        dp=2,
+    )
 
-  inference_engine = OfflineEngine(config, params=None, enable_batch_prefill=False, auto_layout_supported=False, dp=2)
+    inference_engine.warm_up()
+    
+    if profile:
+        jax.profiler.start_trace("gs://wenxindong-multipod-dev/trace/pathways/dp2/6")
+    start_time = time.time()
+    results: list["CompletionOutput"] = inference_engine.batch_inference(input_data)
+    end_time = time.time()
+    if profile:
+        jax.profiler.stop_trace()
+    
+    # print("results: ", results)
 
-  inference_engine.warm_up()
-  start_time = time.time()
-  # jax.profiler.start_trace("gs://wenxindong-vm/trace/pathways")
-  results = inference_engine.batch_inference(input_data)
-  # jax.profiler.stop_trace()
-  end_time = time.time()
-  # print("results: ", results)
+    total_tokens = 0
+    for i, completion_output in enumerate(results):
+        print("tokens: ", completion_output.token_ids)
+        print("logprobs: ", completion_output.logprobs)
+        # text = inference_engine.tokenizer.decode(tokens)
+        # print(text)
+        total_tokens += len(completion_output.token_ids)
 
-  total_tokens = 0
-  for i, tokens in enumerate(results):
-    # text = inference_engine.tokenizer.decode(tokens)
-    # print(text)
-    total_tokens += len(tokens)
+    print(f"Time taken: {end_time - start_time} seconds")
+    print(f"Total tokens: {total_tokens}")
+    print(f"Tokens per second: {total_tokens / (end_time - start_time)}")
 
-  print(f"Time taken: {end_time - start_time} seconds")
-  print(f"Total tokens: {total_tokens}")
-  print(f"Tokens per second: {total_tokens / (end_time - start_time)}")
 
-print("test_dp1_no_batch_prefill #1")
-test_dp1_no_batch_prefill()
+# print("test_dp1_no_batch_prefill #1")
+# test_dp1_no_batch_prefill()
 
 # Time taken: 32.155704498291016 seconds
 # Total tokens: 2600
 # Tokens per second: 80.85657088116923
 
-print("test_dp1_no_batch_prefill #2")
-test_dp1_no_batch_prefill()
+# print("test_dp1_no_batch_prefill #2")
+# test_dp1_no_batch_prefill()
 
 # Time taken: 30.191761016845703 seconds
 # Total tokens: 2600
 # Tokens per second: 86.11620894022418
 
-print("test_dp2_no_batch_prefill #1")
-test_dp2_no_batch_prefill()
+# print("test_dp2_no_batch_prefill #1")
+# test_dp2_no_batch_prefill()
 
 # Time taken: 26.61563491821289 seconds
 # Total tokens: 2600
 # Tokens per second: 97.68694258053706
 
-print("test_dp2_no_batch_prefill #2")
-test_dp2_no_batch_prefill()
+# print("test_dp2_no_batch_prefill #2")
+test_dp2_no_batch_prefill(profile=True)
+
+# test_dp2_no_batch_prefill(profile=True)
+
 
 # Time taken: 26.156818389892578 seconds
 # Total tokens: 2600
