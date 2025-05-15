@@ -283,7 +283,8 @@ def preprocess_eval_dataset(
   # group text up to max_target_length if the dataset is not pre-tokenized/pre-processed
   if not is_tokenized_dataset:
     eval_ds = eval_ds.map(
-        lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)), num_parallel_calls=AUTOTUNE
+        lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)),
+        num_parallel_calls=AUTOTUNE,
     )
     # hardcode batch_sizes 24567 i.e. the exp size in split validation_24567exp
     #   to avoid padding tokens inserted in group text

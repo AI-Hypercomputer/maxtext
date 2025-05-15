@@ -616,15 +616,15 @@ class _HyperParameters:
     global_batch_size_to_train_on = raw_keys["global_batch_size_to_train_on"]
     global_batch_size_to_eval_on = raw_keys["global_batch_size_to_eval_on"]
     max_target_length = raw_keys["max_target_length"]
-    
-    learning_rate = (8.e-5 * global_batch_size_to_train_on) / 1152
+
+    learning_rate = (8.0e-5 * global_batch_size_to_train_on) / 1152
     warmup_steps = math.ceil(8000.0 * 1152 / global_batch_size_to_train_on - 1e-6)
     decay_end_step = math.ceil(1200000.0 * 1152 / global_batch_size_to_train_on - 1e-6)
     raw_keys["learning_rate"] = learning_rate
     raw_keys["learning_rate_schedule_steps"] = decay_end_step
     raw_keys["warmup_steps_fraction"] = warmup_steps / decay_end_step
-    
-    raw_keys["eval_steps"] = math.ceil(5760 * 8192 / max_target_length /global_batch_size_to_eval_on)
+
+    raw_keys["eval_steps"] = math.ceil(5760 * 8192 / max_target_length / global_batch_size_to_eval_on)
     raw_keys["eval_interval"] = math.ceil(377487360 / max_target_length / global_batch_size_to_train_on)
 
   @staticmethod
