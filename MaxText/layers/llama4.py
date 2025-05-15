@@ -427,3 +427,70 @@ class Llama4DecoderLayer(nn.Module):
       return layer_output, None
     else:
       return layer_output
+
+class Llama4ScannableBlock(nn.Module):
+  '''
+  A repeatable block given nope_layer_interval and interleave_moe_layer_step
+
+  Attributes:
+    config: models.Config, MaxText model config
+    mesh: Mesh, JAX device mesh (used for sharding)
+    quant: Optional[Quant], quantization config
+    nope_layer_interval: int, the interval at which layers should use NoPE.
+    interleave_moe_layer_step: int, the interval or stride for placing MoE layers.
+  """
+  '''
+
+  config: models.Config
+  mesh: Mesh
+  quant: Optional[Quant] = None
+  nope_layer_interval: int = 1
+  interleave_moe_layer_step: int = 1
+
+  @nn.compact
+  def __call__(
+      self,
+      inputs,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      slot: Optional[int] = None,
+      page_state: Optional[page_manager.PageState] = None,
+      previous_chunk=None,
+  ):
+
+    cfg = self.config
+    mesh = self.mesh
+
+    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    inputs = checkpoint_name(inputs, "decoder_layer_input")
+    y = inputs
+    for layer_id in range(cfg.inhomogeneous_layer_cycle_interval):
+      nope_layer = determine_is_nope_layer(layer_id, self.nope_layer_interval)
+      moe_layer = determine_is_moe_layer(layer_id, self.interleave_moe_layer_step)
+      layer = Llama4DecoderLayer(
+        config=cfg,
+        mesh=mesh,
+        name=f"layers_{layer_id}",
+        quant=self.quant,
+        is_nope_layer=nope_layer,
+        is_moe_layer=moe_layer,
+      )
+      y = layer(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          previous_chunk=previous_chunk,
+          page_state=page_state,
+          slot=slot,
+      )
+      if cfg.scan_layers:
+        y=y[0]
+    if cfg.scan_layers:
+      return y, None
+    else:
+      return y
+
