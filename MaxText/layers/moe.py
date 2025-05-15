@@ -396,14 +396,17 @@ class RoutedMoE(nn.Module):
     def local_permute(inputs, global_group_sizes, local_expert_size):
       """Sort inputs by expert within each shard."""
       local_id = jax.lax.axis_index("expert")
-      local_sizes = jax.lax.dynamic_slice_in_dim(
+      # all_shard_local_sizes.shape: [expert_shard, local_expert_size]
+      all_shard_local_sizes = jax.lax.dynamic_slice_in_dim(
           global_group_sizes, local_id * local_expert_size, local_expert_size, axis=1
-      ).reshape(-1)
+      )
+      local_sizes = all_shard_local_sizes.reshape(-1)
       base_indices = jnp.mod(jnp.arange(local_sizes.shape[0]), local_expert_size)
       expert_indices = jnp.repeat(base_indices, local_sizes, total_repeat_length=inputs.shape[0])
       sorted_indices = jnp.argsort(expert_indices)
       sorted_inputs = jnp.take(inputs, indices=sorted_indices, axis=0)
-      group_size = jnp.bincount(expert_indices, length=local_expert_size)
+      # group_size: 1D array with size of local_expert_size
+      group_size = jnp.sum(all_shard_local_sizes, axis=0)
       return sorted_inputs, sorted_indices, group_size
 
     def gmm(inputs, kernel, group_sizes):
