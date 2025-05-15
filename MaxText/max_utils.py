@@ -861,7 +861,7 @@ def parse_custom_args(argv):
       configs.append(current_argv)
     return configs
 
-def unscan_train_state_params(train_state, mesh, scan_axis, layer_groups):
+def unscan_train_state_params(params, sharding, mesh, scan_axis, layer_groups):
   """
   Unrolls scanned parameter groups into per-layer entries.
 
@@ -872,27 +872,28 @@ def unscan_train_state_params(train_state, mesh, scan_axis, layer_groups):
     layer_groups: list of tuples like:
       [("dense_layers", 4), ("moe_layers", 12)]
   """
-  decoder = train_state.params["params"]["decoder"]
-
+  decoder = params["params"]["decoder"]
+  sharding = sharding["params"]["decoder"]
+  
   for layer_name, num_layers in layer_groups:
     scanned_layers = decoder[layer_name]
 
     def strip_axis(pspec):
       return P(*(pspec[:scan_axis] + pspec[scan_axis+1:]))
-
-    dummy_spec = jax.tree_util.tree_map(lambda _: P(), scanned_layers)
-    new_spec = jax.tree_util.tree_map(strip_axis, dummy_spec)
+  
+    old_spec = jax.tree_util.tree_map(lambda x: x.spec, sharding[layer_name])
+    new_spec = jax.tree_util.tree_map(strip_axis, old_spec)
     new_sharding = jax.tree_util.tree_map(lambda ps: NamedSharding(mesh, ps), new_spec)
 
-    def slice_layer(i):
-      return jax.tree_util.tree_map(lambda x: jnp.take(x, i, axis=scan_axis), scanned_layers)
+    def slice_layer(arr, i):
+      return jax.tree_util.tree_map(lambda x: jnp.take(x, i, axis=scan_axis), arr)
+    p_slice_layer = jax.jit(slice_layer, out_shardings=new_sharding)
 
     for i in range(num_layers):
-      per_layer = jax.jit(slice_layer, out_shardings=new_sharding)(i)
+      per_layer = p_slice_layer(scanned_layers, i)
       decoder[f"{layer_name}_{i}"] = per_layer
 
-    del decoder[layer_name]
-    jax.tree_util.tree_map(lambda x: x.delete(), scanned_layers)  # Free memory
+    del decoder[layer_name]  # Free memory
 
 def rescan_train_state_params(train_state, scan_axis, layer_groups, mesh):
   """
@@ -900,7 +901,7 @@ def rescan_train_state_params(train_state, scan_axis, layer_groups, mesh):
   
   Args:
     train_state: training state with unrolled {layer_name}_{i} entries
-    scan_axis: axis to scan over (usually 0)
+    scan_axis: axis to scan over
     layer_groups: list of (layer_name, num_layers)
     mesh: jax.sharding.Mesh for out_shardings
   """

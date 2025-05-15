@@ -598,11 +598,19 @@ def reshard(config, params, destination_shardings, meshes):
       inference_params.append(_reshard(params))
   return inference_params
 
-def pathways_reshard(config, params, destination_shardings, meshes):
+def pathways_reshard(config, params, source_shardings, source_mesh, destination_shardings, dest_meshes):
+  layer_groups = [
+    ("dense_layers", config.first_num_dense_layers),
+    ("moe_layers", config.base_num_decoder_layers - config.first_num_dense_layers)
+  ]
+  max_utils.unscan_train_state_params(params, source_shardings, source_mesh, scan_axis=config.param_scan_axis, layer_groups=layer_groups)
+  num_model_parameters = max_utils.calculate_num_params_from_pytree(params)
+  max_logging.log(f"number parameters after unscanning: {num_model_parameters/1e9:.3f} billion")
   with (jax.transfer_guard_device_to_host("disallow_explicit"), jax.transfer_guard_host_to_device("disallow_explicit")):
     inference_params = [pathwaysutils_reshard.reshard(params, destination_shardings[0].params)]
     for destination_sharding in destination_shardings[1:]:
       inference_params.append(jax.device_put(inference_params[0], destination_sharding))
+  max_utils.rescan_train_state_params(params, source_shardings, source_mesh, scan_axis=config.param_scan_axis, layer_groups=layer_groups)
   return inference_params
 
 def setup_mesh_and_model(config, config_inference):
@@ -1006,7 +1014,7 @@ def train_loop(config, config_inference, state=None):
   data_buffer = Buffer(maxsize=-1)
   # initialize inference_params from the state before step=0
   # inference_params = [reshard_transfer_data(config, {'params':state.params['params']}, mesh, inference_state_mesh_sharding.params, config.inference_replicas, inference_meshes[0].shape, inference_state_mesh_sharding.params) for inference_state_mesh_sharding in inference_state_mesh_shardings]
-  inference_params = pathways_reshard(config_inference, {'params':state.params['params']}, inference_state_mesh_shardings, inference_meshes)
+  inference_params = pathways_reshard(config_inference, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, inference_meshes)
   # inference_params = [jax.device_put({'params':state.params['params']}, inference_state_mesh_sharding.params) for inference_state_mesh_sharding in inference_state_mesh_shardings]
   # inference_params = reshard(config_inference, {'params':state.params['params']}, inference_state_mesh_shardings, inference_meshes)
   
