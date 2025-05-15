@@ -26,7 +26,7 @@ Example command:
     --hf-access-token <access token> \
     --batch-size 1024 --num-batches 100 \
     --num-generations 2 \
-    --max-output-length 128 --max-target-length 256 \
+    --max-prefill-length 64 --max-target-length 2048 \
     --use-chat-template --remove-local-dataset-files \
     upload-to-hf --hf-repo-id <hf repository id>
 
@@ -38,6 +38,7 @@ Make sure to run maxengine server in a new terminal before executing this comman
   python3 -m MaxText.maxengine_server MaxText/configs/base.yml \
     model_name=deepseek2-16b tokenizer_path=deepseek-ai/DeepSeek-V2-Lite-chat tokenizer_type=huggingface \
     load_parameters_path=<unscanned checkpoint path> \
+    max_target_length=2048 max_prefill_predict_length=64 \
     per_device_batch_size=10 multi_sampling=True ici_tensor_parallelism=4 \
     decode_sampling_strategy=weighted scan_layers=False
 """
@@ -92,7 +93,7 @@ async def send_request(config, request, stub, tokenizer, progress_bar):  # pylin
 
   outputs = []
   for tokens in completion_tokens:
-    completion = tokenizer.decode(tokens, skip_special_tokens=True)
+    completion = tokenizer.decode(tokens, skip_special_tokens=True).strip()
     outputs.append(
         {
             "prompt": [{"role": "user", "content": prompt}],
@@ -256,9 +257,7 @@ if __name__ == "__main__":
   )
   parser.add_argument("--tokenizer-path", type=str, required=True, help="Path to Hugging Face tokenizer.")
   parser.add_argument("--use-chat-template", action="store_true", help="Enable tokenizer to apply a chat template.")
-  parser.add_argument(
-      "--max-output-length", type=int, required=True, help="The maximum completion tokens to generate for a prompt."
-  )
+  parser.add_argument("--max-prefill-length", type=int, default=64, help="The maximum prompt length.")
   parser.add_argument(
       "--max-target-length", type=int, default=2048, help="The maximum prompt length plus the output completion length."
   )
@@ -293,6 +292,6 @@ if __name__ == "__main__":
   config = parser.parse_args()
 
   assert (
-      config.max_output_length < config.max_target_length
-  ), "Maximum output length of completion should be less than maximum target length."
+      config.max_prefill_length < config.max_target_length
+  ), "Maximum length of prompt should be less than maximum target length."
   generate_data(config)
