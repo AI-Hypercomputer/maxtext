@@ -46,6 +46,7 @@ import dataclasses
 from enum import Enum
 from typing import Any, List, Tuple, Callable, Optional, Dict, Union
 from collections import defaultdict
+import time 
 
 import jax
 import numpy as np
@@ -56,6 +57,8 @@ from jax.experimental import mesh_utils
 import pathwaysutils
 from jetstream.engine import engine_api
 from MaxText.maxengine import MaxEngine
+from MaxText import max_utils
+
 from MaxText.prefill_packing import PrefillProcessor, BatchedPrefillProcessor
 DecodeState = Any
 Params = Any
@@ -373,28 +376,69 @@ class ReplicaWorker:
             run_as_a_thread: Whether to run in a separate thread
         """
         # Configurations
+        self.worker_id = worker_id
         self.config = config
         self.params = params
-        self.min_decode_steps = min_decode_steps
-        self.enable_batch_prefill = enable_batch_prefill
-        self.tokenizer = tokenizer
-        self.eos_ids = eos_ids
-        self.prefill_lengths = prefill_lengths
         self.devices = devices
-        self.batch_prefill_max_batch_size = batch_prefill_max_batch_size
-        self.max_prefill_length = self.config.max_prefill_predict_length
+        self.enable_batch_prefill = enable_batch_prefill
+        self.prefill_lengths = prefill_lengths
         self.max_decode_length = 5 #self.config.max_target_length - self.max_prefill_length
-        self.worker_id = worker_id
+        self.eos_ids = eos_ids
+        self.tokenizer = tokenizer
+        self.batch_prefill_max_batch_size = batch_prefill_max_batch_size
+        self.min_decode_steps = min_decode_steps
         self.run_as_a_thread = run_as_a_thread
         self.auto_layout_supported = auto_layout_supported
+        
+        # Thread management
+        self.worker_thread = None
+        self.warm_up_thread = None
+        self.init_thread = None
+        self.running = False
 
+        # State management
+        self.detokenize_backlog = queue.Queue()
+        self.counter = EventCounter(input=0, prefill=0, decode=0, detokenize=0)
+        self.empty_decode_slots: List[int] = []
+        self.slot_to_id: Dict[int, int] = {}
+        self.decode_state = None
+        self.res = None 
+
+        # Precompiled functions 
+        self.generate_fn = None
+
+
+        # These will be populated in the init thread
+        self.engine = None
+        self.decode_batch_size = None
+        self.prefill_helper = None
+        
+        self._init()
+        
+    
+    def _init(self):
+        if self.run_as_a_thread:
+            self.init_thread = SafeThead(
+                target=self._init_impl,
+                name=f"replica_worker_{self.worker_id}",
+            )
+            self.init_thread.start()
+        else:
+            self._init_impl()
+    
+    def ensure_init_finished(self):
+        if self.init_thread is not None:
+            self.init_thread.join()
+            self.init_thread = None
+
+    def _init_impl(self):
         # Initialize MaxEngine(s)
-        self.params, self.engine = self._init_engine(params)
+        self.params, self.engine = self._init_engine(self.params)
         self.tokenizer = self._init_tokenizer()
-        self.batch_size = self.engine.max_concurrent_decodes
+        self.decode_batch_size = self.engine.max_concurrent_decodes
 
-        # Create a Prefill Helper for each maxengine
-        if enable_batch_prefill:
+        # Create a Prefill Helper
+        if self.enable_batch_prefill:
             self.prefill_helper = PrefillHelper(
                 PrefillType.BATCH,
                 self.engine,
@@ -410,16 +454,8 @@ class ReplicaWorker:
                 self.auto_layout_supported,
             )
 
-        # State management
-        self.detokenize_backlog = queue.Queue()
-        self.counter = EventCounter(input=0, prefill=0, decode=0, detokenize=0)
-        self.empty_decode_slots: List[int] = []
-        self.slot_to_id: Dict[int, int] = {}
-        self.decode_state = None
-        self.res = None  # Results storage
-
-        # Compiled functions
-        if auto_layout_supported:
+        # Initialize decode state and generate function
+        if self.auto_layout_supported:
             self.generate_fn, self.params, init_decode_state_fn = (
                 self.engine.aot_compile(self.params, pass_rng_shape=False)
             )
@@ -428,9 +464,6 @@ class ReplicaWorker:
             self.generate_fn = self.engine.generate
             self.decode_state = self.engine.init_decode_state()
 
-        self.worker_thread = None
-        self.warm_up_thread = None
-        self.running = False
 
     def _init_engine(self, params):
         """Initialize the MaxEngine.
@@ -441,8 +474,13 @@ class ReplicaWorker:
         Returns:
             Tuple of (params, engine)
         """
+        start_time = time.time()
         engine = MaxEngine(self.config, self.devices)
+        print("initialized engine")
         params = engine.load_params(params)
+        print("loaded params")
+        end_time = time.time()
+        print(f"time taken to initialize engine: {end_time - start_time} seconds")
         return params, engine
 
     def _init_tokenizer(self):
@@ -473,6 +511,7 @@ class ReplicaWorker:
 
     def warm_up(self):
         """Start warm-up process, optionally in a separate thread."""
+        self.ensure_init_finished()
         if self.run_as_a_thread:
             self.warm_up_thread = SafeThead(
                 target=self.warm_up_impl,
@@ -501,6 +540,7 @@ class ReplicaWorker:
             results: Dictionary to store results
             desc: Description for logging
         """
+        self.ensure_init_finished()
         self.ensure_warm_up_finished()
         self.res = results
         if self.run_as_a_thread:
@@ -513,7 +553,7 @@ class ReplicaWorker:
         else:
             self._start_inference(data_queue, desc)
 
-    def stop(self):
+    def ensure_inference_finished(self):
         """Stop the inference process and wait for completion."""
         if self.worker_thread is not None:
             self.worker_thread.join()
@@ -536,7 +576,7 @@ class ReplicaWorker:
         print("Starting inference")
         # Reset state
         self.counter = EventCounter(input=0, prefill=0, decode=0, detokenize=0)
-        self.empty_decode_slots = list(range(self.batch_size))
+        self.empty_decode_slots = list(range(self.decode_batch_size))
         self.slot_to_id = {}
 
         # Start detokenization thread
@@ -760,6 +800,7 @@ class OfflineEngine:
         dp=1,
         dp_meshes=None,
         auto_layout_supported=False,
+        warm_up=True,
     ):
         """Initialize the OfflineEngine.
 
@@ -797,6 +838,7 @@ class OfflineEngine:
               automatically.
             auto_layout_supported: Whether auto layout is supported
         """
+        print("Initializing OfflineEngine")
         # Configurations
         self.config = config
         self.params = params
@@ -811,7 +853,8 @@ class OfflineEngine:
         self.max_prefill_length = self.config.max_prefill_predict_length
         self.max_decode_length = self.config.max_target_length - self.max_prefill_length
         self.auto_layout_supported = auto_layout_supported
-        self.not_warmed_up = True
+        self.should_warm_up = warm_up
+        self._not_warmed_up = True
         self._validate_config()
 
         # Create prefill buckets: [0, 64], (64, 128], (128, 256], ..., [max_length//2, max_length]
@@ -827,8 +870,21 @@ class OfflineEngine:
 
         # Create meshes
         devices = jax.devices()
-
+        print(f"devices: {devices}")
+        
         if not self.dp_meshes:
+            # ici_parallelism = max_utils.fill_unspecified_mesh_axes(config.ici_parallelism.copy(), len(devices), "ICI")
+            # devices_array = mesh_utils.create_device_mesh(
+            #             ici_parallelism,
+            #             devices,
+            #             contiguous_submeshes=False,
+            #             allow_split_physical_axes=config.allow_split_physical_axes or False,
+            #         )
+            # flat_devices = devices_array.flatten()
+            # inference_devices = flat_devices.reshape((self.dp, len(devices)//self.dp))
+            # inference_meshes = [Mesh(devices.reshape(config.ici_parallelism), config.mesh_axes) for devices in inference_devices]
+            # self.dp_meshes = inference_meshes
+
             self.dp_meshes = []
             num_devices_per_replica = len(devices) // self.dp
             mesh_shape = self.config.ici_parallelism
@@ -839,7 +895,6 @@ class OfflineEngine:
                         i * num_devices_per_replica : (i + 1) * num_devices_per_replica
                     ]
                 ).reshape(mesh_shape)
-                print(f"Mesh devices shape: {mesh_devices.shape}")
                 self.dp_meshes.append(Mesh(mesh_devices, self.config.mesh_axes))
 
         # Initialize ReplicaWorkers
@@ -861,19 +916,21 @@ class OfflineEngine:
             )
             for i in range(self.dp)
         ]
+        for i in range(self.dp):
+            self.replica_workers[i].ensure_init_finished()
         print(f"Created {self.dp} replica workers")
         self.tokenizer = self.replica_workers[0].tokenizer
-        if self.warm_up:
+        if self.should_warm_up:
             self.warm_up()
 
     def warm_up(self):
-        if self.not_warmed_up:
+        if self._not_warmed_up:
             """Warm up all replica workers."""
             for i in range(self.dp):
                 self.replica_workers[i].warm_up()
             for i in range(self.dp):
                 self.replica_workers[i].ensure_warm_up_finished()
-            self.not_warmed_up = False
+            self._not_warmed_up = False
 
     def batch_inference(
         self,
@@ -905,7 +962,7 @@ class OfflineEngine:
 
         # Wait for all workers to complete
         for i in range(self.dp):
-            self.replica_workers[i].stop()
+            self.replica_workers[i].ensure_inference_finished()
             print("replica worker: ", i, " stopped")
 
         # Return CompletionOutput objects
@@ -947,10 +1004,14 @@ class OfflineEngine:
             # Pad or truncate as needed
             if len(item.tokens) < target_length:
                 # Pad with zeros
-                padded_tokens = jax.numpy.zeros(target_length, dtype=item.tokens.dtype)
-                padded_tokens = padded_tokens.at[: item.true_length].set(
+                if isinstance(item.tokens, jax.Array):
+                    padded_tokens = jax.numpy.zeros(target_length, dtype=item.tokens.dtype)
+                    padded_tokens = padded_tokens.at[: item.true_length].set(
                     item.tokens[: item.true_length]
                 )
+                else:
+                    padded_tokens = np.zeros(target_length, dtype=item.tokens.dtype)
+                    padded_tokens[: item.true_length] = item.tokens[: item.true_length]
             else:
                 # Input is too long, truncate to max_prefill_length
                 padded_tokens = item.tokens[:target_length]
@@ -974,7 +1035,7 @@ class OfflineEngine:
             List of prepared InputData objects
         """
         # Convert JAX arrays to InputData objects
-        if isinstance(data[0], jax.Array):
+        if isinstance(data[0], jax.Array) or isinstance(data[0], np.ndarray):
             data = [
                 InputData(id=i, tokens=array, true_length=len(array))
                 for i, array in enumerate(data)

@@ -33,10 +33,10 @@ from jax.sharding import Mesh
 from MaxText.inference.offline_engine import OfflineEngine, InputData, CompletionOutput
 
 
-def get_metrics(results, start_time, end_time):
+def get_metrics(results: list[CompletionOutput], start_time, end_time):
     total_tokens = 0
     for i, tokens in enumerate(results):
-        total_tokens += len(tokens)
+        total_tokens += len(tokens.token_ids)
     print(f"Time taken: {end_time - start_time} seconds")
     print(f"Total tokens: {total_tokens}")
     print(f"Tokens per second: {total_tokens / (end_time - start_time)}")
@@ -46,7 +46,7 @@ def init_pyconfig(**kwargs):
     init_kwargs = {
         "run_name": "test",
         # Parallelism
-        "per_device_batch_size": 4,
+        "per_device_batch_size": 64,
         "ici_data_parallelism": 1,
         "ici_fsdp_parallelism": 1,
         "ici_tensor_parallelism": -1,  # Use TP
@@ -57,11 +57,10 @@ def init_pyconfig(**kwargs):
         # Model
         "model_name": "llama2-70b",
         "attention": "dot_product",
-        "quantization": "int8",
-        "quant_cfg_path": "",
-        "checkpoint_is_quantized": True,
-        "quantize_kvcache": True,
-        "kv_quant_dtype": "int4",
+        # "quantization": "int8",
+        # "quant_cfg_path": "",
+        # "quantize_kvcache": True,
+        # "kv_quant_dtype": "int4",
         "scan_layers": False,
         # "base_emb_dim": 512,
         # "base_num_query_heads": 32,
@@ -69,7 +68,8 @@ def init_pyconfig(**kwargs):
         # "base_num_decoder_layers": 2,
         # Checkpoint
         "tokenizer_path": "./assets/tokenizer.llama2",
-        "load_parameters_path": "gs://inference-benchmarks/models/llama2-70b-chat/quant/int8_",
+        # "load_parameters_path": "gs://inference-benchmarks/models/llama2-70b-chat/quant/int8_",
+        # "checkpoint_is_quantized": True,
         "skip_jax_distributed_system": True,
     } | kwargs
     config = pyconfig.initialize(
@@ -80,37 +80,48 @@ def init_pyconfig(**kwargs):
 
 
 config = init_pyconfig()
+print("initialized pyconfig")
 random.seed(42)
-# input_data = [jax.numpy.arange(random.randint(1, config.max_prefill_predict_length)) for _ in range(20)]
-input_data = [jax.numpy.arange(config.max_prefill_predict_length) for _ in range(2)]
+
+print("generating input data")
+rand_l = [random.randint(1, config.max_prefill_predict_length) for _ in range(10)]
+
+start_time = time.time()
+input_data = [np.arange(l) for l in rand_l]
+end_time = time.time()
+print(f"Time taken to generate input data: {end_time - start_time} seconds")
+# input_data = [jax.numpy.arange(config.max_prefill_predict_length) for _ in range(2)]
 
 
 def test_offline_engine_compare_warm_up():
+    print("Testing offline engine compare warm up")
     inference_engine = OfflineEngine(
         config,
         params=None,
         enable_batch_prefill=False,
         auto_layout_supported=False,
-        dp=1,
+        dp=4,
         warm_up=True,
     )
-    start_time = time.time()
-    results = inference_engine.batch_inference(input_data)
-    end_time = time.time()
-    get_metrics(results, start_time, end_time)
+    start_time1 = time.time()
+    results1 = inference_engine.batch_inference(input_data)
+    end_time1 = time.time()
 
     inference_engine = OfflineEngine(
         config,
         params=None,
         enable_batch_prefill=False,
         auto_layout_supported=False,
-        dp=1,
+        dp=4,
         warm_up=False,
     )
     start_time = time.time()
     results = inference_engine.batch_inference(input_data)
     end_time = time.time()
+
+    get_metrics(results1, start_time1, end_time1)
     get_metrics(results, start_time, end_time)
+
 
 
 def test_no_dp_no_batch_prefill(
@@ -163,17 +174,20 @@ def test_no_dp_batch_prefill(
 
 
 def test_dp_no_batch_prefill(
-    profile=False, profile_path="gs://wenxindong-multipod-dev/trace/pathways/dp2/6"
+    profile=False, profile_path=None
 ):
+    start_time = time.time()
     inference_engine = OfflineEngine(
         config,
         params=None,
         enable_batch_prefill=False,
         auto_layout_supported=False,
-        dp=8,
-        warm_up=True,
+        dp=4,
+        warm_up=False,
     )
-
+    end_time = time.time()
+    print(f"Final: Time taken to initialize engine: {end_time - start_time} seconds")
+    
     if profile:
         jax.profiler.start_trace(profile_path)
 
@@ -287,3 +301,13 @@ def test_offline_engine_input_data():
     input_data = [InputData(id=f"input_{i}", tokens=jax.numpy.arange(config.max_prefill_predict_length)) for i in range(2)]
     results = inference_engine.batch_inference(input_data)
     print(results)
+
+
+# test_offline_engine_compare_warm_up()
+# test_no_dp_no_batch_prefill()
+# test_no_dp_batch_prefill()
+test_dp_no_batch_prefill(profile=False, profile_path="gs://wenxindong-multipod-dev/trace/pathways/dp2/11")
+# test_dp_batch_prefill()
+# test_offline_engine_init_with_params()
+# test_offline_engine_dp_init_with_params_and_dp_meshes()
+
