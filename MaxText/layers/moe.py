@@ -265,9 +265,7 @@ class RoutedMoE(nn.Module):
   def get_topk(self, gate_logits, pre_bias_logits):
     """get topk. shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)"""
     if self.config.use_random_routing:
-      # For debug and test purpose:
-      # Ideally we should split a new key for each layer, but for simplicity re-use the key to mimic the random routing
-      rng = jax.random.PRNGKey(1234)
+      rng = self.make_rng("random_routing")
       top_k_weights, top_k_indices = random_routing(rng, gate_logits, self.num_experts_per_tok)
       return top_k_weights, top_k_indices
 
