@@ -11,9 +11,8 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""
-distillation data processing test
-"""
+
+"""Data processing tests for distillation."""
 
 import argparse
 import os
@@ -33,7 +32,7 @@ PROMPT_DATA = [
         {"content": "Why is the sky blue?", "role": "user"},
     ],
     [
-        {"content": "How many days are in a week?", "role": "user"},
+        {"content": "Can you tell me how many days are in a week?", "role": "user"},
     ],
 ]
 
@@ -55,7 +54,7 @@ MESSAGES_DATA = [
         {"content": "The sky appears blue due a phenomemon called Rayleigh scattering.", "role": "assistant"},
     ],
     [
-        {"content": "How many days are in a week?", "role": "user"},
+        {"content": "Can you tell me how many days are in a week?", "role": "user"},
         {"content": "There are 7 days in a week.", "role": "assistant"},
     ],
 ]
@@ -64,11 +63,9 @@ MESSAGES_DATA = [
 def add_arguments_to_parser(parser):
   parser.add_argument("--data-columns", nargs="+", required=True, help="Columns names that contain relevant data.")
   parser.add_argument("--use-chat-template", action="store_true", help="Enable tokenizer to apply a chat template.")
+  parser.add_argument("--max-prefill-length", type=int, default=16, help="The maximum length for prompt tokens.")
   parser.add_argument(
-      "--max-output-length", type=int, default=8, help="The maximum completion tokens to generate for a prompt."
-  )
-  parser.add_argument(
-      "--max-target-length", type=int, default=16, help="The maximum prompt length plus the output completion length."
+      "--max-target-length", type=int, default=32, help="The maximum prompt length plus the output completion length."
   )
   return parser
 
@@ -83,7 +80,7 @@ class DistillationDataProcessingTest(unittest.TestCase):
             "gsutil",
             "cp",
             "-r",
-            "gs://maxtext-dataset/hf/llama2-tokenizer",
+            "gs://maxtext-dataset/hf/llama2-chat-tokenizer",
             os.path.join(os.path.dirname(PKG_DIR), "assets", ""),
         ]
     )
@@ -93,7 +90,7 @@ class DistillationDataProcessingTest(unittest.TestCase):
   def setUp(self):
     super().setUp()
     self.tokenizer = transformers.AutoTokenizer.from_pretrained(
-        os.path.join(os.path.dirname(PKG_DIR), "assets", "llama2-tokenizer"),
+        os.path.join(os.path.dirname(PKG_DIR), "assets", "llama2-chat-tokenizer"),
     )
     self.parser = argparse.ArgumentParser()
     self.parser = add_arguments_to_parser(self.parser)
@@ -104,7 +101,7 @@ class DistillationDataProcessingTest(unittest.TestCase):
 
     processed_dataset = _distillation_data_processing.process_dataset(config, dataset)
 
-    expected_prompts = [["What color is the sky?", "Why is the sky blue?"], ["How many days are in a week?"]]
+    expected_prompts = [["What color is the sky?", "Why is the sky blue?"], ["Can you tell me how many days are in a week?"]]
     expected_completions = [
         ["The sky is blue.", "The sky appears blue due a phenomemon called Rayleigh scattering."],
         ["There are 7 days in a week."],
@@ -121,7 +118,7 @@ class DistillationDataProcessingTest(unittest.TestCase):
         self.assertEqual(data["completion"][c_idx], completion)
 
   def test_data_filtering_with_messages(self):
-    config = self.parser.parse_args(["--data-columns", "messages"])
+    config = self.parser.parse_args(["--data-columns", "messages", "--use-chat-template"])
     dataset = Dataset.from_dict({"messages": MESSAGES_DATA})
 
     processed_dataset = _distillation_data_processing.process_dataset(config, dataset)
@@ -137,7 +134,7 @@ class DistillationDataProcessingTest(unittest.TestCase):
 
     processed_dataset = _distillation_data_processing.process_dataset(config, dataset)
 
-    expected_prompts = [["What color is the sky?", "Why is the sky blue?"], ["How many days are in a week?"]]
+    expected_prompts = [["What color is the sky?", "Why is the sky blue?"], ["Can you tell me how many days are in a week?"]]
     expected_completions = [
         ["The sky is blue.", "The sky appears blue due a phenomemon called Rayleigh scattering."],
         ["There are 7 days in a week."],
@@ -154,7 +151,7 @@ class DistillationDataProcessingTest(unittest.TestCase):
         self.assertEqual(data["completion"][c_idx], completion)
 
   def test_data_filtering_with_prompt_completion(self):
-    config = self.parser.parse_args(["--data-columns", "prompt", "completion"])
+    config = self.parser.parse_args(["--data-columns", "prompt", "completion", "--use-chat-template"])
     dataset = Dataset.from_dict({"prompt": PROMPT_DATA, "completion": COMPLETION_DATA})
 
     processed_dataset = _distillation_data_processing.process_dataset(config, dataset)
