@@ -22,16 +22,16 @@ from benchmarks.maxtext_trillium_model_configs import MaxTextModel, _add_to_mode
 
 v5p_model_dict = {}
 
-deepseek_v3_fsdp_v5p_512  = _add_to_model_dictionary(
+deepseek_v3_ep_256_v5p_512  = _add_to_model_dictionary(
     v5p_model_dict,
     MaxTextModel(
-        model_name="deepseek_v3_fsdp_v5p_512",
+        model_name="deepseek_v3_ep_256_v5p_512",
         model_type="deepseek3-671b",
         tuning_params={
             "per_device_batch_size": 4,
             "max_target_length": 8192,
-            "ici_fsdp_parallelism": -1,
-            "ici_expert_parallelism": 1,
+            "ici_fsdp_parallelism": 1,
+            "ici_expert_parallelism": -1,
             "remat_policy": "custom",
             "decoder_layer_input": "offload",
             "gcs_metrics": True,
@@ -63,10 +63,10 @@ deepseek_v3_fsdp_v5p_512  = _add_to_model_dictionary(
     ),
 )
 
-c4_deepseek_v3_fsdp_v5p_512 = _add_to_model_dictionary(
+c4_deepseek_v3_ep_256_v5p_512 = _add_to_model_dictionary(
     v5p_model_dict,
     MaxTextModel(
-        model_name="c4_deepseek_v3_fsdp_v5p_512",
+        model_name="c4_deepseek_v3_ep_256_v5p_512",
         model_type="deepseek3-671b",
         tuning_params={
             "per_device_batch_size": 4,

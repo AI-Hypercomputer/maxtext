@@ -277,8 +277,19 @@ def preprocess_eval_dataset(
     eval_global_batch_size_to_load: int,
     max_target_length: int,
     num_examples: Optional[int] = None,
+    is_tokenized_dataset: bool = True,
 ) -> tf.data.Dataset:
   """Preprocess the evaluation dataset."""
+  # group text up to max_target_length if the dataset is not pre-tokenized/pre-processed
+  if not is_tokenized_dataset:
+    eval_ds = eval_ds.map(
+        lambda x: tokenizer.TokenizeOp(tokenizer=sp_tokenizer, features=x, data_keys=("targets",)), num_parallel_calls=AUTOTUNE
+    )
+    # hardcode batch_sizes 24567 i.e. the exp size in split validation_24567exp
+    #   to avoid padding tokens inserted in group text
+    eval_ds = reduce_concat_tokens(eval_ds, feature_key="targets", batch_size=24567)
+    eval_ds = split_tokens_to_targets_length(eval_ds, max_target_length)
+
   if sp_tokenizer.pad_id is not None:
     pad_id = sp_tokenizer.pad_id
   elif sp_tokenizer.unk_id is not None:
@@ -382,6 +393,7 @@ def make_c4_mlperf_eval_iterator(
       sp_tokenizer=sp_tokenizer,
       eval_global_batch_size_to_load=config.global_batch_size_to_load_eval,
       max_target_length=config.max_target_length,
+      is_tokenized_dataset=is_tokenized_dataset,
   )
 
   eval_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(eval_ds, global_mesh)
