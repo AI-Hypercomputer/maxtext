@@ -8,10 +8,9 @@ FROM $BASEIMAGE
 # Set the working directory in the container
 WORKDIR /deps
 
-# Copy all files from local workspace into docker container. This includes
-# MaxText/test_assets which contain some of the reference "golden" data.
-COPY . .
+# Copy assets separately
+COPY assets assets/
+COPY MaxText/test_assets/ MaxText/test_assets/
 
-# Download other test assets from GCS into /deps/MaxText/test_assets
-RUN gsutil -m cp gs://maxtext-test-assets/* MaxText/test_assets
-
+# Copy all files except assets from local workspace into docker container
+COPY --exclude=assets --exclude=MaxText/test_assets . .
