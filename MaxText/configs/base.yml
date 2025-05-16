@@ -571,8 +571,8 @@ eval_steps: -1  # run this number of steps for eval, recommend setting this to p
 target_eval_loss: 0.  # early stop once reaching target eval_loss
 
 # Goodput parameters
-enable_goodput_recording: True
-monitor_goodput: True
+enable_goodput_recording: False
+monitor_goodput: False
 goodput_upload_interval_seconds: 30
 enable_pathways_goodput: False
 monitor_step_time_deviation: True
