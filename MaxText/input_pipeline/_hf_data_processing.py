@@ -17,10 +17,15 @@ limitations under the License.
 """Input pipeline using Huggingface datasets."""
 
 import ml_collections
+
 import jax
+
 import datasets
+
 import transformers
+
 import grain.python as grain
+
 import numpy as np
 
 from MaxText.input_pipeline import _input_pipeline_utils
@@ -238,6 +243,7 @@ def make_hf_eval_iterator(
     global_mesh,
     process_indices_eval,
 ):
+  """Make Hugging Face evaluation iterator. Load and preprocess eval dataset: and return iterator."""
   eval_ds = datasets.load_dataset(
       config.hf_path,
       data_dir=config.hf_data_dir,

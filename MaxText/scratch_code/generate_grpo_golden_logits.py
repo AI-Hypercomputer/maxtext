@@ -16,42 +16,41 @@
 
 Usage:
 
-python -m MaxText.scratch_code.generate_grpo_golden_logits
+python3 -m MaxText.scratch_code.generate_grpo_golden_logits
 """
 
 import functools
-import jax
 import os
 import unittest
+from collections.abc import Callable
 
 import jsonlines
-from MaxText.layers import models
-from MaxText.layers import initializers
-import jax.numpy as jnp
+
 import numpy as np
 
-from MaxText import pyconfig
-from MaxText import maxtext_utils
-from MaxText import max_utils
+import jax.numpy as jnp
+import jax
 from jax.sharding import Mesh
+
 from flax import linen as nn
-from MaxText import common_types
+
 import torch
+
 # from datasets import Dataset
 from trl import GRPOConfig, GRPOTrainer
+
 import transformers
 
 from datasets import load_dataset
 
-from MaxText.experimental.rl.grpo_trainer import compute_log_probs, grpo_loss_fn, _merge_grpo_state, generate_completions
-from MaxText.tests.grpo_trainer_correctness_test import prepare_maxtext_inputs
 from MaxText import maxengine
+from MaxText import maxtext_utils
+from MaxText import pyconfig
+from MaxText.experimental.rl.grpo_trainer import compute_log_probs, grpo_loss_fn, _merge_grpo_state, generate_completions
 from MaxText.globals import PKG_DIR
-
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-NdInitializer = initializers.NdInitializer
+from MaxText.layers import models
+from MaxText.tests.grpo_trainer_correctness_test import prepare_maxtext_inputs
+from MaxText.common_types import Array
 
 
 class GRPOTest(unittest.TestCase):
@@ -163,7 +162,9 @@ class GRPOTest(unittest.TestCase):
         # using the same model as the ref model,
         # which is equivalent of step 0 of GRPO training when
         # the on-policy params are the same as the ref model
-        "ref_per_token_logps": self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep),  # pylint: disable=protected-access
+        "ref_per_token_logps": self.trainer._get_per_token_logps(
+            self.hf_model, hf_input_ids, attention_mask, logits_to_keep
+        ),  # pylint: disable=protected-access
         # using only one advantage because we have just one sequence
         "advantages": advantages[0][0].unsqueeze(0),
     }
@@ -266,12 +267,13 @@ class GRPOTest(unittest.TestCase):
     )
     prompt_true_length = jnp.array([len(prompt_tokens)] * 4)
     engine_data = {"prompt": prompt, "prompt_true_length": prompt_true_length}
-    p_generate_completions = jax.jit(
+    p_generate_completions: Callable[[dict, dict, Array], Array] = jax.jit(
         functools.partial(generate_completions, self.cfg, self.tokenizer_model, engine),
         in_shardings=(self.data_sharding, self.state_mesh_shardings.params, None),
         out_shardings=self.data_sharding,
         donate_argnums=(0,),
     )
+    # pylint: disable=not-callable
     engine_data = p_generate_completions(engine_data, {"params": self.state_no_ckpt_loading.params["params"]}, self.rng)
     data_to_save = {
         "maxtext_loss": maxtext_loss.tolist(),

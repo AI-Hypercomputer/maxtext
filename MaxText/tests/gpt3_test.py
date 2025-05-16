@@ -14,30 +14,27 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-""" Tests for GPT3 """
-import sys
-import jax
-import unittest
+""" Tests for GPT3. """
+
 import os.path
-from MaxText import maxtext_utils
-from MaxText.globals import PKG_DIR
-from jax.sharding import Mesh
-from MaxText.layers import models
-from MaxText.layers import embeddings
-from MaxText.layers import quantizations
+import sys
+import unittest
 
-import jax.numpy as jnp
-
-from MaxText import pyconfig
 import pytest
 
+from jax.sharding import Mesh
+import jax.numpy as jnp
+import jax
 
-Mesh = jax.sharding.Mesh
-Embed = embeddings.Embed
+from MaxText import maxtext_utils
+from MaxText import pyconfig
+from MaxText.globals import PKG_DIR
+from MaxText.layers import models
+from MaxText.layers import quantizations
 
 
 def init_random_model_vars(model, rng, example_batch):
-  """initialize random model vars."""
+  """Initialize random model vars."""
   model_vars = model.init(
       {"params": rng, "aqt": rng},
       example_batch["inputs"],
@@ -58,7 +55,7 @@ def init_random_model_vars(model, rng, example_batch):
 
 
 class GPT3(unittest.TestCase):
-  """numerical tests for GPT3."""
+  """Numerical tests for GPT3."""
 
   def setUp(self):
     super().setUp()

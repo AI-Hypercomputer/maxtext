@@ -17,22 +17,21 @@
 # pylint: disable=too-many-positional-arguments, unnecessary-lambda-assignment
 
 from collections.abc import Callable
+from functools import partial
+from typing import Any, Optional, Literal
 import dataclasses
 import functools
-from typing import Any, Optional, Literal
 
-import jax
-import jax.numpy as jnp
 from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
-from MaxText.kernels.megablox import common
+import jax
+import jax.numpy as jnp
 
 from aqt.jax.v2 import pallas as aqt_pl
-from aqt.jax.v2 import aqt_tensor
+from aqt.jax.v2.aqt_tensor import QTensor
 
-QTensor = aqt_tensor.QTensor
-partial = functools.partial
+from MaxText.kernels.megablox import common
 
 
 def _validate_args(

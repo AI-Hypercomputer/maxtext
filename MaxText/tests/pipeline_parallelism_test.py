@@ -11,9 +11,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-# pylint: disable=missing-module-docstring, missing-function-docstring
-import sys
+import functools
 import os.path
+import sys
 import unittest
 
 import pytest
@@ -25,16 +25,17 @@ import jax.numpy as jnp
 from flax.core import meta
 from flax import linen as nn
 
+from MaxText import maxtext_utils
+from MaxText import pyconfig
+from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import PKG_DIR
 from MaxText.layers import pipeline
 from MaxText.layers import simple_layer
 from MaxText.train import main as train_main
-from MaxText import common_types
-from MaxText import pyconfig
-from MaxText import maxtext_utils
 
 
 def assert_same_output_and_grad(f1, f2, *inputs):
+  """check that the output and gradient are the same"""
   f1_value, f1_grad = jax.value_and_grad(f1)(*inputs)
   f2_value, f2_grad = jax.value_and_grad(f2)(*inputs)
 
@@ -53,6 +54,7 @@ def assert_same_output_and_grad(f1, f2, *inputs):
 class PipelineParallelismTest(unittest.TestCase):
 
   def assert_pipeline_same_output_and_grad(self, config):
+    """check that the output and gradient are the same"""
     devices_array = maxtext_utils.create_device_mesh(config)
     mesh = Mesh(devices_array, config.mesh_axes)
 
@@ -78,7 +80,7 @@ class PipelineParallelismTest(unittest.TestCase):
         config.global_batch_size_to_train_on, config.max_target_length, config.emb_dim
     )
     deterministic = True
-    model_mode = common_types.MODEL_MODE_TRAIN
+    model_mode = MODEL_MODE_TRAIN
     # We use a simpler single matmul decoder layer for fast compilation in these tests.
     single_pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh)
     my_pipeline = pipeline.Pipeline(config=config, layers=single_pipeline_stage, mesh=mesh)
@@ -96,8 +98,6 @@ class PipelineParallelismTest(unittest.TestCase):
       )
       loss = jnp.linalg.norm(outputs - dummy_targets)
       return loss
-
-    import functools
 
     pipeline_parallelism_dummy_loss = functools.partial(pipeline_parallelism_dummy_loss_extra, partition_spec=partition_spec)
 

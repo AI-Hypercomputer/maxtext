@@ -15,24 +15,23 @@ limitations under the License.
 """
 
 # pylint: disable=bare-except, consider-using-generator
-"""Utils that are only interesting to MaxText. """
+""" Utils that are only interesting to MaxText. """
 
 from typing import Optional
-
 import functools
 import pickle
 
-from flax.training import train_state
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
+from flax.training import train_state
 
 import numpy as np
 
+from jax.experimental import mesh_utils
+from jax.experimental.serialize_executable import deserialize_and_load
+from jax.sharding import PartitionSpec as P
 import jax
 import jax.numpy as jnp
-from jax.experimental import mesh_utils
-from jax.sharding import PartitionSpec as P
-from jax.experimental.serialize_executable import deserialize_and_load
 
 import optax
 
@@ -40,11 +39,10 @@ import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_c
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
 from MaxText import checkpointing
-from MaxText import common_types
-from MaxText.inference.page_manager import PageState
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.common_types import DecoderBlockType
+from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from MaxText.inference.page_manager import PageState
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
@@ -53,12 +51,16 @@ NUM_IMAGES_PER_SEQUENCE = 1
 NUM_IMAGE_CHANNELS = 3
 
 
+def get_input_data_sharding(config, mesh):
+  """Get the input data sharding for the model"""
+  return nn.logical_to_mesh_sharding(P(*config.input_data_sharding_logical_axes), mesh, config.logical_axis_rules)
+
+
 def get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config):
-  """Get the shardings (both state and data) for train_step"""
+  """Get the shardings (both state and data) for `train_step`."""
   functional_train = get_functional_train_step(train_step, model, config, state_mesh_shardings)
   functional_train.__name__ = "train_step"
-  data_pspec = P(*config.data_sharding)
-  data_sharding = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
+  data_sharding = get_input_data_sharding(config, mesh)
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = (state_mesh_shardings, None)  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
@@ -74,8 +76,7 @@ def get_functional_eval_with_signature(eval_step, mesh, state_mesh_shardings, mo
   """Get the shardings (both state and data) for eval_step"""
   functional_eval = get_functional_eval_step(eval_step, model, config)
   functional_eval.__name__ = "eval_step"
-  data_pspec = P(*config.data_sharding)
-  data_sharding = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
+  data_sharding = get_input_data_sharding(config, mesh)
   in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
   out_shardings = None  # metrics
   static_argnums = ()  # We partial out the static argnums of model, config
@@ -236,7 +237,7 @@ def calculate_tflops_training_per_device(config, log=True):
   # MLP flops
   if config.num_experts > 1:
     # calculation based on dropless implementation
-    if config.decoder_block == DecoderBlockType.DEEPSEEK or config.decoder_block == DecoderBlockType.LLAMA4:
+    if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.LLAMA4):
       total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
     else:
       gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
@@ -278,7 +279,7 @@ def calculate_tflops_training_per_device(config, log=True):
     attention_tflops, learnable_weight_tflops = calculate_gemma2_tflops_training_per_device(
         config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops
     )
-  elif config.decoder_block == DecoderBlockType.DEEPSEEK or config.decoder_block == DecoderBlockType.LLAMA4:
+  elif config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.LLAMA4):
     learnable_weight_tflops = (
         (total_ffn_flops + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
     )
@@ -377,7 +378,8 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
   perfectly_sharded_params_per_chip = total_num_params / product_num_devices_for_weight_sharding
   assert total_num_params_per_chip >= perfectly_sharded_params_per_chip, (
       "Number of parameters per chip must not be less than in the ideal sharded "
-      "scenario across `fsdp`, `fsdp_transpose`, `context`, `sequence`, `tensor`, `tensor_transpose`, `tensor_sequence`, `stage`, `expert` axes."
+      "scenario across `fsdp`, `fsdp_transpose`, `context`, `sequence`, `tensor`, `tensor_transpose`, "
+      "`tensor_sequence`, `stage`, `expert` axes."
   )
   unsharded_param_perc = total_num_params_per_chip / perfectly_sharded_params_per_chip - 1
   assert unsharded_param_perc < tolerance, (
@@ -431,7 +433,7 @@ def get_nested_value(dictionary, nested_key, default=None):
   return current_level
 
 
-def init_decode_state(apply_fn, params):
+def init_decode_state(apply_fn, params) -> train_state.TrainState:
   """Init train state with null opt state for decode."""
   state = train_state.TrainState(step=0, apply_fn=apply_fn, params=params, tx=None, opt_state={})  # type: ignore
   return state
@@ -609,8 +611,16 @@ def get_abstract_state(model, tx, config, rng, mesh, is_training=True):
   state_mesh_shardings = nn.logical_to_mesh_sharding(state_logical_annotations, mesh, config.logical_axis_rules)
   if is_training and config.optimizer_memory_host_offload:
     opt_state = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.opt_state)
-    params = jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind="pinned_host"), state_mesh_shardings.params)
-    state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state, params=params)
+    state_mesh_shardings = state_mesh_shardings.replace(opt_state=opt_state)
+  if is_training and config.parameter_memory_host_offload:
+    assert config.param_scan_axis == 0, "You must set the scan axis 0 to enable parameter offloading."
+
+    def move(path, x):
+      max_logging.log(f"max_utils.py: Moving {path} to host")
+      return x.with_memory_kind(kind="pinned_host")
+
+    params = jax.tree_util.tree_map_with_path(move, state_mesh_shardings.params)
+    state_mesh_shardings = state_mesh_shardings.replace(params=params)
 
   abstract_sharded_state = jax.jit(init_state_partial, in_shardings=None, out_shardings=state_mesh_shardings).eval_shape()
 
@@ -646,7 +656,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: Optio
         jnp.ones(input_shape),
         jnp.ones(input_shape),
         encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
-        model_mode=common_types.MODEL_MODE_PREFILL,
+        model_mode=MODEL_MODE_PREFILL,
         slot=0,
         page_state=page_state,
     )
@@ -682,7 +692,7 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[Page
         jnp.ones(input_shape),
         jnp.ones(input_shape),
         encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
-        model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
         slot=0,
         page_state=page_state,
     )
@@ -698,11 +708,17 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[Page
 
 
 def save_quantized_checkpoint_if_configured(config, params):
+  """Save quantized checkpoint if configured"""
   assert config.quantization, "quantization must be configured"
   if config.save_quantized_params_path:
-    checkpointing.save_params_to_path(config.save_quantized_params_path, params, config.checkpoint_storage_use_ocdbt, config.checkpoint_storage_use_zarr3)
+    checkpointing.save_params_to_path(
+        checkpoint_dir=config.save_quantized_params_path,
+        params=params,
+        use_ocdbt=config.checkpoint_storage_use_ocdbt,
+        use_zarr3=config.checkpoint_storage_use_zarr3,
+    )
   else:
-    "Skipping saving quantized checkpoint as save_quantized_params_path is null."
+    max_logging.log("Skipping saving quantized checkpoint as save_quantized_params_path is null.")
 
 
 def add_config_to_summary_writer(config, summary_writer):

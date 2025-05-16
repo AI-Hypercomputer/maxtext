@@ -18,44 +18,25 @@ limitations under the License.
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-
 from typing import Any, Optional, Tuple
 
-from jax.sharding import Mesh
+import jax
 from jax import lax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
+from jax.sharding import Mesh
 
 from flax import linen as nn
 
-from MaxText.layers import attentions
+from MaxText import max_logging
+from MaxText.common_types import Config, DType, AxisNames, BATCH, LENGTH, EMBED, HEAD, D_KV, Array, MODEL_MODE_TRAIN
 from MaxText.layers import initializers
 from MaxText.layers import linears
 from MaxText.layers import models
 from MaxText.layers import quantizations
-
-AttentionOp = attentions.AttentionOp
-
-from MaxText import common_types
-
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-Mesh = common_types.Mesh
-AxisNames = common_types.AxisNames
-BATCH = common_types.BATCH
-LENGTH = common_types.LENGTH
-HEAD = common_types.HEAD
-D_KV = common_types.D_KV
-EMBED = common_types.EMBED
-
-DenseGeneral = linears.DenseGeneral
-NdInitializer = initializers.NdInitializer
-Initializer = initializers.Initializer
-nd_dense_init = initializers.nd_dense_init
-Quant = quantizations.AqtQuantization
-KVQuant = quantizations.KVQuant
-
+from MaxText.layers.attentions import KVQuant, DenseGeneral, AttentionOp
+from MaxText.layers.initializers import Initializer, NdInitializer, nd_dense_init
+from MaxText.layers.quantizations import AqtQuantization as Quant
 
 # -----------------------------------------
 # The Normalization Layer specific for GPT3
@@ -72,6 +53,7 @@ class Gpt3LayerNorm(nn.Module):
   scale_init: Initializer = nn.initializers.zeros
   use_bias: bool = True
   reductions_in_fp32: bool = False
+  parameter_memory_host_offload: bool = False
 
   @nn.compact
   def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
@@ -88,6 +70,10 @@ class Gpt3LayerNorm(nn.Module):
     scale = self.param(
         "scale", nn.with_logical_partitioning(self.scale_init, self.kernel_axes), (features,), self.weight_dtype
     )
+    # Move scale to device if parameter offloading is enabled
+    if self.parameter_memory_host_offload:
+      max_logging.log("gpt3.py: Moving scale parameter to device")
+      scale = jax.device_put(scale, jax._src.sharding_impls.TransferToMemoryKind("device"))
 
     scale = jnp.asarray(scale, self.dtype)
     output = normed_inputs * (scale + 1)
@@ -212,7 +198,7 @@ class Gpt3MultiHeadAttention(nn.Module):
       inputs_q: Array,
       decoder_segment_ids: Array | None = None,
       *,
-      model_mode: str = common_types.MODEL_MODE_TRAIN,
+      model_mode: str = MODEL_MODE_TRAIN,
       deterministic: bool = False,
   ):
     inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)

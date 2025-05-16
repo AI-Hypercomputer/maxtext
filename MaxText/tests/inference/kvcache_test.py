@@ -15,12 +15,12 @@ limitations under the License.
 
 import unittest
 
-from MaxText import common_types
-from MaxText.inference import kvcache
-
 import jax
 from jax import random
 import jax.numpy as jnp
+
+from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from MaxText.inference import kvcache
 
 
 class MlaKVCacheTest(unittest.TestCase):
@@ -47,7 +47,7 @@ class MlaKVCacheTest(unittest.TestCase):
         * 0.03
     )
     decoder_segment_ids = None
-    model_mode = common_types.MODEL_MODE_PREFILL
+    model_mode = MODEL_MODE_PREFILL
     variables = test_module.init(
         {"params": self.rng},
         low_rank_main,
@@ -104,7 +104,7 @@ class MlaKVCacheTest(unittest.TestCase):
 
     # Autoregressive step. Prefill remains same but updates autoregressive
     # variables
-    model_mode = common_types.MODEL_MODE_AUTOREGRESSIVE
+    model_mode = MODEL_MODE_AUTOREGRESSIVE
     low_rank_main_1 = jnp.ones((self.batchsize, 1, self.kv_lora_rank), dtype=self.dtype) * 0.04
     key_rope_1 = jnp.ones((self.batchsize, 1, 1, self.k_rope_head_dim), dtype=self.dtype) * 0.05
     _, new_vars = test_module.apply(

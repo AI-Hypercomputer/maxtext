@@ -46,16 +46,22 @@ import time
 import queue
 
 from absl import app
+
 from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
-from flax.linen import partitioning as nn_partitioning
+
 import jax
+
+from flax.linen import partitioning as nn_partitioning
+
 from ml_goodput_measurement import monitoring
+
 import pathwaysutils
 from pathwaysutils.elastic import manager
 from pathwaysutils.debug import timing
+
 import tensorflow as tf
 
 from MaxText import checkpointing
@@ -187,7 +193,7 @@ def train_loop(config, elastic_manager, state=None):
   Args:
     config:
     state:
-    ckpt_path:
+    elastic_manager:
   Returns:
   """
   # Create a GoodputRecorder to log information
@@ -267,6 +273,7 @@ def train_loop(config, elastic_manager, state=None):
       block=True,
   )
 
+  input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
   # Using while loop instead of a for loop because with elasticity
   # the step is restored back to the latest snapshot when a slice is lost
   while step < config.steps:
@@ -281,6 +288,7 @@ def train_loop(config, elastic_manager, state=None):
           record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
           try:
             example_batch = load_next_batch(data_iterator, example_batch, config)
+            example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
           except Exception as e:  # pylint: disable=broad-except
             max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
             break
@@ -483,6 +491,17 @@ def main(argv: Sequence[str]) -> None:
 
   if config.monitor_goodput and jax.process_index() == 0:
     logger_name = f"goodput_{config.run_name}"
+    # Workload monitoring and Goodput monitoring both uses /workload/performance
+    # GCM metric to publish step_time and step_deviation metrics. For now, we
+    # will disable publishing step deviation metrics to GCM if workload
+    # monitoring is enabled. Will reconcile this in the future.
+    if config.report_performance_metric_for_gcp_monitoring:
+      config.enable_gcp_step_deviation_metrics = False
+
+    gcp_options = monitoring.GCPOptions(
+        enable_gcp_goodput_metrics=config.enable_gcp_goodput_metrics,
+        enable_gcp_step_deviation_metrics=config.enable_gcp_step_deviation_metrics,
+    )
     goodput_monitor = monitoring.GoodputMonitor(
         job_name=config.run_name,
         logger_name=logger_name,
@@ -493,12 +512,13 @@ def main(argv: Sequence[str]) -> None:
         include_badput_breakdown=True,
         include_step_deviation=config.monitor_step_time_deviation,
         step_deviation_interval_seconds=config.step_deviation_interval_seconds,
+        gcp_options=gcp_options,
     )
     goodput_monitor.start_goodput_uploader()
-    max_logging.log("Started Goodput upload to Tensorboard in the background!")
+    max_logging.log("Started Goodput upload to Tensorboard & GCM in the background!")
     if config.monitor_step_time_deviation:
       goodput_monitor.start_step_deviation_uploader()
-      max_logging.log("Started step time deviation upload to Tensorboard in the background!")
+      max_logging.log("Started step time deviation upload to Tensorboard & GCM in the background!")
   debug_config = debug_configuration.DebugConfig(
       stack_trace_config=stack_trace_configuration.StackTraceConfig(
           collect_stack_trace=config.collect_stack_trace,

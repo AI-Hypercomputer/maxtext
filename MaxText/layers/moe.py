@@ -22,41 +22,57 @@ import math
 
 import numpy as np
 
-import jax
 from jax import lax
-import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
+from jax.sharding import Mesh
+import jax
+import jax.numpy as jnp
 
 import flax.linen as nn
 
 from aqt.jax.v2 import aqt_tensor
+from aqt.jax.v2.aqt_tensor import QTensor
 
-from MaxText import common_types
-from MaxText.layers import initializers
-from MaxText.layers import normalizations
-from MaxText.layers import quantizations
-from MaxText.layers import linears
 from MaxText import max_logging
 from MaxText import max_utils
+from MaxText.common_types import DType, Array, Config, DecoderBlockType
 from MaxText.kernels import megablox as mblx
-
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-Mesh = common_types.Mesh
-NdInitializer = initializers.NdInitializer
-
-nd_dense_init = initializers.nd_dense_init
-bias_init = initializers.default_bias_init
-
-RMSNorm = normalizations.RMSNorm
-Quant = quantizations.AqtQuantization
-QTensor = aqt_tensor.QTensor
+from MaxText.layers import initializers
+from MaxText.layers import linears
+from MaxText.layers import quantizations
+from MaxText.layers.attentions import NdInitializer, nd_dense_init
+from MaxText.layers.initializers import default_bias_init
+from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
 DISPATCH = "dispatch"
 COMBINE = "combine"
+
+
+def random_routing(rng_key, gate_logits, num_experts_per_tok):
+  """
+  Performs random routing of tokens to experts.
+
+  Args:
+    rng_key: A JAX PRNGKey for randomness.
+    gate_logits: A JAX array of shape (batch_size, sequence_length, num_experts)
+                 representing the logits for each expert.
+    num_experts_per_tok: The number of experts to select for each token.
+
+  Returns:
+    A tuple containing:
+      - top_k_indices: JAX array of shape (batch_size, sequence_length, num_experts_per_tok)
+                       representing the indices of the selected experts for each token.
+      - top_k_weights: JAX array of shape (batch_size, sequence_length, num_experts_per_tok)
+                       representing the weights for the selected experts.
+  """
+  bs, seq_len, num_experts = gate_logits.shape
+  indices = jnp.arange(num_experts).repeat(bs * seq_len)
+  selected_num = bs * seq_len * num_experts_per_tok
+  top_k_indices = jax.random.choice(rng_key, indices, shape=(selected_num,)).reshape(bs, seq_len, num_experts_per_tok)
+  top_k_weights = jnp.take_along_axis(gate_logits, top_k_indices, axis=-1)
+  return top_k_weights, top_k_indices
 
 
 class GateLogit(nn.Module):
@@ -135,7 +151,7 @@ class GateLogit(nn.Module):
       )
       bias = self.param(
           "bias",
-          nn.with_logical_partitioning(bias_init, bias_axes),
+          nn.with_logical_partitioning(default_bias_init, bias_axes),
           bias_shape,
           self.weight_dtype,
       )
@@ -184,6 +200,7 @@ class RoutedMoE(nn.Module):
     return self.mesh.shape["context_autoregressive"]
 
   def generate_kernels(self, num_experts, emb_dim, mlp_dim):
+    """generates kernels"""
 
     kernel_in_axis = np.arange(1)
     kernel_out_axis = np.arange(1, 2)
@@ -237,15 +254,20 @@ class RoutedMoE(nn.Module):
     return w0_kernel, w1_kernel, wo_kernel
 
   def get_topk(self, gate_logits, pre_bias_logits):
-    # shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)
+    """get topk. shape of top_k_weights & top_k_indices: (batch, sequence, num_experts_per_tok)"""
+    if self.config.use_random_routing:
+      rng = self.make_rng("random_routing")
+      top_k_weights, top_k_indices = random_routing(rng, gate_logits, self.num_experts_per_tok)
+      return top_k_weights, top_k_indices
+
     if self.config.model_name.startswith("deepseek3"):
       top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
     else:
       top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
-    if self.config.decoder_block == common_types.DecoderBlockType.DEEPSEEK:
+    if self.config.decoder_block == DecoderBlockType.DEEPSEEK:
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
-    elif self.config.decoder_block != common_types.DecoderBlockType.LLAMA4:
+    elif self.config.decoder_block != DecoderBlockType.LLAMA4:
       top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
     return top_k_weights, top_k_indices
 
@@ -320,7 +342,7 @@ class RoutedMoE(nn.Module):
     inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[2]))
     weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits)
 
-    if self.config.decoder_block == common_types.DecoderBlockType.LLAMA4:
+    if self.config.decoder_block == DecoderBlockType.LLAMA4:
       # weights will be of shape (batch_size, seq_len, num_experts_per_tok)
       router_scores = jax.nn.sigmoid(weights.astype(jnp.float32))  # weights are top_k_weights here
       # Squeeze router_scores to (batch_size * seq_len, num_experts_per_tok)
@@ -345,7 +367,7 @@ class RoutedMoE(nn.Module):
     )
     with jax.named_scope("weight_sum"):
       matmul_precision = lax.Precision(self.config.matmul_precision)
-      if self.config.decoder_block == common_types.DecoderBlockType.LLAMA4:
+      if self.config.decoder_block == DecoderBlockType.LLAMA4:
         # For Llama4, combine using weights of 1 for selected experts
         reshaped_weights = jnp.ones_like(reshaped_weights)
       output = jnp.einsum(
@@ -357,19 +379,23 @@ class RoutedMoE(nn.Module):
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
 
   def sparse_matmul(self, inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel):
+    """sparse matrix multiplication"""
     tile_size = (512, 1024, 1024)  # (m, k, n)
 
     def local_permute(inputs, global_group_sizes, local_expert_size):
       """Sort inputs by expert within each shard."""
       local_id = jax.lax.axis_index("expert")
-      local_sizes = jax.lax.dynamic_slice_in_dim(
+      # all_shard_local_sizes.shape: [expert_shard, local_expert_size]
+      all_shard_local_sizes = jax.lax.dynamic_slice_in_dim(
           global_group_sizes, local_id * local_expert_size, local_expert_size, axis=1
-      ).reshape(-1)
+      )
+      local_sizes = all_shard_local_sizes.reshape(-1)
       base_indices = jnp.mod(jnp.arange(local_sizes.shape[0]), local_expert_size)
       expert_indices = jnp.repeat(base_indices, local_sizes, total_repeat_length=inputs.shape[0])
       sorted_indices = jnp.argsort(expert_indices)
       sorted_inputs = jnp.take(inputs, indices=sorted_indices, axis=0)
-      group_size = jnp.bincount(expert_indices, length=local_expert_size)
+      # group_size: 1D array with size of local_expert_size
+      group_size = jnp.sum(all_shard_local_sizes, axis=0)
       return sorted_inputs, sorted_indices, group_size
 
     def gmm(inputs, kernel, group_sizes):
@@ -452,7 +478,7 @@ class RoutedMoE(nn.Module):
       recv_sizes = transform_array(all_shards_group_sizes, local_id, TransformStrategy.RECV_SIZE)
       return input_offsets, send_sizes, output_offsets, recv_sizes
 
-    # Currently, we only support data and tensor parallelism with Megablox.
+    # Currently, we support data, tensor, and expert parallelism with Megablox.
     # We all gather the input activations over tensor parallelism to follow strategy
     # in https://parsa.epfl.ch/course-info/cs723/papers/Megatron.pdf.
     input_partition_pspec = nn.logical_to_mesh_axes(("activation_batch", None, None))
@@ -554,8 +580,12 @@ class RoutedMoE(nn.Module):
     return wrapper(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)
 
   def reshape_and_update_weights(self, weights, indices):
-    # input of weights & indices: (batch_size, seq_len, num_experts_per_tok)
-    # output of updated weights: (batch_size, seq_len, num_experts)
+    """
+    reshape and update weights.
+
+    input of weights and indices: (batch_size, seq_len, num_experts_per_tok)
+    output of updated weights: (batch_size, seq_len, num_experts)
+    """
     update_weights = jnp.zeros((weights.shape[0], weights.shape[1], self.num_experts), dtype=self.dtype)
     index_update = (
         jnp.arange(weights.shape[0])[:, None, None],
@@ -572,13 +602,13 @@ class RoutedMoE(nn.Module):
     sub_seq = seq_len // cp
     return cp, sub_seq
 
-  # sub group mask generation for inference only
   def generate_masks_subgroup(self, top_k_indices, softmax_probs):
+    """subgroup mask generation for inference only"""
     # calculate expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
     batch_size, seq_len, _ = top_k_indices.shape
     cp, sub_seq = self.get_context_partition_and_sub_seq(seq_len)
 
-    #  breaking the sequence into sub sequences. It is effectively grouping the tokens in a sequence into groups, and route only within each group.
+    # Break sequence into subsequences (groups) of tokens, and route only within each group.
     top_k_indices = jnp.reshape(top_k_indices, (batch_size, cp, sub_seq, top_k_indices.shape[2]))
 
     tokens_per_batch = sub_seq * self.num_experts_per_tok
@@ -648,6 +678,7 @@ class RoutedMoE(nn.Module):
     return dispatch_mask, combine_mask
 
   def generate_masks(self, top_k_indices, softmax_probs):
+    """generate masks"""
     # calculate expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
     batch_size, seq_len, _ = top_k_indices.shape
 
@@ -720,6 +751,7 @@ class RoutedMoE(nn.Module):
     return loss
 
   def get_einsum(self, rhs_mesh_axes: Tuple[Optional[str], ...] = (), einsum_name=None):
+    """get the Einstein summation"""
 
     # the check is to prevent aqteinsum as einsum op for dispatch and combine einsums in ase when capacity_factor > 0
     # this is necessary to load pre-quantized weights in case of inference
@@ -749,13 +781,14 @@ class RoutedMoE(nn.Module):
     return kernel
 
   def dense_matmul(self, inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel):
+    """dense matrix multiplication"""
     # gate_logits: batch, length, expert
     gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", None))
     if self.config.model_name.startswith("deepseek3"):
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits = nn.with_logical_constraint(pre_bias_logits, ("activation_batch", "activation_length", None))
     top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits)
-    is_llama4_decoder_layer = self.config.decoder_block == common_types.DecoderBlockType.LLAMA4
+    is_llama4_decoder_layer = self.config.decoder_block == DecoderBlockType.LLAMA4
     if is_llama4_decoder_layer:
       router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(jnp.bfloat16)
       inputs = inputs * router_scores
@@ -773,11 +806,13 @@ class RoutedMoE(nn.Module):
 
     cp, sub_seq = self.get_context_partition_and_sub_seq(seq_len)
 
-    # TODO @jacobplatin: allow Llama4 MoE to handle capacity factor > 0
     if self.config.capacity_factor > 0:
       # token dropping if needed
       if self.config.model_call_mode != "inference":
-        dispatch_mask, combine_mask = self.generate_masks(top_k_indices, weights)
+        # TODO: remove this pylint by refactoring the logic here
+        dispatch_mask, combine_mask = self.generate_masks(
+            top_k_indices, weights  # pylint: disable=possibly-used-before-assignment
+        )
         mask_axes = ("activation_batch", "activation_length", None, None)
         input_axis = ("activation_batch", "activation_length", "activation_embed")
         dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, "activation_embed")
@@ -911,6 +946,7 @@ class RoutedMoE(nn.Module):
   def retrieve_quantized_weight(
       self, inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel
   ) -> tuple[QTensor, QTensor, QTensor]:
+    """retrieve quantized weight"""
     # This is called only during tracing. This is to invoke creation of quantized tensor inside AqtEinsum.
     # After jit, this will become no-op and will not affect performance.
     _ = self.dense_matmul(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)

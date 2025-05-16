@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Matrix multiplication sharding"""
+
 from functools import partial
 
 import jax
@@ -28,6 +30,7 @@ DTYPES = [jax.numpy.int8, jax.numpy.bfloat16]
 
 
 def matmul(mesh, mesh_dim, dtype=jax.numpy.bfloat16, batch=1024, enable_visual=False):
+  """sharded matrix multiplication"""
   A = jax.numpy.ones((batch, EMBED), dtype=dtype)
   activation_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "model"))
   A_ = jax.device_put(A, activation_sharding)

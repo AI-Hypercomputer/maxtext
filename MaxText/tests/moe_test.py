@@ -11,6 +11,7 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
+""" Mixture of Experts (MoE) tests. """
 
 import os.path
 import unittest
@@ -25,19 +26,13 @@ from jax.sharding import Mesh
 import flax.linen as nn
 from flax.linen import partitioning as nn_partitioning
 
-from MaxText.layers import linears
-from MaxText.layers import initializers
-from MaxText.layers import moe
-from MaxText import pyconfig
 from MaxText import maxtext_utils
+from MaxText import pyconfig
+from MaxText.common_types import Config, DType
 from MaxText.globals import PKG_DIR
-from MaxText import common_types
-
-
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-NdInitializer = initializers.NdInitializer
+from MaxText.layers import linears
+from MaxText.layers import moe
+from MaxText.layers.initializers import NdInitializer, nd_dense_init
 
 
 class TokenDroppingTest(unittest.TestCase):
@@ -64,7 +59,7 @@ class TokenDroppingTest(unittest.TestCase):
         num_experts=self.cfg.num_experts,
         num_experts_per_tok=self.cfg.num_experts_per_tok,
         mesh=Mesh(devices_array, self.cfg.mesh_axes),
-        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
         kernel_axes=("embed", "mlp"),
         dtype=self.cfg.dtype,
     )
@@ -191,7 +186,7 @@ class DeepSeekRoutingTest(unittest.TestCase):
         num_experts=self.cfg.num_experts,
         num_experts_per_tok=self.cfg.num_experts_per_tok,
         mesh=Mesh(devices_array, self.cfg.mesh_axes),
-        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
         kernel_axes=("embed", "mlp"),
         dtype=self.cfg.dtype,
     )
@@ -233,9 +228,8 @@ class DeepSeekRoutingTest(unittest.TestCase):
 
 
 class MoeLoopBlock(nn.Module):
-  """Reference implemetnation from https://github.com/mistralai/mistral-inference.
-  This is not included anymore in our repo,
-  due to limitation of for-loop implementation in sharding.
+  """Reference implementation from https://github.com/mistralai/mistral-inference.
+  This is not included anymore in our repo, due to a limitation of for-loop implementation in sharding.
   """
 
   config: Config
@@ -282,13 +276,15 @@ class MoeLoopBlock(nn.Module):
 
 
 class RoutedMoeTest(unittest.TestCase):
+  """Routed Mixture of Experts test."""
 
   def get_expected_output(self, rng, hidden_states, cfg):
+    """Retrieve expected output from Routed Mixture of Experts."""
     model = MoeLoopBlock(
         config=cfg,
         num_experts=cfg.num_experts,
         num_experts_per_tok=cfg.num_experts_per_tok,
-        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
         kernel_axes=("embed", "mlp"),
         dtype=cfg.dtype,
     )
@@ -296,17 +292,18 @@ class RoutedMoeTest(unittest.TestCase):
         rng, jax.random.normal(rng, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim))
     )
 
-    output = jax.jit(model.apply)(variables, hidden_states)
+    output = jax.jit(model.apply)(variables, hidden_states)  # pylint: disable=not-callable
     return variables, output
 
   def get_moe_output(self, variables, hidden_states, cfg, mesh):
+    """retrieve expected output from MoE"""
     model = moe.RoutedMoE(
         name="MoeBlock",
         config=cfg,
         num_experts=cfg.num_experts,
         num_experts_per_tok=cfg.num_experts_per_tok,
         mesh=mesh,
-        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
         kernel_axes=("embed", "mlp"),
         intermediate_dim=cfg.mlp_dim,
         dtype=cfg.dtype,
@@ -338,7 +335,7 @@ class RoutedMoeTest(unittest.TestCase):
 
     moe_variables = {"params": {"gate": {"kernel": kernel}, "wi_0": wi_0, "wi_1": wi_1, "wo": wo}}
 
-    output = jax.jit(model.apply)(moe_variables, hidden_states)
+    output = jax.jit(model.apply)(moe_variables, hidden_states)  # pylint: disable=not-callable
     return output
 
   @pytest.mark.tpu_only
@@ -442,6 +439,25 @@ class RoutedMoeTest(unittest.TestCase):
       variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
       actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
       self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+
+  def test_random_routing(self):
+    bs, seq_len, num_experts, num_experts_per_tok = 12, 1024, 8, 2
+    rng = jax.random.PRNGKey(0)
+    rng, logits_key = jax.random.split(rng)
+    gate_logits = jax.random.normal(logits_key, (bs, seq_len, num_experts))
+
+    rng, run_key = jax.random.split(rng)
+    _, top_k_indices = moe.random_routing(run_key, gate_logits, num_experts_per_tok)
+
+    flat_indices = top_k_indices.flatten()
+    counts = jnp.bincount(flat_indices, length=num_experts)
+    expected_count = bs * seq_len * num_experts_per_tok // num_experts
+    tol = 0.05
+
+    lower_bound = expected_count - expected_count * tol
+    upper_bound = expected_count + expected_count * tol
+    is_with_tolerance = (counts >= lower_bound) & (counts <= upper_bound)
+    self.assertTrue(is_with_tolerance.all())
 
 
 if __name__ == "__main__":

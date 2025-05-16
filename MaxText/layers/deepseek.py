@@ -22,30 +22,18 @@ limitations under the License.
 from typing import Optional
 
 from jax.ad_checkpoint import checkpoint_name
+from jax.sharding import Mesh
 import jax.numpy as jnp
 
 from flax import linen as nn
 
-from MaxText.layers import quantizations
-from MaxText.layers import linears
-from MaxText.layers import moe
-from MaxText.layers import initializers
 from MaxText.layers import attentions
-from MaxText.layers import embeddings
-from MaxText.layers import normalizations
+from MaxText.layers import initializers
+from MaxText.layers import linears
 from MaxText.layers import models
-from MaxText import common_types
-
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-Mesh = common_types.Mesh
-ScanIn = common_types.ScanIn
-
-Embed = embeddings.Embed
-Attention = attentions.Attention
-RMSNorm = normalizations.RMSNorm
-Quant = quantizations.AqtQuantization
+from MaxText.layers import moe
+from MaxText.layers import quantizations
+from MaxText.layers.quantizations import AqtQuantization as Quant
 
 # -----------------------------------------
 # The Decoder Layer for DeepSeek v3
@@ -53,6 +41,7 @@ Quant = quantizations.AqtQuantization
 
 
 def self_attention_with_norm(inputs, cfg, mesh, quant, decoder_segment_ids, decoder_positions, deterministic, model_mode):
+  """self-attention with normalization"""
   # Normalization
   lnx_rms = models.RMSNorm(
       dtype=cfg.dtype,
@@ -119,6 +108,7 @@ def self_attention_with_norm(inputs, cfg, mesh, quant, decoder_segment_ids, deco
 
 
 def post_process(cfg, layer_output, sow):
+  """postprocessing."""
   if cfg.record_internal_nn_metrics:
     sow("intermediates", "activation_mean", jnp.mean(layer_output))
     sow("intermediates", "activation_stdev", jnp.std(layer_output))

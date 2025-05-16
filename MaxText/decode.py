@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CLI utility for running inference on a single/multi stream(s)"""
+"""CLI utility for running inference on a single/multi stream(s)."""
 
 import os
 from typing import Sequence
@@ -65,7 +65,7 @@ def _batch_first_result_token(first_tokens: list[engine_api.ResultTokens], batch
   )
 
   def _all_equals(elements: Sequence[jax.Array], target: jax.Array):
-    """Checks if each element equals the given target"""
+    """Checks if each element equals the given target."""
     stacked = jnp.stack(elements)
     row_comparisons = stacked == target
     return jnp.all(row_comparisons)
@@ -106,15 +106,15 @@ def main(argv: Sequence[str]) -> None:
     has_chat_template = getattr(tokenizer_model.tokenizer, "chat_template", False)  # pytype: disable=attribute-error
   except AttributeError as _:
     has_chat_template = False
-  tokens, _ = tokenizer_model.encode(text, is_bos=not has_chat_template, prefill_lengths=[prefill_length])
+  tokens, true_length = tokenizer_model.encode(text, is_bos=not has_chat_template, prefill_lengths=[prefill_length])
   images = None
   if config.use_multimodal:
     # TODO(hengtaoguo): Support multiple images as input.
     images = multimodal_utils.load_image_from_path(config.image_path)
     images = multimodal_utils.pre_process_image(images, model_name=config.model_name)
     tokens = multimodal_utils.prepare_text_for_image_fusion(tokens, model_name=config.model_name)
+    true_length += multimodal_utils.get_image_offsets(config.model_name)
 
-  true_length = tokens.shape[0]
   assert (
       true_length <= config.max_prefill_predict_length
   ), f"Input token length {true_length} is longer than {config.max_prefill_predict_length=}"

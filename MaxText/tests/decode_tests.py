@@ -14,17 +14,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-"""Tests for decode with various configs"""
+"""Tests for decode with various configs."""
+
 import os
 import unittest
+
 import pytest
+
+from absl.testing import absltest
+
 from MaxText.decode import main as decode_main
 from MaxText.globals import PKG_DIR
-from absl.testing import absltest
 
 
 class DecodeTests(unittest.TestCase):
-  """Tests decode with various configs"""
+  """Tests decode with various configs."""
 
   CONFIGS = {
       "base": [  # tests decode

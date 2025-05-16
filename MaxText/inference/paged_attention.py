@@ -21,37 +21,23 @@ import functools
 from typing import Optional
 
 import jax.numpy as jnp
-from jax.experimental import shard_map
+from jax.experimental.shard_map import shard_map
 from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention_kernel
 from jax.sharding import PartitionSpec as P
+from jax.sharding import Mesh
 
 from flax import linen as nn
 
-from MaxText import common_types
 from MaxText.inference import page_manager
 from MaxText.inference import paged_attention_kernel_v2
+from MaxText.common_types import Array, DType, AxisNames, BATCH, LENGTH, HEAD, D_KV, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 
-# pytype: disable=attribute-error
-
-Mesh = common_types.Mesh
-
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-Mesh = common_types.Mesh
-PRNGKey = common_types.PRNGKey
-
-AxisNames = common_types.AxisNames
-BATCH = common_types.BATCH
-LENGTH = common_types.LENGTH
-HEAD = common_types.HEAD
-D_KV = common_types.D_KV
-
-shard_map = shard_map.shard_map
 _use_kernel_v2 = False
 
 
 class PagedAttentionOp(nn.Module):
+  """paged-attention op"""
+
   mesh: Mesh
   num_pages: int
   tokens_per_page: int
@@ -101,6 +87,7 @@ class PagedAttentionOp(nn.Module):
     return key_pages_var, value_pages_var
 
   def paged_dot_product_attention_with_max_and_sum(self, query, key, value):
+    """paged dot product attention with max & sum"""
     b, t, n, d = query.shape
     _, s, n_kv, _ = key.shape
     query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
@@ -252,16 +239,18 @@ class PagedAttentionOp(nn.Module):
     key_pages_var, value_pages_var = self.init_or_get_kv_pages(model_mode)
 
     # update kv pages and call page attention kernel
-    if model_mode == common_types.MODEL_MODE_PREFILL:
+    if model_mode == MODEL_MODE_PREFILL:
       self.update_prefill_step_pages(key_pages_var, value_pages_var, key, value, slot, page_state)
       if _use_kernel_v2:
         return self.paged_attention_v2_prefill(query, key_pages_var, value_pages_var, page_state), None, None
       return self.paged_dot_product_attention_with_max_and_sum(query, key, value)
-    elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+    elif model_mode == MODEL_MODE_AUTOREGRESSIVE and page_state is not None:
       self.update_decode_step_pages(key_pages_var, value_pages_var, key, value, page_state)
       if _use_kernel_v2:
         return self.paged_attention_v2_decode(query, key_pages_var, value_pages_var, page_state), None, None
       return self.paged_attention_v1_decode(query, key_pages_var, value_pages_var, page_state), None, None
+    else:
+      raise NotImplementedError(model_mode)
 
   def update_prefill_step_pages(
       self,
@@ -307,6 +296,7 @@ class PagedAttentionOp(nn.Module):
     value_pages_var.value = nn.with_logical_constraint(value, self.kv_pages_axis_names)
 
   def update_decode_step_pages(self, key_pages_var, value_pages_var, key, value, page_state):
+    """Update decode-step pages"""
     key_pages = key_pages_var.value
     value_pages = value_pages_var.value
 

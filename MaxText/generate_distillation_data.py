@@ -80,6 +80,7 @@ async def send_request(config, request, stub, tokenizer, progress_bar):  # pylin
       token_content=jetstream_pb2.DecodeRequest.TokenContent(token_ids=prompt_token_ids),
       max_tokens=request.max_output_tokens,
       num_samples=config.num_generations,  # number of responses to generate for each request
+      has_bos=True,
   )
 
   response = stub.Decode(decode_request)

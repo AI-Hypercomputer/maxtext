@@ -22,18 +22,19 @@ import sys
 import unittest
 import os.path
 
+import numpy as np
+
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-import numpy as np
 
-from MaxText import common_types
+from MaxText import maxtext_utils
+from MaxText import pyconfig, maxengine
+from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
+from MaxText.globals import PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
-from MaxText import maxtext_utils
 from MaxText.maxengine import MaxEngine
-from MaxText import pyconfig, maxengine
-from MaxText.globals import PKG_DIR
 
 
 class MaxEngineTest(unittest.TestCase):
@@ -47,6 +48,7 @@ class MaxEngineTest(unittest.TestCase):
     self.rng = jax.random.PRNGKey(0)
 
   def init_pyconfig(self, **kwargs):
+    """init pyconfig"""
     init_kwargs = {
         "per_device_batch_size": 1.0,
         "run_name": "test",
@@ -70,7 +72,7 @@ class MaxEngineTest(unittest.TestCase):
     s = (self.cfg.global_batch_size_to_train_on, self.cfg.max_target_length)
     ids = jax.random.randint(self.rng, s, 0, self.cfg.vocab_size)
 
-    decoder_segment_ids = jax.numpy.zeros(s) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+    decoder_segment_ids = jax.numpy.zeros(s) + DECODING_ACTIVE_SEQUENCE_INDICATOR
     decoder_positions = jnp.stack(
         [jnp.arange(self.cfg.max_target_length, dtype=jnp.int32) for _ in range(self.cfg.global_batch_size_to_train_on)]
     )

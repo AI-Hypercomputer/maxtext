@@ -65,10 +65,9 @@ def initialize_config(config):
 
 def get_golden_data(config):
   """Get the golden data for SFTTrainer in TRL."""
-  golden_data_path = os.path.join(PKG_DIR, "test_assets", f"golden_data_sft_{config.model_name}.jsonl")
-  with jsonlines.open(golden_data_path, "r") as f:
-    golden_data = list(f)
-  return golden_data[0]
+  input_golden_data_path = os.path.join(PKG_DIR, "test_assets", f"golden_data_sft_{config.model_name}.jsonl")
+  with jsonlines.open(input_golden_data_path, "r") as reader:
+    return next(iter(reader))
 
 
 def setup_maxtext_model(config):
@@ -83,6 +82,7 @@ def setup_maxtext_model(config):
 
 
 def prepare_maxtext_inputs(maxtext_data, config):
+  """prepare maxtext inputs"""
   data = _input_pipeline_utils.extract_messages_and_mask(maxtext_data, "messages")
   tokenizer = AutoTokenizer.from_pretrained(
       config.tokenizer_path,
@@ -118,6 +118,7 @@ def prepare_maxtext_inputs(maxtext_data, config):
 
 
 def get_maxtext_logits(inputs, inputs_position, inputs_segmentation, config):
+  """get maxtext logits"""
   maxtext_model, state, rng = setup_maxtext_model(config)
   maxtext_logits, _ = maxtext_model.apply(
       state.params,

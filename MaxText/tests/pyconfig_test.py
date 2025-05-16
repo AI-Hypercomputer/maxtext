@@ -19,7 +19,7 @@ from MaxText.globals import PKG_DIR
 
 
 class PyconfigTest(unittest.TestCase):
-  """Tests for pyconfig.py"""
+  """Tests for 'pyconfig.py'."""
 
   def test_basic_override(self):
     raw_keys = {"megablox": None, "foo": ["bar", "baz"]}

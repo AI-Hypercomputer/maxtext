@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-# pylint: disable=g-bad-todo, abstract-method, consider-using-with, ungrouped-imports, attribute-error
+# pylint: disable=g-bad-todo, abstract-method, consider-using-with, attribute-error
 """
 This script implements Group Relative Policy Optimization (GRPO) training
 using JAX. It optimizes a language model with reinforcement learning by
@@ -27,35 +27,43 @@ import os
 import sys
 import functools
 import queue
-
 from typing import Sequence
+from collections.abc import Callable
+
 from absl import app
+
 import tensorflow as tf
-from flax.linen import partitioning as nn_partitioning
-from flax import struct
+
+import numpy as np
+
 import jax
 import jax.numpy as jnp
 from jax import random
-import numpy as np
 
+from flax.linen import partitioning as nn_partitioning
+from flax import struct
+
+from cloud_tpu_diagnostics import diagnostic
+from cloud_tpu_diagnostics.configuration import debug_configuration
+from cloud_tpu_diagnostics.configuration import diagnostic_configuration
+from cloud_tpu_diagnostics.configuration import stack_trace_configuration
+
+from ml_goodput_measurement import monitoring
+
+import transformers
 
 from MaxText import checkpointing
-from MaxText import max_utils
-from MaxText import maxtext_utils
 from MaxText import max_logging
+from MaxText import max_utils
+from MaxText import maxengine
+from MaxText import maxtext_utils
 from MaxText import profiler
 from MaxText import pyconfig
-from MaxText import maxengine
-
-from MaxText.metric_logger import MetricLogger
-
-from MaxText.vertex_tensorboard import VertexTensorboardManager
-
+from MaxText.common_types import Array
 from MaxText.experimental.rl import grpo_input_pipeline
-from MaxText.layers import models
-
 from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
-
+from MaxText.layers import models
+from MaxText.metric_logger import MetricLogger
 from MaxText.train import (
     validate_train_config,
     get_first_step,
@@ -67,15 +75,7 @@ from MaxText.train import (
     check_example_batch,
     setup_mesh_and_model,
 )
-
-from cloud_tpu_diagnostics import diagnostic
-from cloud_tpu_diagnostics.configuration import debug_configuration
-from cloud_tpu_diagnostics.configuration import diagnostic_configuration
-from cloud_tpu_diagnostics.configuration import stack_trace_configuration
-
-from ml_goodput_measurement import monitoring
-
-import transformers
+from MaxText.vertex_tensorboard import VertexTensorboardManager
 
 # pylint: disable=too-many-positional-arguments
 
@@ -375,19 +375,19 @@ def generate_completions(config, tokenizer_model, engine, data, params, rng):
     else:
       data[k] = v[: config.micro_batch_size_to_train_on]
 
-  rng, rng_load_params = jax.random.split(rng)
-
-  rng, rng_init_decode = jax.random.split(rng_load_params)
+  rng, rng_init_decode = jax.random.split(rng)
   decode_state = engine.init_decode_state(rng_init_decode)
 
   prompts, true_length = data[f"{config.train_data_columns}"], data[f"{config.train_data_columns}_true_length"]
+  rng, rng_prefill = jax.random.split(rng)
   decode_state = jax.jit(
       functools.partial(prefill, engine, params, prompts, true_length, config.num_generations), donate_argnums=(0,)
-  )(decode_state, rng)
+  )(decode_state, rng_prefill)
 
+  rng, rng_generate = jax.random.split(rng)
   completions = jax.jit(
       functools.partial(generate, engine, params, config.max_target_length - config.max_prefill_predict_length)
-  )(decode_state, rng)
+  )(decode_state, rng_generate)
 
   data[f"{config.train_data_columns}_completions"], eos_positions = concatenate_prompt_with_completions(
       config, tokenizer_model, prompts, true_length, completions
@@ -777,7 +777,7 @@ def train_loop(config, config_inference, state=None):
 
   data_sharding = in_shard_train[1]
   param_sharding = state_mesh_shardings.params
-  p_generate_completions = jax.jit(
+  p_generate_completions: Callable[[dict, dict, Array], Array] = jax.jit(
       functools.partial(generate_completions, config, tokenizer_model, engine),
       in_shardings=(data_sharding, param_sharding, None),
       out_shardings=data_sharding,
@@ -806,6 +806,7 @@ def train_loop(config, config_inference, state=None):
       gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
 
   metric_logger = MetricLogger(writer, config)
+  input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step or prof.should_activate_periodic_profile(step):
       optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
@@ -814,6 +815,7 @@ def train_loop(config, config_inference, state=None):
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
       example_batch = load_next_batch(data_iterator, example_batch, config)
+      example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
       record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
       check_example_batch(config, example_batch=example_batch)
       # pylint: disable=not-callable

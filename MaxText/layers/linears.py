@@ -19,29 +19,20 @@ import operator
 from typing import Any, Callable, Iterable, Optional, Sequence, Tuple, Union
 
 import numpy as np
-import flax.linen as nn
+import jax
 import jax.numpy as jnp
-import numpy as np
-from aqt.jax.v2 import aqt_tensor
+
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 
-from MaxText import common_types
-from MaxText.layers import initializers, normalizations, quantizations
-from MaxText.common_types import DecoderBlockType
+import flax.linen as nn
 
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-Mesh = common_types.Mesh
-NdInitializer = initializers.NdInitializer
-
-nd_dense_init = initializers.nd_dense_init
-bias_init = initializers.default_bias_init
-
-RMSNorm = normalizations.RMSNorm
-Quant = quantizations.AqtQuantization
-QTensor = aqt_tensor.QTensor
+from MaxText import max_logging
+from MaxText.common_types import DecoderBlockType, DType, Array, Config
+from MaxText.layers import quantizations
+from MaxText.layers.normalizations import RMSNorm
+from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init
+from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
 def _convert_to_activation_function(fn_or_string: Union[str, Callable[..., Any]]) -> Callable[..., Any]:
@@ -59,7 +50,7 @@ def _convert_to_activation_function(fn_or_string: Union[str, Callable[..., Any]]
     )
 
 
-def _normalize_axes(axes: Iterable[int], ndim: int) -> Tuple[int]:
+def _normalize_axes(axes: Iterable[int], ndim: int) -> Tuple[int, ...]:
   # A tuple by convention. len(axes_tuple) then also gives the rank efficiently.
   return tuple(ax if ax >= 0 else ndim + ax for ax in axes)
 
@@ -104,6 +95,7 @@ class DenseGeneral(nn.Module):
   quant: Optional[Quant] = None
   use_bias: bool = False
   matmul_precision: str = "default"
+  parameter_memory_host_offload: bool = False
 
   @nn.compact
   def __call__(self, inputs: Array) -> Array:
@@ -138,6 +130,10 @@ class DenseGeneral(nn.Module):
           kernel_in_axis,
           kernel_out_axis,
       )
+    # Move logit_dense kernel to device if parameter offloading is enabled
+    if self.parameter_memory_host_offload:
+      max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
+      kernel = jax.device_put(kernel, jax._src.sharding_impls.TransferToMemoryKind("device"))
     kernel = jnp.asarray(kernel, self.dtype)
     contract_ind = tuple(range(0, len(axis)))
     output = _compute_dot_general(inputs, kernel, self.kernel_axes, axis, contract_ind, self.matmul_precision, self.quant)
@@ -149,7 +145,7 @@ class DenseGeneral(nn.Module):
       )
       bias = self.param(
           "bias",
-          nn.with_logical_partitioning(bias_init, bias_axes),
+          nn.with_logical_partitioning(default_bias_init, bias_axes),
           bias_shape,
           self.weight_dtype,
       )
@@ -187,6 +183,7 @@ class MlpBlock(nn.Module):
   quant: Optional[Quant] = None
 
   def get_norm_layer(self):
+    """get normalization layer."""
     if self.config.decoder_block in (
         DecoderBlockType.DEFAULT,
         DecoderBlockType.LLAMA2,
@@ -198,7 +195,7 @@ class MlpBlock(nn.Module):
     ):
       return RMSNorm
     elif self.config.decoder_block == DecoderBlockType.GPT3:
-      from MaxText.layers import gpt3
+      from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
 
       return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=self.use_bias)
     else:

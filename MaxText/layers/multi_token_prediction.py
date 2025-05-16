@@ -18,20 +18,15 @@ limitations under the License.
 
 from typing import Optional, Type
 
-from flax import linen as nn
 import jax.numpy as jnp
+from jax.sharding import Mesh
 
-from MaxText.layers import linears
-from MaxText.layers import normalizations
-from MaxText.layers import models
-from MaxText import common_types
+from flax import linen as nn
 
-Config = common_types.Config
-DType = common_types.DType
-Mesh = common_types.Mesh
-RMSNorm = normalizations.RMSNorm
-DenseGeneral = linears.DenseGeneral
-TransformerLayerModuleType = models.DecoderLayer
+from MaxText.common_types import Config, MODEL_MODE_TRAIN
+from MaxText.layers.attentions import DenseGeneral
+from MaxText.layers.models import DecoderLayer
+from MaxText.layers.normalizations import RMSNorm
 
 
 class MultiTokenPredictionLayer(nn.Module):
@@ -54,7 +49,7 @@ class MultiTokenPredictionLayer(nn.Module):
   config: Config
   mesh: Mesh
   layer_number: int
-  transformer_layer_module: Type[TransformerLayerModuleType] = TransformerLayerModuleType
+  transformer_layer_module: Type[DecoderLayer] = DecoderLayer
 
   @nn.compact
   def __call__(
@@ -64,7 +59,7 @@ class MultiTokenPredictionLayer(nn.Module):
       position_ids: jnp.ndarray,
       decoder_segment_ids: Optional[jnp.ndarray],
       deterministic: bool,
-      model_mode: str = common_types.MODEL_MODE_TRAIN,
+      model_mode: str = MODEL_MODE_TRAIN,
   ) -> jnp.ndarray:
     """
     Applies the MTP combination, projection, and internal transformer processing.
