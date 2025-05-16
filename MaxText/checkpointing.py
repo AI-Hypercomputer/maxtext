@@ -55,6 +55,7 @@ except AttributeError:
   cloud_logger = None  # pytype: disable=attribute-error
 
 
+
 def create_orbax_checkpoint_manager(
     checkpoint_dir: str,
     enable_checkpointing: bool,
@@ -373,10 +374,10 @@ def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-
   max_logging.log("Setting up checkpoint logger...")
   if config.enable_checkpoint_cloud_logger:
     logger_name = f"goodput_{config.run_name}"
-    options = cloud_logger.CloudLoggerOptions(
+    options = ocp.logging.CloudLoggerOptions(
         job_name=config.run_name, logger_name=logger_name
     )  # pytype: disable=attribute-error
-    orbax_cloud_logger = cloud_logger.CloudLogger(options=options)  # pytype: disable=attribute-error
+    orbax_cloud_logger = ocp.logging.CloudLogger(options=options)  # pytype: disable=attribute-error
     max_logging.log("Successfully set up checkpoint cloud logger.")
     return orbax_cloud_logger
 
