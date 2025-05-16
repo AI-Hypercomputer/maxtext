@@ -33,6 +33,7 @@ BASE_PATHWAYS_TUNING_PARAMS = {
     "checkpoint_storage_use_ocdbt": False,
     "checkpoint_storage_use_zarr3": False,
     "enable_pathways_goodput": True,
+    "enable_goodput_recording": True,
     "enable_single_controller": True,
     "metrics_file": "metrics.txt",
     "goodput_upload_interval_seconds": 30,
@@ -44,6 +45,7 @@ PATHWAYS_LONG_RUN_CHECKPOINTING_TUNING_PARAMS = {
     "async_checkpointing": True,
     "checkpoint_period": 100,
     "enable_checkpoint_cloud_logger": True,
+    "enable_goodput_recording": True,
 }
 
 # The set of tuning params required for short-running pathways jobs.
@@ -52,6 +54,7 @@ PATHWAYS_SHORT_RUN_CHECKPOINTING_TUNING_PARAMS = {
     "async_checkpointing": True,
     "checkpoint_period": 20,
     "enable_checkpoint_cloud_logger": True,
+    "enable_goodput_recording": True,
 }
 
 
