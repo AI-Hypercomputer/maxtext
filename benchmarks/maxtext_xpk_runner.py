@@ -537,7 +537,6 @@ def _get_pathways_worker_flags(wl_config: WorkloadConfig) -> str:
 
   return worker_flags_string
 
-
 def _get_pathways_server_flags(wl_config: WorkloadConfig) -> str:
   """Get the pathways server flags for the workload."""
   pw_config = wl_config.pathways_config
@@ -618,14 +617,15 @@ def generate_xpk_workload_cmd(
       random.choice(string.ascii_lowercase + string.digits) for _ in range(length_of_random_str)
   )
 
-  truncate_model_name = 12
-  truncate_prefix = 5
-  common_post_fix = f"-{wl_config.num_slices}-{time.strftime('%m%d%H', time.localtime())}-{temp_post_fix}"
+  truncate_model_name = 10
+  truncate_prefix = 3
+  post_fix = f"-{wl_config.num_slices}-{time.strftime('%m%d%H', time.localtime())}-{temp_post_fix}"
   common_prefix = os.environ['USER']
   pw_prefix = "pw-"
 
   if workload_name is None: # Generate name if not provided
     if is_pathways_enabled:
+      post_fix = f"-{wl_config.num_slices}-{temp_post_fix}"
       name = (
           f"{pw_prefix}{wl_config.model.model_name.replace('_', '-')[:truncate_model_name - len(pw_prefix)]}"
       )
@@ -633,7 +633,7 @@ def generate_xpk_workload_cmd(
       name = (
         f"{wl_config.model.model_name.replace('_', '-')[:truncate_model_name]}"
       )
-    name = f"{common_prefix[:truncate_prefix]}-{name}{common_post_fix}"
+    name = f"{common_prefix[:truncate_prefix]}-{name}{post_fix}"
   else:
     name = workload_name # Use provided name
 
@@ -668,7 +668,7 @@ def generate_xpk_workload_cmd(
         f'--docker-image={pw_config.runner_image}'
     )
   else:
-    docker_image_flag = f'--base-docker-image="{wl_config.base_docker_image}"'
+    docker_image_flag = f'--docker-image="{wl_config.base_docker_image}"'
 
   upload_metrics_to_bq_cmd = ""
   if wl_config.generate_metrics_and_upload_to_big_query and not is_pathways_headless_enabled:

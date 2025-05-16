@@ -15,13 +15,13 @@ limitations under the License.
 
 import os
 import sys
-import args_helper as helper
+import benchmarks.recipes.args_helper as helper
 
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.append(parent_dir)
+# parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+# sys.path.append(parent_dir)
 
-import maxtext_xpk_runner as mxr
-from recipes.user_configs import cluster_config, xpk_path, pathways_config, base_output_directory, headless_workload_name
+import benchmarks.maxtext_xpk_runner as mxr
+from benchmarks.recipes.user_configs import cluster_config, xpk_path, pathways_config, base_output_directory, headless_workload_name
 
 
 def main() -> int:

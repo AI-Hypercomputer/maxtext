@@ -141,5 +141,3 @@ dmypy.json
 # Intellij IDEA setting folder
 .idea
 
-# Benchmark user configurations
-benchmarks/recipes/user_configs.py
