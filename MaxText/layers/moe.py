@@ -305,7 +305,7 @@ class RoutedMoE(nn.Module):
     If the configuration does not specify routing groups (n_routing_groups is -1),
     using a standard top-k routing mechanism.
 
-    The selection uses post_bias logits, but the return weigths are based on pre_bias logits.
+    The selection uses post_bias logits, but the return weights are based on pre_bias logits.
     """
     # Reshape
     batch_size, seq_len = gate_logits.shape[0], gate_logits.shape[1]
@@ -474,10 +474,10 @@ class RoutedMoE(nn.Module):
           cumulated_array = jnp.cumsum(array_with_zeros, axis=0, dtype=input_array.dtype)
           return cumulated_array[shard_id]
         elif strategy == TransformStrategy.RECV_SIZE:
-          # Received size in the traget output
+          # Received size in the target output
           return input_array[:, shard_id]
         else:
-          raise ValueError(f"Unknown tranform array strategy: {strategy}")
+          raise ValueError(f"Unknown transform array strategy: {strategy}")
 
       local_id = jax.lax.axis_index("expert")
       input_offsets = transform_array(all_shards_group_sizes, local_id, TransformStrategy.INPUT_OFFSET)
@@ -538,7 +538,22 @@ class RoutedMoE(nn.Module):
             * self.config.max_target_length
             * self.config.num_experts_per_tok
         )
-        output_shape = jnp.zeros((buffer_size, self.config.emb_dim), dtype=x.dtype)
+        output_shape_old = jnp.zeros((buffer_size, self.config.emb_dim), dtype=x.dtype)
+        # original_shape = x.shape
+
+        # # Create the new shape for Y.
+        # # The first dimension is 'my_len', and the rest are from the original shape.
+        # new_shape = (buffer_size,) + original_shape[1:]
+
+        # # Initialize a new JAX array of zeros with the new shape
+        # output_shape = jnp.zeros(new_shape, dtype=x.dtype)
+
+        my_y = jnp.transpose(x)
+       #breakpoint()
+        my_output = my_y @ jnp.zeros((x.shape[0],buffer_size))
+        output_shape = jnp.transpose(my_output)
+        print(output_shape)
+        #breakpoint()
         x = jax.lax.ragged_all_to_all(
             x,
             output_shape,
