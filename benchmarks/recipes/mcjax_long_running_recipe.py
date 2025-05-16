@@ -17,50 +17,33 @@
 import datetime
 import sys
 import os
-import benchmarks.recipes.args_helper as helper
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(parent_dir)
 
-import benchmarks.maxtext_trillium_model_configs as model_configs
-import benchmarks.maxtext_xpk_runner as mxr
-from benchmarks.xpk_configs import XpkClusterConfig
+import recipes.args_helper as helper
+import maxtext_trillium_model_configs as model_configs
+import maxtext_xpk_runner as mxr
+from xpk_configs import XpkClusterConfig
 
-PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
-SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
-# RUNNER = "us-docker.pkg.dev/path/to/maxtext_runner"
-RUNNER="gcr.io/tpu-prod-env-multipod/wstcliyu_latest:latest"
+# RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_nightly"
+RUNNER = "gcr.io/cloud-tpu-multipod-dev/sujinesh_latest"
 
 # Cluster Params
-# CLUSTER = "v6e-256-cluster"
-# PROJECT = "tpu-prod-env-cluster"
-# ZONE = "us-east5-b"
-# REGION = "us-east5"
-# COUNTRY = "us"
-# DEVICE_TYPE = "v6e-256"
-
-# Main Testing Cluster
 CLUSTER = "bodaborg-v6e-256-tt-c"
 PROJECT = "tpu-prod-env-multipod"
 ZONE = "us-west1-c"
 REGION = "us-west1"
-COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
 # Other parameters (MUST BE SET BY USER)
 XPK_PATH = os.path.join("~", "xpk")
 BASE_OUTPUT_DIRECTORY = (
-    # f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
-    "gs://trillium-scale-datasets-q1-25-west/pw_mcjax_benchmarking/"
+    "gs://trillium-scale-datasets-q1-25-west/mcjax_long_running/"
 )
 
-# MAX_RESTARTS = 10_000
-# BENCHMARK_STEPS=10_000_000
-
-# TODO Change this for long running test!
 MAX_RESTARTS = 10_000
-# BENCHMARK_STEPS=10_000_000
-BENCHMARK_STEPS=20
+BENCHMARK_STEPS=10_000_000
 
 
 def main() -> int:
@@ -84,22 +67,10 @@ def main() -> int:
       # model_configs.llama3_1_70b_8192_pw_lr_real_data,
       # model_configs.llama3_1_8b_8192,
       model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
-    #   model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds,
+      # model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds,
   ]
-
-  pathways_config = mxr.PathwaysConfig(
-      server_image=SERVER_IMAGE,
-      proxy_server_image=PROXY_IMAGE,
-      runner_image=RUNNER,
-
-      # User can add additional flags here.
-      # server_flags="--enable_metrics_collection=true",
-      # proxy_flags="--enable_metrics_collection=true",
-      # worker_flags="--enable_metrics_collection=true",
-  )
-
   num_slices_list = [
-      64
+      32
   ]
 
   xpk_workload_cmds = []
@@ -116,14 +87,6 @@ def main() -> int:
       model.tuning_params["use_vertex_tensorboard"] = True
       model.tuning_params["vertex_tensorboard_project"] = PROJECT
       model.tuning_params["vertex_tensorboard_region"] = REGION
-      model.tuning_params["profiler"] = "xplane"
-
-      # Disable goodput recording to avoid quota errors.
-      model.tuning_params["enable_goodput_recording"] = True
-      model.tuning_params["enable_pathways_goodput"] = True
-
-      # Checkpointing params
-      model.tuning_params["async_checkpointing"] = False
 
       # Run workloads in the following slice configurations
       for num_slices in num_slices_list:
@@ -133,14 +96,12 @@ def main() -> int:
             device_type=cluster_config.device_type,
             base_output_directory=BASE_OUTPUT_DIRECTORY,
             max_restarts=MAX_RESTARTS,
-            libtpu_type=None,
+            libtpu_type=mxr.LibTpuType.MAXTEXT,
             libtpu_nightly_version="",
             base_docker_image=RUNNER,
-            pathways_config=pathways_config,
             xpk_path=XPK_PATH,
             num_steps=BENCHMARK_STEPS,
-            priority="high",
-            generate_metrics_and_upload_to_big_query=False,
+            priority="medium",
         )
         command, name = mxr.generate_xpk_workload_cmd(
             cluster_config=cluster_config, wl_config=wl_config
