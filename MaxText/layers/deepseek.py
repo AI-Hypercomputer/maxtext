@@ -22,30 +22,18 @@ limitations under the License.
 from typing import Optional
 
 from jax.ad_checkpoint import checkpoint_name
+from jax.sharding import Mesh
 import jax.numpy as jnp
 
 from flax import linen as nn
 
-from MaxText.layers import quantizations
-from MaxText.layers import linears
-from MaxText.layers import moe
-from MaxText.layers import initializers
 from MaxText.layers import attentions
-from MaxText.layers import embeddings
-from MaxText.layers import normalizations
+from MaxText.layers import initializers
+from MaxText.layers import linears
 from MaxText.layers import models
-from MaxText import common_types
-
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-Mesh = common_types.Mesh
-ScanIn = common_types.ScanIn
-
-Embed = embeddings.Embed
-Attention = attentions.Attention
-RMSNorm = normalizations.RMSNorm
-Quant = quantizations.AqtQuantization
+from MaxText.layers import moe
+from MaxText.layers import quantizations
+from MaxText.layers.quantizations import AqtQuantization as Quant
 
 # -----------------------------------------
 # The Decoder Layer for DeepSeek v3

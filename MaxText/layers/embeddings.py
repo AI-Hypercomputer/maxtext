@@ -15,7 +15,7 @@
 """Embedding Layers."""
 
 import math
-from typing import Any, Optional
+from typing import Optional
 
 import jax
 from jax import lax
@@ -23,16 +23,9 @@ import jax.numpy as jnp
 
 from flax import linen as nn
 
-from MaxText.layers import initializers
 from MaxText import max_logging
-
-Config = Any
-Array = jnp.ndarray
-DType = jnp.dtype
-
-Initializer = initializers.Initializer
-default_embed_init = initializers.default_embed_init
-with_logical_partitioning = nn.with_logical_partitioning
+from MaxText.common_types import Config, DType, Array
+from MaxText.layers.initializers import Initializer, default_embed_init
 
 _MAX_WAVELENGTH = 10_000
 
@@ -73,7 +66,7 @@ class Embed(nn.Module):
 
     embedding = self.param(
         "embedding",
-        with_logical_partitioning(self.embedding_init, ("vocab", "embed")),
+        nn.with_logical_partitioning(self.embedding_init, ("vocab", "embed")),
         (self.num_embeddings, self.features),
         self.config.weight_dtype,
     )

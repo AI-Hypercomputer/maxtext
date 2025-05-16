@@ -36,7 +36,7 @@ Details https://github.com/huggingface/transformers/blob/main/src/transformers/m
 def reshape_for_broadcast(freqs_ci: torch.Tensor, query: torch.Tensor):
   """Reshape the frequency tensor for broadcasting."""
   ndim = query.ndim
-  shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(query.shape)]
+  shape = [d if i in (1, ndim - 1) else 1 for i, d in enumerate(query.shape)]
   return freqs_ci.view(*shape)
 
 

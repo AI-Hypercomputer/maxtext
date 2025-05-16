@@ -18,10 +18,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
-import jax
 import jax.numpy as jnp
-
-from flax.linen import partitioning
 
 Config = Any
 
@@ -29,9 +26,6 @@ Array = jnp.ndarray
 PRNGKey = jnp.ndarray
 DType = jnp.dtype
 Shape = Sequence[int]
-
-Mesh = jax.sharding.Mesh
-ScanIn = partitioning.ScanIn
 
 AxisNames = tuple[str, ...]
 AxisIdxes = tuple[int, ...]

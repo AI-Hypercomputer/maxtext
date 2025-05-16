@@ -21,9 +21,7 @@ from jax import lax
 import jax
 import jax.numpy as jnp
 from MaxText import max_logging
-from MaxText.layers import initializers
-
-Initializer = initializers.Initializer
+from MaxText.layers.initializers import Initializer
 
 
 class RMSNorm(nn.Module):

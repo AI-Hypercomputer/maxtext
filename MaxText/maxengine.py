@@ -14,39 +14,40 @@
 
 """Implementation of Engine API for MaxText."""
 
-import functools
-from typing import Any, List, Optional, Tuple, Callable
 from collections import defaultdict
-import uuid
+from typing import Any, List, Optional, Tuple, Callable
+import functools
 import os.path
+import uuid
 import warnings
 
+from jax.experimental.layout import DeviceLocalLayout as DLL
+from jax.experimental.layout import Layout
+from jax.sharding import PartitionSpec as P
 import jax
 import jax.numpy as jnp
-from jax.sharding import PartitionSpec as P
-from jax.experimental import layout as jax_layout
 
-import flax
 from flax import linen as nn
-from flax.linen import partitioning as nn_partitioning
 from flax import struct
+from flax.linen import partitioning as nn_partitioning
+import flax
 
 from jetstream.core import config_lib
 from jetstream.engine import engine_api
+from jetstream.engine import token_utils
+from jetstream.engine import tokenizer_api
 from jetstream.engine.tokenizer_pb2 import TokenizerParameters
 from jetstream.engine.tokenizer_pb2 import TokenizerType
-from jetstream.engine import tokenizer_api
-from jetstream.engine import token_utils
 
+from MaxText import inference_utils
 from MaxText import max_utils
 from MaxText import maxtext_utils
-from MaxText import inference_utils
 from MaxText import pyconfig
-from MaxText import common_types
-from MaxText.utils import lora_utils
+from MaxText.common_types import MODEL_MODE_PREFILL, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.globals import PKG_DIR
 from MaxText.inference.page_manager import PageManager, PageState
 from MaxText.layers import models, quantizations
+from MaxText.utils import lora_utils
 
 
 warnings.simplefilter("ignore", category=FutureWarning)
@@ -55,8 +56,6 @@ Prefix = Any
 PackedPrefix = Any
 Params = Any
 PRNGKeyType = Any
-DLL = jax_layout.DeviceLocalLayout
-Layout = jax_layout.Layout
 
 
 # TODO(yuyanpeng): Should import ExistingPrefix from jetstream.engine.engine_api
@@ -339,7 +338,7 @@ class MaxEngine(engine_api.Engine):
           else None,
           decoder_segment_ids=jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_PREFILL,
+          model_mode=MODEL_MODE_PREFILL,
           rngs={"params": _rng},
           mutable=True,
       )
@@ -455,7 +454,7 @@ class MaxEngine(engine_api.Engine):
     # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
     start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
     ones_to_keep = start_to_n < full_true_length
-    one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+    one_d_output = ones_to_keep * DECODING_ACTIVE_SEQUENCE_INDICATOR
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
     rng, new_rng = jax.random.split(rng)
@@ -467,7 +466,7 @@ class MaxEngine(engine_api.Engine):
           encoder_images=input_images,
           decoder_segment_ids=sequence_indicator,
           enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_PREFILL,
+          model_mode=MODEL_MODE_PREFILL,
           rngs={"params": new_rng},
           mutable=["cache"],
           previous_chunk=previous_chunk,
@@ -636,7 +635,7 @@ class MaxEngine(engine_api.Engine):
 
     zero_to_n = jnp.arange(0, padded_tokens.shape[0])
     ones_to_keep = zero_to_n < true_length
-    one_d_output = ones_to_keep * common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+    one_d_output = ones_to_keep * DECODING_ACTIVE_SEQUENCE_INDICATOR
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
     rng, new_rng = jax.random.split(rng)
@@ -647,7 +646,7 @@ class MaxEngine(engine_api.Engine):
           positions,
           decoder_segment_ids=sequence_indicator,
           enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_PREFILL,
+          model_mode=MODEL_MODE_PREFILL,
           rngs={"params": new_rng},
           mutable=["cache"],
       )
@@ -760,7 +759,7 @@ class MaxEngine(engine_api.Engine):
           decoder_positions,
           decoder_segment_ids=decoder_segment_ids,
           enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_PREFILL,
+          model_mode=MODEL_MODE_PREFILL,
           rngs={"params": new_rng},
           mutable=["cache"],
       )
@@ -871,7 +870,7 @@ class MaxEngine(engine_api.Engine):
           previous_token,
           decode_state["next_pos"],
           enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
           rngs={"params": new_rng},
           mutable=["cache"],
           page_state=page_state,
@@ -1381,7 +1380,7 @@ class MaxEngine(engine_api.Engine):
           x,
           encoder_images=dummy_image if self.config.use_multimodal else None,
           enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
           rngs={"params": rng},
           mutable=["cache"],
           page_state=page_state,

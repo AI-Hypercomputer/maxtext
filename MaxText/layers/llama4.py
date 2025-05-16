@@ -18,48 +18,27 @@ limitations under the License.
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
+import math
 from typing import Optional
 
 import jax.numpy as jnp
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
+from jax.sharding import Mesh
 
 from flax import linen as nn
 
-from MaxText.layers import attentions
-from MaxText.layers import embeddings
-from MaxText.layers import initializers
-from MaxText.layers import moe
-from MaxText.layers import linears
-from MaxText.layers import normalizations
-from MaxText.layers import models
-from MaxText.layers import quantizations
-from MaxText import common_types
+from MaxText.common_types import Config, Array
 from MaxText.inference import page_manager
+from MaxText.layers import initializers
+from MaxText.layers import linears
+from MaxText.layers import models
+from MaxText.layers import moe
+from MaxText.layers import quantizations
+from MaxText.layers.attentions import Attention, AttentionType
+from MaxText.layers.quantizations import AqtQuantization as Quant
+from MaxText.layers.normalizations import RMSNorm
 
-import math
-
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-Mesh = common_types.Mesh
-ScanIn = common_types.ScanIn
-
-AxisNames = common_types.AxisNames
-BATCH = common_types.BATCH
-KV_BATCH = common_types.KV_BATCH
-LENGTH = common_types.LENGTH
-HEAD = common_types.HEAD
-KV_HEAD = common_types.KV_HEAD
-D_KV = common_types.D_KV
-KV_HEAD_DIM = common_types.KV_HEAD_DIM
-
-
-Attention = attentions.Attention
-AttentionType = attentions.AttentionType
-Embed = embeddings.Embed
-RMSNorm = normalizations.RMSNorm
-Quant = quantizations.AqtQuantization
 
 #### Multi modal model implementation
 
@@ -322,7 +301,7 @@ class Llama4DecoderLayer(nn.Module):
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
-    lnx_rms = models.RMSNorm(
+    lnx_rms = RMSNorm(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="pre_self_attention_layer_norm",
@@ -354,9 +333,9 @@ class Llama4DecoderLayer(nn.Module):
         float32_logits=cfg.float32_logits,
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
-        prefill_cache_axis_order=tuple([int(i) for i in cfg.prefill_cache_axis_order.split(",")]),
-        ar_cache_axis_order=tuple([int(i) for i in cfg.ar_cache_axis_order.split(",")]),
-        compute_axis_order=tuple([int(i) for i in cfg.compute_axis_order.split(",")]),
+        prefill_cache_axis_order=tuple(map(int, cfg.prefill_cache_axis_order.split(","))),
+        ar_cache_axis_order=tuple(map(int, cfg.ar_cache_axis_order.split(","))),
+        compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
         reshape_q=cfg.reshape_q,
         use_ragged_attention=cfg.use_ragged_attention,
         ragged_block_size=cfg.ragged_block_size,
@@ -454,6 +433,7 @@ class Llama4DecoderLayer(nn.Module):
     else:
       return layer_output
 
+
 class Llama4ScannableBlock(nn.Module):
   '''
   A repeatable block given nope_layer_interval and interleave_moe_layer_step
@@ -496,12 +476,12 @@ class Llama4ScannableBlock(nn.Module):
       nope_layer = determine_is_nope_layer(layer_id, self.nope_layer_interval)
       moe_layer = determine_is_moe_layer(layer_id, self.interleave_moe_layer_step)
       layer = Llama4DecoderLayer(
-        config=cfg,
-        mesh=mesh,
-        name=f"layers_{layer_id}",
-        quant=self.quant,
-        is_nope_layer=nope_layer,
-        is_moe_layer=moe_layer,
+          config=cfg,
+          mesh=mesh,
+          name=f"layers_{layer_id}",
+          quant=self.quant,
+          is_nope_layer=nope_layer,
+          is_moe_layer=moe_layer,
       )
       y = layer(
           y,
@@ -514,9 +494,8 @@ class Llama4ScannableBlock(nn.Module):
           slot=slot,
       )
       if cfg.scan_layers:
-        y=y[0]
+        y = y[0]
     if cfg.scan_layers:
       return y, None
     else:
       return y
-

@@ -22,33 +22,24 @@ import functools
 import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
-from jax._src.sharding_impls import TransferToMemoryKind
+from jax.sharding import Mesh
 
 from flax import linen as nn
+from flax.linen.partitioning import ScanIn
 
-from MaxText import common_types
-from MaxText.common_types import DecoderBlockType
+from MaxText.common_types import DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR
 from MaxText import max_logging
 from MaxText.inference import page_manager
-from MaxText.layers import attentions
-from MaxText.layers import embeddings
 from MaxText.layers import linears
-from MaxText.layers import normalizations, quantizations
+from MaxText.layers import quantizations
 from MaxText.layers import pipeline
 from MaxText import maxtext_utils
 from MaxText import multimodal_utils
+from MaxText.layers.attentions import Attention
+from MaxText.layers.normalizations import RMSNorm
+from MaxText.layers.embeddings import PositionalEmbedding, Embed
+from MaxText.layers.quantizations import AqtQuantization as Quant
 
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-Mesh = common_types.Mesh
-ScanIn = common_types.ScanIn
-
-Embed = embeddings.Embed
-Attention = attentions.Attention
-RMSNorm = normalizations.RMSNorm
-PositionalEmbedding = embeddings.PositionalEmbedding
-Quant = quantizations.AqtQuantization
 
 # ------------------------------------------------------------------------------
 # The network: Decoder & Transformer Definitions
@@ -219,6 +210,7 @@ class Decoder(nn.Module):
 
   def get_remat_policy(self):
     """Get remat policy"""
+    policy = None
     cfg = self.config
     if cfg.remat_policy != "none":
       if cfg.remat_policy == "minimal":
@@ -286,7 +278,7 @@ class Decoder(nn.Module):
       else:
         assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
         policy = None
-      return policy
+    return policy
 
   def set_remat_policy(self, block_layers, policy):
     """Set remat policy"""
@@ -363,6 +355,7 @@ class Decoder(nn.Module):
       return [simple_layer.SimpleMlpDecoderLayer]
     elif self.config.decoder_block == DecoderBlockType.LLAMA4:
       from MaxText.layers import llama4  # pylint: disable=import-outside-toplevel
+
       if self.config.scan_layers:
         return [llama4.Llama4ScannableBlock]
       else:
@@ -451,7 +444,7 @@ class Decoder(nn.Module):
       decoder_positions,
       decoder_segment_ids=None,
       deterministic=False,
-      model_mode=common_types.MODEL_MODE_TRAIN,
+      model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
@@ -545,8 +538,8 @@ class Decoder(nn.Module):
             layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
           elif cfg.decoder_block == DecoderBlockType.LLAMA4:
             layer_kwargs = {
-              "nope_layer_interval": self.config.nope_layer_interval,
-              "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
+                "nope_layer_interval": self.config.nope_layer_interval,
+                "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
             }
           RemattedBlockLayer = RemattedBlockLayers[0]
           scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
@@ -646,7 +639,7 @@ class Decoder(nn.Module):
           y
       )  # We do not quantize the logits matmul.
 
-    if model_mode in [common_types.MODEL_MODE_PREFILL, common_types.MODEL_MODE_AUTOREGRESSIVE]:
+    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
       logits = nn.with_logical_constraint(logits, (None, None, "activation_vocab"))
     else:
       logits = nn.with_logical_constraint(
@@ -715,7 +708,7 @@ class Transformer(nn.Module):
       decoder_segment_ids=None,
       encoder_images: Optional[jnp.ndarray] = None,
       enable_dropout=True,
-      model_mode=common_types.MODEL_MODE_TRAIN,
+      model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,
       true_length: Optional[int] = None,
       slot: Optional[int] = None,
@@ -729,10 +722,10 @@ class Transformer(nn.Module):
         for this request.
     """
 
-    if decoder_segment_ids is not None and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+    if decoder_segment_ids is not None and model_mode == MODEL_MODE_AUTOREGRESSIVE:
       raise ValueError(
           f"During autoregressive decoding we assume the tokens are in the active sequence"
-          f" which is always {common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR}."
+          f" which is always {DECODING_ACTIVE_SEQUENCE_INDICATOR}."
       )
 
     bidirectional_mask = None

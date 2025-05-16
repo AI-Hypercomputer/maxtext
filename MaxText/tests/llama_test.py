@@ -24,7 +24,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from MaxText.layers.llama2 import embeddings
+from MaxText.layers import embeddings
 
 
 """  

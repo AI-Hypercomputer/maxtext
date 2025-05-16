@@ -13,14 +13,14 @@
 # limitations under the License.
 
 "Bash helper commands for AOTC artifacts"
-import sys
-import os
-import getpass
-from typing import Dict, Any, Type
-import logging
-import uuid
-import dataclasses
 from tempfile import gettempdir
+from typing import Dict, Any, Type
+import dataclasses
+import getpass
+import logging
+import os
+import sys
+import uuid
 
 from argparse import Namespace
 

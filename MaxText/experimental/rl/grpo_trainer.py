@@ -14,10 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from collections.abc import Callable
-
-from MaxText.common_types import Array
-
 # pylint: disable=g-bad-todo, abstract-method, consider-using-with, attribute-error
 """
 This script implements Group Relative Policy Optimization (GRPO) training
@@ -32,6 +28,7 @@ import sys
 import functools
 import queue
 from typing import Sequence
+from collections.abc import Callable
 
 from absl import app
 
@@ -56,17 +53,17 @@ from ml_goodput_measurement import monitoring
 import transformers
 
 from MaxText import checkpointing
-from MaxText import max_utils
-from MaxText import maxtext_utils
 from MaxText import max_logging
+from MaxText import max_utils
+from MaxText import maxengine
+from MaxText import maxtext_utils
 from MaxText import profiler
 from MaxText import pyconfig
-from MaxText import maxengine
-from MaxText.metric_logger import MetricLogger
-from MaxText.vertex_tensorboard import VertexTensorboardManager
+from MaxText.common_types import Array
 from MaxText.experimental.rl import grpo_input_pipeline
-from MaxText.layers import models
 from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
+from MaxText.layers import models
+from MaxText.metric_logger import MetricLogger
 from MaxText.train import (
     validate_train_config,
     get_first_step,
@@ -78,6 +75,7 @@ from MaxText.train import (
     check_example_batch,
     setup_mesh_and_model,
 )
+from MaxText.vertex_tensorboard import VertexTensorboardManager
 
 # pylint: disable=too-many-positional-arguments
 

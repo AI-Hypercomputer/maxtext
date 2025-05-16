@@ -20,13 +20,13 @@ limitations under the License.
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
 # See github.com/google/maxtext/issues/20 for more
 
-import datetime
-import os
-import sys
-import functools
-import time
-import queue
 from typing import Sequence
+import datetime
+import functools
+import os
+import queue
+import sys
+import time
 
 from absl import app
 
@@ -36,11 +36,11 @@ import pathwaysutils  # pylint: disable=unused-import
 
 import tensorflow as tf
 
+from jax import random
+from jax.experimental import checkify
+from jax.sharding import Mesh
 import jax
 import jax.numpy as jnp
-from jax import random
-from jax.sharding import Mesh
-from jax.experimental import checkify
 
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
@@ -60,24 +60,23 @@ from ml_goodput_measurement import goodput
 from ml_goodput_measurement import monitoring
 
 from MaxText import checkpointing
+from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxtext_utils
-from MaxText import max_logging
 from MaxText import optimizers
 from MaxText import profiler
 from MaxText import pyconfig
+from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
+from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
+from MaxText.layers import quantizations
+from MaxText.layers.models import Transformer
 from MaxText.metric_logger import MetricLogger
 from MaxText.utils import gcs_utils
 from MaxText.vertex_tensorboard import VertexTensorboardManager
-from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
-from MaxText.layers import models
-from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
-from MaxText.layers import quantizations
 # Placeholder: internal
 
 # pylint: disable=too-many-positional-arguments
 
-Transformer = models.Transformer
 EPS = 1e-8
 _DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE = 2 * 1024**3
 

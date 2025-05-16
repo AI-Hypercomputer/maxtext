@@ -26,19 +26,13 @@ from jax.sharding import Mesh
 import flax.linen as nn
 from flax.linen import partitioning as nn_partitioning
 
-from MaxText import common_types
 from MaxText import maxtext_utils
 from MaxText import pyconfig
+from MaxText.common_types import Config, DType
 from MaxText.globals import PKG_DIR
-from MaxText.layers import initializers
 from MaxText.layers import linears
 from MaxText.layers import moe
-
-
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-NdInitializer = initializers.NdInitializer
+from MaxText.layers.initializers import NdInitializer, nd_dense_init
 
 
 class TokenDroppingTest(unittest.TestCase):
@@ -65,7 +59,7 @@ class TokenDroppingTest(unittest.TestCase):
         num_experts=self.cfg.num_experts,
         num_experts_per_tok=self.cfg.num_experts_per_tok,
         mesh=Mesh(devices_array, self.cfg.mesh_axes),
-        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
         kernel_axes=("embed", "mlp"),
         dtype=self.cfg.dtype,
     )
@@ -192,7 +186,7 @@ class DeepSeekRoutingTest(unittest.TestCase):
         num_experts=self.cfg.num_experts,
         num_experts_per_tok=self.cfg.num_experts_per_tok,
         mesh=Mesh(devices_array, self.cfg.mesh_axes),
-        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
         kernel_axes=("embed", "mlp"),
         dtype=self.cfg.dtype,
     )
@@ -290,7 +284,7 @@ class RoutedMoeTest(unittest.TestCase):
         config=cfg,
         num_experts=cfg.num_experts,
         num_experts_per_tok=cfg.num_experts_per_tok,
-        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
         kernel_axes=("embed", "mlp"),
         dtype=cfg.dtype,
     )
@@ -309,7 +303,7 @@ class RoutedMoeTest(unittest.TestCase):
         num_experts=cfg.num_experts,
         num_experts_per_tok=cfg.num_experts_per_tok,
         mesh=mesh,
-        kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
         kernel_axes=("embed", "mlp"),
         intermediate_dim=cfg.mlp_dim,
         dtype=cfg.dtype,
