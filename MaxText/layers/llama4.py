@@ -428,6 +428,7 @@ class Llama4DecoderLayer(nn.Module):
     else:
       return layer_output
 
+
 class Llama4ScannableBlock(nn.Module):
   '''
   A repeatable block given nope_layer_interval and interleave_moe_layer_step
@@ -470,12 +471,12 @@ class Llama4ScannableBlock(nn.Module):
       nope_layer = determine_is_nope_layer(layer_id, self.nope_layer_interval)
       moe_layer = determine_is_moe_layer(layer_id, self.interleave_moe_layer_step)
       layer = Llama4DecoderLayer(
-        config=cfg,
-        mesh=mesh,
-        name=f"layers_{layer_id}",
-        quant=self.quant,
-        is_nope_layer=nope_layer,
-        is_moe_layer=moe_layer,
+          config=cfg,
+          mesh=mesh,
+          name=f"layers_{layer_id}",
+          quant=self.quant,
+          is_nope_layer=nope_layer,
+          is_moe_layer=moe_layer,
       )
       y = layer(
           y,
@@ -488,9 +489,8 @@ class Llama4ScannableBlock(nn.Module):
           slot=slot,
       )
       if cfg.scan_layers:
-        y=y[0]
+        y = y[0]
     if cfg.scan_layers:
       return y, None
     else:
       return y
-

@@ -362,6 +362,7 @@ class Decoder(nn.Module):
       return [simple_layer.SimpleMlpDecoderLayer]
     elif self.config.decoder_block == DecoderBlockType.LLAMA4:
       from MaxText.layers import llama4  # pylint: disable=import-outside-toplevel
+
       if self.config.scan_layers:
         return [llama4.Llama4ScannableBlock]
       else:
@@ -544,8 +545,8 @@ class Decoder(nn.Module):
             layer_call_kwargs = {"bidirectional_mask": bidirectional_mask}
           elif cfg.decoder_block == DecoderBlockType.LLAMA4:
             layer_kwargs = {
-              "nope_layer_interval": self.config.nope_layer_interval,
-              "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
+                "nope_layer_interval": self.config.nope_layer_interval,
+                "interleave_moe_layer_step": self.config.interleave_moe_layer_step,
             }
           RemattedBlockLayer = RemattedBlockLayers[0]
           scan_length = int(cfg.num_decoder_layers / cfg.inhomogeneous_layer_cycle_interval)
