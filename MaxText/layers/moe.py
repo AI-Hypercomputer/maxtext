@@ -22,37 +22,28 @@ import math
 
 import numpy as np
 
-import jax
 from jax import lax
-import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
+from jax.sharding import Mesh
+import jax
+import jax.numpy as jnp
 
 import flax.linen as nn
 
 from aqt.jax.v2 import aqt_tensor
+from aqt.jax.v2.aqt_tensor import QTensor
 
-from MaxText import common_types
-from MaxText.layers import initializers
-from MaxText.layers import normalizations
-from MaxText.layers import quantizations
-from MaxText.layers import linears
 from MaxText import max_logging
 from MaxText import max_utils
+from MaxText.common_types import DType, Array, Config, DecoderBlockType
 from MaxText.kernels import megablox as mblx
-
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-Mesh = common_types.Mesh
-NdInitializer = initializers.NdInitializer
-
-nd_dense_init = initializers.nd_dense_init
-bias_init = initializers.default_bias_init
-
-RMSNorm = normalizations.RMSNorm
-Quant = quantizations.AqtQuantization
-QTensor = aqt_tensor.QTensor
+from MaxText.layers import initializers
+from MaxText.layers import linears
+from MaxText.layers import quantizations
+from MaxText.layers.attentions import NdInitializer, nd_dense_init
+from MaxText.layers.initializers import default_bias_init
+from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
 DISPATCH = "dispatch"
@@ -160,7 +151,7 @@ class GateLogit(nn.Module):
       )
       bias = self.param(
           "bias",
-          nn.with_logical_partitioning(bias_init, bias_axes),
+          nn.with_logical_partitioning(default_bias_init, bias_axes),
           bias_shape,
           self.weight_dtype,
       )
@@ -274,9 +265,9 @@ class RoutedMoE(nn.Module):
     else:
       top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
-    if self.config.decoder_block == common_types.DecoderBlockType.DEEPSEEK:
+    if self.config.decoder_block == DecoderBlockType.DEEPSEEK:
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
-    elif self.config.decoder_block != common_types.DecoderBlockType.LLAMA4:
+    elif self.config.decoder_block != DecoderBlockType.LLAMA4:
       top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
     return top_k_weights, top_k_indices
 
@@ -351,7 +342,7 @@ class RoutedMoE(nn.Module):
     inputs_2d = jnp.reshape(inputs, (bsz_times_seq_len, inputs_shape[2]))
     weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits)
 
-    if self.config.decoder_block == common_types.DecoderBlockType.LLAMA4:
+    if self.config.decoder_block == DecoderBlockType.LLAMA4:
       # weights will be of shape (batch_size, seq_len, num_experts_per_tok)
       router_scores = jax.nn.sigmoid(weights.astype(jnp.float32))  # weights are top_k_weights here
       # Squeeze router_scores to (batch_size * seq_len, num_experts_per_tok)
@@ -376,7 +367,7 @@ class RoutedMoE(nn.Module):
     )
     with jax.named_scope("weight_sum"):
       matmul_precision = lax.Precision(self.config.matmul_precision)
-      if self.config.decoder_block == common_types.DecoderBlockType.LLAMA4:
+      if self.config.decoder_block == DecoderBlockType.LLAMA4:
         # For Llama4, combine using weights of 1 for selected experts
         reshaped_weights = jnp.ones_like(reshaped_weights)
       output = jnp.einsum(
@@ -797,7 +788,7 @@ class RoutedMoE(nn.Module):
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits = nn.with_logical_constraint(pre_bias_logits, ("activation_batch", "activation_length", None))
     top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits)
-    is_llama4_decoder_layer = self.config.decoder_block == common_types.DecoderBlockType.LLAMA4
+    is_llama4_decoder_layer = self.config.decoder_block == DecoderBlockType.LLAMA4
     if is_llama4_decoder_layer:
       router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(jnp.bfloat16)
       inputs = inputs * router_scores

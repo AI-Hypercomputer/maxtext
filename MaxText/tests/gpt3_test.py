@@ -29,13 +29,8 @@ import jax
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.globals import PKG_DIR
-from MaxText.layers import embeddings
 from MaxText.layers import models
 from MaxText.layers import quantizations
-
-
-Mesh = jax.sharding.Mesh
-Embed = embeddings.Embed
 
 
 def init_random_model_vars(model, rng, example_batch):

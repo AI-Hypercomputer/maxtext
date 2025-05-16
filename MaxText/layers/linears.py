@@ -25,27 +25,14 @@ import jax.numpy as jnp
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 
-from aqt.jax.v2 import aqt_tensor
-
 import flax.linen as nn
 
-from MaxText import common_types
 from MaxText import max_logging
-from MaxText.common_types import DecoderBlockType
-from MaxText.layers import initializers, normalizations, quantizations
-
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-Mesh = common_types.Mesh
-NdInitializer = initializers.NdInitializer
-
-nd_dense_init = initializers.nd_dense_init
-bias_init = initializers.default_bias_init
-
-RMSNorm = normalizations.RMSNorm
-Quant = quantizations.AqtQuantization
-QTensor = aqt_tensor.QTensor
+from MaxText.common_types import DecoderBlockType, DType, Array, Config
+from MaxText.layers import quantizations
+from MaxText.layers.normalizations import RMSNorm
+from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init
+from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
 def _convert_to_activation_function(fn_or_string: Union[str, Callable[..., Any]]) -> Callable[..., Any]:
@@ -63,7 +50,7 @@ def _convert_to_activation_function(fn_or_string: Union[str, Callable[..., Any]]
     )
 
 
-def _normalize_axes(axes: Iterable[int], ndim: int) -> Tuple[int]:
+def _normalize_axes(axes: Iterable[int], ndim: int) -> Tuple[int, ...]:
   # A tuple by convention. len(axes_tuple) then also gives the rank efficiently.
   return tuple(ax if ax >= 0 else ndim + ax for ax in axes)
 
@@ -158,7 +145,7 @@ class DenseGeneral(nn.Module):
       )
       bias = self.param(
           "bias",
-          nn.with_logical_partitioning(bias_init, bias_axes),
+          nn.with_logical_partitioning(default_bias_init, bias_axes),
           bias_shape,
           self.weight_dtype,
       )

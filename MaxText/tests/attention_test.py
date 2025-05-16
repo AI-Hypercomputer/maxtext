@@ -26,23 +26,18 @@ from absl.testing import parameterized
 
 import numpy as np
 
+from jax.sharding import Mesh
 import jax
 import jax.numpy as jnp
 
 from flax.core import freeze
 
-from MaxText import common_types
 from MaxText import maxtext_utils
 from MaxText import pyconfig
+from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
 from MaxText.globals import PKG_DIR
 from MaxText.layers import attentions
-
-from jax.sharding import Mesh
-
-Mesh = jax.sharding.Mesh
-Attention = attentions.Attention
-ChunkedCausalMask = attentions.ChunkedCausalMask
-MLA = attentions.MLA
+from MaxText.layers.attentions import Attention, MLA, ChunkedCausalMask
 
 
 class BidirectionalBlockMaskTest(unittest.TestCase):
@@ -356,7 +351,7 @@ class AttentionTest(unittest.TestCase):
     )
 
     decoder_segment_ids = (
-        jax.numpy.zeros((self.global_batch_size, self.max_target_length)) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+        jax.numpy.zeros((self.global_batch_size, self.max_target_length)) + DECODING_ACTIVE_SEQUENCE_INDICATOR
     )
 
     return lnx, decoder_segment_ids, decoder_positions
@@ -374,7 +369,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids,
         inputs_positions=decoder_positions,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": self.rng},
     )
 
@@ -389,7 +384,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids_prefill,
         inputs_positions=decoder_positions_prefill,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_PREFILL,
+        model_mode=MODEL_MODE_PREFILL,
         rngs={"aqt": self.rng},
         mutable=["cache"],
     )
@@ -408,7 +403,7 @@ class AttentionTest(unittest.TestCase):
           lnx_idx,
           inputs_positions=decoder_positions_idx,
           deterministic=True,
-          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
           rngs={"aqt": self.rng},
           mutable=["cache"],
       )
@@ -462,7 +457,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids_prefill,
         inputs_positions=decoder_positions_prefill,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_PREFILL,
+        model_mode=MODEL_MODE_PREFILL,
         rngs={"aqt": self.rng},
         mutable=["cache"],
     )
@@ -514,7 +509,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_positions,
         inputs_positions=decoder_segment_ids,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": self.rng},
     )
 
@@ -546,7 +541,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_positions,
         inputs_positions=decoder_segment_ids,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": self.rng},
     )
 
@@ -582,7 +577,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_positions,
         inputs_positions=decoder_segment_ids,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": self.rng},
     )
 
@@ -600,7 +595,7 @@ class AttentionTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_dot_product_cache_axis_order(self):
-    all_axis_orders = [axis_order for axis_order in itertools.permutations(range(4))]
+    all_axis_orders = tuple(itertools.permutations(range(4)))
     for axis_order in random.choices(all_axis_orders, k=4):
       self.dot_product_attention_helper(prefill_cache_axis_order=axis_order, ar_cache_axis_order=axis_order)
       print(f"passed test for {axis_order=}")
@@ -669,7 +664,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids,
         inputs_positions=decoder_positions,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": self.rng},
     )
 
@@ -680,7 +675,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids_prefill,
         inputs_positions=decoder_positions_prefill,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_PREFILL,
+        model_mode=MODEL_MODE_PREFILL,
         rngs={"aqt": self.rng},
         mutable=["cache"],
     )
@@ -700,7 +695,7 @@ class AttentionTest(unittest.TestCase):
           lnx_idx,
           inputs_positions=decoder_positions_idx,
           deterministic=True,
-          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
           rngs={"aqt": self.rng},
           mutable=["cache"],
       )
@@ -789,7 +784,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids,
         inputs_positions=decoder_positions,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": self.rng},
     )
 
@@ -800,7 +795,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids,
         inputs_positions=decoder_positions,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": self.rng},
     )
 
@@ -811,7 +806,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids_prefill,
         inputs_positions=decoder_positions_prefill,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_PREFILL,
+        model_mode=MODEL_MODE_PREFILL,
         rngs={"aqt": self.rng},
         mutable=["cache"],
     )
@@ -828,7 +823,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids_prefill,
         inputs_positions=decoder_positions_prefill,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_PREFILL,
+        model_mode=MODEL_MODE_PREFILL,
         rngs={"aqt": self.rng},
         mutable=["cache"],
     )
@@ -857,7 +852,7 @@ class AttentionTest(unittest.TestCase):
           lnx_idx,
           inputs_positions=decoder_positions_idx,
           deterministic=True,
-          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
           rngs={"aqt": self.rng},
           mutable=["cache"],
       )
@@ -877,7 +872,7 @@ class AttentionTest(unittest.TestCase):
           lnx_idx,
           inputs_positions=decoder_positions_idx,
           deterministic=True,
-          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
           rngs={"aqt": self.rng},
           mutable=["cache"],
       )
@@ -949,7 +944,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids,
         inputs_positions=decoder_positions,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": self.rng},
     )
 
@@ -960,7 +955,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids,
         inputs_positions=decoder_positions,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": self.rng},
     )
 
@@ -996,7 +991,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids,
         inputs_positions=decoder_positions,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": self.rng},
     )
 
@@ -1099,8 +1094,7 @@ class MLATest(parameterized.TestCase):
     )
 
     decoder_segment_ids = (
-        jax.numpy.zeros((cfg.global_batch_size_to_train_on, cfg.max_target_length))
-        + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+        jax.numpy.zeros((cfg.global_batch_size_to_train_on, cfg.max_target_length)) + DECODING_ACTIVE_SEQUENCE_INDICATOR
     )
 
     return lnx, decoder_segment_ids, decoder_positions
@@ -1123,7 +1117,7 @@ class MLATest(parameterized.TestCase):
         decoder_segment_ids=decoder_segment_ids,
         inputs_positions=decoder_positions,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": rng},
     )
 
@@ -1138,7 +1132,7 @@ class MLATest(parameterized.TestCase):
         decoder_segment_ids=decoder_segment_ids_prefill,
         inputs_positions=decoder_positions_prefill,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_PREFILL,
+        model_mode=MODEL_MODE_PREFILL,
         rngs={"aqt": rng},
         mutable=["cache"],
     )
@@ -1157,7 +1151,7 @@ class MLATest(parameterized.TestCase):
           lnx_idx,
           inputs_positions=decoder_positions_idx,
           deterministic=True,
-          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
           rngs={"aqt": rng},
           mutable=["cache"],
       )

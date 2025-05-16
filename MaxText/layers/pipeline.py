@@ -19,14 +19,15 @@ from typing import Any
 
 import numpy as np
 
+from jax import numpy as jnp
+from jax.sharding import Mesh
 import jax
 import jax.ad_checkpoint
-from jax import numpy as jnp
 
 from flax.core import meta
 from flax import linen as nn
 
-from MaxText import common_types
+from MaxText.common_types import Config, MODEL_MODE_TRAIN
 
 
 class Pipeline(nn.Module):
@@ -46,9 +47,9 @@ class Pipeline(nn.Module):
     remat_policy: Remat policy to use for the loop iterations
   """
 
-  config: common_types.Config
+  config: Config
   layers: nn.Module  # The name of this property (layers) is reflected in the state pytree and thus also checkpoints.
-  mesh: common_types.Mesh
+  mesh: Mesh
   remat_policy: Any = None
 
   def setup(self):
@@ -607,7 +608,7 @@ class Pipeline(nn.Module):
       segment_ids: jnp.ndarray,
       positions: jnp.ndarray,
       deterministic: bool,
-      model_mode=common_types.MODEL_MODE_TRAIN,
+      model_mode=MODEL_MODE_TRAIN,
       partition_spec=None,  # Pytree of sharding specifications of the weights (aka self.layers.variables)
   ) -> jnp.ndarray:
     """The main method that maps the series of decoder layer inputs to final layer outputs.

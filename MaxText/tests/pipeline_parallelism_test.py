@@ -25,9 +25,9 @@ import jax.numpy as jnp
 from flax.core import meta
 from flax import linen as nn
 
-from MaxText import common_types
 from MaxText import maxtext_utils
 from MaxText import pyconfig
+from MaxText.common_types import MODEL_MODE_TRAIN
 from MaxText.globals import PKG_DIR
 from MaxText.layers import pipeline
 from MaxText.layers import simple_layer
@@ -80,7 +80,7 @@ class PipelineParallelismTest(unittest.TestCase):
         config.global_batch_size_to_train_on, config.max_target_length, config.emb_dim
     )
     deterministic = True
-    model_mode = common_types.MODEL_MODE_TRAIN
+    model_mode = MODEL_MODE_TRAIN
     # We use a simpler single matmul decoder layer for fast compilation in these tests.
     single_pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh)
     my_pipeline = pipeline.Pipeline(config=config, layers=single_pipeline_stage, mesh=mesh)

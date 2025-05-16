@@ -16,49 +16,29 @@ limitations under the License.
 
 from typing import Optional
 
-import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
+from jax.sharding import Mesh
 import jax.debug
+import jax.numpy as jnp
 
 from flax import linen as nn
 
-from MaxText import common_types
-from MaxText.layers import normalizations
+from MaxText.common_types import Config
 from MaxText.layers import attentions
-from MaxText.layers import initializers
-from MaxText.layers import embeddings
-from MaxText.layers import linears
 from MaxText.layers import quantizations
-
-Embed = embeddings.Embed
-RMSNorm = normalizations.RMSNorm
-NdInitializer = initializers.NdInitializer
-Attention = attentions.Attention
-AttentionType = attentions.AttentionType
-MlpBlock = linears.MlpBlock
-Config = common_types.Config
-AxisNames = common_types.AxisNames
-Mesh = common_types.Mesh
-ScanIn = common_types.ScanIn
-DType = common_types.DType
-Array = common_types.Array
-BATCH = common_types.BATCH
-LENGTH = common_types.LENGTH
-HEAD = common_types.HEAD
-D_KV = common_types.D_KV
-
-nd_dense_init = initializers.nd_dense_init
-Quant = quantizations.AqtQuantization
-KVQuant = quantizations.KVQuant
+from MaxText.layers.attentions import AttentionType, Attention
+from MaxText.layers.linears import MlpBlock
+from MaxText.layers.normalizations import RMSNorm
+from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
 GEMMA3_ATTENTION_PATTERN = (
-    AttentionType.LOCAL_SLIDING,
-    AttentionType.LOCAL_SLIDING,
-    AttentionType.LOCAL_SLIDING,
-    AttentionType.LOCAL_SLIDING,
-    AttentionType.LOCAL_SLIDING,
-    AttentionType.GLOBAL,
+    attentions.AttentionType.LOCAL_SLIDING,
+    attentions.AttentionType.LOCAL_SLIDING,
+    attentions.AttentionType.LOCAL_SLIDING,
+    attentions.AttentionType.LOCAL_SLIDING,
+    attentions.AttentionType.LOCAL_SLIDING,
+    attentions.AttentionType.GLOBAL,
 )
 
 
@@ -108,10 +88,7 @@ class MlpBlockViT(nn.Module):
   @nn.compact
   def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
     """Applies Transformer MlpBlock module."""
-    inits = dict(
-        kernel_init=nn.initializers.xavier_uniform(),
-        bias_init=nn.initializers.normal(stddev=1e-6),
-    )
+    inits = {"kernel_init": nn.initializers.xavier_uniform(), "bias_init": nn.initializers.normal(stddev=1e-6)}
 
     d = x.shape[-1]
     x = nn.Dense(features=self.mlp_dim or 4 * d, dtype=self.dtype_mm, **inits)(x)
