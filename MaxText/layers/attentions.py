@@ -18,6 +18,7 @@ import enum
 import functools
 from typing import Any, Optional, Tuple
 from functools import partial
+import math
 
 import numpy as np
 
@@ -875,6 +876,8 @@ class AttentionOp(nn.Module):
   ) -> Array:
     """CUDNN Flash Attention with JAX SDPA API.
     """
+    # These imports are only meant to work in a GPU build.
+    # pylint: disable=import-outside-toplevel
     from jax._src.cudnn.fused_attention_stablehlo import (
       dot_product_attention,
       MaskType,
