@@ -32,9 +32,8 @@ from flax import struct
 
 from jaxtyping import Array, Integer, Bool
 
-from MaxText import common_types
+from MaxText.common_types import Config
 
-Config = common_types.Config
 
 # Aliases using <Dims><Type><Rank>d convention
 # We use string names for dimensions as they are symbolic within the type hints.

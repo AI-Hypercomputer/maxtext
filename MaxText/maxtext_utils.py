@@ -21,17 +21,17 @@ from typing import Optional
 import functools
 import pickle
 
-from flax.training import train_state
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
+from flax.training import train_state
 
 import numpy as np
 
+from jax.experimental import mesh_utils
+from jax.experimental.serialize_executable import deserialize_and_load
+from jax.sharding import PartitionSpec as P
 import jax
 import jax.numpy as jnp
-from jax.experimental import mesh_utils
-from jax.sharding import PartitionSpec as P
-from jax.experimental.serialize_executable import deserialize_and_load
 
 import optax
 
@@ -39,11 +39,10 @@ import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_c
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
 from MaxText import checkpointing
-from MaxText import common_types
-from MaxText.inference.page_manager import PageState
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.common_types import DecoderBlockType
+from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
+from MaxText.inference.page_manager import PageState
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
@@ -238,7 +237,7 @@ def calculate_tflops_training_per_device(config, log=True):
   # MLP flops
   if config.num_experts > 1:
     # calculation based on dropless implementation
-    if config.decoder_block == DecoderBlockType.DEEPSEEK or config.decoder_block == DecoderBlockType.LLAMA4:
+    if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.LLAMA4):
       total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
     else:
       gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
@@ -280,7 +279,7 @@ def calculate_tflops_training_per_device(config, log=True):
     attention_tflops, learnable_weight_tflops = calculate_gemma2_tflops_training_per_device(
         config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops
     )
-  elif config.decoder_block == DecoderBlockType.DEEPSEEK or config.decoder_block == DecoderBlockType.LLAMA4:
+  elif config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.LLAMA4):
     learnable_weight_tflops = (
         (total_ffn_flops + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops) * 3 / 10**12
     )
@@ -657,7 +656,7 @@ def get_prefill_kv_cache_annotations(model, config, rng, mesh, page_state: Optio
         jnp.ones(input_shape),
         jnp.ones(input_shape),
         encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
-        model_mode=common_types.MODEL_MODE_PREFILL,
+        model_mode=MODEL_MODE_PREFILL,
         slot=0,
         page_state=page_state,
     )
@@ -693,7 +692,7 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[Page
         jnp.ones(input_shape),
         jnp.ones(input_shape),
         encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
-        model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
         slot=0,
         page_state=page_state,
     )

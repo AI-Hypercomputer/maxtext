@@ -43,20 +43,14 @@ import transformers
 
 from datasets import load_dataset
 
-from MaxText import common_types
 from MaxText import maxengine
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.experimental.rl.grpo_trainer import compute_log_probs, grpo_loss_fn, _merge_grpo_state, generate_completions
 from MaxText.globals import PKG_DIR
-from MaxText.layers import initializers
 from MaxText.layers import models
 from MaxText.tests.grpo_trainer_correctness_test import prepare_maxtext_inputs
-
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-NdInitializer = initializers.NdInitializer
+from MaxText.common_types import Array
 
 
 class GRPOTest(unittest.TestCase):

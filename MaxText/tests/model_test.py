@@ -23,15 +23,15 @@ import pytest
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh
 
-from MaxText import common_types
 from MaxText import maxtext_utils
 from MaxText import pyconfig
+from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.globals import PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
 
-Mesh = jax.sharding.Mesh
 MAX_PREFILL_PREDICT_LENGTH = 4
 
 
@@ -67,7 +67,7 @@ class TestModel(unittest.TestCase):
     s = (self.cfg.global_batch_size_to_train_on, self.cfg.max_target_length)
     ids = jax.random.randint(self.rng, s, 0, self.cfg.vocab_size)
 
-    decoder_segment_ids = jax.numpy.zeros(s) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+    decoder_segment_ids = jax.numpy.zeros(s) + DECODING_ACTIVE_SEQUENCE_INDICATOR
     decoder_positions = jnp.stack(
         [jnp.arange(self.cfg.max_target_length, dtype=jnp.int32) for _ in range(self.cfg.global_batch_size_to_train_on)]
     )
@@ -97,7 +97,7 @@ class TestModel(unittest.TestCase):
             decoder_positions,
             decoder_segment_ids,
             enable_dropout=False,
-            model_mode=common_types.MODEL_MODE_TRAIN,
+            model_mode=MODEL_MODE_TRAIN,
             rngs={"aqt": self.rng},
         )
     )
@@ -134,7 +134,7 @@ class TestModel(unittest.TestCase):
         decoder_positions,
         decoder_segment_ids,
         enable_dropout=False,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": self.rng},
     )
 
@@ -144,7 +144,7 @@ class TestModel(unittest.TestCase):
         decoder_positions[:, :PREFILL_RANGE],
         decoder_segment_ids=decoder_segment_ids[:, :PREFILL_RANGE],
         enable_dropout=False,
-        model_mode=common_types.MODEL_MODE_PREFILL,
+        model_mode=MODEL_MODE_PREFILL,
         rngs={"aqt": self.rng},
         mutable=["cache"],
     )
@@ -164,7 +164,7 @@ class TestModel(unittest.TestCase):
           ids_idx,
           decoder_positions_idx,
           enable_dropout=False,
-          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
           rngs={"aqt": self.rng},
           mutable=["cache"],
       )

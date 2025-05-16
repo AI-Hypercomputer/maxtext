@@ -30,11 +30,10 @@ import omegaconf
 from MaxText import accelerator_to_spec_map
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.layers.attentions import AttentionType
 from MaxText.common_types import DecoderBlockType
+from MaxText.layers.attentions import AttentionType
 from MaxText.utils import gcs_utils
 
-OmegaConf = omegaconf.OmegaConf
 
 # pylint: disable=line-too-long
 
@@ -375,14 +374,14 @@ class _HyperParameters:
           raise ValueError(f"We received env `{environment_var}` but it isn't all uppercase.")
 
   def _update_from_env_and_command_line(self, raw_keys, raw_data_from_yaml, argv, **kwargs) -> list[str]:
-    """Update model config from environment and command line using OmegaConf overrides."""
-    # Use OmegaConf.from_cli to capture CLI arguments.
-    cli_cfg = OmegaConf.from_cli(argv[2:])
+    """Update model config from environment and command line using omegaconf.OmegaConf overrides."""
+    # Use omegaconf.OmegaConf.from_cli to capture CLI arguments.
+    cli_cfg = omegaconf.OmegaConf.from_cli(argv[2:])
     # Also create a configuration from any extra keyword arguments.
-    kwargs_cfg = OmegaConf.create(kwargs)
+    kwargs_cfg = omegaconf.OmegaConf.create(kwargs)
     # Merge command-line and keyword arguments.
-    cmdline_cfg = OmegaConf.merge(cli_cfg, kwargs_cfg)
-    raw_data_from_cmd_line = OmegaConf.to_container(cmdline_cfg, resolve=True)
+    cmdline_cfg = omegaconf.OmegaConf.merge(cli_cfg, kwargs_cfg)
+    raw_data_from_cmd_line = omegaconf.OmegaConf.to_container(cmdline_cfg, resolve=True)
 
     updated_keys = []
 
@@ -427,9 +426,9 @@ class _HyperParameters:
     return updated_keys
 
   def _load_config(self, config_name: str) -> dict[str, Any]:
-    """Loads the YAML config from a file using OmegaConf, and resolves inheritance."""
-    base_cfg = OmegaConf.load(config_name)
-    raw_data_from_yaml = OmegaConf.to_container(base_cfg, resolve=True)
+    """Loads the YAML config from a file using omegaconf.OmegaConf, and resolves inheritance."""
+    base_cfg = omegaconf.OmegaConf.load(config_name)
+    raw_data_from_yaml = omegaconf.OmegaConf.to_container(base_cfg, resolve=True)
 
     # Load data from parent config. Note that inheritance has override
     # semantics, and the path is relative to the current config.
@@ -618,9 +617,9 @@ class _HyperParameters:
       if not os.path.isfile(file_path):
         dir_path = os.path.dirname(os.path.realpath(__file__))
         file_path = os.path.join(dir_path, "configs", "models", f"{model_name}.yml")
-      # Use OmegaConf to load the model-specific configuration.
-      model_vars = OmegaConf.load(file_path)
-      model_vars = OmegaConf.to_container(model_vars, resolve=True)
+      # Use omegaconf.OmegaConf to load the model-specific configuration.
+      model_vars = omegaconf.OmegaConf.load(file_path)
+      model_vars = omegaconf.OmegaConf.to_container(model_vars, resolve=True)
       updated_keys = list(model_vars.keys())
       raw_keys = validate_and_update_keys(raw_keys, model_vars, config_name)
     return updated_keys

@@ -24,38 +24,19 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
+from jax.sharding import Mesh
 
 from flax import linen as nn
 
-from MaxText.layers import attentions
+from MaxText import max_logging
+from MaxText.common_types import Config, DType, AxisNames, BATCH, LENGTH, EMBED, HEAD, D_KV, Array, MODEL_MODE_TRAIN
 from MaxText.layers import initializers
 from MaxText.layers import linears
 from MaxText.layers import models
 from MaxText.layers import quantizations
-from MaxText import common_types
-from MaxText import max_logging
-
-AttentionOp = attentions.AttentionOp
-
-
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-Mesh = common_types.Mesh
-AxisNames = common_types.AxisNames
-BATCH = common_types.BATCH
-LENGTH = common_types.LENGTH
-HEAD = common_types.HEAD
-D_KV = common_types.D_KV
-EMBED = common_types.EMBED
-
-DenseGeneral = linears.DenseGeneral
-NdInitializer = initializers.NdInitializer
-Initializer = initializers.Initializer
-nd_dense_init = initializers.nd_dense_init
-Quant = quantizations.AqtQuantization
-KVQuant = quantizations.KVQuant
-
+from MaxText.layers.attentions import KVQuant, DenseGeneral, AttentionOp
+from MaxText.layers.initializers import Initializer, NdInitializer, nd_dense_init
+from MaxText.layers.quantizations import AqtQuantization as Quant
 
 # -----------------------------------------
 # The Normalization Layer specific for GPT3
@@ -217,7 +198,7 @@ class Gpt3MultiHeadAttention(nn.Module):
       inputs_q: Array,
       decoder_segment_ids: Array | None = None,
       *,
-      model_mode: str = common_types.MODEL_MODE_TRAIN,
+      model_mode: str = MODEL_MODE_TRAIN,
       deterministic: bool = False,
   ):
     inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
