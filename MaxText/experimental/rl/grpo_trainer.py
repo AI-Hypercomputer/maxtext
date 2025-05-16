@@ -599,18 +599,23 @@ def reshard(config, params, destination_shardings, meshes):
   return inference_params
 
 def pathways_reshard(config, params, source_shardings, source_mesh, destination_shardings, dest_meshes):
-  layer_groups = [
-    ("dense_layers", config.first_num_dense_layers),
-    ("moe_layers", config.base_num_decoder_layers - config.first_num_dense_layers)
-  ]
-  max_utils.unscan_train_state_params(params, source_shardings, source_mesh, scan_axis=config.param_scan_axis, layer_groups=layer_groups)
-  num_model_parameters = max_utils.calculate_num_params_from_pytree(params)
-  max_logging.log(f"number parameters after unscanning: {num_model_parameters/1e9:.3f} billion")
+  if not config.scan_layers:
+    layer_groups = [
+      ("dense_layers", config.first_num_dense_layers),
+      ("moe_layers", config.base_num_decoder_layers - config.first_num_dense_layers)
+    ]
+    max_utils.unscan_train_state_params(params, source_shardings, source_mesh, scan_axis=config.param_scan_axis, layer_groups=layer_groups)
+    num_model_parameters = max_utils.calculate_num_params_from_pytree(params)
+    max_logging.log(f"number parameters after unscanning: {num_model_parameters/1e9:.3f} billion")
   with (jax.transfer_guard_device_to_host("disallow_explicit"), jax.transfer_guard_host_to_device("disallow_explicit")):
-    inference_params = [pathwaysutils_reshard.reshard(params, destination_shardings[0].params)]
-    for destination_sharding in destination_shardings[1:]:
-      inference_params.append(jax.device_put(inference_params[0], destination_sharding))
-  max_utils.rescan_train_state_params(params, source_shardings, source_mesh, scan_axis=config.param_scan_axis, layer_groups=layer_groups)
+    # inference_params = [pathwaysutils_reshard.reshard(params, destination_shardings[0].params)]
+    # for destination_sharding in destination_shardings[1:]:
+    #   inference_params.append(jax.device_put(inference_params[0], destination_sharding))
+    inference_params = []
+    for destination_sharding in destination_shardings:
+      inference_params.append(pathwaysutils_reshard.reshard(params, destination_sharding.params, cache_resharding_plans=True))
+  if not config.scan_layers:
+    max_utils.rescan_train_state_params(params, source_shardings, source_mesh, scan_axis=config.param_scan_axis, layer_groups=layer_groups)
   return inference_params
 
 def setup_mesh_and_model(config, config_inference):
@@ -1041,7 +1046,6 @@ def train_loop(config, config_inference, state=None):
         with inference_mesh, nn_partitioning.axis_rules(config_inference.logical_axis_rules):
           example_batch = p_generate(example_batch, inference_param, rng_gen)
         data_buffer.push(example_batch, in_shard_train[1])
-        max_logging.log(f"example batch shape {example_batch.shape}")
   # max_logging.log(f"data buffer: {len(data_buffer.queue)}")
   metric_logger = MetricLogger(writer, config)
   for step in np.arange(start_step, config.steps):
