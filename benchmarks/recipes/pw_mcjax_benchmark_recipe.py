@@ -34,10 +34,10 @@ SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
 RUNNER = "us-docker.pkg.dev/path/to/maxtext_runner"
 
 # Cluster Params
-CLUSTER = "v6e-256-cluster"
-PROJECT = "tpu-prod-env-cluster"
-ZONE = "us-east5-b"
-REGION = "us-east5"
+CLUSTER = "bodaborg-v6e-256-tt-c"
+PROJECT = "tpu-prod-env-multipod"
+ZONE = "us-west1-c"
+REGION = "us-west1"
 COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
@@ -45,7 +45,7 @@ DEVICE_TYPE = "v6e-256"
 XPK_PATH = os.path.join("~", "xpk")  # We're running this script from the maxtext directory
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = (
-    f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
+    f"gs://trillium-scale-datasets-q1-25-west/pw_mcjax_benchmarking/"
 )
 
 BENCHMARK_STEPS = 20
