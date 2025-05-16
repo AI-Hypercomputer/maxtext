@@ -58,6 +58,7 @@ class Train(unittest.TestCase):
             "enable_checkpoint_cloud_logger=False",
             "monitor_goodput=False",
             f"metrics_file={os.path.join(outputs_dir, 'metrics.json')}",
+            "enable_tensorboard=False",
         ]
     )
 

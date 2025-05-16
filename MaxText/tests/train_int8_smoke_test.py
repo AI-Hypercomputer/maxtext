@@ -52,6 +52,7 @@ class Train(unittest.TestCase):
             "enable_goodput_recording=False",
             "monitor_goodput=False",
             "enable_checkpoint_cloud_logger=False",
+            "enable_tensorboard=False",
         ]
     )
 
