@@ -55,10 +55,11 @@ from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
 class AttentionType(enum.Enum):
-  GLOBAL = "global"
+  GLOBAL = "global"  # default, with causality
   LOCAL_SLIDING = "local_sliding"
   CHUNK = "chunk"
   MLA = "mla"
+  FULL = "full"
 
 
 # Used to pass in splash attention block sizes from config.
@@ -389,7 +390,7 @@ class AttentionOp(nn.Module):
 
     causal_mask = None
     # We enforce causality except for AUTOREGRESSION
-    if model_mode != MODEL_MODE_AUTOREGRESSIVE:
+    if model_mode != MODEL_MODE_AUTOREGRESSIVE and self.attention_type != AttentionType.FULL:
       mask_shape = (q_seq_len, kv_seq_len)
       # row_ids indicates the position of query
       # col_ids indicates the position of kv
@@ -407,10 +408,6 @@ class AttentionOp(nn.Module):
     elif causal_mask is not None:
       output_mask = causal_mask
 
-    is_seq_len_greater_than_chunk_window = False
-    if output_mask is not None and self.chunk_attn_window_size is not None:
-      is_seq_len_greater_than_chunk_window = output_mask.shape[-1] > self.chunk_attn_window_size
-
     if self.attention_type == AttentionType.LOCAL_SLIDING and output_mask is not None:
       if self.sliding_window_size is None:
         raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
@@ -418,7 +415,11 @@ class AttentionOp(nn.Module):
       all_ones = jnp.ones_like(output_mask)
       sliding_mask = jnp.triu(all_ones, -1 * self.sliding_window_size + 1) * jnp.tril(all_ones, self.sliding_window_size - 1)
       output_mask = sliding_mask * output_mask
-    elif self.attention_type == AttentionType.CHUNK and output_mask is not None and is_seq_len_greater_than_chunk_window:
+    elif (
+        self.attention_type == AttentionType.CHUNK
+        and output_mask is not None
+        and output_mask.shape[-1] > self.chunk_attn_window_size
+    ):
       mask_shape = (q_seq_len, kv_seq_len)
       chunk_mask = _generate_chunk_attention_mask(mask_shape=(q_seq_len, kv_seq_len), chunk_size=self.chunk_attn_window_size)
       output_mask = chunk_mask * output_mask
@@ -670,7 +671,10 @@ class AttentionOp(nn.Module):
     )
 
     mask_shape = (self.config.max_target_length, self.config.max_target_length)
-    mask = splash_attention_mask.CausalMask(shape=mask_shape)
+    if self.attention_type == AttentionType.FULL:
+      mask = splash_attention_mask.FullMask(mask_shape)
+    else:
+      mask = splash_attention_mask.CausalMask(shape=mask_shape)
 
     # Create LoadBalancedCausalMask if cp and load_balancing
     if cp_size > 1 and load_balanced_context_parallel:
@@ -1208,6 +1212,7 @@ class Attention(nn.Module):
   ragged_block_size: int = 256
   use_qk_norm: bool = False
   query_pre_attn_scalar: float | None = None
+  use_bias_in_projection: bool = False
   # Temperature tuning parameters used for Llama4
   temperature_tuning: bool = False
   temperature_tuning_scale: float = 0.1
@@ -1300,6 +1305,7 @@ class Attention(nn.Module):
         name="query",
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
+        use_bias=self.use_bias_in_projection,
     )(inputs_q)
     return query_proj
 
@@ -1336,6 +1342,7 @@ class Attention(nn.Module):
         name=proj_name,
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
+        use_bias=self.use_bias_in_projection,
     )(inputs_kv)
     return kv_proj
 
@@ -1352,6 +1359,7 @@ class Attention(nn.Module):
         name=proj_name,
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
+        use_bias=self.use_bias_in_projection,
     )(inputs)
     qkv_proj = checkpoint_name(qkv_proj, "qkv_proj")
     query, key, value = qkv_proj[:, :, 0, ...], qkv_proj[:, :, 1, ...], qkv_proj[:, :, 2, ...]
@@ -1372,10 +1380,11 @@ class Attention(nn.Module):
         name="out",
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
+        use_bias=self.use_bias_in_projection,
     )(out)
     return out_proj
 
-  def apply_rotary_embedding(self, inputs: Array, inputs_positions: Array, name: str):
+  def apply_rotary_embedding(self, inputs: Array, name: str, inputs_positions: Optional[Array | None] = None):
     """Applies rotary embeddings, handling different model types.
 
     Args:
@@ -1394,7 +1403,15 @@ class Attention(nn.Module):
 
     rope_type = self.config.rope_type.lower()
     rope_use_scale = self.config.rope_use_scale
-    if self.config.model_name.startswith("llama3.1") or rope_type.startswith("llama3.1"):
+    if self.config.model_name.startswith("llama4") and self.name == "self_attention_vision":
+      rotary_embedding = embeddings.LlamaVisionRotaryEmbedding(
+          image_size=self.config.image_size_for_vit,
+          patch_size=self.config.patch_size_for_vit,
+          hidden_size=self.config.hidden_size_for_vit,
+          num_attention_heads=self.config.num_attention_heads_for_vit,
+          rope_theta=self.config.rope_theta_for_vit,
+      )
+    elif self.config.model_name.startswith("llama3.1") or rope_type.startswith("llama3.1"):
       rotary_embedding = embeddings.LLaMARotaryEmbedding(
           min_timescale=self.config.rope_min_timescale,
           max_timescale=self.config.rope_max_timescale,
@@ -1427,7 +1444,10 @@ class Attention(nn.Module):
           fprop_dtype=self.dtype,
           name=name,
       )
-    inputs = rotary_embedding(inputs, inputs_positions)
+    if inputs_positions is None:
+      inputs = rotary_embedding(inputs)
+    else:
+      inputs = rotary_embedding(inputs, inputs_positions)
     return inputs
 
   def update_kv_caches(self, key, value, decoder_segment_ids, model_mode, previous_chunk):
@@ -1455,7 +1475,7 @@ class Attention(nn.Module):
       self,
       inputs_q: Array,
       inputs_kv: Array,
-      inputs_positions: Array,
+      inputs_positions: Array | None = None,
       decoder_segment_ids: Array | None = None,
       *,
       model_mode: str = MODEL_MODE_TRAIN,
@@ -1526,8 +1546,8 @@ class Attention(nn.Module):
     use_qk_norm = self.use_qk_norm and use_rope
 
     if use_rope:
-      query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
-      key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
+      query = self.apply_rotary_embedding(query, name="query_rotary", inputs_positions=inputs_positions)
+      key = self.apply_rotary_embedding(key, name="key_rotary", inputs_positions=inputs_positions)
 
     if use_qk_norm and is_llama4_decoder_block:
       l2_norm = L2Norm(self.config.normalization_layer_epsilon)
@@ -1712,7 +1732,7 @@ class MLA(Attention):
 
     # Split into non-positional and rotary parts.
     q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=-1)
-    q_pe = self.apply_rotary_embedding(q_pe, inputs_positions, name="query_rope")
+    q_pe = self.apply_rotary_embedding(q_pe, name="query_rope", inputs_positions=inputs_positions)
     # Query projection is scaled by self.softmax_scale to be consistent MaxText implementation.
     # DeepSeek v3 was doing it in attention score computation.
     query = jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
@@ -1782,7 +1802,7 @@ class MLA(Attention):
 
     # Apply rotary embedding to key_rope.
     key_rope = jnp.expand_dims(low_rank_rope, axis=2)
-    key_rope = self.apply_rotary_embedding(key_rope, inputs_positions, name="key_rope")
+    key_rope = self.apply_rotary_embedding(key_rope, name="key_rope", inputs_positions=inputs_positions)
 
     key, value = self.mla_get_key_value(low_rank_main, key_rope, model_mode)
     cached_values = [None, None]
