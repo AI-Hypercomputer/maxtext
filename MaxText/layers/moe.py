@@ -294,7 +294,7 @@ class RoutedMoE(nn.Module):
     If the configuration does not specify routing groups (n_routing_groups is -1),
     using a standard top-k routing mechanism.
 
-    The selection uses post_bias logits, but the return weigths are based on pre_bias logits.
+    The selection uses post_bias logits, but the return weights are based on pre_bias logits.
     """
     # Reshape
     batch_size, seq_len = gate_logits.shape[0], gate_logits.shape[1]
@@ -466,10 +466,10 @@ class RoutedMoE(nn.Module):
           cumulated_array = jnp.cumsum(array_with_zeros, axis=0, dtype=input_array.dtype)
           return cumulated_array[shard_id]
         elif strategy == TransformStrategy.RECV_SIZE:
-          # Received size in the traget output
+          # Received size in the target output
           return input_array[:, shard_id]
         else:
-          raise ValueError(f"Unknown tranform array strategy: {strategy}")
+          raise ValueError(f"Unknown transform array strategy: {strategy}")
 
       local_id = jax.lax.axis_index("expert")
       input_offsets = transform_array(all_shards_group_sizes, local_id, TransformStrategy.INPUT_OFFSET)
@@ -530,7 +530,24 @@ class RoutedMoE(nn.Module):
             * self.config.max_target_length
             * self.config.num_experts_per_tok
         )
-        output_shape = jnp.zeros((buffer_size, self.config.emb_dim), dtype=x.dtype)
+        output_shape_old = jnp.zeros((buffer_size, self.config.emb_dim), dtype=x.dtype)
+        # original_shape = x.shape
+
+        # # Create the new shape for Y.
+        # # The first dimension is 'my_len', and the rest are from the original shape.
+        # new_shape = (buffer_size,) + original_shape[1:]
+
+        # # Initialize a new JAX array of zeros with the new shape
+        # output_shape = jnp.zeros(new_shape, dtype=x.dtype)
+
+        my_y = jnp.transpose(x)
+       #breakpoint()
+        my_output = my_y @ jnp.zeros((x.shape[0],buffer_size), dtype=my_y.dtype)
+        output_shape = jnp.transpose(my_output)
+        print(output_shape)
+        #breakpoint()
+        print("x shape before a2a")
+        print(x.shape)
         x = jax.lax.ragged_all_to_all(
             x,
             output_shape,
@@ -540,8 +557,17 @@ class RoutedMoE(nn.Module):
             recv_sizes,
             axis_name=axis_name,
         )
+        print("x shape after a2a")
+        print(x.shape)
+        if len(x.shape) == 1:
+          print("x shape only 1 DIM")
+          x = jnp.reshape(x, (262144, 7168))
+        print("x shape after 1D -> 2D reshape")
+        print(x.shape)
         global_group_sizes = lax.all_gather(group_sizes, axis_name=axis_name)
         x, local_sorted_indices, group_sizes = local_permute(x, global_group_sizes, local_expert_size)
+        print("x after local_permute")
+        print(x.shape)
 
       layer_w0 = gmm(x, w0, group_sizes)
       layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
@@ -563,6 +589,14 @@ class RoutedMoE(nn.Module):
         input_offsets, send_sizes, output_offsets, recv_sizes = get_all_to_all_params(
             jnp.transpose(all_shards_group_sizes), local_expert_size, self.get_expert_parallelism_size()
         )
+
+        # Begin matt hack
+
+        my_y = jnp.transpose(local_output)
+        my_output = my_y @ jnp.zeros((local_output.shape[0],buffer_size), dtype=my_y.dtype)
+        output_shape = jnp.transpose(my_output)
+        print(output_shape)
+
         intermediate_output = jax.lax.ragged_all_to_all(
             local_output,
             output_shape,
@@ -572,6 +606,12 @@ class RoutedMoE(nn.Module):
             recv_sizes,
             axis_name=axis_name,
         )
+        print("Intermediate output shape:")
+        print(intermediate_output.shape)
+        if len(intermediate_output.shape) == 1:
+          intermediate_output = jnp.reshape(intermediate_output, (262144, 7168))
+          print("intermediate_output shape only 1 DIM")
+          print(intermediate_output.shape)
       output = self.unpermute(
           intermediate_output, sorted_selected_experts, weights, batch_size=batch_size, sequence_length=sequence_length
       )
