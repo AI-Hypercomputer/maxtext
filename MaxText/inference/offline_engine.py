@@ -359,13 +359,48 @@ class ReplicaWorker:
         tokenizer: Any,
         eos_ids: List[int],
         prefill_lengths: List[int],
+        max_decode_length: int,
         batch_prefill_max_batch_size: int,
         worker_id: int = 0,
         auto_layout_supported: bool = False,
         run_as_a_thread=False,
         rng = None,
     ):
-        """Initialize a ReplicaWorker.
+        """Initialize a ReplicaWorker that uses continuous batching over
+           a queue of inputs.
+
+        Continuous batching logic:
+        1. Process input one at a time
+        2. Prefill input and insert KV cache
+        3. Keep on processing inputs and prefilling until
+           there are enough samples to do batch decoding
+        4. Decode until at least one of the samples is finished,
+           so there is room for new samples
+        5. Prefill to fill up the newly emptied decode slots
+        6. Repeat steps 5 and 6 until all samples are finished
+        7. A background thread is used to detokenize the results
+        8. Return the results
+
+        Prefill Packing:
+            When enable_batch_prefill is True, the prefill processor
+            will pack multiple inputs into a single sequence before
+            doing the prefill.
+
+            There are multiple buckets for packed sequences, where each bucket
+            contains inputs with the same padded length. Only inputs with the same
+            padded length will be packed together.
+
+            It is important to sort the inputs by padded length so that the
+            buckets fill up quickly.
+
+            When a decode slot is freed up, the prefill processor will add the
+            sequence to the bucket. If the bucket is full, the bucket will be
+            prefilled.
+
+            E.g.
+            Bucket for length 64: [...seq1, ...seq2, ...seq3, ...seq4]
+            Bucket for length 128: [...seq1, ...seq2]
+            Bucket for length 256: [...seq1]
 
         Args:
             config: MaxText configuration
@@ -388,7 +423,8 @@ class ReplicaWorker:
         self.devices = devices
         self.enable_batch_prefill = enable_batch_prefill
         self.prefill_lengths = prefill_lengths
-        self.max_decode_length = 5 #self.config.max_target_length - self.max_prefill_length
+        self.max_prefill_length = self.prefill_lengths[-1]
+        self.max_decode_length = max_decode_length
         self.eos_ids = eos_ids
         self.tokenizer = tokenizer
         self.batch_prefill_max_batch_size = batch_prefill_max_batch_size
@@ -487,9 +523,7 @@ class ReplicaWorker:
         """
         start_time = time.time()
         engine = MaxEngine(self.config, self.devices)
-        print("initialized engine")
-        params = engine.load_params(params, rng=self.rng)
-        print("loaded params")
+        params = engine.load_params(params=params, rng=self.rng)
         end_time = time.time()
         print(f"time taken to initialize engine: {end_time - start_time} seconds")
         return params, engine
@@ -514,8 +548,8 @@ class ReplicaWorker:
         )
         assert self.decode_state is not None
 
-        for _ in range(3):
-            print("Warming up generate function")
+        for i in range(3):
+            print(f"Warm up generate function ({i+1}/3)")
             self.decode_state, result_tokens = self.generate_fn(
                 self.params, self.decode_state, rng=self.rng
             )
@@ -537,6 +571,9 @@ class ReplicaWorker:
         if self.warm_up_thread is not None:
             self.warm_up_thread.join()
             self.warm_up_thread = None
+
+    def update_params(self, params: Params):
+        self.params = self.engine.load_params(params=params, rng=self.rng)
 
     def start_inference(
         self,
@@ -603,14 +640,12 @@ class ReplicaWorker:
         # Process each input
         while not data_queue.empty():
             try:
-                print("replica worker: ", self.worker_id, " processing input")
                 row = data_queue.get_nowait()
             except queue.Empty:
                 break
 
             # 1. Wait for an empty slot
             while not self.empty_decode_slots:
-                print("replica worker: ", self.worker_id, " running decode")
                 self.decode()
 
             # 2. Get an available slot
@@ -635,9 +670,9 @@ class ReplicaWorker:
 
         # Wait for detokenization to complete
         self.running = False
-        print("replica worker: ", self.worker_id, " joining detokenize thread")
+        print(f"replica worker {self.worker_id}: joining detokenize thread")
         detokenize_thread.join()
-        print("replica worker: ", self.worker_id, " detokenize thread joined")
+        print(f"replica worker {self.worker_id}: detokenize thread joined")
 
         # Log completion statistics
         log.info(
@@ -662,12 +697,10 @@ class ReplicaWorker:
         """
         token, is_valid, length = result_token.data[slot]
         current_length = len(self.res[prompt_id])
-        print("token: ", token, "is_valid: ", is_valid, "length: ", length)
-        # if result_token.log_prob is not None:
-        #     log_prob = result_token.log_prob[slot]  
-        # else:
-        log_prob = None
-        assert length <= self.max_decode_length
+        if result_token.log_prob is not None:
+            log_prob = result_token.log_prob[slot]  
+        else:
+            log_prob = None
 
         already_reached_eos = (
             current_length > 0
@@ -722,7 +755,6 @@ class ReplicaWorker:
             
         
         # Add results to detokenization queue
-        # DO not merge this loop with the previous loop
         for result_tokens in buffer:
             self.detokenize_backlog.put_nowait(
                 (result_tokens, False, 0, 0)
@@ -768,40 +800,6 @@ class ReplicaWorker:
 
 class OfflineEngine:
     """Class for handling offline inference on batches of inputs.
-
-    The logic is as follows:
-    1. Process input one at a time
-    2. Pad the input data to the nearest power of 2
-    3. Prefill input and insert KV cache
-    4. Keep on processing inputs and prefilling until
-       there are enough samples to do batch decoding
-    5. Decode until at least one of the samples is finished,
-       so there is room for new samples
-    6. Prefill to fill up the newly emptied decode slots
-    7. Repeat steps 5 and 6 until all samples are finished
-    8. A background thread is used to detokenize the results
-    9. Return the results
-
-    Prefill Packing:
-        When enable_batch_prefill is True, the prefill processor
-        will pack multiple inputs into a single sequence before
-        doing the prefill.
-
-        There are multiple buckets for packed sequences, where each bucket
-        contains inputs with the same padded length. Only inputs with the same
-        padded length will be packed together.
-
-        It is important to sort the inputs by padded length so that the
-        buckets fill up quickly.
-
-        When a decode slot is freed up, the prefill processor will add the
-        sequence to the bucket. If the bucket is full, the bucket will be
-        prefilled.
-
-        E.g.
-        Bucket for length 64: [...seq1, ...seq2, ...seq3, ...seq4]
-        Bucket for length 128: [...seq1, ...seq2]
-        Bucket for length 256: [...seq1]
     """
 
     def __init__(
@@ -895,29 +893,17 @@ class OfflineEngine:
         print(f"devices: {devices}")
         
         if not self.dp_meshes:
-            # ici_parallelism = max_utils.fill_unspecified_mesh_axes(config.ici_parallelism.copy(), len(devices), "ICI")
-            # devices_array = mesh_utils.create_device_mesh(
-            #             ici_parallelism,
-            #             devices,
-            #             contiguous_submeshes=False,
-            #             allow_split_physical_axes=config.allow_split_physical_axes or False,
-            #         )
-            # flat_devices = devices_array.flatten()
-            # inference_devices = flat_devices.reshape((self.dp, len(devices)//self.dp))
-            # inference_meshes = [Mesh(devices.reshape(config.ici_parallelism), config.mesh_axes) for devices in inference_devices]
-            # self.dp_meshes = inference_meshes
-
-            self.dp_meshes = []
-            num_devices_per_replica = len(devices) // self.dp
-            mesh_shape = self.config.ici_parallelism
-
-            for i in range(self.dp):
-                mesh_devices = np.array(
-                    devices[
-                        i * num_devices_per_replica : (i + 1) * num_devices_per_replica
-                    ]
-                ).reshape(mesh_shape)
-                self.dp_meshes.append(Mesh(mesh_devices, self.config.mesh_axes))
+            ici_parallelism = max_utils.fill_unspecified_mesh_axes(config.ici_parallelism.copy(), len(devices), "ICI")
+            devices_array = mesh_utils.create_device_mesh(
+                        ici_parallelism,
+                        devices,
+                        contiguous_submeshes=False,
+                        allow_split_physical_axes=config.allow_split_physical_axes or False,
+                    )
+            flat_devices = devices_array.flatten()
+            inference_devices = flat_devices.reshape((self.dp, len(devices)//self.dp))
+            inference_meshes = [Mesh(devices.reshape(config.ici_parallelism), config.mesh_axes) for devices in inference_devices]
+            self.dp_meshes = inference_meshes
 
         # Initialize ReplicaWorkers
         run_as_a_thread = self.dp > 1  # No need to run worker as a thread if there is only one replica
@@ -931,6 +917,7 @@ class OfflineEngine:
                 tokenizer=self.tokenizer,
                 eos_ids=self.eos_ids,
                 prefill_lengths=self.prefill_lengths,
+                max_decode_length=self.max_decode_length,
                 batch_prefill_max_batch_size=self.batch_prefill_max_batch_size,
                 worker_id=i,
                 auto_layout_supported=auto_layout_supported,
@@ -955,15 +942,20 @@ class OfflineEngine:
                 self.replica_workers[i].ensure_warm_up_finished()
             self._not_warmed_up = False
 
+    def update_params(self, params: Params):
+        for i in range(self.dp):
+            self.replica_workers[i].update_params(params)
+
     def batch_inference(
         self,
-        data: Union[List[InputData], List[jax.Array]],
+        data: Union[List[InputData], List[jax.Array], List[np.ndarray]],
         desc: str = "",
     ) -> Dict[str, List[int]]:
         """Run inference on a batch of inputs.
 
         Args:
-            data: List of InputData objects or JAX arrays containing input tokens (and no padding tokens).
+            data: List of InputData objects, or JAX or numpy arrays. 
+                If input is JAX or numpy array, it must not contain padding tokens.
             desc: Description string for logging
 
         Returns:
