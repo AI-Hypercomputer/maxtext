@@ -769,7 +769,7 @@ class Pipeline(nn.Module):
       )
       loop_state, _ = run_all_iterations_scanned(self, loop_state, None)
     else:
-      for loop_iteration in range(total_iterations):
+      for _ in range(total_iterations):
         loop_state, _ = run_iteration_scannable(self, loop_state, None)
 
     # The final output is located in the input/output array, however the output microbatches may be permuted relative to
