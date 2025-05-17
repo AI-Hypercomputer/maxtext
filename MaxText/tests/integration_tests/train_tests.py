@@ -317,6 +317,21 @@ class TrainTests(unittest.TestCase):
     ]
     train_main(parameter_offload)
 
+  @pytest.mark.gpu_only
+  def test_gpu_cudnn_flash_jax(self):
+    cudnn_flash_jax = [  # tests base config on GPU with flash attention"""
+        None,
+        os.path.join(PKG_DIR, "configs", "base.yml"),
+        rf"base_output_directory=gs://runner-maxtext-logs",
+        "run_name=runner_test",
+        r"dataset_path=gs://maxtext-dataset",
+        "steps=2",
+        "enable_checkpointing=False",
+        "attention=cudnn_flash_jax",
+        "packing=False",
+        rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
+    ]
+    train_main(cudnn_flash_jax)
 
 if __name__ == "__main__":
   absltest.main()
