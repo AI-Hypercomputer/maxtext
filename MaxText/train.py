@@ -645,6 +645,7 @@ def setup_mesh_and_model(config, devices=None):
         config.enable_checkpointing,
         config.async_checkpointing,
         config.checkpoint_period,
+        config.num_checkpoints_to_keep,
         config.dataset_type,
         logger,
         use_ocdbt,
@@ -746,7 +747,7 @@ def setup_train_loop(config):
   )
 
 
-def train_loop(config, state=None):
+def train_loop(config, state=None, hearbeat_fn=None, failure_fn=None):
   """Main Training loop.
   Args:
     config:
@@ -896,6 +897,8 @@ def train_loop(config, state=None):
         sys.exit()
 
     metric_logger.write_metrics(running_gcs_metrics, metrics, step)
+    if hearbeat_fn is not None:
+      hearbeat_fn()
 
     if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
       jax.block_until_ready(state)  # Ensure compilation has finished.
@@ -955,6 +958,9 @@ def train_loop(config, state=None):
 
     if step == start_step:
       max_utils.print_mem_stats("After params initialized")
+    
+    if failure_fn is not None:
+      failure_fn()
 
   if checkpoint_manager is not None:
     if (int(state.step) - 1) % config.checkpoint_period != 0:
