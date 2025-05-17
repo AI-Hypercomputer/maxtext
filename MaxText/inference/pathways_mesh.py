@@ -12,16 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import pathwaysutils
-
-pathwaysutils.initialize()
+# import pathwaysutils
+# pathwaysutils.initialize()
 
 import sys
 import unittest
 import os.path
+import jax
 
 from MaxText.globals import PKG_DIR
-import jax
+
 import jax.numpy as jnp
 from MaxText.maxengine import MaxEngine
 from MaxText import pyconfig
@@ -46,31 +46,33 @@ def init_pyconfig(**kwargs):
     init_kwargs = {
         "run_name": "test",
         # Parallelism
-        "per_device_batch_size": 64,
+        "per_device_batch_size": 12,
         "ici_data_parallelism": 1,
         "ici_fsdp_parallelism": 1,
         "ici_tensor_parallelism": -1,  # Use TP
         # Inference
-        "max_prefill_predict_length": 128,
-        "max_target_length": 256,
+        "max_prefill_predict_length": 1024,
+        "max_target_length": 1030,
         "return_log_prob": True,
         # Model
         "model_name": "llama2-70b",
         "attention": "dot_product",
-        # "quantization": "int8",
-        # "quant_cfg_path": "",
-        # "quantize_kvcache": True,
-        # "kv_quant_dtype": "int4",
-        "scan_layers": False,
+        "scan_layers": True,
+        # Quantization
+        "quantization": "int8",
+        "quant_cfg_path": "",
+        "quantize_kvcache": True,
+        "kv_quant_dtype": "int4",
+        "checkpoint_is_quantized": True,
+        # Base model
         # "base_emb_dim": 512,
         # "base_num_query_heads": 32,
         # "base_num_kv_heads": 32,
         # "base_num_decoder_layers": 2,
-        # Checkpoint
+        # Checkpoints
         "tokenizer_path": "./assets/tokenizer.llama2",
         # "load_parameters_path": "gs://inference-benchmarks/models/llama2-70b-chat/quant/int8_",
-        # "checkpoint_is_quantized": True,
-        "skip_jax_distributed_system": True,
+        # "skip_jax_distributed_system": True, # Single host
     } | kwargs
     config = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -84,7 +86,7 @@ print("initialized pyconfig")
 random.seed(42)
 
 print("generating input data")
-rand_l = [random.randint(1, config.max_prefill_predict_length) for _ in range(10)]
+rand_l = [random.randint(1, config.max_prefill_predict_length) for _ in range(5)]
 
 start_time = time.time()
 input_data = [np.arange(l) for l in rand_l]
@@ -93,26 +95,99 @@ print(f"Time taken to generate input data: {end_time - start_time} seconds")
 # input_data = [jax.numpy.arange(config.max_prefill_predict_length) for _ in range(2)]
 
 
-def test_offline_engine_compare_warm_up():
+def test_simple_trace():
+    jax.profiler.start_trace("gs://wenxindong-vm/trace/pathways/simple_trace")
+    a = jax.numpy.arange(1000)
+    b = jax.numpy.arange(1000)
+    c = a + b
+    d = jax.numpy.sum(c)
+    e = jax.numpy.sum(d)
+    f = jax.numpy.sum(e)
+    g = jax.numpy.sum(f)
+    
+    jax.profiler.stop_trace()
+
+
+def test_max_engine_decode():
+    maxengine = MaxEngine(config)
+    params=maxengine.load_params(None, rng=jax.random.PRNGKey(0))
+    decode_state = maxengine.init_decode_state(rng=jax.random.PRNGKey(0))
+    for i in range(10):
+        start_time = time.time()
+        decode_state, result_tokens = maxengine.generate(params, decode_state, rng=jax.random.PRNGKey(0))
+        from MaxText import inference_utils
+
+        # Update decode state
+        log_prob = inference_utils.log_prob_of_chosen_token(decode_state["logits"], decode_state["tokens"])
+        print("decode_state log_prob", log_prob)
+
+        end_time = time.time()
+        print(f"Time taken to run 1 step decode: {end_time - start_time} seconds")
+
+def test_decode():
+    inference_engine = OfflineEngine(
+        config,
+        params=None,
+        enable_batch_prefill=False,
+        auto_layout_supported=False,
+        dp=1,
+        warm_up=False,
+        rng=jax.random.PRNGKey(0),
+    )
+
+    start_time = time.time()
+    inference_engine.replica_workers[0].decode()
+    end_time = time.time()
+    print(f"Time taken to run decode: {end_time - start_time} seconds")
+    
+
+def test_correctness():
+    inference_engine = OfflineEngine(
+        config,
+        params=None,
+        enable_batch_prefill=False,
+        auto_layout_supported=False,
+        dp=1,
+        warm_up=False,
+        rng=jax.random.PRNGKey(0),
+    )
+    text = "the sky is so"
+    tokens, true_length = inference_engine.tokenizer.encode(text)
+    print(tokens)
+    input_data = [InputData(id="input_1", tokens=tokens, true_length=true_length) ]
+    results = inference_engine.batch_inference(input_data)[0]
+    result_tokens = results.token_ids
+    detokenized_tokens = inference_engine.tokenizer.decode(result_tokens)
+    print(detokenized_tokens)
+
+    # jax.profiler.start_trace("gs://wenxindong-vm/trace/pathways/gemma2-2b-no-print")
+    # results = inference_engine.batch_inference(input_data)[0]
+    # jax.profiler.stop_trace()
+
+    
+    print(results)
+
+
+def test_offline_engine_compare_warm_up(dp=1):
     print("Testing offline engine compare warm up")
     inference_engine = OfflineEngine(
         config,
         params=None,
         enable_batch_prefill=False,
         auto_layout_supported=False,
-        dp=4,
+        dp=dp,
         warm_up=True,
     )
     start_time1 = time.time()
     results1 = inference_engine.batch_inference(input_data)
     end_time1 = time.time()
-
+    del inference_engine
     inference_engine = OfflineEngine(
         config,
         params=None,
         enable_batch_prefill=False,
         auto_layout_supported=False,
-        dp=4,
+        dp=dp,
         warm_up=False,
     )
     start_time = time.time()
@@ -228,13 +303,16 @@ def test_dp_batch_prefill(
 
 def test_offline_engine_init_with_params():
     maxengine = MaxEngine(config)
-    params = maxengine.params
-
+    params = maxengine.load_params(None, rng=jax.random.PRNGKey(0))
+    
+    jax.tree_util.tree_map(lambda x: x.block_until_ready(), params)
+    assert params is not None
     inference_engine = OfflineEngine(
         config,
         params=params,
         enable_batch_prefill=False,
         auto_layout_supported=False,
+        warm_up=False, 
     )
     inference_engine.batch_inference(input_data)
 
@@ -274,10 +352,11 @@ def test_offline_engine_update_params():
         return params
 
     maxengine = MaxEngine(config)
+    params = maxengine.load_params(None, rng=jax.random.PRNGKey(0))
 
     inference_engine = OfflineEngine(
         config,
-        params=maxengine.params,
+        params=params,
         enable_batch_prefill=False,
         auto_layout_supported=False,
     )
@@ -303,11 +382,29 @@ def test_offline_engine_input_data():
     print(results)
 
 
-# test_offline_engine_compare_warm_up()
+# test_simple_trace()
+test_correctness()
+# test_max_engine_decode()
+
+# Time taken to run 1 step decode: 14.144538164138794 seconds
+# Time taken to run 1 step decode: 2.612926721572876 seconds
+# Time taken to run 1 step decode: 0.006930112838745117 seconds
+# Time taken to run 1 step decode: 0.00624537467956543 seconds
+
+# test_decode()
+
+# time taken to run generate_fn: 12.83881950378418 seconds
+# time taken to run generate_fn: 2.653505325317383 seconds
+# time taken to run generate_fn: 0.006362199783325195 seconds
+# time taken to run generate_fn: 0.005791902542114258 seconds
+# time taken to run generate_fn: 0.0055179595947265625 seconds
+
+# test_offline_engine_compare_warm_up(dp=1)
 # test_no_dp_no_batch_prefill()
 # test_no_dp_batch_prefill()
-test_dp_no_batch_prefill(profile=False, profile_path="gs://wenxindong-multipod-dev/trace/pathways/dp2/11")
+# test_dp_no_batch_prefill(profile=False, profile_path="gs://wenxindong-multipod-dev/trace/pathways/dp2/11")
 # test_dp_batch_prefill()
 # test_offline_engine_init_with_params()
+# test_offline_engine_update_params()
 # test_offline_engine_dp_init_with_params_and_dp_meshes()
 
