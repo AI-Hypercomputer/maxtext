@@ -32,9 +32,9 @@ class Train(unittest.TestCase):
         [
             None,
             os.path.join(PKG_DIR, "configs", "gpu_smoke_test.yml"),
-            f"base_output_directory=gs://runner-maxtext-logs",
+            "base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_test",
-            r"dataset_path=gs://maxtext-dataset",
+            "dataset_path=gs://maxtext-dataset",
             "enable_checkpointing=False",
             rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
             "enable_goodput_recording=False",

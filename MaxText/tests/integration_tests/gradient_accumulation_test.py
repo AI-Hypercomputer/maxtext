@@ -45,8 +45,8 @@ class GradientAccumulationTest(unittest.TestCase):
     shared_maxtext_args = [
         None,
         os.path.join(PKG_DIR, "configs", "base.yml"),
-        rf"base_output_directory=gs://runner-maxtext-logs",
-        r"dataset_path=gs://maxtext-dataset",
+        "base_output_directory=gs://runner-maxtext-logs",
+        "dataset_path=gs://maxtext-dataset",
         "gradient_clipping_threshold=0",  # Ensures we are testing raw scales of gradients (clipping off)
         "enable_checkpointing=False",
         "enable_goodput_recording=False",

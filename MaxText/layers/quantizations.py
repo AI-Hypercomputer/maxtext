@@ -123,6 +123,7 @@ class AqtQuantization:
     quant_dg = None
     is_tiled = False
     tiling_fn = None
+    # pylint: disable=protected-access
     module_path = "/".join(nn.module._context.module_stack[-1].path)
     tile_size = -1
     for layer_name_re, layer_quant_dg in self.quant_dg.items():
@@ -410,6 +411,7 @@ def match_aqt_and_unquantized_param(aqt_params, params):
   param_paths = []
 
   for aqt_k, _ in aqt_param_flat:
+    index = None
     for index, (k, _) in enumerate(param_tree_flat):
       path_depth = len(k)
       # every quantized parameter has AQT.. as the leaf node
@@ -419,6 +421,7 @@ def match_aqt_and_unquantized_param(aqt_params, params):
         aqt_paths.append(aqt_k)
         param_paths.append(k)
         break
+    assert index is not None
     # since the parameter is already added, we can delete it.
     param_tree_flat.pop(index)
   return jax.tree_util.tree_unflatten(aqt_tree_def, param_paths)

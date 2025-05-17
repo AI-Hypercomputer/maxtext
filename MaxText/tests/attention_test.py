@@ -45,6 +45,7 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
 
   def test_one_block_mask(self):
     bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0]])
+    # pylint: disable=protected-access
     block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.asarray(
         [
@@ -62,6 +63,7 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
 
   def test_two_blocks_mask(self):
     bidirectional_mask = np.asarray([[0, 1, 1, 0, 1, 1]])
+    # pylint: disable=protected-access
     block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.asarray(
         [
@@ -79,6 +81,7 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
 
   def test_batch_block_masks(self):
     bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0], [0, 1, 1, 0, 1, 1]])
+    # pylint: disable=protected-access
     block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.asarray(
         [
@@ -104,6 +107,7 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
 
   def test_empty_block_mask(self):
     bidirectional_mask = np.asarray([[0, 0, 0, 0, 0, 0]])
+    # pylint: disable=protected-access
     block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.zeros(
         (bidirectional_mask.shape[0], bidirectional_mask.shape[1], bidirectional_mask.shape[1]), dtype=bool
@@ -112,6 +116,7 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
 
   def test_full_block_mask(self):
     bidirectional_mask = np.asarray([[1, 1, 1, 1, 1, 1]])
+    # pylint: disable=protected-access
     block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.ones(
         (bidirectional_mask.shape[0], bidirectional_mask.shape[1], bidirectional_mask.shape[1]), dtype=bool
@@ -124,6 +129,7 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
     col_ids = np.arange(seq_len, dtype=np.int32)[None, :]
     causal_mask = (col_ids <= row_ids)[None, None, None, :, :]
     bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0], [0, 1, 1, 0, 1, 1]])
+    # pylint: disable=protected-access
     image_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
     combined_mask = causal_mask | image_mask[:, None, None, ...]
     expected_mask = np.asarray(
@@ -181,6 +187,7 @@ class ChunkedCausalMaskTest(unittest.TestCase):
 
     np.testing.assert_array_equal(actual_mask, expected_mask)
     # Make sure _generate_chunk_attention_mask also produces the same mask
+    # pylint: disable=protected-access
     actual_mask = attentions._generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
     np.testing.assert_array_equal(actual_mask, expected_mask)
 
@@ -196,6 +203,7 @@ class ChunkedCausalMaskTest(unittest.TestCase):
     actual_mask = mask[:, :]
     np.testing.assert_array_equal(actual_mask, expected_mask)
     # Make sure _generate_chunk_attention_mask also produces the same mask
+    # pylint: disable=protected-access
     actual_mask = attentions._generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
     np.testing.assert_array_equal(actual_mask, expected_mask)
 
@@ -211,6 +219,7 @@ class ChunkedCausalMaskTest(unittest.TestCase):
     actual_mask = mask[:, :]
     np.testing.assert_array_equal(actual_mask, expected_mask)
     # Make sure _generate_chunk_attention_mask also produces the same mask
+    # pylint: disable=protected-access
     actual_mask = attentions._generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
     np.testing.assert_array_equal(actual_mask, expected_mask)
 
@@ -233,6 +242,7 @@ class ChunkedCausalMaskTest(unittest.TestCase):
     actual_mask = mask[:, :]
     np.testing.assert_array_equal(actual_mask, expected_mask)
     # Make sure _generate_chunk_attention_mask also produces the same mask
+    # pylint: disable=protected-access
     actual_mask = attentions._generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
     np.testing.assert_array_equal(actual_mask, expected_mask)
 
@@ -243,6 +253,7 @@ class ChunkedCausalMaskTest(unittest.TestCase):
     with self.assertRaises(ValueError):
       ChunkedCausalMask(shape=(4, 4), chunk_size=-2)
     with self.assertRaises(ValueError):
+      # pylint: disable=protected-access
       attentions._generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
 
 

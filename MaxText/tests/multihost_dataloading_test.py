@@ -52,12 +52,8 @@ class MultihostDataloadingTest(unittest.TestCase):
         enable_checkpointing=False,
     )
     global_data_shape = PartitionSpec(batch_size, config.max_target_length)
-    data_sharding = ("data",)
     mesh_shape_1d = (len(jax.devices()),)
     self.mesh = Mesh(mesh_utils.create_device_mesh(mesh_shape_1d), config.mesh_axes)
-    data_axes = PartitionSpec(
-        "data",
-    )
     # creating 2 batches of data
     global_data = np.arange(np.prod(global_data_shape) * 2).reshape((batch_size * 2, config.max_target_length))
 
