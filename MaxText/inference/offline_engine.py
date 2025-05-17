@@ -58,6 +58,8 @@ from jax.experimental import mesh_utils
 from jetstream.engine import engine_api
 from MaxText.maxengine import MaxEngine
 from MaxText import max_utils
+from MaxText import inference_utils
+
 
 from MaxText.prefill_packing import PrefillProcessor, BatchedPrefillProcessor
 DecodeState = Any
@@ -684,7 +686,7 @@ class ReplicaWorker:
         )
         return self.res
 
-    def emit_token(self, prompt_id, result_token: engine_api.ResultTokens, slot: int):
+    def emit_token(self, prompt_id, result_token: engine_api.ResultTokens, log_prob, slot: int):
         """Adds the token to the results for the specified prompt ID and
         determines if generation should terminate.
 
@@ -697,10 +699,6 @@ class ReplicaWorker:
         """
         token, is_valid, length = result_token.data[slot]
         current_length = len(self.res[prompt_id])
-        if result_token.log_prob is not None:
-            log_prob = result_token.log_prob[slot]  
-        else:
-            log_prob = None
 
         already_reached_eos = (
             current_length > 0
@@ -708,7 +706,6 @@ class ReplicaWorker:
         )
 
         if is_valid and not already_reached_eos:
-            # print("emitting token: ", token)
             self.res[prompt_id].append(TokenOutput(token, log_prob))
 
         return (token == self.tokenizer.eos_id) or (current_length+1 == self.max_decode_length)
@@ -723,9 +720,10 @@ class ReplicaWorker:
             prompt_ids: List of prompt IDs
             decode_state: Updated decode state
         """
+
         # Update decode state
         self.decode_state = decode_state
-
+        log_prob = inference_utils.log_prob_of_chosen_token(decode_state["logits"], decode_state["tokens"])
         # Process each prefill result
         for i, (first_token, slot) in enumerate(prefill_result):
             self.counter.prefill += 1
@@ -733,7 +731,7 @@ class ReplicaWorker:
 
             # Add token to detokenization queue
             self.detokenize_backlog.put_nowait(
-                (first_token, True, prompt_ids[i], slot)
+                (first_token, log_prob[slot], True, prompt_ids[i], slot)
             )
 
     def decode(self):
@@ -749,15 +747,16 @@ class ReplicaWorker:
             self.decode_state, result_tokens = self.generate_fn(
                 self.params, self.decode_state, rng=self.rng    
             )
+            log_prob = inference_utils.log_prob_of_chosen_token(self.decode_state["logits"], self.decode_state["tokens"])
             end_time = time.time()
             print(f"time taken to run generate_fn: {end_time - start_time} seconds")
-            buffer.append(result_tokens)
+            buffer.append((result_tokens, log_prob))
             
         
         # Add results to detokenization queue
-        for result_tokens in buffer:
+        for result_tokens, log_prob in buffer:
             self.detokenize_backlog.put_nowait(
-                (result_tokens, False, 0, 0)
+                (result_tokens, log_prob, False, 0, 0)
             )       
             self.counter.decode += 1
 
@@ -773,7 +772,7 @@ class ReplicaWorker:
 
             # Get next item from queue with timeout
             try:
-                result_tokens, is_first_token, row_id, slot = self.detokenize_backlog.get_nowait()
+                result_tokens, log_prob, is_first_token, row_id, slot = self.detokenize_backlog.get_nowait()
                 result_tokens = result_tokens.convert_to_numpy()
             except queue.Empty:
                 if not self.running:
@@ -782,12 +781,12 @@ class ReplicaWorker:
 
             # Process generated tokens
             if is_first_token:
-                should_terminate = self.emit_token(row_id, result_tokens, slot=0)
+                should_terminate = self.emit_token(row_id, result_tokens, log_prob, slot=0)
                 if should_terminate:
                     newly_empty.append(slot)
             else:
                 for slot, id_ in self.slot_to_id.items():
-                    should_terminate = self.emit_token(id_, result_tokens, slot=slot)
+                    should_terminate = self.emit_token(id_, result_tokens, log_prob[slot], slot=slot)
                     if should_terminate:
                         newly_empty.append(slot)
 
@@ -890,7 +889,6 @@ class OfflineEngine:
 
         # Create meshes
         devices = jax.devices()
-        print(f"devices: {devices}")
         
         if not self.dp_meshes:
             ici_parallelism = max_utils.fill_unspecified_mesh_axes(config.ici_parallelism.copy(), len(devices), "ICI")
