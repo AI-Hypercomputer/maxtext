@@ -54,7 +54,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
-import pathwaysutils
+
 from jetstream.engine import engine_api
 from MaxText.maxengine import MaxEngine
 from MaxText import max_utils
@@ -153,6 +153,7 @@ class PrefillHelper:
         prefill_lengths: List[int],
         batch_prefill_max_batch_size: int = 16,
         auto_layout_supported: bool = False,
+        rng = None,
     ):
         """Initialize the PrefillHelper.
 
@@ -168,7 +169,10 @@ class PrefillHelper:
         self.prefill_lengths = sorted(prefill_lengths)
         self.max_prefill_length = self.prefill_lengths[-1]
         self.auto_layout_supported = auto_layout_supported
-
+        if rng is None:
+            self.rng = jax.random.PRNGKey(0)
+        else:
+            self.rng = rng
         if type == PrefillType.DEFAULT:
             self._processor = PrefillProcessor(engine)
         elif type == PrefillType.BATCH:
@@ -202,7 +206,7 @@ class PrefillHelper:
             else:
                 tokens = jnp.zeros((length,), dtype=jnp.int32)
                 _, decode_state = self._processor._process(
-                    params, tokens, 0, length, decode_state
+                    params, tokens, 0, length, decode_state, rng=self.rng
                 )
         return decode_state
 
@@ -280,13 +284,13 @@ class PrefillHelper:
             prefill_done: Callback function called when prefill completes
         """
         padded_length = len(input_tokens_padded)
-
         # Use default processor if configured or if input is already at max length
         if (
             self._type == PrefillType.DEFAULT
             or padded_length == self.max_prefill_length
         ):
             if self.auto_layout_supported:
+
                 first_token, decode_state = self._processor.process(
                     model_params,
                     decode_state,
@@ -301,6 +305,7 @@ class PrefillHelper:
                     decode_slot,
                     input_true_length,
                     decode_state,
+                    rng=self.rng
                 )
             prefill_done([(first_token, decode_slot)], [input_id], decode_state)
         # Use batch processor for inputs that can benefit from prefill packing
@@ -358,6 +363,7 @@ class ReplicaWorker:
         worker_id: int = 0,
         auto_layout_supported: bool = False,
         run_as_a_thread=False,
+        rng = None,
     ):
         """Initialize a ReplicaWorker.
 
@@ -389,7 +395,10 @@ class ReplicaWorker:
         self.min_decode_steps = min_decode_steps
         self.run_as_a_thread = run_as_a_thread
         self.auto_layout_supported = auto_layout_supported
-        
+        if rng is None:
+            self.rng = jax.random.PRNGKey(0)
+        else:
+            self.rng = rng
         # Thread management
         self.worker_thread = None
         self.warm_up_thread = None
@@ -445,6 +454,7 @@ class ReplicaWorker:
                 self.prefill_lengths,
                 self.batch_prefill_max_batch_size,
                 self.auto_layout_supported,
+                rng=self.rng,
             )
         else:
             self.prefill_helper = PrefillHelper(
@@ -452,6 +462,7 @@ class ReplicaWorker:
                 self.engine,
                 self.prefill_lengths,
                 self.auto_layout_supported,
+                rng=self.rng,
             )
 
         # Initialize decode state and generate function
@@ -462,7 +473,7 @@ class ReplicaWorker:
             self.decode_state = init_decode_state_fn(None)
         else:
             self.generate_fn = self.engine.generate
-            self.decode_state = self.engine.init_decode_state()
+            self.decode_state = self.engine.init_decode_state(self.rng)
 
 
     def _init_engine(self, params):
@@ -477,7 +488,7 @@ class ReplicaWorker:
         start_time = time.time()
         engine = MaxEngine(self.config, self.devices)
         print("initialized engine")
-        params = engine.load_params(params)
+        params = engine.load_params(params, rng=self.rng)
         print("loaded params")
         end_time = time.time()
         print(f"time taken to initialize engine: {end_time - start_time} seconds")
@@ -506,7 +517,7 @@ class ReplicaWorker:
         for _ in range(3):
             print("Warming up generate function")
             self.decode_state, result_tokens = self.generate_fn(
-                self.params, self.decode_state, None
+                self.params, self.decode_state, rng=self.rng
             )
 
     def warm_up(self):
@@ -650,14 +661,16 @@ class ReplicaWorker:
             True if this token signals the end of generation, False otherwise
         """
         token, is_valid, length = result_token.data[slot]
-        if not is_valid:
-            print("invalid token: ", token, length)
-        # log_prob = result_token.log_prob[slot]
-        log_prob = 1
+        current_length = len(self.res[prompt_id])
+        print("token: ", token, "is_valid: ", is_valid, "length: ", length)
+        # if result_token.log_prob is not None:
+        #     log_prob = result_token.log_prob[slot]  
+        # else:
+        log_prob = None
         assert length <= self.max_decode_length
 
         already_reached_eos = (
-            len(self.res[prompt_id]) > 0
+            current_length > 0
             and self.res[prompt_id][-1].token == self.tokenizer.eos_id
         )
 
@@ -665,7 +678,7 @@ class ReplicaWorker:
             # print("emitting token: ", token)
             self.res[prompt_id].append(TokenOutput(token, log_prob))
 
-        return (token == self.tokenizer.eos_id) or (length == self.max_decode_length)
+        return (token == self.tokenizer.eos_id) or (current_length+1 == self.max_decode_length)
 
     def prefill_done(self, prefill_result, prompt_ids, decode_state):
         """Callback function called when prefill completes.
@@ -699,10 +712,14 @@ class ReplicaWorker:
         buffer = []
         for i in range(self.min_decode_steps):
             # Generate next tokens
+            start_time = time.time()
             self.decode_state, result_tokens = self.generate_fn(
-                self.params, self.decode_state, None
+                self.params, self.decode_state, rng=self.rng    
             )
+            end_time = time.time()
+            print(f"time taken to run generate_fn: {end_time - start_time} seconds")
             buffer.append(result_tokens)
+            
         
         # Add results to detokenization queue
         # DO not merge this loop with the previous loop
@@ -799,8 +816,9 @@ class OfflineEngine:
         batch_prefill_max_batch_size: int = 16,
         dp=1,
         dp_meshes=None,
-        auto_layout_supported=False,
+        auto_layout_supported=True,
         warm_up=True,
+        rng=None,
     ):
         """Initialize the OfflineEngine.
 
@@ -855,6 +873,10 @@ class OfflineEngine:
         self.auto_layout_supported = auto_layout_supported
         self.should_warm_up = warm_up
         self._not_warmed_up = True
+        if rng is None:
+            self.rng = jax.random.PRNGKey(0)
+        else:
+            self.rng = rng
         self._validate_config()
 
         # Create prefill buckets: [0, 64], (64, 128], (128, 256], ..., [max_length//2, max_length]
@@ -913,6 +935,7 @@ class OfflineEngine:
                 worker_id=i,
                 auto_layout_supported=auto_layout_supported,
                 run_as_a_thread=run_as_a_thread,
+                rng=self.rng,
             )
             for i in range(self.dp)
         ]
@@ -982,10 +1005,10 @@ class OfflineEngine:
         that is greater than or equal to its true length.
 
         Args:
-            data: List of input data objects
+            data: List of InputData objects
 
         Returns:
-            List of padded input data objects
+            List of padded InputData objects
         """
         padded_data = []
 
@@ -1065,4 +1088,5 @@ class OfflineEngine:
         # Initialize Pathways if using data parallelism
         if self.dp > 1:
             # Initialize Pathways if not already initialized
+            import pathwaysutils
             pathwaysutils.initialize()
