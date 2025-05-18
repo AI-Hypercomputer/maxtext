@@ -322,7 +322,7 @@ def build_user_command(
       'export ENABLE_PATHWAYS_PERSISTENCE=1 &&',
       f'export JAX_PLATFORMS={jax_platforms} &&',
       'export ENABLE_PJRT_COMPATIBILITY=true &&',
-      'python3 MaxText/train.py MaxText/configs/base.yml',
+      'python3 -m MaxText.train MaxText/configs/base.yml',
       f'{config_tuning_params}',
       f'steps={wl_config.num_steps}',
       f'model_name={wl_config.model.model_type}',
