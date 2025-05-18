@@ -396,7 +396,16 @@ def generate_xpk_workload_cmd(
     #docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2025-02-12"'
     #docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2025-04-02"'
     #docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2025-05-17"'
-    docker_image_flag = '--base-docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2025-05-17"'
+    #docker_image_flag = '--base-docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2025-05-17"'
+    docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ep_first"'
+    
+
+    # Layered with base code from:
+    # commit 83ae04866cfe4c3dedd4b53ee5dc2d4c520144a0 (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
+    # Author: gobbleturk <mattdavidow@google.com>
+    # Date:   Sun May 18 20:09:25 2025 +0000
+
+    #     Swap EP earlier than TP
 
 
 

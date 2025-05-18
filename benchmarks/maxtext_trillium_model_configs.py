@@ -284,15 +284,13 @@ def _add_to_model_dictionary(
   return maxtext_model
 
 
-# Ran with docker
-# docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2025-05-17"'
-#
-# Runner workspace (maxtext_xpk_runner)
-# commit 5b3c91a6193b895712b367c6a60ea68c63307a91 (HEAD -> mattdavidow-moe-trillium-dream, origin/mattdavidow-moe-trillium-dream)
+# Layered with base code and ran from:
+# commit 83ae04866cfe4c3dedd4b53ee5dc2d4c520144a0 (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
 # Author: gobbleturk <mattdavidow@google.com>
-# Date:   Sun May 18 18:50:58 2025 +0000
+# Date:   Sun May 18 20:09:25 2025 +0000
 
-#     Gogog run the things
+#     Swap EP earlier than TP
+# docker_image_flag = '--base-docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2025-05-17"'
 
 matt_dream_v1 = _add_to_model_dictionary(
   trillium_model_dict,
@@ -307,7 +305,7 @@ matt_dream_v1 = _add_to_model_dictionary(
         "enable_checkpointing": False,
         "dataset_type": "synthetic",
         "base_output_directory": "gs://maxtext-experiments-multipod",
-        "decoder_block": "mistral",
+        "decoder_block": "mixtral",
         "ici_expert_parallelism": 64,
         "ici_tensor_parallelism": 4,
         "allow_split_physical_axes": True,
@@ -325,6 +323,7 @@ matt_dream_v1 = _add_to_model_dictionary(
         "capacity_factor": 1,
         "profiler": "xplane",
         "opt_type": "sgd",
+        "dump_hlo": True,
         #"weight_dtype": "bfloat16",
         
         # PP
@@ -375,6 +374,8 @@ matt_dream_pure_ep_v1 = _add_to_model_dictionary(
         "profiler": "xplane",
         "opt_type": "sgd",
         #"weight_dtype": "bfloat16",
+        "dump_hlo": True,
+        
         
         # PP
         "base_num_decoder_layers": 4, # PP * 8
