@@ -554,11 +554,12 @@ class RoutedMoE(nn.Module):
         output_shape = jnp.transpose(my_output)
         print(output_shape)
         #breakpoint()
-        print("x shape before a2a")
+        print(f"{x=}")
+        print(f"{output_shape_old=}")
         print(x.shape)
         x = jax.lax.ragged_all_to_all(
             x,
-            output_shape,
+            output_shape_old,
             input_offsets,
             send_sizes,
             output_offsets,
