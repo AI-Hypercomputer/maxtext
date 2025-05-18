@@ -187,6 +187,12 @@ DISABLE_BUNDLE_AWARE_COST_MODEL = (
     " --xla_tpu_use_bundle_aware_cost_model_for_fusions=false"
 )
 
+ASYNC_A2A = (
+    " --xla_tpu_enable_async_all_to_all=true"
+)
+
+
+
 # Enable Silent Data Corruption (SDC) Checker
 # SDC Checker will check for chip / ici / hardware corruption events.
 # Below is a configuration of finding non-deterministic failures by
@@ -256,7 +262,6 @@ PATHWAYS_SHORT_RUN_CHECKPOINTING_TUNING_PARAMS = {
 
 
 
-
 @dataclasses.dataclass
 class MaxTextModel:
   model_name: str
@@ -284,13 +289,19 @@ def _add_to_model_dictionary(
   return maxtext_model
 
 
-# Layered with base code and ran from:
+# Ran with a docker built from and XPK runner ran from:
+# docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ep_first"'
+#
 # commit 83ae04866cfe4c3dedd4b53ee5dc2d4c520144a0 (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
 # Author: gobbleturk <mattdavidow@google.com>
 # Date:   Sun May 18 20:09:25 2025 +0000
 
 #     Swap EP earlier than TP
-# docker_image_flag = '--base-docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2025-05-17"'
+    # commit 2090c571d4e1e4fc5cff9857b55750a348e58ff3 (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
+    # Author: gobbleturk <mattdavidow@google.com>
+    # Date:   Sun May 18 20:21:35 2025 +0000
+
+    #     Swap EP earlier than TP
 
 matt_dream_v1 = _add_to_model_dictionary(
   trillium_model_dict,
@@ -339,6 +350,7 @@ matt_dream_v1 = _add_to_model_dictionary(
         #CF_FOR_ALL_GATHER
         + LAYOUT_FOR_ALL_REDUCE_SCATTER
         + PIPELINING_FLAGS
+        + ASYNC_A2A
         #+ PP_MORE_FLAGS
     ),
   )
