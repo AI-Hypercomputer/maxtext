@@ -395,7 +395,8 @@ def generate_xpk_workload_cmd(
     #docker_image_flag = f'--docker-image="{wl_config.base_docker_image}"'
     #docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2025-02-12"'
     #docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2025-04-02"'
-    docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2025-05-17"'
+    #docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2025-05-17"'
+    docker_image_flag = '--base-docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2025-05-17"'
 
 
 
@@ -505,8 +506,8 @@ def main() -> int:
   list_of_models = [
     #model_configs.deepseek_matt_a1
     #model_configs.deepseek_manual_matt_a1
-    #model_configs.matt_dream_v1
-    model_configs.matt_dream_pure_ep_v1
+    model_configs.matt_dream_v1
+    #model_configs.matt_dream_pure_ep_v1
   ]
 
   user = os.environ['USER']

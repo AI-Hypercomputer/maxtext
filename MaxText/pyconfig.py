@@ -629,6 +629,7 @@ def create_parallelisms_list(raw_keys):
   ici_parallelism = [
       raw_keys["ici_data_parallelism"],
       raw_keys["ici_pipeline_parallelism"],
+      raw_keys["ici_expert_parallelism"],
       raw_keys["ici_fsdp_parallelism"],
       raw_keys["ici_fsdp_transpose_parallelism"],
       raw_keys["ici_sequence_parallelism"],
@@ -637,12 +638,12 @@ def create_parallelisms_list(raw_keys):
       raw_keys["ici_tensor_parallelism"],
       raw_keys["ici_tensor_transpose_parallelism"],
       raw_keys["ici_tensor_sequence_parallelism"],
-      raw_keys["ici_expert_parallelism"],
       raw_keys["ici_autoregressive_parallelism"],
   ]
   dcn_parallelism = [
       raw_keys["dcn_data_parallelism"],
       raw_keys["dcn_pipeline_parallelism"],
+      raw_keys["dcn_expert_parallelism"],
       raw_keys["dcn_fsdp_parallelism"],
       raw_keys["dcn_fsdp_transpose_parallelism"],
       raw_keys["dcn_sequence_parallelism"],
@@ -651,7 +652,6 @@ def create_parallelisms_list(raw_keys):
       raw_keys["dcn_tensor_parallelism"],
       raw_keys["dcn_tensor_transpose_parallelism"],
       raw_keys["dcn_tensor_sequence_parallelism"],
-      raw_keys["dcn_expert_parallelism"],
       raw_keys["dcn_autoregressive_parallelism"],
   ]
   raw_keys["ici_parallelism"] = ici_parallelism

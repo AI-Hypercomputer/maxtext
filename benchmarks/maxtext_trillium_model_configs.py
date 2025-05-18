@@ -308,7 +308,7 @@ matt_dream_v1 = _add_to_model_dictionary(
         "dataset_type": "synthetic",
         "base_output_directory": "gs://maxtext-experiments-multipod",
         "decoder_block": "mistral",
-        "ici_fsdp_parallelism": 64,
+        "ici_expert_parallelism": 64,
         "ici_tensor_parallelism": 4,
         "allow_split_physical_axes": True,
         "custom_mesh": "hybrid_ring_64x4",
