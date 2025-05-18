@@ -505,7 +505,8 @@ def main() -> int:
   list_of_models = [
     #model_configs.deepseek_matt_a1
     #model_configs.deepseek_manual_matt_a1
-    model_configs.matt_dream_v1
+    #model_configs.matt_dream_v1
+    model_configs.matt_dream_pure_ep_v1
   ]
 
   user = os.environ['USER']
