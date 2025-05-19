@@ -57,7 +57,7 @@ def init_pyconfig(**kwargs):
         # Model
         "model_name": "llama2-70b",
         "attention": "dot_product",
-        "scan_layers": True,
+        "scan_layers": False,
         # Quantization
         "quantization": "int8",
         "quant_cfg_path": "",
@@ -112,18 +112,14 @@ def test_max_engine_decode():
     maxengine = MaxEngine(config)
     params=maxengine.load_params(None, rng=jax.random.PRNGKey(0))
     decode_state = maxengine.init_decode_state(rng=jax.random.PRNGKey(0))
+    jax.profiler.start_trace("gs://wenxindong-vm/trace/pathways/max_engine_decode_2")
     for i in range(10):
         start_time = time.time()
         decode_state, result_tokens = maxengine.generate(params, decode_state, rng=jax.random.PRNGKey(0))
-        from MaxText import inference_utils
-
-        # Update decode state
-        log_prob = inference_utils.log_prob_of_chosen_token(decode_state["logits"], decode_state["tokens"])
-        print("decode_state log_prob", log_prob)
-
+        result_tokens.data.block_until_ready()
         end_time = time.time()
         print(f"Time taken to run 1 step decode: {end_time - start_time} seconds")
-
+    jax.profiler.stop_trace()
 def test_decode():
     inference_engine = OfflineEngine(
         config,
@@ -383,8 +379,8 @@ def test_offline_engine_input_data():
 
 
 # test_simple_trace()
-test_correctness()
-# test_max_engine_decode()
+# test_correctness()
+test_max_engine_decode()
 
 # Time taken to run 1 step decode: 14.144538164138794 seconds
 # Time taken to run 1 step decode: 2.612926721572876 seconds
