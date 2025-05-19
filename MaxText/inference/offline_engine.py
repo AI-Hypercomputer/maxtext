@@ -505,10 +505,13 @@ class ReplicaWorker:
 
         # Initialize decode state and generate function
         if self.auto_layout_supported:
+            start_time = time.time()
             self.generate_fn, self.params, init_decode_state_fn = (
-                self.engine.aot_compile(self.params, pass_rng_shape=False)
+                self.engine.aot_compile(self.params, pass_rng_shape=True)
             )
-            self.decode_state = init_decode_state_fn(None)
+            end_time = time.time()
+            print(f"time taken to compile generate_fn: {end_time - start_time} seconds")
+            self.decode_state = init_decode_state_fn(self.rng)
         else:
             self.generate_fn = self.engine.generate
             self.decode_state = self.engine.init_decode_state(self.rng)
@@ -745,7 +748,7 @@ class ReplicaWorker:
             # Generate next tokens
             start_time = time.time()
             self.decode_state, result_tokens = self.generate_fn(
-                self.params, self.decode_state, rng=self.rng    
+                self.params, self.decode_state, self.rng
             )
             log_prob = inference_utils.log_prob_of_chosen_token(self.decode_state["logits"], self.decode_state["tokens"])
             end_time = time.time()
@@ -905,6 +908,8 @@ class OfflineEngine:
 
         # Initialize ReplicaWorkers
         run_as_a_thread = self.dp > 1  # No need to run worker as a thread if there is only one replica
+        replica_rngs = jax.random.split(self.rng, self.dp)
+        assert replica_rngs[0].shape == self.rng.shape
         self.replica_workers = [
             ReplicaWorker(
                 config=self.config,
@@ -920,7 +925,7 @@ class OfflineEngine:
                 worker_id=i,
                 auto_layout_supported=auto_layout_supported,
                 run_as_a_thread=run_as_a_thread,
-                rng=self.rng,
+                rng=replica_rngs[i],
             )
             for i in range(self.dp)
         ]
