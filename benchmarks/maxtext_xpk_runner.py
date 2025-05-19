@@ -324,7 +324,6 @@ def build_user_command(
       'export ENABLE_PJRT_COMPATIBILITY=true &&',
       'python3 -m MaxText.train MaxText/configs/base.yml',
       f'{config_tuning_params}',
-      f'steps={wl_config.num_steps}',
       f'model_name={wl_config.model.model_type}',
       f'base_output_directory={wl_config.base_output_directory}',
       f'{vertex_tensorboard}',

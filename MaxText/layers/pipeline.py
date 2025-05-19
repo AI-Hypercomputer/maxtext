@@ -584,7 +584,12 @@ class Pipeline(nn.Module):
               else:
                 new_spec.append(None)
             elif isinstance(axis, (list, tuple)):
-              new_axis = [a for a in axis if a not in ("fsdp", "fsdp_transpose")]
+              # We don't want to remove expert from FF, we only want to remove expert
+              # where it acts like FSDP. We filter by lists that already have FSDP
+              if "fsdp" in axis: 
+                new_axis = [a for a in axis if a not in ("fsdp", "fsdp_transpose", "expert")]
+              else:
+                new_axis = [a for a in axis]
               new_spec.append(tuple(new_axis))
             else:
               raise ValueError(f"Unsupported axis type: {type(axis)}")

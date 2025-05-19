@@ -297,11 +297,10 @@ def _add_to_model_dictionary(
 # Ran with a docker built from and XPK runner ran from:
 # docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ep_first"'
 # 
-# commit 1c213eb20026eb9877ebb14768295c4b0e2e1b97 (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
+# commit 1fb44401c22c5267924513909781435536942e26 (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
 # Author: gobbleturk <mattdavidow@google.com>
-# Date:   Sun May 18 20:33:59 2025 +0000
-
-#     Add async a2a flag
+# Date:   Mon May 19 00:10:49 2025 +0000
+#      add async CP
 
 matt_dream_v1 = _add_to_model_dictionary(
   trillium_model_dict,
@@ -309,8 +308,8 @@ matt_dream_v1 = _add_to_model_dictionary(
     model_name="matt_dream_v1",
     model_type="default",
     tuning_params={
-        "steps": 20,
-        "per_device_batch_size": 0.5,
+        "steps": 50,
+        "per_device_batch_size": 1.0,
         "remat_policy": "full",
         "max_target_length": 4096,
         "enable_checkpointing": False,
@@ -328,7 +327,7 @@ matt_dream_v1 = _add_to_model_dictionary(
         "base_num_query_heads": 64,
         "base_num_kv_heads": 16,
         "head_dim": 256,
-        "skip_first_n_steps_for_profiler": 12,
+        "skip_first_n_steps_for_profiler": 40,
         "sparse_matmul": False, # False
         "megablox": False, # True
         "capacity_factor": 1,
