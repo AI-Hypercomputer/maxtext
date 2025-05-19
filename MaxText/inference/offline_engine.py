@@ -753,6 +753,7 @@ class ReplicaWorker:
             self.decode_state, result_tokens = self.generate_fn(
                 self.params, self.decode_state, self.rng
             )
+            result_tokens.data.block_until_ready()
             log_prob = inference_utils.log_prob_of_chosen_token(self.decode_state["logits"], self.decode_state["tokens"])
             end_time = time.time()
             print(f"time taken to run generate_fn: {end_time - start_time} seconds")
