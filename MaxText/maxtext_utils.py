@@ -44,6 +44,7 @@ from MaxText import max_utils
 from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.inference.page_manager import PageState
 
+import time
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
 # Multimodal constants
@@ -549,10 +550,13 @@ def setup_initial_state(
     state: the initialized train state
     state_mesh_annotations: the mesh annotations for the train state
   """
-
+  start = time.time()
   unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = get_abstract_state(
       model, tx, config, rng, mesh, is_training
   )
+  end = time.time()
+  print(f"time taken to get abstract_params: {end - start} seconds")
+  start = time.time()
 
   # Initialization
   with nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -586,11 +590,15 @@ def setup_initial_state(
       init_state_partial = functools.partial(init_initial_state, model, tx, config, is_training)
       init_state_partial.__name__ = "initialize_state"
       # pylint: disable=not-callable
+      start = time.time()
       state = jax.jit(
           init_state_partial,
           in_shardings=None,
           out_shardings=state_mesh_shardings,
       )(rng)
+      end = time.time()
+      print(f"time taken to run initialize_state: {end - start} seconds")
+      start = time.time()
       if raw_params:  # If we loaded a partial state, we need to merge it.
         state = state.replace(params=raw_params)
 

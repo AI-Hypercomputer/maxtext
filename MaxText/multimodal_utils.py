@@ -21,7 +21,7 @@ import os
 
 import numpy as np
 
-from PIL import Image
+# from PIL import Image
 
 import jax
 import jax.numpy as jnp
