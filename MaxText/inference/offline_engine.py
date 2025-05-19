@@ -171,6 +171,7 @@ class PrefillHelper:
         self.prefill_lengths = sorted(prefill_lengths)
         self.max_prefill_length = self.prefill_lengths[-1]
         self.auto_layout_supported = auto_layout_supported
+        self.batch_prefill_max_batch_size = batch_prefill_max_batch_size
         if rng is None:
             self.rng = jax.random.PRNGKey(0)
         else:
@@ -190,6 +191,7 @@ class PrefillHelper:
         self,
         params: Params,
         decode_state: DecodeState,
+        
     ) -> DecodeState:
         """Ahead-of-time compile prefill functions for all supported lengths."""
 
@@ -226,7 +228,7 @@ class PrefillHelper:
                         params, padded_length, max_length, num_prompts
                     )
                 else:
-                    tokens = jax.ShapeDtypeStruct((max_length,), jnp.dtype("int32"))
+                    tokens = jnp.arange(0, max_length, dtype=int)
                     slots = jnp.arange(0, self.batch_prefill_max_batch_size, dtype=int)
                     decoder_positions = jnp.arange(0, max_length, dtype=int)
                     decoder_segment_ids = jnp.ones(max_length, dtype=int)
@@ -292,13 +294,13 @@ class PrefillHelper:
             or padded_length == self.max_prefill_length
         ):
             if self.auto_layout_supported:
-
                 first_token, decode_state = self._processor.process(
                     model_params,
                     decode_state,
                     decode_slot,
                     input_tokens_padded,
                     input_true_length,
+                    self.rng
                 )
             else:
                 first_token, decode_state = self._processor._process(
@@ -307,7 +309,7 @@ class PrefillHelper:
                     decode_slot,
                     input_true_length,
                     decode_state,
-                    rng=self.rng
+                    self.rng
                 )
             prefill_done([(first_token, decode_slot)], [input_id], decode_state)
         # Use batch processor for inputs that can benefit from prefill packing
@@ -516,6 +518,7 @@ class ReplicaWorker:
             self.generate_fn = self.engine.generate
             self.decode_state = self.engine.init_decode_state(self.rng)
 
+        self.generate_fn = self.engine.generate
 
     def _init_engine(self, params):
         """Initialize the MaxEngine.
@@ -556,7 +559,7 @@ class ReplicaWorker:
         for i in range(3):
             print(f"Warm up generate function ({i+1}/3)")
             self.decode_state, result_tokens = self.generate_fn(
-                self.params, self.decode_state, rng=self.rng
+                self.params, self.decode_state, self.rng
             )
 
     def warm_up(self):
@@ -816,8 +819,8 @@ class OfflineEngine:
         batch_prefill_max_batch_size: int = 16,
         dp=1,
         dp_meshes=None,
-        auto_layout_supported=True,
-        warm_up=True,
+        auto_layout_supported=False,
+        warm_up=False,
         rng=None,
     ):
         """Initialize the OfflineEngine.
@@ -849,12 +852,16 @@ class OfflineEngine:
               helps to increase throughput by running multiple inference replicas
               in parallel. When setting dp>1, Pathways must be used. Either provide
               the dp_meshes for each model replica, or let OfflineEngine automatically
-              create the meshes which will make use of all devices.
+              create the meshes which will make use of all visible devices.
             dp_meshes: List of JAX Mesh objects for each model replica. Use this
               option if you want to use only some of the devices for OfflineEngine and
               reserve the rest for other tasks. If None, OfflineEngine will create the meshes
               automatically.
-            auto_layout_supported: Whether auto layout is supported
+            auto_layout_supported: Whether auto layout is supported. Auto layout introduces
+                some start up overhead but can result in faster step times. TODO: Pathways 
+                has some bugs with auto layout, so it is recommended to set this to False
+                for now when using Pathways.
+            rng: Random number generator key. If None, a new key will be created.
         """
         print("Initializing OfflineEngine")
         # Configurations
@@ -1085,3 +1092,10 @@ class OfflineEngine:
             # Initialize Pathways if not already initialized
             import pathwaysutils
             pathwaysutils.initialize()
+
+        if self.enable_batch_prefill and not self.auto_layout_supported:
+            raise ValueError("auto_layout_supported must be True if enable_batch_prefill is True")
+        
+        if self.config.scan_layers:
+            print("WARNING: scan_layers=True will result in slow step time. It is recommended for debugging purposes only.")
+        
