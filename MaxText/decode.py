@@ -85,35 +85,37 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
   config = pyconfig.initialize(argv)
-  _validate_config(config)
-  max_utils.print_system_information()
+  # _validate_config(config)
+  # max_utils.print_system_information()
 
-  engine = maxengine.MaxEngine(config)
-  rng = jax.random.PRNGKey(1234)
-  rng, rng_load_params = jax.random.split(rng)
-  params = engine.load_params(rng_load_params)
+  # engine = maxengine.MaxEngine(config)
+  # rng = jax.random.PRNGKey(1234)
+  # rng, rng_load_params = jax.random.split(rng)
+  # params = engine.load_params(rng_load_params)
 
-  text = config.prompt
-  prefill_length = config.max_prefill_predict_length
-  if config.use_multimodal:
-    text = multimodal_utils.reformat_prompt(text, config.model_name)
-    prefill_length -= multimodal_utils.get_image_offsets(config.model_name)
+  # text = config.prompt
+  # prefill_length = config.max_prefill_predict_length
+  # if config.use_multimodal:
+  #   text = multimodal_utils.reformat_prompt(text, config.model_name)
+  #   prefill_length -= multimodal_utils.get_image_offsets(config.model_name)
 
-  metadata = engine.get_tokenizer()
-  tokenizer_model = engine.build_tokenizer(metadata)
-  try:
-    # TODO: update jetstream.engine.tokenizer_api.Tokenizer to maintain tokenizer state.
-    has_chat_template = getattr(tokenizer_model.tokenizer, "chat_template", False)  # pytype: disable=attribute-error
-  except AttributeError as _:
-    has_chat_template = False
-  tokens, true_length = tokenizer_model.encode(text, is_bos=not has_chat_template, prefill_lengths=[prefill_length])
+  # metadata = engine.get_tokenizer()
+  # tokenizer_model = engine.build_tokenizer(metadata)
+  # try:
+  #   # TODO: update jetstream.engine.tokenizer_api.Tokenizer to maintain tokenizer state.
+  #   has_chat_template = getattr(tokenizer_model.tokenizer, "chat_template", False)  # pytype: disable=attribute-error
+  # except AttributeError as _:
+  #   has_chat_template = False
+  # tokens, true_length = tokenizer_model.encode(text, is_bos=not has_chat_template, prefill_lengths=[prefill_length])
   images = None
   if config.use_multimodal:
     # TODO(hengtaoguo): Support multiple images as input.
     images = multimodal_utils.load_image_from_path(config.image_path)
     images = multimodal_utils.pre_process_image(images, model_name=config.model_name)
-    tokens = multimodal_utils.prepare_text_for_image_fusion(tokens, model_name=config.model_name)
-    true_length += multimodal_utils.get_image_offsets(config.model_name)
+    print(f"Image shape: {images.shape}")
+    print("stop")
+    # tokens = multimodal_utils.prepare_text_for_image_fusion(tokens, model_name=config.model_name)
+    # true_length += multimodal_utils.get_image_offsets(config.model_name)
 
   assert (
       true_length <= config.max_prefill_predict_length
