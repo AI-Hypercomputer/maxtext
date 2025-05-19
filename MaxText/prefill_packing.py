@@ -114,6 +114,7 @@ class PrefillProcessor:
       decode_slot: int,
       input_tokens_padded: jax.Array,
       input_true_length: int,
+      rng: PRNGKeyType,
   ) -> Tuple[engine_api.ResultTokens, DecodeState]:
     """Process a new input."""
 
@@ -141,7 +142,7 @@ class PrefillProcessor:
               jax.ShapeDtypeStruct((), int),
               jax.ShapeDtypeStruct((), int),
               self.engine.decode_state_shapes,
-              jax.ShapeDtypeStruct([4], jax.numpy.dtype("uint32")),
+              jax.ShapeDtypeStruct([2], jax.numpy.dtype("uint32")),
           )
           .compile(compiler_options=None)
       )
