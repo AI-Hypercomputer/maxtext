@@ -539,78 +539,20 @@ def compute_log_probs(
 # Trainer and top level training functions
 # -----------------------------------------------------------------------------
 
-def transfer_data(py_tree, dest_shardings):
-  assert jax.tree_util.tree_structure(py_tree) == jax.tree_util.tree_structure(dest_shardings)
-  def _transfer_array(arr, dest_sharding):
-    
-    try:
-      with (jax.transfer_guard_device_to_host("disallow_explicit"), jax.transfer_guard_host_to_device("disallow_explicit")):
-        shards = []
-        for d, index in dest_sharding.addressable_devices_indices_map(arr.shape).items():
-          shards.append(jax.device_put(arr[index], jax.sharding.SingeDeviceSharding(d)))
-        max_logging.log(f"Moving {arr.shape=} through make_array_from_single_device_arrays")
-        return jax.make_array_from_single_device_arrays(arr.shape, dest_sharding, shards)
-    except:
-      max_logging.log(f"Moving {arr.shape=} through device_put")
-      return jax.device_put(arr, dest_sharding)
-  return jax.tree_util.tree_map(_transfer_array, py_tree, dest_shardings)
 
-def reshard_transfer_data(config, py_tree, source_mesh, source_shardings, inference_replicas, dest_mesh_shape, dest_shardings):
-  # reshape source mesh based on destination mesh shape
-  dest_mesh_shape['data'] = inference_replicas
-  source_devices = source_mesh.devices.flatten().reshape(list(dest_mesh_shape.values()))
-  reshaped_source_mesh = Mesh(source_devices, config.mesh_axes)
-  reshaped_source_shardings = jax.tree_util.tree_map(lambda x: jax.sharding.NamedSharding(reshaped_source_mesh, x.spec), source_shardings)
-  breakpoint()
-  with (jax.transfer_guard_device_to_host("disallow_explicit"), jax.transfer_guard_host_to_device("disallow_explicit")):
-    py_tree = jax.tree_util.tree_map(
-      lambda x, s: jax.device_put(x, s),
-      py_tree,
-      reshaped_source_shardings
-    )
-  # copy over one of the replica from training mesh to inference mesh
-  breakpoint()
-  assert jax.tree_util.tree_structure(py_tree) == jax.tree_util.tree_structure(dest_shardings)
-  def _transfer_array(arr, dest_sharding):
-    try:
-      with (jax.transfer_guard_device_to_host("disallow_explicit"), jax.transfer_guard_host_to_device("disallow_explicit")):
-        shards = []
-        for d, index in dest_sharding.addressable_devices_indices_map(arr.shape).items():
-          shards.append(jax.device_put(arr[index], jax.sharding.SingeDeviceSharding(d)))
-        max_logging.log(f"Moving {arr.shape=} through make_array_from_single_device_arrays")
-        return jax.make_array_from_single_device_arrays(arr.shape, dest_sharding, shards)
-    except:
-      max_logging.log(f"Moving {arr.shape=} through device_put")
-      return jax.device_put(arr, dest_sharding)
-  return jax.tree_util.tree_map(_transfer_array, py_tree, dest_shardings)
-
-def reshard(config, params, destination_shardings, meshes):
-  inference_params = []
-  for destination_sharding, mesh in zip(destination_shardings, meshes):
-    @functools.partial(jax.jit)
-    def _reshard(x):
-      return jax.tree_util.tree_map(
-        lambda arr, target_sh: jax.lax.with_sharding_constraint(arr, target_sh),
-        x,
-        destination_sharding.params
-      )
-    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      inference_params.append(_reshard(params))
-  return inference_params
-
-def pathways_reshard(config, params, source_shardings, source_mesh, destination_shardings, dest_meshes):
-  if not config.scan_layers:
+def pathways_reshard(config, params, source_shardings, source_mesh, destination_shardings):
+  if config.decoder_block == "deepseek":
     layer_groups = [
       ("dense_layers", config.first_num_dense_layers),
       ("moe_layers", config.base_num_decoder_layers - config.first_num_dense_layers)
     ]
+  else:
+    layer_groups = [("layers", config.base_num_decoder_layers)]
+  if not config.scan_layers:
     max_utils.unscan_train_state_params(params, source_shardings, source_mesh, scan_axis=config.param_scan_axis, layer_groups=layer_groups)
     num_model_parameters = max_utils.calculate_num_params_from_pytree(params)
     max_logging.log(f"number parameters after unscanning: {num_model_parameters/1e9:.3f} billion")
   with (jax.transfer_guard_device_to_host("disallow_explicit"), jax.transfer_guard_host_to_device("disallow_explicit")):
-    # inference_params = [pathwaysutils_reshard.reshard(params, destination_shardings[0].params)]
-    # for destination_sharding in destination_shardings[1:]:
-    #   inference_params.append(jax.device_put(inference_params[0], destination_sharding))
     inference_params = []
     for destination_sharding in destination_shardings:
       inference_params.append(pathwaysutils_reshard.reshard(params, destination_sharding.params, cache_resharding_plans=True))
@@ -1017,11 +959,8 @@ def train_loop(config, config_inference, state=None):
 
   param_buffer = Buffer(maxsize=config.inference_replicas)
   data_buffer = Buffer(maxsize=-1)
-  # initialize inference_params from the state before step=0
-  # inference_params = [reshard_transfer_data(config, {'params':state.params['params']}, mesh, inference_state_mesh_sharding.params, config.inference_replicas, inference_meshes[0].shape, inference_state_mesh_sharding.params) for inference_state_mesh_sharding in inference_state_mesh_shardings]
-  inference_params = pathways_reshard(config_inference, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, inference_meshes)
-  # inference_params = [jax.device_put({'params':state.params['params']}, inference_state_mesh_sharding.params) for inference_state_mesh_sharding in inference_state_mesh_shardings]
-  # inference_params = reshard(config_inference, {'params':state.params['params']}, inference_state_mesh_shardings, inference_meshes)
+  
+  inference_params = pathways_reshard(config_inference, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings)
   
   # for inference_state_mesh_sharding in inference_state_mesh_shardings:
     # param_buffer.push({'params':state.params['params']}, inference_state_mesh_sharding.params)
@@ -1074,10 +1013,7 @@ def train_loop(config, config_inference, state=None):
         state, metrics = p_train_step(state, training_batch, rng)
     with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
       if step != 0 and step % config.inference_rollouts == 0:
-        # inference_params = [reshard_transfer_data(config, {'params':state.params['params']}, mesh, inference_state_mesh_sharding.params, config.inference_replicas, inference_meshes[0].shape, inference_state_mesh_sharding.params) for inference_state_mesh_sharding in inference_state_mesh_shardings]
-        inference_params = pathways_reshard(config_inference, {'params':state.params['params']}, inference_state_mesh_shardings, inference_meshes)
-        # inference_params = [jax.device_put({'params':state.params['params']}, inference_state_mesh_sharding.params) for inference_state_mesh_sharding in inference_state_mesh_shardings]
-        # inference_params = reshard(config_inference, {'params':state.params['params']}, inference_state_mesh_shardings, inference_meshes)
+        inference_params = pathways_reshard(config_inference, {'params':state.params['params']}, inference_state_mesh_shardings)
         # for inference_state_mesh_sharding in inference_state_mesh_shardings:
         #   param_buffer.push({'params':state.params['params']}, inference_state_mesh_sharding.params)
     step_time_delta = datetime.datetime.now() - last_step_completion
