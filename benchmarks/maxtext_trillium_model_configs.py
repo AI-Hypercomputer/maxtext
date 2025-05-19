@@ -301,18 +301,19 @@ def _add_to_model_dictionary(
 # Ran with a docker built from and XPK runner ran from:
 # docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ep_first"'
 # 
-# commit 98e5f828ccf00038449fdcbd4d3703b70ac896cd (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
+# commit 5fb90d79a78d28427c3f819e2c3f282cfcec6c4c (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
 # Author: gobbleturk <mattdavidow@google.com>
-# Date:   Mon May 19 00:44:33 2025 +0000
+# Date:   Mon May 19 01:59:24 2025 +0000
 
-#     Fix custom mesh with PP
+#     Add megascale_grpc flag
+
 matt_dream_v1 = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
     model_name="matt_dream_v1",
     model_type="default",
     tuning_params={
-        "steps": 50,
+        "steps": 10,
         "per_device_batch_size": 0.5,
         "remat_policy": "full",
         "max_target_length": 4096,
@@ -331,7 +332,7 @@ matt_dream_v1 = _add_to_model_dictionary(
         "base_num_query_heads": 64,
         "base_num_kv_heads": 16,
         "head_dim": 256,
-        "skip_first_n_steps_for_profiler": 40,
+        "skip_first_n_steps_for_profiler": 3,
         "sparse_matmul": False, # False
         "megablox": False, # True
         "capacity_factor": 1,
@@ -342,9 +343,9 @@ matt_dream_v1 = _add_to_model_dictionary(
         
         "dcn_data_parallelism": 2,
         # PP
-        "base_num_decoder_layers": 64, # PP * 8
-        "dcn_pipeline_parallelism": 8, #PP
-        "num_pipeline_microbatches": 16, # PP * 2 or since we are sad PP * 1
+        "base_num_decoder_layers": 16, # PP * 8
+        "dcn_pipeline_parallelism": 2, #PP
+        "num_pipeline_microbatches": 4, # PP * 2 or since we are sad PP * 1
         "num_layers_per_pipeline_stage": 2,
         "pipeline_fsdp_ag_once": True
         # "scan_layers": False,
@@ -358,6 +359,7 @@ matt_dream_v1 = _add_to_model_dictionary(
         + ASYNC_A2A
         + ASYNC_CP
         + MEGASCALE_GRPC_PREMAP_MEMORY_BYTES #" --megascale_grpc_premap_memory_bytes=17179869184"
+        )
     )
 )
 
