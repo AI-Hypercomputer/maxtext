@@ -648,7 +648,7 @@ class ReplicaWorker:
         # Process each input
         while not data_queue.empty():
             try:
-                row = data_queue.get_nowait()
+                row = data_queue.get(timeout=1)
             except queue.Empty:
                 break
 
@@ -779,7 +779,7 @@ class ReplicaWorker:
 
             # Get next item from queue with timeout
             try:
-                result_tokens, log_prob, is_first_token, row_id, slot = self.detokenize_backlog.get_nowait()
+                result_tokens, log_prob, is_first_token, row_id, slot = self.detokenize_backlog.get(timeout=1)
                 result_tokens = result_tokens.convert_to_numpy()
             except queue.Empty:
                 if not self.running:
