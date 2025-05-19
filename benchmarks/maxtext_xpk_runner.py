@@ -396,7 +396,8 @@ def generate_xpk_workload_cmd(
     #docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2025-04-02"'
     #docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2025-05-17"'
     #docker_image_flag = '--base-docker-image="gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:2025-05-17"'
-    docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ep_first"'
+    #docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ep_first"'
+    docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ep_fsdp_ag"'
     
 
   # commit 1c213eb20026eb9877ebb14768295c4b0e2e1b97 (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)

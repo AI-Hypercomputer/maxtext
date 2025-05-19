@@ -309,7 +309,7 @@ matt_dream_v1 = _add_to_model_dictionary(
     model_type="default",
     tuning_params={
         "steps": 50,
-        "per_device_batch_size": 1.0,
+        "per_device_batch_size": 0.5,
         "remat_policy": "full",
         "max_target_length": 4096,
         "enable_checkpointing": False,
@@ -341,6 +341,7 @@ matt_dream_v1 = _add_to_model_dictionary(
         "dcn_pipeline_parallelism": 2,
         "num_pipeline_microbatches": 4, # PP * 2 or since we are sad PP * 1
         "num_layers_per_pipeline_stage": 2,
+        "pipeline_fsdp_ag_once": True
         # "scan_layers": False,
     },
     xla_flags=(

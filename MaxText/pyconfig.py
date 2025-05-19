@@ -725,7 +725,7 @@ def set_and_validate_pipeline_config(raw_keys):
           # The "stage" needs to be listed first since the microbatch dimension is first before the reshape.
           logical_axis_rules[idx] = [
               "activation_embed_and_logits_batch",
-              ["stage", "data", "fsdp", "fsdp_transpose", "expert"],
+              ["stage", "data", "expert", "fsdp", "fsdp_transpose", ],
           ]
           break  # Exit the loop after modifying the list
       return logical_axis_rules
@@ -735,6 +735,7 @@ def set_and_validate_pipeline_config(raw_keys):
       ici_parallelism = [
           raw_keys["ici_pipeline_parallelism"],
           raw_keys["ici_data_parallelism"],
+          raw_keys["ici_expert_parallelism"],
           raw_keys["ici_fsdp_parallelism"],
           raw_keys["ici_fsdp_transpose_parallelism"],
           raw_keys["ici_sequence_parallelism"],
@@ -743,12 +744,12 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["ici_tensor_parallelism"],
           raw_keys["ici_tensor_transpose_parallelism"],
           raw_keys["ici_tensor_sequence_parallelism"],
-          raw_keys["ici_expert_parallelism"],
           raw_keys["ici_autoregressive_parallelism"],
       ]
       dcn_parallelism = [
           raw_keys["dcn_pipeline_parallelism"],
           raw_keys["dcn_data_parallelism"],
+          raw_keys["dcn_expert_parallelism"],
           raw_keys["dcn_fsdp_parallelism"],
           raw_keys["dcn_fsdp_transpose_parallelism"],
           raw_keys["dcn_sequence_parallelism"],
@@ -757,12 +758,12 @@ def set_and_validate_pipeline_config(raw_keys):
           raw_keys["dcn_tensor_parallelism"],
           raw_keys["dcn_tensor_transpose_parallelism"],
           raw_keys["dcn_tensor_sequence_parallelism"],
-          raw_keys["dcn_expert_parallelism"],
           raw_keys["dcn_autoregressive_parallelism"],
       ]
       mesh_axes = [
           "stage",
           "data",
+          "expert",
           "fsdp",
           "fsdp_transpose",
           "sequence",
@@ -771,13 +772,13 @@ def set_and_validate_pipeline_config(raw_keys):
           "tensor",
           "tensor_transpose",
           "tensor_sequence",
-          "expert",
           "autoregressive",
       ]
       data_sharding = [
           [
               "stage",
               "data",
+              "expert",
               "fsdp",
               "fsdp_transpose",
               "sequence",
@@ -786,7 +787,6 @@ def set_and_validate_pipeline_config(raw_keys):
               "tensor",
               "tensor_transpose",
               "tensor_sequence",
-              "expert",
               "autoregressive",
           ]
       ]
