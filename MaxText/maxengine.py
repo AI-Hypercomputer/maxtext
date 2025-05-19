@@ -200,7 +200,7 @@ class MaxEngine(engine_api.Engine):
       decode_state_executable: The compiled init_decode_state function.
     """
     if pass_rng_shape:
-      rng_shape = jax.ShapeDtypeStruct([4], jax.numpy.dtype("uint32"))
+      rng_shape = jax.ShapeDtypeStruct([2], jax.numpy.dtype("uint32"))
     else:
       rng_shape = None
     self.decode_state_shapes = jax.eval_shape(self.init_decode_state, rng_shape)
@@ -897,8 +897,13 @@ class MaxEngine(engine_api.Engine):
       token_logp = inference_utils.log_prob_of_chosen_token(out_logits, new_token)
     else:
       token_logp = None
+    
+    # Increment index by 1 as prefill returns first token
+    next_pos = decode_state["next_pos"] + 1
+    generated_tokens = decode_state["generated_tokens"] + 1
+
     result = engine_api.ResultTokens(
-        data=jnp.concatenate((new_token, all_valid, decode_state["generated_tokens"]), axis=1),
+        data=jnp.concatenate((new_token, all_valid, generated_tokens), axis=1),
         # Tokens are shape [batch, speculations], so when we concatenate
         # tokens, validity and length along their index 1 dimension then they
         # occupy 0:speculations.
@@ -914,8 +919,8 @@ class MaxEngine(engine_api.Engine):
     return {
         "logits": out_logits,
         "cache": new_cache,
-        "next_pos": decode_state["next_pos"] + 1,
-        "generated_tokens": decode_state["generated_tokens"] + 1,
+        "next_pos": next_pos,
+        "generated_tokens": generated_tokens,
         "tokens": new_token,
     }, result
 
