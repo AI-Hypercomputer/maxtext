@@ -76,6 +76,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
             "checkpoint_period=50",
             "async_checkpointing=False",
             "enable_goodput_recording=False",
+            "skip_jax_distributed_system=True",
         )
     )
     # restore at 50 and checkpoint at 100
@@ -96,6 +97,7 @@ class Standalone_DL_CKPT(unittest.TestCase):
             "checkpoint_period=50",
             "async_checkpointing=False",
             "enable_goodput_recording=False",
+            "skip_jax_distributed_system=True",
         )
     )
 

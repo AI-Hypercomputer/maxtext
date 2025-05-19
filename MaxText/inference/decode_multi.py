@@ -15,13 +15,14 @@
 """CLI utility for running inference with interleaved prefill and generate."""
 
 import os
+import uuid
 from typing import Sequence, List
 
-import jax
 from absl import app
 
+import jax
+
 from MaxText import max_utils, maxengine, pyconfig
-import uuid
 
 _NUM_STREAMS = 5
 # How many streams to prefill initially before starting generation.

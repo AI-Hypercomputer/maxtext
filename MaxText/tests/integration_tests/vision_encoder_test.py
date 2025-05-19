@@ -16,11 +16,18 @@
 
 import unittest
 import os
+from collections.abc import Callable
+
+import pytest
+
+import jsonlines
+
+import numpy as np
+
 import jax
 import jax.numpy as jnp
-import numpy as np
-import pytest
-import jsonlines
+
+from flax.core.scope import VariableDict
 
 from MaxText import pyconfig
 from MaxText import multimodal_utils
@@ -82,8 +89,8 @@ class VisionEncoderEmbeddingTest(unittest.TestCase):
     def apply_vision_encoder_fn(params, images_input):
       return vision_encoder_model.apply({"params": params}, images_input)
 
-    jitted_apply_vision_encoder_fn = jax.jit(apply_vision_encoder_fn)
-    image_embeddings = jitted_apply_vision_encoder_fn(vision_encoder_params, input_images)
+    jitted_apply_vision_encoder_fn: Callable[[VariableDict, tuple[...]], np.ndarray] = jax.jit(apply_vision_encoder_fn)
+    image_embeddings = jitted_apply_vision_encoder_fn(vision_encoder_params, input_images)  # pylint: disable=not-callable
 
     # Load golden image embeddings generated from HuggingFace Gemma3-4b
     input_golden_data_path = os.path.join(PKG_DIR, "test_assets", "golden_data_gemma3_vit.jsonl")

@@ -17,11 +17,12 @@ limitations under the License.
 # pylint: disable=missing-module-docstring, missing-function-docstring
 import os
 import sys
+import unittest
+
 import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
-import unittest
 import tensorflow as tf
 import tensorflow_datasets as tfds
 

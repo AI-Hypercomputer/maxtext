@@ -22,40 +22,19 @@ from typing import Optional
 
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
+from jax.sharding import Mesh
 # from jax.experimental.pallas.ops.tpu import flash_attention
 
 from flax import linen as nn
 
-from MaxText.layers import attentions
-from MaxText.layers import embeddings
+from MaxText.inference import page_manager
 from MaxText.layers import linears
-from MaxText.layers import normalizations
 from MaxText.layers import models
 from MaxText.layers import quantizations
-from MaxText import common_types
-from MaxText.inference import page_manager
+from MaxText.layers.attentions import Attention
+from MaxText.layers.quantizations import AqtQuantization as Quant
+from MaxText.layers.normalizations import RMSNorm
 
-
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-Mesh = common_types.Mesh
-ScanIn = common_types.ScanIn
-
-AxisNames = common_types.AxisNames
-BATCH = common_types.BATCH
-KV_BATCH = common_types.KV_BATCH
-LENGTH = common_types.LENGTH
-HEAD = common_types.HEAD
-KV_HEAD = common_types.KV_HEAD
-D_KV = common_types.D_KV
-KV_HEAD_DIM = common_types.KV_HEAD_DIM
-
-
-Embed = embeddings.Embed
-Attention = attentions.Attention
-RMSNorm = normalizations.RMSNorm
-Quant = quantizations.AqtQuantization
 
 # -----------------------------------------
 # The Decoder Layer specific for Llama2
@@ -86,7 +65,7 @@ class LlamaDecoderLayer(nn.Module):
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
-    lnx_rms = models.RMSNorm(
+    lnx_rms = RMSNorm(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="pre_self_attention_layer_norm",

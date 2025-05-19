@@ -34,8 +34,8 @@ from flax.linen import fp8_ops
 from flax.linen import initializers as flax_initializers
 import flax.linen as nn
 
-from MaxText.inference import kvcache
-from MaxText import common_types
+from MaxText.common_types import DType, Config
+from MaxText.inference.kvcache import KVQuant
 
 # Params used to define mixed precision quantization configs
 DEFAULT = "__default__"  # default config
@@ -44,16 +44,6 @@ _A_BITS = "a_bits"  # Number of bits used to represent activations
 _W_SCALE = "w_scale"  # Clipping scale for weights
 _A_SCALE = "a_scale"  # Clipping scale for activations
 _TILE_SIZE = "tile_size"  # Tile size for subchannel
-
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-AxisIdxes = common_types.AxisIdxes
-AxisNames = common_types.AxisNames
-CACHE_HEADS = common_types.CACHE_HEADS
-CACHE_KV = common_types.CACHE_KV
-KVTensor = aqt_tensor.QTensor
-KVQuant = kvcache.KVQuant
 
 
 @dataclass
@@ -98,7 +88,7 @@ def _rhs_axis_metadata_wrapper(
     # TODO: remove the replication once the 2d sharding quantization
     # works as expected.
     if len(x.shape) == 1:
-      return nn.with_logical_partitioning((lambda: x), tuple([None for _ in mesh_axes]))()
+      return nn.with_logical_partitioning((lambda: x), tuple(None for _ in mesh_axes))()
 
   mesh_axes = list(mesh_axes)
   if is_tiled:
@@ -134,6 +124,7 @@ class AqtQuantization:
     is_tiled = False
     tiling_fn = None
     module_path = "/".join(nn.module._context.module_stack[-1].path)
+    tile_size = -1
     for layer_name_re, layer_quant_dg in self.quant_dg.items():
       if re.fullmatch(layer_name_re, module_path):
         quant_dg, tile_size = layer_quant_dg

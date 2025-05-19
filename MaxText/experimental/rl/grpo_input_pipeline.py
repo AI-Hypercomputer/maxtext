@@ -14,15 +14,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import functools
+from collections.abc import Iterable
+
+import numpy as np
+
 import jax
 from jax.sharding import Mesh
 
-import numpy as np
-import functools
 import datasets
+
 import transformers
+
 import grain.python as grain
-from collections.abc import Iterable
 
 from MaxText.input_pipeline import input_pipeline_interface
 from MaxText.input_pipeline import _input_pipeline_utils

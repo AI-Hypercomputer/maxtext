@@ -22,6 +22,7 @@ python3 -m MaxText.scratch_code.generate_grpo_golden_logits
 import functools
 import os
 import unittest
+from collections.abc import Callable
 
 import jsonlines
 
@@ -42,20 +43,14 @@ import transformers
 
 from datasets import load_dataset
 
-from MaxText import common_types
 from MaxText import maxengine
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.experimental.rl.grpo_trainer import compute_log_probs, grpo_loss_fn, _merge_grpo_state, generate_completions
 from MaxText.globals import PKG_DIR
-from MaxText.layers import initializers
 from MaxText.layers import models
 from MaxText.tests.grpo_trainer_correctness_test import prepare_maxtext_inputs
-
-Array = common_types.Array
-Config = common_types.Config
-DType = common_types.DType
-NdInitializer = initializers.NdInitializer
+from MaxText.common_types import Array
 
 
 class GRPOTest(unittest.TestCase):
@@ -272,12 +267,13 @@ class GRPOTest(unittest.TestCase):
     )
     prompt_true_length = jnp.array([len(prompt_tokens)] * 4)
     engine_data = {"prompt": prompt, "prompt_true_length": prompt_true_length}
-    p_generate_completions = jax.jit(
+    p_generate_completions: Callable[[dict, dict, Array], Array] = jax.jit(
         functools.partial(generate_completions, self.cfg, self.tokenizer_model, engine),
         in_shardings=(self.data_sharding, self.state_mesh_shardings.params, None),
         out_shardings=self.data_sharding,
         donate_argnums=(0,),
     )
+    # pylint: disable=not-callable
     engine_data = p_generate_completions(engine_data, {"params": self.state_no_ckpt_loading.params["params"]}, self.rng)
     data_to_save = {
         "maxtext_loss": maxtext_loss.tolist(),

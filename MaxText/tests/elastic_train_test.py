@@ -21,11 +21,14 @@ from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
+
 import jax
+
+from pathwaysutils.elastic import manager
+
 from MaxText import elastic_train
 from MaxText import max_utils
 from MaxText import pyconfig
-from pathwaysutils.elastic import manager
 
 logging.basicConfig()
 logging.getLogger("pathwaysutils.elastic.manager").setLevel(logging.INFO)

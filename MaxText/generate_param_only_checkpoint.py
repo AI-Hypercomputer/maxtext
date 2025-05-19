@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-# pylint: disable=g-bad-todo, abstract-method, consider-using-with, ungrouped-imports
+# pylint: disable=g-bad-todo, abstract-method, consider-using-with
 """Transforms a "full state" including optimizer state to a bfloat16 "parameter state" without optimizer state.
    This typically used for turning a state output by training.py into a state than can be consumed by decode.py.
 
@@ -24,19 +24,22 @@ limitations under the License.
 """
 
 import os.path
-from MaxText import checkpointing
+from typing import Sequence
+
+from absl import app
+
+from etils import epath
+
 import jax
+from jax.sharding import Mesh
+from jax import random
+
+from MaxText import checkpointing
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import optimizers
 from MaxText import pyconfig
-
-from absl import app
-from etils import epath
-from jax.sharding import Mesh
-from jax import random
-from typing import Sequence
 from MaxText.common_types import DecoderBlockType
 from MaxText.layers import models, quantizations
 from MaxText.train import save_checkpoint

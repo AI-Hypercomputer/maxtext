@@ -74,6 +74,7 @@ jobs:
               jrplatin: "",
               patemotter: "",
               lumosis: "",
+              aireenmei: "",
             }
             const reviews = await github.rest.pulls.listReviews({
               owner,

@@ -16,8 +16,8 @@ limitations under the License.
 Usage:
 
 python3 -m MaxText.scratch_code.generate_hf_golden_logits --model-id=deepseek-ai/DeepSeek-V2-Lite \
-     --output-path=golden_DeepSeek-V2-Lite.jsonl --prompts='I love to,Today is a,What is the,' \
-     --gcs_bucket=my-gcs-bucket
+     --output-path=golden_DeepSeek-V2-Lite.jsonl --prompts='I love to,Today is a,What is the' \
+     --gcs-bucket=my-gcs-bucket
 
 """
 
@@ -44,6 +44,7 @@ def save_golden_logits(model_id, output_path, prompt_texts, gcs_bucket):
   model = AutoModelForCausalLM.from_pretrained(
       model_id,
       torch_dtype=torch.float32,
+      trust_remote_code=True,
   )
 
   all_data_to_save = []

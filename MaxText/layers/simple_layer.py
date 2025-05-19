@@ -20,8 +20,8 @@ from jax.sharding import Mesh
 
 from flax import linen as nn
 
+from MaxText.common_types import Config
 from MaxText.layers import quantizations
-from MaxText import common_types
 
 # pytype: disable=attribute-error
 
@@ -29,7 +29,7 @@ from MaxText import common_types
 class SimpleDecoderLayer(nn.Module):
   """Decoder layer consisting of a single [embed, embed] weight matrix."""
 
-  config: common_types.Config
+  config: Config
   mesh: Mesh
   quant: Optional[quantizations.AqtQuantization] = None
 
@@ -52,7 +52,7 @@ class SimpleDecoderLayer(nn.Module):
 class SimpleMlpDecoderLayer(nn.Module):
   """Decoder layer consisting of [embed,mlp] followed by an [mlp,embed] matmul."""
 
-  config: common_types.Config
+  config: Config
   mesh: Mesh
   quant: Optional[quantizations.AqtQuantization] = None
 

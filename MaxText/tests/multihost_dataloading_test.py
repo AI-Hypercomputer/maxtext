@@ -16,16 +16,19 @@ limitations under the License.
 
 # pylint: disable=missing-module-docstring, missing-function-docstring
 import sys
+import unittest
 import os.path
+
+import pytest
+
 import numpy as np
+
 import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 from jax.sharding import PartitionSpec
 
 import tensorflow as tf
-import unittest
-import pytest
 
 from MaxText import pyconfig
 from MaxText import multihost_dataloading

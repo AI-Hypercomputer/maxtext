@@ -23,29 +23,16 @@ from flax import linen as nn
 
 from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2 import config as aqt_config
+from aqt.jax.v2.aqt_tensor import QTensor as KVTensor
 from aqt.jax.v2.flax import aqt_flax
 
-from MaxText import common_types
+from MaxText.common_types import Array, AxisNames, AxisIdxes, Config, CACHE_BATCH_PREFILL, DType, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, MODEL_MODE_AUTOREGRESSIVE, CACHE_HEADS_NONE, DECODING_ACTIVE_SEQUENCE_INDICATOR
+from MaxText.common_types import CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV, CACHE_SCALE_BATCH, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV
 
-Array = common_types.Array
-AxisNames = common_types.AxisNames
-AxisIdxes = common_types.AxisIdxes
-Config = common_types.Config
-KVTensor = aqt_tensor.QTensor
 
 MAX_INT8 = 127.5
 MAX_INT4 = 7.5
 E4M3_MAX = jnp.finfo(jnp.float8_e4m3fn).max.astype(jnp.float32)
-
-CACHE_BATCH_PREFILL = common_types.CACHE_BATCH_PREFILL
-CACHE_BATCH = common_types.CACHE_BATCH
-CACHE_SEQUENCE = common_types.CACHE_SEQUENCE
-CACHE_HEADS = common_types.CACHE_HEADS
-CACHE_KV = common_types.CACHE_KV
-CACHE_SCALE_BATCH = common_types.CACHE_SCALE_BATCH
-CACHE_SCALE_SEQUENCE = common_types.CACHE_SCALE_SEQUENCE
-CACHE_SCALE_HEADS = common_types.CACHE_SCALE_HEADS
-CACHE_SCALE_KV = common_types.CACHE_SCALE_KV
 
 
 def reverse_transpose(transposed_array, transpose_axis_order):
@@ -167,7 +154,7 @@ class KVCache(nn.Module):
 
   max_prefill_length: int
   max_target_length: int
-  dtype: common_types.DType
+  dtype: DType
   kv_quant: Optional[KVQuant] = None
   prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
   cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
@@ -194,7 +181,7 @@ class KVCache(nn.Module):
     cache_length = self.max_prefill_length
     dtype = self._get_cached_kv_dtype()
 
-    if model_mode == common_types.MODEL_MODE_PREFILL:
+    if model_mode == MODEL_MODE_PREFILL:
       cache_logical_axis_names = self.prefill_cache_logical_axis_names
     else:
       cache_logical_axis_names = self.cache_logical_axis_names
@@ -219,7 +206,7 @@ class KVCache(nn.Module):
         cache_shape_value,
         dtype,
     )
-    if model_mode == common_types.MODEL_MODE_PREFILL:
+    if model_mode == MODEL_MODE_PREFILL:
       segment_id_axis_names = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE)
     else:
       segment_id_axis_names = (CACHE_BATCH, CACHE_SEQUENCE)
@@ -274,7 +261,7 @@ class KVCache(nn.Module):
       )
     cache_length = self.max_target_length - self.max_prefill_length
 
-    if model_mode == common_types.MODEL_MODE_PREFILL:
+    if model_mode == MODEL_MODE_PREFILL:
       cache_logical_axis_names = self.prefill_cache_logical_axis_names
     else:
       cache_logical_axis_names = self.cache_logical_axis_names
@@ -311,7 +298,7 @@ class KVCache(nn.Module):
         cache_axis_names,
     )
 
-    if model_mode == common_types.MODEL_MODE_PREFILL:
+    if model_mode == MODEL_MODE_PREFILL:
       segment_id_axis_names = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE)
     else:
       segment_id_axis_names = (CACHE_BATCH, CACHE_SEQUENCE)
@@ -401,11 +388,11 @@ class KVCache(nn.Module):
       next_pos = previous_chunk.shape[1]
 
     cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
-        batch, key_heads, value_heads, key_head_size, value_head_size, common_types.MODEL_MODE_PREFILL
+        batch, key_heads, value_heads, key_head_size, value_head_size, MODEL_MODE_PREFILL
     )
     # TODO: Find a way to not enable the ar cache for prefill mode.
     _ = self._get_ar_cache_vars(
-        batch, key_heads, value_heads, key_head_size, value_head_size, common_types.MODEL_MODE_PREFILL
+        batch, key_heads, value_heads, key_head_size, value_head_size, MODEL_MODE_PREFILL
     )  # initialize it now
 
     key_shaped_for_cache = jnp.transpose(key, self.prefill_cache_axis_order)
@@ -488,11 +475,11 @@ class KVCache(nn.Module):
     assert key.dtype == value.dtype, "Key and Value Dtypes should match."
 
     cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
-        batch, key_heads, value_heads, key_head_size, value_head_size, common_types.MODEL_MODE_PREFILL
+        batch, key_heads, value_heads, key_head_size, value_head_size, MODEL_MODE_PREFILL
     )
     # TODO: Find a way to not enable the ar cache for prefill mode.
     _ = self._get_ar_cache_vars(
-        batch, key_heads, value_heads, key_head_size, value_head_size, common_types.MODEL_MODE_PREFILL
+        batch, key_heads, value_heads, key_head_size, value_head_size, MODEL_MODE_PREFILL
     )  # initialize it now
 
     key_shaped_for_cache = jnp.transpose(key, self.prefill_cache_axis_order)
@@ -652,9 +639,7 @@ class KVCache(nn.Module):
       raise ValueError(f"Sequence length should be 1 during autoregression, got {sequence=}")
 
     cached_ar_key_vars, cached_ar_value_vars, cached_ar_segment_id_var, cache_ar_index_var, cache_ar_lengths_var = (
-        self._get_ar_cache_vars(
-            batch, key_heads, value_heads, key_head_size, value_head_size, common_types.MODEL_MODE_AUTOREGRESSIVE
-        )
+        self._get_ar_cache_vars(batch, key_heads, value_heads, key_head_size, value_head_size, MODEL_MODE_AUTOREGRESSIVE)
     )
 
     self.update_ar_key_value(
@@ -666,7 +651,7 @@ class KVCache(nn.Module):
         cache_ar_lengths_var.value,
         use_ragged_attention,
     )
-    active_indicator = jnp.zeros((batch, 1), dtype=jnp.int32) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+    active_indicator = jnp.zeros((batch, 1), dtype=jnp.int32) + DECODING_ACTIVE_SEQUENCE_INDICATOR
     cached_ar_segment_id_var.value = jax.lax.dynamic_update_index_in_dim(
         cached_ar_segment_id_var.value, active_indicator, jnp.squeeze(cache_ar_index_var.value), 1
     )
@@ -675,7 +660,7 @@ class KVCache(nn.Module):
 
     # The below retrieves the existing prefill cache variables, not creating new ones
     cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
-        batch, key_heads, value_heads, key_head_size, value_head_size, common_types.MODEL_MODE_AUTOREGRESSIVE
+        batch, key_heads, value_heads, key_head_size, value_head_size, MODEL_MODE_AUTOREGRESSIVE
     )
 
     cached_prefill = (
@@ -719,12 +704,12 @@ class KVCache(nn.Module):
       two tuples of (k, v, decoder_segments) -- either can be Nones
 
     """
-    if model_mode == common_types.MODEL_MODE_PREFILL:
+    if model_mode == MODEL_MODE_PREFILL:
       if self.use_chunked_prefill:
         return self.kv_cache_chunked_prefill(key, value, decoder_segment_ids, previous_chunk), None
       else:
         return self.kv_cache_prefill(key, value, decoder_segment_ids), None
-    elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+    elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
       return self.kv_cache_autoregressive(key, value, use_ragged_attention)
     else:
       raise ValueError(f"Model Mode isn't supported! {model_mode=}")
@@ -736,13 +721,13 @@ class MlaKVCache(KVCache):
   prefill_cache_logical_axis_names: AxisNames = (
       CACHE_BATCH_PREFILL,
       CACHE_SEQUENCE,
-      common_types.CACHE_HEADS_NONE,
+      CACHE_HEADS_NONE,
       CACHE_KV,
   )
   cache_logical_axis_names: AxisNames = (
       CACHE_BATCH,
       CACHE_SEQUENCE,
-      common_types.CACHE_HEADS_NONE,
+      CACHE_HEADS_NONE,
       CACHE_KV,
   )
 
@@ -767,7 +752,7 @@ class MlaKVCache(KVCache):
       Optional[Tuple[Array, Array, Array]],
       Optional[Tuple[Array, Array, Array, Array]],
   ]:
-    assert model_mode != common_types.MODEL_MODE_TRAIN, "incorrectly updating kvcache in train mode."
+    assert model_mode != MODEL_MODE_TRAIN, "incorrectly updating kvcache in train mode."
     assert self.kv_quant is None, "kvcache quantization not supported with mla."
     key_latent = self.key_latent_add_head_dim(key_latent)
     prefill_cache, ar_cache = super().__call__(key_latent, key_rope, decoder_segment_ids, model_mode)

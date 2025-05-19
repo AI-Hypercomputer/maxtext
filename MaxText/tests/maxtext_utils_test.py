@@ -14,16 +14,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+from collections.abc import Callable
+
 """ Tests for the common MaxText utilities """
 
-import unittest
+from typing import Union, Any, Dict, Tuple
 import os.path
+import unittest
 
 from jax import random
 from jax.sharding import Mesh
 import jax.numpy as jnp
 
 from flax import linen as nn
+from flax.core.scope import FrozenVariableDict
+from flax.linen import Dense
 from flax.training import train_state
 
 import optax
@@ -126,7 +131,9 @@ class MaxUtilsInitState(unittest.TestCase):
   def test_init_decode_state(self):
     decode_state = maxtext_utils.init_decode_state(self.model.apply, self.params)
     self.assertEqual(decode_state.apply_fn, self.model.apply)
-    output = decode_state.apply_fn(self.params, self.input)
+    apply_fn: Callable = decode_state.apply_fn
+    # pylint: disable=not-callable
+    output: Union[Any, Tuple[Any, Union[FrozenVariableDict, Dict[str, Any]]]] = apply_fn(self.params, self.input)
     self.assertEqual(output.tolist(), self.output.tolist())
     self.assertEqual(decode_state.tx, None)
     self.assertEqual(decode_state.opt_state, {})
@@ -151,8 +158,9 @@ class ModelWithMultipleCollections(nn.Module):
   A simple model that has variables in multiple collections - "params" and "special_variables"
   """
 
+  dense: Dense = nn.Dense(4)
+
   def setup(self):
-    self.dense = nn.Dense(4)
     self.kernel = self.variable("special_variables", "my_first_kernel", lambda: jnp.ones((4, 5)))
 
   def __call__(self, x, y, encoder_images=None):

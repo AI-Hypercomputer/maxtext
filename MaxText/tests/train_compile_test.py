@@ -560,7 +560,6 @@ class TrainCompile(unittest.TestCase):
         )
     )
 
-  @pytest.mark.skip(reason="b/415132665: Enable it once scan is supported in training for shorter compiler time")
   @pytest.mark.cpu_only
   def test_moe_llama4_17b_16e(self):
     compiled_trainstep_file = "/tmp/test_moe_llama4_17b_16e.pickle"
@@ -576,8 +575,23 @@ class TrainCompile(unittest.TestCase):
             "max_target_length=1024",
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
-            "scan_layers=False",
+            "scan_layers=True",
             "ici_fsdp_parallelism=32",
             "ici_tensor_parallelism=4",
+        )
+    )
+
+  @pytest.mark.cpu_only
+  def test_gpt3_6b(self):
+    compiled_trainstep_file = "/tmp/test_gpt3_6b"
+    train_compile_main(
+        (
+            None,
+            os.path.join(PKG_DIR, "configs", "base.yml"),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-256",
+            "compile_topology_num_slices=1",
+            "model_name=gpt3-6b",
+            "per_device_batch_size=1",
         )
     )

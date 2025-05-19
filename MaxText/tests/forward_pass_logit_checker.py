@@ -49,10 +49,10 @@ import torch
 
 from transformers import AutoModelForCausalLM
 
-from MaxText import common_types
 from MaxText import max_logging
 from MaxText import maxtext_utils
 from MaxText import pyconfig
+from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
 from MaxText.globals import PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
@@ -69,7 +69,7 @@ def get_data(golden_data, golden_data_index, config):
   logits = np.asarray(golden_data[golden_data_index]["logits"], dtype=np.float32)
   max_logging.log(f" prompt=\"{golden_data[golden_data_index]['prompt']}\" raw ids={ids}, logits.shape = {logits.shape}")
 
-  decoder_segment_ids = np.zeros(s) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+  decoder_segment_ids = np.zeros(s) + DECODING_ACTIVE_SEQUENCE_INDICATOR
   decoder_positions = np.stack(
       [np.arange(config.max_target_length, dtype=np.int32) for _ in range(config.global_batch_size_to_train_on)]
   )

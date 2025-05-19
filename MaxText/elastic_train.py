@@ -46,16 +46,22 @@ import time
 import queue
 
 from absl import app
+
 from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
-from flax.linen import partitioning as nn_partitioning
+
 import jax
+
+from flax.linen import partitioning as nn_partitioning
+
 from ml_goodput_measurement import monitoring
+
 import pathwaysutils
 from pathwaysutils.elastic import manager
 from pathwaysutils.debug import timing
+
 import tensorflow as tf
 
 from MaxText import checkpointing
@@ -267,7 +273,7 @@ def train_loop(config, elastic_manager, state=None):
       block=True,
   )
 
-  input_data_shardings = maxtext_utils.get_input_data_shardings(config, mesh)
+  input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
   # Using while loop instead of a for loop because with elasticity
   # the step is restored back to the latest snapshot when a slice is lost
   while step < config.steps:

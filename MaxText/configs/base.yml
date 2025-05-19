@@ -139,6 +139,7 @@ megablox: True
 sparse_matmul: True
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
 load_balance_loss_weight: 0.01 # weight for the load balance loss
+use_random_routing: False # whether to use random routing for debug/test purpose
 
 # deepseek moe
 base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer (use base_mlp_dim if not DeepSeek style)
@@ -150,6 +151,11 @@ routed_bias: False # a flag if a bias term is added for routing
 n_routing_groups: -1 # number of groups for routing, disabled by default
 topk_routing_group: -1 # number of top groups to route inputs. For EP,
 # sending activations to a maximum of topk_routing_group distinct devices can yield performance benefits.
+
+# For complex architectures like llama4 there are repeated sets of
+# inhomogeneous layers. E.g. maverick uses [dense+rope, moe+rope, dense+rope, moe+nope]
+# which can only be scanned together in one large block of inhomogeneous_layer_cycle_interval=4 layers.
+inhomogeneous_layer_cycle_interval: 1 
 
 # pipeline parallelism
 # The number of decoder layers is equal to the product of num_stages, num_layers_per_pipeline_stage and num_pipeline_repeats.
@@ -215,6 +221,7 @@ qkv_proj: 'remat'
 out_proj: 'remat'
 
 optimizer_memory_host_offload: False
+parameter_memory_host_offload: False
 scan_layers: True # We recommend setting this to false when using pipeline parallelism, instead scanning the PP iterations.
 param_scan_axis: 1
 
@@ -562,8 +569,8 @@ eval_steps: -1  # run this number of steps for eval, recommend setting this to p
 target_eval_loss: 0.  # early stop once reaching target eval_loss
 
 # Goodput parameters
-enable_goodput_recording: True
-monitor_goodput: True
+enable_goodput_recording: False
+monitor_goodput: False
 goodput_upload_interval_seconds: 30
 enable_pathways_goodput: False
 monitor_step_time_deviation: True
@@ -599,6 +606,8 @@ inference_microbenchmark_log_file_path: ""
 inference_microbenchmark_num_samples: [1, 2, 3, 4, 5]
 inference_metadata_file: "" # path to a json file
 inference_server: "MaxtextInterleavedServer"  # inference server to start
+prefill_slice: "v5e-16" # slice to use for prefill in disaggregation mode
+generate_slice: "v5e-16" # slice to use for generatation in disaggregation mode
 inference_benchmark_test: False
 enable_model_warmup: False
 enable_llm_inference_pool: False          # Bool to launch inference server for llm_inference_gateway with their specified APIs
@@ -709,3 +718,17 @@ remat_policy_for_vit: "minimal"  # Remat policy for multimodal model's vision en
 image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
 image_path: "" # Local image path used for decoding
 
+
+### llama4 multi modal configs
+hidden_size_for_vit: 1408 
+intermediate_size_for_vit: 5632
+num_attention_heads_for_vit: 16
+num_channels_for_vit: 3
+patch_size_for_vit: 14
+num_hidden_layers_for_vit: 34
+projector_input_dim_for_vit: 4096
+projector_output_dim_for_vit: 4096
+rope_theta_for_vit: 10000
+vision_output_dim_for_vit: 4096
+pixel_shuffle_ratio_for_vit: 0.5
+projector_dropout_for_vit: 0.0

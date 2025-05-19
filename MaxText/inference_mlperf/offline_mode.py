@@ -22,6 +22,9 @@ import logging
 import math
 import os
 import time
+import warnings
+
+from absl import app, flags
 
 import numpy as np
 
@@ -33,18 +36,16 @@ import jax.numpy as jnp
 import mlperf_loadgen as lg
 # pylint: disable=no-name-in-module
 
-import warnings
+from MaxText.maxengine import create_engine_from_config_flags
+from MaxText.inference_mlperf import offline_inference
+
 
 warnings.simplefilter("ignore", category=FutureWarning)
 
-from MaxText.maxengine import create_engine_from_config_flags
-from MaxText.inference_mlperf import offline_inference
 
 _MLPERF_ID = "llama2-70b"
 log = logging.getLogger(__name__)
 log.setLevel(os.getenv("LOGLEVEL", "INFO"))
-
-from absl import app, flags
 
 FLAGS = flags.FLAGS
 
