@@ -51,6 +51,7 @@ import tensorstore as ts
 from MaxText import checkpointing
 from MaxText import max_logging
 from MaxText import maxtext_utils
+from MaxText import max_utils
 from MaxText import optimizers
 from MaxText import pyconfig
 from MaxText.globals import PKG_DIR
@@ -67,16 +68,6 @@ def fmt_size(num_bytes: int) -> str:
     num_bytes /= 1024.0
   return f"{num_bytes:.2f} {unit}"
 
-
-def check_memory():
-  """print out cpu/tpu memory."""
-  cpu_bytes = Process().memory_info().rss
-  max_logging.log(f"cpu memory: {fmt_size(cpu_bytes)}")
-  for d in jax.local_devices():
-    stats = d.memory_stats()
-    used = stats["bytes_in_use"]
-    limit = stats["bytes_limit"]
-    max_logging.log(f"tpu memory: Using {fmt_size(used)} / {fmt_size(limit)} ({used/limit:%}) on {d}")
 
 
 def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name):
@@ -113,7 +104,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
 
   state, _, _, _ = maxtext_utils.setup_training_state(model, None, tx, cfg, init_rng, mesh, checkpoint_manager)
   max_logging.log("start")
-  check_memory()
+  max_utils.print_mem_stats("After params initialized")
 
   # maxtext keystr: (paxml keystr, transform_fn)
   keystr_map = {
@@ -267,12 +258,12 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
     del arr
     gc.collect()
     max_logging.log(f"{key_path_str} finished")
-    check_memory()
+    max_utils.print_mem_stats("After params conversion")
     return result
 
   converted_state = jax.tree_util.tree_map_with_path(map_fn, state)
   max_logging.log("converted state finished")
-  check_memory()
+  max_utils.print_mem_stats("converted state finished")
 
   if save_checkpoint(checkpoint_manager, converted_state.step, converted_state):
     max_logging.log(f"saved a checkpoint at step {converted_state.step}")
