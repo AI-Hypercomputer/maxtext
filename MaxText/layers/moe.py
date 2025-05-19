@@ -294,7 +294,7 @@ class RoutedMoE(nn.Module):
     If the configuration does not specify routing groups (n_routing_groups is -1),
     using a standard top-k routing mechanism.
 
-    The selection uses post_bias logits, but the return weigths are based on pre_bias logits.
+    The selection uses post_bias logits, but the return weights are based on pre_bias logits.
     """
     # Reshape
     batch_size, seq_len = gate_logits.shape[0], gate_logits.shape[1]
@@ -466,10 +466,10 @@ class RoutedMoE(nn.Module):
           cumulated_array = jnp.cumsum(array_with_zeros, axis=0, dtype=input_array.dtype)
           return cumulated_array[shard_id]
         elif strategy == TransformStrategy.RECV_SIZE:
-          # Received size in the traget output
+          # Received size in the target output
           return input_array[:, shard_id]
         else:
-          raise ValueError(f"Unknown tranform array strategy: {strategy}")
+          raise ValueError(f"Unknown transform array strategy: {strategy}")
 
       local_id = jax.lax.axis_index("expert")
       input_offsets = transform_array(all_shards_group_sizes, local_id, TransformStrategy.INPUT_OFFSET)
@@ -861,6 +861,7 @@ class RoutedMoE(nn.Module):
       with jax.named_scope("wi_0"):
         w0_kernel_axes = ("exp", None, "mlp")
         w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
+        # TODO: Potentially reshape before doing matmul
         layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(mlp_einsum, dispatch, w0_kernel, precision=matmul_precision)
 
         if self.config.activations_in_float32:

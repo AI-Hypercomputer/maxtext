@@ -400,13 +400,11 @@ def generate_xpk_workload_cmd(
     docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ep_first"'
     
 
-    # Layered with base code from:
-    # commit 83ae04866cfe4c3dedd4b53ee5dc2d4c520144a0 (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
-    # Author: gobbleturk <mattdavidow@google.com>
-    # Date:   Sun May 18 20:09:25 2025 +0000
+  # commit 1c213eb20026eb9877ebb14768295c4b0e2e1b97 (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
+  # Author: gobbleturk <mattdavidow@google.com>
+  # Date:   Sun May 18 20:33:59 2025 +0000
 
-    #     Swap EP earlier than TP
-
+  #     Add async a2a flag
 
 
   print(f'User command: {user_command}')
@@ -529,7 +527,7 @@ def main() -> int:
         v6e_cluster_config_tt
     ]:
       # Run workloads in the following slice configurations
-      for num_slices in [1,]:
+      for num_slices in [2,]:
         # Use the libtpu dependencies from:
         for libtpu_type in [
             # LibTpuType.CUSTOM

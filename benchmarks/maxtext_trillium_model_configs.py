@@ -181,6 +181,11 @@ PIPELINING_FLAGS = (
     " --xla_tpu_iova_dma_chunk_size_bytes=16777216" # breaks DMA to/from host into 16M chunks
 )
 
+ASYNC_CP = (
+" --xla_enable_async_collective_permute=true"
+)
+
+
 # Disable bundle-aware CostModel which was causing worse perf b/357103386.
 # Some fusions in the backward pass of the model were 3x slower without this.
 DISABLE_BUNDLE_AWARE_COST_MODEL = (
@@ -291,17 +296,12 @@ def _add_to_model_dictionary(
 
 # Ran with a docker built from and XPK runner ran from:
 # docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ep_first"'
-#
-# commit 83ae04866cfe4c3dedd4b53ee5dc2d4c520144a0 (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
+# 
+# commit 1c213eb20026eb9877ebb14768295c4b0e2e1b97 (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
 # Author: gobbleturk <mattdavidow@google.com>
-# Date:   Sun May 18 20:09:25 2025 +0000
+# Date:   Sun May 18 20:33:59 2025 +0000
 
-#     Swap EP earlier than TP
-    # commit 2090c571d4e1e4fc5cff9857b55750a348e58ff3 (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
-    # Author: gobbleturk <mattdavidow@google.com>
-    # Date:   Sun May 18 20:21:35 2025 +0000
-
-    #     Swap EP earlier than TP
+#     Add async a2a flag
 
 matt_dream_v1 = _add_to_model_dictionary(
   trillium_model_dict,
@@ -310,7 +310,7 @@ matt_dream_v1 = _add_to_model_dictionary(
     model_type="default",
     tuning_params={
         "steps": 20,
-        "per_device_batch_size": 1,
+        "per_device_batch_size": 0.5,
         "remat_policy": "full",
         "max_target_length": 4096,
         "enable_checkpointing": False,
@@ -335,13 +335,13 @@ matt_dream_v1 = _add_to_model_dictionary(
         "profiler": "xplane",
         "opt_type": "sgd",
         "dump_hlo": True,
-        #"weight_dtype": "bfloat16",
+        "weight_dtype": "bfloat16",
         
         # PP
-        "base_num_decoder_layers": 8, # PP * 8
-        # "dcn_pipeline_parallelism": 2,
-        # "num_pipeline_microbatches": 2, # PP * 2 or since we are sad PP * 1
-        # "num_layers_per_pipeline_stage": 2,
+        "base_num_decoder_layers": 16, # PP * 8
+        "dcn_pipeline_parallelism": 2,
+        "num_pipeline_microbatches": 4, # PP * 2 or since we are sad PP * 1
+        "num_layers_per_pipeline_stage": 2,
         # "scan_layers": False,
     },
     xla_flags=(
@@ -352,10 +352,21 @@ matt_dream_v1 = _add_to_model_dictionary(
         + PIPELINING_FLAGS
         + ASYNC_A2A
         #+ PP_MORE_FLAGS
+        + ASYNC_CP
     ),
   )
 )
 
+
+
+# Ran with a docker built from and XPK runner ran from:
+# docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ep_first"'
+# 
+# commit 1c213eb20026eb9877ebb14768295c4b0e2e1b97 (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
+# Author: gobbleturk <mattdavidow@google.com>
+# Date:   Sun May 18 20:33:59 2025 +0000
+
+#     Add async a2a flag
 
 matt_dream_pure_ep_v1 = _add_to_model_dictionary(
   trillium_model_dict,
@@ -373,7 +384,7 @@ matt_dream_pure_ep_v1 = _add_to_model_dictionary(
         "decoder_block": "mixtral",
         "ici_expert_parallelism": 256,
         "num_experts": 256, # 256
-        "num_experts_per_tok": 2,
+        "num_experts_per_tok": 8,
         "base_emb_dim": 8192, #7168
         "base_mlp_dim": 32768,
         "base_num_query_heads": 64,
@@ -385,7 +396,7 @@ matt_dream_pure_ep_v1 = _add_to_model_dictionary(
         "capacity_factor": 1,
         "profiler": "xplane",
         "opt_type": "sgd",
-        #"weight_dtype": "bfloat16",
+        "weight_dtype": "bfloat16",
         "dump_hlo": True,
         
         
