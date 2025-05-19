@@ -301,11 +301,11 @@ def _add_to_model_dictionary(
 # Ran with a docker built from and XPK runner ran from:
 # docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ep_first"'
 # 
-# commit 5fb90d79a78d28427c3f819e2c3f282cfcec6c4c (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
+# commit a09c9aaf684fe5897d0d10a0daf79789e6a55157 (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
 # Author: gobbleturk <mattdavidow@google.com>
-# Date:   Mon May 19 01:59:24 2025 +0000
+# Date:   Mon May 19 03:22:13 2025 +0000
 
-#     Add megascale_grpc flag
+#     DP + PP troubles
 
 matt_dream_v1 = _add_to_model_dictionary(
   trillium_model_dict,
@@ -313,9 +313,10 @@ matt_dream_v1 = _add_to_model_dictionary(
     model_name="matt_dream_v1",
     model_type="default",
     tuning_params={
-        "steps": 10,
+        "steps": 50,
         "per_device_batch_size": 0.5,
-        "remat_policy": "full",
+        "remat_policy": "custom",
+        "mlpwo": "device",
         "max_target_length": 4096,
         "enable_checkpointing": False,
         "dataset_type": "synthetic",
@@ -332,7 +333,7 @@ matt_dream_v1 = _add_to_model_dictionary(
         "base_num_query_heads": 64,
         "base_num_kv_heads": 16,
         "head_dim": 256,
-        "skip_first_n_steps_for_profiler": 3,
+        "skip_first_n_steps_for_profiler": 40,
         "sparse_matmul": False, # False
         "megablox": False, # True
         "capacity_factor": 1,
@@ -341,10 +342,9 @@ matt_dream_v1 = _add_to_model_dictionary(
         "dump_hlo": True,
         "weight_dtype": "bfloat16",
         
-        "dcn_data_parallelism": 2,
         # PP
         "base_num_decoder_layers": 16, # PP * 8
-        "dcn_pipeline_parallelism": 2, #PP
+        "dcn_pipeline_parallelism": 2,
         "num_pipeline_microbatches": 4, # PP * 2 or since we are sad PP * 1
         "num_layers_per_pipeline_stage": 2,
         "pipeline_fsdp_ag_once": True

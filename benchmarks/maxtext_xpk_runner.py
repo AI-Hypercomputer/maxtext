@@ -528,7 +528,7 @@ def main() -> int:
         v6e_cluster_config_tt
     ]:
       # Run workloads in the following slice configurations
-      for num_slices in [4,]:
+      for num_slices in [2,]:
         # Use the libtpu dependencies from:
         for libtpu_type in [
             # LibTpuType.CUSTOM
