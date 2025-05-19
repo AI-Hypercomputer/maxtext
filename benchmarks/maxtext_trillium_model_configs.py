@@ -181,6 +181,10 @@ PIPELINING_FLAGS = (
     " --xla_tpu_iova_dma_chunk_size_bytes=16777216" # breaks DMA to/from host into 16M chunks
 )
 
+MEGASCALE_GRPC_PREMAP_MEMORY_BYTES = (
+" --megascale_grpc_premap_memory_bytes=17179869184"
+)
+
 ASYNC_CP = (
 " --xla_enable_async_collective_permute=true"
 )
@@ -297,11 +301,11 @@ def _add_to_model_dictionary(
 # Ran with a docker built from and XPK runner ran from:
 # docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ep_first"'
 # 
-# commit 1fb44401c22c5267924513909781435536942e26 (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
+# commit 98e5f828ccf00038449fdcbd4d3703b70ac896cd (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
 # Author: gobbleturk <mattdavidow@google.com>
-# Date:   Mon May 19 00:10:49 2025 +0000
-#      add async CP
+# Date:   Mon May 19 00:44:33 2025 +0000
 
+#     Fix custom mesh with PP
 matt_dream_v1 = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
@@ -336,10 +340,11 @@ matt_dream_v1 = _add_to_model_dictionary(
         "dump_hlo": True,
         "weight_dtype": "bfloat16",
         
+        "dcn_data_parallelism": 2,
         # PP
-        "base_num_decoder_layers": 16, # PP * 8
-        "dcn_pipeline_parallelism": 2,
-        "num_pipeline_microbatches": 4, # PP * 2 or since we are sad PP * 1
+        "base_num_decoder_layers": 64, # PP * 8
+        "dcn_pipeline_parallelism": 8, #PP
+        "num_pipeline_microbatches": 16, # PP * 2 or since we are sad PP * 1
         "num_layers_per_pipeline_stage": 2,
         "pipeline_fsdp_ag_once": True
         # "scan_layers": False,
@@ -349,14 +354,12 @@ matt_dream_v1 = _add_to_model_dictionary(
         + REDUCE_SCATTER_FUSION
         #CF_FOR_ALL_GATHER
         + LAYOUT_FOR_ALL_REDUCE_SCATTER
-        + PIPELINING_FLAGS
+        + PIPELINING_FLAGS # " --xla_tpu_iova_dma_chunk_size_bytes=16777216"
         + ASYNC_A2A
-        #+ PP_MORE_FLAGS
         + ASYNC_CP
-    ),
-  )
+        + MEGASCALE_GRPC_PREMAP_MEMORY_BYTES #" --megascale_grpc_premap_memory_bytes=17179869184"
+    )
 )
-
 
 
 # Ran with a docker built from and XPK runner ran from:
