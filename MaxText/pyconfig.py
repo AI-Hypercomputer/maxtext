@@ -272,6 +272,7 @@ def validate_model_name(s: str) -> bool:
   # currently supported models
   valid_model_names = (
       "default",
+      "llama2-3.02b",
       "llama2-7b",
       "llama2-13b",
       "llama2-70b",
