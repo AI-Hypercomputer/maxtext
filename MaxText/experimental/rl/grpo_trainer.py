@@ -88,6 +88,57 @@ Transformer = models.Transformer
 EPS = 1e-8
 
 
+def filter_and_split(config, example_batch, num_groups, global_batch_size_per_group):
+  """
+  Splits an example_batch into a list of smaller batches.
+
+  The number of output batches is determined by config_inference.inference_replicas.
+  Each output batch has a size determined by config_inference.per_device_batch_size.
+  Samples are taken from the beginning of the input batch, and extras are dropped.
+
+  Args:
+    example_batch: A dictionary where keys are feature names (e.g., 'inputs')
+                   and values are arrays of shape [gbs, ...], where gbs is
+                   the global batch size.
+    config_inference: The inference configuration object, used to get
+                      config_inference.inference_replicas and
+                      config_inference.per_device_batch_size.
+
+  Returns:
+    A list of dictionaries. Each dictionary has the same keys as
+    example_batch but with values being arrays of shape [n, ...],
+    where n is config_inference.per_device_batch_size.
+    The length of the list is config_inference.inference_replicas.
+    Returns an empty list if not enough samples to form the required groups.
+  """
+  if not example_batch: # Handles None or empty dict
+    return []
+
+  if num_groups <= 0 or global_batch_size_per_group <= 0:
+    max_logging.log(f"Warning: config_inference.inference_replicas ({num_groups}) or config_inference.per_device_batch_size ({global_batch_size_per_group}) is not positive. Cannot split batch.")
+    return []
+
+  total_samples_needed = num_groups * global_batch_size_per_group
+  total_samples_available = example_batch[config.train_data_columns].shape[0]
+  if total_samples_available < total_samples_needed:
+    max_logging.log(f"Warning: Not enough samples ({total_samples_available}) in batch to create {num_groups} groups of size {global_batch_size_per_group} (needed {total_samples_needed}). Dropping batch.")
+    return []
+
+  # Slice the required number of samples
+  sliced_batch = jax.tree_util.tree_map(lambda arr: arr[:total_samples_needed], example_batch)
+
+  list_of_output_batches = []
+  for i in range(num_groups):
+    current_group_dict = {}
+    start_index = i * global_batch_size_per_group
+    end_index = start_index + global_batch_size_per_group
+    for key, sliced_array in sliced_batch.items():
+      # Slice each group
+      current_group_dict[key] = sliced_array[start_index:end_index]
+    list_of_output_batches.append(current_group_dict)
+
+  return list_of_output_batches
+
 # -----------------------------------------------------------------------------
 # GRPO
 # -----------------------------------------------------------------------------
@@ -120,15 +171,14 @@ class Buffer:
     self.lock = threading.Lock()
     self.internal_buffer = []
 
-  def push(self, data, data_sharding):
-    device_data = jax.device_put(data, data_sharding)
+  def push(self, data):
     with self.lock:
       if self.queue.full():
         try:
           self.queue.get_nowait()
         except:
           pass
-      self.queue.put(device_data)
+      self.queue.put(data)
 
   def pull(self, desired_batch_size=None):
     with self.lock:
@@ -303,7 +353,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 # --- GRPO Helpers ---
 
 
-def prefill(engine, params, prompts, true_length, num_generations, decode_state, rng):
+def prefill(engine, params, prompts, true_length, decode_state, rng):
   """
   Args:
     engine: The generation engine instance responsible for managing decoding and inference.
@@ -320,20 +370,16 @@ def prefill(engine, params, prompts, true_length, num_generations, decode_state,
   """
   JIT-compatible version of prefill using a single lax.scan over the repeated batch.
   """
-  # Repeat each prompt `num_generations` times
-  repeated_prompts = jnp.repeat(prompts, num_generations, axis=0)
-  repeated_true_length = jnp.repeat(true_length, num_generations, axis=0)
 
   def _scan_prefill_step(carry, inputs):
     decode_state, rng, slot = carry
     tokens, true_len = inputs
     rng, rng_prefill = jax.random.split(rng)
-    prefill_result, _ = engine.prefill(params=params, padded_tokens=tokens, true_length=true_len, rng=rng_prefill)
-    decode_state = engine.insert(prefill_result, decode_state, slot)
+    decode_state = engine.prefill_insert(padded_tokens=tokens, true_length=true_len, rng=rng_prefill, decode_state=decode_state, slot=slot, params=params)
     return (decode_state, rng, slot + 1), None
 
   (decode_state, _, _), _ = jax.lax.scan(
-      _scan_prefill_step, init=(decode_state, rng, 0), xs=(repeated_prompts, repeated_true_length)
+      _scan_prefill_step, init=(decode_state, rng, 0), xs=(prompts, true_length), length=prompts.shape[0]
   )
 
   return decode_state
@@ -397,7 +443,6 @@ def concatenate_prompt_with_completions(config, tokenizer_model, prompts, true_l
   batched_concat_and_eos = jax.vmap(_concat_and_find_eos, in_axes=(0, 0, 0))
   # prompts = jnp.repeat(prompts, config.num_generations, axis=0)
   # true_length = jnp.repeat(true_length, config.num_generations, axis=0)
-  max_logging.log(f"Inside concatenate {prompts.shape=} {completions.shape=}")
   prompt_completions, eos_positions = batched_concat_and_eos(prompts, true_length, completions)
   return prompt_completions, eos_positions
 
@@ -432,14 +477,20 @@ def generate_completions(config, tokenizer_model, engine, data, params, rng):
   decode_state = engine.init_decode_state(rng_init_decode)
 
   prompts, true_length = data[f"{config.train_data_columns}"], data[f"{config.train_data_columns}_true_length"]
+  # Repeat each prompt `num_generations` times
+  prompts = jnp.repeat(prompts, config.num_generations, axis=0)
+  true_length = jnp.repeat(true_length, config.num_generations, axis=0)
+
   decode_state = jax.jit(
-      functools.partial(prefill, engine, params, prompts, true_length, config.num_generations), donate_argnums=(0,)
+      functools.partial(prefill, engine, params, prompts, true_length), donate_argnums=(0,)
   )(decode_state, rng)
 
   completions = jax.jit(
       functools.partial(generate, engine, params, config.max_target_length - config.max_prefill_predict_length)
   )(decode_state, rng)
-  max_logging.log(f"{prompts.shape=} {completions.shape=}")
+  # TODO: Remove this clipping after moving to OfflineInference from @wenxindong
+  completions = completions[:prompts.shape[0]]
+  
   data[f"{config.train_data_columns}_completions"], eos_positions = concatenate_prompt_with_completions(
       config, tokenizer_model, prompts, true_length, completions
   )
@@ -798,10 +849,10 @@ def setup_train_loop(config, config_inference):
   init_rng, writer, checkpoint_manager, mesh, inference_meshes, model, inference_model, learning_rate_schedule, tx = setup_mesh_and_model(config, config_inference)
   record_goodput(recorder, config, recorder.record_tpu_init_end_time if recorder else None)
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
-  data_iterators = grpo_input_pipeline.create_data_iterator(config_inference, inference_meshes)
+  data_iterator = grpo_input_pipeline.create_data_iterator(config_inference, inference_meshes[0])
   #TODO: setup_training_state may not need to return dataset_iterator, find out why it needs it
   state, _, state_mesh_shardings, _ = maxtext_utils.setup_training_state(
-      model, data_iterators[0], tx, config, init_rng, mesh, checkpoint_manager
+      model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
 
   # create inference_state_mesh_shardings from multiple inference_mesh
@@ -821,7 +872,7 @@ def setup_train_loop(config, config_inference):
       mesh,
       inference_meshes,
       learning_rate_schedule,
-      data_iterators,
+      data_iterator,
       None, # GRPO does not support eval_dataset
       state,
   )
@@ -849,7 +900,7 @@ def train_loop(config, config_inference, state=None):
       mesh,
       inference_meshes,
       learning_rate_schedule,
-      data_iterators,
+      data_iterator,
       eval_data_iterator,
       state,
   ) = setup_train_loop(config, config_inference)
@@ -876,13 +927,6 @@ def train_loop(config, config_inference, state=None):
       donate_argnums_train,
   ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config)
 
-  # Initializing maxengine and everything related from decode.py
-  # TODO: Creating an engine here but might have two model compilation, need to initialize engine while passing model object
-  engines = [maxengine.MaxEngine(config_inference, devices=np.squeeze(inference_mesh.devices)) for inference_mesh in inference_meshes]
-  init_rng, rng_load_params = jax.random.split(init_rng)
-  # TODO: loading parameters from GCS here, need to pass in the same params to engine which already loaded
-  _ = [engine.load_params(rng_load_params) for engine in engines]
-
   if eval_data_iterator:
     # pylint: disable=line-too-long
     (
@@ -892,6 +936,37 @@ def train_loop(config, config_inference, state=None):
         static_argnums_eval,
         donate_argnums_eval,
     ) = maxtext_utils.get_functional_eval_with_signature(eval_step, mesh, state_mesh_shardings, model, config)
+
+  # Helper function for threaded engine initialization
+  def _init_engine_worker(engine_config, devices_np, load_rng, result_list, idx):
+    """Worker function to initialize MaxEngine and load params."""
+    engine = maxengine.MaxEngine(engine_config, devices=devices_np)
+    # Assuming load_params modifies engine in-place and its return value is not critical here
+    engine.load_params(load_rng)
+    result_list[idx] = engine
+
+  # Initialize MaxEngine instances in parallel
+  init_rng, rng_for_all_engine_loads = jax.random.split(init_rng) # Split once for all engines
+
+  num_engines = len(inference_meshes)
+  engines = [None] * num_engines # Pre-allocate for ordered results
+  engine_init_threads = []
+
+  # engines list is now populated with initialized MaxEngine objects.
+  # The TODO: "loading parameters from GCS here, need to pass in the same params to engine which already loaded"
+  # still stands. This change parallelizes the MaxEngine object creation and its internal load_params call.
+  for i, inference_mesh in enumerate(inference_meshes):
+    devices_np = np.squeeze(inference_mesh.devices)
+    thread = threading.Thread(
+        target=_init_engine_worker,
+        args=(config_inference, devices_np, rng_for_all_engine_loads, engines, i)
+    )
+    engine_init_threads.append(thread)
+    thread.start()
+
+  for thread in engine_init_threads:
+    thread.join()
+
 
   # TODO: fix tflops calculations for grpo setting
   num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params['params'])
@@ -931,7 +1006,7 @@ def train_loop(config, config_inference, state=None):
       )
     else:
       p_eval_step = None
-
+  max_logging.log("Finished loading maxengine parameters")
   inference_data_shardings = [jax.sharding.NamedSharding(mesh=inference_mesh, spec=P(*config_inference.data_sharding)) for inference_mesh in inference_meshes]
   p_generate_completions = []
   for inference_data_sharding, inference_state_mesh_sharding, engine in zip(inference_data_shardings, inference_state_mesh_shardings, engines):
@@ -976,16 +1051,18 @@ def train_loop(config, config_inference, state=None):
   # do K rollouts of inference
   if config.inference_rollouts != 1:
     max_logging.log(f"Doing {config.inference_rollouts} Inference rollouts before training starts")
+    example_batch = load_next_batch(data_iterator, example_batch, config)
+    example_batches = filter_and_split(config_inference, example_batch, config.inference_replicas, int(config_inference.per_device_batch_size * inference_meshes[0].devices.size))
     for k in range(config.inference_rollouts):
-      for data_iterator, inference_data_sharding, inference_param, p_generate, inference_mesh in zip(data_iterators, inference_data_shardings, inference_params, p_generate_completions, inference_meshes):
-        example_batch = load_next_batch(data_iterator, example_batch, config)
+      for example_batch, inference_data_sharding, inference_param, p_generate, inference_mesh in zip(example_batches, inference_data_shardings, inference_params, p_generate_completions, inference_meshes):
         rng = jax.jit(jax.random.fold_in)(init_rng, k)
         rng, rng_gen = random.split(rng)
         example_batch = jax.device_put(example_batch, inference_data_sharding)
         with inference_mesh, nn_partitioning.axis_rules(config_inference.logical_axis_rules):
           example_batch = p_generate(example_batch, inference_param, rng_gen)
-        data_buffer.push(example_batch, in_shard_train[1])
-  # max_logging.log(f"data buffer: {len(data_buffer.queue)}")
+        # TODO: Confirm from @wenxindong what sharding is used by result of OfflineInference
+        data_buffer.push(jax.device_put(example_batch, jax.sharding.NamedSharding(mesh, P(None))))
+
   metric_logger = MetricLogger(writer, config)
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step or prof.should_activate_periodic_profile(step):
@@ -993,27 +1070,51 @@ def train_loop(config, config_inference, state=None):
       prof.activate(blocking_object=state, optional_postfix=optional_postfix)
     # inference_params = [param_buffer.pull() for _ in range(len(inference_data_shardings))]
     with jax.profiler.StepTraceAnnotation("inference", step_num=step):
-      for data_iterator, inference_data_sharding, inference_param, p_generate, inference_mesh in zip(data_iterators, inference_data_shardings, inference_params, p_generate_completions, inference_meshes):
-        record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
-        example_batch = load_next_batch(data_iterator, example_batch, config)
-        record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
+      record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
+      example_batch = load_next_batch(data_iterator, example_batch, config)
+      record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
+      example_batches = filter_and_split(config_inference, example_batch, config.inference_replicas, int(config_inference.per_device_batch_size * inference_meshes[0].devices.size))
+
+      rng = jax.jit(jax.random.fold_in)(init_rng, step)
+      if len(example_batches) > 0:
+        generation_rngs = random.split(rng, len(example_batches))
+
+      inference_threads = []
+      def _inference_worker(example_batch, inference_data_sharding, inf_param_slice, p_generate, inference_mesh, gen_rng, leader_inference_mesh, data_buf):
+        """Worker function for parallel inference."""
         check_example_batch(config, example_batch=example_batch)
-        # pylint: disable=not-callable
-        rng = jax.jit(jax.random.fold_in)(init_rng, step)
-        record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
-        rng, rng_gen = random.split(rng)
+        # Put input data onto the specific inference mesh
         example_batch = jax.device_put(example_batch, inference_data_sharding)
-        # inference_param = param_buffer.pull() or inference_param
+        
+        # Run generation on the inference mesh
         with inference_mesh, nn_partitioning.axis_rules(config_inference.logical_axis_rules):
-          example_batch = p_generate(example_batch, inference_param, rng_gen)
-        data_buffer.push(example_batch, in_shard_train[1])
+            example_batch = p_generate(example_batch, inf_param_slice, gen_rng)
+        
+        # Put result data onto the main training mesh (replicated) and push to buffer
+        data_to_push = jax.device_put(example_batch, jax.sharding.NamedSharding(leader_inference_mesh, P(None)))
+        data_buf.push(data_to_push)
+
+      leader_inference_mesh = inference_meshes[0]
+      for example_batch, inference_data_sharding, inference_param, p_generate, inference_mesh in zip(example_batches, inference_data_shardings, inference_params, p_generate_completions, inference_meshes):
+        current_gen_rng = generation_rngs[i]
+        thread = threading.Thread(
+            target=_inference_worker,
+            args=(example_batch, inference_data_sharding, inference_param, p_generate, inference_mesh, current_gen_rng, leader_inference_mesh, data_buffer)
+        )
+        inference_threads.append(thread)
+        thread.start()
+
+      for thread in inference_threads:
+        thread.join()
+
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       training_batch = data_buffer.pull(desired_batch_size=config.inference_replicas)
+      training_batch = jax.device_put(training_batch, in_shard_train[1])
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, training_batch, rng)
     with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
       if step != 0 and step % config.inference_rollouts == 0:
-        inference_params = pathways_reshard(config_inference, {'params':state.params['params']}, inference_state_mesh_shardings)
+        inference_params = pathways_reshard(config_inference, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings)
         # for inference_state_mesh_sharding in inference_state_mesh_shardings:
         #   param_buffer.push({'params':state.params['params']}, inference_state_mesh_sharding.params)
     step_time_delta = datetime.datetime.now() - last_step_completion
@@ -1138,6 +1239,8 @@ def main(argv: Sequence[str]) -> None:
       #   ]
       configs_argv[1]
   )
+  if config.per_device_batch_size < 1.0 or config_inference.per_device_batch_size < 1.0:
+    raise ValueError("GRPO does not support setting per_device_batch_size < 1.0")
   max_utils.print_system_information()
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
