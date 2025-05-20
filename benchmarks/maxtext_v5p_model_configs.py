@@ -251,3 +251,76 @@ gpt_3_175b_v5p_128_sc = _add_to_model_dictionary(
         ),
     ),
 )
+
+llama2_70b_v5p_256 = _add_to_model_dictionary(
+  v5p_model_dict,
+  MaxTextModel(
+    model_name="llama2-70b-v5p-8",
+    model_type="llama2-70b",
+    tuning_params={
+        "ici_fsdp_parallelism": -1,
+        "per_device_batch_size": 2,
+        "remat_policy": "qkv_proj_offloaded",
+        "max_target_length": 2048,
+        "use_iota_embed": True,
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+    },
+    xla_flags=(
+        xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.CF_FOR_ALL_GATHER
+    ),
+	)
+)
+
+llama2_7b_v5p_256 = _add_to_model_dictionary(
+  v5p_model_dict,
+  MaxTextModel(
+    model_name="llama2-7b-v5p-8",
+    model_type="llama2-7b",
+    tuning_params={
+        "ici_fsdp_parallelism": -1,
+        "per_device_batch_size": 4,
+        "remat_policy": "save_qkv_proj",
+        "max_target_length": 2048,
+        "use_iota_embed": True,
+        "tokenizer_path": os.path.join("assets", "tokenizer.llama2"),
+        "dataset_path": "gs://max-datasets-rogue",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+    },
+    xla_flags=(
+        xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.CF_FOR_ALL_GATHER
+    ),
+	)
+)
+
+gpt_3_175b_v5p_256 = _add_to_model_dictionary(
+  v5p_model_dict,
+  MaxTextModel(
+    model_name="gpt-3-175b-v5p-8",
+    model_type="gpt3-175b",
+    tuning_params={
+        "ici_fsdp_parallelism": -1,
+        "ici_tensor_parallelism": 16,
+        "per_device_batch_size": 0.5,
+        "remat_policy": "full",
+        "max_target_length": 2048,
+        "attention": "flash",
+        "dataset_type": "synthetic",
+        "reuse_example_batch": 1,
+        "enable_checkpointing": False,
+        "profiler": "xplane",
+    },
+    xla_flags=(
+        xla_flags_library.DATA_PARALLEL_OVERLAP
+        + xla_flags_library.CF_FOR_ALL_GATHER
+    ),
+	)
+)
