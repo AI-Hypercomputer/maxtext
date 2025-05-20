@@ -412,10 +412,11 @@ def build_user_command(
     # Save metrics to gcs bucket so that we can upload them to bq in post processing.
     enable_metrics_cmd = 'gcs_metrics=true'
 
+  upload_hlo_dump=""
+  hlo_dump=""
   if wl_config.hlo_dump:
     hlo_dump = "XLA_FLAGS=\'--xla_dump_large_constants --xla_dump_to=/tmp/xla_dump\'"
-  else:
-    hlo_dump=""
+    upload_hlo_dump =  f' && gsutil -m cp -r /tmp/xla_dump  {wl_config.base_output_directory}/{wl_config.run_name}/hlo_dump'
   # Construct the command string with proper formatting and line continuations
   command = ' '.join([
       f'{install_libtpu_cmd}',
@@ -432,6 +433,7 @@ def build_user_command(
       f'{vertex_tensorboard}',
       f'{run_name_command}',
       f'{enable_metrics_cmd}'
+      f'{upload_hlo_dump}'
   ])
   return command
 
