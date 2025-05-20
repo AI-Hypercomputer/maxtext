@@ -331,6 +331,12 @@ def _build_args_from_config(wl_config: WorkloadConfig) -> dict:
 
   # Extract tuning_params arg
   tuning_params_str = json.dumps(wl_config.model.tuning_params)
+
+  num_steps = wl_config.num_steps # default case
+
+  if "steps" in wl_config.model.tuning_params and wl_config.num_steps == -1: # replace num_step for not provided num_steps and configuration exist in tuning_params.
+    num_steps = model.tuning_params["steps"]
+
   return {"metrics_gcs_file": wl_config.metrics_gcs_file,
           "model_id": wl_config.model.model_type,
           "hardware_id": wl_config.hardware_id,
@@ -556,6 +562,7 @@ def generate_xpk_workload_cmd(
     cluster_config: XpkClusterConfig,
     wl_config: WorkloadConfig,
     workload_name=None,
+    exp_name=None,
 ):
   """Generates a command to run a maxtext model on XPK."""
 
@@ -654,7 +661,7 @@ def generate_xpk_workload_cmd(
           f' --max-restarts={wl_config.max_restarts}'
           f' {hlo_dump}'
           # ' --use-vertex-tensorboard'
-          # f' --experiment-name={test_purpose_name}'
+          # f' --experiment-name={exp_name}'
           f' {additional_flags}'
       ),
       name,
@@ -695,12 +702,13 @@ def xpk_benchmark_runner(
     cluster_config: XpkClusterConfig,
     workload_configs: list[WorkloadConfig],
     disruption_manager: DisruptionManager = DisruptionManager(),
+    exp_name: str = None,
 ):
   xpk_workload_names = []
   xpk_workload_cmds = []
   for wl_config in workload_configs:
     command, name = generate_xpk_workload_cmd(
-        cluster_config=cluster_config, wl_config=wl_config
+        cluster_config=cluster_config, wl_config=wl_config, exp_name=exp_name
     )
 
     print(f"Name of the workload is: {name} \n")

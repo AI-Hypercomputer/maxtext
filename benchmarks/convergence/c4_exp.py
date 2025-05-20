@@ -1,6 +1,7 @@
 import dataclasses
-from maxtext_training_configs import DatasetHParams, ConvHParams
-from maxtext_trillium_model_configs import MaxTextModel
+from maxtext_training_configs import DatasetHParams, ConvHParams, _setup_model_convergence_
+from maxtext_trillium_model_configs import MaxTextModel, _add_to_model_dictionary
+from maxtext_v5p_model_configs import v5p_model_dict
 import xla_flags_library
 
 c4_mlperf_hp = DatasetHParams(
@@ -37,23 +38,25 @@ c4_mutil_hp = DatasetHParams(
         add_eos=False)
 
 llama3_405b_hp = ConvHParams(
-    warmup_samples = 8000.0 * 1152 
-    decay_end_samples = 1200000.0 * 1152
-    total_tokens_to_train = 2.64e9
-    training_scaleing_factor = 1.0
-    learning_rate = (8.0e-5 / 1152)
-    eval_samples = 5760 * 8192 
+    global_batch_size = 1152,
+    warmup_samples = 8216000, 
+    decay_end_samples = 1382400000.0,
+    total_tokens_to_train = 2.64e9,
+    training_scaleing_factor = 1.0,
+    learning_rate = 6.944e-8,
+    eval_samples = 47185920,
     eval_interval = 377487360
     )
 
 # [todo] resue 405b convergence benchmark hp for now. not tuned yet
 deepseek_671b_hp = ConvHParams(
-    warmup_samples = 8000.0 * 1152 
-    decay_end_samples = 1200000.0 * 1152
-    total_tokens_to_train = 2.64e9
-    training_scaleing_factor = 1.0
-    learning_rate = (8.0e-5 / 1152)
-    eval_samples = 5760 * 8192 
+    global_batch_size = 1152,
+    warmup_samples = 8216000, 
+    decay_end_samples = 1382400000.0,
+    total_tokens_to_train = 2.64e9,
+    training_scaleing_factor = 1.0,
+    learning_rate = 6.944e-8,
+    eval_samples = 47185920,
     eval_interval = 377487360
     )
 
@@ -117,25 +120,25 @@ def setupLLama405BConvHParams(model: MaxTextModel, params: ConvHParams, num_devi
     model.tuning_params["eval_interval"]= int(math.ceil(377487360 / max_target_length / gbs))
     model.tuning_params["enable_checkpointing"] = True
 
-# Run this for new definitions that should be part of the library.
-c4_deepseek_v3_ep_256_v5p_512_gbs_1024 = _add_to_model_dictionary(
-    v5p_model_dict,
-    _setup_model_convergence_(
-    c4_deepseek_v3_ep_256_v5p_512,
-    c4_en_hp,
-    deepseek_671b_hp,
-    global_batch_size=1024,
-    num_devices=256,
-    )
-)
+# # Run this for new definitions that should be part of the library.
+# c4_deepseek_v3_ep_256_v5p_512_gbs_1024 = _add_to_model_dictionary(
+#     v5p_model_dict,
+#     _setup_model_convergence_(
+#     c4_deepseek_v3_ep_256_v5p_512,
+#     c4_en_hp,
+#     deepseek_671b_hp,
+#     global_batch_size=1024,
+#     num_devices=256,
+#     )
+# )
 
-# Run this for new definitions that should be part of the library.
-c4_deepseek_v3_ep_256_v5p_512_gbs_1024 = _setup_model_convergence_(
-    v5p_model_dict,
-    c4_deepseek_v3_ep_256_v5p_512,
-    c4_en_hp,
-    deepseek_671b_hp,
-    global_batch_size=1024,
-    num_devices=256,
-    )
+# # Run this for new definitions that should be part of the library.
+# c4_deepseek_v3_ep_256_v5p_512_gbs_1024 = _setup_model_convergence_(
+#     v5p_model_dict,
+#     c4_deepseek_v3_ep_256_v5p_512,
+#     c4_en_hp,
+#     deepseek_671b_hp,
+#     global_batch_size=1024,
+#     num_devices=256,
+#     )
 
