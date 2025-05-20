@@ -17,7 +17,7 @@
 
 import os.path
 from benchmarks import xla_flags_library
-from benchmarks.maxtext_trillium_model_configs import MaxTextModel, _add_to_model_dictionary
+from benchmarks.benchmark_utils import MaxTextModel, _add_to_model_dictionary
 
 
 v5p_model_dict = {}
