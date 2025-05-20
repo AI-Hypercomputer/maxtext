@@ -491,7 +491,7 @@ class _HyperParameters:
     keys = [k for k in raw_keys]  # pylint: disable=unnecessary-comprehension
     keys.sort()
 
-    if raw_keys["log_config"] and False:
+    if raw_keys["log_config"]:
       for k in keys:
         if k != "hf_access_token":
           max_logging.log(f"Config param {k}: {raw_keys[k]}")
