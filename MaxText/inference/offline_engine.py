@@ -711,13 +711,13 @@ class ReplicaWorker:
 
         already_reached_eos = (
             current_length > 0
-            and self.res[prompt_id][-1].token == self.tokenizer.eos_id
+            and self.res[prompt_id][-1].token in self.eos_ids
         )
 
         if is_valid and not already_reached_eos:
             self.res[prompt_id].append(TokenOutput(token, log_prob))
 
-        return (token == self.tokenizer.eos_id) or (current_length+1 == self.max_decode_length)
+        return (token in self.eos_ids) or (current_length+1 == self.max_decode_length)
 
     def prefill_done(self, prefill_result, prompt_ids, decode_state):
         """Callback function called when prefill completes.
@@ -963,7 +963,7 @@ class OfflineEngine:
         self,
         data: Union[List[InputData], List[jax.Array], List[np.ndarray]],
         desc: str = "",
-    ) -> Dict[str, List[int]]:
+    ) -> List[CompletionOutput]:
         """Run inference on a batch of inputs.
 
         Args:
@@ -1069,6 +1069,10 @@ class OfflineEngine:
                 InputData(id=i, tokens=array, true_length=len(array))
                 for i, array in enumerate(data)
             ]
+        
+        # Make sure all data id is unique 
+        if len(data) != len(set([item.id for item in data])):
+            raise ValueError("All data ids must be unique")
 
         data = self.pad_data(data)
 
