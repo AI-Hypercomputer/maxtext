@@ -313,7 +313,9 @@ class Decoder(nn.Module):
 
           def map_fn(path, value):
             max_logging.log(f"models.py: Moving parameter {path} to device")
-            return jax.device_put(value, jax._src.sharding_impls.TransferToMemoryKind("device"))
+            return jax.device_put(
+                value, jax._src.sharding_impls.TransferToMemoryKind("device")  # pylint: disable=protected-access
+            )
 
           return jax.tree_util.tree_map_with_path(map_fn, variables)
 
@@ -536,7 +538,7 @@ class Decoder(nn.Module):
     else:
       if cfg.scan_layers:
         if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-          assert len(RemattedBlockLayers) == 2, f"Scanned layers must have a length of 2 using deepseek."
+          assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
           dense_layer = RemattedBlockLayers[0]
           moe_layer = RemattedBlockLayers[1]
           y, _ = self.scan_decoder_layers(cfg, dense_layer, cfg.first_num_dense_layers, "dense_layers", mesh)(
@@ -576,7 +578,7 @@ class Decoder(nn.Module):
           )
       else:
         if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-          assert len(RemattedBlockLayers) == 2, f"Unscanned layers must have a length of 2 using deepseek."
+          assert len(RemattedBlockLayers) == 2, "Unscanned layers must have a length of 2 using deepseek."
           dense_layer = RemattedBlockLayers[0]
           moe_layer = RemattedBlockLayers[1]
 

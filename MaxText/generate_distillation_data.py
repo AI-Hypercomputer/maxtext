@@ -225,7 +225,7 @@ def upload_data(config, data, batch_num):  # pylint: disable=redefined-outer-nam
   if config.remove_local_dataset_files and os.path.exists(parquet_file_name):
     try:
       os.remove(parquet_file_name)
-    except Exception as e:
+    except OSError as e:
       max_logging.log(f"Unable to remove local dataset file {parquet_file_name}: {e}")
 
 

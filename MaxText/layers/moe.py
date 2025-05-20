@@ -547,6 +547,7 @@ class RoutedMoE(nn.Module):
       layer_w0 = checkpoint_name(layer_w0, "mlpwi_0")
       layer_w1 = gmm(x, w1, group_sizes)
       layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
+      # pylint: disable=protected-access
       layer_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       intermediate_layer = jnp.multiply(layer_act, layer_w1)
       intermediate_output = gmm(intermediate_layer, wo, group_sizes)
@@ -881,6 +882,7 @@ class RoutedMoE(nn.Module):
             mlp_axis,
         )
         layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
+      # pylint: disable=protected-access
       layer_w0_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
       with jax.named_scope("wo"):
@@ -924,6 +926,7 @@ class RoutedMoE(nn.Module):
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
         layer_w1 = checkpoint_name(layer_w1, "mlpwi_1")
+      # pylint: disable=protected-access
       layer_w0_act = linears._convert_to_activation_function(self.config.mlp_activations[0])(layer_w0)
       layer_multiply = jnp.multiply(layer_w0_act, layer_w1).astype(self.dtype)
       with jax.named_scope("wo"):

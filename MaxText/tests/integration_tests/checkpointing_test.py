@@ -34,8 +34,8 @@ def run_checkpointing(attention_type):
       "bash",
       script_path,
       f"runner_{run_date}",  # run_name
-      r"gs://runner-maxtext-logs",  # output_path
-      r"gs://maxtext-dataset",  # dataset_path
+      "gs://runner-maxtext-logs",  # output_path
+      "gs://maxtext-dataset",  # dataset_path
       "False",  # collect_stack_trace
       "grain",  # dataset_type
       attention_type,
