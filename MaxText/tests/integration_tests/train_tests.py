@@ -327,6 +327,7 @@ class TrainTests(unittest.TestCase):
         r"dataset_path=gs://maxtext-dataset",
         "steps=2",
         "enable_checkpointing=False",
+        "enable_goodput_recording=False",
         "attention=cudnn_flash_jax",
         "packing=False",
         rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
