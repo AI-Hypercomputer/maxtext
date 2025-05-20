@@ -348,13 +348,17 @@ class RoutedMoeTest(unittest.TestCase):
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
-        per_device_batch_size=4,
+        per_device_batch_size=1,
+        max_target_length=5,
     )
 
     rng = jax.random.PRNGKey(1234)
     rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
     hidden_states = jax.random.uniform(
-        rng_hidden_states, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
+        rng_hidden_states,
+        (int(cfg.per_device_batch_size * device_count), cfg.max_target_length, cfg.base_emb_dim),
+        dtype=cfg.dtype,
     )
 
     devices_array = maxtext_utils.create_device_mesh(cfg)
@@ -373,13 +377,16 @@ class RoutedMoeTest(unittest.TestCase):
         dtype="bfloat16",
         megablox=False,
         sparse_matmul=True,
-        per_device_batch_size=4,
+        per_device_batch_size=1,
     )
 
     rng = jax.random.PRNGKey(1234)
     rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
     hidden_states = jax.random.uniform(
-        rng_hidden_states, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
+        rng_hidden_states,
+        (int(cfg.per_device_batch_size * device_count), cfg.max_target_length, cfg.base_emb_dim),
+        dtype=cfg.dtype,
     )
 
     devices_array = maxtext_utils.create_device_mesh(cfg)
@@ -398,13 +405,16 @@ class RoutedMoeTest(unittest.TestCase):
         dtype="float32",
         megablox=False,
         sparse_matmul=False,
-        per_device_batch_size=4,
+        per_device_batch_size=1,
     )
 
     rng = jax.random.PRNGKey(2345)
     rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
     hidden_states = jax.random.uniform(
-        rng_hidden_states, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
+        rng_hidden_states,
+        (int(cfg.per_device_batch_size * device_count), cfg.max_target_length, cfg.base_emb_dim),
+        dtype=cfg.dtype,
     )
 
     devices_array = maxtext_utils.create_device_mesh(cfg)
@@ -423,21 +433,25 @@ class RoutedMoeTest(unittest.TestCase):
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
-        per_device_batch_size=4,
+        per_device_batch_size=1,
         ici_expert_parallelism=4,
         max_target_length=5,
     )
 
     rng = jax.random.PRNGKey(2345)
     rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
     hidden_states = jax.random.uniform(
-        rng_hidden_states, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
+        rng_hidden_states,
+        (int(cfg.per_device_batch_size * device_count), cfg.max_target_length, cfg.base_emb_dim),
+        dtype=cfg.dtype,
     )
 
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
     with nn_partitioning.axis_rules(cfg.logical_axis_rules):
       variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
+      print(f"expected_output: {expected_output}")
       actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
       print(f"actual_output: {actual_output}")
       self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
@@ -460,6 +474,21 @@ class RoutedMoeTest(unittest.TestCase):
     upper_bound = expected_count + expected_count * tol
     is_with_tolerance = (counts >= lower_bound) & (counts <= upper_bound)
     self.assertTrue(is_with_tolerance.all())
+
+  def test_apply_grouped_subtraction(self):
+    inputs = jnp.array([0, 3, 0, 0, 2, 4, 1, 0])
+    subtraction_value_per_group = 2
+    elements_per_group = 2
+
+    actual_remaining_result, actual_process_result = moe.apply_grouped_subtraction(
+        inputs, subtraction_value_per_group, elements_per_group
+    )
+
+    expected_remaining = jnp.array([0, 1, 0, 0, 0, 4, 0, 0])
+    expected_processing = jnp.array([0, 2, 0, 0, 2, 0, 1, 0])
+
+    assert jnp.array_equal(actual_remaining_result, expected_remaining)
+    assert jnp.array_equal(actual_process_result, expected_processing)
 
 
 if __name__ == "__main__":
