@@ -19,6 +19,7 @@ import dataclasses
 import os.path
 import typing
 from tempfile import gettempdir
+from benchmarks.benchmark_utils import MaxTextModel, _add_to_model_dictionary
 from benchmarks import xla_flags_library
 
 # TODO(vbarr@) Abstract software features like checkpointing,
@@ -54,31 +55,9 @@ PATHWAYS_SHORT_RUN_CHECKPOINTING_TUNING_PARAMS = {
 }
 
 
-@dataclasses.dataclass
-class MaxTextModel:
-  model_name: str
-  model_type: str
-  tuning_params: dict[str, typing.Any]
-  xla_flags: str
-
-  # Additional pathways tuning params as necessary. Adding
-  # enable_single_controller=True to pathways_tuning_params is not necessary.
-  pathways_tuning_params: dict[str, typing.Any] = None
-
-  # XLA flags for pathways, if different from the default. Some flags may not
-  # be supported by pathways e.g. "--2a886c8_chip_config_name".
-  pathways_xla_flag_options: dict[str, typing.Any] = None
-
 
 trillium_model_dict = {}
 
-
-# Run this for new definitions that should be part of the library.
-def _add_to_model_dictionary(
-    model_dictionary: dict[str, MaxTextModel], maxtext_model: MaxTextModel
-) -> MaxTextModel:
-  model_dictionary[maxtext_model.model_name.replace("-", "_")] = maxtext_model
-  return maxtext_model
 
 
 default_basic_1 = _add_to_model_dictionary(
