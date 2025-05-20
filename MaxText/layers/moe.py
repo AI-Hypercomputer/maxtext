@@ -389,13 +389,16 @@ class RoutedMoE(nn.Module):
       all_shard_local_sizes = jax.lax.dynamic_slice_in_dim(
           global_group_sizes, local_id * local_expert_size, local_expert_size, axis=1
       )
+      jax.debug.print("local_permute local_id={id}, all_shard_local_sizes={x}", id=local_id, x=all_shard_local_sizes)
       local_sizes = all_shard_local_sizes.reshape(-1)
+      jax.debug.print("local_permute local_id={id}, local_sizes={x}", id=local_id, x=local_sizes)
       base_indices = jnp.mod(jnp.arange(local_sizes.shape[0]), local_expert_size)
       expert_indices = jnp.repeat(base_indices, local_sizes, total_repeat_length=inputs.shape[0])
       sorted_indices = jnp.argsort(expert_indices)
       sorted_inputs = jnp.take(inputs, indices=sorted_indices, axis=0)
       # group_size: 1D array with size of local_expert_size
       group_size = jnp.sum(all_shard_local_sizes, axis=0)
+      jax.debug.print("local_permute local_id={id}, group_size={x}", id=local_id, x=group_size)
       return sorted_inputs, sorted_indices, group_size
 
     def gmm(inputs, kernel, group_sizes):
@@ -508,18 +511,32 @@ class RoutedMoE(nn.Module):
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo):
       batch_size, sequence_length, _ = x.shape
+      axis_name = "expert"
+      expert_shard_id = jax.lax.axis_index(axis_name)
+      jax.debug.print("shard_id={id}, inputs={x}", id=expert_shard_id, x=x)
       x, sorted_selected_experts, weights, group_sizes = self.permute(x, logits, pre_bias_logits)
+      jax.debug.print("after permute shard_id={id}, inputs={x}", id=expert_shard_id, x=x)
+      jax.debug.print("after permute shard_id={id}, sorted_selected_experts={x}", id=expert_shard_id, x=sorted_selected_experts)
+      jax.debug.print("after permute shard_id={id}, group_sizes={x}", id=expert_shard_id, x=group_sizes)
 
       if self.get_expert_parallelism_size() > 1:
         axis_name = "expert"
+        expert_shard_id = jax.lax.axis_index(axis_name)
         # get group sizes for all shards
         local_expert_size = self.config.num_experts // self.get_expert_parallelism_size()
+        jax.debug.print("shard_id={id}, local_expert_size={x}", id=expert_shard_id, x=local_expert_size)
         reshaped_group_sizes = jnp.sum(group_sizes.reshape(-1, local_expert_size), axis=1)
+        jax.debug.print("shard_id={id}, reshaped_group_sizes={x}", id=expert_shard_id, x=reshaped_group_sizes)
         all_shards_group_sizes = lax.all_gather(reshaped_group_sizes, axis_name=axis_name)
+        jax.debug.print("shard_id={id}, all_shards_group_sizes={x}", id=expert_shard_id, x=all_shards_group_sizes)
         # calculate offsets and sizes for ragged_all_to_all operation
         input_offsets, send_sizes, output_offsets, recv_sizes = get_all_to_all_params(
             all_shards_group_sizes, local_expert_size, self.get_expert_parallelism_size()
         )
+        jax.debug.print("shard_id={id}, input_offsets={x}", id=expert_shard_id, x=input_offsets)
+        jax.debug.print("shard_id={id}, send_sizes={x}", id=expert_shard_id, x=send_sizes)
+        jax.debug.print("shard_id={id}, output_offsets={x}", id=expert_shard_id, x=output_offsets)
+        jax.debug.print("shard_id={id}, recv_sizes={x}", id=expert_shard_id, x=recv_sizes)
         # TODO(ranran): For better performance, we could update output buffer to a smaller
         # size to replace self.get_expert_parallelism_size() for efficiency,
         # Or we could apply capacity_factor for excessive experts.
@@ -530,6 +547,7 @@ class RoutedMoE(nn.Module):
             * self.config.max_target_length
             * self.config.num_experts_per_tok
         )
+        jax.debug.print("shard_id={id}, buffer_size={x}", id=expert_shard_id, x=buffer_size)
         output_shape = jnp.zeros((buffer_size, self.config.emb_dim), dtype=x.dtype)
         x = jax.lax.ragged_all_to_all(
             x,
@@ -540,7 +558,9 @@ class RoutedMoE(nn.Module):
             recv_sizes,
             axis_name=axis_name,
         )
+        jax.debug.print("shard_id={id}, after all-to-all x={x}", id=expert_shard_id, x=x)
         global_group_sizes = lax.all_gather(group_sizes, axis_name=axis_name)
+        jax.debug.print("shard_id={id}, global_group_sizes={x}", id=expert_shard_id, x=global_group_sizes)
         x, local_sorted_indices, group_sizes = local_permute(x, global_group_sizes, local_expert_size)
 
       layer_w0 = gmm(x, w0, group_sizes)

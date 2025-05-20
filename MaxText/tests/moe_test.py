@@ -425,6 +425,7 @@ class RoutedMoeTest(unittest.TestCase):
         sparse_matmul=True,
         per_device_batch_size=4,
         ici_expert_parallelism=4,
+        max_target_length=5,
     )
 
     rng = jax.random.PRNGKey(2345)
@@ -438,6 +439,7 @@ class RoutedMoeTest(unittest.TestCase):
     with nn_partitioning.axis_rules(cfg.logical_axis_rules):
       variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
       actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
+      print(f"actual_output: {actual_output}")
       self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
 
   def test_random_routing(self):
