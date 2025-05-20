@@ -73,18 +73,18 @@ class JetThread(threading.Thread):
 class PrefillHelper:
   """Helper class to manage prefill related code and provide a unified interface."""
 
-  def __init__(self, type: str, engine: MaxEngine):
-    self._type = type
+  def __init__(self, kind: str, engine: MaxEngine):
+    self._type = kind
     self.engine = engine
-    if type == "default":
+    if self._type == "default":
       self._processor = PrefillProcessor(engine)
-    elif type == "batch":
+    elif self._type == "batch":
       self._batch_processor = BatchedPrefillProcessor(engine=engine, max_batch_size=16)
       self._processor = PrefillProcessor(engine)  # for fallback
-    elif type == "dummy":
+    elif self._type == "dummy":
       pass
     else:
-      raise ValueError(f"Invalid type: {type}")
+      raise ValueError(f"Invalid type: {self._type}")
 
   def aot_compile(
       self,

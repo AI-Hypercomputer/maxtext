@@ -162,6 +162,7 @@ class GRPOTest(unittest.TestCase):
         # using the same model as the ref model,
         # which is equivalent of step 0 of GRPO training when
         # the on-policy params are the same as the ref model
+        # pylint: disable=protected-access
         "ref_per_token_logps": self.trainer._get_per_token_logps(
             self.hf_model, hf_input_ids, attention_mask, logits_to_keep
         ),  # pylint: disable=protected-access
@@ -170,7 +171,7 @@ class GRPOTest(unittest.TestCase):
     }
     hf_loss = self.trainer.compute_loss(self.hf_model, inputs)
 
-    hf_per_token_logps = self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep)  # pylint: disable=protected-access
+    self.trainer._get_per_token_logps(self.hf_model, hf_input_ids, attention_mask, logits_to_keep)  # pylint: disable=protected-access
 
     input_ids, input_segmentation, input_position, completion_segmentation = prepare_maxtext_inputs(
         self.cfg.prompt, self.tokenizer_model
@@ -199,6 +200,7 @@ class GRPOTest(unittest.TestCase):
         "ar_completions_segmentation": completion_segmentation,
     }
     maxtext_loss, aux = grpo_loss_fn(self.model, self.cfg, data, self.rng, self.state.params, reference_params)
+    # pylint: disable=protected-access
     self.assertEqual(self.trainer._metrics["train"]["kl"][0], aux.avg_kl.tolist())
     self.assertEqual(hf_loss.item(), maxtext_loss.tolist())
     # since this is on-policy

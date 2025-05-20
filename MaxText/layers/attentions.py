@@ -110,7 +110,7 @@ def apply_mask_to_logits(logits: Array, mask: Array):
 
 
 # TODO(agagik): change splash_attention_mask._ComputableMask to be non protected
-class ChunkedCausalMask(splash_attention_mask._ComputableMask):
+class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access
   """Lazy chunked causal mask.
 
   Attention is causal within each chunk (0, K), (K, 2K), (2K, 3K), ... tokens attend to each other but not accross chunks.
@@ -633,6 +633,9 @@ class AttentionOp(nn.Module):
     axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
     axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
 
+    global global_block_q, global_block_kv, global_block_kv_compute, global_block_q_dkv, global_block_kv_dkv
+    global global_block_kv_dkv_compute, global_block_q_dq, global_block_kv_dq, global_use_fused_bwd_kernel
+    global global_q_layout, global_k_layout, global_v_layout
     global_block_q = self.config.sa_block_q
     global_block_kv = self.config.sa_block_kv
     global_block_kv_compute = self.config.sa_block_kv_compute
@@ -1078,15 +1081,16 @@ class AttentionOp(nn.Module):
       value,
       decoder_segment_ids,
       model_mode,
-      cached_values=[None, None],
+      cached_values=None,
       previous_chunk=None,
       bidirectional_mask=None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
   ):
-
-    prefill_kv_cache = cached_values[0]
-    ar_kv_cache = cached_values[1]
+    if cached_values is None:
+      prefill_kv_cache, ar_kv_cache = None, None
+    else:
+      prefill_kv_cache, ar_kv_cache = cached_values[0], cached_values[1]
     if model_mode != MODEL_MODE_TRAIN:
       assert prefill_kv_cache
       key, value, decoder_segment_ids = prefill_kv_cache
@@ -1841,6 +1845,7 @@ class MLA(Attention):
     return out
 
 
+# pylint: disable=protected-access
 class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
   """Lazy causal mask, prevents the model from attending to future tokens.
   Attributes:
