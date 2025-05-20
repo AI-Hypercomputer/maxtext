@@ -676,7 +676,7 @@ class ReplicaWorker:
         self.prefill_helper.finalize(self.params, self.decode_state, self.prefill_done)
 
         # 5. Continue decoding until all sequences are complete
-        while self.slot_to_id:
+        while any(self.slot_to_id.values()):
             self.decode()
 
         # Wait for detokenization to complete
@@ -796,6 +796,8 @@ class ReplicaWorker:
                     newly_empty.append(slot)
             else:
                 for slot, id_ in self.slot_to_id.items():
+                    if id_ is None:
+                        continue
                     should_terminate = self.emit_token(id_, result_tokens, log_prob[slot], slot=slot)
                     if should_terminate:
                         newly_empty.append(slot)
@@ -803,7 +805,7 @@ class ReplicaWorker:
             # Update decode slots
             for slot in newly_empty:
                 self.counter.detokenize += 1
-                del self.slot_to_id[slot]
+                self.slot_to_id[slot] = None
                 self.empty_decode_slots.append(slot)
 
 
@@ -831,7 +833,7 @@ class OfflineEngine:
 
         Args:
             config: The MaxText config object which will be used to
-              create MaxEngine instance(s) and potentially, the tokenizer.
+              create MaxEngine instance(s).
             params: Model parameters (loaded from engine if None)
             enable_batch_prefill: Whether to use prefill packing.
                 config.scan_layers must be False if this is True
@@ -840,7 +842,7 @@ class OfflineEngine:
             eos_ids: List of EOS token IDs for checking sequence completion.
               If None, the tokenizer's EOS token will be used.
             tokenizer: Tokenizer instance for encoding/decoding text. If None,
-              will be created using the config.
+              will be created using the config if eos_ids is not provided.
             prefill_lengths: List of expected prefill lengths, or "auto" to
                 automatically determine appropriate lengths from the engine
                 config. Input sequences will be padded to the nearest length
@@ -850,7 +852,7 @@ class OfflineEngine:
               is True.
             warm_up: Whether to precompile prefill and decode functions for
               each length in the prefill_lengths list during initialization.
-              Alternatively compilation will be done during runtime, or by
+              Alternatively compilation will be done during runtime, or through
               directly calling the warm_up() function.
             dp: Data parallelism, number of replicas of the model to run. This
               helps to increase throughput by running multiple inference replicas
@@ -942,6 +944,7 @@ class OfflineEngine:
         for i in range(self.dp):
             self.replica_workers[i].ensure_init_finished()
         print(f"Created {self.dp} replica workers")
+        
         self.tokenizer = self.replica_workers[0].tokenizer
         if self.should_warm_up:
             self.warm_up()
