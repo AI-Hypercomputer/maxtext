@@ -1076,11 +1076,9 @@ def train_loop(config, config_inference, state=None):
       example_batches = filter_and_split(config_inference, example_batch, config.inference_replicas, int(config_inference.per_device_batch_size * inference_meshes[0].devices.size))
 
       rng = jax.jit(jax.random.fold_in)(init_rng, step)
-      if len(example_batches) > 0:
-        generation_rngs = random.split(rng, len(example_batches))
-
+      
       inference_threads = []
-      def _inference_worker(example_batch, inference_data_sharding, inf_param_slice, p_generate, inference_mesh, gen_rng, leader_inference_mesh, data_buf):
+      def _inference_worker(example_batch, inference_data_sharding, inference_param, p_generate, inference_mesh, leader_inference_mesh, data_buf):
         """Worker function for parallel inference."""
         check_example_batch(config, example_batch=example_batch)
         # Put input data onto the specific inference mesh
@@ -1088,24 +1086,28 @@ def train_loop(config, config_inference, state=None):
         
         # Run generation on the inference mesh
         with inference_mesh, nn_partitioning.axis_rules(config_inference.logical_axis_rules):
-            example_batch = p_generate(example_batch, inf_param_slice, gen_rng)
+            example_batch = p_generate(example_batch, inference_param, rng)
         
         # Put result data onto the main training mesh (replicated) and push to buffer
         data_to_push = jax.device_put(example_batch, jax.sharding.NamedSharding(leader_inference_mesh, P(None)))
         data_buf.push(data_to_push)
 
       leader_inference_mesh = inference_meshes[0]
+      # leader_inference_mesh = mesh
       for example_batch, inference_data_sharding, inference_param, p_generate, inference_mesh in zip(example_batches, inference_data_shardings, inference_params, p_generate_completions, inference_meshes):
-        current_gen_rng = generation_rngs[i]
-        thread = threading.Thread(
-            target=_inference_worker,
-            args=(example_batch, inference_data_sharding, inference_param, p_generate, inference_mesh, current_gen_rng, leader_inference_mesh, data_buffer)
-        )
-        inference_threads.append(thread)
-        thread.start()
+        with inference_mesh, nn_partitioning.axis_rules(config_inference.logical_axis_rules):
+          example_batch = p_generate(example_batch, inference_param, rng)
+        data_to_push = jax.device_put(example_batch, jax.sharding.NamedSharding(leader_inference_mesh, P(None)))
+        data_buffer.push(data_to_push)
+      #   thread = threading.Thread(
+      #       target=_inference_worker,
+      #       args=(example_batch, inference_data_sharding, inference_param, p_generate, inference_mesh, leader_inference_mesh, data_buffer)
+      #   )
+      #   inference_threads.append(thread)
+      #   thread.start()
 
-      for thread in inference_threads:
-        thread.join()
+      # for thread in inference_threads:
+      #   thread.join()
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       training_batch = data_buffer.pull(desired_batch_size=config.inference_replicas)
