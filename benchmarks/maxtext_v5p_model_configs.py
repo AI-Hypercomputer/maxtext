@@ -1,18 +1,19 @@
 """
- Copyright 2025 Google LLC
+Copyright 2025 Google LLC
 
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-      https://www.apache.org/licenses/LICENSE-2.0
+     https://www.apache.org/licenses/LICENSE-2.0
 
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- """
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+"""
+
 """Shared Benchmark config for v6e orchestrations."""
 
 import os.path
@@ -22,7 +23,7 @@ from benchmarks.benchmark_utils import MaxTextModel, _add_to_model_dictionary
 
 v5p_model_dict = {}
 
-deepseek_v3_ep_256_v5p_512  = _add_to_model_dictionary(
+deepseek_v3_ep_256_v5p_512 = _add_to_model_dictionary(
     v5p_model_dict,
     MaxTextModel(
         model_name="deepseek_v3_ep_256_v5p_512",
@@ -63,7 +64,7 @@ deepseek_v3_ep_256_v5p_512  = _add_to_model_dictionary(
     ),
 )
 
-llama4_scout_dropless_v5p_256  = _add_to_model_dictionary(
+llama4_scout_dropless_v5p_256 = _add_to_model_dictionary(
     v5p_model_dict,
     MaxTextModel(
         model_name="llama4_scout_dropless_v5p_256",
@@ -105,7 +106,7 @@ llama4_scout_dropless_v5p_256  = _add_to_model_dictionary(
     ),
 )
 
-llama4_maverick_dropless_v5p_256  = _add_to_model_dictionary(
+llama4_maverick_dropless_v5p_256 = _add_to_model_dictionary(
     v5p_model_dict,
     MaxTextModel(
         model_name="llama4_maverick_dropless_v5p_256",
@@ -148,6 +149,105 @@ llama4_maverick_dropless_v5p_256  = _add_to_model_dictionary(
             + xla_flags_library.DATA_PARALLEL_OVERLAP
             + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
             + xla_flags_library.HOST_OFFLOAD_FLAGS
+        ),
+    ),
+)
+
+llama2_70b_v5p_128 = _add_to_model_dictionary(
+    v5p_model_dict,
+    MaxTextModel(
+        model_name="llama2_70b_v5p_128",
+        model_type="llama2-70b",
+        tuning_params={
+            "ici_fsdp_parallelism": -1,
+            "per_device_batch_size": 4,
+            "remat_policy": "save_dot_except_mlpwi",
+            "max_target_length": 4096,
+            "use_iota_embed": True,
+            "dataset_path": "gs://max-datasets-rogue",
+            "dataset_type": "synthetic",
+            "reuse_example_batch": 1,
+            "enable_checkpointing": False,
+            "profiler": "xplane",
+        },
+        xla_flags=(
+            xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
+        ),
+    ),
+)
+
+llama2_7b_v5p_128 = _add_to_model_dictionary(
+    v5p_model_dict,
+    MaxTextModel(
+        model_name="llama2_7b_v5p_128",
+        model_type="llama2-7b",
+        tuning_params={
+            "ici_fsdp_parallelism": -1,
+            "per_device_batch_size": 4,
+            "remat_policy": "minimal",
+            "max_target_length": 4096,
+            "use_iota_embed": True,
+            "tokenizer_path": os.path.join("assets", "tokenizer.llama2"),
+            "dataset_path": "gs://max-datasets-rogue",
+            "dataset_type": "synthetic",
+            "reuse_example_batch": 1,
+            "enable_checkpointing": False,
+            "profiler": "xplane",
+        },
+        xla_flags=(
+            xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
+        ),
+    ),
+)
+
+gpt_3_175b_v5p_128 = _add_to_model_dictionary(
+    v5p_model_dict,
+    MaxTextModel(
+        model_name="gpt_3_175b_v5p_128",
+        model_type="gpt3-175b",
+        tuning_params={
+            "ici_fsdp_parallelism": -1,
+            "ici_tensor_parallelism": 2,
+            "per_device_batch_size": 0.5,
+            "allow_split_physical_axes": True,
+            "remat_policy": "save_dot_with_context_except_mlp",
+            "max_target_length": 4096,
+            "attention": "flash",
+            "dataset_type": "synthetic",
+            "reuse_example_batch": 1,
+            "enable_checkpointing": False,
+            "profiler": "xplane",
+        },
+        xla_flags=(
+            xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
+        ),
+    ),
+)
+
+gpt_3_175b_v5p_128_sc = _add_to_model_dictionary(
+    v5p_model_dict,
+    MaxTextModel(
+        model_name="gpt_3_175b_v5p_128_sc",
+        model_type="gpt3-175b",
+        tuning_params={
+            "ici_fsdp_parallelism": -1,
+            "ici_tensor_parallelism": 2,
+            "per_device_batch_size": 0.5,
+            "allow_split_physical_axes": True,
+            "remat_policy": "save_dot_with_context_except_mlp",
+            "max_target_length": 4096,
+            "attention": "flash",
+            "dataset_type": "synthetic",
+            "reuse_example_batch": 1,
+            "enable_checkpointing": False,
+            "profiler": "xplane",
+        },
+        xla_flags=(
+            xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_GATHER
         ),
     ),
 )
