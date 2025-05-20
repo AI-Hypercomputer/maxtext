@@ -632,7 +632,7 @@ class ReplicaWorker:
         Returns:
             Dictionary mapping input ids to output token sequences
         """
-        print("Starting inference")
+        print(f"Starting inference on worker {self.worker_id}")
         # Reset state
         self.counter = EventCounter(input=0, prefill=0, decode=0, detokenize=0)
         self.empty_decode_slots = list(range(self.decode_batch_size))
@@ -688,8 +688,9 @@ class ReplicaWorker:
 
         # Log completion statistics
         log.info(
-            "Summary %s: prefills=%d, decodes=%d, detokens=%d completed.",
+            "Summary %s: worker=%d, prefills=%d, decodes=%d, detokens=%d completed.",
             desc,
+            self.worker_id,
             self.counter.prefill,
             self.counter.decode,
             self.counter.detokenize,
@@ -760,7 +761,7 @@ class ReplicaWorker:
             log_prob = inference_utils.log_prob_of_chosen_token(self.decode_state["logits"], self.decode_state["tokens"])
             log_prob.block_until_ready()
             end_time = time.time()
-            print(f"time taken to run generate_fn: {end_time - start_time} seconds")
+            # print(f"time taken to run generate_fn: {end_time - start_time} seconds")
             buffer.append((result_tokens, log_prob))
             
         
