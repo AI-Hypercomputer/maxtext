@@ -24,117 +24,187 @@ from MaxText.globals import PKG_DIR
 import jax
 import jax.numpy as jnp
 from MaxText.maxengine import MaxEngine
-from MaxText.inference.offline_engine import OfflineEngine, InputData
+from MaxText.inference.offline_engine import OfflineEngine, InputData, CompletionOutput
 from MaxText import pyconfig
 import random
 import time
 
-
+if os.getenv('ON_PATHWAYS', 0) == 1 or True:
+  print("Initializing Pathways")
+  import pathwaysutils
+  pathwaysutils.initialize()
+  
 class OfflineEngineTest(unittest.TestCase):
   """Tests for JetStream Offline Engine.
-  Run with: pytest MaxText/tests/offline_engine_test.py -s
+  Run on Pathways with: ON_PATHWAYS=1 pytest MaxText/tests/offline_engine_test.py
+  Run in McJAX mode with: pytest MaxText/tests/offline_engine_test.py
   """
 
   def setUp(self):
     super().setUp()
-    self.cfg = self.init_pyconfig()
     self.rng = jax.random.PRNGKey(0)
 
+
   def init_pyconfig(self, **kwargs):
-    init_kwargs = {
-        "per_device_batch_size": 4,
-        "ici_data_parallelism": 1,
-        "ici_fsdp_parallelism": 1,
-        "ici_tensor_parallelism": -1,  # Use TP
-        "run_name": "test",
-        "enable_checkpointing": False,
-        "attention": "dot_product",
-        "max_prefill_predict_length": 512,
-        "max_target_length": 600,
-        "base_emb_dim": 512,
-        "base_num_query_heads": 8,
-        "base_num_kv_heads": 8,
-        "base_num_decoder_layers": 2,
-    } | kwargs
-    config = pyconfig.initialize(
-        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
-        **init_kwargs,
+      init_kwargs = {
+          "run_name": "test",
+          # Parallelism
+          "per_device_batch_size": 1,
+          "ici_data_parallelism": 1,
+          "ici_fsdp_parallelism": 1,
+          "ici_tensor_parallelism": -1,  # Use TP
+          # Inference
+          "max_prefill_predict_length": 1024,
+          "max_target_length": 1030,
+          # Model
+          "attention": "dot_product",
+          "base_emb_dim": 512,
+          "base_num_query_heads": 32,
+          "base_num_kv_heads": 32,
+          "base_num_decoder_layers": 2,
+          "scan_layers": False,
+          # Quantization
+          "quantization": "int8",
+          "quant_cfg_path": "",
+          "quantize_kvcache": True,
+          "kv_quant_dtype": "int4",
+          "checkpoint_is_quantized": True,
+      } | kwargs
+      config = pyconfig.initialize(
+          [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+          **init_kwargs,
+      )
+      return config
+
+
+  @unittest.skipIf(int(os.getenv('ON_PATHWAYS', 0)) == 0, "Skip if not on Pathways")
+  def test_single_replica_on_pathways(self):
+    
+    config = self.init_pyconfig()
+    inference_engine = OfflineEngine(
+        config = config,
+        params=None,
+        enable_batch_prefill=False,
+        auto_layout_supported=False,
+        dp=1,
+        warm_up=False,
+        rng=self.rng
     )
-    return config
 
-  def test_batch_prefill(self):
+    input_lengths = [20, 40, 50]
+    input_data = [InputData(id="input_1", tokens=jnp.array([3] * length), true_length=length) for length in input_lengths]
+    results = inference_engine.batch_inference(input_data)
 
-    config = self.init_pyconfig(scan_layers=False)
-    engine = MaxEngine(config, jax.devices())
-    inference_engine = OfflineEngine(engine=engine, params=None, enable_batch_prefill=True)
+    assert isinstance(results, list)
+    assert len(results) == len(input_lengths)
+    for result, length in zip(results, input_lengths):
+      assert isinstance(result, CompletionOutput)
+      assert isinstance(result.token_ids, jnp.ndarray)
+      assert result.token_ids.shape == (length,)
+      assert isinstance(result.logprobs, jnp.ndarray)
+      assert result.logprobs.shape == (length,)
+      result_tokens = result.token_ids
+      print(f"Tokens: {result_tokens[:5]}...")  # Print first few logprobs
 
-    random.seed(42)
-    input_data = [jax.numpy.arange(random.randint(1, config.max_prefill_predict_length)) for _ in range(20)]
 
-    # Run inference
+  @unittest.skipIf(int(os.getenv('ON_PATHWAYS', 0)) == 0, "Skip if not on Pathways")
+  def test_multi_replica_on_pathways(self):
+    
+    config = self.init_pyconfig(skip_jax_distributed_system=True)
+    inference_engine = OfflineEngine(
+        config = config,
+        params=None,
+        enable_batch_prefill=False,
+        auto_layout_supported=False,
+        dp=4,
+        warmup=False,
+        rng=self.rng
+    )
+
+    input_lengths = list(range(10, 1000, 100))
+    input_data = [InputData(id="input_1", tokens=jnp.array([3] * length), true_length=length) for length in input_lengths]
+    results = inference_engine.batch_inference(input_data)
+
+    assert isinstance(results, list)
+    assert len(results) == len(input_lengths)
+    for result, length in zip(results, input_lengths):
+      assert isinstance(result, CompletionOutput)
+      assert isinstance(result.token_ids, jnp.ndarray)
+      assert result.token_ids.shape == (length,)
+      assert isinstance(result.logprobs, jnp.ndarray)
+      assert result.logprobs.shape == (length,)
+      result_tokens = result.token_ids
+      print(f"Tokens: {result_tokens[:5]}...")  # Print first few logprobs
+
+
+  @unittest.skipIf(int(os.getenv('ON_PATHWAYS', 0)) == 0, "Skip if not on Pathways")
+  def test_multi_sampling(self):
+    
+    config = self.init_pyconfig(skip_jax_distributed_system=True)
+    inference_engine = OfflineEngine(
+        config = config,
+        params=None,
+        enable_batch_prefill=False,
+        auto_layout_supported=False,
+        dp=4,
+        warm_up=False,
+        rng=self.rng
+    )
+
+    input_data = [InputData(id=f"input_{i}", tokens=jnp.array([3] * 1024), true_length=1024) for i in range(4)]
+    results = inference_engine.batch_inference(input_data)
+
+    assert isinstance(results, list)
+    assert len(results) == 4
+    # Check that completion outputs are different
+    for i in range(4):
+      print(f"Result {i}: {results[i].token_ids[:5]}...")
+      for j in range(i+1, 4):
+        assert not jnp.array_equal(results[i].token_ids, results[j].token_ids)
+      
+
+  @unittest.skipIf(int(os.getenv('ON_PATHWAYS', 0)) == 0, "Skip if not on Pathways")
+  def test_replica_parallelism(self):
+    
+    input_data = [InputData(id=f"input_{i}", tokens=jnp.array([3] * 1024), true_length=1024) for i in range(4)]
+
+    config = self.init_pyconfig(skip_jax_distributed_system=True, max_target_length=1224)
+    inference_engine = OfflineEngine(
+        config = config,
+        params=None,
+        enable_batch_prefill=False,
+        auto_layout_supported=False,
+        dp=1,
+        warm_up=False,
+        rng=self.rng,
+        eos_ids=[]
+    )
+
     start_time = time.time()
-    results = inference_engine.batch_inference(input_data, data_is_padded=False)
+    results = inference_engine.batch_inference(input_data)
     end_time = time.time()
+    single_replica_time = end_time - start_time
 
-    self.assertEqual(type(results), list)
+    del inference_engine
 
-    total_tokens = 0
-    for i, tokens in enumerate(results):
-      text = inference_engine.tokenizer.decode(tokens)
-      print(text)
-      self.assertEqual(type(tokens), list)
-      total_tokens += len(tokens)
-
-    print(f"Time taken: {end_time - start_time} seconds")
-    print(f"Total tokens: {total_tokens}")
-    print(f"Tokens per second: {total_tokens / (end_time - start_time)}")
-
-  def test_no_batch_prefill(self):
-
-    config = self.init_pyconfig(scan_layers=True)
-
-    random.seed(42)
-    input_data = [jax.numpy.arange(random.randint(1, config.max_prefill_predict_length)) for _ in range(20)]
-
-    engine = MaxEngine(config, jax.devices())
-    inference_engine = OfflineEngine(engine=engine, params=None, enable_batch_prefill=False)
+    inference_engine = OfflineEngine(
+        config = config,
+        params=None,
+        enable_batch_prefill=False,
+        auto_layout_supported=False,
+        dp=4,
+        warm_up=False,
+        rng=self.rng
+    )
 
     start_time = time.time()
-    results = inference_engine.batch_inference(input_data, data_is_padded=False)
+    results = inference_engine.batch_inference(input_data)
     end_time = time.time()
+    multi_replica_time = end_time - start_time
+    print(f"Time taken with 1 replica: {single_replica_time} seconds") #53s
+    print(f"Time taken with 4 replicas: {multi_replica_time} seconds")
 
-    total_tokens = 0
-    for i, tokens in enumerate(results):
-      text = inference_engine.tokenizer.decode(tokens)
-      print(text)
-      total_tokens += len(tokens)
-
-    print(f"Time taken: {end_time - start_time} seconds")
-    print(f"Total tokens: {total_tokens}")
-    print(f"Tokens per second: {total_tokens / (end_time - start_time)}")
-
-  def test_input_data(self):
-
-    config = self.init_pyconfig(scan_layers=True)
-    engine = MaxEngine(config, jax.devices())
-    inference = OfflineEngine(engine=engine, params=None, enable_batch_prefill=False)
-
-    input_data = [
-        InputData(id="sample_1", tokens=jnp.array([3] * 20), true_length=20),
-        InputData(id="sample_2", tokens=jnp.array([3] * 40), true_length=30),
-        InputData(id="sample_3", tokens=jnp.array([3] * 60), true_length=60),
-        InputData(id="sample_4", tokens=jnp.array([3] * 120), true_length=120),
-    ]
-
-    # Run inference
-    results = inference.batch_inference(input_data, desc="example_run", data_is_padded=False)
-
-    # Process results
-    for id_, tokens in results.items():
-      self.assertEqual(type(tokens), list)
-      text = inference.tokenizer.decode(tokens)
-      print(text)
-
+    assert multi_replica_time < single_replica_time
 
 if __name__ == "__main__":
   unittest.main()
