@@ -148,7 +148,8 @@ class OfflineEngineTest(unittest.TestCase):
         auto_layout_supported=False,
         dp=4,
         warm_up=False,
-        rng=self.rng
+        rng=self.rng,
+        eos_ids=[]
     )
 
     input_data = [InputData(id=f"input_{i}", tokens=jnp.array([3] * 1024), true_length=1024) for i in range(4)]
@@ -166,7 +167,7 @@ class OfflineEngineTest(unittest.TestCase):
   @unittest.skipIf(int(os.getenv('ON_PATHWAYS', 0)) == 0, "Skip if not on Pathways")
   def test_replica_parallelism(self):
     
-    input_data = [InputData(id=f"input_{i}", tokens=jnp.array([3] * 1024), true_length=1024) for i in range(4)]
+    input_data = [InputData(id=f"input_{i}", tokens=jnp.array([3] * 1024), true_length=1024) for i in range(16)]
 
     config = self.init_pyconfig(skip_jax_distributed_system=True, max_target_length=1224)
     inference_engine = OfflineEngine(

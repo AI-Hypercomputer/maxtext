@@ -991,7 +991,7 @@ class OfflineEngine:
         # Wait for all workers to complete
         for i in range(self.dp):
             self.replica_workers[i].ensure_inference_finished()
-            print("replica worker: ", i, " stopped")
+            print(f"replica worker {i} stopped")
 
         # Return CompletionOutput objects
         completion_outputs = []
