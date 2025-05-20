@@ -112,6 +112,7 @@ def main(argv: Sequence[str]) -> None:
     # TODO(hengtaoguo): Support multiple images as input.
     images = multimodal_utils.load_image_from_path(config.image_path)
     images = multimodal_utils.pre_process_image(images, model_name=config.model_name)
+    
     print(f"Image shape: {images.shape}")
     print("stop")
     # tokens = multimodal_utils.prepare_text_for_image_fusion(tokens, model_name=config.model_name)
