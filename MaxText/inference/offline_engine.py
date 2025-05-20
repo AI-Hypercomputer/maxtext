@@ -516,7 +516,10 @@ class ReplicaWorker:
             self.decode_state = init_decode_state_fn(self.rng)
         else:
             self.generate_fn = self.engine.generate
+            start_time = time.time()
             self.decode_state = self.engine.init_decode_state(self.rng)
+            end_time = time.time()
+            print(f"time taken to initialize decode_state: {end_time - start_time} seconds")
 
         self.generate_fn = self.engine.generate
 
@@ -911,8 +914,7 @@ class OfflineEngine:
                     )
             flat_devices = devices_array.flatten()
             inference_devices = flat_devices.reshape((self.dp, len(devices)//self.dp))
-            inference_meshes = [Mesh(devices.reshape(config.ici_parallelism), config.mesh_axes) for devices in inference_devices]
-            self.dp_meshes = inference_meshes
+            self.dp_meshes = [Mesh(devices.reshape(config.ici_parallelism), config.mesh_axes) for devices in inference_devices]
 
         # Initialize ReplicaWorkers
         run_as_a_thread = self.dp > 1  # No need to run worker as a thread if there is only one replica
@@ -993,12 +995,13 @@ class OfflineEngine:
 
         # Return CompletionOutput objects
         completion_outputs = []
+        
         for input_data in data:
             completion_outputs.append(
                 CompletionOutput(
                     index=input_data.id,
-                    token_ids=[token.token for token in results[input_data.id]],
-                    logprobs=[token.log_prob for token in results[input_data.id]],
+                    token_ids=jnp.stack([token_output.token for token_output in results[input_data.id]]),
+                    logprobs=jnp.stack([token_output.log_prob for token_output in results[input_data.id]]),
                 )
             )
         return completion_outputs

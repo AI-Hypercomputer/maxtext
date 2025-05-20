@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# import pathwaysutils
-# pathwaysutils.initialize()
+import pathwaysutils
+pathwaysutils.initialize()
 
 import sys
 import unittest
@@ -55,13 +55,13 @@ def init_pyconfig(**kwargs):
         "max_target_length": 1030,
         "return_log_prob": True,
         # Model
-        # "model_name": "llama2-70b",
+        "model_name": "llama2-70b",
         "attention": "dot_product",
         # Base model
-        "base_emb_dim": 512,
-        "base_num_query_heads": 32,
-        "base_num_kv_heads": 32,
-        "base_num_decoder_layers": 2,
+        # "base_emb_dim": 512,
+        # "base_num_query_heads": 32,
+        # "base_num_kv_heads": 32,
+        # "base_num_decoder_layers": 2,
         "scan_layers": False,
         # Quantization
         "quantization": "int8",
@@ -72,7 +72,7 @@ def init_pyconfig(**kwargs):
         # Checkpoints
         "tokenizer_path": "./assets/tokenizer.llama2",
         # "load_parameters_path": "gs://inference-benchmarks/models/llama2-70b-chat/quant/int8_",
-        # "skip_jax_distributed_system": True, # Single host
+        "skip_jax_distributed_system": True, # Single host
     } | kwargs
     config = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -144,7 +144,7 @@ def test_correctness():
         params=None,
         enable_batch_prefill=False,
         auto_layout_supported=False,
-        dp=1,
+        dp=4,
         warm_up=False,
         rng=jax.random.PRNGKey(0),
     )
@@ -157,12 +157,6 @@ def test_correctness():
     print(results.logprobs)
     detokenized_tokens = inference_engine.tokenizer.decode(result_tokens)
     print(detokenized_tokens)
-
-    jax.profiler.start_trace("gs://wenxindong-vm/trace/pathways/gemma2-2b-no-print")
-    results = inference_engine.batch_inference(input_data)[0]
-    jax.profiler.stop_trace()
-
-    
     print(results)
 
 
@@ -382,8 +376,8 @@ def test_offline_engine_input_data():
 
 # test_simple_trace()
 # test_correctness()
-test_max_engine_decode()
-test_decode()
+# test_max_engine_decode()
+# test_decode()
 test_correctness()
 # Time taken to run 1 step decode: 14.144538164138794 seconds
 # Time taken to run 1 step decode: 2.612926721572876 seconds
