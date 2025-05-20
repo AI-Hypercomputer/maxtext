@@ -167,8 +167,9 @@ class OfflineEngineTest(unittest.TestCase):
   @unittest.skipIf(int(os.getenv('ON_PATHWAYS', 0)) == 0, "Skip if not on Pathways")
   def test_replica_parallelism(self):
     
-    input_data = [InputData(id=f"input_{i}", tokens=jnp.array([3] * 1024), true_length=1024) for i in range(16)]
-
+    input_data = [InputData(id=f"input_{i}", tokens=jnp.array([3] * 1024), true_length=1024) for i in range(200)]
+    
+    # Decode 200 tokens for each completion
     config = self.init_pyconfig(skip_jax_distributed_system=True, max_target_length=1224)
     inference_engine = OfflineEngine(
         config = config,
@@ -193,7 +194,7 @@ class OfflineEngineTest(unittest.TestCase):
         params=None,
         enable_batch_prefill=False,
         auto_layout_supported=False,
-        dp=4,
+        dp=8,
         warm_up=False,
         rng=self.rng
     )
@@ -203,7 +204,7 @@ class OfflineEngineTest(unittest.TestCase):
     end_time = time.time()
     multi_replica_time = end_time - start_time
     print(f"Time taken with 1 replica: {single_replica_time} seconds") #53s
-    print(f"Time taken with 4 replicas: {multi_replica_time} seconds")
+    print(f"Time taken with 8 replicas: {multi_replica_time} seconds")
 
     assert multi_replica_time < single_replica_time
 
