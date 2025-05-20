@@ -62,7 +62,7 @@ class ElasticTrainTest(parameterized.TestCase):
 
     mock_sleep = self.enter_context(mock.patch.object(time, "sleep", create_autospec=True))
 
-    elastic_train.wait_for_all_slices(mock_manager)
+    elastic_train.wait_for_all_slices(mock_manager, 0)
 
     self.assertEqual(mock_sleep.call_count, len(slice_availability_side_effect) - 1)
 
