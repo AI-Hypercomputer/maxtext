@@ -27,9 +27,9 @@ class SimpleDecoderLayerTest(unittest.TestCase):
         [
             None,
             os.path.join(PKG_DIR, "configs", "base.yml"),
-            rf"base_output_directory=gs://runner-maxtext-logs",
+            "base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_simple_decoder_layer_test",
-            r"dataset_path=gs://maxtext-dataset",
+            "dataset_path=gs://maxtext-dataset",
             "decoder_block=simple",
             "enable_checkpointing=False",
             "enable_goodput_recording=False",
@@ -44,9 +44,9 @@ class SimpleDecoderLayerTest(unittest.TestCase):
         [
             None,
             os.path.join(PKG_DIR, "configs", "base.yml"),
-            rf"base_output_directory=gs://runner-maxtext-logs",
+            "base_output_directory=gs://runner-maxtext-logs",
             "run_name=runner_simple_decoder_layer_test",
-            r"dataset_path=gs://maxtext-dataset",
+            "dataset_path=gs://maxtext-dataset",
             "decoder_block=simple_mlp",
             "enable_checkpointing=False",
             "enable_goodput_recording=False",

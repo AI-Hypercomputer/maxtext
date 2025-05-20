@@ -390,7 +390,6 @@ class TestPageManager(unittest.TestCase):
           f"Group {page_group_id}: incorrect sequence length after decode step",
       )
       # Page count might or might not increase depending on boundary crossing
-      original_pages = (original_length + self.tokens_per_page - 1) // self.tokens_per_page
       new_pages_req = (original_length + 1 + self.tokens_per_page - 1) // self.tokens_per_page
       self.assertEqual(int(decode_state.num_pages_used[page_group_id]), new_pages_req)
 

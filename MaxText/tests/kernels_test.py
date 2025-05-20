@@ -50,8 +50,8 @@ class RaggedAttentionTest(unittest.TestCase):
     v = jax.random.normal(k3, (self.batch_size, self.max_target_length, self.head_dim), dtype=self.dtype)
     lengths = jnp.array(np.random.randint(1, self.max_target_length, self.batch_size), dtype=jnp.int32)
 
-    ragged_out, ragged_max, ragged_denom = ragged_mqa(q, k, v, lengths)
-    reference_out, reference_max, reference_denom = reference_mqa(q, k, v, lengths)
+    ragged_out, _, _ = ragged_mqa(q, k, v, lengths)
+    reference_out, _, _ = reference_mqa(q, k, v, lengths)
     self.assertTrue(
         jnp.max(abs(ragged_out - reference_out)) < 1.5e-1,
         msg=f"Max difference: {jnp.max(abs(ragged_out - reference_out))} > 1e-1",
@@ -75,9 +75,9 @@ class RaggedAttentionTest(unittest.TestCase):
     )
     lengths = jnp.array(np.random.randint(1, self.max_target_length, self.batch_size), dtype=jnp.int32)
 
-    ragged_out, ragged_max, ragged_denom = ragged_mha(q, k, v, lengths)
+    ragged_out, _, ragged_denom = ragged_mha(q, k, v, lengths)
     ragged_out = ragged_out / ragged_denom
-    reference_out, reference_max, reference_denom = reference_mha(q, k, v, lengths)
+    reference_out, _, _ = reference_mha(q, k, v, lengths)
     self.assertTrue(
         jnp.max(abs(ragged_out - reference_out)) < 1.5e-1,
         msg=f"Max difference: {jnp.max(abs(ragged_out - reference_out))} > 1e-1",
@@ -97,11 +97,9 @@ class RaggedAttentionTest(unittest.TestCase):
     v = jax.random.normal(k3, (self.batch_size, self.max_target_length, self.num_kv_heads, self.head_dim), dtype=self.dtype)
     lengths = jnp.array(np.random.randint(1, self.max_target_length, self.batch_size), dtype=jnp.int32)
 
-    ragged_out, ragged_max, ragged_denom = ragged_gqa(q, k, v, lengths)
+    ragged_out, _, ragged_denom = ragged_gqa(q, k, v, lengths)
     ragged_out = ragged_out / ragged_denom
-    reference_out, reference_max, reference_denom = reference_gqa(
-        jnp.squeeze(q), jnp.swapaxes(k, 1, 2), jnp.swapaxes(v, 1, 2), lengths
-    )
+    reference_out, _, _ = reference_gqa(jnp.squeeze(q), jnp.swapaxes(k, 1, 2), jnp.swapaxes(v, 1, 2), lengths)
     self.assertTrue(
         jnp.max(abs(ragged_out - reference_out)) < 1.5e-1,
         msg=f"Max difference: {jnp.max(abs(ragged_out - reference_out))} > 1e-1",
