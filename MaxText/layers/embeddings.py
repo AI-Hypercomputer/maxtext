@@ -526,7 +526,7 @@ class LlamaVisionRotaryEmbedding(nn.Module):
     # Convert to complex representation
     self.freqs_ci = jnp.exp(1j * freqs)
 
-  def __call__(self, inputs: Array) -> Array:
+  def __call__(self, inputs: Array, position: Optional[Array] = None) -> Array:
     """Applies rotary embeddings to the input tensor for Llama4 vision encoder.
 
     Args:
