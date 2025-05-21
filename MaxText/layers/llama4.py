@@ -198,6 +198,39 @@ class Llama4VisionPixelShuffleMLP(nn.Module):
     return result
 
 
+class Llama4MultiModalProjector(nn.Module):
+  """Implementation of Llama4MultiModalProjector for Llama4 Multi modal model.
+
+  This module projects vision features to text hidden dimension.
+
+  Attributes:
+    config: Config containing model parameters
+  """
+
+  config: Config
+
+  def setup(self):
+    cfg = self.config
+    self.linear = linears.DenseGeneral(
+        features=cfg.emb_dim,
+        dtype=cfg.dtype_mm,
+        name="vit_multi_modal_projector",
+        use_bias=False,
+    )
+
+  def __call__(self, image_features: Array) -> Array:
+    """Project image features to text hidden dimension.
+
+    Args:
+      image_features: Input tensor of shape [batch_size*num_patches*(pixel_shuffle_ratio**2), vision_output_dim]
+
+    Returns:
+      Tensor of shape [batch_size*num_patches*(pixel_shuffle_ratio**2), emb_dim]
+    """
+    hidden_states = self.linear(image_features)
+    return hidden_states
+
+
 def determine_is_nope_layer(layer_id: int, nope_layer_interval: int) -> bool:
   """
   Determines whether the given layer at `layer_id` should use RoPE or not (NoPE).
