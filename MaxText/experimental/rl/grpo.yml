@@ -17,6 +17,7 @@ adam_b2: 0.999
 num_generations: 4
 grpo_beta: 0.04
 inference_rollouts: 1
+grpo_epsilon: 0.2
 
 decode_sampling_strategy: "weighted"
 decode_sampling_temperature: 0.9
