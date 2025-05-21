@@ -101,14 +101,14 @@ def is_conversational(features, data_columns):
   return False
 
 
-def apply_chat_template(example, chat_tokenizer, data_column_name):
+def apply_chat_template(example, tokenizer_model, data_column_name):
   """Formats conversational data by applying the tokenizer's chat template
   and identifying prompt/completion segments.
 
   Args:
     example: A dictionary containing conversational data. It is expected to have a key
       specified by `data_column_name` that holds a list of messages.
-    chat_tokenizer: The tokenizer instance associated with the language model,
+    tokenizer_model: The tokenizer instance associated with the language model,
       which contains the specific chat template.
     data_column_name: The name of the column in the `example` dictionary
       that contains the list of messages.
@@ -128,16 +128,16 @@ def apply_chat_template(example, chat_tokenizer, data_column_name):
     for message in example[data_column_name]:
       if message["role"] == "user":
         prompt = message
-        prompt_in_chat_template = chat_tokenizer.apply_chat_template([prompt], add_generation_prompt=False, tokenize=False)
+        prompt_in_chat_template = tokenizer_model.apply_chat_template([prompt], add_generation_prompt=False, tokenize=False)
         messages.append(prompt_in_chat_template)
         is_prompt.append(True)
       elif message["role"] == "assistant":
-        prompt_completion_tokens = chat_tokenizer.apply_chat_template(
+        prompt_completion_tokens = tokenizer_model.apply_chat_template(
             [prompt, message], add_generation_prompt=False, tokenize=True
         )
-        prompt_tokens = chat_tokenizer.apply_chat_template([prompt], add_generation_prompt=False, tokenize=True)
+        prompt_tokens = tokenizer_model.apply_chat_template([prompt], add_generation_prompt=False, tokenize=True)
         completion_tokens = prompt_completion_tokens[len(prompt_tokens) :]
-        completion_in_chat_template = chat_tokenizer.decode(completion_tokens, skip_special_tokens=False)
+        completion_in_chat_template = tokenizer_model.decode(completion_tokens, skip_special_tokens=False)
         messages.append(completion_in_chat_template)
         is_prompt.append(False)
   except ValueError as e:
