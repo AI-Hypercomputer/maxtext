@@ -272,7 +272,7 @@ class PagedAttentionOp(nn.Module):
         f"getting {key_pages_var.shape=} and {value_pages_var.shape=} instead"
     )
 
-    v_n_kv, v_n_p, v_p, v_d = key_pages_var.value.shape
+    v_n_kv, _, v_p, v_d = key_pages_var.value.shape
     assert v_n_kv == n_kv_head, f"{v_n_kv=} {n_kv_head=}"
     assert v_p == self.tokens_per_page, f"{v_p=} {self.tokens_per_page=}"
     assert v_d == head_dim, f"{v_d=} {head_dim=}"
@@ -300,8 +300,8 @@ class PagedAttentionOp(nn.Module):
     key_pages = key_pages_var.value
     value_pages = value_pages_var.value
 
-    batch_size, seq_len, kv_heads, head_dim = key.shape
-    kv_heads, num_pages, tokens_per_page, head_dim = key_pages.shape
+    batch_size, _, kv_heads, head_dim = key.shape
+    kv_heads, _, _, head_dim = key_pages.shape
 
     new_key = key.reshape(batch_size, kv_heads, head_dim)[:, :, :]
     new_key = jnp.transpose(new_key, (1, 0, 2))  # [n_kv_heads, batch_size, head_dim]

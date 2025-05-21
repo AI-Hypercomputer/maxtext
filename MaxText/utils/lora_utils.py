@@ -168,9 +168,7 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
 
   if lora_adapter_path:
     max_logging.log(f"Setting initial state of LoRA with lora_adapter_path = {lora_adapter_path}")
-    unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = maxtext_utils.get_abstract_state(
-        model, tx, config, rng, mesh, True
-    )
+    unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, rng, mesh, True)
 
     lora_config_path = lora_adapter_path + "adapter_config.json"
 
