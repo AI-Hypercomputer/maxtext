@@ -162,7 +162,7 @@ gpt_3_175b_v5p_8 = _add_to_model_dictionary(
     model_type="gpt3-175b",
     tuning_params={
         "ici_fsdp_parallelism": -1,
-        "ici_tensor_parallelism": 16,
+        "ici_tensor_parallelism": 2,
         "per_device_batch_size": 0.5,
         "remat_policy": "full",
         "max_target_length": 2048,
