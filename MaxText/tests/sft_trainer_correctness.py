@@ -17,9 +17,9 @@ Runs SFT trainer correctness with TRL implementation.
 
 Usage:
 python3 -m MaxText.tests.sft_trainer_correctness \
-  --model-name=llama3.1-8b \
-  --tokenizer-path=meta-llama/Llama-3.1-8B \
-  --model-ckpt-path=gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/scanned/0/items
+  --model-name=llama2-7b \
+  --tokenizer-path=meta-llama/Llama-2-7b-chat-hf \
+  --model-ckpt-path=gs://maxtext-model-checkpoints/llama2-7b-chat/scanned/0/items
 """
 
 import argparse
@@ -82,14 +82,14 @@ def setup_maxtext_model(config):
 
 
 def prepare_maxtext_inputs(maxtext_data, config):
-  """prepare maxtext inputs"""
-  data = _input_pipeline_utils.extract_messages_and_mask(maxtext_data, "messages")
+  """Format conversational data & tokenize."""
   tokenizer = AutoTokenizer.from_pretrained(
       config.tokenizer_path,
       add_bos_token=False,
       add_eos_token=False,
       model_max_length=config.max_target_length,
   )
+  data = _input_pipeline_utils.apply_chat_template(maxtext_data, tokenizer, "messages")
   tokenized_data = _input_pipeline_utils.tokenization(
       data,
       hf_tokenizer=tokenizer,
@@ -101,10 +101,6 @@ def prepare_maxtext_inputs(maxtext_data, config):
       text_column_name="messages",
       completion_only=False,
       max_target_length=config.max_target_length,
-      add_bos=True,
-      add_eos=True,
-      bos_id=tokenizer.bos_token_id,
-      eos_id=tokenizer.eos_token_id,
       unk_id=tokenizer.unk_token_id,
   ).map(tokenized_data)
 
@@ -173,7 +169,7 @@ def get_argument_parser():
   argument_parser.add_argument("--model-name", type=str, required=True)
   argument_parser.add_argument("--tokenizer-path", type=str, required=True)
   argument_parser.add_argument("--model-ckpt-path", type=str, required=True)
-  argument_parser.add_argument("--max-target-length", type=int, required=False, default=64)
+  argument_parser.add_argument("--max-target-length", type=int, required=False, default=32)
   argument_parser.add_argument("--atol", type=float, required=True)
   argument_parser.add_argument("--rtol", type=float, required=True)
   argument_parser.add_argument("--kl-div", type=float, required=True)
