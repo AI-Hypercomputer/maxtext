@@ -459,6 +459,266 @@ class RoutedMoeTest(unittest.TestCase):
     is_with_tolerance = (counts >= lower_bound) & (counts <= upper_bound)
     self.assertTrue(is_with_tolerance.all())
 
+  def test_local_permute_no_offset(self):
+    """Tests local_permute with is_offset=False across multiple shards."""
+    num_experts = 8
+    num_shards = 4
+    experts_per_shard = num_experts // num_shards  # 2 experts per shard
+
+    # Global group sizes for each of the 8 experts
+    # Expert 0 gets 0 token, Expert 1 gets 1, ..., Expert 7 gets 7 tokens.
+    global_group_sizes = jnp.arange(num_experts)
+    total_assignments = jnp.sum(global_group_sizes)
+
+    original_inputs = jnp.arange(total_assignments * 5, dtype=jnp.int32).reshape(total_assignments, 5)
+
+    # Calculate the cumulative sum of global group sizes to determine shard input slices
+    global_group_sizes_cumsum = jnp.cumsum(global_group_sizes)
+
+    shard_start_indices = jnp.concatenate([jnp.array([0]), global_group_sizes_cumsum[:-experts_per_shard:experts_per_shard]])
+    shard_end_indices = global_group_sizes_cumsum[experts_per_shard - 1 :: experts_per_shard]
+
+    #               *****Expected outputs****
+    # Shard 0: tokens for global experts 0, 1 (0+1=1 tokens)
+    #  expected_local_group_size: [0, 1]
+    #  expected_sorted_inputs: original_inputs[:0+1]
+    #  expected_sorted_indices: [0]]
+    #  expected_sorted_experts_ids: [1]
+    # Shard 1: tokens for global experts 2, 3 (2+3=5 tokens)
+    #  expected_local_group_size: [2, 3]
+    #  expected_sorted_inputs: original_inputs[1:1+2+3]
+    #  expected_sorted_indices: [0,1,2,3,4]
+    #  expected_sorted_experts_ids: [0]*2 + [1]*3
+    # Shard 2: tokens for global experts 4, 5 (4+5=9 tokens)
+    #  expected_local_group_size: [4, 5]
+    #  expected_sorted_inputs: original_inputs[6:6+4+5]
+    #  expected_sorted_indices: [0,1,2,3,4,5,6,7,8]
+    #  expected_sorted_experts_ids: [0]*4 + [1]*5
+    # Shard 3: tokens for global experts 6, 7 (6+7=13 tokens)
+    #  expected_local_group_size: [6, 7]
+    #  expected_sorted_inputs: original_inputs[15:15+13]
+    #  expected_sorted_indices: [0,1,2,3,4,5,6,7,8,9,10,11,12]
+    #  expected_sorted_experts_ids: [0]*6 + [1]*7
+    for shard_index in range(num_shards):
+      # Determine the input slice for the current shard
+      start_idx = shard_start_indices[shard_index]
+      end_idx = shard_end_indices[shard_index]
+      inputs_shard = original_inputs[start_idx:end_idx]
+      shard_total_tokens = end_idx - start_idx
+
+      # Get the global group sizes relevant to this shard's experts
+      global_group_sizes_for_shard = global_group_sizes[
+          shard_index * experts_per_shard : (shard_index + 1) * experts_per_shard
+      ]
+
+      # Get the actual local_permute outputs.
+      sorted_inputs, sorted_indices, local_group_size, sorted_experts_ids = moe.RoutedMoE.local_permute(
+          inputs_shard, global_group_sizes[None, :], experts_per_shard, shard_index, is_offset=False
+      )
+
+      # Calculate expected outputs for the current shard
+      expected_local_group_size = global_group_sizes_for_shard
+      # With is_offset=False, input is assumed pre-sorted by expert, so sorted_inputs is the input itself.
+      expected_sorted_inputs = inputs_shard
+      # Indices are relative to inputs_shard, and since it's already sorted, they are just arange.
+      expected_sorted_indices = jnp.arange(shard_total_tokens)
+      # Local expert IDs: repeat local expert index (0, 1, ...) by its count
+      expected_sorted_experts_ids = jnp.repeat(
+          jnp.arange(experts_per_shard), expected_local_group_size, total_repeat_length=shard_total_tokens
+      )
+
+      self.assertTrue(jnp.array_equal(sorted_inputs, expected_sorted_inputs), f"Shard {shard_index}: sorted_inputs mismatch")
+      self.assertTrue(
+          jnp.array_equal(sorted_indices, expected_sorted_indices), f"Shard {shard_index}: sorted_indices mismatch"
+      )
+      self.assertTrue(
+          jnp.array_equal(local_group_size, expected_local_group_size), f"Shard {shard_index}: local_group_size mismatch"
+      )
+      self.assertTrue(
+          jnp.array_equal(sorted_experts_ids, expected_sorted_experts_ids),
+          f"Shard {shard_index}: sorted_experts_ids mismatch",
+      )
+
+  def test_local_permute_offset(self):
+    experts_per_group = 2
+    expert_groups = 4 # aka number of expert shards.
+    num_experts = 8
+
+    # Global group sizes for each of the 8 experts
+    # Each entry i specifies the number of tokens assigned to expert i.
+    simple_group_sizes = jnp.arange(8)
+    manual_global_group_sizes = jnp.array([0, 0, 1, 1, 2, 0, 2, 2])
+    for global_expert_counts in [simple_group_sizes, manual_global_group_sizes]:
+      for shard_id in range(expert_groups):
+        # Unpermuted data. shape: (sum(global_expert_counts), 5)
+        x = jnp.tile(jnp.arange(1, jnp.sum(global_expert_counts) + 1).reshape(-1, 1), (1, 5))
+
+        # The number of expert IDs assigned to each expert shard.
+        local_group_sizes = jnp.sum(jnp.reshape(global_expert_counts, (expert_groups, experts_per_group)), axis=-1)
+
+        # Expert assignments corresponding to each entry of x.
+        # NOTE: It is assumed that x is sorted in order of expert ID (because it is previously
+        # passed through permute()), so expert_assignments just repeats the expert ID using counts from
+        # global_expert_counts.
+        expert_assignments = jnp.repeat(jnp.arange(0, num_experts), repeats=global_expert_counts)
+
+        # Offset for the start of each shard (aka expert group). Offset for shard i is the sum
+        # of the number of tokens assigned to all shards (local_group_size) before i.
+        input_offsets = jnp.concatenate((jnp.array([0]), jnp.cumsum(local_group_sizes)[:-1]))
+
+        # Actual results of local_permute().
+        permuted_x, local_sorted_indices, local_expert_counts, local_expert_assignments = moe.RoutedMoE.local_permute(
+            x,
+            global_expert_counts[None, :],
+            experts_per_group,
+            shard_index=shard_id,
+            is_offset=True,
+            global_sorted_experts=expert_assignments,
+        )
+
+        # permuted_x should be equivalent to slicing x at the input offset for that shard.
+        assert jnp.all(
+            permuted_x[: local_group_sizes[shard_id]]
+            == x[input_offsets[shard_id] : input_offsets[shard_id] + local_group_sizes[shard_id]]
+        ), f"Local permuted rows do not match their unpermuted original rows for shard_id={shard_id}"
+
+        # local_sorted_indices should match the indices of the slice from x corresponding to this shard.
+        # That can be computed by taking all of the indices between the input_offset for the current shard
+        # until the last index belonging to the current shard (i.e. input_offset[shard_id] + local_group_sizes[shard_id]).
+        assert jnp.all(
+            local_sorted_indices[: local_group_sizes[shard_id]]
+            == jnp.arange(input_offsets[shard_id], input_offsets[shard_id] + local_group_sizes[shard_id])
+        ), (
+            "Local permuted row indices do not match their respective unpermuted indices in the "
+            f"original inputs for shard_id={shard_id}!"
+        )
+
+        # local_expert_counts should correspond to slicing experts_per_group values from global_expert_counts
+        # for the shard_id.
+        assert jnp.all(
+            local_expert_counts == global_expert_counts[shard_id * experts_per_group : (shard_id + 1) * experts_per_group]
+        ), "Local permuted group sizes do not match the respective unpermuted expert bincounts for shard_id={shard_id}."
+
+        # local_expert_assignments should correspond to taking a slice out of expert_assignments.
+        # The slice size is shard i's size (local_group_sizes[i]]) and the slice should start
+        # at input_offsets[i].
+        assert jnp.all(
+            local_expert_assignments[: local_group_sizes[shard_id]]
+            == jnp.mod(
+                expert_assignments[input_offsets[shard_id] : input_offsets[shard_id] + local_group_sizes[shard_id]],
+                experts_per_group,
+            )
+        ), (
+            "Local permuted expert assignments to not match the expected unpermuted expert assignments "
+            f"for shard_id={shard_id}."
+        )
+
+  def test_get_all_to_all_params_sharded_batch(self):
+    num_expert_parallelism_sharded = 4
+
+    # all_group_sizes[i, j] = num inputs batch_shard i sends to expert_shard j
+    all_group_sizes_sharded = jnp.array([[1, 2, 0, 3], [4, 0, 1, 2], [0, 3, 2, 1], [2, 1, 4, 0]], dtype=jnp.int32)
+
+    # The offset for the current batch shard (row) to send inputs to a particular expert
+    # shard (column), will be the cumulative number of tokens sent to all previous experts.
+    # Example: batch shard 1
+    # all_group_sizes_sharded[1] = [4, 0, 1, 2]:
+    # input_offsets = [0, 4, 4+0, 4+0+1] = [0, 4, 4, 5]
+    expected_input_offsets_sharded = jnp.array([[0, 1, 3, 3], [0, 4, 4, 5], [0, 0, 3, 5], [0, 2, 3, 7]], dtype=jnp.int32)
+
+    # The number of tokens that the current batch shard (row) sends to each expert shard (columns)
+    # is recorded in all_group_sizes_sharded[row].
+    expected_send_sizes_sharded = jnp.array([[1, 2, 0, 3], [4, 0, 1, 2], [0, 3, 2, 1], [2, 1, 4, 0]], dtype=jnp.int32)
+
+    # The offset at which each expert shard (column) will receive the current batch shard's (row)
+    # input is the cumulative number of tokens received by all previous batch shards (rows)
+    # for that expert.
+    # (batch shard 0) output_offsets = [0, 0, 0, 0]
+    # (batch shard 1) output_offsets = [0+1, 0+2, 0+0, 0+3])
+    # (batch shard 2) output_offsets = [0+1+4, 0+2+0, 0+0+1, 0+3+2])
+    # ...
+    expected_output_offsets_sharded = jnp.array([[0, 0, 0, 0], [1, 2, 0, 3], [5, 2, 1, 5], [5, 5, 3, 6]], dtype=jnp.int32)
+
+    # The number of inputs a particular expert shard (col) receives from all of the batch_shards (rows).
+    # Example: expert shard 1
+    # Receives 2 from batch_shard 0, 0 from batch_shard 1, 3 from batch_shard 2, 1 from batch_shard 3
+    # Which is the same as all_group_sizes_sharded[:, 1].
+    expected_recv_sizes_sharded = jnp.array([[1, 4, 0, 2], [2, 0, 3, 1], [0, 1, 2, 4], [3, 2, 1, 0]], dtype=jnp.int32)
+
+    for expert_shard_id in range(num_expert_parallelism_sharded):
+      exp_in_off = expected_input_offsets_sharded[expert_shard_id]
+      exp_send_sz = expected_send_sizes_sharded[expert_shard_id]
+      exp_out_off = expected_output_offsets_sharded[expert_shard_id]
+      exp_recv_sz = expected_recv_sizes_sharded[expert_shard_id]
+
+      in_off, send_sz, out_off, recv_sz = moe.RoutedMoE.get_all_to_all_params(
+          all_group_sizes_sharded, expert_shard_id, num_expert_parallelism_sharded, is_batch_sharded=True
+      )
+      self.assertTrue(
+          jnp.array_equal(in_off, exp_in_off), f"Sharded Batch: Input offsets mismatch for shard {expert_shard_id}"
+      )
+      self.assertTrue(
+          jnp.array_equal(send_sz, exp_send_sz), f"Sharded Batch: Send sizes mismatch for shard {expert_shard_id}"
+      )
+      self.assertTrue(
+          jnp.array_equal(out_off, exp_out_off), f"Sharded Batch: Output offsets mismatch for shard {expert_shard_id}"
+      )
+      self.assertTrue(
+          jnp.array_equal(recv_sz, exp_recv_sz), f"Sharded Batch: Receive sizes mismatch for shard {expert_shard_id}"
+      )
+
+  def test_get_all_to_all_params_unsharded_batch(self):
+    """Tests get_all_to_all_params with a simple hard-coded example using 4 expert shards."""
+    num_expert_parallelism_unsharded = 4
+
+    # group_sizes_unsharded[i] = num inputs that each expert_shard i is responsible for.
+    group_sizes_unsharded = jnp.array([6, 7, 6, 7], dtype=jnp.int32)
+
+    # Each expert shard will send their data starting at index 0.
+    expected_input_offsets_unsharded_template = jnp.array([0, 0, 0, 0], dtype=jnp.int32)
+
+    # Each expert shard will send the amount of data they are responsible for
+    # (indicated by group_sizes_unsharded).
+    expected_send_sizes_unsharded_per_shard = jnp.array(
+        [[6, 6, 6, 6], [7, 7, 7, 7], [6, 6, 6, 6], [7, 7, 7, 7]], dtype=jnp.int32
+    )
+
+    # When the batches are fully replicated (unsharded) then each batch will receive expert i's
+    # data at the cumulative sum of the amount of input received from all previous experts.
+    # (batch shard 0) output_offsets = [0, 0, 0, 0]
+    # (batch shard 1) output_offsets = [0+6, 0+6, 0+6, 0+6])
+    # (batch shard 2) output_offsets = [0+6+7, 0+6+7, 0+6+7, 0+6+7])
+    # Which is just the cumulative sum of 0 and group_sizes_unsharded.
+    expected_output_offsets_unsharded_per_shard = jnp.array(
+        [[0, 0, 0, 0], [6, 6, 6, 6], [13, 13, 13, 13], [19, 19, 19, 19]], dtype=jnp.int32
+    )
+
+    # Each (replicated) batch shard will the amount of data from each expert specified by
+    # group_sizes_unsharded.
+    expected_recv_sizes_unsharded_template = jnp.array([6, 7, 6, 7], dtype=jnp.int32)
+
+    for expert_shard_id in range(num_expert_parallelism_unsharded):
+      exp_in_off = expected_input_offsets_unsharded_template
+      exp_send_sz = expected_send_sizes_unsharded_per_shard[expert_shard_id]
+      exp_out_off = expected_output_offsets_unsharded_per_shard[expert_shard_id]
+      exp_recv_sz = expected_recv_sizes_unsharded_template
+
+      in_off, send_sz, out_off, recv_sz = moe.RoutedMoE.get_all_to_all_params(
+          group_sizes_unsharded, expert_shard_id, num_expert_parallelism_unsharded, is_batch_sharded=False
+      )
+      self.assertTrue(
+          jnp.array_equal(in_off, exp_in_off), f"Unsharded Batch: Input offsets mismatch for shard {expert_shard_id}"
+      )
+      self.assertTrue(
+          jnp.array_equal(send_sz, exp_send_sz), f"Unsharded Batch: Send sizes mismatch for shard {expert_shard_id}"
+      )
+      self.assertTrue(
+          jnp.array_equal(out_off, exp_out_off), f"Unsharded Batch: Output offsets mismatch for shard {expert_shard_id}"
+      )
+      self.assertTrue(
+          jnp.array_equal(recv_sz, exp_recv_sz), f"Unsharded Batch: Receive sizes mismatch for shard {expert_shard_id}"
+      )
+
 
 if __name__ == "__main__":
   unittest.main()
