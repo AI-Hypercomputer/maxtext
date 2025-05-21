@@ -15,6 +15,9 @@ limitations under the License.
 """
 
 """ Tests for Llama4 Vision RoPE """
+from typing import Callable, NamedTuple, Optional, Tuple
+import os.path
+import sys
 import math
 import torch
 from torch import nn
@@ -22,9 +25,16 @@ import torch.nn.functional as F
 import jax
 import unittest
 import jax.numpy as jnp
-from MaxText.layers import embeddings, llama4
+from jax.sharding import Mesh
+from MaxText.globals import PKG_DIR
+from MaxText import pyconfig
+from MaxText import maxtext_utils
+from MaxText.layers import attentions, embeddings, llama4
 import numpy as np
 
+Attention = attentions.Attention
+
+# pylint: disable=line-too-long, missing-function-docstring
 
 """  
 Llama4 Vision RoPE 
@@ -335,6 +345,223 @@ class Llama4VisionPixelShuffleMLPTest(unittest.TestCase):
 
     # Compare outputs with reasonable tolerances
     np.testing.assert_allclose(to_jax(pt_output), jax_output, rtol=1e-3, atol=0.05)
+
+
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+  """
+  Pytorch implementation from HuggingFace:
+  https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama4/modeling_llama4.py
+  This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
+  num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+  """
+  batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+  if n_rep == 1:
+    return hidden_states
+  hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+  return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
+
+def eager_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    scaling: float,
+    dropout: float = 0.0,
+    **kwargs,
+):
+  """
+  Pytorch implementation from HuggingFace:
+  https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama4/modeling_llama4.py
+  """
+  key_states = repeat_kv(key, module.num_key_value_groups)
+  value_states = repeat_kv(value, module.num_key_value_groups)
+  attn_weights = torch.matmul(query, key_states.transpose(2, 3)) / math.sqrt(module.head_dim)
+  if attention_mask is not None:
+    causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+    attn_weights = attn_weights + causal_mask
+
+  attn_weights = nn.functional.softmax(attn_weights.float(), dim=-1).to(query.dtype)
+  attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
+  attn_output = torch.matmul(attn_weights, value_states)
+  attn_output = attn_output.transpose(1, 2).contiguous()
+
+  return attn_output, attn_weights
+
+
+class Llama4VisionAttention(nn.Module):
+  """
+  Pytorch implementation from HuggingFace:
+  https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama4/modeling_llama4.py
+  """
+
+  def __init__(self, config):
+    super().__init__()
+    self.config = config
+    self.embed_dim = config.hidden_size
+    self.num_heads = config.num_attention_heads
+    self.head_dim = config.hidden_size // config.num_attention_heads
+    self.num_key_value_groups = 1
+    self.attention_dropout = config.attention_dropout
+    seed_value = 4
+    torch.manual_seed(seed_value)
+    self.q_proj = nn.Linear(self.embed_dim, self.num_heads * self.head_dim, bias=True)
+    self.k_proj = nn.Linear(self.embed_dim, self.num_heads * self.head_dim, bias=True)
+    self.v_proj = nn.Linear(self.embed_dim, self.num_heads * self.head_dim, bias=True)
+    self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.embed_dim, bias=True)
+
+  def forward(
+      self,
+      hidden_states: torch.Tensor,
+      freqs_ci: torch.Tensor,
+      attention_mask: Optional[torch.Tensor] = None,
+      past_key_value: Optional[torch.Tensor] = None,
+      **kwargs,
+  ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    input_shape = hidden_states.shape[:-1]
+    hidden_shape = (*input_shape, -1, self.head_dim)
+    query_states = self.q_proj(hidden_states).view(hidden_shape)
+
+    key_states = self.k_proj(hidden_states).view(hidden_shape)
+    value_states = self.v_proj(hidden_states).view(hidden_shape)
+
+    # Skip rotary embedding since it's covered in Llama4VisionRotaryEmbeddingTest
+    # query_states, key_states = vision_apply_rotary_emb(query_states, key_states, freqs_ci=freqs_ci)
+    query_states = query_states.transpose(1, 2)
+    key_states = key_states.transpose(1, 2)
+    value_states = value_states.transpose(1, 2)
+
+    # Comment the following block and only test eager_attention_forward in this test
+    # # flex disable because breaks on TP 8, embed is 88 not power of 2
+    # if self.config._attn_implementation not in ["eager", "flex_attention"]:
+    #     if self.config._attn_implementation == "sdpa" and kwargs.get("output_attentions", False):
+    #         logger.warning_once(
+    #             "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
+    #             'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+    #         )
+    #     else:
+    #         attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+    attention_interface: Callable = eager_attention_forward
+
+    attn_output, attn_weights = attention_interface(
+        self,
+        query_states,
+        key_states,
+        value_states,
+        None,
+        dropout=0.0 if not self.training else self.attention_dropout,
+        scaling=None,
+        is_causal=False,  # HAS TO BE ENFORCED
+        **kwargs,
+    )
+
+    attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+    attn_output = self.o_proj(attn_output)
+    return attn_output, attn_weights
+
+
+class Llama4VisionAttentionTest(unittest.TestCase):
+  """Test for the Llama4 vision attention."""
+
+  def _copy_weights_bias(self, pt_model, params, hidden_size=256, num_head=2):
+    """Copy weights from PyTorch model to JAX model.
+
+    Args:
+      pt_model: PyTorch Llama4VisionAttention model
+      params: JAX model parameters
+    """
+    head_dim = hidden_size // num_head
+    updated_params = jax.tree_util.tree_map(lambda x: x, params)
+    # update weights
+    updated_params["params"]["query"]["kernel"] = to_jax(pt_model.q_proj.weight.T.view(hidden_size, num_head, head_dim))
+    updated_params["params"]["key"]["kernel"] = to_jax(pt_model.k_proj.weight.T.view(hidden_size, num_head, head_dim))
+    updated_params["params"]["value"]["kernel"] = to_jax(pt_model.v_proj.weight.T.view(hidden_size, num_head, head_dim))
+    updated_params["params"]["out"]["kernel"] = to_jax(pt_model.o_proj.weight.T.view(num_head, head_dim, hidden_size))
+    # update bias
+    updated_params["params"]["query"]["bias"] = to_jax(pt_model.q_proj.bias.view(num_head, head_dim))
+    updated_params["params"]["key"]["bias"] = to_jax(pt_model.k_proj.bias.view(num_head, head_dim))
+    updated_params["params"]["value"]["bias"] = to_jax(pt_model.v_proj.bias.view(num_head, head_dim))
+    updated_params["params"]["out"]["bias"] = to_jax(pt_model.o_proj.bias)
+    return updated_params
+
+  class Config(NamedTuple):
+    num_attention_heads: int
+    hidden_size: int
+    attention_dropout: int = 0
+
+  config_arguments = {
+      "per_device_batch_size": 1.0,
+      "run_name": "test",
+      "enable_checkpointing": False,
+      "model_name": "llama4-17b-16e",
+      "scan_layers": False,
+  }
+
+  def setUp(self):
+    super().setUp()
+    self.cfg = pyconfig.initialize(
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+        **self.config_arguments,
+    )
+    self.rng = jax.random.PRNGKey(0)
+
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
+    self.seq_len_for_vit = (self.cfg.image_size_for_vit // self.cfg.patch_size_for_vit) ** 2 + 1
+
+  def test_vision_attention(self):
+    """Test for the Llama4 vision attention."""
+
+    pt_config = self.Config(
+        num_attention_heads=self.cfg.num_attention_heads_for_vit, hidden_size=self.cfg.hidden_size_for_vit
+    )
+    model_pt = Llama4VisionAttention(pt_config)
+    hidden_states_pt = torch.rand(
+        self.cfg.global_batch_size_to_load, self.seq_len_for_vit, self.cfg.hidden_size_for_vit, dtype=torch.float32
+    )
+    # Dummy freq_ci, not used since we skip rotary embedding in this test
+    freqs_ci = torch.zeros(
+        self.seq_len_for_vit,
+        1,
+        self.cfg.hidden_size_for_vit // self.cfg.num_attention_heads_for_vit // 2,
+        dtype=torch.float32,
+    )
+    attn_output_pt, _ = model_pt(hidden_states_pt, freqs_ci)
+
+    attention_layer = Attention(
+        config=self.cfg,
+        num_query_heads=self.cfg.num_attention_heads_for_vit,
+        num_kv_heads=self.cfg.num_attention_heads_for_vit,
+        head_dim=self.cfg.hidden_size_for_vit // self.cfg.num_attention_heads_for_vit,
+        max_target_length=self.seq_len_for_vit,
+        attention_kernel="dot_product",  # TODO aireenmei: support flash attention
+        mesh=self.mesh,
+        dropout_rate=0,
+        name="self_attention_vision",
+        attention_type=attentions.AttentionType.FULL,
+        is_nope_layer=True,  # skip rotary embedding in this test since it's covered in Llama4VisionRotaryEmbeddingTest
+        use_bias_in_projections=True,
+        is_vision=True,
+    )
+
+    lnx = to_jax(hidden_states_pt)
+    key = jax.random.PRNGKey(0)
+    attention_layer_params = attention_layer.init(
+        key,
+        lnx,
+        lnx,
+    )
+    params_from_pt = self._copy_weights_bias(
+        model_pt, attention_layer_params, self.cfg.hidden_size_for_vit, self.cfg.num_attention_heads_for_vit
+    )
+    attn_ouput_jax = attention_layer.apply(
+        params_from_pt,
+        lnx,
+        lnx,
+        deterministic=True,
+    )
+    np.testing.assert_allclose(attn_ouput_jax, to_jax(attn_output_pt), rtol=1e-3, atol=0.05)
 
 
 if __name__ == "__main__":
