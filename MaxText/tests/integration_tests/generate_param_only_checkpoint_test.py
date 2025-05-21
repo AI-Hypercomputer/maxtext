@@ -21,7 +21,6 @@ import os.path
 import pytest
 
 from MaxText.globals import PKG_DIR
-from MaxText.tests.globals import TEST_DISABLE_SUBPROCESS, TEST_DISABLE_SUBPROCESS_STR
 
 
 def run_generate_param_only_checkpoint(attention_type, quantization):
@@ -49,7 +48,6 @@ def run_generate_param_only_checkpoint(attention_type, quantization):
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
 @pytest.mark.parametrize("quantization", [(""), ("int8")])
-@pytest.mark.skipif(TEST_DISABLE_SUBPROCESS, reason=TEST_DISABLE_SUBPROCESS_STR)
 def test_autoselected_attention(quantization):
   run_generate_param_only_checkpoint("autoselected", quantization)
 
@@ -57,6 +55,5 @@ def test_autoselected_attention(quantization):
 @pytest.mark.integration_test
 @pytest.mark.gpu_only
 @pytest.mark.parametrize("quantization", [(""), ("int8")])
-@pytest.mark.skipif(TEST_DISABLE_SUBPROCESS, reason=TEST_DISABLE_SUBPROCESS_STR)
 def test_with_dot_product(quantization):
   run_generate_param_only_checkpoint("dot_product", quantization)
