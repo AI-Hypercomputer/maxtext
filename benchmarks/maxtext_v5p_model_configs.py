@@ -106,7 +106,7 @@ c4_deepseek_v3_ep_256_v5p_512 = _add_to_model_dictionary(
     ),
 )
 
-llama2_70b_v5p_256 = _add_to_model_dictionary(
+llama2_70b_v5p_8 = _add_to_model_dictionary(
   v5p_model_dict,
   MaxTextModel(
     model_name="llama2-70b-v5p-8",
@@ -130,7 +130,7 @@ llama2_70b_v5p_256 = _add_to_model_dictionary(
 	)
 )
 
-llama2_7b_v5p_256 = _add_to_model_dictionary(
+llama2_7b_v5p_8 = _add_to_model_dictionary(
   v5p_model_dict,
   MaxTextModel(
     model_name="llama2-7b-v5p-8",
@@ -155,7 +155,7 @@ llama2_7b_v5p_256 = _add_to_model_dictionary(
 	)
 )
 
-gpt_3_175b_v5p_256 = _add_to_model_dictionary(
+gpt_3_175b_v5p_8 = _add_to_model_dictionary(
   v5p_model_dict,
   MaxTextModel(
     model_name="gpt-3-175b-v5p-8",
