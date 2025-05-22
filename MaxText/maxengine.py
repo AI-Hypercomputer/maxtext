@@ -863,6 +863,12 @@ class MaxEngine(engine_api.Engine):
 
     previous_token = decode_state["tokens"]
     rng, new_rng = jax.random.split(rng)
+
+    # Fetching lora_params from decode_state (if exists)
+    lora_state = None
+    if "lora_state" in decode_state:
+      lora_state = decode_state["lora_state"]
+
     # run one step generation
     with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
       out_logits, new_vars = self.model.apply(
@@ -874,6 +880,7 @@ class MaxEngine(engine_api.Engine):
           rngs={"params": new_rng},
           mutable=["cache"],
           page_state=page_state,
+          lora_state=lora_state,
       )
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
     new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)

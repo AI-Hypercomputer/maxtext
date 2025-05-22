@@ -859,6 +859,7 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
     # thus we need to specify this or else loading will fail
     chkpt_vars[int(ckpt_path.name.split(".", maxsplit=2)[1])] = torch.load(ckpt_path, map_location="cpu", weights_only=False)
   chkpt_vars = [chkpt_vars[i] for i in sorted(list(chkpt_vars.keys()))]
+
   # map weight names if they use HuggingFace instead of PyTorch convention
   chkpt_vars = [_NamespaceMapper(var, model_size=model_size) for var in chkpt_vars]
 
@@ -1485,7 +1486,7 @@ if __name__ == "__main__":
     base_weights_path += "/base"
 
   save_weights_to_checkpoint(
-      args.maxtext_model_path,
+      base_weights_path,
       convert_to_jax_weights(args.base_model_path, args.model_size, args.huggingface_checkpoint),
       SIMULATED_CPU_DEVICES_COUNT,
       args.use_ocdbt,
