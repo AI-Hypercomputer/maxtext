@@ -731,14 +731,14 @@ def train_loop(config, state=None):
             f"loss: {metrics['scalar']['learning/loss']:.3f}")
     last_step_completion = new_time
 
-    if checkpoint_manager is not None:
-      if save_checkpoint(checkpoint_manager, int(step), state, config.dataset_type, data_iterator, config):
-        max_logging.log(f"saved a checkpoint at step {step}")
+    # if checkpoint_manager is not None:
+    #   if save_checkpoint(checkpoint_manager, int(step), state, config.dataset_type, data_iterator, config):
+    #     max_logging.log(f"saved a checkpoint at step {step}")
 
-      # Upon preemption, exit when and only when all ongoing saves are complete.
-      if checkpoint_manager.reached_preemption(step):
-        checkpoint_manager.wait_until_finished()
-        sys.exit()
+    #   # Upon preemption, exit when and only when all ongoing saves are complete.
+    #   if checkpoint_manager.reached_preemption(step):
+    #     checkpoint_manager.wait_until_finished()
+    #     sys.exit()
 
     write_metrics(writer, local_metrics_file, running_gcs_metrics, metrics, step, config)
 
