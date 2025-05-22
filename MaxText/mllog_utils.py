@@ -45,7 +45,7 @@ def init_print(config, start_step):
   """an initial mllog for mlperf sumbission compliance check."""
   if jax.process_index() == 0:
     mllogger.event(mllog.constants.SUBMISSION_ORG, 'Google')
-    mllogger.event(mllog.constants.SUBMISSION_PLATFORM, 'tpu-v5p')
+    mllogger.event(mllog.constants.SUBMISSION_PLATFORM, 'tpu-trillium')
     mllogger.event(mllog.constants.SUBMISSION_STATUS, mllog.constants.CLOUD)
     mllogger.event(mllog.constants.SUBMISSION_DIVISION, mllog.constants.CLOSED)
     mllogger.event(mllog.constants.SUBMISSION_BENCHMARK, mllog.constants.GPT3)
