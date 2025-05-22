@@ -21,7 +21,6 @@ import subprocess
 import os.path
 import pytest
 from MaxText.globals import PKG_DIR
-from MaxText.tests.globals import TEST_DISABLE_SUBPROCESS, TEST_DISABLE_SUBPROCESS_STR
 
 
 def run_checkpoint_compatibility(attention_type):
@@ -45,13 +44,11 @@ def run_checkpoint_compatibility(attention_type):
 
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
-@pytest.mark.skipif(TEST_DISABLE_SUBPROCESS, reason=TEST_DISABLE_SUBPROCESS_STR)
 def test_autoselected_attention():
   run_checkpoint_compatibility("autoselected")
 
 
 @pytest.mark.integration_test
 @pytest.mark.gpu_only
-@pytest.mark.skipif(TEST_DISABLE_SUBPROCESS, reason=TEST_DISABLE_SUBPROCESS_STR)
 def test_with_dot_product():
   run_checkpoint_compatibility("dot_product")

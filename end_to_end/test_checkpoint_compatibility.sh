@@ -15,8 +15,11 @@ if [ -z "${4}" ]; then
 fi
 model_params=" base_emb_dim=384 base_num_query_heads=8 base_num_kv_heads=8 base_mlp_dim=192 base_num_decoder_layers=8 head_dim=128"
 
-echo "Mounting $DATASET_PATH to /tmp/gcsfuse/"
-bash setup_gcsfuse.sh DATASET_GCS_BUCKET=$DATASET_PATH MOUNT_PATH=/tmp/gcsfuse/
+MOUNT_PATH=/tmp/gcsfuse/
+if find "${MOUNT_PATH}" -maxdepth 0 -empty -print -quit 2>/dev/null | grep -q .; then
+    echo "Mounting $DATASET_PATH to $MOUNT_PATH"
+    bash setup_gcsfuse.sh DATASET_GCS_BUCKET=$DATASET_PATH MOUNT_PATH=$MOUNT_PATH
+fi
 
 echo "Run_1: Starting the first run using the grain input pipeline"
 
