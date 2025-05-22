@@ -280,6 +280,38 @@ def train_loop(config, elastic_manager, state=None):
   # the step is restored back to the latest snapshot when a slice is lost
   while step < config.steps:
     try:
+      if (config.elastic_mode == "fast-resume" and
+          elastic_manager.good_slice_count < elastic_manager.total_slice_count):
+        wait_for_all_slices(elastic_manager, config.elastic_wait_period)
+
+        (
+            config,
+            step,
+            state,
+            mesh,
+            checkpoint_manager,
+            data_iterator,
+            p_train_step,
+            example_batch,
+            learning_rate_schedule,
+            metric_logger,
+            writer,
+            input_data_shardings,
+        ) = elastic_manager.maybe_reshard_up(
+            step=step,
+            snapshot_jax_arrays={
+                "params": state.params,
+                "opt_state": state.opt_state,
+            },
+            elastic_handler=elastic_handler,
+            handler_kwargs={
+                "config": config,
+                "elastic_manager": elastic_manager,
+                "checkpoint_manager": checkpoint_manager,
+            },
+        )
+        step += 1
+
       if step == first_profiling_step or prof.should_activate_periodic_profile(step):
         optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
         prof.activate(blocking_object=state, optional_postfix=optional_postfix)
@@ -344,6 +376,7 @@ def train_loop(config, elastic_manager, state=None):
               "checkpoint_manager": checkpoint_manager,
           },
       )
+
       if ret is not None:
         (
             config,
@@ -366,7 +399,20 @@ def train_loop(config, elastic_manager, state=None):
       step += 1
 
     except jax.errors.JaxRuntimeError as error:
-      ret = elastic_manager.maybe_reshard_down(
+      (
+          config,
+          step,
+          state,
+          mesh,
+          checkpoint_manager,
+          data_iterator,
+          p_train_step,
+          example_batch,
+          learning_rate_schedule,
+          metric_logger,
+          writer,
+          input_data_shardings,
+      ) = elastic_manager.maybe_reshard_down(
           error=error,
           elastic_handler=elastic_handler,
           handler_kwargs={
@@ -375,21 +421,6 @@ def train_loop(config, elastic_manager, state=None):
               "checkpoint_manager": checkpoint_manager,
           },
       )
-      if ret is not None:
-        (
-            config,
-            step,
-            state,
-            mesh,
-            checkpoint_manager,
-            data_iterator,
-            p_train_step,
-            example_batch,
-            learning_rate_schedule,
-            metric_logger,
-            writer,
-            input_data_shardings,
-        ) = ret
 
   if checkpoint_manager is not None:
     if (int(state.step) - 1) % config.checkpoint_period != 0:
@@ -426,16 +457,21 @@ def train_loop(config, elastic_manager, state=None):
   return state
 
 
-def wait_for_all_slices(elastic_manager: manager.Manager) -> None:
-  elastic_manager.good_slice_indices = elastic_manager.get_slice_availability()
-  while len(elastic_manager.good_slice_indices) < elastic_manager.total_slice_count:
+def wait_for_all_slices(
+    elastic_manager: manager.Manager,
+    wait_period: int,
+) -> set[int]:
+  good_slice_indices = elastic_manager.get_slice_availability()
+  while len(good_slice_indices) < elastic_manager.total_slice_count:
     max_logging.log(
         f"Only {elastic_manager.good_slice_count} slices out of {elastic_manager.total_slice_count} available. "
-        "Sleeping for 5 seconds."
+        f"Sleeping for {wait_period} seconds."
     )
-    time.sleep(5)
-    elastic_manager.good_slice_indices = elastic_manager.get_slice_availability()
+    time.sleep(wait_period)
+    good_slice_indices = elastic_manager.get_slice_availability()
+
   max_logging.log("All slices are available")
+  return good_slice_indices
 
 
 def elastic_initialize(devices: Sequence[jax.Device]) -> manager.Manager:
@@ -447,17 +483,11 @@ def elastic_initialize(devices: Sequence[jax.Device]) -> manager.Manager:
   Returns:
     The initialized elastic manager
   """
-  elastic_manager = manager.Manager(
-      devices,
-      reshard_check_period=1,
-      snapshot_period=5,
-      max_elastic_down_event_count=100,
-      max_reshard_retry_count=3,
-  )
+  elastic_manager = manager.Manager(devices)
 
   # Do not start training until all slices are available
   # TODO: b/408455557 - Migrate to pathwaysutils and make configurable
-  wait_for_all_slices(elastic_manager)
+  elastic_manager.good_slice_indices = wait_for_all_slices(elastic_manager, 30)
 
   pyconfig.HyperParameters.global_batch_size_to_train_on = property(
       lambda self: elastic_manager.scale_by_good_slices(self.get_keys()["global_batch_size_to_train_on"])
@@ -472,6 +502,14 @@ def elastic_initialize(devices: Sequence[jax.Device]) -> manager.Manager:
 
   return elastic_manager
 
+def elastic_configure(
+    config: pyconfig.HyperParameters,
+    elastic_manager: manager.Manager,
+):
+  elastic_manager.reshard_check_period = config.elastic_reshard_check_period
+  elastic_manager.snapshot_period = config.elastic_snapshot_period
+  elastic_manager.max_elastic_down_event_count = config.elastic_max_elastic_down_event_count
+  elastic_manager.max_reshard_retry_count = config.elastic_max_reshard_retry_count
 
 def main(argv: Sequence[str]) -> None:
   pathwaysutils.initialize()
@@ -486,6 +524,9 @@ def main(argv: Sequence[str]) -> None:
   elastic_manager = elastic_initialize(jax.devices())
 
   config = pyconfig.initialize(argv)
+
+  elastic_configure(config, elastic_manager)
+
   max_utils.print_system_information()
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
