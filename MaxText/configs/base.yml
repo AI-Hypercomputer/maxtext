@@ -737,3 +737,12 @@ rope_theta_for_vit: 10000
 vision_output_dim_for_vit: 4096
 pixel_shuffle_ratio_for_vit: 0.5
 projector_dropout_for_vit: 0.0
+
+
+## Elastic training flags
+elastic_mode: "fast-resume"
+elastic_reshard_check_period: 1
+elastic_snapshot_period: 5
+elastic_max_elastic_down_event_count: 100
+elastic_max_reshard_retry_count: 3
+elastic_wait_period: 30

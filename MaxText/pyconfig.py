@@ -147,6 +147,37 @@ def validate_rope_type(rope_type: str) -> None:
     raise ValueError(f"Invalid RoPE type was passed. Got: {rope_type}. Valid options: {valid_rope_types}")
 
 
+def validate_elastic(
+    elastic_mode: str | None,
+    elastic_reshard_check_period: int | None,
+):
+  modes = {
+      "replica-resize",
+      "fast-resume",
+  }
+
+  if elastic_mode not in modes:
+    raise ValueError(f"{elastic_mode=} must be in {modes}")
+
+  if elastic_mode == "fast-resume" and elastic_reshard_check_period not in {None, 1}:
+    raise ValueError(
+        "For {elastic_mode=}, {elastic_reshard_check_period=} must be None or 1"
+    )
+
+
+def get_elastic_defaults(keys) -> tuple[str, int | None]:
+  elastic_defaults = {
+      "elastic_mode": "replica-resize",
+      "elastic_reshard_check_period": 1,
+      "elastic_snapshot_period": 1,
+      "elastic_max_elastic_down_event_count": None,
+      "elastic_max_reshard_retry_count": None,
+      "elastic_wait_period": 30,
+  }
+
+  return {k: v for k, v in elastic_defaults.items() if k not in keys}
+
+
 def validate_keys(keys):
   validate_attention_kernel(keys["attention"])
   validate_attention_type(keys["attention_type"])
@@ -160,6 +191,7 @@ def validate_keys(keys):
   validate_model_call_mode(keys["model_call_mode"])
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
   validate_rope_type(keys["rope_type"])
+  validate_elastic(keys["elastic_mode"], keys["elastic_reshard_check_period"])
 
   assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys[
       "enable_checkpointing"
@@ -591,6 +623,8 @@ class _HyperParameters:
     validate_data_input(raw_keys)
 
     raw_keys["decoder_block"] = DecoderBlockType(raw_keys["decoder_block"])
+
+    raw_keys |= get_elastic_defaults(raw_keys)
 
   @staticmethod
   def configure_gpt3_task(raw_keys):
