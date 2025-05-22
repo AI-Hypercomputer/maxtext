@@ -146,12 +146,19 @@ def _find_next_free_page_index(page_status: PagesInt1d) -> ScalarInt:
 
   # argmax returns the index of the *first* True. If none are True, it returns 0.
   next_free_relative = jnp.argmax(overall_free_mask)
+
+  # If argmax returns 0, it could be the first element OR no free page.
+  # We check if the page found by argmax is actually free.
+  # If overall_free_mask[next_free_relative] is False AND next_free_relative is 0,
+  # it implies no free page was found (argmax defaulted to 0 on an all-False mask).
+  is_actually_free = overall_free_mask[next_free_relative]
+  no_page_found = jnp.logical_and(jnp.logical_not(is_actually_free), next_free_relative == 0)
+
   # Add 1 to compensate for the slice [1:]
   next_free_overall = next_free_relative + 1
-  # Check if a free page exists
-  has_free_overall = jnp.any(overall_free_mask)
-  # If a free page exists, return its index, otherwise return -1
-  return jnp.where(has_free_overall, next_free_overall, -1)
+
+  # If no page was found, return -1, otherwise return the calculated index.
+  return jnp.where(no_page_found, -1, next_free_overall)
 
 
 @partial(jax.jit, static_argnames=("max_pages_per_group",))
@@ -181,22 +188,27 @@ def _release_pages_for_group(
   """
   current_page_status = page_state.page_status
   current_page_map = page_state.page_map
-  num_valid_pages = page_state.num_pages_used[page_group_id]
+  num_valid_pages_for_group = page_state.num_pages_used[page_group_id]
 
-  def release_page(i: int, status: PagesInt1d) -> PagesInt1d:
-    is_valid = i < num_valid_pages
-    page_idx = current_page_map[page_group_id, i]
-    # Only release if index 'i' points to a valid allocated page
-    should_release = jnp.logical_and(is_valid, page_idx > 0)
+  # Get the slice of page indices for the group
+  pages_mapped_to_group = current_page_map[page_group_id, :num_valid_pages_for_group]
+  # Filter for valid page indices (>0)
+  actual_pages_to_release = pages_mapped_to_group[pages_mapped_to_group > 0]
 
-    return jax.lax.cond(should_release, lambda s: s.at[page_idx].set(0), lambda s: s, status)
+  # Conditionally update page_status in a batch
+  new_page_status = jax.lax.cond(
+      actual_pages_to_release.shape[0] > 0,
+      lambda status: status.at[actual_pages_to_release].set(0),
+      lambda status: status,  # No change if no pages to release
+      current_page_status
+  )
 
-  new_page_status = jax.lax.fori_loop(0, max_pages_per_group, release_page, current_page_status)
+  # Clear the page_map row for the group
   cleared_group_map_row = jnp.zeros((max_pages_per_group,), dtype=page_state.page_map.dtype)
-  new_page_map = page_state.page_map.at[page_group_id].set(cleared_group_map_row)
+  new_page_map = current_page_map.at[page_group_id].set(cleared_group_map_row) # use current_page_map
 
   return page_state.replace(
-      page_status=new_page_status,
+      page_status=new_page_status, # Use the new batch-updated status
       page_map=new_page_map,
       num_pages_used=page_state.num_pages_used.at[page_group_id].set(0),
       sequence_lengths=page_state.sequence_lengths.at[page_group_id].set(0),
@@ -253,49 +265,38 @@ def _reserve_pages_for_group(
   has_enough_resources = jnp.logical_and(sufficient_free_pages, group_has_capacity)
 
   def allocate_and_update_state(initial_state_tuple: Tuple[PagesInt1d, GroupsPagesInt2d, GroupsInt1d]) -> PageState:
-    """Allocates pages iteratively if resources are sufficient."""
+    """Allocates pages in a batch if resources are sufficient."""
     initial_status, initial_map, initial_num_used = initial_state_tuple
 
-    def allocate_one_page(
-        page_idx_in_group: ScalarInt, loop_state_tuple: Tuple[PagesInt1d, GroupsPagesInt2d, GroupsInt1d]
-    ) -> Tuple[PagesInt1d, GroupsPagesInt2d, GroupsInt1d]:
-      """Allocates a single page within the fori_loop."""
-      current_loop_status, current_loop_map, current_loop_num_used = loop_state_tuple
-      next_free_page_global = _find_next_free_page_index(current_loop_status)
-      page_allocated = jax.lax.ge(next_free_page_global, 0)
+    # num_pages_needed is from the outer scope of _reserve_pages_for_group
+    # page_group_id, true_length, next_write_position are also from the outer scope.
 
-      new_loop_status = jax.lax.cond(
-          page_allocated,
-          lambda s: s.at[next_free_page_global].set(1),
-          lambda s: s,
-          current_loop_status,
-      )
-      new_loop_map = jax.lax.cond(
-          page_allocated,
-          lambda m: m.at[page_group_id, page_idx_in_group].set(next_free_page_global),
-          lambda m: m,
-          current_loop_map,
-      )
-      new_loop_num_used = jax.lax.cond(
-          page_allocated,
-          lambda n: n.at[page_group_id].add(1),
-          lambda n: n,
-          current_loop_num_used,
-      )
-      return new_loop_status, new_loop_map, new_loop_num_used
-
-    final_page_status, final_page_map, final_num_pages_used = jax.lax.fori_loop(
-        0,
-        num_pages_needed,
-        allocate_one_page,
-        (initial_status, initial_map, initial_num_used),
-    )
-    active_page_global_index = final_page_map[page_group_id, num_pages_needed - 1]
-
+    # Find absolute indices of free pages (from index 1 onwards)
+    # This searches within the initial_status passed via the tuple.
+    free_indices_absolute = jnp.argwhere(initial_status[1:] == 0).squeeze(axis=-1) + 1
+    
+    # Select the first num_pages_needed pages.
+    # The has_enough_resources check in the outer function ensures that
+    # free_indices_absolute.shape[0] >= num_pages_needed.
+    pages_to_allocate = free_indices_absolute[:num_pages_needed]
+        
+    # Batch update page_status based on the initial_status
+    new_status = initial_status.at[pages_to_allocate].set(1)
+    
+    # Batch update page_map for the current group based on initial_map
+    new_map = initial_map.at[page_group_id, :num_pages_needed].set(pages_to_allocate)
+    
+    # Update num_pages_used for the current group based on initial_num_used
+    new_num_used = initial_num_used.at[page_group_id].add(num_pages_needed) # Add, not set
+    
+    # The active page is the last one allocated
+    active_page_global_index = pages_to_allocate[-1]
+    
+    # Construct the new state by replacing fields in the original released_state
     return released_state.replace(
-        page_status=final_page_status,
-        page_map=final_page_map,
-        num_pages_used=final_num_pages_used,
+        page_status=new_status, # Use the newly computed status
+        page_map=new_map,       # Use the newly computed map
+        num_pages_used=new_num_used, # Use the newly computed num_used
         sequence_lengths=released_state.sequence_lengths.at[page_group_id].set(true_length),
         active_page=released_state.active_page.at[page_group_id].set(active_page_global_index),
         has_active_page=released_state.has_active_page.at[page_group_id].set(True),
