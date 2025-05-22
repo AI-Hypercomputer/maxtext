@@ -39,6 +39,7 @@ for more details about the elastic manager.
 """
 from collections.abc import Sequence
 import datetime
+import json
 import logging
 import os
 import sys
@@ -116,10 +117,11 @@ def elastic_handler(
         config, elastic_manager.good_devices
     )
     with mesh:
-      data_iterator, _ = create_data_iterator(config, mesh)
+      data_iterator, _ = create_data_iterator(config, mesh, elastic=True)
 
-      step, snapshot_jax_arrays, _ = elastic_manager.get_resharded_snapshot(mesh)
-
+      step, snapshot_jax_arrays, snapshot_controller = elastic_manager.get_resharded_snapshot(mesh)
+      if config.dataset_type == "grain":
+        data_iterator.set_state(json.dumps(snapshot_controller['data_iterator'], indent=4).encode())
       # We do not want to restore from the previous checkpoint but instead
       # restore from the host offloaded snapshot.
       if checkpoint_manager is not None:
@@ -263,6 +265,9 @@ def train_loop(config, elastic_manager, state=None):
           "params": state.params,
           "opt_state": state.opt_state,
       },
+      snapshot_controller={
+        "data_iterator": json.loads(data_iterator.local_iterator.get_state().decode()),
+      } if config.dataset_type=='grain' else None,
       force=True,
       block=True,
   )
@@ -318,16 +323,22 @@ def train_loop(config, elastic_manager, state=None):
               "params": state.params,
               "opt_state": state.opt_state,
           },
+          snapshot_controller={
+            "data_iterator": json.loads(data_iterator.local_iterator.get_state().decode()),
+          } if config.dataset_type=="grain" else None,
           block=True,
       )
 
       ret = elastic_manager.maybe_reshard_up(
           step=step,
+          elastic_handler=elastic_handler,
           snapshot_jax_arrays={
               "params": state.params,
               "opt_state": state.opt_state,
           },
-          elastic_handler=elastic_handler,
+          snapshot_controller={
+            "data_iterator": json.loads(data_iterator.local_iterator.get_state().decode()),
+          } if config.dataset_type=="grain" else None,
           handler_kwargs={
               "config": config,
               "elastic_manager": elastic_manager,

@@ -22,7 +22,7 @@ from typing import Dict
 from threading import current_thread
 import datasets
 from datasets.distributed import split_dataset_by_node
-import grain.python as grain
+import grain
 import numpy as np
 import tensorflow as tf
 from MaxText import max_logging
@@ -131,7 +131,7 @@ def tokenization(example, hf_tokenizer, truncation, max_length, column_names):
 
 
 @dataclasses.dataclass
-class SFTPromptMasking(grain.MapTransform):
+class SFTPromptMasking(grain.transforms.Map):
   """Construct inputs and targets for SFT training. Concat prompt and completion to generate inputs.
   For targets, if train on completion only, the prompt will be masked by unk_id. Otherwise the same as inputs.
   """
@@ -168,7 +168,7 @@ class SFTPromptMasking(grain.MapTransform):
 
 
 @dataclasses.dataclass
-class HFNormalizeFeatures(grain.MapTransform):
+class HFNormalizeFeatures(grain.transforms.Map):
   """Normalize feature keys for HuggingFace input"""
 
   def __init__(self, column_name):
@@ -181,7 +181,7 @@ class HFNormalizeFeatures(grain.MapTransform):
     }
 
 
-class HFDataSource(grain.RandomAccessDataSource):
+class HFDataSource(grain.sources.RandomAccessDataSource):
   """A class that makes HuggingFace IterableDataset a grain datasource without random access support"""
 
   def __init__(
@@ -268,7 +268,7 @@ class HFDataSource(grain.RandomAccessDataSource):
 
 
 @dataclasses.dataclass
-class ParseFeatures(grain.MapTransform):
+class ParseFeatures(grain.transforms.Map):
   """Parse serialized example"""
 
   def __init__(self, data_columns, tokenize):
@@ -290,7 +290,7 @@ class ParseFeatures(grain.MapTransform):
 
 
 @dataclasses.dataclass
-class NormalizeFeatures(grain.MapTransform):
+class NormalizeFeatures(grain.transforms.Map):
   """Normalize text feature keys."""
 
   def __init__(self, column_names, tokenize):
@@ -305,7 +305,7 @@ class NormalizeFeatures(grain.MapTransform):
 
 
 @dataclasses.dataclass
-class Rekey(grain.MapTransform):
+class Rekey(grain.transforms.Map):
   """Rname keys according to a mappign dict"""
 
   def __init__(self, mapping_dict, keep_old_keys=False):
@@ -324,7 +324,7 @@ class Rekey(grain.MapTransform):
 
 
 @dataclasses.dataclass
-class ReformatPacking(grain.MapTransform):
+class ReformatPacking(grain.transforms.Map):
   """Reformat packing outputs."""
 
   def __init__(self, column_names):
@@ -340,7 +340,7 @@ class ReformatPacking(grain.MapTransform):
 
 
 @dataclasses.dataclass
-class PadOrTrimToMaxLength(grain.MapTransform):
+class PadOrTrimToMaxLength(grain.transforms.Map):
   """Pads/Trims each input to the specified length
   and returns true_length of input
   """
@@ -370,7 +370,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
 
 
 @dataclasses.dataclass
-class PadToMaxLength(grain.MapTransform):
+class PadToMaxLength(grain.transforms.Map):
   """Pads each input to the specified length"""
 
   def __init__(self, max_length, pad_id):
@@ -393,6 +393,26 @@ class PadToMaxLength(grain.MapTransform):
       element[key] = _pad(element[key], self.max_length, self.pad_id)
     return element
 
+class ShiftLeftBeforeBatch(grain.transforms.Map):
+  def __init__(self, pad_id, data_columns):
+    self.pad_id = pad_id
+    self.data_columns = data_columns
+
+  def map(self, data: dict[str, np.ndarray]):
+    """map to each element"""
+    for data_column in self.data_columns:
+      np.pad(data[data_column][:-1], (0,1), constant_values=self.pad_id)
+    return data
+
+class MaskTargetTokens(grain.transforms.Map):
+  def __init__(self, ignored_ids):
+    self.ignored_ids = ignored_ids
+
+  def map(self, data: dict[str, np.ndarray]):
+    """map to each element"""
+    for id in self.ignored_ids:
+      data["targets_segmentation"] = np.where(data["targets"]==id, 0, data["targets_segmentation"])
+    return data
 
 def shift_right(x, axis=1):
   """Shift the input to the right by padding and slicing on axis."""
@@ -428,7 +448,7 @@ def shift_and_refine(x, ignored_ids, axis=1):
 
 
 @dataclasses.dataclass
-class ShiftData(grain.MapTransform):
+class ShiftData(grain.transforms.Map):
   """Shift inputs and refine annotations."""
 
   def __init__(self, ignored_ids, axis=1):

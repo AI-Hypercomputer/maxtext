@@ -145,7 +145,7 @@ def make_mixed_iterator(config, mesh, process_indices_train, process_indices_eva
   return train_iterator, eval_iterator
 
 
-def create_data_iterator(config, mesh):
+def create_data_iterator(config, mesh, elastic=True):
   if config.dataset_type == "synthetic":
     return SyntheticDataIterator(config, mesh), None
 
@@ -175,8 +175,8 @@ def create_data_iterator(config, mesh):
     train_iterator_fn = functools.partial(make_tfds_train_iterator, config, mesh, process_indices_train)
     eval_iterator_fn = functools.partial(make_tfds_eval_iterator, config, mesh, process_indices_eval)
   elif config.dataset_type == "grain":
-    train_iterator_fn = functools.partial(make_grain_train_iterator, config, mesh, process_indices_train)
-    eval_iterator_fn = functools.partial(make_grain_eval_iterator, config, mesh, process_indices_eval)
+    train_iterator_fn = functools.partial(make_grain_train_iterator, config, mesh, process_indices_train, elastic)
+    eval_iterator_fn = functools.partial(make_grain_eval_iterator, config, mesh, process_indices_eval, elastic)
   elif config.dataset_type == "hf":
     train_iterator_fn = functools.partial(make_hf_train_iterator, config, mesh, process_indices_train)
     eval_iterator_fn = functools.partial(make_hf_eval_iterator, config, mesh, process_indices_eval)
