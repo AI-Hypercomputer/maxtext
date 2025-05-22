@@ -59,6 +59,7 @@ from MaxText import maxtext_utils
 from MaxText import profiler
 from MaxText import optimizers
 from MaxText import pyconfig
+from MaxText.common_types import DecoderBlockType
 
 from MaxText.inference import offline_engine
 from MaxText.inference.offline_engine import InputData
@@ -568,7 +569,7 @@ def compute_log_probs(
 
 
 def pathways_reshard(config, inference_engine, params, source_shardings, source_mesh, destination_shardings, is_pw_reshard):
-  if config.decoder_block == "deepseek":
+  if config.decoder_block == DecoderBlockType.DEEPSEEK:
     layer_groups = [
       ("dense_layers", config.first_num_dense_layers),
       ("moe_layers", config.base_num_decoder_layers - config.first_num_dense_layers)
