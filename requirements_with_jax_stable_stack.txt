@@ -1,6 +1,7 @@
 # Requirements for Building the MaxText Docker Image
 # These requirements are additional to the dependencies present in the JAX SS base image.
 datasets
+flax>=0.10.6
 grain[parquet]>=0.2.6
 orbax-checkpoint>=0.10.3
 pylint
