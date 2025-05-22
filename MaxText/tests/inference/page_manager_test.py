@@ -41,9 +41,9 @@ class PageManagerTest(parameterized.TestCase):
           'expected_index': 2,
       },
       {
-          'testcase_name': 'page_0_free_rest_used', # As per current design, searches page_status[1:]
+          'testcase_name': 'page_0_free_rest_used',
           'page_status': jnp.array([0, 1, 1, 1], dtype=jnp.int32),
-          'expected_index': -1,
+          'expected_index': -1, # Searches page_status[1:]
       },
       {
           'testcase_name': 'page_0_used_page_1_free',
@@ -51,7 +51,7 @@ class PageManagerTest(parameterized.TestCase):
           'expected_index': 1,
       },
       {
-          'testcase_name': 'only_page_0_used_others_free_long',
+          'testcase_name': 'long_all_free_except_0',
           'page_status': jnp.array([1, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=jnp.int32),
           'expected_index': 1,
       },
@@ -61,11 +61,11 @@ class PageManagerTest(parameterized.TestCase):
           'expected_index': 4,
       },
       {
-          'testcase_name': 'empty_status_except_0', # Effectively no free pages beyond index 0
+          'testcase_name': 'only_page_0_no_others',
           'page_status': jnp.array([1], dtype=jnp.int32),
           'expected_index': -1,
       },
-      {
+       {
           'testcase_name': 'two_pages_0_used_1_free',
           'page_status': jnp.array([1,0], dtype=jnp.int32),
           'expected_index': 1,
@@ -75,15 +75,13 @@ class PageManagerTest(parameterized.TestCase):
     next_free = page_manager._find_next_free_page_index(page_status)
     self.assertEqual(next_free, expected_index)
 
-  # Common setup for _reserve_pages_for_group and _release_pages_for_group tests
   def setUp(self):
     super().setUp()
-    self.num_pages = 64
-    self.max_page_groups = 4
+    self.num_pages = 64 # Example value
+    self.max_page_groups = 4 # Example value
     self.tokens_per_page = 16 # Static for _reserve_pages_for_group
-    self.max_pages_per_group = 8 # Static for both
+    self.max_pages_per_group = 32 # Static for _reserve_pages_for_group and _release_pages_for_group
 
-    # Initial state is created once, specific modifications happen per test
     self.initial_page_state = page_manager.initialize_page_state(
         num_pages=self.num_pages,
         max_page_groups=self.max_page_groups,
@@ -91,18 +89,18 @@ class PageManagerTest(parameterized.TestCase):
     )
 
   def test_reserve_pages_successful_reservation(self):
-    page_group_id = 0
+    page_group_id = jnp.array(0, dtype=jnp.int32)
     num_pages_to_reserve = 5
-    true_length = num_pages_to_reserve * self.tokens_per_page
+    true_length = jnp.array(num_pages_to_reserve * self.tokens_per_page, dtype=jnp.int32)
 
-    # _reserve_pages_for_group expects a state where the target group is already "released"
-    # For a fresh state, this means the group's entries are 0, which initialize_page_state provides.
+    # _reserve_pages_for_group expects a state where the target group is "released"
+    # For a fresh state, this is the initial_page_state.
     released_state = self.initial_page_state
 
     final_state = page_manager._reserve_pages_for_group(
         released_state,
-        jnp.array(page_group_id, dtype=jnp.int32),
-        jnp.array(true_length, dtype=jnp.int32),
+        page_group_id,
+        true_length,
         self.tokens_per_page, # static
         self.max_pages_per_group # static
     )
@@ -111,30 +109,27 @@ class PageManagerTest(parameterized.TestCase):
     self.assertEqual(final_state.sequence_lengths[page_group_id], true_length)
 
     # Page 0 is used by default, so reserved pages start from index 1
-    expected_page_status_after_reserve = self.initial_page_state.page_status.at[1:num_pages_to_reserve+1].set(1)
-    self.assertTrue(jnp.array_equal(final_state.page_status, expected_page_status_after_reserve))
+    expected_page_status = self.initial_page_state.page_status.at[1:num_pages_to_reserve+1].set(1)
+    self.assertTrue(jnp.array_equal(final_state.page_status, expected_page_status))
 
-    expected_page_map_row = jnp.arange(1, num_pages_to_reserve + 1) # Global page indices
+    expected_page_map_row = jnp.arange(1, num_pages_to_reserve + 1, dtype=jnp.int32)
     self.assertTrue(jnp.array_equal(final_state.page_map[page_group_id, :num_pages_to_reserve], expected_page_map_row))
-    # Check padding is 0
     self.assertTrue(jnp.all(final_state.page_map[page_group_id, num_pages_to_reserve:] == 0))
-
 
     self.assertEqual(final_state.active_page[page_group_id], expected_page_map_row[-1])
     self.assertTrue(final_state.has_active_page[page_group_id])
-    # Since true_length is a multiple of tokens_per_page, position should be 0
-    self.assertEqual(final_state.active_page_position[page_group_id], 0)
+    self.assertEqual(final_state.active_page_position[page_group_id], 0) # true_length is multiple of tokens_per_page
 
     # Test with non-zero active_page_position
-    true_length_plus_one = true_length + 1 # num_pages_to_reserve * tokens_per_page + 1
-    # Need to release first for this group before reserving again
+    true_length_plus_one = jnp.array(num_pages_to_reserve * self.tokens_per_page + 1, dtype=jnp.int32)
+    # Release first for this group
     intermediate_state = page_manager._release_pages_for_group(
-        final_state, jnp.array(page_group_id, dtype=jnp.int32), self.max_pages_per_group
+        final_state, page_group_id, self.max_pages_per_group
     )
     final_state_plus_one = page_manager._reserve_pages_for_group(
         intermediate_state,
-        jnp.array(page_group_id, dtype=jnp.int32),
-        jnp.array(true_length_plus_one, dtype=jnp.int32),
+        page_group_id,
+        true_length_plus_one,
         self.tokens_per_page,
         self.max_pages_per_group
     )
@@ -142,31 +137,25 @@ class PageManagerTest(parameterized.TestCase):
     self.assertEqual(final_state_plus_one.num_pages_used[page_group_id], num_pages_to_reserve + 1)
     self.assertEqual(final_state_plus_one.sequence_lengths[page_group_id], true_length_plus_one)
     self.assertEqual(final_state_plus_one.active_page_position[page_group_id], 1)
-    # Active page should be the (num_pages_to_reserve + 1)-th page allocated *globally*
-    # Since the first num_pages_to_reserve were indices 1 to num_pages_to_reserve,
-    # and they were released, the new pages will again start from 1.
+    # Pages will be allocated starting from 1 again.
     self.assertEqual(final_state_plus_one.active_page[page_group_id], num_pages_to_reserve + 1)
 
 
   def test_reserve_pages_insufficient_global_free_pages(self):
-    page_group_id = 1
+    page_group_id = jnp.array(1, dtype=jnp.int32)
     # Make most pages used, leave only 2 free pages (indices self.num_pages-2, self.num_pages-1)
     # Page 0 is already used. Indices 1 to self.num_pages-3 will be set to used.
     modified_status = self.initial_page_state.page_status.at[1:self.num_pages-2].set(1)
     released_state = self.initial_page_state.replace(page_status=modified_status)
-    # Count actual free pages (excluding page 0)
-    # Initial free pages (excluding page 0) = self.num_pages - 1
-    # Pages marked as used = (self.num_pages - 2) - 1 = self.num_pages - 3
-    # Remaining free pages = (self.num_pages - 1) - (self.num_pages - 3) = 2
+    # Verify only 2 pages are free (excluding page 0)
     self.assertEqual(jnp.sum(released_state.page_status[1:] == 0), 2)
 
-
-    true_length = 3 * self.tokens_per_page # Attempt to reserve 3 pages, but only 2 are free
+    true_length = jnp.array(3 * self.tokens_per_page, dtype=jnp.int32) # Attempt to reserve 3 pages
 
     final_state = page_manager._reserve_pages_for_group(
         released_state,
-        jnp.array(page_group_id, dtype=jnp.int32),
-        jnp.array(true_length, dtype=jnp.int32),
+        page_group_id,
+        true_length,
         self.tokens_per_page,
         self.max_pages_per_group
     )
@@ -180,14 +169,15 @@ class PageManagerTest(parameterized.TestCase):
     self.assertTrue(jnp.array_equal(final_state.page_status, released_state.page_status))
 
   def test_reserve_pages_insufficient_group_capacity(self):
-    page_group_id = 2
-    true_length = (self.max_pages_per_group + 1) * self.tokens_per_page # Exceeds max_pages_per_group
+    page_group_id = jnp.array(2, dtype=jnp.int32)
+    # Attempt to reserve more pages than max_pages_per_group
+    true_length = jnp.array((self.max_pages_per_group + 1) * self.tokens_per_page, dtype=jnp.int32)
     released_state = self.initial_page_state # Start with fresh state for this group
 
     final_state = page_manager._reserve_pages_for_group(
         released_state,
-        jnp.array(page_group_id, dtype=jnp.int32),
-        jnp.array(true_length, dtype=jnp.int32),
+        page_group_id,
+        true_length,
         self.tokens_per_page,
         self.max_pages_per_group
     )
@@ -202,15 +192,15 @@ class PageManagerTest(parameterized.TestCase):
 
 
   def test_release_pages_release_active_group(self):
-    page_group_id = 0
+    page_group_id = jnp.array(0, dtype=jnp.int32)
     num_pages_to_reserve = 3
-    true_length = num_pages_to_reserve * self.tokens_per_page
+    true_length = jnp.array(num_pages_to_reserve * self.tokens_per_page, dtype=jnp.int32)
 
     # First, reserve some pages for the group
     reserved_state = page_manager._reserve_pages_for_group(
         self.initial_page_state,
-        jnp.array(page_group_id, dtype=jnp.int32),
-        jnp.array(true_length, dtype=jnp.int32),
+        page_group_id,
+        true_length,
         self.tokens_per_page,
         self.max_pages_per_group
     )
@@ -220,18 +210,16 @@ class PageManagerTest(parameterized.TestCase):
     expected_allocated_indices = jnp.array([1, 2, 3], dtype=jnp.int32)
     self.assertTrue(jnp.all(reserved_state.page_status[expected_allocated_indices] == 1))
 
-
     # Now, release the pages
     final_state = page_manager._release_pages_for_group(
         reserved_state,
-        jnp.array(page_group_id, dtype=jnp.int32),
+        page_group_id,
         self.max_pages_per_group # static
     )
 
     # Assertions for release
     self.assertTrue(jnp.all(final_state.page_status[expected_allocated_indices] == 0)) # Pages are free
-    # Check that page 0 remains used
-    self.assertEqual(final_state.page_status[0], 1)
+    self.assertEqual(final_state.page_status[0], 1) # Page 0 remains used
     self.assertEqual(final_state.num_pages_used[page_group_id], 0)
     self.assertEqual(final_state.sequence_lengths[page_group_id], 0)
     self.assertTrue(jnp.all(final_state.page_map[page_group_id] == 0))
@@ -239,16 +227,15 @@ class PageManagerTest(parameterized.TestCase):
     self.assertEqual(final_state.active_page[page_group_id], 0)
     self.assertEqual(final_state.active_page_position[page_group_id], 0)
 
-
   def test_release_pages_release_empty_group(self):
-    page_group_id = 1 # A group that has no pages allocated in initial_page_state
+    page_group_id = jnp.array(1, dtype=jnp.int32) # A group that has no pages
     
     # Sanity check: group is indeed empty
     self.assertEqual(self.initial_page_state.num_pages_used[page_group_id], 0)
 
     final_state = page_manager._release_pages_for_group(
         self.initial_page_state,
-        jnp.array(page_group_id, dtype=jnp.int32),
+        page_group_id,
         self.max_pages_per_group
     )
 

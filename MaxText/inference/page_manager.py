@@ -268,29 +268,41 @@ def _reserve_pages_for_group(
     """Allocates pages in a batch if resources are sufficient."""
     initial_status, initial_map, initial_num_used = initial_state_tuple
 
-    # num_pages_needed is from the outer scope of _reserve_pages_for_group
-    # page_group_id, true_length, next_write_position are also from the outer scope.
+    # num_pages_needed, page_group_id, true_length, next_write_position are from the outer scope.
+    # max_pages_per_group is a static argument to the parent _reserve_pages_for_group
+    # and is available here.
 
-    # Find absolute indices of free pages (from index 1 onwards)
-    # This searches within the initial_status passed via the tuple.
-    free_indices_absolute = jnp.argwhere(initial_status[1:] == 0).squeeze(axis=-1) + 1
+    search_array = initial_status[1:]
+    
+    # Use jnp.nonzero with static size
+    # max_pages_per_group is the static size.
+    # found_indices_relative will have shape (max_pages_per_group,)
+    found_indices_relative, _ = jnp.nonzero(
+        search_array == 0,
+        size=max_pages_per_group, # Static size
+        fill_value=-1 # Sentinel for unused slots
+    )
     
     # Select the first num_pages_needed pages.
-    # The has_enough_resources check in the outer function ensures that
-    # free_indices_absolute.shape[0] >= num_pages_needed.
-    pages_to_allocate = free_indices_absolute[:num_pages_needed]
+    # The has_enough_resources check ensures these are valid indices (not -1)
+    # and that there are enough of them.
+    pages_to_allocate_relative = found_indices_relative[:num_pages_needed]
+    
+    # Convert to absolute indices
+    pages_to_allocate_absolute = pages_to_allocate_relative + 1
         
     # Batch update page_status based on the initial_status
-    new_status = initial_status.at[pages_to_allocate].set(1)
+    new_status = initial_status.at[pages_to_allocate_absolute].set(1)
     
     # Batch update page_map for the current group based on initial_map
-    new_map = initial_map.at[page_group_id, :num_pages_needed].set(pages_to_allocate)
+    new_map = initial_map.at[page_group_id, :num_pages_needed].set(pages_to_allocate_absolute)
     
     # Update num_pages_used for the current group based on initial_num_used
     new_num_used = initial_num_used.at[page_group_id].add(num_pages_needed) # Add, not set
     
     # The active page is the last one allocated
-    active_page_global_index = pages_to_allocate[-1]
+    # num_pages_needed is guaranteed to be >= 1 if true_length > 0
+    active_page_global_index = pages_to_allocate_absolute[num_pages_needed - 1]
     
     # Construct the new state by replacing fields in the original released_state
     return released_state.replace(
