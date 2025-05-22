@@ -366,7 +366,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 
   # Compute auxiliary metrics.
   if config.grpo_beta != 0.0:
-    avg_kl = jnp.mean((per_token_kl * valid_seq_mask) / loss_denominator)
+    avg_kl = jnp.mean((per_token_kl * valid_seq_mask) / loss_denominator[:, None])
   else:
     avg_kl = None
   avg_reward = jnp.mean(rewards)
@@ -498,10 +498,14 @@ def generate_completions(config, tokenizer_model, engine, data, params, rng):
 
 
 def generate_offline_completions(config, tokenizer_model, inference_engine, data):
-  input_data = [InputData(id=f"input_{i}", tokens=np.array(d), true_length=np.array(data[f"{config.train_data_columns}_true_length"][i])[0]) for i, d in enumerate(data[config.train_data_columns])]
+  # TODO(mohitkhatwani) think about doing multisampling here
+  input_data = []
+  for i, d in enumerate(data[config.train_data_columns]):
+    for g in range(config.num_generations):
+      input_data.append(InputData(id=f"input_{i}_{g}", tokens=np.array(d), true_length=np.array(data[f"{config.train_data_columns}_true_length"][i])[0]))
   results = inference_engine.batch_inference(input_data)
   completions = jnp.stack([r.token_ids for r in results])
-  completions_logprobs = jnp.stack([r.logprobs for r in results])
+  completions_logprobs = jnp.stack(np.array([r.logprobs for r in results]))
   data = grpo_utils.concatenate_prompt_with_completions(config, tokenizer_model, data, completions)
   # offpolicys
   if config.inference_rollouts > 1:
@@ -573,8 +577,6 @@ def pathways_reshard(config, inference_engine, params, source_shardings, source_
     layer_groups = [("layers", config.base_num_decoder_layers)]
   if not config.scan_layers:
     max_utils.unscan_train_state_params(params, source_shardings, source_mesh, scan_axis=config.param_scan_axis, layer_groups=layer_groups)
-    num_model_parameters = max_utils.calculate_num_params_from_pytree(params)
-    max_logging.log(f"number parameters after unscanning: {num_model_parameters/1e9:.3f} billion")
   inference_engine.update_params(params, jax.tree_util.tree_map(lambda x: x.spec, destination_shardings[0].params), is_pw_reshard)
   if not config.scan_layers:
     max_utils.rescan_train_state_params(params, source_shardings, scan_axis=config.param_scan_axis, layer_groups=layer_groups)
@@ -1040,9 +1042,9 @@ def train_loop(config, config_inference, state=None):
     with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
       if step != 0 and step % config.inference_rollouts == 0:
         if config.use_pathways_reshard:
-          pathways_reshard(config_inference, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
+          pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
         else:
-          pathways_reshard(config_inference, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
+          pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
     step_time_delta = datetime.datetime.now() - last_step_completion
     last_step_completion = datetime.datetime.now()
     record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
