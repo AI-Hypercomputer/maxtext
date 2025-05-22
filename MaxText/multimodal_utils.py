@@ -52,7 +52,7 @@ def load_image_from_path(image_path):
     image.load()  # Load image data to catch errors early
     return jnp.asarray(np.array(image))
   except (IOError, OSError) as e:
-    raise IOError(f"Error loading image from {image_path}")
+    raise IOError(f"Error loading image from {image_path}") from e
 
 
 def _normalize_images(images, mean, std):

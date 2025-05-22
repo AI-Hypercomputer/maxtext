@@ -17,4 +17,3 @@ golden_data_llama4-17b-16e.jsonl
 golden_data_mistral-7b.jsonl
 golden_data_mixtral-8x22b.jsonl
 golden_data_mixtral-8x7b.jsonl
-golden_data_sft_llama2-7b.jsonl

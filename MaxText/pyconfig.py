@@ -458,9 +458,10 @@ class _HyperParameters:
     raw_keys = OrderedDict()
     keys_from_env_and_command_line = self._update_from_env_and_command_line(raw_keys, raw_data_from_yaml, argv, **kwargs)
     max_logging.log(f"Updating keys from env and command line: {keys_from_env_and_command_line}")
-    keys_from_model = _HyperParameters.update_model_vars(argv[1], raw_keys, config_name)
+    keys_from_model = _HyperParameters.update_model_vars(argv[1], raw_keys, config_name, keys_from_env_and_command_line)
     max_logging.log(f"Updating keys from model: {keys_from_model}")
-    validate_no_keys_overwritten_twice(keys_from_env_and_command_line, keys_from_model)
+    if not raw_keys["override_model_config"]:
+      validate_no_keys_overwritten_twice(keys_from_env_and_command_line, keys_from_model)
 
     # This must be invoked before initializing the backend
     raw_keys = validate_and_set_hlo_dump_defaults(raw_keys)
@@ -625,7 +626,7 @@ class _HyperParameters:
     raw_keys["eval_interval"] = math.ceil(377487360 / max_target_length / global_batch_size_to_train_on)
 
   @staticmethod
-  def update_model_vars(base_config_path, raw_keys, config_name: str):
+  def update_model_vars(base_config_path, raw_keys, config_name: str, keys_from_env_and_command_line):
     """Update model config variables"""
     validate_model_name(raw_keys["model_name"])
     max_logging.log(f"Running Model: {raw_keys['model_name']}")
@@ -642,6 +643,8 @@ class _HyperParameters:
       # Use omegaconf.OmegaConf to load the model-specific configuration.
       model_vars = omegaconf.OmegaConf.load(file_path)
       model_vars = omegaconf.OmegaConf.to_container(model_vars, resolve=True)
+      if raw_keys["override_model_config"]:
+        model_vars = {key: value for key, value in model_vars.items() if key not in keys_from_env_and_command_line}
       updated_keys = list(model_vars.keys())
       raw_keys = validate_and_update_keys(raw_keys, model_vars, config_name)
     return updated_keys

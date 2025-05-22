@@ -18,8 +18,6 @@ limitations under the License.
 import unittest
 import os.path
 
-import pytest
-
 import numpy as np
 
 from jax import numpy as jnp
@@ -127,7 +125,7 @@ class QuantizationTest(unittest.TestCase):
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 1)
     # pylint: disable=unsupported-membership-test
     self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
-    quant_cfg, tile_size = quant.quant_dg[quantizations.DEFAULT]
+    quant_cfg, _ = quant.quant_dg[quantizations.DEFAULT]
     self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.dtype, None)
     self.assertEqual(quant_cfg.fwd.dg_quantizer.rhs.numerics.bits, 8)
 
@@ -139,10 +137,10 @@ class QuantizationTest(unittest.TestCase):
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7)
     # pylint: disable=unsupported-membership-test
     self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
-    quant_cfg, tile_size = quant.quant_dg[quantizations.DEFAULT]
+    quant_cfg, _ = quant.quant_dg[quantizations.DEFAULT]
     self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.dtype, None)
     self.assertEqual(quant_cfg.fwd.dg_quantizer.rhs.numerics.bits, 8)
-    quant_cfg, tile_size = quant.quant_dg[_QUERY_REGEX]
+    quant_cfg, _ = quant.quant_dg[_QUERY_REGEX]
     self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.dtype, None)
     self.assertEqual(quant_cfg.fwd.dg_quantizer.rhs.numerics.bits, 4)
 

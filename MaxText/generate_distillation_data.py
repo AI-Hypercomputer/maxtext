@@ -24,20 +24,26 @@ Example command:
     --dataset-path HuggingFaceH4/ultrachat_200k --data-split train_sft --data-columns messages \
     --tokenizer-path deepseek-ai/DeepSeek-V2-Lite-chat \
     --hf-access-token <access token> \
-    --batch-size 1024 --num-batches 100 \
+    --batch-size 1024 --num-batches 10 \
     --num-generations 2 \
-    --max-output-length 128 --max-target-length 256 \
+    --max-prefill-length 256 --max-target-length 2048 \
     --use-chat-template --remove-local-dataset-files \
     upload-to-hf --hf-repo-id <hf repository id>
 
-Running this command executes 100 processing steps.
-In each step, it generates completions for a batch of 40 prompts.
-This results in inference running on 4000 prompts overall, producing 2 samples per prompt.
+Running this command executes 10 processing steps.
+In each step, it generates completions for a batch of 1024 prompts.
+This results in inference running on 10240 prompts overall, producing 2 unique samples per prompt.
+Some prompts may be filtered out if prompt tokens are longer than `max-prefill-length`.
+`max-target-length` is the max length of prompt tokens and expected completion tokens.
+Set `--remove-local-dataset-files` to remove dataset files created locally after uploading to Hugging Face or GCS.
+`upload-to-hf` will upload the dataset to Hugging Face and `upload-to-gcs` will upload the dataset to GCS.
+For more information, check out `python3 -m MaxText.generate_distillation_data --help`.
 Note:
 Make sure to run maxengine server in a new terminal before executing this command. Example command to run maxengine server:
   python3 -m MaxText.maxengine_server MaxText/configs/base.yml \
     model_name=deepseek2-16b tokenizer_path=deepseek-ai/DeepSeek-V2-Lite-chat tokenizer_type=huggingface \
     load_parameters_path=<unscanned checkpoint path> \
+    max_target_length=2048 max_prefill_predict_length=256 \
     per_device_batch_size=10 multi_sampling=True ici_tensor_parallelism=4 \
     decode_sampling_strategy=weighted scan_layers=False
 """
@@ -92,7 +98,7 @@ async def send_request(config, request, stub, tokenizer, progress_bar):  # pylin
 
   outputs = []
   for tokens in completion_tokens:
-    completion = tokenizer.decode(tokens, skip_special_tokens=True)
+    completion = tokenizer.decode(tokens, skip_special_tokens=True).strip()
     outputs.append(
         {
             "prompt": [{"role": "user", "content": prompt}],
@@ -219,7 +225,7 @@ def upload_data(config, data, batch_num):  # pylint: disable=redefined-outer-nam
   if config.remove_local_dataset_files and os.path.exists(parquet_file_name):
     try:
       os.remove(parquet_file_name)
-    except Exception as e:
+    except OSError as e:
       max_logging.log(f"Unable to remove local dataset file {parquet_file_name}: {e}")
 
 
@@ -256,9 +262,7 @@ if __name__ == "__main__":
   )
   parser.add_argument("--tokenizer-path", type=str, required=True, help="Path to Hugging Face tokenizer.")
   parser.add_argument("--use-chat-template", action="store_true", help="Enable tokenizer to apply a chat template.")
-  parser.add_argument(
-      "--max-output-length", type=int, required=True, help="The maximum completion tokens to generate for a prompt."
-  )
+  parser.add_argument("--max-prefill-length", type=int, default=256, help="The maximum prompt length.")
   parser.add_argument(
       "--max-target-length", type=int, default=2048, help="The maximum prompt length plus the output completion length."
   )
@@ -293,6 +297,6 @@ if __name__ == "__main__":
   config = parser.parse_args()
 
   assert (
-      config.max_output_length < config.max_target_length
-  ), "Maximum output length of completion should be less than maximum target length."
+      config.max_prefill_length < config.max_target_length
+  ), "Maximum length of prompt should be less than maximum target length."
   generate_data(config)
