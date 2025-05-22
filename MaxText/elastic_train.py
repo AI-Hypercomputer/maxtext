@@ -39,7 +39,6 @@ for more details about the elastic manager.
 """
 from collections.abc import Sequence
 import datetime
-import json
 import logging
 import os
 import sys
@@ -121,7 +120,7 @@ def elastic_handler(
 
       step, snapshot_jax_arrays, snapshot_controller = elastic_manager.get_resharded_snapshot(mesh)
       if config.dataset_type == "grain":
-        data_iterator.set_state(json.dumps(snapshot_controller['data_iterator'], indent=4).encode())
+        data_iterator.local_iterator.set_state(snapshot_controller['data_iterator'])
       # We do not want to restore from the previous checkpoint but instead
       # restore from the host offloaded snapshot.
       if checkpoint_manager is not None:
@@ -266,7 +265,7 @@ def train_loop(config, elastic_manager, state=None):
           "opt_state": state.opt_state,
       },
       snapshot_controller={
-        "data_iterator": json.loads(data_iterator.local_iterator.get_state().decode()),
+        "data_iterator": data_iterator.local_iterator.get_state(),
       } if config.dataset_type=='grain' else None,
       force=True,
       block=True,
@@ -324,7 +323,7 @@ def train_loop(config, elastic_manager, state=None):
               "opt_state": state.opt_state,
           },
           snapshot_controller={
-            "data_iterator": json.loads(data_iterator.local_iterator.get_state().decode()),
+            "data_iterator": data_iterator.local_iterator.get_state(),
           } if config.dataset_type=="grain" else None,
           block=True,
       )
@@ -337,7 +336,7 @@ def train_loop(config, elastic_manager, state=None):
               "opt_state": state.opt_state,
           },
           snapshot_controller={
-            "data_iterator": json.loads(data_iterator.local_iterator.get_state().decode()),
+            "data_iterator": data_iterator.local_iterator.get_state(),
           } if config.dataset_type=="grain" else None,
           handler_kwargs={
               "config": config,
@@ -458,11 +457,12 @@ def elastic_initialize(devices: Sequence[jax.Device]) -> manager.Manager:
   # TODO: b/408455557 - Migrate to pathwaysutils and make configurable
   wait_for_all_slices(elastic_manager)
 
+  if hasattr(pyconfig.HyperParameters, "elastic_data_option") and pyconfig.HyperParameters.elastic_data_option != 'skip_data':
+    pyconfig.HyperParameters.global_batch_size_to_load = property(
+        lambda self: elastic_manager.scale_by_good_slices(self.get_keys()["global_batch_size_to_load"])
+    )
   pyconfig.HyperParameters.global_batch_size_to_train_on = property(
       lambda self: elastic_manager.scale_by_good_slices(self.get_keys()["global_batch_size_to_train_on"])
-  )
-  pyconfig.HyperParameters.global_batch_size_to_load = property(
-      lambda self: elastic_manager.scale_by_good_slices(self.get_keys()["global_batch_size_to_load"])
   )
   pyconfig.HyperParameters.micro_batch_size_to_train_on = property(
       lambda self: elastic_manager.scale_by_good_slices(self.get_keys()["micro_batch_size_to_train_on"])

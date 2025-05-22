@@ -145,17 +145,19 @@ def make_mixed_iterator(config, mesh, process_indices_train, process_indices_eva
   return train_iterator, eval_iterator
 
 
-def create_data_iterator(config, mesh, elastic=True):
+def create_data_iterator(config, mesh, elastic=False):
   if config.dataset_type == "synthetic":
     return SyntheticDataIterator(config, mesh), None
-
-  process_indices_train = get_process_loading_real_data(
-      config.data_sharding,
-      config.global_batch_size_to_load,
-      config.global_batch_size_to_train_on,
-      config.max_target_length,
-      mesh,
-  )
+  if elastic and config.elastic_data_option == 'skip_data':
+    process_indices_train = [i for i in range(jax.process_count())]
+  else:
+    process_indices_train = get_process_loading_real_data(
+        config.data_sharding,
+        config.global_batch_size_to_load,
+        config.global_batch_size_to_train_on,
+        config.max_target_length,
+        mesh,
+    )
   if config.eval_interval > 0:
     process_indices_eval = get_process_loading_real_data(
         config.data_sharding,
@@ -175,8 +177,9 @@ def create_data_iterator(config, mesh, elastic=True):
     train_iterator_fn = functools.partial(make_tfds_train_iterator, config, mesh, process_indices_train)
     eval_iterator_fn = functools.partial(make_tfds_eval_iterator, config, mesh, process_indices_eval)
   elif config.dataset_type == "grain":
-    train_iterator_fn = functools.partial(make_grain_train_iterator, config, mesh, process_indices_train, elastic)
-    eval_iterator_fn = functools.partial(make_grain_eval_iterator, config, mesh, process_indices_eval, elastic)
+    elastic_data = elastic and config.elastic_data_option=='elastic'
+    train_iterator_fn = functools.partial(make_grain_train_iterator, config, mesh, process_indices_train, elastic=elastic_data)
+    eval_iterator_fn = functools.partial(make_grain_eval_iterator, config, mesh, process_indices_eval, elastic=elastic_data)
   elif config.dataset_type == "hf":
     train_iterator_fn = functools.partial(make_hf_train_iterator, config, mesh, process_indices_train)
     eval_iterator_fn = functools.partial(make_hf_eval_iterator, config, mesh, process_indices_eval)
