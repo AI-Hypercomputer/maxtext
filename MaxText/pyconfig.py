@@ -311,6 +311,8 @@ def validate_multimodal_model_name(s: str) -> bool:
       "gemma3-4b",
       "gemma3-12b",
       "gemma3-27b",
+      "llama4-17b-16e",
+      "llama4-17b-128e",
   )
   if s not in valid_model_names:
     raise ValueError(
