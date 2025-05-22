@@ -507,6 +507,8 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
   results = inference_engine.batch_inference(input_data)
   completions = jnp.stack([r.token_ids for r in results])
   completions_logprobs = jnp.stack(np.array([r.logprobs for r in results]))
+  data[config.train_data_columns] = jnp.repeat(data[config.train_data_columns], config.num_generations, axis=0)
+  data[f"{config.train_data_columns}_true_length"] = jnp.repeat(data[f"{config.train_data_columns}_true_length"], config.num_generations, axis=0)
   data = grpo_utils.concatenate_prompt_with_completions(config, tokenizer_model, data, completions)
   # offpolicys
   if config.inference_rollouts > 1:
@@ -980,7 +982,6 @@ def train_loop(config, config_inference, state=None):
     pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
   else:
     pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
-    # inference_params = [jax.device_put({'params':state.params['params']}, {'params': inference_state_mesh_sharding.params['params']}) for inference_state_mesh_sharding in inference_state_mesh_shardings]
   end_time = time.time()
   print(f"time taken to reshard training params: {end_time - start_time} seconds")
   
