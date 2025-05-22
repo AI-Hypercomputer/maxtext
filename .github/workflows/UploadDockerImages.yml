@@ -81,9 +81,6 @@ jobs:
       run: gcloud auth configure-docker us-docker.pkg.dev --quiet
     - name: build jax stable image
       run : |
-    - name: build jax pinned image
-      run : |
-        bash .github/workflows/build_and_upload_images.sh CLOUD_IMAGE_NAME=maxtext_gpu_jax_pinned MODE=pinned DEVICE=gpu PROJECT=tpu-prod-env-multipod LOCAL_IMAGE_NAME=maxtext_gpu_local_jax_pinned
     - name: build jax AI image
       run : |
         bash .github/workflows/build_and_upload_images.sh CLOUD_IMAGE_NAME=maxtext_gpu_jax_stable_stack MODE=jax_ai_image DEVICE=gpu PROJECT=tpu-prod-env-multipod LOCAL_IMAGE_NAME=maxtext_gpu_jax_stable_stack BASEIMAGE=us-central1-docker.pkg.dev/deeplearning-images/jax-ai-image/gpu:latest
