@@ -951,7 +951,7 @@ def unscan_train_state_params(params, sharding, mesh, scan_axis, layer_groups):
 
     del decoder[layer_name]  # Free memory
 
-def rescan_train_state_params(train_state, scan_axis, layer_groups, mesh):
+def rescan_train_state_params(params, source_shardings, scan_axis, layer_groups):
   """
   Reconstruct scanned layers from per-layer entries using minimal HBM.
   
@@ -961,11 +961,10 @@ def rescan_train_state_params(train_state, scan_axis, layer_groups, mesh):
     layer_groups: list of (layer_name, num_layers)
     mesh: jax.sharding.Mesh for out_shardings
   """
-  decoder = train_state.params["params"]["decoder"]
+  decoder = params["params"]["decoder"]
+  sharding = source_shardings["params"]["decoder"]
 
   for layer_name, num_layers in layer_groups:
-    # Load first layer to get structure
-    base = decoder[f"{layer_name}_0"]
 
     def stack_layers(*layers):
       return jax.tree_util.tree_map(lambda *xs: jnp.stack(xs, axis=scan_axis), *layers)
@@ -973,8 +972,7 @@ def rescan_train_state_params(train_state, scan_axis, layer_groups, mesh):
     # Create a wrapper that allows pjit + donation
     compiled_stack = jax.jit(
       stack_layers,
-      in_shardings=(None,) * num_layers,
-      out_shardings=None,  # Let JAX decide or use sharding inference
+      out_shardings=sharding[layer_name],
       donate_argnums=tuple(range(num_layers)),
     )
 

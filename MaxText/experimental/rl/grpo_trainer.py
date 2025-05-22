@@ -536,7 +536,7 @@ def compute_log_probs(
 # -----------------------------------------------------------------------------
 
 
-def pathways_reshard(config, params, source_shardings, source_mesh, destination_shardings):
+def pathways_reshard(config, inference_engine, params, source_shardings, source_mesh, destination_shardings, is_pw_reshard):
   if config.decoder_block == "deepseek":
     layer_groups = [
       ("dense_layers", config.first_num_dense_layers),
@@ -548,13 +548,9 @@ def pathways_reshard(config, params, source_shardings, source_mesh, destination_
     max_utils.unscan_train_state_params(params, source_shardings, source_mesh, scan_axis=config.param_scan_axis, layer_groups=layer_groups)
     num_model_parameters = max_utils.calculate_num_params_from_pytree(params)
     max_logging.log(f"number parameters after unscanning: {num_model_parameters/1e9:.3f} billion")
-  with (jax.transfer_guard_device_to_host("disallow_explicit"), jax.transfer_guard_host_to_device("disallow_explicit")):
-    inference_params = []
-    for destination_sharding in destination_shardings:
-      inference_params.append(pathwaysutils_reshard.reshard(params, destination_sharding.params, cache_resharding_plans=True))
+  inference_engine.update_params(params, jax.tree_util.tree_map(lambda x: x.spec, destination_shardings[0].params), is_pw_reshard)
   if not config.scan_layers:
-    max_utils.rescan_train_state_params(params, source_shardings, source_mesh, scan_axis=config.param_scan_axis, layer_groups=layer_groups)
-  return inference_params
+    max_utils.rescan_train_state_params(params, source_shardings, scan_axis=config.param_scan_axis, layer_groups=layer_groups)
 
 def setup_mesh_and_model(config, config_inference):
   """Set up the mesh and the model for training
@@ -951,9 +947,10 @@ def train_loop(config, config_inference, state=None):
   data_buffer = Buffer(maxsize=-1)
   start_time = time.time()
   if config.use_pathways_reshard:
-    inference_params = pathways_reshard(config_inference, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings)
+    pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
   else:
-    inference_params = [jax.device_put({'params':state.params['params']}, {'params': inference_state_mesh_sharding.params['params']}) for inference_state_mesh_sharding in inference_state_mesh_shardings]
+    pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
+    # inference_params = [jax.device_put({'params':state.params['params']}, {'params': inference_state_mesh_sharding.params['params']}) for inference_state_mesh_sharding in inference_state_mesh_shardings]
   end_time = time.time()
   print(f"time taken to reshard training params: {end_time - start_time} seconds")
   
@@ -1015,9 +1012,10 @@ def train_loop(config, config_inference, state=None):
         state, metrics = p_train_step(state, example_batch, train_rng)
     with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
       if step != 0 and step % config.inference_rollouts == 0:
-        inference_params = pathways_reshard(config_inference, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings)
-        # for inference_state_mesh_sharding in inference_state_mesh_shardings:
-        #   param_buffer.push({'params':state.params['params']}, inference_state_mesh_sharding.params)
+        if config.use_pathways_reshard:
+          pathways_reshard(config_inference, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
+        else:
+          pathways_reshard(config_inference, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
     step_time_delta = datetime.datetime.now() - last_step_completion
     last_step_completion = datetime.datetime.now()
     record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
