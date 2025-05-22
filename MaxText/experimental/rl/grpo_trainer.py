@@ -233,14 +233,17 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 
     1. Compute the per-token log-probabilities for the full sequence (prompt + completion) both with
          the current model (policy) and the reference model.
-    2. Compute a per-token KL divergence:
-         kl = exp(ref_logp - policy_logp) - (ref_logp - policy_logp) - 1.
-    3. Compute a scalar reward for each generated completion via reward_fn.
-    4. Group the rewards (each prompt yields “G = num_generations” completions), compute the mean and std,
+    2. Compute a scalar reward for each generated completion via reward_fn.
+    3. Group the rewards (each prompt yields “G = num_generations” completions), compute the mean and std,
        and then compute a normalized advantage.
-    5. Compute a per-token loss that is given by
-         - [exp(policy_logp - stop_gradient(policy_logp)) * advantage - beta * kl]
+    4. Compute a per-token loss that is given by
+         - [exp(policy_logp - old_logp) * advantage - beta * kl]
+         where:
+         old_logp = stop_gradient(policy_logp) for on-policy training
        (the jax.lax.stop_gradient ensures that only the advantage contributes to gradients).
+         and actual old_logp obtained during sampling from the data["completions_logprobs"] for off-policy training.
+    5. Compute a per-token KL divergence:
+         kl = exp(ref_logp - policy_logp) - (ref_logp - policy_logp) - 1.
     6. Restrict the loss calculations to the generated completion tokens.
     7. Finally the loss is the average (over examples) of the mean per-token loss - where only tokens before the
        first eos (according to tokenizer.eos_id) are taken into account.
@@ -284,17 +287,6 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
       rngs={"dropout": rng1, "params": rng_fwd},
   )  # [BxG,S-1,E]
 
-  token_logps_ref, _ = compute_log_probs(
-      model,
-      {"params": reference_params},
-      prompt_with_completions,
-      prompt_completions_position,
-      prompt_completions_segmentation,
-      completions_segmentation,
-      config,
-      is_train=False,
-      rngs={"dropout": rng1, "params": rng_fwd},
-  )  # [BxG,S-1,E]
 
   completion_target_segmentation = data["ar_completions_segmentation"][..., 1:]  # [BxG,S-1]
   # Because of the shifting, token_logps have shape [BxG, S-1]. So, we create a mask for the valid tokens
@@ -302,18 +294,12 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   # and to make sure loss is computed on non-padding tokens
   valid_seq_mask = completion_target_segmentation != 0  # [BxG, S-1]
 
-  # --- (2) Compute per-token KL divergence for each token in the generated completion.
-  token_diff_logps_ref_policy = token_logps_ref - token_logps_policy
-
-  per_token_kl = jnp.exp(token_diff_logps_ref_policy) - (token_diff_logps_ref_policy) - 1
-  # loss is computed on non-padding tokens
-  per_token_kl = per_token_kl * valid_seq_mask
-
-  # --- (3) Compute a scalar reward for each generated completion via reward_fn.
+  
+  # --- (2) Compute a scalar reward for each generated completion via reward_fn.
   rewards = grpo_utils.dummy_reward_len(valid_seq_mask)
   rewards = jnp.array(rewards)  # shape [BxG]
 
-  # --- (4) Group rewards and compute normalized advantage.
+  # --- (3) Group rewards and compute normalized advantage.
   G = config.num_generations
   rewards_grouped = rewards.reshape(-1, G)  # shape [B, G]
   group_mean = jnp.mean(rewards_grouped, axis=1)  # shape [B]
@@ -322,18 +308,50 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
   repeated_group_std = jnp.repeat(group_std, G)  # shape [BxG]
   advantages = (rewards - repeated_group_mean) / (repeated_group_std + EPS)  # shape [BxG]
 
-  # --- (5) Compute per-token loss.
-  # We follow the TRL GRPO loss:
-  #   loss_token = - [ exp(policy_logp - stop_gradient(policy_logp)) * advantage - beta * kl ]
+  # --- (4) Compute per-token loss.
   # Make sure to expand advantage along the token dimension.
   advantages_exp = advantages[:, None]  # shape [BxG, 1]
 
-  policy_diff = token_logps_policy - jax.lax.stop_gradient(token_logps_policy)
-  loss_tokens = -(jnp.exp(policy_diff) * advantages_exp - config.grpo_beta * per_token_kl)
+  # We calculate the policy difference with old_per_token_logps for off-policy training,
+  # else, for on-policy training old_per_token_logps = stop_gradient(token_logps_policy)
+  if data["completions_logprobs"] is None: # off-policy
+    old_per_token_logps = jax.lax.stop_gradient(token_logps_policy)
+  else: # on-policy
+    old_per_token_logps = data["completions_logprobs"]
+  
+  policy_diff = token_logps_policy - old_per_token_logps
+  coef_1 = jnp.exp(policy_diff)
+  coef_2 = jnp.clip(coef_1, 1 - config.grpo_epsilon, 1 + config.grpo_epsilon)
+  loss_tokens = -jnp.minimum(
+      coef_1 * advantages_exp,
+      coef_2 * advantages_exp,
+  )
+  
+  # --- (5) Compute per-token KL divergence for each token in the generated completion, if beta != 0.
+  if config.grpo_beta != 0.0:
+    token_logps_ref, _ = compute_log_probs(
+        model,
+        {"params": reference_params},
+        prompt_with_completions,
+        prompt_completions_position,
+        prompt_completions_segmentation,
+        completions_segmentation,
+        config,
+        is_train=False,
+        rngs={"dropout": rng1, "params": rng_fwd},
+    )  # [BxG,S-1,E]
+
+    token_diff_logps_ref_policy = token_logps_ref - token_logps_policy
+
+    per_token_kl = jnp.exp(token_diff_logps_ref_policy) - (token_diff_logps_ref_policy) - 1
+    # loss is computed on non-padding tokens
+    per_token_kl = per_token_kl * valid_seq_mask
+    loss_tokens += config.grpo_beta * per_token_kl
 
   # --- (6) Restrict the loss calculations to the generated completion tokens.
   # Average over tokens per generated completion.
-  loss_per_example = jnp.sum(loss_tokens * valid_seq_mask, axis=1) / (jnp.sum(valid_seq_mask, axis=1) + EPS)
+  loss_denominator = jnp.clip(jnp.sum(valid_seq_mask, axis=1), min=1)
+  loss_per_example = jnp.sum(loss_tokens * valid_seq_mask, axis=1) / loss_denominator
 
   # --- (7) Finally the loss is the average (over examples) of the mean per-token loss
   loss = jnp.mean(loss_per_example)
@@ -347,7 +365,10 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
     loss += moe_lb_loss
 
   # Compute auxiliary metrics.
-  avg_kl = jnp.mean((per_token_kl * valid_seq_mask) / (jnp.sum(valid_seq_mask, axis=1, keepdims=True) + EPS))
+  if config.grpo_beta != 0.0:
+    avg_kl = jnp.mean((per_token_kl * valid_seq_mask) / loss_denominator)
+  else:
+    avg_kl = None
   avg_reward = jnp.mean(rewards)
   avg_advantage = jnp.mean(advantages)
   avg_completion_length = jnp.mean(jnp.sum(data["ar_completions_segmentation"] != 0, axis=1))
@@ -480,7 +501,13 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
   input_data = [InputData(id=f"input_{i}", tokens=np.array(d), true_length=np.array(data[f"{config.train_data_columns}_true_length"][i])[0]) for i, d in enumerate(data[config.train_data_columns])]
   results = inference_engine.batch_inference(input_data)
   completions = jnp.stack([r.token_ids for r in results])
+  completions_logprobs = jnp.stack([r.logprobs for r in results])
   data = grpo_utils.concatenate_prompt_with_completions(config, tokenizer_model, data, completions)
+  # offpolicys
+  if config.inference_rollouts > 1:
+    data["completions_logprobs"] = completions_logprobs
+  else:
+    data["completions_logprobs"] = None
   return data
 
 
