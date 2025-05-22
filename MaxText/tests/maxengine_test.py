@@ -35,6 +35,7 @@ from MaxText.globals import PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.maxengine import MaxEngine
+from MaxText import inference_utils # Added for BatchedPrefillProcessor
 
 
 class MaxEngineTest(unittest.TestCase):
@@ -154,6 +155,120 @@ class MaxEngineTest(unittest.TestCase):
     self.assertEqual(result_token.log_prob.shape[1], 1)
     self.assertEqual(result_token.data.ndim, 2)
     self.assertEqual(result_token.data.shape[1], 3)
+
+  def test_packed_prefill_segment_id_preservation(self):
+    """Tests that segment IDs are preserved during packed prefill."""
+    # 1. Setup Configuration
+    # Prompt lengths: p1=3, p2=4. Capacity = 3+4+2 = 9.
+    # max_prefill_predict_length must be >= capacity.
+    # per_device_batch_size is 1 for this test.
+    config_kwargs = {
+        "max_prefill_predict_length": 20,
+        "max_target_length": 30, # Must be > max_prefill_predict_length
+        "num_decoder_layers": 1, # Simplify cache structure
+        "per_device_batch_size": 1,
+        "vocab_size": 1024,
+        "attention": "dot_product", # Non-paged attention for simplicity
+        "scan_layers": False,
+        "ici_tensor_parallelism": -1, # Run on a single device for testing
+        "dataset_path": "", # Avoid issues with dataset loading
+        "tokenizer_path": "", # Avoid issues with tokenizer loading
+        "load_parameters_path": "", # No real params needed
+    }
+    self.cfg = self.init_pyconfig(**config_kwargs)
+    
+    # Use only one device for this test to simplify batch dimension
+    devices = jax.devices()[:1]
+    mesh = Mesh(maxtext_utils.create_device_mesh(self.cfg, devices), self.cfg.mesh_axes)
+
+    # 2. Initialize Engine and State
+    self.engine = MaxEngine(self.cfg, devices=devices) # Pass devices here
+    
+    # Create mock parameters
+    # For Transformer, model_vars['params'] is what setup_decode_state and load_params expect.
+    # We need a minimal structure that allows init_decode_state and prefill_concat to run.
+    quant = quantizations.configure_quantization(self.cfg)
+    model_for_init = models.Transformer(config=self.cfg, mesh=mesh, quant=quant)
+    # Dummy inputs for model.init
+    # Shape: (global_batch_size, max_target_length)
+    # global_batch_size = per_device_batch_size * num_devices = 1 * 1 = 1
+    dummy_ids = jnp.zeros((1, self.cfg.max_target_length), dtype=jnp.int32)
+    dummy_positions = jnp.zeros((1, self.cfg.max_target_length), dtype=jnp.int32)
+    dummy_segment_ids = jnp.zeros((1, self.cfg.max_target_length), dtype=jnp.int32)
+
+    # Initialize abstract_vars which contains the 'params' pytree
+    abstract_vars = model_for_init.init(
+        {"params": self.rng, "aqt": self.rng}, 
+        dummy_ids, 
+        dummy_positions, 
+        dummy_segment_ids, 
+        enable_dropout=False
+    )
+    
+    # load_params initializes abstract_params, kv_cache_annotations etc.
+    # It expects the 'params' part of the variables.
+    self.params = self.engine.load_params(params=abstract_vars, rng=self.rng) # Pass abstract_vars directly
+    self.decode_state = self.engine.init_decode_state(rng=self.rng)
+
+    # 3. Initialize BatchedPrefillProcessor
+    bpp = inference_utils.BatchedPrefillProcessor(self.engine, max_batch_size=2)
+
+    # 4. Test Data
+    prompt1_tokens = jnp.array([10, 11, 12], dtype=jnp.int32)
+    prompt2_tokens = jnp.array([20, 21, 22, 23], dtype=jnp.int32)
+    len1 = len(prompt1_tokens)
+    len2 = len(prompt2_tokens)
+    capacity = len1 + len2 + 2  # 3 + 4 + 2 = 9
+
+    # 5. Process Prompts
+    processed_results = []
+    # 'decode_state' will be updated by the callback
+    # Need to capture the state potentially modified by prefill_concat and insert_partial
+    
+    # Keep a reference to the test's decode_state that can be updated
+    # by the callback.
+    shared_decode_state_list = [self.decode_state] 
+
+    def dummy_prefill_done(results, row_ids, updated_decode_state_from_bpp):
+      nonlocal processed_results # Use nonlocal if Python 3, or a mutable object for Python 2
+      processed_results.extend(results)
+      shared_decode_state_list[0] = updated_decode_state_from_bpp
+
+    # Process prompt1
+    bpp.process(self.params, shared_decode_state_list[0], decode_slot=0, input_id=0,
+                input_prompt=prompt1_tokens, input_padding=capacity, capacity=capacity,
+                prefill_done=dummy_prefill_done)
+    # Process prompt2
+    bpp.process(self.params, shared_decode_state_list[0], decode_slot=0, input_id=1, 
+                input_prompt=prompt2_tokens, input_padding=capacity, capacity=capacity,
+                prefill_done=dummy_prefill_done)
+    
+    # Flush to force processing of the bucket
+    bpp.flush(self.params, shared_decode_state_list[0], prefill_done=dummy_prefill_done)
+    
+    # Update self.decode_state with the one modified by BPP
+    self.decode_state = shared_decode_state_list[0]
+
+    # 6. Retrieve segment IDs
+    # Path: decode_state['cache']['decoder']['layers_0']['self_attention']['cache_prefill_segment_id']
+    # Shape is (per_device_batch_size, max_prefill_predict_length)
+    # Here per_device_batch_size is 1.
+    cached_segment_ids_full = self.decode_state['cache']['decoder']['layers_0']['self_attention']['cache_prefill_segment_id']
+    slot_0_segment_ids = cached_segment_ids_full[0] # We are using slot 0
+
+    # 7. Assertions
+    # Prompt 1 (len1=3) should have ID 1
+    np.testing.assert_array_equal(slot_0_segment_ids[0:len1], 1,
+                                  "Prompt 1 segment IDs mismatch")
+    # Prompt 2 (len2=4) should have ID 3 (BPP uses odd numbers for segment IDs)
+    np.testing.assert_array_equal(slot_0_segment_ids[len1:len1+len2], 3,
+                                  "Prompt 2 segment IDs mismatch")
+    # Padding within capacity (capacity=9) should have ID 0
+    np.testing.assert_array_equal(slot_0_segment_ids[len1+len2:capacity], 0,
+                                  "Padding within capacity mismatch")
+    # Padding beyond capacity up to max_prefill_predict_length (20) should also be 0
+    np.testing.assert_array_equal(slot_0_segment_ids[capacity:self.cfg.max_prefill_predict_length], 0,
+                                  "Padding beyond capacity mismatch")
 
   @pytest.mark.skip(reason="Can only pass on CPU.")
   def test_chunked_prefill(self):

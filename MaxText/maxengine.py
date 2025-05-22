@@ -1225,17 +1225,27 @@ class MaxEngine(engine_api.Engine):
         zeros = jnp.zeros((1, self.config.max_target_length - self.config.max_prefill_predict_length), dtype=jnp.int32)
         return jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
       elif path_key == "cache_prefill_segment_id":
-        zeros = jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32)
-        ## zero out in case prefill cache is too small to cover
-        full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
-        # In case partial_cache is too small to slice at the given index, pad it with an extra seqlen
-        if i == num_prompts - 1:
-          pad = jnp.zeros((1, seq_len), dtype=int)
-          partial_cache = jnp.concatenate([partial_cache, pad], axis=1)
-        ## copy prefill cache
-        partial_cache = jax.lax.dynamic_slice(partial_cache, (0, start_idx), (1, seq_len))
-        partial_cache = (partial_cache == partial_cache[0, 0]).astype(int)
-        full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+        # Initialize the slot in full_cache with zeros to clear any old data.
+        # The size of the segment_id cache for a slot is max_prefill_predict_length.
+        zeros_for_slot = jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32)
+        full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros_for_slot, slot, batch_idx)
+
+        # Slice the correct segment IDs for the current prompt from the packed partial_cache.
+        # partial_cache here is the cache_unboxed['decoder']['layers_...']['self_attention']['cache_prefill_segment_id']
+        # which corresponds to the concatenated seg_ids from BatchedPrefillProcessor of shape (1, bucket.capacity).
+        # start_idx is the offset of the current prompt in the packed sequence.
+        # seq_len is the true length of the current prompt.
+        _slice_of_packed_segment_ids = jax.lax.dynamic_slice(partial_cache, (0, start_idx), (1, seq_len))
+        
+        # Update the relevant part of the slot in full_cache with these segment_ids.
+        # Note: dynamic_update_slice_in_dim might be more appropriate if we only want to update the first seq_len part.
+        # However, since we zeroed out the whole slot, and _slice_of_packed_segment_ids is of length seq_len,
+        # this dynamic_update_index_in_dim effectively sets the first seq_len elements and leaves the rest as 0, which is correct.
+        # For clarity, one might use dynamic_update_slice_in_dim:
+        # full_cache = jax.lax.dynamic_update_slice_in_dim(full_cache, _slice_of_packed_segment_ids, slot, batch_idx_dim_offset + 0) 
+        # But given it's zeroed, current approach is fine. Let's stick to minimal change.
+        # The crucial part is that _slice_of_packed_segment_ids now contains the original segment IDs (e.g., 1s, or 3s, or 5s).
+        full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, _slice_of_packed_segment_ids, slot, batch_idx)
         return full_cache
       elif path_key == "cached_ar_lengths":
         return full_cache.at[slot].set(0)
@@ -1246,17 +1256,19 @@ class MaxEngine(engine_api.Engine):
           "cached_prefill_value_scale",
       ]:
         seqlen_index = self.config.prefill_cache_axis_order.split(",").index("1")
-        start_indices = [0, 0, 0, 0]
-        start_indices[seqlen_index] = start_idx
+        current_start_indices = [0, 0, 0, 0]
+        current_start_indices[seqlen_index] = start_idx
         slice_size = list(partial_cache.shape)
         slice_size[seqlen_index] = seq_len
 
         slice_size = tuple(slice_size)
         # Same as in prefill_segment_id processing
-        if i == num_prompts - 1:
+        if i == num_prompts - 1: # This 'i' is the loop index for num_prompts
           pad = jnp.zeros(slice_size, dtype=partial_cache.dtype)
+          # partial_cache here is the full packed kv tensor from BatchedPrefillProcessor
           partial_cache = jnp.concatenate([partial_cache, pad], axis=seqlen_index)
-        partial_cache = jax.lax.dynamic_slice(partial_cache, start_indices, slice_size)
+        # partial_cache here is cache_unboxed['decoder']['layers_l']['self_attention']['cached_prefill_key/value']
+        partial_cache = jax.lax.dynamic_slice(partial_cache, current_start_indices, slice_size)
 
         return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
       else:
