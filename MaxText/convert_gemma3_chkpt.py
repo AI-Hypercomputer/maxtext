@@ -108,13 +108,11 @@ def main(raw_args=None) -> None:
               },
               "pos_embedding": params["SigLiPFromPatches_0"]["siglip_encoder"]["pos_embedding"],
               "Transformer": params["SigLiPFromPatches_0"]["siglip_encoder"]["Transformer"],
-              "VisionEmbedder_0": {
-                  "mm_input_projection": params["transformer"]["embedder"]["mm_input_projection"],
-                  "mm_soft_embedding_norm": {
-                      "scale": params["transformer"]["embedder"]["mm_soft_embedding_norm"]["scale"] + 1
-                  },
-              },
-          }
+          },
+          "VisionEmbedder_0": {
+              "mm_input_projection": params["transformer"]["embedder"]["mm_input_projection"],
+              "mm_soft_embedding_norm": {"scale": params["transformer"]["embedder"]["mm_soft_embedding_norm"]["scale"] + 1},
+          },
       },
   }
   # Rename MlpBlock_0 to MlpBlockViT_0 in vision encoder

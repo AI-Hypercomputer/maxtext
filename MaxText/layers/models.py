@@ -725,13 +725,21 @@ class VisionEncoder(nn.Module):
     if self.config.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
       from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
 
-      return [gemma3.Gemma3VisionEncoderLayer]
+      return [gemma3.Gemma3VisionEncoderLayer, gemma3.VisionEmbedder]
     else:
       raise ValueError(f"No VisionEncoder implemented for {self.config.model_name} yet")
 
   @nn.compact
   def __call__(self, input_images, deterministic=False):
-    embeddings = self.vision_encoder_layer[0](config=self.config)(input_images, deterministic=deterministic)
+    cfg = self.config
+    # vision encoder output, frozen params in many cases
+    embeddings = self.vision_encoder_layer[0](config=cfg)(input_images, deterministic=deterministic)
+    if cfg.freeze_vision_encoder_params:
+      embeddings = jax.lax.stop_gradient(embeddings)
+
+    if len(self.vision_encoder_layer) > 1:
+      # vision embedder / projection layer, not frozen in most cases, trained / finetuned together with main model
+      embeddings = self.vision_encoder_layer[1](config=cfg)(embeddings)
     return embeddings
 
 
