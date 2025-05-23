@@ -435,7 +435,9 @@ class RoutedMoeTest(unittest.TestCase):
         sparse_matmul=True,
         per_device_batch_size=1,
         ici_expert_parallelism=4,
+        ici_fsdp_parallelism=1,
         max_target_length=5,
+        ra2a_buffer_ratio=0.4,
     )
 
     rng = jax.random.PRNGKey(2345)
