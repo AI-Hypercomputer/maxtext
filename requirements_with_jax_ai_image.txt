@@ -1,5 +1,5 @@
 # Requirements for Building the MaxText Docker Image
-# These requirements are additional to the dependencies present in the JAX SS base image.
+# These requirements are additional to the dependencies present in the JAX AI base image.
 datasets
 grain[parquet]>=0.2.6
 orbax-checkpoint>=0.10.3
