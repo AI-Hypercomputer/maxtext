@@ -106,10 +106,10 @@ c4_deepseek_v3_ep_256_v5p_512 = _add_to_model_dictionary(
     ),
 )
 
-llama2_70b_v5p_8 = _add_to_model_dictionary(
+llama2_70b_v5p_128 = _add_to_model_dictionary(
   v5p_model_dict,
   MaxTextModel(
-    model_name="llama2-70b-v5p-8",
+    model_name="llama2_70b_v5p_128",
     model_type="llama2-70b",
     tuning_params={
         "ici_fsdp_parallelism": -1,
@@ -130,10 +130,10 @@ llama2_70b_v5p_8 = _add_to_model_dictionary(
 	)
 )
 
-llama2_7b_v5p_8 = _add_to_model_dictionary(
+llama2_7b_v5p_128 = _add_to_model_dictionary(
   v5p_model_dict,
   MaxTextModel(
-    model_name="llama2-7b-v5p-8",
+    model_name="llama2_7b_v5p_128",
     model_type="llama2-7b",
     tuning_params={
         "ici_fsdp_parallelism": -1,
@@ -155,10 +155,10 @@ llama2_7b_v5p_8 = _add_to_model_dictionary(
 	)
 )
 
-gpt_3_175b_v5p_8 = _add_to_model_dictionary(
+gpt_3_175b_v5p_128 = _add_to_model_dictionary(
   v5p_model_dict,
   MaxTextModel(
-    model_name="gpt-3-175b-v5p-8",
+    model_name="gpt_3_175b_v5p_128",
     model_type="gpt3-175b",
     tuning_params={
         "ici_fsdp_parallelism": -1,
