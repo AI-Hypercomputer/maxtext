@@ -674,9 +674,10 @@ class ReplicaWorker:
 
         # 4. Flush any pending inputs in batch prefill mode
         self.prefill_helper.finalize(self.params, self.decode_state, self.prefill_done)
+        self.decode_state["logits"].block_until_ready()
 
         # 5. Continue decoding until all sequences are complete
-        while any(self.slot_to_id.values()):
+        while not all(value is None for value in self.slot_to_id.values()):
             self.decode()
 
         # Wait for detokenization to complete
@@ -729,7 +730,7 @@ class ReplicaWorker:
             prompt_ids: List of prompt IDs
             decode_state: Updated decode state
         """
-
+        print(f"replica worker {self.worker_id}: prefill done")
         # Update decode state
         self.decode_state = decode_state
         log_prob = inference_utils.log_prob_of_chosen_token(decode_state["logits"], decode_state["tokens"])
@@ -756,8 +757,8 @@ class ReplicaWorker:
             self.decode_state, result_tokens = self.generate_fn(
                 self.params, self.decode_state, self.rng
             )
-            result_tokens.data.block_until_ready()
             log_prob = inference_utils.log_prob_of_chosen_token(self.decode_state["logits"], self.decode_state["tokens"])
+            log_prob.block_until_ready()
             end_time = time.time()
             print(f"time taken to run generate_fn: {end_time - start_time} seconds")
             buffer.append((result_tokens, log_prob))
