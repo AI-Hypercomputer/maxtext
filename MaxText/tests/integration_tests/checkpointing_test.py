@@ -15,7 +15,11 @@ limitations under the License.
 """
 
 """
-Integration tests for test_checkpointing.sh
+Integration tests for checkpointing functionality.
+
+These tests verify that a training run saves a checkpoint,
+and then a subsequent training run can correctly restore and
+continue from that saved checkpoint.
 
 Note: Make sure to run
   `bash setup_gcsfuse.sh DATASET_GCS_BUCKET=gs://maxtext-dataset MOUNT_PATH=/tmp/gcsfuse/`
@@ -31,7 +35,7 @@ from MaxText.globals import PKG_DIR
 from MaxText.train import main as train_main
 
 
-def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention_type):
+def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention_type, dataset_type, dataset_path):
   model_params = [
       "base_emb_dim=384",
       "base_num_query_heads=8",
@@ -51,7 +55,8 @@ def get_checkpointing_command(run_date, hardware, steps, metrics_file, attention
       f"metrics_file={metrics_file}",
       "checkpoint_period=3",
       "base_output_directory=gs://runner-maxtext-logs",
-      "dataset_path=/tmp/gcsfuse/",
+      f"dataset_path={dataset_path}",
+      f"dataset_type={dataset_type}",
       "async_checkpointing=False",
       f"attention={attention_type}",
   ] + model_params
@@ -80,7 +85,6 @@ def run_checkpointing(hardware, attention_type):
   run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
   grain_command = [
       "grain_worker_count=0",
-      "dataset_type=grain",
       "grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train.array_record*",
   ]
   train_main(
@@ -90,6 +94,8 @@ def run_checkpointing(hardware, attention_type):
           steps=5,
           metrics_file="saved_metrics.txt",
           attention_type=attention_type,
+          dataset_type="grain",
+          dataset_path="/tmp/gcsfuse",
       )
       + grain_command
   )
@@ -101,6 +107,8 @@ def run_checkpointing(hardware, attention_type):
           steps=10,
           metrics_file="restored_metrics.txt",
           attention_type=attention_type,
+          dataset_type="grain",
+          dataset_path="/tmp/gcsfuse",
       )
       + grain_command
   )
