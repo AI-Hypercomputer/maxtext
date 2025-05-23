@@ -733,3 +733,4 @@ elastic_snapshot_period: 5
 elastic_max_elastic_down_event_count: 100
 elastic_max_reshard_retry_count: 3
 elastic_wait_period: 30
+elastic_data_option: "skip_data" # skip_data or elastic (will disabel packing, not supported yet)

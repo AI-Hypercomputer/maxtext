@@ -1,0 +1,260 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: pathways-aireenmei
+  namespace: default
+spec:
+  coordinator:
+    replicatedJob: pathways-head
+  failurePolicy:
+    maxRestarts: 2
+    restartStrategy: Recreate
+  network:
+    enableDNSHostnames: true
+    publishNotReadyAddresses: true
+  replicatedJobs:
+  - name: pathways-head
+    replicas: 1
+    template:
+      metadata: {}
+      spec:
+        backoffLimit: 0
+        completionMode: Indexed
+        completions: 1
+        parallelism: 1
+        template:
+          metadata:
+            annotations:
+              gke-gcsfuse/cpu-limit: 500m
+              gke-gcsfuse/ephemeral-storage-limit: 40Gi
+              gke-gcsfuse/memory-limit: 350Gi
+              gke-gcsfuse/volumes: 'true'
+          spec:
+            containers:
+            - command:
+              - bash
+              - -c
+              - 'ls /tmp/dataset && python3 -m MaxText.elastic_train MaxText/configs/base.yml base_output_directory=gs://aireenmei-multipod/maxtext/pathways-elastic
+                per_device_batch_size=2 enable_checkpointing=false
+                global_parameter_scale=1 steps=2000 max_target_length=2048 use_iota_embed=true
+                dataset_type=grain grain_train_files=/tmp/dataset/array-record/c4/en/3.0.1/c4-train*
+                attention=flash gcs_metrics=True run_name=aireenmei-elastic10 grain_worker_count=1
+                enable_goodput_recording=False elastic_data_option=skip_data
+                elastic_mode=fast-resume elastic_reshard_check_period=1 elastic_snapshot_period=5
+                elastic_max_elastic_down_event_count=100 elastic_max_reshard_retry_count=3 elastic_wait_period=5
+                '
+              env:
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: JAX_PLATFORMS
+                value: proxy
+              - name: XCLOUD_ENVIRONMENT
+                value: GCP
+              - name: JAX_BACKEND_TARGET
+                value: grpc://$(PATHWAYS_HEAD):29000
+              image: gcr.io/cloud-tpu-multipod-dev/aireen_runner
+              name: main
+              resources: {}
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
+              # - mountPath: /tmp/gcsfuse
+              #   name: gcs-ckpt-pvc
+                readOnly: false
+              - mountPath: /tmp/dataset
+                name: gcs-dataset-pvc
+                readOnly: false
+            - image: gcr.io/gcs-tess/gcs-fuse-csi-driver-sidecar-mounter:v2.10.0_linux_amd64
+              name: gke-gcsfuse-sidecar
+            volumes:
+            - hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+              name: shared-tmp
+            # - name: gcs-ckpt-pvc
+            #   persistentVolumeClaim:
+            #     claimName: ckpt-bucket-pvc
+            - name: gcs-dataset-pvc
+              persistentVolumeClaim:
+                claimName: cached-dataset-bucket-pvc
+            - emptyDir:
+                medium: Memory
+                sizeLimit: 100Gi
+              name: gcs-gcsfuse-cache
+            dnsPolicy: ClusterFirstWithHostNet
+            hostNetwork: true
+            initContainers:
+            - args:
+              - --server_port=29001
+              - --gcs_scratch_location=gs://aireenmei-multipod/maxtext/pathways-elastic
+              - --node_type=resource_manager
+              - --instance_count=2
+              - --instance_type=tpuv6e:16x16
+              env:
+              - name: REPLICATED_JOB_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+              - name: HOST_ADDRESS
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: TPU_SKIP_MDS_QUERY
+                value: 'true'
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+              imagePullPolicy: Always
+              name: pathways-rm
+              ports:
+              - containerPort: 29001
+                protocol: TCP
+              - containerPort: 29002
+                protocol: TCP
+              resources:
+                limits:
+                  cpu: '4'
+                  memory: 8G
+              restartPolicy: Always
+            - args:
+              - --server_port=29000
+              - --resource_manager_address=$(PATHWAYS_HEAD):29001
+              - --gcs_scratch_location=gs://aireenmei-multipod/maxtext/pathways-elastic
+              - --num_elastic_slices=2
+              env:
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest
+              imagePullPolicy: Always
+              name: pathways-proxy
+              ports:
+              - containerPort: 29000
+                protocol: TCP
+              resources:
+                limits:
+                  cpu: '16'
+                  memory: 100G
+              restartPolicy: Always
+            restartPolicy: OnFailure
+  - name: worker
+    replicas: 2
+    template:
+      metadata: {}
+      spec:
+        backoffLimit: 160000
+        completionMode: Indexed
+        completions: 64
+        parallelism: 64
+        template:
+          metadata:
+            annotations:
+              alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+              # gke-gcsfuse/cpu-limit: 500m
+              # gke-gcsfuse/ephemeral-storage-limit: 40Gi
+              # gke-gcsfuse/memory-limit: 350Gi
+              # gke-gcsfuse/volumes: 'true'
+          spec:
+            containers:
+            - args:
+              - --server_port=29005
+              - --resource_manager_address=$(PATHWAYS_HEAD):29001
+              - --gcs_scratch_location=gs://aireenmei-multipod/maxtext/pathways-elastic
+              env:
+              - name: TPU_MIN_LOG_LEVEL
+                value: '0'
+              - name: TF_CPP_MIN_LOG_LEVEL
+                value: '0'
+              - name: XCLOUD_ENVIRONMENT
+                value: GCP
+              - name: MEGASCALE_GRPC_ENABLE_XOR_TRACER
+                value: 'false'
+              - name: MEGASCALE_NUM_SLICES
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/replicatedjob-replicas']
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+              - name: REPLICATED_JOB_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+              - name: MEGASCALE_SLICE_ID
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/job-index']
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: MEGASCALE_COORDINATOR_ADDRESS
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: PROJECT_ID
+                value: tpu-prod-env-multipod
+              - name: LOCATION
+                value: us-west1-c
+              - name: CLUSTER_NAME
+                value: bodaborg-v6e-256-tt-c
+              - name: POD_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.name
+              - name: CONTAINER_NAME
+                value: pathways-worker
+              - name: NAMESPACE
+                value: cloud_prod
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+              imagePullPolicy: Always
+              name: pathways-worker
+              ports:
+              - containerPort: 29005
+                protocol: TCP
+              - containerPort: 29006
+                protocol: TCP
+              - containerPort: 8471
+                protocol: TCP
+              - containerPort: 8080
+                protocol: TCP
+              resources:
+                limits:
+                  google.com/tpu: '4'
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
+            dnsPolicy: ClusterFirstWithHostNet
+            hostNetwork: true
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+              cloud.google.com/gke-tpu-topology: 16x16
+            restartPolicy: OnFailure
+            volumes:
+            - hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+              name: shared-tmp
+            # # - name: gcs-ckpt-pvc
+            # #   persistentVolumeClaim:
+            # #     claimName: ckpt-bucket-pvc
+            # - name: gcs-dataset-pvc
+            #   persistentVolumeClaim:
+            #     claimName: cached-dataset-bucket-pvc
+            # - emptyDir:
+            #     medium: Memory
+            #     sizeLimit: 100Gi
+            #   name: gcs-gcsfuse-cache
+  startupPolicy:
+    startupPolicyOrder: InOrder
+  successPolicy:
+    operator: All
+    targetReplicatedJobs:
+    - pathways-head
+

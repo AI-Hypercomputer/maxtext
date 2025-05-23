@@ -37,6 +37,8 @@ Current limitations:
 See https://github.com/AI-Hypercomputer/pathways-utils/tree/main/pathwaysutils/elastic
 for more details about the elastic manager.
 """
+from absl import logging
+#logging.set_verbosity(logging.DEBUG)
 from collections.abc import Sequence
 import datetime
 import logging
@@ -116,10 +118,12 @@ def elastic_handler(
         config, elastic_manager.good_devices
     )
     with mesh:
-      data_iterator, _ = create_data_iterator(config, mesh)
+      data_iterator, _ = create_data_iterator(config, mesh, elastic=True)
       input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
 
-      step, snapshot_jax_arrays, _ = elastic_manager.get_resharded_snapshot(mesh)
+      step, snapshot_jax_arrays, snapshot_controller = elastic_manager.get_resharded_snapshot(mesh)
+      if config.dataset_type == "grain" and snapshot_controller:
+        data_iterator.local_iterator.set_state(snapshot_controller['data_iterator'])
 
       # We do not want to restore from the previous checkpoint but instead
       # restore from the host offloaded snapshot.
@@ -265,6 +269,9 @@ def train_loop(config, elastic_manager, state=None):
           "params": state.params,
           "opt_state": state.opt_state,
       },
+      snapshot_controller={
+          "data_iterator": data_iterator.local_iterator.get_state(),
+      } if config.dataset_type=="grain" else None,
       force=True,
       block=True,
   )
@@ -293,11 +300,14 @@ def train_loop(config, elastic_manager, state=None):
             input_data_shardings,
         ) = elastic_manager.maybe_reshard_up(
             step=step,
+            elastic_handler=elastic_handler,
             snapshot_jax_arrays={
                 "params": state.params,
                 "opt_state": state.opt_state,
             },
-            elastic_handler=elastic_handler,
+            snapshot_controller={
+              "data_iterator": data_iterator.local_iterator.get_state(),
+            } if config.dataset_type=="grain" else None,
             handler_kwargs={
                 "config": config,
                 "elastic_manager": elastic_manager,
@@ -354,16 +364,22 @@ def train_loop(config, elastic_manager, state=None):
               "params": state.params,
               "opt_state": state.opt_state,
           },
+          snapshot_controller={
+              "data_iterator": data_iterator.local_iterator.get_state(),
+          } if config.dataset_type=="grain" else None,
           block=True,
       )
 
       ret = elastic_manager.maybe_reshard_up(
           step=step,
+          elastic_handler=elastic_handler,
           snapshot_jax_arrays={
               "params": state.params,
               "opt_state": state.opt_state,
           },
-          elastic_handler=elastic_handler,
+          snapshot_controller={
+              "data_iterator": data_iterator.local_iterator.get_state(),
+          } if config.dataset_type=="grain" else None,
           handler_kwargs={
               "config": config,
               "elastic_manager": elastic_manager,
@@ -483,11 +499,12 @@ def elastic_initialize(devices: Sequence[jax.Device]) -> manager.Manager:
   # TODO: b/408455557 - Migrate to pathwaysutils and make configurable
   elastic_manager.good_slice_indices = wait_for_all_slices(elastic_manager, 30)
 
+  if hasattr(pyconfig.HyperParameters, "elastic_data_option") and pyconfig.HyperParameters.elastic_data_option != 'skip_data':
+    pyconfig.HyperParameters.global_batch_size_to_load = property(
+        lambda self: elastic_manager.scale_by_good_slices(self.get_keys()["global_batch_size_to_load"])
+    )
   pyconfig.HyperParameters.global_batch_size_to_train_on = property(
       lambda self: elastic_manager.scale_by_good_slices(self.get_keys()["global_batch_size_to_train_on"])
-  )
-  pyconfig.HyperParameters.global_batch_size_to_load = property(
-      lambda self: elastic_manager.scale_by_good_slices(self.get_keys()["global_batch_size_to_load"])
   )
   pyconfig.HyperParameters.micro_batch_size_to_train_on = property(
       lambda self: elastic_manager.scale_by_good_slices(self.get_keys()["micro_batch_size_to_train_on"])

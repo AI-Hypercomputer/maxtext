@@ -145,18 +145,21 @@ def make_mixed_iterator(config, mesh, process_indices_train, process_indices_eva
   return train_iterator, eval_iterator
 
 
-def create_data_iterator(config, mesh):
+def create_data_iterator(config, mesh, elastic=False):
   """create data iterator"""
   if config.dataset_type == "synthetic":
     return SyntheticDataIterator(config, mesh), None
 
-  process_indices_train = get_process_loading_real_data(
-      config.data_sharding,
-      config.global_batch_size_to_load,
-      config.global_batch_size_to_train_on,
-      config.max_target_length,
-      mesh,
-  )
+  if elastic and config.elastic_data_option == 'skip_data':
+    process_indices_train = [i for i in range(jax.process_count())]
+  else:
+    process_indices_train = get_process_loading_real_data(
+        config.data_sharding,
+        config.global_batch_size_to_load,
+        config.global_batch_size_to_train_on,
+        config.max_target_length,
+        mesh,
+    )
   if config.eval_interval > 0:
     process_indices_eval = get_process_loading_real_data(
         config.data_sharding,

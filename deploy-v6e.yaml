@@ -1,0 +1,48 @@
+apiVersion: pathways-job.pathways.domain/v1
+kind: PathwaysJob
+metadata:
+  name: pathways-aireenmei
+spec:
+  maxRestarts: 2
+  # customComponents:
+  # - componentType: pathways_server
+  #   image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/sanitized_server:staging
+  # - componentType: proxy_server
+  #   image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/sanitized_proxy_server:staging
+  # - componentType: worker
+  #   image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/sanitized_server:staging
+  workers:
+  - type: ct6e-standard-4t
+    topology: 16x16
+    numSlices: 2
+    maxSliceRestarts: 1000
+  pathwaysDir: "gs://aireenmei-multipod/maxtext/pathways-elastic"
+  controller:
+    deploymentMode: default # Default mode deploys pathways cpu resources (resource manager and proxy server) on a dedicated CPU node
+    mainContainerName: main
+    elasticSlices: 2
+    template:
+      spec:
+        containers:
+        - name: main
+          image: gcr.io/cloud-tpu-multipod-dev/aireen_runner  # gcr.io/cloud-tpu-multipod-dev/lukebaumann_runner  # gcr.io/tpu-prod-env-multipod/aireen_runner
+          command:
+          - bash
+          - -c
+          - >         
+            python3 -m MaxText.elastic_train MaxText/configs/base.yml
+            base_output_directory=gs://aireenmei-multipod/maxtext/pathways-elastic
+            per_device_batch_size=1
+            enable_checkpointing=false
+            remat_policy=full
+            global_parameter_scale=1
+            steps=500
+            max_target_length=2048
+            use_iota_embed=true
+            dataset_type=synthetic
+            grain_train_files=/tmp/gcsfuse/array-record/c4/en/3.0.1/c4-train*
+            attention=flash
+            gcs_metrics=True
+            run_name=aireenmei-pathways
+
+# setup_gcsfuse.sh DATASET_GCS_BUCKET=maxtext-dataset MOUNT_PATH=/tmp/gcsfuse && 
