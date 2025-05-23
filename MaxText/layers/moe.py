@@ -294,7 +294,7 @@ class RoutedMoE(nn.Module):
     If the configuration does not specify routing groups (n_routing_groups is -1),
     using a standard top-k routing mechanism.
 
-    The selection uses post_bias logits, but the return weigths are based on pre_bias logits.
+    The selection uses post_bias logits, but the return weights are based on pre_bias logits.
     """
     # Reshape
     batch_size, seq_len = gate_logits.shape[0], gate_logits.shape[1]
@@ -466,10 +466,10 @@ class RoutedMoE(nn.Module):
           cumulated_array = jnp.cumsum(array_with_zeros, axis=0, dtype=input_array.dtype)
           return cumulated_array[shard_id]
         elif strategy == TransformStrategy.RECV_SIZE:
-          # Received size in the traget output
+          # Received size in the target output
           return input_array[:, shard_id]
         else:
-          raise ValueError(f"Unknown tranform array strategy: {strategy}")
+          raise ValueError(f"Unknown transform array strategy: {strategy}")
 
       local_id = jax.lax.axis_index("expert")
       input_offsets = transform_array(all_shards_group_sizes, local_id, TransformStrategy.INPUT_OFFSET)
@@ -499,7 +499,6 @@ class RoutedMoE(nn.Module):
     if isinstance(wo_kernel, QTensor):
       wo_pspec = aqt_tensor.partition_spec(wo_pspec, (1,), wo_kernel.dtype, use_bias=False)
 
-    breakpoint()
     @functools.partial(
         shard_map.shard_map,
         mesh=self.mesh,
@@ -532,6 +531,9 @@ class RoutedMoE(nn.Module):
             * self.config.num_experts_per_tok
         )
         output_shape = jnp.zeros((buffer_size, self.config.emb_dim), dtype=x.dtype)
+        # output_shape = jnp.zeros((buffer_size, x.shape[0]), dtype=x.dtype) @ x
+        output_shape = jnp.tile(x, (self.get_expert_parallelism_size(), 1))
+        
         x = jax.lax.ragged_all_to_all(
             x,
             output_shape,
@@ -541,6 +543,7 @@ class RoutedMoE(nn.Module):
             recv_sizes,
             axis_name=axis_name,
         )
+        x = jnp.reshape(x, (output_shape.shape[0], output_shape.shape[1]))
         global_group_sizes = lax.all_gather(group_sizes, axis_name=axis_name)
         x, local_sorted_indices, group_sizes = local_permute(x, global_group_sizes, local_expert_size)
 
@@ -565,6 +568,7 @@ class RoutedMoE(nn.Module):
         input_offsets, send_sizes, output_offsets, recv_sizes = get_all_to_all_params(
             jnp.transpose(all_shards_group_sizes), local_expert_size, self.get_expert_parallelism_size()
         )
+        output_shape = local_output[::self.get_expert_parallelism_size(), :]
         intermediate_output = jax.lax.ragged_all_to_all(
             local_output,
             output_shape,
@@ -574,6 +578,7 @@ class RoutedMoE(nn.Module):
             recv_sizes,
             axis_name=axis_name,
         )
+        intermediate_output = jnp.reshape(intermediate_output, (-1, self.config.emb_dim))
       output = self.unpermute(
           intermediate_output, sorted_selected_experts, weights, batch_size=batch_size, sequence_length=sequence_length
       )

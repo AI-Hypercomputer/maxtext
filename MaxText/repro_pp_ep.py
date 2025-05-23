@@ -63,15 +63,7 @@ def permute(inputs, gate_logits):
     return sorted_inputs, sorted_selected_experts, weights, group_size
 
 def get_topk(gate_logits):
-    if not random_routing:
-        top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, num_experts_per_tok)
-    else:
-        rng_key = jax.random.PRNGKey(0)
-        bs, seq_len, num_experts = gate_logits.shape
-        indices = jnp.arange(num_experts).repeat(bs * seq_len)
-        selected_num = bs * seq_len * num_experts_per_tok
-        top_k_indices = jax.random.choice(rng_key, indices, shape=(selected_num,)).reshape(bs, seq_len, num_experts_per_tok)
-        top_k_weights = jnp.take_along_axis(gate_logits, top_k_indices, axis=-1)
+    top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, num_experts_per_tok)
     return top_k_weights, top_k_indices
 
 # Define inputs
@@ -81,16 +73,20 @@ batch_size = per_device_batch * num_devices
 sequence_length = 3
 model_dim = 5
 num_experts = 8
+num_experts_per_tok = 2
 expert_parallelism = 4
 pipeline_parallelism = num_devices // expert_parallelism
-num_experts_per_tok = 2
 axis_name = "expert"
 random_routing = False
+print_a2a_input_vars = True
+hack_output_for_vmap = True
+run_vmap=True
 
  # Define a mesh with one axis named "expert"
 device_mesh_array = mesh_utils.create_device_mesh((pipeline_parallelism, expert_parallelism))
 mesh = Mesh(device_mesh_array, ("pipeline", "expert"))
 
+# Create inputs x and logits which are sharded only by expert
 total_elements = batch_size * sequence_length * model_dim
 x = jnp.arange(1.0, total_elements + 1.0).reshape(batch_size, sequence_length, model_dim)
 x_partition_spec = jax.sharding.PartitionSpec("expert", None, None)
@@ -125,7 +121,20 @@ def wrapper(x, logits):
 
     buffer_size = int(expert_parallelism * per_device_batch * sequence_length * num_experts_per_tok)
     output_shape = jnp.zeros((buffer_size, model_dim), dtype=x.dtype)
-    breakpoint()
+
+    if hack_output_for_vmap:
+        # returns the same shape, but this will get vmap transformed since it builds from x??
+        output_shape = jnp.tile(x, (expert_parallelism, 1))
+
+    if print_a2a_input_vars:
+        print(f"{x=}\n")
+        print(f"{output_shape=}\n")
+        print(f"{input_offsets=}\n")
+        print(f"{send_sizes=}\n")
+        print(f"{output_offsets=}\n")
+        print(f"{recv_sizes=}\n")
+
+    # The main event: A2A - this is where things crash in the vmap case unless we set hack_output_for_vmap=True
     x = jax.lax.ragged_all_to_all(
         x,
         output_shape,
@@ -135,31 +144,37 @@ def wrapper(x, logits):
         recv_sizes,
         axis_name=axis_name,
     )
+    print(f"{x.shape=}\n")
     return x
 
 
 
 # This works
-# x_a2a = wrapper(x, logits)
-# print("Successfully ran wrapper (non - vmap)")
+if not run_vmap:
+    jit_wrapper = jax.jit(wrapper)
+    x_a2a = jit_wrapper(x, logits)
+    print("Successfully ran wrapper (non - vmap)")
 
-# We now want to try to emulate how maxtext (and pax) SPMD PP works - which is by vmapping
-# over the PP axis. All inputs will get a new leading dimension of length PP that is sharded by
-# PP and will be vmapped over
-vmap_func = jax.vmap(
-    wrapper,
-    spmd_axis_name="pipeline",
-)
+else:
+    # We now want to try to emulate how maxtext (and pax) SPMD PP works - which is by vmapping
+    # over the PP axis. All inputs will get a new leading dimension of length PP that is sharded by
+    # PP and will be vmapped over
+    vmap_func = jax.vmap(
+        wrapper,
+        spmd_axis_name="pipeline",
+    )
+    jit_vmap_func = jax.jit(vmap_func)
 
-# Add a leading dimension to x and logits of length pipeline_parallelism, and shard it by pipeline
-x_vmap = jnp.expand_dims(x, axis=0)
-x_vmap = jnp.tile(x_vmap, (pipeline_parallelism, 1, 1, 1))
-x_vmap = jax.device_put(x_vmap, NamedSharding(mesh, jax.sharding.PartitionSpec("pipeline", "expert", None, None)))
+    # Add a leading dimension to x and logits of length pipeline_parallelism, and shard it by pipeline
+    x_vmap = jnp.expand_dims(x, axis=0)
+    x_vmap = jnp.tile(x_vmap, (pipeline_parallelism, 1, 1, 1))
+    x_vmap = jax.device_put(x_vmap, NamedSharding(mesh, jax.sharding.PartitionSpec("pipeline", "expert", None, None)))
 
-logits_vmap = jnp.expand_dims(logits, axis=0)
-logits_vmap = jnp.tile(logits_vmap, (pipeline_parallelism, 1, 1, 1))
-logits_vmap = jax.device_put(logits_vmap, NamedSharding(mesh, jax.sharding.PartitionSpec("pipeline", "expert", None, None)))
+    logits_vmap = jnp.expand_dims(logits, axis=0)
+    logits_vmap = jnp.tile(logits_vmap, (pipeline_parallelism, 1, 1, 1))
+    logits_vmap = jax.device_put(logits_vmap, NamedSharding(mesh, jax.sharding.PartitionSpec("pipeline", "expert", None, None)))
 
-# Run the wrapper with vmapped it should really just run #pipeline number of times on #pipeline parallelism groups
-# This fails with "TypeError: tuple indices must be integers or slices, not NoneType"
-x_vmap_a2a = vmap_func(x_vmap, logits_vmap)
+    # Run the wrapper with vmapped it should really just run #pipeline number of times on #pipeline parallelism groups
+    # This fails with "TypeError: tuple indices must be integers or slices, not NoneType"
+    x_vmap_a2a = jit_vmap_func(x_vmap, logits_vmap)
+    print(x_vmap_a2a.shape)
