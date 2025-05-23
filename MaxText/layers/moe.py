@@ -499,6 +499,7 @@ class RoutedMoE(nn.Module):
     if isinstance(wo_kernel, QTensor):
       wo_pspec = aqt_tensor.partition_spec(wo_pspec, (1,), wo_kernel.dtype, use_bias=False)
 
+    breakpoint()
     @functools.partial(
         shard_map.shard_map,
         mesh=self.mesh,
@@ -517,7 +518,6 @@ class RoutedMoE(nn.Module):
         reshaped_group_sizes = jnp.sum(group_sizes.reshape(-1, local_expert_size), axis=1)
         all_shards_group_sizes = lax.all_gather(reshaped_group_sizes, axis_name=axis_name)
         # calculate offsets and sizes for ragged_all_to_all operation
-        breakpoint()
         input_offsets, send_sizes, output_offsets, recv_sizes = get_all_to_all_params(
             all_shards_group_sizes, local_expert_size, self.get_expert_parallelism_size()
         )
