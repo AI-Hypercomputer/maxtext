@@ -65,7 +65,6 @@ deepseek_671b_hp = ConvHParams(
 import math
 
 def setupDataset(model: MaxTextModel, params: DatasetHParams):
-    #model.model_name = model.model_name + "-" + params.name
     model.tuning_params["reuse_example_batch"] = -1
     model.tuning_params["dataset_path"] = params.dataset_path
     model.tuning_params["dataset_name"] = params.dataset_name
@@ -87,20 +86,6 @@ def setupC4En(model: MaxTextModel):
 
 def setupC4Mlperf(model: MaxTextModel):
     setupDataset(model, c4_mlperf_hp)   
-
-def setupConvHParams(model: MaxTextModel, params: ConvHParams, num_devices: int):
-    gbs = params.global_batch_size
-    total_steps = params.total_tokens_to_train / gbs
-    model.tuning_params["per_device_batch_size"] = float(gbs / num_devices)
-    model.tuning_params["learning_rate"] =  params.learning_rate
-    model.tuning_params["warmup_steps_fraction"] =  float(params.warmup_samples) / gbs / total_steps
-    model.tuning_params["learning_rate_schedule_steps"] =  int(params.decay_end_samples / gbs)
-    model.tuning_params["steps"] =  int(total_steps)
-    eval_samples =  model.tuning_params["eval_steps"]
-    model.tuning_params["eval_steps"] = int(math.floor(eval_samples / gbs))
-    model.tuning_params["eval_interval"]= int(math.ceil(params.eval_interval / gbs))
-    model.tuning_params["enable_checkpointing"] = True
-    model.tuning_params["checkpoint_period"] = int(math.ceil( 1000 * 512 / gbs))
 
 def load_checkpoint(model: MaxTextModel, checkpoint_path: str):
     model.tuning_params["load_full_state_path"] = checkpoint_path
