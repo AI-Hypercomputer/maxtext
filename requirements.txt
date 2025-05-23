@@ -14,6 +14,7 @@ google-cloud-monitoring
 google-api-core
 google-api-python-client
 grain[parquet]>=0.2.6
+huggingface_hub
 flax>=v0.10.6
 jaxtyping
 ml-collections
