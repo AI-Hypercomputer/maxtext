@@ -1372,12 +1372,12 @@ class MaxEngine(engine_api.Engine):
     # pylint: disable=unused-argument
     def init(abstract_params, page_state):
       x = jnp.ones(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
+          (int(self.config.per_device_batch_size * self.mesh.size), 1),
           dtype=jnp.int32,
       )
       dummy_image = jnp.ones(
           (
-              int(self.config.per_device_batch_size * jax.device_count()),
+              int(self.config.per_device_batch_size * self.mesh.size),
               maxtext_utils.NUM_IMAGES_PER_SEQUENCE,
               self.config.image_size_for_vit,
               self.config.image_size_for_vit,
@@ -1398,21 +1398,21 @@ class MaxEngine(engine_api.Engine):
       )
 
       next_pos = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
+          (int(self.config.per_device_batch_size * self.mesh.size), 1),
           dtype=jnp.int32,
       )
       generated_tokens = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
+          (int(self.config.per_device_batch_size * self.mesh.size), 1),
           dtype=jnp.int32,
       )
       tokens = jnp.zeros(
-          (int(self.config.per_device_batch_size * jax.device_count()), 1),
+          (int(self.config.per_device_batch_size * self.mesh.size), 1),
           dtype=jnp.int32,
       )
       return {
           "logits": jnp.zeros(
               (
-                  int(self.config.per_device_batch_size * jax.device_count()),
+                  int(self.config.per_device_batch_size * self.mesh.size),
                   1,
                   self.config.vocab_size,
               )
@@ -1452,7 +1452,7 @@ class MaxEngine(engine_api.Engine):
   @property
   def max_concurrent_decodes(self) -> int:
     """Free slots."""
-    return int(self.config.per_device_batch_size * jax.device_count())
+    return int(self.config.per_device_batch_size * self.mesh.size)
 
   @property
   def max_prefill_length(self) -> int:
