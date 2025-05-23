@@ -627,11 +627,17 @@ class ReplicaWorker:
             self.warm_up_thread = None
 
     def update_impl(self, params: Params, destination_sharding: jax.sharding.NamedSharding, is_pw_reshard: bool):
+        start_time = time.time()
         if is_pw_reshard:
             with (jax.transfer_guard_device_to_host("disallow_explicit"), jax.transfer_guard_host_to_device("disallow_explicit")):
                 self.params = pathwaysutils_reshard.reshard(params, destination_sharding, cache_resharding_plans=True)
         else:
             self.params = jax.device_put(params, destination_sharding)
+        if self.params is not None: # It's good practice to check if params could be None
+            jax.tree_util.tree_map(lambda x: x.block_until_ready(), self.params)
+        end_time = time.time()
+        print(f"worker {self.worker_id} reshard training params: {end_time - start_time} seconds")
+
 
     def update_params(self, params: Params, destination_sharding: jax.sharding.NamedSharding, is_pw_reshard: bool = True):
         self.ensure_init_finished()
@@ -668,7 +674,7 @@ class ReplicaWorker:
         """
         self.ensure_init_finished()
         self.ensure_warm_up_finished()
-        # self.ensure_update_finished() TODO(mohitkhatwani) might not need it
+        self.ensure_update_finished()
         self.res = results
         if self.run_as_a_thread:
             self.worker_thread = SafeThead(
