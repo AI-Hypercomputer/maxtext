@@ -2,7 +2,9 @@ import jax
 import jax.numpy as jnp
 from jax import lax, jit
 from jax.experimental import shard_map
-from jax.sharding import Mesh, PartitionSpec
+from jax.sharding import Mesh, PartitionSpec, NamedSharding
+import functools
+from enum import Enum, auto
 
 
 
@@ -33,10 +35,10 @@ def get_all_to_all_params(all_shards_group_sizes, local_expert_size, num_expert_
             cumulated_array = jnp.cumsum(array_with_zeros, axis=0, dtype=input_array.dtype)
             return cumulated_array[shard_id]
         elif strategy == TransformStrategy.RECV_SIZE:
-            # Received size in the traget output
+            # Received size in the target output
             return input_array[:, shard_id]
         else:
-            raise ValueError(f"Unknown tranform array strategy: {strategy}")
+            raise ValueError(f"Unknown transform array strategy: {strategy}")
 
     local_id = jax.lax.axis_index("expert")
     input_offsets = transform_array(all_shards_group_sizes, local_id, TransformStrategy.INPUT_OFFSET)
@@ -45,7 +47,7 @@ def get_all_to_all_params(all_shards_group_sizes, local_expert_size, num_expert_
     recv_sizes = transform_array(all_shards_group_sizes, local_id, TransformStrategy.RECV_SIZE)
     return input_offsets, send_sizes, output_offsets, recv_sizes
 
-def permute(self, inputs, gate_logits):
+def permute(inputs, gate_logits):
     """Permute tokens to group by expert to fit gmm call."""
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
     inputs_shape = inputs.shape
@@ -62,7 +64,7 @@ def permute(self, inputs, gate_logits):
     group_size = jnp.bincount(flatten_selected_experts, length=num_experts)
     return sorted_inputs, sorted_selected_experts, weights, group_size
 
-def get_topk(self, gate_logits):
+def get_topk(gate_logits):
     rng_key = jax.random.PRNGKey(0)
     bs, seq_len, num_experts = gate_logits.shape
     indices = jnp.arange(num_experts).repeat(bs * seq_len)
@@ -73,53 +75,63 @@ def get_topk(self, gate_logits):
 
 
 
-# @functools.partial(
-#     shard_map.shard_map,
-#     mesh=self.mesh,
-#     in_specs=(input_partition_pspec, gate_logits_pspec, pre_bias_logits_pspec, w0_pspec, w1_pspec, wo_pspec),
-#     out_specs=(nn.logical_to_mesh_axes(("activation_batch", None, "activation_embed"))),
-#     check_rep=False,
-# )
-# def wrapper(x, logits, pre_bias_logits, w0, w1, wo):
 
 per_device_batch = 4
 num_devices = 8
 batch_size = per_device_batch * num_devices
 sequence_length = 2048
 model_dim = 3072
-experts = 8
+num_experts = 8
 expert_parallelism = 8
 num_experts_per_tok = 2
 axis_name = "expert"
 
-#mesh = Mesh(mesh_devices, ("expert",)) # Define a mesh with one axis named "expert"
+mesh = Mesh(jax.devices(), ("expert",)) # Define a mesh with one axis named "expert"
 
 x = jnp.zeros((batch_size, sequence_length, model_dim))
+x_partition_spec = jax.sharding.PartitionSpec("expert", None, None)
+x_sharding = NamedSharding(mesh, x_partition_spec)
+x = jax.device_put(x, x_sharding)
+
 logits = jnp.zeros((batch_size, sequence_length, model_dim))
+logits_partition_spec = jax.sharding.PartitionSpec("expert", None, None)
+logits_sharding = NamedSharding(mesh, logits_partition_spec)
+logits = jax.device_put(logits, logits_sharding)
 
 
-# get group sizes for all shards
-batch_size, sequence_length, _ = x.shape
-x, sorted_selected_experts, weights, group_sizes = permute(x, logits)
-local_expert_size = experts // expert_parallelism
-reshaped_group_sizes = jnp.sum(group_sizes.reshape(-1, local_expert_size), axis=1)
-all_shards_group_sizes = lax.all_gather(reshaped_group_sizes, axis_name=axis_name)
-# calculate offsets and sizes for ragged_all_to_all operation
-input_offsets, send_sizes, output_offsets, recv_sizes = get_all_to_all_params(
-    all_shards_group_sizes, local_expert_size, expert_parallelism
+@functools.partial(
+    shard_map.shard_map,
+    mesh=mesh,
+    in_specs=(x_partition_spec, logits_partition_spec),
+    out_specs=(x_partition_spec),
+    check_rep=False,
 )
+def wrapper(x, logits):
+    # get group sizes for all shards
+    batch_size, sequence_length, _ = x.shape
+    x, sorted_selected_experts, weights, group_sizes = permute(x, logits)
+    local_expert_size = num_experts // expert_parallelism
+    reshaped_group_sizes = jnp.sum(group_sizes.reshape(-1, local_expert_size), axis=1)
+    all_shards_group_sizes = lax.all_gather(reshaped_group_sizes, axis_name=axis_name)
+    # calculate offsets and sizes for ragged_all_to_all operation
+    input_offsets, send_sizes, output_offsets, recv_sizes = get_all_to_all_params(
+        all_shards_group_sizes, local_expert_size, expert_parallelism
+    )
 
-buffer_size = int(expert_parallelism * per_device_batch * sequence_length * num_experts_per_tok)
-output_shape = jnp.zeros((buffer_size, model_dim), dtype=x.dtype)
-x = jax.lax.ragged_all_to_all(
-    x,
-    output_shape,
-    input_offsets,
-    send_sizes,
-    output_offsets,
-    recv_sizes,
-    axis_name=axis_name,
-)
+    buffer_size = int(expert_parallelism * per_device_batch * sequence_length * num_experts_per_tok)
+    output_shape = jnp.zeros((buffer_size, model_dim), dtype=x.dtype)
+    x = jax.lax.ragged_all_to_all(
+        x,
+        output_shape,
+        input_offsets,
+        send_sizes,
+        output_offsets,
+        recv_sizes,
+        axis_name=axis_name,
+    )
+    return x
 
+jit_wrapper = jax.jit(wrapper)
+x_a2a = jit_wrapper(x,logits)
 
-# x: [batch, seq]
+#x_a2a = wrapper(x, logits)
