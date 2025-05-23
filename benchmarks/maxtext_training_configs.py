@@ -24,6 +24,7 @@ class ConvHParams:
     eval_interval: int # in number of tokens
     training_scaleing_factor: float # used in critical_batch_size_scaling
     eval_tokens: int = -1
+    seeds: int = 1238
 
 
 @dataclasses.dataclass
@@ -42,7 +43,7 @@ class MaxTextModel:
   pathways_xla_flag_options: dict[str, typing.Any] = None
     
   def setup_dataset(self, params: DatasetHParams):
-    self.tuning_params["reuse_example_batch"] = -1
+    self.tuning_params["reuse_example_batch"] = 0
     self.tuning_params["dataset_path"] = params.dataset_path
     self.tuning_params["dataset_name"] = params.dataset_name
     self.tuning_params["dataset_type"] = params.dataset_type
@@ -54,7 +55,6 @@ class MaxTextModel:
     self.tuning_params["add_bos"] = params.add_bos
     self.tuning_params["add_eos"] = params.add_eos
     self.tuning_params["eval_steps"] = params.eval_tokens
-    self.tuning_params["data_shuffle_seed"] = 1238
 
   def setup_convergence_configs(self, params: ConvHParams, num_devices: int, global_batch_size: int):
     gbs = global_batch_size
@@ -76,6 +76,7 @@ class MaxTextModel:
       eval_tokens  =  self.tuning_params["eval_steps"]
     self.tuning_params["eval_steps"] = int(math.ceil(eval_tokens / max_target_length / gbs))
     self.tuning_params["eval_interval"]= int(math.ceil(params.eval_interval / max_target_length / gbs))
+    self.tuning_params["data_shuffle_seed"] = params.seeds
 
 
 # Run this for new definitions that should be part of the library.

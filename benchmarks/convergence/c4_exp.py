@@ -64,29 +64,6 @@ deepseek_671b_hp = ConvHParams(
 
 import math
 
-def setupDataset(model: MaxTextModel, params: DatasetHParams):
-    model.tuning_params["reuse_example_batch"] = -1
-    model.tuning_params["dataset_path"] = params.dataset_path
-    model.tuning_params["dataset_name"] = params.dataset_name
-    model.tuning_params["dataset_type"] = params.dataset_type
-    model.tuning_params["eval_dataset_name"] = params.dataset_name
-    model.tuning_params["train_split"] = params.train_split
-    model.tuning_params["eval_split"] = params.eval_split
-    model.tuning_params["add_bos"] = params.add_bos
-    model.tuning_params["add_eos"] = params.add_eos
-    model.tuning_params["eval_steps"] = params.eval_tokens
-    model.tuning_params["data_shuffle_seed"] = 1238
-
-
-def setupC4Multilingualen(model: MaxTextModel):
-    setupDataset(model, c4_mutil_hp)
-
-def setupC4En(model: MaxTextModel):
-    setupDataset(model, c4_en_hp)
-
-def setupC4Mlperf(model: MaxTextModel):
-    setupDataset(model, c4_mlperf_hp)   
-
 def load_checkpoint(model: MaxTextModel, checkpoint_path: str):
     model.tuning_params["load_full_state_path"] = checkpoint_path
 
