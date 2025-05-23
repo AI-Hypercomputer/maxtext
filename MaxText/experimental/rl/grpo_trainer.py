@@ -351,8 +351,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 
   # --- (6) Restrict the loss calculations to the generated completion tokens.
   # Average over tokens per generated completion.
-  loss_denominator = jnp.clip(jnp.sum(valid_seq_mask, axis=1), min=1)
-  loss_per_example = jnp.sum(loss_tokens * valid_seq_mask, axis=1) / loss_denominator
+  loss_per_example = jnp.sum(loss_tokens * valid_seq_mask, axis=1) / jnp.clip(jnp.sum(valid_seq_mask, axis=1), min=1)
 
   # --- (7) Finally the loss is the average (over examples) of the mean per-token loss
   loss = jnp.mean(loss_per_example)
@@ -367,7 +366,7 @@ def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_
 
   # Compute auxiliary metrics.
   if config.grpo_beta != 0.0:
-    avg_kl = jnp.mean((per_token_kl * valid_seq_mask) / loss_denominator[:, None])
+    avg_kl = jnp.mean((per_token_kl * valid_seq_mask) / jnp.clip(jnp.sum(valid_seq_mask, axis=1, keepdims=True), min=1))
   else:
     avg_kl = None
   avg_reward = jnp.mean(rewards)
