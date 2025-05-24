@@ -522,13 +522,13 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
     if current_length < target_completion_length:
       # Pad
       padding_length = target_completion_length - current_length
-      # Assuming padding with 0 for token_ids. 
+      # Assuming padding with tokenizer.pad_token_id for token_ids. 
       # For logprobs, padding with a very small number or 0.0 might be appropriate.
       # Ensure the dtype matches.
-      padded_tokens = jnp.pad(current_tokens, (0, padding_length), mode='constant', constant_values=0)
+      padded_tokens = jnp.pad(current_tokens, (0, padding_length), mode='constant', constant_values=tokenizer_model.pad_token_id)
       # Pad logprobs similarly. If they correspond 1:1 with tokens, pad them too.
       # If logprobs might not exist for padding tokens, adjust accordingly (e.g. pad with -jnp.inf or 0.0)
-      padded_logprobs = jnp.pad(current_logprobs, (0, padding_length), mode='constant', constant_values=0.0) 
+      padded_logprobs = jnp.pad(current_logprobs, (0, padding_length), mode='constant', constant_values=-jnp.inf) 
     elif current_length > target_completion_length:
       # Truncate
       padded_tokens = current_tokens[:target_completion_length]
