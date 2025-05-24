@@ -14,6 +14,7 @@
  limitations under the License.
  -->
 
+DO_NOT_SUBMIT testing change only
 
 [![Unit Tests](https://github.com/google/maxtext/actions/workflows/RunTests.yml/badge.svg)](https://github.com/google/maxtext/actions/workflows/RunTests.yml)
 
