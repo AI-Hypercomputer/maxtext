@@ -999,6 +999,8 @@ class OfflineEngine:
     def update_params(self, params: Params, parition_spec: PartitionSpec, is_pw_reshard):
         for i in range(self.dp):
             self.replica_workers[i].update_params(params, jax.tree_util.tree_map(lambda ps: jax.sharding.NamedSharding(self.dp_meshes[i], ps), parition_spec), is_pw_reshard)
+        for i in range(self.dp):
+            self.replica_workers[i].ensure_update_finished()
 
     def batch_inference(
         self,
