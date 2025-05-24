@@ -50,32 +50,6 @@ jobs:
               console.log("This workflow is running within an invalid context")
               process.exit(1)
             }
-
-            // This list should match with CODEOWNERS.
-            let requiredReviewers = {
-              gobbleturk: "",
-              khatwanimohit: "",
-              bvandermoon: "",
-              vipannalla: "",
-              RissyRan: "",
-              richjames0: "",
-              rni418: "",
-              gagika: "",
-              shralex: "",
-              yangyuwei: "",
-              SurbhiJainUSC: "",
-              hengtaoguo: "",
-              A9isha: "",
-              wang2yn84: "",
-              wyzhang: "",
-              mitalisi: "",
-              gpolovets1: "",
-              mailvijayasingh: "",
-              jrplatin: "",
-              patemotter: "",
-              lumosis: "",
-              aireenmei: "",
-            }
             const reviews = await github.rest.pulls.listReviews({
               owner,
               repo,
@@ -93,14 +67,12 @@ jobs:
               console.log("Not adding pull ready because the PR is not approved yet.")
               process.exit()
             }
-            let num_approved = 0
-            for (const review of reviews.data) {
-              if (review.state === "APPROVED" && review.user.login in requiredReviewers) {
-                num_approved = num_approved + 1
-              }
+            let is_approved = false
+            if (pullRequest.state === "APPROVED") {
+              is_approved = true
             }
-            if (num_approved < 2) {
-              console.log("Not adding pull ready because the PR is not approved yet by 2 code owners.")
+            if (!is_approved) {
+              console.log("Not adding pull ready because the PR is not approved yet by sufficient code owners.")
               process.exit()
             }
 
