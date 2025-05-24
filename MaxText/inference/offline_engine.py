@@ -46,7 +46,7 @@ import dataclasses
 from enum import Enum
 from typing import Any, List, Tuple, Callable, Optional, Dict, Union
 from collections import defaultdict
-import time 
+import time
 
 import jax
 import numpy as np
@@ -62,6 +62,7 @@ from MaxText import inference_utils
 
 
 from MaxText.prefill_packing import PrefillProcessor, BatchedPrefillProcessor
+
 DecodeState = Any
 Params = Any
 MaxTextConfig = Any
@@ -102,8 +103,8 @@ class CompletionOutput:
 
 @dataclasses.dataclass
 class TokenOutput:
-    """Class for storing log probabilities.
-    """
+    """Class for storing log probabilities."""
+
     token: int
     log_prob: float
 
@@ -155,7 +156,7 @@ class PrefillHelper:
         prefill_lengths: List[int],
         batch_prefill_max_batch_size: int = 16,
         auto_layout_supported: bool = False,
-        rng = None,
+        rng=None,
     ):
         """Initialize the PrefillHelper.
 
@@ -191,7 +192,6 @@ class PrefillHelper:
         self,
         params: Params,
         decode_state: DecodeState,
-        
     ) -> DecodeState:
         """Ahead-of-time compile prefill functions for all supported lengths."""
 
@@ -300,7 +300,7 @@ class PrefillHelper:
                     decode_slot,
                     input_tokens_padded,
                     input_true_length,
-                    self.rng
+                    self.rng,
                 )
             else:
                 first_token, decode_state = self._processor._process(
@@ -309,7 +309,7 @@ class PrefillHelper:
                     decode_slot,
                     input_true_length,
                     decode_state,
-                    self.rng
+                    self.rng,
                 )
             prefill_done([(first_token, decode_slot)], [input_id], decode_state)
         # Use batch processor for inputs that can benefit from prefill packing
@@ -368,7 +368,7 @@ class ReplicaWorker:
         worker_id: int = 0,
         auto_layout_supported: bool = False,
         run_as_a_thread=False,
-        rng = None,
+        rng=None,
     ):
         """Initialize a ReplicaWorker that uses continuous batching over
            a queue of inputs.
@@ -451,20 +451,18 @@ class ReplicaWorker:
         self.empty_decode_slots: List[int] = []
         self.slot_to_id: Dict[int, int] = {}
         self.decode_state = None
-        self.res = None 
+        self.res = None
 
-        # Precompiled functions 
+        # Precompiled functions
         self.generate_fn = None
-
 
         # These will be populated in the init thread
         self.engine = None
         self.decode_batch_size = None
         self.prefill_helper = None
-        
+
         self._init()
-        
-    
+
     def _init(self):
         if self.run_as_a_thread:
             self.init_thread = SafeThead(
@@ -474,7 +472,7 @@ class ReplicaWorker:
             self.init_thread.start()
         else:
             self._init_impl()
-    
+
     def ensure_init_finished(self):
         if self.init_thread is not None:
             self.init_thread.join()
@@ -519,7 +517,9 @@ class ReplicaWorker:
             start_time = time.time()
             self.decode_state = self.engine.init_decode_state(self.rng)
             end_time = time.time()
-            print(f"time taken to initialize decode_state: {end_time - start_time} seconds")
+            print(
+                f"time taken to initialize decode_state: {end_time - start_time} seconds"
+            )
 
         self.generate_fn = self.engine.generate
 
@@ -560,7 +560,7 @@ class ReplicaWorker:
         assert self.decode_state is not None
 
         for i in range(3):
-            print(f"Warm up generate function ({i+1}/3)")
+            print(f"Warm up generate function ({i + 1}/3)")
             self.decode_state, result_tokens = self.generate_fn(
                 self.params, self.decode_state, self.rng
             )
@@ -687,7 +687,7 @@ class ReplicaWorker:
         print(f"replica worker {self.worker_id}: detokenize thread joined")
 
         # Log completion statistics
-        log.info(
+        print(
             "Summary %s: prefills=%d, decodes=%d, detokens=%d completed.",
             desc,
             self.counter.prefill,
@@ -696,7 +696,9 @@ class ReplicaWorker:
         )
         return self.res
 
-    def emit_token(self, prompt_id, result_token: engine_api.ResultTokens, log_prob, slot: int):
+    def emit_token(
+        self, prompt_id, result_token: engine_api.ResultTokens, log_prob, slot: int
+    ):
         """Adds the token to the results for the specified prompt ID and
         determines if generation should terminate.
 
@@ -707,18 +709,20 @@ class ReplicaWorker:
         Returns:
             True if this token signals the end of generation, False otherwise
         """
-        token, is_valid, length = result_token.data[slot]
-        current_length = len(self.res[prompt_id])
+        # Return if already reached max decode length
+        if len(self.res[prompt_id]) == self.max_decode_length:
+            return True
 
-        already_reached_eos = (
-            current_length > 0
-            and self.res[prompt_id][-1].token in self.eos_ids
-        )
+        # Return if already reached eos
+        if len(self.res[prompt_id]) > 0 and self.res[prompt_id][-1].token in self.eos_ids: 
+            return True
+        
+        token, is_valid, index = result_token.data[slot]
 
-        if is_valid and not already_reached_eos:
+        if is_valid:
             self.res[prompt_id].append(TokenOutput(token, log_prob))
-
-        return (token in self.eos_ids) or (current_length+1 == self.max_decode_length)
+        
+        return (token in self.eos_ids) or (index+1 == self.max_decode_length)
 
     def prefill_done(self, prefill_result, prompt_ids, decode_state):
         """Callback function called when prefill completes.
@@ -730,10 +734,11 @@ class ReplicaWorker:
             prompt_ids: List of prompt IDs
             decode_state: Updated decode state
         """
-        print(f"replica worker {self.worker_id}: prefill done")
         # Update decode state
         self.decode_state = decode_state
-        log_prob = inference_utils.log_prob_of_chosen_token(decode_state["logits"], decode_state["tokens"])
+        log_prob = inference_utils.log_prob_of_chosen_token(
+            decode_state["logits"], decode_state["tokens"]
+        )
         # Process each prefill result
         for i, (first_token, slot) in enumerate(prefill_result):
             self.counter.prefill += 1
@@ -757,18 +762,17 @@ class ReplicaWorker:
             self.decode_state, result_tokens = self.generate_fn(
                 self.params, self.decode_state, self.rng
             )
-            log_prob = inference_utils.log_prob_of_chosen_token(self.decode_state["logits"], self.decode_state["tokens"])
+            log_prob = inference_utils.log_prob_of_chosen_token(
+                self.decode_state["logits"], self.decode_state["tokens"]
+            )
             log_prob.block_until_ready()
             end_time = time.time()
             print(f"time taken to run generate_fn: {end_time - start_time} seconds")
             buffer.append((result_tokens, log_prob))
-            
-        
+
         # Add results to detokenization queue
         for result_tokens, log_prob in buffer:
-            self.detokenize_backlog.put_nowait(
-                (result_tokens, log_prob, False, 0, 0)
-            )       
+            self.detokenize_backlog.put_nowait((result_tokens, log_prob, False, 0, 0))
             self.counter.decode += 1
 
     def detokenize(self):
@@ -783,7 +787,9 @@ class ReplicaWorker:
 
             # Get next item from queue with timeout
             try:
-                result_tokens, log_prob, is_first_token, row_id, slot = self.detokenize_backlog.get(timeout=1)
+                result_tokens, log_prob, is_first_token, row_id, slot = (
+                    self.detokenize_backlog.get(timeout=1)
+                )
                 result_tokens = result_tokens.convert_to_numpy()
             except queue.Empty:
                 if not self.running:
@@ -792,14 +798,18 @@ class ReplicaWorker:
 
             # Process generated tokens
             if is_first_token:
-                should_terminate = self.emit_token(row_id, result_tokens, log_prob, slot=0)
+                should_terminate = self.emit_token(
+                    row_id, result_tokens, log_prob, slot=0
+                )
                 if should_terminate:
                     newly_empty.append(slot)
             else:
                 for slot, id_ in self.slot_to_id.items():
                     if id_ is None:
                         continue
-                    should_terminate = self.emit_token(id_, result_tokens, log_prob[slot], slot=slot)
+                    should_terminate = self.emit_token(
+                        id_, result_tokens, log_prob[slot], slot=slot
+                    )
                     if should_terminate:
                         newly_empty.append(slot)
 
@@ -811,8 +821,7 @@ class ReplicaWorker:
 
 
 class OfflineEngine:
-    """Class for handling offline inference on batches of inputs.
-    """
+    """Class for handling offline inference on batches of inputs."""
 
     def __init__(
         self,
@@ -865,7 +874,7 @@ class OfflineEngine:
               reserve the rest for other tasks. If None, OfflineEngine will create the meshes
               automatically.
             auto_layout_supported: Whether auto layout is supported. Auto layout introduces
-                some start up overhead but can result in faster step times. TODO: Pathways 
+                some start up overhead but can result in faster step times. TODO: Pathways
                 has some bugs with auto layout, so it is recommended to set this to False
                 for now when using Pathways.
             rng: Random number generator key. If None, a new key will be created.
@@ -906,21 +915,28 @@ class OfflineEngine:
 
         # Create meshes
         devices = jax.devices()
-        
+
         if not self.dp_meshes:
-            ici_parallelism = max_utils.fill_unspecified_mesh_axes(config.ici_parallelism.copy(), len(devices), "ICI")
+            ici_parallelism = max_utils.fill_unspecified_mesh_axes(
+                config.ici_parallelism.copy(), len(devices), "ICI"
+            )
             devices_array = mesh_utils.create_device_mesh(
-                        ici_parallelism,
-                        devices,
-                        contiguous_submeshes=False,
-                        allow_split_physical_axes=config.allow_split_physical_axes or False,
-                    )
+                ici_parallelism,
+                devices,
+                contiguous_submeshes=False,
+                allow_split_physical_axes=config.allow_split_physical_axes or False,
+            )
             flat_devices = devices_array.flatten()
-            inference_devices = flat_devices.reshape((self.dp, len(devices)//self.dp))
-            self.dp_meshes = [Mesh(devices.reshape(config.ici_parallelism), config.mesh_axes) for devices in inference_devices]
+            inference_devices = flat_devices.reshape((self.dp, len(devices) // self.dp))
+            self.dp_meshes = [
+                Mesh(devices.reshape(config.ici_parallelism), config.mesh_axes)
+                for devices in inference_devices
+            ]
 
         # Initialize ReplicaWorkers
-        run_as_a_thread = self.dp > 1  # No need to run worker as a thread if there is only one replica
+        run_as_a_thread = (
+            self.dp > 1
+        )  # No need to run worker as a thread if there is only one replica
         replica_rngs = jax.random.split(self.rng, self.dp)
         assert replica_rngs[0].shape == self.rng.shape
         self.replica_workers = [
@@ -945,7 +961,7 @@ class OfflineEngine:
         for i in range(self.dp):
             self.replica_workers[i].ensure_init_finished()
         print(f"Created {self.dp} replica workers")
-        
+
         self.tokenizer = self.replica_workers[0].tokenizer
         if self.should_warm_up:
             self.warm_up()
@@ -971,7 +987,7 @@ class OfflineEngine:
         """Run inference on a batch of inputs.
 
         Args:
-            data: List of InputData objects, or JAX or numpy arrays. 
+            data: List of InputData objects, or JAX or numpy arrays.
                 If input is JAX or numpy array, it must not contain padding tokens.
             desc: Description string for logging
 
@@ -999,13 +1015,20 @@ class OfflineEngine:
 
         # Return CompletionOutput objects
         completion_outputs = []
-        
+
         for input_data in data:
             completion_outputs.append(
                 CompletionOutput(
                     index=input_data.id,
-                    token_ids=jnp.stack([token_output.token for token_output in results[input_data.id]]),
-                    logprobs=jnp.stack([token_output.log_prob for token_output in results[input_data.id]]),
+                    token_ids=jnp.stack(
+                        [token_output.token for token_output in results[input_data.id]]
+                    ),
+                    logprobs=jnp.stack(
+                        [
+                            token_output.log_prob
+                            for token_output in results[input_data.id]
+                        ]
+                    ),
                 )
             )
         return completion_outputs
@@ -1038,10 +1061,12 @@ class OfflineEngine:
             if len(item.tokens) < target_length:
                 # Pad with zeros
                 if isinstance(item.tokens, jax.Array):
-                    padded_tokens = jax.numpy.zeros(target_length, dtype=item.tokens.dtype)
+                    padded_tokens = jax.numpy.zeros(
+                        target_length, dtype=item.tokens.dtype
+                    )
                     padded_tokens = padded_tokens.at[: item.true_length].set(
-                    item.tokens[: item.true_length]
-                )
+                        item.tokens[: item.true_length]
+                    )
                 else:
                     padded_tokens = np.zeros(target_length, dtype=item.tokens.dtype)
                     padded_tokens[: item.true_length] = item.tokens[: item.true_length]
@@ -1073,8 +1098,8 @@ class OfflineEngine:
                 InputData(id=i, tokens=array, true_length=len(array))
                 for i, array in enumerate(data)
             ]
-        
-        # Make sure all data id is unique 
+
+        # Make sure all data id is unique
         if len(data) != len(set([item.id for item in data])):
             raise ValueError("All data ids must be unique")
 
@@ -1103,11 +1128,15 @@ class OfflineEngine:
         if self.dp > 1:
             # Initialize Pathways if not already initialized
             import pathwaysutils
+
             pathwaysutils.initialize()
 
         if self.enable_batch_prefill and not self.auto_layout_supported:
-            raise ValueError("auto_layout_supported must be True if enable_batch_prefill is True")
-        
+            raise ValueError(
+                "auto_layout_supported must be True if enable_batch_prefill is True"
+            )
+
         if self.config.scan_layers:
-            print("WARNING: scan_layers=True will result in slow step time. It is recommended for debugging purposes only.")
-        
+            print(
+                "WARNING: scan_layers=True will result in slow step time. It is recommended for debugging purposes only."
+            )
