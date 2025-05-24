@@ -199,7 +199,7 @@ def save_checkpoint(
         step,
         args=orbax.checkpoint.args.Composite(
             items=orbax.checkpoint.args.PyTreeSave(
-                item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size
+                item=state, save_args=save_args, ocdbt_target_data_file_size=chunk_byte_size, enable_pinned_host_transfer=True
             )
         ),
         force=force,
