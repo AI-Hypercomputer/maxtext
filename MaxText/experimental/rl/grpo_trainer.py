@@ -503,11 +503,16 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
   for i, d in enumerate(data[config.train_data_columns]):
     for g in range(config.num_generations):
       input_data.append(InputData(id=f"input_{i}_{g}", tokens=np.array(d), true_length=np.array(data[f"{config.train_data_columns}_true_length"][i])[0]))
+  start_time = time.time()
+  max_logging.log("MaxText: inference started on samplers")
   results = inference_engine.batch_inference(input_data)
+  end_time = time.time()
+  max_logging.log(f"MaxText: inference finished on all samplers in {end_time - start_time} seconds")
   processed_token_ids = []
   processed_logprobs = []
   # Determine the target length for completions
   target_completion_length = config.max_target_length - config.max_prefill_predict_length
+  start_time = time.time()
   for r in results:
     current_tokens = r.token_ids
     current_logprobs = r.logprobs # Assuming logprobs correspond to tokens
@@ -541,6 +546,9 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
   data[config.train_data_columns] = jnp.repeat(data[config.train_data_columns], config.num_generations, axis=0)
   data[f"{config.train_data_columns}_true_length"] = jnp.repeat(data[f"{config.train_data_columns}_true_length"], config.num_generations, axis=0)
   data = grpo_utils.concatenate_prompt_with_completions(config, tokenizer_model, data, completions)
+  end_time = time.time()
+  max_logging.log(f"MaxText: Preprocessing after inference took {end_time - start_time} seconds")
+  breakpoint()
   # offpolicys
   if config.inference_rollouts > 1:
     data["completions_logprobs"] = completions_logprobs
@@ -610,10 +618,19 @@ def pathways_reshard(config, inference_engine, params, source_shardings, source_
   else:
     layer_groups = [("layers", config.base_num_decoder_layers)]
   if not config.scan_layers:
+    start_time = time.time()
     max_utils.unscan_train_state_params(params, source_shardings, source_mesh, scan_axis=config.param_scan_axis, layer_groups=layer_groups)
+    end_time = time.time()
+    max_logging.log(f"Unscanning took {end_time - start_time} seconds")
+  start_time = time.time()
   inference_engine.update_params(params, jax.tree_util.tree_map(lambda x: x.spec, destination_shardings[0].params), is_pw_reshard)
+  end_time = time.time()
+  max_logging.log(f"MaxText: Total resharding took {end_time - start_time} seconds")
   if not config.scan_layers:
+    start_time = time.time()
     max_utils.rescan_train_state_params(params, source_shardings, scan_axis=config.param_scan_axis, layer_groups=layer_groups)
+    end_time = time.time()
+    max_logging.log(f"Scanning took {end_time - start_time} seconds")
 
 def setup_mesh_and_model(config, config_inference):
   """Set up the mesh and the model for training
