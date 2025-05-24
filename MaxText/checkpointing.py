@@ -60,6 +60,7 @@ def create_orbax_checkpoint_manager(
     enable_checkpointing: bool,
     use_async: bool,
     save_interval_steps: int,
+    max_to_keep: Optional[int] = None,
     dataset_type: Optional[str] = "tfds",
     orbax_logger: Any = None,  # pytype: disable=attribute-error
     use_ocdbt: bool = True,
@@ -90,6 +91,7 @@ def create_orbax_checkpoint_manager(
           create=True,
           save_interval_steps=save_interval_steps,
           enable_async_checkpointing=use_async,
+          max_to_keep=max_to_keep
       ),
       logger=orbax_logger,
   )
@@ -109,6 +111,12 @@ def create_orbax_emergency_checkpoint_manager(
   """Returns an emergency checkpoint manager."""
   flags.FLAGS.experimental_orbax_use_distributed_process_id = True
   max_logging.log("Creating emergency checkpoint manager...")
+
+  local_checkpoint_dir += f"{local_checkpoint_dir}/{jax.process_index()}"
+  local_p = epath.Path(local_checkpoint_dir)
+  persistent_p = epath.Path(persistent_checkpoint_dir)
+  local_p.mkdir(exist_ok=True, parents=True)
+  persistent_p.mkdir(exist_ok=True, parents=True)
 
   options = emergency_checkpoint_manager.CheckpointManagerOptions(
       local=LocalCheckpointOptions(save_interval_steps=local_save_interval_steps),
