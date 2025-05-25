@@ -939,10 +939,13 @@ class OfflineEngine:
         )  # No need to run worker as a thread if there is only one replica
         replica_rngs = jax.random.split(self.rng, self.dp)
         assert replica_rngs[0].shape == self.rng.shape
-        self.replica_workers = [
-            ReplicaWorker(
+        self.replica_workers = []
+        for i in range(self.dp):
+            # Reuse first replica's params to speed up start up time
+            params = self.params if i == 0 else self.replica_workers[0].params
+            replica = ReplicaWorker(
                 config=self.config,
-                params=self.params,
+                params=params,
                 min_decode_steps=self.min_decode_steps,
                 enable_batch_prefill=self.enable_batch_prefill,
                 devices=np.squeeze(self.dp_meshes[i].devices),
@@ -956,8 +959,10 @@ class OfflineEngine:
                 run_as_a_thread=run_as_a_thread,
                 rng=replica_rngs[i],
             )
-            for i in range(self.dp)
-        ]
+            if i == 0:
+                replica.ensure_init_finished()
+            self.replica_workers.append(replica)
+
         for i in range(self.dp):
             self.replica_workers[i].ensure_init_finished()
         print(f"Created {self.dp} replica workers")
