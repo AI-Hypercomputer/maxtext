@@ -26,7 +26,7 @@ Example usage:
 
     for tokens in results:
         text = offline_engine.tokenizer.decode(tokens)
-        print(f"Output: {text}")
+        max_logging.log(f"Output: {text}")
 
 Notes:
     - Prefill packing is only supported with scan_layers=False
@@ -62,6 +62,7 @@ from MaxText import inference_utils
 
 
 from MaxText.prefill_packing import PrefillProcessor, BatchedPrefillProcessor
+from MaxText import max_logging
 
 DecodeState = Any
 Params = Any
@@ -204,7 +205,7 @@ class PrefillHelper:
     def aot_compile_default(self, params: Params, decode_state: DecodeState):
         """AOT compile the default prefill processor."""
         for length in self.prefill_lengths:
-            print(f"AOT compiling prefill for length: {length}")
+            max_logging.log(f"AOT compiling prefill for length: {length}")
             if self.auto_layout_supported:
                 self._processor.aot_compile(params, length)
             else:
@@ -220,7 +221,7 @@ class PrefillHelper:
 
         for padded_length in self.prefill_lengths:
             for num_prompts in range(1, 2 * max_length // padded_length):
-                print(
+                max_logging.log(
                     f"AOT compiling batch prefill for length: {padded_length} and num_prompts: {num_prompts}"
                 )
                 if self.auto_layout_supported:
@@ -254,7 +255,7 @@ class PrefillHelper:
                         decode_state,
                     )
         # For fallback
-        print(f"AOT compiling prefill for length: {max_length}")
+        max_logging.log(f"AOT compiling prefill for length: {max_length}")
         if self.auto_layout_supported:
             self._processor.aot_compile(params, max_length)
         else:
@@ -287,6 +288,7 @@ class PrefillHelper:
             input_true_length: Actual length of the input before padding
             prefill_done: Callback function called when prefill completes
         """
+        start_time = time.time()
         padded_length = len(input_tokens_padded)
         # Use default processor if configured or if input is already at max length
         if (
@@ -324,6 +326,8 @@ class PrefillHelper:
                 self.max_prefill_length,
                 prefill_done,
             )
+        end_time = time.time()
+        max_logging.log(f"Time taken to run prefill: {end_time - start_time} seconds")
 
     def finalize(
         self,
@@ -510,14 +514,14 @@ class ReplicaWorker:
                 self.engine.aot_compile(self.params, pass_rng_shape=True)
             )
             end_time = time.time()
-            print(f"time taken to compile generate_fn: {end_time - start_time} seconds")
+            max_logging.log(f"time taken to compile generate_fn: {end_time - start_time} seconds")
             self.decode_state = init_decode_state_fn(self.rng)
         else:
             self.generate_fn = self.engine.generate
             start_time = time.time()
             self.decode_state = self.engine.init_decode_state(self.rng)
             end_time = time.time()
-            print(
+            max_logging.log(
                 f"time taken to initialize decode_state: {end_time - start_time} seconds"
             )
 
@@ -536,7 +540,7 @@ class ReplicaWorker:
         engine = MaxEngine(self.config, self.devices)
         params = engine.load_params(params=params, rng=self.rng)
         end_time = time.time()
-        print(f"time taken to initialize engine: {end_time - start_time} seconds")
+        max_logging.log(f"time taken to initialize engine: {end_time - start_time} seconds")
         return params, engine
 
     def _init_tokenizer(self):
@@ -560,7 +564,7 @@ class ReplicaWorker:
         assert self.decode_state is not None
 
         for i in range(3):
-            print(f"Warm up generate function ({i + 1}/3)")
+            max_logging.log(f"Warm up generate function ({i + 1}/3)")
             self.decode_state, result_tokens = self.generate_fn(
                 self.params, self.decode_state, self.rng
             )
@@ -632,7 +636,7 @@ class ReplicaWorker:
         Returns:
             Dictionary mapping input ids to output token sequences
         """
-        print("Starting inference")
+        max_logging.log(f"Replica {self.worker_id}. Starting inference")
         # Reset state
         self.counter = EventCounter(input=0, prefill=0, decode=0, detokenize=0)
         self.empty_decode_slots = list(range(self.decode_batch_size))
@@ -682,17 +686,13 @@ class ReplicaWorker:
 
         # Wait for detokenization to complete
         self.running = False
-        print(f"replica worker {self.worker_id}: joining detokenize thread")
+        max_logging.log(f"replica worker {self.worker_id}: joining detokenize thread")
         detokenize_thread.join()
-        print(f"replica worker {self.worker_id}: detokenize thread joined")
+        max_logging.log(f"replica worker {self.worker_id}: detokenize thread joined")
 
         # Log completion statistics
-        print(
-            "Summary %s: prefills=%d, decodes=%d, detokens=%d completed.",
-            desc,
-            self.counter.prefill,
-            self.counter.decode,
-            self.counter.detokenize,
+        max_logging.log(
+            f"Summary {desc}: prefills={self.counter.prefill}, decodes={self.counter.decode}, detokens={self.counter.detokenize} completed."
         )
         return self.res
 
@@ -767,7 +767,7 @@ class ReplicaWorker:
             )
             log_prob.block_until_ready()
             end_time = time.time()
-            print(f"time taken to run generate_fn: {end_time - start_time} seconds")
+            max_logging.log(f"Replica {self.worker_id}. Time taken to run generate_fn: {end_time - start_time} seconds")
             buffer.append((result_tokens, log_prob))
 
         # Add results to detokenization queue
@@ -879,7 +879,7 @@ class OfflineEngine:
                 for now when using Pathways.
             rng: Random number generator key. If None, a new key will be created.
         """
-        print("Initializing OfflineEngine")
+        max_logging.log("Initializing OfflineEngine")
         # Configurations
         self.config = config
         self.params = params
@@ -939,13 +939,9 @@ class OfflineEngine:
         )  # No need to run worker as a thread if there is only one replica
         replica_rngs = jax.random.split(self.rng, self.dp)
         assert replica_rngs[0].shape == self.rng.shape
-        self.replica_workers = []
-        for i in range(self.dp):
-            # Reuse first replica's params to speed up start up time
-            params = self.params if i == 0 else self.replica_workers[0].params
-            replica = ReplicaWorker(
+        self.replica_workers = [ReplicaWorker(
                 config=self.config,
-                params=params,
+                params=self.params,
                 min_decode_steps=self.min_decode_steps,
                 enable_batch_prefill=self.enable_batch_prefill,
                 devices=np.squeeze(self.dp_meshes[i].devices),
@@ -959,13 +955,12 @@ class OfflineEngine:
                 run_as_a_thread=run_as_a_thread,
                 rng=replica_rngs[i],
             )
-            if i == 0:
-                replica.ensure_init_finished()
-            self.replica_workers.append(replica)
-
-        for i in range(self.dp):
-            self.replica_workers[i].ensure_init_finished()
-        print(f"Created {self.dp} replica workers")
+            for i in range(self.dp)
+        ]
+        for replica in self.replica_workers:
+            replica.ensure_init_finished()
+        
+        max_logging.log(f"Created {self.dp} replica workers")
 
         self.tokenizer = self.replica_workers[0].tokenizer
         if self.should_warm_up:
@@ -1016,7 +1011,7 @@ class OfflineEngine:
         # Wait for all workers to complete
         for i in range(self.dp):
             self.replica_workers[i].ensure_inference_finished()
-            print(f"replica worker {i} stopped")
+            max_logging.log(f"replica worker {i} stopped")
 
         # Return CompletionOutput objects
         completion_outputs = []
@@ -1142,6 +1137,6 @@ class OfflineEngine:
             )
 
         if self.config.scan_layers:
-            print(
+            max_logging.log(
                 "WARNING: scan_layers=True will result in slow step time. It is recommended for debugging purposes only."
             )
