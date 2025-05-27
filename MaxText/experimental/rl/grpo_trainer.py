@@ -551,6 +551,7 @@ def generate_offline_completions(training_mesh, config, tokenizer_model, inferen
   data = grpo_utils.concatenate_prompt_with_completions(config, tokenizer_model, data, completions)
   end_time = time.time()
   max_logging.log(f"MaxText: Preprocessing after inference took {end_time - start_time} seconds")
+  # breakpoint()
   # offpolicys
   if config.inference_rollouts > 1:
     data["completions_logprobs"] = completions_logprobs
@@ -800,6 +801,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
       "learning/avg_reward_std": aux.avg_reward_std,
       "learning/avg_advantage": aux.avg_advantage,
       "learning/avg_kl": aux.avg_kl,
+      "learning/completion_length": aux.completion_length,
       "learning/moe_lb_loss": moe_lb_loss,
       "learning/total_weights": total_weights,
   }
