@@ -404,6 +404,6 @@ class RemoteIterator:
     input_gdas = jtu.tree_map_with_path(
         partial(put_to_tpu_devices, sharding=self.tpu_sharding), out
     )
-    max_logging.log(f"RemoteIterator next. input_gdas: {input_gdas}")
+    # max_logging.log(f"RemoteIterator next. input_gdas: {input_gdas}")
 
     return input_gdas

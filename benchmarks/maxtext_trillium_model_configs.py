@@ -108,6 +108,35 @@ default_basic_1_colocated_python = _add_to_model_dictionary(
     ),
 )
 
+default_basic_1_remote_python_elastic_train = _add_to_model_dictionary(
+    trillium_model_dict,
+    MaxTextModel(
+        model_name="default-basic-1",
+        model_type="default",
+        tuning_params={
+            "per_device_batch_size": 1,
+            "remat_policy": "full",
+            "global_parameter_scale": 1,
+            "attention": "flash",
+            "dataset_path": "gs://trillium-scale-datasets-q1-25-west",
+            "tokenizer_path": (
+                "google3/third_party/py/maxtext/assets/tokenizer.llama2"
+            ),
+            "dataset_type": "tfds",
+            "enable_checkpointing": False,
+            "profiler": "xplane",
+            "elastic_mode": "fast-resume",
+            "elastic_reshard_check_period": "1",
+            "elastic_snapshot_period": "5",
+            "elastic_max_elastic_down_event_count": "100",
+            "elastic_max_reshard_retry_count": "3",
+            "elastic_wait_period": "5",
+            "colocated_python_data_input": True,
+        },
+        xla_flags="",
+    ),
+)
+
 default_basic_1 = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(

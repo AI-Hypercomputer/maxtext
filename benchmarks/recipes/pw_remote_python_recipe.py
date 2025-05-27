@@ -66,9 +66,10 @@ def main() -> int:
   base_output_directory = "gs://trillium-scale-tests-q1-25-west/ksadi/"
 
   list_of_models = [
-      model_configs.default_basic_1,
+      # model_configs.default_basic_1,
       # model_configs.default_basic_1_colocated_python,
       # model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds_remote_python,
+      model_configs.default_basic_1_remote_python_elastic_train,
   ]
   pathways_config = mxr.PathwaysConfig(
       server_image=server_image,
@@ -76,7 +77,7 @@ def main() -> int:
       runner_image=runner,
       colocated_python_sidecar_image=colocated_python_image,
   )
-  num_slices_list = [2]
+  num_slices_list = [16]
   # num_slices_list = [1, 2, 4, 8, 16, 32]
 
   xpk_workload_cmds = []
