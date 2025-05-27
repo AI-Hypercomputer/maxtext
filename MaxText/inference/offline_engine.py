@@ -716,6 +716,79 @@ class ReplicaWorker:
         first_token, log_prob, decode_state = self._jitted_prefill(self.engine, model_params, input_tokens_padded, decode_slot, input_true_length, decode_state, self.rng)        
         prefill_done([(first_token, log_prob, decode_slot)], [input_id], decode_state)
 
+    def start_basic_inference(
+        self,
+        data,
+        results,
+        desc: str = "",
+    ):
+        """Start the inference process.
+
+        Args:
+            data_queue: Queue containing input data
+            results: Dictionary to store results
+            desc: Description for logging
+        """
+        self.ensure_init_finished()
+        self.ensure_warm_up_finished()
+        self.ensure_update_finished()
+        self.res = results
+        if self.run_as_a_thread:
+            self.worker_thread = SafeThead(
+                target=self._start_basic_inference,
+                args=(data, desc),
+                name=f"replica_worker_{self.worker_id}",
+            )
+            self.worker_thread.start()
+        else:
+            self._start_basic_inference(data, desc)
+
+
+    def _start_basic_inference(
+        self,
+        data,
+        desc: str = "",
+    ):
+        """Run inference without continous batching on a batch of inputs.
+
+        data_queue: Queue of InputData objects containing input sequences
+            desc: Description string for logging
+
+        Returns:
+            Dictionary mapping input ids to output token sequences
+        """
+        def _scan_prefill_step(carry, inputs):
+            decode_state, rng, slot = carry
+            tokens, true_len = inputs
+            rng, rng_prefill = jax.random.split(rng)
+            prefill_result, _ = self.engine.prefill(params=self.params, padded_tokens=tokens, true_length=true_len, rng=rng_prefill)
+            decode_state = self.engine.insert(prefill_result, decode_state, slot)
+            return (decode_state, rng, slot + 1), None
+
+        def _scan_generate_step(carry, _):
+            rng, decode_state = carry
+            rng, rng_generate = jax.random.split(rng)
+            decode_state, result_tokens = self.engine.generate(self.params, decode_state, rng=rng_generate)
+            logps = inference_utils.log_prob_of_chosen_token(decode_state["logits"], decode_state["tokens"])
+            return (rng, decode_state), (result_tokens.data[:, 0], logps[:, 0])
+
+        prompts = jnp.array([row.tokens for row in data])
+        true_length = jnp.array([row.true_length for row in data])
+
+        (self.decode_state, _, _), _ = jax.lax.scan(
+            _scan_prefill_step, init=(self.decode_state, self.rng, 0), xs=(prompts, true_length)
+        )
+
+        (_, self.decode_state), (all_tokens, all_logps) = jax.lax.scan(_scan_generate_step, init=(self.rng, self.decode_state), xs=None, length=self.max_decode_length)
+        all_tokens = np.asarray(all_tokens)
+        all_logps = np.asarray(all_logps)
+        completions = np.transpose(all_tokens, (1,0))
+        logps = np.transpose(all_logps, (1,0))
+        for x, c in enumerate(completions):
+            for y, _ in enumerate(c):
+                self.res[data[x].id].append(TokenOutput(completions[x,y], logps[x,y]))
+
+
     def _start_inference(
         self,
         data_queue: queue.Queue,
@@ -1159,6 +1232,7 @@ class OfflineEngine:
     def batch_inference(
         self,
         data: Union[List[InputData], List[jax.Array], List[np.ndarray]],
+        continous_batching: bool = True,
         desc: str = "",
     ) -> List[CompletionOutput]:
         """Run inference on a batch of inputs.
@@ -1171,7 +1245,8 @@ class OfflineEngine:
         Returns:
             Dictionary mapping input ids to output token sequences or a list of token sequences
         """
-        data = self.prepare_data(data)
+        if not isinstance(data[0], InputData):
+            data = self.prepare_data(data)
 
         # Create thread-safe queue and results container
         data_queue = queue.Queue()
@@ -1182,8 +1257,14 @@ class OfflineEngine:
             data_queue.put_nowait(row)
 
         # Start inference on all replica workers
-        for i in range(self.dp):
-            self.replica_workers[i].start_inference(data_queue, results, desc)
+        if continous_batching:
+            for i in range(self.dp):
+                self.replica_workers[i].start_inference(data_queue, results, desc)
+        else:
+            per_group_size = len(data) // self.dp
+            grouped_data = [data[i:i+per_group_size] for i in range(0, len(data), per_group_size)]
+            for i in range(self.dp):
+                self.replica_workers[i].start_basic_inference(grouped_data[i], results, desc)
 
         # Wait for all workers to complete
         for i in range(self.dp):

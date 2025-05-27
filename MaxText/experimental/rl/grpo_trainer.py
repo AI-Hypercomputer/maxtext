@@ -505,7 +505,7 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
       input_data.append(InputData(id=f"input_{i}_{g}", tokens=np.array(d), true_length=np.array(data[f"{config.train_data_columns}_true_length"][i])[0]))
   start_time = time.time()
   max_logging.log("MaxText: inference started on samplers")
-  results = inference_engine.batch_inference(input_data)
+  results = inference_engine.batch_inference(input_data, continous_batching=False)
   end_time = time.time()
   max_logging.log(f"MaxText: inference finished on all samplers in {end_time - start_time} seconds")
   processed_token_ids = []
@@ -541,14 +541,13 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
     processed_token_ids.append(padded_tokens)
     processed_logprobs.append(padded_logprobs)
 
-  completions = jnp.stack(processed_token_ids)
+  completions = jnp.stack(np.array(processed_token_ids))
   completions_logprobs = jnp.stack(np.array(processed_logprobs))
   data[config.train_data_columns] = jnp.repeat(data[config.train_data_columns], config.num_generations, axis=0)
   data[f"{config.train_data_columns}_true_length"] = jnp.repeat(data[f"{config.train_data_columns}_true_length"], config.num_generations, axis=0)
   data = grpo_utils.concatenate_prompt_with_completions(config, tokenizer_model, data, completions)
   end_time = time.time()
   max_logging.log(f"MaxText: Preprocessing after inference took {end_time - start_time} seconds")
-  breakpoint()
   # offpolicys
   if config.inference_rollouts > 1:
     data["completions_logprobs"] = completions_logprobs
@@ -622,10 +621,7 @@ def pathways_reshard(config, inference_engine, params, source_shardings, source_
     max_utils.unscan_train_state_params(params, source_shardings, source_mesh, scan_axis=config.param_scan_axis, layer_groups=layer_groups)
     end_time = time.time()
     max_logging.log(f"Unscanning took {end_time - start_time} seconds")
-  start_time = time.time()
   inference_engine.update_params(params, jax.tree_util.tree_map(lambda x: x.spec, destination_shardings[0].params), is_pw_reshard)
-  end_time = time.time()
-  max_logging.log(f"MaxText: Total resharding took {end_time - start_time} seconds")
   if not config.scan_layers:
     start_time = time.time()
     max_utils.rescan_train_state_params(params, source_shardings, scan_axis=config.param_scan_axis, layer_groups=layer_groups)
@@ -870,7 +866,7 @@ def setup_train_loop(config, config_inference):
   init_rng, writer, checkpoint_manager, mesh, inference_meshes, model, inference_model, learning_rate_schedule, tx = setup_mesh_and_model(config, config_inference)
   record_goodput(recorder, config, recorder.record_tpu_init_end_time if recorder else None)
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
-  data_iterator = grpo_input_pipeline.create_data_iterator(config_inference, inference_meshes[0])
+  data_iterator = grpo_input_pipeline.create_data_iterator(config, inference_meshes[0])
   #TODO: setup_training_state may not need to return dataset_iterator, find out why it needs it
   state, _, state_mesh_shardings, _ = maxtext_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
@@ -1206,13 +1202,7 @@ def main(argv: Sequence[str]) -> None:
   if config.inference_devices_per_replica * config.inference_replicas >= jax.device_count():
     raise ValueError(f"Invalid value chosen for {config.num_inference_devices=}")
   config_inference = pyconfig.initialize(
-      # list(argv)
-      # + [
-      #   "ici_fsdp_parallelism=1",
-      #   f"ici_tensor_parallelism={config.inference_devices_per_replica}",
-      #   "per_device_batch_size=" + str(config.per_device_batch_size * config.num_generations / config.inference_replicas)
-      #   ]
-      configs_argv[1]
+      configs_argv[1] + ["per_device_batch_size=" + str(config.per_device_batch_size * config.num_generations)]
   )
   if config.per_device_batch_size < 1.0 or config_inference.per_device_batch_size < 1.0:
     raise ValueError("GRPO does not support setting per_device_batch_size < 1.0")
