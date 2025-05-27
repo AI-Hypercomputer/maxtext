@@ -61,7 +61,7 @@ def main() -> int:
   proxy_image = f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/ksadi/unsanitized_proxy_server:latest"
   server_image = f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/ksadi/unsanitized_server:latest"
   colocated_python_image = f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/remote_python_sidecar_server:latest"
-  runner = f"gcr.io/cloud-tpu-multipod-dev/ksadi_runner:latest"
+  runner = f"gcr.io/cloud-tpu-multipod-dev/{user}_runner:latest"
   # base_output_directory = f"gs://{user}-{region}/{user}"
   base_output_directory = "gs://trillium-scale-tests-q1-25-west/ksadi/"
 
@@ -69,7 +69,8 @@ def main() -> int:
       # model_configs.default_basic_1,
       # model_configs.default_basic_1_colocated_python,
       # model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds_remote_python,
-      model_configs.default_basic_1_remote_python_elastic_train,
+      model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds_colocated_python_elastic_train,
+      # model_configs.default_basic_1_colocated_python_elastic_train,
   ]
   pathways_config = mxr.PathwaysConfig(
       server_image=server_image,
@@ -77,7 +78,7 @@ def main() -> int:
       runner_image=runner,
       colocated_python_sidecar_image=colocated_python_image,
   )
-  num_slices_list = [16]
+  num_slices_list = [1]
   # num_slices_list = [1, 2, 4, 8, 16, 32]
 
   xpk_workload_cmds = []

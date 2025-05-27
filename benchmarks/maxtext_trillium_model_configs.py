@@ -108,7 +108,7 @@ default_basic_1_colocated_python = _add_to_model_dictionary(
     ),
 )
 
-default_basic_1_remote_python_elastic_train = _add_to_model_dictionary(
+default_basic_1_colocated_python_elastic_train = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
         model_name="default-basic-1",
@@ -1283,6 +1283,78 @@ llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds_remote_python = _add_to_
             "enable_pathways_goodput": False,
             "enable_goodput_recording": False,
             "monitor_goodput": False,
+            "per_device_batch_size": 2,
+            "ici_fsdp_parallelism": -1,
+            "remat_policy": "custom",
+            "decoder_layer_input": "offload",
+            "query_proj": "offload",
+            "key_proj": "offload",
+            "value_proj": "offload",
+            "max_target_length": 8192,
+            "attention": "flash",
+            "use_iota_embed": True,
+            "dataset_path": "gs://trillium-scale-datasets-q1-25-west",
+            "dataset_type": "tfds",
+            "enable_checkpointing": True,
+            "async_checkpointing": True,
+            "checkpoint_period": 20,
+            "enable_checkpoint_cloud_logger": True,
+            "sa_block_q": 2048,
+            "sa_block_kv": 2048,
+            "sa_block_kv_compute": 2048,
+            "sa_block_q_dkv": 2048,
+            "sa_block_kv_dkv": 2048,
+            "sa_block_kv_dkv_compute": 2048,
+            "sa_block_q_dq": 2048,
+            "sa_block_kv_dq": 2048,
+            "sa_use_fused_bwd_kernel": True,
+            "gcs_metrics": True,
+            "profiler": "xplane",
+            "skip_first_n_steps_for_profiler": 10,
+            "profiler_steps": 5,
+            "tokenizer_type": "tiktoken",
+            "tokenizer_path": (
+                "google3/third_party/py/maxtext/assets/tokenizer_llama3.tiktoken"
+            ),
+            "colocated_python_data_input": True,
+        },
+        xla_flags=(
+            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+            + xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.HOST_OFFLOAD_FLAGS
+            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+            + " --xla_tpu_iova_dma_chunk_size_bytes=104857"
+        ),
+        pathways_xla_flag_options={
+            xla_flags_library.REMOVE: [
+                "--2a886c8_chip_config_name=megachip_tccontrol"
+            ],
+            xla_flags_library.ADD_SERVER: (
+                xla_flags_library.ENHANCED_LAUNCH_BARRIER
+            ),
+            xla_flags_library.ADD_PROXY: (
+                xla_flags_library.ENHANCED_LAUNCH_BARRIER
+            ),
+            xla_flags_library.ADD_WORKER: (
+                xla_flags_library.ENHANCED_LAUNCH_BARRIER
+            ),
+        },
+    ),
+)
+
+# [ksadi] rp elastic scale tests config
+llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds_colocated_python_elastic_train = _add_to_model_dictionary(
+    trillium_model_dict,
+    MaxTextModel(
+        model_name="llama3_1-70b-8192-iter-real-data-and-checkpointing-tfds",
+        model_type="llama3.1-70b",
+        tuning_params={
+            # "enable_checkpoint_cloud_logger": False,
+            # "enable_pathways_goodput": False,
+            # "enable_goodput_recording": False,
+            # "monitor_goodput": False,
             "per_device_batch_size": 2,
             "ici_fsdp_parallelism": -1,
             "remat_policy": "custom",
