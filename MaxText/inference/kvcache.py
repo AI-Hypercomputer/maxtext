@@ -390,6 +390,7 @@ class KVCache(nn.Module):
     cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
         batch, key_heads, value_heads, key_head_size, value_head_size, MODEL_MODE_PREFILL
     )
+    # YYY: Why need init? how if piggybacking?
     # TODO: Find a way to not enable the ar cache for prefill mode.
     _ = self._get_ar_cache_vars(
         batch, key_heads, value_heads, key_head_size, value_head_size, MODEL_MODE_PREFILL

@@ -27,9 +27,10 @@ from jax.sharding import Mesh
 from flax import linen as nn
 from flax.linen.partitioning import ScanIn
 
-from MaxText.common_types import DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR
+from MaxText.common_types import DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PIGGYBACKING, DECODING_ACTIVE_SEQUENCE_INDICATOR
 from MaxText import max_logging
 from MaxText.inference import page_manager
+from MaxText.inference import piggybacking_decode
 from MaxText.layers import linears
 from MaxText.layers import quantizations
 from MaxText.layers import pipeline
@@ -419,9 +420,10 @@ class Decoder(nn.Module):
 
   def get_pipeline_stage_module(self, decoder_blocks):
     """get pipeline stage module"""
+
     def get_layer_to_pipeline(blocks, cfg):
       if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-        return blocks[1] # return the sparse block
+        return blocks[1]  # return the sparse block
       else:
         return blocks[0]
 
@@ -530,14 +532,9 @@ class Decoder(nn.Module):
                 model_mode,
             )
         y = self.pipeline_module(
-          y,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          partition_spec=partition_spec
+            y, decoder_segment_ids, decoder_positions, deterministic, model_mode, partition_spec=partition_spec
         )
-      else: # Not DeepSeek
+      else:  # Not DeepSeek
         y = self.pipeline_module(
             y, decoder_segment_ids, decoder_positions, deterministic, model_mode, partition_spec=partition_spec
         )
@@ -760,6 +757,7 @@ class Transformer(nn.Module):
       true_length: Optional[int] = None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
+      piggybacking_decode_params: Optional[piggybacking_decode.PiggyBackingDecodeParams] = None,
   ):
     """Applies Transformer decoder-branch on encoded-input and target.
 
@@ -767,6 +765,9 @@ class Transformer(nn.Module):
       true_length: (Optional) Prompt length before padding
       slot: (Optional) An integer representing the decode batch index selected
         for this request.
+      piggybacking_decode_params:
+        (Optional) use for piggybacking decode.
+        If it provided, model_mode should be MODEL_PIGGY_BACK.
     """
 
     if decoder_segment_ids is not None and model_mode == MODEL_MODE_AUTOREGRESSIVE:
@@ -774,6 +775,9 @@ class Transformer(nn.Module):
           f"During autoregressive decoding we assume the tokens are in the active sequence"
           f" which is always {DECODING_ACTIVE_SEQUENCE_INDICATOR}."
       )
+
+    if (piggybacking_decode_params is not None) != (model_mode == MODEL_MODE_PIGGYBACKING):
+      raise ValueError(f"Model mode should be piggybacking with the params, got {model_mode=}")
 
     bidirectional_mask = None
     image_embeddings = None
@@ -783,6 +787,7 @@ class Transformer(nn.Module):
       if self.config.decoder_block == DecoderBlockType.GEMMA3:
         bidirectional_mask = decoder_input_tokens == multimodal_utils.GEMMA_TOKEN_PLACEHOLDER
 
+    # YYY: new mode mode for piggy packing
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
         decoder_positions=decoder_positions,

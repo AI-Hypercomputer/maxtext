@@ -903,6 +903,7 @@ class AttentionOp(nn.Module):
       local_sum = partitioning.with_sharding_constraint(local_sum, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
       local_out = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
 
+    ### YYY: what's shape?
     return local_out, local_max, local_sum
 
   def is_partition_in_decode(self, seq_len):
@@ -1099,6 +1100,7 @@ class AttentionOp(nn.Module):
       assert prefill_kv_cache
       key, value, decoder_segment_ids = prefill_kv_cache
 
+    ### YYY: Need to change key value for piggybacking. Maybe separate from caller.
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
         query=query,
         key=key,

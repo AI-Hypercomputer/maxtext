@@ -43,9 +43,15 @@ from MaxText import inference_utils
 from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import pyconfig
-from MaxText.common_types import MODEL_MODE_PREFILL, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE
+from MaxText.common_types import (
+    MODEL_MODE_PREFILL,
+    DECODING_ACTIVE_SEQUENCE_INDICATOR,
+    MODEL_MODE_AUTOREGRESSIVE,
+    MODEL_MODE_PIGGYBACKING,
+)
 from MaxText.globals import PKG_DIR
 from MaxText.inference.page_manager import PageManager, PageState
+from MaxText.inference import piggybacking_decode
 from MaxText.layers import models, quantizations
 from MaxText.utils import lora_utils
 
@@ -817,6 +823,177 @@ class MaxEngine(engine_api.Engine):
       first_tokens.append(first_token)
     prefill_results = {k: jnp.stack(v) for k, v in prefill_results.items()}
     return cache, prefill_results, first_tokens
+
+  @functools.partial(jax.jit, static_argnums=(0,), donate_argnames=("decode_state",))
+  def prefill_generate(
+      self,
+      *,
+      params: Params,
+      existing_prefix: Optional[ExistingPrefix] = None,
+      padded_tokens: jax.Array,
+      true_length: int,
+      decode_state: DecodeState,
+      piggybacking_decode_params: piggybacking_decode.PiggyBackingDecodeParams,
+      sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
+      rng: Optional[PRNGKeyType] = None,
+  ) -> Tuple[DecodeState, engine_api.ResultTokens]:
+    """Computes a kv-cache with few tokens of generate.
+
+    Args:
+      params: Scalar multiplier.
+      existing_prefix: If provided, represents a prefix that has already been
+        processed by the underlying model.
+      padded_tokens: Logically appended tokens to any existing prefix, this is
+        what we compute prefill on. The last k tokens for genereate due to P/D ratio.
+      true_length: True lengths of the prefill prompt.
+      decode_state: The batch size equal to the genereate batch size. slot -1 for the new prefill.
+      piggybacking_decode_params:
+        Params to which slots to prefill or generate in decode state and
+        the length of genereate slots indicates how many tokens for generate in padded_tokens.
+    Returns:
+      updated decdode state, and list of result tokens which first is prefill and remained is generate.
+    """
+    if rng is None:
+      rng = jax.random.PRNGKey(0)
+
+    prefill_slot = piggybacking_decode_params.prefill_slot
+    generate_slots = piggybacking_decode_params.generate_slots
+    num_decode_token = generate_slots.shape[0]
+
+    start_position = 0
+    previous_chunk = None
+    if existing_prefix is not None:
+      if not self.use_chunked_prefill:
+        raise ValueError("Using chunked prefill is needed for existing_prefix.")
+      ### YYY: insert into decode state
+      # input_params = params | {"cache": existing_prefix.cache}
+      start_position = existing_prefix.common_prefix_tokens.shape[0]
+      previous_chunk = jnp.expand_dims(existing_prefix.common_prefix_tokens, 0)
+
+    full_true_length = start_position + true_length
+
+    input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
+    positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
+
+    # update positions for generate tokens
+    generate_next_pos = decode_state["next_pos"]
+    # Shape: (batch,1)
+    generate_next_pos = generate_next_pos[generate_slots]
+    # Shape: (num_decode_token, 1)
+    generate_next_pos = generate_next_pos.T
+    # Shape: (1, num_decode_token)
+    positions = jax.lax.dynamic_update_index_in_dim(positions, generate_next_pos, index=-num_decode_token, axis=0)
+
+    # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
+    start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
+    ones_to_keep = start_to_n < full_true_length
+    one_d_output = ones_to_keep * DECODING_ACTIVE_SEQUENCE_INDICATOR
+    # truncate genereate tokens
+    one_d_output = one_d_output[:-num_decode_token]
+    sequence_indicator = jnp.expand_dims(one_d_output, 0)
+
+    rng, new_rng = jax.random.split(rng)
+    with self._mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
+      flat_logits, new_vars = self.model.apply(
+          params | {"cache": decode_state["cache"]},
+          input_tokens,
+          positions,
+          decoder_segment_ids=sequence_indicator,
+          enable_dropout=False,
+          model_mode=MODEL_MODE_PIGGYBACKING,
+          rngs={"params": new_rng},
+          mutable=["cache"],
+          previous_chunk=previous_chunk,
+          true_length=true_length,
+          piggybacking_decode_params=piggybacking_decode_params,
+      )
+
+    # Handle new prefill result
+    prefill_generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
+    prefill_selected_logits = jax.lax.dynamic_slice_in_dim(
+        flat_logits,
+        true_length - 1,
+        1,
+        axis=1
+    )
+    prefill_next_pos = jnp.full((1, 1), full_true_length, dtype=jnp.int32)
+    rng, new_rng = jax.random.split(rng)
+    prefill_first_generated_token = inference_utils.sampling(
+        prefill_selected_logits,
+        new_rng,
+        self.config.decode_sampling_strategy,
+        topk=self.config.decode_sampling_top_k,
+        nucleus_topp=self.config.decode_sampling_nucleus_p,
+        temperature=self.config.decode_sampling_temperature,
+    )
+
+    # Handle selected generate results
+    genereate_generated_token = decode_state["generated_tokens"][generate_slots] + 1
+    generate_out_logits = jax.lax.dynamic_slice_in_dim(
+        flat_logits,
+        -num_decode_token,
+        num_decode_token,
+        axis=1
+    )
+    # (1, num_decode_token, vocab) -> # (num_decode_token, 1, vocab)
+    generate_out_logits = generate_out_logits.swapaxes(0, 1)
+    generate_new_next_pos = decode_state["next_pos"][generate_slots] + 1
+    rng, new_rng = jax.random.split(rng)
+    generate_new_token = inference_utils.sampling(
+        generate_out_logits,
+        new_rng,
+        self.config.decode_sampling_strategy,
+        topk=self.config.decode_sampling_top_k,
+        nucleus_topp=self.config.decode_sampling_nucleus_p,
+        temperature=self.config.decode_sampling_temperature,
+    )
+
+    # Merge new prefill and new genereate results to decode state. Others remain non changed.
+    out_logits = decode_state["logits"]
+    out_logits = out_logits.at[prefill_slot].set(prefill_selected_logits)
+    out_logits = out_logits.at[generate_slots].set(generate_out_logits)
+
+    out_next_pos = decode_state["next_pos"]
+    out_next_pos = out_next_pos.at[prefill_slot].set(prefill_next_pos)
+    out_next_pos = out_next_pos.at[generate_slots].set(generate_new_next_pos)
+
+    out_generated_tokens = decode_state["generated_tokens"]
+    out_generated_tokens = out_generated_tokens.at[prefill_slot].set(prefill_generated_tokens)
+    out_generated_tokens = out_generated_tokens.at[generate_slots].set(genereate_generated_token)
+
+    out_tokens = decode_state["tokens"]
+    out_tokens = out_tokens.at[prefill_slot].set(prefill_first_generated_token)
+    out_tokens = out_tokens.at[generate_slots].set(generate_new_token)
+
+    out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
+    new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
+
+    all_valid = jnp.ones(out_tokens.shape, dtype=jnp.int8)
+    if self.config.return_log_prob:
+      token_logp = inference_utils.log_prob_of_chosen_token(out_logits, out_tokens)
+    else:
+      token_logp = None
+    result = engine_api.ResultTokens(
+        data=jnp.concatenate((out_tokens, all_valid, out_generated_tokens), axis=1),
+        # Tokens are shape [batch, speculations], so when we concatenate
+        # tokens, validity and length along their index 1 dimension then they
+        # occupy 0:speculations.
+        tokens_idx=(0, 1),
+        # Validity occupies the same amount of space, but next in line.
+        valid_idx=(1, 2),
+        # And lengths is rank 1.
+        length_idx=(2, 3),
+        log_prob=token_logp,
+        samples_per_slot=1,
+    )
+
+    return {
+        "logits": out_logits,
+        "cache": new_cache,
+        "next_pos": out_next_pos,
+        "generated_tokens": out_generated_tokens,
+        "tokens": out_tokens,
+    }, result
 
   # Public non-JIT generate method that updates page state
   def generate(
