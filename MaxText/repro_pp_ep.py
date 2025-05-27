@@ -78,7 +78,7 @@ expert_parallelism = 4
 pipeline_parallelism = num_devices // expert_parallelism
 axis_name = "expert"
 random_routing = False
-print_a2a_input_vars = True
+print_a2a_input_vars = False
 hack_output_for_vmap = True
 run_vmap=True
 
@@ -104,7 +104,7 @@ output_sharding = jax.sharding.PartitionSpec("expert", None)
     shard_map.shard_map,
     mesh=mesh,
     in_specs=(x_partition_spec, logits_partition_spec),
-    out_specs=(x_partition_spec),
+    out_specs=(x_partition_spec), #output_sharding
     check_rep=False,
 )
 def wrapper(x, logits):
@@ -127,12 +127,12 @@ def wrapper(x, logits):
         output_shape = jnp.tile(x, (expert_parallelism, 1))
 
     if print_a2a_input_vars:
-        print(f"{x=}\n")
-        print(f"{output_shape=}\n")
-        print(f"{input_offsets=}\n")
-        print(f"{send_sizes=}\n")
-        print(f"{output_offsets=}\n")
-        print(f"{recv_sizes=}\n")
+        jax.debug.print(f"{x=}\n")
+        jax.debug.print(f"{output_shape=}\n")
+        jax.debug.print(f"{input_offsets=}\n")
+        jax.debug.print(f"{send_sizes=}\n")
+        jax.debug.print(f"{output_offsets=}\n")
+        jax.debug.print(f"{recv_sizes=}\n")
 
     # The main event: A2A - this is where things crash in the vmap case unless we set hack_output_for_vmap=True
     x = jax.lax.ragged_all_to_all(
@@ -144,7 +144,7 @@ def wrapper(x, logits):
         recv_sizes,
         axis_name=axis_name,
     )
-    print(f"{x.shape=}\n")
+    jax.debug.print(f"{x.shape=}\n")
     return x
 
 
@@ -175,6 +175,7 @@ else:
     logits_vmap = jax.device_put(logits_vmap, NamedSharding(mesh, jax.sharding.PartitionSpec("pipeline", "expert", None, None)))
 
     # Run the wrapper with vmapped it should really just run #pipeline number of times on #pipeline parallelism groups
-    # This fails with "TypeError: tuple indices must be integers or slices, not NoneType"
+    # This fails with "TypeError: tuple indices must be integers or slices, not NoneType" if hack_output_for_vmap=False
+    # with hack_output_for_vmap=True this returns a 1D a2a instead of 2D
     x_vmap_a2a = jit_vmap_func(x_vmap, logits_vmap)
     print(x_vmap_a2a.shape)
