@@ -1,24 +1,23 @@
+"""Copyright 2025 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+     https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 """
- Copyright 2025 Google LLC
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
-      https://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- """
 
 """Used to perf benchmarks between Pathways and McJax."""
 
 import datetime
-import sys
 import os
+import sys
 import args_helper as helper
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -42,7 +41,9 @@ COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
 # Other parameters (MUST BE SET BY USER)
-XPK_PATH = os.path.join("~", "xpk")  # We're running this script from the maxtext directory
+XPK_PATH = os.path.join(
+    "~", "xpk"
+)  # We're running this script from the maxtext directory
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = (
     f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
@@ -80,21 +81,18 @@ def main() -> int:
           # model_configs.llama3_1_70b_8192,
           # model_configs.llama3_1_405b_8192_fsdp_dcn,
           # model_configs.llama2_70b_4096_real_data_long_run,
-      ]
+      ],
   }
   pathways_config = mxr.PathwaysConfig(
       server_image=SERVER_IMAGE,
       proxy_server_image=PROXY_IMAGE,
       runner_image=RUNNER,
-
       # User can add additional flags here.
       server_flags="",
       proxy_flags="",
       worker_flags="",
   )
-  num_slices_list = [
-      2
-  ]
+  num_slices_list = [2]
 
   xpk_workload_cmds = []
   xpk_workload_names = []
@@ -143,7 +141,10 @@ def main() -> int:
       xpk_workload_names, xpk_workload_cmds
   ):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] Running workload: {xpk_workload_name} with command: {xpk_workload_cmd}")
+    print(
+        f"[{timestamp}] Running workload: {xpk_workload_name} with command:"
+        f" {xpk_workload_cmd}"
+    )
     return_code = mxr.run_command_with_updates(
         xpk_workload_cmd, xpk_workload_name
     )

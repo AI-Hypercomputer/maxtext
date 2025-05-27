@@ -95,7 +95,11 @@ cd "$run_name_folder_path" && python3 -m pip install --upgrade pip
 if [[ "$MODE" == "pinned" ]]; then
     python3 -m pip install --no-cache-dir -U -r requirements.txt -c constraints_gpu.txt
 else
-    python3 -m pip install --no-cache-dir -U -r requirements.txt
+    # python3 -m pip install --no-cache-dir -U -r requirements.txt
+    # Install uv
+    python3 -m pip install uv
+    # uv pip install
+    uv pip install --system --no-cache-dir -U -r requirements.txt
 fi
 
 # Uninstall existing jax, jaxlib and  libtpu-nightly

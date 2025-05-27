@@ -236,7 +236,7 @@ def main() -> None:
   on_device_runner_parser = subparsers.add_parser("on-device")
   add_xpk_runner_arguments(xpk_runner_parser)
   add_on_device_runner_arguments(on_device_runner_parser)
-  add_pathways_arguments(parser)
+  add_pathways_arguments(xpk_runner_parser)
   options = parser.parse_args()
 
   # Check that there are no duplicate model configs

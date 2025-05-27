@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:experimental
 # Use Python 3.10 as the base image
-FROM python:3.10-slim-bullseye
+FROM python:3.12-slim-bullseye
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y curl gnupg
@@ -13,10 +13,10 @@ RUN curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyri
 RUN apt-get update && apt-get install -y google-cloud-sdk
 
 # Set the default Python version to 3.10
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python3.10 1
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python3.12 1
 
 # Set environment variables for Google Cloud SDK and Python 3.10
-ENV PATH="/usr/local/google-cloud-sdk/bin:/usr/local/bin/python3.10:${PATH}"
+ENV PATH="/usr/local/google-cloud-sdk/bin:/usr/local/bin/python3.12:${PATH}"
 
 # Set environment variables via build arguments
 ARG MODE
@@ -35,6 +35,8 @@ RUN mkdir -p /deps
 
 # Set the working directory in the container
 WORKDIR /deps
+
+RUN pip install --upgrade setuptools
 
 # Copy setup files and dependency files separately for better caching
 COPY setup.sh ./

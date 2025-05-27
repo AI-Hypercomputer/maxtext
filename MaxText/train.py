@@ -377,6 +377,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   # decimate proportion of data when per_device_batch_size<1
   if is_train:
     for k, v in data.items():
+      # max_logging.log(f"*** [ksadi] data : {data}")
       data[k] = v[: config.micro_batch_size_to_train_on, :]
   else:
     for k, v in data.items():

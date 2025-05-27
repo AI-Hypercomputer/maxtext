@@ -14,11 +14,18 @@ limitations under the License.
 """
 
 import os
+import random
+import string
 import sys
 import args_helper as helper
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+print(f"parent_dir: {parent_dir}")
+parent_parent_dir = os.path.abspath(os.path.join(parent_dir, ".."))
+print(f"parent_parent_dir: {parent_parent_dir}")
+
 sys.path.append(parent_dir)
+sys.path.append(parent_parent_dir)
 
 import maxtext_trillium_model_configs as model_configs
 import maxtext_xpk_runner as mxr
@@ -28,13 +35,17 @@ from xpk_configs import XpkClusterConfig
 def main() -> int:
   # V6e cluster config
   cluster_config = XpkClusterConfig(
-      cluster_name="v6e-256-cluster",
-      project="tpu-project",
-      zone="us-east5-b",
+      cluster_name="bodaborg-v6e-256-tt-c",
+      project="tpu-prod-env-multipod",
+      zone="us-west1-c",
       device_type="v6e-256",
+      # cluster_name="pw-scale-test-v5e-32",
+      # zone="us-south1-a",
+      # project="cloud-tpu-multipod-dev",
+      # device_type="v5litepod-32",
   )
 
-  xpk_path = "xpk"
+  xpk_path = "/google/src/cloud/ksadi/remote-python-par-approach/google3/xpk"
 
   # Handle command line arguments using args_helper
   should_continue = helper.handle_cmd_args(
@@ -47,20 +58,17 @@ def main() -> int:
   # Configure test images
   user = os.environ["USER"]
   region = "-".join(cluster_config.zone.split("-")[:-1])
-  proxy_image = (
-      f"us-docker.pkg.dev/cloud-tpu-v2-images/pathways/gke/{user}/"
-      "proxy_server:latest"
-  )
-  server_image = (
-      f"us-docker.pkg.dev/cloud-tpu-v2-images/pathways/gke/{user}/"
-      "server:latest"
-  )
-  colocated_python_image = f"gcr.io/{cluster_config.project}/{user}/colocated_python_sidecar_latest:latest"
-  runner = f"gcr.io/{cluster_config.project}/{user}_latest:latest"
-  base_output_directory = f"gs://{user}-{region}/{user}"
+  proxy_image = f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/ksadi/unsanitized_proxy_server:latest"
+  server_image = f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/ksadi/unsanitized_server:latest"
+  colocated_python_image = f"us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/remote_python_sidecar_server:latest"
+  runner = f"gcr.io/cloud-tpu-multipod-dev/ksadi_runner:latest"
+  # base_output_directory = f"gs://{user}-{region}/{user}"
+  base_output_directory = "gs://trillium-scale-tests-q1-25-west/ksadi/"
 
   list_of_models = [
       model_configs.default_basic_1,
+      # model_configs.default_basic_1_colocated_python,
+      # model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds_remote_python,
   ]
   pathways_config = mxr.PathwaysConfig(
       server_image=server_image,
@@ -68,7 +76,8 @@ def main() -> int:
       runner_image=runner,
       colocated_python_sidecar_image=colocated_python_image,
   )
-  num_slices_list = [1]
+  num_slices_list = [2]
+  # num_slices_list = [1, 2, 4, 8, 16, 32]
 
   xpk_workload_cmds = []
   xpk_workload_names = []
@@ -93,8 +102,14 @@ def main() -> int:
             xpk_path=xpk_path,
             num_steps=1000000,
         )
+        random_4_digit_suffix = "".join(
+            random.choice(string.ascii_lowercase + string.digits)
+            for _ in range(4)
+        )
         command, name = mxr.generate_xpk_workload_cmd(
-            cluster_config=cluster_config, wl_config=wl_config
+            cluster_config=cluster_config,
+            wl_config=wl_config,
+            workload_name=f"ksadi-col-py-{random_4_digit_suffix}",
         )
 
         print(f"Name of the workload is: {name} \n")

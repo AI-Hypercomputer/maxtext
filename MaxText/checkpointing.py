@@ -371,7 +371,7 @@ def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-
   """
   orbax_cloud_logger = None
   max_logging.log("Setting up checkpoint logger...")
-  if config.enable_checkpoint_cloud_logger:
+  if False and config.enable_checkpoint_cloud_logger:
     logger_name = f"goodput_{config.run_name}"
     options = cloud_logger.CloudLoggerOptions(
         job_name=config.run_name, logger_name=logger_name

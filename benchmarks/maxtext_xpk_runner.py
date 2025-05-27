@@ -467,6 +467,7 @@ def _get_pathways_proxy_flags(wl_config: WorkloadConfig):
     proxy_flags.append(flags_to_add)
 
   # Join the list of flags back into a single string, space-separated
+  print(f'*** [ksadi] proxy_flags: {proxy_flags}')
   return ' '.join(proxy_flags)
 
 
