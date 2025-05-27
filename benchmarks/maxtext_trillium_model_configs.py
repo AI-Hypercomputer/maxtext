@@ -422,3 +422,71 @@ matt_dream_pure_ep_v1 = _add_to_model_dictionary(
     ),
   )
 )
+
+
+
+
+# Ran with a docker built from and XPK runner ran from:
+# docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_5_27_ep_fixes"'
+# 
+# commit f0e1d497c8f92750448ec4687a9d1a2c4f271731 (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
+# Author: gobbleturk <mattdavidow@google.com>
+# Date:   Mon May 19 17:41:56 2025 +0000
+
+#     One dream, realize
+
+matt_ran_rerun = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="matt_ran_rerun",
+    model_type="default",
+    tuning_params={
+        "steps": 50,
+        "per_device_batch_size": 1.0,
+        "remat_policy": "custom",
+        "mlpwo": "device",
+        "max_target_length": 4096,
+        "enable_checkpointing": False,
+        "dataset_type": "synthetic",
+        "base_output_directory": "gs://maxtext-experiments-multipod",
+        "decoder_block": "mixtral",
+        "ici_expert_parallelism": 64,
+        "ici_tensor_parallelism": 4,
+        "allow_split_physical_axes": True,
+        "custom_mesh": "hybrid_ring_64x4",
+        "num_experts": 64, # 256
+        "num_experts_per_tok": 2,
+        "base_emb_dim": 8192, #7168
+        "base_mlp_dim": 49152,
+        "base_num_query_heads": 64,
+        "base_num_kv_heads": 8,
+        "head_dim": 256,
+        "skip_first_n_steps_for_profiler": 42,
+        "sparse_matmul": False, # False
+        "megablox": False, # True
+        "capacity_factor": 1,
+        "profiler": "xplane",
+        "opt_type": "sgd",
+        "dump_hlo": True,
+        "weight_dtype": "bfloat16",
+        
+        # PP
+        "dcn_pipeline_parallelism": 12, #PP
+        "base_num_decoder_layers": 72, # PP * 6 
+        "num_pipeline_microbatches": 24, # PP * 2 or since we are sad PP * 1
+        "num_layers_per_pipeline_stage": 2,
+        "pipeline_fsdp_ag_once": True
+        # "scan_layers": False,
+    },
+    xla_flags=(
+        MOE_VMEM_LIMIT_FLAG
+        + REDUCE_SCATTER_FUSION
+        #CF_FOR_ALL_GATHER
+        + LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + PIPELINING_FLAGS # " --xla_tpu_iova_dma_chunk_size_bytes=16777216"
+        + ASYNC_A2A
+        + ASYNC_CP
+        + MEGASCALE_GRPC_PREMAP_MEMORY_BYTES #" --megascale_grpc_premap_memory_bytes=17179869184"
+        )
+    )
+)
