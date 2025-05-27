@@ -43,7 +43,6 @@ jobs:
       - name: Authenticate gcloud
         if: ${{ inputs.cloud_runner != '' && inputs.cloud_runner }}
         continue-on-error: true
-        continue-on-error: true
         run: |
           # configure registries as root and as runner
           sudo gcloud auth configure-docker --quiet
