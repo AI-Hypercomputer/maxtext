@@ -179,3 +179,28 @@ gpt_3_175b_v5p_128 = _add_to_model_dictionary(
     ),
 	)
 )
+
+gpt_3_175b_v5p_128_sc = _add_to_model_dictionary(
+    v5p_model_dict,
+    MaxTextModel(
+        model_name="gpt_3_175b_v5p_128_sc",
+        model_type="gpt3-175b",
+        tuning_params={
+            "ici_fsdp_parallelism": -1,
+            "ici_tensor_parallelism": 2,
+            "per_device_batch_size": 0.5,
+            "allow_split_physical_axes": True,
+            "remat_policy": "save_dot_with_context_except_mlp",
+            "max_target_length": 4096,
+            "attention": "flash",
+            "dataset_type": "synthetic",
+            "reuse_example_batch": 1,
+            "enable_checkpointing": False,
+            "profiler": "xplane",
+        },
+        xla_flags=(
+            xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_GATHER
+        ),
+    ),
+)
