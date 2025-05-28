@@ -835,7 +835,8 @@ class ReplicaWorker:
                 result_tokens, log_prob, is_first_token, row_id, slot = (
                     self.detokenize_backlog.get(timeout=1)
                 )
-                result_tokens = result_tokens.convert_to_numpy()
+                # Comment out to avoid converting to numpy
+                # result_tokens = result_tokens.convert_to_numpy()
             except queue.Empty:
                 if not self.running:
                     break
