@@ -362,7 +362,8 @@ def get_warmup_samples(dataset):
     )
 
   for group_idx_key in temp_query_batches:
-    needed_more = min(50, group_idx_key[1]) - len(warmup_samples[group_idx_key])
+    # needed_more = min(50, group_idx_key[1]) - len(warmup_samples[group_idx_key])
+    needed_more = 100
     available_in_bucket = temp_query_batches[group_idx_key]
     current_warmup_ids = {s.id for s in warmup_samples[group_idx_key]}
 
@@ -616,15 +617,20 @@ def main(argv):
     except Exception as e:
       log.error(f"Error applying rename_dataset_cols: {e}. Proceeding without renaming.")
 
-  # Apply sampling using the seed if total_sample_count is less than dataset size
-  if FLAGS.total_sample_count < len(dataset_full):
-    log.info(f"Sampling {FLAGS.total_sample_count} samples from the full dataset using seed {FLAGS.python_seed}.")
-    dataset = dataset_full.sample(n=FLAGS.total_sample_count, random_state=FLAGS.python_seed)
+  log.info(f"Deterministically shuffling the entire dataset of {len(dataset_full)} samples using seed {FLAGS.python_seed}.")
+  dataset_shuffled_full = dataset_full.sample(frac=1, random_state=FLAGS.python_seed).reset_index(drop=True)
+
+  # 2. Select the top 'total_sample_count' samples from this canonically shuffled dataset.
+  if FLAGS.total_sample_count < len(dataset_shuffled_full):
+      log.info(f"Selecting the first {FLAGS.total_sample_count} samples from the pre-shuffled dataset.")
+      dataset = dataset_shuffled_full.head(FLAGS.total_sample_count)
   else:
-    dataset = dataset_full
+      log.info("Using the entire pre-shuffled dataset as total_sample_count (%d) is not less than its length (%d).",
+              FLAGS.total_sample_count, len(dataset_shuffled_full))
+      dataset = dataset_shuffled_full
 
   # Reset index for the working dataset to be 0 to N-1, which QSL expects
-  dataset.reset_index(drop=True, inplace=True)
+  # dataset.reset_index(drop=True, inplace=True)
   log.info("Working dataset has %d samples.", len(dataset))
 
   estimated_counts_by_bucket = _estimated_counts_by_bucket(dataset)  # Estimate on the final working dataset
@@ -644,7 +650,7 @@ def main(argv):
 
   for group_key in query_batches_config:
     (length, batch) = group_key
-    target_length = 2 * length
+    target_length = 4 * length
     log.info("Creating engine for prefill_len: %d, batch_size: %d, target_len: %d", length, batch, target_length)
 
     current_engine = create_engine_from_config_flags(

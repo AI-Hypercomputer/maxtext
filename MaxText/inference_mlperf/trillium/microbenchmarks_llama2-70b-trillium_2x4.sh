@@ -57,8 +57,8 @@ echo
 echo "LIBTPU_INIT_ARGS:${LIBTPU_INIT_ARGS}"
 echo "XLA_FLAGS:${XLA_FLAGS}"
 echo
-export TOKENIZER_PATH=/home/${USER}/maxtext/assets/tokenizer.llama2
-export LOAD_PARAMETERS_PATH=gs://${USER}-bkt/checkpoints/quant_llama2-70b-chat/prod/int8_
+export TOKENIZER_PATH=/mnt/disks/persist/maxtext/assets/tokenizer.llama2
+# export LOAD_PARAMETERS_PATH=gs://${USER}-bkt/checkpoints/quant_llama2-70b-chat/prod/int8_
 export MAX_PREFILL_PREDICT_LENGTH=1024
 export MAX_TARGET_LENGTH=2048
 export MODEL_NAME=llama2-70b
@@ -70,16 +70,25 @@ export WEIGHT_DTYPE=bfloat16
 export PER_DEVICE_BATCH_SIZE=64
 export RUN_DESC="${run_name}_xla_flags_${enable_xla_flags}"
 
-$cmd python3 ../../inference_microbenchmark.py   \
-../../configs/base.yml   tokenizer_path=${TOKENIZER_PATH}   \
-load_parameters_path=${LOAD_PARAMETERS_PATH}   \
+$cmd python3 -m MaxText.inference_microbenchmark   \
+MaxText/configs/base.yml   \
+tokenizer_path=${TOKENIZER_PATH}   \
+load_parameters_path=""   \
 max_prefill_predict_length=${MAX_PREFILL_PREDICT_LENGTH}   \
-max_target_length=${MAX_TARGET_LENGTH}   model_name=${MODEL_NAME}   \
+max_target_length=${MAX_TARGET_LENGTH}   \
+model_name=${MODEL_NAME}   \
 ici_fsdp_parallelism=${ICI_FSDP_PARALLELISM}   \
 ici_autoregressive_parallelism=${ICI_AUTOREGRESSIVE_PARALLELISM}   \
-ici_tensor_parallelism=${ICI_TENSOR_PARALLELISM}   scan_layers=${SCAN_LAYERS} \
-weight_dtype=${WEIGHT_DTYPE}   per_device_batch_size=${PER_DEVICE_BATCH_SIZE} \
-quantization=int8 quantize_kvcache=True inference_microbenchmark_stages=${stages} \
-inference_microbenchmark_prefill_lengths="${prefill_lens}" checkpoint_is_quantized=True \
-attention=dot_product base_output_directory="/tmp/mb/profiles" run_name=${RUN_DESC} \
+ici_tensor_parallelism=${ICI_TENSOR_PARALLELISM} \
+scan_layers=${SCAN_LAYERS} \
+weight_dtype=${WEIGHT_DTYPE} \
+per_device_batch_size=${PER_DEVICE_BATCH_SIZE} \
+quantization=int8 \
+quantize_kvcache=True \
+inference_microbenchmark_stages=${stages} \
+inference_microbenchmark_prefill_lengths="${prefill_lens}" \
+checkpoint_is_quantized=True \
+attention=dot_product \
+base_output_directory="/tmp/mb/profiles" \
+run_name=${RUN_DESC} \
 ${PROFILER_OPTION} 2>&1 | tee /tmp/mb/logs/${cmd}_${RUN_DESC}

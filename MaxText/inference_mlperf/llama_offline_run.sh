@@ -6,6 +6,8 @@
 # enable profiling using -p option and capture using
 # tensorboard --logdir /tmp/tensorboard/
 
+set -o pipefail
+
 run_name="llama_offline_benchmarks"
 dry_run=false
 skip_warmup=false
@@ -70,10 +72,10 @@ then
   PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES="256,216|512,108|1024,54"
 fi
 
-if [ -z "$TOK_OUTLEN_MULTIPLIER" ];
-then
-  TOK_OUTLEN_MULTIPLIER="2.5"
-fi
+# if [ -z "$TOK_OUTLEN_MULTIPLIER" ];
+# then
+TOK_OUTLEN_MULTIPLIER="3.0"
+# fi
 
 if [ -z "$MODEL_NAME" ];
 then
@@ -94,11 +96,11 @@ fi
 # then
 CHECKPOINT="gs://msingh-bkt/checkpoints/quant_${MODEL_NAME}-chat/mlperf_070924/int8_"
 BASE_CFG="model_name=${MODEL_NAME} tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT}"
-QUANT_CFG="quantization=int8 quantize_kvcache=True checkpoint_is_quantized=True"
-PAGED_ATTN_CFG=""
-if "$paged"; then
-    PAGED_ATTN_CFG="attention=paged pagedattn_num_pages=16384 pagedattn_tokens_per_page=32 pagedattn_pages_per_compute_block=4"
-fi
+QUANT_CFG="quantization=int8 quantize_kvcache=False checkpoint_is_quantized=True"
+# PAGED_ATTN_CFG=""
+# if "$paged"; then
+#     PAGED_ATTN_CFG="attention=paged pagedattn_num_pages=13000 pagedattn_tokens_per_page=32 pagedattn_pages_per_compute_block=4"
+# fi
 
 MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${PAGED_ATTN_CFG}"
 # fi
@@ -120,7 +122,7 @@ export API_URL=0.0.0.0:9000
 if "$test_run"; then
   export DATASET_TYPE=test
   export DATASET_PATH=${DATA_DISK_DIR}/processed-data.pkl
-  export TOTAL_SAMPLE_COUNT=100
+  export TOTAL_SAMPLE_COUNT=2000
   export USER_CONFIG=/mnt/disks/persist/maxtext/MaxText/inference_mlperf/trillium/user${TOTAL_SAMPLE_COUNT}.conf
 else
   export DATASET_TYPE=full
@@ -131,7 +133,7 @@ fi
 
 # LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
 # makes subsequent runs faster
-export JAX_COMPILATION_CACHE_DIR="/tmp/jax_cache2"
+export JAX_COMPILATION_CACHE_DIR="/mnt/disks/persist/jax_cache"
 export LIBTPU_INIT_ARGS
 
 # Ensure working directory is at repository root.
@@ -156,7 +158,7 @@ run_loadgen() {
     --mlperf_test_mode=${TEST_MODE} \
     --input_mode tokenized \
     --output_mode tokenized \
-    --mlperf_conf $BASEDIR/mlperf.conf \
+    --mlperf_conf /mnt/disks/persist/maxtext/MaxText/inference_mlperf/inference/mlperf.conf \
     --user_conf ${USER_CONFIG} \
     --audit_conf ${AUDIT_CONF}  \
     --total_sample_count ${TOTAL_SAMPLE_COUNT} \

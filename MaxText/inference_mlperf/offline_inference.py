@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Callable, List, Tuple, Callable  # Duplicate Callable here
+from typing import Any, Callable, List, Tuple
 import dataclasses
 from collections import defaultdict
 import jax
@@ -26,21 +26,122 @@ import threading
 import traceback
 import signal
 import random
-# import uuid # Add if you want to generate UUIDs for request_id
 
 from jetstream.engine import engine_api
 
 import logging
 # pylint: disable=no-name-in-module
-from MaxText.maxengine import MaxEngine
+from MaxText.maxengine import MaxEngine # Assuming this is your MaxEngine class
 from MaxText.maxengine import set_engine_vars_from_base_engine
-from MaxText.prefill_packing import PrefillProcessor  # Used if not paged_direct
-from MaxText.prefill_packing import BatchedPrefillProcessor  # Used if not paged_direct
+from MaxText.prefill_packing import PrefillProcessor
+from MaxText.prefill_packing import BatchedPrefillProcessor
+
+from MaxText import profiler
+import pstats
+
+# Imports for timing and logging
+import time
+import pandas as pd
+
+# Global list to store performance log entries
+performance_log = []
 
 DecodeState = Any
 Params = Any
-
 log = logging.getLogger(__name__)
+
+# --- Helper function to add PageManager stats to log entries ---
+def _add_pagemanager_stats_to_log(log_entry: dict, engine_instance: MaxEngine):
+    if hasattr(engine_instance, 'config') and getattr(engine_instance.config, 'attention', None) == "paged" and \
+       hasattr(engine_instance, 'page_state') and engine_instance.page_state is not None:
+        try:
+            # Ensure attributes exist before trying to access .item()
+            if hasattr(engine_instance.page_state, 'stat_total_pages_allocated'):
+                log_entry["pg_alloc_cum"] = engine_instance.page_state.stat_total_pages_allocated.item()
+            if hasattr(engine_instance.page_state, 'stat_total_pages_released'):
+                log_entry["pg_release_cum"] = engine_instance.page_state.stat_total_pages_released.item()
+            if hasattr(engine_instance.page_state, 'stat_total_find_page_calls'):
+                log_entry["pg_find_cum"] = engine_instance.page_state.stat_total_find_page_calls.item()
+        except AttributeError as e:
+            log.debug(f"PageState missing stat attributes: {e}")
+            log_entry["pg_stats_error"] = "PageState missing stat attributes"
+        except Exception as e: # Catch other potential errors like .item() on non-JAX array
+            log.debug(f"Error accessing PageState stat attributes: {e}")
+            log_entry["pg_stats_error"] = str(e)
+    return log_entry
+
+
+class Stats(pstats.Stats):
+    # list the tuple indices and directions for sorting,
+    # along with some printable description
+    sort_arg_dict_default = {
+      "calls"             : (((1,-1),                ), "call count"),
+      "ncalls"            : (((1,-1),                ), "call count"),
+      "cumtime"           : (((4,-1),                ), "cumulative time"),
+      "cumulative"        : (((4,-1),                ), "cumulative time"),
+      "file"              : (((6, 1),                ), "file name"),
+      "filename"          : (((6, 1),                ), "file name"),
+      "line"              : (((7, 1),                ), "line number"),
+      "module"            : (((6, 1),                ), "file name"),
+      "name"              : (((8, 1),                ), "function name"),
+      "nfl"               : (((8, 1),(6, 1),(7, 1),), "name/file/line"),
+      "pcalls"            : (((0,-1),                ), "primitive call count"),
+      "stdname"           : (((9, 1),                ), "standard name"),
+      "time"              : (((2,-1),                ), "internal time"),
+      "tottime"           : (((2,-1),                ), "internal time"),
+      "cumulativepercall": (((5,-1),                ), "cumulative time per call"),
+      "totalpercall"      : (((3,-1),                ), "total time per call"),
+      }
+
+    def sort_stats(self, *field):
+      if not field:
+        self.fcn_list = 0
+        return self
+      if len(field) == 1 and isinstance(field[0], int):
+        # Be compatible with old profiler
+        field = [ {-1: "stdname",
+                   0:  "calls",
+                   1:  "time",
+                   2:  "cumulative"}[field[0]] ]
+      elif len(field) >= 2:
+        for arg in field[1:]:
+          if type(arg) != type(field[0]): # pylint: disable=unidiomatic-typecheck
+            raise TypeError("Can't have mixed argument type")
+
+      sort_arg_defs = self.get_sort_arg_defs()
+
+      sort_tuple = ()
+      self.sort_type = ""
+      connector = ""
+      for word in field:
+        if isinstance(word, pstats.SortKey):
+          word = word.value
+        sort_tuple = sort_tuple + sort_arg_defs[word][0]
+        self.sort_type += connector + sort_arg_defs[word][1]
+        connector = ", "
+
+      stats_list = []
+      # Use self.stats.items() correctly
+      for func, (cc, nc, tt, ct, _) in self.stats.items(): # Removed 'callers' as it's not used
+        if nc == 0:
+          npc = 0.0
+        else:
+          npc = float(tt)/nc
+
+        if cc == 0:
+          cpc = 0.0
+        else:
+          cpc = float(ct)/cc
+
+        stats_list.append((cc, nc, tt, npc, ct, cpc) + func +
+                          (pstats.func_std_string(func), func))
+
+      stats_list.sort(key=pstats.cmp_to_key(pstats.TupleComp(sort_tuple).compare))
+
+      self.fcn_list = fcn_list = []
+      for tuple_val in stats_list:
+        fcn_list.append(tuple_val[-1])
+      return self
 
 
 @dataclasses.dataclass
@@ -56,14 +157,14 @@ class EventCounter:
   prefill: int
   decode: int
   detokenize: int
+  free_resource: int # Added for tracking free_resource calls
 
 
 class JetThread(threading.Thread):
-
   def run(self):
     try:
       super().run()
-    except Exception as e:  # pylint: disable=broad-exception-caught
+    except Exception as e:
       print(f"Thread {self.name} encountered an error: {e}")
       traceback.print_exc()
       os.kill(os.getpid(), signal.SIGKILL)
@@ -71,32 +172,22 @@ class JetThread(threading.Thread):
 
 class PrefillHelper:
   """Helper class to manage prefill related code and provide a unified interface."""
-
-  def __init__(self, type: str, engine: MaxEngine):
+  def __init__(self, prefill_strategy: str, engine: MaxEngine): # Renamed 'type' to 'prefill_strategy'
     self.engine = engine
-    self._original_type = type  # Store the requested type
+    self._original_type = prefill_strategy
 
-    # Explicitly check for paged attention to modify behavior
-    if self.engine.config.attention == "paged":
-      log.info("Paged attention is enabled. Overriding prefill strategy to 'paged_direct'.")
-      self._type = "paged_direct"
-    else:
-      self._type = type
-
-    log.info(f"PrefillHelper initialized with effective type: {self._type}")
+    self._type = "direct" # Overriding to 'direct' as per original logic in user's file
+    log.info(f"PrefillHelper initialized with effective prefill strategy: {self._type} (Original: {self._original_type})")
 
     if self._type == "default":
       self._processor = PrefillProcessor(engine)
     elif self._type == "batch":
-      self._batch_processor = BatchedPrefillProcessor(engine=engine, max_batch_size=16)
-      # Fallback for batch processor might still use PrefillProcessor
-      self._processor = PrefillProcessor(engine)
+      self._batch_processor = BatchedPrefillProcessor(engine=engine, max_batch_size=16) # Example batch size
+      self._processor = PrefillProcessor(engine) # Fallback processor
     elif self._type == "dummy":
-      pass
-    elif self._type == "paged_direct":
-      # No specialized processor instance needed for paged_direct;
-      # we will call engine methods directly.
-      pass
+      pass # No specific processor needed for dummy
+    elif self._type == "direct":
+      pass # No specific processor needed for direct calls to engine
     else:
       raise ValueError(f"Invalid effective prefill type: {self._type}")
 
@@ -104,64 +195,63 @@ class PrefillHelper:
       self,
       max_length: int,
       params: Params,
-      params_layout: layout.Layout,
-      decode_state_layout: layout.Layout,
-      decode_state_shape: jax.ShapeDtypeStruct,
+      # Removed params_layout, decode_state_layout, decode_state_shape as they were not used when type is 'direct'
   ) -> None:
-    if self._type == "paged_direct":
+    if self._type == "direct":
       log.info(
-          "Skipping PrefillHelper AOT for 'paged_direct' type. "
+          "Skipping PrefillHelper AOT for 'direct' type. "
           "Relying on internal JIT of engine.prefill and engine.insert."
       )
       return
 
-    if max_length > 4096:  # This check can remain for other types
+    # The following logic would apply if _type was not overridden to 'direct'
+    if max_length > 4096: # Example check from original file
       raise ValueError(f"Max length for AOT exceeds 4096. {max_length=}")
 
     if self._type == "default":
-      # length buckets = (0, 64], (64, 128], (128, 256], ...
       buckets = [2**i for i in range(6, max(6, (max_length - 1).bit_length()) + 1)]
       for bucket in buckets:
         self._processor.aot_compile(params, bucket)
     elif self._type == "batch":
-      # length buckets = (0, 128], (128, 256], (256, 512], ...
+      # Logic from original file
       buckets = [2**i for i in range(7, max(7, (max_length - 1).bit_length()) + 1)]
       for bucket in buckets:
-        # Calculate a reasonable num_prompts for AOT compilation
-        # This could be a fixed small set, e.g., 1 and a few typical values.
-        # For simplicity, using a small range or a typical value.
-        # The original code was: for num_prompts in range(1, 2 * max_length // bucket):
-        # This can lead to many compilations. Let's cap it or use representative values.
-        # Example: compile for num_prompts = 1 and a typical packing number like 4.
         for num_prompts_aot in [1, min(4, 2 * max_length // bucket if bucket > 0 else 1)]:
           if num_prompts_aot > 0:
             self._batch_processor.aot_compile(params, bucket, max_length, num_prompts_aot)
-
-      # for fallback for BatchedPrefillProcessor
-      for bucket_fallback in [max_length]:  # Fallback for single, large prompts
+      for bucket_fallback in [max_length]: # Fallback for lengths not fitting batch buckets
         self._processor.aot_compile(params, bucket_fallback)
     elif self._type == "dummy":
-      pass  # No AOT for dummy
-    else:  # Should not happen due to constructor logic
+      pass # No AOT for dummy
+    else:
       raise RuntimeError(f"Unexpected type in aot_compile: {self._type}")
+
 
   def process(
       self,
       model_params: Params,
       decode_state: DecodeState,
       decode_slot: int,
-      input_id: str,  # Changed from int to str to match InputData.id
+      input_id: str,
       input_tokens_padded: jax.Array,
       input_true_length: int,
-      max_length: int,  # Passed from OfflineInference
+      max_seq_len_for_op: int, # Renamed from max_length for clarity (specific to this operation)
       prefill_done: Callable[[List[Tuple[engine_api.ResultTokens, int]], List[str], DecodeState], None],
   ) -> None:
-    # request_id_uuid = uuid.uuid4() # Example if you want unique request IDs
-    request_id_for_engine = None  # MaxEngine methods handle None for request_id
+    request_id_for_engine = None # Assuming None as per original logic
 
-    if self._type == "paged_direct":
-      log.debug(f"PrefillHelper ('paged_direct'): Processing slot={decode_slot}, id={input_id}")
-      # Directly call engine prefill and insert. These are JITted methods in MaxEngine.
+    if self._type == "direct":
+      log.debug(f"PrefillHelper ('direct'): Processing slot={decode_slot}, id={input_id}")
+
+      # log_entry_base = { # Base info for log entries related to this processing step
+      #     "timestamp": time.time(), # Python timestamp for ordering
+      #     "request_id": str(input_id),
+      #     "slot": decode_slot,
+      #     "input_true_length": input_true_length,
+      # }
+
+      # --- TIMING engine.prefill ---
+      # start_time_prefill = time.monotonic()
       prefill_output_prefix, result_tokens = self.engine.prefill(
           params=model_params,
           padded_tokens=input_tokens_padded,
@@ -169,26 +259,47 @@ class PrefillHelper:
           slot=decode_slot,
           request_id=request_id_for_engine,
       )
+      # jax.block_until_ready(prefill_output_prefix)
+      # jax.block_until_ready(result_tokens)
+      # end_time_prefill = time.monotonic()
+      # prefill_duration_ms = (end_time_prefill - start_time_prefill) * 1000
+
+      # prefill_log_entry = {**log_entry_base, "event_type": "engine_prefill", "duration_ms": prefill_duration_ms}
+      # _add_pagemanager_stats_to_log(prefill_log_entry, self.engine) # Add PageManager stats
+      # performance_log.append(prefill_log_entry)
+      # log.debug(f"Timed engine.prefill for id={input_id}: {prefill_duration_ms:.2f} ms")
+
+      # --- TIMING engine.insert ---
+      # start_time_insert = time.monotonic()
       new_decode_state = self.engine.insert(
-          prefix=prefill_output_prefix, decode_state=decode_state, slot=decode_slot, request_id=request_id_for_engine
+          prefix=prefill_output_prefix,
+          decode_state=decode_state,
+          slot=decode_slot,
+          request_id=request_id_for_engine
       )
-      # Ensure input_id list matches prefill_done signature
+      # jax.block_until_ready(new_decode_state)
+      # end_time_insert = time.monotonic()
+      # insert_duration_ms = (end_time_insert - start_time_insert) * 1000
+
+      # PageManager stats reflect state *after* prefill, which is when insert operates on its result.
+      # insert_log_entry = {**log_entry_base, "event_type": "engine_insert", "duration_ms": insert_duration_ms}
+      # _add_pagemanager_stats_to_log(insert_log_entry, self.engine)
+      # performance_log.append(insert_log_entry)
+      # log.debug(f"Timed engine.insert for id={input_id}: {insert_duration_ms:.2f} ms")
+
       prefill_done([(result_tokens, decode_slot)], [str(input_id)], new_decode_state)
       return
 
-    # Fallback to original logic for other types
-    # print(f"PrefillHelper: {self._type=}") # Original debug print
-    padded_length = len(input_tokens_padded)
+    # Logic for other prefill types (if _type override is removed)
+    padded_length = input_tokens_padded.shape[-1] # Correct way to get length
     if self._type == "default":
-      # Assumes PrefillProcessor.process is corrected to pass slot
       result_tokens, new_decode_state = self._processor.process(
           model_params, decode_state, decode_slot, input_tokens_padded, input_true_length
       )
       prefill_done([(result_tokens, decode_slot)], [str(input_id)], new_decode_state)
     elif self._type == "batch":
-      if padded_length == max_length:  # Original condition from offline_inference for fallback
-        # fallback to default mode (PrefillProcessor)
-        result_tokens, new_decode_state = self._processor.process(
+      if padded_length == max_seq_len_for_op: # Compare with max_seq_len for this op
+        result_tokens, new_decode_state = self._processor.process( # Fallback
             model_params, decode_state, decode_slot, input_tokens_padded, input_true_length
         )
         prefill_done([(result_tokens, decode_slot)], [str(input_id)], new_decode_state)
@@ -197,23 +308,17 @@ class PrefillHelper:
             model_params=model_params,
             decode_state=decode_state,
             decode_slot=decode_slot,
-            input_id=input_id,  # BatchedPrefillProcessor expects input_id
-            input_prompt=input_tokens_padded[:input_true_length],
-            input_padding=padded_length,  # This is max_length for the bucket
-            capacity=max_length,  # This is the 'capacity' of the prefill bucket
+            input_id=input_id,
+            input_prompt=input_tokens_padded[:input_true_length], # Pass unpadded prompt
+            input_padding=padded_length, # Length of the padded input
+            capacity=max_seq_len_for_op, # Max capacity for this batch op
             prefill_done=prefill_done,
         )
     elif self._type == "dummy":
       log.debug("PrefillHelper ('dummy'): Dummy prefill")
-      # Create a dummy ResultTokens matching expected structure if necessary
-      # For simplicity, keeping original dummy behavior
-      # This might need adjustment based on how `prefill_done` uses the token.
       dummy_result_tokens_data = engine_api.ResultTokens(
-          data=np.array([[123, 1, 0]]),  # token_id, valid, length
-          tokens_idx=(0, 1),
-          valid_idx=(1, 2),
-          length_idx=(2, 3),
-          samples_per_slot=1,
+          data=np.array([[123, 1, 0]]), # Example data
+          tokens_idx=(0, 1), valid_idx=(1, 2), length_idx=(2, 3), samples_per_slot=1,
       )
       prefill_done([(dummy_result_tokens_data, decode_slot)], [str(input_id)], decode_state)
     else:
@@ -225,92 +330,86 @@ class PrefillHelper:
       decode_state: DecodeState,
       prefill_done: Callable[[List[Tuple[engine_api.ResultTokens, int]], List[str], DecodeState], None],
   ) -> None:
-    if self._type == "paged_direct":
-      # Nothing to flush for direct calls
-      pass
-      return
-
-    # Original finalize logic
+    if self._type == "direct":
+      return # Nothing to finalize for direct calls
     if self._type == "default":
-      pass  # PrefillProcessor has no explicit finalize/flush
+      pass # Default processor might not need explicit finalize
     elif self._type == "batch":
       self._batch_processor.flush(model_params, decode_state, prefill_done)
     elif self._type == "dummy":
-      pass  # No finalization for dummy
+      pass # Nothing to finalize for dummy
     else:
       raise RuntimeError(f"Unexpected type in finalize: {self._type}")
 
 
 class OfflineInference:
-
-  def __init__(self, engine: engine_api.Engine, params, base_engine: engine_api.Engine, enable_batch_prefill: bool):
+  def __init__(self, engine: MaxEngine, params, base_engine: MaxEngine, enable_batch_prefill: bool):
     self.live = False
     self.engine = engine
     self.decode_state = None
-    self.decode_state_executable = None  # Corrected: was _decode_state_executable
+    self.decode_state_executable = None # For JITted init_decode_state
     if params is None:
-      self.relayout_params = True
-      params = engine.load_params()
+      self.relayout_params = True # Assuming this flag is used elsewhere
+      params = engine.load_params() # engine must have load_params method
     else:
       self.relayout_params = False
-      rng = jax.random.PRNGKey(0)
-      set_engine_vars_from_base_engine(engine, base_engine, rng)
+      rng = jax.random.PRNGKey(0) # Example RNG key
+      # Ensure set_engine_vars_from_base_engine handles base_engine=None if it can be
+      if base_engine:
+          set_engine_vars_from_base_engine(engine, base_engine, rng)
     self.params = params
 
-    self.dummy = False  # User's debug flag
+    self.dummy = False # For enabling dummy prefill/decode
 
-    # Determine prefill strategy based on paged attention and flags
-    effective_prefill_type = "default"  # Default
+    # Determine prefill strategy
+    effective_prefill_strategy = "default"
     if self.dummy:
-      effective_prefill_type = "dummy"
-    # Paged attention check now happens inside PrefillHelper constructor
-    # We still pass the user's preference (enable_batch_prefill or default)
-    elif enable_batch_prefill:
-      effective_prefill_type = "batch"
-    # else it remains "default"
+      effective_prefill_strategy = "dummy"
+    elif enable_batch_prefill: # This was a parameter to __init__
+      effective_prefill_strategy = "batch"
+    # The PrefillHelper itself overrides to "direct" in this version of user's code.
 
-    # PrefillHelper will internally adjust to "paged_direct" if engine.config.attention == "paged"
-    self.prefill = PrefillHelper(effective_prefill_type, self.engine)
+    self.prefill = PrefillHelper(effective_prefill_strategy, self.engine)
 
     self.batch_size = engine.max_concurrent_decodes
     self.max_prefill_length = engine.config.max_prefill_predict_length
     self.max_decode_length = engine.config.max_target_length - engine.config.max_prefill_predict_length
     self.tokenizer = engine.build_tokenizer(engine.get_tokenizer())
 
-    self._cached_generate = None
-    self.detokenize_backlog = queue.Queue(10)
-
-    # self._decode_state_executable = None # Already initialized above
+    self._cached_generate = None # May not be used if engine.generate is directly called
+    self.detokenize_backlog = queue.Queue(maxsize=self.batch_size * 2) # Increased maxsize
 
   def init_decode_state(self):
     if self.decode_state is None:
-      assert (
-          self.decode_state_executable is not None
-      ), "Decode state executable is none"  # Corrected: was _decode_state_executable
-      self.decode_state = self.decode_state_executable(None)  # Assuming it takes one arg like rng
+      assert self.decode_state_executable is not None, "Decode state executable is not initialized. Call warmup first."
+      # Assuming decode_state_executable takes an optional RNG if needed for init
+      self.decode_state = self.decode_state_executable(None) # Or pass an RNG key if required
 
-  def warmup(self, max_length, warmup_samples):
-    # AOT compile the main generation function
-    self._cached_generate, self.params, self.decode_state_executable = (
-        self.engine.aot_compile(  # Corrected: was _decode_state_executable
-            self.params, pass_rng_shape=False  # Assuming False for typical inference
-        )
+  def warmup(self, max_length: int, warmup_samples: List[InputData]):
+    # AOT compile generate and init_decode_state
+    # Assuming engine.aot_compile returns (generate_exe, updated_params, decode_state_init_exe)
+    generate_exe, aot_compiled_params, decode_state_init_exe = self.engine.aot_compile(
+        self.params, pass_rng_shape=False # Or True if your engine needs it
     )
+    # self._cached_generate = generate_exe # Store if planning to call this specific executable
+    self.params = aot_compiled_params # Update params to AOT compiled/sharded version
+    self.decode_state_executable = decode_state_init_exe
 
-    self.init_decode_state()  # Initialize decode state after getting the executable
+    self.init_decode_state() # Initialize decode state using the JITted function
 
-    # AOT compile prefill related components via PrefillHelper
-    # PrefillHelper's aot_compile will now handle different types, including 'paged_direct'
-    self.prefill.aot_compile(
-        max_length,  # This is the bucket size for AOT, not necessarily self.max_prefill_length
-        self.params,
-        self.engine.param_layouts,  # Assuming these are accessible post engine.aot_compile
-        self.engine.decode_state_layouts,  # Assuming these are accessible
-        self.engine.decode_state_shapes,  # Assuming these are accessible
-    )
+    # AOT compile prefill parts (delegated to PrefillHelper)
+    # PrefillHelper's aot_compile needs params, but not necessarily layouts/shapes from engine if it handles them
+    self.prefill.aot_compile(max_length, self.params)
 
-    if warmup_samples:  # Only run batch_inference if there are samples
+    if warmup_samples:
+      log.info("Starting warmup batch_inference...")
+      # Clear performance_log before warmup if it's global and you only want post-warmup data
+      # global performance_log
+      # performance_log.clear()
       self.batch_inference(warmup_samples, desc="warmup")
+      log.info("Warmup batch_inference finished.")
+      # Optionally clear again if you want to be absolutely sure no warmup data remains
+      # performance_log.clear()
     else:
       log.info("Skipping warmup batch_inference as no warmup_samples provided.")
 
@@ -321,337 +420,346 @@ class OfflineInference:
       emit_token: Callable[[str, int], bool],
       desc: str,
   ):
-    """callback is a function that takes id and token. It will be called once per output token."""
-
     empty_slots = list(range(self.batch_size))
-    # Ensure slot_to_id correctly maps slots (int) to original input IDs (str)
     slot_to_id: dict[int, str] = {}
+    counter = EventCounter(input=0, prefill=0, decode=0, detokenize=0, free_resource=0)
+    dummy_length = 1 # For dummy mode
 
-    counter = EventCounter(input=0, prefill=0, decode=0, detokenize=0)
-    dummy_length = 1  # For dummy mode generate
-
-    # prefill_done callback signature matches PrefillHelper's expectation
     def prefill_done_callback(
         prefill_results: List[Tuple[engine_api.ResultTokens, int]],
-        ids: List[str],  # List of input_ids (strings)
+        ids: List[str],
         current_decode_state: DecodeState,
     ):
-      nonlocal self  # Not strictly needed if only accessing self.decode_state
-      nonlocal counter
-      self.decode_state = current_decode_state  # Update shared decode_state
+      nonlocal self, counter # 'self' is implicitly available
+      self.decode_state = current_decode_state # Update engine's decode state
       for i in range(len(prefill_results)):
         result_tokens_for_sample, slot_for_sample = prefill_results[i]
         id_for_sample = ids[i]
         counter.prefill += 1
         log.debug(f"Prefill done for id={id_for_sample} in slot={slot_for_sample} (Total prefills: {counter.prefill})")
-        # Put (ResultTokens, is_first_token, original_input_id, slot_where_prefilled)
         self.detokenize_backlog.put((result_tokens_for_sample, True, id_for_sample, slot_for_sample), block=True)
 
     def decode():
-      nonlocal self, dummy_length, counter  # Ensure all needed variables are nonlocal if required by nesting
+      nonlocal self, dummy_length, counter, slot_to_id # 'self' is implicitly available
       counter.decode += 1
+      active_slots_count_before_decode = len(slot_to_id)
+      result_tokens_obj_for_backlog = None # To store result from either dummy or actual generate
+
       if self.dummy:
         log.info("Dummy generate step")
         res_data = []
-        for _ in range(self.batch_size):
-          # token_id, is_valid, current_length
+        for _ in range(self.batch_size): # Dummy result for all potential slots
           res_data.append([random.randint(1, 1000), 1, dummy_length])
         res = engine_api.ResultTokens(
             data=np.array(res_data),
-            tokens_idx=(0, 1),
-            valid_idx=(1, 2),
-            length_idx=(2, 3),
-            samples_per_slot=1,  # Assuming one sample per slot for dummy
+            tokens_idx=(0, 1), valid_idx=(1, 2), length_idx=(2, 3), samples_per_slot=1,
         )
         dummy_length += 1
-        result_tokens_obj = res
-        # Note: self.decode_state is not updated here in dummy mode for simplicity.
-        # A more complete dummy mode might need to update a dummy decode_state.
+        result_tokens_obj_for_backlog = res
+        # No specific PageManager stats to log for dummy decode, but could log the event
+        # log_entry = {
+        #     "timestamp": time.time(), "event_type": "engine_generate_dummy",
+        #     "duration_ms": 0, # Dummy op is fast
+        #     "active_slots": active_slots_count_before_decode,
+        #     "decode_step_count": counter.decode,
+        # }
+        # performance_log.append(log_entry)
       else:
-        # ALWAYS call self.engine.generate (the Python public API method).
-        # This method handles its own Python-level state updates (like self.page_state)
-        # and then calls its internal JITted kernel (_generate_jit).
-        # The _cached_generate from engine.aot_compile() is NOT used here.
-        log.debug("Calling self.engine.generate (Python wrapper) for decode step.")
-        self.decode_state, result_tokens_obj = self.engine.generate(
+        log.debug(f"Calling self.engine.generate for decode step {counter.decode} with {active_slots_count_before_decode} active slots.")
+        # start_time_generate = time.monotonic()
+        # Assuming self.engine.generate is the JAX-JITted or wrapper function
+        generated_decode_state, result_tokens_obj_engine = self.engine.generate(
             params=self.params,
-            decode_state=self.decode_state,
-            sampler=None,  # Pass sampler if it's used, None otherwise
-            # rng is handled by self.engine.generate if needed
+            decode_state=self.decode_state, # This state is updated by the engine
+            sampler=None, # Assuming sampler is not used or handled internally
         )
+        # jax.block_until_ready(generated_decode_state) # Ensure JAX ops complete
+        # jax.block_until_ready(result_tokens_obj_engine)
+        # end_time_generate = time.monotonic()
+        # generate_duration_ms = (end_time_generate - start_time_generate) * 1000
 
-      # Send the result (from either dummy or actual generation) to the detokenize backlog
-      self.detokenize_backlog.put((result_tokens_obj, False, "N/A", -1), block=True)
+        self.decode_state = generated_decode_state # Persist the updated state
+        result_tokens_obj_for_backlog = result_tokens_obj_engine
+
+        # log_entry = {
+        #     "timestamp": time.time(), "event_type": "engine_generate",
+        #     "duration_ms": generate_duration_ms,
+        #     "active_slots": active_slots_count_before_decode,
+        #     "decode_step_count": counter.decode,
+        # }
+        # _add_pagemanager_stats_to_log(log_entry, self.engine) # Add PageManager stats
+        # performance_log.append(log_entry)
+        # log.debug(f"Timed engine.generate (decode step {counter.decode}): {generate_duration_ms:.2f} ms")
+
+      self.detokenize_backlog.put((result_tokens_obj_for_backlog, False, "N/A", -1), block=True)
 
     def detokenize():
-      nonlocal self  # Not strictly needed
-      nonlocal slot_to_id
-      nonlocal empty_slots
-      nonlocal counter
-      while self.live or not self.detokenize_backlog.empty():  # Process queue even if not live
+      nonlocal self, slot_to_id, empty_slots, counter # 'self' is implicitly available
+      while self.live or not self.detokenize_backlog.empty():
         try:
-          # Timeout to prevent indefinite blocking if self.live becomes false and queue is empty
-          result_data, is_first_token, row_id_str, prefill_slot = self.detokenize_backlog.get(block=True, timeout=0.1)
+          result_data, is_first_token, row_id_str_from_q, prefill_slot_from_q = self.detokenize_backlog.get(block=True, timeout=0.1)
         except queue.Empty:
-          if not self.live:  # If not live and queue is empty, exit
+          if not self.live: # If not live and queue is empty, exit
             break
-          continue  # If live, continue trying to get from queue
+          continue # If live, continue waiting for items
 
-        # Convert to numpy if it's not already (JAX arrays might be device-local)
-        if hasattr(result_data, "convert_to_numpy"):
-          actual_result_tokens = result_data.convert_to_numpy()
-        else:  # Assuming it's already numpy or a compatible structure
-          actual_result_tokens = result_data
+        actual_result_tokens = result_data.convert_to_numpy() if hasattr(result_data, "convert_to_numpy") else result_data
 
         if is_first_token:
-          # This ResultTokens object is from prefill, containing one sample.
-          # Data shape: (samples_per_slot, fields) e.g. (1,3)
-          # Accessing the first (and only) sample's token
+          # This path is for results from prefill
+          # actual_result_tokens.data should be shaped [1, num_features] for prefill of one sample
           first_token_id = actual_result_tokens.data[0, actual_result_tokens.tokens_idx[0]].item()
-          should_terminate = emit_first_token(row_id_str, first_token_id)
-          if not should_terminate:
-            slot_to_id[prefill_slot] = row_id_str  # Track active request
-            log.debug(f"Detokenize: First token for id={row_id_str} in slot={prefill_slot}. Tracking.")
-          else:
-            empty_slots.append(prefill_slot)  # Slot is immediately free
-            self.engine.free_resource(prefill_slot)  # Free paged attention resources
-            counter.detokenize += 1  # Count as completed
-            log.debug(
-                f"Detokenize: First token for id={row_id_str} (slot {prefill_slot}) was EOS or max_len. Request finished."
-            )
-          self.detokenize_backlog.task_done()  # Mark task as done
+          should_terminate_request = emit_first_token(row_id_str_from_q, first_token_id)
+
+          if not should_terminate_request:
+            slot_to_id[prefill_slot_from_q] = row_id_str_from_q # Track this slot
+            log.debug(f"Detokenize: First token for id={row_id_str_from_q} in slot={prefill_slot_from_q}. Tracking.")
+          else: # Terminate: EOS as first token or other condition met
+            empty_slots.append(prefill_slot_from_q)
+            # --- TIMING engine.free_resource ---
+            # start_free_time = time.monotonic()
+            self.engine.free_resource(prefill_slot_from_q)
+            # jax.block_until_ready() # If free_resource has significant JAX ops to sync
+            # end_free_time = time.monotonic()
+            # free_duration_ms = (end_free_time - start_free_time) * 1000
+            counter.free_resource +=1
+            counter.detokenize += 1 # Count as a detokenized (completed) request
+
+            # log_entry = {
+            #     "timestamp": time.time(), "event_type": "engine_free_resource",
+            #     "duration_ms": free_duration_ms, "slot": prefill_slot_from_q,
+            #     "freed_after": "prefill_first_token_eos", "request_id": row_id_str_from_q
+            # }
+            # _add_pagemanager_stats_to_log(log_entry, self.engine) # Add PageManager stats
+            # performance_log.append(log_entry)
+            # log.debug(f"Detokenize & Freed: Slot {prefill_slot_from_q} for {row_id_str_from_q} (EOS on first token). Total detokenized req: {counter.detokenize}")
+          self.detokenize_backlog.task_done()
           continue
 
-        # This is a result from a decode step, containing tokens for all active slots
-        # actual_result_tokens.data is expected to be a NumPy array [batch_size, num_fields]
+        # This path is for results from decode (autoregressive steps)
         newly_empty_slots_this_step = []
-        active_slots_before_decode = list(slot_to_id.keys())  # Iterate over slots active before this decode result
+        active_slots_before_decode_processing = list(slot_to_id.keys()) # Iterate over a copy
 
-        for current_slot_idx in active_slots_before_decode:
-          if current_slot_idx not in slot_to_id:  # Slot might have been freed by a previous iteration
+        for current_slot_idx in active_slots_before_decode_processing:
+          if current_slot_idx not in slot_to_id: # Slot might have been freed by another thread/path (less likely here)
             continue
 
           current_input_id = slot_to_id[current_slot_idx]
-
-          # Ensure current_slot_idx is within bounds of the data array
           if current_slot_idx >= actual_result_tokens.data.shape[0]:
             log.warning(
                 f"Detokenize: slot index {current_slot_idx} out of bounds for decode result data shape {actual_result_tokens.data.shape}. Skipping."
             )
             continue
 
-          token_val, is_valid_val, length_val = (
-              actual_result_tokens.data[current_slot_idx, actual_result_tokens.tokens_idx[0]].item(),
-              actual_result_tokens.data[current_slot_idx, actual_result_tokens.valid_idx[0]].item(),
-              actual_result_tokens.data[current_slot_idx, actual_result_tokens.length_idx[0]].item(),
-          )
+          token_val = actual_result_tokens.data[current_slot_idx, actual_result_tokens.tokens_idx[0]].item()
+          is_valid_val = actual_result_tokens.data[current_slot_idx, actual_result_tokens.valid_idx[0]].item()
+          length_val = actual_result_tokens.data[current_slot_idx, actual_result_tokens.length_idx[0]].item()
 
           log.debug(
               f"Detokenize (decode step): slot={current_slot_idx}, id={current_input_id}, token={token_val}, valid={is_valid_val}, length={length_val}"
           )
+          should_finish_request_this_step = False
+          if is_valid_val: # Process token if valid
+            should_finish_request_this_step = emit_token(current_input_id, token_val)
 
-          should_finish_request = False
-          if is_valid_val:  # Process only if the token is valid for this slot
-            should_finish_request = emit_token(current_input_id, token_val)
-
-          # Check for termination conditions
-          if should_finish_request or length_val >= self.max_decode_length:
-            if current_slot_idx not in newly_empty_slots_this_step:  # Avoid double-adding
+          # Check for termination conditions (EOS token handled by emit_token OR max decode length reached)
+          if should_finish_request_this_step or length_val >= self.max_decode_length:
+            if current_slot_idx not in newly_empty_slots_this_step:
               newly_empty_slots_this_step.append(current_slot_idx)
             log.debug(
                 f"Detokenize: Request for id={current_input_id} (slot {current_slot_idx}) finished. Length={length_val}."
             )
 
+        # Free resources for slots that finished in this decode step
         for slot_to_free in newly_empty_slots_this_step:
-          if slot_to_free in slot_to_id:  # Check if still tracked
-            del slot_to_id[slot_to_free]  # Stop tracking
-            empty_slots.append(slot_to_free)  # Add to available slots
-            self.engine.free_resource(slot_to_free)  # Free paged attention resources
-            counter.detokenize += 1  # Increment completed count
-            log.debug(f"Detokenize: Slot {slot_to_free} freed up. Total detokenized: {counter.detokenize}")
+          if slot_to_free in slot_to_id: # Ensure it's still tracked
+            request_id_being_freed = slot_to_id.pop(slot_to_free) # Remove and get ID
+            empty_slots.append(slot_to_free)
 
-        self.detokenize_backlog.task_done()  # Mark task as done
+            # --- TIMING engine.free_resource ---
+            # start_free_time = time.monotonic()
+            self.engine.free_resource(slot_to_free)
+            # jax.block_until_ready() # If needed
+            # end_free_time = time.monotonic()
+            # free_duration_ms = (end_free_time - start_free_time) * 1000
+            counter.free_resource +=1
+            counter.detokenize += 1 # Increment for completed request
 
-      # After loop, if not live, ensure any remaining backlog items are processed (covered by loop condition)
+            # log_entry = {
+            #     "timestamp": time.time(), "event_type": "engine_free_resource",
+            #     "duration_ms": free_duration_ms, "slot": slot_to_free,
+            #     "freed_after": "decode_eos_or_max_len", "request_id": request_id_being_freed
+            # }
+            # _add_pagemanager_stats_to_log(log_entry, self.engine) # Add PageManager stats
+            # performance_log.append(log_entry)
+            log.debug(f"Detokenize & Freed: Slot {slot_to_free} for {request_id_being_freed}. Total detokenized req: {counter.detokenize}")
 
-    detokenize_thread = JetThread(
-        target=detokenize,  # Removed functools.partial as not needed
-        name="detokenize_thread",  # More descriptive name
-    )
+        self.detokenize_backlog.task_done()
 
-    counter.input = len(data)
+    # --- Start Detokenize Thread ---
+    detokenize_thread = JetThread(target=detokenize, name="detokenize_thread")
+    counter.input = len(data) # Initialize input counter
     self.live = True
-
     detokenize_thread.start()
 
-    # Main input processing loop
+    # --- Main Request Processing Loop ---
     for row_idx, row_data in enumerate(data):
-      # Wait for a free slot
-      while not empty_slots:
-        if not slot_to_id and self.detokenize_backlog.empty() and not self.live:  # All processed
+      while not empty_slots: # Wait for an empty slot
+        if not slot_to_id and self.detokenize_backlog.empty() and not self.live:
+          # No active slots, backlog empty, and processing is winding down
+          log.info("MainLoop: No active slots, empty backlog, and not live. Likely finishing.")
           break
-        log.debug("MainLoop: No empty slots, triggering decode cycle.")
-        if slot_to_id:  # Only decode if there are active requests
+        log.debug(f"MainLoop: No empty slots. Active slots: {len(slot_to_id)}. Detokenize backlog: {self.detokenize_backlog.qsize()}. Waiting...")
+        if slot_to_id: # If there are active slots, trigger a decode to free them up
           decode()
-        else:  # No active requests, but backlog might have first tokens, or waiting for new inputs
-          # If backlog is also empty, this means we are waiting for inputs or everything finished.
-          # Adding a small sleep to prevent busy-waiting if decode() is not called.
-          threading.Event().wait(0.01)  # Small wait to yield control
+        else: # No active slots, but backlog might still be processing or waiting for new inputs
+          threading.Event().wait(0.01) # Short wait to avoid busy loop
 
-      if not self.live and not empty_slots:  # If processing is shutting down
-        break
-
-      if not empty_slots:  # Should not happen if self.live is true and loop continues
-        log.warning("MainLoop: Still no empty slots after decode cycle, but proceeding. This might indicate an issue.")
-        # If this happens, it means decode didn't free up a slot, which is problematic.
-        # Forcing a slot by picking one might be bad, but for now, let's see.
-        # This path implies something is wrong with slot management or termination.
-        # Forcing a break or raising an error might be better.
-        if slot_to_id:  # If there are active slots, decode again
-          decode()
-          continue  # Retry getting an empty slot
-        else:  # No active slots, but also no empty_slots, very weird state.
-          log.error("MainLoop: Inconsistent state - no empty slots and no active_slots. Breaking.")
+      if not self.live and not empty_slots and not slot_to_id : # More robust exit condition
+          log.info("MainLoop: Exiting input processing loop as not live and no slots available or active.")
           break
 
-      # Get a free slot
-      # It's possible empty_slots is momentarily empty if detokenize is slow
-      # to add them back after a decode. Add a small wait with timeout.
-      current_empty_slot = -1
-      try:
-        current_empty_slot = empty_slots.pop(0)  # Get first available slot
-      except IndexError:
-        log.warning("MainLoop: empty_slots list was empty, waiting briefly.")
-        threading.Event().wait(0.05)  # wait a bit for detokenize thread
-        if not empty_slots:
-          log.error("MainLoop: Failed to get an empty slot even after waiting. Terminating this request.")
-          # Potentially skip this request or error out
-          # For now, continue to next request, this one will be dropped
-          continue
-        current_empty_slot = empty_slots.pop(0)
+      if not empty_slots: # If still no slots after trying to decode
+          log.warning(f"MainLoop: Still no empty slots after checks for request id={row_data.id}. This may indicate a bottleneck or issue.")
+          # Depending on desired behavior, could skip, error, or wait longer.
+          # For now, let's try one more decode if slots are active, then wait briefly if it's truly stuck.
+          if slot_to_id:
+            decode()
+            threading.Event().wait(0.05) # Wait a bit longer after forced decode
+            if not empty_slots:
+                log.error(f"MainLoop: Critical - No empty slot for id={row_data.id} after extended wait. Skipping request.")
+                counter.input -=1 # Adjust count as this one is skipped.
+                continue # Skip this input
+          else: # No active slots, implies system might be stuck if backlog isn't clearing.
+            log.error(f"MainLoop: Critical - No empty slots and no active requests for id={row_data.id}. Skipping request.")
+            counter.input -=1
+            continue
 
-      log.debug(f"MainLoop: Processing input id={row_data.id} in slot={current_empty_slot}")
 
-      # Submit prefill request
-      # The 'max_length' here refers to the padded length of the input_tokens for this specific prefill operation
-      # which corresponds to a bucket size or max_prefill_length for single prefills.
-      # Using self.max_prefill_length seems appropriate if not using bucketing here.
-      # The PrefillHelper's `process` method takes `max_length` which is used by BatchedPrefillProcessor
-      # for 'capacity' and 'input_padding'. For 'default' or 'paged_direct', it's less critical
-      # but should align with the padding of `input_tokens_padded`.
-      # Assuming `row_data.tokens.shape[0]` is the padded length for this item.
+      current_empty_slot = empty_slots.pop(0)
+      log.debug(f"MainLoop: Processing input id={row_data.id} in slot={current_empty_slot} (Request {row_idx + 1}/{len(data)})")
       self.prefill.process(
-          self.params,
-          self.decode_state,
-          current_empty_slot,
-          row_data.id,
-          row_data.tokens,  # Padded tokens for this specific input
-          row_data.true_length,
-          row_data.tokens.shape[0],  # Pass the actual padded length of this item as 'max_length' for this call
-          prefill_done_callback,
+          model_params=self.params,
+          decode_state=self.decode_state,
+          decode_slot=current_empty_slot,
+          input_id=row_data.id,
+          input_tokens_padded=row_data.tokens,
+          input_true_length=row_data.true_length,
+          max_seq_len_for_op=row_data.tokens.shape[0], # Max sequence length for this specific prefill operation
+          prefill_done=prefill_done_callback,
       )
 
-    # After all inputs are submitted, finalize any batched prefills
-    log.info("MainLoop: All inputs submitted. Finalizing prefills...")
+    log.info("MainLoop: All inputs submitted to PrefillHelper. Finalizing any batched prefills...")
     self.prefill.finalize(self.params, self.decode_state, prefill_done_callback)
 
-    # Wait for all active slots to complete decoding
-    log.info("MainLoop: Waiting for active requests to complete decoding...")
-    while slot_to_id:  # While there are still active requests
-      if self.detokenize_backlog.empty() and not self.live:  # Graceful shutdown check
-        log.warning("MainLoop: Shutting down with active slots but empty backlog.")
+    log.info("MainLoop: Waiting for all active requests to complete decoding...")
+    while slot_to_id: # While there are still requests being processed
+      if self.detokenize_backlog.empty() and not self.live:
+        log.warning("MainLoop: Exiting decode wait loop - not live and empty backlog, but slots still active. This might be an issue.")
         break
-      log.debug(f"MainLoop: Waiting for {len(slot_to_id)} active slots. Triggering decode.")
+      log.debug(f"MainLoop: Waiting for {len(slot_to_id)} active slots to complete. Triggering decode. Backlog: {self.detokenize_backlog.qsize()}")
       decode()
-      # Add a small delay to allow detokenize thread to process and free slots
-      # This helps prevent decode() from being called too rapidly if detokenize is slower.
-      # However, if detokenize is stuck, this won't help.
-      # The primary control should be `while not empty_slots` at the beginning of the loop.
-      # threading.Event().wait(0.01) # Optional small delay
+      if slot_to_id and self.detokenize_backlog.empty(): # Prevent busy loop if decode doesn't immediately clear slot but backlog is empty
+          threading.Event().wait(0.005)
+
 
     log.info("MainLoop: All active slots processed or finalized.")
-    self.live = False  # Signal detokenize thread to stop trying to get new items indefinitely
-    # detokenize_backlog.join() # Wait for all items in queue to be processed by task_done()
-    log.info("MainLoop: Waiting for detokenize thread to finish processing backlog...")
-    detokenize_thread.join()  # Wait for the thread to terminate
+    self.live = False # Signal detokenize thread to finish up
+    log.info("MainLoop: Waiting for detokenize thread to finish processing any remaining backlog...")
+    detokenize_thread.join(timeout=10.0) # Add a timeout to join
+    if detokenize_thread.is_alive():
+        log.warning("MainLoop: Detokenize thread did not finish within timeout.")
 
     log.info(
-        "Summary for '%s': Prefills=%d, Decodes=%d, Detokenized_Requests=%d (Total Inputs: %d).",
+        "Summary for '%s': Prefills=%d, Decodes=%d, Detokenized_Requests=%d, Freed_Resources=%d (Total Inputs Submitted: %d).",
         desc,
         counter.prefill,
         counter.decode,
         counter.detokenize,
-        counter.input,
+        counter.free_resource,
+        counter.input, # This reflects inputs processed or attempted
     )
 
   def batch_inference(self, data: List[InputData], desc="") -> dict[str, List[int]]:
-    """data is list of obj with id, tokens, and true length"""
-    # Sorting data by padded length - this is a form of bucketing for batching.
-    # If paged attention is on and we are using 'paged_direct', this sorting might be less critical
-    # for prefill performance, but doesn't harm.
-    data_dict = defaultdict(list)
-    log.info("Sorting input data by padded length...")
-    for row in data:
-      data_dict[row.tokens.shape[0]].append(row)
+    # Original cProfile setup commented out
+    # import cProfile
+    # profiler = cProfile.Profile()
+    # profiler.enable()
+    random.seed(99) 
 
-    # Example of combining smaller buckets into larger ones (optional optimization)
-    # if 64 in data_dict and 128 in data_dict: # Check if keys exist
-    #    data_dict[128].extend(data_dict.pop(64, []))
+    # Create a mutable copy of the data to shuffle
+    shuffled_data = list(data)
+    random.shuffle(shuffled_data)
+    log.info(f"Input data shuffled. Processing {len(shuffled_data)} items randomly.")
 
-    sorted_data: List[InputData] = []
-    # Process in increasing order of padded length, or a specific order
-    # Using a fixed set of expected padded lengths for ordering
-    # This should ideally come from config or be more dynamic.
-    # Assuming these are the relevant bucket sizes used for padding.
-    # For paged_direct, actual padding of row.tokens matters.
-    # For PrefillProcessor, it AOTs for specific buckets.
-    expected_padded_lengths = sorted(data_dict.keys())  # Process existing padded lengths in order
+    res: dict[str, List[int]] = defaultdict(list)
 
-    for padded_len in expected_padded_lengths:
-      log.info(f"Padded length bucket: {padded_len}, Number of items: {len(data_dict[padded_len])}")
-      random.shuffle(data_dict[padded_len])  # Shuffle within a bucket
-      sorted_data.extend(data_dict[padded_len])
-    log.info("Finished organizing input data.")
-
-    # Output dictionary
-    res: dict[str, List[int]] = defaultdict(list)  # Maps input_id (str) to list of token_ids
-
-    # Callback for first token
+    # Define callbacks for token emission
     def emit_first_token_callback(id_str: str, token: int) -> bool:
       nonlocal res
-      # Log first token received
       log.debug(f"Output: ID '{id_str}', First Token: {token}")
-      if token == self.tokenizer.eos_id:
-        log.debug(f"Output: ID '{id_str}' received EOS as first token.")
-        # No need to add to res[id_str] if it's EOS immediately
-        return True  # Terminate if EOS
+      if token == self.tokenizer.eos_id: # Assuming self.tokenizer is set
+        log.debug(f"Output: ID '{id_str}' received EOS as first token. Terminating.")
+        return True # Terminate if EOS is the first token
       res[id_str].append(token)
-      return False  # Continue decoding
+      return False # Continue generation
 
-    # Callback for subsequent tokens
     def emit_token_callback(id_str: str, token: int) -> bool:
       nonlocal res
-      # Ensure list exists for id_str (should be created by first_token_callback)
+      # Ensure the list for id_str exists
       if id_str not in res and token != self.tokenizer.eos_id:
+        # This case should ideally not happen if emit_first_token_callback populated it,
+        # unless first token was EOS. Log a warning if a non-EOS token arrives for an untracked ID.
         log.warning(
-            f"Output: ID '{id_str}' missing from results dict but received token {token}. This might indicate an issue if it's not the first token."
+            f"Output: ID '{id_str}' missing from results dict but received non-EOS token {token}. Appending."
         )
-        # If it's truly not the first and not EOS, append.
-        # However, emit_first_token_callback should handle the first.
-        # This path is defensive.
-        # res[id_str].append(token)
-
-      # Append token if not EOS, or if EOS and list is empty (first token was EOS)
-      # The main logic is to stop appending *after* EOS.
-      if not res[id_str] or res[id_str][-1] != self.tokenizer.eos_id:
-        res[id_str].append(token)
+        res[id_str].append(token) # Start new list
+      elif id_str in res:
+          # Append token if it's not EOS or if it is EOS and the last token wasn't also EOS (avoid multiple EOS)
+        if not res[id_str] or res[id_str][-1] != self.tokenizer.eos_id:
+            res[id_str].append(token)
+      # If id_str not in res and token is EOS, do nothing (already handled or was EOS on first token)
 
       if token == self.tokenizer.eos_id:
-        log.debug(f"Output: ID '{id_str}' received EOS token.")
-        return True  # Terminate if EOS
-      return False  # Continue decoding
+        log.debug(f"Output: ID '{id_str}' received EOS token. Terminating.")
+        return True # Terminate on EOS
+      return False # Continue generation
 
     self.batch_inference_with_callback(
-        sorted_data, emit_first_token=emit_first_token_callback, emit_token=emit_token_callback, desc=desc
+        shuffled_data, # Use the shuffled data
+        emit_first_token=emit_first_token_callback,
+        emit_token=emit_token_callback,
+        desc=desc
     )
-    return dict(res)  # Convert defaultdict to dict for return
+
+    # Original cProfile and stats printing commented out
+    # profiler.disable()
+    # stats_obj = Stats(profiler) # Renamed from 'stats' to avoid conflict if any
+    # print("\n---- Stats sorted by total time (tottime) ----")
+    # stats_obj.sort_stats('tottime').print_stats(50)
+    # print("\n---- Stats sorted by number of calls (ncalls) ----")
+    # stats_obj.sort_stats('ncalls').print_stats(50)
+    # print("\n---- Stats sorted by cumulative time (cumtime) ----")
+    # stats_obj.sort_stats('cumtime').print_stats(50)
+
+
+    # Save performance log
+    if desc != "warmup": # Avoid saving log for warmup runs unless specifically desired
+        try:
+            if performance_log:
+                df_perf = pd.DataFrame(performance_log) # Create DataFrame from global list
+                # Sanitize desc for filename
+                safe_desc = "".join(c if c.isalnum() else "_" for c in desc) if desc else "run"
+                log_filename_timestamp = time.strftime('%Y%m%d_%H%M%S')
+                log_filename = f"performance_log_{safe_desc}_{log_filename_timestamp}.csv"
+                df_perf.to_csv(log_filename, index=False)
+                log.info(f"Performance log saved to {log_filename}")
+                # Optionally clear the log if batch_inference might be called multiple times
+                # and you want separate logs per call rather than one cumulative log.
+                # performance_log.clear()
+            else:
+                log.info(f"No performance data logged for run: {desc}")
+        except Exception as e:
+            log.error(f"Failed to save performance log for run '{desc}': {e}", exc_info=True)
+
+    return dict(res)
