@@ -59,6 +59,7 @@ from jetstream.engine import engine_api
 from MaxText.maxengine import MaxEngine
 from MaxText import max_utils
 from MaxText import inference_utils
+from jax.sharding import PartitionSpec as P, NamedSharding
 
 
 from MaxText.prefill_packing import PrefillProcessor, BatchedPrefillProcessor
@@ -341,7 +342,9 @@ class PrefillHelper:
             )
         end_time = time.time()
         if DEBUG:
-            max_logging.log(f"Time taken to run prefill: {end_time - start_time} seconds")
+            max_logging.log(
+                f"Time taken to run prefill: {end_time - start_time} seconds"
+            )
 
     def finalize(
         self,
@@ -387,6 +390,7 @@ class ReplicaWorker:
         auto_layout_supported: bool = False,
         run_as_a_thread=False,
         rng=None,
+        mesh=None,
     ):
         """Initialize a ReplicaWorker that uses continuous batching over
            a queue of inputs.
@@ -453,6 +457,7 @@ class ReplicaWorker:
         self.min_decode_steps = min_decode_steps
         self.run_as_a_thread = run_as_a_thread
         self.auto_layout_supported = auto_layout_supported
+        self.mesh = mesh
         if rng is None:
             self.rng = jax.random.PRNGKey(0)
         else:
@@ -528,7 +533,9 @@ class ReplicaWorker:
                 self.engine.aot_compile(self.params, pass_rng_shape=True)
             )
             end_time = time.time()
-            max_logging.log(f"time taken to compile generate_fn: {end_time - start_time} seconds")
+            max_logging.log(
+                f"time taken to compile generate_fn: {end_time - start_time} seconds"
+            )
             self.decode_state = init_decode_state_fn(self.rng)
         else:
             self.generate_fn = self.engine.generate
@@ -536,8 +543,8 @@ class ReplicaWorker:
             self.decode_state = self.engine.init_decode_state(self.rng)
             end_time = time.time()
             max_logging.log(
-                    f"time taken to initialize decode_state: {end_time - start_time} seconds"
-                )
+                f"time taken to initialize decode_state: {end_time - start_time} seconds"
+            )
 
         self.generate_fn = self.engine.generate
 
@@ -554,7 +561,9 @@ class ReplicaWorker:
         engine = MaxEngine(self.config, self.devices)
         params = engine.load_params(params=params, rng=self.rng)
         end_time = time.time()
-        max_logging.log(f"time taken to initialize engine: {end_time - start_time} seconds")
+        max_logging.log(
+            f"time taken to initialize engine: {end_time - start_time} seconds"
+        )
         return params, engine
 
     def _init_tokenizer(self):
@@ -703,10 +712,14 @@ class ReplicaWorker:
         # Wait for detokenization to complete
         self.running = False
         if DEBUG:
-            max_logging.log(f"replica worker {self.worker_id}: joining detokenize thread")
+            max_logging.log(
+                f"replica worker {self.worker_id}: joining detokenize thread"
+            )
         detokenize_thread.join()
         if DEBUG:
-            max_logging.log(f"replica worker {self.worker_id}: detokenize thread joined")
+            max_logging.log(
+                f"replica worker {self.worker_id}: detokenize thread joined"
+            )
 
         # Log completion statistics
         if DEBUG:
@@ -733,18 +746,21 @@ class ReplicaWorker:
             return True
 
         # Return if already reached eos
-        if len(self.res[prompt_id]) > 0 and self.res[prompt_id][-1].token in self.eos_ids: 
+        if (
+            len(self.res[prompt_id]) > 0
+            and self.res[prompt_id][-1].token in self.eos_ids
+        ):
             return True
-        
+
         with jax.profiler.TraceAnnotation("getting_token_from_slot"):
             token = result_token[slot]
-        
+
         # Making sure there is no jax and numpy compariosn
         index = len(self.res[prompt_id])
-        
+
         self.res[prompt_id].append(TokenOutput(token, log_prob))
-        
-        return (token in self.eos_ids) or (index+1 == self.max_decode_length)
+
+        return (token in self.eos_ids) or (index + 1 == self.max_decode_length)
 
     def prefill_done(self, prefill_result, prompt_ids, decode_state):
         """Callback function called when prefill completes.
@@ -773,21 +789,41 @@ class ReplicaWorker:
 
     @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
     def _jitted_generate_fn(self, params, decode_state, rng):
-        decode_state, result_tokens = self.engine.generate(params, decode_state, rng=rng)
-        logps = inference_utils.log_prob_of_chosen_token(decode_state["logits"], decode_state["tokens"])
-        
+        decode_state, result_tokens = self.engine.generate(
+            params, decode_state, rng=rng
+        )
+        logps = inference_utils.log_prob_of_chosen_token(
+            decode_state["logits"], decode_state["tokens"]
+        )
+
         tokens_gathered = jax.device_get(result_tokens.data[:, 0])
         logps_gathered = jax.device_get(logps[:, 0])
-        
+
         return decode_state, tokens_gathered, logps_gathered
 
     def _scan_generate_step(self, carry, _):
         rng, decode_state = carry
         rng, rng_generate = jax.random.split(rng)
-        decode_state, result_tokens = self.engine.generate(self.params, decode_state, rng=rng_generate)
-        logps = inference_utils.log_prob_of_chosen_token(decode_state["logits"], decode_state["tokens"])
+        decode_state, result_tokens = self.engine.generate(
+            self.params, decode_state, rng=rng_generate
+        )
+        logps = inference_utils.log_prob_of_chosen_token(
+            decode_state["logits"], decode_state["tokens"]
+        )
         return (rng, decode_state), (result_tokens.data[:, 0], logps[:, 0])
 
+    @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(1,))
+    def _jitted_scan_generate_step(self, decode_state):
+        (_, decode_state), (all_tokens, all_logps) = jax.lax.scan(
+            self._scan_generate_step,
+            init=(self.rng, decode_state),
+            xs=None,
+            length=self.min_decode_steps,
+        )
+        jax.lax.with_sharding_constraint(all_tokens, NamedSharding(self.mesh, P(None)))
+        jax.lax.with_sharding_constraint(all_logps, NamedSharding(self.mesh, P(None)))
+        return decode_state, all_tokens, all_logps
+    
     def decode(self):
         """Run decode steps on current decoder state.
 
@@ -796,24 +832,30 @@ class ReplicaWorker:
         """
         buffer = []
 
-        # DO NOT SUBMIT. Scan version 
-        # (_, self.decode_state), (all_tokens, all_logps) = jax.lax.scan(self._scan_generate_step, init=(self.rng, self.decode_state), xs=None, length=self.min_decode_steps)
-        # all_logps.block_until_ready()
+        # DO NOT SUBMIT. Scan version
+        self.decode_state, all_tokens, all_logps = self._jitted_scan_generate_step(self.decode_state)
+        all_logps.block_until_ready()
+        with jax.profiler.TraceAnnotation("convert_to_numpy"):
+            all_tokens = np.array(all_tokens)
+            all_logps = np.array(all_logps)
         
+
+        with jax.profiler.TraceAnnotation("post_scan_generate_step"):
+            for i in range(self.min_decode_steps):
+                buffer.append((all_tokens[i], all_logps[i]))
+
+        # DO NOT SUBMIT. Non-scan version
         # for i in range(self.min_decode_steps):
-        #     buffer.append((all_tokens[i, :], all_logps[i, :]))
-        
-        for i in range(self.min_decode_steps):
-            # Generate next tokens
-            start_time = time.time()
-            self.decode_state, result_tokens, log_prob = self._jitted_generate_fn(
-                self.params, self.decode_state, self.rng
-            )
-            with jax.profiler.TraceAnnotation("log_prob_block_until_ready"):
-                log_prob.block_until_ready()
-            end_time = time.time()
-            max_logging.log(f"Replica {self.worker_id}. Time taken to run generate_fn: {end_time - start_time} seconds")
-            buffer.append((result_tokens, log_prob))
+        #     # Generate next tokens
+        #     start_time = time.time()
+        #     self.decode_state, result_tokens, log_prob = self._jitted_generate_fn(
+        #         self.params, self.decode_state, self.rng
+        #     )
+        #     with jax.profiler.TraceAnnotation("log_prob_block_until_ready"):
+        #         log_prob.block_until_ready()
+        #     end_time = time.time()
+        #     max_logging.log(f"Replica {self.worker_id}. Time taken to run generate_fn: {end_time - start_time} seconds")
+        #     buffer.append((result_tokens, log_prob))
 
         # Add results to detokenization queue
         for result_tokens, log_prob in buffer:
@@ -987,11 +1029,13 @@ class OfflineEngine:
         )  # No need to run worker as a thread if there is only one replica
         replica_rngs = jax.random.split(self.rng, self.dp)
         assert replica_rngs[0].shape == self.rng.shape
-        self.replica_workers = [ReplicaWorker(
+        self.replica_workers = [
+            ReplicaWorker(
                 config=self.config,
                 params=self.params,
                 min_decode_steps=self.min_decode_steps,
                 enable_batch_prefill=self.enable_batch_prefill,
+                mesh = self.dp_meshes[i],
                 devices=np.squeeze(self.dp_meshes[i].devices),
                 tokenizer=self.tokenizer,
                 eos_ids=self.eos_ids,
@@ -1007,7 +1051,7 @@ class OfflineEngine:
         ]
         for replica in self.replica_workers:
             replica.ensure_init_finished()
-        
+
         max_logging.log(f"Created {self.dp} replica workers")
 
         self.tokenizer = self.replica_workers[0].tokenizer
@@ -1063,22 +1107,23 @@ class OfflineEngine:
 
         # Return CompletionOutput objects
         completion_outputs = []
-
-        for input_data in data:
-            completion_outputs.append(
-                CompletionOutput(
-                    index=input_data.id,
-                    token_ids=jnp.stack(
-                        [token_output.token for token_output in results[input_data.id]]
-                    ),
-                    logprobs=jnp.stack(
-                        [
-                            token_output.log_prob.squeeze()
-                            for token_output in results[input_data.id]
-                        ]
-                    ),
-                )
-            )
+        
+        # DO NOT SUBMIT. Debugging now
+        # for input_data in data:
+        #     completion_outputs.append(
+        #         CompletionOutput(
+        #             index=input_data.id,
+        #             token_ids=jnp.stack(
+        #                 [token_output.token.squeeze() for token_output in results[input_data.id]]
+        #             ),
+        #             logprobs=jnp.stack(
+        #                 [
+        #                     token_output.log_prob.squeeze()
+        #                     for token_output in results[input_data.id]
+        #                 ]
+        #             ),
+        #         )
+        #     )
         return completion_outputs
 
     def pad_data(self, data: List[InputData]) -> List[InputData]:
