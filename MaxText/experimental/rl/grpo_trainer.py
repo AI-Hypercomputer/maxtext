@@ -551,7 +551,6 @@ def generate_offline_completions(training_mesh, config, tokenizer_model, inferen
   data = grpo_utils.concatenate_prompt_with_completions(config, tokenizer_model, data, completions)
   end_time = time.time()
   max_logging.log(f"MaxText: Preprocessing after inference took {end_time - start_time} seconds")
-  # breakpoint()
   # offpolicys
   if config.inference_rollouts > 1:
     data["completions_logprobs"] = completions_logprobs
