@@ -705,6 +705,7 @@ class ReplicaWorker:
                 input_true_length=row.true_length,
                 prefill_done=self.prefill_done,
             )
+            
 
         # 4. Flush any pending inputs in batch prefill mode
         self.prefill_helper.finalize(self.params, self.decode_state, self.prefill_done)
@@ -798,16 +799,16 @@ class ReplicaWorker:
         Performs `self.min_decode_steps` decode operations
         and puts results in the detokenization queue.
         """
-        buffer = []
 
         # DO NOT SUBMIT. Scan version
         self.decode_state, all_tokens, all_logps = self._jitted_scan_generate_step(self.decode_state)
         all_logps.block_until_ready()
         self.detokenize_backlog.put_nowait((all_tokens, all_logps, False, 0, 0))
+        self.counter.decode += 1
         
 
-
-        # DO NOT SUBMIT. Non-scan version
+        ### DO NOT SUBMIT. Non-scan version ###
+        # buffer = []
         # for i in range(self.min_decode_steps):
         #     # Generate next tokens
         #     start_time = time.time()
@@ -817,13 +818,13 @@ class ReplicaWorker:
         #     with jax.profiler.TraceAnnotation("log_prob_block_until_ready"):
         #         log_prob.block_until_ready()
         #     end_time = time.time()
-        #     max_logging.log(f"Replica {self.worker_id}. Time taken to run generate_fn: {end_time - start_time} seconds")
+        #     print(f"Replica {self.worker_id}. Time taken to run generate_fn: {end_time - start_time} seconds")
         #     buffer.append((result_tokens, log_prob))
 
-        # Add results to detokenization queue
-        # for result_tokens, log_prob in buffer:
-        #     self.detokenize_backlog.put_nowait((result_tokens, log_prob, False, 0, 0))
-        #     self.counter.decode += 1
+        # # Add results to detokenization queue
+        # self.detokenize_backlog.put_nowait(([result_token for result_token, _ in buffer], [log_prob for _, log_prob in buffer], False, 0, 0))
+        # self.counter.decode += 1
+        ### DO NOT SUBMIT. Non-scan version ends ###
 
     def detokenize(self):
         """Detokenize results and manage decode slots.
