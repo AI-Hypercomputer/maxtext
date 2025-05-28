@@ -113,6 +113,13 @@ class TokenOutput:
     token: int
     log_prob: float
 
+@dataclasses.dataclass
+class ReplicaOutput:
+    """Class for storing results from each replica
+    """
+    tokens: jax.Array
+    log_prob: jax.Array
+
 
 @dataclasses.dataclass
 class EventCounter:
@@ -633,7 +640,7 @@ class ReplicaWorker:
                 self.params = pathwaysutils_reshard.reshard(params, destination_sharding, cache_resharding_plans=True)
         else:
             self.params = jax.device_put(params, destination_sharding)
-        if self.params is not None: # It's good practice to check if params could be None
+        if self.params is not None:
             jax.tree_util.tree_map(lambda x: x.block_until_ready(), self.params)
         end_time = time.time()
         print(f"worker {self.worker_id} reshard training params: {end_time - start_time} seconds")
@@ -731,7 +738,7 @@ class ReplicaWorker:
         """
         self.ensure_init_finished()
         self.ensure_warm_up_finished()
-        self.ensure_update_finished()
+        # self.ensure_update_finished()
         self.res = results
         if self.run_as_a_thread:
             self.worker_thread = SafeThead(
@@ -757,36 +764,57 @@ class ReplicaWorker:
         Returns:
             Dictionary mapping input ids to output token sequences
         """
-        def _scan_prefill_step(carry, inputs):
-            decode_state, rng, slot = carry
-            tokens, true_len = inputs
-            rng, rng_prefill = jax.random.split(rng)
-            prefill_result, _ = self.engine.prefill(params=self.params, padded_tokens=tokens, true_length=true_len, rng=rng_prefill)
-            decode_state = self.engine.insert(prefill_result, decode_state, slot)
-            return (decode_state, rng, slot + 1), None
+        # def _scan_prefill_step(carry, inputs):
+        #     decode_state, rng, slot = carry
+        #     tokens, true_len = inputs
+        #     rng, rng_prefill = jax.random.split(rng)
+        #     prefill_result, _ = self.engine.prefill(params=self.params, padded_tokens=tokens, true_length=true_len, rng=rng_prefill, slot=slot)
+        #     decode_state = self.engine.insert(prefill_result, decode_state, slot)
+        #     return (decode_state, rng, slot + 1), None
 
-        def _scan_generate_step(carry, _):
-            rng, decode_state = carry
-            rng, rng_generate = jax.random.split(rng)
-            decode_state, result_tokens = self.engine.generate(self.params, decode_state, rng=rng_generate)
-            logps = inference_utils.log_prob_of_chosen_token(decode_state["logits"], decode_state["tokens"])
-            return (rng, decode_state), (result_tokens.data[:, 0], logps[:, 0])
+        # def _scan_generate_step(carry, _):
+        #     rng, decode_state = carry
+        #     rng, rng_generate = jax.random.split(rng)
+        #     decode_state, result_tokens = self.engine.generate(self.params, decode_state, rng=rng_generate)
+        #     logps = inference_utils.log_prob_of_chosen_token(decode_state["logits"], decode_state["tokens"])
+        #     return (rng, decode_state), (result_tokens.data[:, 0], logps[:, 0])
 
         prompts = jnp.array([row.tokens for row in data])
         true_length = jnp.array([row.true_length for row in data])
 
-        (self.decode_state, _, _), _ = jax.lax.scan(
-            _scan_prefill_step, init=(self.decode_state, self.rng, 0), xs=(prompts, true_length)
-        )
+        # (self.decode_state, _, _), _ = jax.lax.scan(
+        #     _scan_prefill_step, init=(self.decode_state, self.rng, 0), xs=(prompts, true_length)
+        # )
+        # with jax.profiler.TraceAnnotation("log_prob_block_until_ready"):
+        #     jax.tree_util.tree_map(lambda x: x.block_until_ready(), self.decode_state)
 
-        (_, self.decode_state), (all_tokens, all_logps) = jax.lax.scan(_scan_generate_step, init=(self.rng, self.decode_state), xs=None, length=self.max_decode_length)
-        all_tokens = np.asarray(all_tokens)
-        all_logps = np.asarray(all_logps)
-        completions = np.transpose(all_tokens, (1,0))
-        logps = np.transpose(all_logps, (1,0))
-        for x, c in enumerate(completions):
-            for y, _ in enumerate(c):
-                self.res[data[x].id].append(TokenOutput(completions[x,y], logps[x,y]))
+        # (_, self.decode_state), (all_tokens, all_logps) = jax.lax.scan(_scan_generate_step, init=(self.rng, self.decode_state), xs=None, length=self.max_decode_length)
+        for slot, (tokens, true_len) in enumerate(zip(prompts, true_length)):
+            rng, rng_prefill = jax.random.split(self.rng)
+            prefill_result, _ = self.engine.prefill(params=self.params, padded_tokens=tokens, true_length=true_len, rng=rng_prefill, slot=slot)
+            self.decode_state = self.engine.insert(prefill_result, self.decode_state, slot)
+        with jax.profiler.TraceAnnotation("log_prob_block_until_ready"):
+            jax.tree_util.tree_map(lambda x: x.block_until_ready(), self.decode_state)
+        all_tokens_list = []
+        all_logps_list = []
+        for _ in range(self.max_decode_length):
+            rng, rng_generate = jax.random.split(rng)
+            self.decode_state, result_tokens = self.engine.generate(self.params, self.decode_state, rng=rng_generate)
+            logps = inference_utils.log_prob_of_chosen_token(self.decode_state["logits"], self.decode_state["tokens"])
+            all_tokens_list.append(result_tokens.data[:, 0])
+            all_logps_list.append(logps[:, 0])
+        all_tokens = jnp.stack(all_tokens_list, axis=0)
+        all_logps = jnp.stack(all_logps_list, axis=0)
+
+        # all_tokens = np.asarray(all_tokens)
+        # all_logps = np.asarray(all_logps)
+        completions = jnp.transpose(all_tokens, (1,0))
+        logps = jnp.transpose(all_logps, (1,0))
+        for x in range(len(completions)):
+            self.res[data[x].id] = ReplicaOutput(completions[x], logps[x])
+        # for x, c in enumerate(completions):
+        #     for y, _ in enumerate(c):
+        #         self.res[data[x].id].append(TokenOutput(completions[x,y], logps[x,y]))
 
 
     def _start_inference(
@@ -1180,6 +1208,7 @@ class OfflineEngine:
             self.dp > 1
         )  # No need to run worker as a thread if there is only one replica
         replica_rngs = jax.random.split(self.rng, self.dp)
+        replica_rngs = [jax.device_put(rng, jax.sharding.NamedSharding(self.dp_meshes[i], PartitionSpec())) for i, rng in enumerate(replica_rngs)]
         assert replica_rngs[0].shape == self.rng.shape
         self.replica_workers = []
         for i in range(self.dp):
@@ -1261,8 +1290,13 @@ class OfflineEngine:
             for i in range(self.dp):
                 self.replica_workers[i].start_inference(data_queue, results, desc)
         else:
+            results = defaultdict(jax.Array)
             per_group_size = len(data) // self.dp
             grouped_data = [data[i:i+per_group_size] for i in range(0, len(data), per_group_size)]
+            # assign correct data sharding to the input array's
+            for i in range(self.dp):
+                for j in range(per_group_size):
+                    grouped_data[i][j].tokens = jax.device_put(grouped_data[i][j].tokens, jax.sharding.NamedSharding(self.dp_meshes[i], PartitionSpec(self.config.data_sharding)))
             for i in range(self.dp):
                 self.replica_workers[i].start_basic_inference(grouped_data[i], results, desc)
 
@@ -1274,18 +1308,28 @@ class OfflineEngine:
         # Return CompletionOutput objects
         completion_outputs = []
         with jax.profiler.TraceAnnotation("return final output"):
-            for input_data in data:
-                completion_outputs.append(
-                    CompletionOutput(
-                        index=input_data.id,
-                        token_ids=np.array(
-                            [token_output.token for token_output in results[input_data.id]]
-                        ),
-                        logprobs=np.array(
-                            [token_output.log_prob for token_output in results[input_data.id]]
-                        ),
+            if continous_batching:
+                for input_data in data:
+                    completion_outputs.append(
+                        CompletionOutput(
+                            index=input_data.id,
+                            token_ids=np.array(
+                                [token_output.token for token_output in results[input_data.id]]
+                            ),
+                            logprobs=np.array(
+                                [token_output.log_prob for token_output in results[input_data.id]]
+                            ),
+                        )
                     )
-                )
+            else:
+                for input_data in data:
+                    completion_outputs.append(
+                        CompletionOutput(
+                            index=input_data.id,
+                            token_ids=results[input_data.id].tokens,
+                            logprobs=results[input_data.id].log_prob,
+                        )
+                    )
         return completion_outputs
 
     def pad_data(self, data: List[InputData]) -> List[InputData]:

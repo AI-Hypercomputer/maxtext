@@ -497,15 +497,16 @@ def generate_completions(config, tokenizer_model, engine, data, params, rng):
   return data
 
 
-def generate_offline_completions(config, tokenizer_model, inference_engine, data):
+def generate_offline_completions(training_mesh, config, tokenizer_model, inference_engine, data):
   # TODO(mohitkhatwani) think about doing multisampling here
+  data[config.train_data_columns] = jnp.repeat(data[config.train_data_columns], config.num_generations, axis=0)
+  data[f"{config.train_data_columns}_true_length"] = jnp.repeat(data[f"{config.train_data_columns}_true_length"], config.num_generations, axis=0)
   input_data = []
   for i, d in enumerate(data[config.train_data_columns]):
-    for g in range(config.num_generations):
-      input_data.append(InputData(id=f"input_{i}_{g}", tokens=np.array(d), true_length=np.array(data[f"{config.train_data_columns}_true_length"][i])[0]))
+    input_data.append(InputData(id=f"input_{i}", tokens=np.array(d), true_length=np.array(data[f"{config.train_data_columns}_true_length"][i])[0]))
   start_time = time.time()
   max_logging.log("MaxText: inference started on samplers")
-  results = inference_engine.batch_inference(input_data, continous_batching=False)
+  results = inference_engine.batch_inference(input_data, continous_batching=config.continous_batching)
   end_time = time.time()
   max_logging.log(f"MaxText: inference finished on all samplers in {end_time - start_time} seconds")
   processed_token_ids = []
@@ -513,38 +514,40 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
   # Determine the target length for completions
   target_completion_length = config.max_target_length - config.max_prefill_predict_length
   start_time = time.time()
-  for r in results:
-    current_tokens = r.token_ids
-    current_logprobs = r.logprobs # Assuming logprobs correspond to tokens
+  if config.continous_batching:
+    for r in results:
+      current_tokens = r.token_ids
+      current_logprobs = r.logprobs # Assuming logprobs correspond to tokens
 
-    current_length = current_tokens.shape[0]
+      current_length = current_tokens.shape[0]
 
-    if current_length < target_completion_length:
-      # Pad
-      padding_length = target_completion_length - current_length
-      # Assuming padding with tokenizer.pad_token_id for token_ids. 
-      # For logprobs, padding with a very small number or 0.0 might be appropriate.
-      # Ensure the dtype matches.
-      padded_tokens = jnp.pad(current_tokens, (0, padding_length), mode='constant', constant_values=tokenizer_model.pad_token_id)
-      # Pad logprobs similarly. If they correspond 1:1 with tokens, pad them too.
-      # If logprobs might not exist for padding tokens, adjust accordingly (e.g. pad with -jnp.inf or 0.0)
-      padded_logprobs = jnp.pad(current_logprobs, (0, padding_length), mode='constant', constant_values=-jnp.inf) 
-    elif current_length > target_completion_length:
-      # Truncate
-      padded_tokens = current_tokens[:target_completion_length]
-      padded_logprobs = current_logprobs[:target_completion_length]
-    else:
-      # Already correct length
-      padded_tokens = current_tokens
-      padded_logprobs = current_logprobs
-    
-    processed_token_ids.append(padded_tokens)
-    processed_logprobs.append(padded_logprobs)
+      if current_length < target_completion_length:
+        # Pad
+        padding_length = target_completion_length - current_length
+        # Assuming padding with tokenizer.pad_token_id for token_ids. 
+        # For logprobs, padding with a very small number or 0.0 might be appropriate.
+        # Ensure the dtype matches.
+        padded_tokens = jnp.pad(current_tokens, (0, padding_length), mode='constant', constant_values=tokenizer_model.pad_token_id)
+        # Pad logprobs similarly. If they correspond 1:1 with tokens, pad them too.
+        # If logprobs might not exist for padding tokens, adjust accordingly (e.g. pad with -jnp.inf or 0.0)
+        padded_logprobs = jnp.pad(current_logprobs, (0, padding_length), mode='constant', constant_values=-jnp.inf) 
+      elif current_length > target_completion_length:
+        # Truncate
+        padded_tokens = current_tokens[:target_completion_length]
+        padded_logprobs = current_logprobs[:target_completion_length]
+      else:
+        # Already correct length
+        padded_tokens = current_tokens
+        padded_logprobs = current_logprobs
+      
+      processed_token_ids.append(padded_tokens)
+      processed_logprobs.append(padded_logprobs)
 
-  completions = jnp.stack(np.array(processed_token_ids))
-  completions_logprobs = jnp.stack(np.array(processed_logprobs))
-  data[config.train_data_columns] = jnp.repeat(data[config.train_data_columns], config.num_generations, axis=0)
-  data[f"{config.train_data_columns}_true_length"] = jnp.repeat(data[f"{config.train_data_columns}_true_length"], config.num_generations, axis=0)
+    completions = jnp.stack(np.array(processed_token_ids))
+    completions_logprobs = jnp.stack(np.array(processed_logprobs))
+  else:
+    completions = jnp.stack([jax.device_put(r.token_ids, jax.sharding.NamedSharding(training_mesh, P())) for r in results])
+    completions_logprobs = jnp.stack([jax.device_put(r.logprobs, jax.sharding.NamedSharding(training_mesh, P())) for r in results])
   data = grpo_utils.concatenate_prompt_with_completions(config, tokenizer_model, data, completions)
   end_time = time.time()
   max_logging.log(f"MaxText: Preprocessing after inference took {end_time - start_time} seconds")
@@ -1003,7 +1006,6 @@ def train_loop(config, config_inference, state=None):
     dp = config.inference_replicas,
     dp_meshes = inference_meshes,
     warm_up=False,
-    rng=init_rng,
     eos_ids=[]
   )
 
@@ -1021,10 +1023,10 @@ def train_loop(config, config_inference, state=None):
 
   param_buffer = Buffer(maxsize=config.inference_replicas)
   data_buffer = Buffer(maxsize=-1)
-  if config.use_pathways_reshard:
-    pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
-  else:
-    pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
+  # if config.use_pathways_reshard:
+  #   pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
+  # else:
+  #   pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
   
   # for inference_state_mesh_sharding in inference_state_mesh_shardings:
     # param_buffer.push({'params':state.params['params']}, inference_state_mesh_sharding.params)
@@ -1073,7 +1075,7 @@ def train_loop(config, config_inference, state=None):
           example_batch[k] = v[: config.micro_batch_size_to_train_on, :]
         else:
           example_batch[k] = v[: config.micro_batch_size_to_train_on]
-      example_batch = generate_offline_completions(config_inference, tokenizer_model, inference_engine, example_batch)
+      example_batch = generate_offline_completions(mesh, config_inference, tokenizer_model, inference_engine, example_batch)
       example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
@@ -1082,12 +1084,12 @@ def train_loop(config, config_inference, state=None):
       train_rng, rng = random.split(init_rng)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, train_rng)
-    with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
-      if step != 0 and step % config.inference_rollouts == 0:
-        if config.use_pathways_reshard:
-          pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
-        else:
-          pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
+    # with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
+    #   if step != 0 and step % config.inference_rollouts == 0:
+    #     if config.use_pathways_reshard:
+    #       pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
+    #     else:
+    #       pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
     step_time_delta = datetime.datetime.now() - last_step_completion
     last_step_completion = datetime.datetime.now()
     record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
@@ -1200,7 +1202,7 @@ def main(argv: Sequence[str]) -> None:
         "Please set decode_sampling_strategy as 'weighted' and decode_sampling_temperature as a positive number"
     )
   if config.inference_devices_per_replica * config.inference_replicas >= jax.device_count():
-    raise ValueError(f"Invalid value chosen for {config.num_inference_devices=}")
+    raise ValueError(f"Invalid value chosen for {config.inference_devices_per_replica=} and {config.inference_replicas=} with {jax.device_count()} devices")
   config_inference = pyconfig.initialize(
       configs_argv[1] + ["per_device_batch_size=" + str(config.per_device_batch_size * config.num_generations)]
   )
