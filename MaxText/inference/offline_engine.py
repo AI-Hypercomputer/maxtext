@@ -67,7 +67,7 @@ from MaxText import max_logging
 DecodeState = Any
 Params = Any
 MaxTextConfig = Any
-
+DEBUG = os.environ.get("DEBUG", "0") == "1"
 # Configure logging
 log = logging.getLogger(__name__)
 
@@ -255,7 +255,8 @@ class PrefillHelper:
                         decode_state,
                     )
         # For fallback
-        max_logging.log(f"AOT compiling prefill for length: {max_length}")
+        if DEBUG:
+            max_logging.log(f"AOT compiling prefill for length: {max_length}")
         if self.auto_layout_supported:
             self._processor.aot_compile(params, max_length)
         else:
@@ -264,6 +265,18 @@ class PrefillHelper:
                 params, tokens, 0, max_length, decode_state
             )
         return decode_state
+
+    @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(5,))
+    def _jitted_process(self, params, tokens, slot, true_length, decode_state, rng):
+        first_token, decode_state = self._processor._process(
+            params,
+            tokens,
+            slot,
+            true_length,
+            decode_state,
+            rng,
+        )
+        return first_token.data[:, 0], decode_state
 
     def process(
         self,
@@ -305,7 +318,7 @@ class PrefillHelper:
                     self.rng,
                 )
             else:
-                first_token, decode_state = self._processor._process(
+                first_token, decode_state = self._jitted_process(
                     model_params,
                     input_tokens_padded,
                     decode_slot,
@@ -327,7 +340,8 @@ class PrefillHelper:
                 prefill_done,
             )
         end_time = time.time()
-        max_logging.log(f"Time taken to run prefill: {end_time - start_time} seconds")
+        if DEBUG:
+            max_logging.log(f"Time taken to run prefill: {end_time - start_time} seconds")
 
     def finalize(
         self,
@@ -522,8 +536,8 @@ class ReplicaWorker:
             self.decode_state = self.engine.init_decode_state(self.rng)
             end_time = time.time()
             max_logging.log(
-                f"time taken to initialize decode_state: {end_time - start_time} seconds"
-            )
+                    f"time taken to initialize decode_state: {end_time - start_time} seconds"
+                )
 
         self.generate_fn = self.engine.generate
 
@@ -564,7 +578,8 @@ class ReplicaWorker:
         assert self.decode_state is not None
 
         for i in range(3):
-            max_logging.log(f"Warm up generate function ({i + 1}/3)")
+            if DEBUG:
+                max_logging.log(f"Warm up generate function ({i + 1}/3)")
             self.decode_state, result_tokens = self.generate_fn(
                 self.params, self.decode_state, self.rng
             )
@@ -636,7 +651,8 @@ class ReplicaWorker:
         Returns:
             Dictionary mapping input ids to output token sequences
         """
-        max_logging.log(f"Replica {self.worker_id}. Starting inference")
+        if DEBUG:
+            max_logging.log(f"Replica {self.worker_id}. Starting inference")
         # Reset state
         self.counter = EventCounter(input=0, prefill=0, decode=0, detokenize=0)
         self.empty_decode_slots = list(range(self.decode_batch_size))
@@ -686,14 +702,17 @@ class ReplicaWorker:
 
         # Wait for detokenization to complete
         self.running = False
-        max_logging.log(f"replica worker {self.worker_id}: joining detokenize thread")
+        if DEBUG:
+            max_logging.log(f"replica worker {self.worker_id}: joining detokenize thread")
         detokenize_thread.join()
-        max_logging.log(f"replica worker {self.worker_id}: detokenize thread joined")
+        if DEBUG:
+            max_logging.log(f"replica worker {self.worker_id}: detokenize thread joined")
 
         # Log completion statistics
-        max_logging.log(
-            f"Summary {desc}: prefills={self.counter.prefill}, decodes={self.counter.decode}, detokens={self.counter.detokenize} completed."
-        )
+        if DEBUG:
+            max_logging.log(
+                f"Summary {desc}: prefills={self.counter.prefill}, decodes={self.counter.decode}, detokens={self.counter.detokenize} completed."
+            )
         return self.res
 
     def emit_token(
@@ -717,10 +736,13 @@ class ReplicaWorker:
         if len(self.res[prompt_id]) > 0 and self.res[prompt_id][-1].token in self.eos_ids: 
             return True
         
-        token, is_valid, index = result_token.data[slot]
-
-        if is_valid:
-            self.res[prompt_id].append(TokenOutput(token, log_prob))
+        with jax.profiler.TraceAnnotation("getting_token_from_slot"):
+            token = result_token[slot]
+        
+        # Making sure there is no jax and numpy compariosn
+        index = len(self.res[prompt_id])
+        
+        self.res[prompt_id].append(TokenOutput(token, log_prob))
         
         return (token in self.eos_ids) or (index+1 == self.max_decode_length)
 
@@ -749,6 +771,23 @@ class ReplicaWorker:
                 (first_token, log_prob[slot], True, prompt_ids[i], slot)
             )
 
+    @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
+    def _jitted_generate_fn(self, params, decode_state, rng):
+        decode_state, result_tokens = self.engine.generate(params, decode_state, rng=rng)
+        logps = inference_utils.log_prob_of_chosen_token(decode_state["logits"], decode_state["tokens"])
+        
+        tokens_gathered = jax.device_get(result_tokens.data[:, 0])
+        logps_gathered = jax.device_get(logps[:, 0])
+        
+        return decode_state, tokens_gathered, logps_gathered
+
+    def _scan_generate_step(self, carry, _):
+        rng, decode_state = carry
+        rng, rng_generate = jax.random.split(rng)
+        decode_state, result_tokens = self.engine.generate(self.params, decode_state, rng=rng_generate)
+        logps = inference_utils.log_prob_of_chosen_token(decode_state["logits"], decode_state["tokens"])
+        return (rng, decode_state), (result_tokens.data[:, 0], logps[:, 0])
+
     def decode(self):
         """Run decode steps on current decoder state.
 
@@ -756,16 +795,22 @@ class ReplicaWorker:
         and puts results in the detokenization queue.
         """
         buffer = []
+
+        # DO NOT SUBMIT. Scan version 
+        # (_, self.decode_state), (all_tokens, all_logps) = jax.lax.scan(self._scan_generate_step, init=(self.rng, self.decode_state), xs=None, length=self.min_decode_steps)
+        # all_logps.block_until_ready()
+        
+        # for i in range(self.min_decode_steps):
+        #     buffer.append((all_tokens[i, :], all_logps[i, :]))
+        
         for i in range(self.min_decode_steps):
             # Generate next tokens
             start_time = time.time()
-            self.decode_state, result_tokens = self.generate_fn(
+            self.decode_state, result_tokens, log_prob = self._jitted_generate_fn(
                 self.params, self.decode_state, self.rng
             )
-            log_prob = inference_utils.log_prob_of_chosen_token(
-                self.decode_state["logits"], self.decode_state["tokens"]
-            )
-            log_prob.block_until_ready()
+            with jax.profiler.TraceAnnotation("log_prob_block_until_ready"):
+                log_prob.block_until_ready()
             end_time = time.time()
             max_logging.log(f"Replica {self.worker_id}. Time taken to run generate_fn: {end_time - start_time} seconds")
             buffer.append((result_tokens, log_prob))
@@ -807,8 +852,10 @@ class ReplicaWorker:
                 for slot, id_ in self.slot_to_id.items():
                     if id_ is None:
                         continue
+                    with jax.profiler.TraceAnnotation("log_prob_slot"):
+                        log_prob_slot = log_prob[slot]
                     should_terminate = self.emit_token(
-                        id_, result_tokens, log_prob[slot], slot=slot
+                        id_, result_tokens, log_prob_slot, slot=slot
                     )
                     if should_terminate:
                         newly_empty.append(slot)
@@ -1025,7 +1072,7 @@ class OfflineEngine:
                     ),
                     logprobs=jnp.stack(
                         [
-                            token_output.log_prob
+                            token_output.log_prob.squeeze()
                             for token_output in results[input_data.id]
                         ]
                     ),
