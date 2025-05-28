@@ -19,6 +19,7 @@ import datetime
 import jax
 import json
 import os
+import sys
 
 from absl import app
 from collections.abc import MutableMapping
@@ -426,9 +427,13 @@ def run_benchmarks(config):
   return results
 
 
-def main(config, **kwargs):
+def run_benchmarks_with_unsafe_rbg(config, **kwargs):
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   return run_benchmarks(pyconfig.initialize(config, **kwargs))
+
+
+def main(config, **kwargs):
+  json.dump(run_benchmarks_with_unsafe_rbg(config, **kwargs), sys.stdout)
 
 
 if __name__ == "__main__":

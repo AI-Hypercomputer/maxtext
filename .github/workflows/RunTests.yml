@@ -49,7 +49,7 @@ jobs:
     with:
       device_type: tpu
       device_name: v4-8
-      build_mode: stable_stack
+      build_mode: jax_ai_image
       base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
 
   gpu_image:
@@ -58,7 +58,7 @@ jobs:
     with:
       device_type: gpu
       device_name: a100-40gb-4
-      build_mode: stable_stack
+      build_mode: jax_ai_image
       base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/gpu:latest
 
   cpu_unit_tests:

@@ -120,7 +120,7 @@ class PyconfigTest(unittest.TestCase):
         skip_jax_distributed_system=True,
         model_name="gemma-7b",
         override_model_config=True,
-        base_emb_dim=1024, # Defined as 3072 in gemma-7b
+        base_emb_dim=1024,  # Defined as 3072 in gemma-7b
     )
 
     self.assertEqual(config.base_emb_dim, 1024)

@@ -112,8 +112,7 @@ class Encoder1DBlock(nn.Module):
   dropout: float = 0.0
 
   @nn.compact
-  def __call__(self, x: jax.Array, deterministic: bool = True) -> tuple[jax.Array, dict[str, jax.Array]]:
-    x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_embed"))
+  def __call__(self, x: jax.Array, deterministic: bool = True) -> jax.Array:
     y = nn.LayerNorm()(x)
 
     y = nn.MultiHeadDotProductAttention(
@@ -122,7 +121,6 @@ class Encoder1DBlock(nn.Module):
         deterministic=deterministic,
         dtype=self.dtype_mm,
     )(y, y)
-    y = nn.with_logical_constraint(y, ("activation_batch", "activation_length", "activation_embed"))
     y = nn.Dropout(rate=self.dropout)(y, deterministic)
     x = x + y
 
@@ -133,10 +131,8 @@ class Encoder1DBlock(nn.Module):
         dropout=self.dropout,
         dtype_mm=self.dtype_mm,
     )(y, deterministic)
-    y = nn.with_logical_constraint(y, ("activation_batch", "activation_length", "activation_embed"))
     y = nn.Dropout(rate=self.dropout)(y, deterministic)
     x = x + y
-    x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_embed"))
     return x
 
 
@@ -214,13 +210,13 @@ class Einsum(nn.Module):
 class VisionEmbedder(nn.Module):
   """Projects image embeddings to the embedding space of the text encoder."""
 
-  embed_dim: int
-  vision_proj_dim: int | None = None
+  config: Config
+  vision_proj_dim: int = 1152
 
   def setup(self):
     if self.vision_proj_dim:
       self.mm_soft_embedding_norm = RMSNorm()
-      self.mm_input_projection = Einsum((self.vision_proj_dim, self.embed_dim))
+      self.mm_input_projection = Einsum((self.vision_proj_dim, self.config.emb_dim))
 
   def encode_vision(self, x: jax.Array) -> jax.Array:
     x = self.mm_soft_embedding_norm(x)
@@ -340,11 +336,6 @@ class Gemma3VisionEncoderLayer(nn.Module):
     x = VisionExit(output_length=256)(x)
     bn, l, c = x.shape
     x = jnp.reshape(x, [b, n, l, c])
-
-    # VisionEmbedder is a projection layer that projects the image embeddings to align with text embeddings emb_dim.
-    x = VisionEmbedder(embed_dim=cfg.emb_dim, vision_proj_dim=self.width)(x)
-    if cfg.freeze_vision_encoder_params:
-      x = jax.lax.stop_gradient(x)
     return x
 
 

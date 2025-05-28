@@ -101,18 +101,48 @@ def is_conversational(features, data_columns):
   return False
 
 
-def extract_messages_and_mask(example, data_column_name):
-  """For sft training, we will have a column containing all the message contents,
-  and the 'is_prompt' column indicating whether each message is prompt or not."""
+def apply_chat_template(example, tokenizer_model, data_column_name):
+  """Formats conversational data by applying the tokenizer's chat template
+  and identifying prompt/completion segments.
+
+  Args:
+    example: A dictionary containing conversational data. It is expected to have a key
+      specified by `data_column_name` that holds a list of messages.
+    tokenizer_model: The tokenizer instance associated with the language model,
+      which contains the specific chat template.
+    data_column_name: The name of the column in the `example` dictionary
+      that contains the list of messages.
+
+  Returns:
+    The modified `example` dictionary.
+      - The `data_column_name` column will be updated to a list of
+        messages, each formatted according to the tokenizer's chat template.
+      - A new column named "is_prompt" will be added, where `True`
+        indicates a user message (prompt) and `False` indicates an assistant
+        message (completion).
+  """
   messages = []
   is_prompt = []
-  for x in example[data_column_name]:
-    if x["role"] == "user":
-      messages.append("<user>" + x["content"] + "</user>")
-      is_prompt.append(True)
-    elif x["role"] == "assistant":
-      messages.append("<assistant>" + x["content"] + "</assistant>")
-      is_prompt.append(False)
+  prompt = None
+  try:
+    for message in example[data_column_name]:
+      if message["role"] == "user":
+        prompt = message
+        prompt_in_chat_template = tokenizer_model.apply_chat_template([prompt], add_generation_prompt=False, tokenize=False)
+        messages.append(prompt_in_chat_template)
+        is_prompt.append(True)
+      elif message["role"] == "assistant":
+        prompt_completion_tokens = tokenizer_model.apply_chat_template(
+            [prompt, message], add_generation_prompt=False, tokenize=True
+        )
+        prompt_tokens = tokenizer_model.apply_chat_template([prompt], add_generation_prompt=False, tokenize=True)
+        completion_tokens = prompt_completion_tokens[len(prompt_tokens) :]
+        completion_in_chat_template = tokenizer_model.decode(completion_tokens, skip_special_tokens=False)
+        messages.append(completion_in_chat_template)
+        is_prompt.append(False)
+  except ValueError as e:
+    max_logging.log(f"Unable to apply chat template: {e}")
+    raise e
   example["is_prompt"] = is_prompt
   example[data_column_name] = messages
   return example
@@ -136,18 +166,10 @@ class SFTPromptMasking(grain.MapTransform):
   For targets, if train on completion only, the prompt will be masked by unk_id. Otherwise the same as inputs.
   """
 
-  def __init__(
-      self, text_column_name, completion_only, max_target_length, add_bos, add_eos, bos_id=None, eos_id=None, unk_id=0
-  ):
+  def __init__(self, text_column_name, completion_only, max_target_length, unk_id=0):
     self.text_column_name = text_column_name
     self.completion_only = completion_only
     self.max_target_length = max_target_length
-    self.add_bos = add_bos
-    self.add_eos = add_eos
-    if self.add_bos:
-      self.bos_id = bos_id
-    if self.add_eos:
-      self.eos_id = eos_id
     self.unk_id = unk_id
 
   def map(self, element):
@@ -164,12 +186,6 @@ class SFTPromptMasking(grain.MapTransform):
     for i, text in enumerate(element[self.text_column_name]):
       inputs += text
       targets += [self.unk_id] * len(text) if self.completion_only and element["is_prompt"][i] else text
-    if self.add_bos:
-      inputs = [self.bos_id] + inputs
-      targets = [self.bos_id] + targets
-    if self.add_eos:
-      inputs += [self.eos_id]
-      targets += [self.eos_id]
     return {
         "inputs": np.asarray(inputs[: self.max_target_length], dtype=np.int32),
         "targets": np.asarray(targets[: self.max_target_length], dtype=np.int32),

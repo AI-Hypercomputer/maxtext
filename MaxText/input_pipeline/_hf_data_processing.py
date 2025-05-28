@@ -64,6 +64,14 @@ def preprocessing_pipeline(
   if shuffle:
     dataset = dataset.shuffle(seed=data_shuffle_seed)
 
+  tokenizer = transformers.AutoTokenizer.from_pretrained(
+      tokenizer_path,
+      add_bos_token=add_bos if not use_sft else False,
+      add_eos_token=add_eos if not use_sft else False,
+      legacy=False,
+      token=hf_access_token,
+  )
+
   if use_sft:
     dataset = dataset.select_columns(data_column_names)
 
@@ -89,18 +97,12 @@ def preprocessing_pipeline(
 
     data_column_names = list(dataset.features.keys())
     dataset = dataset.map(
-        _input_pipeline_utils.extract_messages_and_mask, fn_kwargs={"data_column_name": data_column_names[0]}
+        _input_pipeline_utils.apply_chat_template,
+        fn_kwargs={"tokenizer_model": tokenizer, "data_column_name": data_column_names[0]},
     )
   else:
     dataset = dataset.select_columns(data_column_names)
 
-  tokenizer = transformers.AutoTokenizer.from_pretrained(
-      tokenizer_path,
-      add_bos_token=add_bos if not use_sft else False,
-      add_eos_token=add_eos if not use_sft else False,
-      legacy=False,
-      token=hf_access_token,
-  )
   if tokenizer.pad_token_id is not None:
     pad_id = tokenizer.pad_token_id
   elif tokenizer.unk_token_id is not None:
@@ -136,10 +138,6 @@ def preprocessing_pipeline(
             text_column_name=data_column_names[0],
             completion_only=sft_train_on_completion_only,
             max_target_length=max_target_length,
-            add_bos=add_bos,
-            add_eos=add_eos,
-            bos_id=tokenizer.bos_token_id,
-            eos_id=tokenizer.eos_token_id,
             unk_id=pad_id,
         )
     )

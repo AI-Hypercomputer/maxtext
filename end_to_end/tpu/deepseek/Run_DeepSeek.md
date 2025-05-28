@@ -110,7 +110,7 @@ python3 -m MaxText.sft_trainer MaxText/configs/sft.yml \
 ```
 
 ## Decoding
-One example command to run supervised finetuning with V3 on v5p-256 with unscanned checkpoint for fast decoding. When decoding with a supervised fine-tuned checkpoint, format your prompt as `prompt='<user>your text</user> <assistant>'`.
+One example command to run supervised finetuning with V3 on v5p-256 with unscanned checkpoint for fast decoding.
 
 ```sh
 python3 -m MaxText.decode MaxText/configs/base.yml \
