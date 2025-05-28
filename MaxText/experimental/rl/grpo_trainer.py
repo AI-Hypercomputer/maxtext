@@ -1024,10 +1024,10 @@ def train_loop(config, config_inference, state=None):
 
   param_buffer = Buffer(maxsize=config.inference_replicas)
   data_buffer = Buffer(maxsize=-1)
-  # if config.use_pathways_reshard:
-  #   pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
-  # else:
-  #   pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
+  if config.use_pathways_reshard:
+    pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
+  else:
+    pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
   
   # for inference_state_mesh_sharding in inference_state_mesh_shardings:
     # param_buffer.push({'params':state.params['params']}, inference_state_mesh_sharding.params)
@@ -1085,12 +1085,12 @@ def train_loop(config, config_inference, state=None):
       train_rng, rng = random.split(init_rng)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, train_rng)
-    # with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
-    #   if step != 0 and step % config.inference_rollouts == 0:
-    #     if config.use_pathways_reshard:
-    #       pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
-    #     else:
-    #       pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
+    with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
+      if step != 0 and step % config.inference_rollouts == 0:
+        if config.use_pathways_reshard:
+          pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
+        else:
+          pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
     step_time_delta = datetime.datetime.now() - last_step_completion
     last_step_completion = datetime.datetime.now()
     record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
