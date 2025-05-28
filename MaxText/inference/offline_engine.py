@@ -269,15 +269,30 @@ class PrefillHelper:
 
     @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(5,))
     def _jitted_process(self, params, tokens, slot, true_length, decode_state, rng):
-        first_token, decode_state = self._processor._process(
-            params,
-            tokens,
-            slot,
-            true_length,
-            decode_state,
-            rng,
-        )
-        return first_token.data[:, 0], decode_state
+        if self.auto_layout_supported:
+            first_token, decode_state = self._processor.process(
+                params,
+                decode_state,
+                slot,
+                tokens,
+                true_length,
+                rng,
+            )
+        else:
+            first_token, decode_state = self._processor._process(
+                params,
+                tokens,
+                slot,
+                true_length,
+                decode_state,
+                rng,
+            )
+        log_prob = inference_utils.log_prob_of_chosen_token(
+            decode_state["logits"][slot], decode_state["tokens"][slot]
+        ) 
+
+        # Shapes: (1,), (1,)
+        return first_token.data[:, 0], log_prob, decode_state
 
     def process(
         self,
@@ -309,25 +324,15 @@ class PrefillHelper:
             self._type == PrefillType.DEFAULT
             or padded_length == self.max_prefill_length
         ):
-            if self.auto_layout_supported:
-                first_token, decode_state = self._processor.process(
-                    model_params,
-                    decode_state,
-                    decode_slot,
-                    input_tokens_padded,
-                    input_true_length,
-                    self.rng,
-                )
-            else:
-                first_token, decode_state = self._jitted_process(
-                    model_params,
-                    input_tokens_padded,
-                    decode_slot,
-                    input_true_length,
-                    decode_state,
-                    self.rng,
-                )
-            prefill_done([(first_token, decode_slot)], [input_id], decode_state)
+            first_token, log_prob, decode_state = self._jitted_process(
+                model_params,
+                input_tokens_padded,
+                decode_slot,
+                input_true_length,
+                decode_state,
+                self.rng,
+            )
+            prefill_done([(first_token, log_prob, decode_slot)], [input_id], decode_state)
         # Use batch processor for inputs that can benefit from prefill packing
         elif self._type == PrefillType.BATCH:
             self._batch_processor.process(
@@ -728,39 +733,6 @@ class ReplicaWorker:
             )
         return self.res
 
-    def emit_token(
-        self, prompt_id, result_token: engine_api.ResultTokens, log_prob, slot: int
-    ):
-        """Adds the token to the results for the specified prompt ID and
-        determines if generation should terminate.
-
-        Args:
-            prompt_id: ID of the prompt
-            token: Token to emit
-
-        Returns:
-            True if this token signals the end of generation, False otherwise
-        """
-        # Return if already reached max decode length
-        if len(self.res[prompt_id]) == self.max_decode_length:
-            return True
-
-        # Return if already reached eos
-        if (
-            len(self.res[prompt_id]) > 0
-            and self.res[prompt_id][-1].token in self.eos_ids
-        ):
-            return True
-
-        with jax.profiler.TraceAnnotation("getting_token_from_slot"):
-            token = result_token[slot]
-
-        # Making sure there is no jax and numpy compariosn
-        index = len(self.res[prompt_id])
-
-        self.res[prompt_id].append(TokenOutput(token, log_prob))
-
-        return (token in self.eos_ids) or (index + 1 == self.max_decode_length)
 
     def prefill_done(self, prefill_result, prompt_ids, decode_state):
         """Callback function called when prefill completes.
@@ -774,17 +746,13 @@ class ReplicaWorker:
         """
         # Update decode state
         self.decode_state = decode_state
-        log_prob = inference_utils.log_prob_of_chosen_token(
-            decode_state["logits"], decode_state["tokens"]
-        )
         # Process each prefill result
-        for i, (first_token, slot) in enumerate(prefill_result):
+        for i, (first_token, log_prob, slot) in enumerate(prefill_result):
             self.counter.prefill += 1
             self.slot_to_id[slot] = prompt_ids[i]
-
             # Add token to detokenization queue
             self.detokenize_backlog.put_nowait(
-                (first_token, log_prob[slot], True, prompt_ids[i], slot)
+                (first_token, log_prob, True, prompt_ids[i], slot)
             )
 
     @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
@@ -797,7 +765,7 @@ class ReplicaWorker:
         )
 
         tokens_gathered = jax.device_get(result_tokens.data[:, 0])
-        logps_gathered = jax.device_get(logps[:, 0])
+        logps_gathered = jax.device_get(logps) 
 
         return decode_state, tokens_gathered, logps_gathered
 
@@ -810,7 +778,7 @@ class ReplicaWorker:
         logps = inference_utils.log_prob_of_chosen_token(
             decode_state["logits"], decode_state["tokens"]
         )
-        return (rng, decode_state), (result_tokens.data[:, 0], logps[:, 0])
+        return (rng, decode_state), (result_tokens.data[:, 0], logps)
 
     @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(1,))
     def _jitted_scan_generate_step(self, decode_state):
@@ -835,14 +803,9 @@ class ReplicaWorker:
         # DO NOT SUBMIT. Scan version
         self.decode_state, all_tokens, all_logps = self._jitted_scan_generate_step(self.decode_state)
         all_logps.block_until_ready()
-        with jax.profiler.TraceAnnotation("convert_to_numpy"):
-            all_tokens = np.array(all_tokens)
-            all_logps = np.array(all_logps)
+        self.detokenize_backlog.put_nowait((all_tokens, all_logps, False, 0, 0))
         
 
-        with jax.profiler.TraceAnnotation("post_scan_generate_step"):
-            for i in range(self.min_decode_steps):
-                buffer.append((all_tokens[i], all_logps[i]))
 
         # DO NOT SUBMIT. Non-scan version
         # for i in range(self.min_decode_steps):
@@ -858,9 +821,9 @@ class ReplicaWorker:
         #     buffer.append((result_tokens, log_prob))
 
         # Add results to detokenization queue
-        for result_tokens, log_prob in buffer:
-            self.detokenize_backlog.put_nowait((result_tokens, log_prob, False, 0, 0))
-            self.counter.decode += 1
+        # for result_tokens, log_prob in buffer:
+        #     self.detokenize_backlog.put_nowait((result_tokens, log_prob, False, 0, 0))
+        #     self.counter.decode += 1
 
     def detokenize(self):
         """Detokenize results and manage decode slots.
@@ -877,37 +840,74 @@ class ReplicaWorker:
                 result_tokens, log_prob, is_first_token, row_id, slot = (
                     self.detokenize_backlog.get(timeout=1)
                 )
-                # Comment out to avoid converting to numpy
-                # result_tokens = result_tokens.convert_to_numpy()
+
             except queue.Empty:
                 if not self.running:
                     break
                 continue
 
+            with jax.profiler.TraceAnnotation("convert_to_numpy"):
+                result_tokens = np.array(result_tokens)
+                log_prob = np.array(log_prob)
+
             # Process generated tokens
             if is_first_token:
                 should_terminate = self.emit_token(
-                    row_id, result_tokens, log_prob, slot=0
+                    row_id, int(result_tokens), int(log_prob)
                 )
                 if should_terminate:
                     newly_empty.append(slot)
             else:
-                for slot, id_ in self.slot_to_id.items():
-                    if id_ is None:
-                        continue
-                    with jax.profiler.TraceAnnotation("log_prob_slot"):
-                        log_prob_slot = log_prob[slot]
-                    should_terminate = self.emit_token(
-                        id_, result_tokens, log_prob_slot, slot=slot
-                    )
-                    if should_terminate:
-                        newly_empty.append(slot)
+
+                for decode_step in range(self.min_decode_steps):
+
+                    for slot, id_ in self.slot_to_id.items():
+                        if id_ is None:
+                            continue
+                        with jax.profiler.TraceAnnotation("log_prob_slot"):
+                            log_prob_slot = log_prob[decode_step][slot]
+                            result_tokens_slot = result_tokens[decode_step][slot]
+                        should_terminate = self.emit_token(
+                            id_, int(result_tokens_slot), int(log_prob_slot)
+                        )
+                        if should_terminate:
+                            newly_empty.append(slot)
 
             # Update decode slots
             for slot in newly_empty:
                 self.counter.detokenize += 1
                 self.slot_to_id[slot] = None
                 self.empty_decode_slots.append(slot)
+    
+    def emit_token(
+        self, prompt_id, result_token: int, log_prob, slot: int = None
+    ):
+        """Adds the token to the results for the specified prompt ID and
+        determines if generation should terminate.
+
+        Args:
+            prompt_id: ID of the prompt
+            token: Token to emit
+
+        Returns:
+            True if this token signals the end of generation, False otherwise
+        """
+        # Return if already reached max decode length
+        if len(self.res[prompt_id]) == self.max_decode_length:
+            return True
+
+        # Return if already reached eos
+        if (
+            len(self.res[prompt_id]) > 0
+            and self.res[prompt_id][-1].token in self.eos_ids
+        ):
+            return True
+
+        index = len(self.res[prompt_id])
+
+        self.res[prompt_id].append(TokenOutput(result_token, log_prob))
+
+        return (result_token in self.eos_ids) or (index + 1 == self.max_decode_length)
 
 
 class OfflineEngine:
@@ -1107,23 +1107,19 @@ class OfflineEngine:
 
         # Return CompletionOutput objects
         completion_outputs = []
-        
-        # DO NOT SUBMIT. Debugging now
-        # for input_data in data:
-        #     completion_outputs.append(
-        #         CompletionOutput(
-        #             index=input_data.id,
-        #             token_ids=jnp.stack(
-        #                 [token_output.token.squeeze() for token_output in results[input_data.id]]
-        #             ),
-        #             logprobs=jnp.stack(
-        #                 [
-        #                     token_output.log_prob.squeeze()
-        #                     for token_output in results[input_data.id]
-        #                 ]
-        #             ),
-        #         )
-        #     )
+
+        for input_data in data:
+            completion_outputs.append(
+                CompletionOutput(
+                    index=input_data.id,
+                    token_ids=jnp.array(
+                        [token_output.token for token_output in results[input_data.id]]
+                    ),
+                    logprobs=jnp.array(
+                        [token_output.log_prob for token_output in results[input_data.id]]
+                    ),
+                )
+            )
         return completion_outputs
 
     def pad_data(self, data: List[InputData]) -> List[InputData]:
