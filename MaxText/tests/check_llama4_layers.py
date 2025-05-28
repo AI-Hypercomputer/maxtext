@@ -42,6 +42,10 @@ Details https://github.com/huggingface/transformers/blob/main/src/transformers/m
 """
 
 
+def to_jax(pt_tensor: torch.Tensor) -> jax.Array:
+  return jnp.asarray(pt_tensor.detach().numpy())
+
+
 ### original Pytorch Reference implementation
 def reshape_for_broadcast(freqs_ci: torch.Tensor, query: torch.Tensor):
   """Reshape the frequency tensor for broadcasting."""
@@ -87,13 +91,6 @@ class Llama4VisionRotaryEmbedding(nn.Module):
 
   def forward(self):
     return self.freqs_ci
-
-
-### original Pytorch Reference implementation
-
-
-def to_jax(pt_tensor: torch.Tensor) -> jax.Array:
-  return jnp.asarray(pt_tensor.detach().numpy())
 
 
 class Llama4VisionRotaryEmbeddingTest(unittest.TestCase):
@@ -421,13 +418,13 @@ class Llama4VisionAttention(nn.Module):
   ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
     input_shape = hidden_states.shape[:-1]
     hidden_shape = (*input_shape, -1, self.head_dim)
-    query_states = self.q_proj(hidden_states).view(hidden_shape)
 
+    query_states = self.q_proj(hidden_states).view(hidden_shape)
     key_states = self.k_proj(hidden_states).view(hidden_shape)
     value_states = self.v_proj(hidden_states).view(hidden_shape)
 
-    # Skip rotary embedding since it's covered in Llama4VisionRotaryEmbeddingTest
-    # query_states, key_states = vision_apply_rotary_emb(query_states, key_states, freqs_ci=freqs_ci)
+    query_states, key_states = vision_apply_rotary_emb(query_states, key_states, freqs_ci=freqs_ci)
+
     query_states = query_states.transpose(1, 2)
     key_states = key_states.transpose(1, 2)
     value_states = value_states.transpose(1, 2)
@@ -516,18 +513,22 @@ class Llama4VisionAttentionTest(unittest.TestCase):
     pt_config = self.Config(
         num_attention_heads=self.cfg.num_attention_heads_for_vit, hidden_size=self.cfg.hidden_size_for_vit
     )
+
     model_pt = Llama4VisionAttention(pt_config)
     hidden_states_pt = torch.rand(
         self.cfg.global_batch_size_to_load, self.seq_len_for_vit, self.cfg.hidden_size_for_vit, dtype=torch.float32
     )
-    # Dummy freq_ci, not used since we skip rotary embedding in this test
-    freqs_ci = torch.zeros(
-        self.seq_len_for_vit,
-        1,
-        self.cfg.hidden_size_for_vit // self.cfg.num_attention_heads_for_vit // 2,
-        dtype=torch.float32,
+
+    # Create proper freq_ci using the existing rotary embedding class
+    freqs_ci_model = Llama4VisionRotaryEmbedding(
+        self.cfg.image_size_for_vit,
+        self.cfg.patch_size_for_vit,
+        self.cfg.hidden_size_for_vit,
+        self.cfg.num_attention_heads_for_vit,
+        self.cfg.rope_theta_for_vit,
     )
-    attn_output_pt, _ = model_pt(hidden_states_pt, freqs_ci)
+    freqs_ci = freqs_ci_model.forward()
+    attn_output_pt, _ = model_pt(hidden_states_pt, freqs_ci=freqs_ci)
 
     attention_layer = Attention(
         config=self.cfg,
@@ -540,7 +541,7 @@ class Llama4VisionAttentionTest(unittest.TestCase):
         dropout_rate=0,
         name="self_attention_vision",
         attention_type=attentions.AttentionType.FULL,
-        is_nope_layer=True,  # skip rotary embedding in this test since it's covered in Llama4VisionRotaryEmbeddingTest
+        is_nope_layer=False,
         use_bias_in_projections=True,
         is_vision=True,
     )
@@ -562,6 +563,261 @@ class Llama4VisionAttentionTest(unittest.TestCase):
         deterministic=True,
     )
     np.testing.assert_allclose(attn_ouput_jax, to_jax(attn_output_pt), rtol=1e-3, atol=0.05)
+
+
+### PyTorch Reference Implementations
+
+
+class Llama4VisionMLP(nn.Module):
+  """
+  Pytorch implementation from HuggingFace of Llama4 Vision MLP.
+  """
+
+  def __init__(self, config):
+    super().__init__()
+    self.fc1 = nn.Linear(config.hidden_size, config.intermediate_size, bias=True)
+    self.fc2 = nn.Linear(config.intermediate_size, config.hidden_size, bias=True)
+    self.activation_fn = nn.GELU()
+
+  def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    hidden_states = self.fc1(hidden_states)
+    hidden_states = self.activation_fn(hidden_states)
+    hidden_states = self.fc2(hidden_states)
+    return hidden_states
+
+
+class Llama4VisionEncoderLayer(nn.Module):
+  """
+  Pytorch implementation from HuggingFace of Llama4 Vision Encoder Layer.
+  """
+
+  def __init__(self, config):
+    super().__init__()
+    self.hidden_size = config.hidden_size
+    self.self_attn = Llama4VisionAttention(config)
+    self.mlp = Llama4VisionMLP(config)
+    self.input_layernorm = nn.LayerNorm(config.hidden_size)
+    self.post_attention_layernorm = nn.LayerNorm(config.hidden_size)
+
+  def forward(
+      self,
+      hidden_state: torch.Tensor,
+      freqs_ci: torch.Tensor,
+      attention_mask: Optional[torch.Tensor] = None,
+      output_attentions: Optional[bool] = None,
+  ):
+    # Self Attention
+    residual = hidden_state
+    hidden_state = self.input_layernorm(hidden_state)
+    hidden_state, attn_weights = self.self_attn(
+        hidden_state,
+        freqs_ci=freqs_ci,
+        attention_mask=attention_mask,
+    )
+    hidden_state = residual + hidden_state
+
+    # Feed forward
+    residual = hidden_state
+    hidden_state = self.post_attention_layernorm(hidden_state)
+    hidden_state = self.mlp(hidden_state)
+    hidden_state = residual + hidden_state
+
+    outputs = (hidden_state,)
+    if output_attentions:
+      outputs += (attn_weights,)
+    return outputs
+
+
+class Llama4VisionEncoder(nn.Module):
+  """
+  Pytorch implementation from HuggingFace of Llama4 Vision Encoder.
+  """
+
+  def __init__(self, config):
+    super().__init__()
+    self.config = config
+    self.layers = nn.ModuleList([Llama4VisionEncoderLayer(config) for _ in range(config.num_hidden_layers)])
+
+  def forward(
+      self,
+      hidden_states: torch.Tensor,
+      freqs_ci: torch.Tensor,
+      attention_mask: Optional[torch.Tensor] = None,
+      output_attentions: Optional[bool] = None,
+      output_hidden_states: Optional[bool] = None,
+      return_dict: Optional[bool] = None,
+  ):
+    # all_hidden_states = () if output_hidden_states else None
+    # all_attentions = () if output_attentions else None
+
+    for encoder_layer in self.layers:
+      layer_outputs = encoder_layer(
+          hidden_state=hidden_states,
+          attention_mask=attention_mask,
+          output_attentions=output_attentions,
+          freqs_ci=freqs_ci,
+      )
+
+      # if output_attentions:
+      #   all_attentions = all_attentions + (layer_outputs[1],)
+
+      hidden_states = layer_outputs[0]
+
+    # if output_hidden_states:
+    #   all_hidden_states = all_hidden_states + (hidden_states,)
+
+    return hidden_states
+
+
+class Llama4VisionEncoderTest(unittest.TestCase):
+  """Test for the Llama4 vision encoder."""
+
+  def _copy_weights(self, pt_model, params, hidden_size=256, num_head=2):
+    """Copy weights from PyTorch model to JAX model.
+
+    Args:
+      pt_model: PyTorch Llama4VisionEncoder model
+      params: JAX model parameters
+    """
+    head_dim = hidden_size // num_head
+    updated_params = jax.tree_util.tree_map(lambda x: x, params)
+
+    # Copy weights for each encoder layer
+    for i, _ in enumerate(pt_model.layers):
+      # Copy attention weights
+      updated_params["params"][f"layers_{i}"]["self_attention_vision"]["query"]["kernel"] = to_jax(
+          pt_model.layers[i].self_attn.q_proj.weight.T.view(hidden_size, num_head, head_dim)
+      )
+      updated_params["params"][f"layers_{i}"]["self_attention_vision"]["key"]["kernel"] = to_jax(
+          pt_model.layers[i].self_attn.k_proj.weight.T.view(hidden_size, num_head, head_dim)
+      )
+      updated_params["params"][f"layers_{i}"]["self_attention_vision"]["value"]["kernel"] = to_jax(
+          pt_model.layers[i].self_attn.v_proj.weight.T.view(hidden_size, num_head, head_dim)
+      )
+      updated_params["params"][f"layers_{i}"]["self_attention_vision"]["out"]["kernel"] = to_jax(
+          pt_model.layers[i].self_attn.o_proj.weight.T.view(num_head, head_dim, hidden_size)
+      )
+
+      # Copy attention biases
+      updated_params["params"][f"layers_{i}"]["self_attention_vision"]["query"]["bias"] = to_jax(
+          pt_model.layers[i].self_attn.q_proj.bias.view(num_head, head_dim)
+      )
+      updated_params["params"][f"layers_{i}"]["self_attention_vision"]["key"]["bias"] = to_jax(
+          pt_model.layers[i].self_attn.k_proj.bias.view(num_head, head_dim)
+      )
+      updated_params["params"][f"layers_{i}"]["self_attention_vision"]["value"]["bias"] = to_jax(
+          pt_model.layers[i].self_attn.v_proj.bias.view(num_head, head_dim)
+      )
+      updated_params["params"][f"layers_{i}"]["self_attention_vision"]["out"]["bias"] = to_jax(
+          pt_model.layers[i].self_attn.o_proj.bias
+      )
+
+      # Copy MLP weights
+      updated_params["params"][f"layers_{i}"]["Llama4VisionMLP_0"]["vit_encoder_layer_mlp_fc1"]["kernel"] = to_jax(
+          pt_model.layers[i].mlp.fc1.weight.T
+      )
+      updated_params["params"][f"layers_{i}"]["Llama4VisionMLP_0"]["vit_encoder_layer_mlp_fc2"]["kernel"] = to_jax(
+          pt_model.layers[i].mlp.fc2.weight.T
+      )
+
+      # Copy MLP biases
+      updated_params["params"][f"layers_{i}"]["Llama4VisionMLP_0"]["vit_encoder_layer_mlp_fc1"]["bias"] = to_jax(
+          pt_model.layers[i].mlp.fc1.bias
+      )
+      updated_params["params"][f"layers_{i}"]["Llama4VisionMLP_0"]["vit_encoder_layer_mlp_fc2"]["bias"] = to_jax(
+          pt_model.layers[i].mlp.fc2.bias
+      )
+
+      # Copy layer norm weights
+      updated_params["params"][f"layers_{i}"]["input_layer_norm"]["scale"] = to_jax(
+          pt_model.layers[i].input_layernorm.weight
+      )
+      updated_params["params"][f"layers_{i}"]["input_layer_norm"]["bias"] = to_jax(pt_model.layers[i].input_layernorm.bias)
+      updated_params["params"][f"layers_{i}"]["post_attention_layer_norm"]["scale"] = to_jax(
+          pt_model.layers[i].post_attention_layernorm.weight
+      )
+      updated_params["params"][f"layers_{i}"]["post_attention_layer_norm"]["bias"] = to_jax(
+          pt_model.layers[i].post_attention_layernorm.bias
+      )
+
+    return updated_params
+
+  class Config(NamedTuple):
+    num_attention_heads: int
+    hidden_size: int
+    intermediate_size: int
+    num_hidden_layers: int
+    attention_dropout: int = 0
+
+  config_arguments = {
+      "per_device_batch_size": 4.0,
+      "run_name": "test",
+      "enable_checkpointing": False,
+      "model_name": "llama4-17b-16e",
+      "scan_layers": False,
+      "num_hidden_layers_for_vit": 6,
+      "dtype": "float32",
+  }
+
+  def setUp(self):
+    super().setUp()
+    self.cfg = pyconfig.initialize(
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+        **self.config_arguments,
+    )
+    self.rng = jax.random.PRNGKey(0)
+
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
+    self.seq_len_for_vit = (self.cfg.image_size_for_vit // self.cfg.patch_size_for_vit) ** 2 + 1
+
+  def test_vision_encoder(self):
+    """Test the full vision encoder implementation."""
+
+    # PyTorch config using the loaded configuration values
+    pt_config = self.Config(
+        num_attention_heads=self.cfg.num_attention_heads_for_vit,
+        hidden_size=self.cfg.hidden_size_for_vit,
+        intermediate_size=self.cfg.intermediate_size_for_vit,
+        num_hidden_layers=self.cfg.num_hidden_layers_for_vit,
+        attention_dropout=0,
+    )
+
+    # Create PyTorch model
+    pt_model = Llama4VisionEncoder(pt_config)
+    pt_model.eval()
+
+    # Create JAX model
+    jax_model = llama4.Llama4VisionEncoder(config=self.cfg, mesh=self.mesh)
+
+    # Create test input using config dimensions
+    batch_size = 4
+    inputs = jnp.ones((batch_size, self.seq_len_for_vit, self.cfg.hidden_size_for_vit), dtype=jnp.float32)
+
+    # Initialize JAX parameters
+    params = jax_model.init(self.rng, inputs, deterministic=True)
+
+    # Copy weights from PyTorch to JAX
+    params = self._copy_weights(pt_model, params, self.cfg.hidden_size_for_vit, self.cfg.num_attention_heads_for_vit)
+
+    freqs_ci_model = Llama4VisionRotaryEmbedding(
+        self.cfg.image_size_for_vit,
+        self.cfg.patch_size_for_vit,
+        self.cfg.hidden_size_for_vit,
+        self.cfg.num_attention_heads_for_vit,
+        self.cfg.rope_theta_for_vit,
+    )
+    freqs_ci = freqs_ci_model.forward()
+
+    # Forward pass through PyTorch model
+    pt_inputs = torch.from_numpy(np.array(inputs)).to(torch.float32)
+    pt_outputs = pt_model(hidden_states=pt_inputs, freqs_ci=freqs_ci)
+
+    # Forward pass through JAX model
+    jax_outputs = jax_model.apply(params, inputs, deterministic=True)
+
+    # Compare outputs
+    np.testing.assert_allclose(jax_outputs, to_jax(pt_outputs), rtol=1e-3, atol=0.05)
 
 
 if __name__ == "__main__":
