@@ -95,9 +95,13 @@ def main(argv: Sequence[str]) -> None:
 
   text = config.prompt
   prefill_length = config.max_prefill_predict_length
+  processor_output = multimodal_utils.PreprocessorOutput()
   if config.use_multimodal:
     text = multimodal_utils.reformat_prompt(text, config.model_name)
-    prefill_length -= multimodal_utils.get_image_offsets(config.model_name)
+    # TODO(hengtaoguo): Support multiple images as input.
+    images = multimodal_utils.load_image_from_path(config.image_path)
+    processor_output = multimodal_utils.pre_process_image(images, model_name=config.model_name)
+    prefill_length -= multimodal_utils.get_image_offsets(config.model_name, processor_output=processor_output)
 
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
@@ -107,13 +111,11 @@ def main(argv: Sequence[str]) -> None:
   except AttributeError as _:
     has_chat_template = False
   tokens, true_length = tokenizer_model.encode(text, is_bos=not has_chat_template, prefill_lengths=[prefill_length])
-  processor_output = multimodal_utils.PreprocessorOutput()
   if config.use_multimodal:
-    # TODO(hengtaoguo): Support multiple images as input.
-    images = multimodal_utils.load_image_from_path(config.image_path)
-    processor_output = multimodal_utils.pre_process_image(images, model_name=config.model_name)
-    tokens = multimodal_utils.prepare_text_for_image_fusion(tokens, model_name=config.model_name)
-    true_length += multimodal_utils.get_image_offsets(config.model_name)
+    tokens = multimodal_utils.prepare_text_for_image_fusion(
+        tokens, model_name=config.model_name, processor_output=processor_output
+    )
+    true_length += multimodal_utils.get_image_offsets(config.model_name, processor_output=processor_output)
 
   assert (
       true_length <= config.max_prefill_predict_length
