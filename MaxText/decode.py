@@ -107,11 +107,11 @@ def main(argv: Sequence[str]) -> None:
   except AttributeError as _:
     has_chat_template = False
   tokens, true_length = tokenizer_model.encode(text, is_bos=not has_chat_template, prefill_lengths=[prefill_length])
-  images = None
+  processor_output = multimodal_utils.PreprocessorOutput()
   if config.use_multimodal:
     # TODO(hengtaoguo): Support multiple images as input.
     images = multimodal_utils.load_image_from_path(config.image_path)
-    images = multimodal_utils.pre_process_image(images, model_name=config.model_name)
+    processor_output = multimodal_utils.pre_process_image(images, model_name=config.model_name)
     tokens = multimodal_utils.prepare_text_for_image_fusion(tokens, model_name=config.model_name)
     true_length += multimodal_utils.get_image_offsets(config.model_name)
 
@@ -132,7 +132,12 @@ def main(argv: Sequence[str]) -> None:
   rng, rng_prefill = jax.random.split(rng)  # Split RNG before calling prefill
   for i in range(_NUM_STREAMS):
     prefill_result, first_token = engine.prefill(
-        params=params, padded_tokens=tokens, images=images, true_length=true_length, rng=rng_prefill, slot=i
+        params=params,
+        padded_tokens=tokens,
+        images=processor_output.pixel_values,
+        true_length=true_length,
+        rng=rng_prefill,
+        slot=i,
     )
     prefill_result_list.append(prefill_result)
     first_token_list.append(first_token)

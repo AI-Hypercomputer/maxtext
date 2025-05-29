@@ -18,6 +18,8 @@ limitations under the License.
 import unittest
 import os.path
 
+import pytest
+
 import numpy as np
 
 from jax import numpy as jnp
@@ -103,6 +105,7 @@ class QuantizationTest(unittest.TestCase):
       quant = _configure_quantization(quant_str="int8", mode_str=quant_mode)
       self.assertNotEqual(quant, None)
 
+  @pytest.mark.tpu_only  # b/421002974
   def test_aqt_quantization(self):
     # Without quantization
     inputs, res_einsum, res_dg = _apply()
