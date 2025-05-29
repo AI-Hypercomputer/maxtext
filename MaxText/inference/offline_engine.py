@@ -750,23 +750,6 @@ class ReplicaWorker:
             self.worker_thread.start()
         else:
             self._start_basic_inference(data, desc)
-
-    def _scan_prefill_step(self, carry, inputs):
-        decode_state, rng, slot = carry
-        tokens, true_len = inputs
-        rng, rng_prefill = jax.random.split(rng)
-        prefill_result, _ = self.engine.prefill(params=self.params, padded_tokens=tokens, true_length=true_len, rng=rng_prefill, slot=slot)
-        decode_state = self.engine.insert(prefill_result, decode_state, slot)
-        return (decode_state, rng, slot + 1), None
-        
-    
-
-    def _scan_generate_step(self, carry, _):
-        rng, decode_state = carry
-        rng, rng_generate = jax.random.split(rng)
-        decode_state, result_tokens = self.engine.generate(self.params, decode_state, rng=rng_generate)
-        logps = inference_utils.log_prob_of_chosen_token(decode_state["logits"], decode_state["tokens"])
-        return (rng, decode_state), (result_tokens.data[:, 0], logps[:, 0])
     
     
     def _start_basic_inference(
@@ -786,27 +769,39 @@ class ReplicaWorker:
         prompts = jnp.array([row.tokens for row in data])
         true_length = jnp.array([row.true_length for row in data])
 
-        @functools.partial(jax.jit, donate_argnums=(0,))
+        def _scan_prefill_step(carry, inputs):
+            decode_state, rng, slot = carry
+            tokens, true_len = inputs
+            rng, rng_prefill = jax.random.split(rng)
+            prefill_result, _ = self.engine.prefill(params=self.params, padded_tokens=tokens, true_length=true_len, rng=rng_prefill, slot=slot)
+            decode_state = self.engine.insert(prefill_result, decode_state, slot)
+            return (decode_state, rng, slot + 1), None
+        
+    
+        def _scan_generate_step(carry, _):
+            rng, decode_state = carry
+            rng, rng_generate = jax.random.split(rng)
+            decode_state, result_tokens = self.engine.generate(self.params, decode_state, rng=rng_generate)
+            logps = inference_utils.log_prob_of_chosen_token(decode_state["logits"], decode_state["tokens"])
+            return (rng, decode_state), (result_tokens.data[:, 0], logps[:, 0])
+    
+        # @functools.partial(jax.jit, donate_argnums=(0,))
         def _jitted_prefill(decode_state, prompts, true_length):
             (decode_state, _, _), _ = jax.lax.scan(
-                self._scan_prefill_step, init=(decode_state, self.rng, 0), xs=(prompts, true_length)
+                _scan_prefill_step, init=(decode_state, self.rng, 0), xs=(prompts, true_length)
             )
             return decode_state
         
-        @functools.partial(jax.jit, donate_argnums=(0,))
+        # @functools.partial(jax.jit, donate_argnums=(0,))
         def _jitted_generate(decode_state):
-            (_, decode_state), (all_tokens, all_logps) = jax.lax.scan(self._scan_generate_step, init=(self.rng, decode_state), xs=None, length=self.max_decode_length)
+            (_, decode_state), (all_tokens, all_logps) = jax.lax.scan(_scan_generate_step, init=(self.rng, decode_state), xs=None, length=self.max_decode_length)
             jax.lax.with_sharding_constraint(all_tokens, jax.sharding.NamedSharding(self.mesh, PartitionSpec(None)))
             jax.lax.with_sharding_constraint(all_logps, jax.sharding.NamedSharding(self.mesh, PartitionSpec(None)))
             return decode_state, all_tokens, all_logps
 
         with self.mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
             decode_state = _jitted_prefill(self.decode_state, prompts, true_length)
-        # (decode_state, _, _), _ = jax.lax.scan(
-        #     self._scan_prefill_step, init=(self.decode_state, self.rng, 0), xs=(prompts, true_length)
-        # )
-        with self.mesh, nn_partitioning.axis_rules(self.config.logical_axis_rules):
-            self.decode_state = all_tokens, all_logps = _jitted_generate(decode_state)
+            self.decode_state, all_tokens, all_logps = _jitted_generate(decode_state)
         
         completions = jnp.transpose(all_tokens, (1,0))
         logps = jnp.transpose(all_logps, (1,0))
