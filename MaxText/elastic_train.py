@@ -280,10 +280,34 @@ def train_loop(config, elastic_manager, state=None):
   # the step is restored back to the latest snapshot when a slice is lost
   while step < config.steps:
     try:
+      elastic_manager.maybe_snapshot(
+          step=step,
+          snapshot_jax_arrays={
+              "params": state.params,
+              "opt_state": state.opt_state,
+          },
+          block=True,
+      )
+
       if (config.elastic_mode == "fast-resume" and
           elastic_manager.good_slice_count < elastic_manager.total_slice_count):
         wait_for_all_slices(elastic_manager, config.elastic_wait_period)
 
+      ret = elastic_manager.maybe_reshard_up(
+          step=step,
+          snapshot_jax_arrays={
+              "params": state.params,
+              "opt_state": state.opt_state,
+          },
+          elastic_handler=elastic_handler,
+          handler_kwargs={
+              "config": config,
+              "elastic_manager": elastic_manager,
+              "checkpoint_manager": checkpoint_manager,
+          },
+      )
+
+      if ret is not None:
         (
             config,
             step,
@@ -297,19 +321,7 @@ def train_loop(config, elastic_manager, state=None):
             metric_logger,
             writer,
             input_data_shardings,
-        ) = elastic_manager.maybe_reshard_up(
-            step=step,
-            snapshot_jax_arrays={
-                "params": state.params,
-                "opt_state": state.opt_state,
-            },
-            elastic_handler=elastic_handler,
-            handler_kwargs={
-                "config": config,
-                "elastic_manager": elastic_manager,
-                "checkpoint_manager": checkpoint_manager,
-            },
-        )
+        ) = ret
         step += 1
 
       if step == first_profiling_step or prof.should_activate_periodic_profile(step):
@@ -354,44 +366,6 @@ def train_loop(config, elastic_manager, state=None):
         if step == last_profiling_step or prof.should_deactivate_periodic_profile(step):
           prof.deactivate(blocking_object=state)
 
-      elastic_manager.maybe_snapshot(
-          step=step,
-          snapshot_jax_arrays={
-              "params": state.params,
-              "opt_state": state.opt_state,
-          },
-          block=True,
-      )
-
-      ret = elastic_manager.maybe_reshard_up(
-          step=step,
-          snapshot_jax_arrays={
-              "params": state.params,
-              "opt_state": state.opt_state,
-          },
-          elastic_handler=elastic_handler,
-          handler_kwargs={
-              "config": config,
-              "elastic_manager": elastic_manager,
-              "checkpoint_manager": checkpoint_manager,
-          },
-      )
-
-      if ret is not None:
-        (
-            config,
-            step,
-            state,
-            mesh,
-            checkpoint_manager,
-            data_iterator,
-            p_train_step,
-            example_batch,
-            learning_rate_schedule,
-            metric_logger,
-            writer,
-            input_data_shardings,
-        ) = ret
 
       if step == start_step:
         max_utils.print_mem_stats("After params initialized")
