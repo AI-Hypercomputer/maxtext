@@ -59,6 +59,7 @@ class MixtralDecoderLayer(nn.Module):
       previous_chunk=None,
       page_state=None,
       slot=None,
+      piggybacking_decode_params=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -107,6 +108,7 @@ class MixtralDecoderLayer(nn.Module):
         deterministic=deterministic,
         model_mode=model_mode,
         previous_chunk=previous_chunk,
+        piggybacking_decode_params=piggybacking_decode_params,
     )
 
     attention_lnx = nn.with_logical_constraint(

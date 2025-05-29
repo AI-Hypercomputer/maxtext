@@ -267,6 +267,7 @@ class Gpt3DecoderLayer(nn.Module):
       previous_chunk=None,
       page_state=None,
       slot=None,
+      piggybacking_decode_params=None,
   ):
     cfg = self.config
     mesh = self.mesh

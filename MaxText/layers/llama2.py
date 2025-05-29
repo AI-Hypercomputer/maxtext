@@ -59,6 +59,7 @@ class LlamaDecoderLayer(nn.Module):
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
       previous_chunk=None,
+      piggybacking_decode_params=None,
   ):
     cfg = self.config
     mesh = self.mesh

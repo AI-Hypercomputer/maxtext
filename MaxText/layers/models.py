@@ -65,6 +65,7 @@ class DecoderLayer(nn.Module):
       previous_chunk=None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
+      piggybacking_decode_params=None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -461,6 +462,7 @@ class Decoder(nn.Module):
       page_state: Optional[page_manager.PageState] = None,
       bidirectional_mask: Optional[Any] = None,
       image_embeddings: Optional[jnp.ndarray] = None,
+      piggybacking_decode_params: Optional[piggybacking_decode.PiggyBackingDecodeParams] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -588,6 +590,7 @@ class Decoder(nn.Module):
               decoder_positions,
               deterministic,
               model_mode,
+              piggybacking_decode_params=piggybacking_decode_params, ### YYY: remove it
               **layer_call_kwargs,
           )
       else:
@@ -640,6 +643,7 @@ class Decoder(nn.Module):
                 previous_chunk=previous_chunk,
                 page_state=page_state,
                 slot=slot,
+                piggybacking_decode_params=piggybacking_decode_params,
                 **layer_call_kwargs,
             )
     y = self.get_norm_layer()(
@@ -799,5 +803,6 @@ class Transformer(nn.Module):
         page_state=page_state,
         bidirectional_mask=bidirectional_mask,
         image_embeddings=image_embeddings,
+        piggybacking_decode_params=piggybacking_decode_params,
     )
     return logits
