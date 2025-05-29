@@ -440,9 +440,9 @@ matt_dream_v1 = _add_to_model_dictionary(
         "weight_dtype": "bfloat16",
         
         # PP
-        "dcn_pipeline_parallelism": 8, # PP
-        "base_num_decoder_layers": 64, # PP * 8    
-        "num_pipeline_microbatches": 16, # PP * 2 or since we are sad PP * 1
+        "dcn_pipeline_parallelism": 16, # PP
+        "base_num_decoder_layers": 128, # PP * 8    
+        "num_pipeline_microbatches": 32, # PP * 2 or since we are sad PP * 1
         "num_layers_per_pipeline_stage": 2,
         "pipeline_fsdp_ag_once": True
         # "scan_layers": False,
