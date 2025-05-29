@@ -266,11 +266,13 @@ class PrefillHelper:
                 params, tokens, 0, max_length, decode_state
             )
         return decode_state
-
-    @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(5,))
-    def _jitted_process(self, params, tokens, slot, true_length, decode_state, rng):
-        if self.auto_layout_supported:
-            first_token, decode_state = self._processor.process(
+    
+    # TODO: clean up this code logic. 
+    @staticmethod
+    @functools.partial(jax.jit, static_argnums=(6,7), donate_argnums=(4,))
+    def _jitted_process(params, tokens, slot, true_length, decode_state, rng, processor_fn, auto_layout_supported=False):
+        if auto_layout_supported:
+            first_token, decode_state = processor_fn(
                 params,
                 decode_state,
                 slot,
@@ -279,7 +281,7 @@ class PrefillHelper:
                 rng,
             )
         else:
-            first_token, decode_state = self._processor._process(
+            first_token, decode_state = processor_fn(
                 params,
                 tokens,
                 slot,
@@ -324,6 +326,7 @@ class PrefillHelper:
             self._type == PrefillType.DEFAULT
             or padded_length == self.max_prefill_length
         ):
+            prefill_fn = self._processor.process if self.auto_layout_supported else self._processor._process
             first_token, log_prob, decode_state = self._jitted_process(
                 model_params,
                 input_tokens_padded,
@@ -331,6 +334,8 @@ class PrefillHelper:
                 input_true_length,
                 decode_state,
                 self.rng,
+                prefill_fn,
+                self.auto_layout_supported,
             )
             prefill_done([(first_token, log_prob, decode_slot)], [input_id], decode_state)
         # Use batch processor for inputs that can benefit from prefill packing
@@ -651,6 +656,7 @@ class ReplicaWorker:
             self.worker_thread.join()
             self.worker_thread = None
 
+    
     def _start_inference(
         self,
         data_queue: queue.Queue,
@@ -685,7 +691,7 @@ class ReplicaWorker:
         # Process each input
         while not data_queue.empty():
             try:
-                row = data_queue.get(timeout=1)
+                row = data_queue.get(timeout=0.01)
             except queue.Empty:
                 break
 
@@ -709,7 +715,6 @@ class ReplicaWorker:
 
         # 4. Flush any pending inputs in batch prefill mode
         self.prefill_helper.finalize(self.params, self.decode_state, self.prefill_done)
-        self.decode_state["logits"].block_until_ready()
 
         # 5. Continue decoding until all sequences are complete
         while not all(value is None for value in self.slot_to_id.values()):
@@ -745,6 +750,8 @@ class ReplicaWorker:
             prompt_ids: List of prompt IDs
             decode_state: Updated decode state
         """
+        if DEBUG:
+            max_logging.log("Replica {}. Prefill done".format(self.worker_id))
         # Update decode state
         self.decode_state = decode_state
         # Process each prefill result
@@ -801,29 +808,30 @@ class ReplicaWorker:
         """
 
         # DO NOT SUBMIT. Scan version
-        self.decode_state, all_tokens, all_logps = self._jitted_scan_generate_step(self.decode_state)
-        all_logps.block_until_ready()
-        self.detokenize_backlog.put_nowait((all_tokens, all_logps, False, 0, 0))
-        self.counter.decode += 1
+        # self.decode_state, all_tokens, all_logps = self._jitted_scan_generate_step(self.decode_state)
+        # all_logps.block_until_ready()
+        # self.detokenize_backlog.put_nowait((all_tokens, all_logps, False, 0, 0))
+        # self.counter.decode += 1
         
 
         ### DO NOT SUBMIT. Non-scan version ###
-        # buffer = []
-        # for i in range(self.min_decode_steps):
-        #     # Generate next tokens
-        #     start_time = time.time()
-        #     self.decode_state, result_tokens, log_prob = self._jitted_generate_fn(
-        #         self.params, self.decode_state, self.rng
-        #     )
-        #     with jax.profiler.TraceAnnotation("log_prob_block_until_ready"):
-        #         log_prob.block_until_ready()
-        #     end_time = time.time()
-        #     print(f"Replica {self.worker_id}. Time taken to run generate_fn: {end_time - start_time} seconds")
-        #     buffer.append((result_tokens, log_prob))
+        buffer = []
+        for i in range(self.min_decode_steps):
+            # Generate next tokens
+            start_time = time.time()
+            self.decode_state, result_tokens, log_prob = self._jitted_generate_fn(
+                self.params, self.decode_state, self.rng
+            )
+            with jax.profiler.TraceAnnotation("log_prob_block_until_ready"):
+                log_prob.block_until_ready()
+            end_time = time.time()
+            if DEBUG:
+                max_logging.log("Replica {}. Time taken to run generate_fn: {} seconds".format(self.worker_id, end_time - start_time))
+            buffer.append((result_tokens, log_prob))
 
-        # # Add results to detokenization queue
-        # self.detokenize_backlog.put_nowait(([result_token for result_token, _ in buffer], [log_prob for _, log_prob in buffer], False, 0, 0))
-        # self.counter.decode += 1
+        # Add results to detokenization queue
+        self.detokenize_backlog.put_nowait(([result_token for result_token, _ in buffer], [log_prob for _, log_prob in buffer], False, 0, 0))
+        self.counter.decode += 1
         ### DO NOT SUBMIT. Non-scan version ends ###
 
     def detokenize(self):
@@ -1030,8 +1038,9 @@ class OfflineEngine:
         )  # No need to run worker as a thread if there is only one replica
         replica_rngs = jax.random.split(self.rng, self.dp)
         assert replica_rngs[0].shape == self.rng.shape
-        self.replica_workers = [
-            ReplicaWorker(
+        self.replica_workers = []
+        for i in range(self.dp):
+            worker = ReplicaWorker(
                 config=self.config,
                 params=self.params,
                 min_decode_steps=self.min_decode_steps,
@@ -1048,8 +1057,11 @@ class OfflineEngine:
                 run_as_a_thread=run_as_a_thread,
                 rng=replica_rngs[i],
             )
-            for i in range(self.dp)
-        ]
+            if i == 0:
+                worker.ensure_init_finished()
+            self.replica_workers.append(worker)
+            
+
         for replica in self.replica_workers:
             replica.ensure_init_finished()
 
