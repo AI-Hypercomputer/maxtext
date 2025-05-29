@@ -92,7 +92,7 @@ if [ -z "$MAXENGINE_ARGS" ];
 then
   CHECKPOINT="gs://msingh-bkt/checkpoints/quant_${MODEL_NAME}-chat/mlperf_070924/int8_"
   BASE_CFG="model_name=${MODEL_NAME} tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT}"
-  QUANT_CFG="quantization=int8 quantize_kvcache=True checkpoint_is_quantized=True"
+  QUANT_CFG="quantization=int8 quantize_kvcache=True checkpoint_is_quantized=True skip_jax_distributed_system=true"
   MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG}"
 fi
 
@@ -117,7 +117,7 @@ else
   export DATASET_TYPE=full
   export DATASET_PATH=${DATA_DISK_DIR}/processed-data.pkl
   export TOTAL_SAMPLE_COUNT=24576
-  export USER_CONFIG=user.conf
+  export USER_CONFIG=user.conf # NOTE: you may need to change this path(e.g. `MaxText/inference_mlperf/user.conf`)
 fi
 
 # LIBTPU_INIT_ARGS="--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true --xla_tpu_enable_async_collective_fusion=true --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true"
