@@ -571,7 +571,7 @@ class RoutedMoE(nn.Module):
         output = output[: hs_shape[0]]
       return output
 
-    # Currently, we only support data and tensor parallelism with Megablox.
+    # Currently, we support data, tensor, and expert parallelism with Megablox.
     # We all gather the input activations over tensor parallelism to follow strategy
     # in https://parsa.epfl.ch/course-info/cs723/papers/Megatron.pdf.
 
@@ -589,10 +589,10 @@ class RoutedMoE(nn.Module):
     else:
       batch_logical_axis = "activation_batch_no_exp"
 
-    input_partition_pspec = nn.logical_to_mesh_axes((batch_logical_axis, None, None))
-    gate_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, None, None))
+    input_partition_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_length", None))
+    gate_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_length", None))
     if self.config.model_name.startswith("deepseek3"):
-      pre_bias_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, None, None))
+      pre_bias_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_length", None))
     else:
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits_pspec = None
@@ -610,7 +610,7 @@ class RoutedMoE(nn.Module):
         shard_map.shard_map,
         mesh=self.mesh,
         in_specs=(input_partition_pspec, gate_logits_pspec, pre_bias_logits_pspec, w0_pspec, w1_pspec, wo_pspec),
-        out_specs=(nn.logical_to_mesh_axes((batch_logical_axis, None, "activation_embed"))),
+        out_specs=(nn.logical_to_mesh_axes((batch_logical_axis, "activation_length", "activation_embed"))),
         check_rep=False,
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo):

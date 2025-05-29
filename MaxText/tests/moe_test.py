@@ -348,13 +348,16 @@ class RoutedMoeTest(unittest.TestCase):
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
-        per_device_batch_size=4,
+        per_device_batch_size=1,
     )
 
     rng = jax.random.PRNGKey(1234)
     rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
     hidden_states = jax.random.uniform(
-        rng_hidden_states, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
+        rng_hidden_states,
+        (int(cfg.per_device_batch_size) * device_count, cfg.max_target_length, cfg.base_emb_dim),
+        dtype=cfg.dtype,
     )
 
     devices_array = maxtext_utils.create_device_mesh(cfg)
@@ -373,13 +376,16 @@ class RoutedMoeTest(unittest.TestCase):
         dtype="bfloat16",
         megablox=False,
         sparse_matmul=True,
-        per_device_batch_size=4,
+        per_device_batch_size=1,
     )
 
     rng = jax.random.PRNGKey(1234)
     rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
     hidden_states = jax.random.uniform(
-        rng_hidden_states, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
+        rng_hidden_states,
+        (int(cfg.per_device_batch_size) * device_count, cfg.max_target_length, cfg.base_emb_dim),
+        dtype=cfg.dtype,
     )
 
     devices_array = maxtext_utils.create_device_mesh(cfg)
@@ -398,13 +404,16 @@ class RoutedMoeTest(unittest.TestCase):
         dtype="float32",
         megablox=False,
         sparse_matmul=False,
-        per_device_batch_size=4,
+        per_device_batch_size=1,
     )
 
     rng = jax.random.PRNGKey(2345)
     rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
     hidden_states = jax.random.uniform(
-        rng_hidden_states, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
+        rng_hidden_states,
+        (int(cfg.per_device_batch_size) * device_count, cfg.max_target_length, cfg.base_emb_dim),
+        dtype=cfg.dtype,
     )
 
     devices_array = maxtext_utils.create_device_mesh(cfg)
@@ -423,14 +432,47 @@ class RoutedMoeTest(unittest.TestCase):
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
-        per_device_batch_size=4,
+        per_device_batch_size=1,
         ici_expert_parallelism=4,
     )
 
     rng = jax.random.PRNGKey(2345)
     rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
     hidden_states = jax.random.uniform(
-        rng_hidden_states, (int(cfg.per_device_batch_size), cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype
+        rng_hidden_states,
+        (int(cfg.per_device_batch_size) * device_count, cfg.max_target_length, cfg.base_emb_dim),
+        dtype=cfg.dtype,
+    )
+
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices_array, cfg.mesh_axes)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      variables, expected_output = self.get_expected_output(rng_model, hidden_states, cfg)
+      actual_output, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
+      self.assertTrue(jax.numpy.allclose(expected_output, actual_output, rtol=1e-02, atol=1e-02, equal_nan=False))
+
+  @pytest.mark.tpu_only
+  def test_megablox_context_parallelism(self):
+    cfg = pyconfig.initialize(
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
+        run_name="moe_block_megablox_cp_test",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        megablox=True,
+        sparse_matmul=True,
+        per_device_batch_size=1,
+        ici_context_parallelism=4,
+    )
+
+    rng = jax.random.PRNGKey(2345)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
+    hidden_states = jax.random.uniform(
+        rng_hidden_states,
+        (int(cfg.per_device_batch_size) * device_count, cfg.max_target_length, cfg.base_emb_dim),
+        dtype=cfg.dtype,
     )
 
     devices_array = maxtext_utils.create_device_mesh(cfg)
@@ -541,7 +583,7 @@ class RoutedMoeTest(unittest.TestCase):
 
   def test_local_permute_offset(self):
     experts_per_group = 2
-    expert_groups = 4 # aka number of expert shards.
+    expert_groups = 4  # aka number of expert shards.
     num_experts = 8
 
     # Global group sizes for each of the 8 experts
