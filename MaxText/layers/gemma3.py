@@ -211,6 +211,7 @@ class VisionEmbedder(nn.Module):
   """Projects image embeddings to the embedding space of the text encoder."""
 
   config: Config
+  mesh: Mesh
   vision_proj_dim: int = 1152
 
   def setup(self):
@@ -261,6 +262,7 @@ class Gemma3VisionEncoderLayer(nn.Module):
   """gemma 3 vision encoder layer"""
 
   config: Config
+  mesh: Mesh
   patch_size: tuple[int, int] = (14, 14)
   width: int = 1152
   mlp_dim: int | None = 4304  # Defaults to 4x input dim
