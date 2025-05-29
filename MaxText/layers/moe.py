@@ -965,7 +965,8 @@ class RoutedMoE(nn.Module):
         dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, "activation_embed")
         mlp_axis = ("activation_exp", "activation_batch_no_exp", None, "activation_mlp")
         dispatch_eimsum = "BSM,BSEC -> EBCM"
-        mlp_einsum = "EBCM,EMH -> EBCH"
+        mlp_up_einsum = "EBCM,EMH -> EBCH"
+        mlp_down_einsum = "EBCH,EHM -> EBCM"
         output_einsum = "EBCM,BSEC -> BSM"
       else:
         # todo: try replace softmax_probs with padded weights and verify with decode acc tests
@@ -982,7 +983,8 @@ class RoutedMoE(nn.Module):
           dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_embed")
           mlp_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_mlp")
         dispatch_eimsum = "BNSM,BNSEC -> EBNCM"
-        mlp_einsum = "EBNCM,EMH -> EBNCH"
+        mlp_up_einsum = "EBNCM,EMH -> EBNCH"
+        mlp_down_einsum = "EBNCH,EHM -> EBNCM"
         output_einsum = "EBNCM,BNSEC -> BNSM"
 
         inputs = jnp.reshape(inputs, (batch_size, cp, sub_seq, inputs.shape[2]))
@@ -1008,7 +1010,9 @@ class RoutedMoE(nn.Module):
       with jax.named_scope("wi_0"):
         w0_kernel_axes = ("exp", None, "mlp")
         w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
-        layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(mlp_einsum, dispatch, w0_kernel, precision=matmul_precision)
+        layer_w0 = self.get_einsum(rhs_mesh_axes=w0_kernel_axes)(
+            mlp_up_einsum, dispatch, w0_kernel, precision=matmul_precision
+        )
 
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
@@ -1020,7 +1024,9 @@ class RoutedMoE(nn.Module):
       with jax.named_scope("wi_1"):
         w1_kernel_axes = ("exp", None, "mlp")
         w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
-        layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(mlp_einsum, dispatch, w1_kernel, precision=matmul_precision)
+        layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(
+            mlp_up_einsum, dispatch, w1_kernel, precision=matmul_precision
+        )
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
         layer_w1 = nn.with_logical_constraint(
@@ -1035,7 +1041,7 @@ class RoutedMoE(nn.Module):
         wo_kernel_axes = ("exp", "mlp", None)
         wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
         intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
-            mlp_einsum, layer_multiply, wo_kernel, precision=matmul_precision
+            mlp_down_einsum, layer_multiply, wo_kernel, precision=matmul_precision
         )
         if self.config.activations_in_float32:
           intermediate_layer = intermediate_layer.astype(jnp.float32)
