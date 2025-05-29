@@ -122,7 +122,6 @@ class PrefillProcessor:
 
   def _process_compiled(self, params: Params, padded_length: int):
     """Ahead-of-time compilation wrapper of _process()."""
-
     if padded_length not in self.process_func:
       log.info("compile prefill process(%d)", padded_length)
       self.process_func[padded_length] = (
