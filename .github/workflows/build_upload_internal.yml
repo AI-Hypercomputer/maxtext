@@ -31,21 +31,25 @@ on:
       base_image:
         required: false
         type: string
+      cloud_runner:
+        required: false
+        type: string
 
 jobs:
   build_and_upload:
     name: Build and upload image (${{ inputs.device_name }})
-    runs-on: ["self-hosted", "${{ inputs.device_type }}", "${{ inputs.device_name }}"]
+    runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
+    container: ubuntu:22.04
     steps:
-      - name: Authenticate gcloud
-        continue-on-error: true
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Sleep
         run: |
-          # configure registries as root and as runner
-          sudo gcloud auth configure-docker --quiet
-          gcloud auth configure-docker --quiet
-          sudo gcloud auth configure-docker us-docker.pkg.dev --quiet
-          gcloud auth configure-docker us-docker.pkg.dev --quiet
-      - uses: actions/checkout@v4
+          while true; do echo "sleeping"; sleep 40; done
+      - name: Set up Docker BuildX
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2
+        with:
+          driver: remote
+          endpoint: unix:///mnt/buildkit/buildkitd.sock
       - name: Build an image
         run: |
           bash docker_build_dependency_image.sh MODE=${{ inputs.build_mode }} DEVICE=${{ inputs.device_type }} BASEIMAGE=${{ inputs.base_image }}
@@ -55,4 +59,3 @@ jobs:
       - name: Upload the image
         run: |
           docker push gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:${{ inputs.device_type }}
-
