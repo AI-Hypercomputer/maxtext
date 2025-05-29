@@ -75,7 +75,7 @@ build_ai_image() {
     COMMIT_HASH=$(git rev-parse --short HEAD)
     echo "Building JAX AI MaxText Imageat commit hash ${COMMIT_HASH}..."
 
-    docker build --no-cache \
+    docker build \
         --build-arg JAX_AI_IMAGE_BASEIMAGE=${BASEIMAGE} \
         --build-arg COMMIT_HASH=${COMMIT_HASH} \
         --build-arg DEVICE="$DEVICE" \
