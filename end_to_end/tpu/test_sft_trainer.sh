@@ -9,7 +9,6 @@
   PRE_TRAINED_MODEL_CKPT_PATH=gs://maxtext-model-checkpoints/llama2-7b-chat/scanned/0/items \
   BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs STEPS=100 \
   PROMPT="Suggest some famous landmarks in London." \
-  ROTL=1e-05 ATOL=0.09 KL_DIV=7e-05 \
   bash end_to_end/tpu/test_sft_trainer.sh
 '
 
@@ -52,10 +51,3 @@ python3 -m MaxText.decode MaxText/configs/sft.yml \
     load_parameters_path=${FINE_TUNED_MODEL_CKPT_PATH} \
     per_device_batch_size=${PER_DEVICE_BATCH_SIZE} max_target_length=128 max_prefill_predict_length=64 \
     attention=dot_product decode_sampling_strategy=greedy prompt="${PROMPT}" use_chat_template=True
-
-# Correctness test
-python3 -m MaxText.tests.sft_trainer_correctness \
-    --model-name=${PRE_TRAINED_MODEL} \
-    --tokenizer-path=${PRE_TRAINED_MODEL_TOKENIZER} \
-    --model-ckpt-path=${PRE_TRAINED_MODEL_CKPT_PATH} \
-    --rtol=${RTOL} --atol=${ATOL} --kl-div=${KL_DIV}

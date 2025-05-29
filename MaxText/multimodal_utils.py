@@ -16,7 +16,8 @@ limitations under the License.
 
 """Utils needed by multimodal pipelines for image processing."""
 
-from typing import List, Tuple, Union
+from dataclasses import dataclass
+from typing import List, Tuple, Union, Optional
 from collections import defaultdict
 import os
 
@@ -50,6 +51,25 @@ LLAMA4_TILES_NUM = 16
 LLAMA4_PIXEL_VALUE_RESCALE_FACTOR = 1.0 / 255.0
 LLAMA4_IMAGE_MEAN = (0.5,) * 3
 LLAMA4_IMAGE_STD = (0.5,) * 3
+
+
+@dataclass
+class PreprocessorOutput:
+  """Holds the output of an image preprocessor.
+
+  Attributes:
+    pixel_values: A JAX array containing the processed image pixel data.
+                  The shape and format depend on the specific model and
+                  preprocessing steps (e.g., [H, W, C] for Gemma3 or
+                  [NUM_TILES, C, TILE_SIZE, TILE_SIZE] for Llama4).
+    aspect_ratios: An optional JAX array of shape (batch_size, 2) representing
+                   the aspect ratio [ratio_h, ratio_w] of the processed image(s).
+                   This is particularly relevant for models like Llama4 that handle
+                   images by tiling.
+  """
+
+  pixel_values: Optional[jnp.ndarray] = None
+  aspect_ratios: Optional[jnp.ndarray] = None
 
 
 def load_image_from_path(image_path):
@@ -275,7 +295,10 @@ def pre_process_gemma3_image(image):
   )
   image = _normalize_images(image, mean=GEMMA_IMAGE_MEAN, std=GEMMA_IMAGE_STD)
   image = jnp.clip(image, -1, 1)
-  return image
+  processor_output = PreprocessorOutput(
+      pixel_values=image,
+  )
+  return processor_output
 
 
 def pre_process_llama4_image(image):
@@ -329,7 +352,13 @@ def pre_process_llama4_image(image):
     global_tiles = jnp.expand_dims(global_tiles, axis=0)
     image_tiles = jnp.concatenate((image_tiles, global_tiles), axis=0)
 
-  return image_tiles
+  # TODO(hengtaoguo): Add support for multiple images with aspect ratios size of [num_images, 2]
+  aspect_ratios_array = jnp.array([[ratio_h, ratio_w]], dtype=jnp.int32)
+  processor_output = PreprocessorOutput(
+      pixel_values=image_tiles,
+      aspect_ratios=aspect_ratios_array,
+  )
+  return processor_output
 
 
 def pre_process_image(image, model_name):
