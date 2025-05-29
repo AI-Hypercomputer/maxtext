@@ -816,7 +816,7 @@ class RoutedMoE(nn.Module):
         mask_axes = ("activation_batch", "activation_length", None, None)
         input_axis = ("activation_batch", "activation_length", "activation_embed")
         dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, "activation_embed")
-        if reshape_dropping_matmul:
+        if self.config.reshape_dropping_matmul:
           mlp_axis = ("activation_exp", "activation_batch_no_exp", "activation_mlp")
         else:
           mlp_axis = ("activation_exp", "activation_batch_no_exp", None, "activation_mlp")
@@ -865,7 +865,7 @@ class RoutedMoE(nn.Module):
         disp_shape = jnp.shape(dispatch)
         E,B,C,M = disp_shape[0], disp_shape[1], disp_shape[2], disp_shape[3]
         new_shape = (E, B * C, M)
-        reshaped_dispatch = dispatch.reshape(new_shape)
+        dispatch = dispatch.reshape(new_shape)
       with jax.named_scope("wi_0"):
         w0_kernel_axes = ("exp", None, "mlp")
         w0_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w0_kernel, w0_kernel_axes)
@@ -893,7 +893,7 @@ class RoutedMoE(nn.Module):
           layer_w1 = jnp.einsum(mlp_reshaped_einsum, dispatch, w1_kernel, precision=matmul_precision)
           # rawr
         else:
-        layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(mlp_einsum, dispatch, w1_kernel, precision=matmul_precision)
+          layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes)(mlp_einsum, dispatch, w1_kernel, precision=matmul_precision)
         if self.config.activations_in_float32:
           layer_w1 = layer_w1.astype(jnp.float32)
         layer_w1 = nn.with_logical_constraint(
@@ -906,15 +906,16 @@ class RoutedMoE(nn.Module):
       with jax.named_scope("wo"):
         wo_kernel_axes = ("exp", "mlp", None)
         wo_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(wo_kernel, wo_kernel_axes)
-        if reshape_dropping_matmul:
+        if self.config.reshape_dropping_matmul:
           intermediate_layer = jnp.einsum(mlp_reshaped_einsum, layer_multiply, wo_kernel, precision=matmul_precision)
-        intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
-            mlp_einsum, layer_multiply, wo_kernel, precision=matmul_precision
-        )
+        else:
+          intermediate_layer = self.get_einsum(rhs_mesh_axes=wo_kernel_axes)(
+              mlp_einsum, layer_multiply, wo_kernel, precision=matmul_precision
+          )
         if self.config.activations_in_float32:
           intermediate_layer = intermediate_layer.astype(jnp.float32)
         if self.config.model_call_mode != "inference":
-          if reshape_dropping_matmul:
+          if self.config.reshape_dropping_matmul:
             intermediate_layer = nn.with_logical_constraint(
                 intermediate_layer,
                 ("activation_exp", "activation_batch_no_exp", "activation_embed"),
