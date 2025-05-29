@@ -656,9 +656,10 @@ class ReplicaWorker:
             self.worker_thread.join()
             self.worker_thread = None
 
+    @staticmethod
     @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(5,))
     def _jitted_prefill(
-        self,
+        engine,
         params: Params,
         tokens: jax.Array,
         slot: int,
@@ -668,15 +669,15 @@ class ReplicaWorker:
     ) -> Tuple[engine_api.ResultTokens, DecodeState]:
         """Prefill and insert a request."""
 
-        prefill_result, first_token = self.engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng)
-        decode_state = self.engine.insert(prefill_result, decode_state, slot)
+        prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng)
+        decode_state = engine.insert(prefill_result, decode_state, slot)
         log_prob = inference_utils.log_prob_of_chosen_token(
             decode_state["logits"][slot], decode_state["tokens"][slot]
         ) 
         return first_token.data[:, 0], log_prob, decode_state
 
     def simple_prefill(self, model_params, decode_state, decode_slot, input_id, input_tokens_padded, input_true_length, prefill_done):
-        first_token, log_prob, decode_state = self._jitted_prefill(model_params, input_tokens_padded, decode_slot, input_true_length, decode_state, self.rng)        
+        first_token, log_prob, decode_state = self._jitted_prefill(self.engine, model_params, input_tokens_padded, decode_slot, input_true_length, decode_state, self.rng)        
         prefill_done([(first_token, log_prob, decode_slot)], [input_id], decode_state)
 
     def _start_inference(
@@ -1153,19 +1154,19 @@ class OfflineEngine:
 
         # Return CompletionOutput objects
         completion_outputs = []
-
-        for input_data in data:
-            completion_outputs.append(
-                CompletionOutput(
-                    index=input_data.id,
-                    token_ids=jnp.array(
-                        [token_output.token for token_output in results[input_data.id]]
-                    ),
-                    logprobs=jnp.array(
-                        [token_output.log_prob for token_output in results[input_data.id]]
-                    ),
+        with jax.profiler.TraceAnnotation("return final output"):
+            for input_data in data:
+                completion_outputs.append(
+                    CompletionOutput(
+                        index=input_data.id,
+                        token_ids=np.array(
+                            [token_output.token for token_output in results[input_data.id]]
+                        ),
+                        logprobs=np.array(
+                            [token_output.log_prob for token_output in results[input_data.id]]
+                        ),
+                    )
                 )
-            )
         return completion_outputs
 
     def pad_data(self, data: List[InputData]) -> List[InputData]:
