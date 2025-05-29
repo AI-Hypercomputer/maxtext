@@ -120,7 +120,7 @@ class PrefillProcessor:
     """Process a new input."""
 
     process_fn = self._process_compiled(model_params, len(input_tokens_padded))
-    return process_fn(model_params, input_tokens_padded, decode_slot, input_true_length, decode_state)
+    return process_fn(model_params, input_tokens_padded, decode_slot, input_true_length, decode_state, rng)
 
   def _process_compiled(self, params: Params, padded_length: int):
     """Ahead-of-time compilation wrapper of _process()."""
