@@ -509,15 +509,23 @@ def main() -> int:
     device_type='v6e-256',
   )
 
+  v6e_cluster_matt_exp= XpkClusterConfig(
+    cluster_name='bodaborg-v6e-64-tt',
+    project='tpu-prod-env-multipod',
+    zone='us-west1-c',
+    device_type='v6e-64',
+  )
+
   xpk_workload_cmds = []
   xpk_workload_names = []
 
   list_of_models = [
     #model_configs.deepseek_matt_a1
     #model_configs.deepseek_manual_matt_a1
-    #model_configs.matt_dream_v1
+    model_configs.matt_dream_v1
     #model_configs.matt_dream_pure_ep_v1
-    model_configs.matt_ran_rerun
+    #model_configs.matt_ran_rerun
+    #model_configs.llama3-8b-8192
   ]
 
   user = os.environ['USER']
@@ -528,9 +536,10 @@ def main() -> int:
     for cluster_config in [
         #v6e_cluster_config_lcs
         v6e_cluster_config_tt
+        #v6e_cluster_matt_exp
     ]:
       # Run workloads in the following slice configurations
-      for num_slices in [12,]:
+      for num_slices in [4,]:
         # Use the libtpu dependencies from:
         for libtpu_type in [
             # LibTpuType.CUSTOM

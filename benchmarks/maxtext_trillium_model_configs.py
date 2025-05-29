@@ -185,6 +185,10 @@ MEGASCALE_GRPC_PREMAP_MEMORY_BYTES = (
 " --megascale_grpc_premap_memory_bytes=17179869184"
 )
 
+MEGASCALE_GRPC_PREMAP_MEMORY_BYTES_32 = (
+" --megascale_grpc_premap_memory_bytes=34359738368"
+)
+
 ASYNC_CP = (
 " --xla_enable_async_collective_permute=true"
 )
@@ -298,14 +302,105 @@ def _add_to_model_dictionary(
   return maxtext_model
 
 
-# Ran with a docker built from and XPK runner ran from:
-# docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ep_first"'
-# 
-# commit a09c9aaf684fe5897d0d10a0daf79789e6a55157 (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
-# Author: gobbleturk <mattdavidow@google.com>
-# Date:   Mon May 19 03:22:13 2025 +0000
 
-#     DP + PP troubles
+
+llama3_8b_8192 = _add_to_model_dictionary(
+    trillium_model_dict,
+    MaxTextModel(
+        model_name="llama3-8b-8192",
+        model_type="llama3-8b",
+        tuning_params={
+            "per_device_batch_size": 8,
+            "ici_fsdp_parallelism": -1,
+            "remat_policy": "full",
+            "max_target_length": 8192,
+            "attention": "flash",
+            "gcs_metrics": True,
+            "use_iota_embed": True,
+            "dataset_path": "gs://max-datasets-rogue",
+            "dataset_type": "synthetic",
+            "reuse_example_batch": 1,
+            "enable_checkpointing": False,
+            "profiler": "xplane",
+            "sa_block_q": 1024,
+            "sa_block_q_dkv": 2048,
+            "sa_block_q_dq": 2048,
+        },
+        xla_flags=(
+            DENSE_VMEM_LIMIT_FLAG
+            + CF_FOR_ALL_GATHER
+        ),
+    ),
+)
+
+
+matt_debug_ep_pp = _add_to_model_dictionary(
+  trillium_model_dict,
+  MaxTextModel(
+    model_name="matt_dream_v1",
+    model_type="default",
+    tuning_params={
+        "steps": 50,
+        "per_device_batch_size": 2.0,
+        "remat_policy": "full",
+        #"decoder_layer_input": "offload",
+        "max_target_length": 4096,
+        "enable_checkpointing": False,
+        "dataset_type": "synthetic",
+        "base_output_directory": "gs://maxtext-experiments-multipod",
+        "decoder_block": "mixtral",
+        "ici_expert_parallelism": 16,
+        "ici_pipeline_parallelism": 16,
+        # "allow_split_physical_axes": True,
+        # "custom_mesh": "hybrid_ring_64x4",
+        "num_experts": 16, # 256
+        "num_experts_per_tok": 2,
+        "base_emb_dim": 2048, #7168
+        "base_mlp_dim": 8192,
+        "base_num_query_heads": 64,
+        "base_num_kv_heads": 16,
+        "head_dim": 256,
+        "skip_first_n_steps_for_profiler": 40,
+        "sparse_matmul": True, # False
+        "megablox": False, # True
+        "profiler": "xplane",
+        "opt_type": "sgd",
+        "dump_hlo": True,
+        "weight_dtype": "bfloat16",
+        
+        # PP
+        "base_num_decoder_layers": 64, # PP * 8    
+        "num_pipeline_microbatches": 32, # PP * 2 or since we are sad PP * 1
+        "num_layers_per_pipeline_stage": 2,
+        "pipeline_fsdp_ag_once": True
+        # "scan_layers": False,
+    },
+    xla_flags=(
+        MOE_VMEM_LIMIT_FLAG
+        + REDUCE_SCATTER_FUSION
+        #CF_FOR_ALL_GATHER
+        + LAYOUT_FOR_ALL_REDUCE_SCATTER
+        + PIPELINING_FLAGS # " --xla_tpu_iova_dma_chunk_size_bytes=16777216"
+        + ASYNC_A2A
+        + ASYNC_CP
+        #+ MEGASCALE_GRPC_PREMAP_MEMORY_BYTES #" --megascale_grpc_premap_memory_bytes=17179869184"
+        + MEGASCALE_GRPC_PREMAP_MEMORY_BYTES_32
+        )
+    )
+)
+
+
+
+
+# Ran with a docker built from and XPK runner ran from:
+# docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_5_27_ep_fixes"'
+# 
+# commit 440287d8794c9c6a908f9a2f1180af254360d82c (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
+# Author: gobbleturk <mattdavidow@google.com>
+# Date:   Tue May 27 19:00:05 2025 +0000
+
+#     Capacity is hard
+
 
 matt_dream_v1 = _add_to_model_dictionary(
   trillium_model_dict,
@@ -315,8 +410,8 @@ matt_dream_v1 = _add_to_model_dictionary(
     tuning_params={
         "steps": 50,
         "per_device_batch_size": 0.5,
-        "remat_policy": "custom",
-        "mlpwo": "device",
+        "remat_policy": "full",
+        #"decoder_layer_input": "offload",
         "max_target_length": 4096,
         "enable_checkpointing": False,
         "dataset_type": "synthetic",
@@ -338,13 +433,14 @@ matt_dream_v1 = _add_to_model_dictionary(
         "megablox": False, # True
         "capacity_factor": 1,
         "profiler": "xplane",
+        "upload_all_profiler_results": True,
         "opt_type": "sgd",
         "dump_hlo": True,
         "weight_dtype": "bfloat16",
         
         # PP
-        "base_num_decoder_layers": 16, # PP * 8
-        "dcn_pipeline_parallelism": 2,
+        "dcn_pipeline_parallelism": 2, # PP
+        "base_num_decoder_layers": 16, # PP * 8    
         "num_pipeline_microbatches": 4, # PP * 2 or since we are sad PP * 1
         "num_layers_per_pipeline_stage": 2,
         "pipeline_fsdp_ag_once": True
@@ -358,7 +454,8 @@ matt_dream_v1 = _add_to_model_dictionary(
         + PIPELINING_FLAGS # " --xla_tpu_iova_dma_chunk_size_bytes=16777216"
         + ASYNC_A2A
         + ASYNC_CP
-        + MEGASCALE_GRPC_PREMAP_MEMORY_BYTES #" --megascale_grpc_premap_memory_bytes=17179869184"
+        #+ MEGASCALE_GRPC_PREMAP_MEMORY_BYTES #" --megascale_grpc_premap_memory_bytes=17179869184"
+        + MEGASCALE_GRPC_PREMAP_MEMORY_BYTES_32
         )
     )
 )
