@@ -322,9 +322,9 @@ class TrainTests(unittest.TestCase):
     cudnn_flash_jax = [  # tests base config on GPU with flash attention"""
         None,
         os.path.join(PKG_DIR, "configs", "base.yml"),
-        rf"base_output_directory=gs://runner-maxtext-logs",
+        "base_output_directory=gs://runner-maxtext-logs",
         "run_name=runner_test",
-        r"dataset_path=gs://maxtext-dataset",
+        "dataset_path=gs://maxtext-dataset",
         "steps=2",
         "enable_checkpointing=False",
         "enable_goodput_recording=False",
