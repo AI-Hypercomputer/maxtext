@@ -19,6 +19,7 @@ import sys
 import os.path
 import tempfile
 import unittest
+import pytest
 
 import jax
 from jax.sharding import Mesh
@@ -64,6 +65,7 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
     )
     self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
+  @pytest.mark.cpu_only
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
     # For training we pack multiple short examples in one example.
@@ -81,6 +83,7 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
         },
     )
 
+  @pytest.mark.cpu_only
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
     train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
@@ -92,6 +95,7 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
     self.assertTrue((batch1["inputs_position"] == batch2["inputs_position"]).all())
     self.assertTrue((batch1["targets_position"] == batch2["targets_position"]).all())
 
+  @pytest.mark.cpu_only
   def test_for_loop_repeatable(self):
     def get_first_batch(iterator):
       batch = None
@@ -141,6 +145,7 @@ class GrainParquetProcessingTest(unittest.TestCase):
     )
     self.train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
 
+  @pytest.mark.cpu_only
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
     # For training we pack multiple short examples in one example.
@@ -158,6 +163,7 @@ class GrainParquetProcessingTest(unittest.TestCase):
         },
     )
 
+  @pytest.mark.cpu_only
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
     train_iter = _grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
@@ -169,6 +175,7 @@ class GrainParquetProcessingTest(unittest.TestCase):
     self.assertTrue((batch1["inputs_position"] == batch2["inputs_position"]).all())
     self.assertTrue((batch1["targets_position"] == batch2["targets_position"]).all())
 
+  @pytest.mark.cpu_only
   def test_for_loop_repeatable(self):
     def get_first_batch(iterator):
       batch = None

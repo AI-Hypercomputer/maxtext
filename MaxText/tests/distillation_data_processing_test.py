@@ -18,6 +18,7 @@ import argparse
 import os
 import subprocess
 import unittest
+import pytest
 
 import transformers
 
@@ -95,6 +96,7 @@ class DistillationDataProcessingTest(unittest.TestCase):
     self.parser = argparse.ArgumentParser()
     self.parser = add_arguments_to_parser(self.parser)
 
+  @pytest.mark.cpu_only
   def test_data_processing_with_messages(self):
     config = self.parser.parse_args(["--data-columns", "messages"])
     dataset = Dataset.from_dict({"messages": MESSAGES_DATA})
@@ -117,6 +119,7 @@ class DistillationDataProcessingTest(unittest.TestCase):
       for c_idx, completion in enumerate(expected_completions[idx]):
         self.assertEqual(data["completion"][c_idx], completion)
 
+  @pytest.mark.cpu_only
   def test_data_filtering_with_messages(self):
     config = self.parser.parse_args(["--data-columns", "messages", "--use-chat-template"])
     dataset = Dataset.from_dict({"messages": MESSAGES_DATA})
@@ -128,6 +131,7 @@ class DistillationDataProcessingTest(unittest.TestCase):
     self.assertEqual(filtered_dataset[0].prompt, "What color is the sky?")
     self.assertEqual(filtered_dataset[0].actual_completion, "The sky is blue.")
 
+  @pytest.mark.cpu_only
   def test_data_processing_with_prompt_completion(self):
     config = self.parser.parse_args(["--data-columns", "prompt", "completion"])
     dataset = Dataset.from_dict({"prompt": PROMPT_DATA, "completion": COMPLETION_DATA})
@@ -150,6 +154,7 @@ class DistillationDataProcessingTest(unittest.TestCase):
       for c_idx, completion in enumerate(expected_completions[idx]):
         self.assertEqual(data["completion"][c_idx], completion)
 
+  @pytest.mark.cpu_only
   def test_data_filtering_with_prompt_completion(self):
     config = self.parser.parse_args(["--data-columns", "prompt", "completion", "--use-chat-template"])
     dataset = Dataset.from_dict({"prompt": PROMPT_DATA, "completion": COMPLETION_DATA})

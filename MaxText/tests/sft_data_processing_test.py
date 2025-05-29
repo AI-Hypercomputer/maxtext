@@ -17,6 +17,7 @@
 import subprocess
 import unittest
 import os.path
+import pytest
 
 import numpy as np
 
@@ -164,6 +165,7 @@ class SFTDataProcessingTest(unittest.TestCase):
         grain_worker_count=0,
     )
 
+  @pytest.mark.cpu_only
   def test_sft_format_with_messages(self):
     dataset = Dataset.from_dict({"messages": MESSAGES_DATA * 4})
     data_columns = ["messages"]
@@ -229,6 +231,7 @@ class SFTDataProcessingTest(unittest.TestCase):
         packed_exp2_targets_predictable,
     )
 
+  @pytest.mark.cpu_only
   def test_sft_format_with_prompt_completion(self):
     dataset = Dataset.from_dict({"prompt": PROMPT_DATA * 4, "completion": COMPLETION_DATA * 4})
     data_columns = ["prompt", "completion"]
