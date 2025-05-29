@@ -18,6 +18,7 @@ import enum
 import functools
 from typing import Any, Optional, Tuple
 from functools import partial
+import math
 
 import numpy as np
 
@@ -519,6 +520,12 @@ class AttentionOp(nn.Module):
                            Use `dot_product` instead."""
         )
       return self.cudnn_flash_attention(query, key, value, decoder_segment_ids, model_mode), None, None
+    elif self.attention_kernel == "cudnn_flash_jax":
+      if isinstance(key, KVTensor):
+        key = key.dequant()
+      if isinstance(value, KVTensor):
+        value = value.dequant()
+      return *self.cudnn_jax_flash_attention(query, key, value, decoder_segment_ids, model_mode), None
     else:
       raise ValueError(f"Unexpected attention kernel {self.attention_kernel=}.")
 
@@ -859,6 +866,52 @@ class AttentionOp(nn.Module):
     )
     return dpa_layer(query, key, value, mask=attn_mask)
 
+  def cudnn_jax_flash_attention(
+      self,
+      query: Array,
+      key: Array,
+      value: Array,
+      decoder_segment_ids: Array | None,
+      model_mode: str = MODEL_MODE_TRAIN,
+  ) -> Array:
+    """CUDNN Flash Attention with JAX SDPA API.
+    """
+    # These imports are only meant to work in a GPU build.
+    # pylint: disable=import-outside-toplevel
+    from jax._src.cudnn.fused_attention_stablehlo import (
+      dot_product_attention,
+      MaskType,
+    )
+
+    _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
+
+    if model_mode == MODEL_MODE_AUTOREGRESSIVE:
+      lengths = jnp.sum(decoder_segment_ids, axis=-1)
+
+      return dot_product_attention(
+          query,
+          key,
+          value,
+          q_seqlen=lengths,
+          kv_seqlen=lengths,
+          mask_type=MaskType.PADDING,
+          scale=1.0,
+          dropout_rate=self.dropout_rate,
+          qkv_layout="BTNH",
+          return_residual=True
+      )
+    else:
+      return dot_product_attention(
+          query,
+          key,
+          value,
+          mask_type=MaskType.CAUSAL,
+          scale=1.0 / math.sqrt(head_dim),
+          dropout_rate=self.dropout_rate,
+          qkv_layout="BTNH",
+          return_residual=True
+      )
+
   def compute_local_attention(
       self, attn_weights: Array, value: Array | KVTensor, q_seq_len: int, model_mode: str
   ) -> tuple[Array, Array, Array]:
@@ -1054,6 +1107,27 @@ class AttentionOp(nn.Module):
   def reverse_transepose(self, transposed_array, transpose_axis_order):
     return jax.numpy.moveaxis(transposed_array, (0, 1, 2, 3), transpose_axis_order)
 
+  def normalize_cudnn_attention(self, local_outs, local_stats):
+    """Normalize across two cuDNN attentions
+
+    Args:
+        local_outs (list): List of outputs entries for each cudnn attention
+          in shape [b, t, n, d].
+        local_stats (list): List of logsumexp entries for each cudnn attention
+          in shape [b, n, t].
+
+    Returns:
+        Array: Combined attention that has been normalized in shape [b, t, n, d].
+    """
+    # reshape stat to have shape [b, n, t, 1]
+    stat0 = local_stats[0].reshape((*local_stats[0].shape, 1))
+    stat1 = local_stats[1].reshape((*local_stats[1].shape, 1))
+    global_stat = jnp.log(jnp.exp(stat0) + jnp.exp(stat1))
+    # # transpose stat to have shape [b, t, n, 1] for elemenwise multiplication
+    attn_out = local_outs[0].astype(jnp.float32) * jnp.exp(stat0 - global_stat).transpose((0, 2, 1, 3)) \
+      + local_outs[1].astype(jnp.float32) * jnp.exp(stat1 - global_stat).transpose((0, 2, 1, 3))
+    return attn_out.astype(local_stats[0].dtype)
+
   def normalize_attention(self, local_outs, local_maxes, local_sums):
     """Normalize across multiple localized attentions
 
@@ -1133,7 +1207,13 @@ class AttentionOp(nn.Module):
       unnormalized_outputs = [prefill_unnormalized_output, ar_unnormalized_output]
       exponentials_maxes = [prefill_exponentials_max, ar_exponentials_max]
       exponentials_sums = [prefill_exponentials_sum, ar_exponentials_sum]
-      return self.normalize_attention(unnormalized_outputs, exponentials_maxes, exponentials_sums)
+      if prefill_exponentials_max is not None and prefill_exponentials_sum is None:
+        prefill_stat = prefill_exponentials_max
+        ar_stat = ar_exponentials_max
+        stats = [prefill_stat, ar_stat]
+        return self.normalize_cudnn_attention(unnormalized_outputs, stats)
+      else:
+        return self.normalize_attention(unnormalized_outputs, exponentials_maxes, exponentials_sums)
     else:
       return prefill_unnormalized_output / prefill_exponentials_sum
 
