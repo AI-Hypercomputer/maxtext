@@ -179,3 +179,4 @@ else:
     # with hack_output_for_vmap=True this returns a 1D a2a instead of 2D
     x_vmap_a2a = jit_vmap_func(x_vmap, logits_vmap)
     print(x_vmap_a2a.shape)
+    print("rawr")
