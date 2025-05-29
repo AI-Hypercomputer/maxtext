@@ -1472,6 +1472,7 @@ class Attention(nn.Module):
         use_ragged_attention=self.use_ragged_attention,
         previous_chunk=previous_chunk,
     )
+    ### YYY: need modify retrieved cache
     return [prefill_kv_cache, ar_kv_cache]
 
   @nn.compact
@@ -1589,6 +1590,7 @@ class Attention(nn.Module):
     assert not self.config.quantize_kvcache or self.kv_quant
 
     if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
+      ### YYY: currently not consider paged
       unnormalized_out, _, exp_sum = self.paged_attention_op(
           query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
       )
@@ -1596,7 +1598,9 @@ class Attention(nn.Module):
     else:
       cached_values = [None, None]
       if model_mode != MODEL_MODE_TRAIN:
+        ### YYY: update need handle piggybacking, too
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
+      ### YYY: maybe seperate piggybacking here, and call two appention_op
       out = self.attention_op(
           query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk, bidirectional_mask
       )

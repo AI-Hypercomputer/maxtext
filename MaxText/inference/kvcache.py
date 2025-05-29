@@ -351,7 +351,12 @@ class KVCache(nn.Module):
     return key_vars, value_vars, cached_segment_id_var, cache_index_var, cached_lengths_var
 
   def kv_cache_chunked_prefill(
-      self, key: Array, value: Array, decoder_segment_ids: Array, previous_chunk: Optional[Array] = None
+      self,
+      key: Array,
+      value: Array,
+      decoder_segment_ids: Array,
+      previous_chunk: Optional[Array] = None,
+      selected_slots: Optional[Array] = None,
   ):
     """Update the current kv cache into previous chunk and return needed length.
 
@@ -457,6 +462,7 @@ class KVCache(nn.Module):
       key: Array,
       value: Array,
       decoder_segment_ids: Array,
+      selected_slots: Optional[Array] = None,
   ):
     """In prefill mode, we zero out the existing cache, run the computation and
     prepare the cache as necessary.
@@ -486,20 +492,32 @@ class KVCache(nn.Module):
     key_shaped_for_cache = jnp.transpose(key, self.prefill_cache_axis_order)
     value_shaped_for_cache = jnp.transpose(value, self.prefill_cache_axis_order)
 
+    batch_axis = self.prefill_cache_logical_axis_names.index(CACHE_BATCH_PREFILL)
+    cache_batch_axis = self.prefill_cache_axis_order.index(batch_axis)
+
+    def update_variable(var: nn.Variable, update_value: Array, update_batch_axis: int):
+      if selected_slots is not None:
+        var.value = jnp.put_along_axis(var.value, selected_slots, update_value, axis=update_batch_axis)
+      else:
+        var.value = update_value
+
     if self.kv_quant:
       prefill_key_axis_names = transpose_tuple(self.cache_logical_axis_names, self.prefill_cache_axis_order)
       key_shaped_for_cache, key_scale_shaped_for_cache = self.kv_quant.quantize(key_shaped_for_cache, prefill_key_axis_names)
       value_shaped_for_cache, value_scale_shaped_for_cache = self.kv_quant.quantize(
           value_shaped_for_cache, prefill_key_axis_names
       )
-      cached_prefill_key_vars[1].value = key_scale_shaped_for_cache
-      cached_prefill_value_vars[1].value = value_scale_shaped_for_cache
 
-    cached_prefill_key_vars[0].value = key_shaped_for_cache
-    cached_prefill_value_vars[0].value = value_shaped_for_cache
+      update_variable(cached_prefill_key_vars[1], key_scale_shaped_for_cache, cache_batch_axis)
+      update_variable(cached_prefill_value_vars[1], value_scale_shaped_for_cache, cache_batch_axis)
+
+    update_variable(cached_prefill_key_vars[0], key_shaped_for_cache, cache_batch_axis)
+    update_variable(cached_prefill_value_vars[0], value_shaped_for_cache, cache_batch_axis)
 
     if decoder_segment_ids is not None:
-      cached_prefill_segment_id_var.value = decoder_segment_ids
+      # assume batch at axis 0
+      update_variable(cached_prefill_segment_id_var, decoder_segment_ids, 0)
+
     return key, value, decoder_segment_ids
 
   def update_ar_key_value(
@@ -511,6 +529,7 @@ class KVCache(nn.Module):
       one_hot_indices: Array,
       lengths: Array,
       use_ragged_attention: bool,
+      selected_slots: Optional[Array] = None,
   ) -> None:
     """Adds a single token's results to the ar kv cache
 
@@ -546,7 +565,18 @@ class KVCache(nn.Module):
     ar_cache_sequence_axis = ar_cache_update_axis = ar_cache_axis_names.index(CACHE_SEQUENCE)
     ar_cache_batch_axis = ar_cache_axis_names.index(CACHE_BATCH)
 
+    def update_variable(var: nn.Variable, update_value: Array, update_idx: Array, update_axis: int, update_batch_axis: int):
+      if selected_slots is not None:
+        selected_var_value = jnp.take_along_axis(var.value, selected_slots, axis=update_batch_axis)
+        update_selected_var_value = jax.lax.dynamic_update_index_in_dim(
+            selected_var_value, update_value, update_idx, update_axis
+        )
+        var.value = jnp.put_along_axis(var.value, selected_slots, update_selected_var_value, axis=update_batch_axis)
+      else:
+        var.value = jax.lax.dynamic_update_index_in_dim(var.value, update_value, update_idx, update_axis)
+
     if use_ragged_attention:
+      assert selected_slots is not None, "Not support selected slot with ragged attention yet."
       cache_locations = [slice(None)] * 4
       new_token_locations = [slice(None)] * 4
       new_token_locations[ar_cache_sequence_axis] = 0
@@ -572,28 +602,36 @@ class KVCache(nn.Module):
 
     else:
       one_hot_indices = one_hot_indices.astype(int)
-      cached_key_var.value = jax.lax.dynamic_update_index_in_dim(
-          cached_key_var.value, one_token_key_shaped_for_cache, ar_cache_update_idx, ar_cache_update_axis
+      update_variable(
+          cached_key_var, one_token_key_shaped_for_cache, ar_cache_update_idx, ar_cache_update_axis, ar_cache_batch_axis
       )
-      cached_value_var.value = jax.lax.dynamic_update_index_in_dim(
-          cached_value_var.value, one_token_value_shaped_for_cache, ar_cache_update_idx, ar_cache_update_axis
+      update_variable(
+          cached_value_var, one_token_value_shaped_for_cache, ar_cache_update_idx, ar_cache_update_axis, ar_cache_batch_axis
       )
+
     cached_key_var.value = nn.with_logical_constraint(cached_key_var.value, ar_cache_axis_names)
     cached_value_var.value = nn.with_logical_constraint(cached_value_var.value, ar_cache_axis_names)
 
     if self.kv_quant:
       ar_cache_scale_axis_names = transpose_tuple(self.cache_scale_logical_axis_names, self.ar_cache_axis_order)
       ar_cache_scale_update_axis = ar_cache_scale_axis_names.index(CACHE_SCALE_SEQUENCE)
+      ar_cache_scale_batch_axis = ar_cache_scale_axis_names.index(CACHE_SCALE_BATCH)
       assert cached_key_scale_var is not None, "cached_key_scale_var cannot be None"
       assert cached_value_scale_var is not None, "cached_value_scale_var cannot be None"
-      cached_key_scale_var.value = jax.lax.dynamic_update_index_in_dim(
-          cached_key_scale_var.value, one_token_key_scale_shaped_for_cache, ar_cache_update_idx, ar_cache_scale_update_axis
+
+      update_variable(
+          cached_key_scale_var,
+          one_token_key_scale_shaped_for_cache,
+          ar_cache_update_idx,
+          ar_cache_scale_update_axis,
+          ar_cache_scale_batch_axis,
       )
-      cached_value_scale_var.value = jax.lax.dynamic_update_index_in_dim(
-          cached_value_scale_var.value,
+      update_variable(
+          cached_value_scale_var,
           one_token_value_scale_shaped_for_cache,
           ar_cache_update_idx,
           ar_cache_scale_update_axis,
+          ar_cache_scale_batch_axis,
       )
 
   def get_cached_values(self, cache_vars, target_dtype, cache_axis_order) -> jax.Array | KVTensor:
@@ -619,6 +657,7 @@ class KVCache(nn.Module):
       key: Array,
       value: Array,
       use_ragged_attention: bool = False,
+      selected_slots: Optional[Array] = None,
   ):
     """In autoregressive mode, we update the cache for this entry and
        then return the full cache.
@@ -651,32 +690,108 @@ class KVCache(nn.Module):
         cache_ar_index_var.value,
         cache_ar_lengths_var.value,
         use_ragged_attention,
-    )
-    active_indicator = jnp.zeros((batch, 1), dtype=jnp.int32) + DECODING_ACTIVE_SEQUENCE_INDICATOR
-    cached_ar_segment_id_var.value = jax.lax.dynamic_update_index_in_dim(
-        cached_ar_segment_id_var.value, active_indicator, jnp.squeeze(cache_ar_index_var.value), 1
-    )
-    cache_ar_index_var.value = jnp.mod(cache_ar_index_var.value + 1, self.max_target_length - self.max_prefill_length)
-    cache_ar_lengths_var.value = cache_ar_lengths_var.value.at[:].add(1)
-
-    # The below retrieves the existing prefill cache variables, not creating new ones
-    cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
-        batch, key_heads, value_heads, key_head_size, value_head_size, MODEL_MODE_AUTOREGRESSIVE
+        selected_slots,
     )
 
-    cached_prefill = (
-        self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order),
-        self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order),
-        cached_prefill_segment_id_var.value,
-    )
+    if selected_slots is None:
+      active_indicator = jnp.zeros((batch, 1), dtype=jnp.int32) + DECODING_ACTIVE_SEQUENCE_INDICATOR
+      cached_ar_segment_id_var.value = jax.lax.dynamic_update_index_in_dim(
+          cached_ar_segment_id_var.value, active_indicator, jnp.squeeze(cache_ar_index_var.value), 1
+      )
+      cache_ar_index_var.value = jnp.mod(cache_ar_index_var.value + 1, self.max_target_length - self.max_prefill_length)
+      cache_ar_lengths_var.value = cache_ar_lengths_var.value.at[:].add(1)
 
-    cached_ar = (
-        self.get_cached_values(cached_ar_key_vars, key.dtype, self.ar_cache_axis_order),
-        self.get_cached_values(cached_ar_value_vars, value.dtype, self.ar_cache_axis_order),
-        cached_ar_segment_id_var.value,
-        cache_ar_lengths_var.value,
-    )
-    return cached_prefill, cached_ar
+      # The below retrieves the existing prefill cache variables, not creating new ones
+      cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
+          batch, key_heads, value_heads, key_head_size, value_head_size, MODEL_MODE_AUTOREGRESSIVE
+      )
+
+      cached_prefill = (
+          self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order),
+          self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order),
+          cached_prefill_segment_id_var.value,
+      )
+
+      cached_ar = (
+          self.get_cached_values(cached_ar_key_vars, key.dtype, self.ar_cache_axis_order),
+          self.get_cached_values(cached_ar_value_vars, value.dtype, self.ar_cache_axis_order),
+          cached_ar_segment_id_var.value,
+          cache_ar_lengths_var.value,
+      )
+      return cached_prefill, cached_ar
+    else:
+      selected_cache_ar_index_var_value = jnp.take_along_axis(cache_ar_index_var.value, selected_slots, axis=0)
+      active_indicator = jnp.zeros((batch, 1), dtype=jnp.int32) + DECODING_ACTIVE_SEQUENCE_INDICATOR
+      selected_ar_segment_id_value = jnp.take_along_axis(cached_ar_segment_id_var.value, selected_slots, axis=0)
+      updated_ar_segment_id_value = jax.lax.dynamic_update_index_in_dim(
+          selected_ar_segment_id_value, active_indicator, jnp.squeeze(selected_cache_ar_index_var_value), 1
+      )
+      cached_ar_segment_id_var.value = jnp.put_along_axis(
+          cached_ar_segment_id_var.value, selected_slots, updated_ar_segment_id_value, axis=0
+      )
+
+      updated_cache_ar_index_var_value = jnp.mod(
+          selected_cache_ar_index_var_value + 1, self.max_target_length - self.max_prefill_length
+      )
+      cache_ar_index_var.value = jnp.put_along_axis(
+          cache_ar_index_var.value, selected_slots, updated_cache_ar_index_var_value, axis=0
+      )
+
+      cache_ar_lengths_var.value = cache_ar_lengths_var.value.at[selected_slots].add(1)
+
+      # The below retrieves the existing prefill cache variables, not creating new ones
+      cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
+          batch, key_heads, value_heads, key_head_size, value_head_size, MODEL_MODE_AUTOREGRESSIVE
+      )
+
+      prefill_cache_axis_names = transpose_tuple(self.prefill_cache_logical_axis_names, self.prefill_cache_axis_order)
+      prefill_cache_batch_axis = prefill_cache_axis_names.index(CACHE_BATCH_PREFILL)
+
+      cached_prefill = (
+          jnp.take_along_axis(
+              self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order),
+              selected_slots,
+              axis=prefill_cache_batch_axis,
+          ),
+          jnp.take_along_axis(
+              self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order),
+              selected_slots,
+              axis=prefill_cache_batch_axis,
+          ),
+          jnp.take_along_axis(
+              cached_prefill_segment_id_var.value,
+              selected_slots,
+              axis=0,
+          ),
+      )
+
+      ar_cache_axis_names = transpose_tuple(self.cache_logical_axis_names, self.ar_cache_axis_order)
+      ar_cache_batch_axis = ar_cache_axis_names.index(CACHE_BATCH)
+
+      cached_ar = (
+          jnp.take_along_axis(
+              self.get_cached_values(cached_ar_key_vars, key.dtype, self.ar_cache_axis_order),
+              selected_slots,
+              axis=ar_cache_batch_axis,
+          ),
+          jnp.take_along_axis(
+              self.get_cached_values(cached_ar_value_vars, value.dtype, self.ar_cache_axis_order),
+              selected_slots,
+              axis=ar_cache_batch_axis,
+          ),
+          jnp.take_along_axis(
+              cached_ar_segment_id_var.value,
+              selected_slots,
+              axis=0,
+          ),
+          jnp.take_along_axis(
+              cache_ar_lengths_var.value,
+              selected_slots,
+              axis=0,
+          ),
+      )
+
+      return cached_prefill, cached_ar
 
   @nn.compact
   def __call__(
@@ -687,6 +802,7 @@ class KVCache(nn.Module):
       model_mode: str,
       use_ragged_attention: bool = False,
       previous_chunk: Any = None,
+      selected_slots: Optional[Array] = None,
   ) -> tuple:
     """KV cache takes the current state and updates the state accordingly.
 
@@ -700,18 +816,28 @@ class KVCache(nn.Module):
       key: in shape [b, s, n_kv, d].
       value: in shape [b, s, n_kv, d].
       model_mode: model mode controlling model
+      selected_slots:
+        1d int array indicate which slots per batch idx should be used and updated.
+        The length of selected should match the batch size of key and value.
 
     Returns:
       two tuples of (k, v, decoder_segments) -- either can be Nones
 
     """
+    if selected_slots is not None and selected_slots.shape[0] != key.shape[0]:
+      raise ValueError(
+          "If provided selected slots, it should match the batch size of key and value.\n"
+          f"Get key batch size[{key.shape[0]}] and selected batch size[{selected_slots.shape[0]}]"
+      )
+
     if model_mode == MODEL_MODE_PREFILL:
       if self.use_chunked_prefill:
-        return self.kv_cache_chunked_prefill(key, value, decoder_segment_ids, previous_chunk), None
+        # YYY: TODO
+        return self.kv_cache_chunked_prefill(key, value, decoder_segment_ids, previous_chunk, selected_slots), None
       else:
-        return self.kv_cache_prefill(key, value, decoder_segment_ids), None
+        return self.kv_cache_prefill(key, value, decoder_segment_ids, selected_slots), None
     elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
-      return self.kv_cache_autoregressive(key, value, use_ragged_attention)
+      return self.kv_cache_autoregressive(key, value, use_ragged_attention, selected_slots)
     else:
       raise ValueError(f"Model Mode isn't supported! {model_mode=}")
 
