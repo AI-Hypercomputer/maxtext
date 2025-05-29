@@ -337,7 +337,7 @@ llama3_8b_8192 = _add_to_model_dictionary(
 matt_debug_ep_pp = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
-    model_name="matt_dream_v1",
+    model_name="matt_debug_ep_pp",
     model_type="default",
     tuning_params={
         "steps": 50,
@@ -395,11 +395,12 @@ matt_debug_ep_pp = _add_to_model_dictionary(
 # Ran with a docker built from and XPK runner ran from:
 # docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_5_27_ep_fixes"'
 # 
-# commit 440287d8794c9c6a908f9a2f1180af254360d82c (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
+# commit 4b7e8f31669a4bcd7f710763e4950b0ed39f9a9a (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
 # Author: gobbleturk <mattdavidow@google.com>
-# Date:   Tue May 27 19:00:05 2025 +0000
+# Date:   Thu May 29 18:28:59 2025 +0000
 
-#     Capacity is hard
+#     --megascale_grpc_premap_memory_bytes=34359738368
+
 
 
 matt_dream_v1 = _add_to_model_dictionary(
@@ -439,9 +440,9 @@ matt_dream_v1 = _add_to_model_dictionary(
         "weight_dtype": "bfloat16",
         
         # PP
-        "dcn_pipeline_parallelism": 2, # PP
-        "base_num_decoder_layers": 16, # PP * 8    
-        "num_pipeline_microbatches": 4, # PP * 2 or since we are sad PP * 1
+        "dcn_pipeline_parallelism": 8, # PP
+        "base_num_decoder_layers": 64, # PP * 8    
+        "num_pipeline_microbatches": 16, # PP * 2 or since we are sad PP * 1
         "num_layers_per_pipeline_stage": 2,
         "pipeline_fsdp_ag_once": True
         # "scan_layers": False,
@@ -455,7 +456,7 @@ matt_dream_v1 = _add_to_model_dictionary(
         + ASYNC_A2A
         + ASYNC_CP
         #+ MEGASCALE_GRPC_PREMAP_MEMORY_BYTES #" --megascale_grpc_premap_memory_bytes=17179869184"
-        + MEGASCALE_GRPC_PREMAP_MEMORY_BYTES_32
+        + MEGASCALE_GRPC_PREMAP_MEMORY_BYTES_32 #--megascale_grpc_premap_memory_bytes=34359738368
         )
     )
 )
