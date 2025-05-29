@@ -36,10 +36,11 @@ from flax import linen as nn
 from flax.linen import partitioning
 
 from MaxText import max_utils
-from MaxText.common_types import DecoderBlockType, DEFAULT_MASK_VALUE, BATCH, HEAD, KV_LENGTH, D_KV, CACHE_BATCH_PREFILL, CACHE_SEQUENCE, AxisNames, CACHE_BATCH, CACHE_HEADS, CACHE_SCALE_BATCH, CACHE_KV, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV, AxisIdxes, LENGTH, DType, Config, Array, Q_LENGTH, DECODE_LENGTH, DECODE_BATCH, PREFILL_KV_BATCH, KV_HEAD, KV_HEAD_DIM, KV_BATCH, EMBED, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL
+from MaxText.common_types import DecoderBlockType, DEFAULT_MASK_VALUE, BATCH, HEAD, KV_LENGTH, D_KV, CACHE_BATCH_PREFILL, CACHE_SEQUENCE, AxisNames, CACHE_BATCH, CACHE_HEADS, CACHE_SCALE_BATCH, CACHE_KV, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV, AxisIdxes, LENGTH, DType, Config, Array, Q_LENGTH, DECODE_LENGTH, DECODE_BATCH, PREFILL_KV_BATCH, KV_HEAD, KV_HEAD_DIM, KV_BATCH, EMBED, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_PIGGYBACKING
 from MaxText.inference import kvcache
 from MaxText.inference import page_manager
 from MaxText.inference import paged_attention
+from MaxText.inference import piggybacking_decode
 from MaxText.inference.kvcache import KVQuant, KVTensor
 from MaxText.kernels.ragged_attention import ragged_gqa
 from MaxText.kernels.ragged_attention import ragged_mha
@@ -903,7 +904,7 @@ class AttentionOp(nn.Module):
       local_sum = partitioning.with_sharding_constraint(local_sum, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
       local_out = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
 
-    ### YYY: what's shape?
+    ### YYY: what's shape? [B,L,N,D]
     return local_out, local_max, local_sum
 
   def is_partition_in_decode(self, seq_len):
@@ -1454,7 +1455,15 @@ class Attention(nn.Module):
     inputs = rotary_embedding(inputs, inputs_positions)
     return inputs
 
-  def update_kv_caches(self, key, value, decoder_segment_ids, model_mode, previous_chunk):
+  def update_kv_caches(
+      self,
+      key,
+      value,
+      decoder_segment_ids,
+      model_mode,
+      previous_chunk,
+      selected_slots: Optional[Array] = None,
+  ):
     """Updates the KV caches for prefill and autoregressive modes."""
     prefill_kv_cache, ar_kv_cache = kvcache.KVCache(
         self.max_prefill_predict_length,
@@ -1471,6 +1480,7 @@ class Attention(nn.Module):
         model_mode,
         use_ragged_attention=self.use_ragged_attention,
         previous_chunk=previous_chunk,
+        selected_slots=selected_slots,
     )
     ### YYY: need modify retrieved cache
     return [prefill_kv_cache, ar_kv_cache]
@@ -1489,6 +1499,7 @@ class Attention(nn.Module):
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
       bidirectional_mask: Any = None,
+      piggybacking_decode_params: Optional[piggybacking_decode.PiggyBackingDecodeParams] = None,
   ):
     """Applies Attention on the input data.
 
@@ -1579,6 +1590,9 @@ class Attention(nn.Module):
       query = nn.with_logical_constraint(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
       key = nn.with_logical_constraint(key, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
       value = nn.with_logical_constraint(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
+    elif model_mode == MODEL_MODE_PIGGYBACKING:
+      # Need separate prefill part and generate part. Do logical constraint later.
+      pass
     else:
       query = nn.with_logical_constraint(query, self.query_axis_names)
       key = nn.with_logical_constraint(key, self.key_axis_names)
@@ -1595,17 +1609,69 @@ class Attention(nn.Module):
           query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
       )
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
+    elif model_mode == MODEL_MODE_PIGGYBACKING:
+      assert piggybacking_decode_params is not None
+      prefill_slot = piggybacking_decode_params.prefill_slot
+      generate_slots = piggybacking_decode_params.generate_slots
+      num_genereate_token = generate_slots.shape[0]
+
+      # Piggybacking is like prefill, batch size == 1, shape [B, L, N, D]
+      prefill_query = query[:, :-num_genereate_token]
+      prefill_key = key[:, :-num_genereate_token]
+      prefill_value = value[:, :-num_genereate_token]
+      prefill_query = nn.with_logical_constraint(prefill_query, self.prefill_query_axis_names)
+      prefill_key = nn.with_logical_constraint(prefill_key, self.prefill_key_axis_names)
+      prefill_value = nn.with_logical_constraint(prefill_value, self.prefill_value_axis_names)
+
+      # Transform generate shape [1,num_token, ...] -> [num_token, 1, ...]
+      generate_query = query[:, -num_genereate_token:].swapaxes(0, 1)
+      generate_key = key[:, -num_genereate_token:].swapaxes(0, 1)
+      generate_value = value[:, -num_genereate_token:].swapaxes(0, 1)
+      generate_query = nn.with_logical_constraint(generate_query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+      generate_key = nn.with_logical_constraint(generate_key, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
+      generate_value = nn.with_logical_constraint(generate_value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
+
+      # decoder_segment_ids is for prefill
+      assert decoder_segment_ids is not None
+      prefill_cached_values = self.update_kv_caches(
+          prefill_key, prefill_value, decoder_segment_ids, MODEL_MODE_PREFILL, previous_chunk, prefill_slot
+      )
+      generate_cached_values = self.update_kv_caches(
+          generate_key, generate_value, None, MODEL_MODE_AUTOREGRESSIVE, previous_chunk, generate_slots
+      )
+      # attention_op return [B,L,N,D]
+      prefill_out = self.attention_op(
+          prefill_query,
+          prefill_key,
+          prefill_value,
+          decoder_segment_ids,
+          MODEL_MODE_PREFILL,
+          prefill_cached_values,
+          previous_chunk,
+          bidirectional_mask,
+      )
+      generate_out = self.attention_op(
+          generate_query,
+          generate_key,
+          generate_value,
+          None,
+          MODEL_MODE_AUTOREGRESSIVE,
+          generate_cached_values,
+          previous_chunk,
+          bidirectional_mask,
+      )
+      # Transform generate shape [num_token, 1, ...] -> [1,num_token, ...]
+      generate_out = generate_out.swapaxes(0, 1)
+      out = jnp.concatenate([prefill_out, generate_out], axis=1)
     else:
       cached_values = [None, None]
       if model_mode != MODEL_MODE_TRAIN:
-        ### YYY: update need handle piggybacking, too
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
-      ### YYY: maybe seperate piggybacking here, and call two appention_op
       out = self.attention_op(
           query, key, value, decoder_segment_ids, model_mode, cached_values, previous_chunk, bidirectional_mask
       )
 
-    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_TRAIN):
+    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, MODEL_MODE_PIGGYBACKING):
       out = nn.with_logical_constraint(out, self.out_axis_names)
     else:
       out = nn.with_logical_constraint(out, self.decode_out_axis_names)
