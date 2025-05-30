@@ -979,6 +979,8 @@ def get_num_target_devices(raw_keys):
     compile_topology = accelerator_to_spec_map.get_system_characteristics(raw_keys["compile_topology"])
     devices_per_slice = compile_topology.devices_per_slice
     return int(devices_per_slice * raw_keys["compile_topology_num_slices"])
+  elif raw_keys.get("num_inference_devices"):
+    return jax.device_count() - raw_keys["num_inference_devices"]
   else:
     return len(jax.devices())
 

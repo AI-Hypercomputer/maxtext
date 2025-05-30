@@ -188,4 +188,4 @@ def create_data_iterator(config, mesh):
   if config.eval_interval > 0:
     raise ValueError("GRPO input pipeline is not supported for eval data")
   train_iterator_fn = functools.partial(make_hf_train_iterator, config, mesh, process_indices_train)
-  return input_pipeline_interface.make_mixed_iterator(config, mesh, process_indices_train, [], train_iterator_fn, None)
+  return input_pipeline_interface.make_mixed_iterator(config, mesh, process_indices_train, [], train_iterator_fn, None)[0]

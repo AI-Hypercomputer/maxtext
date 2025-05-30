@@ -52,6 +52,7 @@ import jax
 import numpy as np
 import jax.numpy as jnp
 from jax.sharding import Mesh
+from jax.sharding import PartitionSpec
 from jax.experimental import mesh_utils
 
 
@@ -60,6 +61,8 @@ from MaxText.maxengine import MaxEngine
 from MaxText import max_utils
 from MaxText import inference_utils
 from jax.sharding import PartitionSpec as P, NamedSharding
+
+from MaxText.experimental.rl import pathwaysutils_reshard
 
 
 from MaxText.prefill_packing import PrefillProcessor, BatchedPrefillProcessor
@@ -397,6 +400,7 @@ class ReplicaWorker:
         max_decode_length: int,
         batch_prefill_max_batch_size: int,
         worker_id: int = 0,
+        is_pw_reshard: bool = True, 
         auto_layout_supported: bool = False,
         run_as_a_thread=False,
         rng=None,
@@ -457,6 +461,7 @@ class ReplicaWorker:
         self.config = config
         self.params = params
         self.devices = devices
+        self.is_pw_reshard = is_pw_reshard
         self.enable_batch_prefill = enable_batch_prefill
         self.prefill_lengths = prefill_lengths
         self.max_prefill_length = self.prefill_lengths[-1]
@@ -621,8 +626,32 @@ class ReplicaWorker:
             self.warm_up_thread.join()
             self.warm_up_thread = None
 
-    def update_params(self, params: Params):
-        self.params = self.engine.load_params(params=params, rng=self.rng)
+    def update_impl(self, params: Params, destination_sharding: jax.sharding.NamedSharding, is_pw_reshard: bool):
+        if is_pw_reshard:
+            with (jax.transfer_guard_device_to_host("disallow_explicit"), jax.transfer_guard_host_to_device("disallow_explicit")):
+                self.params = pathwaysutils_reshard.reshard(params, destination_sharding, cache_resharding_plans=True)
+        else:
+            self.params = jax.device_put(params, destination_sharding)
+
+    def update_params(self, params: Params, destination_sharding: jax.sharding.NamedSharding, is_pw_reshard: bool = True):
+        self.ensure_init_finished()
+        self.ensure_warm_up_finished()
+        if self.run_as_a_thread:
+            self.update_thread = SafeThead(
+                target=self.update_impl,
+                args=(params, destination_sharding, is_pw_reshard),
+                name=f"replica_worker_{self.worker_id}",
+            )
+            self.update_thread.start()
+        else:
+            self.update_impl(params, destination_sharding, is_pw_reshard)
+
+        
+
+    def ensure_update_finished(self):
+        if self.update_thread is not None:
+            self.update_thread.join()
+            self.update_thread = None
 
     def start_inference(
         self,
@@ -639,6 +668,7 @@ class ReplicaWorker:
         """
         self.ensure_init_finished()
         self.ensure_warm_up_finished()
+        # self.ensure_update_finished() TODO(mohitkhatwani) might not need it
         self.res = results
         if self.run_as_a_thread:
             self.worker_thread = SafeThead(
@@ -1115,9 +1145,9 @@ class OfflineEngine:
                 self.replica_workers[i].ensure_warm_up_finished()
             self._not_warmed_up = False
 
-    def update_params(self, params: Params):
+    def update_params(self, params: Params, parition_spec: PartitionSpec, is_pw_reshard):
         for i in range(self.dp):
-            self.replica_workers[i].update_params(params)
+            self.replica_workers[i].update_params(params, jax.tree_util.tree_map(lambda ps: jax.sharding.NamedSharding(self.dp_meshes[i], ps), parition_spec), is_pw_reshard)
 
     def batch_inference(
         self,

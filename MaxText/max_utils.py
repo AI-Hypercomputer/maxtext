@@ -14,33 +14,33 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-""" Common Max Utils needed by multiple modules.
-All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
-
-import functools
-import time
-import os
-import socket
-import subprocess
-import collections
-from collections.abc import Sequence
-from typing import Any, Tuple
-from functools import partial
-
+""" Common Max Utils needed by multiple modules"""
+""" All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
 import numpy as np
-
 import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
+from jax.sharding import PartitionSpec as P
+from jax.sharding import NamedSharding
+import functools
+import time
+import os
+import psutil
+import socket
+import subprocess
+from etils import epath
+from collections.abc import Sequence
+import collections
+from typing import Any, Tuple
+from functools import partial
+
+from MaxText import max_logging
+
 
 import flax
 
-import psutil
 
-from etils import epath
-
-import orbax.checkpoint as ocp
-
+import flax
 from tensorboardX import writer
 
 from MaxText import max_logging
@@ -529,6 +529,66 @@ def optimize_mesh_for_tpu_v6e(mesh, devices):
   return new_mesh
 
 
+def create_device_mesh(config, devices=None):
+  """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
+  num_slices = 1 if config.inference_benchmark_test or devices is not None else config.num_slices
+  if devices is None:
+    devices = jax.devices()
+  num_devices = len(devices)
+  
+  num_devices_per_slice = num_devices // num_slices
+
+  multi_slice_env = num_slices > 1
+
+  # Find possible unspecified parallelisms
+  ici_parallelism = config.ici_parallelism.copy()
+  if -1 in config.ici_parallelism:
+    ici_parallelism = fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, "ICI")
+
+  allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
+
+  if multi_slice_env:
+    dcn_parallelism = fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN")
+    if is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
+      mesh = create_custom_device_mesh(ici_parallelism, dcn_parallelism, devices, config.custom_mesh)
+    else:
+      mesh = mesh_utils.create_hybrid_device_mesh(
+          ici_parallelism,
+          dcn_parallelism,
+          devices,
+          allow_split_physical_axes=allow_split_physical_axes,
+      )
+  else:
+    if allow_split_physical_axes:
+      if is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
+        mesh = mesh_utils.create_device_mesh(
+            [16, 16],
+            devices,
+            contiguous_submeshes=False,
+            allow_split_physical_axes=False,
+        )
+        mesh = reshape_mesh_to_rings(mesh, config.custom_mesh)
+        mesh = np.reshape(mesh, ici_parallelism)
+      else:
+        mesh = mesh_utils.create_device_mesh(
+            ici_parallelism,
+            devices,
+            contiguous_submeshes=False,
+            allow_split_physical_axes=allow_split_physical_axes,
+        )
+    else:
+      mesh = mesh_utils.create_device_mesh(
+          ici_parallelism,
+          devices,
+      )
+      if config.optimize_mesh_for_tpu_v6e:
+        mesh = optimize_mesh_for_tpu_v6e(mesh, devices)
+
+  max_logging.log(f"Num_devices: {num_devices}, shape {mesh.shape}")
+
+  return mesh
+
+
 def unbox_logicallypartioned(boxed_pytree):
   """Unboxes the flax.LogicallyPartitioned pieces
 
@@ -841,51 +901,86 @@ def get_reorder_callable(cp_size):
   """Creates a callable that can be used with map() to reorder batches."""
   return functools.partial(shard_reorder_causal_load_balanced, cp_size=cp_size)
 
+def parse_custom_args(argv):
+    configs = []
+    current_argv = []
+    python_script = argv[0]
+    for arg in argv[1:]:
+      if arg.endswith((".yaml", ".yml")):
+        if current_argv:
+          configs.append(current_argv)
+        current_argv = [python_script, arg]
+      else:
+        current_argv.append(arg)
+    if current_argv:
+      configs.append(current_argv)
+    return configs
 
-@staticmethod
-def reorder_mask_load_balancing(tensor, cp_size: int, seq_dim: int):
+
+def unscan_train_state_params(params, sharding, mesh, scan_axis, layer_groups):
   """
-  Reorders a tensor for load balancing the compute of causal attention.
-  This function works on numpy arrays instead of jax.numpy arrays.
-  This is needed because we need the mask to be statically computable.
-  So, we need to redefine the same logic as reorder_causal_load_balancing.
-  We are still doing [0, 1, 2, 3, 4, 5, 6, 7] -> [0, 1, 6, 7, 2, 3, 4, 5]
+  Unrolls scanned parameter groups into per-layer entries.
 
   Args:
-    tensor: The tensor to reorder.
-    cp_size: The size of the compute parallelism.
-    seq_dim: The dimension of the sequence.
+    train_state: training state with scanned `params`
+    mesh: the mesh to use for sharding output
+    scan_axis: axis along which scanning was applied (usually 0)
+    layer_groups: list of tuples like:
+      [("dense_layers", 4), ("moe_layers", 12)]
   """
+  decoder = params["params"]["decoder"]
+  sharding = sharding["params"]["decoder"]
+  
+  for layer_name, num_layers in layer_groups:
+    scanned_layers = decoder[layer_name]
 
-  seq_len = tensor.shape[seq_dim]
-  group_size = seq_len // (2 * cp_size)
+    def strip_axis(pspec):
+      return P(*(pspec[:scan_axis] + pspec[scan_axis+1:]))
+  
+    old_spec = jax.tree_util.tree_map(lambda x: x.spec, sharding[layer_name])
+    new_spec = jax.tree_util.tree_map(strip_axis, old_spec)
+    new_sharding = jax.tree_util.tree_map(lambda ps: NamedSharding(mesh, ps), new_spec)
 
-  if cp_size % 2 != 0:
-    raise ValueError(f"{cp_size=} must be a multiple of 2.")
+    def slice_layer(arr, i):
+      return jax.tree_util.tree_map(lambda x: jnp.take(x, i, axis=scan_axis), arr)
+    p_slice_layer = jax.jit(slice_layer, out_shardings=new_sharding)
 
-  # Need to ensure we have 2 pairs to swap for balancing between cp ranks
-  if seq_len % (cp_size * 2) != 0:
-    raise ValueError(f"{tensor.shape=} is not a multiple of {cp_size*2=}")
+    for i in range(num_layers):
+      per_layer = p_slice_layer(scanned_layers, i)
+      decoder[f"{layer_name}_{i}"] = per_layer
 
-  # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
-  # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
-  ori_tensor_shape = tensor.shape
-  reshaped = tensor.reshape(
-      *ori_tensor_shape[:seq_dim],
-      2 * cp_size,
-      group_size,
-      *ori_tensor_shape[seq_dim + 1 :],
-  )
+    del decoder[layer_name]  # Free memory
 
-  # Create first and second halves
-  first_half = np.arange(cp_size)
-  second_half = np.arange(2 * cp_size - 1, cp_size - 1, -1)
+def rescan_train_state_params(params, source_shardings, scan_axis, layer_groups):
+  """
+  Reconstruct scanned layers from per-layer entries using minimal HBM.
+  
+  Args:
+    train_state: training state with unrolled {layer_name}_{i} entries
+    scan_axis: axis to scan over
+    layer_groups: list of (layer_name, num_layers)
+    mesh: jax.sharding.Mesh for out_shardings
+  """
+  decoder = params["params"]["decoder"]
+  sharding = source_shardings["params"]["decoder"]
 
-  # Stack and reshape to interleave
-  src_indices = np.stack([first_half, second_half], axis=1).reshape(-1)
+  for layer_name, num_layers in layer_groups:
 
-  # One gather and one reshape
-  reordered = np.take(reshaped, src_indices, axis=seq_dim)
+    def stack_layers(*layers):
+      return jax.tree_util.tree_map(lambda *xs: jnp.stack(xs, axis=scan_axis), *layers)
 
-  # Reshape back to original dimensions
-  return reordered.reshape(ori_tensor_shape)
+    # Create a wrapper that allows pjit + donation
+    compiled_stack = jax.jit(
+      stack_layers,
+      out_shardings=sharding[layer_name],
+      donate_argnums=tuple(range(num_layers)),
+    )
+
+    # Collect per-layer entries for stacking
+    layer_list = [decoder.pop(f"{layer_name}_{i}") for i in range(num_layers)]
+
+    # Stack them with donation
+    scanned = compiled_stack(*layer_list)
+
+    # Store result and clear temporary memory
+    decoder[layer_name] = scanned
