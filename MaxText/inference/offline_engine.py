@@ -1053,8 +1053,9 @@ class OfflineEngine:
             ici_parallelism = max_utils.fill_unspecified_mesh_axes(
                 config.ici_parallelism.copy(), len(devices), "ICI"
             )
+            # ici_parallelism =  [self.dp, 1, 1, 1, 1, 1, 1, len(devices) // self.dp, 1, 1, 1, 1]
             devices_array = mesh_utils.create_device_mesh(
-                ici_parallelism,
+                [self.dp, len(devices) // self.dp],
                 devices,
                 contiguous_submeshes=False,
                 allow_split_physical_axes=config.allow_split_physical_axes or False,
