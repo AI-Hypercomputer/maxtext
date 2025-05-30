@@ -805,6 +805,8 @@ class ReplicaWorker:
         
         completions = jnp.transpose(all_tokens, (1,0))
         logps = jnp.transpose(all_logps, (1,0))
+        completions.block_until_ready()
+        logps.block_until_ready()
         for x in range(len(completions)):
             self.res[data[x].id] = ReplicaOutput(completions[x], logps[x])
 
