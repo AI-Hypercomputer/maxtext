@@ -67,6 +67,7 @@ def main() -> int:
 
   list_of_models = [
       # model_configs.default_basic_1,
+      # model_configs.default_basic_1_elastic_train,
       # model_configs.default_basic_1_colocated_python,
       # model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds_remote_python,
       model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds_colocated_python_elastic_train,
@@ -78,8 +79,8 @@ def main() -> int:
       runner_image=runner,
       colocated_python_sidecar_image=colocated_python_image,
   )
-  num_slices_list = [1]
-  # num_slices_list = [1, 2, 4, 8, 16, 32]
+  num_slices_list = [8, 16, 32, 64, 128]
+  # num_slices_list = [32,]
 
   xpk_workload_cmds = []
   xpk_workload_names = []
@@ -100,9 +101,10 @@ def main() -> int:
             libtpu_type=None,
             libtpu_nightly_version="",
             base_docker_image="",
+            priority="high",
             pathways_config=pathways_config,
             xpk_path=xpk_path,
-            num_steps=1000000,
+            num_steps=100,
         )
         random_4_digit_suffix = "".join(
             random.choice(string.ascii_lowercase + string.digits)
