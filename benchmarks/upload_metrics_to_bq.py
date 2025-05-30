@@ -239,7 +239,16 @@ def update_config_with_tuning_params(base_config: omegaconf.DictConfig,
 
 def main(argv: Sequence[str]) -> None:
   is_pathways = os.environ.get('JAX_PLATFORMS', '') == 'proxy'
-  is_mcjax_0th_worker = int(os.environ['TPU_WORKER_ID']) == 0
+  
+  if is_pathways:
+    print("Skipping BigQuery metrics uploader for Pathways.")
+    return
+
+  tpu_worker_id_str = os.environ.get('TPU_WORKER_ID', None)
+  if tpu_worker_id_str is not None:
+    is_mcjax_0th_worker = int(tpu_worker_id_str) == 0
+  else:
+    is_mcjax_0th_worker = False
 
   # Only write once for McJAX. Pathways is single controller,
   # so only can write once.
