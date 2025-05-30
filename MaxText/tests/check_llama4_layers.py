@@ -344,6 +344,96 @@ class Llama4VisionPixelShuffleMLPTest(unittest.TestCase):
     np.testing.assert_allclose(to_jax(pt_output), jax_output, rtol=1e-3, atol=0.05)
 
 
+class Llama4MultiModalProjectorTest(unittest.TestCase):
+  """Test for the Llama4 Multi Modal Projector implementation."""
+
+  def __copy_weights(self, pt_model, params):
+    """Copy weights from PyTorch model to JAX model.
+
+    Args:
+      pt_model: PyTorch Llama4MultiModalProjector model
+      params: JAX model parameters
+    """
+    # Create new params with copied weights
+    updated_params = jax.tree_util.tree_map(lambda x: x, params)
+    updated_params["params"]["vit_multi_modal_projector"]["kernel"] = to_jax(pt_model.linear_1.weight).T
+    return updated_params
+
+  def test_multi_modal_projector(self):
+    """Test for the Llama4 Multi Modal Projector implementation."""
+    # Test parameters
+    # following config https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct/blob/main/config.json
+    batch_size = 10
+    num_patches = 24 * 24  # 336/14 = 24 patches per side
+    pixel_shuffle_ratio = 0.5
+    vision_output_dim = 4096
+    hidden_size = 5120
+
+    # PyTorch implementation
+    class VisionConfig:
+
+      def __init__(self):
+        self.vision_output_dim = vision_output_dim
+
+    class TextConfig:
+
+      def __init__(self):
+        self.hidden_size = hidden_size
+
+    class Config:
+
+      def __init__(self):
+        self.vision_config = VisionConfig()
+        self.text_config = TextConfig()
+
+    class Llama4MultiModalProjector(nn.Module):
+      """Llama4 Multi Modal Projector pytorch original implementation."""
+
+      def __init__(self, config):
+        super().__init__()
+        self.linear_1 = nn.Linear(
+            config.vision_config.vision_output_dim,
+            config.text_config.hidden_size,
+            bias=False,
+        )
+
+      def forward(self, image_features):
+        hidden_states = self.linear_1(image_features)
+        return hidden_states
+
+    # Create random input tensor
+    # Shape: [batch_size*num_patches*(pixel_shuffle_ratio**2), vision_output_dim]
+    inputs_pt = torch.randn(batch_size * num_patches * int(pixel_shuffle_ratio**2), vision_output_dim)
+
+    # Initialize PyTorch model
+    pt_model = Llama4MultiModalProjector(Config())
+    pt_model.eval()
+    pt_output = pt_model(inputs_pt)
+
+    # JAX implementation
+    class JaxConfig:
+
+      def __init__(self):
+        self.emb_dim = hidden_size
+        self.dtype_mm = jnp.float32
+
+    # Initialize JAX model
+    jax_model = llama4.Llama4MultiModalProjector(JaxConfig())
+    params = jax_model.init(jax.random.PRNGKey(0), to_jax(inputs_pt))
+
+    # Copy weights from PyTorch to JAX
+    pt_params = self.__copy_weights(pt_model, params)
+
+    # Run JAX forward pass with updated params
+    jax_output = jax_model.apply(pt_params, to_jax(inputs_pt))
+
+    # Compare shapes
+    self.assertEqual(pt_output.shape, jax_output.shape)
+
+    # Compare outputs with reasonable tolerances
+    np.testing.assert_allclose(to_jax(pt_output), jax_output, rtol=1e-3, atol=0.05)
+
+
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
   """
   Pytorch implementation from HuggingFace:
@@ -544,6 +634,8 @@ class Llama4VisionAttentionTest(unittest.TestCase):
         is_nope_layer=False,
         use_bias_in_projections=True,
         is_vision=True,
+        use_qk_norm=False,
+        query_pre_attn_scalar=1 / math.sqrt(self.cfg.hidden_size_for_vit // self.cfg.num_attention_heads_for_vit),
     )
 
     lnx = to_jax(hidden_states_pt)
