@@ -41,7 +41,17 @@ jobs:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     container: google/cloud-sdk:524.0.0
     steps:
+      - name: Authenticate gcloud
+        continue-on-error: true
+        run: |
+          # configure registries as root and as runner
+          sudo gcloud auth configure-docker --quiet
+          gcloud auth configure-docker --quiet
+          sudo gcloud auth configure-docker us-docker.pkg.dev --quiet
+          gcloud auth configure-docker us-docker.pkg.dev --quiet
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Mark git repository as safe
+        run: git config --global --add safe.directory ${GITHUB_WORKSPACE}
       - name: Configure Docker
         run: gcloud auth configure-docker gcr.io
       - name: Set up Docker BuildX
