@@ -47,7 +47,7 @@ jobs:
         with:
           version: v0.23.0
           driver: remote
-          endpoint: unix:///mnt/buildkit/buildkitd.sock
+          endpoint: tcp://localhost:1234
       - name: Build an image
         run: |
           bash docker_build_dependency_image.sh MODE=${{ inputs.build_mode }} DEVICE=${{ inputs.device_type }} BASEIMAGE=${{ inputs.base_image }}
