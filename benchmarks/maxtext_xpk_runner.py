@@ -98,7 +98,7 @@ class WorkloadConfig:
   xpk_path: str = os.path.join("~", "xpk")
   pathways_config: PathwaysConfig = None
   run_name: str = None
-  generate_metrics_and_upload_to_big_query: bool = True
+  generate_metrics_and_upload_to_big_query: bool = False
   hardware_id: str = 'v6e'
   metrics_gcs_file: str = ''
   base_config: str = os.path.join("MaxText", "configs", "base.yml")
@@ -414,14 +414,15 @@ def build_user_command(
       'export ENABLE_PATHWAYS_PERSISTENCE=1 &&',
       f'export JAX_PLATFORMS={jax_platforms} &&',
       'export ENABLE_PJRT_COMPATIBILITY=true &&',
-      f'python3 -m MaxText.train {os.path.join("MaxText", "configs", "base.yml")}',
+      f'python3 -m MaxText.elastic_train {os.path.join("MaxText", "configs", "base.yml")}',
       f'{config_tuning_params}',
       f'steps={wl_config.num_steps}',
       f'model_name={wl_config.model.model_type}',
       f'base_output_directory={wl_config.base_output_directory}',
       f'{vertex_tensorboard}',
       f'{run_name_command}',
-      f'{enable_metrics_cmd}'
+      f'{enable_metrics_cmd}',
+      'elastic_mode=fast-resume elastic_reshard_check_period=1 elastic_snapshot_period=5 elastic_max_elastic_down_event_count=1000 elastic_max_reshard_retry_count=3 elastic_wait_period=5'
   ])
   return command
 
@@ -652,6 +653,8 @@ def generate_xpk_workload_cmd(
           f' {device_type}'
           f' {all_xpk_storage}'
           f' --num-slices={wl_config.num_slices}'
+          f' --elastic-slices={wl_config.num_slices}'
+          f' --max-slice-restarts=1000'
           f' --command="{user_command} {upload_metrics_to_bq_cmd}"'
           f' {docker_image_flag}'
           ' --enable-debug-logs'
