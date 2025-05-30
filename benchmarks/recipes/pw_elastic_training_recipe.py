@@ -21,8 +21,10 @@ sys.path.append(parent_dir)
 
 from benchmarks.disruption_management.disruption_handler import DisruptionConfig
 from benchmarks.disruption_management.disruption_handler import DisruptionMethod
+from benchmarks.disruption_management.disruption_handler import MCJAX_STANDARD_STEP_POD_REGEX_SUFFIX
 from benchmarks.disruption_management.disruption_handler import MCJAX_STANDARD_TARGET_POD_REGEX_SUFFIX
 from benchmarks.disruption_management.disruption_handler import MCJAX_WORKER_CONTAINER_NAME
+from benchmarks.disruption_management.disruption_handler import PATHWAYS_STANDARD_STEP_POD_REGEX_SUFFIX
 from benchmarks.disruption_management.disruption_handler import PATHWAYS_STANDARD_TARGET_POD_REGEX_SUFFIX
 from benchmarks.disruption_management.disruption_handler import PATHWAYS_WORKER_CONTAINER_NAME
 from benchmarks.disruption_management.disruption_handler import TriggerType
@@ -73,9 +75,11 @@ def construct_disruption_configs(
 
   if pathways_config:
     target_pod_regex = PATHWAYS_STANDARD_TARGET_POD_REGEX_SUFFIX
+    step_pod_regex = PATHWAYS_STANDARD_STEP_POD_REGEX_SUFFIX
     worker_container_name = PATHWAYS_WORKER_CONTAINER_NAME
   else:
     target_pod_regex = MCJAX_STANDARD_TARGET_POD_REGEX_SUFFIX
+    step_pod_regex = MCJAX_STANDARD_STEP_POD_REGEX_SUFFIX
     worker_container_name = MCJAX_WORKER_CONTAINER_NAME
 
   # Do 2 total disruptions, once after 2 minutes and once after 6 minutes.
@@ -88,6 +92,7 @@ def construct_disruption_configs(
           trigger_value=5,
           disruption_method=DisruptionMethod.SIGILL,
           target_pod_regex=target_pod_regex,
+          step_pod_regex=step_pod_regex,
           worker_container_name=worker_container_name,
       ),
       DisruptionConfig(
@@ -98,6 +103,7 @@ def construct_disruption_configs(
           trigger_value=15,
           disruption_method=DisruptionMethod.SIGILL,
           target_pod_regex=target_pod_regex,
+          step_pod_regex=step_pod_regex,
           worker_container_name=worker_container_name,
       )
   ]
@@ -121,6 +127,7 @@ def construct_workload_config_with_disruptions(
       pathways_config=pathways_config,
       xpk_path=XPK_PATH,
       num_steps=BENCHMARK_STEPS,
+      priority="very-high",
       disruption_configs=construct_disruption_configs(pathways_config)
   )
 
