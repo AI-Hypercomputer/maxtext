@@ -34,7 +34,6 @@ from MaxText.input_pipeline._hf_data_processing import make_hf_train_iterator, m
 from MaxText.input_pipeline._tfds_data_processing import make_tfds_train_iterator, make_tfds_eval_iterator
 from MaxText.input_pipeline._tfds_data_processing_c4_mlperf import make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator
 
-
 class SyntheticDataIterator:
   """Creates a synthetic data iterator for performance testing work"""
 
@@ -43,36 +42,36 @@ class SyntheticDataIterator:
   def __init__(self, config, mesh):
     self.mesh = mesh
     self.config = config
+
+
     data_pspec = P(*config.data_sharding)
     data_pspec_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
     self.data_generator = jax.jit(
         SyntheticDataIterator.raw_generate_synthetic_data, out_shardings=data_pspec_shardings, static_argnums=0
     )
 
-    # tokens = jax.random.randint(
-    #     jax.random.PRNGKey(0),
-    #     (config.global_batch_size_to_load, config.max_target_length + 1),
-    #     0,
-    #     config.vocab_size,
-    #     dtype=jnp.int32,
-    # )
-
-    # sequence_positions = jnp.arange(0, config.max_target_length + 1, dtype=jnp.int32).reshape(1, -1)
-    # batch_positions = jnp.broadcast_to(sequence_positions, (config.global_batch_size_to_load, config.max_target_length + 1))
-    # segmentation = jnp.ones((config.global_batch_size_to_load, config.max_target_length), dtype=jnp.int32)
-    self.data = None
-
   def __iter__(self):
     return self
 
   def __next__(self):
     with self.mesh:
-      return self.data_generator(self.config, self.data)  # pylint: disable=not-callable
+      return self.data_generator(self.config)
 
   @staticmethod
-  def raw_generate_synthetic_data(config: pyconfig.HyperParameters, data):
+  def raw_generate_synthetic_data(config):
     """Generates a single batch of synthetic data"""
-    # tokens, positions, segmentation = data
+
+    tokens = jax.random.randint(
+        jax.random.PRNGKey(0),
+        (config.global_batch_size_to_load, config.max_target_length + 1),
+        0,
+        config.vocab_size,
+        dtype=jnp.int32,
+    )
+
+    sequence_positions = jnp.arange(0, config.max_target_length + 1, dtype=jnp.int32).reshape(1, -1)
+    positions = jnp.broadcast_to(sequence_positions, (config.global_batch_size_to_load, config.max_target_length + 1))
+    segmentation = jnp.ones((config.global_batch_size_to_load, config.max_target_length), dtype=jnp.int32)
 
     output = {}
     output["inputs"] = jax.numpy.zeros((config.global_batch_size_to_load, config.max_target_length), dtype=jax.numpy.int32)
