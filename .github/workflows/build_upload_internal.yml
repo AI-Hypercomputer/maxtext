@@ -49,6 +49,8 @@ jobs:
         with:
           driver: remote
           endpoint: tcp://localhost:1234
+      - name: Mark git repository as safe
+        run: git config --global --add safe.directory /__w/maxtext/maxtext
       - name: Build an image
         run: |
           bash docker_build_dependency_image.sh MODE=${{ inputs.build_mode }} DEVICE=${{ inputs.device_type }} BASEIMAGE=${{ inputs.base_image }}
