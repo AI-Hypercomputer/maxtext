@@ -22,20 +22,23 @@ import benchmarks.recipes.args_helper as helper
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(parent_dir)
 
-import benchmarks.maxtext_trillium_model_configs as model_configs
+# import benchmarks.maxtext_trillium_model_configs as model_configs
+import benchmarks.maxtext_v5e_model_configs as v5e_model_configs
 import benchmarks.maxtext_xpk_runner as mxr
 from benchmarks.xpk_configs import XpkClusterConfig
 
 PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
 SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
 # RUNNER = "us-docker.pkg.dev/path/to/maxtext_runner"
-RUNNER="gcr.io/tpu-prod-env-multipod/wstcliyu_latest:latest"
+# RUNNER="gcr.io/tpu-prod-env-multipod/wstcliyu_latest"
+RUNNER="gcr.io/tpu-prod-env-multipod/wstcliyu_async_ckpt_runner"
 
 # PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitzed_proxy_server:copy-arrays"
 # SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_server:copy-arrays"
 # RUNNER = "gcr.io/tpu-prod-env-multipod/sujinesh_latest"
 # RUNNER = "gcr.io/cloud-tpu-multipod-dev/shauryag_elastic_runner"
-RUNNER = "gcr.io/tpu-prod-env-multipod/shauryag_elastic_runner"
+# RUNNER = "gcr.io/tpu-prod-env-multipod/shauryag_elastic_runner"
+
 # Cluster Params
 # CLUSTER = "v6e-256-cluster"
 # PROJECT = "tpu-prod-env-cluster"
@@ -45,25 +48,33 @@ RUNNER = "gcr.io/tpu-prod-env-multipod/shauryag_elastic_runner"
 # DEVICE_TYPE = "v6e-256"
 
 # Main Testing Cluster
-CLUSTER = "bodaborg-v6e-256-tt-c"
-PROJECT = "tpu-prod-env-multipod"
-ZONE = "us-west1-c"
-REGION = "us-west1"
+# CLUSTER = "bodaborg-v6e-256-tt-c"
+# PROJECT = "tpu-prod-env-multipod"
+# ZONE = "us-west1-c"
+# REGION = "us-west1"
+# COUNTRY = "us"
+# DEVICE_TYPE = "v6e-256"
+
+# v5e-32 cluster
+CLUSTER = "pw-scale-test-v5e-32"
+PROJECT = "cloud-tpu-multipod-dev"
+ZONE = "us-south1-a"
+REGION = "us-south1"
 COUNTRY = "us"
-DEVICE_TYPE = "v6e-256"
+DEVICE_TYPE = "v5litepod-32"
 
 # Other parameters (MUST BE SET BY USER)
-# XPK_PATH = os.path.join("~", "xpk")
-XPK_PATH = os.path.join("~", "github/xpk")
+XPK_PATH = os.path.join("~", "xpk")
+# XPK_PATH = os.path.join("~", "github/xpk")
 BASE_OUTPUT_DIRECTORY = (
     # f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
-    "gs://trillium-scale-datasets-q1-25-west/pw_mcjax_benchmarking/"
+    "gs://trillium-scale-datasets-q1-25-west/pw_async_ckpt/"
 )
 
 # TODO Change this for long running test!
 MAX_RESTARTS = 10_000
 # BENCHMARK_STEPS=10_000_000
-BENCHMARK_STEPS=20
+BENCHMARK_STEPS=41
 
 
 def main() -> int:
@@ -84,9 +95,10 @@ def main() -> int:
     return 0
 
   model_list = [
+      v5e_model_configs.llama3_1_8b_8192_v5e_256,
       # model_configs.llama3_1_70b_8192_pw_lr_real_data,
       # model_configs.llama3_1_8b_8192,
-      model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
+    #   model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
     #   model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds,
   ]
 
@@ -127,7 +139,7 @@ def main() -> int:
       model.tuning_params["enable_pathways_goodput"] = True
 
       # Checkpointing params
-      model.tuning_params["async_checkpointing"] = False
+      model.tuning_params["async_checkpointing"] = True
 
       # Run workloads in the following slice configurations
       for num_slices in num_slices_list:

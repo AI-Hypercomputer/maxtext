@@ -17,6 +17,16 @@ import os.path
 from benchmarks import xla_flags_library
 from benchmarks.maxtext_trillium_model_configs import MaxTextModel, _add_to_model_dictionary
 
+PATHWAYS_LONG_RUN_CHECKPOINTING_TUNING_PARAMS = {
+    "enable_checkpointing": True,
+    "async_checkpointing": False,
+    "checkpoint_period": 20,
+    "enable_checkpoint_cloud_logger": True,
+    "goodput_upload_interval_seconds": 300,
+    "enable_goodput_recording": False,
+    "enable_pathways_goodput": False,
+    "enable_gcp_goodput_metrics": False,
+}
 
 v5e_model_dict = {}
 
@@ -244,7 +254,7 @@ llama3_1_8b_8192_v5e_256 = _add_to_model_dictionary(
             "use_iota_embed": True,
             "dataset_path": "gs://max-datasets-rogue",
             "dataset_type": "synthetic",
-            "enable_checkpointing": False,
+            "enable_checkpointing": True,
             "sa_block_q": 2048,
             "sa_block_kv": 2048,
             "sa_block_kv_compute": 2048,
@@ -258,6 +268,7 @@ llama3_1_8b_8192_v5e_256 = _add_to_model_dictionary(
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
         },
+        pathways_tuning_params=PATHWAYS_LONG_RUN_CHECKPOINTING_TUNING_PARAMS,
         xla_flags=(
             xla_flags_library.DENSE_VMEM_LIMIT_FLAG
             + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER

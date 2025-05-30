@@ -21,14 +21,16 @@ sys.path.append(parent_dir)
 
 from benchmarks.disruption_management.disruption_handler import DisruptionConfig
 from benchmarks.disruption_management.disruption_handler import DisruptionMethod
+from benchmarks.disruption_management.disruption_handler import MCJAX_STANDARD_STEP_POD_REGEX_SUFFIX
 from benchmarks.disruption_management.disruption_handler import MCJAX_STANDARD_TARGET_POD_REGEX_SUFFIX
 from benchmarks.disruption_management.disruption_handler import MCJAX_WORKER_CONTAINER_NAME
+from benchmarks.disruption_management.disruption_handler import PATHWAYS_STANDARD_STEP_POD_REGEX_SUFFIX
 from benchmarks.disruption_management.disruption_handler import PATHWAYS_STANDARD_TARGET_POD_REGEX_SUFFIX
 from benchmarks.disruption_management.disruption_handler import PATHWAYS_WORKER_CONTAINER_NAME
 from benchmarks.disruption_management.disruption_handler import TriggerType
 from benchmarks.maxtext_trillium_model_configs import MaxTextModel
-# import maxtext_v5e_model_configs as v5e_model_configs
-import benchmarks.maxtext_trillium_model_configs as model_configs
+import maxtext_v5e_model_configs as v5e_model_configs
+# import benchmarks.maxtext_trillium_model_configs as model_configs
 import benchmarks.maxtext_xpk_runner as mxr
 from benchmarks.xpk_configs import XpkClusterConfig
 
@@ -45,12 +47,21 @@ RUNNER="gcr.io/tpu-prod-env-multipod/wstcliyu_latest:latest"
 # DEVICE_TYPE = "v6e-256"
 
 # Main Testing Cluster
-CLUSTER = "bodaborg-v6e-256-tt-c"
-PROJECT = "tpu-prod-env-multipod"
-ZONE = "us-west1-c"
-REGION = "us-west1"
+# CLUSTER = "bodaborg-v6e-256-tt-c"
+# CLUSTER = "bodaborg-v6e-256-tt-c-new-2"
+# PROJECT = "tpu-prod-env-multipod"
+# ZONE = "us-west1-c"
+# REGION = "us-west1"
+# COUNTRY = "us"
+# DEVICE_TYPE = "v6e-256"
+
+# v5e-32 cluster
+CLUSTER = "pw-scale-test-v5e-32"
+PROJECT = "cloud-tpu-multipod-dev"
+ZONE = "us-south1-a"
+REGION = "us-south1"
 COUNTRY = "us"
-DEVICE_TYPE = "v6e-256"
+DEVICE_TYPE = "v5litepod-32"
 
 # Other parameters (MUST BE SET BY USER)
 XPK_PATH = "~/xpk"  # We're running this script from the maxtext directory
@@ -59,7 +70,7 @@ BASE_OUTPUT_DIRECTORY = (
     # f"gs://{USER}-{PROJECT}-{COUNTRY}/disruption_management/"
     "gs://trillium-scale-datasets-q1-25-west/disruption_management/"
 )
-MAX_RESTARTS = 10
+MAX_RESTARTS = 0
 NUM_SLICES = 2
 BENCHMARK_STEPS = 50
 COMPARE_WITH_MCJAX = False
@@ -73,9 +84,11 @@ def construct_disruption_configs(
 
   if pathways_config:
     target_pod_regex = PATHWAYS_STANDARD_TARGET_POD_REGEX_SUFFIX
+    step_pod_regex = PATHWAYS_STANDARD_STEP_POD_REGEX_SUFFIX
     worker_container_name = PATHWAYS_WORKER_CONTAINER_NAME
   else:
     target_pod_regex = MCJAX_STANDARD_TARGET_POD_REGEX_SUFFIX
+    step_pod_regex = MCJAX_STANDARD_STEP_POD_REGEX_SUFFIX
     worker_container_name = MCJAX_WORKER_CONTAINER_NAME
 
   # Do 2 total disruptions, once after 2 minutes and once after 6 minutes.
@@ -88,6 +101,7 @@ def construct_disruption_configs(
           trigger_value=5,
           disruption_method=DisruptionMethod.SIGILL,
           target_pod_regex=target_pod_regex,
+          step_pod_regex=step_pod_regex,
           worker_container_name=worker_container_name,
       ),
       DisruptionConfig(
@@ -98,6 +112,7 @@ def construct_disruption_configs(
           trigger_value=15,
           disruption_method=DisruptionMethod.SIGILL,
           target_pod_regex=target_pod_regex,
+          step_pod_regex=step_pod_regex,
           worker_container_name=worker_container_name,
       )
   ]
@@ -121,6 +136,7 @@ def construct_workload_config_with_disruptions(
       pathways_config=pathways_config,
       xpk_path=XPK_PATH,
       num_steps=BENCHMARK_STEPS,
+      priority="very-high",
       disruption_configs=construct_disruption_configs(pathways_config)
   )
 
@@ -145,8 +161,11 @@ def main() -> None:
     return 0
 
   # Model Configuration - Using a simple default model for testing
-  # model = v5e_model_configs.llama3_1_8b_8192
-  model = model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing
+  model = v5e_model_configs.llama3_1_8b_8192_v5e_256
+  # model = model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing
+  model.tuning_params["enable_goodput_recording"] = False
+  model.tuning_params["enable_pathways_goodput"] = False
+  model.tuning_params["enable_gcp_goodput_metrics"] = False
 
   pathways_config = mxr.PathwaysConfig(
       server_image=SERVER_IMAGE,

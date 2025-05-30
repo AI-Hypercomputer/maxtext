@@ -42,10 +42,12 @@ BASE_PATHWAYS_TUNING_PARAMS = {
 PATHWAYS_LONG_RUN_CHECKPOINTING_TUNING_PARAMS = {
     "enable_checkpointing": True,
     "async_checkpointing": True,
-    "checkpoint_period": 100,
+    "checkpoint_period": 20,
     "enable_checkpoint_cloud_logger": True,
     "goodput_upload_interval_seconds": 300,
-    "enable_goodput_recording": True,
+    "enable_goodput_recording": False,
+    "enable_pathways_goodput": False,
+    "enable_gcp_goodput_metrics": False,
 }
 
 # The set of tuning params required for short-running pathways jobs.
