@@ -79,7 +79,7 @@ def main() -> int:
       runner_image=runner,
       colocated_python_sidecar_image=colocated_python_image,
   )
-  num_slices_list = [8, 16, 32, 64, 128]
+  num_slices_list = [1]
   # num_slices_list = [32,]
 
   xpk_workload_cmds = []
