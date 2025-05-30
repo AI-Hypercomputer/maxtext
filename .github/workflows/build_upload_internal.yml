@@ -54,8 +54,6 @@ jobs:
       - name: Build an image
         run: |
           bash docker_build_dependency_image.sh MODE=${{ inputs.build_mode }} DEVICE=${{ inputs.device_type }} BASEIMAGE=${{ inputs.base_image }}
-        env:
-          DOCKER_BUILDKIT: 1
       - name: Tag the image
         run: |
           docker tag maxtext_base_image gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:${{ inputs.device_type }}
