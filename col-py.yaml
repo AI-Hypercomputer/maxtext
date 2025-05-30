@@ -1,0 +1,317 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+    xpk.google.com/workload: ksadi-col-py-3vsr
+  name: ksadi-col-py-3vsr
+  namespace: default
+spec:
+  coordinator:
+    replicatedJob: pathways-head
+  failurePolicy:
+    restartStrategy: Recreate
+  network:
+    enableDNSHostnames: true
+    publishNotReadyAddresses: true
+  replicatedJobs:
+  - name: pathways-head
+    replicas: 1
+    template:
+      metadata: {}
+      spec:
+        backoffLimit: 0
+        completionMode: Indexed
+        completions: 1
+        parallelism: 1
+        template:
+          metadata: {}
+          spec:
+            containers:
+            - command:
+              - bash
+              - -c
+              - "echo XPK Start: $(date);\n_sigterm() (kill -SIGTERM $! 2>/dev/null;);\n\
+                trap _sigterm SIGTERM;\n\n(export TPU_STDERR_LOG_LEVEL=0 && export\
+                \ TPU_MIN_LOG_LEVEL=0 && export TF_CPP_MIN_LOG_LEVEL=0 && export TPU_VMODULE=real_program_continuator=1\
+                \ &&    export ENABLE_PATHWAYS_PERSISTENCE=1 && export JAX_PLATFORMS=proxy\
+                \ && export ENABLE_PJRT_COMPATIBILITY=true && python3 -m MaxText.elastic_train\
+                \ MaxText/configs/base.yml enable_checkpoint_cloud_logger=True enable_pathways_goodput=True\
+                \ enable_goodput_recording=True monitor_goodput=False per_device_batch_size=2\
+                \ ici_fsdp_parallelism=-1 remat_policy=custom decoder_layer_input=offload\
+                \ query_proj=offload key_proj=offload value_proj=offload max_target_length=8192\
+                \ attention=flash use_iota_embed=True dataset_path=/tmp/dataset\
+                \ dataset_type=tfds enable_checkpointing=False async_checkpointing=True\
+                \ checkpoint_period=20 sa_block_q=2048 sa_block_kv=2048 sa_block_kv_compute=2048\
+                \ sa_block_q_dkv=2048 sa_block_kv_dkv=2048 sa_block_kv_dkv_compute=2048\
+                \ sa_block_q_dq=2048 sa_block_kv_dq=2048 sa_use_fused_bwd_kernel=True\
+                \ gcs_metrics=True skip_first_n_steps_for_profiler=10 profiler_steps=5\
+                \ tokenizer_type=tiktoken tokenizer_path=google3/third_party/py/maxtext/assets/tokenizer_llama3.tiktoken\
+                \ colocated_python_data_input=True checkpoint_storage_use_ocdbt=False\
+                \ checkpoint_storage_use_zarr3=False enable_single_controller=True\
+                \ metrics_file=metrics.txt goodput_upload_interval_seconds=30  steps=100\
+                \ model_name=llama3.1-70b base_output_directory=gs://trillium-scale-tests-q1-25-west/ksadi/\
+                \  run_name=ksadi-col-py-3vsr  elastic_mode=fast-resume elastic_reshard_check_period=1\
+                \ elastic_snapshot_period=5 elastic_max_elastic_down_event_count=1000\
+                \ elastic_max_reshard_retry_count=3 elastic_wait_period=5 ) & PID=$!;\n\
+                while kill -0 $PID 2>/dev/null;\n    do sleep 5;\ndone;\nwait $PID;\n\
+                EXIT_CODE=$?;\n\necho XPK End: $(date);\necho EXIT_CODE=$EXIT_CODE;\n\
+                \n\nexit $EXIT_CODE\n"
+              env:
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: JAX_PLATFORMS
+                value: proxy
+              - name: XCLOUD_ENVIRONMENT
+                value: GCP
+              - name: JAX_BACKEND_TARGET
+                value: grpc://$(PATHWAYS_HEAD):29000
+              image: gcr.io/cloud-tpu-multipod-dev/ksadi_runner:latest
+              imagePullPolicy: Always
+              name: jax-tpu
+              resources:
+                limits:
+                  cpu: '24'
+                  memory: 100G
+              securityContext:
+                privileged: true
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
+            dnsPolicy: ClusterFirstWithHostNet
+            hostNetwork: true
+            initContainers:
+            - args:
+              - --server_port=29001
+              - --gcs_scratch_location=gs://trillium-scale-tests-q1-25-west/ksadi/
+              - --node_type=resource_manager
+              - --instance_count=1
+              - --instance_type=tpuv6e:16x16
+              - --xla_tpu_use_enhanced_launch_barrier=true
+              env:
+              - name: REPLICATED_JOB_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+              - name: HOST_ADDRESS
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: TPU_SKIP_MDS_QUERY
+                value: 'true'
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/ksadi/unsanitized_server:latest
+              imagePullPolicy: Always
+              name: pathways-rm
+              ports:
+              - containerPort: 29001
+                protocol: TCP
+              - containerPort: 29002
+                protocol: TCP
+              resources:
+                limits:
+                  cpu: '8'
+                  memory: 16G
+              restartPolicy: Always
+            - args:
+              - --server_port=29000
+              - --resource_manager_address=$(PATHWAYS_HEAD):29001
+              - --gcs_scratch_location=gs://trillium-scale-tests-q1-25-west/ksadi/
+              - --xla_tpu_scoped_vmem_limit_kib=98304
+              - --xla_tpu_use_minor_sharding_for_major_trivial_input=true
+              - --xla_tpu_relayout_group_size_threshold_for_reduce_scatter=1
+              - --xla_tpu_assign_all_reduce_scatter_layout=true
+              - --xla_tpu_enable_data_parallel_all_reduce_opt=true
+              - --xla_tpu_data_parallel_opt_different_sized_ops=true
+              - --xla_tpu_enable_async_collective_fusion=true
+              - --xla_tpu_enable_async_collective_fusion_fuse_all_gather=true
+              - --xla_tpu_enable_async_collective_fusion_multiple_steps=true
+              - --xla_tpu_overlap_compute_collective_tc=true
+              - --xla_enable_async_all_gather=true
+              - --xla_tpu_enable_all_experimental_scheduler_features=true
+              - --xla_tpu_enable_scheduler_memory_pressure_tracking=true
+              - --xla_tpu_host_transfer_overlap_limit=24
+              - --xla_tpu_aggressive_opt_barrier_removal=ENABLED
+              - --xla_lhs_prioritize_async_depth_over_stall=ENABLED
+              - --xla_tpu_enable_ag_backward_pipelining=true
+              - --xla_should_allow_loop_variant_parameter_in_chain=ENABLED
+              - --xla_should_add_loop_invariant_op_in_chain=ENABLED
+              - --xla_max_concurrent_host_send_recv=100
+              - --xla_tpu_scheduler_percent_shared_memory_limit=100
+              - --xla_latency_hiding_scheduler_rerun=2
+              - --xla_tpu_enable_async_collective_fusion_fuse_all_reduce=false
+              - --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true
+              - --xla_tpu_enable_all_reduce_offload_tracing=true
+              - --xla_tpu_use_tc_device_shape_on_sc=true
+              - --xla_sc_enable_instruction_fusion=false
+              - --xla_sc_disjoint_spmem=false
+              - --xla_sc_disable_megacore_partitioning=true
+              - --xla_tpu_iova_dma_chunk_size_bytes=104857
+              - --xla_tpu_use_enhanced_launch_barrier=true
+              - --num_elastic_slices=1
+              env:
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/ksadi/unsanitized_proxy_server:latest
+              imagePullPolicy: Always
+              name: pathways-proxy
+              ports:
+              - containerPort: 29000
+                protocol: TCP
+              resources:
+                limits:
+                  cpu: '16'
+                  memory: 100G
+              restartPolicy: Always
+            nodeSelector:
+              cloud.google.com/gke-nodepool: cpu-np
+            restartPolicy: Never
+            volumes:
+            - hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+              name: shared-tmp
+  - name: worker
+    replicas: 1
+    template:
+      metadata: {}
+      spec:
+        backoffLimit: 160000
+        completionMode: Indexed
+        completions: 64
+        parallelism: 64
+        template:
+          metadata:
+            annotations:
+              alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+              gke-gcsfuse/cpu-limit: 500m
+              gke-gcsfuse/ephemeral-storage-limit: 40Gi
+              gke-gcsfuse/memory-limit: 350Gi
+              gke-gcsfuse/volumes: 'true'
+          spec:
+            containers:
+            - args:
+              - --server_port=29005
+              - --resource_manager_address=$(PATHWAYS_HEAD):29001
+              - --gcs_scratch_location=gs://trillium-scale-tests-q1-25-west/ksadi/
+              - --xla_tpu_use_enhanced_launch_barrier=true
+              env:
+              - name: TPU_MIN_LOG_LEVEL
+                value: '0'
+              - name: TF_CPP_MIN_LOG_LEVEL
+                value: '0'
+              - name: XCLOUD_ENVIRONMENT
+                value: GCP
+              - name: MEGASCALE_GRPC_ENABLE_XOR_TRACER
+                value: 'false'
+              - name: MEGASCALE_NUM_SLICES
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/replicatedjob-replicas']
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+              - name: REPLICATED_JOB_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+              - name: MEGASCALE_SLICE_ID
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/job-index']
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: MEGASCALE_COORDINATOR_ADDRESS
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: PROJECT_ID
+                value: tpu-prod-env-multipod
+              - name: LOCATION
+                value: us-west1-c
+              - name: CLUSTER_NAME
+                value: bodaborg-v6e-256-tt-c
+              - name: POD_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.name
+              - name: CONTAINER_NAME
+                value: pathways-worker
+              - name: NAMESPACE
+                value: cloud_prod
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/ksadi/unsanitized_server:latest
+              imagePullPolicy: Always
+              name: pathways-worker
+              ports:
+              - containerPort: 29005
+                protocol: TCP
+              - containerPort: 29006
+                protocol: TCP
+              - containerPort: 8471
+                protocol: TCP
+              - containerPort: 8080
+                protocol: TCP
+              resources:
+                limits:
+                  google.com/tpu: '4'
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
+              - mountPath: /tmp/dataset
+                name: gcs-dataset-pvc
+                readOnly: false
+            - image: gcr.io/gcs-tess/gcs-fuse-csi-driver-sidecar-mounter:v2.10.0_linux_amd64
+              name: gke-gcsfuse-sidecar
+            dnsPolicy: ClusterFirstWithHostNet
+            hostNetwork: true
+            initContainers:
+            - env:
+              - name: GRPC_SERVER_ADDRESS
+                value: '''0.0.0.0:50051'''
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/remote_python_sidecar_server:latest
+              imagePullPolicy: Always
+              name: colocated-python-sidecar
+              ports:
+              - containerPort: 50051
+                protocol: TCP
+              resources: {}
+              restartPolicy: Always
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+              cloud.google.com/gke-tpu-topology: 16x16
+            priorityClassName: high
+            restartPolicy: OnFailure
+            terminationGracePeriodSeconds: 300
+            volumes:
+            - hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+              name: shared-tmp
+            - name: gcs-dataset-pvc
+              persistentVolumeClaim:
+                claimName: cached-dataset-bucket-pvc
+            - emptyDir:
+                medium: Memory
+                sizeLimit: 100Gi
+              name: gcs-gcsfuse-cache
+  startupPolicy:
+    startupPolicyOrder: InOrder
+  successPolicy:
+    operator: All
+    targetReplicatedJobs:
+    - pathways-head
+  suspend: false
+
