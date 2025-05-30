@@ -438,7 +438,7 @@ def wait_for_all_slices(
   good_slice_indices = elastic_manager.get_slice_availability()
   while len(good_slice_indices) < elastic_manager.total_slice_count:
     max_logging.log(
-        f"Only {elastic_manager.good_slice_count} slices out of {elastic_manager.total_slice_count} available. "
+        f"Only {len(good_slice_indices)} slices out of {elastic_manager.total_slice_count} available. "
         f"Sleeping for {wait_period} seconds."
     )
     time.sleep(wait_period)
