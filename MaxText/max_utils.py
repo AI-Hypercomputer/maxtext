@@ -159,7 +159,13 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     if not raw_keys["enable_emergency_checkpoint"]:
       jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
     else:
-      initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
+      if raw_keys["hardware"] == "gpu_multiprocess":
+        max_logging.log("Initializing jax distribtued to support local checkpointing with GPUs...")
+        jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
+        ocp.multihost.initialize_runtime_to_distributed_ids()
+        ocp.multihost.initialize_distributed_to_device_ids()
+      else:
+        initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
     max_logging.log("Jax distributed system initialized!")
 
 
