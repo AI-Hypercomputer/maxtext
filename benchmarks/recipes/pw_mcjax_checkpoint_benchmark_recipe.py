@@ -42,7 +42,8 @@ from xpk_configs import XpkClusterConfig
 
 PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_proxy_server:latest"
 SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/unsanitized_server:latest"
-RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest"
+# RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_stable:latest"
+RUNNER="gcr.io/tpu-prod-env-multipod/wstcliyu_latest:latest"
 
 # Cluster Params
 # CLUSTER = "v6e-256-cluster"
@@ -69,7 +70,8 @@ DEVICE_TYPE = "v6e-256"
 XPK_PATH = os.path.join("~", "xpk")  # We're running this script from the maxtext directory
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = (
-    f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
+    # f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
+    "gs://trillium-scale-datasets-q1-25-west/pw_mcjax_benchmarking/"
 )
 # This needs to be set to True to test restore and if you want to restore from
 # a previous run, you'll need to set RESUME_CHECKPOINT_NAMES below.
@@ -256,8 +258,8 @@ def main() -> int:
   models = {
       "pathways": {
           "models": [
-              # model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
-              model_configs.llama3_1_405b_8192_fsdp_dcn,
+              model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
+              # model_configs.llama3_1_405b_8192_fsdp_dcn,
           ],
           "num_slices_list": [
               4,

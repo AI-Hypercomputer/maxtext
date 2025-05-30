@@ -69,7 +69,7 @@ XPK_PATH = os.path.join("~", "xpk")  # We're running this script from the maxtex
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = (
     # f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
-    f"gs://trillium-scale-datasets-q1-25-west/pw_mcjax_benchmarking/"
+    "gs://trillium-scale-datasets-q1-25-west/pw_mcjax_benchmarking/"
 )
 
 BENCHMARK_STEPS = 20
@@ -96,12 +96,14 @@ def main() -> int:
       "mcjax": [
           # model_configs.llama3_1_8b_8192,
           # model_configs.llama3_1_70b_8192,
-          model_configs.llama3_1_405b_8192_fsdp_dcn,
+          # model_configs.llama3_1_405b_8192_fsdp_dcn,
           # model_configs.llama2_70b_4096_real_data_long_run,
+        #   model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
       ],
       "pathways": [
           # model_configs.llama3_1_8b_8192,
-        #   model_configs.llama3_1_70b_8192,
+          # model_configs.llama3_1_70b_8192,
+          model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
         #   model_configs.llama3_1_405b_8192_fsdp_dcn,
           # model_configs.llama2_70b_4096_real_data_long_run,
       ]
@@ -117,11 +119,11 @@ def main() -> int:
       worker_flags="",
   )
   num_slices_list = [
-    #   8,
-      16,
-      32,
-      48,
-      64,
+      8,
+      # 16,
+      # 32,
+      # 48,
+      # 64,
   ]
 
   xpk_workload_cmds = []

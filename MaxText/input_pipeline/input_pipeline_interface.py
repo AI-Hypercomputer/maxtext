@@ -49,38 +49,56 @@ class SyntheticDataIterator:
         SyntheticDataIterator.raw_generate_synthetic_data, out_shardings=data_pspec_shardings, static_argnums=0
     )
 
-    tokens = jax.random.randint(
-        jax.random.PRNGKey(0),
-        (config.global_batch_size_to_load, config.max_target_length + 1),
-        0,
-        config.vocab_size,
-        dtype=jnp.int32,
-    )
+    print(f"***** in SyntheticDataIterator past jit")
+    # tokens = jax.random.randint(
+    #     jax.random.PRNGKey(0),
+    #     (config.global_batch_size_to_load, config.max_target_length + 1),
+    #     0,
+    #     config.vocab_size,
+    #     dtype=jnp.int32,
+    # )
 
-    sequence_positions = jnp.arange(0, config.max_target_length + 1, dtype=jnp.int32).reshape(1, -1)
-    batch_positions = jnp.broadcast_to(sequence_positions, (config.global_batch_size_to_load, config.max_target_length + 1))
-    segmentation = jnp.ones((config.global_batch_size_to_load, config.max_target_length), dtype=jnp.int32)
-    self.data = (tokens, batch_positions, segmentation)
+    # sequence_positions = jnp.arange(0, config.max_target_length + 1, dtype=jnp.int32).reshape(1, -1)
+    # batch_positions = jnp.broadcast_to(sequence_positions, (config.global_batch_size_to_load, config.max_target_length + 1))
+    # segmentation = jnp.ones((config.global_batch_size_to_load, config.max_target_length), dtype=jnp.int32)
+    # self.data = (tokens, batch_positions, segmentation)
+    self.data = None
 
   def __iter__(self):
     return self
 
   def __next__(self):
+    print(f"***** in SyntheticDataIterator __next__")
     with self.mesh:
-      return self.data_generator(self.config, self.data)  # pylint: disable=not-callable
+      return self.data_generator(self.config, self.data) # pylint: disable=not-callable
 
   @staticmethod
   def raw_generate_synthetic_data(config: pyconfig.HyperParameters, data):
     """Generates a single batch of synthetic data"""
-    tokens, positions, segmentation = data
+    # tokens, positions, segmentation = data
+    print(f"***** in SyntheticDataIterator raw_generate_synthetic_data")
 
     output = {}
-    output["inputs"] = tokens[:, :-1]
-    output["inputs_position"] = positions[:, :-1]
-    output["inputs_segmentation"] = segmentation
-    output["targets"] = tokens[:, 1:]
-    output["targets_position"] = positions[:, 1:]
-    output["targets_segmentation"] = segmentation
+    output["inputs"] = jax.numpy.zeros((config.global_batch_size_to_load, config.max_target_length), dtype=jax.numpy.int32)
+    output["inputs_position"] = jax.numpy.zeros(
+        (config.global_batch_size_to_load, config.max_target_length), dtype=jax.numpy.int32
+    )
+    output["inputs_segmentation"] = jax.numpy.ones(
+        (config.global_batch_size_to_load, config.max_target_length), dtype=jax.numpy.int32
+    )
+    output["targets"] = jax.numpy.zeros((config.global_batch_size_to_load, config.max_target_length), dtype=jax.numpy.int32)
+    output["targets_position"] = jax.numpy.zeros(
+        (config.global_batch_size_to_load, config.max_target_length), dtype=jax.numpy.int32
+    )
+    output["targets_segmentation"] = jax.numpy.ones(
+        (config.global_batch_size_to_load, config.max_target_length), dtype=jax.numpy.int32
+    )
+    # output["inputs"] = tokens[:, :-1]
+    # output["inputs_position"] = positions[:, :-1]
+    # output["inputs_segmentation"] = segmentation
+    # output["targets"] = tokens[:, 1:]
+    # output["targets_position"] = positions[:, 1:]
+    # output["targets_segmentation"] = segmentation
     return output
 
 
