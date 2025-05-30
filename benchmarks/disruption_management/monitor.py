@@ -152,11 +152,11 @@ class TimeMonitor(Monitor):
 
 def create_monitor(workload_name, disruption_config, step_pod_regex):
   """Factory function to create the appropriate monitor."""
-  if disruption_config.trigger_type == TriggerType.STEP:
+  if disruption_config.trigger_type.value == TriggerType.STEP.value:
     return StepMonitor(
         workload_name, disruption_config, step_pod_regex=step_pod_regex
     )
-  elif disruption_config.trigger_type == TriggerType.TIME_SECONDS:
+  elif disruption_config.trigger_type.value == TriggerType.TIME_SECONDS.value:
     return TimeMonitor(workload_name, disruption_config)
   else:
     raise ValueError(

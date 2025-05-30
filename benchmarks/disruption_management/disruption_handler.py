@@ -147,9 +147,9 @@ class SIGTERMHandler(DisruptionHandler):
 
 def create_disruption_handler(disruption_config):
   """Factory function to create the appropriate disruption handler."""
-  if disruption_config.disruption_method == DisruptionMethod.SIGTERM:
+  if disruption_config.disruption_method.value == DisruptionMethod.SIGTERM.value:
     return SIGTERMHandler()
-  elif disruption_config.disruption_method == DisruptionMethod.SIGILL:
+  elif disruption_config.disruption_method.value == DisruptionMethod.SIGILL.value:
     return SIGILLHandler()
   else:
     raise ValueError(

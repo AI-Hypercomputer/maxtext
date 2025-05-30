@@ -53,7 +53,7 @@ COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
 # Other parameters (MUST BE SET BY USER)
-XPK_PATH = "../xpk"  # We're running this script from the maxtext directory
+XPK_PATH = "~/xpk"  # We're running this script from the maxtext directory
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = (
     # f"gs://{USER}-{PROJECT}-{COUNTRY}/disruption_management/"
