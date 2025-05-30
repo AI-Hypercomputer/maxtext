@@ -29,7 +29,7 @@ import jax
 from jax.sharding import PartitionSpec
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
-from jax._src.pjit import with_sharding_constraint
+from jax.lax import with_sharding_constraint
 
 import numpy as np
 
