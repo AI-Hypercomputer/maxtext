@@ -28,7 +28,7 @@ pyink
 pre-commit
 pytype
 pillow>=11.1.0
-sentencepiece==0.1.97
+sentencepiece==0.2.0
 tensorflow-text>=2.13.0
 tensorflow>=2.13.0
 tensorflow-datasets
