@@ -31,6 +31,11 @@ SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
 # RUNNER = "us-docker.pkg.dev/path/to/maxtext_runner"
 RUNNER="gcr.io/tpu-prod-env-multipod/wstcliyu_latest:latest"
 
+# PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitzed_proxy_server:copy-arrays"
+# SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/shauryag/unsanitized_server:copy-arrays"
+# RUNNER = "gcr.io/tpu-prod-env-multipod/sujinesh_latest"
+# RUNNER = "gcr.io/cloud-tpu-multipod-dev/shauryag_elastic_runner"
+RUNNER = "gcr.io/tpu-prod-env-multipod/shauryag_elastic_runner"
 # Cluster Params
 # CLUSTER = "v6e-256-cluster"
 # PROJECT = "tpu-prod-env-cluster"
@@ -48,14 +53,12 @@ COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
 # Other parameters (MUST BE SET BY USER)
-XPK_PATH = os.path.join("~", "xpk")
+# XPK_PATH = os.path.join("~", "xpk")
+XPK_PATH = os.path.join("~", "github/xpk")
 BASE_OUTPUT_DIRECTORY = (
     # f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
     "gs://trillium-scale-datasets-q1-25-west/pw_mcjax_benchmarking/"
 )
-
-# MAX_RESTARTS = 10_000
-# BENCHMARK_STEPS=10_000_000
 
 # TODO Change this for long running test!
 MAX_RESTARTS = 10_000
@@ -96,10 +99,11 @@ def main() -> int:
       # server_flags="--enable_metrics_collection=true",
       # proxy_flags="--enable_metrics_collection=true",
       # worker_flags="--enable_metrics_collection=true",
+      # proxy_flags="--vmodule=grpc_host_buffer=3,rpc_helper=3,host_buffer=3,ifrt_backend=3,grpc_service_impl=3"
   )
 
   num_slices_list = [
-      64
+      2
   ]
 
   xpk_workload_cmds = []
