@@ -43,6 +43,7 @@ PATHWAYS_LONG_RUN_CHECKPOINTING_TUNING_PARAMS = {
     "async_checkpointing": True,
     "checkpoint_period": 100,
     "enable_checkpoint_cloud_logger": True,
+    "goodput_upload_interval_seconds": 300,
 }
 
 # The set of tuning params required for short-running pathways jobs.
@@ -1283,7 +1284,7 @@ llama3_1_70b_8192_iter_synth_data_and_checkpointing = _add_to_model_dictionary(
             "dataset_path": "gs://max-datasets-rogue",
             "dataset_type": "synthetic",
             "enable_checkpointing": True,
-            "async_checkpointing": True,
+            "async_checkpointing": False,
             "checkpoint_period": 20,
             "enable_checkpoint_cloud_logger": True,
             "sa_block_q": 2048,
@@ -1302,6 +1303,7 @@ llama3_1_70b_8192_iter_synth_data_and_checkpointing = _add_to_model_dictionary(
             "tokenizer_type": "tiktoken",
             "tokenizer_path": "assets/tokenizer_llama3.tiktoken",
         },
+        pathways_tuning_params=PATHWAYS_LONG_RUN_CHECKPOINTING_TUNING_PARAMS,
         xla_flags=(
             xla_flags_library.DENSE_VMEM_LIMIT_FLAG
             + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER

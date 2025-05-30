@@ -14,31 +14,41 @@
 import os
 import sys
 
-import args_helper as helper
+import benchmarks.recipes.args_helper as helper
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(parent_dir)
 
-from disruption_management.disruption_handler import DisruptionConfig
-from disruption_management.disruption_handler import DisruptionMethod
-from disruption_management.disruption_handler import MCJAX_STANDARD_TARGET_POD_REGEX_SUFFIX
-from disruption_management.disruption_handler import MCJAX_WORKER_CONTAINER_NAME
-from disruption_management.disruption_handler import PATHWAYS_STANDARD_TARGET_POD_REGEX_SUFFIX
-from disruption_management.disruption_handler import PATHWAYS_WORKER_CONTAINER_NAME
-from disruption_management.disruption_handler import TriggerType
-from maxtext_trillium_model_configs import MaxTextModel
-import maxtext_v5e_model_configs as v5e_model_configs
-import maxtext_xpk_runner as mxr
-from xpk_configs import XpkClusterConfig
+from benchmarks.disruption_management.disruption_handler import DisruptionConfig
+from benchmarks.disruption_management.disruption_handler import DisruptionMethod
+from benchmarks.disruption_management.disruption_handler import MCJAX_STANDARD_TARGET_POD_REGEX_SUFFIX
+from benchmarks.disruption_management.disruption_handler import MCJAX_WORKER_CONTAINER_NAME
+from benchmarks.disruption_management.disruption_handler import PATHWAYS_STANDARD_TARGET_POD_REGEX_SUFFIX
+from benchmarks.disruption_management.disruption_handler import PATHWAYS_WORKER_CONTAINER_NAME
+from benchmarks.disruption_management.disruption_handler import TriggerType
+from benchmarks.maxtext_trillium_model_configs import MaxTextModel
+# import maxtext_v5e_model_configs as v5e_model_configs
+import benchmarks.maxtext_trillium_model_configs as model_configs
+import benchmarks.maxtext_xpk_runner as mxr
+from benchmarks.xpk_configs import XpkClusterConfig
 
 PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
 SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
-RUNNER = "us-docker.pkg.dev/path/to/maxtext_runner"
+# RUNNER = "us-docker.pkg.dev/path/to/maxtext_runner"
+RUNNER="gcr.io/tpu-prod-env-multipod/wstcliyu_latest:latest"
 
 # Cluster Params
-CLUSTER = "v6e-256-cluster"
-PROJECT = "tpu-prod-env-cluster"
-ZONE = "us-east5-b"
+# CLUSTER = "v6e-256-cluster"
+# PROJECT = "tpu-prod-env-cluster"
+# ZONE = "us-east5-b"
+# COUNTRY = "us"
+# DEVICE_TYPE = "v6e-256"
+
+# Main Testing Cluster
+CLUSTER = "bodaborg-v6e-256-tt-c"
+PROJECT = "tpu-prod-env-multipod"
+ZONE = "us-west1-c"
+REGION = "us-west1"
 COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
@@ -46,12 +56,13 @@ DEVICE_TYPE = "v6e-256"
 XPK_PATH = "../xpk"  # We're running this script from the maxtext directory
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = (
-    f"gs://{USER}-{PROJECT}-{COUNTRY}/disruption_management/"
+    # f"gs://{USER}-{PROJECT}-{COUNTRY}/disruption_management/"
+    "gs://trillium-scale-datasets-q1-25-west/disruption_management/"
 )
 MAX_RESTARTS = 10
 NUM_SLICES = 2
-BENCHMARK_STEPS = 101
-COMPARE_WITH_MCJAX = True
+BENCHMARK_STEPS = 50
+COMPARE_WITH_MCJAX = False
 
 
 # Do 2 total disruptions, once after 2 minutes and once after 6 minutes.
@@ -71,16 +82,20 @@ def construct_disruption_configs(
   return [
       DisruptionConfig(
           name="sigill_2min",
-          trigger_type=TriggerType.TIME_SECONDS,
-          trigger_value=2 * 60,  # 2 minutes
+          # trigger_type=TriggerType.TIME_SECONDS,
+          # trigger_value=2 * 60,  # 2 minutes
+          trigger_type=TriggerType.STEP,
+          trigger_value=5,
           disruption_method=DisruptionMethod.SIGILL,
           target_pod_regex=target_pod_regex,
           worker_container_name=worker_container_name,
       ),
       DisruptionConfig(
           name="sigill_6min",
-          trigger_type=TriggerType.TIME_SECONDS,
-          trigger_value=6 * 60,  # 6 minutes
+          # trigger_type=TriggerType.TIME_SECONDS,
+          # trigger_value=6 * 60,  # 6 minutes
+          trigger_type=TriggerType.STEP,
+          trigger_value=15,
           disruption_method=DisruptionMethod.SIGILL,
           target_pod_regex=target_pod_regex,
           worker_container_name=worker_container_name,
@@ -130,7 +145,8 @@ def main() -> None:
     return 0
 
   # Model Configuration - Using a simple default model for testing
-  model = v5e_model_configs.llama3_1_8b_8192
+  # model = v5e_model_configs.llama3_1_8b_8192
+  model = model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing
 
   pathways_config = mxr.PathwaysConfig(
       server_image=SERVER_IMAGE,
