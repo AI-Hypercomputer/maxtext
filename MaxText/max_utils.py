@@ -17,15 +17,16 @@ limitations under the License.
 """ Common Max Utils needed by multiple modules.
 All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
 
+from collections.abc import Sequence
+from functools import partial
+from typing import Any, Tuple
+import collections
 import functools
-import time
+import logging
 import os
 import socket
 import subprocess
-import collections
-from collections.abc import Sequence
-from typing import Any, Tuple
-from functools import partial
+import time
 
 import numpy as np
 
@@ -889,3 +890,12 @@ def reorder_mask_load_balancing(tensor, cp_size: int, seq_dim: int):
 
   # Reshape back to original dimensions
   return reordered.reshape(ori_tensor_shape)
+
+
+def get_xpk_path():
+  """Get XPK path. Defaults to `"$HOME/xpk"`."""
+  xpk_path = os.path.join(os.path.expanduser("~"), "xpk")
+  if not os.path.isdir(xpk_path):
+    logging.error("Could not find %s. Please install or move XPK to %s", xpk_path, xpk_path)
+    raise SystemExit(1)
+  return xpk_path
