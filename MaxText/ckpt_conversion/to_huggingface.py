@@ -65,6 +65,9 @@ def _get_model_mappings(model_name: str, scan_layers: bool, config_dict: dict): 
 
 _NUM_STREAMS = 1
 
+# Read Hugging Face token from environment variable
+hf_token = os.environ.get("HF_AUTH_TOKEN")
+
 def main(argv: Sequence[str]) -> None:
     jax.config.update("jax_default_prng_impl", "unsafe_rbg")
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"

@@ -199,8 +199,6 @@ def save_safetensor_file(
     if jax.process_index() == 0:
         state_dict = {k: v for k, v in state_dict.items() if v is not None}
         local_path = os.path.join(local_dir_to_save_to, file_name)
-        # Use numpy_save_file. Keep metadata "pt" for Hugging Face compatibility,
-        # as HF tools might expect this, even if saved from NumPy.
         numpy_save_file(state_dict, local_path, metadata={"format": "pt"})
         print(f"   Saved {file_name} to {local_path}")
 
@@ -346,6 +344,9 @@ def save_model_files(
 
                 if output_dir.startswith("gs://"):
                     for local_file_path in saved_tokenizer_files:
+                        if not os.path.exists(local_file_path):
+                            print(f"   Warning: Tokenizer file {local_file_path} not found locally. Skipping upload to GCS.")
+                            continue
                         file_name = os.path.basename(local_file_path)
                         upload_file_to_gcs(
                             local_file_path,
@@ -355,6 +356,9 @@ def save_model_files(
                 elif output_dir.startswith("hf://") and repo_id:
                     api = HfApi()
                     for local_file_path in saved_tokenizer_files:
+                        if not os.path.exists(local_file_path):
+                            print(f"   Warning: Tokenizer file {local_file_path} not found locally. Skipping upload to HF Hub.")
+                            continue
                         file_name = os.path.basename(local_file_path)
                         api.upload_file(
                             path_or_fileobj=local_file_path,
@@ -398,7 +402,8 @@ def upload_file_to_gcs(
     storage_client = Client()
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
-    blob.upload_from_filename(local_file)
+    # set large timeout to support large safetensors
+    blob.upload_from_filename(local_file, timeout=600)
 
     print(f"✅ Uploaded {local_file} to {bucket.name}/{blob_name}")
 
@@ -407,7 +412,7 @@ def upload_file_to_gcs(
         print(f"✅ Deleted {local_file}")
 
 
-def upload_folder_to_gcs(local_folder: str, gs_bucket_path: str, num_workers: int = 8):
+def upload_folder_to_gcs(local_folder: str, gs_bucket_path: str, num_workers: int = 4):
     """Uploads all files from a local folder to Google Cloud Storage.
 
     Args:
@@ -440,6 +445,8 @@ def upload_folder_to_gcs(local_folder: str, gs_bucket_path: str, num_workers: in
         source_directory=local_folder,
         max_workers=num_workers,
         blob_name_prefix=destination_dir,
+        timeout=600,
+        deadline=None,
     )
 
     # Report results

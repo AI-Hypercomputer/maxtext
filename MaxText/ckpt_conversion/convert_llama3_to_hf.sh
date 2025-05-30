@@ -3,20 +3,23 @@
 # Exit immediately if a command exits with a non-zero status.
 # set -e
 
+# remeber to save your token here
 export HF_AUTH_TOKEN=""
 
 # Define variables for paths and arguments
 MAXTEXT_PROJECT_DIR="/home/yixuannwang_google_com/projects/maxtext"
-HF_CHECKPOINT_GCS_PATH="gs://yixuannwang-maxtext-logs/hf_gemma2-2b_output" # GCS path for HF model
-MAXTEST_CHECKPOINT_DIR="gs://maxtext-model-checkpoints/gemma2-2b-it/2025-02-20-18-01/unscanned/checkpoints/0/items"
-LOCAL_HF_CHECKPOINT_DIR="/tmp/hf_gemma2-2b_output" # HF requires a local dir
-GOLDEN_MODEL_ID="google/gemma-2-2b-it"
+HF_CHECKPOINT_GCS_PATH="gs://yixuannwang-maxtext-logs/hf_llama31-8b_output" # (optional)GCS path for HF model
+MAXTEST_CHECKPOINT_DIR="gs://maxtext-model-checkpoints/llama3.1-8b/2025-01-23-19-04/unscanned/checkpoints/0/items"
+LOCAL_HF_CHECKPOINT_DIR="/tmp/hf_llama31-8b_output" # Local directory for HF model
+GOLDEN_MODEL_ID="meta-llama/Llama-3.1-8B"
 
+# This convert args are same as load llama3 in maxengine
 CONVERT_MODULE="MaxText.ckpt_conversion.to_huggingface"
 CONVERT_ARGS=(
     "MaxText/configs/base.yml"
-    "model_name=gemma2-2b"
-    "tokenizer_path=assets/tokenizer.gemma"
+    "model_name=llama3.1-8b"
+    "tokenizer_path=assets/tokenizer_llama3.tiktoken"
+    "tokenizer_type=tiktoken"
     "load_parameters_path=${MAXTEST_CHECKPOINT_DIR}"
     "per_device_batch_size=1"
     "max_prefill_predict_length=8"
@@ -34,12 +37,12 @@ VERIFY_MODULE="MaxText.ckpt_conversion.test_hf"
 
 VERIFY_ARGS=(
     "golden_model_id=${GOLDEN_MODEL_ID}"
-    "hf_checkpoint_path=${LOCAL_HF_CHECKPOINT_DIR}" # Updated to local path
+    "hf_checkpoint_path=${HF_CHECKPOINT_GCS_PATH}"
 )
 
 
 # --- Step 1: Run the Hugging Face Conversion ---
-echo "Starting Hugging Face model conversion for gemma2-2b..."
+# echo "Starting Hugging Face model conversion for llama3-8b..."
 cd "$MAXTEXT_PROJECT_DIR"
 
 # Construct the command
@@ -53,8 +56,9 @@ done
 
 echo "Hugging Face model conversion finished."
 
+
 # --- Step 2: Run the Verification Script ---
-echo "Starting verification for the converted gemma2-2b model..."
+echo "Starting verification for the converted llama3-8b model..."
 
 # Create local directory for checkpoints and download from GCS
 echo "Creating local directory for HF checkpoints: ${LOCAL_HF_CHECKPOINT_DIR}"
@@ -74,7 +78,7 @@ fi
 # Execute the command
 "${VERIFY_CMD[@]}"
 
-# Optional: Clean up the local checkpoint directory
+# Clean up the local checkpoint directory
 echo "Cleaning up local HF checkpoint directory: ${LOCAL_HF_CHECKPOINT_DIR}"
 rm -rf "${LOCAL_HF_CHECKPOINT_DIR}"
 echo "Cleanup complete."
