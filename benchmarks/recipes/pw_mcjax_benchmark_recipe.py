@@ -68,7 +68,8 @@ DEVICE_TYPE = "v6e-256"
 XPK_PATH = os.path.join("~", "xpk")  # We're running this script from the maxtext directory
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = (
-    f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
+    # f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
+    f"gs://trillium-scale-datasets-q1-25-west/pw_mcjax_benchmarking/"
 )
 
 BENCHMARK_STEPS = 20
@@ -95,13 +96,13 @@ def main() -> int:
       "mcjax": [
           # model_configs.llama3_1_8b_8192,
           # model_configs.llama3_1_70b_8192,
-          # model_configs.llama3_1_405b_8192_fsdp_dcn,
+          model_configs.llama3_1_405b_8192_fsdp_dcn,
           # model_configs.llama2_70b_4096_real_data_long_run,
       ],
       "pathways": [
           # model_configs.llama3_1_8b_8192,
         #   model_configs.llama3_1_70b_8192,
-          model_configs.llama3_1_405b_8192_fsdp_dcn,
+        #   model_configs.llama3_1_405b_8192_fsdp_dcn,
           # model_configs.llama2_70b_4096_real_data_long_run,
       ]
   }
@@ -116,7 +117,11 @@ def main() -> int:
       worker_flags="",
   )
   num_slices_list = [
-      2
+    #   8,
+      16,
+      32,
+      48,
+      64,
   ]
 
   xpk_workload_cmds = []
@@ -151,14 +156,15 @@ def main() -> int:
               xpk_path=XPK_PATH,
               num_steps=BENCHMARK_STEPS,
               priority="medium",
-              generate_metrics_and_upload_to_big_query=False
+              generate_metrics_and_upload_to_big_query=False,
           )
           temp_post_fix = ''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(3))
           common_prefix = os.environ['USER'][:5]
+          infra_short = "mc" if infra == "mcjax" else "pw"
           command, name = mxr.generate_xpk_workload_cmd(
               cluster_config=cluster_config,
               wl_config=wl_config,
-              workload_name=f"{common_prefix}-pw-{num_slices}-{temp_post_fix}",
+              workload_name=f"{common_prefix}-{infra_short}-{num_slices}-{temp_post_fix}",
           )
 
           print(f"Name of the workload is: {name} \n")
@@ -178,6 +184,8 @@ def main() -> int:
     if return_code != 0:
       print(f"Unable to run xpk workload: {xpk_workload_name}")
 
+  for xpk_workload_name in xpk_workload_names:
+    print(f"Workload {xpk_workload_name} has been submitted successfully.")
 
 if __name__ == "__main__":
   main()

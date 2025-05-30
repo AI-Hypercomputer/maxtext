@@ -48,7 +48,7 @@ PATHWAYS_LONG_RUN_CHECKPOINTING_TUNING_PARAMS = {
 # The set of tuning params required for short-running pathways jobs.
 PATHWAYS_SHORT_RUN_CHECKPOINTING_TUNING_PARAMS = {
     "enable_checkpointing": True,
-    "async_checkpointing": True,
+    "async_checkpointing": False,
     "checkpoint_period": 20,
     # "enable_checkpoint_cloud_logger": True,
 }
@@ -971,6 +971,20 @@ llama3_1_70b_8192 = _add_to_model_dictionary(
             + xla_flags_library.CF_FOR_ALL_GATHER
             + xla_flags_library.HOST_OFFLOAD_FLAGS
         ),
+        pathways_xla_flag_options={
+            xla_flags_library.REMOVE: [
+                "--2a886c8_chip_config_name=megachip_tccontrol"
+            ],
+            xla_flags_library.ADD_SERVER: (
+                xla_flags_library.ENHANCED_LAUNCH_BARRIER
+            ),
+            xla_flags_library.ADD_PROXY: (
+                xla_flags_library.ENHANCED_LAUNCH_BARRIER
+            ),
+            xla_flags_library.ADD_WORKER: (
+                xla_flags_library.ENHANCED_LAUNCH_BARRIER
+            ),
+        },
     ),
 )
 

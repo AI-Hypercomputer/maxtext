@@ -172,7 +172,7 @@ def _get_xpk_commands(
               num_steps=num_steps,
               priority="medium",
               run_name=run_name,
-              generate_metrics_and_upload_to_big_query=False
+              generate_metrics_and_upload_to_big_query=False,
           )
           command, name = mxr.generate_xpk_workload_cmd(
               cluster_config=config, wl_config=wl_config, workload_name=run_name
