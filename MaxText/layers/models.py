@@ -284,24 +284,7 @@ class Decoder(nn.Module):
     """Set remat policy"""
     RemattedBlockLayers = []
     for block_layer in block_layers:
-      if self.config.parameter_memory_host_offload:
-        # Define parameter movement with mesh-based sharding
-        def move_to_device(variables):
-          """Move parameters to device with proper sharding."""
-
-          def map_fn(path, value):
-            max_logging.log(f"models.py: Moving parameter {path} to device")
-            return jax.device_put(
-                value, jax._src.sharding_impls.TransferToMemoryKind("device")  # pylint: disable=protected-access
-            )
-
-          return jax.tree_util.tree_map_with_path(map_fn, variables)
-
-        # Transform layer class before remat
-        block_layer = nn.map_variables(block_layer, ["params"], move_to_device, mutable=True)
-
-      # Apply remat policy to layer
-      layer = nn.remat(
+      layer = nn.remat(  # pylint: disable=invalid-name
           block_layer,
           prevent_cse=not self.config.scan_layers,
           policy=policy,
@@ -651,7 +634,6 @@ class Decoder(nn.Module):
         name="decoder_norm",
         epsilon=cfg.normalization_layer_epsilon,
         kernel_axes=("norm",),
-        parameter_memory_host_offload=cfg.parameter_memory_host_offload,
     )(y)
     y = nn.Dropout(rate=cfg.dropout_rate, broadcast_dims=(-2,))(y, deterministic=deterministic)
 
@@ -673,7 +655,6 @@ class Decoder(nn.Module):
           kernel_axes=("embed", "vocab"),
           name="logits_dense",
           matmul_precision=self.config.matmul_precision,
-          parameter_memory_host_offload=cfg.parameter_memory_host_offload,
       )(
           y
       )  # We do not quantize the logits matmul.

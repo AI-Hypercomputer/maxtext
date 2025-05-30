@@ -50,33 +50,12 @@ class Embed(nn.Module):
   embedding_init: Initializer = default_embed_init
 
   def setup(self):
-    """
-    Sets up the embedding parameters for the model.
-
-    This method initializes the embedding parameters with logical partitioning.
-    The embedding is represented as a parameter with the specified shape and data type.
-
-    Parameters:
-    - embedding: The embedding parameter initialized using the specified method,
-                 partitioned logically along the 'vocab' and 'embed' dimensions.
-
-    Returns:
-    None
-    """
-
-    embedding = self.param(
+    self.embedding = self.param(
         "embedding",
         nn.with_logical_partitioning(self.embedding_init, ("vocab", "embed")),
         (self.num_embeddings, self.features),
         self.config.weight_dtype,
     )
-    # Move embeddings to device if parameter offloading is enabled
-    if self.config.parameter_memory_host_offload:
-      max_logging.log("embeddings.py: Moving embedding parameter to device")
-      # pylint: disable=protected-access
-      self.embedding = jax.device_put(embedding, jax._src.sharding_impls.TransferToMemoryKind("device"))
-    else:
-      self.embedding = embedding
 
   def __call__(self, inputs: Array) -> Array:
     """Embeds the inputs along the last dimension.
