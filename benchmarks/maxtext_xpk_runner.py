@@ -464,7 +464,8 @@ def _get_pathways_proxy_flags(wl_config: WorkloadConfig):
     flags_to_add = wl_config.model.pathways_xla_flag_options[
         xla_flags.ADD_PROXY
     ]
-    proxy_flags.append(flags_to_add)
+    flags_to_add_list = flags_to_add.strip().split()
+    proxy_flags += flags_to_add_list
 
   # Join the list of flags back into a single string, space-separated
   return ' '.join(proxy_flags)
@@ -486,7 +487,9 @@ def _get_pathways_worker_flags(wl_config: WorkloadConfig):
     flags_to_add = wl_config.model.pathways_xla_flag_options[
         xla_flags.ADD_WORKER
     ]
-    worker_flags += flags_to_add
+    worker_flags_list = worker_flags.strip().split()
+    flags_to_add_list = flags_to_add.strip().split()
+    worker_flags = ' '.join(worker_flags_list + flags_to_add_list)
 
   # Join the list of flags back into a single string, space-separated
   return worker_flags
@@ -508,7 +511,9 @@ def _get_pathways_server_flags(wl_config: WorkloadConfig):
     flags_to_add = wl_config.model.pathways_xla_flag_options[
         xla_flags.ADD_SERVER
     ]
-    server_flags += flags_to_add
+    server_flags_list = server_flags.strip().split()
+    flags_to_add_list = flags_to_add.strip().split()
+    server_flags = ' '.join(server_flags_list + flags_to_add_list)
 
   # Join the list of flags back into a single string, space-separated
   return server_flags
@@ -567,14 +572,15 @@ def generate_xpk_workload_cmd(
       random.choice(string.ascii_lowercase + string.digits) for _ in range(length_of_random_str)
   )
 
-  truncate_model_name = 12
-  truncate_prefix = 5
-  common_post_fix = f"-{wl_config.num_slices}-{time.strftime('%m%d%H', time.localtime())}-{temp_post_fix}"
+  truncate_model_name = 10
+  truncate_prefix = 3
+  post_fix = f"-{wl_config.num_slices}-{time.strftime('%m%d%H', time.localtime())}-{temp_post_fix}"
   common_prefix = os.environ['USER']
   pw_prefix = "pw-"
 
   if workload_name is None: # Generate name if not provided
     if is_pathways_enabled:
+      post_fix = f"-{wl_config.num_slices}-{temp_post_fix}"
       name = (
           f"{pw_prefix}{wl_config.model.model_name.replace('_', '-')[:truncate_model_name - len(pw_prefix)]}"
       )
@@ -582,7 +588,7 @@ def generate_xpk_workload_cmd(
       name = (
         f"{wl_config.model.model_name.replace('_', '-')[:truncate_model_name]}"
       )
-    name = f"{common_prefix[:truncate_prefix]}-{name}{common_post_fix}"
+    name = f"{common_prefix[:truncate_prefix]}-{name}{post_fix}"
   else:
     name = workload_name # Use provided name
 
@@ -615,7 +621,7 @@ def generate_xpk_workload_cmd(
         f'--docker-image={pw_config.runner_image}'
     )
   else:
-    docker_image_flag = f'--base-docker-image="{wl_config.base_docker_image}"'
+    docker_image_flag = f'--docker-image="{wl_config.base_docker_image}"'
 
   upload_metrics_to_bq_cmd = ""
   if wl_config.generate_metrics_and_upload_to_big_query:
