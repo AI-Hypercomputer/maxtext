@@ -62,7 +62,7 @@ BASE_OUTPUT_DIRECTORY = (
     "gs://trillium-scale-datasets-q1-25-west/disruption_management/"
 )
 MAX_RESTARTS = 10
-NUM_SLICES = 2
+NUM_SLICES = 16
 BENCHMARK_STEPS = 50
 COMPARE_WITH_MCJAX = False
 
@@ -128,7 +128,7 @@ def construct_workload_config_with_disruptions(
       xpk_path=XPK_PATH,
       num_steps=BENCHMARK_STEPS,
       priority="very-high",
-      disruption_configs=construct_disruption_configs(pathways_config)
+      # disruption_configs=construct_disruption_configs(pathways_config)
   )
 
 
@@ -154,6 +154,9 @@ def main() -> None:
   # Model Configuration - Using a simple default model for testing
   # model = v5e_model_configs.llama3_1_8b_8192
   model = model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing
+  model.tuning_params["enable_goodput_recording"] = False
+  model.tuning_params["enable_pathways_goodput"] = False
+  model.tuning_params["enable_gcp_goodput_metrics"] = False
 
   pathways_config = mxr.PathwaysConfig(
       server_image=SERVER_IMAGE,
@@ -181,17 +184,17 @@ def main() -> None:
     workload_configs.append(mcjax_workload_config)
 
   # Run the benchmark and use the returned disruption manager.
-  disruption_manager = mxr.xpk_benchmark_runner(
+  mxr.xpk_benchmark_runner(
       cluster_config=cluster_config,
       workload_configs=workload_configs,
   )
 
   # Wait for disruptions to complete
-  disruption_manager.start_disruptions_and_wait_for_completion()
+  # disruption_manager.start_disruptions_and_wait_for_completion()
 
-  print(
-      "Elastic Training disruptions completed. Please check logs for results."
-  )
+  # print(
+  #     "Elastic Training disruptions completed. Please check logs for results."
+  # )
 
 
 if __name__ == "__main__":
