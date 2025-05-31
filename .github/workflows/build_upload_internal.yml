@@ -45,10 +45,7 @@ jobs:
       - name: Mark git repository as safe
         run: git config --global --add safe.directory ${GITHUB_WORKSPACE}
       - name: Configure Docker
-        run: |
-          gcloud auth configure-docker
-          gcloud auth configure-docker us-docker.pkg.dev
-          gcloud auth configure-docker gcr.io
+        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
       - name: Set up Docker BuildX
         uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2
         with:
