@@ -703,6 +703,11 @@ class VisionEncoder(nn.Module):
       from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
 
       return [gemma3.Gemma3VisionEncoderLayer, gemma3.VisionEmbedder]
+    elif self.config.model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
+      from MaxText.layers import llama4
+
+      # TODO(hengtaoguo): Implement actual VisionEncoder and VisionEmbedder for Llama4
+      return [llama4.Llama4VisionEncoderLayer]
     else:
       raise ValueError(f"No VisionEncoder implemented for {self.config.model_name} yet")
 
@@ -777,7 +782,8 @@ class Transformer(nn.Module):
 
     bidirectional_mask = None
     image_embeddings = None
-    if self.config.use_multimodal and encoder_images is not None:
+    # TODO(hengtaoguo): Here we temporarily skip multimodal support for Llama4 models because of WIP
+    if self.config.use_multimodal and encoder_images is not None and not self.config.model_name.startswith("llama4"):
       image_embeddings = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
 
       if self.config.decoder_block == DecoderBlockType.GEMMA3:
