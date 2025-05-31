@@ -118,6 +118,7 @@ class TestLlama4ImageProcessing(unittest.TestCase):
 
 class TestLlama4PostProcessing(unittest.TestCase):
   """Test Llama4 post-processing"""
+
   LLAMA4_FAKE_IMAGE_TOKEN = 200090  # <|image|>
   LLAMA4_BEGIN_IMAGE_TOKEN = 200080  # <|image_start|>
   LLAMA4_END_IMAGE_TOKEN = 200081  # <|image_end|>
@@ -130,29 +131,46 @@ class TestLlama4PostProcessing(unittest.TestCase):
     self.NUM_IMAGE_CHANNELS = 3
     self.LLAMA4_TILE_SIZE = 336
     self.model_name = "llama4-17b-16e"
-  
+
   def test_image_tokens_for_single_image(self):
     this_aspect_ratio = jnp.array([2, 2])
     num_patches_per_chunk = 4
     image_tokens = multimodal_utils.get_tokens_for_this_image(this_aspect_ratio, num_patches_per_chunk)
     expected_tokens = [
-      self.LLAMA4_BEGIN_IMAGE_TOKEN,
-      self.LLAMA4_PATCH_TOKEN, self.LLAMA4_PATCH_TOKEN, self.LLAMA4_PATCH_TOKEN, self.LLAMA4_PATCH_TOKEN,
-      self.LLAMA4_TILE_X_SEPARATOR_TOKEN,
-      self.LLAMA4_PATCH_TOKEN, self.LLAMA4_PATCH_TOKEN, self.LLAMA4_PATCH_TOKEN, self.LLAMA4_PATCH_TOKEN,
-      self.LLAMA4_TILE_Y_SEPARATOR_TOKEN,
-      self.LLAMA4_PATCH_TOKEN, self.LLAMA4_PATCH_TOKEN, self.LLAMA4_PATCH_TOKEN, self.LLAMA4_PATCH_TOKEN,
-      self.LLAMA4_TILE_X_SEPARATOR_TOKEN,
-      self.LLAMA4_PATCH_TOKEN, self.LLAMA4_PATCH_TOKEN, self.LLAMA4_PATCH_TOKEN, self.LLAMA4_PATCH_TOKEN,
-      self.LLAMA4_TILE_Y_SEPARATOR_TOKEN,
-      self.LLAMA4_FAKE_IMAGE_TOKEN,
-      self.LLAMA4_PATCH_TOKEN, self.LLAMA4_PATCH_TOKEN, self.LLAMA4_PATCH_TOKEN, self.LLAMA4_PATCH_TOKEN,
-      self.LLAMA4_END_IMAGE_TOKEN
+        self.LLAMA4_BEGIN_IMAGE_TOKEN,
+        self.LLAMA4_PATCH_TOKEN,
+        self.LLAMA4_PATCH_TOKEN,
+        self.LLAMA4_PATCH_TOKEN,
+        self.LLAMA4_PATCH_TOKEN,
+        self.LLAMA4_TILE_X_SEPARATOR_TOKEN,
+        self.LLAMA4_PATCH_TOKEN,
+        self.LLAMA4_PATCH_TOKEN,
+        self.LLAMA4_PATCH_TOKEN,
+        self.LLAMA4_PATCH_TOKEN,
+        self.LLAMA4_TILE_Y_SEPARATOR_TOKEN,
+        self.LLAMA4_PATCH_TOKEN,
+        self.LLAMA4_PATCH_TOKEN,
+        self.LLAMA4_PATCH_TOKEN,
+        self.LLAMA4_PATCH_TOKEN,
+        self.LLAMA4_TILE_X_SEPARATOR_TOKEN,
+        self.LLAMA4_PATCH_TOKEN,
+        self.LLAMA4_PATCH_TOKEN,
+        self.LLAMA4_PATCH_TOKEN,
+        self.LLAMA4_PATCH_TOKEN,
+        self.LLAMA4_TILE_Y_SEPARATOR_TOKEN,
+        self.LLAMA4_FAKE_IMAGE_TOKEN,
+        self.LLAMA4_PATCH_TOKEN,
+        self.LLAMA4_PATCH_TOKEN,
+        self.LLAMA4_PATCH_TOKEN,
+        self.LLAMA4_PATCH_TOKEN,
+        self.LLAMA4_END_IMAGE_TOKEN,
     ]
     self.assertEqual(image_tokens, expected_tokens)
 
   def test_post_process_image_tokens(self):
-    dummy_pixel_values = jnp.ones((5, multimodal_utils.NUM_IMAGE_CHANNELS, multimodal_utils.LLAMA4_TILE_SIZE, multimodal_utils.LLAMA4_TILE_SIZE))
+    dummy_pixel_values = jnp.ones(
+        (5, multimodal_utils.NUM_IMAGE_CHANNELS, multimodal_utils.LLAMA4_TILE_SIZE, multimodal_utils.LLAMA4_TILE_SIZE)
+    )
     dummy_aspect_ratios = jnp.array([[2, 2]])
     dummy_tokens = jnp.array([1, 2, self.LLAMA4_FAKE_IMAGE_TOKEN, 4, 5])
     processor_output = multimodal_utils.PreprocessorOutput(
@@ -160,12 +178,9 @@ class TestLlama4PostProcessing(unittest.TestCase):
         aspect_ratios=dummy_aspect_ratios,
     )
 
-    image_offsets = multimodal_utils.get_image_offsets(
-        model_name=self.model_name, processor_output=processor_output
-    )
+    image_offsets = multimodal_utils.get_image_offsets(model_name=self.model_name, processor_output=processor_output)
     post_processed_tokens = multimodal_utils.add_extra_tokens_for_images_llama4(dummy_tokens, processor_output)
     self.assertEqual(post_processed_tokens.shape[0], dummy_tokens.shape[0] + image_offsets)
-    
 
 
 if __name__ == "__main__":
