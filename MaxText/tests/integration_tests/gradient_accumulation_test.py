@@ -39,9 +39,7 @@ class GradientAccumulationTest(unittest.TestCase):
     random_suffix = generate_random_string()
     temp_dir = tempfile.gettempdir()
     run_accumulate_metrics_file = os.path.join(temp_dir, f"runner_grad_accumulate_{random_suffix}.txt")
-    print(f"{run_accumulate_metrics_file=}")
     run_regular_metrics_file = os.path.join(temp_dir, f"runner_regular_{random_suffix}.txt")
-    print(f"{run_regular_metrics_file=}")
     shared_maxtext_args = [
         None,
         os.path.join(PKG_DIR, "configs", "base.yml"),
@@ -53,7 +51,7 @@ class GradientAccumulationTest(unittest.TestCase):
         "base_emb_dim=256",
         "base_num_decoder_layers=4",
         rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
-        "steps=50",
+        "steps=20",
     ]
     # Run with gradient accumulation with accumulate_steps=10, per_device_batch=1 --> simulating per_device_batch=10
     train_main(

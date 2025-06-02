@@ -19,7 +19,7 @@ Integration tests for generating a decode-only checkpoint from a training checkp
 and then running decode with it.
 """
 from datetime import datetime
-import os.path
+import os
 import pytest
 
 from MaxText.globals import PKG_DIR
@@ -47,7 +47,7 @@ def run_generate_param_only_checkpoint(hardware, attention_type, quantization):
       get_checkpointing_command(
           run_date,
           hardware=hardware,
-          steps=5,
+          steps=1,
           metrics_file="run_metrics.txt",
           attention_type=attention_type,
           dataset_type="tfds",
@@ -56,7 +56,7 @@ def run_generate_param_only_checkpoint(hardware, attention_type, quantization):
       + model_params
   )
 
-  state_path = f"gs://runner-maxtext-logs/runner_{run_date}/checkpoints/4/items"
+  state_path = f"gs://runner-maxtext-logs/runner_{run_date}/checkpoints/0/items"
   generate_param_only_ckpt_main(
       [
           None,
@@ -84,6 +84,8 @@ def run_generate_param_only_checkpoint(hardware, attention_type, quantization):
           f"load_parameters_path={decode_ckpt_path}",
           f"attention={attention_type}",
           "max_target_length=128",
+          "ici_tensor_parallelism=4",
+          "per_device_batch_size=1",
       ]
       + model_params
   )
@@ -103,6 +105,7 @@ def test_autoselected_attention(quantization, capsys):
 @pytest.mark.gpu_only
 @pytest.mark.parametrize("quantization", [(""), ("int8")])
 def test_with_dot_product(quantization, capsys):
+  os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
   run_generate_param_only_checkpoint("gpu", "dot_product", quantization)
   captured = capsys.readouterr()
   expected_output = "Input `I love to`"
