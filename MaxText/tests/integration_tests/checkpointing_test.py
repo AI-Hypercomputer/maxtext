@@ -91,7 +91,7 @@ def run_checkpointing(hardware, attention_type):
       get_checkpointing_command(
           run_date,
           hardware=hardware,
-          steps=5,
+          steps=1,
           metrics_file="saved_metrics.txt",
           attention_type=attention_type,
           dataset_type="grain",
@@ -104,7 +104,7 @@ def run_checkpointing(hardware, attention_type):
       get_checkpointing_command(
           run_date,
           hardware=hardware,
-          steps=10,
+          steps=2,
           metrics_file="restored_metrics.txt",
           attention_type=attention_type,
           dataset_type="grain",

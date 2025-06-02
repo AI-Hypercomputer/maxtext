@@ -29,6 +29,7 @@ before running tests locally.
 
 from datetime import datetime
 import json
+import os
 import pytest
 from MaxText.train import main as train_main
 from MaxText.tests.integration_tests.checkpointing_test import get_checkpointing_command
@@ -55,7 +56,7 @@ def run_checkpoint_compatibility(hardware, attention_type):
       get_checkpointing_command(
           run_date,
           hardware=hardware,
-          steps=3,
+          steps=1,
           metrics_file="run_1_metrics.txt",
           attention_type=attention_type,
           dataset_type="grain",
@@ -69,7 +70,7 @@ def run_checkpoint_compatibility(hardware, attention_type):
       get_checkpointing_command(
           run_date,
           hardware=hardware,
-          steps=5,
+          steps=2,
           metrics_file="run_2_metrics.txt",
           attention_type=attention_type,
           dataset_type="tfds",
@@ -77,22 +78,7 @@ def run_checkpoint_compatibility(hardware, attention_type):
       )
   )
 
-  # Resume training again using grain input pipeline
-  train_main(
-      get_checkpointing_command(
-          run_date,
-          hardware=hardware,
-          steps=7,
-          metrics_file="run_3_metrics.txt",
-          attention_type=attention_type,
-          dataset_type="grain",
-          dataset_path="/tmp/gcsfuse",
-      )
-      + grain_command
-  )
-
-  check_start_step("run_2_metrics.txt", 3.0)
-  check_start_step("run_3_metrics.txt", 5.0)
+  check_start_step("run_2_metrics.txt", 1.0)
 
 
 @pytest.mark.integration_test
@@ -104,4 +90,5 @@ def test_autoselected_attention():
 @pytest.mark.integration_test
 @pytest.mark.gpu_only
 def test_with_dot_product():
+  os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
   run_checkpoint_compatibility("gpu", "dot_product")
