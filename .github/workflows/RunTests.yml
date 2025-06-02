@@ -152,10 +152,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Check whether one of the jobs failed
-      if: ${{ failure() && github.event.pull_request == null }}
+      if: ${{ failure() && github.event.pull_request }}
       uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
       with:
         github-token: ${{ secrets.GITHUB_TOKEN }}
     - name: Log message if dependent job succeeded
-      if: ${{ ! (failure() && github.event.pull_request == null) }}
+      if: ${{ ! (failure() && github.event.pull_request) }}
       run: echo "Conditions for creating/updating issue not met. Skipping."
