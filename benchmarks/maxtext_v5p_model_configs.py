@@ -105,3 +105,92 @@ c4_deepseek_v3_ep_256_v5p_512 = _add_to_model_dictionary(
         ),
     ),
 )
+
+llama4_scout_dropless_v5p_256  = _add_to_model_dictionary(
+    v5p_model_dict,
+    MaxTextModel(
+        model_name="llama4_scout_dropless_v5p_256",
+        model_type="llama4-17b-16e",
+        tuning_params={
+            "per_device_batch_size": 8,
+            "max_target_length": 8192,
+            "ici_fsdp_parallelism": -1,
+            "enable_checkpointing": False,
+            "dtype": "bfloat16",
+            "weight_dtype": "float32",
+            "megablox": True,
+            "sparse_matmul": True,
+            "dataset_type": "synthetic",
+            "opt_type": "adamw",
+            "skip_first_n_steps_for_profiler": 5,
+            "profiler_steps": 3,
+            "profiler": "xplane",
+            "remat_policy": "custom",
+            "decoder_layer_input": "offload",
+            "reuse_example_batch": 1,
+            "sa_block_q": 2048,
+            "sa_block_kv": 2048,
+            "sa_block_kv_compute": 2048,
+            "sa_block_q_dkv": 2048,
+            "sa_block_kv_dkv": 2048,
+            "sa_block_kv_dkv_compute": 2048,
+            "sa_block_q_dq": 2048,
+            "sa_block_kv_dq": 2048,
+            "tokenizer_path": "meta-llama/Llama-4-Scout-17B-16E",
+        },
+        xla_flags=(
+            xla_flags_library.MOE_VMEM_LIMIT_FLAG
+            + xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+            + xla_flags_library.HOST_OFFLOAD_FLAGS
+        ),
+    ),
+)
+
+llama4_maverick_dropless_v5p_256  = _add_to_model_dictionary(
+    v5p_model_dict,
+    MaxTextModel(
+        model_name="llama4_maverick_dropless_v5p_256",
+        model_type="llama4-17b-128e",
+        tuning_params={
+            "per_device_batch_size": 4,
+            "max_target_length": 8192,
+            "ici_fsdp_parallelism": 32,
+            "ici_tensor_parallelism": 4,
+            "enable_checkpointing": False,
+            "dtype": "bfloat16",
+            "weight_dtype": "float32",
+            "megablox": True,
+            "sparse_matmul": True,
+            "dataset_type": "synthetic",
+            "opt_type": "adamw",
+            "skip_first_n_steps_for_profiler": 5,
+            "profiler_steps": 3,
+            "profiler": "xplane",
+            "remat_policy": "custom",
+            "decoder_layer_input": "offload",
+            "out_proj": "offload",
+            "query_proj": "offload",
+            "key_proj": "offload",
+            "value_proj": "offload",
+            "reuse_example_batch": 1,
+            "sa_block_q": 2048,
+            "sa_block_kv": 2048,
+            "sa_block_kv_compute": 2048,
+            "sa_block_q_dkv": 2048,
+            "sa_block_kv_dkv": 2048,
+            "sa_block_kv_dkv_compute": 2048,
+            "sa_block_q_dq": 2048,
+            "sa_block_kv_dq": 2048,
+            "tokenizer_path": "meta-llama/Llama-4-Maverick-17B-128E",
+        },
+        xla_flags=(
+            xla_flags_library.MOE_VMEM_LIMIT_FLAG
+            + xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+            + xla_flags_library.HOST_OFFLOAD_FLAGS
+        ),
+    ),
+)
