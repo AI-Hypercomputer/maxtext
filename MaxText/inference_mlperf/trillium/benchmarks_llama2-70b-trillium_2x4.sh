@@ -95,22 +95,34 @@ if [[ -z ${TOKENIZER_PATH} ]] ; then
   export TOKENIZER_PATH="/home/${USER}/maxtext/assets/tokenizer.llama2"
 fi
 
-if [ -z "$PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES" ];
-then
-    PREFILL_LEN="1024"
-    BATCH_SIZE_PER_DEVICE="23" 
-    export PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES="${PREFILL_LEN},${BATCH_SIZE_PER_DEVICE}"
-fi
+# Default values if not overridden by environment variables
+PREFILL_LEN_DEFAULT="1024"
+BATCH_SIZE_PER_DEVICE_DEFAULT="7"
+
+# Use environment variables if set, otherwise use defaults.
+# These variables will hold the actual values being used, ensuring RUN_DESC is correct.
+PREFILL_LEN=${USER_PREFILL_LEN:-$PREFILL_LEN_DEFAULT}
+BATCH_SIZE_PER_DEVICE=${USER_BATCH_SIZE_PER_DEVICE:-$BATCH_SIZE_PER_DEVICE_DEFAULT}
+
+export PREFILL_LENS_AND_PER_DEVICE_BATCH_SIZES="${PREFILL_LEN},${BATCH_SIZE_PER_DEVICE}"
 
 
 BASE_CFG="model_name=llama2-70b tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${CHECKPOINT}"
 QUANT_CFG="quantization=${QUANTIZATION} quant_cfg_path=${QUANT_PATH} checkpoint_is_quantized=True"
-KV_QUANT_CFG="quantize_kvcache=True kv_quant_dtype=${KV_QUANT_DTYPE}"
+KV_QUANT_CFG="quantize_kvcache=False" # kv_quant_dtype=${KV_QUANT_DTYPE}"
 PAGED_ATTN_CFG=""
 if "$paged"; then
-    PAGED_ATTN_CFG="attention=paged pagedattn_num_pages=16384 pagedattn_tokens_per_page=32 pagedattn_pages_per_compute_block=4"
+    # Use environment variables for paging parameters if set, otherwise use original defaults
+    _attention_type=${USER_ATTENTION_TYPE:-paged}
+    _num_pages=${USER_PAGEDATTN_NUM_PAGES:-13000}
+    _tokens_per_page=${USER_PAGEDATTN_TOKENS_PER_PAGE:-32}
+    _pages_per_block=${USER_PAGEDATTN_PAGES_PER_COMPUTE_BLOCK:-4}
+
+    PAGED_ATTN_CFG="attention=${_attention_type} pagedattn_num_pages=${_num_pages} pagedattn_tokens_per_page=${_tokens_per_page} pagedattn_pages_per_compute_block=${_pages_per_block}"
 fi
-export MAXENGINE_ARGS="${BASE_CFG} ${QUANT_CFG} ${KV_QUANT_CFG} ${PAGED_ATTN_CFG} optimize_mesh_for_tpu_v6e=True"
+export PAGED_ATTN_CFG=${PAGED_ATTN_CFG}
+
+
 echo
 echo $MAXENGINE_ARGS
 echo
@@ -122,10 +134,10 @@ run_benchmark() {
     local type=$1
     case "$type" in
         "performance")
-            $cmd bash llama_offline_run.sh ${RUN_OPTIONS} -r -benchmarks_performance_${RUN_DESC}
+            $cmd bash llama_offline_run.sh ${RUN_OPTIONS} --run=benchmarks_performance_${RUN_DESC}
             ;;
         "audit")
-            $cmd bash llama_offline_run.sh ${RUN_OPTIONS} -r -benchmarks_audit_${RUN_DESC} -d
+            $cmd bash llama_offline_run.sh ${RUN_OPTIONS} -r benchmarks_audit_${RUN_DESC} -d
             ;;
         "accuracy")
             export HF_CKPT="meta-llama/Llama-2-70b-chat-hf"

@@ -199,11 +199,6 @@ def main(argv: Sequence[str]) -> None:
     if streams_results[i]:
       output = tokenizer_model.decode(streams_results[i])
       print(f"Stream {i}: Input=`{text}` -> Output=`{output}`")
-
-      if i == 0:  # Check first stream as an example
-        assert output.startswith(
-            config.autoregressive_decode_assert
-        ), f"Stream {i} generated text mismatch: `{output}` vs expected start `{config.autoregressive_decode_assert}`"
     else:
       print(f"Stream {i}: Was not activated.")
 

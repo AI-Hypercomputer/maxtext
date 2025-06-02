@@ -41,8 +41,8 @@ BASE_CONFIG_FILE = "MaxText/configs/base.yml" # Ensure this path is correct
 
 COMMON_PARAMS: Dict[str, Any] = {
     "tokenizer_path": "assets/tokenizer.llama2",
-    "max_prefill_predict_length": 2048,
-    "max_target_length": 8192,
+    "max_prefill_predict_length": 1024,
+    "max_target_length": 2048,
     "model_name": "llama2-70b",
     "ici_fsdp_parallelism": 1,
     "ici_autoregressive_parallelism": 1,
@@ -53,20 +53,20 @@ COMMON_PARAMS: Dict[str, Any] = {
 }
 
 SCENARIOS: List[Dict[str, Any]] = [
-    # {
-    #     "name": "int8kv_dot_product",
-    #     "base_params": {"quantize_kvcache": True, "attention": "dot_product", "quantization": "int8"},
-    #     "sweep_params": {"per_device_batch_size": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]},
-    # },
-    # {
-    #     "name": "bf16kv_dot_product",
-    #     "base_params": {"quantize_kvcache": False, "attention": "dot_product", "quantization": "int8"},
-    #     "sweep_params": {"per_device_batch_size": [3, 4, 5, 6, 7, 8, 9, 10]},
-    # },
+    {
+        "name": "int8kv_dot_product",
+        "base_params": {"quantize_kvcache": True, "attention": "dot_product", "quantization": "int8"},
+        "sweep_params": {"per_device_batch_size": [16, 18, 20, 22, 24, 26, 28, 30]},
+    },
+    {
+        "name": "bf16kv_dot_product",
+        "base_params": {"quantize_kvcache": False, "attention": "dot_product", "quantization": "int8"},
+        "sweep_params": {"per_device_batch_size": [12, 14, 16, 18, 20]},
+    },
     {
         "name": "bf16kv_paged_attention",
         "base_params": {"quantize_kvcache": False, "attention": "paged", "pagedattn_tokens_per_page": 32, "quantization": "int8"},
-        "sweep_params": {"per_device_batch_size": [4, 5, 6, 7, 8, 9, 10], "pagedattn_num_pages": [13000]}
+        "sweep_params": {"per_device_batch_size": [12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32], "pagedattn_num_pages": [15000]}
     }
 ]
 

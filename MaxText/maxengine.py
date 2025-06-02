@@ -543,7 +543,7 @@ class MaxEngine(engine_api.Engine):
     # Update page state before JIT call
 
     if self.config.attention == "paged" and self.page_manager is not None and self.page_state is not None:
-      print(f"\nprefill: {request_id=}, {slot=}")
+      # print(f"\nprefill: {request_id=}, {slot=}")
       # print("Before prefill:", self.page_state)
       self.page_state = self.page_manager.update_prefill_pages(  # pytype: disable=attribute-error
           page_state=self.page_state,
@@ -1254,7 +1254,7 @@ class MaxEngine(engine_api.Engine):
   def free_resource(self, slot: int):
     """Frees resources associated with a slot, including KV cache pages."""
     if self.config.attention == "paged":
-      print(f"Releasing pages for {slot=}")
+      # print(f"Releasing pages for {slot=}")
       self.release_pages(slot)
 
   def release_pages(self, slot: int):
