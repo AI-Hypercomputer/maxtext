@@ -148,7 +148,6 @@ jobs:
 
   notify:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests, clean_up]
     runs-on: ubuntu-latest
     steps:
     - name: Check whether one of the jobs failed
