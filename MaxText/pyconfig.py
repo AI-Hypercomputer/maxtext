@@ -898,7 +898,7 @@ def validate_deepseek_moe(raw_keys):
 
 
 def validate_sparse_matmul_parallelism(raw_keys):
-  if raw_keys["sparse_matmul"] and (using_sequence_parallelism(raw_keys) or using_pipeline_parallelism(raw_keys)):
+  if raw_keys["sparse_matmul"] and (using_sequence_parallelism(raw_keys)):
     raise ValueError("Currently we only support Megablox and Ragged dot with data, tensor, and expert parallelism.")
   tensor_parallelism = (
       raw_keys["ici_tensor_parallelism"]

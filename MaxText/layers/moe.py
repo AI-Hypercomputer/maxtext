@@ -640,7 +640,7 @@ class RoutedMoE(nn.Module):
               * self.config.max_target_length
               * self.config.num_experts_per_tok
           )
-          output_shape = jnp.zeros((buffer_size, self.config.emb_dim), dtype=x.dtype)
+          output_shape = jnp.tile(x, (self.get_expert_parallelism_size(), 1))
 
           x = jax.lax.ragged_all_to_all(
               x,
@@ -682,10 +682,7 @@ class RoutedMoE(nn.Module):
         original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
         if sorted_selected_experts.shape[0] != original_inputs_first_dim:
           raise ValueError("original_inputs_first_dim does not match the original tensor shape!")
-        output_shape = jnp.zeros(
-            (original_inputs_first_dim, self.config.emb_dim // self.get_tensor_parallelism_size()),
-            dtype=intermediate_output.dtype,
-        )
+        output_shape = local_output[::self.get_expert_parallelism_size(), :]
         if is_batch_sharded_by_expert:
           # locally unpermute back to the original order
           local_output = jnp.take(intermediate_output, indices=jnp.argsort(local_sorted_indices), axis=0)
