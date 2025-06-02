@@ -189,6 +189,10 @@ MEGASCALE_GRPC_PREMAP_MEMORY_BYTES_32 = (
 " --megascale_grpc_premap_memory_bytes=34359738368"
 )
 
+MEGASCALE_GRPC_PREMAP_MEMORY_BYTES_64 = (
+" --megascale_grpc_premap_memory_bytes=68719476736"
+)
+
 ASYNC_CP = (
 " --xla_enable_async_collective_permute=true"
 )
@@ -310,7 +314,7 @@ llama3_8b_8192 = _add_to_model_dictionary(
         model_name="llama3-8b-8192",
         model_type="llama3-8b",
         tuning_params={
-            "per_device_batch_size": 8,
+            "per_device_batch_size": 4,
             "ici_fsdp_parallelism": -1,
             "remat_policy": "full",
             "max_target_length": 8192,
@@ -393,7 +397,7 @@ matt_debug_ep_pp = _add_to_model_dictionary(
 
 
 # Ran with a docker built from and XPK runner ran from:
-# docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_5_27_ep_fixes"'
+# docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_reshape_dropping"'
 # 
 # commit 4b7e8f31669a4bcd7f710763e4950b0ed39f9a9a (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
 # Author: gobbleturk <mattdavidow@google.com>
@@ -440,9 +444,9 @@ matt_dream_v1 = _add_to_model_dictionary(
         "weight_dtype": "bfloat16",
         
         # PP
-        "dcn_pipeline_parallelism": 16, # PP
-        "base_num_decoder_layers": 128, # PP * 8    
-        "num_pipeline_microbatches": 32, # PP * 2 or since we are sad PP * 1
+        "dcn_pipeline_parallelism": 2, # PP
+        "base_num_decoder_layers": 16, # PP * 8    
+        "num_pipeline_microbatches": 4, # PP * 2 or since we are sad PP * 1
         "num_layers_per_pipeline_stage": 2,
         "pipeline_fsdp_ag_once": True
         # "scan_layers": False,
@@ -456,7 +460,8 @@ matt_dream_v1 = _add_to_model_dictionary(
         + ASYNC_A2A
         + ASYNC_CP
         #+ MEGASCALE_GRPC_PREMAP_MEMORY_BYTES #" --megascale_grpc_premap_memory_bytes=17179869184"
-        + MEGASCALE_GRPC_PREMAP_MEMORY_BYTES_32 #--megascale_grpc_premap_memory_bytes=34359738368
+        #+ MEGASCALE_GRPC_PREMAP_MEMORY_BYTES_32 #--megascale_grpc_premap_memory_bytes=34359738368
+        + MEGASCALE_GRPC_PREMAP_MEMORY_BYTES_64
         )
     )
 )

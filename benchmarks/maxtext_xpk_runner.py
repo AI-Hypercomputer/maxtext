@@ -399,7 +399,8 @@ def generate_xpk_workload_cmd(
     #docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ep_first"'
     #docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_ep_fsdp_ag"'
     #docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_fix_custom_mesh"'
-    docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_5_27_ep_fixes"'
+    #docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_5_27_ep_fixes"'
+    docker_image_flag = '--docker-image="gcr.io/tpu-prod-env-multipod/mattdavidow_reshape_dropping"'
     
 
   # commit 1c213eb20026eb9877ebb14768295c4b0e2e1b97 (HEAD -> mattdavidow-dream-ep-first, origin/mattdavidow-dream-ep-first)
@@ -522,10 +523,10 @@ def main() -> int:
   list_of_models = [
     #model_configs.deepseek_matt_a1
     #model_configs.deepseek_manual_matt_a1
-    model_configs.matt_dream_v1
+    #model_configs.matt_dream_v1
     #model_configs.matt_dream_pure_ep_v1
     #model_configs.matt_ran_rerun
-    #model_configs.llama3-8b-8192
+    model_configs.llama3_8b_8192
   ]
 
   user = os.environ['USER']
@@ -535,11 +536,11 @@ def main() -> int:
     # Run workloads on the below clusters
     for cluster_config in [
         #v6e_cluster_config_lcs
-        v6e_cluster_config_tt
-        #v6e_cluster_matt_exp
+        #v6e_cluster_config_tt
+        v6e_cluster_matt_exp
     ]:
       # Run workloads in the following slice configurations
-      for num_slices in [32,]:
+      for num_slices in [2,]:
         # Use the libtpu dependencies from:
         for libtpu_type in [
             # LibTpuType.CUSTOM
