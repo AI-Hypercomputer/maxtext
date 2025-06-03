@@ -232,6 +232,24 @@ class TrainTests(unittest.TestCase):
         rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
     ]
     train_main(cudnn_flash_te)
+  
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_packed_cudnn_flash_te(self):
+    os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
+    packed_fused_attention = [  # tests base config on GPU with flash attention"""
+        None,
+        os.path.join(PKG_DIR, "configs", "base.yml"),
+        "base_output_directory=gs://runner-maxtext-logs",
+        "run_name=runner_test",
+        "dataset_path=gs://maxtext-dataset",
+        "steps=10",
+        "enable_checkpointing=False",
+        "enable_goodput_recording=False",
+        "attention=cudnn_flash_te",
+        rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
+    ]
+    train_main(packed_fused_attention)
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
@@ -317,6 +335,7 @@ class TrainTests(unittest.TestCase):
     ]
     train_main(parameter_offload)
 
+  @pytest.mark.integration_test
   @pytest.mark.gpu_only
   def test_gpu_cudnn_flash_jax(self):
     cudnn_flash_jax = [  # tests base config on GPU with flash attention"""
