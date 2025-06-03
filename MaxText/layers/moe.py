@@ -421,7 +421,7 @@ class RoutedMoE(nn.Module):
           precision=matmul_precision,
       )
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
-
+  
   def sparse_matmul(self, inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel):
     """sparse matrix multiplication"""
     tile_size = (512, 1024, 1024)  # (m, k, n)
@@ -563,49 +563,22 @@ class RoutedMoE(nn.Module):
         intermediate_output = checkpoint_name(intermediate_output, "mlpwo")
         return intermediate_output
 
-      expert_parallelism_size = self.get_expert_parallelism_size()
-      if expert_parallelism_size > 1:
+      @jax.custom_vjp
+      def dynamic_while_loop(x, batch_size, sequence_length, group_sizes, local_buffer_size, local_expert_size):
         axis_name = "expert"
-        expert_shard_id = jax.lax.axis_index(axis_name)
-        # get group sizes for all shards
-        local_expert_size = self.config.num_experts // expert_parallelism_size
-        # # Get number of tokens for each device
-        # reshaped_group_sizes = jnp.sum(group_sizes.reshape(-1, local_expert_size), axis=1)
-        # jax.debug.print("shard_id={id}, reshaped_group_sizes={x}", id=expert_shard_id, x=reshaped_group_sizes)
-        # all_shards_group_sizes = lax.all_gather(group_sizes, axis_name=axis_name)
-        # jax.debug.print("shard_id={id}, all_shards_group_sizes={x}", id=expert_shard_id, x=all_shards_group_sizes)
 
-        # set output buffer size based on ra2a_buffer_ratio
-        custom_buffer_size = int(
-            self.config.ra2a_buffer_ratio
-            * self.config.per_device_batch_size
-            * self.config.max_target_length
-            * self.config.num_experts_per_tok
-        )
-        assert custom_buffer_size >= expert_parallelism_size
-        assert self.config.ra2a_buffer_ratio <= expert_parallelism_size
-        local_buffer_size = custom_buffer_size // expert_parallelism_size
-        buffer_size = local_buffer_size * expert_parallelism_size
+        def condition_func(carry):
+          # Continue the loop if any group still has elements to process
+          _, _, current_group_sizes, _ = carry
+          all_shards_current_group_sizes = lax.all_gather(current_group_sizes, axis_name=axis_name)
+          return jnp.any(all_shards_current_group_sizes > 0)
 
-        # max_group_size = jnp.max(all_shards_group_sizes)
-        # num_iterations = (max_group_size + local_buffer_size - 1) // local_buffer_size
-        max_logging.log(f"custom_buffer_size is set at {custom_buffer_size}")
-        max_logging.log(f"local_buffer_size is set at {local_buffer_size}")
-        max_logging.log(f"The buffer size of ragged_all_to_all is set at {buffer_size}")
-
-        # def condition_func(carry):
-        #   # Continue the loop if any group still has elements to process
-        #   _, _, current_group_sizes, _, iter, num_iter = carry
-        #   # all_shards_current_group_sizes = lax.all_gather(current_group_sizes, axis_name=axis_name)
-        #   # return jnp.any(all_shards_current_group_sizes > 0)
-        #   return iter < 10
-
-        def iterate_gmm_calls(i, carry):
+        def iterate_gmm_calls(carry):
           # processed_group_sizes: have been processed
           # current_group_sizes: all rest group sizes for this iteration
           # process_group_sizes: group sizes for this iteration to be processed
           # rest_group_sizes: all rest group sizes for next iteration
-          previous_output, x, current_group_sizes, processed_group_sizes, iter, num_iter = carry
+          previous_output, x, current_group_sizes, processed_group_sizes = carry
           rest_group_sizes, process_group_sizes = apply_grouped_subtraction(
               current_group_sizes, local_buffer_size, local_expert_size
           )
@@ -677,24 +650,72 @@ class RoutedMoE(nn.Module):
           processed_group_sizes = processed_group_sizes + process_group_sizes
           intermediate_output = previous_output + intermediate_output
 
-          iter = iter + 1
           return (
               intermediate_output,
               x,
               rest_group_sizes,
               processed_group_sizes,
-              iter,
-              num_iter,
           )
 
         init_output = jnp.zeros(
             (batch_size * sequence_length * self.config.num_experts_per_tok, self.config.emb_dim), dtype=x.dtype
         )
         processed_group_sizes = jnp.zeros_like(group_sizes)
+        output, _, _, _ = lax.while_loop(condition_func, iterate_gmm_calls, (init_output, x, group_sizes, processed_group_sizes))
+        return output
+    
+      def _dynamic_while_loop_fwd(x, batch_size, sequence_length, group_sizes, local_buffer_size, local_expert_size):
+        final_output = dynamic_while_loop(x, batch_size, sequence_length, group_sizes, local_buffer_size, local_expert_size)    
+        residuals = (x, batch_size, sequence_length, group_sizes, local_buffer_size, local_expert_size)
+        return final_output, residuals
+    
+      def _dynamic_while_loop_bwd(residuals, g):
+        x, batch_size, sequence_length, group_sizes, local_buffer_size, local_expert_size = residuals
+        
+        fwd_fn = lambda x_arg: dynamic_while_loop(
+          x_arg, batch_size, sequence_length, group_sizes, local_buffer_size, local_expert_size
+        )
+        _, vjp_fn = jax.vjp(fwd_fn, x)
+        (x_grad,) = vjp_fn(g)
+        return (x_grad, None, None, None, None, None)
+      
+      dynamic_while_loop.defvjp(_dynamic_while_loop_fwd, _dynamic_while_loop_bwd)
+
+      expert_parallelism_size = self.get_expert_parallelism_size()
+      if expert_parallelism_size > 1:
+        axis_name = "expert"
+        expert_shard_id = jax.lax.axis_index(axis_name)
+        # get group sizes for all shards
+        local_expert_size = self.config.num_experts // expert_parallelism_size
+        # # Get number of tokens for each device
+        # reshaped_group_sizes = jnp.sum(group_sizes.reshape(-1, local_expert_size), axis=1)
+        # jax.debug.print("shard_id={id}, reshaped_group_sizes={x}", id=expert_shard_id, x=reshaped_group_sizes)
+        # all_shards_group_sizes = lax.all_gather(group_sizes, axis_name=axis_name)
+        # jax.debug.print("shard_id={id}, all_shards_group_sizes={x}", id=expert_shard_id, x=all_shards_group_sizes)
+
+        # set output buffer size based on ra2a_buffer_ratio
+        custom_buffer_size = int(
+            self.config.ra2a_buffer_ratio
+            * self.config.per_device_batch_size
+            * self.config.max_target_length
+            * self.config.num_experts_per_tok
+        )
+        assert custom_buffer_size >= expert_parallelism_size
+        assert self.config.ra2a_buffer_ratio <= expert_parallelism_size
+        local_buffer_size = custom_buffer_size // expert_parallelism_size
+        buffer_size = local_buffer_size * expert_parallelism_size
+
+        # max_group_size = jnp.max(all_shards_group_sizes)
+        # num_iterations = (max_group_size + local_buffer_size - 1) // local_buffer_size
+        max_logging.log(f"custom_buffer_size is set at {custom_buffer_size}")
+        max_logging.log(f"local_buffer_size is set at {local_buffer_size}")
+        max_logging.log(f"The buffer size of ragged_all_to_all is set at {buffer_size}")        
+
+        intermediate_output = dynamic_while_loop(x, batch_size, sequence_length, group_sizes, local_buffer_size, local_expert_size)
+        
         # intermediate_output, _, _, _, _ = lax.while_loop(condition_func, iterate_gmm_calls, (init_output, x, group_sizes, processed_group_sizes, 0))
-        num_iter = expert_parallelism_size * math.ceil(1 / self.config.ra2a_buffer_ratio)
-        # intermediate_output, _, _, _, _, _ = lax.while_loop(condition_func, iterate_gmm_calls, (init_output, x, group_sizes, processed_group_sizes, 0, num_iter))
-        intermediate_output, _, _, _, _, _ = lax.fori_loop(0, num_iter, iterate_gmm_calls, (init_output, x, group_sizes, processed_group_sizes, 0, num_iter))
+        # num_iter = expert_parallelism_size * math.ceil(1 / self.config.ra2a_buffer_ratio)
+        # intermediate_output, _, _, _, _, _ = lax.fori_loop(0, num_iter, iterate_gmm_calls, (init_output, x, group_sizes, processed_group_sizes, 0, num_iter))
       else:
         intermediate_output = gmm_block(x, group_sizes)
         if self.get_tensor_parallelism_size() > 1:
