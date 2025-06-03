@@ -36,7 +36,7 @@ Key supported features:
 * **[April 7, 2025] 🚨🚨🚨 We support modular imports. This comes with an API change for `train.py`: Now you should invoke the script via `python3 -m MaxText.train MaxText/configs/base.yml run_name=...`. If you want the old behavior you can stick to an older commit `git checkout pre-module-v0.1.0` and use the older API `python MaxText/train.py MaxText/configs/base.yml run_name=...`.**
 * [March 24, 2025] We are excited to announce support for DeepSeek v3 (671B) and v2-Lite (16B), compatible with both TPUs and GPUs. We are actively working on further optimization.
 * [March 12, 2025] We are excited to announce support for Gemma 3: 4B, 12B, and 27B in text-only formats. Please see [Google Launch Blog](https://blog.google/technology/developers/gemma-3/) and [Developer Blog](https://developers.googleblog.com/en/introducing-gemma3/) for more information on Gemma 3.
-* [February, 2025] (Preview): We're excited to announce the preview of building Maxtext Docker images using the JAX Stable Stack base image, available for both TPUs and GPUs. This provides a more reliable and consistent build environment. Learn more [Here](getting_started/Run_MaxText_via_xpk.md)
+* [February, 2025] (Preview): We're excited to announce the preview of building Maxtext Docker images using the JAX AI Training Images, available for both TPUs and GPUs. This provides a more reliable and consistent build environment. Learn more [Here](getting_started/Run_MaxText_via_xpk.md)
 
 # Table of Contents
 

@@ -13,13 +13,23 @@ source .env/bin/activate
 ```
 
 ### Install loadgen
+Note: this is taken from the MLCommons inference [README](https://github.com/mlcommons/inference/blob/master/loadgen/README_BUILD.md#quick-start) (as of May 2025).
 ```
-sudo apt-get install python3-dev
-sudo apt-get install build-essential -y
-git clone git@github.com:mlcommons/inference.git
-cd inference/
-cd loadgen/ && python3 -m pip install .
+pip install absl-py numpy
+git clone --recurse-submodules https://github.com/mlcommons/inference.git mlperf_inference
+cd mlperf_inference/loadgen
+CFLAGS="-std=c++14 -O3" python -m pip install .
 ```
+
+If you run into an issue like the following:
+
+```
+ImportError: venv/lib/libstdc++.so.6: version `GLIBCXX_3.4.30'
+not found (required by venv/lib/python3.10/site-packages/lperf_loadgen.cpython-310-x86_64-linux-gnu.so)
+```
+
+Please try running `conda install -c conda-forge gcc_linux-64 gxx_linux-64 libstdcxx-ng` if you using Conda or `sudo apt install build-essential` if you are using Venv and then reinstalling `loadgen`
+
 
 ### Download datasets
 

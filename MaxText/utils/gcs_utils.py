@@ -107,7 +107,7 @@ def gcs_path_exists(file_path):
     blob = bucket.blob(file_name)
 
     return blob.exists()
-  except Exception as e:
+  except ValueError as e:
     print(f"Error while accessing {file_path} from GCE: {str(e)}")
     return False
 
@@ -168,7 +168,7 @@ def read_json_from_gcs(file_path):
     data = json.loads(json_string)
 
     return data
-  except Exception as e:
+  except (ValueError, TypeError, json.JSONDecodeError) as e:
     print(f"Error reading JSON file from GCS: {str(e)}")
     return None
 
@@ -192,5 +192,5 @@ def write_dict_to_gcs_json(data_dict, file_path):
 
     # Upload the JSON string to GCS
     blob.upload_from_string(json_string, content_type="application/json")
-  except Exception as e:
+  except (ValueError, TypeError, RecursionError) as e:
     print(f"Failed to write json file at {file_path} with error: {str(e)}")

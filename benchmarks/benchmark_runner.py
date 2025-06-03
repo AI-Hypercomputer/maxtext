@@ -202,7 +202,7 @@ def add_on_device_runner_arguments(custom_parser: argparse.ArgumentParser):
   custom_parser.add_argument(
       '--model_name',
       type=str,
-      choices=list(trillium_model_dict.keys()) + list(v5e_model_dict.keys()),
+      choices=list(trillium_model_dict.keys()) + list(v5p_model_dict.keys()) + list(v5e_model_dict.keys()),
       default=list(trillium_model_dict.keys())[0],
       help=(
         'model to be benchmarked, supported models are the command choices.'

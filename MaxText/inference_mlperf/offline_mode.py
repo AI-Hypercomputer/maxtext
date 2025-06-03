@@ -362,8 +362,8 @@ class SUT:
         resp = make_response(key, val)
         lg.QuerySamplesComplete([resp])
 
-    log.info("Flush queries end")
     end = time.perf_counter()
+    log.info("Flush queries end-start: %d", end - start)
     gc.collect()
 
   def LoadSamplesToRam(self, sample_list):
@@ -426,12 +426,11 @@ def _estimated_counts_by_bucket(dataset):
 
 def main(argv):
   del argv
-  args = FLAGS
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   # jax.config.update("jax_explain_cache_misses", True)
 
   if FLAGS.enable_profile:
-    server = jax.profiler.start_server(FLAGS.jax_profiler_port)
+    jax.profiler.start_server(FLAGS.jax_profiler_port)
 
   settings = lg.TestSettings()
   settings.scenario = lg.TestScenario.Offline
@@ -454,7 +453,6 @@ def main(argv):
   estimated_counts_by_bucket = _estimated_counts_by_bucket(dataset)
   log.info("Dataset len %d, estimated counts by bucket %s", len(dataset), estimated_counts_by_bucket)
 
-  rows = list(dataset.iterrows())
   len_batch_str = FLAGS.prefill_lengths_and_per_device_batch_sizes
   log.info("Prefill lengths and Batch sizes: %s", len_batch_str)
   log.info("Maxengine args: %s", FLAGS.maxengine_args)
@@ -524,6 +522,7 @@ def main(argv):
   )
   log.info("Starting Benchmark run")
   lg.StartTestWithLogSettings(lgSUT, qsl, settings, log_settings, FLAGS.audit_conf)
+  # pylint: disable=protected-access
   log.info("query counts %s", str(list(map(len, sut._query_batches.values()))))
   log.info("Run Completed!")
   log.info("Destroying SUT...")

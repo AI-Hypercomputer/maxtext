@@ -202,7 +202,7 @@ class Decoder(nn.Module):
     self.decoder_layer = self.get_decoder_layers()
     self.norm_layer = self.get_norm_layer()
     if self.config.using_pipeline_parallelism:
-      pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer[0])
+      pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
       remat_policy = self.get_remat_policy()
       self.pipeline_module = pipeline.Pipeline(
           config=self.config, mesh=self.mesh, layers=pipeline_stage_module, remat_policy=remat_policy
@@ -291,7 +291,9 @@ class Decoder(nn.Module):
 
           def map_fn(path, value):
             max_logging.log(f"models.py: Moving parameter {path} to device")
-            return jax.device_put(value, jax._src.sharding_impls.TransferToMemoryKind("device"))
+            return jax.device_put(
+                value, jax._src.sharding_impls.TransferToMemoryKind("device")  # pylint: disable=protected-access
+            )
 
           return jax.tree_util.tree_map_with_path(map_fn, variables)
 
@@ -415,9 +417,16 @@ class Decoder(nn.Module):
     )
     return scan_fn(config=cfg, mesh=mesh, name=metdata_axis_name, quant=self.quant, **kwargs)
 
-  def get_pipeline_stage_module(self, base_stage):
+  def get_pipeline_stage_module(self, decoder_blocks):
     """get pipeline stage module"""
+    def get_layer_to_pipeline(blocks, cfg):
+      if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
+        return blocks[1] # return the sparse block
+      else:
+        return blocks[0]
+
     cfg = self.config
+    base_stage = get_layer_to_pipeline(decoder_blocks, cfg)
     if cfg.set_remat_policy_on_layers_per_stage:
       policy = self.get_remat_policy()
       base_stage = self.set_remat_policy([base_stage], policy)[0]
@@ -496,24 +505,57 @@ class Decoder(nn.Module):
         )
       else:
         partition_spec = None  # This partition spec is only used for the fsdp_ag_once feature.
-      y = self.pipeline_module(
-          y, decoder_segment_ids, decoder_positions, deterministic, model_mode, partition_spec=partition_spec
-      )
-      remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
-      if remaining_layers > 0:
+      if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
+        assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
+        dense_layer = RemattedBlockLayers[0]
+        moe_layer = RemattedBlockLayers[1]
+        num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
+        num_moe_layers_outside_pp = num_moe_layers - self.config.pipeline_parallel_layers
         logical_axis_rules_pp_as_dp = maxtext_utils.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)
+        # We chose not to pipeline the dense layers, only sparse for SPMD.
         with self.mesh, nn.partitioning.axis_rules(logical_axis_rules_pp_as_dp):
-          y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayers[0], remaining_layers, "layers", mesh)(
+          y, _ = self.scan_decoder_layers(cfg, dense_layer, cfg.first_num_dense_layers, "dense_layers", mesh)(
               y,
               decoder_segment_ids,
               decoder_positions,
               deterministic,
               model_mode,
           )
+          if num_moe_layers_outside_pp > 0:
+            y, _ = self.scan_decoder_layers(cfg, moe_layer, num_moe_layers_outside_pp, "moe_layers", mesh)(
+                y,
+                decoder_segment_ids,
+                decoder_positions,
+                deterministic,
+                model_mode,
+            )
+        y = self.pipeline_module(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          partition_spec=partition_spec
+        )
+      else: # Not DeepSeek
+        y = self.pipeline_module(
+            y, decoder_segment_ids, decoder_positions, deterministic, model_mode, partition_spec=partition_spec
+        )
+        remaining_layers = self.config.num_decoder_layers - self.config.pipeline_parallel_layers
+        if remaining_layers > 0:
+          logical_axis_rules_pp_as_dp = maxtext_utils.logical_axis_rules_pp_act_as_dp(self.config.logical_axis_rules)
+          with self.mesh, nn.partitioning.axis_rules(logical_axis_rules_pp_as_dp):
+            y, _ = self.scan_decoder_layers(cfg, RemattedBlockLayers[0], remaining_layers, "layers", mesh)(
+                y,
+                decoder_segment_ids,
+                decoder_positions,
+                deterministic,
+                model_mode,
+            )
     else:
       if cfg.scan_layers:
         if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-          assert len(RemattedBlockLayers) == 2, f"Scanned layers must have a length of 2 using deepseek."
+          assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
           dense_layer = RemattedBlockLayers[0]
           moe_layer = RemattedBlockLayers[1]
           y, _ = self.scan_decoder_layers(cfg, dense_layer, cfg.first_num_dense_layers, "dense_layers", mesh)(
@@ -553,7 +595,7 @@ class Decoder(nn.Module):
           )
       else:
         if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-          assert len(RemattedBlockLayers) == 2, f"Unscanned layers must have a length of 2 using deepseek."
+          assert len(RemattedBlockLayers) == 2, "Unscanned layers must have a length of 2 using deepseek."
           dense_layer = RemattedBlockLayers[0]
           moe_layer = RemattedBlockLayers[1]
 
@@ -660,13 +702,21 @@ class VisionEncoder(nn.Module):
     if self.config.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
       from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
 
-      return [gemma3.Gemma3VisionEncoderLayer]
+      return [gemma3.Gemma3VisionEncoderLayer, gemma3.VisionEmbedder]
     else:
       raise ValueError(f"No VisionEncoder implemented for {self.config.model_name} yet")
 
   @nn.compact
   def __call__(self, input_images, deterministic=False):
-    embeddings = self.vision_encoder_layer[0](config=self.config)(input_images, deterministic=deterministic)
+    cfg = self.config
+    # vision encoder output, frozen params in many cases
+    embeddings = self.vision_encoder_layer[0](config=cfg)(input_images, deterministic=deterministic)
+    if cfg.freeze_vision_encoder_params:
+      embeddings = jax.lax.stop_gradient(embeddings)
+
+    if len(self.vision_encoder_layer) > 1:
+      # vision embedder / projection layer, not frozen in most cases, trained / finetuned together with main model
+      embeddings = self.vision_encoder_layer[1](config=cfg)(embeddings)
     return embeddings
 
 

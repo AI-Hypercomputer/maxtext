@@ -17,6 +17,7 @@
 run_name: ""
 
 model_name: "default" # override config settings to match a specific model. other than the override, nothing should use this!
+override_model_config: False # When set to true allows overriding model parameters via CLI for the purpose of debugging/testing.
 normalization_layer_epsilon: 1.e-05
 
 ################################## CHECKPOINTING ##################################
@@ -140,6 +141,10 @@ sparse_matmul: True
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
 load_balance_loss_weight: 0.01 # weight for the load balance loss
 use_random_routing: False # whether to use random routing for debug/test purpose
+# Tunable tiling dimensions used for Megablox
+tile_batch_seq: 512
+tile_activation_dim: 1024
+tile_weight_dim: 1024
 
 # deepseek moe
 base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer (use base_mlp_dim if not DeepSeek style)

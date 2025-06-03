@@ -18,6 +18,7 @@ import enum
 import functools
 from typing import Any, Optional, Tuple
 from functools import partial
+import math
 
 import numpy as np
 
@@ -55,10 +56,11 @@ from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
 class AttentionType(enum.Enum):
-  GLOBAL = "global"
+  GLOBAL = "global"  # default, with causality
   LOCAL_SLIDING = "local_sliding"
   CHUNK = "chunk"
   MLA = "mla"
+  FULL = "full"
 
 
 # Used to pass in splash attention block sizes from config.
@@ -110,7 +112,7 @@ def apply_mask_to_logits(logits: Array, mask: Array):
 
 
 # TODO(agagik): change splash_attention_mask._ComputableMask to be non protected
-class ChunkedCausalMask(splash_attention_mask._ComputableMask):
+class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access
   """Lazy chunked causal mask.
 
   Attention is causal within each chunk (0, K), (K, 2K), (2K, 3K), ... tokens attend to each other but not accross chunks.
@@ -389,7 +391,7 @@ class AttentionOp(nn.Module):
 
     causal_mask = None
     # We enforce causality except for AUTOREGRESSION
-    if model_mode != MODEL_MODE_AUTOREGRESSIVE:
+    if model_mode != MODEL_MODE_AUTOREGRESSIVE and self.attention_type != AttentionType.FULL:
       mask_shape = (q_seq_len, kv_seq_len)
       # row_ids indicates the position of query
       # col_ids indicates the position of kv
@@ -518,6 +520,12 @@ class AttentionOp(nn.Module):
                            Use `dot_product` instead."""
         )
       return self.cudnn_flash_attention(query, key, value, decoder_segment_ids, model_mode), None, None
+    elif self.attention_kernel == "cudnn_flash_jax":
+      if isinstance(key, KVTensor):
+        key = key.dequant()
+      if isinstance(value, KVTensor):
+        value = value.dequant()
+      return *self.cudnn_jax_flash_attention(query, key, value, decoder_segment_ids, model_mode), None
     else:
       raise ValueError(f"Unexpected attention kernel {self.attention_kernel=}.")
 
@@ -633,6 +641,9 @@ class AttentionOp(nn.Module):
     axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
     axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
 
+    global global_block_q, global_block_kv, global_block_kv_compute, global_block_q_dkv, global_block_kv_dkv
+    global global_block_kv_dkv_compute, global_block_q_dq, global_block_kv_dq, global_use_fused_bwd_kernel
+    global global_q_layout, global_k_layout, global_v_layout
     global_block_q = self.config.sa_block_q
     global_block_kv = self.config.sa_block_kv
     global_block_kv_compute = self.config.sa_block_kv_compute
@@ -670,7 +681,10 @@ class AttentionOp(nn.Module):
     )
 
     mask_shape = (self.config.max_target_length, self.config.max_target_length)
-    mask = splash_attention_mask.CausalMask(shape=mask_shape)
+    if self.attention_type == AttentionType.FULL:
+      mask = splash_attention_mask.FullMask(mask_shape)
+    else:
+      mask = splash_attention_mask.CausalMask(shape=mask_shape)
 
     # Create LoadBalancedCausalMask if cp and load_balancing
     if cp_size > 1 and load_balanced_context_parallel:
@@ -851,6 +865,52 @@ class AttentionOp(nn.Module):
         context_parallel_axis="context",
     )
     return dpa_layer(query, key, value, mask=attn_mask)
+
+  def cudnn_jax_flash_attention(
+      self,
+      query: Array,
+      key: Array,
+      value: Array,
+      decoder_segment_ids: Array | None,
+      model_mode: str = MODEL_MODE_TRAIN,
+  ) -> Array:
+    """CUDNN Flash Attention with JAX SDPA API.
+    """
+    # These imports are only meant to work in a GPU build.
+    # pylint: disable=import-outside-toplevel
+    from jax._src.cudnn.fused_attention_stablehlo import (
+      dot_product_attention,
+      MaskType,
+    )
+
+    _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
+
+    if model_mode == MODEL_MODE_AUTOREGRESSIVE:
+      lengths = jnp.sum(decoder_segment_ids, axis=-1)
+
+      return dot_product_attention(
+          query,
+          key,
+          value,
+          q_seqlen=lengths,
+          kv_seqlen=lengths,
+          mask_type=MaskType.PADDING,
+          scale=1.0,
+          dropout_rate=self.dropout_rate,
+          qkv_layout="BTNH",
+          return_residual=True
+      )
+    else:
+      return dot_product_attention(
+          query,
+          key,
+          value,
+          mask_type=MaskType.CAUSAL,
+          scale=1.0 / math.sqrt(head_dim),
+          dropout_rate=self.dropout_rate,
+          qkv_layout="BTNH",
+          return_residual=True
+      )
 
   def compute_local_attention(
       self, attn_weights: Array, value: Array | KVTensor, q_seq_len: int, model_mode: str
@@ -1047,6 +1107,27 @@ class AttentionOp(nn.Module):
   def reverse_transepose(self, transposed_array, transpose_axis_order):
     return jax.numpy.moveaxis(transposed_array, (0, 1, 2, 3), transpose_axis_order)
 
+  def normalize_cudnn_attention(self, local_outs, local_stats):
+    """Normalize across two cuDNN attentions
+
+    Args:
+        local_outs (list): List of outputs entries for each cudnn attention
+          in shape [b, t, n, d].
+        local_stats (list): List of logsumexp entries for each cudnn attention
+          in shape [b, n, t].
+
+    Returns:
+        Array: Combined attention that has been normalized in shape [b, t, n, d].
+    """
+    # reshape stat to have shape [b, n, t, 1]
+    stat0 = local_stats[0].reshape((*local_stats[0].shape, 1))
+    stat1 = local_stats[1].reshape((*local_stats[1].shape, 1))
+    global_stat = jnp.log(jnp.exp(stat0) + jnp.exp(stat1))
+    # # transpose stat to have shape [b, t, n, 1] for elemenwise multiplication
+    attn_out = local_outs[0].astype(jnp.float32) * jnp.exp(stat0 - global_stat).transpose((0, 2, 1, 3)) \
+      + local_outs[1].astype(jnp.float32) * jnp.exp(stat1 - global_stat).transpose((0, 2, 1, 3))
+    return attn_out.astype(local_stats[0].dtype)
+
   def normalize_attention(self, local_outs, local_maxes, local_sums):
     """Normalize across multiple localized attentions
 
@@ -1078,15 +1159,16 @@ class AttentionOp(nn.Module):
       value,
       decoder_segment_ids,
       model_mode,
-      cached_values=[None, None],
+      cached_values=None,
       previous_chunk=None,
       bidirectional_mask=None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
   ):
-
-    prefill_kv_cache = cached_values[0]
-    ar_kv_cache = cached_values[1]
+    if cached_values is None:
+      prefill_kv_cache, ar_kv_cache = None, None
+    else:
+      prefill_kv_cache, ar_kv_cache = cached_values[0], cached_values[1]
     if model_mode != MODEL_MODE_TRAIN:
       assert prefill_kv_cache
       key, value, decoder_segment_ids = prefill_kv_cache
@@ -1125,7 +1207,13 @@ class AttentionOp(nn.Module):
       unnormalized_outputs = [prefill_unnormalized_output, ar_unnormalized_output]
       exponentials_maxes = [prefill_exponentials_max, ar_exponentials_max]
       exponentials_sums = [prefill_exponentials_sum, ar_exponentials_sum]
-      return self.normalize_attention(unnormalized_outputs, exponentials_maxes, exponentials_sums)
+      if prefill_exponentials_max is not None and prefill_exponentials_sum is None:
+        prefill_stat = prefill_exponentials_max
+        ar_stat = ar_exponentials_max
+        stats = [prefill_stat, ar_stat]
+        return self.normalize_cudnn_attention(unnormalized_outputs, stats)
+      else:
+        return self.normalize_attention(unnormalized_outputs, exponentials_maxes, exponentials_sums)
     else:
       return prefill_unnormalized_output / prefill_exponentials_sum
 
@@ -1208,6 +1296,7 @@ class Attention(nn.Module):
   ragged_block_size: int = 256
   use_qk_norm: bool = False
   query_pre_attn_scalar: float | None = None
+  use_bias_in_projections: bool = False  # Set to True will enable bias in q, k, v, o projections
   # Temperature tuning parameters used for Llama4
   temperature_tuning: bool = False
   temperature_tuning_scale: float = 0.1
@@ -1233,6 +1322,7 @@ class Attention(nn.Module):
   reshape_q: bool = False
 
   is_nope_layer: bool = False
+  is_vision: bool = False
 
   def setup(self):
     """init with attention_op and possibly paged_attention_op"""
@@ -1300,6 +1390,7 @@ class Attention(nn.Module):
         name="query",
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
+        use_bias=self.use_bias_in_projections,
     )(inputs_q)
     return query_proj
 
@@ -1336,6 +1427,7 @@ class Attention(nn.Module):
         name=proj_name,
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
+        use_bias=self.use_bias_in_projections,
     )(inputs_kv)
     return kv_proj
 
@@ -1352,6 +1444,7 @@ class Attention(nn.Module):
         name=proj_name,
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
+        use_bias=self.use_bias_in_projections,
     )(inputs)
     qkv_proj = checkpoint_name(qkv_proj, "qkv_proj")
     query, key, value = qkv_proj[:, :, 0, ...], qkv_proj[:, :, 1, ...], qkv_proj[:, :, 2, ...]
@@ -1372,10 +1465,11 @@ class Attention(nn.Module):
         name="out",
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
+        use_bias=self.use_bias_in_projections,
     )(out)
     return out_proj
 
-  def apply_rotary_embedding(self, inputs: Array, inputs_positions: Array, name: str):
+  def apply_rotary_embedding(self, inputs: Array, name: str, inputs_positions: Optional[Array | None] = None):
     """Applies rotary embeddings, handling different model types.
 
     Args:
@@ -1394,7 +1488,15 @@ class Attention(nn.Module):
 
     rope_type = self.config.rope_type.lower()
     rope_use_scale = self.config.rope_use_scale
-    if self.config.model_name.startswith("llama3.1") or rope_type.startswith("llama3.1"):
+    if self.is_vision:
+      rotary_embedding = embeddings.LlamaVisionRotaryEmbedding(
+          image_size=self.config.image_size_for_vit,
+          patch_size=self.config.patch_size_for_vit,
+          hidden_size=self.config.hidden_size_for_vit,
+          num_attention_heads=self.config.num_attention_heads_for_vit,
+          rope_theta=self.config.rope_theta_for_vit,
+      )
+    elif self.config.model_name.startswith("llama3.1") or rope_type.startswith("llama3.1"):
       rotary_embedding = embeddings.LLaMARotaryEmbedding(
           min_timescale=self.config.rope_min_timescale,
           max_timescale=self.config.rope_max_timescale,
@@ -1455,7 +1557,7 @@ class Attention(nn.Module):
       self,
       inputs_q: Array,
       inputs_kv: Array,
-      inputs_positions: Array,
+      inputs_positions: Array | None = None,
       decoder_segment_ids: Array | None = None,
       *,
       model_mode: str = MODEL_MODE_TRAIN,
@@ -1526,8 +1628,8 @@ class Attention(nn.Module):
     use_qk_norm = self.use_qk_norm and use_rope
 
     if use_rope:
-      query = self.apply_rotary_embedding(query, inputs_positions, name="query_rotary")
-      key = self.apply_rotary_embedding(key, inputs_positions, name="key_rotary")
+      query = self.apply_rotary_embedding(query, name="query_rotary", inputs_positions=inputs_positions)
+      key = self.apply_rotary_embedding(key, name="key_rotary", inputs_positions=inputs_positions)
 
     if use_qk_norm and is_llama4_decoder_block:
       l2_norm = L2Norm(self.config.normalization_layer_epsilon)
@@ -1712,7 +1814,7 @@ class MLA(Attention):
 
     # Split into non-positional and rotary parts.
     q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=-1)
-    q_pe = self.apply_rotary_embedding(q_pe, inputs_positions, name="query_rope")
+    q_pe = self.apply_rotary_embedding(q_pe, name="query_rope", inputs_positions=inputs_positions)
     # Query projection is scaled by self.softmax_scale to be consistent MaxText implementation.
     # DeepSeek v3 was doing it in attention score computation.
     query = jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
@@ -1782,7 +1884,7 @@ class MLA(Attention):
 
     # Apply rotary embedding to key_rope.
     key_rope = jnp.expand_dims(low_rank_rope, axis=2)
-    key_rope = self.apply_rotary_embedding(key_rope, inputs_positions, name="key_rope")
+    key_rope = self.apply_rotary_embedding(key_rope, name="key_rope", inputs_positions=inputs_positions)
 
     key, value = self.mla_get_key_value(low_rank_main, key_rope, model_mode)
     cached_values = [None, None]
@@ -1799,7 +1901,7 @@ class MLA(Attention):
       self,
       inputs_q: Array,
       inputs_kv: Array,
-      inputs_positions: Array,
+      inputs_positions: Array | None = None,
       decoder_segment_ids: Array | None = None,
       *,
       model_mode: str = MODEL_MODE_TRAIN,
@@ -1841,6 +1943,7 @@ class MLA(Attention):
     return out
 
 
+# pylint: disable=protected-access
 class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
   """Lazy causal mask, prevents the model from attending to future tokens.
   Attributes:

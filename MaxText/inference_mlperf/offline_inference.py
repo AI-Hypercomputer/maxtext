@@ -40,6 +40,7 @@ from MaxText.prefill_packing import BatchedPrefillProcessor
 
 DecodeState = Any
 Params = Any
+PRNGKeyType = Any
 
 log = logging.getLogger(__name__)
 
@@ -73,18 +74,18 @@ class JetThread(threading.Thread):
 class PrefillHelper:
   """Helper class to manage prefill related code and provide a unified interface."""
 
-  def __init__(self, type: str, engine: MaxEngine):
-    self._type = type
+  def __init__(self, kind: str, engine: MaxEngine):
+    self._type = kind
     self.engine = engine
-    if type == "default":
+    if self._type == "default":
       self._processor = PrefillProcessor(engine)
-    elif type == "batch":
+    elif self._type == "batch":
       self._batch_processor = BatchedPrefillProcessor(engine=engine, max_batch_size=16)
       self._processor = PrefillProcessor(engine)  # for fallback
-    elif type == "dummy":
+    elif self._type == "dummy":
       pass
     else:
-      raise ValueError(f"Invalid type: {type}")
+      raise ValueError(f"Invalid type: {self._type}")
 
   def aot_compile(
       self,
@@ -130,19 +131,20 @@ class PrefillHelper:
       input_true_length: int,
       max_length: int,
       prefill_done: Callable[[List[Tuple[engine_api.ResultTokens, int]], List[int], DecodeState], None],
+      rng: PRNGKeyType,
   ) -> None:
     """Prefill helper process runner"""
     padded_length = len(input_tokens_padded)
     if self._type == "default":
       first_token, decode_state = self._processor.process(
-          model_params, decode_state, decode_slot, input_tokens_padded, input_true_length
+          model_params, decode_state, decode_slot, input_tokens_padded, input_true_length, rng
       )
       prefill_done([(first_token, decode_slot)], [input_id], decode_state)
     elif self._type == "batch":
       if padded_length == max_length:
         # fallback to default mode
         first_token, decode_state = self._processor.process(
-            model_params, decode_state, decode_slot, input_tokens_padded, input_true_length
+            model_params, decode_state, decode_slot, input_tokens_padded, input_true_length, rng
         )
         prefill_done([(first_token, decode_slot)], [input_id], decode_state)
       else:
@@ -249,6 +251,9 @@ class OfflineInference:
     counter = EventCounter(input=0, prefill=0, decode=0, detokenize=0)
     dummy_length = 1
 
+    rng = jax.random.PRNGKey(1234)
+    rng, _ = jax.random.split(rng)
+
     def prefill_done(prefill_result, ids, decode_state):
       nonlocal self
       nonlocal counter
@@ -345,7 +350,15 @@ class OfflineInference:
 
       # Do prefill when there are free slots
       self.prefill.process(
-          self.params, self.decode_state, slot, row.id, row.tokens, row.true_length, self.max_prefill_length, prefill_done
+          self.params,
+          self.decode_state,
+          slot,
+          row.id,
+          row.tokens,
+          row.true_length,
+          self.max_prefill_length,
+          prefill_done,
+          rng,
       )
     self.prefill.finalize(self.params, self.decode_state, prefill_done)
 

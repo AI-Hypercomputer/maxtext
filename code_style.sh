@@ -34,7 +34,7 @@ done
 for folder in "${FOLDERS_TO_FORMAT[@]}"
 do
   # pylint doesn't change files, only reports errors.
-  pylint --disable R0401,R0917,W0102,W0107,W0201,W0212,W0221,W0223,W0237,W0404,W0611,W0612,W0613,W0621,W0622,W0631,W0707,W0718,W1201,W1203,W1309,W1514,W4901 "./$folder"
+  pylint --disable R0401,R0917,W0201,W0613 "./$folder"
 done
 
 echo "Successfully clean up all codes."

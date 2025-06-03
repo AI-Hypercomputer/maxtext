@@ -28,10 +28,11 @@ import os
 import json
 from argparse import ArgumentParser
 from glob import glob
-import string
+
 from tqdm import tqdm
 
 import torch
+
 from safetensors.torch import load_file, save_file
 
 
@@ -93,7 +94,7 @@ def convert_fp8_to_bf16(fp8_path: str, bf16_path: str, cache_file_num: int = 2):
   torch.set_default_dtype(torch.bfloat16)
   os.makedirs(bf16_path, exist_ok=True)
   model_index_file = os.path.join(fp8_path, "model.safetensors.index.json")
-  with open(model_index_file, "r") as f:
+  with open(model_index_file, "rt", encoding="utf8") as f:
     model_index = json.load(f)
   weight_map = model_index["weight_map"]
 
@@ -159,7 +160,7 @@ def convert_fp8_to_bf16(fp8_path: str, bf16_path: str, cache_file_num: int = 2):
     if scale_inv_name in weight_map:
       weight_map.pop(scale_inv_name)
   new_model_index_file = os.path.join(bf16_path, "model.safetensors.index.json")
-  with open(new_model_index_file, "w") as f:
+  with open(new_model_index_file, "wt", encoding="utf8") as f:
     json.dump({"metadata": {}, "weight_map": weight_map}, f, indent=2)
 
 

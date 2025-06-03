@@ -69,7 +69,6 @@ def fmt_size(num_bytes: int) -> str:
   return f"{num_bytes:.2f} {unit}"
 
 
-
 def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name):
   """convert ckpt."""
 

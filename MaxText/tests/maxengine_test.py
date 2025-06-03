@@ -100,9 +100,11 @@ class MaxEngineTest(unittest.TestCase):
         "a": jnp.ones((num_layers, 1, 10)),
         "b": jnp.ones((num_layers, 1, 9)),
     }
+    # pylint: disable=protected-access
     got_stacked = engine._maybe_stack_prefill_result_cache(input_d)
     jax.tree.map(np.testing.assert_array_equal, got_stacked, expected_stacked)
 
+    # pylint: disable=protected-access
     got_unstacked = engine._maybe_unstack_prefill_result_cache(got_stacked)
     jax.tree.map(np.testing.assert_array_equal, got_unstacked, input_d)
 

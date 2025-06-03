@@ -73,6 +73,7 @@ class Embed(nn.Module):
     # Move embeddings to device if parameter offloading is enabled
     if self.config.parameter_memory_host_offload:
       max_logging.log("embeddings.py: Moving embedding parameter to device")
+      # pylint: disable=protected-access
       self.embedding = jax.device_put(embedding, jax._src.sharding_impls.TransferToMemoryKind("device"))
     else:
       self.embedding = embedding
@@ -516,7 +517,7 @@ class LlamaVisionRotaryEmbedding(nn.Module):
     # Convert to complex representation
     self.freqs_ci = jnp.exp(1j * freqs)
 
-  def __call__(self, inputs: Array) -> Array:
+  def __call__(self, inputs: Array, position: Optional[Array] = None) -> Array:
     """Applies rotary embeddings to the input tensor for Llama4 vision encoder.
 
     Args:

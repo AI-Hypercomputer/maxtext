@@ -17,6 +17,7 @@ limitations under the License.
 """ Tests for the common MaxText utilities """
 import unittest
 import numpy as np
+import jax.numpy as jnp
 
 from MaxText import multimodal_utils
 
@@ -62,6 +63,57 @@ class TestTextImageFusionGemma3(unittest.TestCase):
         ]
     )
     np.testing.assert_array_equal(new_tokens, expected)
+
+
+class TestLlama4ImageProcessing(unittest.TestCase):
+  """Test Llama4 image processing"""
+
+  def setUp(self):
+    super().setUp()
+    self.LLAMA4_TILES_NUM = 16
+    self.LLAMA4_TILE_SIZE = 336
+    self.NUM_IMAGE_CHANNELS = 3
+
+  def test_get_best_resolution(self):
+    image_1 = jnp.ones((224, 300, self.NUM_IMAGE_CHANNELS))
+    image_2 = jnp.ones((536, 640, self.NUM_IMAGE_CHANNELS))
+
+    possible_resolutions = multimodal_utils.find_supported_resolutions(
+        max_num_chunks=self.LLAMA4_TILES_NUM, patch_size=self.LLAMA4_TILE_SIZE
+    )
+    best_resolution_1 = multimodal_utils.get_best_resolution(
+        img_height=image_1.shape[0],
+        image_width=image_1.shape[1],
+        possible_resolutions=possible_resolutions,
+        resize_to_max_canvas=False,
+    )
+    best_resolution_2 = multimodal_utils.get_best_resolution(
+        img_height=image_2.shape[0],
+        image_width=image_2.shape[1],
+        possible_resolutions=possible_resolutions,
+        resize_to_max_canvas=False,
+    )
+    self.assertEqual(best_resolution_1, (336, 336))
+    self.assertEqual(best_resolution_2, (672, 672))
+
+  def test_pad_to_best_fit_jax(self):
+    image = jnp.zeros((536, 640, self.NUM_IMAGE_CHANNELS))
+    best_resolution = (672, 672)
+    padded_image = multimodal_utils.pad_to_best_fit_jax(image, best_resolution)
+    self.assertEqual(padded_image.shape, (672, 672, self.NUM_IMAGE_CHANNELS))
+    self.assertTrue(jnp.all(padded_image == 0))
+
+  def test_split_to_tiles_jax(self):
+    image = jnp.ones((672, 672, self.NUM_IMAGE_CHANNELS))
+    best_resolution = (672, 672)
+    ratio_h, ratio_w = (
+        best_resolution[0] // self.LLAMA4_TILE_SIZE,
+        best_resolution[1] // self.LLAMA4_TILE_SIZE,
+    )
+    image_tiles = multimodal_utils.split_to_tiles_jax(image, ratio_h, ratio_w)
+    self.assertEqual(
+        image_tiles.shape, (ratio_h * ratio_w, self.NUM_IMAGE_CHANNELS, self.LLAMA4_TILE_SIZE, self.LLAMA4_TILE_SIZE)
+    )
 
 
 if __name__ == "__main__":

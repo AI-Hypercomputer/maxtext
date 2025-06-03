@@ -114,6 +114,18 @@ class PyconfigTest(unittest.TestCase):
     with self.assertRaises(ValueError):
       config_inference.ici_fsdp_parallelism = 4
 
+  def test_overriding_model(self):
+    config = pyconfig.initialize(
+        [os.path.join(PKG_DIR, "train.py"), os.path.join(PKG_DIR, "configs", "base.yml")],
+        skip_jax_distributed_system=True,
+        model_name="gemma-7b",
+        override_model_config=True,
+        base_emb_dim=1024,  # Defined as 3072 in gemma-7b
+    )
+
+    self.assertEqual(config.base_emb_dim, 1024)
+    self.assertEqual(config.base_mlp_dim, 24576)
+
 
 if __name__ == "__main__":
   unittest.main()

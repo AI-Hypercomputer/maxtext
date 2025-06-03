@@ -465,7 +465,7 @@ def init_initial_state(model, tx, config, is_training, key):
       {"params": key, "dropout": key, "aqt": key},
       np.ones(input_shape, dtype=jnp.int32),
       np.ones(input_shape, dtype=jnp.int32),
-      encoder_images=np.ones(image_shape, dtype=jnp.int32),
+      encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
   )
   if is_training:
     return init_training_state(model.apply, model_vars, tx)
