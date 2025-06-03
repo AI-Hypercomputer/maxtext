@@ -294,7 +294,7 @@ class RoutedMoE(nn.Module):
     If the configuration does not specify routing groups (n_routing_groups is -1),
     using a standard top-k routing mechanism.
 
-    The selection uses post_bias logits, but the return weigths are based on pre_bias logits.
+    The selection uses post_bias logits, but the return weights are based on pre_bias logits.
     """
     # Reshape
     batch_size, seq_len = gate_logits.shape[0], gate_logits.shape[1]
@@ -409,7 +409,7 @@ class RoutedMoE(nn.Module):
         sorted_indices: Indices used to permute the inputs.
         local_group_size: Number of tokens assigned to each local expert on this
           shard.
-        sorted_experts_ids: expert ID corrsponding to each token of the permuted inputs.
+        sorted_experts_ids: expert ID corresponding to each token of the permuted inputs.
     """
 
     # Slice the count of local expert IDs in each batch shard.
@@ -480,10 +480,10 @@ class RoutedMoE(nn.Module):
           cumulated_array = jnp.cumsum(array_with_zeros, axis=0, dtype=input_array.dtype)
           return cumulated_array[shard_id]
         elif strategy == TransformStrategy.RECV_SIZE:
-          # Received size in the traget output
+          # Received size in the target output
           return input_array[:, shard_id]
         else:
-          raise ValueError(f"Unknown tranform array strategy: {strategy}")
+          raise ValueError(f"Unknown transform array strategy: {strategy}")
 
       # If the batch is unsharded then we send the same data slice to all other shards.
       # We also assume each shard will have the local processed inputs sorted to start from index 0.
@@ -503,10 +503,10 @@ class RoutedMoE(nn.Module):
         # The amount that each shard receives from all other shards is equivalent to the group sizes
         # (aka input_array).
         elif strategy == TransformStrategy.RECV_SIZE:
-          # Received size in the traget output
+          # Received size in the target output
           return input_array
         else:
-          raise ValueError(f"Unknown tranform array strategy: {strategy}")
+          raise ValueError(f"Unknown transform array strategy: {strategy}")
 
     input_offsets = transform_array(all_shards_group_sizes, shard_id, TransformStrategy.INPUT_OFFSET, is_batch_sharded)
     send_sizes = transform_array(all_shards_group_sizes, shard_id, TransformStrategy.SEND_SIZE, is_batch_sharded)
@@ -678,11 +678,13 @@ class RoutedMoE(nn.Module):
       if self.get_tensor_parallelism_size() > 1:
         intermediate_output = jax.lax.psum_scatter(intermediate_output, "tensor", scatter_dimension=1, tiled=True)
 
+      breakpoint()
       if num_expert_parallelism > 1:
         original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
         if sorted_selected_experts.shape[0] != original_inputs_first_dim:
           raise ValueError("original_inputs_first_dim does not match the original tensor shape!")
-        output_shape = local_output[::self.get_expert_parallelism_size(), :]
+        breakpoint()
+        output_shape = intermediate_output[::self.get_expert_parallelism_size(), :]
         if is_batch_sharded_by_expert:
           # locally unpermute back to the original order
           local_output = jnp.take(intermediate_output, indices=jnp.argsort(local_sorted_indices), axis=0)

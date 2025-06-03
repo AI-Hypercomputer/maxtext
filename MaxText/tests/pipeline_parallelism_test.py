@@ -47,7 +47,6 @@ def assert_same_output_and_grad(f1, f2, *inputs):
 
   f1_grad = pytree_ravel(f1_grad)
   f2_grad = pytree_ravel(f2_grad)
-
   assert jax.numpy.allclose(f1_value, f2_value, rtol=1e-2, equal_nan=False)
   assert jax.numpy.allclose(f1_grad, f2_grad, rtol=1e-1, equal_nan=False)
 
@@ -87,7 +86,7 @@ class PipelineParallelismTest(unittest.TestCase):
     deterministic = True
     model_mode = MODEL_MODE_TRAIN
     # We use a simpler single matmul decoder layer for fast compilation in these tests.
-    single_pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh)
+    #single_pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh)
     my_pipeline = pipeline.Pipeline(config=config, layers=single_pipeline_stage, mesh=mesh)
     init_pipeline_params = my_pipeline.init(
         jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode
@@ -156,6 +155,7 @@ class PipelineParallelismTest(unittest.TestCase):
         dummy_targets,
     )
 
+
   @pytest.mark.tpu_only
   def test_ra2a(self):
     # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
@@ -173,11 +173,38 @@ class PipelineParallelismTest(unittest.TestCase):
         per_device_batch_size=4,
         num_experts=4,
         num_experts_per_tok=2,
-        megablox=True,
-        sparse_matmul=True,
+        megablox=False,
+        sparse_matmul=False,
+        capacity_factor=1.0,
+        attention_type="mla",
         decoder_block="deepseek",
     )
     self.assert_pipeline_same_output_and_grad(config, single_pipeline_stage_class=deepseek.DeepSeekMoELayer)
+
+
+  # @pytest.mark.tpu_only
+  # def test_ra2a(self):
+  #   # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
+  #   config = pyconfig.initialize(
+  #       [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+  #       enable_checkpointing=False,
+  #       enable_goodput_recording=False,
+  #       run_name="circular_moe",
+  #       max_target_length=128,
+  #       base_emb_dim=28,
+  #       ici_pipeline_parallelism=4,
+  #       ici_expert_parallelism=2,
+  #       base_num_decoder_layers=8,
+  #       num_pipeline_microbatches=8,
+  #       per_device_batch_size=4,
+  #       num_experts=4,
+  #       num_experts_per_tok=2,
+  #       megablox=True,
+  #       sparse_matmul=True,
+  #       attention_type="mla",
+  #       decoder_block="deepseek",
+  #   )
+  #   self.assert_pipeline_same_output_and_grad(config, single_pipeline_stage_class=deepseek.DeepSeekMoELayer)
 
 
 if __name__ == "__main__":

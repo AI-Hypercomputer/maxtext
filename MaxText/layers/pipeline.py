@@ -439,7 +439,6 @@ class Pipeline(nn.Module):
     This becomes a vmap over a single layer instance if body_instance is a single layer,
     else a set of layers if body_instance is a set of layers.
     """
-
     def func_to_vmap(body_instance, weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
       """nn.vmap requires either a nn.module class or a function whose first argument is a nn.module instance."""
       return body_instance.apply(weights, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode)
