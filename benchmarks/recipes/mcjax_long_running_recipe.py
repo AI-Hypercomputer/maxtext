@@ -26,9 +26,8 @@ import maxtext_trillium_model_configs as model_configs
 import maxtext_xpk_runner as mxr
 from xpk_configs import XpkClusterConfig
 
-PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
-SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
-RUNNER = "gcr.io/tpu-prod-env-multipod/sujinesh_latest"
+# RUNNER = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/maxtext_jax_nightly"
+RUNNER = "gcr.io/cloud-tpu-multipod-dev/sujinesh_latest"
 
 # Cluster Params
 CLUSTER = "bodaborg-v6e-256-tt-c"
@@ -45,10 +44,6 @@ BASE_OUTPUT_DIRECTORY = (
 
 MAX_RESTARTS = 10_000
 BENCHMARK_STEPS=10_000_000
-
-# TODO Change this for long running test!
-MAX_RESTARTS = 8
-BENCHMARK_STEPS=20
 
 
 def main() -> int:
@@ -71,24 +66,11 @@ def main() -> int:
   model_list = [
       # model_configs.llama3_1_70b_8192_pw_lr_real_data,
       # model_configs.llama3_1_8b_8192,
-      # model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
+      model_configs.llama3_1_70b_8192_iter_synth_data_and_checkpointing,
       # model_configs.llama3_1_70b_8192_iter_real_data_and_checkpointing_tfds,
-      model_configs.llama3_1_70b_8192_iter_synthetic,
   ]
-
-  pathways_config = mxr.PathwaysConfig(
-      server_image=SERVER_IMAGE,
-      proxy_server_image=PROXY_IMAGE,
-      runner_image=RUNNER,
-
-      # User can add additional flags here.
-      # server_flags="--enable_metrics_collection=true",
-      # proxy_flags="--enable_metrics_collection=true",
-      # worker_flags="--enable_metrics_collection=true",
-  )
-
   num_slices_list = [
-      150, 170, 190, 200, 204
+      32
   ]
 
   xpk_workload_cmds = []
@@ -102,18 +84,9 @@ def main() -> int:
 
       # Make modifications to the model config here to add in any additional
       # flags or changes to the model config.
-      model.tuning_params["use_vertex_tensorboard"] = False
+      model.tuning_params["use_vertex_tensorboard"] = True
       model.tuning_params["vertex_tensorboard_project"] = PROJECT
       model.tuning_params["vertex_tensorboard_region"] = REGION
-      model.tuning_params["profiler"] = "xplane"
-
-      # Disable goodput recording to avoid quota errors.
-      model.tuning_params["enable_goodput_recording"] = False
-      model.tuning_params["enable_pathways_goodput"] = False
-      model.tuning_params["monitor_goodput"] = False
-      model.tuning_params["monitor_step_time_deviation"] = False
-      model.tuning_params["enable_gcp_goodput_metrics"] = False
-      model.tuning_params["enable_gcp_step_deviation_metrics"] = False
 
       # Run workloads in the following slice configurations
       for num_slices in num_slices_list:
@@ -123,13 +96,12 @@ def main() -> int:
             device_type=cluster_config.device_type,
             base_output_directory=BASE_OUTPUT_DIRECTORY,
             max_restarts=MAX_RESTARTS,
-            libtpu_type=None,
+            libtpu_type=mxr.LibTpuType.MAXTEXT,
             libtpu_nightly_version="",
             base_docker_image=RUNNER,
-            pathways_config=pathways_config,
             xpk_path=XPK_PATH,
             num_steps=BENCHMARK_STEPS,
-            priority="very-high",
+            priority="medium",
         )
         command, name = mxr.generate_xpk_workload_cmd(
             cluster_config=cluster_config, wl_config=wl_config
