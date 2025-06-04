@@ -34,6 +34,7 @@ from MaxText.layers import pipeline
 from MaxText.layers import simple_layer
 from MaxText.train import main as train_main
 from MaxText.layers import deepseek
+from MaxText.common_types import DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR
 
 
 def test_simple():
@@ -86,39 +87,73 @@ def test_simple():
     deterministic = True
     model_mode = MODEL_MODE_TRAIN
 
+    class WrappedPipeline(nn.Module):
+        config: Config
+        mesh: Mesh
 
-    single_pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh)
-    my_pipeline = pipeline.Pipeline(config=config, layers=single_pipeline_stage, mesh=mesh)
+        def setup(self):
+            single_pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh)
+            self.pipeline_module = pipeline.Pipeline(
+                config=self.config,
+                mesh=self.mesh,
+                layers=single_pipeline_stage,
+            )
+
+        @nn.compact
+        def __call__(
+            self,
+            inputs: jnp.ndarray,
+            segment_ids: jnp.ndarray,
+            positions: jnp.ndarray,
+            deterministic: bool,
+            model_mode=MODEL_MODE_TRAIN,
+            partition_spec=None,  # Pytree of sharding specifications of the weights (aka self.layers.variables)
+        ) -> jnp.ndarray:
+            return self.pipeline_module(
+                inputs,
+                segment_ids,
+                positions,
+                deterministic,
+                model_mode,
+                partition_spec=partition_spec
+            )
+
+    
+    my_wrapped_pipeline = WrappedPipeline(config=config, mesh=mesh)
     def get_params():
-        init_pipeline_params = my_pipeline.init(
+        init_pipeline_params = my_wrapped_pipeline.init(
             jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode
         )
         return init_pipeline_params
 
-    partition_spec = my_pipeline.get_weight_sharding(inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
-    partition_spec2={'params': {}}
-    partition_spec2['params']['layers'] = partition_spec['params']
-    physical_spec = nn.logical_to_mesh_sharding(partition_spec2, rules=config.logical_axis_rules, mesh=mesh)
-    jit_params = jax.jit(get_params, out_shardings=physical_spec)
+    jit_params = jax.jit(get_params)
     init_pipeline_params = jit_params()
     
-
 
     # Create a dummy scalar loss function so we may take the gradient wrt weights
     def pipeline_parallelism_dummy_loss_extra(
         params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode, dummy_targets, partition_spec=None
     ):
-        outputs = my_pipeline.apply(
+        outputs = my_wrapped_pipeline.apply(
             params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode, partition_spec=partition_spec
         )
         loss = jnp.linalg.norm(outputs - dummy_targets)
         return loss
 
-    pipeline_parallelism_dummy_loss = functools.partial(pipeline_parallelism_dummy_loss_extra, partition_spec=partition_spec2)
+        # Create a dummy scalar loss function so we may take the gradient wrt weights
+    def pipeline_parallelism_dummy_loss_extra(
+        params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode, dummy_targets, partition_spec=None
+    ):
+        outputs = my_wrapped_pipeline.apply(
+            params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode, partition_spec=partition_spec
+        )
+        loss = jnp.linalg.norm(outputs - dummy_targets)
+        return loss
+
+    pipeline_parallelism_dummy_loss = functools.partial(pipeline_parallelism_dummy_loss_extra)
 
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         jit_pp = jax.jit(pipeline_parallelism_dummy_loss, static_argnums=(4,5))
-        breakpoint()
         f2_value, f2_grad = jax.value_and_grad(jit_pp)(
                 init_pipeline_params,
                 inputs,
@@ -131,4 +166,8 @@ def test_simple():
     print(f"{f2_value=}", flush=True)
 
 if __name__ == "__main__":
+  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+  if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
+    os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
   test_simple()
