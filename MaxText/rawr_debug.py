@@ -38,9 +38,9 @@ from MaxText.layers import deepseek
 
 def assert_same_output_and_grad(f1, f2, *inputs):
   """check that the output and gradient are the same"""
-  f1_value, f1_grad = jax.value_and_grad(f1)(*inputs)
   f2_value, f2_grad = jax.value_and_grad(f2)(*inputs)
-
+  f1_value, f1_grad = jax.value_and_grad(f1)(*inputs)
+  
   def pytree_ravel(pytree):
     ravelled_tree = jax.tree.map(jnp.ravel, pytree)
     ravelled_leaves, _ = jax.tree_util.tree_flatten(ravelled_tree)
@@ -85,8 +85,6 @@ def assert_pipeline_same_output_and_grad(config, single_pipeline_stage_class=Non
     )
     deterministic = True
     model_mode = MODEL_MODE_TRAIN
-    # We use a simpler single matmul decoder layer for fast compilation in these tests.
-    #single_pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh)
     my_pipeline = pipeline.Pipeline(config=config, layers=single_pipeline_stage, mesh=mesh)
     init_pipeline_params = my_pipeline.init(
         jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode
@@ -142,10 +140,15 @@ def assert_pipeline_same_output_and_grad(config, single_pipeline_stage_class=Non
         outputs = regular_sequential_layers(params, inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
         loss = jnp.linalg.norm(outputs - dummy_targets)
         return loss
+
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        jit_regular = jax.jit(regular_sequential_layers_dummy_loss, static_argnums=(4,5))
+        jit_pipeline = jax.jit(pipeline_parallelism_dummy_loss, static_argnums=(4,5))
+
+        breakpoint()
         assert_same_output_and_grad(
-            regular_sequential_layers_dummy_loss,
-            pipeline_parallelism_dummy_loss,
+            jit_regular,
+            jit_pipeline,
             init_pipeline_params,
             inputs,
             inputs_segmentation,
@@ -180,8 +183,27 @@ def test_ra2a():
     )
     assert_pipeline_same_output_and_grad(config, single_pipeline_stage_class=deepseek.DeepSeekMoELayer)
 
+def test_simple():
+    # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches
+    config = pyconfig.initialize(
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+        enable_checkpointing=False,
+        enable_goodput_recording=False,
+        run_name="circular_moe",
+        max_target_length=128,
+        base_emb_dim=28,
+        ici_pipeline_parallelism=4,
+        ici_expert_parallelism=2,
+        base_num_decoder_layers=8,
+        num_pipeline_microbatches=8,
+        per_device_batch_size=4,
+        decoder_block="simple",
+    )
+    assert_pipeline_same_output_and_grad(config)
+
 
 
 
 if __name__ == "__main__":
-  test_ra2a()
+  #test_ra2a()
+  test_simple()

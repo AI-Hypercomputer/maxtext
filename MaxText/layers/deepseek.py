@@ -50,7 +50,8 @@ def self_attention_with_norm(inputs, cfg, mesh, quant, decoder_segment_ids, deco
       kernel_axes=("norm",),
       epsilon=cfg.normalization_layer_epsilon,
   )
-  lnx = lnx_rms(inputs)
+  #lnx = lnx_rms(inputs)
+  lnx = inputs
   lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
 
   attention_layer = attentions.MLA(
