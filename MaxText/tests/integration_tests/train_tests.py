@@ -232,7 +232,7 @@ class TrainTests(unittest.TestCase):
         rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
     ]
     train_main(cudnn_flash_te)
-  
+
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
   def test_gpu_packed_cudnn_flash_te(self):
@@ -352,6 +352,7 @@ class TrainTests(unittest.TestCase):
         rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
     ]
     train_main(cudnn_flash_jax)
+
 
 if __name__ == "__main__":
   absltest.main()
