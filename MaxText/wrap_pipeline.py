@@ -84,19 +84,26 @@ def test_simple():
     jit_inputs = jax.jit(get_inputs, in_shardings=(), out_shardings=(data_shardings, data_shardings, token_shardings, token_shardings), static_argnums=(0,1,2))
 
     inputs, dummy_targets, inputs_position, inputs_segmentation = jit_inputs(config.global_batch_size_to_train_on, config.max_target_length, config.emb_dim)
-    breakpoint()
     deterministic = True
     model_mode = MODEL_MODE_TRAIN
 
 
-
-
+    single_pipeline_stage = simple_layer.SimpleDecoderLayer(config=config, mesh=mesh)
+    my_pipeline = pipeline.Pipeline(config=config, layers=single_pipeline_stage, mesh=mesh)
     def get_params():
-        my_pipeline = pipeline.Pipeline(config=config, layers=single_pipeline_stage, mesh=mesh)
         init_pipeline_params = my_pipeline.init(
             jax.random.PRNGKey(0), inputs, inputs_position, inputs_segmentation, deterministic, model_mode
         )
-        partition_spec = my_pipeline.get_weight_sharding(inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
+        return init_pipeline_params
+
+    partition_spec = my_pipeline.get_weight_sharding(inputs, inputs_position, inputs_segmentation, deterministic, model_mode)
+    partition_spec2={'params': {}}
+    partition_spec2['params']['layers'] = partition_spec['params']
+    physical_spec = nn.logical_to_mesh_sharding(partition_spec2, rules=config.logical_axis_rules, mesh=mesh)
+    jit_params = jax.jit(get_params, out_shardings=physical_spec)
+    init_pipeline_params = jit_params()
+    
+
 
     # Create a dummy scalar loss function so we may take the gradient wrt weights
     def pipeline_parallelism_dummy_loss_extra(
@@ -108,10 +115,18 @@ def test_simple():
         loss = jnp.linalg.norm(outputs - dummy_targets)
         return loss
 
-    pipeline_parallelism_dummy_loss = functools.partial(pipeline_parallelism_dummy_loss_extra, partition_spec=partition_spec)
+    pipeline_parallelism_dummy_loss = functools.partial(pipeline_parallelism_dummy_loss_extra, partition_spec=partition_spec2)
 
-    jit_pp = jax.jit(pipeline_parallelism_dummy_loss)
-    f2_value, f2_grad = jax.value_and_grad(f2)(*inputs)
+    jit_pp = jax.jit(pipeline_parallelism_dummy_loss, static_argnums=(4,5))
+    f2_value, f2_grad = jax.value_and_grad(jit_pp)(
+        init_pipeline_params,
+        inputs,
+        inputs_position,
+        inputs_segmentation,
+        deterministic,
+        model_mode,
+        dummy_targets)
+    print(f"{f2_value=}", flush=True)
 
 if __name__ == "__main__":
   test_simple()
