@@ -279,15 +279,21 @@ class PagedAttentionOp(nn.Module):
     assert page_state.page_map.shape == (page_state.num_pages_used.shape[0], self.max_pages_per_slot)
 
     # Handle both init (b>1) and runtime (b=1) cases
+    # Ensure key and value remain 3D after this block if batch_size was 1
     if batch_size == 1:
-      key = jnp.squeeze(key)  # [batch_size, seq_len, n_kv_head, head_dim] to [seq_len, n_kv_head, head_dim]
-      value = jnp.squeeze(value)
+      key = jnp.squeeze(key, axis=0)  # Squeeze only the batch dim
+      value = jnp.squeeze(value, axis=0)
     else:
+      # This path might not be hit if batch_size > 1 is not a typical prefill scenario for this specific logic
+      # If it were, we'd need to decide how to handle it or if it's an error.
+      # Assuming for now that prefill ops work on unbatched sequences or B=1.
+      # If key[0] is used, it implies the logic processes one item from batch if B > 1.
       key = key[0]
       value = value[0]
 
-    key = jnp.transpose(key, axes=(1, 0, 2))
-    value = jnp.transpose(value, axes=(1, 0, 2))
+    # key and value should now be (seq_len, n_kv_head, head_dim)
+    key = jnp.transpose(key, axes=(1, 0, 2)) # Transpose to (n_kv_head, seq_len, head_dim)
+    value = jnp.transpose(value, axes=(1, 0, 2)) # Transpose to (n_kv_head, seq_len, head_dim)
 
     key = jnp.reshape(key, shape=(n_kv_head, max(1, seq_len // self.tokens_per_page), self.tokens_per_page, head_dim))
     value = jnp.reshape(value, shape=(n_kv_head, max(1, seq_len // self.tokens_per_page), self.tokens_per_page, head_dim))
