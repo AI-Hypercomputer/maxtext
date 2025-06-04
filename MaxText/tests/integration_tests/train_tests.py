@@ -237,7 +237,7 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.gpu_only
   def test_gpu_packed_cudnn_flash_te(self):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
-    packed_fused_attention = [  # tests base config on GPU with flash attention"""
+    packed_fused_attention = [  # tests base config on GPU with packed flash attention"""
         None,
         os.path.join(PKG_DIR, "configs", "base.yml"),
         "base_output_directory=gs://runner-maxtext-logs",

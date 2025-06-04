@@ -842,6 +842,8 @@ class AttentionOp(nn.Module):
       sliding_window_size = [self.sliding_window_size, 0]
 
     if self.config.packing and self.config.dataset_type != "synthetic":
+      if decoder_segment_ids is None:
+        decoder_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
       attn_mask = SequenceDescriptor.from_segment_ids_and_pos(segment_ids=decoder_segment_ids, segment_pos=None)
       qkv_layout = "THD_THD_THD"  # 'T3HD', 'THD_T2HD' or 'THD_THD_THD'
       max_segments_per_seq = 32
