@@ -45,11 +45,10 @@ def test_simple():
         run_name="circular_moe",
         max_target_length=128,
         base_emb_dim=28,
-        ici_pipeline_parallelism=4,
-        ici_expert_parallelism=2,
-        base_num_decoder_layers=8,
-        num_pipeline_microbatches=8,
-        per_device_batch_size=4,
+        ici_pipeline_parallelism=8,
+        # base_num_decoder_layers=8,
+        # num_pipeline_microbatches=8,
+        # per_device_batch_size=4,
         decoder_block="simple",
     )
     
@@ -117,15 +116,18 @@ def test_simple():
 
     pipeline_parallelism_dummy_loss = functools.partial(pipeline_parallelism_dummy_loss_extra, partition_spec=partition_spec2)
 
-    jit_pp = jax.jit(pipeline_parallelism_dummy_loss, static_argnums=(4,5))
-    f2_value, f2_grad = jax.value_and_grad(jit_pp)(
-        init_pipeline_params,
-        inputs,
-        inputs_position,
-        inputs_segmentation,
-        deterministic,
-        model_mode,
-        dummy_targets)
+    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        jit_pp = jax.jit(pipeline_parallelism_dummy_loss, static_argnums=(4,5))
+        breakpoint()
+        f2_value, f2_grad = jax.value_and_grad(jit_pp)(
+                init_pipeline_params,
+                inputs,
+                inputs_position,
+                inputs_segmentation,
+                deterministic,
+                model_mode,
+                dummy_targets)
+        
     print(f"{f2_value=}", flush=True)
 
 if __name__ == "__main__":

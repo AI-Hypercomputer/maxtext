@@ -883,6 +883,7 @@ def train_loop(config, state=None):
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        breakpoint()
         state, metrics = p_train_step(state, example_batch, nextrng)
 
     step_time_delta = datetime.datetime.now() - last_step_completion
