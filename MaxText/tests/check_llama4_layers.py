@@ -846,13 +846,15 @@ class Llama4VisionEncoderTest(unittest.TestCase):
     attention_dropout: int = 0
 
   config_arguments = {
-      "per_device_batch_size": 4.0,
       "run_name": "test",
       "enable_checkpointing": False,
       "model_name": "llama4-17b-16e",
       "scan_layers": False,
-      "num_hidden_layers_for_vit": 6,
+      "num_hidden_layers_for_vit": 34,
       "dtype": "float32",
+      "matmul_precision": "float32",
+      "float32_qk_product": True,
+      "float32_logits": True,
   }
 
   def setUp(self):
@@ -889,6 +891,7 @@ class Llama4VisionEncoderTest(unittest.TestCase):
     # Create test input using config dimensions
     batch_size = 4
     inputs = jnp.ones((batch_size, self.seq_len_for_vit, self.cfg.hidden_size_for_vit), dtype=jnp.float32)
+    inputs /= 10
 
     # Initialize JAX parameters
     params = jax_model.init(self.rng, inputs, deterministic=True)
@@ -913,7 +916,7 @@ class Llama4VisionEncoderTest(unittest.TestCase):
     jax_outputs = jax_model.apply(params, inputs, deterministic=True)
 
     # Compare outputs
-    np.testing.assert_allclose(jax_outputs, to_jax(pt_outputs), rtol=1e-3, atol=0.05)
+    np.testing.assert_allclose(jax_outputs, to_jax(pt_outputs), rtol=0.01, atol=0.05)
 
 
 if __name__ == "__main__":

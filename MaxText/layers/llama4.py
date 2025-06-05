@@ -15,8 +15,7 @@ limitations under the License.
 """
 
 """Llama4 decoder layer definition."""
-# pylint: disable=arguments-differ
-# pylint: disable=no-name-in-module
+# pylint: disable=arguments-differ, disable=no-name-in-module, missing-function-docstring
 
 import math
 from typing import Optional
@@ -70,7 +69,8 @@ class Llama4UnfoldConvolution(nn.Module):
         features=cfg.hidden_size_for_vit,
         dtype=cfg.dtype_mm,
         name="vit_unfold_linear",
-        use_bias=False
+        use_bias=False,
+        matmul_precision=cfg.matmul_precision,
     )
 
   def __call__(self, inputs: Array) -> Array:
@@ -152,14 +152,16 @@ class Llama4VisionMLP(nn.Module):
         features=cfg.intermediate_size_for_vit,
         dtype=cfg.dtype_mm,
         name="vit_encoder_layer_mlp_fc1",
-        use_bias=True
+        use_bias=True,
+        matmul_precision=cfg.matmul_precision,
     )
     self.fc2 = linears.dense_general(
         in_features=cfg.intermediate_size_for_vit,
         features=cfg.hidden_size_for_vit,
         dtype=cfg.dtype_mm,
         name="vit_encoder_layer_mlp_fc2",
-        use_bias=True
+        use_bias=True,
+        matmul_precision=cfg.matmul_precision,
     )
 
   def __call__(self, hidden_states: Array) -> Array:
@@ -196,14 +198,16 @@ class Llama4VisionMLP2(nn.Module):
         features=cfg.projector_input_dim_for_vit,
         dtype=cfg.dtype_mm,
         name="vit_pixel_shuffle_mlp_fc1",
-        use_bias=False
+        use_bias=False,
+        matmul_precision=cfg.matmul_precision,
     )
     self.fc2 = linears.dense_general(
         in_features=cfg.projector_input_dim_for_vit,
         features=cfg.projector_output_dim_for_vit,
         dtype=cfg.dtype_mm,
         name="vit_pixel_shuffle_mlp_fc2",
-        use_bias=False
+        use_bias=False,
+        matmul_precision=cfg.matmul_precision,
     )
     self.dropout = nn.Dropout(rate=cfg.projector_dropout_for_vit)
 
@@ -283,6 +287,7 @@ class Llama4MultiModalProjector(nn.Module):
         dtype=cfg.dtype_mm,
         name="vit_multi_modal_projector",
         use_bias=False,
+        matmul_precision=cfg.matmul_precision,
     )
 
   def __call__(self, image_features: Array) -> Array:
@@ -610,6 +615,8 @@ class Llama4VisionEncoderLayer(nn.Module):
         head_dim=self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit,
         max_target_length=(self.config.image_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1,
         attention_kernel="dot_product",
+        float32_qk_product=self.config.float32_qk_product,
+        float32_logits=self.config.float32_logits,
         mesh=self.mesh,
         dropout_rate=0,
         name="self_attention_vision",
