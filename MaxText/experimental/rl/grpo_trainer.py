@@ -51,6 +51,13 @@ from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 from flax import struct
 
+from cloud_tpu_diagnostics import diagnostic
+from cloud_tpu_diagnostics.configuration import debug_configuration
+from cloud_tpu_diagnostics.configuration import diagnostic_configuration
+from cloud_tpu_diagnostics.configuration import stack_trace_configuration
+
+import transformers
+
 from MaxText import checkpointing
 from MaxText import max_logging
 from MaxText import max_utils
@@ -84,19 +91,16 @@ from MaxText.train import (
     load_next_batch,
     record_scalar_metrics,
     save_checkpoint,
-    record_goodput,
-    create_goodput_recorder,
     check_example_batch,
+    setup_mesh_and_model,
 )
-
-from cloud_tpu_diagnostics import diagnostic
-from cloud_tpu_diagnostics.configuration import debug_configuration
-from cloud_tpu_diagnostics.configuration import diagnostic_configuration
-from cloud_tpu_diagnostics.configuration import stack_trace_configuration
-
-from ml_goodput_measurement import monitoring
-
-import transformers
+from MaxText.utils.goodput_utils import (
+    GoodputEvent,
+    create_goodput_recorder,
+    maybe_monitor_goodput,
+    maybe_record_goodput,
+)
+from MaxText.vertex_tensorboard import VertexTensorboardManager
 
 # pylint: disable=too-many-positional-arguments
 
@@ -797,13 +801,14 @@ def eval_step(model, config, state, data, dropout_rng):
   return metrics
 
 
-def setup_train_loop(config, config_inference):
+def setup_train_loop(config, config_inference, recorder):
   """Set up prerequisites for the training loop -
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
       Set up data iterator and tokenizer, initialize the model.
 
   Args:
     config
+    recorder
 
   Returns:
     init_rng:
@@ -816,16 +821,14 @@ def setup_train_loop(config, config_inference):
     data_iterator:
     state: the initialized train state
   """
-  recorder = create_goodput_recorder(config)
-  record_goodput(recorder, config, recorder.record_tpu_init_start_time if recorder else None)
-  init_rng, writer, checkpoint_manager, mesh, inference_meshes, model, inference_model, learning_rate_schedule, tx = setup_mesh_and_model(config, config_inference)
-  record_goodput(recorder, config, recorder.record_tpu_init_end_time if recorder else None)
-  record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
-  data_iterator = grpo_input_pipeline.create_data_iterator(config_inference, inference_meshes[0])
+  with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
+    init_rng, writer, checkpoint_manager, mesh, inference_meshes, model, inference_model, learning_rate_schedule, tx = setup_mesh_and_model(config, config_inference)
+  with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
+    data_iterator = grpo_input_pipeline.create_data_iterator(config_inference, inference_meshes[0])
   #TODO: setup_training_state may not need to return dataset_iterator, find out why it needs it
-  state, _, state_mesh_shardings, _ = maxtext_utils.setup_training_state(
-      model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
-  )
+    state, _, state_mesh_shardings, _ = maxtext_utils.setup_training_state(
+        model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
+    )
 
   # create inference_state_mesh_shardings from multiple inference_mesh
   inference_state_mesh_shardings = [maxtext_utils.get_abstract_state(inference_model, tx, config_inference, init_rng, inference_mesh, is_training=False)[2] for inference_mesh in inference_meshes]
@@ -833,7 +836,6 @@ def setup_train_loop(config, config_inference):
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
     maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
 
-  record_goodput(recorder, config, recorder.record_training_preparation_end_time if recorder else None)
   return (
       init_rng,
       writer,
@@ -850,18 +852,8 @@ def setup_train_loop(config, config_inference):
   )
 
 
-def train_loop(config, config_inference, state=None):
-  """Main Training loop.
-  Args:
-    config:
-    state:
-    ckpt_path:
-  Returns:
-  """
-  # Create a GoodputRecorder to log information
-  recorder = create_goodput_recorder(config)
-  record_goodput(recorder, config, recorder.record_job_start_time if recorder else None)
-
+def train_loop(config, config_inference, recorder, state=None):
+  """Main Training loop."""
   (
       init_rng,
       writer,
@@ -875,7 +867,7 @@ def train_loop(config, config_inference, state=None):
       data_iterator,
       eval_data_iterator,
       state,
-  ) = setup_train_loop(config, config_inference)
+  ) = setup_train_loop(config, config_inference, recorder)
   tokenizer_model = transformers.AutoTokenizer.from_pretrained(
       config.tokenizer_path,
       add_bos_token=config.add_bos,
@@ -1046,6 +1038,23 @@ def train_loop(config, config_inference, state=None):
           pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
         else:
           pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
+
+    with jax.profiler.StepTraceAnnotation("train", step_num=step):
+      with maybe_record_goodput(recorder, GoodputEvent.DATA_LOADING):
+        example_batch = load_next_batch(data_iterator, example_batch, config)
+        example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
+
+      check_example_batch(config, example_batch=example_batch)
+      # pylint: disable=not-callable
+      rng = jax.jit(jax.random.fold_in)(init_rng, step)
+      with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
+        rng, rng_gen = random.split(rng)
+        example_batch = p_generate_completions(example_batch, state.params, rng_gen)
+
+        # TODO: ensure this partitioning is correct
+        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+          state, metrics = p_train_step(state, example_batch, rng)
+
     step_time_delta = datetime.datetime.now() - last_step_completion
     last_step_completion = datetime.datetime.now()
     record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
@@ -1127,7 +1136,7 @@ def train_loop(config, config_inference, state=None):
     checkpoint_manager.wait_until_finished()
   metric_logger.write_metrics(running_gcs_metrics, metrics, config.steps - 1)  # final step metrics
   max_utils.close_summary_writer(writer)
-  record_goodput(recorder, config, recorder.record_job_end_time if recorder else None)
+
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     compiled = p_train_step.lower(state, example_batch, rng).compile()
     compiled_stats = compiled.memory_analysis()
@@ -1177,19 +1186,11 @@ def main(argv: Sequence[str]) -> None:
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
-  if config.monitor_goodput and jax.process_index() == 0:
-    logger_name = f"goodput_{config.run_name}"
-    goodput_monitor = monitoring.GoodputMonitor(
-        job_name=config.run_name,
-        logger_name=logger_name,
-        tensorboard_dir=config.tensorboard_dir,
-        upload_interval=config.goodput_upload_interval_seconds,
-        monitoring_enabled=True,
-        pathway_enabled=config.enable_pathways_goodput,
-        include_badput_breakdown=True,
-    )
-    goodput_monitor.start_goodput_uploader()
-    max_logging.log("Started Goodput upload to Tensorboard in the background!")
+  # Goodput configurations
+  maybe_monitor_goodput(config)
+  recorder = create_goodput_recorder(config)
+
+  # Stack traces configurations
   debug_config = debug_configuration.DebugConfig(
       stack_trace_config=stack_trace_configuration.StackTraceConfig(
           collect_stack_trace=config.collect_stack_trace,
@@ -1198,8 +1199,10 @@ def main(argv: Sequence[str]) -> None:
       )
   )
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
+
   with diagnostic.diagnose(diagnostic_config):
-    train_loop(config, config_inference)
+    with maybe_record_goodput(recorder, GoodputEvent.JOB):
+      train_loop(config, config_inference, recorder)
 
 
 if __name__ == "__main__":
