@@ -20,6 +20,7 @@ limitations under the License.
 import math
 from typing import Optional
 
+import jax
 import jax.numpy as jnp
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
@@ -35,6 +36,7 @@ from MaxText.layers import models
 from MaxText.layers import moe
 from MaxText.layers import quantizations
 from MaxText.layers import attentions
+from MaxText.layers import embeddings
 from MaxText.layers.attentions import AttentionType
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.normalizations import RMSNorm
@@ -58,7 +60,7 @@ class Llama4UnfoldConvolution(nn.Module):
 
   def setup(self):
     """
-      Initialize Llama4UnfoldConvolution
+    Initialize Llama4UnfoldConvolution
     """
     cfg = self.config
     # Linear projection layer using dense_general.
@@ -190,7 +192,7 @@ class Llama4VisionMLP2(nn.Module):
 
   def setup(self):
     """
-      Initialize Llama4VisionMLP2
+    Initialize Llama4VisionMLP2
     """
     cfg = self.config
     self.fc1 = linears.dense_general(
@@ -278,6 +280,7 @@ class Llama4MultiModalProjector(nn.Module):
   """
 
   config: Config
+  mesh: Mesh
 
   def setup(self):
     cfg = self.config
@@ -299,7 +302,11 @@ class Llama4MultiModalProjector(nn.Module):
     Returns:
       Tensor of shape [batch_size*num_patches*(pixel_shuffle_ratio**2), emb_dim]
     """
+    b, t, c, d = image_features.shape
+    image_features = image_features.reshape(b * t, c, d)
     hidden_states = self.linear(image_features)
+    _, c, d = hidden_states.shape
+    hidden_states = hidden_states.reshape(b, t, c, d)
     return hidden_states
 
 
@@ -691,5 +698,75 @@ class Llama4VisionEncoder(nn.Module):
           hidden_states=hidden_states,
           deterministic=deterministic,
       )
+
+    return hidden_states
+
+
+class Llama4VisionModel(nn.Module):
+  config: Config
+  mesh: Mesh
+
+  def setup(self):
+    self.scale = self.config.hidden_size_for_vit**-0.5
+    self.num_patches = (self.config.tile_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1
+    self.class_embedding = self.param(
+        "class_embedding",
+        nn.initializers.normal(stddev=self.scale),  # Or any other appropriate initializer
+        (self.config.hidden_size_for_vit,),  # Shape (hidden_size_for_vit,)
+        dtype=self.config.dtype_mm,
+    )
+    self.positional_embedding_vlm = self.param(
+        "positional_embedding_vlm",
+        nn.initializers.normal(stddev=self.scale),
+        (self.num_patches, self.config.hidden_size_for_vit),
+        dtype=self.config.dtype_mm,
+    )
+
+  @nn.compact
+  def __call__(
+      self,
+      pixel_values: Array,
+      output_attentions: Optional[bool] = None,
+      output_hidden_states: Optional[bool] = None,
+      return_dict: Optional[bool] = None,
+      deterministic: Optional[bool] = False,
+  ) -> Array:
+    """Forward pass of the Llama4 vision model.
+
+    Args:
+      inputs: Input tensor of shape [batch_size, num_tiles, num_channels_for_vit, tile_size_for_vit, tile_size_for_vit]
+      deterministic: Whether to use deterministic mode (disables dropout)
+
+    Returns:
+      Final hidden states from the vision encoder
+    """
+    cfg = self.config
+    mesh = self.mesh
+
+    b, t, c, h, w = pixel_values.shape
+    pixel_values = jnp.reshape(pixel_values, [b * t, c, h, w])
+
+    # Unfold convolution to extract patches
+    hidden_states = Llama4UnfoldConvolution(config=cfg)(pixel_values)
+
+    # Add class embedding to the beginning of the sequence
+    class_embedding_expanded = jnp.expand_dims(jnp.expand_dims(self.class_embedding, axis=0), axis=0)
+    class_embedding = jnp.broadcast_to(class_embedding_expanded, (hidden_states.shape[0], 1, cfg.hidden_size_for_vit))
+    hidden_states = jnp.concatenate([class_embedding, hidden_states], axis=1)
+
+    # Add positional embedding
+    hidden_states += self.positional_embedding_vlm
+
+    # Transformation layers
+    hidden_states = nn.LayerNorm(name="layernorm_pre")(hidden_states)
+    hidden_states = Llama4VisionEncoder(config=cfg, mesh=mesh)(hidden_states)
+    hidden_states = nn.LayerNorm(name="layernorm_post")(hidden_states)
+    hidden_states = hidden_states[:, :-1, :]
+
+    hidden_states = Llama4VisionPixelShuffleMLP(config=cfg)(hidden_states)
+
+    # Reshape hidden states to [batch_size, num_tiles, num_patches, vision_output_dim_for_vit]
+    _, patch_num, patch_dim = hidden_states.shape
+    hidden_states = jnp.reshape(hidden_states, [b, t, patch_num, patch_dim])
 
     return hidden_states
