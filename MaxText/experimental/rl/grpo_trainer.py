@@ -509,42 +509,10 @@ def generate_offline_completions(training_mesh, config, tokenizer_model, inferen
   results = inference_engine.batch_inference(input_data, continous_batching=config.continous_batching)
   end_time = time.time()
   max_logging.log(f"MaxText: inference finished on all samplers in {end_time - start_time} seconds")
-  processed_token_ids = []
-  processed_logprobs = []
-  # Determine the target length for completions
-  target_completion_length = config.max_target_length - config.max_prefill_predict_length
   start_time = time.time()
   if config.continous_batching:
-    for r in results:
-      current_tokens = r.token_ids
-      current_logprobs = r.logprobs # Assuming logprobs correspond to tokens
-
-      current_length = current_tokens.shape[0]
-
-      if current_length < target_completion_length:
-        # Pad
-        padding_length = target_completion_length - current_length
-        # Assuming padding with tokenizer.pad_token_id for token_ids. 
-        # For logprobs, padding with a very small number or 0.0 might be appropriate.
-        # Ensure the dtype matches.
-        padded_tokens = jnp.pad(current_tokens, (0, padding_length), mode='constant', constant_values=tokenizer_model.pad_token_id)
-        # Pad logprobs similarly. If they correspond 1:1 with tokens, pad them too.
-        # If logprobs might not exist for padding tokens, adjust accordingly (e.g. pad with -jnp.inf or 0.0)
-        padded_logprobs = jnp.pad(current_logprobs, (0, padding_length), mode='constant', constant_values=-jnp.inf) 
-      elif current_length > target_completion_length:
-        # Truncate
-        padded_tokens = current_tokens[:target_completion_length]
-        padded_logprobs = current_logprobs[:target_completion_length]
-      else:
-        # Already correct length
-        padded_tokens = current_tokens
-        padded_logprobs = current_logprobs
-      
-      processed_token_ids.append(padded_tokens)
-      processed_logprobs.append(padded_logprobs)
-
-    completions = jnp.stack(np.array(processed_token_ids))
-    completions_logprobs = jnp.stack(np.array(processed_logprobs))
+    completions = jnp.stack([r.token_ids for r in results])
+    completions_logprobs = jnp.stack([r.logprobs for r in results])
   else:
     completions = jnp.stack([jax.device_put(r.token_ids, jax.sharding.NamedSharding(training_mesh, P())) for r in results])
     completions_logprobs = jnp.stack([jax.device_put(r.logprobs, jax.sharding.NamedSharding(training_mesh, P())) for r in results])

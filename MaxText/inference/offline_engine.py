@@ -1305,15 +1305,25 @@ class OfflineEngine:
         with jax.profiler.TraceAnnotation("return final output"):
             if continous_batching:
                 for input_data in data:
+                    current_tokens = [token_output.token for token_output in results[input_data.id]]
+                    current_logprobs = [token_output.log_prob for token_output in results[input_data.id]]
+
+                    # Pad or trim tokens
+                    if len(current_tokens) < self.max_decode_length:
+                        pad_width = self.max_decode_length - len(current_tokens)
+                        # Assuming pad_id is 0 if tokenizer is not available or doesn't have one.
+                        pad_token_id = self.tokenizer.pad_id if hasattr(self.tokenizer, 'pad_id') and self.tokenizer.pad_id is not None else 0
+                        current_tokens.extend([pad_token_id] * pad_width)
+                        current_logprobs.extend([-float('inf')] * pad_width) # Pad logprobs with -inf
+                    elif len(current_tokens) > self.max_decode_length:
+                        current_tokens = current_tokens[:self.max_decode_length]
+                        current_logprobs = current_logprobs[:self.max_decode_length]
+
                     completion_outputs.append(
                         CompletionOutput(
                             index=input_data.id,
-                            token_ids=np.array(
-                                [token_output.token for token_output in results[input_data.id]]
-                            ),
-                            logprobs=np.array(
-                                [token_output.log_prob for token_output in results[input_data.id]]
-                            ),
+                            token_ids=np.array(current_tokens),
+                            logprobs=np.array(current_logprobs),
                         )
                     )
             else:
