@@ -686,3 +686,38 @@ class Llama4VisionEncoder(nn.Module):
       )
 
     return hidden_states
+
+
+class Llama4VisionModel(nn.Module):
+  config: Config
+  mesh: Mesh
+
+  @nn.compact
+  def __call__(
+      self,
+      pixel_values: Array,
+      output_attentions: Optional[bool] = None,
+      output_hidden_states: Optional[bool] = None,
+      return_dict: Optional[bool] = None,
+      deterministic: Optional[bool] = False,
+  ) -> Array:
+    """Forward pass of the Llama4 vision model.
+
+    Args:
+      inputs: Input tensor of shape [batch_size, channels, img, img]
+      deterministic: Whether to use deterministic mode (disables dropout)
+
+    Returns:
+      Final hidden states from the vision encoder
+    """
+    cfg = self.config
+
+    # Unfold convolution to extract patches
+    unfold_conv = Llama4UnfoldConvolution(config=cfg)
+    hidden_states = unfold_conv(pixel_values)
+
+    # Vision encoder
+    vision_encoder = Llama4VisionEncoder(config=cfg, mesh=self.mesh)
+    hidden_states = vision_encoder(hidden_states, deterministic=deterministic)
+
+    return hidden_states  # [batch_size, num_patches, hidden_size_for_vit]
