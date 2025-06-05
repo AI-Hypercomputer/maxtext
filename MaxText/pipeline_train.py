@@ -52,10 +52,9 @@ def train_step_grads(model, config, state_mesh_shardings, state, data, dropout_r
     grads: Same format as state.
     metrics: Dictionary of model metrics such as loss, training rate, etc.
   """
-  reference_params, reference_params_sharding, extra_dpo_args, _loss_fn = [], [], [], loss_fn
   
-  grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
-  (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, *extra_dpo_args, is_train=True)
+  grad_func = jax.value_and_grad(loss_fn, argnums=4, has_aux=True)
+  (loss, aux), raw_grads = grad_func(model, config, data, dropout_rng, state.params, is_train=True)
 
   if config.gradient_clipping_threshold > 0:
     grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
@@ -75,7 +74,45 @@ def train_step_grads(model, config, state_mesh_shardings, state, data, dropout_r
   return raw_grads, metrics
 
 
-config = pyconfig.initialize(
+
+
+def get_state_and_grads(config):
+  init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
+  data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
+  state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
+      model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
+  )
+
+
+  (
+      functional_train,
+      in_shard_train,
+      out_shard_train,
+      static_argnums_train,
+      donate_argnums_train,
+  ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config)
+  donate_argnums_train = () # Keep the state 
+
+  #functional_train=functools.partial(train_step, model, config, state_mesh_shardings)
+  functional_train=functools.partial(train_step_grads, model, config, state_mesh_shardings)
+
+  p_train_step = jax.jit(
+      functional_train,
+      in_shardings=in_shard_train,
+      #out_shardings=out_shard_train,
+      static_argnums=static_argnums_train,
+      donate_argnums=donate_argnums_train,
+  )
+
+  example_batch = load_next_batch(data_iterator, None, config) # None=example_batch
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      grads, metrics = p_train_step(state, example_batch, init_rng) #using same rng
+
+  loss = metrics['scalar']['learning/loss']
+  print(f"{loss=}", flush=True)
+  return state, grads
+
+pp_config = pyconfig.initialize(
     [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
     enable_checkpointing=False,
     enable_goodput_recording=False,
@@ -86,48 +123,45 @@ config = pyconfig.initialize(
     base_num_decoder_layers=8,
     num_pipeline_microbatches=8,
     per_device_batch_size=4,
-    pipeline_fsdp_ag_once=True,
     decoder_block="simple",
     dataset_type="synthetic",
 )
 
-def get_state_and_grads(config)
-init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
-data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
-state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
-    model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
+dp_config = pyconfig.initialize(
+    [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+    enable_checkpointing=False,
+    enable_goodput_recording=False,
+    run_name="cdp",
+    max_target_length=128,
+    base_emb_dim=28,
+    ici_data_parallelism=2,
+    base_num_decoder_layers=8,
+    per_device_batch_size=4,
+    decoder_block="simple",
+    dataset_type="synthetic",
 )
 
+pp_state, pp_grads = get_state_and_grads(pp_config)
+dp_state, dp_grads = get_state_and_grads(dp_config)
 
-(
-    functional_train,
-    in_shard_train,
-    out_shard_train,
-    static_argnums_train,
-    donate_argnums_train,
-) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config)
-
-#functional_train=functools.partial(train_step, model, config, state_mesh_shardings)
-functional_train=functools.partial(train_step_grads, model, config, state_mesh_shardings)
-
-p_train_step = jax.jit(
-    functional_train,
-    in_shardings=in_shard_train,
-    #out_shardings=out_shard_train,
-    static_argnums=static_argnums_train,
-    donate_argnums=donate_argnums_train,
-)
-
-example_batch = load_next_batch(data_iterator, None, config) # None=example_batch
-with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    grads, metrics = p_train_step(state, example_batch, init_rng) #using same rng
-
-loss = metrics['scalar']['learning/loss']
-print(f"{loss=}", flush=True)
+def reshape_tree(pytree):
+  def reshape_pp_to_dp(arr, scan_index=1):
+    arr_shape = jnp.shape(arr)
+    repeats, stages = arr_shape[0], arr_shape[1]
+    arr_flat = jnp.reshape(arr, (repeats*stages,) + arr_shape[2:])
+    if scan_index > 0:
+      # swap first index with scan_index using jnp.transpose:
+      perm = [scan_index] + list(range(scan_index)) + list(range(scan_index + 1, len(arr_flat.shape)))
+      arr_flat = jnp.transpose(arr_flat, perm)
+    return arr_flat
+  # Perform a tree map of reshape_pp_to_dp
+  dp_pytree = jax.tree_util.tree_map(reshape_pp_to_dp, pytree)
+  return dp_pytree
 
 
-def convert_pp_params_to_non_pp():
-    return False
+pp_module_subtree = pp_state.params['params']['decoder']['pipeline_module']
+dp_module_subtree = reshape_tree(pp_module_subtree)
+breakpoint()
 
 
 
