@@ -58,10 +58,19 @@ class Llama4UnfoldConvolution(nn.Module):
   config: Config
 
   def setup(self):
+    """
+      Initialize Llama4UnfoldConvolution
+    """
     cfg = self.config
-    # Linear projection layer using DenseGeneral
-    self.linear = linears.DenseGeneral(
-        features=cfg.hidden_size_for_vit, dtype=cfg.dtype_mm, name="vit_unfold_linear", use_bias=False
+    # Linear projection layer using dense_general.
+    # patches sent to dense_general with shape:
+    # [batch_size, num_patches, num_channels * patch_size * patch_size]
+    self.linear = linears.dense_general(
+        in_features=(cfg.num_channels_for_vit * cfg.patch_size_for_vit * cfg.patch_size_for_vit),
+        features=cfg.hidden_size_for_vit,
+        dtype=cfg.dtype_mm,
+        name="vit_unfold_linear",
+        use_bias=False
     )
 
   def __call__(self, inputs: Array) -> Array:
@@ -89,9 +98,11 @@ class Llama4UnfoldConvolution(nn.Module):
 
     # reshape patches to [batch_size, num_patches, num_channels * patch_size * patch_size]
     patches = patches.reshape(batch_size, num_channels * cfg.patch_size_for_vit * cfg.patch_size_for_vit, num_patches)
+    # After transpose, patches shape:
+    # [batch_size, num_patches, num_channels * patch_size * patch_size]
     patches = patches.transpose(0, 2, 1)
 
-    # Project patches to hidden dimension using DenseGeneral
+    # Project patches to hidden dimension using dense_general
     hidden_states = self.linear(patches)
 
     return hidden_states
@@ -136,11 +147,19 @@ class Llama4VisionMLP(nn.Module):
 
   def setup(self):
     cfg = self.config
-    self.fc1 = linears.DenseGeneral(
-        features=cfg.intermediate_size_for_vit, dtype=cfg.dtype_mm, name="vit_encoder_layer_mlp_fc1", use_bias=True
+    self.fc1 = linears.dense_general(
+        in_features=cfg.hidden_size_for_vit,
+        features=cfg.intermediate_size_for_vit,
+        dtype=cfg.dtype_mm,
+        name="vit_encoder_layer_mlp_fc1",
+        use_bias=True
     )
-    self.fc2 = linears.DenseGeneral(
-        features=cfg.hidden_size_for_vit, dtype=cfg.dtype_mm, name="vit_encoder_layer_mlp_fc2", use_bias=True
+    self.fc2 = linears.dense_general(
+        in_features=cfg.intermediate_size_for_vit,
+        features=cfg.hidden_size_for_vit,
+        dtype=cfg.dtype_mm,
+        name="vit_encoder_layer_mlp_fc2",
+        use_bias=True
     )
 
   def __call__(self, hidden_states: Array) -> Array:
@@ -168,12 +187,23 @@ class Llama4VisionMLP2(nn.Module):
   config: Config
 
   def setup(self):
+    """
+      Initialize Llama4VisionMLP2
+    """
     cfg = self.config
-    self.fc1 = linears.DenseGeneral(
-        features=cfg.projector_input_dim_for_vit, dtype=cfg.dtype_mm, name="vit_pixel_shuffle_mlp_fc1", use_bias=False
+    self.fc1 = linears.dense_general(
+        in_features=cfg.intermediate_size_for_vit,
+        features=cfg.projector_input_dim_for_vit,
+        dtype=cfg.dtype_mm,
+        name="vit_pixel_shuffle_mlp_fc1",
+        use_bias=False
     )
-    self.fc2 = linears.DenseGeneral(
-        features=cfg.projector_output_dim_for_vit, dtype=cfg.dtype_mm, name="vit_pixel_shuffle_mlp_fc2", use_bias=False
+    self.fc2 = linears.dense_general(
+        in_features=cfg.projector_input_dim_for_vit,
+        features=cfg.projector_output_dim_for_vit,
+        dtype=cfg.dtype_mm,
+        name="vit_pixel_shuffle_mlp_fc2",
+        use_bias=False
     )
     self.dropout = nn.Dropout(rate=cfg.projector_dropout_for_vit)
 
@@ -247,7 +277,8 @@ class Llama4MultiModalProjector(nn.Module):
 
   def setup(self):
     cfg = self.config
-    self.linear = linears.DenseGeneral(
+    self.linear = linears.dense_general(
+        in_features=cfg.vision_output_dim_for_vit,
         features=cfg.emb_dim,
         dtype=cfg.dtype_mm,
         name="vit_multi_modal_projector",

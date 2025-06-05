@@ -194,9 +194,12 @@ class Llama4UnfoldConvolutionTest(unittest.TestCase):
     class JaxConfig:
 
       def __init__(self):
-        self.patch_size_for_vit = patch_size
-        self.hidden_size_for_vit = hidden_size
         self.dtype_mm = jnp.float32
+        self.hidden_size_for_vit = hidden_size
+        self.image_size_for_vit = 896
+        self.num_channels_for_vit = 3
+        self.patch_size_for_vit = patch_size
+        self.per_device_batch_size = batch_size
 
     # Initialize JAX model
     jax_model = llama4.Llama4UnfoldConvolution(JaxConfig())
@@ -321,11 +324,12 @@ class Llama4VisionPixelShuffleMLPTest(unittest.TestCase):
     class JaxConfig:
 
       def __init__(self):
-        self.pixel_shuffle_ratio_for_vit = pixel_shuffle_ratio
+        self.dtype_mm = jnp.float32
+        self.intermediate_size_for_vit = 5632
+        self.projector_dropout_for_vit = projector_dropout
         self.projector_input_dim_for_vit = projector_input_dim
         self.projector_output_dim_for_vit = projector_output_dim
-        self.dtype_mm = jnp.float32
-        self.projector_dropout_for_vit = projector_dropout
+        self.pixel_shuffle_ratio_for_vit = pixel_shuffle_ratio
 
     # Initialize JAX model
     jax_model = llama4.Llama4VisionPixelShuffleMLP(JaxConfig())
