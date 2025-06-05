@@ -76,12 +76,14 @@ def train_step_grads(model, config, state_mesh_shardings, state, data, dropout_r
 
 
 
-def get_state_and_grads(config):
+def get_state_and_grads(config, state=None):
   init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
-  state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
+  random_state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
+  if state is None:
+    state = random_state
 
 
   (
@@ -125,6 +127,7 @@ pp_config = pyconfig.initialize(
     per_device_batch_size=4,
     decoder_block="simple",
     dataset_type="synthetic",
+    opt_type="sgd",
 )
 
 dp_config = pyconfig.initialize(
@@ -139,6 +142,7 @@ dp_config = pyconfig.initialize(
     per_device_batch_size=4,
     decoder_block="simple",
     dataset_type="synthetic",
+    opt_type="sgd",
 )
 
 pp_state, pp_grads = get_state_and_grads(pp_config)
@@ -161,7 +165,17 @@ def reshape_tree(pytree):
 
 pp_module_subtree = pp_state.params['params']['decoder']['pipeline_module']
 dp_module_subtree = reshape_tree(pp_module_subtree)
+
+
+# replace dp_state.params['params']['decoder'] with dp_module_subtree
+dp_state_copy=dp_state.params.copy()
+dp_state_copy['params']['decoder'] = dp_module_subtree
+
+dp_replaced = dp_state.replace(params=dp_state_copy)
+
+dp_rp_state, dp_rp_grads = get_state_and_grads(dp_config, state=dp_replaced)
+
+
+
 breakpoint()
-
-
 
