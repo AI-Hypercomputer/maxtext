@@ -22,8 +22,10 @@ new_config = _setup_model_convergence_(
     convergence_config: ConvHParams, # Model-specific hyperparameters for convergence testing (e.g. deepseek_v3_ep_256_v5p_512)
     global_batch_size: int,          # The global batch size to be used
     num_devices: int,                # The number of devices available for training
+    checkpoint: str,                 # path to the checkpoint to load
 )
 """
+import copy
 import dataclasses
 import math
 from benchmarks.benchmark_utils import _add_to_model_dictionary, MaxTextModel
@@ -55,7 +57,8 @@ class ConvHParams:
 
 
 def load_checkpoint(model: MaxTextModel, checkpoint_path: str):
-    model.tuning_params["load_full_state_path"] = checkpoint_path
+    model.tuning_params["enable_checkpointing"] = True
+    model.tuning_params["load_parameters_path"] = checkpoint_path
 
 
 def setup_dataset(model: MaxTextModel, params: DatasetHParams):
@@ -95,11 +98,12 @@ def setup_convergence_configs(model, params: ConvHParams, num_devices: int, glob
     model.tuning_params["data_shuffle_seed"] = params.seeds
 
 def _setup_model_convergence_(
-    maxtext_model: MaxTextModel, dataset: DatasetHParams, convergence_configs: ConvHParams, num_devices: int, global_batch_size: int,
+    maxtext_model: MaxTextModel, dataset: DatasetHParams, convergence_configs: ConvHParams, num_devices: int, global_batch_size: int, checkpoint=None,
 ) -> MaxTextModel:
-  convergence_model = dataclasses.replace(maxtext_model)
+  convergence_model = copy.deepcopy(maxtext_model)
   setup_dataset(convergence_model, dataset)
   setup_convergence_configs(convergence_model, convergence_configs, num_devices, global_batch_size)
   convergence_model.model_name = convergence_model.model_name + "-" + dataset.name
-
+  if checkpoint is not None:
+    load_checkpoint(convergence_model, checkpoint)
   return convergence_model
