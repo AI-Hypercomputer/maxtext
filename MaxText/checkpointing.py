@@ -110,6 +110,16 @@ def create_orbax_emergency_checkpoint_manager(
   flags.FLAGS.experimental_orbax_use_distributed_process_id = True
   max_logging.log("Creating emergency checkpoint manager...")
 
+  # Only create directories if running on GPUs as the previous
+  # directory structure might be assumed by TPUs
+  if global_mesh.devices.flatten()[0].platform == 'gpu':
+    # pylint: disable=protected-access
+    local_checkpoint_dir = f"{local_checkpoint_dir}/{jax._src.distributed.global_state.process_id}"
+    local_p = epath.Path(local_checkpoint_dir)
+    persistent_p = epath.Path(persistent_checkpoint_dir)
+    local_p.mkdir(exist_ok=True, parents=True)
+    persistent_p.mkdir(exist_ok=True, parents=True)
+
   options = emergency_checkpoint_manager.CheckpointManagerOptions(
       local=LocalCheckpointOptions(save_interval_steps=local_save_interval_steps),
       persistent=PersistentCheckpointOptions(save_interval_steps=persistent_save_interval_steps),
