@@ -470,7 +470,7 @@ class Decoder(nn.Module):
 
     # Merge the image embeddings with the text embeddings for multimodal models
     if image_embeddings is not None and cfg.use_multimodal:
-      if cfg.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
+      if cfg.model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b", "llama4-17b-16e", "llama4-17b-128e"]:
         y = multimodal_utils.merge_mm_embeddings(
             text_embeddings=y,
             vision_embeddings=image_embeddings,
@@ -714,8 +714,7 @@ class VisionEncoder(nn.Module):
     elif self.config.model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
       from MaxText.layers import llama4  # pylint: disable=import-outside-toplevel
 
-      # TODO(hengtaoguo): return [llama4.Llama4VisionModel, llama4.Llama4MultiModalProjector] once ready
-      return [llama4.Llama4VisionEncoderLayer]
+      return [llama4.Llama4VisionModel, llama4.Llama4MultiModalProjector]
     else:
       raise ValueError(f"No VisionEncoder implemented for {self.config.model_name} yet")
 
@@ -735,7 +734,7 @@ class VisionEncoder(nn.Module):
 
 
 class Transformer(nn.Module):
-  """An decoder-only Transformer model."""
+  """An autoregressive transformer model."""
 
   # Make new attributes required, so that all Transformer dependencies (train, decode, compile, etc) will error instead
   #   of silently use defaults.
@@ -791,12 +790,13 @@ class Transformer(nn.Module):
 
     bidirectional_mask = None
     image_embeddings = None
-    # TODO(hengtaoguo): Here we temporarily skip multimodal support for Llama4 models because of WIP
-    if self.config.use_multimodal and encoder_images is not None and not self.config.model_name.startswith("llama4"):
+    if self.config.use_multimodal and encoder_images is not None:
       image_embeddings = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
 
       if self.config.decoder_block == DecoderBlockType.GEMMA3:
         bidirectional_mask = decoder_input_tokens == multimodal_utils.GEMMA_TOKEN_PLACEHOLDER
+      elif self.config.decoder_block == DecoderBlockType.LLAMA4:
+        bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
 
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,
