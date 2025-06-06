@@ -888,8 +888,6 @@ class MaxEngine(engine_api.Engine):
     start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
     ones_to_keep = start_to_n < full_true_length
     one_d_output = ones_to_keep * DECODING_ACTIVE_SEQUENCE_INDICATOR
-    # truncate genereate tokens
-    one_d_output = one_d_output[:-num_decode_token]
     sequence_indicator = jnp.expand_dims(one_d_output, 0)
 
     rng, new_rng = jax.random.split(rng)
@@ -966,7 +964,9 @@ class MaxEngine(engine_api.Engine):
     out_tokens = out_tokens.at[generate_slots].set(generate_new_token)
 
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
-    new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
+    ### YYY: kv_cache_shardings is different?
+    # new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
+    new_cache = new_vars["cache"]
 
     all_valid = jnp.ones(out_tokens.shape, dtype=jnp.int8)
     if self.config.return_log_prob:

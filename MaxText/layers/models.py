@@ -590,7 +590,6 @@ class Decoder(nn.Module):
               decoder_positions,
               deterministic,
               model_mode,
-              piggybacking_decode_params=piggybacking_decode_params, ### YYY: remove it
               **layer_call_kwargs,
           )
       else:

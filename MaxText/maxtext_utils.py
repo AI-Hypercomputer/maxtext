@@ -692,7 +692,7 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[Page
         jnp.ones(input_shape),
         jnp.ones(input_shape),
         encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
-        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE, ### YYY: shape for piggy?
         slot=0,
         page_state=page_state,
     )

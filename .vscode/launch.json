@@ -2,6 +2,19 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "My debug",
+      "type": "python",
+      "request": "launch",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "python": "python3",
+      "env":{
+        "PYTHONPATH": "/w/maxtext",
+        "JAX_PLATFORMS": "cpu",
+      },
+      "program": "/w/my/debug_prefill_generate.py"
+    },
+    {
       "name": "Debug MaxText Decode (llama2-7b-int8)",
       "type": "python",
       "request": "launch",

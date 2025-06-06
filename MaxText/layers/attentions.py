@@ -1616,9 +1616,10 @@ class Attention(nn.Module):
       num_genereate_token = generate_slots.shape[0]
 
       # Piggybacking is like prefill, batch size == 1, shape [B, L, N, D]
-      prefill_query = query[:, :-num_genereate_token]
-      prefill_key = key[:, :-num_genereate_token]
-      prefill_value = value[:, :-num_genereate_token]
+      # Preserve generated tokens just like they are padding
+      prefill_query = query[:]
+      prefill_key = key[:]
+      prefill_value = value[:]
       prefill_query = nn.with_logical_constraint(prefill_query, self.prefill_query_axis_names)
       prefill_key = nn.with_logical_constraint(prefill_key, self.prefill_key_axis_names)
       prefill_value = nn.with_logical_constraint(prefill_value, self.prefill_value_axis_names)
@@ -1650,6 +1651,8 @@ class Attention(nn.Module):
           previous_chunk,
           bidirectional_mask,
       )
+      # truncate the generate tokens values
+      prefill_out = prefill_out[:, :-num_genereate_token, ...]
       generate_out = self.attention_op(
           generate_query,
           generate_key,

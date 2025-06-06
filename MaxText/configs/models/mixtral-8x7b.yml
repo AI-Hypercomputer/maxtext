@@ -15,12 +15,12 @@
 # model config for mixtral-8x7b
 # tokenizer_path is assets/tokenizer.mistral-v1
 
-base_emb_dim: 4096
-base_num_query_heads: 32
+base_emb_dim: 128
+base_num_query_heads: 8
 base_num_kv_heads: 8
-base_mlp_dim: 14336
-base_num_decoder_layers: 32
-head_dim: 128
+base_mlp_dim: 128
+base_num_decoder_layers: 1
+head_dim: 8
 mlp_activations: ["silu","linear"]
 vocab_size: 32000
 enable_dropout: False

@@ -497,7 +497,9 @@ class KVCache(nn.Module):
 
     def update_variable(var: nn.Variable, update_value: Array, update_batch_axis: int):
       if selected_slots is not None:
-        var.value = jnp.put_along_axis(var.value, selected_slots, update_value, axis=update_batch_axis)
+        selected_locations: list[slice | Array] = [slice(None)] * len(var.value.shape)
+        selected_locations[update_batch_axis] = selected_slots
+        var.value = var.value.at[tuple(selected_locations)].set(update_value)
       else:
         var.value = update_value
 
@@ -567,11 +569,13 @@ class KVCache(nn.Module):
 
     def update_variable(var: nn.Variable, update_value: Array, update_idx: Array, update_axis: int, update_batch_axis: int):
       if selected_slots is not None:
-        selected_var_value = jnp.take_along_axis(var.value, selected_slots, axis=update_batch_axis)
+        selected_locations: list[slice | Array] = [slice(None)] * 4
+        selected_locations[update_batch_axis] = selected_slots
+        selected_var_value = var.value[tuple(selected_locations)]
         update_selected_var_value = jax.lax.dynamic_update_index_in_dim(
             selected_var_value, update_value, update_idx, update_axis
         )
-        var.value = jnp.put_along_axis(var.value, selected_slots, update_selected_var_value, axis=update_batch_axis)
+        var.value = var.value.at[tuple(selected_locations)].set(update_selected_var_value)
       else:
         var.value = jax.lax.dynamic_update_index_in_dim(var.value, update_value, update_idx, update_axis)
 
@@ -720,75 +724,33 @@ class KVCache(nn.Module):
       )
       return cached_prefill, cached_ar
     else:
-      selected_cache_ar_index_var_value = jnp.take_along_axis(cache_ar_index_var.value, selected_slots, axis=0)
       active_indicator = jnp.zeros((batch, 1), dtype=jnp.int32) + DECODING_ACTIVE_SEQUENCE_INDICATOR
-      selected_ar_segment_id_value = jnp.take_along_axis(cached_ar_segment_id_var.value, selected_slots, axis=0)
+      selected_ar_segment_id_value = cached_ar_segment_id_var.value[selected_slots, ...]
       updated_ar_segment_id_value = jax.lax.dynamic_update_index_in_dim(
-          selected_ar_segment_id_value, active_indicator, jnp.squeeze(selected_cache_ar_index_var_value), 1
+          selected_ar_segment_id_value, active_indicator, jnp.squeeze(cache_ar_index_var.value), 1
       )
-      cached_ar_segment_id_var.value = jnp.put_along_axis(
-          cached_ar_segment_id_var.value, selected_slots, updated_ar_segment_id_value, axis=0
+      cached_ar_segment_id_var.value = cached_ar_segment_id_var.value.at[selected_slots, ...].set(
+          updated_ar_segment_id_value
       )
-
-      updated_cache_ar_index_var_value = jnp.mod(
-          selected_cache_ar_index_var_value + 1, self.max_target_length - self.max_prefill_length
-      )
-      cache_ar_index_var.value = jnp.put_along_axis(
-          cache_ar_index_var.value, selected_slots, updated_cache_ar_index_var_value, axis=0
-      )
-
-      cache_ar_lengths_var.value = cache_ar_lengths_var.value.at[selected_slots].add(1)
+      cache_ar_index_var.value = jnp.mod(cache_ar_index_var.value + 1, self.max_target_length - self.max_prefill_length)
+      cache_ar_lengths_var.value = cache_ar_lengths_var.value.at[selected_slots, ...].add(1)
 
       # The below retrieves the existing prefill cache variables, not creating new ones
       cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(
           batch, key_heads, value_heads, key_head_size, value_head_size, MODEL_MODE_AUTOREGRESSIVE
       )
 
-      prefill_cache_axis_names = transpose_tuple(self.prefill_cache_logical_axis_names, self.prefill_cache_axis_order)
-      prefill_cache_batch_axis = prefill_cache_axis_names.index(CACHE_BATCH_PREFILL)
-
       cached_prefill = (
-          jnp.take_along_axis(
-              self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order),
-              selected_slots,
-              axis=prefill_cache_batch_axis,
-          ),
-          jnp.take_along_axis(
-              self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order),
-              selected_slots,
-              axis=prefill_cache_batch_axis,
-          ),
-          jnp.take_along_axis(
-              cached_prefill_segment_id_var.value,
-              selected_slots,
-              axis=0,
-          ),
+          self.get_cached_values(cached_prefill_key_vars, key.dtype, self.prefill_cache_axis_order)[selected_slots, ...],
+          self.get_cached_values(cached_prefill_value_vars, value.dtype, self.prefill_cache_axis_order)[selected_slots, ...],
+          cached_prefill_segment_id_var.value[selected_slots, ...],
       )
 
-      ar_cache_axis_names = transpose_tuple(self.cache_logical_axis_names, self.ar_cache_axis_order)
-      ar_cache_batch_axis = ar_cache_axis_names.index(CACHE_BATCH)
-
       cached_ar = (
-          jnp.take_along_axis(
-              self.get_cached_values(cached_ar_key_vars, key.dtype, self.ar_cache_axis_order),
-              selected_slots,
-              axis=ar_cache_batch_axis,
-          ),
-          jnp.take_along_axis(
-              self.get_cached_values(cached_ar_value_vars, value.dtype, self.ar_cache_axis_order),
-              selected_slots,
-              axis=ar_cache_batch_axis,
-          ),
-          jnp.take_along_axis(
-              cached_ar_segment_id_var.value,
-              selected_slots,
-              axis=0,
-          ),
-          jnp.take_along_axis(
-              cache_ar_lengths_var.value,
-              selected_slots,
-              axis=0,
-          ),
+          self.get_cached_values(cached_ar_key_vars, key.dtype, self.ar_cache_axis_order)[selected_slots, ...],
+          self.get_cached_values(cached_ar_value_vars, value.dtype, self.ar_cache_axis_order)[selected_slots, ...],
+          cached_ar_segment_id_var.value[selected_slots, ...],
+          cache_ar_lengths_var.value[selected_slots, ...],
       )
 
       return cached_prefill, cached_ar
