@@ -964,9 +964,7 @@ class MaxEngine(engine_api.Engine):
     out_tokens = out_tokens.at[generate_slots].set(generate_new_token)
 
     out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
-    ### YYY: kv_cache_shardings is different?
-    # new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
-    new_cache = new_vars["cache"]
+    new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
 
     all_valid = jnp.ones(out_tokens.shape, dtype=jnp.int8)
     if self.config.return_log_prob:

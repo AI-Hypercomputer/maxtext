@@ -1272,6 +1272,15 @@ class Attention(nn.Module):
         use_ragged_attention=self.use_ragged_attention,
         ragged_block_size=self.ragged_block_size,
     )
+    self.kv_cache_layer = kvcache.KVCache(
+        self.max_prefill_predict_length,
+        self.max_target_length,
+        self.dtype,
+        kv_quant=self.kv_quant,
+        prefill_cache_axis_order=self.prefill_cache_axis_order,
+        ar_cache_axis_order=self.ar_cache_axis_order,
+        use_chunked_prefill=self.config.use_chunked_prefill,
+    )
     # When paged attention is enabled, paged attention op is used for all model modes except TRAIN,
     # which uses default attention op.
     if self.config.attention == "paged":
@@ -1465,15 +1474,7 @@ class Attention(nn.Module):
       selected_slots: Optional[Array] = None,
   ):
     """Updates the KV caches for prefill and autoregressive modes."""
-    prefill_kv_cache, ar_kv_cache = kvcache.KVCache(
-        self.max_prefill_predict_length,
-        self.max_target_length,
-        self.dtype,
-        kv_quant=self.kv_quant,
-        prefill_cache_axis_order=self.prefill_cache_axis_order,
-        ar_cache_axis_order=self.ar_cache_axis_order,
-        use_chunked_prefill=self.config.use_chunked_prefill,
-    )(
+    prefill_kv_cache, ar_kv_cache = self.kv_cache_layer(
         key,
         value,
         decoder_segment_ids,
