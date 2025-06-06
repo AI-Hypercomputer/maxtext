@@ -13,8 +13,16 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Usage: python3 -m MaxText.scratch_code.golden_llama3_1_export --model-id meta-llama/Meta-Llama-3-70B \
-  --output-path llama3-70b/golden_logits/golden_data_llama3-70b.jsonl
+Usage:
+
+python3 -m MaxText.scratch_code.golden_llama3_1_export --model-id meta-llama/Meta-Llama-3-70B \
+  --output-path golden_logits/golden_data_llama3-70b.jsonl
+
+python3 -m MaxText.scratch_code.golden_llama3_1_export --model-id deepseek-ai/DeepSeek-R1-Distill-Llama-70B \
+  --output-bucket maxtext-llama --output-path golden_data_deepseek-r1-distill-llama3-70b.jsonl
+
+python3 -m MaxText.scratch_code.golden_llama3_1_export --model-id deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+  --output-bucket maxtext-llama --output-path golden_data_deepseek-r1-distill-llama3-8b.jsonl
 """
 
 import os
@@ -36,7 +44,7 @@ def upload_blob(bucket_name, source_file_name, destination_blob_name):
   blob.upload_from_filename(source_file_name)
 
 
-def save_golden_logits(model_id, output_path):
+def save_golden_logits(model_id, output_path, output_bucket):
   """save golden logits"""
   tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B")
   model = AutoModelForCausalLM.from_pretrained(
@@ -68,20 +76,22 @@ def save_golden_logits(model_id, output_path):
       }
       all_data_to_save.append(data_to_save)
 
-  with jsonlines.open(output_path, "w") as f:
+  local_path = "golden_logits.jsonl"
+  with jsonlines.open(local_path, "w") as f:
     f.write_all(all_data_to_save)
 
-  upload_blob("maxtext-llama", output_path, f"Llama3_1_8B/golden-logits/{output_path}")
-  print(f"File {output_path} uploaded to Llama3_1_8B/golden-logits/{output_path}.")
-  os.remove(output_path)
+  upload_blob(output_bucket, local_path, f"{output_path}")
+  print(f"File {local_path} uploaded to gs://{output_bucket}/{output_path}.")
+  os.remove(local_path)
 
 
 def main(raw_args=None) -> None:
   parser = argparse.ArgumentParser()
   parser.add_argument("--model-id", type=str, required=False, default="meta-llama/Llama-3.1-8B")
   parser.add_argument("--output-path", type=str, required=True)
+  parser.add_argument("--output-bucket", type=str, required=False, default="maxtext-llama")
   args = parser.parse_args(raw_args)
-  save_golden_logits(args.model_id, args.output_path)
+  save_golden_logits(args.model_id, args.output_path, args.output_bucket)
 
 
 if __name__ == "__main__":
