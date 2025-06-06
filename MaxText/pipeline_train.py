@@ -64,6 +64,7 @@ def print_pytree_leaf_shapes(pytree):
     else:
       # For non-JAX array leaves, print the path and a note
       print(f"  Leaf {i}: Path = '{path_str}', (Not a JAX array or does not have a shape attribute)")
+ppl = print_pytree_leaf_shapes
 
 def train_step_grads(model, config, state_mesh_shardings, state, data, dropout_rng):
   """
@@ -161,42 +162,57 @@ def reshape_tree(pytree):
   return dp_pytree
 
 pp_config = pyconfig.initialize(
-    [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
-    enable_checkpointing=False,
-    enable_goodput_recording=False,
-    run_name="circular_ag_once",
-    max_target_length=128,
-    base_emb_dim=28,
-    ici_pipeline_parallelism=2,
-    base_num_decoder_layers=8,
-    num_pipeline_microbatches=8,
-    per_device_batch_size=4,
-    decoder_block="simple",
-    dataset_type="synthetic",
-    opt_type="sgd",
-)
+      [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+      enable_checkpointing=False,
+      enable_goodput_recording=False,
+      run_name="circular_moe",
+      max_target_length=128,
+      base_emb_dim=28,
+      base_moe_mlp_dim=56,
+      ici_pipeline_parallelism=4,
+      base_num_decoder_layers=8,
+      num_pipeline_microbatches=8,
+      per_device_batch_size=4,
+      num_experts=4,
+      num_experts_per_tok=2,
+      megablox=False,
+      sparse_matmul=False,
+      capacity_factor=1,
+      dataset_type="synthetic",
+      attention_type="mla",
+      decoder_block="deepseek",
+      opt_type="sgd",
+  )
 
 dp_config = pyconfig.initialize(
-    [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
-    enable_checkpointing=False,
-    enable_goodput_recording=False,
-    run_name="cdp",
-    max_target_length=128,
-    base_emb_dim=28,
-    ici_data_parallelism=2,
-    base_num_decoder_layers=8,
-    per_device_batch_size=4,
-    decoder_block="simple",
-    dataset_type="synthetic",
-    opt_type="sgd",
-)
+      [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+      enable_checkpointing=False,
+      enable_goodput_recording=False,
+      run_name="circular_moe",
+      max_target_length=128,
+      base_emb_dim=28,
+      base_moe_mlp_dim=56,
+      ici_data_parallelism=4,
+      base_num_decoder_layers=8,
+      per_device_batch_size=4,
+      num_experts=4,
+      num_experts_per_tok=2,
+      megablox=False,
+      sparse_matmul=False,
+      capacity_factor=1,
+      dataset_type="synthetic",
+      attention_type="mla",
+      decoder_block="deepseek",
+      opt_type="sgd",
+  )
+
 
 # Run PP to get real grads and weights
 pp_state, pp_grads, inputs = get_state_and_grads(pp_config)
-# Run DP to get pytree strucuture for DP (random possibly different weights)
+# Run DP to get pytree structure for DP (random possibly different weights)
 dp_state, _, _ = get_state_and_grads(dp_config, run_train=False)
 
-# Replaca
+# Copy PP Params into DP
 pp_module_subtree = pp_state.params['params']['decoder']['pipeline_module']['layers']
 dp_module_subtree = reshape_tree(pp_module_subtree)
 dp_params_copy=dp_state.params.copy()
@@ -206,8 +222,10 @@ dp_params_copy['params']['decoder']['layers'] = dp_module_subtree
 dp_rp_state, dp_rp_grads, _ = get_state_and_grads(dp_config, params=dp_params_copy, inputs=inputs)
 
 # Reshape PP grads so identical pytree structure as pp grads
-pp_layer_grads = reshape_tree(pp_grads['params']['decoder']['pipeline_module']['layers']['weights'])
-dp_layer_grads = dp_rp_grads['params']['decoder']['layers']['weights']
+pp_layer_grads = reshape_tree(pp_grads['params']['decoder']['pipeline_module']['layers'])
+#pp_layer_grads = reshape_tree(pp_grads['params']['decoder']['pipeline_module']['layers']['weights'])
+dp_layer_grads = dp_rp_grads['params']['decoder']['layers']
+breakpoint()
 #assert jax.numpy.allclose(f1_value, f2_value, rtol=1e-2, equal_nan=False) # Loss
 #assert jax.numpy.allclose(pp_layer_grads, dp_layer_grads, rtol=1e-1, equal_nan=False) # why is this broken
 assert jax.numpy.allclose(pp_layer_grads, dp_layer_grads, atol=1e-3, equal_nan=False)
