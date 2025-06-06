@@ -101,7 +101,7 @@ def train_step_grads(model, config, state_mesh_shardings, state, data, dropout_r
 
 
 
-def get_state_and_grads(config, inputs=None, params=None):
+def get_state_and_grads(config, inputs=None, params=None, run_train=True):
   init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
   state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
@@ -131,12 +131,15 @@ def get_state_and_grads(config, inputs=None, params=None):
       donate_argnums=donate_argnums_train,
   )
 
-  if not inputs:
-    example_batch = load_next_batch(data_iterator, None, config) # None=example_batch
+  if run_train:
+    if not inputs:
+      example_batch = load_next_batch(data_iterator, None, config) # None=example_batch
+    else:
+      example_batch = inputs
+    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+          grads, metrics = p_train_step(state, example_batch, init_rng) #using same rng
   else:
-    example_batch = inputs
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      grads, metrics = p_train_step(state, example_batch, init_rng) #using same rng
+    return state, None, None
 
   loss = metrics['scalar']['learning/loss']
   print(f"{loss=}", flush=True)
@@ -190,10 +193,10 @@ dp_config = pyconfig.initialize(
 
 # Run PP to get real grads and weights
 pp_state, pp_grads, inputs = get_state_and_grads(pp_config)
-# Run DP to get pytree strucuture for DP (use random weights)
-dp_state, dp_grads, _ = get_state_and_grads(dp_config)
+# Run DP to get pytree strucuture for DP (random possibly different weights)
+dp_state, _, _ = get_state_and_grads(dp_config, run_train=False)
 
-# Replace DP weights with PP weights
+# Replaca
 pp_module_subtree = pp_state.params['params']['decoder']['pipeline_module']['layers']
 dp_module_subtree = reshape_tree(pp_module_subtree)
 dp_params_copy=dp_state.params.copy()
@@ -201,8 +204,10 @@ dp_params_copy['params']['decoder']['layers'] = dp_module_subtree
 
 # Run DP with same weights and inputs as PP
 dp_rp_state, dp_rp_grads, _ = get_state_and_grads(dp_config, params=dp_params_copy, inputs=inputs)
-breakpoint()
 
-
-
-
+# Reshape PP grads so identical pytree structure as pp grads
+pp_layer_grads = reshape_tree(pp_grads['params']['decoder']['pipeline_module']['layers']['weights'])
+dp_layer_grads = dp_rp_grads['params']['decoder']['layers']['weights']
+#assert jax.numpy.allclose(f1_value, f2_value, rtol=1e-2, equal_nan=False) # Loss
+#assert jax.numpy.allclose(pp_layer_grads, dp_layer_grads, rtol=1e-1, equal_nan=False) # why is this broken
+assert jax.numpy.allclose(pp_layer_grads, dp_layer_grads, atol=1e-3, equal_nan=False)
