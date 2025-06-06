@@ -38,7 +38,32 @@ from MaxText.train import (
     loss_fn
 )
 from flax.linen import partitioning as nn_partitioning
+from jax.tree_util import tree_leaves_with_path # Import the function to get paths
 
+
+
+
+def print_pytree_leaf_shapes(pytree):
+  """
+  Prints the shapes of all leaf nodes in a given JAX PyTree,
+  along with their respective keypaths.
+
+  Args:
+    pytree: The PyTree whose leaf shapes and keypaths are to be printed.
+  """
+  print("Shapes of PyTree leaves with keypaths:")
+  # Use tree_leaves_with_path to get both the path and the leaf
+  leaves_with_paths = tree_leaves_with_path(pytree)
+
+  for i, (key_path, leaf) in enumerate(leaves_with_paths):
+    # Format the key_path for readability (e.g., 'a.b.c' or '0.1.key')
+    path_str = ".".join(str(p) for p in key_path) if key_path else "root"
+
+    if hasattr(leaf, 'shape'):
+      print(f"  Leaf {i}: Path = '{path_str}', Shape = {leaf.shape}")
+    else:
+      # For non-JAX array leaves, print the path and a note
+      print(f"  Leaf {i}: Path = '{path_str}', (Not a JAX array or does not have a shape attribute)")
 
 def train_step_grads(model, config, state_mesh_shardings, state, data, dropout_rng):
   """
@@ -76,14 +101,14 @@ def train_step_grads(model, config, state_mesh_shardings, state, data, dropout_r
 
 
 
-def get_state_and_grads(config, state=None):
+def get_state_and_grads(config, inputs=None, params=None):
   init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
-  random_state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
+  state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
-  if state is None:
-    state = random_state
+  if params is not None:
+    state = state.replace(params=params)
 
 
   (
@@ -100,19 +125,37 @@ def get_state_and_grads(config, state=None):
 
   p_train_step = jax.jit(
       functional_train,
-      in_shardings=in_shard_train,
+      #in_shardings=in_shard_train,
       #out_shardings=out_shard_train,
       static_argnums=static_argnums_train,
       donate_argnums=donate_argnums_train,
   )
 
-  example_batch = load_next_batch(data_iterator, None, config) # None=example_batch
+  if not inputs:
+    example_batch = load_next_batch(data_iterator, None, config) # None=example_batch
+  else:
+    example_batch = inputs
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
       grads, metrics = p_train_step(state, example_batch, init_rng) #using same rng
 
   loss = metrics['scalar']['learning/loss']
   print(f"{loss=}", flush=True)
-  return state, grads
+  return state, grads, example_batch
+
+
+def reshape_tree(pytree):
+  def reshape_pp_to_dp(arr, scan_index=1):
+    arr_shape = jnp.shape(arr)
+    repeats, stages = arr_shape[0], arr_shape[1]
+    arr_flat = jnp.reshape(arr, (repeats*stages,) + arr_shape[2:])
+    if scan_index > 0:
+      # swap first index with scan_index using jnp.transpose:
+      perm = [scan_index] + list(range(scan_index)) + list(range(scan_index + 1, len(arr_flat.shape)))
+      arr_flat = jnp.transpose(arr_flat, perm)
+    return arr_flat
+  # Perform a tree map of reshape_pp_to_dp
+  dp_pytree = jax.tree_util.tree_map(reshape_pp_to_dp, pytree)
+  return dp_pytree
 
 pp_config = pyconfig.initialize(
     [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -145,37 +188,21 @@ dp_config = pyconfig.initialize(
     opt_type="sgd",
 )
 
-pp_state, pp_grads = get_state_and_grads(pp_config)
-dp_state, dp_grads = get_state_and_grads(dp_config)
+# Run PP to get real grads and weights
+pp_state, pp_grads, inputs = get_state_and_grads(pp_config)
+# Run DP to get pytree strucuture for DP (use random weights)
+dp_state, dp_grads, _ = get_state_and_grads(dp_config)
 
-def reshape_tree(pytree):
-  def reshape_pp_to_dp(arr, scan_index=1):
-    arr_shape = jnp.shape(arr)
-    repeats, stages = arr_shape[0], arr_shape[1]
-    arr_flat = jnp.reshape(arr, (repeats*stages,) + arr_shape[2:])
-    if scan_index > 0:
-      # swap first index with scan_index using jnp.transpose:
-      perm = [scan_index] + list(range(scan_index)) + list(range(scan_index + 1, len(arr_flat.shape)))
-      arr_flat = jnp.transpose(arr_flat, perm)
-    return arr_flat
-  # Perform a tree map of reshape_pp_to_dp
-  dp_pytree = jax.tree_util.tree_map(reshape_pp_to_dp, pytree)
-  return dp_pytree
-
-
-pp_module_subtree = pp_state.params['params']['decoder']['pipeline_module']
+# Replace DP weights with PP weights
+pp_module_subtree = pp_state.params['params']['decoder']['pipeline_module']['layers']
 dp_module_subtree = reshape_tree(pp_module_subtree)
+dp_params_copy=dp_state.params.copy()
+dp_params_copy['params']['decoder']['layers'] = dp_module_subtree
 
-
-# replace dp_state.params['params']['decoder'] with dp_module_subtree
-dp_state_copy=dp_state.params.copy()
-dp_state_copy['params']['decoder'] = dp_module_subtree
-
-dp_replaced = dp_state.replace(params=dp_state_copy)
-
-dp_rp_state, dp_rp_grads = get_state_and_grads(dp_config, state=dp_replaced)
-
-
-
+# Run DP with same weights and inputs as PP
+dp_rp_state, dp_rp_grads, _ = get_state_and_grads(dp_config, params=dp_params_copy, inputs=inputs)
 breakpoint()
+
+
+
 
