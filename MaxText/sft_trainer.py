@@ -30,89 +30,38 @@ import jax
 
 from flax.linen import partitioning as nn_partitioning
 
-from ml_goodput_measurement import monitoring
-
 from MaxText import checkpointing
 from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import max_logging
 from MaxText import profiler
 from MaxText import pyconfig
-from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
 from MaxText.metric_logger import MetricLogger
 from MaxText.train import (
     check_example_batch,
-    create_goodput_recorder,
     eval_step,
     EPS,
     get_first_step,
     load_next_batch,
-    record_goodput,
     record_scalar_metrics,
     save_checkpoint,
-    setup_mesh_and_model,
+    setup_train_loop,
     train_step,
     validate_train_config,
 )
+from MaxText.utils.goodput_utils import (
+    GoodputEvent,
+    create_goodput_recorder,
+    maybe_monitor_goodput,
+    maybe_record_goodput,
+)
 
 
-def setup_train_loop(config):
-  """Set up prerequisites for the training loop -
-    checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
-    Set up data iterator and tokenizer, initialize the model.
-
-  Args:
-      config
-
-  Returns:
-      init_rng:
-      writer: Summary writer for tensorboard
-      checkpoint_manager: Orbax checkpointer
-      state_mesh_annotations: the mesh annotations for the train state
-      model:
-      mesh:
-      learning_rate_schedule:
-      data_iterator:
-      state: the initialized train state
-  """
-  recorder = create_goodput_recorder(config)
-
-  record_goodput(recorder, config, recorder.record_tpu_init_start_time if recorder else None)
-  init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
-  record_goodput(recorder, config, recorder.record_tpu_init_end_time if recorder else None)
-
-  record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
-  data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
-  state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
-      model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
-  )
-  if not config.using_pipeline_parallelism:
-    # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
-    maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
-  record_goodput(recorder, config, recorder.record_training_preparation_end_time if recorder else None)
-  return (
-      init_rng,
-      writer,
-      checkpoint_manager,
-      state_mesh_shardings,
-      model,
-      mesh,
-      learning_rate_schedule,
-      data_iterator,
-      eval_data_iterator,
-      state,
-  )
-
-
-def train_loop(config, state=None):
+def train_loop(config, recorder, state=None):
   """Main training loop for SFT."""
   if not config.use_sft:
     raise TypeError("Set use_sft to True to run Supervised Fine Tuning.")
-
-  # Create a GoodputRecorder to log information
-  recorder = create_goodput_recorder(config)
-  record_goodput(recorder, config, recorder.record_job_start_time if recorder else None)
 
   (
       init_rng,
@@ -125,7 +74,7 @@ def train_loop(config, state=None):
       data_iterator,
       eval_data_iterator,
       state,
-  ) = setup_train_loop(config)
+  ) = setup_train_loop(config, recorder)
 
   # pylint: disable=line-too-long
   (
@@ -212,20 +161,20 @@ def train_loop(config, state=None):
       prof.activate(blocking_object=state, optional_postfix=optional_postfix)
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
-      record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
-      try:
-        example_batch = load_next_batch(data_iterator, example_batch, config)
-        example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
-      except Exception as e:  # pylint: disable=broad-except
-        max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
-        break
-      record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
+      with maybe_record_goodput(recorder, GoodputEvent.DATA_LOADING):
+        try:
+          example_batch = load_next_batch(data_iterator, example_batch, config)
+          example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
+        except Exception as e:  # pylint: disable=broad-except
+          max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
+          break
+
       check_example_batch(config, example_batch=example_batch)
       # pylint: disable=not-callable
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
-      record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
-      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        state, metrics = p_train_step(state, example_batch, nextrng)
+      with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
+        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+          state, metrics = p_train_step(state, example_batch, nextrng)
 
     step_time_delta = datetime.datetime.now() - last_step_completion
     last_step_completion = datetime.datetime.now()
@@ -312,7 +261,6 @@ def train_loop(config, state=None):
     checkpoint_manager.wait_until_finished()
   metric_logger.write_metrics(running_gcs_metrics, metrics, config.steps - 1)  # final step metrics
   max_utils.close_summary_writer(writer)
-  record_goodput(recorder, config, recorder.record_job_end_time if recorder else None)
 
   with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     compiled = p_train_step.lower(state, example_batch, nextrng).compile()
@@ -340,38 +288,10 @@ def main(argv: Sequence[str]) -> None:
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
 
-  if config.monitor_goodput and jax.process_index() == 0:
-    logger_name = f"goodput_{config.run_name}"
-    # Workload monitoring and Goodput monitoring both uses /workload/performance
-    # GCM metric to publish step_time and step_deviation metrics. For now, we
-    # will disable publishing step deviation metrics to GCM if workload
-    # monitoring is enabled. Will reconcile this in the future.
-    if config.report_performance_metric_for_gcp_monitoring:
-      config.enable_gcp_step_deviation_metrics = False
-
-    gcp_options = monitoring.GCPOptions(
-        enable_gcp_goodput_metrics=config.enable_gcp_goodput_metrics,
-        enable_gcp_step_deviation_metrics=config.enable_gcp_step_deviation_metrics,
-    )
-    goodput_monitor = monitoring.GoodputMonitor(
-        job_name=config.run_name,
-        logger_name=logger_name,
-        tensorboard_dir=config.tensorboard_dir,
-        upload_interval=config.goodput_upload_interval_seconds,
-        monitoring_enabled=True,
-        pathway_enabled=config.enable_pathways_goodput,
-        include_badput_breakdown=True,
-        include_step_deviation=config.monitor_step_time_deviation,
-        step_deviation_interval_seconds=config.step_deviation_interval_seconds,
-        gcp_options=gcp_options,
-    )
-    goodput_monitor.start_goodput_uploader()
-    max_logging.log("Started Goodput upload to Tensorboard & GCM in the background!")
-    if config.monitor_step_time_deviation:
-      goodput_monitor.start_step_deviation_uploader()
-      max_logging.log("Started step time deviation upload to Tensorboard & GCM in the background!")
-
-  train_loop(config)
+  maybe_monitor_goodput(config)
+  recorder = create_goodput_recorder(config)
+  with maybe_record_goodput(recorder, GoodputEvent.JOB):
+    train_loop(config, recorder)
 
 
 if __name__ == "__main__":
