@@ -28,7 +28,7 @@ from jax.ad_checkpoint import checkpoint_name
 import flax.linen as nn
 
 from MaxText import max_logging
-from MaxText.common_types import DecoderBlockType, DType, Array, Config
+from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, DecoderBlockType, DType, Array, Config
 from MaxText.layers import quantizations
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init
@@ -181,6 +181,7 @@ class MlpBlock(nn.Module):
   use_bias: bool = False
   use_pre_norm: bool = False
   quant: Optional[Quant] = None
+  model_mode: str = None
 
   def get_norm_layer(self):
     """get normalization layer."""
@@ -260,7 +261,11 @@ class MlpBlock(nn.Module):
     x = nn.Dropout(rate=self.intermediate_dropout_rate, broadcast_dims=(-2,))(
         x, deterministic=deterministic
     )  # Broadcast along length.
-    x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
+    # assert self.model_mode is not None
+    if self.model_mode == MODEL_MODE_PREFILL:
+      x = nn.with_logical_constraint(x, ("activation_batch", "prefill_activation_length", "activation_mlp"))
+    else:
+      x = nn.with_logical_constraint(x, ("activation_batch", "activation_length", "activation_mlp"))
     output = DenseGeneral(
         inputs.shape[-1],
         dtype=self.dtype,
