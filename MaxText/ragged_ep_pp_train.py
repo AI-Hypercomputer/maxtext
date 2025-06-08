@@ -39,9 +39,10 @@ from MaxText.train import (
 )
 from flax.linen import partitioning as nn_partitioning
 from jax.tree_util import tree_leaves_with_path # Import the function to get paths
+import datetime
+import os
 
-
-
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
 def print_pytree_leaf_shapes(pytree):
   """
@@ -137,8 +138,11 @@ def get_state_and_grads(config, inputs=None, params=None, run_train=True):
       example_batch = load_next_batch(data_iterator, None, config) # None=example_batch
     else:
       example_batch = inputs
+    prof = profiler.Profiler(config)
+    prof.activate(blocking_object=state, optional_postfix="pp")
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
           grads, metrics = p_train_step(state, example_batch, init_rng) #using same rng
+    prof.deactivate()
   else:
     return state, None, None
 
@@ -161,11 +165,17 @@ def reshape_tree(pytree):
   dp_pytree = jax.tree_util.tree_map(reshape_pp_to_dp, pytree)
   return dp_pytree
 
+datetime_string =  datetime.datetime.now().strftime("%Y%m%d_%H%M")
+
+
+from MaxText import profiler
+
+
 pp_config = pyconfig.initialize(
       [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
       enable_checkpointing=False,
       enable_goodput_recording=False,
-      run_name="circular_moe",
+      run_name=f"pp_{datetime_string}",
       max_target_length=128,
       base_emb_dim=28,
       base_moe_mlp_dim=56,
@@ -182,13 +192,15 @@ pp_config = pyconfig.initialize(
       attention_type="mla",
       decoder_block="deepseek",
       opt_type="sgd",
+      profiler="xplane",
+      base_output_directory="gs://maxtext-experiments-multipod",
   )
 
 dp_config = pyconfig.initialize(
       [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
       enable_checkpointing=False,
       enable_goodput_recording=False,
-      run_name="circular_moe",
+      run_name=f"dp_{datetime_string}",
       max_target_length=128,
       base_emb_dim=28,
       base_moe_mlp_dim=56,
@@ -204,11 +216,15 @@ dp_config = pyconfig.initialize(
       attention_type="mla",
       decoder_block="deepseek",
       opt_type="sgd",
+      profiler="xplane",
+      base_output_directory="gs://maxtext-experiments-multipod",
   )
 
 
 # Run PP to get real grads and weights
+
 pp_state, pp_grads, inputs = get_state_and_grads(pp_config)
+
 # Run DP to get pytree structure for DP (random possibly different weights)
 dp_state, _, _ = get_state_and_grads(dp_config, run_train=False)
 
