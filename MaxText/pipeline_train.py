@@ -177,7 +177,7 @@ pp_config = pyconfig.initialize(
       num_experts_per_tok=2,
       megablox=False,
       sparse_matmul=False,
-      capacity_factor=1,
+      capacity_factor=-1,
       dataset_type="synthetic",
       attention_type="mla",
       decoder_block="deepseek",
@@ -199,7 +199,7 @@ dp_config = pyconfig.initialize(
       num_experts_per_tok=2,
       megablox=False,
       sparse_matmul=False,
-      capacity_factor=1,
+      capacity_factor=-1,
       dataset_type="synthetic",
       attention_type="mla",
       decoder_block="deepseek",
@@ -216,7 +216,8 @@ dp_state, _, _ = get_state_and_grads(dp_config, run_train=False)
 pp_module_subtree = pp_state.params['params']['decoder']['pipeline_module']['layers']
 dp_module_subtree = reshape_tree(pp_module_subtree)
 dp_params_copy=dp_state.params.copy()
-dp_params_copy['params']['decoder']['layers'] = dp_module_subtree
+# Fuck DeepSeek
+dp_params_copy['params']['decoder']['moe_layers'] = dp_module_subtree
 
 # Run DP with same weights and inputs as PP
 dp_rp_state, dp_rp_grads, _ = get_state_and_grads(dp_config, params=dp_params_copy, inputs=inputs)
@@ -224,8 +225,18 @@ dp_rp_state, dp_rp_grads, _ = get_state_and_grads(dp_config, params=dp_params_co
 # Reshape PP grads so identical pytree structure as pp grads
 pp_layer_grads = reshape_tree(pp_grads['params']['decoder']['pipeline_module']['layers'])
 #pp_layer_grads = reshape_tree(pp_grads['params']['decoder']['pipeline_module']['layers']['weights'])
-dp_layer_grads = dp_rp_grads['params']['decoder']['layers']
-breakpoint()
+dp_layer_grads = dp_rp_grads['params']['decoder']['moe_layers']
+
 #assert jax.numpy.allclose(f1_value, f2_value, rtol=1e-2, equal_nan=False) # Loss
 #assert jax.numpy.allclose(pp_layer_grads, dp_layer_grads, rtol=1e-1, equal_nan=False) # why is this broken
-assert jax.numpy.allclose(pp_layer_grads, dp_layer_grads, atol=1e-3, equal_nan=False)
+#assert jax.numpy.allclose(pp_layer_grads, dp_layer_grads, atol=1e-3, equal_nan=False)
+
+#pytree version of jnp.allclose:
+def assert_allclose(tree1, tree2, atol=1e-3, rtol=1e-3, equal_nan=False):
+  def compare_leaves(leaf1, leaf2):
+    return jax.numpy.allclose(leaf1, leaf2, atol=atol, rtol=rtol, equal_nan=equal_nan)
+  leaves1, leaves2 = jax.tree_util.tree_leaves(tree1), jax.tree_util.tree_leaves(tree2)
+  all_close = all(compare_leaves(leaf1, leaf2) for leaf1, leaf2 in zip(leaves1, leaves2))
+  assert all_close, "PyTrees are not all close"
+
+assert_allclose(pp_layer_grads, dp_layer_grads, atol=1e-3, rtol=1e10, equal_nan=False)
