@@ -73,6 +73,8 @@ DEBUG = os.environ.get("DEBUG", "0") == "1"
 # Configure logging
 log = logging.getLogger(__name__)
 
+logging.getLogger("jax").setLevel(logging.DEBUG)
+
 
 @dataclasses.dataclass
 class InputData:
@@ -648,6 +650,7 @@ class ReplicaWorker:
             self.worker_thread.join()
             self.worker_thread = None
         return self.completion_outputs
+    
     def _start_inference(
         self,
         data_queue: queue.Queue,
@@ -703,16 +706,6 @@ class ReplicaWorker:
             )
             self.res_prompt_tokens[row.id] = row.tokens[:row.true_length]
 
-            # self.simple_prefill(
-            #     model_params=self.params,
-            #     decode_state=self.decode_state,
-            #     decode_slot=slot,
-            #     input_id=row.id,
-            #     input_tokens_padded=row.tokens,
-            #     input_true_length=row.true_length,
-            #     prefill_done=self.prefill_done,
-            # )
-
         # 4. Flush any pending inputs in batch prefill mode
         self.prefill_helper.finalize(self.params, self.decode_state, self.prefill_done)
 
@@ -752,51 +745,6 @@ class ReplicaWorker:
                     )
                 )
 
-    ### DEBUGGING PURPOSE CODE ###
-    @staticmethod
-    @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(5,))
-    def _jitted_simple_prefill(
-        engine,
-        params: Params,
-        tokens: jax.Array,
-        slot: int,
-        true_length: int,
-        decode_state: DecodeState,
-        rng: Any,
-    ) -> Tuple[engine_api.ResultTokens, DecodeState]:
-        """Prefill and insert a request."""
-
-        prefill_result, first_token = engine.prefill(
-            params=params, padded_tokens=tokens, true_length=true_length, rng=rng
-        )
-        decode_state = engine.insert(prefill_result, decode_state, slot)
-        log_prob = inference_utils.log_prob_of_chosen_token(
-            decode_state["logits"][slot], decode_state["tokens"][slot]
-        )
-        return first_token.data[:, 0], log_prob, decode_state
-
-    def simple_prefill(
-        self,
-        model_params,
-        decode_state,
-        decode_slot,
-        input_id,
-        input_tokens_padded,
-        input_true_length,
-        prefill_done,
-    ):
-        first_token, log_prob, decode_state = self._jitted_simple_prefill(
-            self.engine,
-            model_params,
-            input_tokens_padded,
-            decode_slot,
-            input_true_length,
-            decode_state,
-            self.rng,
-        )
-        prefill_done([(first_token, log_prob, decode_slot)], [input_id], decode_state)
-
-    ### DEBUGGING PURPOSE CODE ###
     @staticmethod
     @jax.jit
     def _jitted_log_prob_and_slice_token(token, decode_state, slot):
