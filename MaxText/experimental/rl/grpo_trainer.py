@@ -29,7 +29,6 @@ import sys
 import functools
 import queue
 import threading
-from queue import Queue
 
 from typing import Sequence
 from collections.abc import Callable
@@ -185,49 +184,49 @@ class LossAux:
   moe_lb_loss: float
   total_weights: float
 
-class Buffer:
-  def __init__(self, maxsize=1):
-    self.queue = Queue(maxsize=maxsize)
-    self.lock = threading.Lock()
-    self.internal_buffer = []
+# class Buffer:
+#   def __init__(self, maxsize=1):
+#     self.queue = Queue(maxsize=maxsize)
+#     self.lock = threading.Lock()
+#     self.internal_buffer = []
 
-  def push(self, data):
-    with self.lock:
-      if self.queue.full():
-        try:
-          self.queue.get_nowait()
-        except:
-          pass
-      self.queue.put(data)
+#   def push(self, data):
+#     with self.lock:
+#       if self.queue.full():
+#         try:
+#           self.queue.get_nowait()
+#         except:
+#           pass
+#       self.queue.put(data)
 
-  def pull(self, desired_batch_size=None):
-    with self.lock:
-      # Fill internal buffer
-      while True:
-        try:
-          self.internal_buffer.append(self.queue.get_nowait())
-        except queue.Empty:
-          break
+#   def pull(self, desired_batch_size=None):
+#     with self.lock:
+#       # Fill internal buffer
+#       while True:
+#         try:
+#           self.internal_buffer.append(self.queue.get_nowait())
+#         except queue.Empty:
+#           break
 
-      if not self.internal_buffer:
-        return None
+#       if not self.internal_buffer:
+#         return None
 
-      if desired_batch_size is None:
-        # Default behavior: return one batch
-        return self.internal_buffer.pop(0)
+#       if desired_batch_size is None:
+#         # Default behavior: return one batch
+#         return self.internal_buffer.pop(0)
 
-      # Aggregate until you reach the desired_batch_size
-      combined = []
-      count = 0
-      while self.internal_buffer and count < desired_batch_size:
-        batch = self.internal_buffer.pop(0)
-        combined.append(batch)
-        count += 1
+#       # Aggregate until you reach the desired_batch_size
+#       combined = []
+#       count = 0
+#       while self.internal_buffer and count < desired_batch_size:
+#         batch = self.internal_buffer.pop(0)
+#         combined.append(batch)
+#         count += 1
 
-      if combined:
-        return jax.tree_util.tree_map(lambda *xs: jnp.concatenate(xs, axis=0), *combined)
-      else:
-        return None
+#       if combined:
+#         return jax.tree_util.tree_map(lambda *xs: jnp.concatenate(xs, axis=0), *combined)
+#       else:
+#         return None
 
 
 def grpo_loss_fn(model, config, data, dropout_rng, params, reference_params, is_train=True):
@@ -501,18 +500,28 @@ def generate_completions(config, tokenizer_model, engine, data, params, rng):
   return data
 
 
-def generate_offline_completions(config, tokenizer_model, inference_engine, data):
+def generate_offline_completions(training_mesh, config, tokenizer_model, inference_engine, data):
   # TODO(mohitkhatwani) think about doing multisampling here
-  input_data = []
-  for i, d in enumerate(data[config.train_data_columns]):
-    for g in range(config.num_generations):
-      input_data.append(InputData(id=f"input_{i}_{g}", tokens=np.array(d), true_length=np.array(data[f"{config.train_data_columns}_true_length"][i])[0]))
-  results = inference_engine.batch_inference(input_data)
-  completions = jnp.stack([r.token_ids for r in results])
-  completions_logprobs = jnp.stack(np.array([r.logprobs for r in results]))
   data[config.train_data_columns] = jnp.repeat(data[config.train_data_columns], config.num_generations, axis=0)
   data[f"{config.train_data_columns}_true_length"] = jnp.repeat(data[f"{config.train_data_columns}_true_length"], config.num_generations, axis=0)
+  input_data = []
+  for i, d in enumerate(data[config.train_data_columns]):
+    input_data.append(InputData(id=f"input_{i}", tokens=np.array(d), true_length=np.array(data[f"{config.train_data_columns}_true_length"][i])[0]))
+  start_time = time.time()
+  max_logging.log("MaxText: inference started on samplers")
+  results = inference_engine.batch_inference(input_data, continous_batching=config.continous_batching)
+  end_time = time.time()
+  max_logging.log(f"MaxText: inference finished on all samplers in {end_time - start_time} seconds")
+  start_time = time.time()
+  if config.continous_batching:
+    completions = jnp.stack([r.token_ids for r in results])
+    completions_logprobs = jnp.stack([r.logprobs for r in results])
+  else:
+    completions = jnp.stack([jax.device_put(r.token_ids, jax.sharding.NamedSharding(training_mesh, P())) for r in results])
+    completions_logprobs = jnp.stack([jax.device_put(r.logprobs, jax.sharding.NamedSharding(training_mesh, P())) for r in results])
   data = grpo_utils.concatenate_prompt_with_completions(config, tokenizer_model, data, completions)
+  end_time = time.time()
+  max_logging.log(f"MaxText: Preprocessing after inference took {end_time - start_time} seconds")
   # offpolicys
   if config.inference_rollouts > 1:
     data["completions_logprobs"] = completions_logprobs
@@ -582,10 +591,16 @@ def pathways_reshard(config, inference_engine, params, source_shardings, source_
   else:
     layer_groups = [("layers", config.base_num_decoder_layers)]
   if not config.scan_layers:
+    start_time = time.time()
     max_utils.unscan_train_state_params(params, source_shardings, source_mesh, scan_axis=config.param_scan_axis, layer_groups=layer_groups)
+    end_time = time.time()
+    max_logging.log(f"Unscanning took {end_time - start_time} seconds")
   inference_engine.update_params(params, jax.tree_util.tree_map(lambda x: x.spec, destination_shardings[0].params), is_pw_reshard)
   if not config.scan_layers:
+    start_time = time.time()
     max_utils.rescan_train_state_params(params, source_shardings, scan_axis=config.param_scan_axis, layer_groups=layer_groups)
+    end_time = time.time()
+    max_logging.log(f"Scanning took {end_time - start_time} seconds")
 
 def setup_mesh_and_model(config, config_inference):
   """Set up the mesh and the model for training
@@ -756,6 +771,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
       "learning/avg_reward_std": aux.avg_reward_std,
       "learning/avg_advantage": aux.avg_advantage,
       "learning/avg_kl": aux.avg_kl,
+      "learning/completion_length": aux.completion_length,
       "learning/moe_lb_loss": moe_lb_loss,
       "learning/total_weights": total_weights,
   }
@@ -945,12 +961,11 @@ def train_loop(config, config_inference, recorder, state=None):
   inference_engine = offline_engine.OfflineEngine(
     config = config_inference,
     params = None,
-    enable_batch_prefill=False,
+    enable_batch_prefill=True,
     auto_layout_supported=False,
     dp = config.inference_replicas,
     dp_meshes = inference_meshes,
     warm_up=False,
-    rng=init_rng,
     eos_ids=[]
   )
 
@@ -966,15 +981,13 @@ def train_loop(config, config_inference, recorder, state=None):
   example_batch = None
   last_step_completion = datetime.datetime.now()
 
-  param_buffer = Buffer(maxsize=config.inference_replicas)
-  data_buffer = Buffer(maxsize=-1)
-  start_time = time.time()
+  # param_buffer = Buffer(maxsize=config.inference_replicas)
+  # data_buffer = Buffer(maxsize=-1)
+  data_buffer = queue.Queue()
   if config.use_pathways_reshard:
     pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
   else:
     pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
-  end_time = time.time()
-  print(f"time taken to reshard training params: {end_time - start_time} seconds")
   
   # for inference_state_mesh_sharding in inference_state_mesh_shardings:
     # param_buffer.push({'params':state.params['params']}, inference_state_mesh_sharding.params)
@@ -990,9 +1003,12 @@ def train_loop(config, config_inference, recorder, state=None):
   # do K rollouts of inference
   if config.inference_rollouts != 1:
     max_logging.log(f"Doing {config.inference_rollouts} Inference rollouts before training starts")
-    # example_batch = load_next_batch(data_iterator, example_batch, config)
-    # example_batches = filter_and_split(config_inference, example_batch, config.inference_replicas, int(config_inference.per_device_batch_size * inference_meshes[0].devices.size))
-    # for k in range(config.inference_rollouts):
+    example_batch = load_next_batch(data_iterator, example_batch, config)
+    example_batch = jax.tree_util.tree_map(lambda arr: arr[:int(config.per_device_batch_size * config.inference_replicas * config.inference_devices_per_replica)], example_batch)
+    for k in range(config.inference_rollouts):
+      example_batch = generate_offline_completions(mesh, config_inference, tokenizer_model, inference_engine, example_batch)
+      example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
+      data_buffer.put_nowait(example_batch)
     #   for example_batch, inference_data_sharding, inference_param, p_generate, inference_mesh in zip(example_batches, inference_data_shardings, inference_params, p_generate_completions, inference_meshes):
     #     rng = jax.jit(jax.random.fold_in)(init_rng, k)
     #     rng, rng_gen = random.split(rng)
@@ -1009,10 +1025,15 @@ def train_loop(config, config_inference, recorder, state=None):
       optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
       prof.activate(blocking_object=state, optional_postfix=optional_postfix)
     # inference_params = [param_buffer.pull() for _ in range(len(inference_data_shardings))]
+    with maybe_record_goodput(recorder, GoodputEvent.DATA_LOADING):
+      try:
+        example_batch = load_next_batch(data_iterator, example_batch, config)
+        # Reshard data from loaded sharding to performant activation sharding
+        example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
+      except Exception as e:  # pylint: disable=broad-except
+        max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
+        break
     with jax.profiler.StepTraceAnnotation("inference", step_num=step):
-      record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
-      example_batch = load_next_batch(data_iterator, example_batch, config)
-      record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
       # TODO(mohitkhatwani): This is a workaround to just load the data required for k replicas, right now we load data based of num_global_devices
       example_batch = jax.tree_util.tree_map(lambda arr: arr[:int(config.per_device_batch_size * config.inference_replicas * config.inference_devices_per_replica)], example_batch)
       # example_batches = filter_and_split(config_inference, example_batch, config.inference_replicas, int(config_inference.per_device_batch_size * inference_meshes[0].devices.size))
@@ -1039,21 +1060,6 @@ def train_loop(config, config_inference, recorder, state=None):
         else:
           pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
 
-    with jax.profiler.StepTraceAnnotation("train", step_num=step):
-      with maybe_record_goodput(recorder, GoodputEvent.DATA_LOADING):
-        example_batch = load_next_batch(data_iterator, example_batch, config)
-        example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
-
-      check_example_batch(config, example_batch=example_batch)
-      # pylint: disable=not-callable
-      rng = jax.jit(jax.random.fold_in)(init_rng, step)
-      with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
-        rng, rng_gen = random.split(rng)
-        example_batch = p_generate_completions(example_batch, state.params, rng_gen)
-
-        # TODO: ensure this partitioning is correct
-        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-          state, metrics = p_train_step(state, example_batch, rng)
 
     step_time_delta = datetime.datetime.now() - last_step_completion
     last_step_completion = datetime.datetime.now()
@@ -1167,15 +1173,9 @@ def main(argv: Sequence[str]) -> None:
         "Please set decode_sampling_strategy as 'weighted' and decode_sampling_temperature as a positive number"
     )
   if config.inference_devices_per_replica * config.inference_replicas >= jax.device_count():
-    raise ValueError(f"Invalid value chosen for {config.num_inference_devices=}")
+    raise ValueError(f"Invalid value chosen for {config.inference_devices_per_replica=} and {config.inference_replicas=} with {jax.device_count()} devices")
   config_inference = pyconfig.initialize(
-      # list(argv)
-      # + [
-      #   "ici_fsdp_parallelism=1",
-      #   f"ici_tensor_parallelism={config.inference_devices_per_replica}",
-      #   "per_device_batch_size=" + str(config.per_device_batch_size * config.num_generations / config.inference_replicas)
-      #   ]
-      configs_argv[1]
+      configs_argv[1] + ["per_device_batch_size=" + str(config.per_device_batch_size * config.num_generations)]
   )
   if config.per_device_batch_size < 1.0 or config_inference.per_device_batch_size < 1.0:
     raise ValueError("GRPO does not support setting per_device_batch_size < 1.0")
