@@ -190,6 +190,7 @@ class BatchedPrefillProcessor:
       input_padding: int,
       capacity: int,
       prefill_done: Callable[[List[Tuple[engine_api.ResultTokens, int]], List[int], DecodeState], None],
+      return_prompt_logp: bool = False,
   ) -> None:
     """Process a new input.
 
@@ -203,7 +204,7 @@ class BatchedPrefillProcessor:
 
     bucket = self.buckets.setdefault(input_padding, PrefillBucket(capacity))
     if len(input_prompt) > bucket.unallocated():
-      prefill_result, decode_state = self._process_bucket(model_params, bucket, input_padding, decode_state)
+      prefill_result, decode_state = self._process_bucket(model_params, bucket, input_padding, decode_state, return_prompt_logp)
       if prefill_done:
         prefill_done(prefill_result, bucket.row_ids, decode_state)
       bucket.clear()
@@ -224,18 +225,19 @@ class BatchedPrefillProcessor:
       model_params: Params,
       decode_state: DecodeState,
       prefill_done: Callable[[List[Tuple[engine_api.ResultTokens, int]], List[int], DecodeState], None],
+      return_prompt_logp: bool = False,
   ) -> None:
     """Process all remaining items in buckets."""
 
     for input_padding, bucket in self.buckets.items():
       if not bucket.is_empty():
-        prefill_result, decode_state = self._process_bucket(model_params, bucket, input_padding, decode_state)
+        prefill_result, decode_state = self._process_bucket(model_params, bucket, input_padding, decode_state, return_prompt_logp)
         if prefill_done:
           prefill_done(prefill_result, bucket.row_ids, decode_state)
         bucket.clear()
 
   def _process_bucket(
-      self, model_params: Params, bucket: PrefillBucket, input_padding: int, decode_state: DecodeState
+      self, model_params: Params, bucket: PrefillBucket, input_padding: int, decode_state: DecodeState, return_prompt_logp: bool = False
   ) -> Tuple[List[Tuple[engine_api.ResultTokens, int]], DecodeState]:
     """Process all items in a bucket."""
 
@@ -271,7 +273,7 @@ class BatchedPrefillProcessor:
     if not self.auto_layout_supported:
       first_tokens, decode_state = jax.jit(
         self._process_batch, 
-        static_argnames=("num_prompts", "padded_length"), 
+        static_argnames=("num_prompts", "padded_length", "return_prompt_logp"), 
         donate_argnames=("decode_state"))( 
               model_params,
               tok_ids,
@@ -283,6 +285,7 @@ class BatchedPrefillProcessor:
               input_padding,
               lengths,
               decode_state,
+              return_prompt_logp,
         )
     else:
       prefill_fn = self._process_batch_compiled(model_params, input_padding, bucket.capacity, bucket.count)
@@ -296,10 +299,15 @@ class BatchedPrefillProcessor:
           lengths,
           decode_state,
       )
+    
 
     prefill_result = []
     for i in range(bucket.count):
-      prefill_result.append((first_tokens[i], bucket.slots[i]))
+      if return_prompt_logp:
+        prompt_logp = decode_state["prompt_logp"][:, offsets[i]:offsets[i] + lengths[i]]
+        prefill_result.append((first_tokens[i], bucket.slots[i], prompt_logp))
+      else:
+        prefill_result.append((first_tokens[i], bucket.slots[i]))
     return prefill_result, decode_state
 
   def _process_batch_compiled(self, params: Params, padded_length: int, capacity: int, num_prompts: int):
@@ -343,6 +351,7 @@ class BatchedPrefillProcessor:
       padded_length: int,
       true_lengths: jax.Array,
       decode_state: DecodeState,
+      return_prompt_logp: bool = False,
   ) -> Tuple[List[engine_api.ResultTokens], DecodeState]:
     """Prefill and insert a packed request."""
 
@@ -354,6 +363,7 @@ class BatchedPrefillProcessor:
         start_pos=start_pos,
         true_lengths=true_lengths,
         num_prompts=num_prompts,
+        return_prompt_logp=return_prompt_logp,
     )
     decode_state = self.engine.insert_partial(
         prefix=prefix_state,
@@ -364,4 +374,6 @@ class BatchedPrefillProcessor:
         num_prompts=num_prompts,
         seq_len=padded_length,
     )
+    if return_prompt_logp:
+      decode_state["prompt_logp"] = prefix_state["prompt_logp"]
     return first_tokens, decode_state

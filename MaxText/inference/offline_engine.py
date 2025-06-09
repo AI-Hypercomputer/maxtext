@@ -102,7 +102,8 @@ class CompletionOutput:
     index: int
     token_ids: jax.Array
     logprobs: jax.Array
-
+    prompt_token_ids: jax.Array
+    prompt_logp: jax.Array
 
 @dataclasses.dataclass
 class TokenOutput:
@@ -348,6 +349,7 @@ class PrefillHelper:
                 padded_length,
                 self.max_prefill_length,
                 prefill_done,
+                return_prompt_logp=True,
             )
 
     def finalize(
@@ -370,7 +372,7 @@ class PrefillHelper:
             pass
         elif self._type == PrefillType.BATCH:
             # Flush any remaining inputs in the batch processor
-            self._batch_processor.flush(model_params, decode_state, prefill_done)
+            self._batch_processor.flush(model_params, decode_state, prefill_done, return_prompt_logp=True)
 
 
 class ReplicaWorker:
@@ -628,6 +630,10 @@ class ReplicaWorker:
         self.ensure_init_finished()
         # self.ensure_update_finished() TODO(mohitkhatwani) might not need it
         self.res = defaultdict(list)
+        self.res_prompt_logp = defaultdict(list)
+        self.res_prompt_tokens = defaultdict(list)
+        self.completion_outputs = []
+
         if self.run_as_a_thread:
             self.worker_thread = SafeThead(
                 target=self._start_inference,
@@ -643,8 +649,7 @@ class ReplicaWorker:
         if self.worker_thread is not None:
             self.worker_thread.join()
             self.worker_thread = None
-        return self.res
-
+        return self.completion_outputs
     def _start_inference(
         self,
         data_queue: queue.Queue,
@@ -698,6 +703,7 @@ class ReplicaWorker:
                 input_true_length=row.true_length,
                 prefill_done=self.prefill_done,
             )
+            self.res_prompt_tokens[row.id].append(row.tokens[:row.true_length])
 
             # self.simple_prefill(
             #     model_params=self.params,
@@ -726,8 +732,28 @@ class ReplicaWorker:
             detokenize_thread.join()
         end_time = time.time()
         max_logging.log(f"Replica worker {self.worker_id}: detokenize thread joined in {end_time - start_time} seconds")
-
-        return self.res
+        
+        with jax.profiler.TraceAnnotation("offline_engine.batch_inference.return_final_output"):
+            for input_id in self.res.keys():
+                self.completion_outputs.append(
+                    CompletionOutput(
+                        index=input_id,
+                        token_ids=np.array(
+                            [
+                                token_output.token
+                                for token_output in self.res[input_id]
+                            ]
+                        ),
+                        logprobs=np.array(
+                            [
+                                token_output.log_prob
+                                for token_output in self.res[input_id]
+                            ]
+                        ),
+                        prompt_token_ids=self.res_prompt_tokens[input_id],
+                        prompt_logp=self.res_prompt_logp[input_id],
+                    )
+                )
 
     ### DEBUGGING PURPOSE CODE ###
     @staticmethod
@@ -799,12 +825,12 @@ class ReplicaWorker:
 
         if self.enable_batch_prefill:
             # Calculate log_prob
-            for i, (first_token, slot) in enumerate(prefill_result):
+            for i, (first_token, slot, prompt_logp) in enumerate(prefill_result):
                 first_token, log_prob = self._jitted_log_prob_and_slice_token(first_token, self.decode_state, slot)
-                prefill_result[i] = (first_token, log_prob, slot)
+                prefill_result[i] = (first_token, log_prob, slot, prompt_logp)
 
         # Process each prefill result
-        for i, (first_token, log_prob, slot) in enumerate(prefill_result):
+        for i, (first_token, log_prob, slot, prompt_logp) in enumerate(prefill_result):
             
             self.slot_to_id[slot] = prompt_ids[i]
             
@@ -813,11 +839,12 @@ class ReplicaWorker:
             with jax.profiler.TraceAnnotation("convert_to_numpy"):
                 first_token = np.array(first_token)
                 log_prob = np.array(log_prob)
+                prompt_logp = np.array(prompt_logp)
             end_time = time.time()
             max_logging.log(f"Replica worker {self.worker_id}: convert to numpy in Prefill in {end_time - start_time} seconds")
 
             self.detokenize_backlog.put_nowait(
-                (first_token, log_prob, True, prompt_ids[i], slot)
+                (first_token, log_prob, True, prompt_ids[i], slot, prompt_logp)
             )
 
     def decode(self):
@@ -851,6 +878,7 @@ class ReplicaWorker:
                 False,
                 0,
                 0,
+                None,
             )
         )
 
@@ -877,7 +905,7 @@ class ReplicaWorker:
 
             # Get next item from queue with timeout
             try:
-                result_tokens, log_prob, is_first_token, row_id, slot = (
+                result_tokens, log_prob, is_first_token, row_id, slot, prompt_logp = (
                     self.detokenize_backlog.get(timeout=0.01)
                 )
             except queue.Empty:
@@ -889,7 +917,7 @@ class ReplicaWorker:
             start_time = time.time()
             if is_first_token:
                 should_terminate = self.emit_token(
-                    row_id, int(result_tokens), int(log_prob)
+                    row_id, int(result_tokens), log_prob, prompt_logp=prompt_logp
                 )
                 if should_terminate:
                     newly_empty.append(slot)
@@ -901,7 +929,7 @@ class ReplicaWorker:
                         log_prob_at_slot = log_prob[decode_step][slot]
                         result_tokens_at_slot = result_tokens[decode_step][slot]
                         should_terminate = self.emit_token(
-                            id_, int(result_tokens_at_slot), int(log_prob_at_slot)
+                            id_, int(result_tokens_at_slot), log_prob_at_slot
                         )
                         if should_terminate:
                             newly_empty.append(slot)
@@ -913,7 +941,7 @@ class ReplicaWorker:
             end_time = time.time()
             max_logging.log(f"replica worker {self.worker_id}: detokenize in {end_time - start_time} seconds")
 
-    def emit_token(self, prompt_id, result_token: int, log_prob, slot: int = None):
+    def emit_token(self, prompt_id, result_token: int, log_prob, prompt_logp = None, ):
         """Adds the token to the results for the specified prompt ID and
         determines if generation should terminate.
 
@@ -936,7 +964,8 @@ class ReplicaWorker:
             return True
 
         index = len(self.res[prompt_id])
-
+        
+        self.res_prompt_logp[prompt_id].append(prompt_logp)
         self.res[prompt_id].append(TokenOutput(result_token, log_prob))
 
         return (result_token in self.eos_ids) or (index + 1 == self.max_decode_length)
@@ -1100,38 +1129,20 @@ class OfflineEngine:
             data_queue.put_nowait(row)
 
         # Start inference on all replica workers
-        results = {}
+        completion_outputs = {}
         for i in range(self.dp):
             self.replica_workers[i].start_inference(data_queue, desc)
         
         # Wait for all workers to complete
         for i in range(self.dp):
-            replica_results = self.replica_workers[i].ensure_inference_finished_and_return_results()
-            results.update(replica_results)
+            replica_completion_outputs = self.replica_workers[i].ensure_inference_finished_and_return_results()
+            completion_outputs.update({replica_completion_outputs[i].index: replica_completion_outputs[i] for i in range(len(replica_completion_outputs))})
             max_logging.log(f"replica worker {i} stopped")
-
-        # Return CompletionOutput objects
-        completion_outputs = []
-        with jax.profiler.TraceAnnotation("offline_engine.batch_inference.return_final_output"):
-            for input_data in data:
-                completion_outputs.append(
-                    CompletionOutput(
-                        index=input_data.id,
-                        token_ids=np.array(
-                            [
-                                token_output.token
-                                for token_output in results[input_data.id]
-                            ]
-                        ),
-                        logprobs=np.array(
-                            [
-                                token_output.log_prob
-                                for token_output in results[input_data.id]
-                            ]
-                        ),
-                    )
-                )
-        return completion_outputs
+        
+        sorted_completion_outputs = []
+        for input_data in data:
+            sorted_completion_outputs.append(completion_outputs[input_data.id])
+        return sorted_completion_outputs
 
     def pad_data(self, data: List[InputData]) -> List[InputData]:
         """For each input, pad it to the next length in self.prefill_lengths

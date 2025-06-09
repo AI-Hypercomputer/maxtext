@@ -712,7 +712,7 @@ class MaxEngine(engine_api.Engine):
         "tokens": first_generated_tokens,
     }, result
 
-  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_prompts",))
+  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("num_prompts", "return_prompt_logp"))
   def prefill_concat(
       self,
       *,
@@ -726,6 +726,7 @@ class MaxEngine(engine_api.Engine):
       num_prompts: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
+      return_prompt_logp: bool = False,
   ) -> Tuple[Any, PackedPrefix, List[engine_api.ResultTokens]]:
     """Computes a kv-cache for a new packed generate request, which is a
     concatenation of several shorter prompts. Experimentation shows that
@@ -770,6 +771,7 @@ class MaxEngine(engine_api.Engine):
       )
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
+    prompt_logp = inference_utils.log_prob_of_chosen_token(flat_logits, input_tokens)
 
     def process_packed_logits_and_caches(packed_flat_logits, idx):
       next_pos = jnp.full((1, 1), true_lengths[idx], dtype=jnp.int32)
@@ -821,6 +823,8 @@ class MaxEngine(engine_api.Engine):
         prefill_results[k].append(v)
       first_tokens.append(first_token)
     prefill_results = {k: jnp.stack(v) for k, v in prefill_results.items()}
+    if return_prompt_logp:
+      prefill_results["prompt_logp"] = prompt_logp
     return cache, prefill_results, first_tokens
 
   # Public non-JIT generate method that updates page state
