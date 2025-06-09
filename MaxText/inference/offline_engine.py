@@ -102,8 +102,6 @@ class CompletionOutput:
     index: int
     token_ids: jax.Array
     logprobs: jax.Array
-    prompt_token_ids: jax.Array
-    prompt_logp: jax.Array
 
 @dataclasses.dataclass
 class TokenOutput:
@@ -703,7 +701,7 @@ class ReplicaWorker:
                 input_true_length=row.true_length,
                 prefill_done=self.prefill_done,
             )
-            self.res_prompt_tokens[row.id].append(row.tokens[:row.true_length])
+            self.res_prompt_tokens[row.id] = row.tokens[:row.true_length]
 
             # self.simple_prefill(
             #     model_params=self.params,
@@ -738,20 +736,19 @@ class ReplicaWorker:
                 self.completion_outputs.append(
                     CompletionOutput(
                         index=input_id,
-                        token_ids=np.array(
-                            [
+                        token_ids=np.concatenate((self.res_prompt_tokens[input_id].squeeze(), 
+                            np.array([
                                 token_output.token
                                 for token_output in self.res[input_id]
-                            ]
-                        ),
-                        logprobs=np.array(
-                            [
+                            ]).squeeze()
+                        )),
+                        logprobs=np.concatenate((
+                            self.res_prompt_logp[input_id].squeeze(),
+                            np.array([
                                 token_output.log_prob
                                 for token_output in self.res[input_id]
-                            ]
-                        ),
-                        prompt_token_ids=self.res_prompt_tokens[input_id],
-                        prompt_logp=self.res_prompt_logp[input_id],
+                            ]).squeeze()
+                        ))
                     )
                 )
 
@@ -842,7 +839,6 @@ class ReplicaWorker:
                 prompt_logp = np.array(prompt_logp)
             end_time = time.time()
             max_logging.log(f"Replica worker {self.worker_id}: convert to numpy in Prefill in {end_time - start_time} seconds")
-
             self.detokenize_backlog.put_nowait(
                 (first_token, log_prob, True, prompt_ids[i], slot, prompt_logp)
             )
@@ -964,8 +960,8 @@ class ReplicaWorker:
             return True
 
         index = len(self.res[prompt_id])
-        
-        self.res_prompt_logp[prompt_id].append(prompt_logp)
+        if prompt_logp is not None:
+            self.res_prompt_logp[prompt_id] = prompt_logp
         self.res[prompt_id].append(TokenOutput(result_token, log_prob))
 
         return (result_token in self.eos_ids) or (index + 1 == self.max_decode_length)
