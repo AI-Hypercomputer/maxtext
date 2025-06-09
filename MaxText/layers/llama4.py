@@ -278,6 +278,7 @@ class Llama4MultiModalProjector(nn.Module):
   """
 
   config: Config
+  mesh: Mesh
 
   def setup(self):
     cfg = self.config
@@ -693,3 +694,38 @@ class Llama4VisionEncoder(nn.Module):
       )
 
     return hidden_states
+
+
+class Llama4VisionModel(nn.Module):
+  config: Config
+  mesh: Mesh
+
+  @nn.compact
+  def __call__(
+      self,
+      pixel_values: Array,
+      output_attentions: Optional[bool] = None,
+      output_hidden_states: Optional[bool] = None,
+      return_dict: Optional[bool] = None,
+      deterministic: Optional[bool] = False,
+  ) -> Array:
+    """Forward pass of the Llama4 vision model.
+
+    Args:
+      inputs: Input tensor of shape [batch_size, channels, img, img]
+      deterministic: Whether to use deterministic mode (disables dropout)
+
+    Returns:
+      Final hidden states from the vision encoder
+    """
+    cfg = self.config
+
+    b, t, c, h, w = pixel_values.shape
+    pixel_values = jnp.reshape(pixel_values, [b * t, c, h, w])
+
+    # Unfold convolution to extract patches
+    hidden_states = Llama4UnfoldConvolution(config=cfg)(pixel_values)
+
+    hidden_states = Llama4VisionPixelShuffleMLP(config=cfg)(hidden_states)
+
+    return hidden_states  # [batch_size, num_patches, hidden_size_for_vit]
