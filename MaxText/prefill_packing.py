@@ -174,6 +174,11 @@ class BatchedPrefillProcessor:
     self.buckets = {}
     self.max_batch_size = max_batch_size
     self.auto_layout_supported = auto_layout_supported
+    self.jitted_process_batch = jax.jit(
+    self._process_batch, 
+    static_argnames=("num_prompts", "padded_length", "return_prompt_logp"), 
+    donate_argnames=("decode_state"))
+
 
   def aot_compile(self, params: Params, input_padding: int, capacity: int, num_prompts: int):
     """Ahead-of-time compile prefill processing routines."""
@@ -271,10 +276,7 @@ class BatchedPrefillProcessor:
     offsets = zero_padded(offsets, self.max_batch_size)
     lengths = zero_padded(lengths, self.max_batch_size)
     if not self.auto_layout_supported:
-      first_tokens, decode_state = jax.jit(
-        self._process_batch, 
-        static_argnames=("num_prompts", "padded_length", "return_prompt_logp"), 
-        donate_argnames=("decode_state"))( 
+      first_tokens, decode_state = self.jitted_process_batch( 
               model_params,
               tok_ids,
               slots,
@@ -302,9 +304,12 @@ class BatchedPrefillProcessor:
     
 
     prefill_result = []
+    prompt_logp_numpy=None
+    if return_prompt_logp:
+      prompt_logp_numpy = np.array(decode_state["prompt_logp"])
     for i in range(bucket.count):
       if return_prompt_logp:
-        prompt_logp = decode_state["prompt_logp"][:, offsets[i]:offsets[i] + lengths[i]]
+        prompt_logp = prompt_logp_numpy[:, offsets[i]:offsets[i] + lengths[i]]
         prefill_result.append((first_tokens[i], bucket.slots[i], prompt_logp))
       else:
         prefill_result.append((first_tokens[i], bucket.slots[i]))
