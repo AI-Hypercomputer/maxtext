@@ -47,21 +47,20 @@ def init_pyconfig(**kwargs):
         "run_name": "test",
         # Parallelism
         "per_device_batch_size": 4,
-        "ici_data_parallelism": 1,
-        "ici_fsdp_parallelism": 1,
-        "ici_tensor_parallelism": -1,  # Use TP
+        "ici_data_parallelism": 4,
+        "ici_tensor_parallelism": 8, 
         # Inference
         "max_prefill_predict_length": 512,
         "max_target_length": 512 + 8,
-        "return_log_prob": True,
+        "return_log_prob": False,
         # Model
-        "model_name": "gemma2-2b",
+        # "model_name": "gemma2-2b",
         "attention": "dot_product",
         # Base model
-        # "base_emb_dim": 512,
-        # "base_num_query_heads": 32,
-        # "base_num_kv_heads": 32,
-        # "base_num_decoder_layers": 2,
+        "base_emb_dim": 128,
+        "base_num_query_heads": 8,
+        "base_num_kv_heads": 8,
+        "base_num_decoder_layers": 1,
         "scan_layers": False,
         # Quantization
         # "quantization": "int8",
@@ -90,7 +89,7 @@ max_logging.log("generating input data")
 rand_l = [random.randint(1, config.max_prefill_predict_length) for _ in range(500)]
 
 start_time = time.time()
-input_data = [np.arange(l) for l in rand_l]
+input_data = [np.arange(25) for l in rand_l]
 end_time = time.time()
 max_logging.log(f"Time taken to generate input data: {end_time - start_time} seconds")
 
@@ -144,10 +143,9 @@ def test_correctness(
     inference_engine = OfflineEngine(
         config,
         params=None,
-        enable_batch_prefill=False,
+        enable_batch_prefill=True,
         auto_layout_supported=False,
         dp=dp,
-        warm_up=False,
         rng=jax.random.PRNGKey(0),
         eos_ids=[],
     )
@@ -162,25 +160,24 @@ def test_correctness(
     if profile:
         jax.profiler.start_trace(profile_path)
 
-    start_time = time.time()
-    max_logging.log(f"Second Round. Start time: {start_time}")
-    results = inference_engine.batch_inference(input_data[:num_input])
-    end_time = time.time()
-    max_logging.log(
-        f"Second Round. Time taken to run {num_input} inference samples: {end_time - start_time} seconds"
-    )
-    tokens = 0
-    for result in results:
-        tokens += len(result.token_ids)
-    max_logging.log(f"Tokens generated: {tokens}")
-    max_logging.log(f"Tokens per second: {tokens / (end_time - start_time)}")
-    if profile:
+        start_time = time.time()
+        max_logging.log(f"Second Round. Start time: {start_time}")
+        results = inference_engine.batch_inference(input_data[:num_input])
+        end_time = time.time()
+        max_logging.log(
+            f"Second Round. Time taken to run {num_input} inference samples: {end_time - start_time} seconds"
+        )
+        tokens = 0
+        for result in results:
+            tokens += len(result.token_ids)
+        max_logging.log(f"Tokens generated: {tokens}")
+        max_logging.log(f"Tokens per second: {tokens / (end_time - start_time)}")
         jax.profiler.stop_trace()
 
 
 test_correctness(
-    dp=8,
-    num_input=8,
-    profile=True,
-    profile_path=f"gs://wenxindong-multipod-dev/trace/{date}/pathways/test_gemma_correctness_4",
+    dp=1,
+    num_input=4,
+    profile=False,
+    profile_path=f"gs://wenxindong-multipod-dev/trace/{date}/pathways/test_mesh_6",
 )  
