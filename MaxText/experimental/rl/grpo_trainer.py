@@ -775,6 +775,7 @@ def train_loop(config, config_inference, recorder, state=None):
   )
 
   running_gcs_metrics = [] if config.gcs_metrics else None
+  metrics = None
 
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
@@ -804,8 +805,12 @@ def train_loop(config, config_inference, recorder, state=None):
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       with maybe_record_goodput(recorder, GoodputEvent.DATA_LOADING):
-        example_batch = load_next_batch(data_iterator, example_batch, config)
-        example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
+        try:
+          example_batch = load_next_batch(data_iterator, example_batch, config)
+          example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
+        except Exception as e:  # pylint: disable=broad-except
+          max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
+          break
 
       check_example_batch(config, example_batch=example_batch)
       # pylint: disable=not-callable
@@ -896,20 +901,29 @@ def train_loop(config, config_inference, recorder, state=None):
       max_utils.print_mem_stats("After params initialized")
 
   if checkpoint_manager is not None:
+    if ((int(state.step) - 1) % config.checkpoint_period != 0) and (int(state.step) != 0):
+      try:
+        if save_checkpoint(
+            checkpoint_manager, int(state.step) - 1, state, config.dataset_type, data_iterator, config, force=True
+        ):
+          checkpointing.print_save_message(int(state.step) - 1, config.async_checkpointing)
+      except Exception:  # pylint: disable=broad-except
+        max_logging.log(f"Checkpoint already saved for step {int(state.step)-1}.")
+
     checkpoint_manager.wait_until_finished()
   metric_logger.write_metrics(running_gcs_metrics, metrics, config.steps - 1)  # final step metrics
   max_utils.close_summary_writer(writer)
-
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    compiled = p_train_step.lower(state, example_batch, rng).compile()
-    compiled_stats = compiled.memory_analysis()
-    if compiled_stats is not None:
-      max_logging.log(
-          f"Output size: {compiled_stats.output_size_in_bytes}, "
-          f"temp size: {compiled_stats.temp_size_in_bytes}, "
-          f"argument size: {compiled_stats.argument_size_in_bytes}, "
-          f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
-      )
+  if example_batch:
+    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      compiled = p_train_step.lower(state, example_batch, rng).compile()
+      compiled_stats = compiled.memory_analysis()
+      if compiled_stats is not None:
+        max_logging.log(
+            f"Output size: {compiled_stats.output_size_in_bytes}, "
+            f"temp size: {compiled_stats.temp_size_in_bytes}, "
+            f"argument size: {compiled_stats.argument_size_in_bytes}, "
+            f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
+        )
   return state
 
 
