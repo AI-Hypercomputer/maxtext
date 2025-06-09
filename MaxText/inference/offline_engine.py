@@ -30,9 +30,7 @@ Example usage:
 
 Notes:
     - Prefill packing is only supported with scan_layers=False
-    - DO NOT add print statements in the inference loop as it will
-      introduce non-deterministic behavior due to the background
-      detokenization thread.
+    - auto_layout_supported is not supported on Pathways.
 """
 
 import os
@@ -114,23 +112,6 @@ class TokenOutput:
     log_prob: float
 
 
-@dataclasses.dataclass
-class EventCounter:
-    """Class for tracking statistics during inference.
-
-    Attributes:
-        input: Number of input sequences processed
-        prefill: Number of prefill operations completed
-        decode: Number of decode operations completed
-        detokenize: Number of sequences completely detokenized
-    """
-
-    input: int
-    prefill: int
-    decode: int
-    detokenize: int
-
-
 class SafeThead(threading.Thread):
     """Thread class with exception handling to prevent silent failures."""
 
@@ -186,13 +167,14 @@ class PrefillHelper:
             self._processor = PrefillProcessor(engine)
         elif type == PrefillType.BATCH:
             self._batch_processor = BatchedPrefillProcessor(
-                engine=engine, max_batch_size=batch_prefill_max_batch_size
+                engine=engine, max_batch_size=batch_prefill_max_batch_size, auto_layout_supported=auto_layout_supported
             )
             # Also create a standard processor for fallback cases
             self._processor = PrefillProcessor(engine)
         else:
             raise ValueError(f"Invalid prefill type: {type}")
 
+    ## AOT compile logic is yet to be tested.###
     def aot_compile(
         self,
         params: Params,
@@ -269,11 +251,20 @@ class PrefillHelper:
                 params, tokens, 0, max_length, decode_state
             )
         return decode_state
-    
-    # TODO: clean up this code logic. 
+
+    # TODO: clean up this code logic.
     @staticmethod
-    @functools.partial(jax.jit, static_argnums=(6,7), donate_argnums=(4,))
-    def _jitted_process(params, tokens, slot, true_length, decode_state, rng, processor_fn, auto_layout_supported=False):
+    @functools.partial(jax.jit, static_argnums=(6, 7), donate_argnums=(4,))
+    def _jitted_process(
+        params,
+        tokens,
+        slot,
+        true_length,
+        decode_state,
+        rng,
+        processor_fn,
+        auto_layout_supported=False,
+    ):
         if auto_layout_supported:
             first_token, decode_state = processor_fn(
                 params,
@@ -294,7 +285,7 @@ class PrefillHelper:
             )
         log_prob = inference_utils.log_prob_of_chosen_token(
             decode_state["logits"][slot], decode_state["tokens"][slot]
-        ) 
+        )
 
         # Shapes: (1,), (1,)
         return first_token.data[:, 0], log_prob, decode_state
@@ -322,14 +313,17 @@ class PrefillHelper:
             input_true_length: Actual length of the input before padding
             prefill_done: Callback function called when prefill completes
         """
-        start_time = time.time()
         padded_length = len(input_tokens_padded)
         # Use default processor if configured or if input is already at max length
         if (
             self._type == PrefillType.DEFAULT
             or padded_length == self.max_prefill_length
         ):
-            prefill_fn = self._processor.process if self.auto_layout_supported else self._processor._process
+            prefill_fn = (
+                self._processor.process
+                if self.auto_layout_supported
+                else self._processor._process
+            )
             first_token, log_prob, decode_state = self._jitted_process(
                 model_params,
                 input_tokens_padded,
@@ -340,7 +334,9 @@ class PrefillHelper:
                 prefill_fn,
                 self.auto_layout_supported,
             )
-            prefill_done([(first_token, log_prob, decode_slot)], [input_id], decode_state)
+            prefill_done(
+                [(first_token, log_prob, decode_slot)], [input_id], decode_state
+            )
         # Use batch processor for inputs that can benefit from prefill packing
         elif self._type == PrefillType.BATCH:
             self._batch_processor.process(
@@ -352,11 +348,6 @@ class PrefillHelper:
                 padded_length,
                 self.max_prefill_length,
                 prefill_done,
-            )
-        end_time = time.time()
-        if DEBUG:
-            max_logging.log(
-                f"Time taken to run prefill: {end_time - start_time} seconds"
             )
 
     def finalize(
@@ -400,7 +391,7 @@ class ReplicaWorker:
         max_decode_length: int,
         batch_prefill_max_batch_size: int,
         worker_id: int = 0,
-        is_pw_reshard: bool = True, 
+        is_pw_reshard: bool = True,
         auto_layout_supported: bool = False,
         run_as_a_thread=False,
         rng=None,
@@ -463,6 +454,10 @@ class ReplicaWorker:
         self.devices = devices
         self.is_pw_reshard = is_pw_reshard
         self.enable_batch_prefill = enable_batch_prefill
+        if self.enable_batch_prefill:
+            self.prefill_type = PrefillType.BATCH
+        else:
+            self.prefill_type = PrefillType.DEFAULT
         self.prefill_lengths = prefill_lengths
         self.max_prefill_length = self.prefill_lengths[-1]
         self.max_decode_length = max_decode_length
@@ -479,13 +474,11 @@ class ReplicaWorker:
             self.rng = rng
         # Thread management
         self.worker_thread = None
-        self.warm_up_thread = None
         self.init_thread = None
         self.running = False
 
         # State management
         self.detokenize_backlog = queue.Queue()
-        self.counter = EventCounter(input=0, prefill=0, decode=0, detokenize=0)
         self.empty_decode_slots: List[int] = []
         self.slot_to_id: Dict[int, int] = {}
         self.decode_state = None
@@ -517,51 +510,38 @@ class ReplicaWorker:
             self.init_thread = None
 
     def _init_impl(self):
+
+        start_time = time.time()
         # Initialize MaxEngine(s)
         self.params, self.engine = self._init_engine(self.params)
         self.tokenizer = self._init_tokenizer()
         self.decode_batch_size = self.engine.max_concurrent_decodes
 
         # Create a Prefill Helper
-        if self.enable_batch_prefill:
-            self.prefill_helper = PrefillHelper(
-                PrefillType.BATCH,
-                self.engine,
-                self.prefill_lengths,
-                self.batch_prefill_max_batch_size,
-                self.auto_layout_supported,
-                rng=self.rng,
-            )
-        else:
-            self.prefill_helper = PrefillHelper(
-                PrefillType.DEFAULT,
-                self.engine,
-                self.prefill_lengths,
-                self.auto_layout_supported,
-                rng=self.rng,
-            )
+        self.prefill_helper = PrefillHelper(
+            self.prefill_type,
+            self.engine,
+            self.prefill_lengths,
+            self.batch_prefill_max_batch_size,
+            self.auto_layout_supported,
+            rng=self.rng,
+        )
 
         # Initialize decode state and generate function
+        start_time_decode_state = time.time()
         if self.auto_layout_supported:
-            start_time = time.time()
             self.generate_fn, self.params, init_decode_state_fn = (
                 self.engine.aot_compile(self.params, pass_rng_shape=True)
-            )
-            end_time = time.time()
-            max_logging.log(
-                f"time taken to compile generate_fn: {end_time - start_time} seconds"
             )
             self.decode_state = init_decode_state_fn(self.rng)
         else:
             self.generate_fn = self.engine.generate
-            start_time = time.time()
             self.decode_state = self.engine.init_decode_state(self.rng)
-            end_time = time.time()
-            max_logging.log(
-                f"time taken to initialize decode_state: {end_time - start_time} seconds"
-            )
-
-        self.generate_fn = self.engine.generate
+            
+        max_logging.log(
+            f"time taken to initialize decode_state: {time.time() - start_time_decode_state} seconds"
+        )
+        max_logging.log(f"Initialized replica worker {self.worker_id} in {time.time() - start_time} seconds")
 
     def _init_engine(self, params):
         """Initialize the MaxEngine.
@@ -577,7 +557,7 @@ class ReplicaWorker:
         params = engine.load_params(params=params, rng=self.rng)
         end_time = time.time()
         max_logging.log(
-            f"time taken to initialize engine: {end_time - start_time} seconds"
+            f"Time taken to initialize engine: {end_time - start_time} seconds"
         )
         return params, engine
 
@@ -594,48 +574,13 @@ class ReplicaWorker:
             self.eos_ids = [self.tokenizer.eos_id]
         return self.tokenizer
 
-    def warm_up_impl(self):
-        """Warm up the engine by compiling and running on dummy data."""
-        self.decode_state = self.prefill_helper.aot_compile(
-            self.params, self.decode_state
-        )
-        assert self.decode_state is not None
-
-        for i in range(3):
-            if DEBUG:
-                max_logging.log(f"Warm up generate function ({i + 1}/3)")
-            self.decode_state, result_tokens = self.generate_fn(
-                self.params, self.decode_state, self.rng
-            )
-
-    def warm_up(self):
-        """Start warm-up process, optionally in a separate thread."""
+    def update_params(
+        self,
+        params: Params,
+        destination_sharding: jax.sharding.NamedSharding,
+        is_pw_reshard: bool = True,
+    ):
         self.ensure_init_finished()
-        if self.run_as_a_thread:
-            self.warm_up_thread = SafeThead(
-                target=self.warm_up_impl,
-                name=f"replica_worker_{self.worker_id}",
-            )
-            self.warm_up_thread.start()
-        else:
-            self.warm_up_impl()
-
-    def ensure_warm_up_finished(self):
-        """Ensure the warm up thread is finished"""
-        if self.warm_up_thread is not None:
-            self.warm_up_thread.join()
-            self.warm_up_thread = None
-
-    def update_impl(self, params: Params, destination_sharding: jax.sharding.NamedSharding, is_pw_reshard: bool):
-        if is_pw_reshard:
-            with (jax.transfer_guard_device_to_host("disallow_explicit"), jax.transfer_guard_host_to_device("disallow_explicit")):
-                self.params = pathwaysutils_reshard.reshard(params, destination_sharding, cache_resharding_plans=True)
-        else:
-            self.params = jax.device_put(params, destination_sharding)
-
-    def update_params(self, params: Params, destination_sharding: jax.sharding.NamedSharding, is_pw_reshard: bool = True):
-        self.ensure_init_finished()
-        self.ensure_warm_up_finished()
         if self.run_as_a_thread:
             self.update_thread = SafeThead(
                 target=self.update_impl,
@@ -646,17 +591,31 @@ class ReplicaWorker:
         else:
             self.update_impl(params, destination_sharding, is_pw_reshard)
 
-        
-
     def ensure_update_finished(self):
         if self.update_thread is not None:
             self.update_thread.join()
             self.update_thread = None
 
+    def update_impl(
+        self,
+        params: Params,
+        destination_sharding: jax.sharding.NamedSharding,
+        is_pw_reshard: bool,
+    ):
+        if is_pw_reshard:
+            with (
+                jax.transfer_guard_device_to_host("disallow_explicit"),
+                jax.transfer_guard_host_to_device("disallow_explicit"),
+            ):
+                self.params = pathwaysutils_reshard.reshard(
+                    params, destination_sharding, cache_resharding_plans=True
+                )
+        else:
+            self.params = jax.device_put(params, destination_sharding)
+
     def start_inference(
         self,
         data_queue: queue.Queue,
-        results,
         desc: str = "",
     ):
         """Start the inference process.
@@ -667,9 +626,8 @@ class ReplicaWorker:
             desc: Description for logging
         """
         self.ensure_init_finished()
-        self.ensure_warm_up_finished()
         # self.ensure_update_finished() TODO(mohitkhatwani) might not need it
-        self.res = results
+        self.res = defaultdict(list)
         if self.run_as_a_thread:
             self.worker_thread = SafeThead(
                 target=self._start_inference,
@@ -680,35 +638,12 @@ class ReplicaWorker:
         else:
             self._start_inference(data_queue, desc)
 
-    def ensure_inference_finished(self):
+    def ensure_inference_finished_and_return_results(self):
         """Stop the inference process and wait for completion."""
         if self.worker_thread is not None:
             self.worker_thread.join()
             self.worker_thread = None
-
-    @staticmethod
-    @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(5,))
-    def _jitted_prefill(
-        engine,
-        params: Params,
-        tokens: jax.Array,
-        slot: int,
-        true_length: int,
-        decode_state: DecodeState,
-        rng: Any,
-    ) -> Tuple[engine_api.ResultTokens, DecodeState]:
-        """Prefill and insert a request."""
-
-        prefill_result, first_token = engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng)
-        decode_state = engine.insert(prefill_result, decode_state, slot)
-        log_prob = inference_utils.log_prob_of_chosen_token(
-            decode_state["logits"][slot], decode_state["tokens"][slot]
-        ) 
-        return first_token.data[:, 0], log_prob, decode_state
-
-    def simple_prefill(self, model_params, decode_state, decode_slot, input_id, input_tokens_padded, input_true_length, prefill_done):
-        first_token, log_prob, decode_state = self._jitted_prefill(self.engine, model_params, input_tokens_padded, decode_slot, input_true_length, decode_state, self.rng)        
-        prefill_done([(first_token, log_prob, decode_slot)], [input_id], decode_state)
+        return self.res
 
     def _start_inference(
         self,
@@ -724,10 +659,8 @@ class ReplicaWorker:
         Returns:
             Dictionary mapping input ids to output token sequences
         """
-        if DEBUG:
-            max_logging.log(f"Replica {self.worker_id}. Starting inference")
+        max_logging.log(f"Replica {self.worker_id}. Starting inference")
         # Reset state
-        self.counter = EventCounter(input=0, prefill=0, decode=0, detokenize=0)
         self.empty_decode_slots = list(range(self.decode_batch_size))
         self.slot_to_id = {}
 
@@ -744,7 +677,7 @@ class ReplicaWorker:
         # Process each input
         while not data_queue.empty():
             try:
-                row = data_queue.get(timeout=0.01)
+                row = data_queue.get()
             except queue.Empty:
                 break
 
@@ -754,19 +687,9 @@ class ReplicaWorker:
 
             # 2. Get an available slot
             slot = self.empty_decode_slots.pop()
+            
             # 3. Prefill and insert kv cache
-            # TODO: This function is recompiling 
-            # self.prefill_helper.process(
-            #     model_params=self.params,
-            #     decode_state=self.decode_state,
-            #     decode_slot=slot,
-            #     input_id=row.id,
-            #     input_tokens_padded=row.tokens,
-            #     input_true_length=row.true_length,
-            #     prefill_done=self.prefill_done,
-            # )
-
-            self.simple_prefill( 
+            self.prefill_helper.process(
                 model_params=self.params,
                 decode_state=self.decode_state,
                 decode_slot=slot,
@@ -775,7 +698,16 @@ class ReplicaWorker:
                 input_true_length=row.true_length,
                 prefill_done=self.prefill_done,
             )
-            
+
+            # self.simple_prefill(
+            #     model_params=self.params,
+            #     decode_state=self.decode_state,
+            #     decode_slot=slot,
+            #     input_id=row.id,
+            #     input_tokens_padded=row.tokens,
+            #     input_true_length=row.true_length,
+            #     prefill_done=self.prefill_done,
+            # )
 
         # 4. Flush any pending inputs in batch prefill mode
         self.prefill_helper.finalize(self.params, self.decode_state, self.prefill_done)
@@ -786,24 +718,71 @@ class ReplicaWorker:
 
         # Wait for detokenization to complete
         self.running = False
-        if DEBUG:
-            max_logging.log(
-                f"replica worker {self.worker_id}: joining detokenize thread"
-            )
-        detokenize_thread.join()
-        if DEBUG:
-            max_logging.log(
-                f"replica worker {self.worker_id}: detokenize thread joined"
-            )
+        max_logging.log(
+            f"Replica worker {self.worker_id}: joining detokenize thread. There are {self.detokenize_backlog.qsize()} elements in the backlog"
+        )
+        start_time = time.time()
+        with jax.profiler.TraceAnnotation("Flushing detokenization thread"):
+            detokenize_thread.join()
+        end_time = time.time()
+        max_logging.log(f"Replica worker {self.worker_id}: detokenize thread joined in {end_time - start_time} seconds")
 
-        # Log completion statistics
-        if DEBUG:
-            max_logging.log(
-                f"Summary {desc}: prefills={self.counter.prefill}, decodes={self.counter.decode}, detokens={self.counter.detokenize} completed."
-            )
         return self.res
 
+    ### DEBUGGING PURPOSE CODE ###
+    @staticmethod
+    @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(5,))
+    def _jitted_simple_prefill(
+        engine,
+        params: Params,
+        tokens: jax.Array,
+        slot: int,
+        true_length: int,
+        decode_state: DecodeState,
+        rng: Any,
+    ) -> Tuple[engine_api.ResultTokens, DecodeState]:
+        """Prefill and insert a request."""
+
+        prefill_result, first_token = engine.prefill(
+            params=params, padded_tokens=tokens, true_length=true_length, rng=rng
+        )
+        decode_state = engine.insert(prefill_result, decode_state, slot)
+        log_prob = inference_utils.log_prob_of_chosen_token(
+            decode_state["logits"][slot], decode_state["tokens"][slot]
+        )
+        return first_token.data[:, 0], log_prob, decode_state
+
+    def simple_prefill(
+        self,
+        model_params,
+        decode_state,
+        decode_slot,
+        input_id,
+        input_tokens_padded,
+        input_true_length,
+        prefill_done,
+    ):
+        first_token, log_prob, decode_state = self._jitted_simple_prefill(
+            self.engine,
+            model_params,
+            input_tokens_padded,
+            decode_slot,
+            input_true_length,
+            decode_state,
+            self.rng,
+        )
+        prefill_done([(first_token, log_prob, decode_slot)], [input_id], decode_state)
+
+    ### DEBUGGING PURPOSE CODE ###
+    @staticmethod
+    @jax.jit
+    def _jitted_log_prob_and_slice_token(token, decode_state, slot):
         
+        log_prob = inference_utils.log_prob_of_chosen_token(
+            decode_state["logits"][slot], decode_state["tokens"][slot]
+        )
+        return token.data[:, 0], log_prob
+
     def prefill_done(self, prefill_result, prompt_ids, decode_state):
         """Callback function called when prefill completes.
         This function adds the prefill tokens to the detokenization queue,
@@ -814,18 +793,66 @@ class ReplicaWorker:
             prompt_ids: List of prompt IDs
             decode_state: Updated decode state
         """
-        if DEBUG:
-            max_logging.log("Replica {}. Prefill done".format(self.worker_id))
+        max_logging.log("Replica {}. Prefill done".format(self.worker_id))
         # Update decode state
         self.decode_state = decode_state
+
+        if self.enable_batch_prefill:
+            # Calculate log_prob
+            for i, (first_token, slot) in enumerate(prefill_result):
+                first_token, log_prob = self._jitted_log_prob_and_slice_token(first_token, self.decode_state, slot)
+                prefill_result[i] = (first_token, log_prob, slot)
+
         # Process each prefill result
         for i, (first_token, log_prob, slot) in enumerate(prefill_result):
-            self.counter.prefill += 1
+            
             self.slot_to_id[slot] = prompt_ids[i]
+            
             # Add token to detokenization queue
+            start_time = time.time()
+            with jax.profiler.TraceAnnotation("convert_to_numpy"):
+                first_token = np.array(first_token)
+                log_prob = np.array(log_prob)
+            end_time = time.time()
+            max_logging.log(f"Replica worker {self.worker_id}: convert to numpy in Prefill in {end_time - start_time} seconds")
+
             self.detokenize_backlog.put_nowait(
                 (first_token, log_prob, True, prompt_ids[i], slot)
             )
+
+    def decode(self):
+        """Run decode steps on current decoder state.
+
+        Performs `self.min_decode_steps` decode operations
+        and puts results in the detokenization queue.
+        """
+
+        buffer = []
+        for i in range(self.min_decode_steps):
+            # Generate next tokens
+            self.decode_state, result_tokens, log_prob = self._jitted_generate_fn(
+                self.params, self.decode_state, self.rng
+            )
+            # Add token to detokenization queue
+            start_time = time.time()
+            with jax.profiler.TraceAnnotation("convert_to_numpy"):
+                result_tokens = np.array(result_tokens)
+                log_prob = np.array(log_prob)
+            end_time = time.time()
+            max_logging.log(f"Replica worker {self.worker_id}: convert to numpy in Decode in {end_time - start_time} seconds")
+
+            buffer.append((result_tokens, log_prob))
+
+        # Add results to detokenization queue
+        self.detokenize_backlog.put_nowait(
+            (
+                [result_token for result_token, _ in buffer],
+                [log_prob for _, log_prob in buffer],
+                False,
+                0,
+                0,
+            )
+        )
 
     @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(2,))
     def _jitted_generate_fn(self, params, decode_state, rng):
@@ -835,68 +862,7 @@ class ReplicaWorker:
         logps = inference_utils.log_prob_of_chosen_token(
             decode_state["logits"], decode_state["tokens"]
         )
-
-        tokens_gathered = jax.device_get(result_tokens.data[:, 0])
-        logps_gathered = jax.device_get(logps) 
-
-        return decode_state, tokens_gathered, logps_gathered
-
-    def _scan_generate_step(self, carry, _):
-        rng, decode_state = carry
-        rng, rng_generate = jax.random.split(rng)
-        decode_state, result_tokens = self.engine.generate(
-            self.params, decode_state, rng=rng_generate
-        )
-        logps = inference_utils.log_prob_of_chosen_token(
-            decode_state["logits"], decode_state["tokens"]
-        )
-        return (rng, decode_state), (result_tokens.data[:, 0], logps)
-
-    @functools.partial(jax.jit, static_argnums=(0,), donate_argnums=(1,))
-    def _jitted_scan_generate_step(self, decode_state):
-        (_, decode_state), (all_tokens, all_logps) = jax.lax.scan(
-            self._scan_generate_step,
-            init=(self.rng, decode_state),
-            xs=None,
-            length=self.min_decode_steps,
-        )
-        jax.lax.with_sharding_constraint(all_tokens, NamedSharding(self.mesh, P(None)))
-        jax.lax.with_sharding_constraint(all_logps, NamedSharding(self.mesh, P(None)))
-        return decode_state, all_tokens, all_logps
-    
-    def decode(self):
-        """Run decode steps on current decoder state.
-
-        Performs `self.min_decode_steps` decode operations
-        and puts results in the detokenization queue.
-        """
-
-        # DO NOT SUBMIT. Scan version
-        # self.decode_state, all_tokens, all_logps = self._jitted_scan_generate_step(self.decode_state)
-        # all_logps.block_until_ready()
-        # self.detokenize_backlog.put_nowait((all_tokens, all_logps, False, 0, 0))
-        # self.counter.decode += 1
-        
-
-        ### DO NOT SUBMIT. Non-scan version ###
-        buffer = []
-        for i in range(self.min_decode_steps):
-            # Generate next tokens
-            start_time = time.time()
-            self.decode_state, result_tokens, log_prob = self._jitted_generate_fn(
-                self.params, self.decode_state, self.rng
-            )
-            with jax.profiler.TraceAnnotation("log_prob_block_until_ready"):
-                log_prob.block_until_ready()
-            end_time = time.time()
-            if DEBUG:
-                max_logging.log("Replica {}. Time taken to run generate_fn: {} seconds".format(self.worker_id, end_time - start_time))
-            buffer.append((result_tokens, log_prob))
-
-        # Add results to detokenization queue
-        self.detokenize_backlog.put_nowait(([result_token for result_token, _ in buffer], [log_prob for _, log_prob in buffer], False, 0, 0))
-        self.counter.decode += 1
-        ### DO NOT SUBMIT. Non-scan version ends ###
+        return decode_state, result_tokens.data[:, 0], logps
 
     def detokenize(self):
         """Detokenize results and manage decode slots.
@@ -905,25 +871,22 @@ class ReplicaWorker:
         the detokenization queue, emit tokens, and free up
         decode slots when sequences complete.
         """
+        max_logging.log(f"Replica worker {self.worker_id}: starting detokenization thread")
         while self.running or not self.detokenize_backlog.empty():
             newly_empty = []
 
             # Get next item from queue with timeout
             try:
                 result_tokens, log_prob, is_first_token, row_id, slot = (
-                    self.detokenize_backlog.get(timeout=1)
+                    self.detokenize_backlog.get(timeout=0.01)
                 )
-
             except queue.Empty:
                 if not self.running:
                     break
                 continue
-
-            with jax.profiler.TraceAnnotation("convert_to_numpy"):
-                result_tokens = np.array(result_tokens)
-                log_prob = np.array(log_prob)
-
+            
             # Process generated tokens
+            start_time = time.time()
             if is_first_token:
                 should_terminate = self.emit_token(
                     row_id, int(result_tokens), int(log_prob)
@@ -931,30 +894,26 @@ class ReplicaWorker:
                 if should_terminate:
                     newly_empty.append(slot)
             else:
-
                 for decode_step in range(self.min_decode_steps):
-
                     for slot, id_ in self.slot_to_id.items():
                         if id_ is None:
                             continue
-                        with jax.profiler.TraceAnnotation("log_prob_slot"):
-                            log_prob_slot = log_prob[decode_step][slot]
-                            result_tokens_slot = result_tokens[decode_step][slot]
+                        log_prob_at_slot = log_prob[decode_step][slot]
+                        result_tokens_at_slot = result_tokens[decode_step][slot]
                         should_terminate = self.emit_token(
-                            id_, int(result_tokens_slot), int(log_prob_slot)
+                            id_, int(result_tokens_at_slot), int(log_prob_at_slot)
                         )
                         if should_terminate:
                             newly_empty.append(slot)
 
             # Update decode slots
             for slot in newly_empty:
-                self.counter.detokenize += 1
                 self.slot_to_id[slot] = None
                 self.empty_decode_slots.append(slot)
-    
-    def emit_token(
-        self, prompt_id, result_token: int, log_prob, slot: int = None
-    ):
+            end_time = time.time()
+            max_logging.log(f"replica worker {self.worker_id}: detokenize in {end_time - start_time} seconds")
+
+    def emit_token(self, prompt_id, result_token: int, log_prob, slot: int = None):
         """Adds the token to the results for the specified prompt ID and
         determines if generation should terminate.
 
@@ -999,7 +958,6 @@ class OfflineEngine:
         dp=1,
         dp_meshes=None,
         auto_layout_supported=False,
-        warm_up=False,
         rng=None,
     ):
         """Initialize the OfflineEngine.
@@ -1023,10 +981,6 @@ class OfflineEngine:
             batch_prefill_max_batch_size: Maximum number of inputs to pack
               into a single prefill. This is only used when enable_batch_prefill
               is True.
-            warm_up: Whether to precompile prefill and decode functions for
-              each length in the prefill_lengths list during initialization.
-              Alternatively compilation will be done during runtime, or through
-              directly calling the warm_up() function.
             dp: Data parallelism, number of replicas of the model to run. This
               helps to increase throughput by running multiple inference replicas
               in parallel. When setting dp>1, Pathways must be used. Either provide
@@ -1057,8 +1011,6 @@ class OfflineEngine:
         self.max_prefill_length = self.config.max_prefill_predict_length
         self.max_decode_length = self.config.max_target_length - self.max_prefill_length
         self.auto_layout_supported = auto_layout_supported
-        self.should_warm_up = warm_up
-        self._not_warmed_up = True
         if rng is None:
             self.rng = jax.random.PRNGKey(0)
         else:
@@ -1078,32 +1030,15 @@ class OfflineEngine:
 
         # Create meshes
         devices = jax.devices()
-
         if not self.dp_meshes:
-            ici_parallelism = max_utils.fill_unspecified_mesh_axes(
-                config.ici_parallelism.copy(), len(devices), "ICI"
-            )
-            # ici_parallelism =  [self.dp, 1, 1, 1, 1, 1, 1, len(devices) // self.dp, 1, 1, 1, 1]
-            devices_array = mesh_utils.create_device_mesh(
-                [self.dp, len(devices) // self.dp],
-                devices,
-                contiguous_submeshes=False,
-                allow_split_physical_axes=config.allow_split_physical_axes or False,
-            )
-            flat_devices = devices_array.flatten()
-            inference_devices = flat_devices.reshape((self.dp, len(devices) // self.dp))
-            self.dp_meshes = [
-                Mesh(devices.reshape(config.ici_parallelism), config.mesh_axes)
-                for devices in inference_devices
-            ]
+            self.dp_meshes = OfflineEngine.create_dp_meshes(devices, self.dp, self.config)
 
         # Initialize ReplicaWorkers
         run_as_a_thread = (
             self.dp > 1
         )  # No need to run worker as a thread if there is only one replica
         replica_rngs = jax.random.split(self.rng, self.dp)
-        assert replica_rngs[0].shape == self.rng.shape
-        self.replica_workers = []
+        self.replica_workers: List[ReplicaWorker] = []
         for i in range(self.dp):
             worker = ReplicaWorker(
                 config=self.config,
@@ -1111,7 +1046,7 @@ class OfflineEngine:
                 min_decode_steps=self.min_decode_steps,
                 enable_batch_prefill=self.enable_batch_prefill,
                 mesh = self.dp_meshes[i],
-                devices=np.squeeze(self.dp_meshes[i].devices),
+                devices=self.dp_meshes[i].devices.flatten(),
                 tokenizer=self.tokenizer,
                 eos_ids=self.eos_ids,
                 prefill_lengths=self.prefill_lengths,
@@ -1122,32 +1057,23 @@ class OfflineEngine:
                 run_as_a_thread=run_as_a_thread,
                 rng=replica_rngs[i],
             )
-            if i == 0:
-                worker.ensure_init_finished()
             self.replica_workers.append(worker)
-            
 
-        for replica in self.replica_workers:
-            replica.ensure_init_finished()
-
-        max_logging.log(f"Created {self.dp} replica workers")
-
+        # Skipping rebuilding the tokenizer
         self.tokenizer = self.replica_workers[0].tokenizer
-        if self.should_warm_up:
-            self.warm_up()
 
-    def warm_up(self):
-        if self._not_warmed_up:
-            """Warm up all replica workers."""
-            for i in range(self.dp):
-                self.replica_workers[i].warm_up()
-            for i in range(self.dp):
-                self.replica_workers[i].ensure_warm_up_finished()
-            self._not_warmed_up = False
-
-    def update_params(self, params: Params, parition_spec: PartitionSpec, is_pw_reshard):
+    def update_params(
+        self, params: Params, parition_spec: PartitionSpec, is_pw_reshard
+    ):
         for i in range(self.dp):
-            self.replica_workers[i].update_params(params, jax.tree_util.tree_map(lambda ps: jax.sharding.NamedSharding(self.dp_meshes[i], ps), parition_spec), is_pw_reshard)
+            self.replica_workers[i].update_params(
+                params,
+                jax.tree_util.tree_map(
+                    lambda ps: jax.sharding.NamedSharding(self.dp_meshes[i], ps),
+                    parition_spec,
+                ),
+                is_pw_reshard,
+            )
 
     def batch_inference(
         self,
@@ -1168,33 +1094,40 @@ class OfflineEngine:
 
         # Create thread-safe queue and results container
         data_queue = queue.Queue()
-        results = defaultdict(list)
 
         # Add all data to the queue
         for row in data:
             data_queue.put_nowait(row)
 
         # Start inference on all replica workers
+        results = {}
         for i in range(self.dp):
-            self.replica_workers[i].start_inference(data_queue, results, desc)
-
+            self.replica_workers[i].start_inference(data_queue, desc)
+        
         # Wait for all workers to complete
         for i in range(self.dp):
-            self.replica_workers[i].ensure_inference_finished()
+            replica_results = self.replica_workers[i].ensure_inference_finished_and_return_results()
+            results.update(replica_results)
             max_logging.log(f"replica worker {i} stopped")
 
         # Return CompletionOutput objects
         completion_outputs = []
-        with jax.profiler.TraceAnnotation("return final output"):
+        with jax.profiler.TraceAnnotation("offline_engine.batch_inference.return_final_output"):
             for input_data in data:
                 completion_outputs.append(
                     CompletionOutput(
                         index=input_data.id,
                         token_ids=np.array(
-                            [token_output.token for token_output in results[input_data.id]]
+                            [
+                                token_output.token
+                                for token_output in results[input_data.id]
+                            ]
                         ),
                         logprobs=np.array(
-                            [token_output.log_prob for token_output in results[input_data.id]]
+                            [
+                                token_output.log_prob
+                                for token_output in results[input_data.id]
+                            ]
                         ),
                     )
                 )
@@ -1277,6 +1210,28 @@ class OfflineEngine:
 
         return data
 
+    @staticmethod
+    def create_dp_meshes(devices, dp, config):
+        """Create data parallelism meshes for each replica worker."""
+        ici_parallelism = max_utils.fill_unspecified_mesh_axes(
+            config.ici_parallelism.copy(), len(devices), "ICI"
+        )
+        devices_array = mesh_utils.create_device_mesh(
+            ici_parallelism,
+            devices,
+            contiguous_submeshes=False,
+            allow_split_physical_axes=config.allow_split_physical_axes or False,
+        )
+        inference_devices = devices_array.reshape(
+            (dp, -1)
+        )
+        dp_meshes = [
+            Mesh(devices.reshape(ici_parallelism), config.mesh_axes)
+            for devices in inference_devices
+        ]
+        return dp_meshes
+
+
     def _validate_config(self):
         """Validate configuration parameters and check for incompatible settings."""
         # Check if batch prefill is compatible with scan layers
@@ -1297,11 +1252,6 @@ class OfflineEngine:
             import pathwaysutils
 
             pathwaysutils.initialize()
-
-        if self.enable_batch_prefill and not self.auto_layout_supported:
-            raise ValueError(
-                "auto_layout_supported must be True if enable_batch_prefill is True"
-            )
 
         if self.config.scan_layers:
             max_logging.log(

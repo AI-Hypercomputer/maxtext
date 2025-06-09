@@ -26,6 +26,7 @@ from MaxText.maxengine import MaxEngine
 
 import warnings
 import logging
+import functools
 
 warnings.simplefilter("ignore", category=FutureWarning)
 DecodeState = Any
@@ -167,11 +168,12 @@ class PrefillProcessor:
 class BatchedPrefillProcessor:
   """A wrapper around the APIs used by MaxEngine to do prefill and insert, provides prefill packing feature."""
 
-  def __init__(self, engine: MaxEngine, max_batch_size: int):
+  def __init__(self, engine: MaxEngine, max_batch_size: int, auto_layout_supported: bool = True):
     self.engine = engine
     self.process_batch_func = {}
     self.buckets = {}
     self.max_batch_size = max_batch_size
+    self.auto_layout_supported = auto_layout_supported
 
   def aot_compile(self, params: Params, input_padding: int, capacity: int, num_prompts: int):
     """Ahead-of-time compile prefill processing routines."""
@@ -266,18 +268,34 @@ class BatchedPrefillProcessor:
     slots = zero_padded(slots, self.max_batch_size)
     offsets = zero_padded(offsets, self.max_batch_size)
     lengths = zero_padded(lengths, self.max_batch_size)
-
-    prefill_fn = self._process_batch_compiled(model_params, input_padding, bucket.capacity, bucket.count)
-    first_tokens, decode_state = prefill_fn(
-        model_params,
-        tok_ids,
-        slots,
-        pos_ids,
-        seg_ids,
-        offsets,
-        lengths,
-        decode_state,
-    )
+    if not self.auto_layout_supported:
+      first_tokens, decode_state = jax.jit(
+        self._process_batch, 
+        static_argnames=("num_prompts", "padded_length"), 
+        donate_argnames=("decode_state"))( 
+              model_params,
+              tok_ids,
+              slots,
+              bucket.count,
+              pos_ids,
+              seg_ids,
+              offsets,
+              input_padding,
+              lengths,
+              decode_state,
+        )
+    else:
+      prefill_fn = self._process_batch_compiled(model_params, input_padding, bucket.capacity, bucket.count)
+      first_tokens, decode_state = prefill_fn(
+          model_params,
+          tok_ids,
+          slots,
+          pos_ids,
+          seg_ids,
+          offsets,
+          lengths,
+          decode_state,
+      )
 
     prefill_result = []
     for i in range(bucket.count):
