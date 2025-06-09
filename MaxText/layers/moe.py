@@ -705,6 +705,7 @@ class RoutedMoE(nn.Module):
               recv_sizes,
               axis_name=expert_axis_name,
           )
+          # TODO: This reshape should not be necessary
           intermediate_output = jnp.reshape(intermediate_output, (-1, self.config.emb_dim))
         else:
           # If bach is replicated across EP shards then each shard should send
