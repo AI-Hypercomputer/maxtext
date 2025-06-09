@@ -973,7 +973,7 @@ def rescan_train_state_params(params, source_shardings, scan_axis, layer_groups)
     compiled_stack = jax.jit(
       stack_layers,
       out_shardings=sharding[layer_name],
-      donate_argnums=tuple(range(num_layers)),
+      # donate_argnums=tuple(range(num_layers)),
     )
 
     # Collect per-layer entries for stacking
