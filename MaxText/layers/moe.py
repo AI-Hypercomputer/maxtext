@@ -651,6 +651,8 @@ class RoutedMoE(nn.Module):
               recv_sizes,
               axis_name=expert_axis_name,
           )
+          # TODO(is this reshape necesssary??)
+          x = jnp.reshape(x, (output_shape.shape[0], output_shape.shape[1]))
           global_group_sizes = lax.all_gather(group_sizes, axis_name=expert_axis_name)
           x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
               x, global_group_sizes, local_expert_size, shard_index=expert_shard_id
@@ -682,18 +684,18 @@ class RoutedMoE(nn.Module):
         original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
         if sorted_selected_experts.shape[0] != original_inputs_first_dim:
           raise ValueError("original_inputs_first_dim does not match the original tensor shape!")
-        output_shape = jnp.zeros(
-            (original_inputs_first_dim, self.config.emb_dim // self.get_tensor_parallelism_size()),
-            dtype=intermediate_output.dtype,
-        )
-        breakpoint()
-        output_shape =intermediate_output[::self.get_expert_parallelism_size(), :]
+        # output_shape = jnp.zeros(
+        #     (original_inputs_first_dim, self.config.emb_dim // self.get_tensor_parallelism_size()),
+        #     dtype=intermediate_output.dtype,
+        # )
+
         if is_batch_sharded_by_expert:
           # locally unpermute back to the original order
           local_output = jnp.take(intermediate_output, indices=jnp.argsort(local_sorted_indices), axis=0)
           input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
               jnp.transpose(all_shards_group_sizes), expert_shard_id, num_expert_parallelism
           )
+          output_shape = local_output[::self.get_expert_parallelism_size(), :]
           intermediate_output = jax.lax.ragged_all_to_all(
               local_output,
               output_shape,
@@ -703,6 +705,7 @@ class RoutedMoE(nn.Module):
               recv_sizes,
               axis_name=expert_axis_name,
           )
+          intermediate_output = jnp.reshape(intermediate_output, (-1, self.config.emb_dim))
         else:
           # If bach is replicated across EP shards then each shard should send
           # 0..local_shard_size data to the other shards and receive the local_shard data from
