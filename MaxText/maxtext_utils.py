@@ -692,13 +692,7 @@ def get_kv_cache_annotations(model, config, rng, mesh, page_state: Optional[Page
         config.global_batch_size_to_load,
         1,
     )
-    image_shape = (
-        config.global_batch_size_to_load,
-        NUM_IMAGES_PER_SEQUENCE,
-        config.image_size_for_vit,
-        config.image_size_for_vit,
-        NUM_IMAGE_CHANNELS,
-    )
+    image_shape = get_dummy_image_shape_for_init(config)
 
     model_vars = model.init(
         {"params": rng, "dropout": rng, "aqt": rng},

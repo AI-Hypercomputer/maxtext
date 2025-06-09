@@ -440,10 +440,11 @@ class MaxEngine(engine_api.Engine):
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
 
-    if self.config.use_multimodal:
-      input_images = images[jnp.newaxis, jnp.newaxis, ...]  # Add batch and sequence dimension [B, N, H, W, C]
-    else:
-      input_images = None
+    if self.config.use_multimodal and images is not None:
+      if self.config.model_name.startswith("gemma3"):
+        input_images = images[jnp.newaxis, jnp.newaxis, ...]  # Add batch and sequence dimension [B, N, H, W, C]
+      elif self.config.model_name.startswith("llama4"):
+        input_images = images[jnp.newaxis, ...]  # Add batch dimension [B, T, C, H, W]
 
     # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
     start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])

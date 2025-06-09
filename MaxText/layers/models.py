@@ -477,6 +477,8 @@ class Decoder(nn.Module):
             mask=bidirectional_mask,
         )
       # TODO(hengtaoguo): Add support for other multimodal models such as Llama4, refactor if needed
+      elif cfg.model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
+        y = y
       else:
         raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")
 
