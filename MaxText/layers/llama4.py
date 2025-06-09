@@ -696,7 +696,21 @@ class Llama4VisionModel(nn.Module):
 
   def setup(self):
     self.scale = self.config.hidden_size_for_vit**-0.5
-    print(self.scale)
+    self.num_patches = (self.config.tile_size_for_vit // self.config.patch_size_for_vit) ** 2 + 1
+    self.class_embedding = self.param(
+        "class_embedding",
+        nn.initializers.normal(stddev=self.scale),  # Or any other appropriate initializer
+        (self.config.hidden_size_for_vit,),  # Shape (hidden_size_for_vit,)
+        dtype=self.config.dtype_mm,
+    )
+    self.positional_embedding_vlm = self.param(
+        "positional_embedding_vlm",
+        nn.initializers.normal(stddev=self.scale),
+        (self.num_patches, self.config.hidden_size_for_vit),
+        dtype=self.config.dtype_mm,
+    )
+
+    print(f"Class embedding shape: {self.class_embedding.shape}")
 
   @nn.compact
   def __call__(
@@ -724,12 +738,18 @@ class Llama4VisionModel(nn.Module):
 
     # Unfold convolution to extract patches
     hidden_states = Llama4UnfoldConvolution(config=cfg)(pixel_values)
-    class_embedding = self.scale * jax.random.normal(
-        key=self.make_rng("params"), shape=(hidden_states.shape[0], 1, cfg.hidden_size_for_vit), dtype=cfg.dtype_mm
-    )
+
+    class_embedding_expanded = jnp.expand_dims(jnp.expand_dims(self.class_embedding, axis=0), axis=0)
+    class_embedding = jnp.broadcast_to(class_embedding_expanded, (hidden_states.shape[0], 1, cfg.hidden_size_for_vit))
+    
     hidden_states = jnp.concatenate([class_embedding, hidden_states], axis=1)
+    hidden_states += self.positional_embedding_vlm
+
+    hidden_states = nn.LayerNorm(name="layernorm_pre")(hidden_states)
 
     hidden_states = Llama4VisionEncoder(config=cfg, mesh=mesh)(hidden_states)
+    hidden_states = nn.LayerNorm(name="layernorm_post")(hidden_states)
+
     hidden_states = hidden_states[:, :-1, :]
 
     hidden_states = Llama4VisionPixelShuffleMLP(config=cfg)(hidden_states)
