@@ -108,19 +108,19 @@ def get_dummy_image_shape_for_init(config):
   image_shape = None
   if config.model_name.startswith("gemma3"):
     image_shape = (
-      config.micro_batch_size_to_train_on,
-      NUM_IMAGES_PER_SEQUENCE,
-      config.image_size_for_vit,
-      config.image_size_for_vit,
-      NUM_IMAGE_CHANNELS,
+        config.micro_batch_size_to_train_on,
+        NUM_IMAGES_PER_SEQUENCE,
+        config.image_size_for_vit,
+        config.image_size_for_vit,
+        NUM_IMAGE_CHANNELS,
     )
   elif config.model_name.startswith("llama4"):
     image_shape = (
-      config.micro_batch_size_to_train_on,
-      NUM_TILES_PER_IMAGE,
-      NUM_IMAGE_CHANNELS,
-      config.tile_size_for_vit,
-      config.tile_size_for_vit,
+        config.micro_batch_size_to_train_on,
+        NUM_TILES_PER_IMAGE,
+        NUM_IMAGE_CHANNELS,
+        config.tile_size_for_vit,
+        config.tile_size_for_vit,
     )
   else:
     raise ValueError(f"Model {config.model_name} does not support multimodal inference.")

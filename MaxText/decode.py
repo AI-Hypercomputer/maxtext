@@ -80,6 +80,40 @@ def _batch_first_result_token(first_tokens: list[engine_api.ResultTokens], batch
   return result_tokens
 
 
+def get_flat_dict(data, prefix=""):
+  """
+  Converts a nested dictionary-like structure into a flat dictionary.
+
+  Args:
+      data: The dictionary-like structure to traverse.
+      prefix: The current path prefix for keys in the flat dictionary.
+
+  Returns:
+      A flat dictionary where keys are concatenated paths and values are the
+      leaf-level values from the original nested structure.
+  """
+  flat_dict = {}
+  if isinstance(data, dict):
+    for key, value in data.items():
+      current_path = f"{prefix}{key}."
+      flat_dict.update(get_flat_dict(value, current_path))
+  else:
+    # Remove the trailing dot from the prefix for the final key
+    flat_dict[prefix.rstrip(".")] = data
+  return flat_dict
+
+
+def save_model_params_to_excel(param_dict, file_path):
+  import pandas as pd
+  param_data = []
+  for name, param in param_dict.items():
+      param_data.append({"Parameter Name": name, "Shape": str(param.shape)})
+
+  df = pd.DataFrame(param_data)
+  df.to_excel(file_path, index=False)
+  print(f"Model parameters saved to {file_path}")
+
+
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
@@ -92,6 +126,11 @@ def main(argv: Sequence[str]) -> None:
   rng = jax.random.PRNGKey(1234)
   rng, rng_load_params = jax.random.split(rng)
   params = engine.load_params(rng_load_params)
+
+  flat_params = get_flat_dict(params)
+  for key, value in flat_params.items():
+    print(f"{key}: {value.shape if hasattr(value, 'shape') else type(value)}")
+  save_model_params_to_excel(flat_params, "/home/hengtaoguo/projects/params_maxtext.xlsx")
 
   text = config.prompt
   prefill_length = config.max_prefill_predict_length

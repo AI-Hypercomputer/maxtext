@@ -1360,9 +1360,7 @@ class MaxEngine(engine_api.Engine):
           (int(self.config.per_device_batch_size * jax.device_count()), 1),
           dtype=jnp.int32,
       )
-      dummy_image = jnp.ones(
-          maxtext_utils.get_dummy_image_shape_for_init(self.config), dtype=jnp.int32
-      )
+      dummy_image = jnp.ones(maxtext_utils.get_dummy_image_shape_for_init(self.config), dtype=jnp.int32)
       _, cache = self.model.apply(
           abstract_params,
           x,

@@ -21,6 +21,7 @@ limitations under the License.
 import math
 from typing import Optional
 
+import jax
 import jax.numpy as jnp
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
@@ -59,7 +60,7 @@ class Llama4UnfoldConvolution(nn.Module):
 
   def setup(self):
     """
-      Initialize Llama4UnfoldConvolution
+    Initialize Llama4UnfoldConvolution
     """
     cfg = self.config
     # Linear projection layer using dense_general.
@@ -70,7 +71,7 @@ class Llama4UnfoldConvolution(nn.Module):
         features=cfg.hidden_size_for_vit,
         dtype=cfg.dtype_mm,
         name="vit_unfold_linear",
-        use_bias=False
+        use_bias=False,
     )
 
   def __call__(self, inputs: Array) -> Array:
@@ -152,14 +153,14 @@ class Llama4VisionMLP(nn.Module):
         features=cfg.intermediate_size_for_vit,
         dtype=cfg.dtype_mm,
         name="vit_encoder_layer_mlp_fc1",
-        use_bias=True
+        use_bias=True,
     )
     self.fc2 = linears.dense_general(
         in_features=cfg.intermediate_size_for_vit,
         features=cfg.hidden_size_for_vit,
         dtype=cfg.dtype_mm,
         name="vit_encoder_layer_mlp_fc2",
-        use_bias=True
+        use_bias=True,
     )
 
   def __call__(self, hidden_states: Array) -> Array:
@@ -188,7 +189,7 @@ class Llama4VisionMLP2(nn.Module):
 
   def setup(self):
     """
-      Initialize Llama4VisionMLP2
+    Initialize Llama4VisionMLP2
     """
     cfg = self.config
     self.fc1 = linears.dense_general(
@@ -196,14 +197,14 @@ class Llama4VisionMLP2(nn.Module):
         features=cfg.projector_input_dim_for_vit,
         dtype=cfg.dtype_mm,
         name="vit_pixel_shuffle_mlp_fc1",
-        use_bias=False
+        use_bias=False,
     )
     self.fc2 = linears.dense_general(
         in_features=cfg.projector_input_dim_for_vit,
         features=cfg.projector_output_dim_for_vit,
         dtype=cfg.dtype_mm,
         name="vit_pixel_shuffle_mlp_fc2",
-        use_bias=False
+        use_bias=False,
     )
     self.dropout = nn.Dropout(rate=cfg.projector_dropout_for_vit)
 
@@ -693,6 +694,10 @@ class Llama4VisionModel(nn.Module):
   config: Config
   mesh: Mesh
 
+  def setup(self):
+    self.scale = self.config.hidden_size_for_vit**-0.5
+    print(self.scale)
+
   @nn.compact
   def __call__(
       self,
@@ -712,12 +717,20 @@ class Llama4VisionModel(nn.Module):
       Final hidden states from the vision encoder
     """
     cfg = self.config
+    mesh = self.mesh
 
     b, t, c, h, w = pixel_values.shape
     pixel_values = jnp.reshape(pixel_values, [b * t, c, h, w])
 
     # Unfold convolution to extract patches
     hidden_states = Llama4UnfoldConvolution(config=cfg)(pixel_values)
+    class_embedding = self.scale * jax.random.normal(
+        key=self.make_rng("params"), shape=(hidden_states.shape[0], 1, cfg.hidden_size_for_vit), dtype=cfg.dtype_mm
+    )
+    hidden_states = jnp.concatenate([class_embedding, hidden_states], axis=1)
+
+    hidden_states = Llama4VisionEncoder(config=cfg, mesh=mesh)(hidden_states)
+    hidden_states = hidden_states[:, :-1, :]
 
     hidden_states = Llama4VisionPixelShuffleMLP(config=cfg)(hidden_states)
 
