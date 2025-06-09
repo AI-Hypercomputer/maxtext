@@ -23,7 +23,7 @@ import contextlib
 import jax
 from MaxText import max_logging
 from enum import Enum
-from cloud_goodput.ml_goodput_measurement.src import goodput, monitoring
+from ml_goodput_measurement import goodput, monitoring
 
 
 class GoodputEvent(Enum):
