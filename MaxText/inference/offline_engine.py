@@ -1,19 +1,11 @@
 """
 MaxText Offline Inference Engine
 
-Features:
-- Continuous batching
-- Prefill packing
-- Single and multihost with Tensor Parallelism (TP)
-- Data Parallelism (DP) with Pathways
-
 Example usage:
     offline_engine = OfflineEngine(
         config=maxtext_config,
         params=None,
         enable_batch_prefill=True,
-        dp=1,
-        dp_meshes=None
     )
 
     input_data = [
@@ -24,13 +16,9 @@ Example usage:
 
     results = offline_engine.batch_inference(input_data)
 
-    for tokens in results:
-        text = offline_engine.tokenizer.decode(tokens)
+    for completion_output in results:
+        text = offline_engine.tokenizer.decode(completion_output.token_ids)
         max_logging.log(f"Output: {text}")
-
-Notes:
-    - Prefill packing is only supported with scan_layers=False
-    - auto_layout_supported is not supported on Pathways.
 """
 
 import os
@@ -58,27 +46,22 @@ from jetstream.engine import engine_api
 from MaxText.maxengine import MaxEngine
 from MaxText import max_utils
 from MaxText import inference_utils
-from jax.sharding import PartitionSpec as P, NamedSharding
 
 from MaxText.experimental.rl import pathwaysutils_reshard
-
-
 from MaxText.prefill_packing import PrefillProcessor, BatchedPrefillProcessor
 from MaxText import max_logging
 
 DecodeState = Any
 Params = Any
 MaxTextConfig = Any
-DEBUG = os.environ.get("DEBUG", "0") == "1"
-# Configure logging
-log = logging.getLogger(__name__)
+
 
 # logging.getLogger("jax").setLevel(logging.DEBUG)
 
 
 @dataclasses.dataclass
 class InputData:
-    """Class for storing input data and its metadata.
+    """Container for input data and metadata.
 
     Attributes:
         id: Unique identifier for this input
@@ -87,13 +70,13 @@ class InputData:
     """
 
     id: str
-    tokens: jax.Array
+    tokens: jax.Array | np.ndarray
     true_length: int
 
 
 @dataclasses.dataclass
 class CompletionOutput:
-    """Class for returned output.
+    """Container for model generation output.
 
     Attributes:
         index: The index of the output in the request.
@@ -102,16 +85,16 @@ class CompletionOutput:
     """
 
     index: int
-    token_ids: jax.Array
-    logprobs: jax.Array
+    token_ids: np.ndarray
+    logprobs: np.ndarray
 
 
 @dataclasses.dataclass
 class TokenOutput:
-    """Class for storing log probabilities."""
+    """Container for individual token generation result."""
 
-    token: int
-    log_prob: float
+    token: np.ndarray
+    log_prob: np.ndarray
 
 
 class SafeThead(threading.Thread):
@@ -127,13 +110,15 @@ class SafeThead(threading.Thread):
 
 
 class PrefillType(Enum):
+    """Enumeration of supported prefill processing methods."""
+
     DEFAULT = "default"
     BATCH = "batch"
 
 
 @dataclasses.dataclass
 class PrefillResult:
-    """Class for storing log probabilities."""
+    """Result from prefill processing operation."""
 
     token: jax.Array
     log_prob: jax.Array
@@ -142,9 +127,10 @@ class PrefillResult:
 
 
 class PrefillHelper:
-    """
-    This class abstracts the details of two prefill methods (default vs batch)
-    and provides a common interface for prefill operations.
+    """Abstraction layer for different prefill processing strategies.
+
+    Provides a unified interface for both default (single-sequence) and batch
+    (packed multi-sequence) prefill processing methods.
     """
 
     def __init__(
@@ -160,18 +146,15 @@ class PrefillHelper:
         Args:
             type: The type of prefill processor to use ("default" or "batch")
             engine: The MaxEngine instance to use for prefill operations
-            prefill_lengths: List of prefill lengths to support
-            batch_prefill_max_batch_size: Maximum number of inputs in one packed sequence for batch prefill
+            prefill_lengths: List of prompt lengths to support
+            batch_prefill_max_batch_size: Maximum number of prompts in one packed sequence for batch prefill
         """
         self._type = type
         self.engine = engine
         self.prefill_lengths = sorted(prefill_lengths)
         self.max_prefill_length = self.prefill_lengths[-1]
         self.batch_prefill_max_batch_size = batch_prefill_max_batch_size
-        if rng is None:
-            self.rng = jax.random.PRNGKey(0)
-        else:
-            self.rng = rng
+        self.rng = jax.random.PRNGKey(0) if rng is None else rng
         if type == PrefillType.DEFAULT:
             self._processor = PrefillProcessor(engine)
         elif type == PrefillType.BATCH:
@@ -180,15 +163,15 @@ class PrefillHelper:
                 max_batch_size=batch_prefill_max_batch_size,
                 auto_layout_supported=False,
             )
-            # Also create a standard processor for fallback cases
+            # Keep fallback processor for edge cases
             self._processor = PrefillProcessor(engine)
         else:
             raise ValueError(f"Invalid prefill type: {type}")
 
-    @functools.partial(jax.jit, static_argnums=(0), donate_argnums=(5,))
-    def _jitted_non_batched_process(
+    @functools.partial(jax.jit, static_argnums=(0), donate_argnames=("decode_state",))
+    def _jitted_single_prefill(
         self, params, tokens, slot, true_length, decode_state, rng
-    ):
+    ) -> Tuple[jax.Array, jax.Array, DecodeState, jax.Array]:
         first_token, decode_state = self._processor._process(
             params,
             tokens,
@@ -218,9 +201,7 @@ class PrefillHelper:
         input_id: int,
         input_tokens_padded: jax.Array,
         input_true_length: int,
-        prefill_done: Callable[
-            [List[Tuple[engine_api.ResultTokens, int]], List[int], DecodeState], None
-        ],
+        prefill_done: Callable,
     ) -> None:
         """Process an input through the appropriate prefill processor.
 
@@ -240,7 +221,7 @@ class PrefillHelper:
             or padded_length == self.max_prefill_length
         ):
             first_token, log_prob, decode_state, prompt_logp = (
-                self._jitted_non_batched_process(
+                self._jitted_single_prefill(
                     model_params,
                     input_tokens_padded,
                     decode_slot,
@@ -272,9 +253,7 @@ class PrefillHelper:
         self,
         model_params: Params,
         decode_state: DecodeState,
-        prefill_done: Callable[
-            [List[Tuple[engine_api.ResultTokens, int]], List[int], DecodeState], None
-        ],
+        prefill_done: Callable,
     ) -> None:
         """Finalize prefill operations, flushing any pending inputs.
 
@@ -316,21 +295,16 @@ class ReplicaWorker:
         rng=None,
         mesh=None,
     ):
-        """Initialize a ReplicaWorker that uses continuous batching over
+        """Initialize a ReplicaWorker that runs continuous batching over
            a queue of inputs.
 
-        Continuous batching logic:
-        1. Process input one at a time
-        2. Prefill input and insert KV cache
-        3. Keep on processing inputs and prefilling until
-           there are enough samples to do batch decoding
-        4. Decode until at least one of the samples is finished,
-           so there is room for new samples
-        5. Prefill to fill up the newly emptied decode slots
-        6. Repeat steps 5 and 6 until all samples are finished
-        7. A background thread is used to detokenize the results
-        8. Return the results
-
+        Continuous batching workflow:
+        1. Process inputs one at a time from queue
+        2. Prefill input and insert into KV cache
+        3. Continue prefilling until enough samples for batch decode
+        4. Decode until at least one sequence completes
+        5. Refill newly available decode slots with prefill
+        6. Repeat until all sequences complete
         Prefill Packing:
             When enable_batch_prefill is True, the prefill processor
             will pack multiple inputs into a single sequence before
@@ -338,14 +312,14 @@ class ReplicaWorker:
 
             There are multiple buckets for packed sequences, where each bucket
             contains inputs with the same padded length. Only inputs with the same
-            padded length will be packed together.
+            padded length can be packed together.
 
             It is important to sort the inputs by padded length so that the
             buckets fill up quickly.
 
-            When a decode slot is freed up, the prefill processor will add the
-            sequence to the bucket. If the bucket is full, the bucket will be
-            prefilled.
+            When a decode slot frees up, the prefill processor will add the
+            sequence to a bucket. If the bucket becomes full, the packed sequence
+            will be prefilled.
 
             E.g.
             Bucket for length 64: [...seq1, ...seq2, ...seq3, ...seq4]
@@ -361,9 +335,13 @@ class ReplicaWorker:
             tokenizer: Tokenizer to use
             eos_ids: End-of-sequence token IDs
             prefill_lengths: List of supported prefill lengths
+            max_decode_length: Maximum tokens to generate per sequence
             batch_prefill_max_batch_size: Maximum batch size for batch prefill
             worker_id: Worker identifier
             run_as_a_thread: Whether to run in a separate thread
+            rng: Random number generator key
+            mesh: JAX mesh for distributed computation
+            is_pw_reshard: Whether to use Pathways for resharding
         """
         # Configurations
         self.worker_id = worker_id
@@ -372,10 +350,9 @@ class ReplicaWorker:
         self.devices = devices
         self.is_pw_reshard = is_pw_reshard
         self.enable_batch_prefill = enable_batch_prefill
-        if self.enable_batch_prefill:
-            self.prefill_type = PrefillType.BATCH
-        else:
-            self.prefill_type = PrefillType.DEFAULT
+        self.prefill_type = (
+            PrefillType.BATCH if enable_batch_prefill else PrefillType.DEFAULT
+        )
         self.prefill_lengths = prefill_lengths
         self.max_prefill_length = self.prefill_lengths[-1]
         self.max_decode_length = max_decode_length
@@ -385,29 +362,32 @@ class ReplicaWorker:
         self.min_decode_steps = min_decode_steps
         self.run_as_a_thread = run_as_a_thread
         self.mesh = mesh
-        if rng is None:
-            self.rng = jax.random.PRNGKey(0)
-        else:
-            self.rng = rng
+        self.rng = jax.random.PRNGKey(0) if rng is None else rng
+
         # Thread management
+        # TODO(wenxindong): remove thread logic
         self.worker_thread = None
         self.init_thread = None
         self.running = False
 
-        # State management
+        # Inference state (initialized later)
         self.detokenize_backlog = queue.Queue()
         self.empty_decode_slots: List[int] = []
         self.slot_to_id: Dict[int, int] = {}
         self.decode_state = None
-        self.res = None
+        self.completion_tokens_by_id = {}
+        self.prompt_logprobs_by_id = {}
+        self.prompt_tokens_by_id = {}
+        self.completion_outputs = {}
 
-        # Precompiled functions
-        self.generate_fn = None
+        
+        
 
-        # These will be populated in the init thread
+        # Model components (initialized later)
         self.engine = None
         self.decode_batch_size = None
         self.prefill_helper = None
+        self.generate_fn = None
 
         self._init()
 
@@ -466,9 +446,8 @@ class ReplicaWorker:
         start_time = time.time()
         engine = MaxEngine(self.config, self.devices)
         params = engine.load_params(params=params, rng=self.rng)
-        end_time = time.time()
         max_logging.log(
-            f"Time taken to initialize engine: {end_time - start_time} seconds"
+            f"Time taken to initialize engine: {time.time() - start_time} seconds"
         )
         return params, engine
 
@@ -538,9 +517,11 @@ class ReplicaWorker:
         """
         self.ensure_init_finished()
         # self.ensure_update_finished() TODO(mohitkhatwani) might not need it
-        self.res_completion_tokens = defaultdict(list)
-        self.res_prompt_logp = defaultdict(list)
-        self.res_prompt_tokens = defaultdict(list)
+        
+        # Reset state for new inference run
+        self.completion_tokens_by_id = defaultdict(list)
+        self.prompt_logprobs_by_id = defaultdict(list)
+        self.prompt_tokens_by_id = defaultdict(list)
         self.completion_outputs = {}
 
         # TODO(wenxindong): remove threading logic
@@ -596,9 +577,9 @@ class ReplicaWorker:
                 row = data_queue.get()
             except queue.Empty:
                 break
-            
+
             # Save prompt tokens
-            self.res_prompt_tokens[row.id] = row.tokens[: row.true_length]
+            self.prompt_tokens_by_id[row.id] = row.tokens[: row.true_length]
 
             # 1. Wait for an empty slot
             while not self.empty_decode_slots:
@@ -637,37 +618,42 @@ class ReplicaWorker:
         max_logging.log(
             f"Replica worker {self.worker_id}: detokenize thread joined in {end_time - start_time} seconds"
         )
-
+        self._build_final_outputs()
+    
+    def _build_final_outputs(self):
         with jax.profiler.TraceAnnotation(
             "offline_engine.batch_inference.return_final_output"
         ):
-            for input_id in self.res_completion_tokens.keys():
+            for input_id in self.completion_tokens_by_id.keys():
                 self.completion_outputs[input_id] = CompletionOutput(
                     index=input_id,
                     token_ids=np.concatenate(
-                            (
-                                self.res_prompt_tokens[input_id].squeeze(),
-                                np.array(
-                                    [
-                                        token_output.token
-                                        for token_output in self.res_completion_tokens[input_id]
+                        (
+                            self.prompt_tokens_by_id[input_id].squeeze(),
+                            np.array(
+                                [
+                                    token_output.token
+                                    for token_output in self.completion_tokens_by_id[
+                                        input_id
                                     ]
-                                ).squeeze(),
-                            )
-                        ),
-                        logprobs=np.concatenate(
-                            (
-                                self.res_prompt_logp[input_id].squeeze(),
-                                np.array(
-                                    [
-                                        token_output.log_prob
-                                        for token_output in self.res_completion_tokens[input_id]
+                                ]
+                            ).squeeze(),
+                        )
+                    ),
+                    logprobs=np.concatenate(
+                        (
+                            self.prompt_logprobs_by_id[input_id].squeeze(),
+                            np.array(
+                                [
+                                    token_output.log_prob
+                                    for token_output in self.completion_tokens_by_id[
+                                        input_id
                                     ]
-                                ).squeeze(),
-                            )
-                        ),
-                    )
-                
+                                ]
+                            ).squeeze(),
+                        )
+                    ),
+                )
 
     @staticmethod
     @jax.jit
@@ -688,7 +674,7 @@ class ReplicaWorker:
             decode_state: Updated decode state
         """
         max_logging.log("Replica {}. Prefill done".format(self.worker_id))
-        
+
         # Update decode state
         self.decode_state = decode_state
 
@@ -704,7 +690,7 @@ class ReplicaWorker:
                 first_token, log_prob = self._jitted_log_prob_and_slice_token(
                     first_token, self.decode_state, slot
                 )
-
+            
             self.slot_to_id[slot] = prompt_ids[i]
 
             # Add token to detokenization queue
@@ -713,9 +699,8 @@ class ReplicaWorker:
                 first_token = np.array(first_token)
                 log_prob = np.array(log_prob)
                 prompt_logp = np.array(prompt_logp)
-            end_time = time.time()
             max_logging.log(
-                f"Replica worker {self.worker_id}: convert to numpy in Prefill in {end_time - start_time} seconds"
+                f"Replica worker {self.worker_id}: convert to numpy in Prefill in {time.time() - start_time} seconds"
             )
             self.detokenize_backlog.put_nowait(
                 (first_token, log_prob, True, prompt_ids[i], slot, prompt_logp)
@@ -739,9 +724,8 @@ class ReplicaWorker:
             with jax.profiler.TraceAnnotation("convert_to_numpy"):
                 result_tokens = np.array(result_tokens)
                 log_prob = np.array(log_prob)
-            end_time = time.time()
             max_logging.log(
-                f"Replica worker {self.worker_id}: convert to numpy in Decode in {end_time - start_time} seconds"
+                f"Replica worker {self.worker_id}: convert to numpy in Decode in {time.time() - start_time} seconds"
             )
 
             buffer.append((result_tokens, log_prob))
@@ -825,8 +809,8 @@ class ReplicaWorker:
         self,
         prompt_id,
         result_token: int,
-        log_prob,
-        prompt_logp=None,
+        log_prob: float,
+        prompt_logp: np.ndarray = None,
     ):
         """Adds the token to the results for the specified prompt ID and
         determines if generation should terminate.
@@ -839,20 +823,22 @@ class ReplicaWorker:
             True if this token signals the end of generation, False otherwise
         """
         # Return if already reached max decode length
-        if len(self.res_completion_tokens[prompt_id]) == self.max_decode_length:
+        if len(self.completion_tokens_by_id[prompt_id]) == self.max_decode_length:
             return True
 
         # Return if already reached eos
         if (
-            len(self.res_completion_tokens[prompt_id]) > 0
-            and self.res_completion_tokens[prompt_id][-1].token in self.eos_ids
+            len(self.completion_tokens_by_id[prompt_id]) > 0
+            and self.completion_tokens_by_id[prompt_id][-1].token in self.eos_ids
         ):
             return True
 
-        index = len(self.res_completion_tokens[prompt_id])
+        index = len(self.completion_tokens_by_id[prompt_id])
         if prompt_logp is not None:
-            self.res_prompt_logp[prompt_id] = prompt_logp
-        self.res_completion_tokens[prompt_id].append(TokenOutput(result_token, log_prob))
+            self.prompt_logprobs_by_id[prompt_id] = prompt_logp
+        self.completion_tokens_by_id[prompt_id].append(
+            TokenOutput(result_token, log_prob)
+        )
 
         return (result_token in self.eos_ids) or (index + 1 == self.max_decode_length)
 
@@ -867,12 +853,12 @@ class OfflineEngine:
         enable_batch_prefill: bool = False,
         min_decode_steps: int = 10,
         tokenizer: Any = None,
-        eos_ids=None,
+        eos_ids: List[int] = None,
         prefill_lengths: Union[List[int], str] = "auto",
         batch_prefill_max_batch_size: int = 16,
-        dp=1,
-        dp_meshes=None,
-        rng=None,
+        dp: int = 1,
+        dp_meshes: List[Mesh] = None,
+        rng: jax.random.PRNGKey = None,
     ):
         """Initialize the OfflineEngine.
 
@@ -895,11 +881,7 @@ class OfflineEngine:
             batch_prefill_max_batch_size: Maximum number of inputs to pack
               into a single prefill. This is only used when enable_batch_prefill
               is True.
-            dp: Data parallelism, number of replicas of the model to run. This
-              helps to increase throughput by running multiple inference replicas
-              in parallel. When setting dp>1, Pathways must be used. Either provide
-              the dp_meshes for each model replica, or let OfflineEngine automatically
-              create the meshes which will make use of all visible devices.
+            
             dp_meshes: List of JAX Mesh objects for each model replica. Use this
               option if you want to use only some of the devices for OfflineEngine and
               reserve the rest for other tasks. If None, OfflineEngine will create the meshes
@@ -920,10 +902,7 @@ class OfflineEngine:
         self.batch_prefill_max_batch_size = batch_prefill_max_batch_size
         self.max_prefill_length = self.config.max_prefill_predict_length
         self.max_decode_length = self.config.max_target_length - self.max_prefill_length
-        if rng is None:
-            self.rng = jax.random.PRNGKey(0)
-        else:
-            self.rng = rng
+        self.rng = jax.random.PRNGKey(0) if rng is None else rng
         self._validate_config()
 
         # Create prefill buckets: [0, 64], (64, 128], (128, 256], ..., [max_length//2, max_length]
@@ -1026,7 +1005,7 @@ class OfflineEngine:
             sorted_completion_outputs.append(completion_outputs[input_data.id])
         return sorted_completion_outputs
 
-    def prepare_data(self, data: List[Union[InputData, jax.Array]]) -> List[InputData]:
+    def prepare_data(self, data: List[Union[InputData, jax.Array, np.ndarray]]) -> List[InputData]:
         """Pad and if batch prefill is enabled, sort data by length.
 
         Args:
@@ -1055,7 +1034,6 @@ class OfflineEngine:
             return sorted(data, key=lambda x: x.tokens.shape[0])
 
         return data
-
 
     def pad_data(self, data: List[InputData]) -> List[InputData]:
         """For each input, pad it to the next length in self.prefill_lengths
