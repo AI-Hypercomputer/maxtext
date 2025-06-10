@@ -160,7 +160,7 @@ topk_routing_group: -1 # number of top groups to route inputs. For EP,
 # For complex architectures like llama4 there are repeated sets of
 # inhomogeneous layers. E.g. maverick uses [dense+rope, moe+rope, dense+rope, moe+nope]
 # which can only be scanned together in one large block of inhomogeneous_layer_cycle_interval=4 layers.
-inhomogeneous_layer_cycle_interval: 1 
+inhomogeneous_layer_cycle_interval: 1
 
 # pipeline parallelism
 # The number of decoder layers is equal to the product of num_stages, num_layers_per_pipeline_stage and num_pipeline_repeats.
@@ -291,8 +291,10 @@ logical_axis_rules: [
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence','autoregressive']],
                       ['activation_kv_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
-                      ['activation_length', ['sequence', 'context']],
-                      ['activation_length', ['context']],
+                      ['activation_length', ['sequence', 'context', 'expert']],
+                      ['activation_length', ['context', 'expert']],
+                      ['activation_length_no_exp', ['sequence', 'context']],
+                      ['activation_length_no_exp', ['context']],
                       ['activation_norm_length', ['tensor_sequence', 'context', 'sequence']],
                       ['activation_q_length', ['context']],
                       ['activation_kv_length', []],
@@ -301,6 +303,7 @@ logical_axis_rules: [
                       ['activation_kv', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_prefill_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_kv_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
                       ['activation_kv_head_dim', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_vocab', ['tensor', 'tensor_transpose', 'sequence', 'tensor_sequence']],
                       ['activation_vocab', ['tensor', 'tensor_transpose']],
@@ -383,6 +386,9 @@ ici_tensor_sequence_parallelism: 1
 ici_autoregressive_parallelism: 1
 ici_pipeline_parallelism: 1
 ici_expert_parallelism: 1
+
+# MoE with expert parallel + training: expert -> batch (rather than seq) in attention
+is_batch_shard_by_expert: True
 
 # The number of TPU slices is automatically determined, you should not set this explicitly. For ahead of time compilation,
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
@@ -725,7 +731,7 @@ image_path: "" # Local image path used for decoding
 
 
 ### llama4 multi modal configs
-hidden_size_for_vit: 1408 
+hidden_size_for_vit: 1408
 intermediate_size_for_vit: 5632
 num_attention_heads_for_vit: 16
 num_channels_for_vit: 3

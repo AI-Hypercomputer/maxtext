@@ -115,7 +115,7 @@ def apply_mask_to_logits(logits: Array, mask: Array):
 class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access
   """Lazy chunked causal mask.
 
-  Attention is causal within each chunk (0, K), (K, 2K), (2K, 3K), ... tokens attend to each other but not accross chunks.
+  Attention is causal within each chunk (0, K), (K, 2K), (2K, 3K), ... tokens attend to each other but not across chunks.
   Llama4 models use interleaved chunk attention along with global attention.
 
   This mask class inherits from splash_attention_mask._ComputableMask and is designed to be used with Splash Attention.
@@ -874,13 +874,12 @@ class AttentionOp(nn.Module):
       decoder_segment_ids: Array | None,
       model_mode: str = MODEL_MODE_TRAIN,
   ) -> Array:
-    """CUDNN Flash Attention with JAX SDPA API.
-    """
+    """CUDNN Flash Attention with JAX SDPA API."""
     # These imports are only meant to work in a GPU build.
     # pylint: disable=import-outside-toplevel
     from jax._src.cudnn.fused_attention_stablehlo import (
-      dot_product_attention,
-      MaskType,
+        dot_product_attention,
+        MaskType,
     )
 
     _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
@@ -898,7 +897,7 @@ class AttentionOp(nn.Module):
           scale=1.0,
           dropout_rate=self.dropout_rate,
           qkv_layout="BTNH",
-          return_residual=True
+          return_residual=True,
       )
     else:
       return dot_product_attention(
@@ -909,7 +908,7 @@ class AttentionOp(nn.Module):
           scale=1.0 / math.sqrt(head_dim),
           dropout_rate=self.dropout_rate,
           qkv_layout="BTNH",
-          return_residual=True
+          return_residual=True,
       )
 
   def compute_local_attention(
@@ -1124,8 +1123,9 @@ class AttentionOp(nn.Module):
     stat1 = local_stats[1].reshape((*local_stats[1].shape, 1))
     global_stat = jnp.log(jnp.exp(stat0) + jnp.exp(stat1))
     # # transpose stat to have shape [b, t, n, 1] for elemenwise multiplication
-    attn_out = local_outs[0].astype(jnp.float32) * jnp.exp(stat0 - global_stat).transpose((0, 2, 1, 3)) \
-      + local_outs[1].astype(jnp.float32) * jnp.exp(stat1 - global_stat).transpose((0, 2, 1, 3))
+    attn_out = local_outs[0].astype(jnp.float32) * jnp.exp(stat0 - global_stat).transpose((0, 2, 1, 3)) + local_outs[
+        1
+    ].astype(jnp.float32) * jnp.exp(stat1 - global_stat).transpose((0, 2, 1, 3))
     return attn_out.astype(local_stats[0].dtype)
 
   def normalize_attention(self, local_outs, local_maxes, local_sums):
@@ -1308,12 +1308,24 @@ class Attention(nn.Module):
   prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  input_axis_names: AxisNames = (BATCH, LENGTH, EMBED)
+  # query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
+  # key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
+  # value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
+  query_axis_names: AxisNames = ("activation_kv_batch", "activation_length_no_exp", KV_HEAD, KV_HEAD_DIM)
+  key_axis_names: AxisNames = ("activation_kv_batch", "activation_length_no_exp", KV_HEAD, KV_HEAD_DIM)
+  value_axis_names: AxisNames = ("activation_kv_batch", "activation_length_no_exp", KV_HEAD, KV_HEAD_DIM)
+  ep_query_axis_names: AxisNames = ("activation_kv_batch_no_exp", "activation_length", KV_HEAD, KV_HEAD_DIM)
+  ep_key_axis_names: AxisNames = ("activation_kv_batch_no_exp", "activation_length", KV_HEAD, KV_HEAD_DIM)
+  ep_value_axis_names: AxisNames = ("activation_kv_batch_no_exp", "activation_length", KV_HEAD, KV_HEAD_DIM)
+
+  # input_axis_names: AxisNames = (BATCH, LENGTH, EMBED)
+  input_axis_names: AxisNames = ("activation_batch", " activation_length_no_exp", EMBED)
+  ep_input_axis_names: AxisNames = ("activation_batch_no_exp", "activation_length", EMBED)
   decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED)
-  key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
-  out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+
+  # out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
+  out_axis_names: AxisNames = ("activation_batch", " activation_length_no_exp", HEAD, D_KV)
+  ep_out_axis_names: AxisNames = ("activation_batch_no_exp", "activation_length", HEAD, D_KV)
   decode_out_axis_names = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV)
 
   prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
@@ -1356,8 +1368,10 @@ class Attention(nn.Module):
           mesh=self.mesh,
           num_pages=self.config.pagedattn_num_pages,
           tokens_per_page=self.config.pagedattn_tokens_per_page,
-          max_pages_per_slot=(self.config.max_target_length + self.config.pagedattn_tokens_per_page - 1) // self.config.pagedattn_tokens_per_page,
-          max_pages_per_prefill=(self.config.max_prefill_predict_length + self.config.pagedattn_tokens_per_page - 1) // self.config.pagedattn_tokens_per_page,
+          max_pages_per_slot=(self.config.max_target_length + self.config.pagedattn_tokens_per_page - 1)
+          // self.config.pagedattn_tokens_per_page,
+          max_pages_per_prefill=(self.config.max_prefill_predict_length + self.config.pagedattn_tokens_per_page - 1)
+          // self.config.pagedattn_tokens_per_page,
           pages_per_compute_block=self.config.pagedattn_pages_per_compute_block,
           num_kv_heads=self.num_kv_heads,
           kv_head_dim_size=self.head_dim,
@@ -1593,12 +1607,37 @@ class Attention(nn.Module):
     Returns:
       output of shape `[batch, length, q_features]`.
     """
+    # if self.config.ici_context_parallelism > 1 and self.config.ici_expert_parallelism > 1:
+    #   is_batch_shard_by_expert = True
+    is_batch_shard_by_expert = self.config.is_batch_shard_by_expert
+
+
     if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_TRAIN):
-      inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
+      if is_batch_shard_by_expert:
+        # jax.debug.print("1")
+        inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
+      else:
+        # jax.debug.print("2")
+        inputs_q = nn.with_logical_constraint(inputs_q, self.ep_input_axis_names)
     else:
       inputs_q = nn.with_logical_constraint(inputs_q, self.decode_input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.decode_input_axis_names)
+
+
+    # jax.debug.print("inputs_q")
+    # # jax.debug.print("\t local {shape}", shape=inputs_q.addressable_shards[0].data.shape)
+    # jax.debug.inspect_array_sharding(inputs_q, callback=lambda B: print(f"\t Sharding of B: {B.data.shape}"))
+
+    if model_mode == MODEL_MODE_TRAIN:
+      B = inputs_q
+      jax.debug.print("inputs_q")
+      # jax.debug.print("{}", B.addressable_shards[0].data.shape)
+      jax.debug.inspect_array_sharding(B, callback=lambda B: print(f"\t Sharding of B: {B.shard_shape}"))
+    # jax.debug.breakpoint()
+    # jax.debug.inspect_array_sharding(B, callback=lambda x: print(f"\t Sharding of B: {x.addressable_shards[0].data.shape}"))
+    # jax.debug.print("\t global {shape}", shape=B.shape)
+    # jax.debug.print("\t local {shape}", shape=B.addressable_shards[0].data.shape)
 
     # apply projection.
     if self.config.fused_qkv:
@@ -1660,13 +1699,26 @@ class Attention(nn.Module):
       query = nn.with_logical_constraint(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
       key = nn.with_logical_constraint(key, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
       value = nn.with_logical_constraint(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
-    else:
+    # model_mode == MODEL_MODE_TRAIN
+    elif is_batch_shard_by_expert:
       query = nn.with_logical_constraint(query, self.query_axis_names)
       key = nn.with_logical_constraint(key, self.key_axis_names)
       value = nn.with_logical_constraint(value, self.value_axis_names)
+    else:
+      query = nn.with_logical_constraint(query, self.ep_query_axis_names)
+      key = nn.with_logical_constraint(key, self.ep_key_axis_names)
+      value = nn.with_logical_constraint(value, self.ep_value_axis_names)
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
+
+    # if model_mode == MODEL_MODE_TRAIN:
+    #   B = query
+    #   jax.debug.print("query")
+    #   # jax.debug.inspect_array_sharding(B.addressable_shards[0].data.shape, callback=print)
+    #   jax.debug.inspect_array_sharding(B, callback=lambda B: print(f"\t Sharding of B: {B.shard_shape}"))
+    #   # jax.debug.print("\t global {shape}", shape=B.shape)
+    #   # jax.debug.print("\t local {shape}", shape=B.addressable_shards[0].data.shape)
 
     assert not self.config.quantize_kvcache or self.kv_quant
 
@@ -1684,9 +1736,21 @@ class Attention(nn.Module):
       )
 
     if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_TRAIN):
-      out = nn.with_logical_constraint(out, self.out_axis_names)
+      if is_batch_shard_by_expert:
+        out = nn.with_logical_constraint(out, self.out_axis_names)
+      else:
+        out = nn.with_logical_constraint(out, self.ep_out_axis_names)
     else:
       out = nn.with_logical_constraint(out, self.decode_out_axis_names)
+
+
+    # if model_mode == MODEL_MODE_TRAIN:
+    #   B = out
+    #   jax.debug.print("out")
+    #   jax.debug.inspect_array_sharding(B, callback=lambda B: print(f"\t Sharding of B: {B.shard_shape}"))
+    #   # jax.debug.print("\t global {shape}", shape=B.shape)
+      # jax.debug.print("\t local {shape}", shape=B.addressable_shards[0].data.shape)
+
     out = self.out_projection(inputs_q.shape[-1], out)
     out = checkpoint_name(out, "out_proj")
     return out
@@ -2008,4 +2072,3 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
             self.q_sequence.tobytes() if self.q_sequence is not None else None,
         )
     )
-  
