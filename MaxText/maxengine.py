@@ -872,7 +872,16 @@ class MaxEngine(engine_api.Engine):
 
     full_true_length = start_position + true_length
 
-    input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
+    assert num_decode_token < padded_tokens.shape[0]
+    previous_token = decode_state["tokens"][generate_slots, ...]
+    previous_token = jnp.squeeze(previous_token, axis=1)
+    input_tokens = jax.lax.dynamic_update_index_in_dim(
+        padded_tokens,
+        previous_token,
+        index=-num_decode_token,
+        axis=0,
+    )
+    input_tokens = jnp.expand_dims(input_tokens, 0)  # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
 
     # update positions for generate tokens
@@ -908,12 +917,7 @@ class MaxEngine(engine_api.Engine):
 
     # Handle new prefill result
     prefill_generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
-    prefill_selected_logits = jax.lax.dynamic_slice_in_dim(
-        flat_logits,
-        true_length - 1,
-        1,
-        axis=1
-    )
+    prefill_selected_logits = jax.lax.dynamic_slice_in_dim(flat_logits, true_length - 1, 1, axis=1)
     prefill_next_pos = jnp.full((1, 1), full_true_length, dtype=jnp.int32)
     rng, new_rng = jax.random.split(rng)
     prefill_first_generated_token = inference_utils.sampling(
@@ -927,12 +931,7 @@ class MaxEngine(engine_api.Engine):
 
     # Handle selected generate results
     genereate_generated_token = decode_state["generated_tokens"][generate_slots] + 1
-    generate_out_logits = jax.lax.dynamic_slice_in_dim(
-        flat_logits,
-        -num_decode_token,
-        num_decode_token,
-        axis=1
-    )
+    generate_out_logits = jax.lax.dynamic_slice_in_dim(flat_logits, -num_decode_token, num_decode_token, axis=1)
     # (1, num_decode_token, vocab) -> # (num_decode_token, 1, vocab)
     generate_out_logits = generate_out_logits.swapaxes(0, 1)
     generate_new_next_pos = decode_state["next_pos"][generate_slots] + 1
