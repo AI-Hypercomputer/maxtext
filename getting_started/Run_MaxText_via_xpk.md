@@ -67,7 +67,7 @@ after which log out and log back in to the machine.
 1. Git clone maxtext locally
 
     ```shell
-    git clone https://github.com/google/maxtext.git
+    git clone https://github.com/AI-Hypercomputer/maxtext.git
     cd maxtext
     ```
 2. Build local Maxtext docker image
