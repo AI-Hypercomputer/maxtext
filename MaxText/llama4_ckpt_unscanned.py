@@ -263,12 +263,12 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
       "token_embedder": {"embedding": None},
       "vision_encoder": {
           "Llama4VisionModel_0": {
-              "Llama4VisionEncoder_0": None,
+              "Llama4VisionEncoder_0": {},
               "class_embedding": None,
               "positional_embedding_vlm": None,
               "Llama4UnfoldConvolution_0": None,
-              "layernorm_pre": None,
-              "layernorm_post": None,
+              "layernorm_pre": {},
+              "layernorm_post": {},
           },
           "Llama4MultiModalProjector_0": {"vit_multi_modal_projector": {"kernel": None}},
       },
