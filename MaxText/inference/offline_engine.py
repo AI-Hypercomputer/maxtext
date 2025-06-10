@@ -51,12 +51,17 @@ from MaxText.experimental.rl import pathwaysutils_reshard
 from MaxText.prefill_packing import PrefillProcessor, BatchedPrefillProcessor
 from MaxText import max_logging
 
+from jetstream.engine import engine_api
+
 DecodeState = Any
 Params = Any
 MaxTextConfig = Any
 
 
-# logging.getLogger("jax").setLevel(logging.DEBUG)
+logging.getLogger("jax").setLevel(logging.DEBUG)
+from jax import config
+
+config.update("jax_persistent_cache_min_compile_time_secs", 0.005)
 
 
 @dataclasses.dataclass
@@ -120,8 +125,7 @@ class PrefillType(Enum):
 class PrefillResult:
     """Result from prefill processing operation."""
 
-    token: jax.Array
-    log_prob: jax.Array
+    result_tokens: engine_api.ResultTokens
     slot: int
     prompt_logp: jax.Array
 
@@ -181,14 +185,9 @@ class PrefillHelper:
             rng,
             return_prompt_logp=True,
         )
-        log_prob = inference_utils.log_prob_of_chosen_token(
-            decode_state["logits"][slot], decode_state["tokens"][slot]
-        )
-
-        # Token, log_prob, decode_state, prompt_logp
+        # ResultTokens, decode_state, prompt_logp
         return (
-            first_token.data[:, 0],
-            log_prob,
+            first_token,
             decode_state,
             decode_state["prompt_logp"],
         )
@@ -220,7 +219,7 @@ class PrefillHelper:
             self._type == PrefillType.DEFAULT
             or padded_length == self.max_prefill_length
         ):
-            first_token, log_prob, decode_state, prompt_logp = (
+            first_token, decode_state, prompt_logp = (
                 self._jitted_single_prefill(
                     model_params,
                     input_tokens_padded,
@@ -231,7 +230,7 @@ class PrefillHelper:
                 )
             )
             prefill_done(
-                [PrefillResult(first_token, log_prob, decode_slot, prompt_logp)],
+                [PrefillResult(first_token, decode_slot, prompt_logp)],
                 [input_id],
                 decode_state,
             )
@@ -650,7 +649,7 @@ class ReplicaWorker:
                             self.prompt_logprobs_by_id[input_id].squeeze(),
                             np.array(
                                 [
-                                    token_output.log_prob
+                                    token_output.log_prob.squeeze()
                                     for token_output in self.completion_tokens_by_id[
                                         input_id
                                     ]
@@ -659,14 +658,6 @@ class ReplicaWorker:
                         )
                     ),
                 )
-
-    @staticmethod
-    @jax.jit
-    def _jitted_log_prob_and_slice_token(token, decode_state, slot):
-        log_prob = inference_utils.log_prob_of_chosen_token(
-            decode_state["logits"][slot], decode_state["tokens"][slot]
-        )
-        return token.data[:, 0], log_prob
 
     def prefill_done(self, prefill_result, prompt_ids, decode_state):
         """Callback function called when prefill completes.
@@ -685,25 +676,20 @@ class ReplicaWorker:
 
         # Process each prefill result
         for i, prefill_result in enumerate(prefill_result):
-            first_token = prefill_result.token
-            log_prob = prefill_result.log_prob
-            slot = prefill_result.slot
-            prompt_logp = prefill_result.prompt_logp
-
-            # TODO: clean up this code logic.
-            if log_prob is None:
-                first_token, log_prob = self._jitted_log_prob_and_slice_token(
-                    first_token, self.decode_state, slot
-                )
+            result_tokens: engine_api.ResultTokens = prefill_result.result_tokens
+            slot: int = prefill_result.slot
+            prompt_logp: jax.Array = prefill_result.prompt_logp
             
             self.slot_to_id[slot] = prompt_ids[i]
 
             # Add token to detokenization queue
             start_time = time.time()
+
             with jax.profiler.TraceAnnotation("convert_to_numpy"):
-                first_token = np.array(first_token)
-                log_prob = np.array(log_prob)
+                first_token = np.array(result_tokens.data[:, 0])
+                log_prob = np.array(result_tokens.log_prob)
                 prompt_logp = np.array(prompt_logp)
+            
             max_logging.log(
                 f"Replica worker {self.worker_id}: convert to numpy in Prefill in {time.time() - start_time} seconds"
             )
@@ -752,10 +738,7 @@ class ReplicaWorker:
         decode_state, result_tokens = self.engine.generate(
             params, decode_state, rng=rng
         )
-        logps = inference_utils.log_prob_of_chosen_token(
-            decode_state["logits"], decode_state["tokens"]
-        )
-        return decode_state, result_tokens.data[:, 0], logps
+        return decode_state, result_tokens.data[:, 0], result_tokens.log_prob
 
     def detokenize(self):
         """Detokenize results and manage decode slots.

@@ -278,8 +278,8 @@ class BatchedPrefillProcessor:
       return jnp.array(arr)
 
     slots = zero_padded(slots, self.max_batch_size)
-    offsets = zero_padded(offsets, self.max_batch_size)
-    lengths = zero_padded(lengths, self.max_batch_size)
+    offsets_jax = zero_padded(offsets, self.max_batch_size)
+    lengths_jax = zero_padded(lengths, self.max_batch_size)
     if not self.auto_layout_supported:
       first_tokens, decode_state = self.jitted_process_batch( 
               model_params,
@@ -288,9 +288,9 @@ class BatchedPrefillProcessor:
               bucket.count,
               pos_ids,
               seg_ids,
-              offsets,
+              offsets_jax,
               input_padding,
-              lengths,
+              lengths_jax,
               decode_state,
               return_prompt_logp,
         )
@@ -302,8 +302,8 @@ class BatchedPrefillProcessor:
           slots,
           pos_ids,
           seg_ids,
-          offsets,
-          lengths,
+          offsets_jax,
+          lengths_jax,
           decode_state,
       )
     
@@ -315,9 +315,9 @@ class BatchedPrefillProcessor:
     for i in range(bucket.count):
       if return_prompt_logp:
         prompt_logp = prompt_logp_numpy[:, offsets[i]:offsets[i] + lengths[i]]
-        prefill_result.append(PrefillResult(first_tokens[i], None, bucket.slots[i], prompt_logp))
+        prefill_result.append(PrefillResult(first_tokens[i], bucket.slots[i], prompt_logp))
       else:
-        prefill_result.append(PrefillResult(first_tokens[i], None, bucket.slots[i]))
+        prefill_result.append(PrefillResult(first_tokens[i], bucket.slots[i]))
     return prefill_result, decode_state
 
   def _process_batch_compiled(self, params: Params, padded_length: int, capacity: int, num_prompts: int):
