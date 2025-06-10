@@ -269,12 +269,13 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
               "Llama4UnfoldConvolution_0": {"vit_unfold_linear": {"kernel": None}},
               "layernorm_pre": {},
               "layernorm_post": {},
+              "Llama4VisionPixelShuffleMLP_0": {},
           },
           "Llama4MultiModalProjector_0": {"vit_multi_modal_projector": {"kernel": None}},
       },
   }
 
-  # vision encoder ###########################################
+  # vision model ###########################################
   max_logging.log("Processing vision model")
   jax_weights["vision_encoder"]["Llama4VisionModel_0"]["class_embedding"] = chkpt_vars["vision_model.class_embedding"].to(torch.float32).numpy().astype(CAST_DTYPE)
   jax_weights["vision_encoder"]["Llama4VisionModel_0"]["positional_embedding_vlm"] = chkpt_vars["vision_model.positional_embedding_vlm"].to(torch.float32).numpy().astype(CAST_DTYPE)
@@ -287,9 +288,10 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
       "scale": chkpt_vars["vision_model.layernorm_pre.weight"].to(torch.float32).numpy().astype(CAST_DTYPE),
       "bias": chkpt_vars["vision_model.layernorm_pre.bias"].to(torch.float32).numpy().astype(CAST_DTYPE),
   })
+
+  max_logging.log("Processing vision encoder")
   for layer_idx in tqdm(range(num_hidden_layers_for_vit), desc="layers", leave=False):
     layer_name = f"layers_{layer_idx}"
-
     wq = chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.q_proj.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
     wk = chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.k_proj.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
     wv = chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.v_proj.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
@@ -319,8 +321,8 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     fc1_b = chkpt_vars[f"vision_model.model.layers.{layer_idx}.mlp.fc1.bias"].to(torch.float32).numpy().astype(CAST_DTYPE)
     fc2_b = chkpt_vars[f"vision_model.model.layers.{layer_idx}.mlp.fc2.bias"].to(torch.float32).numpy().astype(CAST_DTYPE)
     vision_mlp = {
-      "vit_encoder_layer_mlp_fc1": {"kernal": fc1_w, "bias": fc1_b},
-      "vit_encoder_layer_mlp_fc2": {"kernal": fc2_w, "bias": fc2_b},
+      "vit_encoder_layer_mlp_fc1": {"kernel": fc1_w, "bias": fc1_b},
+      "vit_encoder_layer_mlp_fc2": {"kernel": fc2_w, "bias": fc2_b},
     }
 
     jax_weights["vision_encoder"]["Llama4VisionModel_0"]["Llama4VisionEncoder_0"].update(
@@ -328,14 +330,32 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
         layer_name: {
             "self_attention_vision": self_attention_vision,
             "Llama4VisionMLP_0": vision_mlp,
+            "input_layer_norm": {
+              "kernel": chkpt_vars["vision_model.model.layers.{layer_idx}.input_layernorm.weight"].to(torch.float32).numpy().astype(CAST_DTYPE),
+              "bias": chkpt_vars["vision_model.model.layers.{layer_idx}.input_layernorm.bias"].to(torch.float32).numpy().astype(CAST_DTYPE),
+            },
+            "post_attention_layer_norm": {
+              "kernel": chkpt_vars["vision_model.model.layers.{layer_idx}.post_attention_layernorm.weight"].to(torch.float32).numpy().astype(CAST_DTYPE),
+              "bias": chkpt_vars["vision_model.model.layers.{layer_idx}.post_attention_layernorm.bias"].to(torch.float32).numpy().astype(CAST_DTYPE),
+            },
         }
       }
     )
+    
+  max_logging.log("Processing pixel shuffle mlp")
+  adaptor_fc1 = chkpt_vars["vision_model.vision_adapter.mlp.fc1.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+  adaptor_fc2 = chkpt_vars["vision_model.vision_adapter.mlp.fc2.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+  jax_weights["vision_encoder"]["Llama4VisionModel_0"]["Llama4VisionPixelShuffleMLP_0"].update(
+    {
+      "pixel_shuffle_mlp": {
+        "vit_pixel_shuffle_mlp_fc1": {"kernel": adaptor_fc1},
+        "vit_pixel_shuffle_mlp_fc2": {"kernel": adaptor_fc2},
+      },
+    }
+  )
 
   max_logging.log("Processing multimodal projector")
   jax_weights["vision_encoder"]["Llama4MultiModalProjector_0"]["vit_multi_modal_projector"]["kernel"] = chkpt_vars["multi_modal_projector.linear_1.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
-
-  return jax_weights
 
   # language model ###########################################
   max_logging.log("Processing language model")

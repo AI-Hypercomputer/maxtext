@@ -131,7 +131,7 @@ MODEL_PARAMS_DICT = {
         "vocab": 128256,
     },
     "llama4-17b-16e": {
-        "num_layers": 48,
+        "num_layers": 1,
         "num_heads": 40,
         "num_kv_heads": 8,
         "dims_per_head": 128,
