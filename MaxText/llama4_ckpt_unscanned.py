@@ -336,7 +336,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
             },
             "post_attention_layer_norm": {
               "scale": chkpt_vars[f"vision_model.model.layers.{layer_idx}.post_attention_layernorm.weight"].to(torch.float32).numpy().astype(CAST_DTYPE),
-              "bias": chkpt_vars["vision_model.model.layers.{layer_idx}.post_attention_layernorm.bias"].to(torch.float32).numpy().astype(CAST_DTYPE),
+              "bias": chkpt_vars[f"vision_model.model.layers.{layer_idx}.post_attention_layernorm.bias"].to(torch.float32).numpy().astype(CAST_DTYPE),
             },
         }
       }
