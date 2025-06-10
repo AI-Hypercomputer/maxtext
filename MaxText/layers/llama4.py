@@ -37,6 +37,7 @@ from MaxText.layers import models
 from MaxText.layers import moe
 from MaxText.layers import quantizations
 from MaxText.layers import attentions
+from MaxText.layers import embeddings
 from MaxText.layers.attentions import AttentionType
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.normalizations import RMSNorm
@@ -298,6 +299,64 @@ class Llama4MultiModalProjector(nn.Module):
     """
     hidden_states = self.linear(image_features)
     return hidden_states
+
+
+class Llama4VisionRotaryEmbedding(nn.Module):
+    config: object  # You'll need to define a config object with the necessary attributes
+
+    @nn.compact
+    def __call__(self):
+        idx = self.config.tile_size_for_vit // self.config.patch_size_for_vit
+        
+        # Original: img_idx = torch.arange(idx**2, dtype=torch.int32).reshape(idx**2, 1)
+        img_idx = jnp.arange(idx**2, dtype=jnp.int32).reshape(idx**2, 1)
+        
+        # Original: img_idx = torch.cat([img_idx, img_idx[:1]], dim=0)
+        img_idx = jnp.concatenate([img_idx, img_idx[:1]], axis=0)
+        
+        # Original: img_idx[-1, -1] = -2  # ID_CLS_TOKEN
+        # JAX arrays are immutable, so we create a new array
+        img_idx = img_idx.at[-1, -1].set(-2)
+
+        # Original: frequencies_x = img_idx % idx
+        frequencies_x = img_idx % idx
+        
+        # Original: frequencies_y = img_idx // idx
+        frequencies_y = img_idx // idx
+        
+        freq_dim = self.config.hidden_size_for_vit // self.config.num_attention_heads_for_vit // 2
+        
+        # Original: rope_freq = 1.0 / (config.rope_theta ** (torch.arange(0, freq_dim, 2)[: (freq_dim // 2)].float() / freq_dim))
+        rope_freq_arange = jnp.arange(0, freq_dim, 2)[: (freq_dim // 2)].astype(jnp.float32)
+        rope_freq = 1.0 / (self.config.rope_theta_for_vit ** (rope_freq_arange / freq_dim))
+        
+        # Original: freqs_x = ((frequencies_x + 1)[..., None] * rope_freq[None, None, :]).repeat_interleave(2, dim=-1)
+        # JAX doesn't have a direct `repeat_interleave` with `dim` argument like PyTorch for arbitrary dimensions.
+        # We can achieve the same by reshaping and tiling.
+        freqs_x_base = (frequencies_x + 1)[..., None] * rope_freq[None, None, :]
+        freqs_x = jnp.concatenate([freqs_x_base, freqs_x_base], axis=-1)
+
+        # Original: freqs_y = ((frequencies_y + 1)[..., None] * rope_freq[None, None, :]).repeat_interleave(2, dim=-1)
+        freqs_y_base = (frequencies_y + 1)[..., None] * rope_freq[None, None, :]
+        freqs_y = jnp.concatenate([freqs_y_base, freqs_y_base], axis=-1)
+        
+        # Original: freqs = torch.cat([freqs_x, freqs_y], dim=-1).float().contiguous()[..., ::2]
+        freqs = jnp.concatenate([freqs_x, freqs_y], axis=-1).astype(jnp.float32)[..., ::2]
+        
+        # Original: freqs = freqs.masked_fill(img_idx.reshape(-1, 1, 1) < 0, 0)
+        mask = (img_idx.reshape(-1, 1, 1) < 0)
+        freqs = jnp.where(mask, 0.0, freqs)
+        
+        # Original: freq_cis = torch.view_as_complex(torch.stack([torch.cos(freqs), torch.sin(freqs)], dim=-1))
+        # JAX handles complex numbers directly; jnp.cos and jnp.sin on real numbers work as expected
+        # To get the complex representation, we can do cos(freqs) + 1j * sin(freqs)
+        freq_cis = jnp.cos(freqs) + 1j * jnp.sin(freqs)
+        
+        # Store as a module attribute
+        # In Flax, you typically define parameters and constants during setup.
+        # For values computed once and used later, you can store them as attributes of the module.
+        self.sow('intermediates', 'freqs_ci', freq_cis)
+        return freq_cis # Return it as well for immediate use if needed, or rely on sow
 
 
 def determine_is_nope_layer(layer_id: int, nope_layer_interval: int) -> bool:
@@ -709,6 +768,14 @@ class Llama4VisionModel(nn.Module):
         (self.num_patches, self.config.hidden_size_for_vit),
         dtype=self.config.dtype_mm,
     )
+    # self.rotary_embedding_pt = Llama4VisionRotaryEmbedding(config=self.config)
+    self.rotary_embedding = embeddings.LlamaVisionRotaryEmbedding(
+        self.config.tile_size_for_vit, 
+        self.config.patch_size_for_vit, 
+        self.config.hidden_size_for_vit, 
+        self.config.num_attention_heads_for_vit, 
+        self.config.rope_theta_for_vit
+    )
 
     print(f"Class embedding shape: {self.class_embedding.shape}")
 
@@ -732,6 +799,7 @@ class Llama4VisionModel(nn.Module):
     """
     cfg = self.config
     mesh = self.mesh
+    jax.debug.print("pixel_values {}", pixel_values.mean())
 
     b, t, c, h, w = pixel_values.shape
     pixel_values = jnp.reshape(pixel_values, [b * t, c, h, w])
@@ -739,13 +807,17 @@ class Llama4VisionModel(nn.Module):
     # Unfold convolution to extract patches
     hidden_states = Llama4UnfoldConvolution(config=cfg)(pixel_values)
 
+    # Add class embedding to the beginning of the sequence
     class_embedding_expanded = jnp.expand_dims(jnp.expand_dims(self.class_embedding, axis=0), axis=0)
     class_embedding = jnp.broadcast_to(class_embedding_expanded, (hidden_states.shape[0], 1, cfg.hidden_size_for_vit))
-    
     hidden_states = jnp.concatenate([class_embedding, hidden_states], axis=1)
+    
+    # Add positional embedding
     hidden_states += self.positional_embedding_vlm
 
     hidden_states = nn.LayerNorm(name="layernorm_pre")(hidden_states)
+    # freqs_ci = self.rotary_embedding()
+    # jax.debug.print("freqs_ci {}", freqs_ci.mean())
 
     hidden_states = Llama4VisionEncoder(config=cfg, mesh=mesh)(hidden_states)
     hidden_states = nn.LayerNorm(name="layernorm_post")(hidden_states)
