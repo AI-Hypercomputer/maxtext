@@ -841,6 +841,10 @@ def train_loop(config, recorder, state=None):
     if step == first_profiling_step or prof.should_activate_periodic_profile(step):
       optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
       prof.activate(blocking_object=state, optional_postfix=optional_postfix)
+      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        compiled = p_train_step.lower(state, example_batch, nextrng).compile()
+        compiled_stats = compiled.memory_analysis()
+        max_utils.print_compiled_memory_stats(compiled_stats)
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       with maybe_record_goodput(recorder, GoodputEvent.DATA_LOADING):
@@ -957,23 +961,6 @@ def train_loop(config, recorder, state=None):
   metric_logger.write_metrics(running_gcs_metrics, metrics, config.steps - 1)  # final step metrics
   max_utils.close_summary_writer(writer)
 
-  if example_batch:
-    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      # pytype: disable=attribute-error
-      compiled = p_train_step.lower(state, example_batch, nextrng).compile()
-      compiled_stats = compiled.memory_analysis()
-      if compiled_stats is not None:
-        total = (compiled_stats.output_size_in_bytes +
-                 compiled_stats.temp_size_in_bytes +
-                 compiled_stats.argument_size_in_bytes -
-                 compiled_stats.alias_size_in_bytes) / (1024**3)
-        max_logging.log(
-            f"Total memory size: {total:.1f} GB, "
-            f"Output size: {compiled_stats.output_size_in_bytes/(1024**3):.1f} GB, "
-            f"Temp size: {compiled_stats.temp_size_in_bytes/(1024**3):.1f} GB, "
-            f"Argument size: {compiled_stats.argument_size_in_bytes/(1024**3):.1f} GB, "
-            f"Host temp size: {compiled_stats.host_temp_size_in_bytes/(1024**3):.1f} GB."
-        )
   return state
 
 
