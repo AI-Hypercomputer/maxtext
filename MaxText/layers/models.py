@@ -678,7 +678,7 @@ class Decoder(nn.Module):
           y
       )  # We do not quantize the logits matmul.
 
-    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE):
+    if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PIGGYBACKING):
       logits = nn.with_logical_constraint(logits, (None, None, "activation_vocab"))
     else:
       logits = nn.with_logical_constraint(

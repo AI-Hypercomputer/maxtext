@@ -891,7 +891,7 @@ class MaxEngine(engine_api.Engine):
     # Shape: (num_decode_token, 1)
     generate_next_pos = generate_next_pos.T
     # Shape: (1, num_decode_token)
-    positions = jax.lax.dynamic_update_index_in_dim(positions, generate_next_pos, index=-num_decode_token, axis=0)
+    positions = jax.lax.dynamic_update_index_in_dim(positions, generate_next_pos, index=-num_decode_token, axis=1)
 
     # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
     start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
@@ -930,7 +930,6 @@ class MaxEngine(engine_api.Engine):
     )
 
     # Handle selected generate results
-    genereate_generated_token = decode_state["generated_tokens"][generate_slots] + 1
     generate_out_logits = jax.lax.dynamic_slice_in_dim(flat_logits, -num_decode_token, num_decode_token, axis=1)
     # (1, num_decode_token, vocab) -> # (num_decode_token, 1, vocab)
     generate_out_logits = generate_out_logits.swapaxes(0, 1)
@@ -956,7 +955,6 @@ class MaxEngine(engine_api.Engine):
 
     out_generated_tokens = decode_state["generated_tokens"]
     out_generated_tokens = out_generated_tokens.at[prefill_slot].set(prefill_generated_tokens)
-    out_generated_tokens = out_generated_tokens.at[generate_slots].set(genereate_generated_token)
 
     out_tokens = decode_state["tokens"]
     out_tokens = out_tokens.at[prefill_slot].set(prefill_first_generated_token)
@@ -983,6 +981,9 @@ class MaxEngine(engine_api.Engine):
         log_prob=token_logp,
         samples_per_slot=1,
     )
+
+    genereate_generated_token = decode_state["generated_tokens"][generate_slots] + 1
+    out_generated_tokens = out_generated_tokens.at[generate_slots].set(genereate_generated_token)
 
     return {
         "logits": out_logits,
