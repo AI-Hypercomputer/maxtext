@@ -29,6 +29,8 @@ from MaxText import maxengine
 from MaxText import pyconfig
 from MaxText import multimodal_utils
 
+from MaxText.inference import piggybacking_decode
+
 # Number of text sequences to process in a single batch.
 _NUM_STREAMS = 1
 
@@ -128,38 +130,90 @@ def main(argv: Sequence[str]) -> None:
   first_token_list = []
   sampled_tokens_list = []
 
-  # Prefill
-  rng, rng_prefill = jax.random.split(rng)  # Split RNG before calling prefill
-  for i in range(_NUM_STREAMS):
-    prefill_result, first_token = engine.prefill(
-        params=params, padded_tokens=tokens, images=images, true_length=true_length, rng=rng_prefill, slot=i
+  _PIG = False
+  _PIG = True
+  if not _PIG:
+    # Prefill
+    rng, rng_prefill = jax.random.split(rng)  # Split RNG before calling prefill
+    for i in range(_NUM_STREAMS):
+      prefill_result, first_token = engine.prefill(
+          params=params, padded_tokens=tokens, images=images, true_length=true_length, rng=rng_prefill, slot=i
+      )
+      prefill_result_list.append(prefill_result)
+      first_token_list.append(first_token)
+
+    # Insert
+    rng, rng_init_decode = jax.random.split(rng)
+    decode_state = engine.init_decode_state(rng_init_decode)
+    for i in range(_NUM_STREAMS):
+      decode_state = engine.insert(prefill_result_list[i], decode_state, slot=i)
+
+    # Generate
+    steps = range(config.max_prefill_predict_length, config.max_target_length)
+    sampled_tokens_list.append(_batch_first_result_token(first_token_list, batch_size))
+    for _ in steps:
+      rng, rng_generate = jax.random.split(rng)
+      decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
+      sampled_tokens_list.append(sampled_tokens)
+
+    # Get results
+    for i in range(_NUM_STREAMS):
+      results = [t.get_result_at_slot(i).tokens.item() for t in sampled_tokens_list]
+      output = tokenizer_model.decode(results)
+      print(f"Input `{text}` -> `{output}`")
+
+    assert output.startswith(
+        config.autoregressive_decode_assert
+    ), f"generated text mismatch {output=}, {config.autoregressive_decode_assert=}"
+  else:
+    # Piggybacking decode
+    print("USE PIG")
+
+    decode_state = engine.init_decode_state()
+
+    # First prefill
+    piggybacking_decode_params = piggybacking_decode.PiggyBackingDecodeParams(
+        prefill_slot=jnp.array([0]),
+        generate_slots=jnp.array([1]),
     )
-    prefill_result_list.append(prefill_result)
-    first_token_list.append(first_token)
+    decode_state, sampled_tokens = engine.prefill_generate(
+        params=params,
+        padded_tokens=tokens,
+        true_length=true_length,
+        decode_state=decode_state,
+        piggybacking_decode_params=piggybacking_decode_params,
+    )
 
-  # Insert
-  rng, rng_init_decode = jax.random.split(rng)
-  decode_state = engine.init_decode_state(rng_init_decode)
-  for i in range(_NUM_STREAMS):
-    decode_state = engine.insert(prefill_result_list[i], decode_state, slot=i)
+    # prefill_result, first_token = engine.prefill(
+    #     params=params, padded_tokens=tokens, true_length=true_length
+    # )
+    # decode_state = engine.insert(prefill_result, decode_state, slot=0)
 
-  # Generate
-  steps = range(config.max_prefill_predict_length, config.max_target_length)
-  sampled_tokens_list.append(_batch_first_result_token(first_token_list, batch_size))
-  for _ in steps:
-    rng, rng_generate = jax.random.split(rng)
-    decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
-    sampled_tokens_list.append(sampled_tokens)
+    # Do the remain generate with dummy prefill
+    piggybacking_decode_params = piggybacking_decode.PiggyBackingDecodeParams(
+        prefill_slot=jnp.array([1]),
+        generate_slots=jnp.array([0]),
+    )
+    steps = range(config.max_prefill_predict_length, config.max_target_length)
+    for _ in steps:
+      decode_state, sampled_tokens = engine.prefill_generate(
+          params=params,
+          padded_tokens=tokens,
+          true_length=true_length,
+          decode_state=decode_state,
+          piggybacking_decode_params=piggybacking_decode_params,
+      )
+      sampled_tokens_list.append(sampled_tokens)
 
-  # Get results
-  for i in range(_NUM_STREAMS):
-    results = [t.get_result_at_slot(i).tokens.item() for t in sampled_tokens_list]
-    output = tokenizer_model.decode(results)
-    print(f"Input `{text}` -> `{output}`")
+    # Get results
+    for i in range(1):
+      results = [t.get_result_at_slot(i).tokens.item() for t in sampled_tokens_list]
+      output = tokenizer_model.decode(results)
+      print(f"Input `{text}` -> `{output}`")
 
-  assert output.startswith(
-      config.autoregressive_decode_assert
-  ), f"generated text mismatch {output=}, {config.autoregressive_decode_assert=}"
+    assert output.startswith(
+        config.autoregressive_decode_assert
+    ), f"generated text mismatch {output=}, {config.autoregressive_decode_assert=}"
 
 
 def _validate_config(config):
