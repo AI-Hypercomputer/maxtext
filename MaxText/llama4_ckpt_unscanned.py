@@ -266,7 +266,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
               "Llama4VisionEncoder_0": {},
               "class_embedding": None,
               "positional_embedding_vlm": None,
-              "Llama4UnfoldConvolution_0": None,
+              "Llama4UnfoldConvolution_0": {"vit_unfold_linear": {"kernel": None}},
               "layernorm_pre": {},
               "layernorm_post": {},
           },
@@ -278,7 +278,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
   max_logging.log("Processing vision model")
   jax_weights["vision_encoder"]["Llama4VisionModel_0"]["class_embedding"] = chkpt_vars["vision_model.class_embedding"].to(torch.float32).numpy().astype(CAST_DTYPE)
   jax_weights["vision_encoder"]["Llama4VisionModel_0"]["positional_embedding_vlm"] = chkpt_vars["vision_model.positional_embedding_vlm"].to(torch.float32).numpy().astype(CAST_DTYPE)
-  jax_weights["vision_encoder"]["Llama4VisionModel_0"]["Llama4UnfoldConvolution_0"] = chkpt_vars["vision_model.patch_embedding.linear.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+  jax_weights["vision_encoder"]["Llama4VisionModel_0"]["Llama4UnfoldConvolution_0"]["vit_unfold_linear"]["kernel"] = chkpt_vars["vision_model.patch_embedding.linear.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
   jax_weights["vision_encoder"]["Llama4VisionModel_0"]["layernorm_pre"].update({
       "scale": chkpt_vars["vision_model.layernorm_pre.weight"].to(torch.float32).numpy().astype(CAST_DTYPE),
       "bias": chkpt_vars["vision_model.layernorm_pre.bias"].to(torch.float32).numpy().astype(CAST_DTYPE),
