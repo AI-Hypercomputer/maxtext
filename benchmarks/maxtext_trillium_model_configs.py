@@ -1728,7 +1728,7 @@ llama3_1_70b_131072 = _add_to_model_dictionary(
         "skip_first_n_steps_for_profiler": 10,
         "profiler_steps": 5,
         "tokenizer_type": "tiktoken",
-        "tokenizer_path": "assets/tokenizer_llama3.tiktoken", 
+        "tokenizer_path": "assets/tokenizer_llama3.tiktoken",
         "packing": False,
     },
     xla_flags=(xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -1736,7 +1736,7 @@ llama3_1_70b_131072 = _add_to_model_dictionary(
         + xla_flags_library.DATA_PARALLEL_OVERLAP
         + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR
         + xla_flags_library.HOST_OFFLOAD_FLAGS
-        
+
     ),
     pathways_xla_flag_options={
         xla_flags_library.REMOVE: [
@@ -1763,7 +1763,7 @@ llama3_1_405b_8192_fsdp_dcn_mlperf = _add_to_model_dictionary(
     tuning_params={
         "per_device_batch_size": 1,
         "ici_fsdp_parallelism": 256,
-        "dcn_fsdp_parallelism": 2,
+        "dcn_fsdp_parallelism": 4,
         "remat_policy": "custom",
         "decoder_layer_input": "offload",
         "max_target_length": 8192,
@@ -1785,16 +1785,15 @@ llama3_1_405b_8192_fsdp_dcn_mlperf = _add_to_model_dictionary(
         "adam_eps": 1e-5,
         "enable_checkpointing": True,
         "load_parameters_path": "gs://trillium-scale-tests-q1-25-west/mlperf50_llama405b_checkpoints/scanned_sharded/0/items",
-        "tokenizer_type": "huggingface",
-        "tokenizer_path": "assets/mistral/tokenizer",
+        "tokenizer_path": "assets/tokenizer.mistral-v3",
         "dataset_path": "gs://trillium-scale-datasets-q1-25-west",
         "dataset_type": "c4_mlperf",
         "dataset_name": "c4/en:3.0.7",
         "eval_dataset_name": "c4/en:3.0.9",
-        "skip_first_n_steps_for_profiler": 295, 
+        "skip_first_n_steps_for_profiler": 645,
         "weight_dtype": "float32",
         "dtype": "bfloat16",
-        "steps": 300, 
+        "steps": 650,
         "learning_rate": 8.e-5,
         "warmup_steps_fraction": 0.0067,
         "learning_rate_schedule_steps": 2400000,
