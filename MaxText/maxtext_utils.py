@@ -31,7 +31,7 @@ from collections.abc import Iterable
 from jax.experimental import mesh_utils
 from jax.experimental.serialize_executable import deserialize_and_load
 from jax.sharding import PartitionSpec as P
-from pprint import pprint 
+
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
@@ -349,19 +349,46 @@ def calculate_prefill_tflops_per_device(num_model_parameters, prefill_length, co
 def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec, all_mesh_axis_names):
   """
   Extracts the set of mesh axis names that a tensor's PartitionSpec uses.
-  An unsharded tensor will result in an empty set.
-  """
 
+  This function inspects a tensor's sharding specification (PartitionSpec) and
+  identifies which mesh axes are actively used for sharding. If a tensor is not
+  sharded (i.e., fully replicated), the resulting set will be empty.
+
+  Args:
+    tensor_sharding_spec: The PartitionSpec of a tensor, which defines how it's partitioned across the mesh. 
+    It can be None or contain strings and iterables representing the mesh axes.
+    all_mesh_axis_names: A collection of all available mesh axis names in the current device mesh.
+
+  Returns:
+    A set of strings, where each string is a mesh axis name used by the
+    tensor's sharding spec. Returns an empty set for unsharded tensors.
+  """
+  # If there's no sharding spec, it's unsharded; return an empty set.
   if tensor_sharding_spec is None:
     return set()
-  tensor_sharding_spec=sum([[axis] if isinstance(axis,str) else list(axis) if isinstance(axis,Iterable) else [] for axis in tensor_sharding_spec], [])
+  # Flatten the sharding spec, as it can contain nested iterables (e.g., ('data', 'mdl')).
+  tensor_sharding_spec=sum([[axis] if isinstance(axis,str) else list(axis) if isinstance(axis,Iterable) 
+                            else [] for axis in tensor_sharding_spec], [])
+  # Filter the flattened spec to include only valid, non-None mesh axis names.
   used_axis = set(axis for axis in tensor_sharding_spec if axis is not None and axis in all_mesh_axis_names)
   return used_axis
 
 def _get_valid_target_axis(mesh):
   """
   Returns mesh axes from config that are valid and have more than one shard.
+
+  This function identifies which of the predefined potential sharding axes are
+  actually present in the current device mesh and are configured with a size
+  greater than one (i.e., are actually sharded).
+
+  Args:
+    mesh: The device mesh object, which contains information about the mesh topology, including axis names and their sizes.
+
+  Returns:
+    A set of strings, where each string is a mesh axis name that is both
+    pre-configured as a target for sharding and has more than one shard in the mesh.
   """
+
   target_sharding_axes_config = [
       "fsdp",
       "fsdp_transpose",
@@ -375,7 +402,8 @@ def _get_valid_target_axis(mesh):
       "expert",
   ]
 
-  # Filter axes present in mesh and with >1 shard
+  # Filter the target axes to find those that exist in the current mesh
+  # and have a size greater than 1, meaning they are actually used for sharding.
   return {
     axis for axis in target_sharding_axes_config
     if axis in mesh.axis_names and mesh.shape[axis] > 1
@@ -385,29 +413,47 @@ def _analyze_sharding(params, mesh, valid_target_mesh_axes):
   """
   Analyzes parameters to find which are unsharded on any valid mesh axis.
 
-  returns:
-    unsharded_params_total_size (int): total size of unsharded parameters
-    problematic_tensors_details (list): information on problematic tensors
+  This function iterates through all parameters in a model, checking their
+  sharding specifications. It identifies parameters that are not sharded along any
+  of the provided valid target axes (i.e., they are fully replicated across these axes).
+
+  Args:
+    params: A PyTree of model parameters.
+    mesh: The device mesh object.
+    valid_target_mesh_axes: A set of mesh axis names that are considered valid targets for sharding.
+
+  Returns:
+    A tuple containing:
+      - unsharded_params_total_size (int): The total size (number of elements) of all parameters found to be 
+        unsharded on the target axes.
+      - problematic_tensors_details (list): A list of dictionaries, where each
+        dictionary contains details about a tensor that is not sharded on any of the target axes.
   """
-  unsharded_params_total_size = 0 # Initialize count of unsharded parameter size
-  problematic_tensors_details = [] # List to hold details about problematic tensors
+  unsharded_params_total_size = 0 # Initialize a counter for the size of unsharded parameters.
+  problematic_tensors_details = [] # Initialize a list to store details of problematic tensors.
 
-  all_param_leaves = jtu.tree_leaves_with_path(params) # Get all parameter and their paths
+  # Get a flattened list of all parameters (leaves) in the PyTree, along with their paths.
+  all_params_leaves = jtu.tree_leaves_with_path(params) 
 
-  for path, p_leaf  in all_param_leaves: # Iterate over each parameter leaf
+  for path, p_leaf  in all_params_leaves: # Iterate over each parameter leaf
     param_name_str = jtu.keystr(path) # Convert the tree path to a readable string
 
-    has_sharding_spec = hasattr(p_leaf,'sharding') and hasattr(p_leaf.sharding, 'spec') # check sharding info exsits
-    assert has_sharding_spec, ( # Fail early if missing '.sharding.spec'
+    # Check if the parameter has the necessary sharding information.
+    has_sharding_spec = hasattr(p_leaf,'sharding') and hasattr(p_leaf.sharding, 'spec')
+    # If not, raise an error, as all parameters are expected to have it.
+    assert has_sharding_spec, ( 
       f"Parameter '{param_name_str}' is missing sharding information."
       "All parameters must have an explicit '.sharding.spec' attribute."
     )
 
     current_sharding_spec = p_leaf.sharding.spec # Extract the current tensor's sharding spec
-    mesh_axes_used = get_mesh_axes_used_by_tensor_spec(current_sharding_spec, mesh.axis_names) # Identify axes used for sharding
-    is_sharded_on_any_target_axis = any(axis in mesh_axes_used for axis in valid_target_mesh_axes) # check if sharded on any valid axis
+    # Determine which mesh axes are used by this parameter's sharding spec.
+    mesh_axes_used = get_mesh_axes_used_by_tensor_spec(current_sharding_spec, mesh.axis_names) 
+    # Check if the parameter is sharded on at least one of the valid target axes.
+    is_sharded_on_any_target_axis = any(axis in mesh_axes_used for axis in valid_target_mesh_axes) 
 
-    if not is_sharded_on_any_target_axis: # If not sharded on any axis
+    # If the parameter is not sharded on any of the target axes, it's considered "problematic."
+    if not is_sharded_on_any_target_axis: 
       unsharded_params_total_size += p_leaf.size # Add to total unsharded parameter size
       # Add detailed info to list of problematic tensors
       problematic_tensors_details.append({
@@ -416,220 +462,89 @@ def _analyze_sharding(params, mesh, valid_target_mesh_axes):
         'spec': str(current_sharding_spec), # Tensor sharding spec as string
         'available_axes': sorted(list(valid_target_mesh_axes)) # Axes that could be used for sharding
       })
+  # Return the total size of unsharded parameters and the list of problematic tensors.
   return unsharded_params_total_size, problematic_tensors_details # Return results
 
 def _raise_if_unsharded_exceeds_tolerance(unsharded_size, total_size, tolerance, problematic_tensors_details):
   """
-  Raises AssertionError: If unsharded parameter percentage exceeds the given tolerance.
-  """
-  unsharded_param_perc = unsharded_size / total_size if total_size > 0 else 0.0 # Compute % of unsharded params
+  Raises an AssertionError if the percentage of unsharded parameters exceeds the given tolerance.
 
-  if unsharded_param_perc > tolerance: # If above tolerance threshold
-    problematic_tensors_details.sort(key=lambda x: x['size'], reverse=True) # Sort tensors by size descending
-      
+  This function calculates the proportion of model parameters that are unsharded
+  and compares it against a specified tolerance. If the tolerance is exceeded,
+  it constructs and raises a detailed error message.
+
+  Args:
+    unsharded_size: The total size of parameters not sharded on target axes.
+    total_size: The total size of all parameters in the model.
+    tolerance: A float (e.g., 0.05 for 5%) representing the maximum allowed percentage of unsharded parameters.
+    problematic_tensors_details: A list of details about the unsharded tensors, used to generate an informative error message.
+
+  Raises:
+    AssertionError: If the percentage of unsharded parameters is greater than the tolerance.
+  """
+  # Calculate the percentage of unsharded parameters.
+  unsharded_param_perc = unsharded_size / total_size if total_size > 0 else 0.0 
+
+  # If the percentage is over the tolerance, prepare and raise an error.
+  if unsharded_param_perc > tolerance: 
+    # Sort the problematic tensors by size to show the largest ones first.
+    problematic_tensors_details.sort(key=lambda x: x['size'], reverse=True) 
+
+    # Begin constructing the error message.  
     error_msg_lines = [
       f"Unsharded parameter percentage ({unsharded_param_perc:.2%})"
       f"exceeds tolerance ({tolerance:.2%})."
     ]
-    # Add explanation header
+    # Add a header explaining the issue.
     error_msg_lines.append(
-      "The following large tensors are fully replicated (unsharrded) but could be sharded on at least one of the available axes:"
+      "The following large tensors are fully replicated (unsharrded) but could be sharded on at " \
+      "least one of the available axes:"
     )
+    # Add details for the top 5 largest problematic tensors.
     for detail in problematic_tensors_details[:5]: # Show top 5 largest problematic tensors
-      # Format each tensor's issue line
       error_msg_lines.append(
         f" - Name: {detail['name']}(Size: {detail['size']}, Spec: {detail['spec']}) "
         f"could be sharded on: {detail['available_axes']}"
       )
     
-    raise AssertionError("\n".join(error_msg_lines)) # Raise exception with full message
+    # Raise the assertion error with the combined, formatted message.
+    raise AssertionError("\n".join(error_msg_lines))
 
 def assert_params_sufficiently_sharded(params,mesh,tolerance):
-  total_num_params = max_utils.calculate_bytes_from_pytree(params)
-  if total_num_params == 0:
-    return
+  """
+  Asserts that the total size of replicated parameters is within a given tolerance.
 
-  valid_target_mesh_axes = _get_valid_target_axis(mesh) # Get mesh axes with more than 1 shard
+  This is the main function that orchestrates the sharding analysis. It determines
+  the total number of parameters, identifies valid sharding axes, analyzes the
+  sharding of all parameters, and then raises an error if the amount of
+  unsharded parameters exceeds the specified tolerance.
+
+  Args:
+    params: A PyTree of model parameters.
+    mesh: The device mesh object.
+    tolerance: A float representing the maximum allowed percentage of unsharded parameters.
+  """
+  # Calculate the total size of all parameters in the model.
+  total_num_params = max_utils.calculate_bytes_from_pytree(params)
+
+  # Get the set of valid mesh axes that can be used for sharding.
+  valid_target_mesh_axes = _get_valid_target_axis(mesh)
+  # If there are no valid axes to shard along, there's nothing to check, so we can exit.
   if not valid_target_mesh_axes:
     return # Exit early
 
-  # Analyze sharding and get unsharded size and problematic tensors
+  # Analyze the parameters to find the total size of unsharded parameters
+  # and get details on which tensors are problematic.
   unsharded_params_total_size, problematic_tensors_details = _analyze_sharding(
     params, mesh, valid_target_mesh_axes
   )  
 
-  # Raise an error if unsharded portion exceeds tolerance
+  # Check if the amount of unsharded parameters is within the tolerance and
+  # raise an exception if it is not.
   _raise_if_unsharded_exceeds_tolerance(
     unsharded_params_total_size, total_num_params,
     tolerance, problematic_tensors_details
   )
-
-# def printParamData(params,mesh):
-#   """
-#   A debugging utility to print a structred overview of the mesh and model paramters.
-
-#   It displays the mesh's shape, axis names, and device layout. It then recursively 
-#   maps over the entire 'params' PyTree to print the shape of each parameter leaf, 
-#   which is useful for verifying model structure.
-
-#   Args:
-#     params: The PyTree of model parameters.
-#     mesh: The JAX device mesh.
-#   """
-
-#   print("*******************PrintParamData****************************")
-#   def inspect_param(x): # Getting shape from array
-#     return{"Shape":x.shape}
-#   # Getting the shape of mesh that helps me to get which type of tensor have how many dimensions
-#   print("Mesh Shape", mesh.shape)
-#   print("Mesh Axis",mesh.axis_names)
-#   print("Mesh Device",mesh.devices)
-#   print("Param Info")
-#   # Show the shape of all parameters and what devices has been assigned
-#   pprint(jax.tree_util.tree_map(inspect_param,params))
-#   print("******************************************************************")
-
-# def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec, all_mesh_axis_names):
-#   """
-#   Parses a tensor's sharding specification to find which mesh axes it's sharded on.
-
-#   This helper function takes a PartionSpec and compares it against all availble
-#   mesh axes to return a set of axes that are actively used for sharding this tensor.
-#   A fully replicated tensor (spec is None or contains no valid axis names)
-#   will result in an empty set.
-
-#   Args:
-#     tensor_sharding_spec: The PartitionSpec Object (e.g., from 'param.sharding.spec').
-#     all_mesh_axis_names: A list or tuple of all axis names defined in the mesh.
-  
-#   Returns:
-#     A set of strings, where each strong is a mesh axis name used by the tensor.
-#   """
-#   if tensor_sharding_spec is None:
-#     return set()
-  
-#   # Use a set comprehension for an efficient way to find the intersection
-#   # It iterates through the spec, keeping only the names that are valid mesh axes.
-#   used_axes = set(axis for axis in tensor_sharding_spec if axis is not None and axis in all_mesh_axis_names)
-#   return used_axes
-
-# def assert_params_sufficiently_sharded(params, mesh, tolerance):
-#   """Checks that parameter are explicitly sharded and that the total size of any 
-#     fully replicated parameters remains within a given tolerance.
-
-#     This function enforces two rules:
-#     1. Strict Sharding Policy: Every parameter in the PyTree MUST have an
-#       explicit sharding specification ('.sharding.spec'). The fucntion will fail 
-#       immediately if any parameter is a raw, unsharded array.
-#     2. Replication Tolerance: It identifies parameters that are not sharded across
-#       ANY of a predefined set of "target" sharding axes (e.g., 'fsdp', 'tensor').
-#       It calculates the total size of these replicated parameters and asserts that
-#       this size does not exceed a percentage ('tolerance') of the total model size.
-    
-#     Args:
-#       params: The PyTree of model state parameters.
-#       mesh: The device mesh constructed from the config.
-#       tolerance: A float between 0.0 to 1.0. Represents the allowed percentage of the model (by size)
-#       that can be replicated. 
-#   """
-#   # Call the debug printer to display parameter info when this function runs.
-#   printParamData(params,mesh)
-
-#   # Calculate the total number of parameters in the model.
-#   total_num_params = max_utils.calculate_num_params_from_pytree(params)
-#   if total_num_params == 0:
-#     return # nothing to check
-  
-#   # product_num_devices_for_weight_sharding = 1
-
-#   # Define the list of ideal mesh axes that weights are expected to be sharded on.
-#   target_sharding_axes_config = [
-#       "fsdp",
-#       "fsdp_transpose",
-#       "sequence",
-#       "context",
-#       "context_autoregressive",
-#       "tensor",
-#       "tensor_transpose",
-#       "tensor_sequence",
-#       "stage",
-#       "expert",
-#   ]
-
-#   # Filter the ideal list to get axes that are actually present in the current
-#   # mesh and have a dimension > 1, meaning they can actually be used for sharding.
-#   valid_target_mesh_axes = {
-#     axis for axis in target_sharding_axes_config
-#     if axis in mesh.axis_names and mesh.shape[axis] > 1
-#     }
-  
-#   # If none of the target axes are available for sharding in this mesh, we cannot 
-#   # perform the check.
-#   if not valid_target_mesh_axes:
-#     return 
-  
-#   # Initialize counters and lists to track replicated parameters.
-#   unsharded_params_total_size = 0
-#   problematic_tensors_details = []
-
-#   # Iterate through every parameter (leaf) in the Pytree along with its path (name).
-#   all_params_leaves = jtu.tree_leaves_with_path(params)
-#   for path,p_leaf in all_params_leaves:
-#     param_name_str = jtu.keystr(path)
-
-#     # CRITICAL CHECK: Assert that the parameter has explicit sharding information.
-#     # This fails immediately if a parameter is missing its '.sharding.spec' attribute.
-#     has_sharding_spec = hasattr(p_leaf, 'sharding') and hasattr(p_leaf.sharding, 'spec')
-#     assert has_sharding_spec, (
-#       f"Parameter '{param_name_str}' is missing sharding information."
-#       "All parameters must have an explicit '.sharding.spec' attribute."
-#     )
-
-#     # Get the parameter's sharding spec and find out which mesh axis it actually uses.
-#     current_sharding_spec = p_leaf.sharding.spec
-#     mesh_axes_used = get_mesh_axes_used_by_tensor_spec(current_sharding_spec, mesh.axis_names)
-
-#     # Check if the parameter is sharded on AT LEAST ONE of the valid target axes.
-#     is_sharded_on_any_target_axis = any(axis in mesh_axes_used for axis in valid_target_mesh_axes)
-
-#     # If a parameter is not sharded on any of the target axes, it's considered 
-#     # "unsharded" or "replicated" for the purpose of this check.
-#     if not is_sharded_on_any_target_axis:
-#       # Add its size to the running total of unsharded parameter memory.
-#       unsharded_params_total_size += p_leaf.size
-#       # Record its details for the potential error message.
-#       problematic_tensors_details.append({
-#         'name': param_name_str,
-#         'size': p_leaf.size,
-#         'spec': str(current_sharding_spec),
-#         'available_axes': sorted(list(valid_target_mesh_axes))
-#       })
-  
-#   # Calculate the percentage of the model that is considered "unsharded".
-#   unsharded_param_perc = unsharded_params_total_size / total_num_params if total_num_params > 0 else 0.0
-
-#   # If the percentage of unsharded parameters exceeds the allowed tolerance
-#   if unsharded_param_perc > tolerance:
-#     # Sort the problematic tensors by size to show the largest offenders first.
-#     problematic_tensors_details.sort(key=lambda x: x['size'], reverse=True)
-#     # (Error message)
-#     error_msg_lines = [
-#       f"Unsharded parameter percentage ({unsharded_param_perc:.2%})"
-#       f"exceeds tolerance ({tolerance:.2%})."
-#     ]
-#     error_msg_lines.append(
-#       "The following large tensors are unsharded but could be sharded on at least one of the axes:"
-#     )
-#     # List the top 5 largest replicated tensors.
-#     for detail in problematic_tensors_details[:5]:
-#       error_msg_lines.append(
-#         f" - Name: {detail['name']} (Size: {detail['size']}, Spec: {detail['spec']})"
-#         f" could be sharded on: {detail['available_axes']}"
-#       )
-    
-#     # Raise an assertion error with the formated message.
-#     raise AssertionError("\n".join(error_msg_lines))
-
 
 
 def apply_gradient_clipping(raw_grads, state, clipping_threshold):
@@ -1092,3 +1007,78 @@ def create_learning_rate_schedule(config):
     boundaries.append(warmup_steps + cos_steps + constant_zero_steps)
 
   return optax.join_schedules(pieces, boundaries)
+
+def get_formatted_sharding_annotations(params, mesh=None):
+  """
+  Generates a readable string report of sharding annotations for all parameters.
+
+  This function iterates through a PyTree of model parameters and inspects the
+  sharding information attached to each parameter (leaf). It creates a
+  human-readable summary that is useful for debugging sharding configurations.
+
+  Args:
+    params: The PyTree of model parameters to inspect.
+    mesh: (Optional) The device mesh. If provided, its axis names and shape
+          are included in the report for additional context.
+
+  Returns:
+    A single string containing the formatted report of sharding annotations
+    for every parameter, with each entry on a new line.
+  """
+  # Initialize a list to hold the lines of the report, starting with a title.
+  annotation_lines = ["Comprehensice Weight Sharding Annotations:"]
+
+  # If a mesh object is provided, add its details to the report header.
+  if mesh:
+    annotation_lines.append(f"Mesh axes: {mesh.axis_names}, Mesh shape: {mesh.shape}")
+    annotation_lines.append("-"*30)
+  
+  # Get a flattened list of all parameters (leaves) and their corresponding paths in the PyTree.
+  all_params_leaves = jtu.tree_leaves_with_path(params)
+
+  # Loop through each parameter leaf in the flattened list.
+  for path, p_leaf in all_params_leaves:
+    # Convert the parameter's path (a sequence of keys) into a readable string name.
+    param_name_str = jtu.keystr(path)
+    # Get the shape of the parameter as a string.
+    shape_str = str(p_leaf.shape)
+    # Set a default description for sharding, in case none is found.
+    sharding_desc = "N/A"
+
+    # Check if the parameter leaf has a 'sharding' attribute.
+    if hasattr(p_leaf, 'sharding'):
+      # Case 1: Standard JAX sharding with a PartitionSpec.
+      if hasattr(p_leaf.sharding, 'spec') and p_leaf.sharding.spec is not None:
+        # The spec is a tuple (PartitionSpec), format it for readability.
+        spec_parts = []
+        for item in p_leaf.sharding.spec:
+          # Represent None as "Replicated" to make it explicit.
+          spec_parts.append(str(item) if item is not None else "Relicated")
+        sharding_desc = f"PartitionSpec({', '.join(spec_parts)})"
+      # Case 2: The parameter is explicitly marked as fully replicated.
+      elif hasattr(p_leaf.sharding, 'spec') and p_leaf.sharding.spec is None:
+        sharding_desc = "Fully Replicated (spec is None)"
+      # Case 3: Fallback for GSPMD-style sharding which uses a different attribute.
+      elif hasattr(p_leaf.sharding,
+                   '_parsed_pspec') and p_leaf.sharding._parsed_pspec is not None:
+        spec_parts = []
+        for item in p_leaf.sharding._parsed_pspec:
+          # Also represent None as "Replicated" here.
+          spec_parts.append(str(item) if item is not None else "Replicated")
+        sharding_desc = f"GSPMD Parsed Pspec({', '.join(spec_parts)})"
+      # Case 4: A generic fallback if a sharding object exists but has no recognized spec attribute.
+      else:
+        # Print the string representation of the sharding object itself.
+        sharding_desc = str(p_leaf.sharding)
+    # Case 5: The parameter has no .sharding attribute at all.
+    else:
+      sharding_desc = "No .sharding attribute found"
+    
+    # Append the formatted details for the current parameter to our list of lines.
+    annotation_lines.append(
+      f" - Param: {param_name_str}\n"
+      f"   Shape: {shape_str}\n"
+      f"   Sharding: {sharding_desc}"
+    )
+  # Join all the collected lines into a single string, separated by newlines.
+  return "\n".join(annotation_lines)
