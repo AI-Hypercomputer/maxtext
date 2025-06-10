@@ -73,7 +73,7 @@ DEBUG = os.environ.get("DEBUG", "0") == "1"
 # Configure logging
 log = logging.getLogger(__name__)
 
-logging.getLogger("jax").setLevel(logging.DEBUG)
+# logging.getLogger("jax").setLevel(logging.DEBUG)
 
 
 @dataclasses.dataclass
@@ -128,6 +128,15 @@ class SafeThead(threading.Thread):
 class PrefillType(Enum):
     DEFAULT = "default"
     BATCH = "batch"
+
+@dataclasses.dataclass
+class PrefillResult:
+    """Class for storing log probabilities."""
+
+    token: jax.Array
+    log_prob: jax.Array
+    slot: int
+    prompt_logp: jax.Array
 
 
 class PrefillHelper:
@@ -274,6 +283,7 @@ class PrefillHelper:
                 tokens,
                 true_length,
                 rng,
+                return_prompt_logp=True,
             )
         else:
             first_token, decode_state = processor_fn(
@@ -283,13 +293,14 @@ class PrefillHelper:
                 true_length,
                 decode_state,
                 rng,
+                return_prompt_logp=True,
             )
         log_prob = inference_utils.log_prob_of_chosen_token(
             decode_state["logits"][slot], decode_state["tokens"][slot]
         )
 
         # Shapes: (1,), (1,)
-        return first_token.data[:, 0], log_prob, decode_state
+        return first_token.data[:, 0], log_prob, decode_state, decode_state["prompt_logp"]
 
     def process(
         self,
@@ -325,7 +336,7 @@ class PrefillHelper:
                 if self.auto_layout_supported
                 else self._processor._process
             )
-            first_token, log_prob, decode_state = self._jitted_process(
+            first_token, log_prob, decode_state, prompt_logp = self._jitted_process(
                 model_params,
                 input_tokens_padded,
                 decode_slot,
@@ -336,7 +347,7 @@ class PrefillHelper:
                 self.auto_layout_supported,
             )
             prefill_done(
-                [(first_token, log_prob, decode_slot)], [input_id], decode_state
+                [PrefillResult(first_token, log_prob, decode_slot, prompt_logp)], [input_id], decode_state
             )
         # Use batch processor for inputs that can benefit from prefill packing
         elif self._type == PrefillType.BATCH:
@@ -768,14 +779,17 @@ class ReplicaWorker:
         # Update decode state
         self.decode_state = decode_state
 
-        if self.enable_batch_prefill:
-            # Calculate log_prob
-            for i, (first_token, slot, prompt_logp) in enumerate(prefill_result):
-                first_token, log_prob = self._jitted_log_prob_and_slice_token(first_token, self.decode_state, int(slot))
-                prefill_result[i] = (first_token, log_prob, slot, prompt_logp)
-
         # Process each prefill result
-        for i, (first_token, log_prob, slot, prompt_logp) in enumerate(prefill_result):
+        for i, prefill_result in enumerate(prefill_result):
+            
+            first_token = prefill_result.token
+            log_prob = prefill_result.log_prob
+            slot = prefill_result.slot
+            prompt_logp = prefill_result.prompt_logp
+            
+            #TODO: clean up this code logic.
+            if log_prob is None:
+                first_token, log_prob = self._jitted_log_prob_and_slice_token(first_token, self.decode_state, slot)
             
             self.slot_to_id[slot] = prompt_ids[i]
             

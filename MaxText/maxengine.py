@@ -404,7 +404,7 @@ class MaxEngine(engine_api.Engine):
         rng=rng,
     )
 
-  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("request_id",))
+  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("request_id","return_prompt_logp"))
   def _prefill_jit(
       self,
       *,
@@ -418,6 +418,7 @@ class MaxEngine(engine_api.Engine):
       request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
       slot: Optional[int] = None,
       page_state: Optional[PageState] = None,
+      return_prompt_logp: bool = False,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Computes a kv-cache for a new generate request.
 
@@ -479,6 +480,10 @@ class MaxEngine(engine_api.Engine):
           slot=slot,
           page_state=page_state,
       )
+    if return_prompt_logp:
+      prompt_logp = inference_utils.log_prob_of_chosen_token(flat_logits, input_tokens)
+    else:
+      prompt_logp = None
     generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
     selected_logits = jax.lax.dynamic_slice(
         flat_logits,
@@ -526,6 +531,7 @@ class MaxEngine(engine_api.Engine):
         "next_pos": next_pos,
         "generated_tokens": generated_tokens,
         "tokens": first_generated_token,
+        "prompt_logp": prompt_logp,
     }, result
 
   # Public non-JIT prefill method that updates page state
@@ -541,6 +547,7 @@ class MaxEngine(engine_api.Engine):
       rng: Optional[PRNGKeyType] = None,
       request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
       slot: Optional[int] = None,
+      return_prompt_logp: bool = False,
   ) -> Tuple[Prefix, engine_api.ResultTokens]:
     """Public API for prefill that updates page state outside JIT."""
     # Update page state before JIT call
@@ -569,6 +576,7 @@ class MaxEngine(engine_api.Engine):
         slot=slot,
         rng=rng,
         request_id=request_id,
+        return_prompt_logp=return_prompt_logp,
     )
 
   def prefill_multisampling_aot(  # pylint: disable=too-many-positional-arguments

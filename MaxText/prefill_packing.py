@@ -116,13 +116,14 @@ class PrefillProcessor:
       input_tokens_padded: jax.Array,
       input_true_length: int,
       rng: PRNGKeyType,
+      return_prompt_logp: bool = False,
   ) -> Tuple[engine_api.ResultTokens, DecodeState]:
     """Process a new input."""
 
-    process_fn = self._process_compiled(model_params, len(input_tokens_padded))
+    process_fn = self._process_compiled(model_params, len(input_tokens_padded), return_prompt_logp)
     return process_fn(model_params, input_tokens_padded, decode_slot, input_true_length, decode_state)
 
-  def _process_compiled(self, params: Params, padded_length: int):
+  def _process_compiled(self, params: Params, padded_length: int, return_prompt_logp: bool = False):
     """Ahead-of-time compilation wrapper of _process()."""
 
     if padded_length not in self.process_func:
@@ -136,6 +137,7 @@ class PrefillProcessor:
                   self.engine.decode_state_layouts,
               ),
               donate_argnames=("decode_state"),
+              static_argnames=("return_prompt_logp"),
           )
           .lower(
               params,
@@ -144,6 +146,7 @@ class PrefillProcessor:
               jax.ShapeDtypeStruct((), int),
               self.engine.decode_state_shapes,
               jax.ShapeDtypeStruct([2], jax.numpy.dtype("uint32")),
+              return_prompt_logp
           )
           .compile(compiler_options=None)
       )
@@ -157,11 +160,14 @@ class PrefillProcessor:
       true_length: int,
       decode_state: DecodeState,
       rng: PRNGKeyType,
+      return_prompt_logp: bool = False,
   ) -> Tuple[engine_api.ResultTokens, DecodeState]:
     """Prefill and insert a request."""
 
-    prefill_result, first_token = self.engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng)
+    prefill_result, first_token = self.engine.prefill(params=params, padded_tokens=tokens, true_length=true_length, rng=rng, return_prompt_logp=return_prompt_logp)
     decode_state = self.engine.insert(prefill_result, decode_state, slot)
+    if return_prompt_logp:
+      decode_state["prompt_logp"] = prefill_result["prompt_logp"]
     return first_token, decode_state
 
 
@@ -200,7 +206,6 @@ class BatchedPrefillProcessor:
     """Process a new input.
 
     This may trigger MaxEngine prefill API call."""
-
     length = len(input_prompt)
     if length > capacity or length > input_padding:
       raise ValueError(
@@ -245,7 +250,7 @@ class BatchedPrefillProcessor:
       self, model_params: Params, bucket: PrefillBucket, input_padding: int, decode_state: DecodeState, return_prompt_logp: bool = False
   ) -> Tuple[List[Tuple[engine_api.ResultTokens, int]], DecodeState]:
     """Process all items in a bucket."""
-
+    from MaxText.inference.offline_engine import PrefillResult
     slots = bucket.slots
     lengths = [len(prompt) for prompt in bucket.token_ids]
     offsets = np.cumsum([0] + lengths)[:-1].tolist()
@@ -310,9 +315,9 @@ class BatchedPrefillProcessor:
     for i in range(bucket.count):
       if return_prompt_logp:
         prompt_logp = prompt_logp_numpy[:, offsets[i]:offsets[i] + lengths[i]]
-        prefill_result.append((first_tokens[i], bucket.slots[i], prompt_logp))
+        prefill_result.append(PrefillResult(first_tokens[i], None, bucket.slots[i], prompt_logp))
       else:
-        prefill_result.append((first_tokens[i], bucket.slots[i]))
+        prefill_result.append(PrefillResult(first_tokens[i], None, bucket.slots[i]))
     return prefill_result, decode_state
 
   def _process_batch_compiled(self, params: Params, padded_length: int, capacity: int, num_prompts: int):
