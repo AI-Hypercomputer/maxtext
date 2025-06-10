@@ -13,6 +13,11 @@
 #  limitations under the License.
 
 """
+ATTENTION: This unit test should only be run on TPU v4-8. The test
+may fail on different versions like v5p-8, v6e-8
+
+TODO: b/413146740 - Match logits on other TPU versions
+
 Runs GRPO trainer unit test correctness with golden logits generated
   from maxtext/MaxText/scratch_code/generate_grpo_golden_logits.py
 
@@ -20,41 +25,46 @@ Usage:
   pytest MaxText/tests/grpo_trainer_correctness_test.py
 """
 
+from collections.abc import Callable
 import functools
-import subprocess
-import jax
-import jax.numpy as jnp
-import jsonlines
-import numpy as np
 import os
-import pytest
+import subprocess
 import unittest
 
+import pytest
+
+import jsonlines
+
+import numpy as np
+
+import jax
+import jax.numpy as jnp
 from jax.sharding import Mesh
+
 from flax import linen as nn
-from MaxText.globals import PKG_DIR
 
+import transformers
 
+from MaxText import maxengine
 from MaxText import maxtext_utils
 from MaxText import pyconfig
+from MaxText.common_types import Array
+from MaxText.experimental.rl.grpo_trainer import compute_log_probs, grpo_loss_fn, _merge_grpo_state, generate_completions
+from MaxText.globals import PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
-
-from MaxText.experimental.rl.grpo_trainer import compute_log_probs, grpo_loss_fn, _merge_grpo_state, generate_completions
-from MaxText import maxengine
-import transformers
 
 
 def get_golden_data(config):
   """Get the golden data for GrpoTrainer from maxtext/MaxText/scratch_code/generate_grpo_golden_logits.py."""
-  golden_data_path = os.path.join(PKG_DIR, "test_assets", f"golden_data_grpo_{config.model_name}.jsonl")
-  print(f"Loading {golden_data_path}")
-  with jsonlines.open(golden_data_path, "r") as f:
-    golden_data = list(f)
-  return golden_data[0]
+  input_golden_data_path = os.path.join(PKG_DIR, "test_assets", f"golden_data_grpo_{config.model_name}.jsonl")
+  print(f"Loading {input_golden_data_path}")
+  with jsonlines.open(input_golden_data_path, "r") as reader:
+    return next(iter(reader))
 
 
 def setup_maxtext_model(config):
+  """setup maxtext model"""
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
   quant = quantizations.configure_quantization(config)
   devices_array = maxtext_utils.create_device_mesh(config)
@@ -69,6 +79,7 @@ def setup_maxtext_model(config):
 
 
 def prepare_maxtext_inputs(input_str, tokenizer_model):
+  """prepare maxtext inputs"""
   prompt = tokenizer_model.encode(input_str)
   input_ids = jnp.pad(
       jnp.tile(jnp.concat([jnp.array(prompt), jnp.array(prompt)], axis=-1), (4, 1)),
@@ -87,6 +98,7 @@ class GrpoTrainerTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
+    jax.config.update("jax_default_prng_impl", "unsafe_rbg")
     command = [
         "gsutil",
         "cp",
@@ -123,7 +135,7 @@ class GrpoTrainerTest(unittest.TestCase):
     )
     self.tokenizer_model.add_special_tokens({"pad_token": "<pad>"})
 
-  @pytest.mark.tpu_only
+  @pytest.mark.tpu_only  # ATTENTION: Only run on TPU V4-8
   def test_grpo_trainer_correctness(self):
     # Get the expected (golden) data.
     golden_data = get_golden_data(self.config)
@@ -190,12 +202,13 @@ class GrpoTrainerTest(unittest.TestCase):
     )
     prompt_true_length = jnp.array([len(prompt_tokens)] * 4)
     engine_data = {"prompt": prompt, "prompt_true_length": prompt_true_length}
-    p_generate_completions = jax.jit(
+    p_generate_completions: Callable[[dict, dict, Array], Array] = jax.jit(
         functools.partial(generate_completions, self.config, self.tokenizer_model, engine),
         in_shardings=(data_sharding, state_mesh_shardings.params, None),
         out_shardings=data_sharding,
         donate_argnums=(0,),
     )
+    # pylint: disable=not-callable
     engine_data = p_generate_completions(engine_data, {"params": state.params["params"]}, rng)
     # Assert that the generated completions match the golden reference.
     self.assertEqual(engine_data["prompt_completions"][0].tolist(), golden_data["generated_completions"])

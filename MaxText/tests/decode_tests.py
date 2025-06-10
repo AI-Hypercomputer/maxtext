@@ -14,25 +14,29 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-"""Tests for decode with various configs"""
+"""Tests for decode with various configs."""
+
 import os
 import unittest
+
 import pytest
+
+from absl.testing import absltest
+
 from MaxText.decode import main as decode_main
 from MaxText.globals import PKG_DIR
-from absl.testing import absltest
 
 
 class DecodeTests(unittest.TestCase):
-  """Tests decode with various configs"""
+  """Tests decode with various configs."""
 
   CONFIGS = {
       "base": [  # tests decode
           None,
           os.path.join(PKG_DIR, "configs", "base.yml"),
-          rf"base_output_directory=gs://runner-maxtext-logs",
+          "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
-          r"dataset_path=gs://maxtext-dataset",
+          "dataset_path=gs://maxtext-dataset",
           "steps=2",
           "enable_checkpointing=False",
           "ici_tensor_parallelism=4",
@@ -43,9 +47,9 @@ class DecodeTests(unittest.TestCase):
       "int8": [  # tests decode with int8 quantization
           None,
           os.path.join(PKG_DIR, "configs", "base.yml"),
-          rf"base_output_directory=gs://runner-maxtext-logs",
+          "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
-          r"dataset_path=gs://maxtext-dataset",
+          "dataset_path=gs://maxtext-dataset",
           "steps=2",
           "enable_checkpointing=False",
           "ici_tensor_parallelism=4",
@@ -58,9 +62,9 @@ class DecodeTests(unittest.TestCase):
       "pdb_lt_1": [  # tests decode with per_device_batch_size < 1
           None,
           os.path.join(PKG_DIR, "configs", "base.yml"),
-          rf"base_output_directory=gs://runner-maxtext-logs",
+          "base_output_directory=gs://runner-maxtext-logs",
           "run_name=runner_test",
-          r"dataset_path=gs://maxtext-dataset",
+          "dataset_path=gs://maxtext-dataset",
           "steps=2",
           "enable_checkpointing=False",
           "ici_tensor_parallelism=4",

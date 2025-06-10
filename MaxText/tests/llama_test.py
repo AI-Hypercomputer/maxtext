@@ -14,13 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-""" Tests for Llama """
-import jax
-import unittest
-import jax.numpy as jnp
+""" Tests for Llama. """
+
 from typing import Tuple
-from MaxText.layers.llama2 import embeddings
+import unittest
+
 import numpy as np
+
+import jax
+import jax.numpy as jnp
+
+from MaxText.layers import embeddings
 
 
 """  
@@ -28,12 +32,11 @@ An example reference jax_llama RoPE implementation from https://github.com/Sea-S
 Users should feel free to change and optimize the RoPE implementation in MaxText defined in layers.py 
 as long as it passes our tests. But they shouldn't change the "reference" implementation in 
 llama_test.py which is only to be used for comparison purpose. 
-
 """
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, dtype: jnp.dtype = jnp.float32) -> jnp.ndarray:
-  """Calculate the frequencies"""
+  """Calculate the frequencies."""
   freqs = 1.0 / (theta ** (np.arange(0, dim, 2)[: (dim // 2)].astype(dtype) / dim))
   t = np.arange(end)  # type: ignore
   freqs = np.outer(t, freqs).astype(dtype)  # type: ignore
@@ -48,7 +51,7 @@ def apply_rotary_emb(
     freqs_cis: jnp.ndarray,
     dtype: jnp.dtype = jnp.bfloat16,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-  """Apply the computed Rotary Positional Embedding"""
+  """Apply the computed Rotary Positional Embedding."""
   reshape_xq = xq.astype(jnp.float32).reshape(*xq.shape[:-1], -1, 2)
   reshape_xk = xk.astype(jnp.float32).reshape(*xk.shape[:-1], -1, 2)
 

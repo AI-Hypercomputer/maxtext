@@ -12,19 +12,22 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-""" Tests for Page Manager."""
-import jax
-import jax.numpy as jnp
+""" Tests for Page Manager. """
+
 import os
-import pyconfig
 import sys
 import unittest
 
-from inference.page_manager import PageManager, PageState
+import jax
+import jax.numpy as jnp
+
+from MaxText import pyconfig
 from MaxText.globals import PKG_DIR
+from MaxText.inference.page_manager import PageManager, PageState
 
 
 class TestPageManager(unittest.TestCase):
+  """Test page manager."""
 
   def setUp(self):
     super().setUp()
@@ -95,7 +98,10 @@ class TestPageManager(unittest.TestCase):
     self.assertTrue(jnp.all(state.page_status[1:] == 0), "All pages should be initially free (status 0)")
     self.assertTrue(jnp.all(state.num_pages_used[1:] == 0), "No pages should be used initially")
     self.assertTrue(jnp.all(state.sequence_lengths[1:] == 0), "Sequence lengths should be 0 initially")
-    self.assertTrue(jnp.all(state.has_active_page[1:] == False), "No groups should be active initially")
+    self.assertTrue(
+        jnp.all(state.has_active_page[1:] == False),  # pylint: disable=singleton-comparison
+        "No groups should be active initially",
+    )
 
   def test_reserve_prefill_group(self):
     """Tests update_prefill_pages: standard case with sufficient space (global state)."""
@@ -384,7 +390,6 @@ class TestPageManager(unittest.TestCase):
           f"Group {page_group_id}: incorrect sequence length after decode step",
       )
       # Page count might or might not increase depending on boundary crossing
-      original_pages = (original_length + self.tokens_per_page - 1) // self.tokens_per_page
       new_pages_req = (original_length + 1 + self.tokens_per_page - 1) // self.tokens_per_page
       self.assertEqual(int(decode_state.num_pages_used[page_group_id]), new_pages_req)
 

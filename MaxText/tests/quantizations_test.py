@@ -105,7 +105,7 @@ class QuantizationTest(unittest.TestCase):
       quant = _configure_quantization(quant_str="int8", mode_str=quant_mode)
       self.assertNotEqual(quant, None)
 
-  @pytest.mark.skip(reason="b/400476456 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
+  @pytest.mark.tpu_only  # b/421002974
   def test_aqt_quantization(self):
     # Without quantization
     inputs, res_einsum, res_dg = _apply()
@@ -126,8 +126,9 @@ class QuantizationTest(unittest.TestCase):
         quant_str="intmp", quant_cfg_path=os.path.join(PKG_DIR, "configs", "quantization", "int8_weight_only.json")
     )
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 1)
+    # pylint: disable=unsupported-membership-test
     self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
-    quant_cfg, tile_size = quant.quant_dg[quantizations.DEFAULT]
+    quant_cfg, _ = quant.quant_dg[quantizations.DEFAULT]
     self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.dtype, None)
     self.assertEqual(quant_cfg.fwd.dg_quantizer.rhs.numerics.bits, 8)
 
@@ -137,11 +138,12 @@ class QuantizationTest(unittest.TestCase):
         quant_cfg_path=os.path.join(PKG_DIR, "configs", "quantization", "dense_llm_weight_only_scale.json"),
     )
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7)
+    # pylint: disable=unsupported-membership-test
     self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
-    quant_cfg, tile_size = quant.quant_dg[quantizations.DEFAULT]
+    quant_cfg, _ = quant.quant_dg[quantizations.DEFAULT]
     self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.dtype, None)
     self.assertEqual(quant_cfg.fwd.dg_quantizer.rhs.numerics.bits, 8)
-    quant_cfg, tile_size = quant.quant_dg[_QUERY_REGEX]
+    quant_cfg, _ = quant.quant_dg[_QUERY_REGEX]
     self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.dtype, None)
     self.assertEqual(quant_cfg.fwd.dg_quantizer.rhs.numerics.bits, 4)
 
@@ -150,6 +152,7 @@ class QuantizationTest(unittest.TestCase):
         quant_str="intmp", quant_cfg_path=os.path.join(PKG_DIR, "configs", "quantization", "dense_llm_subchannel.json")
     )
     self.assertTrue(isinstance(quant.quant_dg, dict) and len(quant.quant_dg) == 7)
+    # pylint: disable=unsupported-membership-test
     self.assertTrue(quantizations.DEFAULT in quant.quant_dg)
     quant_cfg, tile_size = quant.quant_dg[quantizations.DEFAULT]
     self.assertEqual(quant_cfg.fwd.dg_quantizer.lhs.numerics.bits, 8)

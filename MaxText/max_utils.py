@@ -14,30 +14,37 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-""" Common Max Utils needed by multiple modules"""
-""" All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
-import numpy as np
-import jax
-import jax.numpy as jnp
-from jax.experimental import mesh_utils
-from MaxText import max_logging
+""" Common Max Utils needed by multiple modules.
+All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
+
 import functools
 import time
 import os
-import psutil
 import socket
 import subprocess
-from etils import epath
-from collections.abc import Sequence
 import collections
+from collections.abc import Sequence
 from typing import Any, Tuple
 from functools import partial
 
-import orbax.checkpoint as ocp
+import numpy as np
 
+import jax
+import jax.numpy as jnp
+from jax.experimental import mesh_utils
 
 import flax
+
+import psutil
+
+from etils import epath
+
+import orbax.checkpoint as ocp
+
 from tensorboardX import writer
+
+from MaxText import max_logging
+
 
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
 HYBRID_RING_32X8 = "hybrid_ring_32x8"
@@ -75,7 +82,7 @@ def calculate_num_params_from_pytree(params):
 
 
 def calculate_total_params_per_chip(params):
-  """Calculate total paramsper chip."""
+  """Calculate total params per chip."""
 
   def calculate_leaf_params_per_chip(arr):
     shard = arr.addressable_shards[0]
@@ -109,7 +116,7 @@ def close_summary_writer(summary_writer):
 
 
 def add_text_to_summary_writer(key, value, summary_writer):
-  """Writes given key-value pair to tensorboard as text/summary"""
+  """Writes given key-value pair to tensorboard as text/summary."""
   if jax.process_index() == 0:
     summary_writer.add_text(key, value)
 
@@ -125,6 +132,12 @@ def maybe_initialize_jax_distributed_system(raw_keys):
   if raw_keys["skip_jax_distributed_system"]:
     max_logging.log("Skipping jax distributed system due to skip_jax_distributed_system=True flag.")
     return
+  if raw_keys["enable_single_controller"]:
+    max_logging.log("Skipping jax distributed system since its not needed for single controller.")
+    return
+  if jax.distributed.is_initialized():
+    max_logging.log("Jax distributed system is already initialized.")
+    return
   if raw_keys["inference_benchmark_test"]:
     # Disable initialization for inference benmark test.
     return
@@ -139,17 +152,20 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     max_logging.log("Attempting to initialize the jax distributed system for CPU backend...")
     initialize_jax_for_cpu(raw_keys)
     max_logging.log("Jax distributed system initialized on CPUs!")
-  elif (
-      raw_keys["enable_checkpointing"]
-      and raw_keys["async_checkpointing"]
-      and raw_keys["compile_topology_num_slices"] == -1
-      and not raw_keys["enable_single_controller"]
-  ) or raw_keys["hardware"] == "gpu_multiprocess":
+  elif (raw_keys["enable_checkpointing"] and raw_keys["compile_topology_num_slices"] == -1) or raw_keys[
+      "hardware"
+  ] == "gpu_multiprocess":
     max_logging.log("Attempting to initialize the jax distributed system...")
     if not raw_keys["enable_emergency_checkpoint"]:
       jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
     else:
-      initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
+      if raw_keys["hardware"] == "gpu_multiprocess":
+        max_logging.log("Initializing jax distribtued to support local checkpointing with GPUs...")
+        jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
+        ocp.multihost.initialize_runtime_to_distributed_ids()
+        ocp.multihost.initialize_distributed_to_device_ids()
+      else:
+        initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys)
     max_logging.log("Jax distributed system initialized!")
 
 
@@ -817,9 +833,19 @@ def reorder_causal_load_balanced(batch, cp_size):
   }
 
 
+def shard_reorder_causal_load_balanced(batch, cp_size):
+  """Shard the output of the reordered sequence."""
+  reordered = reorder_causal_load_balanced(batch, cp_size)
+  for _, v in batch.items():
+    if isinstance(v, jax.Array):
+      reordered = jax.lax.with_sharding_constraint(reordered, v.sharding)
+      break
+  return reordered
+
+
 def get_reorder_callable(cp_size):
   """Creates a callable that can be used with map() to reorder batches."""
-  return functools.partial(reorder_causal_load_balanced, cp_size=cp_size)
+  return functools.partial(shard_reorder_causal_load_balanced, cp_size=cp_size)
 
 
 @staticmethod

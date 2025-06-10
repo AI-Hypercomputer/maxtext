@@ -11,7 +11,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-# pylint: disable=g-bad-todo, abstract-method, consider-using-with, ungrouped-imports
+# pylint: disable=g-bad-todo, abstract-method, consider-using-with
 """ Standalone data loader - only loads data for each training step, accesses storage needs."""
 
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
@@ -35,7 +35,7 @@ def data_load_loop(config, state=None):
   """Main data loader loop.
   Loads batches of data for each training step.
   """
-  _, _, _, _, _, _, _, data_iterator, _, state = setup_train_loop(config)
+  _, _, _, _, _, _, _, data_iterator, _, state = setup_train_loop(config, recorder=None)
 
   example_batch = None
 

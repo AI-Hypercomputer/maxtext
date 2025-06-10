@@ -1,7 +1,7 @@
 # Run command:
 # bash microbenchmarks_llama2-70b-trillium_2x4.sh
-# Look at profiles: 
-# tensorboard --logdir /tmp/mb/profiles/trillium_llama2_70b/tensorboard/prefill_insert_1024 
+# Look at profiles:
+# tensorboard --logdir /tmp/mb/profiles/trillium_llama2_70b/tensorboard/prefill_insert_1024
 
 
 run_name="trillium_llama2-70b"

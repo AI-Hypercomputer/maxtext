@@ -15,37 +15,37 @@
 """Tests for Attentions."""
 
 import itertools
+import os.path
 import random
 import sys
 import unittest
-import os.path
-import numpy as np
-from absl.testing import parameterized
 
-from MaxText import common_types
-
-from flax.core import freeze
-import jax
-import jax.numpy as jnp
-from MaxText import maxtext_utils
 import pytest
 
-from MaxText import pyconfig
-from MaxText.globals import PKG_DIR
-from MaxText.layers import attentions
+from absl.testing import parameterized
+
+import numpy as np
 
 from jax.sharding import Mesh
-Mesh = jax.sharding.Mesh
-Attention = attentions.Attention
-ChunkedCausalMask = attentions.ChunkedCausalMask
-MLA = attentions.MLA
+import jax
+import jax.numpy as jnp
+
+from flax.core import freeze
+
+from MaxText import maxtext_utils
+from MaxText import pyconfig
+from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
+from MaxText.globals import PKG_DIR
+from MaxText.layers import attentions
+from MaxText.layers.attentions import Attention, MLA, ChunkedCausalMask
 
 
 class BidirectionalBlockMaskTest(unittest.TestCase):
-  """Test for make_bidirectional_block_mask"""
+  """Test for make_bidirectional_block_mask."""
 
   def test_one_block_mask(self):
     bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0]])
+    # pylint: disable=protected-access
     block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.asarray(
         [
@@ -63,6 +63,7 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
 
   def test_two_blocks_mask(self):
     bidirectional_mask = np.asarray([[0, 1, 1, 0, 1, 1]])
+    # pylint: disable=protected-access
     block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.asarray(
         [
@@ -80,6 +81,7 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
 
   def test_batch_block_masks(self):
     bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0], [0, 1, 1, 0, 1, 1]])
+    # pylint: disable=protected-access
     block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.asarray(
         [
@@ -105,6 +107,7 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
 
   def test_empty_block_mask(self):
     bidirectional_mask = np.asarray([[0, 0, 0, 0, 0, 0]])
+    # pylint: disable=protected-access
     block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.zeros(
         (bidirectional_mask.shape[0], bidirectional_mask.shape[1], bidirectional_mask.shape[1]), dtype=bool
@@ -113,6 +116,7 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
 
   def test_full_block_mask(self):
     bidirectional_mask = np.asarray([[1, 1, 1, 1, 1, 1]])
+    # pylint: disable=protected-access
     block_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
     expected_mask = np.ones(
         (bidirectional_mask.shape[0], bidirectional_mask.shape[1], bidirectional_mask.shape[1]), dtype=bool
@@ -125,6 +129,7 @@ class BidirectionalBlockMaskTest(unittest.TestCase):
     col_ids = np.arange(seq_len, dtype=np.int32)[None, :]
     causal_mask = (col_ids <= row_ids)[None, None, None, :, :]
     bidirectional_mask = np.asarray([[0, 1, 1, 1, 0, 0], [0, 1, 1, 0, 1, 1]])
+    # pylint: disable=protected-access
     image_mask = attentions._make_bidirectional_block_mask(bidirectional_mask)
     combined_mask = causal_mask | image_mask[:, None, None, ...]
     expected_mask = np.asarray(
@@ -182,6 +187,7 @@ class ChunkedCausalMaskTest(unittest.TestCase):
 
     np.testing.assert_array_equal(actual_mask, expected_mask)
     # Make sure _generate_chunk_attention_mask also produces the same mask
+    # pylint: disable=protected-access
     actual_mask = attentions._generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
     np.testing.assert_array_equal(actual_mask, expected_mask)
 
@@ -197,6 +203,7 @@ class ChunkedCausalMaskTest(unittest.TestCase):
     actual_mask = mask[:, :]
     np.testing.assert_array_equal(actual_mask, expected_mask)
     # Make sure _generate_chunk_attention_mask also produces the same mask
+    # pylint: disable=protected-access
     actual_mask = attentions._generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
     np.testing.assert_array_equal(actual_mask, expected_mask)
 
@@ -212,6 +219,7 @@ class ChunkedCausalMaskTest(unittest.TestCase):
     actual_mask = mask[:, :]
     np.testing.assert_array_equal(actual_mask, expected_mask)
     # Make sure _generate_chunk_attention_mask also produces the same mask
+    # pylint: disable=protected-access
     actual_mask = attentions._generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
     np.testing.assert_array_equal(actual_mask, expected_mask)
 
@@ -234,6 +242,7 @@ class ChunkedCausalMaskTest(unittest.TestCase):
     actual_mask = mask[:, :]
     np.testing.assert_array_equal(actual_mask, expected_mask)
     # Make sure _generate_chunk_attention_mask also produces the same mask
+    # pylint: disable=protected-access
     actual_mask = attentions._generate_chunk_attention_mask(mask_shape=mask.shape, chunk_size=chunk_size)
     np.testing.assert_array_equal(actual_mask, expected_mask)
 
@@ -244,6 +253,7 @@ class ChunkedCausalMaskTest(unittest.TestCase):
     with self.assertRaises(ValueError):
       ChunkedCausalMask(shape=(4, 4), chunk_size=-2)
     with self.assertRaises(ValueError):
+      # pylint: disable=protected-access
       attentions._generate_chunk_attention_mask(mask_shape=(4, 4), chunk_size=0)
 
 
@@ -254,19 +264,19 @@ class AttentionTest(unittest.TestCase):
   # context_parallelism.py as well, since we are using the same configs for both
   # tests to get the same mesh and other config
   config_arguments = {
-    "per_device_batch_size":1.0,
-    "run_name":"test",
-    "enable_checkpointing":False,
-    "max_prefill_predict_length":16,
-    "max_target_length":512,
-    "sa_block_q": 128,
-    "sa_block_kv": 128,
-    "sa_block_kv_compute": 128,
-    "sa_block_q_dkv": 128,
-    "sa_block_kv_dkv": 128,
-    "sa_block_kv_dkv_compute": 128,
-    "sa_block_q_dq": 128,
-    "sa_block_kv_dq": 128,
+      "per_device_batch_size": 1.0,
+      "run_name": "test",
+      "enable_checkpointing": False,
+      "max_prefill_predict_length": 16,
+      "max_target_length": 512,
+      "sa_block_q": 128,
+      "sa_block_kv": 128,
+      "sa_block_kv_compute": 128,
+      "sa_block_q_dkv": 128,
+      "sa_block_kv_dkv": 128,
+      "sa_block_kv_dkv_compute": 128,
+      "sa_block_q_dq": 128,
+      "sa_block_kv_dq": 128,
   }
 
   def setUp(self):
@@ -280,19 +290,18 @@ class AttentionTest(unittest.TestCase):
     config_cp = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         **self.config_arguments,
-        ici_context_parallelism = 4, # use context parallelism of 4
-        context_parallel_load_balance = False, # set load_balancing to False such that
+        ici_context_parallelism=4,  # use context parallelism of 4
+        context_parallel_load_balance=False,  # set load_balancing to False such that
         # there's no need for reordering the input/output
     )
-
 
     self.cfg_cp = config_cp
     self.rng = jax.random.PRNGKey(0)
 
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
-    devices_array_cp = maxtext_utils.create_device_mesh(self.cfg_cp) # for context parallelism
-    self.mesh_cp = Mesh(devices_array_cp, self.cfg_cp.mesh_axes) # for context parallelism
+    devices_array_cp = maxtext_utils.create_device_mesh(self.cfg_cp)  # for context parallelism
+    self.mesh_cp = Mesh(devices_array_cp, self.cfg_cp.mesh_axes)  # for context parallelism
     self.global_batch_size = self.cfg.global_batch_size_to_train_on
     self.num_kv_heads = self.cfg.num_kv_heads
     self.num_query_heads = self.cfg.num_query_heads
@@ -326,6 +335,7 @@ class AttentionTest(unittest.TestCase):
     )
 
   def get_data(self, dtype):
+    """get data"""
     lnx = jax.random.normal(
         self.rng,
         shape=(self.global_batch_size, self.max_target_length, self.embed_dim),
@@ -340,6 +350,7 @@ class AttentionTest(unittest.TestCase):
     return lnx, decoder_segment_ids, decoder_positions
 
   def get_structured_data(self, dtype):
+    """get structured data"""
     lnx = jax.random.normal(
         self.rng,
         shape=(self.global_batch_size, self.max_target_length, self.embed_dim),
@@ -351,7 +362,7 @@ class AttentionTest(unittest.TestCase):
     )
 
     decoder_segment_ids = (
-        jax.numpy.zeros((self.global_batch_size, self.max_target_length)) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+        jax.numpy.zeros((self.global_batch_size, self.max_target_length)) + DECODING_ACTIVE_SEQUENCE_INDICATOR
     )
 
     return lnx, decoder_segment_ids, decoder_positions
@@ -369,7 +380,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids,
         inputs_positions=decoder_positions,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": self.rng},
     )
 
@@ -384,7 +395,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids_prefill,
         inputs_positions=decoder_positions_prefill,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_PREFILL,
+        model_mode=MODEL_MODE_PREFILL,
         rngs={"aqt": self.rng},
         mutable=["cache"],
     )
@@ -403,7 +414,7 @@ class AttentionTest(unittest.TestCase):
           lnx_idx,
           inputs_positions=decoder_positions_idx,
           deterministic=True,
-          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
           rngs={"aqt": self.rng},
           mutable=["cache"],
       )
@@ -418,9 +429,11 @@ class AttentionTest(unittest.TestCase):
 
   @pytest.mark.tpu_only
   def test_model_mode_prefill_dtype_bfloat16(self):
+    """test model mode prefill for dtype bfloat16"""
     self._test_model_mode_prefill_dtype(jnp.bfloat16)
 
   def _test_model_mode_prefill_dtype(self, dtype):
+    """test model mode prefill for specified dtype"""
     lnx, decoder_segment_ids, decoder_positions = self.get_data(dtype)
     prefill_length = self.cfg.max_prefill_predict_length
     lnx_prefill = lnx[:, 0:prefill_length, :]
@@ -455,7 +468,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids_prefill,
         inputs_positions=decoder_positions_prefill,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_PREFILL,
+        model_mode=MODEL_MODE_PREFILL,
         rngs={"aqt": self.rng},
         mutable=["cache"],
     )
@@ -507,7 +520,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_positions,
         inputs_positions=decoder_segment_ids,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": self.rng},
     )
 
@@ -539,7 +552,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_positions,
         inputs_positions=decoder_segment_ids,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": self.rng},
     )
 
@@ -549,7 +562,7 @@ class AttentionTest(unittest.TestCase):
 
     # Test with Context Parallelism
     attention_as_mha_flash_cp = Attention(
-        config=self.cfg_cp, # we pass the context parallelism in the config
+        config=self.cfg_cp,  # we pass the context parallelism in the config
         num_query_heads=self.cfg_cp.num_query_heads,
         num_kv_heads=num_kv_heads,
         head_dim=self.cfg_cp.head_dim,
@@ -575,28 +588,25 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_positions,
         inputs_positions=decoder_segment_ids,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": self.rng},
     )
-
 
     # Assert that the logits generated by the generic flash and flash attention+context parallelism are close
     self.assertTrue(
         jax.numpy.allclose(mha_generic_flash_output, mha_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
-        msg="Logits from generic flash and flash attention+context parallelism are not close."
+        msg="Logits from generic flash and flash attention+context parallelism are not close.",
     )
 
     # Assert that the logits generated by the generic dot product and flash attention+context parallelism are close
     self.assertTrue(
         jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
-        msg="Logits from generic dot product and flash attention+context parallelism are not close."
+        msg="Logits from generic dot product and flash attention+context parallelism are not close.",
     )
-
-
 
   @pytest.mark.tpu_only
   def test_dot_product_cache_axis_order(self):
-    all_axis_orders = [axis_order for axis_order in itertools.permutations(range(4))]
+    all_axis_orders = tuple(itertools.permutations(range(4)))
     for axis_order in random.choices(all_axis_orders, k=4):
       self.dot_product_attention_helper(prefill_cache_axis_order=axis_order, ar_cache_axis_order=axis_order)
       print(f"passed test for {axis_order=}")
@@ -665,7 +675,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids,
         inputs_positions=decoder_positions,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": self.rng},
     )
 
@@ -676,7 +686,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids_prefill,
         inputs_positions=decoder_positions_prefill,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_PREFILL,
+        model_mode=MODEL_MODE_PREFILL,
         rngs={"aqt": self.rng},
         mutable=["cache"],
     )
@@ -696,7 +706,7 @@ class AttentionTest(unittest.TestCase):
           lnx_idx,
           inputs_positions=decoder_positions_idx,
           deterministic=True,
-          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
           rngs={"aqt": self.rng},
           mutable=["cache"],
       )
@@ -785,7 +795,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids,
         inputs_positions=decoder_positions,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": self.rng},
     )
 
@@ -796,7 +806,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids,
         inputs_positions=decoder_positions,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": self.rng},
     )
 
@@ -807,7 +817,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids_prefill,
         inputs_positions=decoder_positions_prefill,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_PREFILL,
+        model_mode=MODEL_MODE_PREFILL,
         rngs={"aqt": self.rng},
         mutable=["cache"],
     )
@@ -824,7 +834,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids_prefill,
         inputs_positions=decoder_positions_prefill,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_PREFILL,
+        model_mode=MODEL_MODE_PREFILL,
         rngs={"aqt": self.rng},
         mutable=["cache"],
     )
@@ -853,7 +863,7 @@ class AttentionTest(unittest.TestCase):
           lnx_idx,
           inputs_positions=decoder_positions_idx,
           deterministic=True,
-          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
           rngs={"aqt": self.rng},
           mutable=["cache"],
       )
@@ -873,7 +883,7 @@ class AttentionTest(unittest.TestCase):
           lnx_idx,
           inputs_positions=decoder_positions_idx,
           deterministic=True,
-          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
           rngs={"aqt": self.rng},
           mutable=["cache"],
       )
@@ -945,7 +955,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids,
         inputs_positions=decoder_positions,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": self.rng},
     )
 
@@ -956,7 +966,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids,
         inputs_positions=decoder_positions,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": self.rng},
     )
 
@@ -992,7 +1002,7 @@ class AttentionTest(unittest.TestCase):
         decoder_segment_ids=decoder_segment_ids,
         inputs_positions=decoder_positions,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": self.rng},
     )
 
@@ -1064,6 +1074,7 @@ class MLATest(parameterized.TestCase):
     return cfg, mla, mla_variable, rng
 
   def get_data(self, cfg, rng, dtype):
+    """get data"""
     lnx = jax.random.normal(
         rng,
         shape=(cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.base_emb_dim),
@@ -1078,6 +1089,7 @@ class MLATest(parameterized.TestCase):
     return lnx, decoder_segment_ids, decoder_positions
 
   def get_structured_data(self, cfg, rng, dtype):
+    """get structured data"""
     lnx = jax.random.normal(
         rng,
         shape=(
@@ -1093,8 +1105,7 @@ class MLATest(parameterized.TestCase):
     )
 
     decoder_segment_ids = (
-        jax.numpy.zeros((cfg.global_batch_size_to_train_on, cfg.max_target_length))
-        + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
+        jax.numpy.zeros((cfg.global_batch_size_to_train_on, cfg.max_target_length)) + DECODING_ACTIVE_SEQUENCE_INDICATOR
     )
 
     return lnx, decoder_segment_ids, decoder_positions
@@ -1117,7 +1128,7 @@ class MLATest(parameterized.TestCase):
         decoder_segment_ids=decoder_segment_ids,
         inputs_positions=decoder_positions,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+        model_mode=MODEL_MODE_TRAIN,
         rngs={"aqt": rng},
     )
 
@@ -1132,7 +1143,7 @@ class MLATest(parameterized.TestCase):
         decoder_segment_ids=decoder_segment_ids_prefill,
         inputs_positions=decoder_positions_prefill,
         deterministic=True,
-        model_mode=common_types.MODEL_MODE_PREFILL,
+        model_mode=MODEL_MODE_PREFILL,
         rngs={"aqt": rng},
         mutable=["cache"],
     )
@@ -1151,7 +1162,7 @@ class MLATest(parameterized.TestCase):
           lnx_idx,
           inputs_positions=decoder_positions_idx,
           deterministic=True,
-          model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
           rngs={"aqt": rng},
           mutable=["cache"],
       )

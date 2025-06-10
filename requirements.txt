@@ -14,7 +14,8 @@ google-cloud-monitoring
 google-api-core
 google-api-python-client
 grain[parquet]>=0.2.6
-flax>=0.8.0
+huggingface_hub
+flax>=0.10.6
 jaxtyping
 ml-collections
 ml-goodput-measurement==0.0.10
@@ -27,7 +28,7 @@ pyink
 pre-commit
 pytype
 pillow>=11.1.0
-sentencepiece==0.1.97
+sentencepiece==0.2.0
 tensorflow-text>=2.13.0
 tensorflow>=2.13.0
 tensorflow-datasets

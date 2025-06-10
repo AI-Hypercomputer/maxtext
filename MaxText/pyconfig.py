@@ -17,24 +17,23 @@ limitations under the License.
 # pytype: skip-file
 # pylint: disable=missing-module-docstring, bare-except, consider-using-generator, missing-function-docstring
 from collections import OrderedDict
+from typing import Any, Union
 import math
 import os
 import sys
 
-from typing import Any, Union
-
 import jax
-import omegaconf
 from jax.experimental.compilation_cache import compilation_cache
+
+import omegaconf
 
 from MaxText import accelerator_to_spec_map
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.layers.attentions import AttentionType
 from MaxText.common_types import DecoderBlockType
+from MaxText.layers.attentions import AttentionType
 from MaxText.utils import gcs_utils
 
-OmegaConf = omegaconf.OmegaConf
 
 # pylint: disable=line-too-long
 
@@ -74,7 +73,7 @@ def validate_kv_quant_axis(s: str, quantize_kvcache: bool) -> None:
 
 
 def validate_attention_kernel(s: str) -> None:
-  valid_attention_kernels = ("autoselected", "dot_product", "flash", "cudnn_flash_te", "paged")
+  valid_attention_kernels = ("autoselected", "dot_product", "flash", "cudnn_flash_te", "cudnn_flash_jax", "paged")
   if s not in valid_attention_kernels:  # currently supported attention
     raise ValueError("Invalid attention kernel was passed. Valid options ", valid_attention_kernels)
 
@@ -262,8 +261,6 @@ def validate_llama4_config(keys: dict):
     raise ValueError("Llama4 decoder has not been tested with capacity_factor >= 0 -- please set that value to -1 for now!")
   if keys["num_experts_per_tok"] > 1:
     raise ValueError("Only top-1 routing is supported for Llama4 for now!")
-  if keys["scan_layers"]:
-    raise ValueError("Only unscanned layer is supported for Llama4, and please set scan_layers=False for now!")
   if keys["base_num_decoder_layers"] % keys["interleave_moe_layer_step"] != 0:
     raise ValueError(
         f"The number of decoder layers ({keys['base_num_decoder_layers']}) must be divisible by interleave moe layer step ({keys['interleave_moe_layer_step']})"
@@ -314,6 +311,8 @@ def validate_multimodal_model_name(s: str) -> bool:
       "gemma3-4b",
       "gemma3-12b",
       "gemma3-27b",
+      "llama4-17b-16e",
+      "llama4-17b-128e",
   )
   if s not in valid_model_names:
     raise ValueError(
@@ -377,14 +376,14 @@ class _HyperParameters:
           raise ValueError(f"We received env `{environment_var}` but it isn't all uppercase.")
 
   def _update_from_env_and_command_line(self, raw_keys, raw_data_from_yaml, argv, **kwargs) -> list[str]:
-    """Update model config from environment and command line using OmegaConf overrides."""
-    # Use OmegaConf.from_cli to capture CLI arguments.
-    cli_cfg = OmegaConf.from_cli(argv[2:])
+    """Update model config from environment and command line using omegaconf.OmegaConf overrides."""
+    # Use omegaconf.OmegaConf.from_cli to capture CLI arguments.
+    cli_cfg = omegaconf.OmegaConf.from_cli(argv[2:])
     # Also create a configuration from any extra keyword arguments.
-    kwargs_cfg = OmegaConf.create(kwargs)
+    kwargs_cfg = omegaconf.OmegaConf.create(kwargs)
     # Merge command-line and keyword arguments.
-    cmdline_cfg = OmegaConf.merge(cli_cfg, kwargs_cfg)
-    raw_data_from_cmd_line = OmegaConf.to_container(cmdline_cfg, resolve=True)
+    cmdline_cfg = omegaconf.OmegaConf.merge(cli_cfg, kwargs_cfg)
+    raw_data_from_cmd_line = omegaconf.OmegaConf.to_container(cmdline_cfg, resolve=True)
 
     updated_keys = []
 
@@ -429,9 +428,9 @@ class _HyperParameters:
     return updated_keys
 
   def _load_config(self, config_name: str) -> dict[str, Any]:
-    """Loads the YAML config from a file using OmegaConf, and resolves inheritance."""
-    base_cfg = OmegaConf.load(config_name)
-    raw_data_from_yaml = OmegaConf.to_container(base_cfg, resolve=True)
+    """Loads the YAML config from a file using omegaconf.OmegaConf, and resolves inheritance."""
+    base_cfg = omegaconf.OmegaConf.load(config_name)
+    raw_data_from_yaml = omegaconf.OmegaConf.to_container(base_cfg, resolve=True)
 
     # Load data from parent config. Note that inheritance has override
     # semantics, and the path is relative to the current config.
@@ -461,9 +460,10 @@ class _HyperParameters:
     raw_keys = OrderedDict()
     keys_from_env_and_command_line = self._update_from_env_and_command_line(raw_keys, raw_data_from_yaml, argv, **kwargs)
     max_logging.log(f"Updating keys from env and command line: {keys_from_env_and_command_line}")
-    keys_from_model = _HyperParameters.update_model_vars(argv[1], raw_keys, config_name)
+    keys_from_model = _HyperParameters.update_model_vars(argv[1], raw_keys, config_name, keys_from_env_and_command_line)
     max_logging.log(f"Updating keys from model: {keys_from_model}")
-    validate_no_keys_overwritten_twice(keys_from_env_and_command_line, keys_from_model)
+    if not raw_keys["override_model_config"]:
+      validate_no_keys_overwritten_twice(keys_from_env_and_command_line, keys_from_model)
 
     # This must be invoked before initializing the backend
     raw_keys = validate_and_set_hlo_dump_defaults(raw_keys)
@@ -480,6 +480,9 @@ class _HyperParameters:
     _HyperParameters.user_init(raw_keys)
     if raw_keys["dataset_type"] == "c4_mlperf" and raw_keys["model_name"] == "gpt3-175b":
       _HyperParameters.configure_gpt3_task(raw_keys)
+
+    if raw_keys["dataset_type"] == "c4_mlperf" and raw_keys["model_name"] != "gpt3-175b":
+      _HyperParameters.configure_c4_mlperf_task(raw_keys)
 
     if not os.path.isfile(raw_keys["tokenizer_path"]):
       # Try and find the tokenizer path relative to the config file.
@@ -607,7 +610,26 @@ class _HyperParameters:
     raw_keys["eval_interval"] = math.ceil(24567 / global_batch_size_to_train_on)
 
   @staticmethod
-  def update_model_vars(base_config_path, raw_keys, config_name: str):
+  def configure_c4_mlperf_task(raw_keys):
+    """dynamically configure based on training rules"""
+    # follow https://github.com/google/paxml/blob/19db52eed85ae0d2365339b83a97cd0b873bbf73/paxml/tasks/lm/params/c4.py#L280
+    #   according to training_rules of mlperf
+    global_batch_size_to_train_on = raw_keys["global_batch_size_to_train_on"]
+    global_batch_size_to_eval_on = raw_keys["global_batch_size_to_eval_on"]
+    max_target_length = raw_keys["max_target_length"]
+
+    learning_rate = (8.0e-5 * global_batch_size_to_train_on) / 1152
+    warmup_steps = math.ceil(8000.0 * 1152 / global_batch_size_to_train_on - 1e-6)
+    decay_end_step = math.ceil(1200000.0 * 1152 / global_batch_size_to_train_on - 1e-6)
+    raw_keys["learning_rate"] = learning_rate
+    raw_keys["learning_rate_schedule_steps"] = decay_end_step
+    raw_keys["warmup_steps_fraction"] = warmup_steps / decay_end_step
+
+    raw_keys["eval_steps"] = math.ceil(5760 * 8192 / max_target_length / global_batch_size_to_eval_on)
+    raw_keys["eval_interval"] = math.ceil(377487360 / max_target_length / global_batch_size_to_train_on)
+
+  @staticmethod
+  def update_model_vars(base_config_path, raw_keys, config_name: str, keys_from_env_and_command_line):
     """Update model config variables"""
     validate_model_name(raw_keys["model_name"])
     max_logging.log(f"Running Model: {raw_keys['model_name']}")
@@ -621,9 +643,11 @@ class _HyperParameters:
       if not os.path.isfile(file_path):
         dir_path = os.path.dirname(os.path.realpath(__file__))
         file_path = os.path.join(dir_path, "configs", "models", f"{model_name}.yml")
-      # Use OmegaConf to load the model-specific configuration.
-      model_vars = OmegaConf.load(file_path)
-      model_vars = OmegaConf.to_container(model_vars, resolve=True)
+      # Use omegaconf.OmegaConf to load the model-specific configuration.
+      model_vars = omegaconf.OmegaConf.load(file_path)
+      model_vars = omegaconf.OmegaConf.to_container(model_vars, resolve=True)
+      if raw_keys["override_model_config"]:
+        model_vars = {key: value for key, value in model_vars.items() if key not in keys_from_env_and_command_line}
       updated_keys = list(model_vars.keys())
       raw_keys = validate_and_update_keys(raw_keys, model_vars, config_name)
     return updated_keys
@@ -806,11 +830,21 @@ def set_and_validate_pipeline_config(raw_keys):
     raw_keys = pipeline_first_axis(raw_keys)
     num_stages = int(raw_keys["ici_pipeline_parallelism"] * raw_keys["dcn_pipeline_parallelism"])
     if raw_keys["pipeline_parallel_layers"] == -1:
-      raw_keys["pipeline_parallel_layers"] = raw_keys["num_decoder_layers"]
+      if raw_keys["decoder_block"]=="deepseek":
+        moe_layers = raw_keys["num_decoder_layers"] - raw_keys["first_num_dense_layers"]
+        raw_keys["pipeline_parallel_layers"] = moe_layers
+      else:
+        raw_keys["pipeline_parallel_layers"] = raw_keys["num_decoder_layers"]
     else:
-      assert (
-          raw_keys["pipeline_parallel_layers"] <= raw_keys["num_decoder_layers"]
-      ), f"You can only pipeline a subset of the decoder layers, but you requested to pipeline {raw_keys['pipeline_parallel_layers']} with pipeline_parallel_layers and there are only {raw_keys['num_decoder_layers']} decoder layers."
+      if raw_keys["decoder_block"]=="deepseek":
+        moe_layers = raw_keys["num_decoder_layers"] - raw_keys["first_num_dense_layers"]
+        assert (
+          raw_keys["pipeline_parallel_layers"] <= moe_layers
+      ), f"You can only pipeline a subset of the moe decoder layers for deepseek, but you requested to pipeline {raw_keys['pipeline_parallel_layers']} with pipeline_parallel_layers and there are only {moe_layers} decoder layers."
+      else:
+        assert (
+            raw_keys["pipeline_parallel_layers"] <= raw_keys["num_decoder_layers"]
+        ), f"You can only pipeline a subset of the decoder layers, but you requested to pipeline {raw_keys['pipeline_parallel_layers']} with pipeline_parallel_layers and there are only {raw_keys['num_decoder_layers']} decoder layers."
     assert (
         raw_keys["scan_layers"] or raw_keys["pipeline_parallel_layers"] == raw_keys["num_decoder_layers"]
     ), "Currently we only support scan_layers=True when pipelining a subset of layers."
@@ -851,8 +885,6 @@ def set_and_validate_pipeline_config(raw_keys):
 
 
 def validate_deepseek_moe(raw_keys):
-  if raw_keys["decoder_block"] == "deepseek" and using_pipeline_parallelism(raw_keys):
-    raise ValueError("Currently we do not support DeepSeek MoE with pipeline parallelism.")
   if raw_keys["n_routing_groups"] != -1:
     if raw_keys["topk_routing_group"] == -1:
       raise ValueError(f'config topk_routing_group: {raw_keys["topk_routing_group"]} is not defined')

@@ -27,7 +27,7 @@ For example: `llama4-17b-16e.00.pth`
 If using a HF checkpoint, the base model checkpoints should be in the format `model-{idx}-of-{total}.safetensors`
 For example: `model-00020-of-00055.safetensors`.
 
-This script requires a large memory VM (a CPU instance with at least 500GB of memory for Scout and at least 1TB for Maverick).
+This script requires a large memory VM (a CPU instance with >= 500GB of memory for Scout and >= 1TB for Maverick).
 
 NOTE @jacobplatin: eventually, we'll want to merge this into the regular `llama_or_mistral` script
 since the logic is effectively the same.
@@ -52,7 +52,7 @@ from tqdm import tqdm
 
 from MaxText import max_logging
 from MaxText.inference_utils import str2bool
-from MaxText.llama_or_mistral_ckpt import save_weights_to_checkpoint, permute_to_match_maxtext_rope, MODEL_PARAMS_DICT
+from MaxText.llama_or_mistral_ckpt import save_weights_to_checkpoint, MODEL_PARAMS_DICT
 
 SIMULATED_CPU_DEVICES_COUNT = 16
 
@@ -121,6 +121,7 @@ def _pytorch_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1, model
     base_mapping[f"layers.{layer_idx}.feed_forward.experts.moe_w_swiglu_eD_F"] = base_mapping.pop(
         f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w3.weight"
     )
+  return base_mapping
 
 
 def _hf_to_maxtext_mapping(layer_idx: int = -1) -> dict:
@@ -263,7 +264,6 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
 
   # self attention ###############################################
   max_logging.log("Processing self attention")
-  has_printed_warning = False
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
     layer_name = f"layers_{layer_idx}"
     jax_weights["decoder"].update(
@@ -512,7 +512,6 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
 
   # llama3.1-405b kv weight is replicated within every two files.
   wkv_step = 1 if model_size != "llama3.1-405b" else 2
-  has_printed_warning = False
 
   for layer_idx in tqdm(range(base_num_decoder_layers), desc="layers", leave=False):
     layer_name = f"layers_{layer_idx}"
@@ -726,7 +725,6 @@ def _convert_pytorch_to_jax_weights(base_model_path: str, model_size: str, model
           axis=2,
       )
       # NOTE: should probably update this to be more rigorous, but this should be fine for now
-      f_dim = wi_0.shape[-1]
       wi_1 = np.concatenate(
           [
               var[f"layers.{layer_idx}.feed_forward.experts.moe_w_swiglu_eD_F"]

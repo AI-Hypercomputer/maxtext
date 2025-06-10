@@ -61,6 +61,7 @@ def aggregate_rouge_scores(chunk_results: List[Dict]) -> Dict:
 
 
 def get_args():
+  """Parse command line arguments, returning argparse.Namespace from it"""
   parser = argparse.ArgumentParser()
   parser.add_argument("--mlperf-accuracy-file", required=True, help="path to mlperf_log_accuracy.json")
   parser.add_argument("--dataset-file", required=True, help="path to processed openorca validation set")

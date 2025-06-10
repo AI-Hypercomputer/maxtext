@@ -39,18 +39,25 @@ import re
 import logging
 import json
 from dataclasses import dataclass
+
 from safetensors import safe_open
+
+import ml_dtypes
+
+import psutil
+
+from tqdm import tqdm
+
+import numpy as np
 
 os.environ["JAX_PLATFORMS"] = "cpu"
 
-from flax.training import train_state
+import torch
+
 import jax
 from jax import tree
-import ml_dtypes
-import numpy as np
-import psutil
-from tqdm import tqdm
-import torch
+
+from flax.training import train_state
 
 from MaxText import checkpointing
 from MaxText import max_logging
@@ -256,6 +263,7 @@ def _incoming_ckpt_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1,
     base_mapping[f"layers.{layer_idx}.feed_forward.experts.moe_w_swiglu_eD_F"] = base_mapping.pop(
         f"layers.{layer_idx}.feed_forward.experts.{expert_idx}.w3.weight"
     )
+  return base_mapping
 
 
 def _hf_to_maxtext_mapping(layer_idx: int = -1, expert_idx: int = -1) -> dict:
@@ -1466,7 +1474,8 @@ if __name__ == "__main__":
   llama4_17b_128e = "llama4-17b-128e"
   if args.model_size == llama4_17b_128e:
     raise NotImplementedError(
-        f"Currently, the `{llama4_17b_128e}` model only supports unscanned checkpoint conversion.  Please use `MaxText/llama4_ckpt_unscanned.py` instead!"
+        f"Currently, the `{llama4_17b_128e}` model only supports unscanned checkpoint conversion.  "
+        f"Please use `MaxText/llama4_ckpt_unscanned.py` instead!"
     )
 
   os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={SIMULATED_CPU_DEVICES_COUNT}"

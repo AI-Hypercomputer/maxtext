@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-# pylint: disable=g-bad-todo, abstract-method, consider-using-with, ungrouped-imports
+# pylint: disable=g-bad-todo, abstract-method, consider-using-with
 """Standalone checkpointer - only saves and restores checkpoints at regular intervals, accesses storage needs."""
 
 # Calling jax.device_count here prevents a "TPU platform already registered" error.
@@ -22,20 +22,22 @@ limitations under the License.
 
 import datetime
 import os
-
 from typing import Sequence
+
 from absl import app
-from flax.linen import partitioning as nn_partitioning
+
+import numpy as np
+
 import jax
 from jax import numpy as jnp
-import numpy as np
+
+from flax.linen import partitioning as nn_partitioning
 
 from MaxText import checkpointing
 from MaxText import maxtext_utils
 from MaxText import max_logging
 from MaxText import pyconfig
 from MaxText.train import setup_mesh_and_model, get_first_step, validate_train_config, save_checkpoint
-
 from MaxText.layers import models
 
 Transformer = models.Transformer

@@ -18,9 +18,12 @@ limitations under the License.
 
 import os
 import sys
-import jax
 import json
+
 import jsonlines
+
+import jax
+
 from MaxText import inference_microbenchmark
 from MaxText import pyconfig
 
@@ -120,7 +123,9 @@ def main():
         **inference_metadata,
     }
     try:
-      microbenchmark_results = inference_microbenchmark.main(config, inference_metadata=inference_metadata)
+      microbenchmark_results = inference_microbenchmark.run_benchmarks_with_unsafe_rbg(
+          config, inference_metadata=inference_metadata
+      )
       if microbenchmark_results:
         metrics = microbenchmark_results["flattened_results"]
         metrics = {k.lower(): v for k, v in metrics.items()}

@@ -15,21 +15,17 @@
 """Embedding Layers."""
 
 import math
-from typing import Any, Optional
+from typing import Optional
 
-from flax import linen as nn
 import jax
 from jax import lax
 import jax.numpy as jnp
-from MaxText.layers import initializers
 
-Config = Any
-Array = jnp.ndarray
-DType = jnp.dtype
+from flax import linen as nn
 
-Initializer = initializers.Initializer
-default_embed_init = initializers.default_embed_init
-with_logical_partitioning = nn.with_logical_partitioning
+from MaxText import max_logging
+from MaxText.common_types import Config, DType, Array
+from MaxText.layers.initializers import Initializer, default_embed_init
 
 _MAX_WAVELENGTH = 10_000
 
@@ -54,12 +50,33 @@ class Embed(nn.Module):
   embedding_init: Initializer = default_embed_init
 
   def setup(self):
-    self.embedding = self.param(
+    """
+    Sets up the embedding parameters for the model.
+
+    This method initializes the embedding parameters with logical partitioning.
+    The embedding is represented as a parameter with the specified shape and data type.
+
+    Parameters:
+    - embedding: The embedding parameter initialized using the specified method,
+                 partitioned logically along the 'vocab' and 'embed' dimensions.
+
+    Returns:
+    None
+    """
+
+    embedding = self.param(
         "embedding",
-        with_logical_partitioning(self.embedding_init, ("vocab", "embed")),
+        nn.with_logical_partitioning(self.embedding_init, ("vocab", "embed")),
         (self.num_embeddings, self.features),
         self.config.weight_dtype,
     )
+    # Move embeddings to device if parameter offloading is enabled
+    if self.config.parameter_memory_host_offload:
+      max_logging.log("embeddings.py: Moving embedding parameter to device")
+      # pylint: disable=protected-access
+      self.embedding = jax.device_put(embedding, jax._src.sharding_impls.TransferToMemoryKind("device"))
+    else:
+      self.embedding = embedding
 
   def __call__(self, inputs: Array) -> Array:
     """Embeds the inputs along the last dimension.
@@ -123,6 +140,7 @@ class RotaryEmbedding(nn.Module):
   fprop_dtype: DType = jnp.bfloat16
 
   def setup(self) -> None:
+    """init with timescale"""
     if self.embedding_dims % 2:
       raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
 
@@ -183,6 +201,7 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
   use_scale: bool = True
 
   def _apply_scaling_factor(self, freq):
+    """apply scaling factor to rotary position embedding."""
     scale_factor = 8
     low_freq_factor = 1
     high_freq_factor = 4
@@ -307,6 +326,7 @@ class YarnRotaryEmbedding(nn.Module):
   fprop_dtype: DType = jnp.bfloat16
 
   def setup(self) -> None:
+    """init with freqs_cis"""
     if self.embedding_dims % 2:
       raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
 
@@ -412,6 +432,8 @@ class YarnRotaryEmbedding(nn.Module):
 
 
 class PositionalEmbedding(nn.Module):
+  """positional embedding layer."""
+
   embedding_dims: int
   max_wavelength: int = _MAX_WAVELENGTH
 
@@ -432,3 +454,105 @@ class PositionalEmbedding(nn.Module):
     # signal = jnp.pad(signal, [[0, jnp.mod(self.embedding_dims, 2)]])
     position_embedding = signal.astype(jnp.float32)
     return input_embedding + position_embedding
+
+
+class LlamaVisionRotaryEmbedding(nn.Module):
+  """Rotary position embedding for Llama4 vision encoder.
+
+  Based on Pytorch Reference
+  https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama4/modeling_llama4.py
+  This implementation follows the Llama4 vision encoder's rotary embedding approach,
+  which uses 2D coordinates (x, y) to generate rotary position embeddings.
+
+  Attributes:
+    image_size: int size of the input image
+    patch_size: int size of the image patches
+    hidden_size: int size of the hidden dimension
+    num_attention_heads: int number of attention heads
+    rope_theta: float = 10000.0 base theta value for the frequency computation
+    cast_as_fprop_dtype: bool = True whether to cast the output to the fprop dtype
+    fprop_dtype: DType = jnp.bfloat16 the dtype of the output
+  Returns:
+    jax.Array of shape [batch_size_times_tiles, num_patches_incl_cls, num_heads, head_dim]
+    where vision rotary position embeddings are applied.
+  """
+
+  image_size: int
+  patch_size: int
+  hidden_size: int
+  num_attention_heads: int
+  rope_theta: float = 10000.0
+  cast_as_fprop_dtype: bool = True
+  fprop_dtype: DType = jnp.bfloat16
+
+  def setup(self):
+    """Initializes the rotary embedding parameters."""
+    idx = self.image_size // self.patch_size
+    img_idx = jnp.arange(idx**2, dtype=jnp.int32).reshape(idx**2, 1)
+    img_idx = jnp.concatenate([img_idx, img_idx[:1]], axis=0)
+    img_idx = img_idx.at[-1, -1].set(-2)  # ID_CLS_TOKEN
+
+    # Get 2D coordinates
+    frequencies_x = img_idx % idx  # x coordinates
+    frequencies_y = img_idx // idx  # y coordinates
+
+    # Compute frequency dimensions
+    freq_dim = self.hidden_size // self.num_attention_heads // 2
+    rope_freq = 1.0 / (self.rope_theta ** (jnp.arange(0, freq_dim, 2)[: (freq_dim // 2)].astype(jnp.float32) / freq_dim))
+
+    # Compute frequencies for x and y coordinates
+    freqs_x = (frequencies_x + 1)[..., None] * rope_freq[None, None, :]
+    freqs_y = (frequencies_y + 1)[..., None] * rope_freq[None, None, :]
+
+    # Interleave x and y frequencies
+    freqs_x = jnp.repeat(freqs_x, 2, axis=-1)
+    freqs_y = jnp.repeat(freqs_y, 2, axis=-1)
+
+    # Combine frequencies
+    freqs = jnp.concatenate([freqs_x, freqs_y], axis=-1).astype(jnp.float32)
+    freqs = freqs[..., ::2]
+
+    # Mask out invalid positions
+    freqs = jnp.where(img_idx.reshape(-1, 1, 1) < 0, 0, freqs)
+    # Convert to complex representation
+    self.freqs_ci = jnp.exp(1j * freqs)
+
+  def __call__(self, inputs: Array, position: Optional[Array] = None) -> Array:
+    """Applies rotary embeddings to the input tensor for Llama4 vision encoder.
+
+    Args:
+      inputs: Input tensor of shape [batch_size_times_tiles, num_patches_incl_cls, num_heads, head_dim]
+
+    Returns:
+      Tensor with rotary embeddings applied, maintaining the same shape as input.
+    """
+    if len(inputs.shape) != 4:
+      raise ValueError(
+          """Input is assumed to be a rank 4 tensor of shape [batch_size_times_tiles, num_patches_incl_cls, 
+          num_heads, head_dim]."""
+      )
+
+    # Reshape inputs to complex representation
+    B, S, N, H = inputs.shape
+    half_dim = H // 2
+
+    # Convert the last dimension into a complex representation.
+    # First reshape so that each pair of numbers represents the real and imaginary parts.
+    inputs_reshaped = inputs.reshape(B, S, N, half_dim, 2)
+    inputs_complex = inputs_reshaped[..., 0] + 1j * inputs_reshaped[..., 1]
+
+    # Reshape freqs_ci for broadcasting
+    freqs_ci = self.freqs_ci[jnp.newaxis, :, :, :]
+
+    # Apply rotary transformation
+    rotated = inputs_complex * freqs_ci
+
+    # Convert the complex result back to a real tensor.
+    # Split the complex number into its real and imaginary parts.
+    rotated_real = jnp.stack([jnp.real(rotated), jnp.imag(rotated)], axis=-1)
+    output = rotated_real.reshape(B, S, N, H)
+
+    if self.cast_as_fprop_dtype:
+      output = output.astype(self.fprop_dtype)
+
+    return output

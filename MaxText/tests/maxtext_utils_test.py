@@ -14,30 +14,37 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+from collections.abc import Callable
+
 """ Tests for the common MaxText utilities """
+
+from typing import Union, Any, Dict, Tuple
+import os.path
 import unittest
-import jax.numpy as jnp
-
-from MaxText import maxtext_utils
-from MaxText import max_utils
-
-
-from flax import linen as nn
-from flax.training import train_state
 
 from jax import random
 from jax.sharding import Mesh
+import jax.numpy as jnp
+
+from flax import linen as nn
+from flax.core.scope import FrozenVariableDict
+from flax.linen import Dense
+from flax.training import train_state
+
 import optax
+
+from MaxText import max_utils
+from MaxText import maxtext_utils
 from MaxText import pyconfig
-import os.path
-from MaxText.layers import quantizations
 from MaxText.globals import PKG_DIR
 from MaxText.layers import models
+from MaxText.layers import quantizations
 
 Transformer = models.Transformer
 
 
 class TestGradientClipping(unittest.TestCase):
+  """test class for gradient clipping"""
 
   def test_grad_clipping_with_no_fp8_stats(self):
     raw_grads = {"params": jnp.array([3.0, -4.0]), "wi_0": jnp.array([5.0, -6.0])}
@@ -67,6 +74,7 @@ class TestGradientClipping(unittest.TestCase):
 
 
 class TestNestedValueRetrieval(unittest.TestCase):
+  """test class for NestedValueRetrieval"""
 
   def setUp(self):
     self.test_dict = {
@@ -123,7 +131,9 @@ class MaxUtilsInitState(unittest.TestCase):
   def test_init_decode_state(self):
     decode_state = maxtext_utils.init_decode_state(self.model.apply, self.params)
     self.assertEqual(decode_state.apply_fn, self.model.apply)
-    output = decode_state.apply_fn(self.params, self.input)
+    apply_fn: Callable = decode_state.apply_fn
+    # pylint: disable=not-callable
+    output: Union[Any, Tuple[Any, Union[FrozenVariableDict, Dict[str, Any]]]] = apply_fn(self.params, self.input)
     self.assertEqual(output.tolist(), self.output.tolist())
     self.assertEqual(decode_state.tx, None)
     self.assertEqual(decode_state.opt_state, {})
@@ -148,8 +158,9 @@ class ModelWithMultipleCollections(nn.Module):
   A simple model that has variables in multiple collections - "params" and "special_variables"
   """
 
+  dense: Dense = nn.Dense(4)
+
   def setup(self):
-    self.dense = nn.Dense(4)
     self.kernel = self.variable("special_variables", "my_first_kernel", lambda: jnp.ones((4, 5)))
 
   def __call__(self, x, y, encoder_images=None):
@@ -159,6 +170,7 @@ class ModelWithMultipleCollections(nn.Module):
 
 
 class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
+  """test class for multiple collection state in maxutils"""
 
   def setUp(self):
     self.config = pyconfig.initialize([None, os.path.join(PKG_DIR, "configs", "base.yml")], enable_checkpointing=False)
@@ -169,6 +181,7 @@ class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
     self.tx = optax.adam(learning_rate=0.001)
 
   def _test_init_initial_state_driver(self, is_training):
+    """test initiating of the initial state driver"""
     state_under_test = maxtext_utils.init_initial_state(self.model, self.tx, self.config, is_training, self.key3)
     self.assertEqual(state_under_test.apply_fn, self.model.apply)
     if is_training:
@@ -237,6 +250,7 @@ class MaxUtilsPpAsDp(unittest.TestCase):
     self.assertEqual(transformed_rules, expected_transform)
 
   def multiple_rules(self):
+    """test multiple rules"""
     input_rules = (
         ("activation_batch", ("data", "fsdp")),
         ("layers", "stage"),

@@ -17,17 +17,25 @@ limitations under the License.
 """Create an Orbax CheckpointManager with specified (Async or not) Checkpointer."""
 
 from typing import Any, Optional, Union
+
 from absl import flags
+
 from etils import epath
-from flax.training import train_state
+
 import grain.python as grain
-import jax
-from MaxText import max_logging
-from MaxText.multihost_dataloading import MultiHostDataLoadIterator
+
 import numpy as np
+
+import jax
+
+from flax.training import train_state
+
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
+
+from MaxText import max_logging
+from MaxText.multihost_dataloading import MultiHostDataLoadIterator
 
 # pylint: disable=too-many-positional-arguments
 
@@ -104,11 +112,15 @@ def create_orbax_emergency_checkpoint_manager(
   flags.FLAGS.experimental_orbax_use_distributed_process_id = True
   max_logging.log("Creating emergency checkpoint manager...")
 
-  local_checkpoint_dir += f"{local_checkpoint_dir}/{jax.process_index()}"
-  local_p = epath.Path(local_checkpoint_dir)
-  persistent_p = epath.Path(persistent_checkpoint_dir)
-  local_p.mkdir(exist_ok=True, parents=True)
-  persistent_p.mkdir(exist_ok=True, parents=True)
+  # Only create directories if running on GPUs as the previous
+  # directory structure might be assumed by TPUs
+  if global_mesh.devices.flatten()[0].platform == 'gpu':
+    # pylint: disable=protected-access
+    local_checkpoint_dir = f"{local_checkpoint_dir}/{jax._src.distributed.global_state.process_id}"
+    local_p = epath.Path(local_checkpoint_dir)
+    persistent_p = epath.Path(persistent_checkpoint_dir)
+    local_p.mkdir(exist_ok=True, parents=True)
+    persistent_p.mkdir(exist_ok=True, parents=True)
 
   options = emergency_checkpoint_manager.CheckpointManagerOptions(
       local=LocalCheckpointOptions(save_interval_steps=local_save_interval_steps),
@@ -147,6 +159,48 @@ def create_orbax_emergency_replicator_checkpoint_manager(
 
   max_logging.log("Emergency replicator checkpoint manager created!")
   return manager
+
+
+def replicator_error_handler(config: Any):
+  """Replicator error handler to handle errors in replicator service."""
+  if config.enable_emergency_checkpoint and config.use_replicator_service and config.local_checkpoint_directory:
+    local_dir = config.local_checkpoint_directory
+    replicator_errors_file = f"{local_dir}/replicator.errors"
+    replicator_failed_file = f"{local_dir}/replicator.failed"
+    process_replicator_error_file(replicator_errors_file)
+
+    # if the replicator.failed file exists, then we have a fatal error
+    is_fatal = process_replicator_error_file(replicator_failed_file)
+    if is_fatal:
+      raise ValueError("Replicator fatal error found in replicator.failed file.")
+
+
+def process_replicator_error_file(error_file: str) -> bool:
+  """Handles replicator errors by reading, logging, cleaning the error file."""
+  error_file_path_exists = epath.Path(error_file).exists()
+  if error_file_path_exists:
+    max_logging.log(f"replicator_error_handler: file found: {error_file}.")
+    read_replicator_error_file(error_file)
+    cleanup_replicator_error_file(error_file)
+    return error_file_path_exists
+  return error_file_path_exists
+
+
+def read_replicator_error_file(error_file: str):
+  """Read replicator errors file."""
+  try:
+    error_data = epath.Path(error_file).read_text()
+    max_logging.log(f"Contents of replicator error file:\n{error_data}")
+  except (OSError, ValueError) as e:
+    max_logging.log("replicator_error_handler: Failed to read contents of failed" f" file: {e}")
+
+
+def cleanup_replicator_error_file(error_file: str):
+  """Clean up replicator errors file."""
+  try:
+    epath.Path(error_file).unlink()
+  except (OSError, ValueError) as e:
+    max_logging.log("replicator_error_handler: Failed to remove replicator errors file:" f" {e}")
 
 
 def print_save_message(step, async_checkpointing):

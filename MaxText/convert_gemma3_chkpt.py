@@ -11,24 +11,26 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-import jax
-import jax.numpy as jnp
-import numpy as np
-
-jax.config.update("jax_platform_name", "cpu")
+from typing import Any
 import argparse
 import copy
-from flax.training import train_state
-
-from typing import Any
 import sys
 
+import numpy as np
+
+import jax
+import jax.numpy as jnp
+
+from flax.training import train_state
 
 import orbax
 
 from MaxText import checkpointing
 from MaxText import max_logging
 from MaxText.train import save_checkpoint
+
+jax.config.update("jax_platform_name", "cpu")
+
 
 Params = dict[str, Any]
 
@@ -106,13 +108,11 @@ def main(raw_args=None) -> None:
               },
               "pos_embedding": params["SigLiPFromPatches_0"]["siglip_encoder"]["pos_embedding"],
               "Transformer": params["SigLiPFromPatches_0"]["siglip_encoder"]["Transformer"],
-              "VisionEmbedder_0": {
-                  "mm_input_projection": params["transformer"]["embedder"]["mm_input_projection"],
-                  "mm_soft_embedding_norm": {
-                      "scale": params["transformer"]["embedder"]["mm_soft_embedding_norm"]["scale"] + 1
-                  },
-              },
-          }
+          },
+          "VisionEmbedder_0": {
+              "mm_input_projection": params["transformer"]["embedder"]["mm_input_projection"],
+              "mm_soft_embedding_norm": {"scale": params["transformer"]["embedder"]["mm_soft_embedding_norm"]["scale"] + 1},
+          },
       },
   }
   # Rename MlpBlock_0 to MlpBlockViT_0 in vision encoder

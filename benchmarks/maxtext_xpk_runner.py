@@ -331,6 +331,13 @@ def _build_args_from_config(wl_config: WorkloadConfig) -> dict:
 
   # Extract tuning_params arg
   tuning_params_str = json.dumps(wl_config.model.tuning_params)
+
+  num_steps = wl_config.num_steps # default case
+
+  if "steps" in wl_config.model.tuning_params and wl_config.num_steps == -1: # replace num_step for not provided num_steps and configuration exist in tuning_params.
+    num_steps = model.tuning_params["steps"]
+    log.info("using steps=(%d) in model convergence test setup", num_steps)
+
   return {"metrics_gcs_file": wl_config.metrics_gcs_file,
           "model_id": wl_config.model.model_type,
           "hardware_id": wl_config.hardware_id,
@@ -406,6 +413,11 @@ def build_user_command(
     # Save metrics to gcs bucket so that we can upload them to bq in post processing.
     enable_metrics_cmd = 'gcs_metrics=true'
 
+  upload_hlo_dump=""
+  hlo_dump=""
+  if wl_config.hlo_dump:
+    hlo_dump = "XLA_FLAGS=\'--xla_dump_large_constants --xla_dump_to=/tmp/xla_dump\'"
+    upload_hlo_dump =  f' && gsutil -m cp -r /tmp/xla_dump  {wl_config.base_output_directory}/{wl_config.run_name}/hlo_dump'
   # Construct the command string with proper formatting and line continuations
   command = ' '.join([
       f'{install_libtpu_cmd}',
@@ -414,7 +426,7 @@ def build_user_command(
       'export ENABLE_PATHWAYS_PERSISTENCE=1 &&',
       f'export JAX_PLATFORMS={jax_platforms} &&',
       'export ENABLE_PJRT_COMPATIBILITY=true &&',
-      f'python3 -m MaxText.train {os.path.join("MaxText", "configs", "base.yml")}',
+      f'{hlo_dump} python3 -m MaxText.train {os.path.join("MaxText", "configs", "base.yml")}',
       f'{config_tuning_params}',
       f'steps={wl_config.num_steps}',
       f'model_name={wl_config.model.model_type}',
@@ -422,6 +434,7 @@ def build_user_command(
       f'{vertex_tensorboard}',
       f'{run_name_command}',
       f'{enable_metrics_cmd}'
+      f'{upload_hlo_dump}'
   ])
   return command
 
@@ -556,6 +569,7 @@ def generate_xpk_workload_cmd(
     cluster_config: XpkClusterConfig,
     wl_config: WorkloadConfig,
     workload_name=None,
+    exp_name=None,
 ):
   """Generates a command to run a maxtext model on XPK."""
 
@@ -654,7 +668,7 @@ def generate_xpk_workload_cmd(
           f' --max-restarts={wl_config.max_restarts}'
           f' {hlo_dump}'
           # ' --use-vertex-tensorboard'
-          # f' --experiment-name={test_purpose_name}'
+          # f' --experiment-name={exp_name}'
           f' {additional_flags}'
       ),
       name,
@@ -695,12 +709,13 @@ def xpk_benchmark_runner(
     cluster_config: XpkClusterConfig,
     workload_configs: list[WorkloadConfig],
     disruption_manager: DisruptionManager = DisruptionManager(),
+    exp_name: str = None,
 ):
   xpk_workload_names = []
   xpk_workload_cmds = []
   for wl_config in workload_configs:
     command, name = generate_xpk_workload_cmd(
-        cluster_config=cluster_config, wl_config=wl_config
+        cluster_config=cluster_config, wl_config=wl_config, exp_name=exp_name
     )
 
     print(f"Name of the workload is: {name} \n")

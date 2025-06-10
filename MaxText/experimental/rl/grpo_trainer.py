@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-# pylint: disable=g-bad-todo, abstract-method, consider-using-with, ungrouped-imports, attribute-error
+# pylint: disable=g-bad-todo, abstract-method, consider-using-with, attribute-error
 """
 This script implements Group Relative Policy Optimization (GRPO) training
 using JAX. It optimizes a language model with reinforcement learning by
@@ -27,55 +27,57 @@ import os
 import sys
 import functools
 import queue
-
 from typing import Sequence
+from collections.abc import Callable
+
 from absl import app
+
 import tensorflow as tf
-from flax.linen import partitioning as nn_partitioning
-from flax import struct
+
+import numpy as np
+
 import jax
 import jax.numpy as jnp
 from jax import random
-import numpy as np
 
-
-from MaxText import checkpointing
-from MaxText import max_utils
-from MaxText import maxtext_utils
-from MaxText import max_logging
-from MaxText import profiler
-from MaxText import pyconfig
-from MaxText import maxengine
-
-from MaxText.metric_logger import MetricLogger
-
-from MaxText.vertex_tensorboard import VertexTensorboardManager
-
-from MaxText.experimental.rl import grpo_input_pipeline
-from MaxText.layers import models
-
-from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
-
-from MaxText.train import (
-    validate_train_config,
-    get_first_step,
-    load_next_batch,
-    record_scalar_metrics,
-    save_checkpoint,
-    record_goodput,
-    create_goodput_recorder,
-    check_example_batch,
-    setup_mesh_and_model,
-)
+from flax.linen import partitioning as nn_partitioning
+from flax import struct
 
 from cloud_tpu_diagnostics import diagnostic
 from cloud_tpu_diagnostics.configuration import debug_configuration
 from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
-from ml_goodput_measurement import monitoring
-
 import transformers
+
+from MaxText import checkpointing
+from MaxText import max_logging
+from MaxText import max_utils
+from MaxText import maxengine
+from MaxText import maxtext_utils
+from MaxText import profiler
+from MaxText import pyconfig
+from MaxText.common_types import Array
+from MaxText.experimental.rl import grpo_input_pipeline
+from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
+from MaxText.layers import models
+from MaxText.metric_logger import MetricLogger
+from MaxText.train import (
+    validate_train_config,
+    get_first_step,
+    load_next_batch,
+    record_scalar_metrics,
+    save_checkpoint,
+    check_example_batch,
+    setup_mesh_and_model,
+)
+from MaxText.utils.goodput_utils import (
+    GoodputEvent,
+    create_goodput_recorder,
+    maybe_monitor_goodput,
+    maybe_record_goodput,
+)
+from MaxText.vertex_tensorboard import VertexTensorboardManager
 
 # pylint: disable=too-many-positional-arguments
 
@@ -375,19 +377,19 @@ def generate_completions(config, tokenizer_model, engine, data, params, rng):
     else:
       data[k] = v[: config.micro_batch_size_to_train_on]
 
-  rng, rng_load_params = jax.random.split(rng)
-
-  rng, rng_init_decode = jax.random.split(rng_load_params)
+  rng, rng_init_decode = jax.random.split(rng)
   decode_state = engine.init_decode_state(rng_init_decode)
 
   prompts, true_length = data[f"{config.train_data_columns}"], data[f"{config.train_data_columns}_true_length"]
+  rng, rng_prefill = jax.random.split(rng)
   decode_state = jax.jit(
       functools.partial(prefill, engine, params, prompts, true_length, config.num_generations), donate_argnums=(0,)
-  )(decode_state, rng)
+  )(decode_state, rng_prefill)
 
+  rng, rng_generate = jax.random.split(rng)
   completions = jax.jit(
       functools.partial(generate, engine, params, config.max_target_length - config.max_prefill_predict_length)
-  )(decode_state, rng)
+  )(decode_state, rng_generate)
 
   data[f"{config.train_data_columns}_completions"], eos_positions = concatenate_prompt_with_completions(
       config, tokenizer_model, prompts, true_length, completions
@@ -623,13 +625,14 @@ def eval_step(model, config, state, data, dropout_rng):
   return metrics
 
 
-def setup_train_loop(config):
+def setup_train_loop(config, recorder):
   """Set up prerequisites for the training loop -
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
       Set up data iterator and tokenizer, initialize the model.
 
   Args:
     config
+    recorder
 
   Returns:
     init_rng:
@@ -642,22 +645,19 @@ def setup_train_loop(config):
     data_iterator:
     state: the initialized train state
   """
-  recorder = create_goodput_recorder(config)
-  record_goodput(recorder, config, recorder.record_tpu_init_start_time if recorder else None)
-  init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
+  with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
+    init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
 
-  record_goodput(recorder, config, recorder.record_tpu_init_end_time if recorder else None)
-  record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
-  data_iterator, eval_data_iterator = grpo_input_pipeline.create_data_iterator(config, mesh)
-  state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
-      model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
-  )
+  with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
+    data_iterator, eval_data_iterator = grpo_input_pipeline.create_data_iterator(config, mesh)
+    state, _, state_mesh_shardings, data_iterator = maxtext_utils.setup_training_state(
+        model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
+    )
 
-  if not config.using_pipeline_parallelism:
-    # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
-    maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
+    if not config.using_pipeline_parallelism:
+      # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
+      maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, config.sharding_tolerance)
 
-  record_goodput(recorder, config, recorder.record_training_preparation_end_time if recorder else None)
   return (
       init_rng,
       writer,
@@ -672,18 +672,8 @@ def setup_train_loop(config):
   )
 
 
-def train_loop(config, config_inference, state=None):
-  """Main Training loop.
-  Args:
-    config:
-    state:
-    ckpt_path:
-  Returns:
-  """
-  # Create a GoodputRecorder to log information
-  recorder = create_goodput_recorder(config)
-  record_goodput(recorder, config, recorder.record_job_start_time if recorder else None)
-
+def train_loop(config, config_inference, recorder, state=None):
+  """Main Training loop."""
   (
       init_rng,
       writer,
@@ -695,7 +685,7 @@ def train_loop(config, config_inference, state=None):
       data_iterator,
       eval_data_iterator,
       state,
-  ) = setup_train_loop(config)
+  ) = setup_train_loop(config, recorder)
   tokenizer_model = transformers.AutoTokenizer.from_pretrained(
       config.tokenizer_path,
       add_bos_token=config.add_bos,
@@ -777,7 +767,7 @@ def train_loop(config, config_inference, state=None):
 
   data_sharding = in_shard_train[1]
   param_sharding = state_mesh_shardings.params
-  p_generate_completions = jax.jit(
+  p_generate_completions: Callable[[dict, dict, Array], Array] = jax.jit(
       functools.partial(generate_completions, config, tokenizer_model, engine),
       in_shardings=(data_sharding, param_sharding, None),
       out_shardings=data_sharding,
@@ -785,6 +775,7 @@ def train_loop(config, config_inference, state=None):
   )
 
   running_gcs_metrics = [] if config.gcs_metrics else None
+  metrics = None
 
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
@@ -806,25 +797,31 @@ def train_loop(config, config_inference, state=None):
       gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
 
   metric_logger = MetricLogger(writer, config)
+  input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step or prof.should_activate_periodic_profile(step):
       optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
       prof.activate(blocking_object=state, optional_postfix=optional_postfix)
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
-      record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
-      example_batch = load_next_batch(data_iterator, example_batch, config)
-      record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
+      with maybe_record_goodput(recorder, GoodputEvent.DATA_LOADING):
+        try:
+          example_batch = load_next_batch(data_iterator, example_batch, config)
+          example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
+        except Exception as e:  # pylint: disable=broad-except
+          max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
+          break
+
       check_example_batch(config, example_batch=example_batch)
       # pylint: disable=not-callable
       rng = jax.jit(jax.random.fold_in)(init_rng, step)
-      record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
-      rng, rng_gen = random.split(rng)
-      example_batch = p_generate_completions(example_batch, state.params, rng_gen)
+      with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
+        rng, rng_gen = random.split(rng)
+        example_batch = p_generate_completions(example_batch, state.params, rng_gen)
 
-      # TODO: ensure this partitioning is correct
-      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        state, metrics = p_train_step(state, example_batch, rng)
+        # TODO: ensure this partitioning is correct
+        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+          state, metrics = p_train_step(state, example_batch, rng)
 
     step_time_delta = datetime.datetime.now() - last_step_completion
     last_step_completion = datetime.datetime.now()
@@ -904,20 +901,29 @@ def train_loop(config, config_inference, state=None):
       max_utils.print_mem_stats("After params initialized")
 
   if checkpoint_manager is not None:
+    if ((int(state.step) - 1) % config.checkpoint_period != 0) and (int(state.step) != 0):
+      try:
+        if save_checkpoint(
+            checkpoint_manager, int(state.step) - 1, state, config.dataset_type, data_iterator, config, force=True
+        ):
+          checkpointing.print_save_message(int(state.step) - 1, config.async_checkpointing)
+      except Exception:  # pylint: disable=broad-except
+        max_logging.log(f"Checkpoint already saved for step {int(state.step)-1}.")
+
     checkpoint_manager.wait_until_finished()
   metric_logger.write_metrics(running_gcs_metrics, metrics, config.steps - 1)  # final step metrics
   max_utils.close_summary_writer(writer)
-  record_goodput(recorder, config, recorder.record_job_end_time if recorder else None)
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    compiled = p_train_step.lower(state, example_batch, rng).compile()
-    compiled_stats = compiled.memory_analysis()
-    if compiled_stats is not None:
-      max_logging.log(
-          f"Output size: {compiled_stats.output_size_in_bytes}, "
-          f"temp size: {compiled_stats.temp_size_in_bytes}, "
-          f"argument size: {compiled_stats.argument_size_in_bytes}, "
-          f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
-      )
+  if example_batch:
+    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      compiled = p_train_step.lower(state, example_batch, rng).compile()
+      compiled_stats = compiled.memory_analysis()
+      if compiled_stats is not None:
+        max_logging.log(
+            f"Output size: {compiled_stats.output_size_in_bytes}, "
+            f"temp size: {compiled_stats.temp_size_in_bytes}, "
+            f"argument size: {compiled_stats.argument_size_in_bytes}, "
+            f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
+        )
   return state
 
 
@@ -947,19 +953,11 @@ def main(argv: Sequence[str]) -> None:
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
-  if config.monitor_goodput and jax.process_index() == 0:
-    logger_name = f"goodput_{config.run_name}"
-    goodput_monitor = monitoring.GoodputMonitor(
-        job_name=config.run_name,
-        logger_name=logger_name,
-        tensorboard_dir=config.tensorboard_dir,
-        upload_interval=config.goodput_upload_interval_seconds,
-        monitoring_enabled=True,
-        pathway_enabled=config.enable_pathways_goodput,
-        include_badput_breakdown=True,
-    )
-    goodput_monitor.start_goodput_uploader()
-    max_logging.log("Started Goodput upload to Tensorboard in the background!")
+  # Goodput configurations
+  maybe_monitor_goodput(config)
+  recorder = create_goodput_recorder(config)
+
+  # Stack traces configurations
   debug_config = debug_configuration.DebugConfig(
       stack_trace_config=stack_trace_configuration.StackTraceConfig(
           collect_stack_trace=config.collect_stack_trace,
@@ -968,8 +966,10 @@ def main(argv: Sequence[str]) -> None:
       )
   )
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
+
   with diagnostic.diagnose(diagnostic_config):
-    train_loop(config, config_inference)
+    with maybe_record_goodput(recorder, GoodputEvent.JOB):
+      train_loop(config, config_inference, recorder)
 
 
 if __name__ == "__main__":
