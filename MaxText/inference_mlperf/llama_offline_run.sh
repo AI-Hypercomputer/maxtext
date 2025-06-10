@@ -11,7 +11,7 @@ set -o pipefail
 run_name="llama_offline_benchmarks"
 dry_run=false
 skip_warmup=false
-test_run=false
+test_run=true
 enable_profiler=false
 performance=true
 audit=false
@@ -121,8 +121,8 @@ export LOADGEN_RUN_TIMESTAMP=$(TZ=America/Los_Angeles date +%Y%m%d%H%M%S%Z)
 export API_URL=0.0.0.0:9000
 if "$test_run"; then
   export DATASET_TYPE=test
-  export DATASET_PATH=${DATA_DISK_DIR}/processed-data.pkl
-  export TOTAL_SAMPLE_COUNT=2000
+  export DATASET_PATH=/mnt/disks/persist/openorca/processed-data.pkl
+  export TOTAL_SAMPLE_COUNT=1000
   export USER_CONFIG=/mnt/disks/persist/maxtext/MaxText/inference_mlperf/trillium/user${TOTAL_SAMPLE_COUNT}.conf
 else
   export DATASET_TYPE=full

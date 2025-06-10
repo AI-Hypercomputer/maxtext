@@ -590,8 +590,8 @@ def main(argv):
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   # jax.config.update("jax_explain_cache_misses", True)
 
-  if FLAGS.enable_profile:
-    server = jax.profiler.start_server(FLAGS.jax_profiler_port)
+  # if FLAGS.enable_profile:
+  server = jax.profiler.start_server(FLAGS.jax_profiler_port)
 
   settings = lg.TestSettings()
   settings.scenario = lg.TestScenario.Offline  # Explicitly Offline
@@ -731,9 +731,9 @@ def main(argv):
   log.info("Destroying QSL...")
   lg.DestroyQSL(qsl)
 
-  if FLAGS.enable_profile and "server" in locals():
-    jax.profiler.stop_server()
-    log.info("JAX Profiler server stopped.")
+  # if FLAGS.enable_profile and "server" in locals():
+  jax.profiler.stop_server()
+  # log.info("JAX Profiler server stopped.")
 
 
 if __name__ == "__main__":

@@ -681,10 +681,6 @@ class OfflineInference:
     )
 
   def batch_inference(self, data: List[InputData], desc="") -> dict[str, List[int]]:
-    # Original cProfile setup commented out
-    # import cProfile
-    # profiler = cProfile.Profile()
-    # profiler.enable()
     random.seed(99) 
 
     # Create a mutable copy of the data to shuffle
@@ -731,35 +727,5 @@ class OfflineInference:
         emit_token=emit_token_callback,
         desc=desc
     )
-
-    # Original cProfile and stats printing commented out
-    # profiler.disable()
-    # stats_obj = Stats(profiler) # Renamed from 'stats' to avoid conflict if any
-    # print("\n---- Stats sorted by total time (tottime) ----")
-    # stats_obj.sort_stats('tottime').print_stats(50)
-    # print("\n---- Stats sorted by number of calls (ncalls) ----")
-    # stats_obj.sort_stats('ncalls').print_stats(50)
-    # print("\n---- Stats sorted by cumulative time (cumtime) ----")
-    # stats_obj.sort_stats('cumtime').print_stats(50)
-
-
-    # Save performance log
-    if desc != "warmup": # Avoid saving log for warmup runs unless specifically desired
-        try:
-            if performance_log:
-                df_perf = pd.DataFrame(performance_log) # Create DataFrame from global list
-                # Sanitize desc for filename
-                safe_desc = "".join(c if c.isalnum() else "_" for c in desc) if desc else "run"
-                log_filename_timestamp = time.strftime('%Y%m%d_%H%M%S')
-                log_filename = f"performance_log_{safe_desc}_{log_filename_timestamp}.csv"
-                df_perf.to_csv(log_filename, index=False)
-                log.info(f"Performance log saved to {log_filename}")
-                # Optionally clear the log if batch_inference might be called multiple times
-                # and you want separate logs per call rather than one cumulative log.
-                # performance_log.clear()
-            else:
-                log.info(f"No performance data logged for run: {desc}")
-        except Exception as e:
-            log.error(f"Failed to save performance log for run '{desc}': {e}", exc_info=True)
 
     return dict(res)
