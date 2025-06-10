@@ -963,11 +963,16 @@ def train_loop(config, recorder, state=None):
       compiled = p_train_step.lower(state, example_batch, nextrng).compile()
       compiled_stats = compiled.memory_analysis()
       if compiled_stats is not None:
+        total = (compiled_stats.output_size_in_bytes +
+                 compiled_stats.temp_size_in_bytes +
+                 compiled_stats.argument_size_in_bytes -
+                 compiled_stats.alias_size_in_bytes) / (1024**3)
         max_logging.log(
-            f"Output size: {compiled_stats.output_size_in_bytes}, "
-            f"temp size: {compiled_stats.temp_size_in_bytes}, "
-            f"argument size: {compiled_stats.argument_size_in_bytes}, "
-            f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
+            f"Total memory size: {total:.1f} GB, "
+            f"Output size: {compiled_stats.output_size_in_bytes/(1024**3):.1f} GB, "
+            f"Temp size: {compiled_stats.temp_size_in_bytes/(1024**3):.1f} GB, "
+            f"Argument size: {compiled_stats.argument_size_in_bytes/(1024**3):.1f} GB, "
+            f"Host temp size: {compiled_stats.host_temp_size_in_bytes/(1024**3):.1f} GB."
         )
   return state
 
