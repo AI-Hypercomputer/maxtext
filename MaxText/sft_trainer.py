@@ -17,7 +17,6 @@
 import datetime
 import os
 import sys
-import queue
 from typing import Sequence
 
 from absl import app
@@ -36,15 +35,12 @@ from MaxText import maxtext_utils
 from MaxText import max_logging
 from MaxText import profiler
 from MaxText import pyconfig
-from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
 from MaxText.metric_logger import MetricLogger
 from MaxText.train import (
     check_example_batch,
     eval_step,
-    EPS,
     get_first_step,
     load_next_batch,
-    record_scalar_metrics,
     save_checkpoint,
     setup_train_loop,
     train_step,
@@ -65,7 +61,6 @@ def train_loop(config, recorder, state=None):
 
   (
       init_rng,
-      writer,
       checkpoint_manager,
       state_mesh_shardings,
       model,
@@ -95,16 +90,6 @@ def train_loop(config, recorder, state=None):
         donate_argnums_eval,
     ) = maxtext_utils.get_functional_eval_with_signature(eval_step, mesh, state_mesh_shardings, model, config)
 
-  num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
-  max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
-  per_device_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(config)
-  per_device_tokens = maxtext_utils.calculate_tokens_training_per_device(config)
-
-  # Write train config params, num model params, and XLA flags to tensorboard
-  max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
-  max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], writer)
-  maxtext_utils.add_config_to_summary_writer(config, writer)
-
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
   if config.compiled_trainstep_file != "":
     print("Loading the compiled function...", flush=True)
@@ -132,9 +117,6 @@ def train_loop(config, recorder, state=None):
           donate_argnums=donate_argnums_eval,
       )
 
-  running_gcs_metrics = [] if config.gcs_metrics else None
-  metrics = None
-
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
   first_profiling_step = prof.start_initial_profile_step
@@ -143,20 +125,16 @@ def train_loop(config, recorder, state=None):
   last_profiling_step = prof.finished_initial_profile_step
 
   example_batch = None
-  last_step_completion = datetime.datetime.now()
 
-  performance_metric_queue = None
-  if config.report_heartbeat_metric_for_gcp_monitoring or config.report_performance_metric_for_gcp_monitoring:
-    gcp_workload_monitor = GCPWorkloadMonitor(config.run_name)
-    if config.report_heartbeat_metric_for_gcp_monitoring:
-      gcp_workload_monitor.start_heartbeat_reporting_thread(config.heartbeat_reporting_interval_in_seconds)
-    if config.report_performance_metric_for_gcp_monitoring:
-      performance_metric_queue = queue.Queue()
-      gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
-
-  metric_logger = MetricLogger(writer, config)
   input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
+
+  metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
+
+  # Write train config params, num model params, and XLA flags to tensorboard
+  metric_logger.write_setup_info_to_tensorboard(state.params)
+
   for step in np.arange(start_step, config.steps):
+    train_step_start_time = datetime.datetime.now()
     if step == first_profiling_step or prof.should_activate_periodic_profile(step):
       optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
       prof.activate(blocking_object=state, optional_postfix=optional_postfix)
@@ -177,12 +155,6 @@ def train_loop(config, recorder, state=None):
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
           state, metrics = p_train_step(state, example_batch, nextrng)
 
-    step_time_delta = datetime.datetime.now() - last_step_completion
-    last_step_completion = datetime.datetime.now()
-    record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
-    if performance_metric_queue:
-      performance_metric_queue.put(step_time_delta.total_seconds())
-
     if checkpoint_manager is not None:
       if save_checkpoint(checkpoint_manager, int(step), state, config.dataset_type, data_iterator, config):
         checkpointing.print_save_message(step, config.async_checkpointing)
@@ -191,8 +163,6 @@ def train_loop(config, recorder, state=None):
       if checkpoint_manager.reached_preemption(step):
         checkpoint_manager.wait_until_finished()
         sys.exit()
-
-    metric_logger.write_metrics(running_gcs_metrics, metrics, step)
 
     if config.dump_hlo and step == start_step:
       jax.block_until_ready(state)  # Ensure compilation has finished.
@@ -204,16 +174,12 @@ def train_loop(config, recorder, state=None):
           all_host_upload=config.dump_hlo_upload_all,
       )
 
+    train_step_time_delta = datetime.datetime.now() - train_step_start_time
+    metric_logger.record_train_metrics(metrics, step, train_step_time_delta)
+
     if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
       assert eval_data_iterator
-      cumulative_eval_metrics = {
-          "scalar": {
-              "eval/total_loss": 0.0,
-              "eval/total_weights": 0.0,
-              "eval/avg_loss": 0.0,
-              "eval/moe_lb_loss": 0.0,
-          }
-      }
+      eval_step_start_time = datetime.datetime.now()
       eval_step_count = 0
       # pylint: disable=not-callable
       for eval_batch in eval_data_iterator:
@@ -221,24 +187,12 @@ def train_loop(config, recorder, state=None):
           break
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
           eval_metrics = p_eval_step(state, eval_batch, nextrng)
-        cumulative_eval_metrics["scalar"]["eval/total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
-        cumulative_eval_metrics["scalar"]["eval/total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
-        cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] += float(eval_metrics["scalar"]["evaluation/moe_lb_loss"])
+        metric_logger.record_eval_metrics(step, metrics=eval_metrics)
         max_logging.log(f"Completed eval step {eval_step_count}")
         eval_step_count += 1
-      eval_loss = cumulative_eval_metrics["scalar"]["eval/total_loss"] / (
-          cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS
-      )
-      cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
-      cumulative_eval_metrics["scalar"]["eval/avg_moe_lb_loss"] = (
-          cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
-      )
-      metric_logger.write_metrics(running_gcs_metrics, cumulative_eval_metrics, step, is_training=False)
-      max_logging.log(
-          f"average loss after {step=}: {eval_step_count=}, {eval_loss=},"
-          f" total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}"
-      )
-      if eval_loss <= config.target_eval_loss:
+      eval_step_time_delta = datetime.datetime.now() - eval_step_start_time
+      metric_logger.record_eval_metrics(step, eval_step_count=eval_step_count, eval_step_time_delta=eval_step_time_delta)
+      if metric_logger.cumulative_eval_metrics["scalar"]["eval/avg_loss"] <= config.target_eval_loss:
         max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
         prof.deactivate()
         break
@@ -260,8 +214,7 @@ def train_loop(config, recorder, state=None):
         max_logging.log(f"Checkpoint already saved for step {int(state.step)-1}.")
 
     checkpoint_manager.wait_until_finished()
-  metric_logger.write_metrics(running_gcs_metrics, metrics, config.steps - 1)  # final step metrics
-  max_utils.close_summary_writer(writer)
+  metric_logger.flush_metrics_and_cleanup()
 
   if example_batch:
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
