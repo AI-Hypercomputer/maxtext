@@ -23,6 +23,7 @@ limitations under the License.
 import datetime
 import os
 import time
+from MaxText.utils.goodput_utils import GoodputEvent, create_goodput_recorder, maybe_record_goodput
 import ray
 import asyncio
 import random as py_rand
@@ -127,13 +128,15 @@ class MaxtextTrainer(ray_cluster.ResilientWorker):
           # Cause a seg fault, no graceful exception propagation
           eval((lambda:0).__code__.replace(co_consts=()))
 
-  def _train_loop(self, state=None):
+  def _train_loop(self, recorder, state=None):
     failure_fn = functools.partial(self._fail, failure_timer_start=datetime.datetime.now())
-    train_loop(self.config, state=state, hearbeat_fn=self.heartbeat, failure_fn=failure_fn)
+    train_loop(self.config, recorder, state=state, hearbeat_fn=self.heartbeat, failure_fn=failure_fn)
 
   def run(self):
+    recorder = create_goodput_recorder(self.config)
     with diagnostic.diagnose(self.diagnostic_config):
-      self._train_loop()
+      with maybe_record_goodput(recorder, GoodputEvent.JOB):
+        self._train_loop(recorder)
 
 def main(argv: Sequence[str]) -> None:
   ray.init(address='auto', logging_level=0)
