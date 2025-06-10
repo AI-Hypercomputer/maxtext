@@ -771,7 +771,7 @@ class ReplicaWorker:
         if self.enable_batch_prefill:
             # Calculate log_prob
             for i, (first_token, slot, prompt_logp) in enumerate(prefill_result):
-                first_token, log_prob = self._jitted_log_prob_and_slice_token(first_token, self.decode_state, slot)
+                first_token, log_prob = self._jitted_log_prob_and_slice_token(first_token, self.decode_state, int(slot))
                 prefill_result[i] = (first_token, log_prob, slot, prompt_logp)
 
         # Process each prefill result
