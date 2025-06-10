@@ -330,7 +330,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     )
 
   max_logging.log("Processing multimodal projector")
-  jax_weights["Llama4MultiModalProjector_0"]["vit_multi_modal_projector"]["kernel"] = chkpt_vars["multi_modal_projector.linear_1.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
+  jax_weights["vision_encoder"]["Llama4MultiModalProjector_0"]["vit_multi_modal_projector"]["kernel"] = chkpt_vars["multi_modal_projector.linear_1.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
 
   return jax_weights
 
