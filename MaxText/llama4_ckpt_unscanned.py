@@ -303,6 +303,9 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     wk = np.reshape(wk, [hidden_size_for_vit, num_attention_heads_for_vit, head_dim_for_vit])
     wv = np.reshape(wv, [hidden_size_for_vit, num_attention_heads_for_vit, head_dim_for_vit])
     wo = np.reshape(wo, [num_attention_heads_for_vit, head_dim_for_vit, hidden_size_for_vit])
+    bq = np.reshape(bq, [num_attention_heads_for_vit, head_dim_for_vit])
+    bk = np.reshape(bk, [num_attention_heads_for_vit, head_dim_for_vit])
+    bv = np.reshape(bv, [num_attention_heads_for_vit, head_dim_for_vit])
 
     self_attention_vision = {
       "query": {"kernel": wq , "bias": bq},
