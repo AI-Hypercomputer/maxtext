@@ -509,18 +509,38 @@ def generate_offline_completions(training_mesh, config, tokenizer_model, inferen
   end_time = time.time()
   max_logging.log(f"MaxText: inference finished on all samplers in {end_time - start_time} seconds")
   start_time = time.time()
-  if config.continous_batching:
-    completions = jnp.stack([r.token_ids for r in results])
-    completions_logprobs = jnp.stack([r.logprobs for r in results])
-  else:
-    completions = jnp.stack([jax.device_put(r.token_ids, jax.sharding.NamedSharding(training_mesh, P())) for r in results])
-    completions_logprobs = jnp.stack([jax.device_put(r.logprobs, jax.sharding.NamedSharding(training_mesh, P())) for r in results])
-  data = grpo_utils.concatenate_prompt_with_completions(config, tokenizer_model, data, completions)
+  
+  prompt_completions_segmentation = []
+  completion_segmentation = []
+  prompt_completions = []
+  prompt_completions_logprobs = []
+  for i, r in enumerate(results):
+    indices = np.arange(r.token_ids.shape[0])
+    completion_mask = (indices >= np.array(data[f"{config.train_data_columns}_true_length"][i])[0]).astype(jnp.int32)
+    completion_segmentation.append(completion_mask)
+    prompt_completions.append(r.token_ids)
+    prompt_completions_segmentation.append(np.full((r.token_ids.shape[0],), 1))
+    prompt_completions_logprobs.append(r.logprobs)
+  
+  prompt_completions = grpo_utils.pad_or_trim(prompt_completions, config.max_target_length, tokenizer_model.pad_token_id)
+  completion_segmentation = grpo_utils.pad_or_trim(completion_segmentation, config.max_target_length, 0)
+  prompt_completions_segmentation = grpo_utils.pad_or_trim(prompt_completions_segmentation, config.max_target_length, 0)
+  prompt_completions_logprobs = grpo_utils.pad_or_trim(prompt_completions_logprobs, config.max_target_length, -np.inf)
+
+  data[f"{config.train_data_columns}_completions"] = prompt_completions
+  data[f"{config.train_data_columns}_completions_segmentation"] = prompt_completions_segmentation
+  data[f"{config.train_data_columns}_completions_position"] = np.where(
+      data[f"{config.train_data_columns}_completions_segmentation"],
+      np.arange(data[f"{config.train_data_columns}_completions"].shape[1]),
+      0,
+  )
+  data["ar_completions_segmentation"] = completion_segmentation
+
   end_time = time.time()
   max_logging.log(f"MaxText: Preprocessing after inference took {end_time - start_time} seconds")
   # offpolicys
   if config.inference_rollouts > 1:
-    data["completions_logprobs"] = completions_logprobs
+    data["completions_logprobs"] = prompt_completions_logprobs
   else:
     data["completions_logprobs"] = None
   return data
