@@ -725,6 +725,19 @@ def print_cpu_ram_stats(label: str):
   except (RuntimeError, KeyError, TypeError) as ex:
     max_logging.log(f"\tRAM stats unavailable, error: {ex}")
 
+def print_compiled_memory_stats(compiled_stats):
+  if compiled_stats is not None:
+    total = (compiled_stats.output_size_in_bytes +
+             compiled_stats.temp_size_in_bytes +
+             compiled_stats.argument_size_in_bytes -
+             compiled_stats.alias_size_in_bytes) / (1024**3)
+    max_logging.log(
+        f"Total memory size: {total:.1f} GB, "
+        f"Output size: {compiled_stats.output_size_in_bytes/(1024**3):.1f} GB, "
+        f"Temp size: {compiled_stats.temp_size_in_bytes/(1024**3):.1f} GB, "
+        f"Argument size: {compiled_stats.argument_size_in_bytes/(1024**3):.1f} GB, "
+        f"Host temp size: {compiled_stats.host_temp_size_in_bytes/(1024**3):.1f} GB."
+    )
 
 def print_system_information():
   """Print system information of the current environment.
