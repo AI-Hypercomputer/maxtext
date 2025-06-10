@@ -105,6 +105,7 @@ class CompletionOutput:
     token_ids: jax.Array
     logprobs: jax.Array
 
+
 @dataclasses.dataclass
 class TokenOutput:
     """Class for storing log probabilities."""
@@ -129,6 +130,7 @@ class PrefillType(Enum):
     DEFAULT = "default"
     BATCH = "batch"
 
+
 @dataclasses.dataclass
 class PrefillResult:
     """Class for storing log probabilities."""
@@ -151,7 +153,6 @@ class PrefillHelper:
         engine: MaxEngine,
         prefill_lengths: List[int],
         batch_prefill_max_batch_size: int = 16,
-        auto_layout_supported: bool = False,
         rng=None,
     ):
         """Initialize the PrefillHelper.
@@ -161,13 +162,11 @@ class PrefillHelper:
             engine: The MaxEngine instance to use for prefill operations
             prefill_lengths: List of prefill lengths to support
             batch_prefill_max_batch_size: Maximum number of inputs in one packed sequence for batch prefill
-            auto_layout_supported: Whether to use auto layout.
         """
         self._type = type
         self.engine = engine
         self.prefill_lengths = sorted(prefill_lengths)
         self.max_prefill_length = self.prefill_lengths[-1]
-        self.auto_layout_supported = auto_layout_supported
         self.batch_prefill_max_batch_size = batch_prefill_max_batch_size
         if rng is None:
             self.rng = jax.random.PRNGKey(0)
@@ -177,130 +176,39 @@ class PrefillHelper:
             self._processor = PrefillProcessor(engine)
         elif type == PrefillType.BATCH:
             self._batch_processor = BatchedPrefillProcessor(
-                engine=engine, max_batch_size=batch_prefill_max_batch_size, auto_layout_supported=auto_layout_supported
+                engine=engine,
+                max_batch_size=batch_prefill_max_batch_size,
+                auto_layout_supported=False,
             )
             # Also create a standard processor for fallback cases
             self._processor = PrefillProcessor(engine)
         else:
             raise ValueError(f"Invalid prefill type: {type}")
 
-    ## AOT compile logic is yet to be tested.###
-    def aot_compile(
-        self,
-        params: Params,
-        decode_state: DecodeState,
-    ) -> DecodeState:
-        """Ahead-of-time compile prefill functions for all supported lengths."""
-
-        if self._type == PrefillType.DEFAULT:
-            decode_state = self.aot_compile_default(params, decode_state)
-        elif self._type == PrefillType.BATCH:
-            decode_state = self.aot_compile_batch(params, decode_state)
-        return decode_state
-
-    def aot_compile_default(self, params: Params, decode_state: DecodeState):
-        """AOT compile the default prefill processor."""
-        for length in self.prefill_lengths:
-            max_logging.log(f"AOT compiling prefill for length: {length}")
-            if self.auto_layout_supported:
-                self._processor.aot_compile(params, length)
-            else:
-                tokens = jnp.zeros((length,), dtype=jnp.int32)
-                _, decode_state = self._processor._process(
-                    params, tokens, 0, length, decode_state, rng=self.rng
-                )
-        return decode_state
-
-    def aot_compile_batch(self, params: Params, decode_state: DecodeState):
-        """AOT compile the batch prefill processor."""
-        max_length = self.max_prefill_length
-
-        for padded_length in self.prefill_lengths:
-            for num_prompts in range(1, 2 * max_length // padded_length):
-                max_logging.log(
-                    f"AOT compiling batch prefill for length: {padded_length} and num_prompts: {num_prompts}"
-                )
-                if self.auto_layout_supported:
-                    self._batch_processor.aot_compile(
-                        params, padded_length, max_length, num_prompts
-                    )
-                else:
-                    tokens = jnp.arange(0, max_length, dtype=int)
-                    slots = jnp.arange(0, self.batch_prefill_max_batch_size, dtype=int)
-                    decoder_positions = jnp.arange(0, max_length, dtype=int)
-                    decoder_segment_ids = jnp.ones(max_length, dtype=int)
-                    start_pos = jnp.arange(
-                        0,
-                        max_length,
-                        max_length // self.batch_prefill_max_batch_size,
-                        dtype=int,
-                    )
-                    true_lengths = jnp.full(
-                        self.batch_prefill_max_batch_size, padded_length, dtype=int
-                    )
-                    _, decode_state = self._batch_processor._process_batch(
-                        params,
-                        tokens,
-                        slots,
-                        num_prompts,
-                        decoder_positions,
-                        decoder_segment_ids,
-                        start_pos,
-                        padded_length,
-                        true_lengths,
-                        decode_state,
-                    )
-        # For fallback
-        if DEBUG:
-            max_logging.log(f"AOT compiling prefill for length: {max_length}")
-        if self.auto_layout_supported:
-            self._processor.aot_compile(params, max_length)
-        else:
-            tokens = jnp.zeros((max_length,), dtype=jnp.int32)
-            _, decode_state = self._processor._process(
-                params, tokens, 0, max_length, decode_state
-            )
-        return decode_state
-
-    # TODO: clean up this code logic.
-    @staticmethod
-    @functools.partial(jax.jit, static_argnums=(6, 7), donate_argnums=(4,))
-    def _jitted_process(
-        params,
-        tokens,
-        slot,
-        true_length,
-        decode_state,
-        rng,
-        processor_fn,
-        auto_layout_supported=False,
+    @functools.partial(jax.jit, static_argnums=(0), donate_argnums=(5,))
+    def _jitted_non_batched_process(
+        self, params, tokens, slot, true_length, decode_state, rng
     ):
-        if auto_layout_supported:
-            first_token, decode_state = processor_fn(
-                params,
-                decode_state,
-                slot,
-                tokens,
-                true_length,
-                rng,
-                return_prompt_logp=True,
-            )
-        else:
-            first_token, decode_state = processor_fn(
-                params,
-                tokens,
-                slot,
-                true_length,
-                decode_state,
-                rng,
-                return_prompt_logp=True,
-            )
+        first_token, decode_state = self._processor._process(
+            params,
+            tokens,
+            slot,
+            true_length,
+            decode_state,
+            rng,
+            return_prompt_logp=True,
+        )
         log_prob = inference_utils.log_prob_of_chosen_token(
             decode_state["logits"][slot], decode_state["tokens"][slot]
         )
 
-        # Shapes: (1,), (1,)
-        return first_token.data[:, 0], log_prob, decode_state, decode_state["prompt_logp"]
+        # Token, log_prob, decode_state, prompt_logp
+        return (
+            first_token.data[:, 0],
+            log_prob,
+            decode_state,
+            decode_state["prompt_logp"],
+        )
 
     def process(
         self,
@@ -331,23 +239,20 @@ class PrefillHelper:
             self._type == PrefillType.DEFAULT
             or padded_length == self.max_prefill_length
         ):
-            prefill_fn = (
-                self._processor.process
-                if self.auto_layout_supported
-                else self._processor._process
-            )
-            first_token, log_prob, decode_state, prompt_logp = self._jitted_process(
-                model_params,
-                input_tokens_padded,
-                decode_slot,
-                input_true_length,
-                decode_state,
-                self.rng,
-                prefill_fn,
-                self.auto_layout_supported,
+            first_token, log_prob, decode_state, prompt_logp = (
+                self._jitted_non_batched_process(
+                    model_params,
+                    input_tokens_padded,
+                    decode_slot,
+                    input_true_length,
+                    decode_state,
+                    self.rng,
+                )
             )
             prefill_done(
-                [PrefillResult(first_token, log_prob, decode_slot, prompt_logp)], [input_id], decode_state
+                [PrefillResult(first_token, log_prob, decode_slot, prompt_logp)],
+                [input_id],
+                decode_state,
             )
         # Use batch processor for inputs that can benefit from prefill packing
         elif self._type == PrefillType.BATCH:
@@ -383,7 +288,9 @@ class PrefillHelper:
             pass
         elif self._type == PrefillType.BATCH:
             # Flush any remaining inputs in the batch processor
-            self._batch_processor.flush(model_params, decode_state, prefill_done, return_prompt_logp=True)
+            self._batch_processor.flush(
+                model_params, decode_state, prefill_done, return_prompt_logp=True
+            )
 
 
 class ReplicaWorker:
@@ -405,7 +312,6 @@ class ReplicaWorker:
         batch_prefill_max_batch_size: int,
         worker_id: int = 0,
         is_pw_reshard: bool = True,
-        auto_layout_supported: bool = False,
         run_as_a_thread=False,
         rng=None,
         mesh=None,
@@ -457,7 +363,6 @@ class ReplicaWorker:
             prefill_lengths: List of supported prefill lengths
             batch_prefill_max_batch_size: Maximum batch size for batch prefill
             worker_id: Worker identifier
-            auto_layout_supported: Whether auto layout is supported
             run_as_a_thread: Whether to run in a separate thread
         """
         # Configurations
@@ -479,7 +384,6 @@ class ReplicaWorker:
         self.batch_prefill_max_batch_size = batch_prefill_max_batch_size
         self.min_decode_steps = min_decode_steps
         self.run_as_a_thread = run_as_a_thread
-        self.auto_layout_supported = auto_layout_supported
         self.mesh = mesh
         if rng is None:
             self.rng = jax.random.PRNGKey(0)
@@ -523,7 +427,6 @@ class ReplicaWorker:
             self.init_thread = None
 
     def _init_impl(self):
-
         start_time = time.time()
         # Initialize MaxEngine(s)
         self.params, self.engine = self._init_engine(self.params)
@@ -536,25 +439,20 @@ class ReplicaWorker:
             self.engine,
             self.prefill_lengths,
             self.batch_prefill_max_batch_size,
-            self.auto_layout_supported,
             rng=self.rng,
         )
 
         # Initialize decode state and generate function
         start_time_decode_state = time.time()
-        if self.auto_layout_supported:
-            self.generate_fn, self.params, init_decode_state_fn = (
-                self.engine.aot_compile(self.params, pass_rng_shape=True)
-            )
-            self.decode_state = init_decode_state_fn(self.rng)
-        else:
-            self.generate_fn = self.engine.generate
-            self.decode_state = self.engine.init_decode_state(self.rng)
-            
+        self.generate_fn = self.engine.generate
+        self.decode_state = self.engine.init_decode_state(self.rng)
+
         max_logging.log(
             f"time taken to initialize decode_state: {time.time() - start_time_decode_state} seconds"
         )
-        max_logging.log(f"Initialized replica worker {self.worker_id} in {time.time() - start_time} seconds")
+        max_logging.log(
+            f"Initialized replica worker {self.worker_id} in {time.time() - start_time} seconds"
+        )
 
     def _init_engine(self, params):
         """Initialize the MaxEngine.
@@ -640,11 +538,12 @@ class ReplicaWorker:
         """
         self.ensure_init_finished()
         # self.ensure_update_finished() TODO(mohitkhatwani) might not need it
-        self.res = defaultdict(list)
+        self.res_completion_tokens = defaultdict(list)
         self.res_prompt_logp = defaultdict(list)
         self.res_prompt_tokens = defaultdict(list)
-        self.completion_outputs = []
+        self.completion_outputs = {}
 
+        # TODO(wenxindong): remove threading logic
         if self.run_as_a_thread:
             self.worker_thread = SafeThead(
                 target=self._start_inference,
@@ -661,7 +560,7 @@ class ReplicaWorker:
             self.worker_thread.join()
             self.worker_thread = None
         return self.completion_outputs
-    
+
     def _start_inference(
         self,
         data_queue: queue.Queue,
@@ -697,6 +596,9 @@ class ReplicaWorker:
                 row = data_queue.get()
             except queue.Empty:
                 break
+            
+            # Save prompt tokens
+            self.res_prompt_tokens[row.id] = row.tokens[: row.true_length]
 
             # 1. Wait for an empty slot
             while not self.empty_decode_slots:
@@ -704,7 +606,7 @@ class ReplicaWorker:
 
             # 2. Get an available slot
             slot = self.empty_decode_slots.pop()
-            
+
             # 3. Prefill and insert kv cache
             self.prefill_helper.process(
                 model_params=self.params,
@@ -715,7 +617,6 @@ class ReplicaWorker:
                 input_true_length=row.true_length,
                 prefill_done=self.prefill_done,
             )
-            self.res_prompt_tokens[row.id] = row.tokens[:row.true_length]
 
         # 4. Flush any pending inputs in batch prefill mode
         self.prefill_helper.finalize(self.params, self.decode_state, self.prefill_done)
@@ -733,33 +634,44 @@ class ReplicaWorker:
         with jax.profiler.TraceAnnotation("Flushing detokenization thread"):
             detokenize_thread.join()
         end_time = time.time()
-        max_logging.log(f"Replica worker {self.worker_id}: detokenize thread joined in {end_time - start_time} seconds")
-        
-        with jax.profiler.TraceAnnotation("offline_engine.batch_inference.return_final_output"):
-            for input_id in self.res.keys():
-                self.completion_outputs.append(
-                    CompletionOutput(
-                        index=input_id,
-                        token_ids=np.concatenate((self.res_prompt_tokens[input_id].squeeze(), 
-                            np.array([
-                                token_output.token
-                                for token_output in self.res[input_id]
-                            ]).squeeze()
-                        )),
-                        logprobs=np.concatenate((
-                            self.res_prompt_logp[input_id].squeeze(),
-                            np.array([
-                                token_output.log_prob
-                                for token_output in self.res[input_id]
-                            ]).squeeze()
-                        ))
+        max_logging.log(
+            f"Replica worker {self.worker_id}: detokenize thread joined in {end_time - start_time} seconds"
+        )
+
+        with jax.profiler.TraceAnnotation(
+            "offline_engine.batch_inference.return_final_output"
+        ):
+            for input_id in self.res_completion_tokens.keys():
+                self.completion_outputs[input_id] = CompletionOutput(
+                    index=input_id,
+                    token_ids=np.concatenate(
+                            (
+                                self.res_prompt_tokens[input_id].squeeze(),
+                                np.array(
+                                    [
+                                        token_output.token
+                                        for token_output in self.res_completion_tokens[input_id]
+                                    ]
+                                ).squeeze(),
+                            )
+                        ),
+                        logprobs=np.concatenate(
+                            (
+                                self.res_prompt_logp[input_id].squeeze(),
+                                np.array(
+                                    [
+                                        token_output.log_prob
+                                        for token_output in self.res_completion_tokens[input_id]
+                                    ]
+                                ).squeeze(),
+                            )
+                        ),
                     )
-                )
+                
 
     @staticmethod
     @jax.jit
     def _jitted_log_prob_and_slice_token(token, decode_state, slot):
-        
         log_prob = inference_utils.log_prob_of_chosen_token(
             decode_state["logits"][slot], decode_state["tokens"][slot]
         )
@@ -776,23 +688,25 @@ class ReplicaWorker:
             decode_state: Updated decode state
         """
         max_logging.log("Replica {}. Prefill done".format(self.worker_id))
+        
         # Update decode state
         self.decode_state = decode_state
 
         # Process each prefill result
         for i, prefill_result in enumerate(prefill_result):
-            
             first_token = prefill_result.token
             log_prob = prefill_result.log_prob
             slot = prefill_result.slot
             prompt_logp = prefill_result.prompt_logp
-            
-            #TODO: clean up this code logic.
+
+            # TODO: clean up this code logic.
             if log_prob is None:
-                first_token, log_prob = self._jitted_log_prob_and_slice_token(first_token, self.decode_state, slot)
-            
+                first_token, log_prob = self._jitted_log_prob_and_slice_token(
+                    first_token, self.decode_state, slot
+                )
+
             self.slot_to_id[slot] = prompt_ids[i]
-            
+
             # Add token to detokenization queue
             start_time = time.time()
             with jax.profiler.TraceAnnotation("convert_to_numpy"):
@@ -800,7 +714,9 @@ class ReplicaWorker:
                 log_prob = np.array(log_prob)
                 prompt_logp = np.array(prompt_logp)
             end_time = time.time()
-            max_logging.log(f"Replica worker {self.worker_id}: convert to numpy in Prefill in {end_time - start_time} seconds")
+            max_logging.log(
+                f"Replica worker {self.worker_id}: convert to numpy in Prefill in {end_time - start_time} seconds"
+            )
             self.detokenize_backlog.put_nowait(
                 (first_token, log_prob, True, prompt_ids[i], slot, prompt_logp)
             )
@@ -824,7 +740,9 @@ class ReplicaWorker:
                 result_tokens = np.array(result_tokens)
                 log_prob = np.array(log_prob)
             end_time = time.time()
-            max_logging.log(f"Replica worker {self.worker_id}: convert to numpy in Decode in {end_time - start_time} seconds")
+            max_logging.log(
+                f"Replica worker {self.worker_id}: convert to numpy in Decode in {end_time - start_time} seconds"
+            )
 
             buffer.append((result_tokens, log_prob))
 
@@ -857,7 +775,9 @@ class ReplicaWorker:
         the detokenization queue, emit tokens, and free up
         decode slots when sequences complete.
         """
-        max_logging.log(f"Replica worker {self.worker_id}: starting detokenization thread")
+        max_logging.log(
+            f"Replica worker {self.worker_id}: starting detokenization thread"
+        )
         while self.running or not self.detokenize_backlog.empty():
             newly_empty = []
 
@@ -870,7 +790,7 @@ class ReplicaWorker:
                 if not self.running:
                     break
                 continue
-            
+
             # Process generated tokens
             start_time = time.time()
             if is_first_token:
@@ -897,9 +817,17 @@ class ReplicaWorker:
                 self.slot_to_id[slot] = None
                 self.empty_decode_slots.append(slot)
             end_time = time.time()
-            max_logging.log(f"replica worker {self.worker_id}: detokenize in {end_time - start_time} seconds")
+            max_logging.log(
+                f"replica worker {self.worker_id}: detokenize in {end_time - start_time} seconds"
+            )
 
-    def emit_token(self, prompt_id, result_token: int, log_prob, prompt_logp = None, ):
+    def emit_token(
+        self,
+        prompt_id,
+        result_token: int,
+        log_prob,
+        prompt_logp=None,
+    ):
         """Adds the token to the results for the specified prompt ID and
         determines if generation should terminate.
 
@@ -911,20 +839,20 @@ class ReplicaWorker:
             True if this token signals the end of generation, False otherwise
         """
         # Return if already reached max decode length
-        if len(self.res[prompt_id]) == self.max_decode_length:
+        if len(self.res_completion_tokens[prompt_id]) == self.max_decode_length:
             return True
 
         # Return if already reached eos
         if (
-            len(self.res[prompt_id]) > 0
-            and self.res[prompt_id][-1].token in self.eos_ids
+            len(self.res_completion_tokens[prompt_id]) > 0
+            and self.res_completion_tokens[prompt_id][-1].token in self.eos_ids
         ):
             return True
 
-        index = len(self.res[prompt_id])
+        index = len(self.res_completion_tokens[prompt_id])
         if prompt_logp is not None:
             self.res_prompt_logp[prompt_id] = prompt_logp
-        self.res[prompt_id].append(TokenOutput(result_token, log_prob))
+        self.res_completion_tokens[prompt_id].append(TokenOutput(result_token, log_prob))
 
         return (result_token in self.eos_ids) or (index + 1 == self.max_decode_length)
 
@@ -944,7 +872,6 @@ class OfflineEngine:
         batch_prefill_max_batch_size: int = 16,
         dp=1,
         dp_meshes=None,
-        auto_layout_supported=False,
         rng=None,
     ):
         """Initialize the OfflineEngine.
@@ -977,10 +904,6 @@ class OfflineEngine:
               option if you want to use only some of the devices for OfflineEngine and
               reserve the rest for other tasks. If None, OfflineEngine will create the meshes
               automatically.
-            auto_layout_supported: Whether auto layout is supported. Auto layout introduces
-                some start up overhead but can result in faster step times. TODO: Pathways
-                has some bugs with auto layout, so it is recommended to set this to False
-                for now when using Pathways.
             rng: Random number generator key. If None, a new key will be created.
         """
         max_logging.log("Initializing OfflineEngine")
@@ -997,7 +920,6 @@ class OfflineEngine:
         self.batch_prefill_max_batch_size = batch_prefill_max_batch_size
         self.max_prefill_length = self.config.max_prefill_predict_length
         self.max_decode_length = self.config.max_target_length - self.max_prefill_length
-        self.auto_layout_supported = auto_layout_supported
         if rng is None:
             self.rng = jax.random.PRNGKey(0)
         else:
@@ -1016,9 +938,10 @@ class OfflineEngine:
             self.prefill_lengths = sorted(prefill_lengths)
 
         # Create meshes
-        devices = jax.devices()
         if not self.dp_meshes:
-            self.dp_meshes = OfflineEngine.create_dp_meshes(devices, self.dp, self.config)
+            self.dp_meshes = OfflineEngine.create_dp_meshes(
+                jax.devices(), self.dp, self.config
+            )
 
         # Initialize ReplicaWorkers
         run_as_a_thread = (
@@ -1032,7 +955,7 @@ class OfflineEngine:
                 params=self.params,
                 min_decode_steps=self.min_decode_steps,
                 enable_batch_prefill=self.enable_batch_prefill,
-                mesh = self.dp_meshes[i],
+                mesh=self.dp_meshes[i],
                 devices=self.dp_meshes[i].devices.flatten(),
                 tokenizer=self.tokenizer,
                 eos_ids=self.eos_ids,
@@ -1040,7 +963,6 @@ class OfflineEngine:
                 max_decode_length=self.max_decode_length,
                 batch_prefill_max_batch_size=self.batch_prefill_max_batch_size,
                 worker_id=i,
-                auto_layout_supported=auto_layout_supported,
                 run_as_a_thread=run_as_a_thread,
                 rng=replica_rngs[i],
             )
@@ -1090,17 +1012,50 @@ class OfflineEngine:
         completion_outputs = {}
         for i in range(self.dp):
             self.replica_workers[i].start_inference(data_queue, desc)
-        
+
         # Wait for all workers to complete
         for i in range(self.dp):
-            replica_completion_outputs = self.replica_workers[i].ensure_inference_finished_and_return_results()
-            completion_outputs.update({replica_completion_outputs[i].index: replica_completion_outputs[i] for i in range(len(replica_completion_outputs))})
-            max_logging.log(f"replica worker {i} stopped")
-        
-        sorted_completion_outputs = []
+            replica_completion_outputs: dict[any, CompletionOutput] = (
+                self.replica_workers[i].ensure_inference_finished_and_return_results()
+            )
+            completion_outputs.update(replica_completion_outputs)
+            max_logging.log(f"Replica worker {i} stopped")
+
+        sorted_completion_outputs: list[CompletionOutput] = []
         for input_data in data:
             sorted_completion_outputs.append(completion_outputs[input_data.id])
         return sorted_completion_outputs
+
+    def prepare_data(self, data: List[Union[InputData, jax.Array]]) -> List[InputData]:
+        """Pad and if batch prefill is enabled, sort data by length.
+
+        Args:
+            data: List of InputData objects, or JAX or numpy arrays
+
+        Returns:
+            List of prepared InputData objects
+        """
+        # Convert JAX/numpy arrays to InputData objects
+        if isinstance(data[0], jax.Array) or isinstance(data[0], np.ndarray):
+            max_logging.log(
+                "When you provide JAX/numpy arrays to Offline Engine, make sure that the arrays are not padded with padding tokens."
+            )
+            data = [
+                InputData(id=i, tokens=array, true_length=len(array))
+                for i, array in enumerate(data)
+            ]
+
+        # Make sure all data id is unique
+        if len(data) != len(set([item.id for item in data])):
+            raise ValueError("All data ids must be unique")
+
+        data = self.pad_data(data)
+
+        if self.enable_batch_prefill:
+            return sorted(data, key=lambda x: x.tokens.shape[0])
+
+        return data
+
 
     def pad_data(self, data: List[InputData]) -> List[InputData]:
         """For each input, pad it to the next length in self.prefill_lengths
@@ -1152,33 +1107,7 @@ class OfflineEngine:
 
         return padded_data
 
-    def prepare_data(self, data: List[Union[InputData, jax.Array]]) -> List[InputData]:
-        """Pad and if batch prefill is enabled, sort data by length.
-
-        Args:
-            data: List of InputData objects or JAX arrays
-
-        Returns:
-            List of prepared InputData objects
-        """
-        # Convert JAX arrays to InputData objects
-        if isinstance(data[0], jax.Array) or isinstance(data[0], np.ndarray):
-            data = [
-                InputData(id=i, tokens=array, true_length=len(array))
-                for i, array in enumerate(data)
-            ]
-
-        # Make sure all data id is unique
-        if len(data) != len(set([item.id for item in data])):
-            raise ValueError("All data ids must be unique")
-
-        data = self.pad_data(data)
-
-        if self.enable_batch_prefill:
-            return sorted(data, key=lambda x: x.tokens.shape[0])
-
-        return data
-
+    # TODO[wenxin]: fix this function
     @staticmethod
     def create_dp_meshes(devices, dp, config):
         """Create data parallelism meshes for each replica worker."""
@@ -1191,15 +1120,12 @@ class OfflineEngine:
             contiguous_submeshes=False,
             allow_split_physical_axes=config.allow_split_physical_axes or False,
         )
-        inference_devices = devices_array.reshape(
-            (dp, -1)
-        )
+        inference_devices = devices_array.reshape((dp, -1))
         dp_meshes = [
             Mesh(devices.reshape(ici_parallelism), config.mesh_axes)
             for devices in inference_devices
         ]
         return dp_meshes
-
 
     def _validate_config(self):
         """Validate configuration parameters and check for incompatible settings."""
