@@ -81,3 +81,4 @@ class DecoderBlockType(enum.Enum):
   SIMPLE = "simple"
   SIMPLE_MLP = "simple_mlp"
   LLAMA4 = "llama4"
+  QWEN3_MOE = "qwen3_moe"

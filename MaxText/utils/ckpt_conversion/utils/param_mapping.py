@@ -150,6 +150,36 @@ def GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
   return mapping
 
 
+def QWEN3_MOE_MAXTEXT_TO_HF_PARAM_MAPPING(config):
+  """Mapping between MaxText and HF weights for Qwen3 MoE models."""
+  nlayers = config["num_hidden_layers"]
+  mapping = {
+      "params-token_embedder-embedding": "model.embed_tokens.weight",
+      "params-decoder-decoder_norm-scale": "model.norm.weight",
+      "params-decoder-logits_dense-kernel": "lm_head.weight",
+  }
+  for layer_idx in range(nlayers):
+    layer_mapping = {
+        f"params-decoder-layers_{layer_idx}-pre_self_attention_layer_norm-scale": f"model.layers.{layer_idx}.input_layernorm.weight",
+        f"params-decoder-layers_{layer_idx}-post_self_attention_layer_norm-scale": f"model.layers.{layer_idx}.post_attention_layernorm.weight",
+        f"params-decoder-layers_{layer_idx}-self_attention-query-kernel": f"model.layers.{layer_idx}.self_attn.q_proj.weight",
+        f"params-decoder-layers_{layer_idx}-self_attention-key-kernel": f"model.layers.{layer_idx}.self_attn.k_proj.weight",
+        f"params-decoder-layers_{layer_idx}-self_attention-value-kernel": f"model.layers.{layer_idx}.self_attn.v_proj.weight",
+        f"params-decoder-layers_{layer_idx}-self_attention-out-kernel": f"model.layers.{layer_idx}.self_attn.o_proj.weight",
+        f"params-decoder-layers_{layer_idx}-MoeBlock_0-gate-kernel": f"model.layers.{layer_idx}.mlp.gate.weight",
+    }
+    for expert_idx in range(config["num_experts"]):
+      layer_mapping.update(
+          {
+              f"params-decoder-layers_{layer_idx}-MoeBlock_0-wi_0_{expert_idx}": f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.gate_proj.weight",
+              f"params-decoder-layers_{layer_idx}-MoeBlock_0-wi_1_{expert_idx}": f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.up_proj.weight",
+              f"params-decoder-layers_{layer_idx}-MoeBlock_0-wo_{expert_idx}": f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.weight",
+          }
+      )
+    mapping.update(layer_mapping)
+  return mapping
+
+
 def GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=False):
   """Creates parameter transformation functions for converting between MaxText and
   HuggingFace formats.
@@ -339,10 +369,13 @@ PARAM_MAPPING = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3-moe": QWEN3_MOE_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
 HOOK_FNS = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    # Reuse Gemma2 hooks for Qwen3 MoE
+    "qwen3-moe": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }
