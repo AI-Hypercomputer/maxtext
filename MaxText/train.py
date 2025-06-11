@@ -837,14 +837,11 @@ def train_loop(config, recorder, state=None):
 
   metric_logger = MetricLogger(writer, config)
   input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
+  max_utils.compile_sample_batch(data_iterator, p_train_step, state, config, mesh, input_data_shardings)
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step or prof.should_activate_periodic_profile(step):
       optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
       prof.activate(blocking_object=state, optional_postfix=optional_postfix)
-      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        compiled = p_train_step.lower(state, example_batch, nextrng).compile()
-        compiled_stats = compiled.memory_analysis()
-        max_utils.print_compiled_memory_stats(compiled_stats)
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
       with maybe_record_goodput(recorder, GoodputEvent.DATA_LOADING):
