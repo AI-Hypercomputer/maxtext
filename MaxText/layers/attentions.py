@@ -873,7 +873,7 @@ class AttentionOp(nn.Module):
       value: Array,
       decoder_segment_ids: Array | None,
       model_mode: str = MODEL_MODE_TRAIN,
-  ) -> Array:
+  ) -> tuple[Array, Array]:
     """CUDNN Flash Attention with JAX SDPA API.
     """
     # These imports are only meant to work in a GPU build.
@@ -888,7 +888,7 @@ class AttentionOp(nn.Module):
     if model_mode == MODEL_MODE_AUTOREGRESSIVE:
       lengths = jnp.sum(decoder_segment_ids, axis=-1)
 
-      return dot_product_attention(
+      output, lse = dot_product_attention(
           query,
           key,
           value,
@@ -901,7 +901,7 @@ class AttentionOp(nn.Module):
           return_residual=True
       )
     else:
-      return dot_product_attention(
+      output, lse = dot_product_attention(
           query,
           key,
           value,
@@ -911,6 +911,9 @@ class AttentionOp(nn.Module):
           qkv_layout="BTNH",
           return_residual=True
       )
+    output = checkpoint_name(output, "context")
+    lse = checkpoint_name(lse, "context")
+    return output, lse
 
   def compute_local_attention(
       self, attn_weights: Array, value: Array | KVTensor, q_seq_len: int, model_mode: str
