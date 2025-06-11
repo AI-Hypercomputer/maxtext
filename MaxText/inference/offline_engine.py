@@ -51,6 +51,7 @@ import numpy as np
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec
+from flax.linen import partitioning as nn_partitioning
 from jax.experimental import mesh_utils
 
 
@@ -59,6 +60,7 @@ from MaxText.maxengine import MaxEngine
 from MaxText import max_utils
 from MaxText import inference_utils
 from jax.sharding import PartitionSpec as P, NamedSharding
+from flax import linen as nn
 
 from MaxText.experimental.rl import pathwaysutils_reshard
 
@@ -1050,15 +1052,18 @@ class OfflineEngine:
         self.tokenizer = self.replica_workers[0].tokenizer
 
     def update_params(
-        self, params: Params, parition_spec: PartitionSpec, is_pw_reshard
+        self, params: Params, partition_spec: PartitionSpec, is_pw_reshard
     ):
         for i in range(self.dp):
+            with self.dp_meshes[i], nn_partitioning.axis_rules(self.config.logical_axis_rules):
+                mesh_annotations = nn.logical_to_mesh(partition_spec)
+            shardings = jax.tree_util.tree_map(
+                lambda mesh_annotation: jax.sharding.NamedSharding(self.dp_meshes[i], mesh_annotation),
+                mesh_annotations,
+            )
             self.replica_workers[i].update_params(
                 params,
-                jax.tree_util.tree_map(
-                    lambda ps: jax.sharding.NamedSharding(self.dp_meshes[i], ps),
-                    parition_spec,
-                ),
+                shardings,
                 is_pw_reshard,
             )
 

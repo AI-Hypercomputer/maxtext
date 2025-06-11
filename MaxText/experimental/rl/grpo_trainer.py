@@ -496,10 +496,10 @@ def generate_completions(config, tokenizer_model, engine, data, params, rng):
   return data
 
 
-def generate_offline_completions(training_mesh, config, tokenizer_model, inference_engine, data):
+def generate_offline_completions(config, tokenizer_model, inference_engine, data):
   # TODO(mohitkhatwani) think about doing multisampling here
-  data[config.train_data_columns] = jnp.repeat(data[config.train_data_columns], config.num_generations, axis=0)
-  data[f"{config.train_data_columns}_true_length"] = jnp.repeat(data[f"{config.train_data_columns}_true_length"], config.num_generations, axis=0)
+  data[config.train_data_columns] = np.asarray(jnp.repeat(data[config.train_data_columns], config.num_generations, axis=0))
+  data[f"{config.train_data_columns}_true_length"] = np.asarray(jnp.repeat(data[f"{config.train_data_columns}_true_length"], config.num_generations, axis=0))
   input_data = []
   for i, d in enumerate(data[config.train_data_columns]):
     input_data.append(InputData(id=f"input_{i}", tokens=np.array(d), true_length=np.array(data[f"{config.train_data_columns}_true_length"][i])[0]))
@@ -522,7 +522,7 @@ def generate_offline_completions(training_mesh, config, tokenizer_model, inferen
     prompt_completions_segmentation.append(np.full((r.token_ids.shape[0],), 1))
     prompt_completions_logprobs.append(r.logprobs)
   
-  prompt_completions = grpo_utils.pad_or_trim(prompt_completions, config.max_target_length, tokenizer_model.pad_token_id)
+  prompt_completions = grpo_utils.pad_or_trim(prompt_completions, config.max_target_length, 0) # assume 0 for pad_token_id
   completion_segmentation = grpo_utils.pad_or_trim(completion_segmentation, config.max_target_length, 0)
   prompt_completions_segmentation = grpo_utils.pad_or_trim(prompt_completions_segmentation, config.max_target_length, 0)
   prompt_completions_logprobs = grpo_utils.pad_or_trim(prompt_completions_logprobs, config.max_target_length, -np.inf)
@@ -640,19 +640,16 @@ def setup_mesh_and_model(config, config_inference):
 
   # Mesh definition
   if config.inference_devices_per_replica * config.inference_replicas != jax.device_count():
-    max_logging.log(f"Global mesh used for the workload")
-    devices_array = max_utils.create_device_mesh(config)
-    flat_devices = devices_array.flatten()
+    max_logging.log(f"Training mesh used for the workload")
     num_inference_devices = config.inference_devices_per_replica * config.inference_replicas
-    training_devices = flat_devices[num_inference_devices:].reshape(config.ici_parallelism)
-    max_logging.log(f"Training: Num_devices: {jax.device_count() - num_inference_devices}, shape {training_devices.shape}")
-    mesh = Mesh(training_devices, config.mesh_axes)
-    inference_devices = flat_devices[:num_inference_devices]
-    inference_meshes = [
-      Mesh(inference_devices.reshape(config_inference.ici_parallelism), config_inference.mesh_axes)
-    ]
-    # inference_devices = flat_devices[:num_inference_devices].reshape((config.inference_replicas, config.inference_devices_per_replica))
-    # inference_meshes = [Mesh(devices.reshape(config_inference.ici_parallelism), config_inference.mesh_axes) for devices in inference_devices]
+    
+    training_devices = jax.devices()[num_inference_devices:]
+    training_devices = maxtext_utils.create_device_mesh(config=config, devices=training_devices)
+    mesh = jax.sharding.Mesh(training_devices, config.mesh_axes)
+    
+    inference_devices = jax.devices()[:num_inference_devices]
+    inference_devices = maxtext_utils.create_device_mesh(config=config_inference, devices=inference_devices)
+    inference_meshes = [jax.sharding.Mesh(inference_devices, config_inference.mesh_axes)]
     max_logging.log(f"Inference: Num_devices: {num_inference_devices}, replicas: {config.inference_replicas} with shape {tuple(inference_meshes[0].shape.values())}")
   else:
     training_devices_array = max_utils.create_device_mesh(config)
@@ -1015,10 +1012,10 @@ def train_loop(config, config_inference, state=None):
   # param_buffer = Buffer(maxsize=config.inference_replicas)
   # data_buffer = Buffer(maxsize=-1)
   data_buffer = queue.Queue()
-  # if config.use_pathways_reshard:
-  #   pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
-  # else:
-  #   pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
+  if config.use_pathways_reshard:
+    pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
+  else:
+    pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
   
   # for inference_state_mesh_sharding in inference_state_mesh_shardings:
     # param_buffer.push({'params':state.params['params']}, inference_state_mesh_sharding.params)
@@ -1037,7 +1034,7 @@ def train_loop(config, config_inference, state=None):
     example_batch = load_next_batch(data_iterator, example_batch, config)
     example_batch = jax.tree_util.tree_map(lambda arr: arr[:int(config.per_device_batch_size * config.inference_replicas * config.inference_devices_per_replica)], example_batch)
     for k in range(config.inference_rollouts):
-      example_batch = generate_offline_completions(mesh, config_inference, tokenizer_model, inference_engine, example_batch)
+      example_batch = generate_offline_completions(config_inference, tokenizer_model, inference_engine, example_batch)
       example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
       data_buffer.put_nowait(example_batch)
     #   for example_batch, inference_data_sharding, inference_param, p_generate, inference_mesh in zip(example_batches, inference_data_shardings, inference_params, p_generate_completions, inference_meshes):
@@ -1070,7 +1067,7 @@ def train_loop(config, config_inference, state=None):
           example_batch[k] = v[: config.micro_batch_size_to_train_on, :]
         else:
           example_batch[k] = v[: config.micro_batch_size_to_train_on]
-      example_batch = generate_offline_completions(mesh, config_inference, tokenizer_model, inference_engine, example_batch)
+      example_batch = generate_offline_completions(config_inference, tokenizer_model, inference_engine, example_batch)
       example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
       data_buffer.put_nowait(example_batch)
 
@@ -1083,11 +1080,10 @@ def train_loop(config, config_inference, state=None):
         state, metrics = p_train_step(state, example_batch, train_rng)
     with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
       if step != 0 and step % config.inference_rollouts == 0:
-        pass
-        # if config.use_pathways_reshard:
-        #   pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
-        # else:
-        #   pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
+        if config.use_pathways_reshard:
+          pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
+        else:
+          pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
     step_time_delta = datetime.datetime.now() - last_step_completion
     last_step_completion = datetime.datetime.now()
     record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
