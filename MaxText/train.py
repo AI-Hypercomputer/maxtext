@@ -76,6 +76,7 @@ from MaxText.vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
 import MaxText as mt
+from MaxText import global_store
 
 # pylint: disable=too-many-positional-arguments
 
@@ -593,74 +594,6 @@ def check_example_batch(config, example_batch):
     err.throw()
 
 
-# def setup_mesh_and_model(config, devices=None):
-#   """Set up the mesh and the model for training
-
-#   Args:
-#     config
-#     devices
-
-#   Returns:
-#     init_rng: RNG key
-#     writer: Summary writer for tensorboard
-#     checkpoint_manager: Orbax checkpointer
-#     state_mesh_annotations: the mesh annotations for the train state
-#     model:
-#     mesh:
-#     learning_rate_schedule:
-#     tx:
-#   """
-
-#   init_rng = random.PRNGKey(config.init_weights_seed)
-#   writer = max_utils.initialize_summary_writer(config.tensorboard_dir, config.run_name)
-
-#   # Mesh definition
-#   devices_array = maxtext_utils.create_device_mesh(config, devices)
-#   mesh = Mesh(devices_array, config.mesh_axes)
-
-#   # Model and Optimizer definition
-#   quant = quantizations.configure_quantization(config)
-#   model = Transformer(config, mesh, quant=quant)
-#   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
-#   tx = optimizers.get_optimizer(config, learning_rate_schedule)
-#   logger = checkpointing.setup_checkpoint_logger(config)
-#   if config.enable_emergency_checkpoint:
-#     if config.use_replicator_service:
-#       checkpoint_manager = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
-#           config.local_checkpoint_directory,
-#           config.local_checkpoint_period,
-#           mesh,
-#       )
-#     else:
-#       abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
-#       checkpoint_manager = checkpointing.create_orbax_emergency_checkpoint_manager(
-#           config.local_checkpoint_directory,
-#           config.checkpoint_dir,
-#           mesh,
-#           abstract_state,
-#           config.local_checkpoint_period,
-#           config.checkpoint_period,
-#           logger,
-#       )
-#   else:
-#     # TODO(b/368121306): Remove this once zarr3 support is plumbed on the backend
-#     use_ocdbt = config.checkpoint_storage_use_ocdbt
-#     use_zarr3 = config.checkpoint_storage_use_zarr3
-#     if config.enable_single_controller:
-#       use_ocdbt, use_zarr3 = False, False
-#     checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-#         config.checkpoint_dir,
-#         config.enable_checkpointing,
-#         config.async_checkpointing,
-#         config.checkpoint_period,
-#         config.dataset_type,
-#         logger,
-#         use_ocdbt,
-#         use_zarr3,
-#     )
-
-#   return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
-
 
 def setup_train_loop(config):
   """Set up prerequisites for the training loop -
@@ -672,7 +605,6 @@ def setup_train_loop(config):
 
   Returns:
     init_rng:
-    writer: Summary writer for tensorboard
     checkpoint_manager: Orbax checkpointer
     state_mesh_annotations: the mesh annotations for the train state
     model:
@@ -683,7 +615,21 @@ def setup_train_loop(config):
   """
   recorder = create_goodput_recorder(config)
   record_goodput(recorder, config, recorder.record_tpu_init_start_time if recorder else None)
-  model, mesh, init_rng, writer, checkpoint_manager, learning_rate_schedule, tx = mt(config)
+  model, mesh, init_rng, checkpoint_manager, learning_rate_schedule, tx = mt(config)
+
+  model = mt(config)
+  # Check if we have values in the global store
+  global_store = global_store.get_global_store()
+
+  # If the global store is initialized, we retrieve the training supporters from it.
+  if global_store.is_initialized():
+    mesh, init_rng, checkpoint_manager, learning_rate_schedule, tx = global_store.get_training_supporters()
+
+  # If the global store is not initialized, we initialize it with the training supporters.
+  else:
+    mesh, init_rng = maxtext_utils.initialize_platform(config)
+    checkpoint_manager, learning_rate_schedule, tx = maxtext_utils.create_training_tools(config, model, mesh, init_rng)
+
   record_goodput(recorder, config, recorder.record_tpu_init_end_time if recorder else None)
   record_goodput(recorder, config, recorder.record_training_preparation_start_time if recorder else None)
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
