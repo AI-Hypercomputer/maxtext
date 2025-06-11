@@ -506,6 +506,7 @@ class ReplicaWorker:
     def start_inference(
         self,
         data_queue: queue.Queue,
+        rng = None,
         desc: str = "",
     ):
         """Start the inference process.
@@ -518,6 +519,10 @@ class ReplicaWorker:
         self.ensure_init_finished()
         # self.ensure_update_finished() TODO(mohitkhatwani) might not need it
         
+        # Reset rng 
+        if rng is not None: 
+            self.rng = rng
+
         # Reset state for new inference run
         self.completion_tokens_by_id = defaultdict(list)
         self.prompt_logprobs_by_id = defaultdict(list)
@@ -967,6 +972,7 @@ class OfflineEngine:
         self,
         data: Union[List[InputData], List[jax.Array], List[np.ndarray]],
         desc: str = "",
+        rng = None
     ) -> List[CompletionOutput]:
         """Run inference on a batch of inputs.
 
@@ -990,7 +996,7 @@ class OfflineEngine:
         # Start inference on all replica workers
         completion_outputs = {}
         for i in range(self.dp):
-            self.replica_workers[i].start_inference(data_queue, desc)
+            self.replica_workers[i].start_inference(data_queue, rng, desc)
 
         # Wait for all workers to complete
         for i in range(self.dp):
