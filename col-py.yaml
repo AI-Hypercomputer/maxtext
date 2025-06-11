@@ -192,7 +192,7 @@ spec:
             annotations:
               alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
               gke-gcsfuse/cpu-limit: 500m
-              gke-gcsfuse/ephemeral-storage-limit: 40Gi
+              # gke-gcsfuse/ephemeral-storage-limit: 40Gi
               gke-gcsfuse/memory-limit: 350Gi
               gke-gcsfuse/volumes: 'true'
           spec:
