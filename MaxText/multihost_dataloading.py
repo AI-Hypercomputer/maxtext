@@ -200,7 +200,7 @@ class RemoteIterator:
 
     out = jax.device_get(init(self.dummy_array))
     if out is not None:
-      max_logging.log("RemoteIterator initiated.")
+      max_logging.log(f"RemoteIterator initiated. Test output: {out}")
 
   def __iter__(self):
     return self
@@ -210,9 +210,10 @@ class RemoteIterator:
 
     def put_to_tpu_devices(path, array, sharding):
       try:
-        jax.device_put(array, sharding)
+        return jax.device_put(array, sharding)
       except Exception as e:  # pylint: disable=broad-exception-caught
         max_logging.log(f"Error putting data to TPU device path{path}, exception={e}")
+        raise
 
     input_gdas = jtu.tree_map_with_path(partial(put_to_tpu_devices, sharding=self.tpu_sharding), out)
 
