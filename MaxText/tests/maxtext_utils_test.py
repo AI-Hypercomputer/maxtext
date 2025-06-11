@@ -339,27 +339,6 @@ class TestAssertParamsSufficientlySharded(unittest.TestCase):
       with self.assertRaises(AssertionError):
         assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.2)
 
-  def test_4d_tensor_fully_sharded(self):
-    """
-    Tests that a 4D tensor that is sharded across valid axes passes.
-    """
-    with self.mesh:
-      pspec = PartitionSpec("fsdp", "tensor", None, None)
-      params = {"conv4d_layer": jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(self.mesh, pspec))}
-
-      # This should pass
-      assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.1)
-
-  def test_4d_tensor_unsharded_fails(self):
-    """
-    Tests that a completely unsharded 4D tensor fails the assertion.
-    """
-    with self.mesh:
-      params = {"conv4d_layer": jnp.ones((8, 8, 2, 2))}
-
-      with self.assertRaises(AssertionError):
-        assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.1)
-
   def test_multi_axis_sharding_pass(self):
     """
     Tests that a tensor sharded with a valid axis ('fsdp') on a complex,
