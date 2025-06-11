@@ -16,6 +16,7 @@ limitations under the License.
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 
 def dummy_reward_len(valid_seq_mask):
@@ -97,3 +98,10 @@ def concatenate_prompt_with_completions(config, tokenizer_model, data, completio
   completion_mask = data[f"{config.train_data_columns}_completions_position"] >= true_length - 1
   data["ar_completions_segmentation"] = data[f"{config.train_data_columns}_completions_segmentation"] * completion_mask.astype(jnp.int32)
   return data
+
+def pad_or_trim(arr, max_target_length, pad_token):
+  padded = np.array([
+    np.pad(seq[:max_target_length], (0, max(0, max_target_length - len(seq))), constant_values=pad_token)
+    for seq in arr
+  ])
+  return padded
