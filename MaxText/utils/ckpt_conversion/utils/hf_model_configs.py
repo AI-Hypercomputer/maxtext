@@ -61,4 +61,6 @@ HF_MODEL_CONFIGS = {
     "GEMMA2_2B": gemma2_2b_config,
     "GEMMA2_9B": gemma2_9b_config,
     "GEMMA2_27B": gemma2_27b_config,
+    # Default configuration for Qwen3 MoE models
+    "QWEN3_MOE": transformers.Qwen3MoeConfig(),
 }

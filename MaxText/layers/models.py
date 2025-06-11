@@ -327,6 +327,10 @@ class Decoder(nn.Module):
       from MaxText.layers import mixtral  # pylint: disable=import-outside-toplevel
 
       return [mixtral.MixtralDecoderLayer]
+    elif self.config.decoder_block == DecoderBlockType.QWEN3_MOE:
+      from MaxText.layers import qwen3_moe  # pylint: disable=import-outside-toplevel
+
+      return [qwen3_moe.Qwen3MoeDecoderLayer]
     elif self.config.decoder_block == DecoderBlockType.DEEPSEEK:
       from MaxText.layers import deepseek  # pylint: disable=import-outside-toplevel
 
@@ -372,6 +376,7 @@ class Decoder(nn.Module):
         DecoderBlockType.LLAMA2,
         DecoderBlockType.MISTRAL,
         DecoderBlockType.MIXTRAL,
+        DecoderBlockType.QWEN3_MOE,
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
