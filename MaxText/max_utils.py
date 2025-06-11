@@ -18,6 +18,7 @@ limitations under the License.
 All the functions include MaxText modules, such as Pyconfig, should be moved to MaxText utils file."""
 
 import functools
+import itertools
 import time
 import os
 import socket
@@ -38,12 +39,14 @@ import flax
 import psutil
 
 from etils import epath
+from flax.linen import partitioning as nn_partitioning
 
 import orbax.checkpoint as ocp
 
 from tensorboardX import writer
 
 from MaxText import max_logging
+from MaxText.train import load_next_batch
 
 
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
@@ -738,6 +741,15 @@ def print_compiled_memory_stats(compiled_stats):
         f"Argument size: {compiled_stats.argument_size_in_bytes/(1024**3):.1f} GB, "
         f"Host temp size: {compiled_stats.host_temp_size_in_bytes/(1024**3):.1f} GB."
     )
+
+def compile_sample_batch(data_iterator, p_train_step, state, config, mesh, input_data_shardings):
+  copied_iter, _ = itertools.tee(data_iterator)
+  sample_batch = load_next_batch(copied_iter, None, config)
+  sample_batch = jax.lax.with_sharding_constraint(sample_batch, input_data_shardings)
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    compiled = p_train_step.lower(state, sample_batch, jax.random.PRNGKey(0)).compile()
+    compiled_stats = compiled.memory_analysis()
+    print_compiled_memory_stats(compiled_stats)
 
 def print_system_information():
   """Print system information of the current environment.
