@@ -41,10 +41,10 @@ def get_server_config(config_str: str, config: Any) -> Type[config_lib.ServerCon
       server_config = config_lib.ServerConfig(
           prefill_slices=(),
           generate_slices=(),
-          interleaved_slices=("tpu=" + str(int(jax.device_count()/4)), "tpu=" + str(int(jax.device_count()/4)), "tpu=" + str(int(jax.device_count()/4)), "tpu=" + str(int(jax.device_count()/4)), ),
+          interleaved_slices=("tpu=" + str(jax.device_count()),),
           prefill_engine_create_fns=(),
           generate_engine_create_fns=(),
-          interleaved_engine_create_fns=(functools.partial(create_exp_maxengine, config=config),),
+          interleaved_engine_create_fns=(functools.partial(create_maxengine, config=config),),
       )
     case "ExperimentalMaxtextDisaggregatedServer":
       # ExperimentalMaxtextDisaggregatedServer is still under development.
