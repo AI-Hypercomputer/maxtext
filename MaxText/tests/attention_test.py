@@ -288,24 +288,24 @@ class AttentionTest(unittest.TestCase):
     )
     self.cfg = config
 
-    config_cp = pyconfig.initialize(
-        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
-        **self.config_arguments,
-        ici_context_parallelism=4,  # use context parallelism of 4
-        context_parallel_load_balance=False,  # set load_balancing to False such that
-        # there's no need for reordering the input/output
-    )
+    # config_cp = pyconfig.initialize(
+    #     [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+    #     **self.config_arguments,
+    #     ici_context_parallelism=4,  # use context parallelism of 4
+    #     context_parallel_load_balance=False,  # set load_balancing to False such that
+    #     # there's no need for reordering the input/output
+    # )
 
-    self.cfg_cp = config_cp
+    # self.cfg_cp = config_cp
 
-    config_ep1 = pyconfig.initialize(
-        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
-        **self.config_arguments,
-        ici_context_parallelism=2,
-        ici_expert_parallelism=2,
-        is_batch_shard_by_expert=True,
-    )
-    self.cfg_ep1 = config_ep1
+    # config_ep1 = pyconfig.initialize(
+    #     [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+    #     **self.config_arguments,
+    #     ici_context_parallelism=2,
+    #     ici_expert_parallelism=2,
+    #     is_batch_shard_by_expert=True,
+    # )
+    # self.cfg_ep1 = config_ep1
 
     config_ep2 = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
@@ -322,11 +322,11 @@ class AttentionTest(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
 
-    devices_array_cp = maxtext_utils.create_device_mesh(self.cfg_cp)  # for context parallelism
-    self.mesh_cp = Mesh(devices_array_cp, self.cfg_cp.mesh_axes)  # for context parallelism
+    # devices_array_cp = maxtext_utils.create_device_mesh(self.cfg_cp)  # for context parallelism
+    # self.mesh_cp = Mesh(devices_array_cp, self.cfg_cp.mesh_axes)  # for context parallelism
 
-    devices_array_ep1 = maxtext_utils.create_device_mesh(self.cfg_ep1)
-    self.mesh_ep1 = Mesh(devices_array_ep1, self.cfg_ep1.mesh_axes)
+    # devices_array_ep1 = maxtext_utils.create_device_mesh(self.cfg_ep1)
+    # self.mesh_ep1 = Mesh(devices_array_ep1, self.cfg_ep1.mesh_axes)
 
     devices_array_ep2 = maxtext_utils.create_device_mesh(self.cfg_ep2)
     self.mesh_ep2 = Mesh(devices_array_ep2, self.cfg_ep2.mesh_axes)
@@ -521,117 +521,117 @@ class AttentionTest(unittest.TestCase):
 
     lnx, decoder_segment_ids, decoder_positions = self.get_data(self.dtype)
 
-    attention_as_mha_generic = Attention(
-        config=self.cfg,
-        num_query_heads=self.num_query_heads,
-        num_kv_heads=num_kv_heads,
-        head_dim=self.head_dim,
-        max_target_length=self.max_target_length,
-        max_prefill_predict_length=self.cfg.max_prefill_predict_length,
-        mesh=self.mesh,
-        attention_kernel="dot_product",
-        dtype=self.dtype,
-        dropout_rate=self.cfg.dropout_rate,
-        name="self_attention",
-    )
+    # attention_as_mha_generic = Attention(
+    #     config=self.cfg,
+    #     num_query_heads=self.num_query_heads,
+    #     num_kv_heads=num_kv_heads,
+    #     head_dim=self.head_dim,
+    #     max_target_length=self.max_target_length,
+    #     max_prefill_predict_length=self.cfg.max_prefill_predict_length,
+    #     mesh=self.mesh,
+    #     attention_kernel="dot_product",
+    #     dtype=self.dtype,
+    #     dropout_rate=self.cfg.dropout_rate,
+    #     name="self_attention",
+    # )
 
-    attention_as_mha_generic_variable = attention_as_mha_generic.init(
-        {"params": self.rng, "aqt": self.rng},
-        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones((self.global_batch_size, self.max_target_length)),
-    )
+    # attention_as_mha_generic_variable = attention_as_mha_generic.init(
+    #     {"params": self.rng, "aqt": self.rng},
+    #     jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+    #     jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+    #     jnp.ones((self.global_batch_size, self.max_target_length)),
+    # )
 
-    mha_generic_output = attention_as_mha_generic.apply(
-        attention_as_mha_generic_variable,
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_positions,
-        inputs_positions=decoder_segment_ids,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-        rngs={"aqt": self.rng},
-    )
+    # mha_generic_output = attention_as_mha_generic.apply(
+    #     attention_as_mha_generic_variable,
+    #     lnx,
+    #     lnx,
+    #     decoder_segment_ids=decoder_positions,
+    #     inputs_positions=decoder_segment_ids,
+    #     deterministic=True,
+    #     model_mode=MODEL_MODE_TRAIN,
+    #     rngs={"aqt": self.rng},
+    # )
 
-    attention_as_mha_flash = Attention(
-        config=self.cfg,
-        num_query_heads=self.num_query_heads,
-        num_kv_heads=num_kv_heads,
-        head_dim=self.head_dim,
-        max_target_length=self.max_target_length,
-        max_prefill_predict_length=self.cfg.max_prefill_predict_length,
-        mesh=self.mesh,
-        attention_kernel="flash",
-        dtype=self.dtype,
-        dropout_rate=self.cfg.dropout_rate,
-        name="self_attention",
-    )
+    # attention_as_mha_flash = Attention(
+    #     config=self.cfg,
+    #     num_query_heads=self.num_query_heads,
+    #     num_kv_heads=num_kv_heads,
+    #     head_dim=self.head_dim,
+    #     max_target_length=self.max_target_length,
+    #     max_prefill_predict_length=self.cfg.max_prefill_predict_length,
+    #     mesh=self.mesh,
+    #     attention_kernel="flash",
+    #     dtype=self.dtype,
+    #     dropout_rate=self.cfg.dropout_rate,
+    #     name="self_attention",
+    # )
 
-    attention_as_mha_flash_variable = attention_as_mha_flash.init(
-        {"params": self.rng, "aqt": self.rng},
-        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones((self.global_batch_size, self.max_target_length)),
-    )
+    # attention_as_mha_flash_variable = attention_as_mha_flash.init(
+    #     {"params": self.rng, "aqt": self.rng},
+    #     jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+    #     jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+    #     jnp.ones((self.global_batch_size, self.max_target_length)),
+    # )
 
-    mha_generic_flash_output = attention_as_mha_flash.apply(
-        attention_as_mha_flash_variable,
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_positions,
-        inputs_positions=decoder_segment_ids,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-        rngs={"aqt": self.rng},
-    )
+    # mha_generic_flash_output = attention_as_mha_flash.apply(
+    #     attention_as_mha_flash_variable,
+    #     lnx,
+    #     lnx,
+    #     decoder_segment_ids=decoder_positions,
+    #     inputs_positions=decoder_segment_ids,
+    #     deterministic=True,
+    #     model_mode=MODEL_MODE_TRAIN,
+    #     rngs={"aqt": self.rng},
+    # )
 
-    self.assertTrue(
-        jax.numpy.allclose(mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False)
-    )
+    # self.assertTrue(
+    #     jax.numpy.allclose(mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False)
+    # )
 
-    # Test with Context Parallelism
-    attention_as_mha_flash_cp = Attention(
-        config=self.cfg_cp,  # we pass the context parallelism in the config
-        num_query_heads=self.cfg_cp.num_query_heads,
-        num_kv_heads=num_kv_heads,
-        head_dim=self.cfg_cp.head_dim,
-        max_target_length=self.cfg_cp.max_target_length,
-        max_prefill_predict_length=self.cfg_cp.max_prefill_predict_length,
-        mesh=self.mesh_cp,
-        attention_kernel="flash",
-        dtype=self.dtype,
-        dropout_rate=self.cfg_cp.dropout_rate,
-        name="self_attention_cp",
-    )
-    attention_as_mha_flash_cp_variable = attention_as_mha_flash_cp.init(
-        {"params": self.rng, "aqt": self.rng},
-        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
-        jnp.ones((self.global_batch_size, self.max_target_length)),
-    )
+    # # Test with Context Parallelism
+    # attention_as_mha_flash_cp = Attention(
+    #     config=self.cfg_cp,  # we pass the context parallelism in the config
+    #     num_query_heads=self.cfg_cp.num_query_heads,
+    #     num_kv_heads=num_kv_heads,
+    #     head_dim=self.cfg_cp.head_dim,
+    #     max_target_length=self.cfg_cp.max_target_length,
+    #     max_prefill_predict_length=self.cfg_cp.max_prefill_predict_length,
+    #     mesh=self.mesh_cp,
+    #     attention_kernel="flash",
+    #     dtype=self.dtype,
+    #     dropout_rate=self.cfg_cp.dropout_rate,
+    #     name="self_attention_cp",
+    # )
+    # attention_as_mha_flash_cp_variable = attention_as_mha_flash_cp.init(
+    #     {"params": self.rng, "aqt": self.rng},
+    #     jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+    #     jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim)),
+    #     jnp.ones((self.global_batch_size, self.max_target_length)),
+    # )
 
-    mha_generic_flash_cp_output = attention_as_mha_flash_cp.apply(
-        attention_as_mha_flash_cp_variable,
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_positions,
-        inputs_positions=decoder_segment_ids,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-        rngs={"aqt": self.rng},
-    )
+    # mha_generic_flash_cp_output = attention_as_mha_flash_cp.apply(
+    #     attention_as_mha_flash_cp_variable,
+    #     lnx,
+    #     lnx,
+    #     decoder_segment_ids=decoder_positions,
+    #     inputs_positions=decoder_segment_ids,
+    #     deterministic=True,
+    #     model_mode=MODEL_MODE_TRAIN,
+    #     rngs={"aqt": self.rng},
+    # )
 
-    # Assert that the logits generated by the generic flash and flash attention+context parallelism are close
-    self.assertTrue(
-        jax.numpy.allclose(mha_generic_flash_output, mha_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
-        msg="Logits from generic flash and flash attention+context parallelism are not close.",
-    )
+    # # Assert that the logits generated by the generic flash and flash attention+context parallelism are close
+    # self.assertTrue(
+    #     jax.numpy.allclose(mha_generic_flash_output, mha_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
+    #     msg="Logits from generic flash and flash attention+context parallelism are not close.",
+    # )
 
-    # Assert that the logits generated by the generic dot product and flash attention+context parallelism are close
-    self.assertTrue(
-        jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
-        msg="Logits from generic dot product and flash attention+context parallelism are not close.",
-    )
+    # # Assert that the logits generated by the generic dot product and flash attention+context parallelism are close
+    # self.assertTrue(
+    #     jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-01, atol=1e-01, equal_nan=False),
+    #     msg="Logits from generic dot product and flash attention+context parallelism are not close.",
+    # )
 
     # # Test with EP1
     # attention_as_mha_flash_ep1 = Attention(

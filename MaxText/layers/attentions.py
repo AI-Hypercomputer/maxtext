@@ -54,6 +54,9 @@ from MaxText.layers.quantizations import AqtQuantization as Quant
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
 
+from jax.experimental.shard import reshard, auto_axes, explicit_axes
+from jax.sharding import AxisType
+
 
 class AttentionType(enum.Enum):
   GLOBAL = "global"  # default, with causality
@@ -1319,12 +1322,12 @@ class Attention(nn.Module):
   ep_value_axis_names: AxisNames = ("activation_kv_batch_no_exp", "activation_length", KV_HEAD, KV_HEAD_DIM)
 
   # input_axis_names: AxisNames = (BATCH, LENGTH, EMBED)
-  input_axis_names: AxisNames = ("activation_batch", " activation_length_no_exp", EMBED)
+  input_axis_names: AxisNames = ("activation_batch", "activation_length_no_exp", EMBED)
   ep_input_axis_names: AxisNames = ("activation_batch_no_exp", "activation_length", EMBED)
   decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED)
 
   # out_axis_names: AxisNames = (BATCH, LENGTH, HEAD, D_KV)
-  out_axis_names: AxisNames = ("activation_batch", " activation_length_no_exp", HEAD, D_KV)
+  out_axis_names: AxisNames = ("activation_batch", "activation_length_no_exp", HEAD, D_KV)
   ep_out_axis_names: AxisNames = ("activation_batch_no_exp", "activation_length", HEAD, D_KV)
   decode_out_axis_names = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV)
 
@@ -1611,33 +1614,52 @@ class Attention(nn.Module):
     #   is_batch_shard_by_expert = True
     is_batch_shard_by_expert = self.config.is_batch_shard_by_expert
 
+    # DEBUGGING DEFINITION BEGIN #
+    assert model_mode == MODEL_MODE_TRAIN
+
+    def debug_sharding(array, prefix=""):
+     global_shape = array.shape
+     jax.debug.inspect_array_sharding(
+            array,
+            callback=lambda sharding_obj: print(
+                prefix + f"\tGlobal Shape: {global_shape}\n"
+                f"\tLocal Shape: {sharding_obj.shard_shape(global_shape)}\n"
+                f"\tSharding Object: {sharding_obj}\n"
+            )
+        )
+
+    def debug_axis():
+      jax.debug.print("nn.logical_to_mesh_axes(self.input_axis_names): {x}", x=nn.logical_to_mesh_axes(self.input_axis_names))
+      jax.debug.print("nn.logical_to_mesh_axes(self.ep_input_axis_names): {x}", x=nn.logical_to_mesh_axes(self.ep_input_axis_names))
+      jax.debug.print("is_batch_shard_by_expert: {x}", x=is_batch_shard_by_expert)
+
+    # DEBUGGING DEFINITION END #
+
+    use_nn_constraint = self.config.use_nn_constraint
+    def apply_logical_sharding(array, logical_axis_name, use_nn_constraint=True):
+      if use_nn_constraint:
+        return nn.with_logical_constraint(array, logical_axis_name)
+      pspec = nn.logical_to_mesh_axes(logical_axis_name)
+      named_sharding = jax.sharding.NamedSharding(self.mesh, pspec)
+      return lax.with_sharding_constraint(array, named_sharding)
+
 
     if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_TRAIN):
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
       if is_batch_shard_by_expert:
-        # jax.debug.print("1")
-        inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
+        #inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
+        inputs_q = apply_logical_sharding(inputs_q, self.input_axis_names, use_nn_constraint)
       else:
-        # jax.debug.print("2")
-        inputs_q = nn.with_logical_constraint(inputs_q, self.ep_input_axis_names)
+        #inputs_q = nn.with_logical_constraint(inputs_q, self.ep_input_axis_names)
+        inputs_q = apply_logical_sharding(inputs_q, self.ep_input_axis_names, use_nn_constraint)
     else:
       inputs_q = nn.with_logical_constraint(inputs_q, self.decode_input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.decode_input_axis_names)
 
 
-    # jax.debug.print("inputs_q")
-    # # jax.debug.print("\t local {shape}", shape=inputs_q.addressable_shards[0].data.shape)
-    # jax.debug.inspect_array_sharding(inputs_q, callback=lambda B: print(f"\t Sharding of B: {B.data.shape}"))
+    prefix = f"\nuse_nn_constraint={use_nn_constraint}, context={self.config.ici_context_parallelism}, expert={self.config.ici_expert_parallelism}, is_batch_shard_by_expert={is_batch_shard_by_expert}\n\n"
+    debug_sharding(inputs_q,  prefix + "inputs_q\n")
 
-    if model_mode == MODEL_MODE_TRAIN:
-      B = inputs_q
-      jax.debug.print("inputs_q")
-      # jax.debug.print("{}", B.addressable_shards[0].data.shape)
-      jax.debug.inspect_array_sharding(B, callback=lambda B: print(f"\t Sharding of B: {B.shard_shape}"))
-    # jax.debug.breakpoint()
-    # jax.debug.inspect_array_sharding(B, callback=lambda x: print(f"\t Sharding of B: {x.addressable_shards[0].data.shape}"))
-    # jax.debug.print("\t global {shape}", shape=B.shape)
-    # jax.debug.print("\t local {shape}", shape=B.addressable_shards[0].data.shape)
 
     # apply projection.
     if self.config.fused_qkv:
@@ -1701,24 +1723,28 @@ class Attention(nn.Module):
       value = nn.with_logical_constraint(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
     # model_mode == MODEL_MODE_TRAIN
     elif is_batch_shard_by_expert:
-      query = nn.with_logical_constraint(query, self.query_axis_names)
-      key = nn.with_logical_constraint(key, self.key_axis_names)
-      value = nn.with_logical_constraint(value, self.value_axis_names)
+      # query = nn.with_logical_constraint(query, self.query_axis_names)
+      # key = nn.with_logical_constraint(key, self.key_axis_names)
+      # value = nn.with_logical_constraint(value, self.value_axis_names)
+      query = apply_logical_sharding(query, self.query_axis_names, use_nn_constraint)
+      key = apply_logical_sharding(key, self.key_axis_names, use_nn_constraint)
+      value = apply_logical_sharding(value, self.value_axis_names, use_nn_constraint)
     else:
-      query = nn.with_logical_constraint(query, self.ep_query_axis_names)
-      key = nn.with_logical_constraint(key, self.ep_key_axis_names)
-      value = nn.with_logical_constraint(value, self.ep_value_axis_names)
+      # query = nn.with_logical_constraint(query, self.ep_query_axis_names)
+      # key = nn.with_logical_constraint(key, self.ep_key_axis_names)
+      # value = nn.with_logical_constraint(value, self.ep_value_axis_names)
+      query = apply_logical_sharding(query, self.ep_query_axis_names, use_nn_constraint)
+      key = apply_logical_sharding(key, self.ep_key_axis_names, use_nn_constraint)
+      value = apply_logical_sharding(value, self.ep_value_axis_names, use_nn_constraint)
+
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
 
-    # if model_mode == MODEL_MODE_TRAIN:
-    #   B = query
-    #   jax.debug.print("query")
-    #   # jax.debug.inspect_array_sharding(B.addressable_shards[0].data.shape, callback=print)
-    #   jax.debug.inspect_array_sharding(B, callback=lambda B: print(f"\t Sharding of B: {B.shard_shape}"))
-    #   # jax.debug.print("\t global {shape}", shape=B.shape)
-    #   # jax.debug.print("\t local {shape}", shape=B.addressable_shards[0].data.shape)
+    debug_sharding(query, "query\n")
+    debug_sharding(key, "key\n")
+    debug_sharding(value, "value\n")
+
 
     assert not self.config.quantize_kvcache or self.kv_quant
 
@@ -1737,19 +1763,15 @@ class Attention(nn.Module):
 
     if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_TRAIN):
       if is_batch_shard_by_expert:
-        out = nn.with_logical_constraint(out, self.out_axis_names)
+        #out = nn.with_logical_constraint(out, self.out_axis_names)
+        out = apply_logical_sharding(out, self.out_axis_names, use_nn_constraint)
       else:
-        out = nn.with_logical_constraint(out, self.ep_out_axis_names)
+        # out = nn.with_logical_constraint(out, self.ep_out_axis_names)
+        out = apply_logical_sharding(out, self.ep_out_axis_names, use_nn_constraint)
     else:
       out = nn.with_logical_constraint(out, self.decode_out_axis_names)
 
-
-    # if model_mode == MODEL_MODE_TRAIN:
-    #   B = out
-    #   jax.debug.print("out")
-    #   jax.debug.inspect_array_sharding(B, callback=lambda B: print(f"\t Sharding of B: {B.shard_shape}"))
-    #   # jax.debug.print("\t global {shape}", shape=B.shape)
-      # jax.debug.print("\t local {shape}", shape=B.addressable_shards[0].data.shape)
+    debug_sharding(out, "out\n")
 
     out = self.out_projection(inputs_q.shape[-1], out)
     out = checkpoint_name(out, "out_proj")

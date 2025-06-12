@@ -389,6 +389,8 @@ ici_expert_parallelism: 1
 
 # MoE with expert parallel + training: expert -> batch (rather than seq) in attention
 is_batch_shard_by_expert: True
+# debugging flag
+use_nn_constraint: True
 
 # The number of TPU slices is automatically determined, you should not set this explicitly. For ahead of time compilation,
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.

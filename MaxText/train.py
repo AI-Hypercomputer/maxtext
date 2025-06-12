@@ -73,6 +73,10 @@ from MaxText.layers.models import Transformer
 from MaxText.metric_logger import MetricLogger
 from MaxText.utils import gcs_utils
 from MaxText.vertex_tensorboard import VertexTensorboardManager
+
+from jax.sharding import PartitionSpec as P, AxisType, set_mesh, get_abstract_mesh
+from jax.experimental.shard import reshard, auto_axes, explicit_axes
+
 # Placeholder: internal
 
 # pylint: disable=too-many-positional-arguments
@@ -615,6 +619,12 @@ def setup_mesh_and_model(config, devices=None):
   # Mesh definition
   devices_array = maxtext_utils.create_device_mesh(config, devices)
   mesh = Mesh(devices_array, config.mesh_axes)
+  # mesh = Mesh(devices_array, config.mesh_axes, axis_types=(AxisType.Explicit, AxisType.Explicit, AxisType.Explicit, AxisType.Explicit,
+  #                                                          AxisType.Explicit, AxisType.Explicit, AxisType.Explicit, AxisType.Explicit,
+  #                                                          AxisType.Explicit, AxisType.Explicit, AxisType.Explicit, AxisType.Explicit,
+  #                                                          ))
+
+  # set_mesh(mesh)
 
   # Model and Optimizer definition
   quant = quantizations.configure_quantization(config)
