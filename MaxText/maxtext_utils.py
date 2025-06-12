@@ -460,7 +460,7 @@ def _analyze_sharding(params, mesh, valid_target_mesh_axes):
           {
               "name": param_name_str,  # Tensor name
               "size": p_leaf.size,  # tensor size
-              "shape": p_leaf.shape, # tensor shape
+              "shape": p_leaf.shape,  # tensor shape
               "spec": str(current_sharding_spec),  # Tensor sharding spec as string
               "available_axes": sorted(list(valid_target_mesh_axes)),  # Axes that could be used for sharding
               "unsharded_axes": sorted(list(unsharded_axes)),  # Unsharded axes
@@ -490,9 +490,9 @@ def _raise_if_unsharded_exceeds_tolerance(unsharded_size, total_size, tolerance,
   """
   if total_size <= 0:
     raise ValueError("Total size must be greater than zero.")
-  
+
   # Calculate the percentage of unsharded parameters.
-  unsharded_param_perc = unsharded_size / total_size 
+  unsharded_param_perc = unsharded_size / total_size
 
   # If the percentage is over the tolerance, prepare and raise an error.
   if unsharded_param_perc > tolerance:
