@@ -1029,52 +1029,99 @@ def train_loop(config, config_inference, state=None):
       gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
 
   # do K rollouts of inference
+  input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
   if config.inference_rollouts != 1:
     max_logging.log(f"Doing {config.inference_rollouts} Inference rollouts before training starts")
-    example_batch = load_next_batch(data_iterator, example_batch, config)
-    example_batch = jax.tree_util.tree_map(lambda arr: arr[:int(config.per_device_batch_size * config.inference_replicas * config.inference_devices_per_replica)], example_batch)
     for k in range(config.inference_rollouts):
+      max_logging.log(f"Inference Rollout {k}")
+      example_batch = load_next_batch(data_iterator, example_batch, config)
+      example_batch = jax.tree_util.tree_map(lambda arr: arr[:int(config.per_device_batch_size * config.inference_replicas * config.inference_devices_per_replica)], example_batch)
       example_batch = generate_offline_completions(config_inference, tokenizer_model, inference_engine, example_batch)
       example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
       data_buffer.put_nowait(example_batch)
-    #   for example_batch, inference_data_sharding, inference_param, p_generate, inference_mesh in zip(example_batches, inference_data_shardings, inference_params, p_generate_completions, inference_meshes):
-    #     rng = jax.jit(jax.random.fold_in)(init_rng, k)
-    #     rng, rng_gen = random.split(rng)
-    #     example_batch = jax.device_put(example_batch, inference_data_sharding)
-    #     with inference_mesh, nn_partitioning.axis_rules(config_inference.logical_axis_rules):
-    #       example_batch = p_generate(example_batch, inference_param, rng_gen)
-    #     # TODO: Confirm from @wenxindong what sharding is used by result of OfflineInference
-    #     data_buffer.push(jax.device_put(example_batch, jax.sharding.NamedSharding(mesh, P(None))))
 
   metric_logger = MetricLogger(writer, config)
-  input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
+  
+  def generation_worker_fn(
+    worker_data_iterator,
+    worker_inference_engine,
+    worker_tokenizer_model,
+    worker_config_inference,
+    worker_config_train,
+    worker_data_buffer,
+    worker_input_data_shardings,
+    stop_event
+  ):
+    while not stop_event.is_set():
+      try:
+        with jax.profiler.StepTraceAnnotation("inference"):
+          thread_example_batch = load_next_batch(worker_data_iterator, thread_example_batch, worker_config_train)
+          # Trim data for inference processing
+          thread_example_batch_trimmed = jax.tree_util.tree_map(lambda arr: arr[:int(worker_config_train.per_device_batch_size * worker_config_train.inference_replicas * worker_config_train.inference_devices_per_replica)], thread_example_batch)
+          processed_batch = generate_offline_completions(worker_config_inference, worker_tokenizer_model, worker_inference_engine, thread_example_batch_trimmed)
+          processed_batch = jax.lax.with_sharding_constraint(processed_batch, worker_input_data_shardings)
+          worker_data_buffer.put_nowait(processed_batch)
+      except StopIteration:
+        max_logging.log("Data iterator exhausted in generation worker. Stopping.")
+        break
+      except Exception as e: # pylint: disable=broad-except
+        max_logging.log(f"Error in generation worker: {e}")
+        # Depending on the error, you might want to break or attempt to continue
+        break # For safety, stop on unexpected errors
+    max_logging.log("Generation worker thread finished.")
+
+  stop_event = threading.Event()
+  generation_thread = threading.Thread(
+      target=generation_worker_fn,
+      args=(
+          data_iterator, # The main data iterator
+          inference_engine, # Shared inference engine
+          tokenizer_model,
+          config_inference,
+          config, # Main config for load_next_batch
+          data_buffer,
+          input_data_shardings, # Sharding for the data put into the buffer
+          stop_event,
+      ),
+      daemon=True # So it exits when the main thread exits
+  )
+  generation_thread.start()
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step or prof.should_activate_periodic_profile(step):
       optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
       prof.activate(blocking_object=state, optional_postfix=optional_postfix)
     # inference_params = [param_buffer.pull() for _ in range(len(inference_data_shardings))]
-    with jax.profiler.StepTraceAnnotation("inference", step_num=step):
-      record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
-      example_batch = load_next_batch(data_iterator, example_batch, config)
-      record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
-      # TODO(mohitkhatwani): This is a workaround to just load the data required for k replicas, right now we load data based of num_global_devices
-      example_batch = jax.tree_util.tree_map(lambda arr: arr[:int(config.per_device_batch_size * config.inference_replicas * config.inference_devices_per_replica)], example_batch)
-      # example_batches = filter_and_split(config_inference, example_batch, config.inference_replicas, int(config_inference.per_device_batch_size * inference_meshes[0].devices.size))
+    
+
+    # with jax.profiler.StepTraceAnnotation("inference", step_num=step):
+    #   record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
+    #   example_batch = load_next_batch(data_iterator, example_batch, config)
+    #   record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
+    #   # TODO(mohitkhatwani): This is a workaround to just load the data required for k replicas, right now we load data based of num_global_devices
+    #   example_batch = jax.tree_util.tree_map(lambda arr: arr[:int(config.per_device_batch_size * config.inference_replicas * config.inference_devices_per_replica)], example_batch)
+    #   # example_batches = filter_and_split(config_inference, example_batch, config.inference_replicas, int(config_inference.per_device_batch_size * inference_meshes[0].devices.size))
       
-      for k, v in example_batch.items():
-        assert v.ndim in (1, 2), f"Invalid {v.shape=} found for key={k}"
-        if v.ndim == 2:
-          example_batch[k] = v[: config.micro_batch_size_to_train_on, :]
-        else:
-          example_batch[k] = v[: config.micro_batch_size_to_train_on]
-      example_batch = generate_offline_completions(config_inference, tokenizer_model, inference_engine, example_batch)
-      example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
-      data_buffer.put_nowait(example_batch)
+    #   for k, v in example_batch.items():
+    #     assert v.ndim in (1, 2), f"Invalid {v.shape=} found for key={k}"
+    #     if v.ndim == 2:
+    #       example_batch[k] = v[: config.micro_batch_size_to_train_on, :]
+    #     else:
+    #       example_batch[k] = v[: config.micro_batch_size_to_train_on]
+    #   example_batch = generate_offline_completions(config_inference, tokenizer_model, inference_engine, example_batch)
+    #   example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
+    #   data_buffer.put_nowait(example_batch)
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
-      while data_buffer.empty():
-        max_logging.log("Training Stalled! Waiting for data")
-      example_batch = data_buffer.get(timeout=1)
+      try:
+        example_batch = data_buffer.get(timeout=1) # Adjust timeout as needed
+      except queue.Empty:
+        if not generation_thread.is_alive():
+          max_logging.log("Generation worker is not alive and data buffer is empty. Exiting.")
+          break
+        else:
+          max_logging.log("Waiting for data from generation worker. Retrying or check worker status.")
+          # Potentially skip step or handle error
+          continue # Or break, depending on desired behavior
       train_rng, rng = random.split(init_rng)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, train_rng)
