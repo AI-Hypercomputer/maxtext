@@ -66,6 +66,20 @@ def wrapper(x):
     # recv_sizes is [EP]
     recv_sizes=jnp.array([batch_per_ep_shard for _ in range(expert_parallelism)], dtype=jnp.int32)
     
+
+    print(f"{x=}\n")
+    print(f"{output_shape=}\n")
+    print(f"{input_offsets=}\n")
+    print(f"{send_sizes=}\n")
+    print(f"{output_offsets=}\n")
+    print(f"{recv_sizes=}\n")
+    # Strangely jax.debug.print doesn't print anything...?
+    # jax.debug.print("{}\n", x)
+    # jax.debug.print("{}\n", output_shape)
+    # jax.debug.print("{}\n", input_offsets)
+    # jax.debug.print("{}\n", send_sizes)
+    # jax.debug.print("{}\n", output_offsets)
+    # jax.debug.print("{}\n", recv_sizes)
     output = jax.lax.ragged_all_to_all(
         x,
         output_shape,
@@ -79,6 +93,39 @@ def wrapper(x):
     return output
 
 
+# Non vmap version - this should work
+# jit_wrapper = jax.jit(wrapper)
+# print(f"{x.shape=}", flush=True)
+# x_a2a = jit_wrapper(x)
+# print("Successfully ran wrapper (non - vmap)")
+# print(x_a2a)
+
+
+# Vmapped version - this will fail
+# 
+# Traceback (most recent call last):
+#   File "/usr/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+#     return _run_code(code, main_globals, None,
+#   File "/usr/lib/python3.10/runpy.py", line 86, in _run_code
+#     exec(code, run_globals)
+#   File "/home/mattdavidow/maxtext/MaxText/rv_minimal.py", line 99, in <module>
+#     x_vmap_a2a = jit_vmap_func(x_vmap)
+#   File "/home/mattdavidow/maxtext/MaxText/rv_minimal.py", line 69, in wrapper
+#     output = jax.lax.ragged_all_to_all(
+# TypeError: tuple indices must be integers or slices, not NoneType
+# 
+# Likely due to shapes that look like below
+# x=Traced<float32[4,5]>with<BatchTrace> with
+#   val = Traced<float32[1,4,5]>with<DynamicJaxprTrace>
+#   batch_dim = 0
+
+# output_shape=Traced<float32[4,5]>with<BatchTrace> with
+#   val = Traced<float32[1,4,5]>with<DynamicJaxprTrace>
+#   batch_dim = 0
+
+# input_offsets=Traced<int32[2]>with<DynamicJaxprTrace>
+
+# send_sizes=Traced<int32[2]>with<DynamicJaxprTrace>
 
 vmap_func = jax.vmap(
     wrapper,
@@ -91,10 +138,5 @@ x_vmap = jax.device_put(x_vmap, NamedSharding(mesh, jax.sharding.PartitionSpec("
 x_vmap_a2a = jit_vmap_func(x_vmap)
 print(x_vmap_a2a.shape)
 print("Successfully ran vmapped wrapper!", flush=True)
-breakpoint()
 
-# jit_wrapper = jax.jit(wrapper)
-# print(f"{x.shape=}", flush=True)
-# x_a2a = jit_wrapper(x)
-# print("Successfully ran wrapper (non - vmap)")
-# print(x_a2a)
+

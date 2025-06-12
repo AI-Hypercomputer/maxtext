@@ -10,10 +10,11 @@ from enum import Enum, auto
 
 # Define inputs
 num_devices = len(jax.devices())
-batch = 8
-model = 5
 expert_parallelism = 2
 pipeline_parallelism = num_devices // expert_parallelism
+#batch = 2 * expert_parallelism**2
+batch = 32
+model = 5
 axis_name = "expert"
 
  # Define a 1D mesh only EP
@@ -37,6 +38,7 @@ output_sharding = x_sharding
 
 
 tokens_routed_per_ep_group = batch / expert_parallelism**2
+# Create a routing table representing an equal routing
 all_shard_group_sizes = tokens_routed_per_ep_group * jnp.ones((expert_parallelism,expert_parallelism), dtype=jnp.int32)
 all_shard_group_sizes = all_shard_group_sizes.astype(jnp.int32)
 
@@ -57,7 +59,21 @@ def wrapper(x, all_shards_group_sizes):
     output_shape = x # This is best case, which our test case achieves
 
     input_offsets, send_sizes, output_offsets, recv_sizes = get_all_to_all_params(all_shards_group_sizes)
-    
+
+    print(f"{x=}\n")
+    print(f"{output_shape=}\n")
+    print(f"{input_offsets=}\n")
+    print(f"{send_sizes=}\n")
+    print(f"{output_offsets=}\n")
+    print(f"{recv_sizes=}\n")
+    # Strangely jax.debug.print doesn't print anything...?
+    # jax.debug.print("{}\n", x)
+    # jax.debug.print("{}\n", output_shape)
+    # jax.debug.print("{}\n", input_offsets)
+    # jax.debug.print("{}\n", send_sizes)
+    # jax.debug.print("{}\n", output_offsets)
+    # jax.debug.print("{}\n", recv_sizes)
+
     output = jax.lax.ragged_all_to_all(
         x,
         output_shape,
@@ -109,8 +125,46 @@ def get_all_to_all_params(all_shards_group_sizes):
     return input_offsets, send_sizes, output_offsets, recv_sizes
 
 
+
+
+# Run without vmap: This should work
 jit_wrapper = jax.jit(wrapper)
 print(f"{x.shape=}", flush=True)
 x_a2a = jit_wrapper(x, all_shard_group_sizes)
 print("Successfully ran wrapper (non - vmap)")
 print(x_a2a)
+
+
+
+# Run with vmap: This doesn't work
+# Errors with
+# ValueError: all operands must have the same batch sizes
+# I assume this is related to the shapes that are printed, such as
+#
+# input_offsets=Traced<int32[2]>with<BatchTrace> with
+#   val = Traced<int32[1,2]>with<DynamicJaxprTrace>
+#   batch_dim = 0
+
+# send_sizes=Traced<int32[2]>with<BatchTrace> with
+#   val = Traced<int32[4,2]>with<DynamicJaxprTrace>
+#   batch_dim = 0
+
+vmap_func = jax.vmap(
+    wrapper,
+    spmd_axis_name="pipeline",
+)
+jit_vmap_func = jax.jit(vmap_func)
+
+x_vmap = jnp.expand_dims(x, axis=0)
+x_vmap = jnp.tile(x_vmap, (pipeline_parallelism, 1, 1))
+x_vmap = jax.device_put(x_vmap, NamedSharding(mesh, jax.sharding.PartitionSpec("pipeline", "expert", None)))
+
+all_shard_group_sizes_vmap = jnp.expand_dims(all_shard_group_sizes, axis=0)
+all_shard_group_sizes_vmap = jnp.tile(all_shard_group_sizes_vmap, (pipeline_parallelism, 1, 1))
+all_shard_group_sizes_vmap = jax.device_put(all_shard_group_sizes_vmap, NamedSharding(mesh, jax.sharding.PartitionSpec("pipeline", None, None)))
+
+x_vmap_a2a = jit_vmap_func(x_vmap, all_shard_group_sizes_vmap)
+print(x_vmap_a2a.shape)
+print("Successfully ran vmapped wrapper!", flush=True)
+
+
