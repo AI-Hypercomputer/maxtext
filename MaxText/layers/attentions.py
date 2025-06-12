@@ -183,7 +183,7 @@ class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disab
     )
 
 
-def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int) -> jax.Array:
+def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int, q_offset: int = 0) -> jax.Array:
   """Generates an explicit boolean mask for chunked causal attention.
 
   This function computes the full boolean mask array where True indicates
@@ -202,7 +202,7 @@ def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int)
     ValueError: If chunk_window_size is None or not positive.
   """
 
-  row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0)
+  row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0) + q_offset
   col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
   if chunk_size <= 0:
     raise ValueError("chunk_size must be positive")
@@ -388,6 +388,9 @@ class AttentionOp(nn.Module):
       next_pos = previous_chunk.shape[1]
       if mask is not None:
         mask = mask[:, :, :, next_pos : next_pos + q_seq_len, :]
+    elif model_mode == MODEL_MODE_AUTOREGRESSIVE and q_seq_len == 1:
+      # In autoregression, the query position is the last position in the KV sequence.
+      next_pos = kv_seq_len - 1
 
     causal_mask = None
     # We enforce causality except for AUTOREGRESSION
@@ -409,20 +412,19 @@ class AttentionOp(nn.Module):
     elif causal_mask is not None:
       output_mask = causal_mask
 
-    is_seq_len_greater_than_chunk_window = False
-    if output_mask is not None and self.chunk_attn_window_size is not None:
-      is_seq_len_greater_than_chunk_window = output_mask.shape[-1] > self.chunk_attn_window_size
-
     if self.attention_type == AttentionType.LOCAL_SLIDING and output_mask is not None:
       if self.sliding_window_size is None:
         raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
 
-      all_ones = jnp.ones_like(output_mask)
-      sliding_mask = jnp.triu(all_ones, -1 * self.sliding_window_size + 1) * jnp.tril(all_ones, self.sliding_window_size - 1)
+      row_ids_sliding = jax.lax.broadcasted_iota(jnp.int32, (q_seq_len, 1), 0) + next_pos
+      col_ids_sliding = jax.lax.broadcasted_iota(jnp.int32, (1, kv_seq_len), 1)
+      sliding_mask = (col_ids_sliding > (row_ids_sliding - self.sliding_window_size)) & (col_ids_sliding <= row_ids_sliding)
       output_mask = sliding_mask * output_mask
-    elif self.attention_type == AttentionType.CHUNK and output_mask is not None and is_seq_len_greater_than_chunk_window:
+    elif self.attention_type == AttentionType.CHUNK and output_mask is not None:
       mask_shape = (q_seq_len, kv_seq_len)
-      chunk_mask = _generate_chunk_attention_mask(mask_shape=(q_seq_len, kv_seq_len), chunk_size=self.chunk_attn_window_size)
+      chunk_mask = _generate_chunk_attention_mask(
+          mask_shape=(q_seq_len, kv_seq_len), chunk_size=self.chunk_attn_window_size, q_offset=next_pos
+      )
       output_mask = chunk_mask * output_mask
 
     if bidirectional_mask is not None:
@@ -874,13 +876,12 @@ class AttentionOp(nn.Module):
       decoder_segment_ids: Array | None,
       model_mode: str = MODEL_MODE_TRAIN,
   ) -> tuple[Array, Array]:
-    """CUDNN Flash Attention with JAX SDPA API.
-    """
+    """CUDNN Flash Attention with JAX SDPA API."""
     # These imports are only meant to work in a GPU build.
     # pylint: disable=import-outside-toplevel
     from jax._src.cudnn.fused_attention_stablehlo import (
-      dot_product_attention,
-      MaskType,
+        dot_product_attention,
+        MaskType,
     )
 
     _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
@@ -898,7 +899,7 @@ class AttentionOp(nn.Module):
           scale=1.0,
           dropout_rate=self.dropout_rate,
           qkv_layout="BTNH",
-          return_residual=True
+          return_residual=True,
       )
     else:
       output, lse = dot_product_attention(
@@ -909,7 +910,7 @@ class AttentionOp(nn.Module):
           scale=1.0 / math.sqrt(head_dim),
           dropout_rate=self.dropout_rate,
           qkv_layout="BTNH",
-          return_residual=True
+          return_residual=True,
       )
     output = checkpoint_name(output, "context")
     lse = checkpoint_name(lse, "context")
@@ -1127,8 +1128,9 @@ class AttentionOp(nn.Module):
     stat1 = local_stats[1].reshape((*local_stats[1].shape, 1))
     global_stat = jnp.log(jnp.exp(stat0) + jnp.exp(stat1))
     # # transpose stat to have shape [b, t, n, 1] for elemenwise multiplication
-    attn_out = local_outs[0].astype(jnp.float32) * jnp.exp(stat0 - global_stat).transpose((0, 2, 1, 3)) \
-      + local_outs[1].astype(jnp.float32) * jnp.exp(stat1 - global_stat).transpose((0, 2, 1, 3))
+    attn_out = local_outs[0].astype(jnp.float32) * jnp.exp(stat0 - global_stat).transpose((0, 2, 1, 3)) + local_outs[
+        1
+    ].astype(jnp.float32) * jnp.exp(stat1 - global_stat).transpose((0, 2, 1, 3))
     return attn_out.astype(local_stats[0].dtype)
 
   def normalize_attention(self, local_outs, local_maxes, local_sums):
@@ -1359,8 +1361,10 @@ class Attention(nn.Module):
           mesh=self.mesh,
           num_pages=self.config.pagedattn_num_pages,
           tokens_per_page=self.config.pagedattn_tokens_per_page,
-          max_pages_per_slot=(self.config.max_target_length + self.config.pagedattn_tokens_per_page - 1) // self.config.pagedattn_tokens_per_page,
-          max_pages_per_prefill=(self.config.max_prefill_predict_length + self.config.pagedattn_tokens_per_page - 1) // self.config.pagedattn_tokens_per_page,
+          max_pages_per_slot=(self.config.max_target_length + self.config.pagedattn_tokens_per_page - 1)
+          // self.config.pagedattn_tokens_per_page,
+          max_pages_per_prefill=(self.config.max_prefill_predict_length + self.config.pagedattn_tokens_per_page - 1)
+          // self.config.pagedattn_tokens_per_page,
           pages_per_compute_block=self.config.pagedattn_pages_per_compute_block,
           num_kv_heads=self.num_kv_heads,
           kv_head_dim_size=self.head_dim,
@@ -2011,4 +2015,3 @@ class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
             self.q_sequence.tobytes() if self.q_sequence is not None else None,
         )
     )
-  
