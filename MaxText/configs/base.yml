@@ -627,7 +627,7 @@ custom_mesh: "" # Available options: ['hybrid_ring_64x4', 'hybrid_ring_32x8']
 # Split physical axes for https://jax.readthedocs.io/en/latest/_autosummary/jax.experimental.mesh_utils.create_device_mesh.html
 allow_split_physical_axes: False
 # Apply transformations to the mesh to optimize for TPU v6e
-optimize_mesh_for_tpu_v6e: False
+optimize_mesh_for_tpu_v6e: True
 
 use_ragged_attention: False
 ragged_block_size: 256
@@ -685,3 +685,7 @@ nope_layer_interval: -1
 use_multimodal: False
 image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
 image_path: "" # Local image path used for decoding
+
+warmup_requests: 128
+main_requests: 1024
+workload_seed: 1234
