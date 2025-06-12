@@ -374,7 +374,7 @@ def get_mesh_axes_used_by_tensor_spec(tensor_sharding_spec):
   return tensor_sharding_spec
 
 
-def _get_valid_target_axis(mesh):
+def _get_nontrival_mesh_axes(mesh):
   """
   Returns mesh axes from config that are valid and have more than one shard.
 
@@ -460,6 +460,7 @@ def _analyze_sharding(params, mesh, valid_target_mesh_axes):
           {
               "name": param_name_str,  # Tensor name
               "size": p_leaf.size,  # tensor size
+              "shape": p_leaf.shape, # tensor shape
               "spec": str(current_sharding_spec),  # Tensor sharding spec as string
               "available_axes": sorted(list(valid_target_mesh_axes)),  # Axes that could be used for sharding
               "unsharded_axes": sorted(list(unsharded_axes)),  # Unsharded axes
@@ -487,8 +488,11 @@ def _raise_if_unsharded_exceeds_tolerance(unsharded_size, total_size, tolerance,
   Raises:
     AssertionError: If the percentage of unsharded parameters is greater than the tolerance.
   """
+  if total_size <= 0:
+    raise ValueError("Total size must be greater than zero.")
+  
   # Calculate the percentage of unsharded parameters.
-  unsharded_param_perc = unsharded_size / total_size if total_size > 0 else 0.0
+  unsharded_param_perc = unsharded_size / total_size 
 
   # If the percentage is over the tolerance, prepare and raise an error.
   if unsharded_param_perc > tolerance:
@@ -507,7 +511,7 @@ def _raise_if_unsharded_exceeds_tolerance(unsharded_size, total_size, tolerance,
     # Add details for the top 5 largest problematic tensors.
     for detail in problematic_tensors_details[:5]:  # Show top 5 largest problematic tensors
       error_msg_lines.append(
-          f" - Name: {detail['name']}(Size: {detail['size']}, Spec: {detail['spec']}) "
+          f" - Name: {detail['name']}(Size: {detail['size']}, Shape: {detail['spec']}, Spec: {detail['spec']}) "
           f"is unsharded on axis: {detail['unsharded_axes']}"
           f"could be sharded on: {detail['available_axes']}"
       )
@@ -533,8 +537,8 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
   # Calculate the total size of all parameters in the model.
   total_num_params = max_utils.calculate_bytes_from_pytree(params)
 
-  # Get the set of valid mesh axes that can be used for sharding.
-  valid_target_mesh_axes = _get_valid_target_axis(mesh)
+  # Get the set of nontrival mesh axes that can be used for sharding.
+  valid_target_mesh_axes = _get_nontrival_mesh_axes(mesh)
   # If there are no valid axes to shard along, there's nothing to check, so we can exit.
   if not valid_target_mesh_axes:
     return  # Exit early
