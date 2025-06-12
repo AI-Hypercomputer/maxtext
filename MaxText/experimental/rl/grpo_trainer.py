@@ -21,6 +21,39 @@ using JAX. It optimizes a language model with reinforcement learning by
 updating policy gradients based on reward functions
 """
 
+# Before running this script, install JetStream by running the following command in `/maxtext`
+# git clone https://github.com/AI-Hypercomputer/JetStream.git
+
+import os
+import sys
+import subprocess
+from pathlib import Path
+
+try:
+    print("Installing JetStream... " )
+    jetstream_path = Path(
+        os.path.join(os.path.dirname(Path(__file__)), "../../../JetStream")
+    )
+    print(f"JetStream path: {jetstream_path}")
+    subprocess.check_call(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "-e",
+            str(jetstream_path),
+            "--no-deps",
+        ]
+    )
+    print("JetStream installed successfully")
+except Exception as e:
+    print(f"Failed to install JetStream: {e}")
+
+jetstream_dir = Path(__file__).parent / "../../../JetStream"
+print(f"JetStream dir: {jetstream_dir}")
+sys.path.append(str(jetstream_dir))
+
 
 import datetime
 import time
@@ -510,39 +543,40 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
   max_logging.log(f"MaxText: inference finished on all samplers in {end_time - start_time} seconds")
   start_time = time.time()
   
-  prompt_completions_segmentation = []
-  completion_segmentation = []
-  prompt_completions = []
-  prompt_completions_logprobs = []
-  for i, r in enumerate(results):
-    indices = np.arange(r.token_ids.shape[0])
-    completion_mask = (indices >= np.array(data[f"{config.train_data_columns}_true_length"][i])[0]).astype(jnp.int32)
-    completion_segmentation.append(completion_mask)
-    prompt_completions.append(r.token_ids)
-    prompt_completions_segmentation.append(np.full((r.token_ids.shape[0],), 1))
-    prompt_completions_logprobs.append(r.logprobs)
-  
-  prompt_completions = grpo_utils.pad_or_trim(prompt_completions, config.max_target_length, 0) # assume 0 for pad_token_id
-  completion_segmentation = grpo_utils.pad_or_trim(completion_segmentation, config.max_target_length, 0)
-  prompt_completions_segmentation = grpo_utils.pad_or_trim(prompt_completions_segmentation, config.max_target_length, 0)
-  prompt_completions_logprobs = grpo_utils.pad_or_trim(prompt_completions_logprobs, config.max_target_length, -np.inf)
+  with jax.profiler.StepTraceAnnotation("inference postprocessing"):
+    prompt_completions_segmentation = []
+    completion_segmentation = []
+    prompt_completions = []
+    prompt_completions_logprobs = []
+    for i, r in enumerate(results):
+      indices = np.arange(r.token_ids.shape[0])
+      completion_mask = (indices >= np.array(data[f"{config.train_data_columns}_true_length"][i])[0]).astype(jnp.int32)
+      completion_segmentation.append(completion_mask)
+      prompt_completions.append(r.token_ids)
+      prompt_completions_segmentation.append(np.full((r.token_ids.shape[0],), 1))
+      prompt_completions_logprobs.append(r.logprobs)
+    
+    prompt_completions = grpo_utils.pad_or_trim(prompt_completions, config.max_target_length, 0) # assume 0 for pad_token_id
+    completion_segmentation = grpo_utils.pad_or_trim(completion_segmentation, config.max_target_length, 0)
+    prompt_completions_segmentation = grpo_utils.pad_or_trim(prompt_completions_segmentation, config.max_target_length, 0)
+    prompt_completions_logprobs = grpo_utils.pad_or_trim(prompt_completions_logprobs, config.max_target_length, -np.inf)
 
-  data[f"{config.train_data_columns}_completions"] = prompt_completions
-  data[f"{config.train_data_columns}_completions_segmentation"] = prompt_completions_segmentation
-  data[f"{config.train_data_columns}_completions_position"] = np.where(
-      data[f"{config.train_data_columns}_completions_segmentation"],
-      np.arange(data[f"{config.train_data_columns}_completions"].shape[1]),
-      0,
-  )
-  data["ar_completions_segmentation"] = completion_segmentation
+    data[f"{config.train_data_columns}_completions"] = prompt_completions
+    data[f"{config.train_data_columns}_completions_segmentation"] = prompt_completions_segmentation
+    data[f"{config.train_data_columns}_completions_position"] = np.where(
+        data[f"{config.train_data_columns}_completions_segmentation"],
+        np.arange(data[f"{config.train_data_columns}_completions"].shape[1]),
+        0,
+    )
+    data["ar_completions_segmentation"] = completion_segmentation
 
-  end_time = time.time()
-  max_logging.log(f"MaxText: Preprocessing after inference took {end_time - start_time} seconds")
-  # offpolicys
-  if config.inference_rollouts > 1:
-    data["completions_logprobs"] = prompt_completions_logprobs
-  else:
-    data["completions_logprobs"] = None
+    end_time = time.time()
+    max_logging.log(f"MaxText: Preprocessing after inference took {end_time - start_time} seconds")
+    # offpolicys
+    if config.inference_rollouts > 1:
+      data["completions_logprobs"] = prompt_completions_logprobs
+    else:
+      data["completions_logprobs"] = None
   return data
 
 
@@ -991,7 +1025,6 @@ def train_loop(config, config_inference, state=None):
     config = config_inference,
     params = None,
     enable_batch_prefill=False,
-    auto_layout_supported=False,
     dp = 1,
     dp_meshes = inference_meshes,
     eos_ids=[]
@@ -1078,6 +1111,8 @@ def train_loop(config, config_inference, state=None):
       train_rng, rng = random.split(init_rng)
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         state, metrics = p_train_step(state, example_batch, train_rng)
+      metrics["scalar"]["learning/loss"].block_until_ready()
+
     with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
       if step != 0 and step % config.inference_rollouts == 0:
         if config.use_pathways_reshard:

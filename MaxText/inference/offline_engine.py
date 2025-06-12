@@ -60,7 +60,7 @@ Params = Any
 MaxTextConfig = Any
 
 
-logging.getLogger("jax").setLevel(logging.DEBUG)
+# logging.getLogger("jax").setLevel(logging.DEBUG)
 from jax import config
 
 config.update("jax_persistent_cache_min_compile_time_secs", 0.005)
@@ -609,8 +609,9 @@ class ReplicaWorker:
         self.prefill_helper.finalize(self.params, self.decode_state, self.prefill_done)
 
         # 5. Continue decoding until all sequences are complete
-        while not all(value is None for value in self.slot_to_id.values()):
-            self.decode()
+        with jax.profiler.TraceAnnotation("flushing unfinished sequences"):
+            while not all(value is None for value in self.slot_to_id.values()):
+                self.decode()
 
         # Wait for detokenization to complete
         self.running = False

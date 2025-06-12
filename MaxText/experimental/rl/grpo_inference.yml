@@ -17,6 +17,7 @@ inference_rollouts: 1
 decode_sampling_strategy: "weighted"
 decode_sampling_temperature: 0.9
 async_checkpointing: false
+return_log_prob: True
 
 continous_batching: True
 
