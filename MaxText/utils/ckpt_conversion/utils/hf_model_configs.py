@@ -22,6 +22,59 @@ This config defines the architectural configurations of the Hugging Face version
 import transformers
 
 
+gemma3text_4b_config = transformers.Gemma3TextConfig(
+    vocab_size=262144,
+    hidden_size=2560,
+    intermediate_size=10240,
+    num_hidden_layers=34,
+    num_attention_heads=8,
+    num_key_value_heads=4,
+    head_dim=256,
+    hidden_activation="gelu",
+    max_position_embeddings=163840,
+    rms_norm_eps=1e-06,
+    rope_theta=10000,
+    sliding_window=1024,
+    tie_word_embeddings=True,
+    torch_dtype="bfloat16",
+)
+
+gemma3text_12b_config = transformers.Gemma3TextConfig(
+    vocab_size=262144,
+    hidden_size=3840,
+    intermediate_size=15360,
+    num_attention_heads=16,
+    num_hidden_layers=48,
+    num_key_value_heads=8,
+    head_dim=256,
+    hidden_activation="gelu",
+    max_position_embeddings=163840,
+    rms_norm_eps=1e-06,
+    rope_theta=10000,
+    sliding_window=1024,
+    tie_word_embeddings=True,
+    torch_dtype="bfloat16",
+)
+
+gemma3text_27b_config = transformers.Gemma3TextConfig(
+    vocab_size=262144,
+    hidden_size=5376,
+    intermediate_size=21504,
+    num_attention_heads=32,
+    num_hidden_layers=62,
+    num_key_value_heads=16,
+    head_dim=128,
+    hidden_activation="gelu",
+    max_position_embeddings=163840,
+    rms_norm_eps=1e-06,
+    rope_theta=10000,
+    sliding_window=1024,
+    tie_word_embeddings=True,
+    torch_dtype="bfloat16",
+    query_pre_attn_scalar=168,
+)
+
+
 gemma2_2b_config = transformers.Gemma2Config(
     num_hidden_layers=26,
     num_attention_heads=8,
@@ -58,7 +111,10 @@ gemma2_27b_config = transformers.Gemma2Config(
 
 
 HF_MODEL_CONFIGS = {
-    "GEMMA2_2B": gemma2_2b_config,
-    "GEMMA2_9B": gemma2_9b_config,
-    "GEMMA2_27B": gemma2_27b_config,
+    "gemma2-2b": gemma2_2b_config,
+    "gemma2-9b": gemma2_9b_config,
+    "gemma2-27b": gemma2_27b_config,
+    "gemma3-4b": gemma3text_4b_config,
+    "gemma3-12b": gemma3text_12b_config,
+    "gemma3-27b": gemma3text_27b_config,
 }
