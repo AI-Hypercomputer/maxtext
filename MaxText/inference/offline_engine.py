@@ -40,7 +40,6 @@ Example usage:
 import os
 import queue
 import signal
-import logging
 import threading
 import traceback
 import functools
@@ -56,15 +55,12 @@ from jax.sharding import Mesh
 from jax.sharding import PartitionSpec
 from jax.experimental import mesh_utils
 
-
 from jetstream.engine import engine_api
 from MaxText.maxengine import MaxEngine
 from MaxText import max_utils
-
 from MaxText.prefill_packing import PrefillProcessor, BatchedPrefillProcessor
 from MaxText import max_logging
 
-from jetstream.engine import engine_api
 
 try:
   from MaxText.experimental.rl import pathwaysutils_reshard
@@ -116,13 +112,13 @@ class TokenOutput:
   log_prob: np.ndarray
 
 
-class SafeThead(threading.Thread):
+class SafeThread(threading.Thread):
   """Thread class with exception handling to prevent silent failures."""
 
   def run(self):
     try:
       super().run()
-    except Exception as e:  # pylint: disable=broad-exception-caught
+    except Exception as _:  # pylint: disable=broad-exception-caught
       traceback.print_exc()
       # Kill the process if a thread encounters an error
       os.kill(os.getpid(), signal.SIGKILL)
@@ -147,13 +143,13 @@ class PrefillResult:
 class PrefillHelper:
   """Abstraction layer for different prefill processing strategies.
 
-  Provides a unified interface for both default (single-sequence) and batch
+  Provides a unified interface for both default (single-sequencse) and batch
   (packed multi-sequence) prefill processing methods.
   """
 
   def __init__(
       self,
-      type: PrefillType,
+      prefill_type: PrefillType,
       engine: MaxEngine,
       prefill_lengths: List[int],
       batch_prefill_max_batch_size: int = 16,
@@ -165,9 +161,10 @@ class PrefillHelper:
         type: The type of prefill processor to use ("default" or "batch")
         engine: The MaxEngine instance to use for prefill operations
         prefill_lengths: List of prompt lengths to support
-        batch_prefill_max_batch_size: Maximum number of prompts in one packed sequence for batch prefill
+        batch_prefill_max_batch_size: Maximum number of prompts in one packed
+            sequence for batch prefill
     """
-    self._type = type
+    self._type = prefill_type
     self.engine = engine
     self.prefill_lengths = sorted(prefill_lengths)
     self.max_prefill_length = self.prefill_lengths[-1]
@@ -190,6 +187,7 @@ class PrefillHelper:
   def _jitted_single_prefill(
       self, params, tokens, slot, true_length, decode_state, rng
   ) -> Tuple[jax.Array, jax.Array, DecodeState, jax.Array]:
+    """Prefill a single input."""
     first_token, decode_state = self._processor._process(
         params,
         tokens,
@@ -279,28 +277,11 @@ class PrefillHelper:
 
 
 class InferenceWorker:
-
-  def __init__(
-      self,
-      config: MaxTextConfig,
-      params: Params | None,
-      min_decode_steps: int,
-      enable_batch_prefill: bool,
-      devices: List[Any],
-      tokenizer: Any,
-      eos_ids: List[int],
-      prefill_lengths: List[int],
-      max_decode_length: int,
-      batch_prefill_max_batch_size: int,
-      is_pw_reshard: bool = True,
-      rng: jax.random.PRNGKey = None,
-      mesh: Mesh = None,
-      debug: bool = False,
-  ):
-    """Initialize a InferenceWorker that runs continuous batching over
+  """
+  InferenceWorker runs continuous batching over
        a queue of inputs.
 
-    Continuous batching workflow:
+      Continuous batching workflow:
     1. Process inputs one at a time from queue
     2. Prefill input and insert into KV cache
     3. Continue prefilling until enough samples for batch decode
@@ -329,6 +310,26 @@ class InferenceWorker:
         Bucket for length 128: [...seq1, ...seq2]
         Bucket for length 256: [...seq1]
 
+  """
+
+  def __init__(
+      self,
+      config: MaxTextConfig,
+      params: Params | None,
+      min_decode_steps: int,
+      enable_batch_prefill: bool,
+      devices: List[Any],
+      tokenizer: Any,
+      eos_ids: List[int],
+      prefill_lengths: List[int],
+      max_decode_length: int,
+      batch_prefill_max_batch_size: int,
+      is_pw_reshard: bool = True,
+      rng: jax.random.PRNGKey = None,
+      mesh: Mesh = None,
+      debug: bool = False,
+  ):
+    """
     Args:
         config: MaxText configuration
         params: Model parameters, if None, the params will be loaded from the config
@@ -378,9 +379,6 @@ class InferenceWorker:
     self.prefill_helper = None
     self.generate_fn = None
 
-    self._init()
-
-  def _init(self):
     start_time = time.time()
     # Initialize MaxEngine(s)
     self.params, self.engine = self._init_engine(self.params)
@@ -468,7 +466,7 @@ class InferenceWorker:
     self.running = True
     self.true_lengths = {input.id: input.true_length for input in data}
 
-    max_logging.log(f"Continous batching started")
+    max_logging.log("Continous batching started")
 
     self._run_continous_batching(data)
 
@@ -485,7 +483,7 @@ class InferenceWorker:
     """
 
     # Start token emission thread
-    token_emission_thread = SafeThead(
+    token_emission_thread = SafeThread(
         target=functools.partial(
             self.background_token_emission,
         ),
@@ -522,20 +520,23 @@ class InferenceWorker:
     # Wait for detokenization to complete
     self.running = False
     max_logging.log(
-        f"Inference worker: joining token emission thread. There are {self.generated_token_backlog.qsize()} elements in the backlog"
+        f"Inference worker: joining token emission thread. "
+        f"There are {self.generated_token_backlog.qsize()} elements in the backlog"
     )
     start_time = time.time()
     with jax.profiler.TraceAnnotation("Flushing token emission thread"):
       token_emission_thread.join()
     max_logging.log(f"Inference worker: token emission thread joined in {time.time() - start_time} seconds")
 
-  def _build_final_outputs(self, input_data: List[InputData]):
+  def _build_final_outputs(self, input_data: List[InputData]) -> List[CompletionOutput]:
+    """Build the final list of CompletionOutput."""
+
     with jax.profiler.TraceAnnotation("offline_engine.batch_inference.return_final_output"):
       completion_outputs = []
-      for input in input_data:
-        input_id = input.id
-        prompt_length = input.true_length
-        prompt_tokens = input.tokens[: input.true_length].squeeze()
+      for row in input_data:
+        input_id = row.id
+        prompt_length = row.true_length
+        prompt_tokens = row.tokens[: row.true_length].squeeze()
         completion_tokens = np.array(
             [token_output.token for token_output in self.completion_tokens_by_id[input_id]]
         ).flatten()
@@ -576,11 +577,11 @@ class InferenceWorker:
     # Update decode state
     self.decode_state = decode_state
     # Process each prefill result
-    for i, prefill_result in enumerate(prefill_result):
+    for i, result in enumerate(prefill_result):
       input_id = prompt_ids[i]
-      result_tokens = prefill_result.result_tokens
-      slot = prefill_result.slot
-      prompt_logp = prefill_result.prompt_logp
+      result_tokens = result.result_tokens
+      slot = result.slot
+      prompt_logp = result.prompt_logp
       true_length = self.true_lengths[input_id]
 
       self.slot_to_id[slot] = input_id
@@ -605,7 +606,7 @@ class InferenceWorker:
     """
 
     buffer = []
-    for i in range(self.min_decode_steps):
+    for _ in range(self.min_decode_steps):
       # Generate next tokens
       self.decode_state, result_tokens, log_prob = self._jitted_generate_fn(self.params, self.decode_state, self.rng)
       # Add token to detokenization queue
@@ -615,7 +616,7 @@ class InferenceWorker:
         log_prob = np.array(log_prob)
 
       if self.debug:
-        max_logging.log(f"Inference worker: convert to numpy in Decode in {time.time() - start_time} seconds")
+        max_logging.log(f"Inference worker: convert to numpy " f"in Decode in {time.time() - start_time} seconds")
 
       buffer.append((result_tokens, log_prob))
 
@@ -643,7 +644,7 @@ class InferenceWorker:
     the backlog, emit tokens, and free up
     decode slots when sequences complete.
     """
-    max_logging.log(f"Inference worker: starting background token emission thread")
+    max_logging.log("Inference worker: starting background token emission thread")
     while self.running or not self.generated_token_backlog.empty():
       newly_empty = []
 
@@ -659,8 +660,7 @@ class InferenceWorker:
       start_time = time.time()
       if is_first_token:
         should_terminate = self.emit_token(row_id, int(result_tokens), log_prob, prompt_logp=prompt_logp)
-        should_release_slot = should_terminate and slot in self.slot_to_id and self.slot_to_id[slot] == row_id
-        if should_release_slot:
+        if should_terminate:
           newly_empty.append(slot)
       else:
         for decode_step in range(self.min_decode_steps):
@@ -670,8 +670,7 @@ class InferenceWorker:
             log_prob_at_slot = log_prob[decode_step][slot]
             result_tokens_at_slot = result_tokens[decode_step][slot]
             should_terminate = self.emit_token(id_, int(result_tokens_at_slot), log_prob_at_slot)
-            should_release_slot = should_terminate and slot in self.slot_to_id and self.slot_to_id[slot] == id_
-            if should_release_slot:
+            if should_terminate:
               newly_empty.append(slot)
 
       # Update decode slots
@@ -807,7 +806,13 @@ class OfflineEngine:
 
     self.tokenizer = self.worker.tokenizer
 
-  def update_params(self, params: Params, parition_spec: PartitionSpec, is_pw_reshard):
+  def update_params(
+      self,
+      params: Params,
+      parition_spec: PartitionSpec,
+      is_pw_reshard: bool,
+  ):
+    """Update model weights."""
     self.worker.update_params(
         params,
         jax.tree_util.tree_map(
@@ -854,7 +859,8 @@ class OfflineEngine:
     # Convert numpy arrays to InputData objects
     if isinstance(data[0], np.ndarray):
       max_logging.log(
-          "When you provide JAX/numpy arrays to Offline Engine, make sure that the arrays are not padded with padding tokens."
+          "When you provide JAX/numpy arrays to Offline Engine, "
+          "make sure that the arrays are not padded with padding tokens."
       )
       data = [InputData(id=i, tokens=array, true_length=len(array)) for i, array in enumerate(data)]
 
@@ -931,5 +937,5 @@ class OfflineEngine:
       raise ValueError("Make sure max_target_length - max_prefill_predict_length is greater than 0")
     if self.config.scan_layers:
       max_logging.log(
-          "WARNING: scan_layers=True will result in slow step time. It is recommended for debugging purposes only."
+          "WARNING: scan_layers=True will result in slow step time. " "It is recommended for debugging purposes only."
       )
