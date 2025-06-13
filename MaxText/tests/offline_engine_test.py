@@ -31,6 +31,10 @@ class OfflineEngineTest(unittest.TestCase):
   Command: pytest MaxText/tests/offline_engine_test.py
   """
 
+  def setUp(self):
+    super().setUp()
+    self.cfg = self.init_pyconfig()
+
   def init_pyconfig(self, **kwargs):
     init_kwargs = {
         "run_name": "test",
@@ -60,7 +64,7 @@ class OfflineEngineTest(unittest.TestCase):
 
   def test_mcjax_tp(self):
 
-    config = self.init_pyconfig()
+    config = self.cfg
     rng = jax.random.PRNGKey(0)
     inference_engine = OfflineEngine(config=config, params=None, enable_batch_prefill=False, rng=rng, eos_ids=[])
     input_lengths = list(range(10, 600, 100))
@@ -79,7 +83,7 @@ class OfflineEngineTest(unittest.TestCase):
       assert result.logprobs.shape == (length + completion_length,)
 
   def test_mcjax_tp_batch_prefill(self):
-    config = self.init_pyconfig()
+    config = self.cfg
     rng = jax.random.PRNGKey(0)
     inference_engine = OfflineEngine(config=config, params=None, enable_batch_prefill=True, rng=rng, eos_ids=[])
     input_lengths = list(range(10, 600, 100))
@@ -96,7 +100,7 @@ class OfflineEngineTest(unittest.TestCase):
       assert result.logprobs.shape == (length + completion_length,)
 
   def test_multi_sampling(self):
-    config = self.init_pyconfig()
+    config = self.cfg
     rng = jax.random.PRNGKey(0)
     inference_engine = OfflineEngine(config=config, params=None, enable_batch_prefill=False, rng=rng, eos_ids=[])
     rng1, rng_2 = jax.random.split(rng, 2)

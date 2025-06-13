@@ -1950,8 +1950,8 @@ class MLA(Attention):
       MLA-attended outputs.
     """
     if model_mode == MODEL_MODE_PREFILL:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_input_axis_names)
+      inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_axis_names)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_axis_names)
     else:
       inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
