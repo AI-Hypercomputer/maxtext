@@ -56,6 +56,7 @@ class OfflineEngineTest(unittest.TestCase):
         "base_num_kv_heads": 32,
         "base_num_decoder_layers": 2,
         "scan_layers": False,
+        "skip_jax_distributed_system": True,
     } | kwargs
     config = pyconfig.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
