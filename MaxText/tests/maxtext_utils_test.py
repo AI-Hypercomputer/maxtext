@@ -23,8 +23,10 @@ import os.path
 import unittest
 
 from jax import random
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+import jax
 import jax.numpy as jnp
+import numpy as np
 
 from flax import linen as nn
 from flax.core.scope import FrozenVariableDict
@@ -39,6 +41,7 @@ from MaxText import pyconfig
 from MaxText.globals import PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
+from MaxText.maxtext_utils import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
 
 Transformer = models.Transformer
 
@@ -263,6 +266,158 @@ class MaxUtilsPpAsDp(unittest.TestCase):
     )
     transformed_rules = maxtext_utils.logical_axis_rules_pp_act_as_dp(input_rules)
     self.assertEqual(transformed_rules, expected_transform)
+
+
+class TestAssertParamsSufficientlySharded(unittest.TestCase):
+  """
+  Test suite for the sharding assertion utility function 'assert_params_sufficiently_sharded'.
+  """
+
+  def setUp(self):
+    """
+    Set up the test environment before each test method is run.
+    This method initializes a device mesh required for sharding tests.
+    """
+    # Skip these tests if the environment has fewer than 4 devices, as the mesh requires them.
+    if len(jax.devices()) < 4:
+      self.skipTest("This test suite requires at least 4 TPU devices.")
+    # Create a 2x2 device mesh from the first 4 available JAX devices.
+    devices = np.array(jax.devices()[:4]).reshape((2, 2))
+    # Define the non-trival mesh axes and a broader set of mesh axes.
+    nonTrival_mesh_axes = ("fsdp", "tensor")
+    self.mesh = Mesh(devices, nonTrival_mesh_axes)
+    self.mesh_axes = ("fsdp", "sequence", "tensor", "stage", "context")
+
+  def test_fully_sharded_2d(self):
+    """
+    Tests that a 2D tensor fully sharded across both mesh axes passes the assertion.
+    """
+    # Activate the mesh context.
+    with self.mesh:
+      # Define a sharding spec that shards the first tensor dimension by the 'fsdp' mesh axis
+      # and the second dimension by the 'tensor' mesh axis.
+      pspec = PartitionSpec("fsdp", "tensor")
+      # Create a parameter and apply the sharding, ensuring it's distributed across all devices.
+      params = {"layer1": jax.device_put(jnp.ones((8, 8)), NamedSharding(self.mesh, pspec))}
+
+      # Assert that the parameters are sufficiently sharded; this should pass with no error.
+      assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.1)
+
+  def test_unsharded_fails(self):
+    """
+    Tests that a completely unsharded (fully replicated) parameter fails the assertion.
+    """
+    with self.mesh:
+      # Create a parameter without any sharding specification. It will be replicated on all devices.
+      params = {"layer1": jnp.ones((8, 8))}
+
+      # Expect an AssertionError because 100% of params are unsharded, exceeding the 10% tolerance.
+      with self.assertRaises(AssertionError):
+        assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.1)
+
+  def test_mixed_sharding_fails(self):
+    """
+    Tests that a mix of sharded and unsharded parameters fails when the unsharded
+    portion exceeds the tolerance.
+    """
+    with self.mesh:
+      sharded_param = jax.device_put(jnp.ones((8, 8)), NamedSharding(self.mesh, PartitionSpec("fsdp", "tensor")))
+      unsharded_param = jnp.ones((8, 8))
+      params = {"layer1": sharded_param, "layer2": unsharded_param}
+
+      with self.assertRaises(AssertionError):
+        assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.5)
+
+  def test_3d_tensor_sharded_on_fsdp_axis(self):
+    """
+    Tests that a 3D tensor sharded only on a valid target axis ('fsdp') should fail.
+    """
+    with self.mesh:
+      pspec = PartitionSpec("fsdp", None, None)
+      params = {"conv3d_layer": jax.device_put(jnp.ones((8, 4, 4)), NamedSharding(self.mesh, pspec))}
+
+      with self.assertRaises(AssertionError):
+        assert_params_sufficiently_sharded(params, self.mesh, tolerance=0.2)
+
+  def test_multi_axis_sharding_pass(self):
+    """
+    Tests that a tensor sharded with a valid axis ('fsdp') on a complex,
+    multi-dimensional mesh passes the assertion.
+    """
+    # Create a mesh shape for a 5D mesh.
+    devices = np.array(jax.devices()).reshape((4, 1, 1, 1, 1))
+    mesh = Mesh(devices, self.mesh_axes)
+
+    with mesh:
+      # Shard across multiple axes, including the valid 'fsdp' axis.
+      pspec = PartitionSpec(("fsdp", "sequence"), "stage", ("tensor"), None)
+      params = {"complex_layer": jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(mesh, pspec))}
+
+      # This should pass because 'fsdp' is a valid sharding axis being used.
+      assert_params_sufficiently_sharded(params, mesh, tolerance=0.05)
+
+  def test_multi_axis_not_sharded_fails(self):
+    """
+    Tests that a tensor on a complex mesh fails if it's not sharded along any
+    of the primary valid axes (like 'fsdp').
+    """
+    devices = np.array(jax.devices()).reshape((4, 1, 1, 1, 1))
+    mesh = Mesh(devices, self.mesh_axes)
+    with mesh:
+      pspec = PartitionSpec(("sequence", "context"), "stage", "tensor", None)
+      params = {"complex_layer": jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(mesh, pspec))}
+
+      with self.assertRaises(AssertionError):
+        assert_params_sufficiently_sharded(params, mesh, tolerance=0.05)
+
+  def test_multi_axis_mixed_sharding_fails(self):
+    """
+    Tests that a mix of sharded (correctly) and unsharded tensors on a complex mesh fails.
+    """
+    devices = np.array(jax.devices()).reshape((4, 1, 1, 1, 1))
+    mesh = Mesh(devices, self.mesh_axes)
+    with mesh:
+      sharded_pspec = PartitionSpec(("fsdp", "sequence"), "stage", ("tensor"), None)
+      sharded_param = jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(mesh, sharded_pspec))
+      unsharded_param = jnp.ones((8, 8, 2, 2))
+      params = {
+          "sharded_layer": sharded_param,
+          "unsharded_layer": unsharded_param,
+      }
+
+      with self.assertRaises(AssertionError):
+        assert_params_sufficiently_sharded(params, mesh, tolerance=0.5)
+
+
+class TestAssert_Formatted_sharding_annotations(unittest.TestCase):
+  """
+  Test suite for sharding assertion formating functions.
+  """
+
+  def setUp(self):
+    """
+    Set up the common 2*2 mesh for sharding tests.
+    """
+    if len(jax.devices()) < 4:
+      self.skipTest("This test suite requires at least 4 TPU devices")
+
+    self.mesh_axes = ("fsdp", "sequence", "tensor", "stage", "context")
+    devices = np.array(jax.devices()).reshape((4, 1, 1, 1, 1))
+    self.mesh = Mesh(devices, self.mesh_axes)
+
+  def test_multi_axis_mixed_formating(self):
+    """
+    Tests a mix of sharded and unsharded tensors on a complex mesh fails.
+    """
+    with self.mesh:
+      sharded_pspec = PartitionSpec(("fsdp", "sequence"), "stage", ("tensor"), None)
+      sharded_param = jax.device_put(jnp.ones((8, 8, 2, 2)), NamedSharding(self.mesh, sharded_pspec))
+      unsharded_param = jnp.ones((8, 8, 2, 2))
+      params = {
+          "sharded_layer": sharded_param,
+          "unsharded_layer": unsharded_param,
+      }
+      self.assertIsNotNone(get_formatted_sharding_annotations(params, self.mesh))
 
 
 if __name__ == "__main__":
