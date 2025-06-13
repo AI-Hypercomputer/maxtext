@@ -188,6 +188,7 @@ class PrefillHelper:
       self, params, tokens, slot, true_length, decode_state, rng
   ) -> Tuple[jax.Array, jax.Array, DecodeState, jax.Array]:
     """Prefill a single input."""
+    # pylint: disable=protected-access
     first_token, decode_state = self._processor._process(
         params,
         tokens,
@@ -437,6 +438,7 @@ class InferenceWorker:
       destination_sharding: jax.sharding.NamedSharding,
       is_pw_reshard: bool,
   ):
+    """Update the model parameters"""
     if is_pw_reshard:
       with (
           jax.transfer_guard_device_to_host("disallow_explicit"),
@@ -865,7 +867,7 @@ class OfflineEngine:
       data = [InputData(id=i, tokens=array, true_length=len(array)) for i, array in enumerate(data)]
 
     # Make sure all data id is unique
-    if len(data) != len(set([item.id for item in data])):
+    if len(data) != len({item.id for item in data}):
       raise ValueError("All data ids must be unique")
 
     data = self.pad_data(data)
