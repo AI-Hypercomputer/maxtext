@@ -873,7 +873,7 @@ class AttentionOp(nn.Module):
       value: Array,
       decoder_segment_ids: Array | None,
       model_mode: str = MODEL_MODE_TRAIN,
-  ) -> Array:
+  ) -> tuple[Array, Array]:
     """CUDNN Flash Attention with JAX SDPA API."""
     # These imports are only meant to work in a GPU build.
     # pylint: disable=import-outside-toplevel

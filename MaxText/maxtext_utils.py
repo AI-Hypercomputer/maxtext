@@ -512,8 +512,8 @@ def _raise_if_unsharded_exceeds_tolerance(unsharded_size, total_size, tolerance,
     for detail in problematic_tensors_details[:5]:  # Show top 5 largest problematic tensors
       error_msg_lines.append(
           f" - Name: {detail['name']}(Size: {detail['size']}, Shape: {detail['spec']}, Spec: {detail['spec']}) "
-          f"is unsharded on axis: {detail['unsharded_axes']}"
-          f"could be sharded on: {detail['available_axes']}"
+          f" is unsharded on axis: {detail['unsharded_axes']}"
+          f" could be sharded on: {detail['available_axes']}"
       )
 
     # Raise the assertion error with the combined, formatted message.
