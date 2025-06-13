@@ -719,7 +719,7 @@ llama3_70b_8192 = _add_to_model_dictionary(
     ),
 )
 
-
+# Config only runs on v6e-256
 llama3_1_405b_8192_fsdp_dcn = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
@@ -773,6 +773,7 @@ llama3_1_405b_8192_fsdp_dcn = _add_to_model_dictionary(
     ),
 )
 
+# Config only runs on v6e-256
 llama3_1_405b_8192_pure_fsdp_ici = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
@@ -1521,6 +1522,7 @@ mixtral_8x7b_dropped_int8 = _add_to_model_dictionary(
     ),
 )
 
+# Config only runs on v6e-256
 mixtral_8x22b_dropped = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
@@ -1565,6 +1567,7 @@ mixtral_8x22b_dropped = _add_to_model_dictionary(
     ),
 )
 
+# Config only runs on v6e-256
 deepseek_v3_ep16 = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
@@ -1605,7 +1608,7 @@ deepseek_v3_ep16 = _add_to_model_dictionary(
     ),
 )
 
-
+# Config only runs on v6e-256
 gemma2_9b_8192 = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
@@ -1638,7 +1641,7 @@ gemma2_9b_8192 = _add_to_model_dictionary(
     ),
 )
 
-
+# Config only runs on v6e-256
 gemma2_27b_8192 = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
@@ -1733,7 +1736,7 @@ llama3_1_70b_131072 = _add_to_model_dictionary(
   )
 )
 
-# Customized MoE model - 700B
+# Customized MoE model - 700B, and config only runs on v6e-256
 custom_moe_700b = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
@@ -1794,5 +1797,3 @@ custom_moe_700b = _add_to_model_dictionary(
         ),
     ),
 )
-
-
