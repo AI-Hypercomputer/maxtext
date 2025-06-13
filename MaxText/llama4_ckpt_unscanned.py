@@ -285,8 +285,8 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
       "bias": chkpt_vars["vision_model.layernorm_pre.bias"].to(torch.float32).numpy().astype(CAST_DTYPE),
   })
   jax_weights["vision_encoder"]["Llama4VisionModel_0"]["layernorm_post"].update({
-      "scale": chkpt_vars["vision_model.layernorm_pre.weight"].to(torch.float32).numpy().astype(CAST_DTYPE),
-      "bias": chkpt_vars["vision_model.layernorm_pre.bias"].to(torch.float32).numpy().astype(CAST_DTYPE),
+      "scale": chkpt_vars["vision_model.layernorm_post.weight"].to(torch.float32).numpy().astype(CAST_DTYPE),
+      "bias": chkpt_vars["vision_model.layernorm_post.bias"].to(torch.float32).numpy().astype(CAST_DTYPE),
   })
 
   max_logging.log("Processing vision encoder")
@@ -300,7 +300,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
     bk = chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.k_proj.bias"].to(torch.float32).numpy().astype(CAST_DTYPE)
     bv = chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.v_proj.bias"].to(torch.float32).numpy().astype(CAST_DTYPE)
     bo = chkpt_vars[f"vision_model.model.layers.{layer_idx}.self_attn.o_proj.bias"].to(torch.float32).numpy().astype(CAST_DTYPE)
-    
+  
     wq = np.reshape(wq, [hidden_size_for_vit, num_attention_heads_for_vit, head_dim_for_vit])
     wk = np.reshape(wk, [hidden_size_for_vit, num_attention_heads_for_vit, head_dim_for_vit])
     wv = np.reshape(wv, [hidden_size_for_vit, num_attention_heads_for_vit, head_dim_for_vit])
@@ -341,7 +341,7 @@ def _convert_huggingface_to_jax_weights(base_model_path: str, model_size: str, m
         }
       }
     )
-    
+
   max_logging.log("Processing pixel shuffle mlp")
   adaptor_fc1 = chkpt_vars["vision_model.vision_adapter.mlp.fc1.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
   adaptor_fc2 = chkpt_vars["vision_model.vision_adapter.mlp.fc2.weight"].to(torch.float32).numpy().astype(CAST_DTYPE).transpose()
