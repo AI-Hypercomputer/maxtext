@@ -28,8 +28,7 @@ from MaxText import pyconfig
 
 class OfflineEngineTest(unittest.TestCase):
   """Tests for JetStream Offline Engine.
-  Run on Pathways with: ON_PATHWAYS=1 pytest MaxText/tests/offline_engine_test.py
-  Run in McJAX mode with: pytest MaxText/tests/offline_engine_test.py
+  Command: pytest MaxText/tests/offline_engine_test.py
   """
 
   def init_pyconfig(self, **kwargs):
