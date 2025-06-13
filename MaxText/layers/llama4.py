@@ -661,7 +661,9 @@ class Llama4VisionEncoderLayer(nn.Module):
     residual = hidden_states
 
     # Input layer norm
+    jax.debug.print("INSIDE before norm {}", hidden_states.mean())
     hidden_states = nn.LayerNorm(name="input_layer_norm", epsilon=1e-5)(hidden_states)
+    jax.debug.print("INSIDE after norm {}", hidden_states.mean())
 
     # Self attention
     attention_layer = Attention(
@@ -687,6 +689,7 @@ class Llama4VisionEncoderLayer(nn.Module):
         inputs_kv=hidden_states,
         deterministic=deterministic,
     )
+    jax.debug.print("INSIDE attention_layer {}", hidden_states.mean())
 
     hidden_states = residual + hidden_states
 
@@ -768,15 +771,6 @@ class Llama4VisionModel(nn.Module):
         (self.num_patches, self.config.hidden_size_for_vit),
         dtype=self.config.dtype_mm,
     )
-    # self.rotary_embedding_pt = Llama4VisionRotaryEmbedding(config=self.config)
-    self.rotary_embedding = embeddings.LlamaVisionRotaryEmbedding(
-        self.config.tile_size_for_vit, 
-        self.config.patch_size_for_vit, 
-        self.config.hidden_size_for_vit, 
-        self.config.num_attention_heads_for_vit, 
-        self.config.rope_theta_for_vit
-    )
-
     print(f"Class embedding shape: {self.class_embedding.shape}")
 
   @nn.compact
@@ -805,25 +799,39 @@ class Llama4VisionModel(nn.Module):
     pixel_values = jnp.reshape(pixel_values, [b * t, c, h, w])
 
     # Unfold convolution to extract patches
+    jax.debug.print("pixel_values {}", pixel_values.mean())
+    # pixel_values = jnp.ones_like(pixel_values) * 0.1
+    # jax.debug.print("pixel_values ones before {}", pixel_values.mean())
     hidden_states = Llama4UnfoldConvolution(config=cfg)(pixel_values)
+    jax.debug.print("patch_embedding {}", hidden_states.mean())
+    # print(f"positional_embedding_vlm {jax.device_get(self.positional_embedding_vlm.mean())}")
+    # print(f"Patch embedding shape: {hidden_states.shape}")
 
     # Add class embedding to the beginning of the sequence
     class_embedding_expanded = jnp.expand_dims(jnp.expand_dims(self.class_embedding, axis=0), axis=0)
     class_embedding = jnp.broadcast_to(class_embedding_expanded, (hidden_states.shape[0], 1, cfg.hidden_size_for_vit))
     hidden_states = jnp.concatenate([class_embedding, hidden_states], axis=1)
-    
+    # jax.debug.print("class_embedding {}", self.class_embedding.mean())
+    jax.debug.print("class_embedding+h {}", hidden_states.mean())
+
     # Add positional embedding
     hidden_states += self.positional_embedding_vlm
+    # jax.debug.print("positional_embedding_vlm {}", self.positional_embedding_vlm.mean())
+    jax.debug.print("positional_embedding_vlm+h {}", hidden_states.mean())
 
     hidden_states = nn.LayerNorm(name="layernorm_pre")(hidden_states)
-    # freqs_ci = self.rotary_embedding()
-    # jax.debug.print("freqs_ci {}", freqs_ci.mean())
-
+    jax.debug.print("layernorm_pre {}", hidden_states.mean())
     hidden_states = Llama4VisionEncoder(config=cfg, mesh=mesh)(hidden_states)
-    hidden_states = nn.LayerNorm(name="layernorm_post")(hidden_states)
+    jax.debug.print("model {}", hidden_states.mean())
 
+    hidden_states = nn.LayerNorm(name="layernorm_post")(hidden_states)
+    jax.debug.print("layernorm_post {}", hidden_states.mean())
     hidden_states = hidden_states[:, :-1, :]
 
+
     hidden_states = Llama4VisionPixelShuffleMLP(config=cfg)(hidden_states)
+    jax.debug.print("vision_adapter {}", hidden_states.mean())
+    # jax.debug.print("vision_adapter {}", hidden_states.shape)
+    jax.debug.print("*"*50)
 
     return hidden_states  # [batch_size, num_patches, hidden_size_for_vit]

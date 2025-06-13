@@ -130,7 +130,7 @@ def main(argv: Sequence[str]) -> None:
   flat_params = get_flat_dict(params)
   # for key, value in flat_params.items():
   #   print(f"{key}: {value.shape if hasattr(value, 'shape') else type(value)}")
-  save_model_params_to_excel(flat_params, "/home/hengtaoguo/projects/params_maxtext.xlsx")
+  # save_model_params_to_excel(flat_params, "/home/hengtaoguo/projects/params_maxtext.xlsx")
 
   text = config.prompt
   prefill_length = config.max_prefill_predict_length
@@ -142,8 +142,8 @@ def main(argv: Sequence[str]) -> None:
     processor_output = multimodal_utils.pre_process_image(images, model_name=config.model_name)
     prefill_length -= multimodal_utils.get_image_offsets(config.model_name, processor_output=processor_output)
 
-  pixel_values = processor_output.pixel_values
-  print(f"image {pixel_values.shape}, mean {pixel_values.mean()}")
+    pixel_values = processor_output.pixel_values
+    print(f"image {pixel_values.shape}, mean {pixel_values.mean()}")
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
   try:
