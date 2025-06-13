@@ -105,7 +105,7 @@ class GrainArrayRecordProcessingTest(unittest.TestCase):
     self.assertTrue((train_batch1["targets"] == train_batch2["targets"]).all())
 
 
-class GrainArrayRecordProcessingTestWithMultiSourceBlending(GrainArrayRecordProcessingTest):
+class GrainArrayRecordProcessingWithMultiSourceBlendingTest(GrainArrayRecordProcessingTest):
   def setUp(self):
     super().setUp()
     temp_dir = tempfile.gettempdir()
