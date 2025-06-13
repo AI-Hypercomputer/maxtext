@@ -21,7 +21,6 @@ limitations under the License.
 
 from typing import Optional
 
-from MaxText.common_types import MODEL_MODE_PREFILL
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
@@ -35,6 +34,7 @@ from MaxText.layers import models
 from MaxText.layers import moe
 from MaxText.layers import quantizations
 from MaxText.layers.quantizations import AqtQuantization as Quant
+from MaxText.common_types import MODEL_MODE_PREFILL
 
 # -----------------------------------------
 # The Decoder Layer for DeepSeek v3

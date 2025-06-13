@@ -260,6 +260,7 @@ class BatchedPrefillProcessor:
       return_prompt_logp: bool = False,
   ) -> Tuple[List[Tuple[engine_api.ResultTokens, int]], DecodeState]:
     """Process all items in a bucket."""
+    # pylint: disable=import-outside-toplevel
     from MaxText.inference.offline_engine import PrefillResult
 
     slots = bucket.slots

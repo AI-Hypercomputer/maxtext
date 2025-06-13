@@ -18,12 +18,12 @@ import sys
 import unittest
 import os.path
 
-from MaxText.globals import PKG_DIR
 import jax
 import jax.numpy as jnp
 import numpy as np
 from MaxText.inference.offline_engine import OfflineEngine, InputData, CompletionOutput
 from MaxText import pyconfig
+from MaxText.globals import PKG_DIR
 
 
 class OfflineEngineTest(unittest.TestCase):
@@ -36,6 +36,7 @@ class OfflineEngineTest(unittest.TestCase):
     self.cfg = self.init_pyconfig()
 
   def init_pyconfig(self, **kwargs):
+    """Initialize MaxText pyconfig."""
     init_kwargs = {
         "run_name": "test",
         # Parallelism
