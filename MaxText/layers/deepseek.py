@@ -21,6 +21,7 @@ limitations under the License.
 
 from typing import Optional
 
+from MaxText.common_types import MODEL_MODE_PREFILL
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
@@ -63,7 +64,7 @@ def self_attention_with_norm(
       epsilon=cfg.normalization_layer_epsilon,
   )
   lnx = lnx_rms(inputs)
-  if model_mode == models.ModelMode.PREFILL:
+  if model_mode == MODEL_MODE_PREFILL:
     axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
   else:
     axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
@@ -160,7 +161,7 @@ class DeepSeekDenseLayer(nn.Module):
       slot: Optional[int] = None,
   ):
     cfg = self.config
-    if model_mode == models.ModelMode.PREFILL:
+    if model_mode == MODEL_MODE_PREFILL:
       axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
     else:
       axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
