@@ -170,9 +170,9 @@ class PrefillHelper:
     self.max_prefill_length = self.prefill_lengths[-1]
     self.batch_prefill_max_batch_size = batch_prefill_max_batch_size
     self.rng = jax.random.PRNGKey(0) if rng is None else rng
-    if type == PrefillType.DEFAULT:
+    if prefill_type == PrefillType.DEFAULT:
       self._processor = PrefillProcessor(engine)
-    elif type == PrefillType.BATCH:
+    elif prefill_type == PrefillType.BATCH:
       self._batch_processor = BatchedPrefillProcessor(
           engine=engine,
           max_batch_size=batch_prefill_max_batch_size,
@@ -181,7 +181,7 @@ class PrefillHelper:
       # Keep fallback processor for edge cases
       self._processor = PrefillProcessor(engine)
     else:
-      raise ValueError(f"Invalid prefill type: {type}")
+      raise ValueError(f"Invalid prefill type: {prefill_type}")
 
   @functools.partial(jax.jit, static_argnums=(0), donate_argnames=("decode_state",))
   def _jitted_single_prefill(

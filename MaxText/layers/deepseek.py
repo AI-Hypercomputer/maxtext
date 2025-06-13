@@ -225,7 +225,7 @@ class DeepSeekMoELayer(nn.Module):
       slot: Optional[int] = None,
   ):
     cfg = self.config
-    if model_mode == models.ModelMode.PREFILL:
+    if model_mode == MODEL_MODE_PREFILL:
       axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
     else:
       axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
