@@ -40,6 +40,18 @@ class Profiler:
     self.profile_period = config.profile_periodically_period
     self.start_initial_profile_step = self._set_first_profiler_step(config.skip_first_n_steps_for_profiler, offset_step)
     self.finished_initial_profile_step = self._set_last_profiler_step(config.profiler_steps, config.steps)
+    if config.profiler != "" and self.start_initial_profile_step >= config.steps:
+      raise ValueError("Profiling requested but initial profiling step set past training final step")
+
+  def maybe_activate_profiler(self, step, state):
+    """Conditionally activates the profiler based on the current step.
+    This method checks if the current training step matches the step designated
+    for starting an initial profile, or if it meets the criteria for
+    activating a new periodic profile.
+    """
+    if self.mode != "" and (step == self.start_initial_profile_step or self.should_activate_periodic_profile(step)):
+      optional_postfix = f"step_{step}" if self.profile_period > 0 else ""
+      self.activate(blocking_object=state, optional_postfix=optional_postfix)
 
   def activate(self, blocking_object=None, optional_postfix=""):
     """Start the profiler.
@@ -59,6 +71,15 @@ class Profiler:
       self.libcudart.cudaProfilerStart()
     elif self.mode == "xplane":
       jax.profiler.start_trace(self.output_path)
+
+  def maybe_deactivate_profiler(self, step, state):
+    """Conditionally deactivates the profiler based on the current step.
+    This method checks if the current training step matches the step designated
+    for finishing the initial profile, or if it meets the criteria for
+    deactivating a periodic profile.
+    """
+    if self.mode != "" and (step == self.finished_initial_profile_step or self.should_deactivate_periodic_profile(step)):
+      self.deactivate(blocking_object=state)
 
   def deactivate(self, blocking_object=None):
     """End the profiler.
