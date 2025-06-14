@@ -24,7 +24,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 
 from MaxText import max_logging
-from MaxText.common_types import Config, DType, Array
+from MaxText.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Config, DType, Array
 from MaxText.layers.initializers import Initializer, default_embed_init
 
 _MAX_WAVELENGTH = 10_000
@@ -78,7 +78,7 @@ class Embed(nn.Module):
     else:
       self.embedding = embedding
 
-  def __call__(self, inputs: Array) -> Array:
+  def __call__(self, inputs: Array, model_mode: str = MODEL_MODE_TRAIN) -> Array:
     """Embeds the inputs along the last dimension.
 
     Args:
@@ -100,9 +100,14 @@ class Embed(nn.Module):
       output = jnp.dot(one_hot, jnp.asarray(self.embedding, self.dtype))
     else:
       output = jnp.asarray(self.embedding, self.dtype)[inputs]
-    output = nn.with_logical_constraint(
-        output, ("activation_embed_and_logits_batch", "activation_length", "activation_embed")
-    )
+
+    output_prefill_axis_names = ("activation_embed_and_logits_batch", "prefill_activation_length", "activation_embed")
+    output_default_axis_names = ("activation_embed_and_logits_batch", "activation_length", "activation_embed")
+
+    if model_mode == MODEL_MODE_PREFILL:
+      output = nn.with_logical_constraint(output, output_prefill_axis_names)
+    else:
+      output = nn.with_logical_constraint(output, output_default_axis_names)
     return output
 
   def attend(self, query: Array) -> Array:
