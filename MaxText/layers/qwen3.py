@@ -103,7 +103,7 @@ class Qwen3DecoderLayer(nn.Module):
         reshape_q=cfg.reshape_q,
         use_ragged_attention=cfg.use_ragged_attention,
         ragged_block_size=cfg.ragged_block_size,
-        use_qk_norm=cfg.use_qk_norm,
+        use_qk_norm=True,
         query_pre_attn_scalar=query_pre_attn_scalar,
     )
 
