@@ -19,6 +19,7 @@ limitations under the License.
 from dataclasses import dataclass
 from typing import List, Tuple, Union, Optional
 from collections import defaultdict
+from itertools import groupby
 import os
 
 import numpy as np
@@ -51,6 +52,14 @@ LLAMA4_TILES_NUM = 16
 LLAMA4_PIXEL_VALUE_RESCALE_FACTOR = 1.0 / 255.0
 LLAMA4_IMAGE_MEAN = (0.5,) * 3
 LLAMA4_IMAGE_STD = (0.5,) * 3
+LLAMA4_PATCH_SIZE = 14
+LLAMA4_FAKE_IMAGE_TOKEN = 200090  # <|image|>
+LLAMA4_BEGIN_IMAGE_TOKEN = 200080  # <|image_start|>
+LLAMA4_END_IMAGE_TOKEN = 200081  # <|image_end|>
+LLAMA4_PATCH_TOKEN = 200092  # <|patch|>
+LLAMA4_TILE_X_SEPARATOR_TOKEN = 200084  # <|tile_x_separator|>
+LLAMA4_TILE_Y_SEPARATOR_TOKEN = 200085  # <|tile_y_separator|>
+LLAMA4_PIXEL_SHUFFLE_RATIO = 0.5  # TODO(hengtaoguo): We should reuse config.pixel_shuffle_ratio_for_vit
 
 
 @dataclass
@@ -382,23 +391,161 @@ def reformat_prompt(prompt, model_name):
   if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     formatted_prompt = f"<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
     return formatted_prompt
+  elif model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
+    formatted_prompt = (
+        f"<|begin_of_text|><|header_start|>user<|header_end|>\n\n{prompt}<|eot|><|header_start|>assistant<|header_end|>\n\n"
+    )
+    return formatted_prompt
   else:
     return prompt
 
 
-def get_image_offsets(model_name):
+def get_image_offsets(model_name, processor_output: PreprocessorOutput | None):
   """Get the increase in total token count after inserting image token placeholders"""
   if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     return GEMMA_NUM_TOKENS_PER_MEDIA - 1  # -1 because <start_of_image> is already present in the input tokens.
+  if model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
+    assert processor_output is not None, "Processor output must be provided for Llama4 image fusion."
+    assert processor_output.aspect_ratios is not None, "Aspect ratio must be provided for Llama4 image fusion."
+    image_height, image_width = LLAMA4_TILE_SIZE, LLAMA4_TILE_SIZE
+    downsample_ratio = int(round(1.0 / (LLAMA4_PIXEL_SHUFFLE_RATIO**2)))
+    num_patches_per_chunk = int((image_height // LLAMA4_PATCH_SIZE) * (image_width // LLAMA4_PATCH_SIZE) // downsample_ratio)
+    num_images = processor_output.aspect_ratios.shape[0]
+    image_tokens_count = 0
+    for image_index in range(num_images):
+      image_tokens_count += get_num_tokens_for_this_image(processor_output.aspect_ratios[image_index], num_patches_per_chunk)
+    images_offsets = image_tokens_count - num_images
+    return images_offsets  # -num_images because replacing every <|image|> tokens.
   else:
     return 0
 
 
-def prepare_text_for_image_fusion(texts, model_name):
+def prepare_text_for_image_fusion(texts, model_name, processor_output=None):
   if model_name in ["gemma3-4b", "gemma3-12b", "gemma3-27b"]:
     return add_extra_tokens_for_images_gemma3(texts)
+  if model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
+    return add_extra_tokens_for_images_llama4(texts, processor_output)
   else:
     raise ValueError(f"Model {model_name} does not support multimodal inference.")
+
+
+def add_extra_tokens_for_images_llama4(tokens, processor_output: PreprocessorOutput):
+  """Add the extra image tokens to the text tokens for Llama4."""
+  tokens_list = tokens.tolist()
+
+  grouped = groupby(tokens_list, lambda x: x == 200090)
+
+  sublists = []
+  for is_splitter, group in grouped:
+    if not is_splitter:  # If the group does NOT consist of the split_value
+      sublists.append(list(group))
+
+  aspect_ratio = processor_output.aspect_ratios
+  assert aspect_ratio is not None, "Aspect ratio must be provided for Llama4 image fusion."
+
+  new_tokens = []
+
+  image_height, image_width = LLAMA4_TILE_SIZE, LLAMA4_TILE_SIZE
+  downsample_ratio = int(round(1.0 / (LLAMA4_PIXEL_SHUFFLE_RATIO**2)))
+  num_patches_per_chunk = int((image_height // LLAMA4_PATCH_SIZE) * (image_width // LLAMA4_PATCH_SIZE) // downsample_ratio)
+
+  image_index = 0
+  for local_image_index, split_part in enumerate(sublists):
+    new_tokens += split_part  # Add the sublist
+    if local_image_index < aspect_ratio.shape[0]:
+      new_tokens += get_tokens_for_this_image(aspect_ratio[image_index], num_patches_per_chunk)
+      image_index += 1
+  new_tokens_jnp = jnp.array(new_tokens, dtype=jnp.int32)
+  return new_tokens_jnp
+
+
+def get_tokens_for_this_image(this_aspect_ratio, num_patches_per_chunk):
+  """Constructs the token sequence for a single image in Llama4.
+  This function generates a list of special tokens that represent an image,
+  including its tiled structure (if applicable) and a global representation.
+  The sequence includes:
+  - A beginning-of-image token.
+  - Patch tokens for each local tile, interspersed with tile separators
+    if the image is divided into multiple tiles (ratio_h * ratio_w > 1).
+  - A fake image token placeholder for the global image representation.
+  - Patch tokens associated with the global image representation.
+  - An end-of-image token.
+
+  Args:
+    this_aspect_ratio: A tuple (ratio_h, ratio_w) representing the number
+                       of tiles along the height and width dimensions for
+                       the current image.
+    num_patches_per_chunk: The number of patch tokens to use for each
+                           image tile (both local and global).
+
+  Returns:
+    A list of integer token IDs representing the image.
+
+  Example:
+    If `this_aspect_ratio` is [2, 2] and `num_patches_per_chunk` is 4,
+    the output will be:
+    [
+      LLAMA4_BEGIN_IMAGE_TOKEN,
+      LLAMA4_PATCH_TOKEN, LLAMA4_PATCH_TOKEN, LLAMA4_PATCH_TOKEN, LLAMA4_PATCH_TOKEN,
+      LLAMA4_TILE_X_SEPARATOR_TOKEN,
+      LLAMA4_PATCH_TOKEN, LLAMA4_PATCH_TOKEN, LLAMA4_PATCH_TOKEN, LLAMA4_PATCH_TOKEN,
+      LLAMA4_TILE_Y_SEPARATOR_TOKEN,
+      LLAMA4_PATCH_TOKEN, LLAMA4_PATCH_TOKEN, LLAMA4_PATCH_TOKEN, LLAMA4_PATCH_TOKEN,
+      LLAMA4_TILE_X_SEPARATOR_TOKEN,
+      LLAMA4_PATCH_TOKEN, LLAMA4_PATCH_TOKEN, LLAMA4_PATCH_TOKEN, LLAMA4_PATCH_TOKEN,
+      LLAMA4_TILE_Y_SEPARATOR_TOKEN,
+      LLAMA4_FAKE_IMAGE_TOKEN,
+      LLAMA4_PATCH_TOKEN, LLAMA4_PATCH_TOKEN, LLAMA4_PATCH_TOKEN, LLAMA4_PATCH_TOKEN,
+      LLAMA4_END_IMAGE_TOKEN
+    ], total 27 tokens.
+  """
+
+  img_tokens = [LLAMA4_BEGIN_IMAGE_TOKEN]
+  ratio_h, ratio_w = this_aspect_ratio
+  if ratio_h * ratio_w > 1:
+    for _ in range(ratio_h):
+      for xx in range(ratio_w):
+        img_tokens += [LLAMA4_PATCH_TOKEN] * num_patches_per_chunk
+        if xx < ratio_w - 1:
+          img_tokens += [LLAMA4_TILE_X_SEPARATOR_TOKEN]
+
+      img_tokens += [LLAMA4_TILE_Y_SEPARATOR_TOKEN]
+
+  img_tokens += [LLAMA4_FAKE_IMAGE_TOKEN]
+  img_tokens += [LLAMA4_PATCH_TOKEN] * num_patches_per_chunk
+  img_tokens += [LLAMA4_END_IMAGE_TOKEN]
+
+  return img_tokens
+
+
+def get_num_tokens_for_this_image(this_aspect_ratio, num_patches_per_chunk):
+  """This function computes the length of the token sequence that would be generated by
+  `get_tokens_for_this_image`, without explicit loops.
+
+  Args:
+    aspect_ratio: A tuple (ratio_h, ratio_w) representing the number of tiles
+                  along height and width.
+    num_patches_per_chunk: The number of patch tokens per image tile.
+
+  Returns:
+    The total number of tokens for the image representation.
+  """
+  ratio_h, ratio_w = this_aspect_ratio
+
+  # Basic tokens: <|image_start|>, <|image|> (global image placeholder), <|image_end|>
+  # Plus global patch tokens associated with the <|image|> placeholder.
+  num_img_tokens = 3 + num_patches_per_chunk
+
+  if ratio_h * ratio_w > 1:
+    # Additional tokens for local tiles if the image is split into more than one tile:
+    # - Patch tokens for each local tile: ratio_h * ratio_w * num_patches_per_chunk
+    # - Separator tokens (TILE_X_SEPARATOR_TOKEN and TILE_Y_SEPARATOR_TOKEN):
+    #   TILE_X_SEPARATOR_TOKEN count: ratio_h * (ratio_w - 1)
+    #   TILE_Y_SEPARATOR_TOKEN count: ratio_h
+    #   Total separator tokens: ratio_h * ratio_w
+    num_img_tokens += ratio_h * ratio_w * (num_patches_per_chunk + 1)
+
+  return int(num_img_tokens)
 
 
 def add_extra_tokens_for_images_gemma3(

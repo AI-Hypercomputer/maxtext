@@ -24,7 +24,7 @@ from jax.sharding import Mesh
 from flax import linen as nn
 
 from MaxText.common_types import Config, MODEL_MODE_TRAIN
-from MaxText.layers.attentions import DenseGeneral
+from MaxText.layers.attentions import dense_general
 from MaxText.layers.models import DecoderLayer
 from MaxText.layers.normalizations import RMSNorm
 
@@ -113,7 +113,8 @@ class MultiTokenPredictionLayer(nn.Module):
 
     # --- 3. Project Concatenated Features ---
     # Projects from 2*H back down to H
-    projection_layer = DenseGeneral(
+    projection_layer = dense_general(
+        inputs_shape=concatenated_features.shape,
         features=cfg.base_emb_dim,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -135,3 +136,4 @@ class MultiTokenPredictionLayer(nn.Module):
     # Shape: [B, S, H]
     # --- Return Processed Hidden State ---
     return next_hidden_state
+  

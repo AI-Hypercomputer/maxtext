@@ -239,7 +239,7 @@ def update_config_with_tuning_params(base_config: omegaconf.DictConfig,
 
 def main(argv: Sequence[str]) -> None:
   is_pathways = os.environ.get('JAX_PLATFORMS', '') == 'proxy'
-  is_mcjax_0th_worker = int(os.environ['TPU_WORKER_ID']) == 0
+  is_mcjax_0th_worker = int(os.environ.get('TPU_WORKER_ID', -1)) == 0
 
   # Only write once for McJAX. Pathways is single controller,
   # so only can write once.
