@@ -54,8 +54,11 @@ def get_datasets(
     if ";" in data_file_pattern:
       data_file_patterns, weights = zip(*[pattern.split(":") for pattern in data_file_pattern.split(";")])
       assert len(data_file_patterns) == len(weights), "Number of data file patterns and weights must match"
+      weights = [float(weight) for weight in weights]
       weights = [round(weight / sum(weights), 4) for weight in weights]
-      dataset_list = [grain.MapDataset.source(grain.ArrayRecordDataSource(find_data_files(pattern))) for pattern in data_file_patterns]
+      dataset_list = [
+          grain.MapDataset.source(grain.ArrayRecordDataSource(find_data_files(pattern))) for pattern in data_file_patterns
+      ]
       dataset = grain.MapDataset.mix(dataset_list, weights)
     else:
       data_files = find_data_files(data_file_pattern)
