@@ -362,6 +362,10 @@ class Decoder(nn.Module):
         return [llama4.Llama4ScannableBlock]
       else:
         return [llama4.Llama4DecoderLayer]
+    elif self.config.decoder_block == DecoderBlockType.QWEN3:
+      from MaxText.layers import qwen3  # pylint: disable=import-outside-toplevel
+
+      return [qwen3.Qwen3DecoderLayer]
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
@@ -379,6 +383,7 @@ class Decoder(nn.Module):
         DecoderBlockType.SIMPLE,
         DecoderBlockType.SIMPLE_MLP,
         DecoderBlockType.LLAMA4,
+        DecoderBlockType.QWEN3,
     ):
       return RMSNorm
     elif self.config.decoder_block == DecoderBlockType.GPT3:
