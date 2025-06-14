@@ -18,6 +18,7 @@ limitations under the License.
 import os
 import sys
 import unittest
+import pytest
 
 import jax
 from jax.sharding import Mesh
@@ -78,6 +79,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
     return ds
 
+  @pytest.mark.cpu_only
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
     # For training we pack multiple short examples in one example.
@@ -95,6 +97,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
         },
     )
 
+  @pytest.mark.cpu_only
   def test_ds_determinism(self):
     train_ds1 = self.train_ds.batch(64)
     train_ds1 = next(train_ds1.as_numpy_iterator())
@@ -105,6 +108,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
 
     self.assertCountEqual(train_ds1["tfds_id"], train_ds2["tfds_id"])
 
+  @pytest.mark.cpu_only
   def test_batch_determinism(self):
     batch1 = next(self.train_iter)
     train_iter = _tfds_data_processing.make_tfds_train_iterator(self.config, self.mesh, self.process_indices)
@@ -116,6 +120,7 @@ class TfdsDataProcessingTest(unittest.TestCase):
     self.assertTrue(tf.reduce_all(tf.equal(batch1["inputs_position"], batch2["inputs_position"])))
     self.assertTrue(tf.reduce_all(tf.equal(batch1["targets_position"], batch2["targets_position"])))
 
+  @pytest.mark.cpu_only
   def test_for_loop_repeatable(self):
     def get_first_batch(iterator):
       batch = None
