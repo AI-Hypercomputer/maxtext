@@ -419,9 +419,10 @@ class Decoder(nn.Module):
 
   def get_pipeline_stage_module(self, decoder_blocks):
     """get pipeline stage module"""
+
     def get_layer_to_pipeline(blocks, cfg):
       if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
-        return blocks[1] # return the sparse block
+        return blocks[1]  # return the sparse block
       else:
         return blocks[0]
 
@@ -530,14 +531,9 @@ class Decoder(nn.Module):
                 model_mode,
             )
         y = self.pipeline_module(
-          y,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          partition_spec=partition_spec
+            y, decoder_segment_ids, decoder_positions, deterministic, model_mode, partition_spec=partition_spec
         )
-      else: # Not DeepSeek
+      else:  # Not DeepSeek
         y = self.pipeline_module(
             y, decoder_segment_ids, decoder_positions, deterministic, model_mode, partition_spec=partition_spec
         )

@@ -874,13 +874,12 @@ class AttentionOp(nn.Module):
       decoder_segment_ids: Array | None,
       model_mode: str = MODEL_MODE_TRAIN,
   ) -> Array:
-    """CUDNN Flash Attention with JAX SDPA API.
-    """
+    """CUDNN Flash Attention with JAX SDPA API."""
     # These imports are only meant to work in a GPU build.
     # pylint: disable=import-outside-toplevel
     from jax._src.cudnn.fused_attention_stablehlo import (
-      dot_product_attention,
-      MaskType,
+        dot_product_attention,
+        MaskType,
     )
 
     _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
@@ -898,7 +897,7 @@ class AttentionOp(nn.Module):
           scale=1.0,
           dropout_rate=self.dropout_rate,
           qkv_layout="BTNH",
-          return_residual=True
+          return_residual=True,
       )
     else:
       return dot_product_attention(
@@ -909,7 +908,7 @@ class AttentionOp(nn.Module):
           scale=1.0 / math.sqrt(head_dim),
           dropout_rate=self.dropout_rate,
           qkv_layout="BTNH",
-          return_residual=True
+          return_residual=True,
       )
 
   def compute_local_attention(
@@ -1124,8 +1123,9 @@ class AttentionOp(nn.Module):
     stat1 = local_stats[1].reshape((*local_stats[1].shape, 1))
     global_stat = jnp.log(jnp.exp(stat0) + jnp.exp(stat1))
     # # transpose stat to have shape [b, t, n, 1] for elemenwise multiplication
-    attn_out = local_outs[0].astype(jnp.float32) * jnp.exp(stat0 - global_stat).transpose((0, 2, 1, 3)) \
-      + local_outs[1].astype(jnp.float32) * jnp.exp(stat1 - global_stat).transpose((0, 2, 1, 3))
+    attn_out = local_outs[0].astype(jnp.float32) * jnp.exp(stat0 - global_stat).transpose((0, 2, 1, 3)) + local_outs[
+        1
+    ].astype(jnp.float32) * jnp.exp(stat1 - global_stat).transpose((0, 2, 1, 3))
     return attn_out.astype(local_stats[0].dtype)
 
   def normalize_attention(self, local_outs, local_maxes, local_sums):
