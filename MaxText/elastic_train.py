@@ -56,8 +56,6 @@ import jax
 
 from flax.linen import partitioning as nn_partitioning
 
-from ml_goodput_measurement import monitoring
-
 import pathwaysutils
 from pathwaysutils.elastic import manager
 from pathwaysutils.debug import timing
@@ -74,16 +72,20 @@ from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
 from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.metric_logger import MetricLogger
 from MaxText.train import check_example_batch
-from MaxText.train import create_goodput_recorder
 from MaxText.train import get_first_step
 from MaxText.train import load_next_batch
-from MaxText.train import record_goodput
 from MaxText.train import record_scalar_metrics
 from MaxText.train import save_checkpoint
 from MaxText.train import setup_mesh_and_model
 from MaxText.train import setup_train_loop
 from MaxText.train import train_step
 from MaxText.train import validate_train_config
+from MaxText.utils.goodput_utils import (
+    GoodputEvent,
+    create_goodput_recorder,
+    maybe_monitor_goodput,
+    maybe_record_goodput,
+)
 from MaxText.vertex_tensorboard import VertexTensorboardManager
 
 logging.basicConfig()
@@ -188,18 +190,8 @@ def elastic_handler(
   )
 
 
-def train_loop(config, elastic_manager, state=None):
-  """Main Training loop.
-  Args:
-    config:
-    state:
-    elastic_manager:
-  Returns:
-  """
-  # Create a GoodputRecorder to log information
-  recorder = create_goodput_recorder(config)
-  record_goodput(recorder, config, recorder.record_job_start_time if recorder else None)
-
+def train_loop(config, elastic_manager, recorder, state=None):
+  """Main Training loop."""
   (
       init_rng,
       writer,
@@ -211,7 +203,7 @@ def train_loop(config, elastic_manager, state=None):
       data_iterator,
       _,
       state,
-  ) = setup_train_loop(config)
+  ) = setup_train_loop(config, recorder)
 
   # pylint: disable=line-too-long
   (
@@ -240,6 +232,7 @@ def train_loop(config, elastic_manager, state=None):
       donate_argnums=donate_argnums_train,
   )
   running_gcs_metrics = [] if config.gcs_metrics else None
+  metrics = None
 
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
@@ -285,19 +278,19 @@ def train_loop(config, elastic_manager, state=None):
       max_logging.log(f"{step=} {elastic_manager.elastic_down_event_count=} {elastic_manager.good_slice_count=}")
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules), jax.default_device(elastic_manager.default_device):
         with jax.profiler.StepTraceAnnotation("train", step_num=step):
-          record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
-          try:
-            example_batch = load_next_batch(data_iterator, example_batch, config)
-            example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
-          except Exception as e:  # pylint: disable=broad-except
-            max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
-            break
-          record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
+          with maybe_record_goodput(recorder, GoodputEvent.DATA_LOADING):
+            try:
+              example_batch = load_next_batch(data_iterator, example_batch, config)
+              example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
+            except Exception as e:  # pylint: disable=broad-except
+              max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
+              break
+
           check_example_batch(config, example_batch=example_batch)
           # pylint: disable=not-callable
           nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
-          record_goodput(recorder, config, recorder.record_step_start_time if recorder else None, step)
-          state, metrics = p_train_step(state, example_batch, nextrng)
+          with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
+            state, metrics = p_train_step(state, example_batch, nextrng)
 
         step_time_delta = datetime.datetime.now() - last_step_completion
         last_step_completion = datetime.datetime.now()
@@ -388,7 +381,7 @@ def train_loop(config, elastic_manager, state=None):
         ) = ret
 
   if checkpoint_manager is not None:
-    if (int(state.step) - 1) % config.checkpoint_period != 0:
+    if ((int(state.step) - 1) % config.checkpoint_period != 0) and (int(state.step) != 0):
       try:
         state_to_save = state
         if save_checkpoint(
@@ -407,18 +400,20 @@ def train_loop(config, elastic_manager, state=None):
     checkpoint_manager.wait_until_finished()
   metric_logger.write_metrics(running_gcs_metrics, metrics, config.steps - 1)  # final step metrics
   max_utils.close_summary_writer(writer)
-  record_goodput(recorder, config, recorder.record_job_end_time if recorder else None)
-  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-    # pytype: disable=attribute-error
-    compiled = p_train_step.lower(state, example_batch, nextrng).compile()
-    compiled_stats = compiled.memory_analysis()
-    if compiled_stats is not None:
-      max_logging.log(
-          f"Output size: {compiled_stats.output_size_in_bytes}, "
-          f"temp size: {compiled_stats.temp_size_in_bytes}, "
-          f"argument size: {compiled_stats.argument_size_in_bytes}, "
-          f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
-      )
+
+  if example_batch:
+    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+      # pytype: disable=attribute-error
+      compiled = p_train_step.lower(state, example_batch, nextrng).compile()
+      compiled_stats = compiled.memory_analysis()
+      if compiled_stats is not None:
+        max_logging.log(
+            f"Output size: {compiled_stats.output_size_in_bytes}, "
+            f"temp size: {compiled_stats.temp_size_in_bytes}, "
+            f"argument size: {compiled_stats.argument_size_in_bytes}, "
+            f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
+        )
+
   return state
 
 
@@ -489,36 +484,11 @@ def main(argv: Sequence[str]) -> None:
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
     vertex_tensorboard_manager.configure_vertex_tensorboard(config)
 
-  if config.monitor_goodput and jax.process_index() == 0:
-    logger_name = f"goodput_{config.run_name}"
-    # Workload monitoring and Goodput monitoring both uses /workload/performance
-    # GCM metric to publish step_time and step_deviation metrics. For now, we
-    # will disable publishing step deviation metrics to GCM if workload
-    # monitoring is enabled. Will reconcile this in the future.
-    if config.report_performance_metric_for_gcp_monitoring:
-      config.enable_gcp_step_deviation_metrics = False
+  # Goodput configurations
+  maybe_monitor_goodput(config)
+  recorder = create_goodput_recorder(config)
 
-    gcp_options = monitoring.GCPOptions(
-        enable_gcp_goodput_metrics=config.enable_gcp_goodput_metrics,
-        enable_gcp_step_deviation_metrics=config.enable_gcp_step_deviation_metrics,
-    )
-    goodput_monitor = monitoring.GoodputMonitor(
-        job_name=config.run_name,
-        logger_name=logger_name,
-        tensorboard_dir=config.tensorboard_dir,
-        upload_interval=config.goodput_upload_interval_seconds,
-        monitoring_enabled=True,
-        pathway_enabled=config.enable_pathways_goodput,
-        include_badput_breakdown=True,
-        include_step_deviation=config.monitor_step_time_deviation,
-        step_deviation_interval_seconds=config.step_deviation_interval_seconds,
-        gcp_options=gcp_options,
-    )
-    goodput_monitor.start_goodput_uploader()
-    max_logging.log("Started Goodput upload to Tensorboard & GCM in the background!")
-    if config.monitor_step_time_deviation:
-      goodput_monitor.start_step_deviation_uploader()
-      max_logging.log("Started step time deviation upload to Tensorboard & GCM in the background!")
+  # Stack traces configurations
   debug_config = debug_configuration.DebugConfig(
       stack_trace_config=stack_trace_configuration.StackTraceConfig(
           collect_stack_trace=config.collect_stack_trace,
@@ -527,8 +497,10 @@ def main(argv: Sequence[str]) -> None:
       )
   )
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
+
   with diagnostic.diagnose(diagnostic_config):
-    train_loop(config, elastic_manager)
+    with maybe_record_goodput(recorder, GoodputEvent.JOB):
+      train_loop(config, elastic_manager, recorder)
 
 
 if __name__ == "__main__":

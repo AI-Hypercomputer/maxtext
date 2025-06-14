@@ -27,7 +27,9 @@ from jetstream.engine import engine_api
 from MaxText import max_utils
 from MaxText import maxengine
 from MaxText import pyconfig
+from MaxText import profiler
 from MaxText import multimodal_utils
+# Placeholder: internal
 
 # Number of text sequences to process in a single batch.
 _NUM_STREAMS = 1
@@ -92,12 +94,17 @@ def main(argv: Sequence[str]) -> None:
   rng = jax.random.PRNGKey(1234)
   rng, rng_load_params = jax.random.split(rng)
   params = engine.load_params(rng_load_params)
+  prof = profiler.Profiler(config)
 
   text = config.prompt
   prefill_length = config.max_prefill_predict_length
+  processor_output = multimodal_utils.PreprocessorOutput()
   if config.use_multimodal:
     text = multimodal_utils.reformat_prompt(text, config.model_name)
-    prefill_length -= multimodal_utils.get_image_offsets(config.model_name)
+    # TODO(hengtaoguo): Support multiple images as input.
+    images = multimodal_utils.load_image_from_path(config.image_path)
+    processor_output = multimodal_utils.pre_process_image(images, model_name=config.model_name)
+    prefill_length -= multimodal_utils.get_image_offsets(config.model_name, processor_output=processor_output)
 
   metadata = engine.get_tokenizer()
   tokenizer_model = engine.build_tokenizer(metadata)
@@ -107,13 +114,11 @@ def main(argv: Sequence[str]) -> None:
   except AttributeError as _:
     has_chat_template = False
   tokens, true_length = tokenizer_model.encode(text, is_bos=not has_chat_template, prefill_lengths=[prefill_length])
-  processor_output = multimodal_utils.PreprocessorOutput()
   if config.use_multimodal:
-    # TODO(hengtaoguo): Support multiple images as input.
-    images = multimodal_utils.load_image_from_path(config.image_path)
-    processor_output = multimodal_utils.pre_process_image(images, model_name=config.model_name)
-    tokens = multimodal_utils.prepare_text_for_image_fusion(tokens, model_name=config.model_name)
-    true_length += multimodal_utils.get_image_offsets(config.model_name)
+    tokens = multimodal_utils.prepare_text_for_image_fusion(
+        tokens, model_name=config.model_name, processor_output=processor_output
+    )
+    true_length += multimodal_utils.get_image_offsets(config.model_name, processor_output=processor_output)
 
   assert (
       true_length <= config.max_prefill_predict_length
@@ -128,17 +133,20 @@ def main(argv: Sequence[str]) -> None:
   first_token_list = []
   sampled_tokens_list = []
 
+  prof.activate(optional_postfix="trace")
+
   # Prefill
   rng, rng_prefill = jax.random.split(rng)  # Split RNG before calling prefill
   for i in range(_NUM_STREAMS):
-    prefill_result, first_token = engine.prefill(
+    with jax.profiler.StepTraceAnnotation("prefill", stream=i):
+      prefill_result, first_token = engine.prefill(
         params=params,
         padded_tokens=tokens,
         images=processor_output.pixel_values,
         true_length=true_length,
         rng=rng_prefill,
         slot=i,
-    )
+      )
     prefill_result_list.append(prefill_result)
     first_token_list.append(first_token)
 
@@ -151,9 +159,10 @@ def main(argv: Sequence[str]) -> None:
   # Generate
   steps = range(config.max_prefill_predict_length, config.max_target_length)
   sampled_tokens_list.append(_batch_first_result_token(first_token_list, batch_size))
-  for _ in steps:
+  for i in steps:
     rng, rng_generate = jax.random.split(rng)
-    decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
+    with jax.profiler.StepTraceAnnotation("generate", step=i):
+      decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
     sampled_tokens_list.append(sampled_tokens)
 
   # Get results
@@ -166,6 +175,8 @@ def main(argv: Sequence[str]) -> None:
       config.autoregressive_decode_assert
   ), f"generated text mismatch {output=}, {config.autoregressive_decode_assert=}"
 
+  # Deactivate profiler
+  prof.deactivate()
 
 def _validate_config(config):
   assert config.load_full_state_path == "", (
