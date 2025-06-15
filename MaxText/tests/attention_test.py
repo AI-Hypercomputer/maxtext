@@ -1,4 +1,4 @@
-#  Copyright 2023 Google LLC
+#  Copyright 2023–2025 Google LLC
 #
 #  Licensed under the Apache License, Version 2.0 (the "License");
 #  you may not use this file except in compliance with the License.
@@ -32,9 +32,10 @@ import jax.numpy as jnp
 
 from flax.core import freeze
 
-from MaxText import maxtext_utils
-from MaxText import pyconfig
-from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
+from MaxText import maxtext_utils, pyconfig
+from MaxText.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, \
+    DECODING_ACTIVE_SEQUENCE_INDICATOR
+from MaxText.configs.types_g import MaxTextConfig, BaseDatasetConfig, DatasetNestingConfig, BasicTrainingConfig, DatasetType, ModelArchitectureConfig, QuantizationConfig, CheckpointConfig, CheckpointSavingConfig, AttentionMechanismConfig, RunConfig, AttentionKernel
 from MaxText.globals import PKG_DIR
 from MaxText.layers import attentions
 from MaxText.layers.attentions import Attention, MLA, ChunkedCausalMask

@@ -1277,7 +1277,7 @@ class Attention(nn.Module):
     is_nope_layer: bool, whether to skip RoPE on this Attention layer
   """
 
-  config: Config
+  config: Any
   num_query_heads: int
   num_kv_heads: int
   head_dim: int
