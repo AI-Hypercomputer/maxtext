@@ -692,6 +692,9 @@ pagedattn_num_pages: 64  # total number of pages to allocate
 pagedattn_tokens_per_page: 32  # number of tokens each page can hold
 pagedattn_pages_per_compute_block: 4  # number of pages processed together in pallas kernels
 pagedattn_max_pages_per_group: -1  # defaults to number of pages needed to reach max_target_length
+# Alignment of head_dim to the nearest multiple of this value, set to 0 to disable alignment. On
+# TPUs, the head_dim is padded to the nearest multiple of 128.
+pagedattn_head_dim_alignment: 128
 
 
 # Chunked Prefill Parameters
