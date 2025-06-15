@@ -16,6 +16,7 @@
 
 import numpy as np
 import jax
+import jax.numpy as jnp
 
 
 def GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
@@ -227,7 +228,7 @@ def GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=F
   def reshape_kernel(input_tensor, target_shape):
     def to_hf():
       flipped_target_shape = np.flip(np.array(target_shape))
-      return input_tensor.reshape(flipped_target_shape).transpose()
+      return input_tensor.reshape(flipped_target_shape).T
 
     def from_hf():
       return input_tensor.T.reshape(target_shape)
@@ -335,14 +336,204 @@ def GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=F
   return mapping
 
 
+def GEMMA3TEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, scan_layers=False):
+  """
+  Returns a dictionary mapping from MaxText parameter names to
+  HuggingFace Gemma3Text parameter names.
+
+  Args:
+      config (dict): HF model configuration dictionary containing:
+          - num_hidden_layers (int): The number of decoder layers.
+      scan_layers (bool, optional): If True, MaxText layers are 'stacked'
+          into a single param. Defaults to False.
+
+  Returns:
+      dict: A mapping from MaxText parameter names to HF parameter names (str)
+            or lists of names (if scan_layers=True).
+  """
+  n_layers = config["num_hidden_layers"]
+
+  mapping = {
+      "params-token_embedder-embedding": "model.embed_tokens.weight",
+      "params-decoder-decoder_norm-scale": "model.norm.weight",
+  }
+
+  if scan_layers:
+    mapping.update(
+        {
+            "params-decoder-layers-pre_self_attention_norm-scale": [
+                f"model.layers.{i}.input_layernorm.weight" for i in range(n_layers)
+            ],
+            "params-decoder-layers-self_attention-query-kernel": [
+                f"model.layers.{i}.self_attn.q_proj.weight" for i in range(n_layers)
+            ],
+            "params-decoder-layers-self_attention-key-kernel": [
+                f"model.layers.{i}.self_attn.k_proj.weight" for i in range(n_layers)
+            ],
+            "params-decoder-layers-self_attention-value-kernel": [
+                f"model.layers.{i}.self_attn.v_proj.weight" for i in range(n_layers)
+            ],
+            "params-decoder-layers-self_attention-out-kernel": [
+                f"model.layers.{i}.self_attn.o_proj.weight" for i in range(n_layers)
+            ],
+            "params-decoder-layers-self_attention-query_norm-scale": [
+                f"model.layers.{i}.self_attn.q_norm.weight" for i in range(n_layers)  # Assuming q_norm exists
+            ],
+            "params-decoder-layers-self_attention-key_norm-scale": [
+                f"model.layers.{i}.self_attn.k_norm.weight" for i in range(n_layers)  # Assuming k_norm exists
+            ],
+            "params-decoder-layers-post_self_attention_norm-scale": [
+                f"model.layers.{i}.post_attention_layernorm.weight" for i in range(n_layers)
+            ],
+            "params-decoder-layers-pre_ffw_norm-scale": [  # MaxText pre_ffw_norm maps to HF pre_feedforward_layernorm
+                f"model.layers.{i}.pre_feedforward_layernorm.weight" for i in range(n_layers)
+            ],
+            "params-decoder-layers-mlp-wi_0-kernel": [  # gate_proj
+                f"model.layers.{i}.mlp.gate_proj.weight" for i in range(n_layers)
+            ],
+            "params-decoder-layers-mlp-wi_1-kernel": [  # up_proj
+                f"model.layers.{i}.mlp.up_proj.weight" for i in range(n_layers)
+            ],
+            "params-decoder-layers-mlp-wo-kernel": [  # down_proj
+                f"model.layers.{i}.mlp.down_proj.weight" for i in range(n_layers)
+            ],
+            "params-decoder-layers-post_ffw_norm-scale": [  # MaxText post_ffw_norm maps to HF post_feedforward_layernorm
+                f"model.layers.{i}.post_feedforward_layernorm.weight" for i in range(n_layers)
+            ],
+        }
+    )
+  else:
+    for i in range(n_layers):
+      mapping.update(
+          {
+              f"params-decoder-layers_{i}-pre_self_attention_norm-scale": f"model.layers.{i}.input_layernorm.weight",
+              f"params-decoder-layers_{i}-self_attention-query-kernel": f"model.layers.{i}.self_attn.q_proj.weight",
+              f"params-decoder-layers_{i}-self_attention-key-kernel": f"model.layers.{i}.self_attn.k_proj.weight",
+              f"params-decoder-layers_{i}-self_attention-value-kernel": f"model.layers.{i}.self_attn.v_proj.weight",
+              f"params-decoder-layers_{i}-self_attention-out-kernel": f"model.layers.{i}.self_attn.o_proj.weight",
+              f"params-decoder-layers_{i}-self_attention-query_norm-scale": f"model.layers.{i}.self_attn.q_norm.weight",
+              f"params-decoder-layers_{i}-self_attention-key_norm-scale": f"model.layers.{i}.self_attn.k_norm.weight",
+              f"params-decoder-layers_{i}-post_self_attention_norm-scale": f"model.layers.{i}.post_attention_layernorm.weight",
+              f"params-decoder-layers_{i}-pre_ffw_norm-scale": f"model.layers.{i}.pre_feedforward_layernorm.weight",
+              f"params-decoder-layers_{i}-mlp-wi_0-kernel": f"model.layers.{i}.mlp.gate_proj.weight",
+              f"params-decoder-layers_{i}-mlp-wi_1-kernel": f"model.layers.{i}.mlp.up_proj.weight",
+              f"params-decoder-layers_{i}-mlp-wo-kernel": f"model.layers.{i}.mlp.down_proj.weight",
+              f"params-decoder-layers_{i}-post_ffw_norm-scale": f"model.layers.{i}.post_feedforward_layernorm.weight",
+          }
+      )
+  return mapping
+
+
+def GEMMA3TEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, scan_layers=False, saving_to_hf=False):
+  """Creates parameter transformation functions for Gemma3Text."""
+
+  nlayers = config["num_hidden_layers"]
+
+  def pad_and_scale_embedding_gemma3(input_tensor, target_shape):
+    """
+    Handles potential vocabulary size mismatch and scaling for Gemma3 embedding.
+    Assumes input_tensor is the source embedding, target_shape is the destination shape.
+    """
+    source_vocab_size, source_hidden_size = input_tensor.shape
+    target_vocab_size, target_hidden_size = target_shape
+
+    # MaxText embedding = original_embedding * sqrt(hidden_size)
+    # HF embedding = original_embedding (HF model forward pass applies scaling)
+    # Note: config["hidden_size"] is the HF hidden size from the HF config object
+    normalizer = np.dtype("bfloat16").type(config["hidden_size"] ** 0.5)
+
+    # Apply scaling first
+    if saving_to_hf:  # MaxText to HF
+      scaled_tensor = (input_tensor / normalizer).astype(input_tensor.dtype)
+    else:  # HF to MaxText
+      scaled_tensor = (input_tensor * normalizer).astype(input_tensor.dtype)
+
+    # Handle padding/truncation
+    if source_vocab_size > target_vocab_size:
+      output_tensor = scaled_tensor[:target_vocab_size, :]
+    elif source_vocab_size < target_vocab_size:
+      padding_shape = (target_vocab_size - source_vocab_size, target_hidden_size)
+      # Use jnp.zeros for JAX arrays, np.zeros for numpy arrays
+      padding = (
+          jnp.zeros(padding_shape, dtype=scaled_tensor.dtype)
+          if isinstance(scaled_tensor, jax.Array)
+          else np.zeros(padding_shape, dtype=scaled_tensor.dtype)
+      )
+      output_tensor = (
+          jnp.concatenate([scaled_tensor, padding], axis=0)
+          if isinstance(scaled_tensor, jax.Array)
+          else np.concatenate([scaled_tensor, padding], axis=0)
+      )
+    else:  # Vocab sizes match
+      output_tensor = scaled_tensor
+
+    return output_tensor
+
+  def scale_rmsnorm_layer(input_tensor, target_shape):
+    # MaxText norm_scale = hf_norm_scale + 1.0
+    if saving_to_hf:  # MaxText to HF
+      output_tensor = (input_tensor - 1.0).reshape(target_shape)
+      return output_tensor
+    else:  # HF to MaxText
+      output_tensor = (input_tensor + 1.0).reshape(target_shape)
+      return output_tensor
+
+  def reshape_kernel(input_tensor, target_shape):
+    # Used for O, MLP kernels (transpose-like behavior)
+    # MaxText (A, B) -> HF (B, A) or MaxText (A,B,C) -> HF (C, A*B) etc.
+    if saving_to_hf:
+      flipped_target_shape = np.flip(np.array(target_shape))
+      output_tensor = input_tensor.reshape(flipped_target_shape).T
+      return output_tensor
+    else:
+      output_tensor = input_tensor.T.reshape(target_shape)
+      return output_tensor
+
+  mapping = {
+      "params-token_embedder-embedding": pad_and_scale_embedding_gemma3,
+      "params-decoder-decoder_norm-scale": scale_rmsnorm_layer,
+  }
+
+  layer_hooks = {
+      "pre_self_attention_norm-scale": scale_rmsnorm_layer,
+      "self_attention-query-kernel": reshape_kernel,
+      "self_attention-key-kernel": reshape_kernel,
+      "self_attention-value-kernel": reshape_kernel,
+      "self_attention-out-kernel": reshape_kernel,  # O proj is like MLP kernel
+      "self_attention-query_norm-scale": scale_rmsnorm_layer,
+      "self_attention-key_norm-scale": scale_rmsnorm_layer,
+      "post_self_attention_norm-scale": scale_rmsnorm_layer,
+      "pre_ffw_norm-scale": scale_rmsnorm_layer,
+      "mlp-wi_0-kernel": reshape_kernel,
+      "mlp-wi_1-kernel": reshape_kernel,
+      "mlp-wo-kernel": reshape_kernel,
+      "post_ffw_norm-scale": scale_rmsnorm_layer,
+  }
+
+  if scan_layers:
+    for key, hook in layer_hooks.items():
+      mapping[f"params-decoder-layers-{key}"] = hook
+  else:
+    for i in range(nlayers):
+      for key, hook in layer_hooks.items():
+        mapping[f"params-decoder-layers_{i}-{key}"] = hook
+  return mapping
+
+
 PARAM_MAPPING = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "gemma3-4b": GEMMA3TEXT_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "gemma3-12b": GEMMA3TEXT_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "gemma3-27b": GEMMA3TEXT_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
 HOOK_FNS = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "gemma3-4b": GEMMA3TEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "gemma3-12b": GEMMA3TEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "gemma3-27b": GEMMA3TEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }

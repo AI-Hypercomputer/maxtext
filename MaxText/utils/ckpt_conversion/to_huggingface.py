@@ -34,7 +34,7 @@ from MaxText.utils.ckpt_conversion.utils.param_mapping import (
 )
 from MaxText.utils.ckpt_conversion.utils.shape_mapping import SHAPE_MAPPING
 from MaxText.utils.ckpt_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
-from MaxText.utils.ckpt_conversion.utils.utils import (process_leaf_param, save_model_files, TOKENIZER_HF_IDS)
+from MaxText.utils.ckpt_conversion.utils.utils import (process_leaf_param, save_model_files, HF_IDS)
 
 """Convert MaxText unscanned ckpt into HF format"""
 
@@ -83,9 +83,9 @@ def main(argv: Sequence[str]) -> None:
   hf_config_obj = HF_MODEL_CONFIGS[model_key]
 
   # 2. Load Tokenizer
-  if model_key not in TOKENIZER_HF_IDS:
+  if model_key not in HF_IDS:
     raise ValueError(f"HF Tokenizer ID not found for model key: {model_key}")
-  hf_tokenizer_id = TOKENIZER_HF_IDS[model_key]
+  hf_tokenizer_id = HF_IDS[model_key]
   tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id, token=hf_token)
 
   # 3. Get parameter mappings
