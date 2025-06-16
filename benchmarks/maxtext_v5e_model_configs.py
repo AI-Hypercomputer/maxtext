@@ -282,3 +282,67 @@ llama3_1_8b_8192_v5e_256 = _add_to_model_dictionary(
         },
     ),
 )
+
+llama3_1_8b_8192_v5e_256_real_data = _add_to_model_dictionary(
+    v5e_model_dict,
+    MaxTextModel(
+        model_name="llama3_1-8b-8192-v5e-256-real-data",
+        model_type="llama3.1-8b",
+        tuning_params={
+            "per_device_batch_size": 2,
+            "ici_fsdp_parallelism": -1,
+            "remat_policy": "custom",
+            "decoder_layer_input": "offload",
+            "out_proj": "offload",
+            "query_proj": "offload",
+            "key_proj": "offload",
+            "value_proj": "offload",
+            "max_target_length": 8192,
+            "attention": "flash",
+            "use_iota_embed": True,
+            "dataset_path": "gs://trillium-scale-datasets-q1-25-west",
+            "dataset_type": "tfds",
+            "enable_checkpointing": False,
+            "async_checkpointing": True,
+            "checkpoint_period": 20,
+            "enable_checkpoint_cloud_logger": True,
+            "sa_block_q": 2048,
+            "sa_block_kv": 2048,
+            "sa_block_kv_compute": 2048,
+            "sa_block_q_dkv": 2048,
+            "sa_block_kv_dkv": 2048,
+            "sa_block_kv_dkv_compute": 2048,
+            "sa_block_q_dq": 2048,
+            "sa_block_kv_dq": 2048,
+            "sa_use_fused_bwd_kernel": True,
+            "gcs_metrics": True,
+            "profiler": "xplane",
+            "skip_first_n_steps_for_profiler": 10,
+            "profiler_steps": 5,
+            "tokenizer_type": "tiktoken",
+            "tokenizer_path": "assets/tokenizer_llama3.tiktoken",
+        },
+        xla_flags=(
+            xla_flags_library.DENSE_VMEM_LIMIT_FLAG
+            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+            + xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_ALL_REDUCE
+            + xla_flags_library.HOST_OFFLOAD_FLAGS
+        ),
+        pathways_xla_flag_options={
+            xla_flags_library.REMOVE: [
+                "--2a886c8_chip_config_name=megachip_tccontrol"
+            ],
+            xla_flags_library.ADD_SERVER: (
+                xla_flags_library.ENHANCED_LAUNCH_BARRIER
+            ),
+            xla_flags_library.ADD_PROXY: (
+                xla_flags_library.ENHANCED_LAUNCH_BARRIER
+            ),
+            xla_flags_library.ADD_WORKER: (
+                xla_flags_library.ENHANCED_LAUNCH_BARRIER
+            ),
+        },
+    ),
+)

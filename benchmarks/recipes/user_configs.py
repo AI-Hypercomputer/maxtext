@@ -16,35 +16,38 @@ limitations under the License.
 """Define user specific configurations for recipes here."""
 
 import os
-
 import maxtext_xpk_runner as mxr
 from xpk_configs import XpkClusterConfig
 
+# Cluster Parameters
 cluster_config = XpkClusterConfig(
-    cluster_name="test-v5e-32-cluster",
-    project="cloud-tpu-cluster",
-    zone="us-south1-a",
+    cluster_name="pw-scale-test-v5e-32",
+    project="cloud-tpu-multipod-dev",
+    zone="us-south1",
     device_type="v5litepod-32",
 )
-xpk_path = "~/xpk"
 
+# Path to your local xpk checkout
+xpk_path = os.path.join("~", "xpk")
+
+# User and project details
 user = os.environ["USER"]
-region = "-".join(cluster_config.zone.split("-")[:-1])
-proxy_image = (
-    f"us-docker.pkg.dev/path/to/{user}/proxy_server"
-)
-server_image = (
-    f"us-docker.pkg.dev/path/to/{user}/server"
-)
-colocated_python_image = f"gcr.io/{cluster_config.project}/path/to/{user}/colocated_python_sidecar"
-runner = f"gcr.io/{cluster_config.project}/{user}_maxtext_latest:latest"
-base_output_directory = f"gs://{user}-{region}/{user}"
-headless = True
+project = cluster_config.project
+country = "us"  # Used for GCS bucket naming
+
+# GCS bucket for output
+base_output_directory = f"gs://{user}-{project}-{country}/pw_small_run/"
+
+# Docker Image URIs
+proxy_image = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/sujinesh/unsanitized_proxy_server"
+server_image = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/sujinesh/unsanitized_server"
+runner = "gcr.io/tpu-prod-env-multipod/sujinesh_maxtext_latest"
+colocated_python_image = "us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/sujinesh/remote_python_sidecar_server"
+
+# Pathways-specific configurations
 pathways_config = mxr.PathwaysConfig(
     server_image=server_image,
     proxy_server_image=proxy_image,
     runner_image=runner,
     colocated_python_sidecar_image=colocated_python_image,
-    headless=headless,
 )
-headless_workload_name = f"{user[:3]}-headless"
