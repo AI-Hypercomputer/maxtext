@@ -55,15 +55,7 @@ def main_wrapper(x, routing_table):
     input_offsets, send_sizes, output_offsets, recv_sizes = get_ra2a_inputs(routing_table)
     output_shape = x
     # output_shape = jnp.tile(x, (expert_parallelism, 1)) # necessary for worst case in real models
-    output = ra2a_wrapper(
-        x,
-        output_shape,
-        input_offsets,
-        send_sizes,
-        output_offsets,
-        recv_sizes,
-    )
-    return output
+    return output_shape, input_offsets, send_sizes, output_offsets, recv_sizes
 
 @functools.partial(
     shard_map.shard_map,
@@ -187,29 +179,28 @@ def get_all_to_all_params(all_shards_group_sizes):
 
 
 ##### Non-vmap #####
-# jit_wrapper = jax.jit(main_wrapper)
-# print(f"{x.shape=}", flush=True)
-# x_a2a = jit_wrapper(x, routing_table)
-# print("Successfully ran wrapper (non - vmap)")
-# print(x_a2a)
-# breakpoint()
+jit_wrapper = jax.jit(main_wrapper)
+print(f"{x.shape=}", flush=True)
+output_shape, input_offsets, send_sizes, output_offsets, recv_sizes = jit_wrapper(x, routing_table)
+print("Successfully ran wrapper (non - vmap)")
+breakpoint()
+
 
 
 ##### Vmap #####
-# vmap_func = jax.vmap(
-#     main_wrapper,
-#     spmd_axis_name="pipeline",
-# )
-# jit_vmap_func = jax.jit(vmap_func)
+vmap_func = jax.vmap(
+    main_wrapper,
+    spmd_axis_name="pipeline",
+)
+jit_vmap_func = jax.jit(vmap_func)
 
-# x_vmap = jnp.expand_dims(x, axis=0)
-# x_vmap = jnp.tile(x_vmap, (pipeline_parallelism, 1, 1))
-# x_vmap = jax.device_put(x_vmap, NamedSharding(mesh, jax.sharding.PartitionSpec("pipeline", "expert", None)))
+x_vmap = jnp.expand_dims(x, axis=0)
+x_vmap = jnp.tile(x_vmap, (pipeline_parallelism, 1, 1))
+x_vmap = jax.device_put(x_vmap, NamedSharding(mesh, jax.sharding.PartitionSpec("pipeline", "expert", None)))
 
-# routing_table = jnp.expand_dims(routing_table, axis=0)
-# routing_table = jnp.tile(routing_table, (pipeline_parallelism, 1, 1))
-# routing_table = jax.device_put(routing_table, NamedSharding(mesh, jax.sharding.PartitionSpec("pipeline", "expert", None)))
-# x_a2a = jit_vmap_func(x_vmap, routing_table)
-# print("Successfully ran vmap!!")
-# print(x_a2a)
-# breakpoint()
+routing_table = jnp.expand_dims(routing_table, axis=0)
+routing_table = jnp.tile(routing_table, (pipeline_parallelism, 1, 1))
+routing_table = jax.device_put(routing_table, NamedSharding(mesh, jax.sharding.PartitionSpec("pipeline", "expert", None)))
+output_shape, input_offsets, send_sizes, output_offsets, recv_sizes = jit_vmap_func(x_vmap, routing_table)
+print("Successfully ran vmap!!")
+breakpoint()
