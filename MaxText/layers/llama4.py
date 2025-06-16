@@ -297,7 +297,12 @@ class Llama4MultiModalProjector(nn.Module):
     Returns:
       Tensor of shape [batch_size*num_patches*(pixel_shuffle_ratio**2), emb_dim]
     """
+    b, t, c, d = image_features.shape
+    image_features = image_features.reshape(b * t, c, d)
     hidden_states = self.linear(image_features)
+    _, c, d = hidden_states.shape
+    hidden_states = hidden_states.reshape(b, t, c, d)
+    jax.debug.print("Llama4MultiModalProjector output {}", hidden_states.mean())
     return hidden_states
 
 
@@ -800,7 +805,7 @@ class Llama4VisionModel(nn.Module):
 
     # Unfold convolution to extract patches
     jax.debug.print("pixel_values {}", pixel_values.mean())
-    # pixel_values = jnp.ones_like(pixel_values) * 0.1
+    # pixel_values = jnp.ones_like(pixel_values) * 0.15
     # jax.debug.print("pixel_values ones before {}", pixel_values.mean())
     hidden_states = Llama4UnfoldConvolution(config=cfg)(pixel_values)
     jax.debug.print("patch_embedding {}", hidden_states.mean())
@@ -833,5 +838,7 @@ class Llama4VisionModel(nn.Module):
     jax.debug.print("vision_adapter {}", hidden_states.mean())
     # jax.debug.print("vision_adapter {}", hidden_states.shape)
     jax.debug.print("*"*50)
+    _, patch_num, patch_dim = hidden_states.shape
+    hidden_states = jnp.reshape(hidden_states, [b, t, patch_num, patch_dim])
 
     return hidden_states  # [batch_size, num_patches, hidden_size_for_vit]

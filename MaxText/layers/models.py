@@ -476,9 +476,15 @@ class Decoder(nn.Module):
             vision_embeddings=image_embeddings,
             mask=bidirectional_mask,
         )
-      # TODO(hengtaoguo): Add support for other multimodal models such as Llama4, refactor if needed
       elif cfg.model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
-        y = y
+        jax.debug.print("y.mean() {}", y.mean())
+        y = multimodal_utils.merge_mm_embeddings(
+            text_embeddings=y,
+            vision_embeddings=image_embeddings,
+            mask=bidirectional_mask,
+        )
+        jax.debug.print("y.mean() {}", y.mean())
+      # TODO(hengtaoguo): Add support for other multimodal models such as Llama4, refactor if needed
       else:
         raise ValueError(f"Unsupported model_name for multimodal: {cfg.model_name}")
 
@@ -792,6 +798,8 @@ class Transformer(nn.Module):
 
       if self.config.decoder_block == DecoderBlockType.GEMMA3:
         bidirectional_mask = decoder_input_tokens == multimodal_utils.GEMMA_TOKEN_PLACEHOLDER
+      elif self.config.decoder_block == DecoderBlockType.LLAMA4:
+        bidirectional_mask = decoder_input_tokens == multimodal_utils.LLAMA4_PATCH_TOKEN
 
     logits = self.decoder(
         decoder_input_tokens=decoder_input_tokens,

@@ -49,7 +49,7 @@ OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 # Multimodal constants
 NUM_IMAGES_PER_SEQUENCE = 1
 NUM_IMAGE_CHANNELS = 3
-NUM_TILES_PER_IMAGE = 1  # Fake number of tiles for llama4, init purpose
+NUM_TILES_PER_IMAGE = 5  # Fake number of tiles for llama4, init purpose
 
 
 def get_input_data_sharding(config, mesh):

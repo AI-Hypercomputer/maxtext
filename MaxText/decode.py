@@ -158,6 +158,9 @@ def main(argv: Sequence[str]) -> None:
     )
     true_length += multimodal_utils.get_image_offsets(config.model_name, processor_output=processor_output)
 
+  # print(tokens)
+  count = (tokens == 200092).sum()
+  print(f"tokens 200092 count: {count}")
   assert (
       true_length <= config.max_prefill_predict_length
   ), f"Input token length {true_length} is longer than {config.max_prefill_predict_length=}"
