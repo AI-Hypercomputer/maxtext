@@ -23,7 +23,7 @@ limitations under the License.
 import datetime
 import os
 import time
-from MaxText.utils.goodput_utils import GoodputEvent, create_goodput_recorder, maybe_record_goodput
+from MaxText.utils.goodput_utils import GoodputEvent, create_goodput_recorder, maybe_monitor_goodput, maybe_record_goodput
 import ray
 import asyncio
 import random as py_rand
@@ -85,24 +85,8 @@ class MaxtextTrainer(ray_cluster.ResilientWorker):
     if self.config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
       self.vertex_tensorboard_manager.configure_vertex_tensorboard(self.config)
 
-    if self.config.monitor_goodput and jax.process_index() == 0:
-      logger_name = f"goodput_{self.config.run_name}"
-      self.goodput_monitor = monitoring.GoodputMonitor(
-        job_name=self.config.run_name,
-        logger_name=logger_name,
-        tensorboard_dir=self.config.tensorboard_dir,
-        upload_interval=self.config.goodput_upload_interval_seconds,
-        monitoring_enabled=True,
-        pathway_enabled=self.config.enable_pathways_goodput,
-        include_badput_breakdown=True,
-        include_step_deviation=self.config.monitor_step_time_deviation,
-        step_deviation_interval_seconds=self.config.step_deviation_interval_seconds,
-      )
-      self.goodput_monitor.start_goodput_uploader()
-      max_logging.log("Started Goodput upload to Tensorboard in the background!")
-      if self.config.monitor_step_time_deviation:
-        self.goodput_monitor.start_step_deviation_uploader()
-        max_logging.log("Started step time deviation upload to Tensorboard in the background!")
+    maybe_monitor_goodput(self.config)
+    self.recorder = create_goodput_recorder(self.config)
       
     debug_config = debug_configuration.DebugConfig(
       stack_trace_config=stack_trace_configuration.StackTraceConfig(
@@ -133,10 +117,9 @@ class MaxtextTrainer(ray_cluster.ResilientWorker):
     train_loop(self.config, recorder, state=state, hearbeat_fn=self.heartbeat, failure_fn=failure_fn)
 
   def run(self):
-    recorder = create_goodput_recorder(self.config)
     with diagnostic.diagnose(self.diagnostic_config):
-      with maybe_record_goodput(recorder, GoodputEvent.JOB):
-        self._train_loop(recorder)
+      with maybe_record_goodput(self.recorder, GoodputEvent.JOB):
+        self._train_loop(self.recorder)
 
 def main(argv: Sequence[str]) -> None:
   ray.init(address='auto', logging_level=0)
