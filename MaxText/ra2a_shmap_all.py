@@ -179,10 +179,30 @@ def get_all_to_all_params(all_shards_group_sizes):
     return output_2
 
 
-
+##### Non-vmap #####
 jit_wrapper = jax.jit(main_wrapper)
 print(f"{x.shape=}", flush=True)
 x_a2a = jit_wrapper(x, routing_table)
 print("Successfully ran wrapper (non - vmap)")
+print(x_a2a)
+breakpoint()
+
+
+##### Vmap #####
+vmap_func = jax.vmap(
+    main_wrapper,
+    spmd_axis_name="pipeline",
+)
+jit_vmap_func = jax.jit(vmap_func)
+
+x_vmap = jnp.expand_dims(x, axis=0)
+x_vmap = jnp.tile(x_vmap, (pipeline_parallelism, 1, 1))
+x_vmap = jax.device_put(x_vmap, NamedSharding(mesh, jax.sharding.PartitionSpec("pipeline", "expert", None)))
+
+routing_table = jnp.expand_dims(routing_table, axis=0)
+routing_table = jnp.tile(routing_table, (pipeline_parallelism, 1, 1))
+routing_table = jax.device_put(routing_table, NamedSharding(mesh, jax.sharding.PartitionSpec("pipeline", "expert", None)))
+x_a2a = jit_vmap_func(x_vmap, routing_table)
+print("Successfully ran vmap!!")
 print(x_a2a)
 breakpoint()
