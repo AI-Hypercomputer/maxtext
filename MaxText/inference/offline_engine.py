@@ -126,6 +126,14 @@ class SafeThead(threading.Thread):
             # Kill the process if a thread encounters an error
             os.kill(os.getpid(), signal.SIGKILL)
 
+def _block_until_ready_pytree(tree: Any):
+    """Helper to call block_until_ready on all JAX arrays in a Pytree."""
+    if tree is None:
+        return
+    jax.tree_util.tree_map(
+        lambda x: x.block_until_ready() if hasattr(x, 'block_until_ready') else None,
+        tree
+    )
 
 class PrefillType(Enum):
     DEFAULT = "default"
@@ -628,6 +636,8 @@ class ReplicaWorker:
         else:
             self.params = jax.device_put(params, destination_sharding)
 
+        # Ensure JAX operations for parameter update are complete before returning.
+        _block_until_ready_pytree(self.params)
     def start_inference(
         self,
         data_queue: queue.Queue,
@@ -780,6 +790,8 @@ class ReplicaWorker:
         max_logging.log("Replica {}. Prefill done".format(self.worker_id))
         # Update decode state
         self.decode_state = decode_state
+        # Ensure the decode_state (potentially modified by JITted prefill) is ready.
+        _block_until_ready_pytree(self.decode_state)
 
         # Process each prefill result
         for i, prefill_result in enumerate(prefill_result):
@@ -820,6 +832,9 @@ class ReplicaWorker:
             self.decode_state, result_tokens, log_prob = self._jitted_generate_fn(
                 self.params, self.decode_state, self.rng
             )
+            # Ensure the decode_state (KV cache) is ready after modification by JITted generate.
+            _block_until_ready_pytree(self.decode_state)
+
             # Add token to detokenization queue
             start_time = time.time()
             with jax.profiler.TraceAnnotation("convert_to_numpy"):

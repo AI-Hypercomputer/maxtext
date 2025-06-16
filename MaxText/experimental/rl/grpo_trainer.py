@@ -1050,15 +1050,17 @@ def train_loop(config, config_inference, state=None):
     worker_config_train,
     worker_data_buffer,
     worker_input_data_shardings,
+    engine_lock,
     stop_event
   ):
     while not stop_event.is_set():
       try:
         with jax.profiler.StepTraceAnnotation("inference"):
-          thread_example_batch = load_next_batch(worker_data_iterator, thread_example_batch, worker_config_train)
+          thread_example_batch = load_next_batch(worker_data_iterator, example_batch, worker_config_train)
           # Trim data for inference processing
           thread_example_batch_trimmed = jax.tree_util.tree_map(lambda arr: arr[:int(worker_config_train.per_device_batch_size * worker_config_train.inference_replicas * worker_config_train.inference_devices_per_replica)], thread_example_batch)
-          processed_batch = generate_offline_completions(worker_config_inference, worker_tokenizer_model, worker_inference_engine, thread_example_batch_trimmed)
+          with engine_lock:
+            processed_batch = generate_offline_completions(worker_config_inference, worker_tokenizer_model, worker_inference_engine, thread_example_batch_trimmed)          
           processed_batch = jax.lax.with_sharding_constraint(processed_batch, worker_input_data_shardings)
           worker_data_buffer.put_nowait(processed_batch)
       except StopIteration:
@@ -1071,6 +1073,7 @@ def train_loop(config, config_inference, state=None):
     max_logging.log("Generation worker thread finished.")
 
   stop_event = threading.Event()
+  inference_engine_lock = threading.Lock()
   generation_thread = threading.Thread(
       target=generation_worker_fn,
       args=(
@@ -1081,132 +1084,142 @@ def train_loop(config, config_inference, state=None):
           config, # Main config for load_next_batch
           data_buffer,
           input_data_shardings, # Sharding for the data put into the buffer
+          inference_engine_lock,
           stop_event,
       ),
       daemon=True # So it exits when the main thread exits
   )
   generation_thread.start()
-  for step in np.arange(start_step, config.steps):
-    if step == first_profiling_step or prof.should_activate_periodic_profile(step):
-      optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
-      prof.activate(blocking_object=state, optional_postfix=optional_postfix)
-    # inference_params = [param_buffer.pull() for _ in range(len(inference_data_shardings))]
-    
-
-    # with jax.profiler.StepTraceAnnotation("inference", step_num=step):
-    #   record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
-    #   example_batch = load_next_batch(data_iterator, example_batch, config)
-    #   record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
-    #   # TODO(mohitkhatwani): This is a workaround to just load the data required for k replicas, right now we load data based of num_global_devices
-    #   example_batch = jax.tree_util.tree_map(lambda arr: arr[:int(config.per_device_batch_size * config.inference_replicas * config.inference_devices_per_replica)], example_batch)
-    #   # example_batches = filter_and_split(config_inference, example_batch, config.inference_replicas, int(config_inference.per_device_batch_size * inference_meshes[0].devices.size))
+  try:
+    for step in np.arange(start_step, config.steps):
+      if step == first_profiling_step or prof.should_activate_periodic_profile(step):
+        optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
+        prof.activate(blocking_object=state, optional_postfix=optional_postfix)
+      # inference_params = [param_buffer.pull() for _ in range(len(inference_data_shardings))]
       
-    #   for k, v in example_batch.items():
-    #     assert v.ndim in (1, 2), f"Invalid {v.shape=} found for key={k}"
-    #     if v.ndim == 2:
-    #       example_batch[k] = v[: config.micro_batch_size_to_train_on, :]
-    #     else:
-    #       example_batch[k] = v[: config.micro_batch_size_to_train_on]
-    #   example_batch = generate_offline_completions(config_inference, tokenizer_model, inference_engine, example_batch)
-    #   example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
-    #   data_buffer.put_nowait(example_batch)
 
-    with jax.profiler.StepTraceAnnotation("train", step_num=step):
-      try:
-        example_batch = data_buffer.get(timeout=1) # Adjust timeout as needed
-      except queue.Empty:
-        if not generation_thread.is_alive():
-          max_logging.log("Generation worker is not alive and data buffer is empty. Exiting.")
-          break
-        else:
-          max_logging.log("Waiting for data from generation worker. Retrying or check worker status.")
-          # Potentially skip step or handle error
-          continue # Or break, depending on desired behavior
-      train_rng, rng = random.split(init_rng)
-      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-        state, metrics = p_train_step(state, example_batch, train_rng)
-    with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
-      if step != 0 and step % config.inference_rollouts == 0:
-        if config.use_pathways_reshard:
-          pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
-        else:
-          pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
-    step_time_delta = datetime.datetime.now() - last_step_completion
-    last_step_completion = datetime.datetime.now()
-    record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
-    if performance_metric_queue:
-      performance_metric_queue.put(step_time_delta.total_seconds())
+      # with jax.profiler.StepTraceAnnotation("inference", step_num=step):
+      #   record_goodput(recorder, config, recorder.record_data_loading_start_time if recorder else None)
+      #   example_batch = load_next_batch(data_iterator, example_batch, config)
+      #   record_goodput(recorder, config, recorder.record_data_loading_end_time if recorder else None)
+      #   # TODO(mohitkhatwani): This is a workaround to just load the data required for k replicas, right now we load data based of num_global_devices
+      #   example_batch = jax.tree_util.tree_map(lambda arr: arr[:int(config.per_device_batch_size * config.inference_replicas * config.inference_devices_per_replica)], example_batch)
+      #   # example_batches = filter_and_split(config_inference, example_batch, config.inference_replicas, int(config_inference.per_device_batch_size * inference_meshes[0].devices.size))
+        
+      #   for k, v in example_batch.items():
+      #     assert v.ndim in (1, 2), f"Invalid {v.shape=} found for key={k}"
+      #     if v.ndim == 2:
+      #       example_batch[k] = v[: config.micro_batch_size_to_train_on, :]
+      #     else:
+      #       example_batch[k] = v[: config.micro_batch_size_to_train_on]
+      #   example_batch = generate_offline_completions(config_inference, tokenizer_model, inference_engine, example_batch)
+      #   example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
+      #   data_buffer.put_nowait(example_batch)
 
-    if checkpoint_manager is not None:
-      state_to_save = state if not config.use_dpo else _split_grpo_state(state)[0]
-      if save_checkpoint(checkpoint_manager, int(step), state_to_save, config.dataset_type, data_iterator, config):
-        checkpointing.print_save_message(step, config.async_checkpointing)
-
-      # Upon preemption, exit when and only when all ongoing saves are complete.
-      if checkpoint_manager.reached_preemption(step):
-        checkpoint_manager.wait_until_finished()
-        sys.exit()
-
-    metric_logger.write_metrics(running_gcs_metrics, metrics, step)
-
-    if config.dump_hlo and step == start_step:
-      jax.block_until_ready(state)  # Ensure compilation has finished.
-      max_utils.upload_dump(
-          config.dump_hlo_local_dir,
-          config.dump_hlo_gcs_dir,
-          module_name=config.dump_hlo_module_name,
-          delete_local_after=config.dump_hlo_delete_local_after,
-          all_host_upload=config.dump_hlo_upload_all,
-      )
-
-    if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
-      assert eval_data_iterator
-      cumulative_eval_metrics = {
-          "scalar": {
-              "eval/total_loss": 0.0,
-              "eval/total_weights": 0.0,
-              "eval/avg_loss": 0.0,
-              "eval/moe_lb_loss": 0.0,
-          }
-      }
-      eval_dpo_reward_accuracy = 0.0
-      eval_step_count = 0
-      # pylint: disable=not-callable
-      for eval_batch in eval_data_iterator:
-        if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
-          break
+      with jax.profiler.StepTraceAnnotation("train", step_num=step):
+        while True:
+          if not generation_thread.is_alive() and data_buffer.empty():
+            max_logging.log("Generation worker is not alive and data buffer is empty. Exiting.")
+            break
+          try:
+            example_batch = data_buffer.get(timeout=1)  # Wait for data
+            break  # Exit loop once data is successfully fetched
+          except queue.Empty:
+            max_logging.log("Waiting for data...")
+            continue  # Retry
+        train_rng, rng = random.split(init_rng)
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-          eval_metrics = p_eval_step(state, eval_batch, rng)
-        cumulative_eval_metrics["scalar"]["eval/total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
-        cumulative_eval_metrics["scalar"]["eval/total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
-        cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] += float(eval_metrics["scalar"]["evaluation/moe_lb_loss"])
-        eval_dpo_reward_accuracy += float(eval_metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0))  # for dpo only
-        max_logging.log(f"Completed eval step {eval_step_count}")
-        eval_step_count += 1
-      eval_loss = cumulative_eval_metrics["scalar"]["eval/total_loss"] / (
-          cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS
-      )
-      cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
-      cumulative_eval_metrics["scalar"]["eval/avg_moe_lb_loss"] = (
-          cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
-      )
-      if config.use_dpo:
-        cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = eval_dpo_reward_accuracy / eval_step_count
-      metric_logger.write_metrics(running_gcs_metrics, cumulative_eval_metrics, step, is_training=False)
-      max_logging.log(
-          f"average loss after {step=}: {eval_step_count=}, {eval_loss=},"
-          f" total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}"
-      )
-      if eval_loss <= config.target_eval_loss:
-        max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
-        prof.deactivate()
-        break
+          state, metrics = p_train_step(state, example_batch, train_rng)
+      with jax.profiler.StepTraceAnnotation("transfer data", step_num=step):
+        if step != 0 and step % config.inference_rollouts == 0:
+          if config.use_pathways_reshard:
+            pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
+          else:
+            pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=False)
+      step_time_delta = datetime.datetime.now() - last_step_completion
+      last_step_completion = datetime.datetime.now()
+      record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
+      if performance_metric_queue:
+        performance_metric_queue.put(step_time_delta.total_seconds())
 
-    if step == last_profiling_step or prof.should_deactivate_periodic_profile(step):
-      prof.deactivate(blocking_object=state)
+      if checkpoint_manager is not None:
+        state_to_save = state if not config.use_dpo else _split_grpo_state(state)[0]
+        if save_checkpoint(checkpoint_manager, int(step), state_to_save, config.dataset_type, data_iterator, config):
+          checkpointing.print_save_message(step, config.async_checkpointing)
 
-    if step == start_step:
-      max_utils.print_mem_stats("After params initialized")
+        # Upon preemption, exit when and only when all ongoing saves are complete.
+        if checkpoint_manager.reached_preemption(step):
+          checkpoint_manager.wait_until_finished()
+          sys.exit()
+
+      metric_logger.write_metrics(running_gcs_metrics, metrics, step)
+
+      if config.dump_hlo and step == start_step:
+        jax.block_until_ready(state)  # Ensure compilation has finished.
+        max_utils.upload_dump(
+            config.dump_hlo_local_dir,
+            config.dump_hlo_gcs_dir,
+            module_name=config.dump_hlo_module_name,
+            delete_local_after=config.dump_hlo_delete_local_after,
+            all_host_upload=config.dump_hlo_upload_all,
+        )
+
+      if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
+        assert eval_data_iterator
+        cumulative_eval_metrics = {
+            "scalar": {
+                "eval/total_loss": 0.0,
+                "eval/total_weights": 0.0,
+                "eval/avg_loss": 0.0,
+                "eval/moe_lb_loss": 0.0,
+            }
+        }
+        eval_dpo_reward_accuracy = 0.0
+        eval_step_count = 0
+        # pylint: disable=not-callable
+        for eval_batch in eval_data_iterator:
+          if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
+            break
+          with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+            eval_metrics = p_eval_step(state, eval_batch, rng)
+          cumulative_eval_metrics["scalar"]["eval/total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
+          cumulative_eval_metrics["scalar"]["eval/total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
+          cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] += float(eval_metrics["scalar"]["evaluation/moe_lb_loss"])
+          eval_dpo_reward_accuracy += float(eval_metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0))  # for dpo only
+          max_logging.log(f"Completed eval step {eval_step_count}")
+          eval_step_count += 1
+        eval_loss = cumulative_eval_metrics["scalar"]["eval/total_loss"] / (
+            cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS
+        )
+        cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
+        cumulative_eval_metrics["scalar"]["eval/avg_moe_lb_loss"] = (
+            cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
+        )
+        if config.use_dpo:
+          cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = eval_dpo_reward_accuracy / eval_step_count
+        metric_logger.write_metrics(running_gcs_metrics, cumulative_eval_metrics, step, is_training=False)
+        max_logging.log(
+            f"average loss after {step=}: {eval_step_count=}, {eval_loss=},"
+            f" total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}"
+        )
+        if eval_loss <= config.target_eval_loss:
+          max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
+          prof.deactivate()
+          break
+
+      if step == last_profiling_step or prof.should_deactivate_periodic_profile(step):
+        prof.deactivate(blocking_object=state)
+
+      if step == start_step:
+        max_utils.print_mem_stats("After params initialized")
+  finally:
+    max_logging.log("Training loop finished or exited. Signaling generation worker to stop.")
+    stop_event.set()
+    # Wait for the generation thread to finish
+    generation_thread.join(timeout=60.0) # Increased timeout
+    if generation_thread.is_alive():
+        max_logging.log("Warning: Generation worker did not stop in time after loop completion.")
+      
 
   if checkpoint_manager is not None:
     checkpoint_manager.wait_until_finished()
