@@ -837,7 +837,11 @@ def train_loop(config, recorder, state=None):
 
   metric_logger = MetricLogger(writer, config)
   input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
-  max_utils.compile_sample_batch(data_iterator, p_train_step, state, config, mesh, input_data_shardings)
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    shaped_batch = maxtext_utils.get_shaped_batch(config)
+    compiled = p_train_step.lower(state, shaped_batch, jax.random.PRNGKey(0) ).compile()
+    compiled_stats = compiled.memory_analysis()
+    max_utils.print_compiled_memory_stats(compiled_stats)
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step or prof.should_activate_periodic_profile(step):
       optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
