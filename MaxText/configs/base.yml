@@ -311,7 +311,7 @@ logical_axis_rules: [
                       ['decode_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['decode_length', ['sequence']],
                       ['mlp', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
-                      ['vocab', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
+                      ['vocab', ['tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['q_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['kv_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
