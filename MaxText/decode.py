@@ -27,7 +27,9 @@ from jetstream.engine import engine_api
 from MaxText import max_utils
 from MaxText import maxengine
 from MaxText import pyconfig
+from MaxText import profiler
 from MaxText import multimodal_utils
+# Placeholder: internal
 
 # Number of text sequences to process in a single batch.
 _NUM_STREAMS = 1
@@ -92,6 +94,7 @@ def main(argv: Sequence[str]) -> None:
   rng = jax.random.PRNGKey(1234)
   rng, rng_load_params = jax.random.split(rng)
   params = engine.load_params(rng_load_params)
+  prof = profiler.Profiler(config)
 
   text = config.prompt
   prefill_length = config.max_prefill_predict_length
@@ -130,17 +133,20 @@ def main(argv: Sequence[str]) -> None:
   first_token_list = []
   sampled_tokens_list = []
 
+  prof.activate(optional_postfix="trace")
+
   # Prefill
   rng, rng_prefill = jax.random.split(rng)  # Split RNG before calling prefill
   for i in range(_NUM_STREAMS):
-    prefill_result, first_token = engine.prefill(
+    with jax.profiler.StepTraceAnnotation("prefill", stream=i):
+      prefill_result, first_token = engine.prefill(
         params=params,
         padded_tokens=tokens,
         images=processor_output.pixel_values,
         true_length=true_length,
         rng=rng_prefill,
         slot=i,
-    )
+      )
     prefill_result_list.append(prefill_result)
     first_token_list.append(first_token)
 
@@ -153,9 +159,10 @@ def main(argv: Sequence[str]) -> None:
   # Generate
   steps = range(config.max_prefill_predict_length, config.max_target_length)
   sampled_tokens_list.append(_batch_first_result_token(first_token_list, batch_size))
-  for _ in steps:
+  for i in steps:
     rng, rng_generate = jax.random.split(rng)
-    decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
+    with jax.profiler.StepTraceAnnotation("generate", step=i):
+      decode_state, sampled_tokens = engine.generate(params, decode_state, rng=rng_generate)
     sampled_tokens_list.append(sampled_tokens)
 
   # Get results
@@ -168,6 +175,8 @@ def main(argv: Sequence[str]) -> None:
       config.autoregressive_decode_assert
   ), f"generated text mismatch {output=}, {config.autoregressive_decode_assert=}"
 
+  # Deactivate profiler
+  prof.deactivate()
 
 def _validate_config(config):
   assert config.load_full_state_path == "", (

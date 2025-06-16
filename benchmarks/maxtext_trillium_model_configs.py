@@ -33,6 +33,7 @@ BASE_PATHWAYS_TUNING_PARAMS = {
     "checkpoint_storage_use_ocdbt": False,
     "checkpoint_storage_use_zarr3": False,
     "enable_pathways_goodput": True,
+    "enable_goodput_recording": True,
     "enable_single_controller": True,
     "metrics_file": "metrics.txt",
     "goodput_upload_interval_seconds": 30,
@@ -44,6 +45,7 @@ PATHWAYS_LONG_RUN_CHECKPOINTING_TUNING_PARAMS = {
     "async_checkpointing": True,
     "checkpoint_period": 100,
     "enable_checkpoint_cloud_logger": True,
+    "enable_goodput_recording": True,
 }
 
 # The set of tuning params required for short-running pathways jobs.
@@ -52,6 +54,7 @@ PATHWAYS_SHORT_RUN_CHECKPOINTING_TUNING_PARAMS = {
     "async_checkpointing": True,
     "checkpoint_period": 20,
     "enable_checkpoint_cloud_logger": True,
+    "enable_goodput_recording": True,
 }
 
 
@@ -719,7 +722,7 @@ llama3_70b_8192 = _add_to_model_dictionary(
     ),
 )
 
-
+# Config only runs on v6e-256
 llama3_1_405b_8192_fsdp_dcn = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
@@ -773,6 +776,7 @@ llama3_1_405b_8192_fsdp_dcn = _add_to_model_dictionary(
     ),
 )
 
+# Config only runs on v6e-256
 llama3_1_405b_8192_pure_fsdp_ici = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
@@ -1521,6 +1525,7 @@ mixtral_8x7b_dropped_int8 = _add_to_model_dictionary(
     ),
 )
 
+# Config only runs on v6e-256
 mixtral_8x22b_dropped = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
@@ -1565,7 +1570,7 @@ mixtral_8x22b_dropped = _add_to_model_dictionary(
     ),
 )
 
-
+# Config only runs on v6e-256
 deepseek_v3_ep16 = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
@@ -1606,7 +1611,7 @@ deepseek_v3_ep16 = _add_to_model_dictionary(
     ),
 )
 
-
+# Config only runs on v6e-256
 gemma2_9b_8192 = _add_to_model_dictionary(
     trillium_model_dict,
     MaxTextModel(
@@ -1639,7 +1644,7 @@ gemma2_9b_8192 = _add_to_model_dictionary(
     ),
 )
 
-
+# Config only runs on v6e-256
 gemma2_27b_8192 = _add_to_model_dictionary(
   trillium_model_dict,
   MaxTextModel(
@@ -1734,4 +1739,64 @@ llama3_1_70b_131072 = _add_to_model_dictionary(
   )
 )
 
-
+# Customized MoE model - 700B, and config only runs on v6e-256
+custom_moe_700b = _add_to_model_dictionary(
+    trillium_model_dict,
+    MaxTextModel(
+        model_name="custom_moe_700b",
+        model_type="default",
+        tuning_params={
+            "per_device_batch_size": 1,
+            "max_target_length": 8192,
+            "decoder_block": "mixtral",
+            "base_emb_dim": 8192,
+            "base_mlp_dim": 32768,
+            "base_num_decoder_layers": 56,
+            "head_dim": 256,
+            "base_num_kv_heads": 8,
+            "base_num_query_heads": 128,
+            "vocab_size": 32000,
+            "enable_dropout": False,
+            "logits_via_embedding": False,
+            "normalization_layer_epsilon": 1.0e-5,
+            "rope_max_timescale": 1_000_000,
+            "num_experts": 16,
+            "num_experts_per_tok": 2,
+            "ici_fsdp_parallelism": 16,
+            "ici_expert_parallelism": 16,
+            "remat_policy": "custom",
+            "decoder_layer_input": "offload",
+            "out_proj": "offload",
+            "query_proj": "offload",
+            "key_proj": "offload",
+            "value_proj": "offload",
+            "dataset_type": "synthetic",
+            "reuse_example_batch": 1,
+            "enable_checkpointing": False,
+            "profiler": "xplane",            
+            "sa_block_q": 2048,
+            "sa_block_kv": 2048,
+            "sa_block_kv_compute": 2048,
+            "sa_block_q_dkv": 2048,
+            "sa_block_kv_dkv": 2048,
+            "sa_block_kv_dkv_compute": 2048,
+            "sa_block_q_dq": 2048,
+            "sa_block_kv_dq": 2048,
+            "sa_use_fused_bwd_kernel": True,
+            "sparse_matmul": False,
+            "capacity_factor": 1.5,
+            "tokenizer_path": "assets/tokenizer.mistral-v1",
+            "dtype": "bfloat16",
+            "weight_dtype": "bfloat16",
+            "opt_type": "sgd",
+            "attention": "flash",
+        },
+        xla_flags=(
+            xla_flags_library.MOE_VMEM_LIMIT_FLAG
+            + xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.DATA_PARALLEL_OVERLAP
+            + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
+            + xla_flags_library.HOST_OFFLOAD_FLAGS
+        ),
+    ),
+)

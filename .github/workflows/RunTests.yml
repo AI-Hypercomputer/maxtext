@@ -49,6 +49,7 @@ jobs:
     with:
       device_type: tpu
       device_name: v4-8
+      cloud_runner: linux-x86-n2-16-buildkit
       build_mode: jax_ai_image
       base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
 
@@ -58,6 +59,7 @@ jobs:
     with:
       device_type: gpu
       device_name: a100-40gb-4
+      cloud_runner: linux-x86-n2-16-buildkit
       build_mode: jax_ai_image
       base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/gpu:latest
 
@@ -145,6 +147,7 @@ jobs:
       run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu --force-delete-tags --quiet
 
   notify:
+    if: ${{ always() }}
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
     needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
     runs-on: ubuntu-latest
