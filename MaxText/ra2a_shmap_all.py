@@ -6,18 +6,20 @@ from jax.sharding import Mesh, PartitionSpec, NamedSharding
 from jax.experimental import mesh_utils
 import functools
 from enum import Enum, auto
+from jax.sharding import PartitionSpec as P
 
 
 # Define inputs
 num_devices = len(jax.devices())
-expert_parallelism = 8
+expert_parallelism = 2
+pipeline_parallelism = num_devices // expert_parallelism
 batch = 2 * expert_parallelism**2
 model = 3
 axis_name = "expert"
 
  # Define a mesh with PP + EP
-device_mesh_array = mesh_utils.create_device_mesh((expert_parallelism,))
-mesh = Mesh(device_mesh_array, ("expert",))
+device_mesh_array = mesh_utils.create_device_mesh((expert_parallelism, pipeline_parallelism))
+mesh = Mesh(device_mesh_array, ("expert", "pipeline"))
 
 # create an array x which is [batch, model] and has elements like
 # [[0,0,0],
@@ -34,15 +36,13 @@ x = jax.device_put(x, x_sharding)
 # Assign rows to expert groups in a symmetric balanced way
 routing_table = jnp.zeros((2 * expert_parallelism, expert_parallelism), dtype=jnp.int32)
 for ep_shard in range(expert_parallelism):
-    routing_table[2 * ep_shard, ep_shard] = 1
-    routing_table[2 * ep_shard + 1, ep_shard] = 1
+    routing_table = routing_table.at[2 * ep_shard, ep_shard].set(1)
+    routing_table = routing_table.at[2 * ep_shard + 1, ep_shard].set(1)
 routing_table = jnp.tile(routing_table, (expert_parallelism, 1))
 
 routing_table_partition_spec = jax.sharding.PartitionSpec("expert", None)
 routing_table_sharding = NamedSharding(mesh, routing_table_partition_spec)
 routing_table = jax.device_put(routing_table, routing_table_sharding)
-
-
 
 
 out_partition_spec = x_partition_spec
@@ -52,7 +52,9 @@ output_sharding = x_sharding
 def main_wrapper(x, routing_table):
     # x is [batch, embed] (we can imagine batch=pdb * seq * exp_per_tok)
     # routing table is [batch, ep_groups] one hot
-    output_shape, input_offsets, send_sizes, output_offsets, recv_sizes = get_ra2a_inputs(routing_table)
+    input_offsets, send_sizes, output_offsets, recv_sizes = get_ra2a_inputs(routing_table)
+    output_shape = x
+    # output_shape = jnp.tile(x, (expert_parallelism, 1)) # necessary for worst case in real models
     output = ra2a_wrapper(
         x,
         output_shape,
@@ -68,23 +70,28 @@ def main_wrapper(x, routing_table):
     mesh=mesh,
     in_specs=(
         x_partition_spec,
-        ),
+    ),
     out_specs=(
-        x_partition_spec,
-        x_partition_spec,
-        x_partition_spec,
-        x_partition_spec,
-        x_partition_spec,
-    )
+        P("expert", None),
+        P("expert", None),
+        P("expert", None),
+        P("expert", None),
+    ),
     check_rep=False,
 )
 def get_ra2a_inputs(routing_table):
     # routing table is [batch, ep_groups] one hot
     local_expert_size, num_ep_groups = routing_table.shape
-    reshaped_group_sizes = jnp.sum(routing_table.reshape(-1, local_expert_size), axis=1)
-    input_offsets, send_sizes, output_offsets, recv_sizes = get_all_to_all_params(reshaped_group_sizes)
-    output_shape = jnp.tile(x, (expert_parallelism, 1))
-    return output_shape, input_offsets, send_sizes, output_offsets, recv_sizes
+    reshaped_group_sizes = jnp.sum(routing_table, axis=0)
+    all_shards_group_sizes = lax.all_gather(reshaped_group_sizes, axis_name="expert")
+    
+    input_offsets, send_sizes, output_offsets, recv_sizes = get_all_to_all_params(all_shards_group_sizes)
+    input_offsets = jnp.expand_dims(input_offsets, axis=0)
+    send_sizes = jnp.expand_dims(send_sizes, axis=0)
+    output_offsets = jnp.expand_dims(output_offsets, axis=0)
+    recv_sizes = jnp.expand_dims(recv_sizes, axis=0)
+    
+    return input_offsets, send_sizes, output_offsets, recv_sizes
 
 @functools.partial(
     shard_map.shard_map,
@@ -100,7 +107,12 @@ def get_ra2a_inputs(routing_table):
     out_specs=(out_partition_spec),
     check_rep=False,
 )
-def ra2a_wrapper(x, output, input_offsets, send_sizes, output_offsets, recv_sizes):
+def ra2a_wrapper(x, output_shape, input_offsets, send_sizes, output_offsets, recv_sizes):
+    input_offsets = input_offsets.reshape(input_offsets.shape[1:])
+    send_sizes = send_sizes.reshape(send_sizes.shape[1:])
+    output_offsets = output_offsets.reshape(output_offsets.shape[1:])
+    recv_sizes = recv_sizes.reshape(recv_sizes.shape[1:])
+
     output = jax.lax.ragged_all_to_all(
         x,
         output_shape,
@@ -168,10 +180,9 @@ def get_all_to_all_params(all_shards_group_sizes):
 
 
 
-main_wrapper
-
-jit_wrapper = jax.jit(wrapper)
+jit_wrapper = jax.jit(main_wrapper)
 print(f"{x.shape=}", flush=True)
-x_a2a = jit_wrapper(x)
+x_a2a = jit_wrapper(x, routing_table)
 print("Successfully ran wrapper (non - vmap)")
+print(x_a2a)
 breakpoint()
