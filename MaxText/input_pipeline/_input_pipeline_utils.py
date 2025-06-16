@@ -386,7 +386,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
     for data_column in data_columns:
       element[f"{data_column}_segmentation"] = (element[data_column] != 0).astype(np.int32)
       element[f"{data_column}_position"] = np.arange(element[data_column].shape[0], dtype=np.int32)
-      element[f"{data_column}_true_length"] = np.array(element[data_column].shape[0], dtype=np.int32)
+      element[f"{data_column}_true_length"] = np.array([element[data_column].shape[0]], dtype=np.int32)
     for key, _ in element.items():
       if "true_length" not in key:
         element[key] = _pad(element[key], self.max_length)
