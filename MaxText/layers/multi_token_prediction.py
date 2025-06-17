@@ -153,7 +153,6 @@ class MultiTokenPredictionBlock(nn.Module):
       self,
       main_hidden_state,
       shared_embedding,
-      output_head,
       input_ids,
       target_ids,
       target_mask,
@@ -194,8 +193,10 @@ class MultiTokenPredictionBlock(nn.Module):
           mtp_hidden_state, target_token_embedding, position_ids, decoder_segment_ids, deterministic
       )
 
-      # Project to logits using the shared output head
-      mtp_logits = output_head(hidden_states=next_mtp_hidden_state, deterministic=deterministic, model_mode=MODEL_MODE_TRAIN)
+      final_mtp_norm = RMSNorm(dtype=cfg.dtype, name=f"mtp_{k}_final_norm")(next_mtp_hidden_state)
+
+      # Project to logits using the shared embedding transpose
+      mtp_logits = shared_embedding.attend(final_mtp_norm)
 
       # Calculate cross-entropy loss for this specific layer's prediction
       mtp_xent, _ = max_utils.cross_entropy_with_logits(mtp_logits, jax.nn.one_hot(rolled_target_ids, cfg.vocab_size), 0.0)
