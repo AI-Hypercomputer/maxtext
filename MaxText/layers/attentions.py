@@ -37,7 +37,7 @@ from flax import linen as nn
 from flax.linen import partitioning
 
 from MaxText import max_utils
-from MaxText.common_types import DecoderBlockType, DEFAULT_MASK_VALUE, BATCH, HEAD, KV_LENGTH, D_KV, CACHE_BATCH_PREFILL, CACHE_SEQUENCE, AxisNames, CACHE_BATCH, CACHE_HEADS, CACHE_SCALE_BATCH, CACHE_KV, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV, AxisIdxes, LENGTH, DType, Config, Array, Q_LENGTH, DECODE_LENGTH, DECODE_BATCH, PREFILL_KV_BATCH, KV_HEAD, KV_HEAD_DIM, KV_BATCH, EMBED, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL
+from MaxText.common_types import DecoderBlockType, LENGTH_NO_EXP, BATCH_NO_EXP, DEFAULT_MASK_VALUE, BATCH, HEAD, KV_LENGTH, D_KV, CACHE_BATCH_PREFILL, CACHE_SEQUENCE, AxisNames, CACHE_BATCH, CACHE_HEADS, CACHE_SCALE_BATCH, CACHE_KV, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV, AxisIdxes, LENGTH, DType, Config, Array, Q_LENGTH, Q_LENGTH_NO_EXP, DECODE_LENGTH, DECODE_BATCH, PREFILL_KV_BATCH, KV_HEAD, KV_HEAD_DIM, KV_BATCH, EMBED, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL
 from MaxText.inference import kvcache
 from MaxText.inference import page_manager
 from MaxText.inference import paged_attention
@@ -266,8 +266,11 @@ class AttentionOp(nn.Module):
   max_prefill_predict_length: int = -1
   float32_logits: bool = False
   flash_axis_names_kv: AxisNames = (BATCH, HEAD, KV_LENGTH, D_KV)
-  flash_axis_names_q: AxisNames = (BATCH, HEAD, LENGTH, D_KV)
+  flash_axis_names_q: AxisNames = (BATCH, HEAD, LENGTH_NO_EXP, D_KV)
+  flash_axis_names_kv_ep:  AxisNames = (BATCH_NO_EXP, HEAD, KV_LENGTH, D_KV)
+  flash_axis_names_q_ep: AxisNames = (BATCH_NO_EXP, HEAD, LENGTH, D_KV)
   flash_axis_names_splash_kernel: AxisNames = (HEAD, LENGTH)
+  flash_axis_names_splash_kernel_no_ep: AxisNames = (HEAD, LENGTH_NO_EXP)
   prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
   cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
   cache_scale_logical_axis_names: AxisNames = (CACHE_SCALE_BATCH, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV)
@@ -628,7 +631,11 @@ class AttentionOp(nn.Module):
   ) -> Array:
     """TPU Flash Attention."""
 
-    cp_size = self.mesh.shape["context"]
+    if self.config.is_batch_shard_by_expert:
+      cp_size = self.mesh.shape["context"]
+    else:
+      cp_size = 0 if self.mesh.shape["context"] == 1 else self.mesh.shape["context"]
+      cp_size += self.mesh.shape["expert"]
     load_balanced_context_parallel = self.config.context_parallel_load_balance
 
     # Transpose to ('batch', 'heads', 'length', 'kv')
@@ -638,11 +645,19 @@ class AttentionOp(nn.Module):
     segment_axis_names_q = None
     segment_axis_names_kv = None
     if decoder_segment_ids is not None:
-      segment_axis_names_q = nn.logical_to_mesh_axes((BATCH, Q_LENGTH))
+      segment_axis_names_q = nn.logical_to_mesh_axes((BATCH, Q_LENGTH_NO_EXP))
       segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH, KV_LENGTH))
-    axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
+      if not self.config.is_batch_shard_by_expert: 
+        segment_axis_names_q = nn.logical_to_mesh_axes((BATCH_NO_EXP, Q_LENGTH))
+        segment_axis_names_kv = nn.logical_to_mesh_axes((BATCH_NO_EXP, KV_LENGTH))
+
+    axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel_no_ep)
     axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q)
     axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv)
+    if not self.config.is_batch_shard_by_expert:
+      axis_names_q = nn.logical_to_mesh_axes(self.flash_axis_names_q_ep)
+      axis_names_kv = nn.logical_to_mesh_axes(self.flash_axis_names_kv_ep)
+      axis_names_splash_kernel = nn.logical_to_mesh_axes(self.flash_axis_names_splash_kernel)
 
     global global_block_q, global_block_kv, global_block_kv_compute, global_block_q_dkv, global_block_kv_dkv
     global global_block_kv_dkv_compute, global_block_q_dq, global_block_kv_dq, global_use_fused_bwd_kernel
@@ -1645,13 +1660,14 @@ class Attention(nn.Module):
 
 
     if model_mode in (MODEL_MODE_PREFILL, MODEL_MODE_TRAIN):
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
       if is_batch_shard_by_expert:
         #inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
         inputs_q = apply_logical_sharding(inputs_q, self.input_axis_names, use_nn_constraint)
+        inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
       else:
         #inputs_q = nn.with_logical_constraint(inputs_q, self.ep_input_axis_names)
         inputs_q = apply_logical_sharding(inputs_q, self.ep_input_axis_names, use_nn_constraint)
+        inputs_kv = nn.with_logical_constraint(inputs_kv, self.ep_input_axis_names)
     else:
       inputs_q = nn.with_logical_constraint(inputs_q, self.decode_input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.decode_input_axis_names)

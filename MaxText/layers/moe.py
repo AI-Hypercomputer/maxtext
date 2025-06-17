@@ -589,10 +589,10 @@ class RoutedMoE(nn.Module):
     else:
       batch_logical_axis = "activation_batch_no_exp"
 
-    input_partition_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_length", None))
-    gate_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_length", None))
+    input_partition_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+    gate_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
     if self.config.model_name.startswith("deepseek3"):
-      pre_bias_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_length", None))
+      pre_bias_logits_pspec = nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
     else:
       # pre_bias_logits is None for non-DeepSeek v3 models
       pre_bias_logits_pspec = None
@@ -610,7 +610,7 @@ class RoutedMoE(nn.Module):
         shard_map.shard_map,
         mesh=self.mesh,
         in_specs=(input_partition_pspec, gate_logits_pspec, pre_bias_logits_pspec, w0_pspec, w1_pspec, wo_pspec),
-        out_specs=(nn.logical_to_mesh_axes((batch_logical_axis, "activation_length", "activation_embed"))),
+        out_specs=(nn.logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", "activation_embed"))),
         check_rep=False,
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo):
@@ -787,7 +787,7 @@ class RoutedMoE(nn.Module):
         ((batch_size, cp, sub_seq, self.num_experts_per_tok, self.num_experts)),
     )
     expert_token_count = nn.with_logical_constraint(
-        expert_token_count, ("activation_batch", "activation_length", None, None, None)
+        expert_token_count, ("activation_batch", "activation_norm_length", None, None, None)
     )
     trunc_expert_mask = expert_mask * jnp.less_equal(expert_token_count, expert_capacity_per_batch)
     combined_expert_mask = jnp.sum(trunc_expert_mask, axis=3)
@@ -858,7 +858,7 @@ class RoutedMoE(nn.Module):
         ((batch_size, seq_len, self.num_experts_per_tok, self.num_experts)),
     )
     expert_token_count = nn.with_logical_constraint(
-        expert_token_count, ("activation_batch", "activation_length", None, None)
+        expert_token_count, ("activation_batch", "activation_norm_length", None, None)
     )
     trunc_expert_mask = expert_mask * jnp.less_equal(expert_token_count, expert_capacity_per_batch)
     combined_expert_mask = jnp.sum(trunc_expert_mask, axis=2)
@@ -930,10 +930,10 @@ class RoutedMoE(nn.Module):
   def dense_matmul(self, inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel):
     """dense matrix multiplication"""
     # gate_logits: batch, length, expert
-    gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_length", None))
+    gate_logits = nn.with_logical_constraint(gate_logits, ("activation_batch", "activation_norm_length", None))
     if self.config.model_name.startswith("deepseek3"):
       # pre_bias_logits is None for non-DeepSeek v3 models
-      pre_bias_logits = nn.with_logical_constraint(pre_bias_logits, ("activation_batch", "activation_length", None))
+      pre_bias_logits = nn.with_logical_constraint(pre_bias_logits, ("activation_batch", "activation_norm_length", None))
     top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits)
     is_llama4_decoder_layer = self.config.decoder_block == DecoderBlockType.LLAMA4
     if is_llama4_decoder_layer:
@@ -960,8 +960,8 @@ class RoutedMoE(nn.Module):
         dispatch_mask, combine_mask = self.generate_masks(
             top_k_indices, weights  # pylint: disable=possibly-used-before-assignment
         )
-        mask_axes = ("activation_batch", "activation_length", None, None)
-        input_axis = ("activation_batch", "activation_length", "activation_embed")
+        mask_axes = ("activation_batch", "activation_norm_length", None, None)
+        input_axis = ("activation_batch", "activation_norm_length", "activation_embed")
         dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, "activation_embed")
         mlp_axis = ("activation_exp", "activation_batch_no_exp", None, "activation_mlp")
         dispatch_eimsum = "BSM,BSEC -> EBCM"
@@ -973,13 +973,13 @@ class RoutedMoE(nn.Module):
         softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
         dispatch_mask, combine_mask = self.generate_masks_subgroup(top_k_indices, softmax_probs)
         if self.get_context_autoregressive_parallelism_size() > 0 and cp == 1:
-          mask_axes = ("activation_length", "activation_batch", None, None, None)
-          input_axis = ("activation_length", "activation_batch", None, "activation_embed")
+          mask_axes = ("activation_norm_length", "activation_batch", None, None, None)
+          input_axis = ("activation_norm_length", "activation_batch", None, "activation_embed")
           dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_embed")
           mlp_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_mlp")
         else:
-          mask_axes = ("activation_batch", "activation_length", None, None, None)
-          input_axis = ("activation_batch", "activation_length", None, "activation_embed")
+          mask_axes = ("activation_batch", "activation_norm_length", None, None, None)
+          input_axis = ("activation_batch", "activation_norm_length", None, "activation_embed")
           dispatch_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_embed")
           mlp_axis = ("activation_exp", "activation_batch_no_exp", None, None, "activation_mlp")
         dispatch_eimsum = "BNSM,BNSEC -> EBNCM"
@@ -1001,7 +1001,7 @@ class RoutedMoE(nn.Module):
         if cp > 1:
           dispatch = nn.with_logical_constraint(
               dispatch,
-              (None, "activation_batch_no_exp", "activation_length", None, "activation_embed"),
+              (None, "activation_batch_no_exp", "activation_norm_length", None, "activation_embed"),
           )
         dispatch = nn.with_logical_constraint(
             dispatch,
@@ -1063,7 +1063,7 @@ class RoutedMoE(nn.Module):
           output = jnp.reshape(output, (output.shape[0], output.shape[1] * output.shape[2], output.shape[3]))
       return output, loss
     else:
-      inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
+      inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
       with jax.named_scope("wi_0"):
         layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes)(
             "BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision
