@@ -7,7 +7,7 @@ DATE=$(date +%Y-%m-%d)
 OUTPUT_BASE_DIR=""
 # Model name must be consistent in utils/utils.py
 MODEL_NAME="gemma2-2b"
-# Tokenizer path
+# Tokenizer path for decoding
 TOKENIZER_PATH="assets/tokenizer.gemma"
 
 PER_DEVICE_BATCH_SIZE=1
@@ -30,7 +30,7 @@ python3 -m "MaxText.utils.ckpt_conversion.to_maxtext" \
 
 echo "--- Checkpoint Conversion Complete ---"
 
-# --- Step 2: Decode using the Converted Checkpoint ---
+# --- Step 2 (Optional): Decode using the Converted Checkpoint ---
 
 echo "--- Starting Decoding ---"
 python3 -m "MaxText.decode" \
@@ -47,5 +47,17 @@ python3 -m "MaxText.decode" \
   async_checkpointing="${ASYNC_CHECKPOINTING}" \
   scan_layers="${SCAN_LAYERS}" \
   prompt="${PROMPT}"
+
+echo "--- Decoding Complete ---"
+
+# --- Step 3: Compare the HF and MT Checkpoint ---
+
+echo "--- Starting Comparing Logits and Predicted Tokens ---"
+python3 -m "MaxText.tests.mt_hf_mutual_conversion_check" \
+    hf_model_id="google/gemma-2-2b" \
+    maxtext_model_name="gemma2-2b" \
+    maxtext_checkpoint_path="${OUTPUT_BASE_DIR}/0/items" \
+    maxtext_base_config_path="/MaxText/configs/base.yml" \
+    max_kl_div="0.02"
 
 echo "--- Decoding Complete ---"
