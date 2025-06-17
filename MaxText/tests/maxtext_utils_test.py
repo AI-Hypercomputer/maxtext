@@ -268,6 +268,65 @@ class MaxUtilsPpAsDp(unittest.TestCase):
     self.assertEqual(transformed_rules, expected_transform)
 
 
+class TestRollAndMask(unittest.TestCase):
+  """Test class for utility functions supporting Roll and Mask."""
+
+  def test_mtp_roll_and_mask_shapes(self):
+    """
+    Validates that roll_and_mask works correctly on the specific tensor shapes
+    that will be passed during training. The primary use case involves tensors
+    with a [batch, sequence_length] shape.
+    """
+    batch_size = 4
+    seq_len = 8
+    # Create a dummy input tensor that mimics `input_ids` or `target_ids`.
+    # The values are sequential for easy validation.
+    # Shape: [4, 8]
+    input_tensor = jnp.arange(batch_size * seq_len, dtype=jnp.int32).reshape((batch_size, seq_len))
+
+    # print(input_tensor)
+
+    # --- Test Case 1: Default left shift by 1 ---
+    # This is the most common operation inside the MTP loop.
+    rolled_by_1 = maxtext_utils.roll_and_mask(input_tensor, shift=-1)
+
+    # Manually construct the expected output using jnp
+    expected_1 = jnp.array(
+        [
+            [1, 2, 3, 4, 5, 6, 7, 0],  # First row rolled left, last element masked
+            [9, 10, 11, 12, 13, 14, 15, 0],  # Second row rolled left
+            [17, 18, 19, 20, 21, 22, 23, 0],
+            [25, 26, 27, 28, 29, 30, 31, 0],
+        ],
+        dtype=jnp.int32,
+    )
+
+    self.assertEqual(rolled_by_1.shape, (batch_size, seq_len), "Shape should be preserved after rolling.")
+    self.assertTrue(jnp.array_equal(rolled_by_1, expected_1), "Array content is incorrect after shift by -1.")
+
+    # --- Test Case 2: Larger left shift by 3 ---
+    # This simulates a later step in a hypothetical MTP loop.
+    rolled_by_3 = maxtext_utils.roll_and_mask(input_tensor, shift=-3)
+
+    # Manually construct the expected output using jnp
+    expected_3 = jnp.array(
+        [
+            [3, 4, 5, 6, 7, 0, 0, 0],  # First row rolled left by 3, last 3 masked
+            [11, 12, 13, 14, 15, 0, 0, 0],
+            [19, 20, 21, 22, 23, 0, 0, 0],
+            [27, 28, 29, 30, 31, 0, 0, 0],
+        ],
+        dtype=jnp.int32,
+    )
+    self.assertEqual(rolled_by_3.shape, (batch_size, seq_len), "Shape should be preserved after rolling.")
+    self.assertTrue(jnp.array_equal(rolled_by_3, expected_3), "Array content is incorrect after shift by -3.")
+
+    # --- Test Case 3: Shift of 0 (edge case) ---
+    # This should result in no change to the tensor.
+    rolled_by_0 = maxtext_utils.roll_and_mask(input_tensor, shift=0)
+    self.assertTrue(jnp.array_equal(rolled_by_0, input_tensor), "A shift of 0 should be a no-op.")
+
+
 class TestAssertParamsSufficientlySharded(unittest.TestCase):
   """
   Test suite for the sharding assertion utility function 'assert_params_sufficiently_sharded'.

@@ -18,6 +18,7 @@ limitations under the License.
 
 from typing import Optional, Type
 
+import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
@@ -27,6 +28,8 @@ from MaxText.common_types import Config, MODEL_MODE_TRAIN
 from MaxText.layers.attentions import dense_general
 from MaxText.layers.blocks import DecoderLayer
 from MaxText.layers.normalizations import RMSNorm
+from MaxText import max_utils
+from MaxText import maxtext_utils
 
 
 class MultiTokenPredictionLayer(nn.Module):
@@ -136,3 +139,74 @@ class MultiTokenPredictionLayer(nn.Module):
     # Shape: [B, S, H]
     # --- Return Processed Hidden State ---
     return next_hidden_state
+
+
+class MultiTokenPredictionBlock(nn.Module):
+  """Orchestrates the MTP process by running a sequence of MTP layers."""
+
+  config: Config
+  mesh: Mesh
+  transformer_layer_module: Type[DecoderLayer]
+
+  @nn.compact
+  def __call__(
+      self,
+      main_hidden_state,
+      shared_embedding,
+      output_head,
+      input_ids,
+      target_ids,
+      target_mask,
+      position_ids,
+      decoder_segment_ids,
+      deterministic,
+  ):
+    cfg = self.config
+    # The initial hidden state for the MTP chain is the raw output from the main model.
+    mtp_hidden_state = main_hidden_state
+
+    # These variables are updated sequentially in each loop iteration,
+    # moving the prediction window one token to the right each time.
+    rolled_input_ids = input_ids
+    rolled_target_ids = target_ids
+    rolled_target_mask = target_mask
+
+    # Range chosen to align with the naming convention of the paper
+    for k in range(1, cfg.mtp_num_layers + 1):
+      # Sequentially roll all tensors to prepare data for predicting the k-th future token.
+      rolled_input_ids = maxtext_utils.roll_and_mask(rolled_input_ids)
+      rolled_target_ids = maxtext_utils.roll_and_mask(rolled_target_ids)
+      rolled_target_mask = maxtext_utils.roll_and_mask(rolled_target_mask)
+
+      # Embed the k-th future input tokens using the shared embedding module
+      target_token_embedding = shared_embedding(rolled_input_ids)
+
+      # Instantiate and apply the MTP layer for this step
+      mtp_layer = MultiTokenPredictionLayer(
+          config=cfg,
+          mesh=self.mesh,
+          layer_number=k,
+          name=f"mtp_layer_{k}",
+          transformer_layer_module=self.transformer_layer_module,
+      )
+
+      next_mtp_hidden_state = mtp_layer(
+          mtp_hidden_state, target_token_embedding, position_ids, decoder_segment_ids, deterministic
+      )
+
+      # Project to logits using the shared output head
+      mtp_logits = output_head(hidden_states=next_mtp_hidden_state, deterministic=deterministic, model_mode=MODEL_MODE_TRAIN)
+
+      # Calculate cross-entropy loss for this specific layer's prediction
+      mtp_xent, _ = max_utils.cross_entropy_with_logits(mtp_logits, jax.nn.one_hot(rolled_target_ids, cfg.vocab_size), 0.0)
+      mtp_xent_masked = mtp_xent * rolled_target_mask
+
+      # This condition ensures loss is only computed during training runs (`.apply`),
+      # and not during model initialization (`.init()`).
+      if not self.is_initializing():
+        # "Sow" the loss values into the 'mtp_losses' collection for the
+        self.sow("mtp_losses", "losses", jnp.sum(mtp_xent_masked))
+        self.sow("mtp_losses", "weights", jnp.sum(rolled_target_mask))
+
+      # The output of this layer is the input for the next, maintaining the causal chain.
+      mtp_hidden_state = next_mtp_hidden_state
