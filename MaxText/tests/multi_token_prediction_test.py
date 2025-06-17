@@ -127,8 +127,15 @@ class MTPBlockTestModel(nn.Module):
     self.shared_embedding = embeddings.Embed(
         num_embeddings=self.config.vocab_size, features=self.config.base_emb_dim, name="token_embedder", config=self.config
     )
+    self.decoder = blocks.Decoder(
+        config=self.config, mesh=self.mesh, shared_embedding=self.shared_embedding, name="decoder_for_mtp"
+    )
     self.mtp_block = multi_token_prediction.MultiTokenPredictionBlock(
-        config=self.config, mesh=self.mesh, name="mtp_block", transformer_layer_module=blocks.DecoderLayer
+        config=self.config,
+        mesh=self.mesh,
+        name="mtp_block",
+        transformer_layer_module=blocks.DecoderLayer,
+        decoder=self.decoder,
     )
 
   def __call__(
@@ -136,7 +143,6 @@ class MTPBlockTestModel(nn.Module):
   ):
     return self.mtp_block(
         main_hidden_state,
-        self.shared_embedding,
         input_ids,
         target_ids,
         target_mask,
