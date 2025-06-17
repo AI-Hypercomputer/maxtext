@@ -124,10 +124,13 @@ output_offsets_vmap = expand_array_for_vmap(output_offsets)
 recv_sizes_vmap = expand_array_for_vmap(recv_sizes)
 
 vmap_output = jit_vmap_func(x_vmap, output_shape_vmap, input_offsets_vmap, send_sizes_vmap, output_offsets_vmap, recv_sizes_vmap)
-print(f"output of a2a WITH vmap:\nn {vmap_output}")
+print(f"output of a2a WITH vmap:\n {vmap_output}")
 print(f"vmap_output.shape = {vmap_output.shape}")
 print("Successfully ran vmap!!")
 # This will fail! The output shape is [PP, 2, 4, 3] but we expect [PP, 8, 3] - the same shape as both x_vmap and output_shape_vmap
+# vmap_output = vmap_output.reshape([4,8,3])
+# print(f"output of a2a WITH vmap:\n {vmap_output}")
+breakpoint()
 assert vmap_output.shape == (pipeline_parallelism, batch, model)
 print("Now running expected assert...")
 for i in range(pipeline_parallelism):
