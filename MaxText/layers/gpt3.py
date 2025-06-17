@@ -146,7 +146,7 @@ class Gpt3MultiHeadAttention(nn.Module):
 
     qkv_proj = dense_general(
         inputs_shape=inputs.shape,
-        features=(3, self.num_heads, self.head_dim),
+        out_features_shape=(3, self.num_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
         kernel_axes=("embed", "qkv", "heads", "kv"),
@@ -165,7 +165,7 @@ class Gpt3MultiHeadAttention(nn.Module):
     """individual projection for one of q, k and v."""
     proj = dense_general(
         inputs_shape=inputs.shape,
-        features=(self.num_heads, self.head_dim),
+        out_features_shape=(self.num_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
         kernel_axes=("embed", "heads", "kv"),
@@ -182,7 +182,7 @@ class Gpt3MultiHeadAttention(nn.Module):
     """output projection"""
     out_proj = dense_general(
         inputs_shape=out.shape,
-        features=output_dim,
+        out_features_shape=output_dim,
         axis=(-2, -1),
         kernel_init=self.kernel_init,
         kernel_axes=("heads", "kv", "embed"),

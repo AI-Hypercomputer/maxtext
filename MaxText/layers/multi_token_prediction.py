@@ -115,7 +115,7 @@ class MultiTokenPredictionLayer(nn.Module):
     # Projects from 2*H back down to H
     projection_layer = dense_general(
         inputs_shape=concatenated_features.shape,
-        features=cfg.base_emb_dim,
+        out_features_shape=cfg.base_emb_dim,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         kernel_axes=("concat_embed", "embed"),
