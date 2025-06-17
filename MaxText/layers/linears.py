@@ -131,16 +131,17 @@ class DenseGeneral(nnx.Module):
         len(self.axis), len(self.axis) + len(self.out_features)
     )
 
-    self.kernel = nnx.Param(
-        self.kernel_init(
-            rngs.params(),
-            kernel_shape,
-            self.weight_dtype,
-            kernel_in_axis,
-            kernel_out_axis,
-        ),
-        sharding=self.kernel_axes,
-    )
+    if not quantizations.in_serve_mode(self.quant):
+      self.kernel = nnx.Param(
+          self.kernel_init(
+              rngs.params(),
+              kernel_shape,
+              self.weight_dtype,
+              kernel_in_axis,
+              kernel_out_axis,
+          ),
+          sharding=self.kernel_axes,
+      )
 
     if self.use_bias:
       bias_axes = self.kernel_axes[-len(self.out_features) :]
