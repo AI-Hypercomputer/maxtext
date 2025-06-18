@@ -15,19 +15,11 @@ limitations under the License.
 """
 
 """Input pipeline"""
-from collections.abc import Callable
-from typing import Any
 import functools
 
-import numpy as np
-
-import tensorflow as tf
-
 import jax
-import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
-from MaxText import multihost_dataloading
 from MaxText import pyconfig
 from MaxText import max_logging
 from MaxText.input_pipeline._grain_data_processing import make_grain_train_iterator, make_grain_eval_iterator
@@ -94,7 +86,6 @@ def create_data_iterator(config: pyconfig.HyperParameters, mesh):
     assert len(process_indices_train) == jax.process_count() // config.expansion_factor_real_data
     if config.eval_interval > 0:
       assert len(process_indices_eval) == jax.process_count() // config.expansion_factor_real_data
-  
   # Generate iterator functions according to dataset type
   if config.dataset_type in ["tfds", "grain", "hf", "c4_mlperf"]:
     if config.dataset_type == "c4_mlperf":
