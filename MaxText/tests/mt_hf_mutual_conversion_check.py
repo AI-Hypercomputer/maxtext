@@ -163,7 +163,7 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02):
   assert max_kl_div < atol, f"KL divergence values {max_kl_div.item():.6f} exceed the threshold {atol}"
 
 
-def run_prompts(args: argparse.Namespace, additional_maxtext_overrides: list) -> None:
+def run_prompts(args: argparse.Namespace, unknown_args: list) -> None:
   """
   Args:
       - hf_model_id (str): HF model ID for the HF checkpoint.
@@ -171,7 +171,7 @@ def run_prompts(args: argparse.Namespace, additional_maxtext_overrides: list) ->
       - maxtext_base_config_path (str): Path to MaxText base configuration.
       - maxtext_model_name (str): Name of the MaxText model.
       - max_kl_div (float): Maximum allowed KL divergence.
-      - additional_maxtext_overrides (list): List of MaxText configuration overrides.
+      - unknown_args (list): List of unknown arguments to be passed as MaxText overrides.
   """
   # 1. Load Golden HF Model and Tokenizer
   hf_model = AutoModelForCausalLM.from_pretrained(args.hf_model_id, torch_dtype=torch.bfloat16)
@@ -182,13 +182,11 @@ def run_prompts(args: argparse.Namespace, additional_maxtext_overrides: list) ->
   maxtext_argv.append(args.maxtext_base_config_path)
 
   if args.maxtext_model_name:
-    additional_maxtext_overrides.append(f"model_name={args.maxtext_model_name}")
-  additional_maxtext_overrides.append(f"load_parameters_path={args.maxtext_checkpoint_path}")
-  additional_maxtext_overrides.append("per_device_batch_size=1")  # Match batch size for comparison
-  additional_maxtext_overrides.append("max_prefill_predict_length=16")
-  additional_maxtext_overrides.append("max_target_length=32")
-  additional_maxtext_overrides.append("scan_layers=False")
-  maxtext_argv.extend(additional_maxtext_overrides)
+    maxtext_argv.append(f"model_name={args.maxtext_model_name}")
+  maxtext_argv.append(f"load_parameters_path={args.maxtext_checkpoint_path}")
+  maxtext_argv.append("per_device_batch_size=1")
+  maxtext_argv.append(f"scan_layers={args.scan_layers}")
+
   config = pyconfig.initialize(maxtext_argv)
 
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
@@ -275,12 +273,13 @@ if __name__ == "__main__":
       type=str,
       default=os.path.join(PKG_DIR, "configs", "base.yml"),
   )
+  parser.add_argument("--scan_layers", type=bool, default=False)
   parser.add_argument("--max_kl_div", type=float, default=0.02, help="Maximum allowed KL divergence between model logits.")
 
   parsed_args, unknown_args = parser.parse_known_args()
 
-  maxtext_config_overrides = []
-  for arg in unknown_args:
-    maxtext_config_overrides.append(arg.lstrip("-"))  # pyconfig expects "key=value"
+  # Pass unknown_args directly; pyconfig.initialize will handle them
+  # pyconfig expects "key=value" or "--key=value", so lstrip any leading "--"
+  processed_unknown_args = [arg.lstrip("-") if arg.startswith("--") else arg for arg in unknown_args]
 
-  run_prompts(parsed_args, maxtext_config_overrides)
+  run_prompts(parsed_args, processed_unknown_args)
