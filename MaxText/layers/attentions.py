@@ -1389,7 +1389,7 @@ class Attention(nn.Module):
     )
     query_proj = dense_general(
         inputs_shape=inputs_q.shape,
-        features=(self.num_query_heads, self.head_dim),
+        out_features_shape=(self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=query_init,
         kernel_axes=kernel_axes,
@@ -1427,7 +1427,7 @@ class Attention(nn.Module):
 
     kv_proj = dense_general(
         inputs_shape=inputs_kv.shape,
-        features=(self.num_kv_heads, self.head_dim),
+        out_features_shape=(self.num_kv_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
         kernel_axes=kernel_axes,
@@ -1445,7 +1445,7 @@ class Attention(nn.Module):
 
     qkv_proj = dense_general(
         inputs_shape=inputs.shape,
-        features=(3, self.num_query_heads, self.head_dim),
+        out_features_shape=(3, self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
         kernel_axes=("embed", "qkv", "heads", "kv"),
@@ -1467,7 +1467,7 @@ class Attention(nn.Module):
     )
     out_proj = dense_general(
         inputs_shape=out.shape,
-        features=output_dim,
+        out_features_shape=output_dim,
         axis=(-2, -1),
         kernel_init=self.kernel_init,
         kernel_axes=out_kernel_axis,  # trade speed with memory
@@ -1734,8 +1734,8 @@ class MLA(Attention):
     if self.q_lora_rank == 0:
       # Standard Q projection (without LoRA).
       self.query_proj = dense_general(
-          in_features=self.config.emb_dim,
-          features=(self.num_query_heads, self.qk_head_dim),
+          in_features_shape=self.config.emb_dim,
+          out_features_shape=(self.num_query_heads, self.qk_head_dim),
           axis=-1,
           kernel_init=self.kernel_init,
           kernel_axes=("embed", "q_heads", "kv"),
@@ -1748,8 +1748,8 @@ class MLA(Attention):
     else:
       # LoRA path for Q.
       self.wq_a = dense_general(
-          in_features=self.config.emb_dim,
-          features=self.q_lora_rank,
+          in_features_shape=self.config.emb_dim,
+          out_features_shape=self.q_lora_rank,
           axis=-1,
           kernel_init=self.kernel_init,
           kernel_axes=("embed", "q_lora"),
@@ -1767,8 +1767,8 @@ class MLA(Attention):
           kernel_axes=("norm",),
       )
       self.wq_b = dense_general(
-          in_features=self.q_lora_rank,
-          features=(self.num_query_heads, self.qk_head_dim),
+          in_features_shape=self.q_lora_rank,
+          out_features_shape=(self.num_query_heads, self.qk_head_dim),
           axis=-1,
           kernel_init=self.kernel_init,
           kernel_axes=("q_lora", "q_heads", "kv"),
@@ -1781,8 +1781,8 @@ class MLA(Attention):
 
     # KV LoRA path.
     self.wkv_a = dense_general(
-        in_features=self.config.emb_dim,
-        features=self.kv_lora_rank + self.qk_rope_head_dim,
+        in_features_shape=self.config.emb_dim,
+        out_features_shape=self.kv_lora_rank + self.qk_rope_head_dim,
         axis=-1,
         kernel_init=self.kernel_init,
         kernel_axes=("embed", "kv_lora"),
@@ -1800,8 +1800,8 @@ class MLA(Attention):
         kernel_axes=("norm",),
     )
     self.wkv_b = dense_general(
-        in_features=self.kv_lora_rank,
-        features=(
+        in_features_shape=self.kv_lora_rank,
+        out_features_shape=(
             self.num_query_heads,
             (self.qk_nope_head_dim + self.v_head_dim),
         ),
