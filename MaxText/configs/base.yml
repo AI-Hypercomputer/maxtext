@@ -372,15 +372,15 @@ dcn_pipeline_parallelism: 1
 dcn_expert_parallelism: 1
 dcn_autoregressive_parallelism: 1 # never recommended
 ici_data_parallelism: 1
-ici_fsdp_parallelism: 1 # recommended ICI axis to be auto-sharded
+ici_fsdp_parallelism: -1 # recommended ICI axis to be auto-sharded
 ici_fsdp_transpose_parallelism: 1
 ici_sequence_parallelism: 1
 ici_context_parallelism: 1
 ici_context_autoregressive_parallelism: 1
-ici_tensor_parallelism: 4
+ici_tensor_parallelism: 1
 ici_tensor_transpose_parallelism: 1
 ici_tensor_sequence_parallelism: 1
-ici_autoregressive_parallelism: 16
+ici_autoregressive_parallelism: 1
 ici_pipeline_parallelism: 1
 ici_expert_parallelism: 1
 
