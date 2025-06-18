@@ -103,6 +103,7 @@ def _normalize_images(images, mean, std):
   Returns:
     The normalized images.
   """
+  print(f"images mean: {images.mean()}")
   images -= jnp.asarray(mean)
   images /= jnp.asarray(std)
   return images
@@ -322,6 +323,7 @@ def pre_process_llama4_image(image):
     image of (536, 640, 3), its best_resolution = (672, 672), image split into 4 tiles of (336, 336)
     Additional global tile of (336, 336) is added, and the final output image_tiles is (5, 3, 336, 336).
   """
+  print(f"image mean: {image.mean()}")
   # Find the best resolution canvas for the image
   possible_resolutions = find_supported_resolutions(max_num_chunks=LLAMA4_TILES_NUM, patch_size=LLAMA4_TILE_SIZE)
   best_resolution = get_best_resolution(
@@ -333,11 +335,13 @@ def pre_process_llama4_image(image):
 
   # Pad the image to the best resolution and normalize it
   image_padded = pad_to_best_fit_jax(image, best_resolution)
+  print(f"image_padded mean: {image_padded.mean()}")
   image_normalized = _normalize_images(
       images=image_padded * LLAMA4_PIXEL_VALUE_RESCALE_FACTOR,
       mean=LLAMA4_IMAGE_MEAN,
       std=LLAMA4_IMAGE_STD,
   )
+  print(f"image_normalized mean: {image_normalized.mean()}")
 
   # Split the image into tiles
   ratio_h, ratio_w = (
@@ -345,6 +349,7 @@ def pre_process_llama4_image(image):
       best_resolution[1] // LLAMA4_TILE_SIZE,
   )
   image_tiles = split_to_tiles_jax(image_normalized, ratio_h, ratio_w)
+  print(f"image_tiles mean: {image_tiles.mean()}")
 
   # If more than one tile, add a global tile by resizing the image to the tile size
   if ratio_h * ratio_w > 1:
@@ -359,7 +364,9 @@ def pre_process_llama4_image(image):
     )
     global_tiles = jnp.transpose(global_tiles, (2, 0, 1))
     global_tiles = jnp.expand_dims(global_tiles, axis=0)
+    print(f"global_tiles mean: {global_tiles.mean()}")
     image_tiles = jnp.concatenate((image_tiles, global_tiles), axis=0)
+  print(f"all image_tiles mean: {image_tiles.mean()}")
 
   # TODO(hengtaoguo): Add support for multiple images with aspect ratios size of [num_images, 2]
   aspect_ratios_array = jnp.array([[ratio_h, ratio_w]], dtype=jnp.int32)

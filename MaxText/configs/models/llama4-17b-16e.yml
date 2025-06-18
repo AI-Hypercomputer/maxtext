@@ -36,7 +36,7 @@ use_qk_norm: True # Llama4 models apply an L2Norm to the Query and Keys after Ro
 nope_layer_interval: 4 # Every fourth layer should NOT use RoPE
 interleave_moe_layer_step: 1 # Every layer is MoE layer
 inhomogeneous_layer_cycle_interval: 4 # Every four layers the pattern of nope and moe repeats (least common multiple of nope interval and moe interval)
-ici_expert_parallelism: 8
+# ici_expert_parallelism: 8
 
 temperature_tuning: True
 # Chunk attention is used on all RoPE layers
