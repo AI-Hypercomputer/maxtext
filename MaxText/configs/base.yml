@@ -257,7 +257,7 @@ record_internal_nn_metrics: 0
 
 # Output directory
 # Create a GCS bucket, e.g. my-maxtext-outputs and set this to "gs://my-maxtext-outputs/"
-base_output_directory: "gs://chengnuojin-maxtext-logs"
+base_output_directory: ""
 
 # Whether to enable emergency checkpoint. If True, `local_checkpoint_directory` and a non-zero `local_checkpoint_period` must also be specified.
 # Emergency checkpoint is an experimental Orbax feature that: periodically saves to persistent storage and, with a larger invertal, saves to a local directory.
@@ -425,7 +425,7 @@ sft_train_on_completion_only: False
 # details in: https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md
 dataset_type: tfds
 # for TFDS input pipeline (dataset_type=tfds)
-dataset_path: "gs://chengnuojin-maxtext-dataset" # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
+dataset_path: "" # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
 dataset_name: 'c4/en:3.0.1'
 eval_dataset_name: 'c4/en:3.0.1'
 train_split: 'train'
