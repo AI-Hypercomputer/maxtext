@@ -50,7 +50,7 @@ from MaxText.layers import embeddings
 from MaxText.layers.embeddings import YarnRotaryEmbedding, rotary_embedding_as_linen
 from MaxText.layers.initializers import nd_dense_init, NdInitializer
 from MaxText.layers.linears import dense_general
-from MaxText.layers.normalizations import RMSNorm
+from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
@@ -1714,7 +1714,8 @@ class Attention(nn.Module):
     is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
     # NOTE: llama 4 does L2 normalization after RoPE
     if self.use_qk_norm and not is_llama4_decoder_block:
-      query = RMSNorm(
+      query = rms_norm(
+          num_features=query.shape[-1],
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           name="query_norm",
@@ -1722,7 +1723,8 @@ class Attention(nn.Module):
           kernel_axes=("norm",),
       )(query)
 
-      key = RMSNorm(
+      key = rms_norm(
+          num_features=key.shape[-1],
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           name="key_norm",
@@ -1855,7 +1857,8 @@ class MLA(Attention):
           quant=self.quant,
           matmul_precision=self.config.matmul_precision,
       )
-      self.q_norm = RMSNorm(
+      self.q_norm = rms_norm(
+          num_features=self.q_lora_rank,
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           name="q_norm",
@@ -1888,7 +1891,8 @@ class MLA(Attention):
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
     )
-    self.kv_norm = RMSNorm(
+    self.kv_norm = rms_norm(
+        num_features=self.kv_lora_rank,
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
         name="kv_norm",

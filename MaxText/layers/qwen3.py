@@ -32,7 +32,7 @@ from MaxText.layers import initializers
 from MaxText.layers import linears
 from MaxText.layers import moe
 from MaxText.layers import quantizations
-from MaxText.layers.normalizations import RMSNorm
+from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.inference import page_manager
 
@@ -63,7 +63,8 @@ class Qwen3DecoderLayer(nn.Module):
     inputs_checkpoint = checkpoint_name(inputs, "decoder_layer_input")
 
     # Corresponds to Qwen3's `input_layernorm`
-    lnx = RMSNorm(
+    lnx = rms_norm(
+        num_features=inputs.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="pre_self_attention_layer_norm",
@@ -108,7 +109,8 @@ class Qwen3DecoderLayer(nn.Module):
     residual_after_attention = inputs_checkpoint + attention_output
 
     # Post Attention LayerNorm (corresponds to Qwen3's `post_attention_layernorm`)
-    mlp_input = RMSNorm(
+    mlp_input = rms_norm(
+        num_features=residual_after_attention.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="post_self_attention_layer_norm", # Standard MaxText naming
