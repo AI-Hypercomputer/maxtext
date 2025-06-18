@@ -49,8 +49,8 @@ import datasets
 
 import jax
 
-from mmlu_categories import categories
-from mmlu_categories import subcategories
+from .mmlu_categories import categories
+from .mmlu_categories import subcategories
 
 from tqdm import tqdm
 
