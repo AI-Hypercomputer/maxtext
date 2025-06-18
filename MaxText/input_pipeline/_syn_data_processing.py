@@ -80,11 +80,11 @@ class SyntheticDataIterator:
 
 
 class PlaceHolderDataIterator:
-  """Creates a Bad synthetic data iterator for loading on subset of hosts"""
+  """Creates a place holder synthetic data iterator for loading on subset of hosts"""
 
   def __init__(self, config: pyconfig.HyperParameters, mesh):
     self.mesh = mesh
-    dataset = PlaceHolderDataIterator.get_bad_synthetic_data(config)
+    dataset = PlaceHolderDataIterator.get_place_holder_synthetic_data(config)
     self.data_generator = multihost_dataloading.MultiHostDataLoadIterator(dataset, self.mesh)
 
   def __iter__(self):
@@ -94,7 +94,7 @@ class PlaceHolderDataIterator:
     return next(self.data_generator)
 
   @staticmethod
-  def get_bad_synthetic_data(config: pyconfig.HyperParameters):
+  def get_place_holder_synthetic_data(config: pyconfig.HyperParameters):
     """fill negative value in synthetic data"""
     output = {}
     output["inputs"] = tf.data.Dataset.from_tensor_slices(np.full((1, config.max_target_length), -1, dtype=jax.numpy.int32))
