@@ -7,33 +7,34 @@ export HF_AUTH_TOKEN=""
 
 DATE=$(date +%Y-%m-%d)
 # Define variables for paths and arguments
-HF_CHECKPOINT_GCS_PATH="gs://maxtext-model-checkpoints/HuggingFace/gemma2-2b/${DATE}" # (optional)GCS path for HF model
-MAXTEXT_CHECKPOINT_DIR="gs://maxtext-model-checkpoints/gemma2-2b-it/2025-02-20-18-01/unscanned/checkpoints/0/items"
-LOCAL_HF_CHECKPOINT_DIR="/tmp/hf_gemma2-2b_output" # HF requires a local dir
-GOLDEN_MODEL_ID="google/gemma-2-2b-it"
+HF_CHECKPOINT_GCS_PATH="gs://maxtext-model-checkpoints/HuggingFace/gemma3-4b/${DATE}" # (optional)GCS path for HF model
+MAXTEXT_CHECKPOINT_DIR="gs://maxtext-model-checkpoints/gemma3-4b/2025-03-18-19-03/unscanned/checkpoints/0/items"
+LOCAL_HF_CHECKPOINT_DIR="/tmp/hf_gemma3-4b_output" # HF requires a local dir
+GOLDEN_MODEL_ID="google/gemma-3-4b-it"
 
 CONVERT_MODULE="MaxText.utils.ckpt_conversion.to_huggingface"
 CONVERT_ARGS=(
-    "MaxText/configs/base.yml"
-    "model_name=gemma2-2b"
-    "tokenizer_path=assets/tokenizer.gemma"
-    "load_parameters_path=${MAXTEXT_CHECKPOINT_DIR}"
-    "per_device_batch_size=1"
-    "max_prefill_predict_length=8"
-    "max_target_length=16"
-    "steps=1"
-    "async_checkpointing=false"
-    "scan_layers=false"
-    "prompt='I love to'"
-    "attention='dot_product'"
+    "MaxText/configs/base.yml",
+    "model_name=gemma3-4b",
+    "tokenizer_path=assets/tokenizer.gemma3",
+    "load_parameters_path=${MAXTEXT_CHECKPOINT_DIR}",
+    "per_device_batch_size=1",
+    "run_name=ht_test",
+    "max_prefill_predict_length=8",
+    "max_target_length=16",
+    "steps=1",
+    "async_checkpointing=false",
+    "prompt='I love to'",
+    "scan_layers=false",
+    "attention='dot_product'",
     "base_output_directory=${HF_CHECKPOINT_GCS_PATH}"
 )
 
 VERIFY_MODULE="MaxText.tests.hf_ckpt_conversion_check"
 
 VERIFY_ARGS=(
-    "golden_model_id=${GOLDEN_MODEL_ID}"
-    "hf_checkpoint_path=${LOCAL_HF_CHECKPOINT_DIR}" # Updated to local path
+    "--golden_model_id=${GOLDEN_MODEL_ID}"
+    "--hf_checkpoint_path=${LOCAL_HF_CHECKPOINT_DIR}" # Updated to local path
 )
 
 

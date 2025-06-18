@@ -572,14 +572,14 @@ class TrainCompile(unittest.TestCase):
             "compile_topology_num_slices=8",
             "use_iota_embed=true",
             "model_name=deepseek3-671b",
-            "megablox=False", # dropless not yet supported (b/418313093)
-            "sparse_matmul=False", 
+            "megablox=False",  # dropless not yet supported (b/418313093)
+            "sparse_matmul=False",
             "capacity_factor=1",
             "per_device_batch_size=1",
             "max_target_length=2048",
             "pipeline_parallel_layers=56",
             "ici_expert_parallelism=16",
-            "dcn_pipeline_parallelism=8"
+            "dcn_pipeline_parallelism=8",
         )
     )
 
