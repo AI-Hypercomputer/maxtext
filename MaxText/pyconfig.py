@@ -301,6 +301,12 @@ def validate_model_name(s: str) -> bool:
       "gpt3-52k",
       "llama4-17b-16e",
       "llama4-17b-128e",
+      "qwen3-0.6b",
+      "qwen3-1.7b",
+      "qwen3-4b",
+      "qwen3-8b",
+      "qwen3-14b",
+      "qwen3-32b",
   )
   if s not in valid_model_names:
     raise ValueError(f"Invalid model name was passed. Got {s}, Valid options {valid_model_names}")
