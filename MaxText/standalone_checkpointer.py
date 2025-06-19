@@ -33,11 +33,13 @@ from jax import numpy as jnp
 
 from flax.linen import partitioning as nn_partitioning
 
+import MaxText as mt
 from MaxText import checkpointing
 from MaxText import maxtext_utils
+from MaxText import train_utils
 from MaxText import max_logging
 from MaxText import pyconfig
-from MaxText.train import setup_mesh_and_model, get_first_step, validate_train_config, save_checkpoint
+from MaxText.train import get_first_step, validate_train_config, save_checkpoint
 from MaxText.layers import models
 
 Transformer = models.Transformer
@@ -52,7 +54,9 @@ def checkpoint_loop(config, state=None):
     ckpt_path:
   Returns:
   """
-  init_rng, checkpoint_manager, mesh, model, _, tx = setup_mesh_and_model(config)
+  model = mt.from_pretrained(config)
+  mesh = model.mesh
+  init_rng, checkpoint_manager, _, tx = train_utils.create_training_tools(config, model, mesh)
 
   unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
   # A barrier to sync all hosts before starting to restore checkpoint
