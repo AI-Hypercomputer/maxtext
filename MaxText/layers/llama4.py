@@ -58,7 +58,7 @@ class Llama4UnfoldConvolution(nn.Module):
 
   def setup(self):
     """
-      Initialize Llama4UnfoldConvolution
+    Initialize Llama4UnfoldConvolution
     """
     cfg = self.config
     # Linear projection layer using dense_general.
@@ -190,7 +190,7 @@ class Llama4VisionMLP2(nn.Module):
 
   def setup(self):
     """
-      Initialize Llama4VisionMLP2
+    Initialize Llama4VisionMLP2
     """
     cfg = self.config
     self.fc1 = linears.dense_general(
