@@ -157,3 +157,4 @@ class Transformer(nn.Module):
       )
 
     return logits
+  

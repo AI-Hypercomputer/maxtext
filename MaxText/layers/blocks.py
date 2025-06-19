@@ -700,3 +700,4 @@ class VisionEncoder(nn.Module):
       # vision embedder / projection layer, not frozen in most cases, trained / finetuned together with main model
       embeddings = self.vision_encoder_layer[1](config=cfg, mesh=mesh)(embeddings)
     return embeddings
+  
