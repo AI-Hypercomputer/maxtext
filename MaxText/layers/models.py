@@ -465,7 +465,7 @@ class Decoder(nn.Module):
     mesh = self.mesh
     assert decoder_input_tokens.ndim == 2  # [batch, len]
 
-    jax.debug.print("decoder_input_tokens.mean() {}", decoder_input_tokens.mean())
+    # jax.debug.print("decoder_input_tokens.mean() {}", decoder_input_tokens.mean())
     # [batch, length] -> [batch, length, emb_dim]
     y = self.shared_embedding(decoder_input_tokens.astype("int32"))
 
