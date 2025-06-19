@@ -384,16 +384,22 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   else:
     for k, v in data.items():
       data[k] = v[: config.micro_batch_size_to_eval_on, :]
-
+  mutable_collections = ["intermediates"]
+  if config.mtp_num_layers > 0 and is_train:
+    # The single model.apply call now triggers the entire chain if MTP is enabled:
+    # Decoder runs -> returns hidden_state -> MTPBlock uses it -> MTPBlock sows losses -> we reap them here.
+    mutable_collections.append("mtp_losses")
   logits, intermediate_outputs = model.apply(
       params,
       data["inputs"],
       data["inputs_position"],
+      decoder_target_tokens=data["targets"] if is_train else None,
+      decoder_target_mask=data["targets_segmentation"] if is_train else None,
       decoder_segment_ids=data["inputs_segmentation"],
       encoder_images=data["images"] if config.use_multimodal else None,
       enable_dropout=config.enable_dropout if is_train else False,
       rngs={"dropout": rng1, "params": aqt_rng},
-      mutable="intermediates",
+      mutable=mutable_collections,
   )
   one_hot_targets = jax.nn.one_hot(data["targets"], config.vocab_size)
   xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot_targets, 0.0)
@@ -403,6 +409,26 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
   total_loss = jnp.sum(xent)
   total_weights = jnp.sum(data["targets_segmentation"] != 0)
   loss = total_loss / (total_weights + EPS)
+
+  # Calculate and Add MTP Loss
+  mtp_loss = 0.0
+  if config.mtp_num_layers > 0 and is_train:
+    # Safely retrieve the sown values
+    losses_path = ("mtp_losses", "mtp_block", "losses")
+    weights_path = ("mtp_losses", "mtp_block", "weights")
+
+    mtp_losses = maxtext_utils.get_nested_value(intermediate_outputs, losses_path, default=())
+    mtp_weights = maxtext_utils.get_nested_value(intermediate_outputs, weights_path, default=())
+    if mtp_losses:  # Ensure MTP heads ran
+      sum_of_all_mtp_losses = jnp.sum(jnp.array(mtp_losses))
+      sum_of_all_mtp_weights = jnp.sum(jnp.array(mtp_weights))
+
+      avg_mtp_loss = sum_of_all_mtp_losses / (sum_of_all_mtp_weights + EPS)
+      scaled_mtp_loss = avg_mtp_loss * config.mtp_loss_scaling_factor
+
+      loss += scaled_mtp_loss
+      mtp_loss = scaled_mtp_loss
+
   # get moe load balance loss
   moe_lb_loss = 0.0
   if config.num_experts > 1:
@@ -415,6 +441,7 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       "total_loss": total_loss,
       "total_weights": total_weights,
       "moe_lb_loss": moe_lb_loss,
+      "mtp_loss": mtp_loss,
   }
   return loss, aux
 
@@ -450,6 +477,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
       )
       acc_grad_and_loss["loss"] += aux["total_loss"]
       acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
+      acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]
       acc_grad_and_loss["grad"] = jax.tree_util.tree_map(
           lambda x, y: x * aux["total_weights"] + y, cur_batch_gradient, acc_grad_and_loss["grad"]
       )
@@ -464,7 +492,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
 
     data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
     init_grad = jax.tree_util.tree_map(jnp.zeros_like, state.params)
-    init_grad_and_loss = {"loss": 0.0, "grad": init_grad, "total_weights": 0, "moe_lb_loss": 0.0}
+    init_grad_and_loss = {"loss": 0.0, "grad": init_grad, "total_weights": 0, "moe_lb_loss": 0.0, "mtp_loss": 0.0}
 
     grad_and_loss, aux = jax.lax.scan(
         accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
@@ -472,6 +500,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
     loss = (
         grad_and_loss["loss"] / grad_and_loss["total_weights"]
         + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
+        + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
     )
     raw_grads = jax.tree_util.tree_map(lambda arr: arr / grad_and_loss["total_weights"], grad_and_loss["grad"])
     aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
@@ -485,6 +514,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   intermediate_outputs = aux["intermediate_outputs"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
+  mtp_loss = aux["mtp_loss"]
 
   if config.gradient_clipping_threshold > 0:
     grads = maxtext_utils.apply_gradient_clipping(raw_grads, state, config.gradient_clipping_threshold)
@@ -516,6 +546,7 @@ def train_step(model, config, state_mesh_shardings, state, data, dropout_rng):
   scalar_metrics = {
       "learning/loss": loss,
       "learning/moe_lb_loss": moe_lb_loss,
+      "learning/mtp_loss": mtp_loss,
       "learning/total_weights": total_weights,
   }
   if not config.optimizer_memory_host_offload:
@@ -552,12 +583,14 @@ def eval_step(model, config, state, data, dropout_rng):
   total_loss = aux["total_loss"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
+  mtp_loss = aux["mtp_loss"]
   metrics = {
       "scalar": {
           "evaluation/loss": loss,
           "evaluation/total_loss": total_loss,
           "evaluation/total_weights": total_weights,
           "evaluation/moe_lb_loss": moe_lb_loss,
+          "evaluation/mtp_loss": mtp_loss,
       },
   }
   if config.use_dpo:
@@ -895,6 +928,7 @@ def train_loop(config, recorder, state=None):
               "eval/total_weights": 0.0,
               "eval/avg_loss": 0.0,
               "eval/moe_lb_loss": 0.0,
+              "eval/mtp_loss": 0.0,
           }
       }
       eval_dpo_reward_accuracy = 0.0
@@ -908,6 +942,7 @@ def train_loop(config, recorder, state=None):
         cumulative_eval_metrics["scalar"]["eval/total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
         cumulative_eval_metrics["scalar"]["eval/total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
         cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] += float(eval_metrics["scalar"]["evaluation/moe_lb_loss"])
+        cumulative_eval_metrics["scalar"]["eval/mtp_loss"] += float(eval_metrics["scalar"]["evaluation/mtp_loss"])
         eval_dpo_reward_accuracy += float(eval_metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0))  # for dpo only
         max_logging.log(f"Completed eval step {eval_step_count}")
         eval_step_count += 1
