@@ -17,7 +17,8 @@
 
 # How to run MaxText with XPK?
 
-This document focuses on steps required to setup XPK on TPU VM and assumes you have gone through the [README](https://github.com/google/xpk/blob/main/README.md) to understand XPK basics.
+* This document focuses on steps required to setup XPK on TPU VM and assumes you have gone through the [README](https://github.com/google/xpk/blob/main/README.md) to understand XPK basics.
+* Please also checkout [maxtext_xpk_runner.py](../benchmarks/Getting_Started_Benchmarking.md) for more advanced methods of executing several xpk workloads across a sweep of parameters such as maxtext models, xpk clusters, and model parameters.
 
 ## Steps to setup XPK on TPU VM
 
