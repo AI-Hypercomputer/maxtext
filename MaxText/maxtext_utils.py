@@ -46,6 +46,7 @@ from MaxText import max_logging
 from MaxText import max_utils
 from MaxText.common_types import DecoderBlockType, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE
 from MaxText.inference.page_manager import PageState
+from MaxText.layers.blocks import DecoderLayer
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
@@ -1078,3 +1079,62 @@ def get_formatted_sharding_annotations(params, mesh=None):
     annotation_lines.append(f" - Param: {param_name_str}\n" f"   Shape: {shape_str}\n" f"   Sharding: {sharding_desc}")
   # Join all the collected lines into a single string, separated by newlines.
   return "\n".join(annotation_lines)
+
+
+def get_decoder_layers(config):
+  """
+  Helper function to get the list of decoder layer classes based on config.
+  Get decoder layers, one of `DecoderBlockType` discriminants or a direct `nn.Module` inheritor
+  """
+  if config.decoder_block == DecoderBlockType.DEFAULT:
+    return [DecoderLayer]
+  elif config.decoder_block == DecoderBlockType.LLAMA2:
+    from MaxText.layers import llama2  # pylint: disable=import-outside-toplevel
+
+    return [llama2.LlamaDecoderLayer]
+  elif config.decoder_block == DecoderBlockType.MISTRAL:
+    # TODO(ranran): update to Mistral with sliding window attention
+    from MaxText.layers import mistral  # pylint: disable=import-outside-toplevel
+
+    return [mistral.MistralDecoderLayer]
+  elif config.decoder_block == DecoderBlockType.MIXTRAL:
+    from MaxText.layers import mixtral  # pylint: disable=import-outside-toplevel
+
+    return [mixtral.MixtralDecoderLayer]
+  elif config.decoder_block == DecoderBlockType.DEEPSEEK:
+    from MaxText.layers import deepseek  # pylint: disable=import-outside-toplevel
+
+    return [deepseek.DeepSeekDenseLayer, deepseek.DeepSeekMoELayer]
+  elif config.decoder_block == DecoderBlockType.GEMMA:
+    from MaxText.layers import gemma  # pylint: disable=import-outside-toplevel
+
+    return [gemma.GemmaDecoderLayer]
+  elif config.decoder_block == DecoderBlockType.GEMMA2:
+    from MaxText.layers import gemma2  # pylint: disable=import-outside-toplevel
+
+    return [gemma2.Gemma2DecoderLayer]
+  elif config.decoder_block == DecoderBlockType.GEMMA3:
+    from MaxText.layers import gemma3  # pylint: disable=import-outside-toplevel
+
+    return [gemma3.Gemma3DecoderLayer]
+  elif config.decoder_block == DecoderBlockType.GPT3:
+    from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
+
+    return [gpt3.Gpt3DecoderLayer]
+  elif config.decoder_block == DecoderBlockType.SIMPLE:
+    from MaxText.layers import simple_layer  # pylint: disable=import-outside-toplevel
+
+    return [simple_layer.SimpleDecoderLayer]
+  elif config.decoder_block == DecoderBlockType.SIMPLE_MLP:
+    from MaxText.layers import simple_layer  # pylint: disable=import-outside-toplevel
+
+    return [simple_layer.SimpleMlpDecoderLayer]
+  elif config.decoder_block == DecoderBlockType.LLAMA4:
+    from MaxText.layers import llama4  # pylint: disable=import-outside-toplevel
+
+    if config.scan_layers:
+      return [llama4.Llama4ScannableBlock]
+    else:
+      return [llama4.Llama4DecoderLayer]
+  else:
+    raise ValueError(f"Incorrect decoder_block name {config.decoder_block.value=}")
