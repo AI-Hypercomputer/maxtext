@@ -159,6 +159,12 @@ def main(config):
     # Convert the label index to the corresponding letter
     correct_answer = chr(65 + label)
 
+    # Debug
+    max_logging.log(
+        f"{total_count + 1} | {prompt}\n[Model output] {output}\n"
+        f"[Correct answer] {correct_answer}, Matching: {predicted_answer == correct_answer}"
+    )
+
     # Update accuracy for overall and per-subject
     if predicted_answer == correct_answer:
       correct_count += 1
@@ -167,7 +173,7 @@ def main(config):
     subject_total[subject] += 1
 
     if idx % 50 == 0:
-      max_logging.log(f" Accuracy: {correct_count / total_count:.4f}")
+      max_logging.log(f" Accuracy: {correct_count / total_count:.4f} | {total_count}/{len(mmlu_test_ds)}")
 
   # Final accuracy
   if total_count > 0:
