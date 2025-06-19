@@ -798,7 +798,7 @@ class RoutedMoE(nn.Module):
         processed_group_sizes = jnp.zeros_like(group_sizes)
         # intermediate_output, _, _, _, _ = lax.while_loop(condition_func, iterate_gmm_calls, (init_output, x, group_sizes, processed_group_sizes, 0))
         num_iter = expert_parallelism_size * math.ceil(1 / self.config.ra2a_buffer_ratio)
-        intermediate_output, _, _, _, _, _ = lax.fori_loop(0, num_iter, iterate_gmm_calls, (init_output, x, group_sizes, processed_group_sizes, 0, num_iter))
+        intermediate_output, _, _, _, _, _ = lax.fori_loop(0, 2, iterate_gmm_calls, (init_output, x, group_sizes, processed_group_sizes, 0, num_iter))
       else:
         intermediate_output = gmm_block(x, group_sizes)
         if self.get_tensor_parallelism_size() > 1:
