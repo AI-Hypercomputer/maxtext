@@ -36,7 +36,7 @@ from MaxText.layers import pipeline
 from MaxText import maxtext_utils
 from MaxText import multimodal_utils
 from MaxText.layers.attentions import Attention
-from MaxText.layers.normalizations import RMSNorm
+from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.embeddings import PositionalEmbedding, Embed
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
@@ -71,7 +71,8 @@ class DecoderLayer(nn.Module):
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
-    lnx = RMSNorm(
+    lnx = rms_norm(
+        features=inputs.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="pre_self_attention_norm",
@@ -200,7 +201,7 @@ class Decoder(nn.Module):
   def setup(self):
     """Initialize decoder layer."""
     self.decoder_layer = self.get_decoder_layers()
-    self.norm_layer = self.get_norm_layer()
+    self.norm_layer = self.get_norm_layer(features=self.config.emb_dim)
     if self.config.using_pipeline_parallelism:
       pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
       remat_policy = self.get_remat_policy()
@@ -365,7 +366,7 @@ class Decoder(nn.Module):
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
-  def get_norm_layer(self):
+  def get_norm_layer(self, features: int):
     """get normalization layer (return type inherits from nn.Module)"""
     if self.config.decoder_block in (
         DecoderBlockType.DEFAULT,
@@ -380,7 +381,7 @@ class Decoder(nn.Module):
         DecoderBlockType.SIMPLE_MLP,
         DecoderBlockType.LLAMA4,
     ):
-      return RMSNorm
+      return functools.partial(rms_norm, features=features)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
       from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
 
@@ -641,7 +642,7 @@ class Decoder(nn.Module):
                 slot=slot,
                 **layer_call_kwargs,
             )
-    y = self.get_norm_layer()(
+    y = self.get_norm_layer(features=y.shape[-1])(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="decoder_norm",

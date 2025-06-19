@@ -19,6 +19,7 @@ from typing import Callable, Tuple, Union
 import jax
 
 from flax import linen as nn
+from flax import nnx
 
 from MaxText.common_types import Array, DType, Shape, PRNGKey
 
@@ -39,3 +40,12 @@ def nd_dense_init(scale, mode, distribution):
     return fn(key, shape, dtype)
 
   return init_fn
+
+def variable_to_logically_partitioned(variable: nnx.VariableState):
+  metadata = variable.get_metadata()
+  return nn.LogicallyPartitioned(  # type: ignore[wrong-keyword-args]
+      variable.value,
+      variable.sharding,  # type: ignore[arg-type]
+      mesh=metadata.get("mesh"),
+      rules=metadata.get("rules"),
+  )
