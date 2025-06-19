@@ -174,7 +174,7 @@ class MaxEngine(engine_api.Engine):
     """Lays out an array tensor by tensor to prevent OOMs."""
 
     def _layout(x, s, l):
-      if x.layout == l:
+      if x.format == l:
         return x
       # Somehow this can be None sometimes.
       dll = l.device_local_layout if isinstance(l, Format) else l
