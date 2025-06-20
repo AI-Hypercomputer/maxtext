@@ -707,7 +707,6 @@ class VisionEncoder(nn.Module):
     elif self.config.model_name in ["llama4-17b-16e", "llama4-17b-128e"]:
       from MaxText.layers import llama4  # pylint: disable=import-outside-toplevel
 
-      # TODO(hengtaoguo): return [llama4.Llama4VisionModel, llama4.Llama4MultiModalProjector] once ready
       return [llama4.Llama4VisionModel, llama4.Llama4MultiModalProjector]
     else:
       raise ValueError(f"No VisionEncoder implemented for {self.config.model_name} yet")
@@ -784,7 +783,6 @@ class Transformer(nn.Module):
 
     bidirectional_mask = None
     image_embeddings = None
-    # TODO(hengtaoguo): Here we temporarily skip multimodal support for Llama4 models because of WIP
     if self.config.use_multimodal and encoder_images is not None:
       image_embeddings = self.vision_encoder(input_images=encoder_images, deterministic=not enable_dropout)
 
