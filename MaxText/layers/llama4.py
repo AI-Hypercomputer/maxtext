@@ -20,7 +20,6 @@ limitations under the License.
 import math
 from typing import Optional
 
-import jax
 import jax.numpy as jnp
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
@@ -36,7 +35,6 @@ from MaxText.layers import models
 from MaxText.layers import moe
 from MaxText.layers import quantizations
 from MaxText.layers import attentions
-from MaxText.layers import embeddings
 from MaxText.layers.attentions import AttentionType
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.normalizations import RMSNorm
@@ -703,6 +701,15 @@ class Llama4VisionEncoder(nn.Module):
 
 
 class Llama4VisionModel(nn.Module):
+  """Llama4 vision model for processing image inputs.
+
+  This model extracts patches from input image tiles and processes them through Llama4VisionEncoder and other vision-specific layers.
+
+  Attributes:
+    config: Config containing model parameters
+    mesh: Mesh, JAX device mesh (used for sharding)
+  """
+
   config: Config
   mesh: Mesh
 
@@ -738,7 +745,7 @@ class Llama4VisionModel(nn.Module):
       deterministic: Whether to use deterministic mode (disables dropout)
 
     Returns:
-      Final hidden states from the vision encoder
+      Final hidden states from the vision encoder of shape [batch_size, num_tiles, num_patches, vision_output_dim_for_vit]
     """
     cfg = self.config
     mesh = self.mesh
@@ -765,7 +772,7 @@ class Llama4VisionModel(nn.Module):
 
     hidden_states = Llama4VisionPixelShuffleMLP(config=cfg)(hidden_states)
 
-    # Reshape hidden states to [batch_size, num_tiles, num_patches, vision_output_dim_for_vit]
+    # Reshape hidden states
     _, patch_num, patch_dim = hidden_states.shape
     hidden_states = jnp.reshape(hidden_states, [b, t, patch_num, patch_dim])
 
