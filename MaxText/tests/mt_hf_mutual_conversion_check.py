@@ -163,7 +163,7 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02):
   assert max_kl_div < atol, f"KL divergence values {max_kl_div.item():.6f} exceed the threshold {atol}"
 
 
-def run_prompts(args: argparse.Namespace, unknown_args: list) -> None:
+def run_prompts(args: argparse.Namespace) -> None:
   """
   Args:
       - hf_model_id (str): HF model ID for the HF checkpoint.
@@ -178,7 +178,7 @@ def run_prompts(args: argparse.Namespace, unknown_args: list) -> None:
   tokenizer = AutoTokenizer.from_pretrained(args.hf_model_id)  # Use this for both
 
   # 2. Load MaxText Model and Parameters
-  maxtext_argv = [""]  # Placeholder for script name
+  maxtext_argv = [""]
   maxtext_argv.append(args.maxtext_base_config_path)
 
   if args.maxtext_model_name:
@@ -204,7 +204,6 @@ def run_prompts(args: argparse.Namespace, unknown_args: list) -> None:
     # Tokenize for HF
     inputs = tokenizer(input_text, return_tensors="pt", padding=True, max_length=config.max_target_length, truncation=True)
     actual_seq_len = inputs["input_ids"].shape[1]
-    # actual_seq_len = 4
 
     # Tokenize for MaxText
     mt_ids = jnp.asarray(inputs["input_ids"], dtype=jnp.int32)
@@ -222,9 +221,6 @@ def run_prompts(args: argparse.Namespace, unknown_args: list) -> None:
         [jnp.arange(config.max_target_length, dtype=jnp.int32) for _ in range(config.global_batch_size_to_train_on)]
     )
     mt_decoder_positions = mt_decoder_positions_full[:, :actual_seq_len]
-    # max_logging.log(f"MaxText input shapes: ids={mt_ids.shape}, "
-    #                 f"decoder_positions={mt_decoder_positions.shape}, "
-    #                 f"decoder_segment_ids={mt_decoder_segment_ids.shape}")
 
     # --- HF Forward Pass ---
     with torch.no_grad():
@@ -276,10 +272,6 @@ if __name__ == "__main__":
   parser.add_argument("--scan_layers", type=bool, default=False)
   parser.add_argument("--max_kl_div", type=float, default=0.02, help="Maximum allowed KL divergence between model logits.")
 
-  parsed_args, unknown_args = parser.parse_known_args()
+  parsed_args, _ = parser.parse_known_args()
 
-  # Pass unknown_args directly; pyconfig.initialize will handle them
-  # pyconfig expects "key=value" or "--key=value", so lstrip any leading "--"
-  processed_unknown_args = [arg.lstrip("-") if arg.startswith("--") else arg for arg in unknown_args]
-
-  run_prompts(parsed_args, processed_unknown_args)
+  run_prompts(parsed_args)

@@ -44,6 +44,10 @@ def main(argv: Sequence[str]) -> None:
   hf_token = os.getenv("HF_AUTH_TOKEN")
 
   config = pyconfig.initialize(argv)
+  # check the supported model ids
+  if config.model_name not in HF_IDS:
+    raise ValueError(f"Unsupported model name: {config.model_name}. Supported models are: {list(HF_IDS.keys())}")
+
   model_id = HF_IDS[config.model_name]
   max_utils.print_system_information()
   if not config.base_output_directory:
