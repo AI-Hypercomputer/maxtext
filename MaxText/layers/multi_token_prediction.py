@@ -25,7 +25,7 @@ from flax import linen as nn
 
 from MaxText.common_types import Config, MODEL_MODE_TRAIN
 from MaxText.layers.attentions import dense_general
-from MaxText.layers.models import DecoderLayer
+from MaxText.layers.blocks import DecoderLayer
 from MaxText.layers.normalizations import RMSNorm
 
 
@@ -136,4 +136,3 @@ class MultiTokenPredictionLayer(nn.Module):
     # Shape: [B, S, H]
     # --- Return Processed Hidden State ---
     return next_hidden_state
-  
