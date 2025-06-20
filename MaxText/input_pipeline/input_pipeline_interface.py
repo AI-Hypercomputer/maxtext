@@ -29,6 +29,7 @@ from jax.sharding import PartitionSpec as P
 
 from MaxText import multihost_dataloading
 from MaxText import pyconfig
+from MaxText import max_logging
 from MaxText.input_pipeline._grain_data_processing import make_grain_train_iterator, make_grain_eval_iterator
 from MaxText.input_pipeline._hf_data_processing import make_hf_train_iterator, make_hf_eval_iterator
 from MaxText.input_pipeline._tfds_data_processing import make_tfds_train_iterator, make_tfds_eval_iterator
@@ -133,6 +134,19 @@ def get_process_loading_real_data(
       process_loading_real_data.add(p.process_index)
   return list(process_loading_real_data)
 
+def check_index_in_process(
+    config: pyconfig.HyperParameters, mesh, process_indices, input_iterator
+):
+  """
+    If the current process's index is among the `process_indices`, a real
+    data iterator is created. Otherwise, a placeholder iterator is returned.
+  """
+  if jax.process_index() in process_indices:
+    iterator_fn = functools.partial(input_iterator, config, mesh, process_indices)
+    output_iterator = iterator_fn()
+  else:
+    output_iterator = PlaceHolderDataIterator(config, mesh)
+  return output_iterator
 
 def make_mixed_iterator(
     config: pyconfig.HyperParameters, mesh, process_indices_train, process_indices_eval, train_iterator_fn, eval_iterator_fn
@@ -154,9 +168,13 @@ def make_mixed_iterator(
 
 
 def create_data_iterator(config: pyconfig.HyperParameters, mesh):
-  """create data iterator"""
-  if config.dataset_type == "synthetic":
-    return SyntheticDataIterator(config, mesh), None
+  """Create train and eval data iterators given configs and mesh."""
+  dateset_type_to_train_eval_iterator = {
+    "tfds": (make_tfds_train_iterator, make_tfds_eval_iterator),
+    "grain": (make_grain_train_iterator, make_grain_eval_iterator),
+    "hf": (make_hf_train_iterator, make_hf_eval_iterator),
+    "c4_mlperf": (make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator)
+  }
 
   process_indices_train = get_process_loading_real_data(
       config.data_sharding,
@@ -180,19 +198,19 @@ def create_data_iterator(config: pyconfig.HyperParameters, mesh):
     assert len(process_indices_train) == jax.process_count() // config.expansion_factor_real_data
     if config.eval_interval > 0:
       assert len(process_indices_eval) == jax.process_count() // config.expansion_factor_real_data
-  if config.dataset_type == "tfds":
-    train_iterator_fn = functools.partial(make_tfds_train_iterator, config, mesh, process_indices_train)
-    eval_iterator_fn = functools.partial(make_tfds_eval_iterator, config, mesh, process_indices_eval)
-  elif config.dataset_type == "grain":
-    train_iterator_fn = functools.partial(make_grain_train_iterator, config, mesh, process_indices_train)
-    eval_iterator_fn = functools.partial(make_grain_eval_iterator, config, mesh, process_indices_eval)
-  elif config.dataset_type == "hf":
-    train_iterator_fn = functools.partial(make_hf_train_iterator, config, mesh, process_indices_train)
-    eval_iterator_fn = functools.partial(make_hf_eval_iterator, config, mesh, process_indices_eval)
-  elif config.dataset_type == "c4_mlperf":
-    assert config.packing, "c4_mlperf dataloader only works with packing. For padded version, use tfds dataloader"
-    train_iterator_fn = functools.partial(make_c4_mlperf_train_iterator, config, mesh, process_indices_train)
-    eval_iterator_fn = functools.partial(make_c4_mlperf_eval_iterator, config, mesh, process_indices_eval)
+  # Generate iterator functions according to dataset type
+  if config.dataset_type in ["tfds", "grain", "hf", "c4_mlperf"]:
+    if config.dataset_type == "c4_mlperf":
+      assert config.packing, "c4_mlperf dataloader only works with packing. For padded version, use tfds dataloader"
+    train_iterator, eval_iterator = dateset_type_to_train_eval_iterator[config.dataset_type]
+    output_train_iterator = check_index_in_process(config, mesh, process_indices_train, train_iterator)
+    if config.eval_interval <= 0:
+      output_eval_iterator = None
+    else:
+      output_eval_iterator = check_index_in_process(config, mesh, process_indices_eval, eval_iterator)
   else:
-    assert False, f"Unknown dataset_type {config.dataset_type}, dataset_type must be synthetic, tfds, grain, hf or c4_mlperf"
-  return make_mixed_iterator(config, mesh, process_indices_train, process_indices_eval, train_iterator_fn, eval_iterator_fn)
+    max_logging.log(f"WARNING: '{config.dataset_type}' is not a supported dataset type." \
+                    "Using synthetic data. Please choose from 'tfds', 'grain', 'hf', or 'c4_mlperf'.")
+    output_train_iterator, output_eval_iterator = SyntheticDataIterator(config, mesh), None
+
+  return output_train_iterator, output_eval_iterator
