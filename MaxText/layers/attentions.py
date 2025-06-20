@@ -26,7 +26,6 @@ from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental.pallas.ops.gpu import attention as gpu_pallas_attention
 from jax.experimental.pallas.ops.gpu import decode_attention as gpu_pallas_decode_attention
-from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh
@@ -44,6 +43,7 @@ from MaxText.inference import paged_attention
 from MaxText.inference.kvcache import KVQuant, KVTensor
 from MaxText.kernels.ragged_attention import ragged_gqa
 from MaxText.kernels.ragged_attention import ragged_mha
+from MaxText.kernels import splash_attention_kernel
 from MaxText.layers import embeddings
 from MaxText.layers.embeddings import YarnRotaryEmbedding, RotaryEmbedding
 from MaxText.layers.initializers import nd_dense_init, NdInitializer
