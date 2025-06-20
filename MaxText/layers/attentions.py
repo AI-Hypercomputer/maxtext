@@ -14,6 +14,7 @@
 
 """Attentions Layers."""
 
+import dataclasses
 import enum
 import functools
 from typing import Any, Optional, Tuple
@@ -34,6 +35,7 @@ import jax
 import jax.numpy as jnp
 
 from flax import linen as nn
+from flax import nnx
 from flax.linen import partitioning
 
 from MaxText import max_utils
@@ -1223,19 +1225,29 @@ class AttentionOp(nn.Module):
       return prefill_unnormalized_output / prefill_exponentials_sum
 
 
-class L2Norm(nn.Module):
+@dataclasses.dataclass(repr=False)
+class L2Norm(nnx.Module):
   """
   Implementation of L2Norm in JAX.
 
-  Attributes:
+  Args:
     eps: float, epsilon used for numerical stability (default value should be ok for most cases).
   """
-
   eps: float = 1e-6
+  rngs: nnx.Rngs = None # Not used in L2Norm but passed in by nnx.bridge.to_linen
 
-  @nn.compact
   def __call__(self, x):
     return x * jax.lax.rsqrt(jnp.mean(x**2, axis=-1, keepdims=True) + self.eps)
+
+
+def l2_norm_as_linen(self, eps: float = 1e-6):
+  """
+  Initializes the L2Norm module and returns it as a Linen module.
+
+  Args:
+    eps: float, epsilon used for numerical stability (default value should be ok for most cases).
+  """
+  return nnx.bridge.to_linen(L2Norm, eps)
 
 
 class Attention(nn.Module):
@@ -1643,7 +1655,7 @@ class Attention(nn.Module):
       key = self.apply_rotary_embedding(key, name="key_rotary", inputs_positions=inputs_positions)
 
     if use_qk_norm and is_llama4_decoder_block:
-      l2_norm = L2Norm(self.config.normalization_layer_epsilon)
+      l2_norm = l2_norm_as_linen(self.config.normalization_layer_epsilon)
       query = l2_norm(query)
       key = l2_norm(key)
 
