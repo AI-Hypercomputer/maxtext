@@ -703,7 +703,8 @@ class Llama4VisionEncoder(nn.Module):
 class Llama4VisionModel(nn.Module):
   """Llama4 vision model for processing image inputs.
 
-  This model extracts patches from input image tiles and processes them through Llama4VisionEncoder and other vision-specific layers.
+  This model extracts patches from input image tiles and processes them 
+  through Llama4VisionEncoder and other vision-specific layers.
 
   Attributes:
     config: Config containing model parameters
