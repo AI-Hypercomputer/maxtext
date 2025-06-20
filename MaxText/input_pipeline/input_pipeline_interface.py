@@ -34,7 +34,7 @@ from MaxText.input_pipeline._grain_data_processing import make_grain_train_itera
 from MaxText.input_pipeline._hf_data_processing import make_hf_train_iterator, make_hf_eval_iterator
 from MaxText.input_pipeline._tfds_data_processing import make_tfds_train_iterator, make_tfds_eval_iterator
 from MaxText.input_pipeline._tfds_data_processing_c4_mlperf import make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator
-from MaxText.input_pipeline._syn_data_processing import _SyntheticDataIterator, _PlaceHolderDataIterator
+# from MaxText.input_pipeline._syn_data_processing import _SyntheticDataIterator, _PlaceHolderDataIterator
 
 class SyntheticDataIterator:
   """Creates a synthetic data iterator for performance testing work"""
