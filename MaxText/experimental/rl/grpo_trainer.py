@@ -855,7 +855,9 @@ def train_loop(config, config_inference, recorder, state=None):
   example_batch = None
   last_step_completion = datetime.datetime.now()
 
-  data_buffer = queue.Queue()
+  # data_buffer = queue.Queue()
+  data_buffer = []
+  data_buffer_lock = threading.Lock()
   if config.use_pathways_reshard:
     pathways_reshard(config_inference, inference_engine, {'params':state.params['params']}, {'params': state_mesh_shardings.params['params']}, mesh, inference_state_mesh_shardings, is_pw_reshard=True)
   else:
@@ -882,7 +884,16 @@ def train_loop(config, config_inference, recorder, state=None):
       example_batch = jax.tree_util.tree_map(lambda arr: arr[:int(config.per_device_batch_size * config.inference_replicas * config.inference_devices_per_replica)], example_batch)
       example_batch = generate_offline_completions(config_inference, tokenizer_model, inference_engine, example_batch)
       example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
-      data_buffer.put_nowait(example_batch)
+      # data_buffer.put_nowait(example_batch)
+      with data_buffer_lock:
+        if not data_buffer:
+          data_buffer.append(example_batch)
+        else:
+          data_buffer[0] = jax.tree_util.tree_map(
+              lambda a, b: np.concatenate([a, b], axis=0),
+              data_buffer[0],
+              example_batch
+          )
 
   metric_logger = MetricLogger(writer, config)
   
@@ -893,6 +904,7 @@ def train_loop(config, config_inference, recorder, state=None):
     worker_config_inference,
     worker_config_train,
     worker_data_buffer,
+    worker_data_buffer_lock,
     worker_input_data_shardings,
     engine_lock,
     stop_event
@@ -906,7 +918,18 @@ def train_loop(config, config_inference, recorder, state=None):
           with engine_lock:
             processed_batch = generate_offline_completions(worker_config_inference, worker_tokenizer_model, worker_inference_engine, thread_example_batch_trimmed)          
           processed_batch = jax.lax.with_sharding_constraint(processed_batch, worker_input_data_shardings)
-          worker_data_buffer.put_nowait(processed_batch)
+          
+          # worker_data_buffer.put_nowait(processed_batch)
+          # Buffer logic: concatenate if present, else append
+          with worker_data_buffer_lock:
+            if not worker_data_buffer:
+              worker_data_buffer.append(processed_batch)
+            else:
+              worker_data_buffer[0] = jax.tree_util.tree_map(
+                  lambda a, b: np.concatenate([a, b], axis=0),
+                  worker_data_buffer[0],
+                  processed_batch
+              )
       except StopIteration:
         max_logging.log("Data iterator exhausted in generation worker. Stopping.")
         break
@@ -927,6 +950,7 @@ def train_loop(config, config_inference, recorder, state=None):
           config_inference,
           config, # Main config for load_next_batch
           data_buffer,
+          data_buffer_lock,
           input_data_shardings, # Sharding for the data put into the buffer
           inference_engine_lock,
           stop_event,
@@ -942,15 +966,39 @@ def train_loop(config, config_inference, recorder, state=None):
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
         while True:
-          if not generation_thread.is_alive() and data_buffer.empty():
-            max_logging.log("Generation worker is not alive and data buffer is empty. Exiting.")
-            break
-          try:
-            example_batch = data_buffer.get(timeout=1)  # Wait for data
-            break  # Exit loop once data is successfully fetched
-          except queue.Empty:
-            max_logging.log("Waiting for data...")
-            continue  # Retry
+          # if not generation_thread.is_alive() and data_buffer.empty():
+          #   max_logging.log("Generation worker is not alive and data buffer is empty. Exiting.")
+          #   break
+          # try:
+          #   example_batch = data_buffer.get(timeout=1)  # Wait for data
+          #   break  # Exit loop once data is successfully fetched
+          # except queue.Empty:
+          #   max_logging.log("Waiting for data...")
+          #   continue  # Retry
+          with data_buffer_lock:
+            if not data_buffer and not generation_thread.is_alive():
+              max_logging.log("Generation worker is not alive and data buffer is empty. Exiting.")
+              break
+            if data_buffer:
+              example_batch = data_buffer[0]
+              required_batch_size = int(config.per_device_batch_size * config.num_generations * mesh.size)
+              if example_batch[config.train_data_columns].shape[0] >= required_batch_size:
+                example_batch = jax.tree_util.tree_map(
+                    lambda arr: arr[:required_batch_size],
+                    data_buffer[0]
+                )
+                data_buffer[0] = jax.tree_util.tree_map(
+                    lambda arr: arr[required_batch_size:],
+                    data_buffer[0]
+                )
+                break
+              else:
+                max_logging.log("Waiting for data...")
+                continue
+            else:
+              max_logging.log("Waiting for data...")
+              continue
+          time.sleep(0.1)
         train_rng, rng = random.split(init_rng)
         with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
           state, metrics = p_train_step(state, example_batch, train_rng)
@@ -1084,8 +1132,9 @@ def main(argv: Sequence[str]) -> None:
   if config.inference_devices_per_replica * config.inference_replicas >= jax.device_count():
     raise ValueError(f"Invalid value chosen for {config.inference_devices_per_replica=} and {config.inference_replicas=} with {jax.device_count()} devices")
   config_inference = pyconfig.initialize(
-      configs_argv[1] + ["per_device_batch_size=" + str(config.per_device_batch_size * config.num_generations)]
+      configs_argv[1]
   )
+  #  + ["per_device_batch_size=" + str(config.per_device_batch_size * config.num_generations)]
   if config.per_device_batch_size < 1.0 or config_inference.per_device_batch_size < 1.0:
     raise ValueError("GRPO does not support setting per_device_batch_size < 1.0")
   max_utils.print_system_information()
