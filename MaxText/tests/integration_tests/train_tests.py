@@ -278,6 +278,47 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
+  def test_gpu_activation_offload_with_scan(self):
+    os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
+    optimizer_offload = [  # tests base config on GPU with activation offload with scan"""
+        None,
+        os.path.join(PKG_DIR, "configs", "base.yml"),
+        "base_output_directory=gs://runner-maxtext-logs",
+        "run_name=runner_test",
+        "dataset_path=gs://maxtext-dataset",
+        "steps=10",
+        "attention=dot_product",
+        "remat_policy=save_dot_except_mlpwi",
+        "dataset_type=synthetic",
+        "enable_checkpointing=False",
+        "enable_goodput_recording=False",
+        rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
+    ]
+    train_main(optimizer_offload)
+
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_activation_offload_without_scan(self):
+    os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
+    optimizer_offload = [  # tests base config on GPU with activation offload without scan"""
+        None,
+        os.path.join(PKG_DIR, "configs", "base.yml"),
+        "base_output_directory=gs://runner-maxtext-logs",
+        "run_name=runner_test",
+        "dataset_path=gs://maxtext-dataset",
+        "steps=10",
+        "attention=dot_product",
+        "remat_policy=save_dot_except_mlpwi",
+        "scan_layers=False",
+        "dataset_type=synthetic",
+        "enable_checkpointing=False",
+        "enable_goodput_recording=False",
+        rf"tokenizer_path={os.path.join(os.path.dirname(PKG_DIR), 'assets', 'tokenizer.llama2')}",
+    ]
+    train_main(optimizer_offload)
+
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
   def test_gpu_optimizer_offload(self):
     os.environ["NVTE_FUSED_ATTN"] = "1"  # Enable fused attention
     optimizer_offload = [  # tests base config on GPU with optimizer state offload"""
