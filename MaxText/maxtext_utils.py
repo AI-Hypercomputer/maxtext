@@ -916,6 +916,31 @@ def create_device_mesh(config, devices=None):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
   if devices is None:
     devices = jax.devices()
+  if (
+      config.subslice_shape is not None
+      and config.enable_single_controller
+      and config.num_slices == 1
+  ):
+    max_logging.log(
+        f"Trying to create a subslice with shape: {config.subslice_shape}"
+    )
+    subslice_shape = tuple(int(x) for x in config.subslice_shape.split(","))
+    device_coords = [device.coords for device in devices]
+    device_coords_np = np.array(device_coords)
+
+    # Find the minimum coordinates to start the subslice
+    min_coords = device_coords_np.min(axis=0)
+
+    subslice_devices = []
+    for device in devices:
+      coords = device.coords
+      if all(
+          min_coords[i] <= coords[i] < min_coords[i] + subslice_shape[i]
+          for i in range(len(subslice_shape))
+      ):
+        subslice_devices.append(device)
+    devices = subslice_devices
+
   num_devices = len(devices)
   num_slices = 1 if config.inference_benchmark_test else config.num_slices
   num_devices_per_slice = num_devices // num_slices

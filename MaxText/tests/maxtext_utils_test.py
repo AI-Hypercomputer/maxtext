@@ -208,6 +208,28 @@ class MaxUtilsInitStateWithMultipleCollections(unittest.TestCase):
     self._test_init_initial_state_driver(False)
 
 
+class MaxUtilsInitSubslice(unittest.TestCase):
+  """Tests initialization on a subslice."""
+
+  def test_setup_subslice_with_single_controller(self):
+    self.config = pyconfig.initialize(
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
+        enable_single_controller=True,
+        subslice_shape=(1, 1),
+    )
+    devices_array = maxtext_utils.create_device_mesh(self.config)
+    self.assertEqual(len(devices_array), 1)
+
+  def test_setup_subslice_with_mcjax(self):
+    self.config = pyconfig.initialize(
+        [None, os.path.join(PKG_DIR, "configs", "base.yml")],
+        subslice_shape=(1, 1),
+    )
+    devices_array = maxtext_utils.create_device_mesh(self.config)
+    # Default device set is returned since mcjax des not support subslicing
+    self.assertEqual(len(devices_array), 4)
+
+
 class MaxUtilsInitTransformerState(unittest.TestCase):
   """Tests initialization of transformer states in max_utils.py"""
 

@@ -742,3 +742,5 @@ rope_theta_for_vit: 10000
 vision_output_dim_for_vit: 4096
 pixel_shuffle_ratio_for_vit: 0.5
 projector_dropout_for_vit: 0.0
+
+subslice_shape: "" # Subslice shape in the form of "x,y,z" when using pathways (single controller).
