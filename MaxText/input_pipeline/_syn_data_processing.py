@@ -30,7 +30,7 @@ from jax.sharding import PartitionSpec as P
 from MaxText import multihost_dataloading
 from MaxText import pyconfig
 
-class SyntheticDataIterator:
+class _SyntheticDataIterator:
   """Creates a synthetic data iterator for performance testing work"""
 
   data_generator: Callable[[pyconfig.HyperParameters, tuple[Any, ...]], dict]
@@ -41,7 +41,7 @@ class SyntheticDataIterator:
     data_pspec = P(*config.data_sharding)
     data_pspec_shardings = jax.tree_util.tree_map(lambda p: jax.sharding.NamedSharding(mesh, p), data_pspec)
     self.data_generator = jax.jit(
-        SyntheticDataIterator.raw_generate_synthetic_data, out_shardings=data_pspec_shardings, static_argnums=0
+        _SyntheticDataIterator.raw_generate_synthetic_data, out_shardings=data_pspec_shardings, static_argnums=0
     )
 
     tokens = jax.random.randint(
@@ -79,12 +79,12 @@ class SyntheticDataIterator:
     return output
 
 
-class PlaceHolderDataIterator:
+class _PlaceHolderDataIterator:
   """Creates a place holder synthetic data iterator for loading on subset of hosts"""
 
   def __init__(self, config: pyconfig.HyperParameters, mesh):
     self.mesh = mesh
-    dataset = PlaceHolderDataIterator.get_place_holder_synthetic_data(config)
+    dataset = _PlaceHolderDataIterator.get_place_holder_synthetic_data(config)
     self.data_generator = multihost_dataloading.MultiHostDataLoadIterator(dataset, self.mesh)
 
   def __iter__(self):
