@@ -77,6 +77,7 @@ class DecoderBlockType(enum.Enum):
   GEMMA = "gemma"
   GEMMA2 = "gemma2"
   GEMMA3 = "gemma3"
+  QWEN3 = "qwen3"
   GPT3 = "gpt3"
   SIMPLE = "simple"
   SIMPLE_MLP = "simple_mlp"
