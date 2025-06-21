@@ -1799,6 +1799,7 @@ llama3_1_405b_8192_fsdp_dcn_mlperf = _add_to_model_dictionary(
         "learning_rate_schedule_steps": 2400000,
         "target_eval_loss": 5.6,
         "data_shuffle_seed": 8941,
+        "quantization": "fp8"
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
