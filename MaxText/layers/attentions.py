@@ -38,6 +38,7 @@ from flax.linen import partitioning
 
 from MaxText import max_utils
 from MaxText.common_types import DecoderBlockType, DEFAULT_MASK_VALUE, BATCH, HEAD, KV_LENGTH, D_KV, CACHE_BATCH_PREFILL, CACHE_SEQUENCE, AxisNames, CACHE_BATCH, CACHE_HEADS, CACHE_SCALE_BATCH, CACHE_KV, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV, AxisIdxes, LENGTH, DType, Config, Array, Q_LENGTH, DECODE_LENGTH, DECODE_BATCH, PREFILL_KV_BATCH, KV_HEAD, KV_HEAD_DIM, KV_BATCH, EMBED, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL
+from MaxText.configs.types_g import AttentionKernel, MaxTextConfig
 from MaxText.inference import kvcache
 from MaxText.inference import page_manager
 from MaxText.inference import paged_attention
@@ -963,7 +964,7 @@ class AttentionOp(nn.Module):
     return local_out, local_max, local_sum
 
   def is_partition_in_decode(self, seq_len):
-    return self.config.ici_context_autoregressive_parallelism > 0 and seq_len == 1
+    return self.config.ici_parallelism.ici_context_autoregressive_parallelism > 0 and seq_len == 1
 
   def apply_attention_dot(
       self,
@@ -1277,7 +1278,7 @@ class Attention(nn.Module):
     is_nope_layer: bool, whether to skip RoPE on this Attention layer
   """
 
-  config: Config
+  config: MaxTextConfig
   num_query_heads: int
   num_kv_heads: int
   head_dim: int
@@ -1350,22 +1351,30 @@ class Attention(nn.Module):
         attention_type=self.attention_type,
         attn_logits_soft_cap=self.attn_logits_soft_cap,
         sliding_window_size=self.sliding_window_size,
-        chunk_attn_window_size=self.config.chunk_attn_window_size,
+        chunk_attn_window_size=self.config.attention_mechanism_config.chunk_attn_window_size,
         use_ragged_attention=self.use_ragged_attention,
         ragged_block_size=self.ragged_block_size,
     )
     # When paged attention is enabled, paged attention op is used for all model modes except TRAIN,
     # which uses default attention op.
-    if self.config.attention == "paged":
+    if self.config.attention_mechanism_config.attention == AttentionKernel.PAGED:
       self.paged_attention_op = paged_attention.PagedAttentionOp(
           mesh=self.mesh,
-          num_pages=self.config.pagedattn_num_pages,
-          tokens_per_page=self.config.pagedattn_tokens_per_page,
-          max_pages_per_slot=(self.config.max_target_length + self.config.pagedattn_tokens_per_page - 1)
-          // self.config.pagedattn_tokens_per_page,
-          max_pages_per_prefill=(self.config.max_prefill_predict_length + self.config.pagedattn_tokens_per_page - 1)
-          // self.config.pagedattn_tokens_per_page,
-          pages_per_compute_block=self.config.pagedattn_pages_per_compute_block,
+          num_pages=self.config.paged_attention_run_config.pagedattn_num_pages,
+          tokens_per_page=self.config.paged_attention_run_config.pagedattn_tokens_per_page,
+          max_pages_per_slot=(
+              self.config.basic_training_config.max_target_length
+              + self.config.paged_attention_run_config.pagedattn_tokens_per_page
+              - 1
+          )
+          // self.config.paged_attention_run_config.pagedattn_tokens_per_page,
+          max_pages_per_prefill=(
+              self.config.basic_training_config.max_prefill_predict_length
+              + self.config.paged_attention_run_config.pagedattn_tokens_per_page
+              - 1
+          )
+          // self.config.paged_attention_run_config.pagedattn_tokens_per_page,
+          pages_per_compute_block=self.config.paged_attention_run_config.pagedattn_pages_per_compute_block,
           num_kv_heads=self.num_kv_heads,
           kv_head_dim_size=self.head_dim,
           dtype=self.dtype,
@@ -1385,7 +1394,9 @@ class Attention(nn.Module):
       return self.kernel_init(*args) / depth_scaling
 
     kernel_axes = (
-        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("embed", "q_heads", "kv")
+        (None, None, None)
+        if self.config.ici_parallelism.ici_context_autoregressive_parallelism > 1
+        else ("embed", "q_heads", "kv")
     )
     query_proj = dense_general(
         inputs_shape=inputs_q.shape,
@@ -1397,7 +1408,7 @@ class Attention(nn.Module):
         weight_dtype=self.weight_dtype,
         name="query",
         quant=self.quant,
-        matmul_precision=self.config.matmul_precision,
+        matmul_precision=self.config.quantization_config.matmul_precision.value,
         use_bias=self.use_bias_in_projections,
     )(inputs_q)
     return query_proj
@@ -1421,7 +1432,7 @@ class Attention(nn.Module):
 
     kernel_axes = (
         (None, None, None)
-        if self.config.ici_context_autoregressive_parallelism > 1
+        if self.config.ici_parallelism.ici_context_autoregressive_parallelism > 1
         else ("embed", "kv_heads", "kv_head_dim")
     )
 
@@ -1435,7 +1446,7 @@ class Attention(nn.Module):
         weight_dtype=self.weight_dtype,
         name=proj_name,
         quant=self.quant,
-        matmul_precision=self.config.matmul_precision,
+        matmul_precision=self.config.quantization_config.matmul_precision.value,
         use_bias=self.use_bias_in_projections,
     )(inputs_kv)
     return kv_proj
@@ -1453,7 +1464,7 @@ class Attention(nn.Module):
         weight_dtype=self.weight_dtype,
         name=proj_name,
         quant=self.quant,
-        matmul_precision=self.config.matmul_precision,
+        matmul_precision=self.config.quantization_config.matmul_precision.value,
         use_bias=self.use_bias_in_projections,
     )(inputs)
     qkv_proj = checkpoint_name(qkv_proj, "qkv_proj")
@@ -1463,7 +1474,9 @@ class Attention(nn.Module):
   def out_projection(self, output_dim: int, out: Array) -> Array:
     """out projection"""
     out_kernel_axis = (
-        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed")
+        (None, None, None)
+        if self.config.ici_parallelism.ici_context_autoregressive_parallelism > 1
+        else ("heads", "kv", "embed")
     )
     out_proj = dense_general(
         inputs_shape=out.shape,
@@ -1475,7 +1488,7 @@ class Attention(nn.Module):
         weight_dtype=self.weight_dtype,
         name="out",
         quant=self.quant,
-        matmul_precision=self.config.matmul_precision,
+        matmul_precision=self.config.quantization_config.matmul_precision.value,
         use_bias=self.use_bias_in_projections,
     )(out)
     return out_proj
@@ -1491,26 +1504,26 @@ class Attention(nn.Module):
     Returns:
       The input tensor with rotary embeddings applied.
     """
-    if self.config.attention_type == AttentionType.MLA.value:
+    if self.config.attention_mechanism_config.attention_type == AttentionType.MLA.value:
       # For MLA attention RoPE is applied to only `self.qk_rope_head_dim` portion the heads.
       rope_embedding_dims = self.qk_rope_head_dim
     else:
       rope_embedding_dims = self.head_dim
 
-    rope_type = self.config.rope_type.lower()
-    rope_use_scale = self.config.rope_use_scale
+    rope_type = self.config.rope_config.rope_type.value.lower()
+    rope_use_scale = self.config.rope_config.rope_use_scale
     if self.is_vision:
       rotary_embedding = embeddings.LlamaVisionRotaryEmbedding(
-          image_size=self.config.image_size_for_vit,
-          patch_size=self.config.patch_size_for_vit,
-          hidden_size=self.config.hidden_size_for_vit,
-          num_attention_heads=self.config.num_attention_heads_for_vit,
-          rope_theta=self.config.rope_theta_for_vit,
+          image_size=self.config.multimodal_run_config.image_size_for_vit,
+          patch_size=self.config.llama4_vit_run_config.patch_size_for_vit,
+          hidden_size=self.config.llama4_vit_run_config.hidden_size_for_vit,
+          num_attention_heads=self.config.llama4_vit_run_config.num_attention_heads_for_vit,
+          rope_theta=self.config.llama4_vit_run_config.rope_theta_for_vit,
       )
-    elif self.config.model_name.startswith("llama3.1") or rope_type.startswith("llama3.1"):
+    elif self.config.model_identity_config.model_name.startswith("llama3.1") or rope_type.startswith("llama3.1"):
       rotary_embedding = embeddings.LLaMARotaryEmbedding(
-          min_timescale=self.config.rope_min_timescale,
-          max_timescale=self.config.rope_max_timescale,
+          min_timescale=self.config.rope_config.rope_min_timescale,
+          max_timescale=self.config.rope_config.rope_max_timescale,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
           name=name,
@@ -1518,23 +1531,23 @@ class Attention(nn.Module):
       )
     elif rope_type.startswith("yarn"):
       rotary_embedding = YarnRotaryEmbedding(
-          max_position_embeddings=self.config.max_position_embeddings,
-          original_max_position_embeddings=self.config.original_max_position_embeddings,
-          beta_fast=self.config.beta_fast,
-          beta_slow=self.config.beta_slow,
-          rope_theta=self.config.rope_max_timescale,
-          rope_factor=self.config.rope_factor,
+          max_position_embeddings=self.config.yarn_rope_config.max_position_embeddings,
+          original_max_position_embeddings=self.config.yarn_rope_config.original_max_position_embeddings,
+          beta_fast=self.config.yarn_rope_config.beta_fast,
+          beta_slow=self.config.yarn_rope_config.beta_slow,
+          rope_theta=self.config.rope_config.rope_max_timescale,
+          rope_factor=self.config.yarn_rope_config.rope_factor,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
           name=name,
       )
     else:
-      max_timescale = self.config.rope_max_timescale
-      # For local attention use local_rope_max_timescale if it's is positive
-      if self.attention_type == AttentionType.LOCAL_SLIDING and self.config.local_rope_max_timescale > 0:
-        max_timescale = self.config.local_rope_max_timescale
+      max_timescale = self.config.rope_config.rope_max_timescale
+      # For local attention use local_rope_max_timescale if it is positive
+      if self.attention_type == AttentionType.LOCAL_SLIDING and self.config.rope_config.local_rope_max_timescale > 0:
+        max_timescale = self.config.rope_config.local_rope_max_timescale
       rotary_embedding = RotaryEmbedding(
-          min_timescale=self.config.rope_min_timescale,
+          min_timescale=self.config.rope_config.rope_min_timescale,
           max_timescale=max_timescale,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
@@ -1552,7 +1565,7 @@ class Attention(nn.Module):
         kv_quant=self.kv_quant,
         prefill_cache_axis_order=self.prefill_cache_axis_order,
         ar_cache_axis_order=self.ar_cache_axis_order,
-        use_chunked_prefill=self.config.use_chunked_prefill,
+        use_chunked_prefill=self.config.chunked_prefill_run_config.use_chunked_prefill,
     )(
         key,
         value,
@@ -1608,29 +1621,29 @@ class Attention(nn.Module):
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.decode_input_axis_names)
 
     # apply projection.
-    if self.config.fused_qkv:
+    if self.config.attention_mechanism_config.fused_qkv:
       query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
     else:
       query = self.query_projection(inputs_q)
       key = self.kv_projection(inputs_kv, proj_name="key")
       value = self.kv_projection(inputs_kv, proj_name="value")
 
-    is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
+    is_llama4_decoder_block = self.config.model_core_config.decoder_block == DecoderBlockType.LLAMA4
     # NOTE: llama 4 does L2 normalization after RoPE
     if self.use_qk_norm and not is_llama4_decoder_block:
       query = RMSNorm(
           dtype=self.config.dtype,
-          weight_dtype=self.config.weight_dtype,
+          weight_dtype=self.config.model_core_config.weight_dtype,
           name="query_norm",
-          epsilon=self.config.normalization_layer_epsilon,
+          epsilon=self.config.model_core_config.normalization_layer_epsilon,
           kernel_axes=("norm",),
       )(query)
 
       key = RMSNorm(
           dtype=self.config.dtype,
-          weight_dtype=self.config.weight_dtype,
+          weight_dtype=self.config.model_core_config.weight_dtype,
           name="key_norm",
-          epsilon=self.config.normalization_layer_epsilon,
+          epsilon=self.config.model_core_config.normalization_layer_epsilon,
           kernel_axes=("norm",),
       )(key)
 
@@ -1643,7 +1656,7 @@ class Attention(nn.Module):
       key = self.apply_rotary_embedding(key, name="key_rotary", inputs_positions=inputs_positions)
 
     if use_qk_norm and is_llama4_decoder_block:
-      l2_norm = L2Norm(self.config.normalization_layer_epsilon)
+      l2_norm = L2Norm(self.config.model_core_config.normalization_layer_epsilon)
       query = l2_norm(query)
       key = l2_norm(key)
 
@@ -1675,9 +1688,9 @@ class Attention(nn.Module):
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
 
-    assert not self.config.quantize_kvcache or self.kv_quant
+    assert not self.config.quantization_config.quantize_kvcache or self.kv_quant
 
-    if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
+    if self.config.attention_mechanism_config.attention is AttentionKernel.PAGED and model_mode != MODEL_MODE_TRAIN:
       unnormalized_out, _, exp_sum = self.paged_attention_op(
           query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
       )
@@ -1722,14 +1735,14 @@ class MLA(Attention):
 
     # Assert required configuration parameters for MLA attention.
     assert (
-        self.config.attention_type == AttentionType.MLA.value
+        self.config.attention_mechanism_config.attention_type == AttentionType.MLA.value
     ), f"MLA requires MLA attention type {AttentionType.MLA.value}"
     assert self.kv_lora_rank > 0, "KV LoRA rank must be > 0"
     assert self.qk_nope_head_dim > 0, "QK NoPe head dim must be > 0"
     assert self.qk_rope_head_dim > 0, "QK RoPE head dim must be > 0"
     assert self.v_head_dim > 0, "V head dim must be > 0"
     assert self.num_query_heads == self.num_kv_heads, "MLA requires equal number of query and kv heads"
-    assert not self.config.fused_qkv, "Fused QKV is not supported for MLA"
+    assert not self.config.attention_mechanism_config.fused_qkv, "Fused QKV is not supported for MLA"
 
     if self.q_lora_rank == 0:
       # Standard Q projection (without LoRA).
@@ -1743,7 +1756,7 @@ class MLA(Attention):
           weight_dtype=self.weight_dtype,
           name="query",
           quant=self.quant,
-          matmul_precision=self.config.matmul_precision,
+          matmul_precision=self.config.quantization_config.matmul_precision.value,
       )
     else:
       # LoRA path for Q.
@@ -1757,13 +1770,13 @@ class MLA(Attention):
           weight_dtype=self.weight_dtype,
           name="wq_a",
           quant=self.quant,
-          matmul_precision=self.config.matmul_precision,
+          matmul_precision=self.config.quantization_config.matmul_precision.value,
       )
       self.q_norm = RMSNorm(
           dtype=self.config.dtype,
-          weight_dtype=self.config.weight_dtype,
+          weight_dtype=self.config.model_core_config.weight_dtype,
           name="q_norm",
-          epsilon=self.config.normalization_layer_epsilon,
+          epsilon=self.config.model_core_config.normalization_layer_epsilon,
           kernel_axes=("norm",),
       )
       self.wq_b = dense_general(
@@ -1776,7 +1789,7 @@ class MLA(Attention):
           weight_dtype=self.weight_dtype,
           name="wq_b",
           quant=self.quant,
-          matmul_precision=self.config.matmul_precision,
+          matmul_precision=self.config.quantization_config.matmul_precision.value,
       )
 
     # KV LoRA path.
@@ -1790,13 +1803,13 @@ class MLA(Attention):
         weight_dtype=self.weight_dtype,
         name="wkv_a",
         quant=self.quant,
-        matmul_precision=self.config.matmul_precision,
+        matmul_precision=self.config.quantization_config.matmul_precision.value,
     )
     self.kv_norm = RMSNorm(
         dtype=self.config.dtype,
-        weight_dtype=self.config.weight_dtype,
+        weight_dtype=self.config.model_core_config.weight_dtype,
         name="kv_norm",
-        epsilon=self.config.normalization_layer_epsilon,
+        epsilon=self.config.model_core_config.normalization_layer_epsilon,
         kernel_axes=("norm",),
     )
     self.wkv_b = dense_general(
@@ -1812,7 +1825,7 @@ class MLA(Attention):
         weight_dtype=self.weight_dtype,
         name="wkv_b",
         quant=self.quant,
-        matmul_precision=self.config.matmul_precision,
+        matmul_precision=self.config.quantization_config.matmul_precision.value,
     )
 
     # Set softmax scaling.
