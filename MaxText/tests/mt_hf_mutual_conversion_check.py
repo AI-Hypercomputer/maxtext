@@ -17,25 +17,34 @@ limitations under the License.
 import os
 import torch
 import torch.nn.functional as F
+import jax
+import jax.numpy as jnp
 import argparse
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from tabulate import tabulate
 
 from MaxText.utils.ckpt_conversion.utils.hf_utils import (
-    # check_predicted_tokens_match,
-    check_arrays_match,
+    # check_arrays_match,
+    convert_jax_weight_to_torch,
 )
 from MaxText import max_logging
-# Read Hugging Face token from environment variable
+from MaxText import maxtext_utils
+from MaxText import pyconfig
+from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
+from MaxText.globals import PKG_DIR
+from MaxText.layers import models
+from MaxText.layers import quantizations
+
 hf_token = os.environ.get("HF_AUTH_TOKEN")
 
 """
-This script is to verify HuggingFace (HF) checkpoints that have been converted from MaxText. 
+This script is to compare the logits of maxtext checkpoint and Huggingface checkpoint.
+Used to verify the checkpoint conversion (to_huggingface.py and to_maxtext.py)
 
-It loads the converted HF model and a "golden" (reference) HF model, and:
-    1. runs a foward pass of the converted ckpt model
-    2. compares their weights, output logits for a given input
-    3. Compare the predicted token sequences
+It loads the HF checkpoint and a maxtext checkpoint, and:
+    1. runs a foward pass of a MaxText model and a HF model
+    2. compares their output logits for a given input
+    3. compares the predicted token sequences
     
 Extra Requirements:
     torch
@@ -46,41 +55,12 @@ Extra Requirements:
 """
 
 
-def get_all_modules(model):
-  """Get all weights names from a HF model."""
-  modules = []
-  for name, _ in model.named_modules():
-    if name and hasattr(model.get_submodule(name), "weight"):
-      modules.append(name)
-  return modules
-
-
-def check_weights_match(model, golden_model, tol=0.1):
-  """Compare weights between two HF models."""
-  modules = get_all_modules(golden_model)
-
-  for module in modules:
-    golden_weights = golden_model.get_submodule(module).state_dict()["weight"]
-    model_weight = model.get_submodule(module).state_dict()["weight"]
-    check_arrays_match(golden_weights, model_weight, tol)
-
-
-def get_logits(inputs, model, golden_model):
-  """Get logits from two HF models for comparison."""
-  logits = model(**inputs, output_hidden_states=True).logits
-  golden_logits = golden_model(**inputs, output_hidden_states=True).logits
-
-  return logits, golden_logits
-
-
 def get_top_k_tokens_scores(logits_tensor, tokenizer_instance, k=10, description=""):
   """Get the top-k tokens and their scores from a given logits tensor."""
   max_logging.log(f"\n--- {description} top {k} tokens ---")
   collected_tokens = []
   tokens = []
-  # Ensure logits_tensor is on CPU for operations like topk and item()
-  logits_tensor = logits_tensor.cpu()
-  topk_results = torch.topk(logits_tensor[0, -1], k=k)
+  topk_results = torch.topk(logits_tensor[0], k=k)
   for i in range(k):
     tok_id = topk_results.indices[i].item()
     score = topk_results.values[i].item()
@@ -186,67 +166,112 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02):
 def run_prompts(args: argparse.Namespace) -> None:
   """
   Args:
-      - golden_model_id (str): HF model ID for the golden model.
-      - hf_checkpoint_path (str): Path to the converted HF checkpoint.
+      - hf_model_id (str): HF model ID for the HF checkpoint.
+      - maxtext_checkpoint_path (str): Path to the MaxText checkpoint.
+      - maxtext_base_config_path (str): Path to MaxText base configuration.
+      - maxtext_model_name (str): Name of the MaxText model.
       - max_kl_div (float): Maximum allowed KL divergence.
+      - unknown_args (list): List of unknown arguments to be passed as MaxText overrides.
   """
-  golden_model = AutoModelForCausalLM.from_pretrained(args.golden_model_id, torch_dtype=torch.bfloat16)
-  golden_tokenizer = AutoTokenizer.from_pretrained(args.golden_model_id)
+  # 1. Load Golden HF Model and Tokenizer
+  hf_model = AutoModelForCausalLM.from_pretrained(args.hf_model_id, torch_dtype=torch.bfloat16)
+  tokenizer = AutoTokenizer.from_pretrained(args.hf_model_id)  # Use this for both
 
-  tokenizer = AutoTokenizer.from_pretrained(args.hf_checkpoint_path)
-  model, _ = AutoModelForCausalLM.from_pretrained(
-      args.hf_checkpoint_path, trust_remote_code=True, torch_dtype=torch.bfloat16, output_loading_info=True
-  )
+  # 2. Load MaxText Model and Parameters
+  maxtext_argv = [""]
+  maxtext_argv.append(args.maxtext_base_config_path)
 
-  # max_logging.log(loading_info)
+  if args.maxtext_model_name:
+    maxtext_argv.append(f"model_name={args.maxtext_model_name}")
+  maxtext_argv.append(f"load_parameters_path={args.maxtext_checkpoint_path}")
+  maxtext_argv.append("per_device_batch_size=1")
+  maxtext_argv.append(f"scan_layers={args.scan_layers}")
+
+  config = pyconfig.initialize(maxtext_argv)
+
+  init_rng = jax.random.PRNGKey(config.init_weights_seed)
+  init_rng, rng1 = jax.random.split(init_rng)
+  devices_array = maxtext_utils.create_device_mesh(config)
+  mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
+  quant = quantizations.configure_quantization(config)
+  maxtext_model = models.Transformer(config, mesh, quant=quant)
+  maxtext_state, _ = maxtext_utils.setup_decode_state(maxtext_model, config, rng1, mesh, None)
 
   prompts = ["I love to", "Today is a", "What is the"]
   for input_text in prompts:
     max_logging.log(f"\n--- Prompt: {input_text} ---")
-    inputs = tokenizer(input_text, return_tensors="pt")
-    # --- Generate Output ---
+
+    # Tokenize for HF
+    inputs = tokenizer(input_text, return_tensors="pt", padding=True, max_length=config.max_target_length, truncation=True)
+    actual_seq_len = inputs["input_ids"].shape[1]
+
+    # Tokenize for MaxText
+    mt_ids = jnp.asarray(inputs["input_ids"], dtype=jnp.int32)
+
+    if mt_ids.shape[0] != config.global_batch_size_to_train_on:  # Ensure batch size matches
+      mt_ids = jnp.repeat(mt_ids, config.global_batch_size_to_train_on // mt_ids.shape[0], axis=0)
+
+    s = (config.global_batch_size_to_train_on, config.max_target_length)
+    mt_decoder_segment_ids_full = jnp.zeros(s, dtype=jnp.int32) + DECODING_ACTIVE_SEQUENCE_INDICATOR
+
+    mt_decoder_segment_ids = mt_decoder_segment_ids_full[:, :actual_seq_len]
+
+    # Create full decoder positions up to max_target_length
+    mt_decoder_positions_full = jnp.stack(
+        [jnp.arange(config.max_target_length, dtype=jnp.int32) for _ in range(config.global_batch_size_to_train_on)]
+    )
+    mt_decoder_positions = mt_decoder_positions_full[:, :actual_seq_len]
+
+    # --- HF Forward Pass ---
     with torch.no_grad():
-      outputs = model.generate(**inputs, max_new_tokens=15, do_sample=False)
-    # --- Decode and Print ---
-    max_logging.log(f"Output: {tokenizer.decode(outputs[0], skip_special_tokens=True)}")
+      hf_logits_torch = hf_model(**inputs).logits
 
-    # --- Compare tokens ---
-    model_logits, golden_model_logits = get_logits(inputs, model, golden_model)
-    tokens = get_top_k_tokens_scores(model_logits, tokenizer, k=10, description="converted model")
-    golden_tokens = get_top_k_tokens_scores(golden_model_logits, golden_tokenizer, k=10, description="golden model")
-    compare_top_tokens(converted_tokens=tokens, golden_tokens=golden_tokens)
+    # --- MaxText Forward Pass ---
+    mt_logits_jax = maxtext_model.apply(
+        maxtext_state.params,
+        mt_ids,
+        mt_decoder_positions,
+        mt_decoder_segment_ids,
+        enable_dropout=False,
+        rngs={"aqt": init_rng},
+    )
+    mt_logits_jax_sliced = mt_logits_jax[:, :actual_seq_len, :]
+    mt_logits_torch = convert_jax_weight_to_torch(mt_logits_jax_sliced)
 
-    check_kl_divergence(model_logits, golden_model_logits, atol=args.max_kl_div)
+    # --- Compare logits for the last token prediction ---
+    hf_last_token_logits = hf_logits_torch[:, -1, :]
+    mt_last_token_logits = mt_logits_torch[:, -1, :]  # MaxText output already sliced to actual_seq_len
 
-  """
-  if the model's structure is exactly the same as the golden model (layers, vocab_size, etc.), 
-  you can check more weights details using the following steps:
+    tokens_maxtext = get_top_k_tokens_scores(mt_last_token_logits, tokenizer, k=10, description="MaxText model")
+    tokens_hf = get_top_k_tokens_scores(hf_last_token_logits, tokenizer, k=10, description="HF model")
+    compare_top_tokens(converted_tokens=tokens_maxtext, golden_tokens=tokens_hf)
 
-  check_weights_match(model, golden_model)
-
-  # Check logits from the first 5 tokens match
-  check_arrays_match(model_logits[0, :5, :], golden_model_logits[0, :5, :], atol=0.2)
-
-  check_predicted_tokens_match(model_logits, golden_model_logits)
-  """
+    # --- Compare all logits in the sequence (for the first batch item) ---
+    # Unsqueeze to add batch dimension for check_kl_divergence: [1, seq, vocab]
+    check_kl_divergence(mt_logits_torch[0].unsqueeze(0), hf_logits_torch[0].unsqueeze(0), atol=args.max_kl_div)
 
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser(description="Verify HuggingFace checkpoints converted from MaxText.")
   parser.add_argument(
-      "--golden_model_id",
+      "--hf_model_id",
       type=str,
-      default="google/gemma-2-2b-it",
-      help="The HuggingFace model ID for the golden/reference model.",
+      default="google/gemma-2-2b",
   )
   parser.add_argument(
-      "--hf_checkpoint_path",
+      "--maxtext_model_name",
       type=str,
-      default=os.path.expanduser("~/.hf_output/"),
-      help="Path to the converted HuggingFace checkpoint directory.",
+      default="gemma2-2b",
   )
+  parser.add_argument("--maxtext_checkpoint_path", type=str, default=os.path.expanduser("~/.mt_output/0/items"))
+  parser.add_argument(
+      "--maxtext_base_config_path",
+      type=str,
+      default=os.path.join(PKG_DIR, "configs", "base.yml"),
+  )
+  parser.add_argument("--scan_layers", type=bool, default=False)
   parser.add_argument("--max_kl_div", type=float, default=0.02, help="Maximum allowed KL divergence between model logits.")
 
-  parsed_args = parser.parse_args()
+  parsed_args, _ = parser.parse_known_args()
 
   run_prompts(parsed_args)

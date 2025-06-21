@@ -78,8 +78,8 @@ def main(argv: Sequence[str]) -> None:
 
   # 1. Get HuggingFace Model Configuration
   model_key = config.model_name
-  if model_key not in HF_MODEL_CONFIGS:
-    raise ValueError(f"HF configuration not found for model key: {model_key}")
+  if model_key not in HF_IDS:
+    raise ValueError(f"Unsupported model name: {config.model_name}. Supported models are: {list(HF_IDS.keys())}")
   hf_config_obj = HF_MODEL_CONFIGS[model_key]
 
   # 2. Load Tokenizer
