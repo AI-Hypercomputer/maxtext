@@ -52,7 +52,7 @@ def checkpoint_loop(config, state=None):
     ckpt_path:
   Returns:
   """
-  init_rng, _, checkpoint_manager, mesh, model, _, tx = setup_mesh_and_model(config)
+  init_rng, checkpoint_manager, mesh, model, _, tx = setup_mesh_and_model(config)
 
   unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
   # A barrier to sync all hosts before starting to restore checkpoint
