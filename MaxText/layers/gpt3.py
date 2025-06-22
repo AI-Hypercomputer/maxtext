@@ -18,23 +18,19 @@ limitations under the License.
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
-from typing import Any, Optional, Tuple
+from typing import Optional
 
-import jax
-from jax import lax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 
 from flax import linen as nn
 
-from MaxText import max_logging
 from MaxText.common_types import Array, AxisNames, BATCH, Config, DType, EMBED, HEAD, D_KV, LENGTH, MODEL_MODE_TRAIN
-from MaxText.layers import initializers
 from MaxText.layers import linears
 from MaxText.layers import quantizations
 from MaxText.layers.attentions import AttentionOp, KVQuant, dense_general
-from MaxText.layers.initializers import Initializer, NdInitializer, nd_dense_init
+from MaxText.layers.initializers import NdInitializer, nd_dense_init
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.layers.gpt3_layers import Gpt3LayerNorm
 
