@@ -21,11 +21,15 @@ import os.path
 import uuid
 import warnings
 
-from jax.experimental.layout import DeviceLocalLayout as DLL
 from jax.experimental.layout import Format
 from jax.sharding import PartitionSpec as P
 import jax
 import jax.numpy as jnp
+
+if jax.__version_info__ >= (0, 6, 3):
+  from jax.experimental.layout import Layout as DLL  # type: ignore
+else:
+  from jax.experimental.layout import DeviceLocalLayout as DLL  # type: ignore
 
 from flax import linen as nn
 from flax import struct
@@ -177,7 +181,8 @@ class MaxEngine(engine_api.Engine):
       if x.format == l:
         return x
       # Somehow this can be None sometimes.
-      dll = l.device_local_layout if isinstance(l, Format) else l
+      dll = (l.layout if jax.__version_info__ >= (0, 6, 3) else
+             l.device_local_layout) if isinstance(l, Format) else l
       f = (
           jax.jit(self._identity, out_shardings=Format(dll, s))
           .lower(x)

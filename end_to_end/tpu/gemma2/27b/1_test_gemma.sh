@@ -42,5 +42,5 @@ export RUN_NAME=unscanned_chkpt
 
 export UNSCANNED_CKPT_PATH=${BASE_OUTPUT_PATH}/${RUN_NAME}/checkpoints/0/items
 
-JAX_PLATFORMS=cpu python3 -m MaxText.generate_param_only_checkpoint MaxText/configs/base.yml async_checkpointing=false base_output_directory=${BASE_OUTPUT_PATH} load_parameters_path=${CONVERTED_CHECKPOINT} run_name=${RUN_NAME} model_name=gemma2-27b force_unroll=true skip_jax_distributed_system=true
+JAX_PLATFORMS=cpu python3 -m MaxText.generate_param_only_checkpoint MaxText/configs/base.yml async_checkpointing=false base_output_directory=${BASE_OUTPUT_PATH} load_parameters_path=${CONVERTED_CHECKPOINT} run_name=${RUN_NAME} model_name=gemma2-27b force_unroll=true
 echo "Written MaxText compatible unscanned checkpoint to ${BASE_OUTPUT_PATH}/${MODEL_VARIATION}/${RUN_NAME}/checkpoints/0/items"
