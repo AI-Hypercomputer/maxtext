@@ -27,9 +27,9 @@ from jax.sharding import Mesh
 
 from flax import linen as nn
 
+from MaxText.common_types import Config
 from MaxText.inference import page_manager
 from MaxText.layers import linears
-from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.layers.attentions import Attention
 from MaxText.layers.quantizations import AqtQuantization as Quant
@@ -44,7 +44,7 @@ from MaxText.layers.normalizations import RMSNorm
 class LlamaDecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
 
-  config: models.Config
+  config: Config
   mesh: Mesh
   quant: Optional[Quant] = None
 
@@ -120,7 +120,7 @@ class LlamaDecoderLayer(nn.Module):
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
-    hidden_states = models.RMSNorm(
+    hidden_states = RMSNorm(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="post_self_attention_layer_norm",

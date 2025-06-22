@@ -27,8 +27,8 @@ import jax.numpy as jnp
 
 from flax import linen as nn
 
+from MaxText.common_types import Config
 from MaxText.layers import linears
-from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.layers.attentions import Attention
 from MaxText.layers.quantizations import AqtQuantization as Quant
@@ -43,7 +43,7 @@ from MaxText.layers.normalizations import RMSNorm
 class MistralDecoderLayer(nn.Module):
   """Transformer decoder layer that attends to the encoder."""
 
-  config: models.Config
+  config: Config
   mesh: Mesh
   quant: Optional[Quant] = None
 

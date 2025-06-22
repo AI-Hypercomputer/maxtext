@@ -318,9 +318,9 @@ class MlpBlock(nn.Module):
     ):
       return RMSNorm
     elif self.config.decoder_block == DecoderBlockType.GPT3:
-      from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
+      from MaxText.layers import gpt3_layers  # pylint: disable=import-outside-toplevel
 
-      return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=self.use_bias)
+      return functools.partial(gpt3_layers.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=self.use_bias)
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
@@ -401,4 +401,3 @@ class MlpBlock(nn.Module):
 
     output = checkpoint_name(output, "mlpwo")
     return output
-  

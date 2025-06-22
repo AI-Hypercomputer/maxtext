@@ -27,11 +27,10 @@ from jax.sharding import Mesh
 
 from flax import linen as nn
 
-from MaxText.common_types import Config, Array
+from MaxText.common_types import Array, Config
 from MaxText.inference import page_manager
 from MaxText.layers import initializers
 from MaxText.layers import linears
-from MaxText.layers import models
 from MaxText.layers import moe
 from MaxText.layers import quantizations
 from MaxText.layers import attentions
@@ -348,14 +347,14 @@ class Llama4DecoderLayer(nn.Module):
   """Transformer decoder layer for Llama4.
 
   Attributes:
-    config: models.Config, MaxText model config
+    config: Config, MaxText model config
     mesh: Mesh, JAX device mesh (used for sharding)
     quant: Optional[Quant], quantization config
     is_nope_layer: bool, whether to use RoPE or not on this layer
     is_moe_layer: bool, whether this layer operates as a MoE layer
   """
 
-  config: models.Config
+  config: Config
   mesh: Mesh
   quant: Optional[Quant] = None
   is_nope_layer: bool = False
@@ -446,7 +445,7 @@ class Llama4DecoderLayer(nn.Module):
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
-    hidden_states = models.RMSNorm(
+    hidden_states = RMSNorm(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="post_self_attention_layer_norm",
@@ -518,7 +517,7 @@ class Llama4ScannableBlock(nn.Module):
   A repeatable block given nope_layer_interval and interleave_moe_layer_step
 
   Attributes:
-    config: models.Config, MaxText model config
+    config: Config, MaxText model config
     mesh: Mesh, JAX device mesh (used for sharding)
     quant: Optional[Quant], quantization config
     nope_layer_interval: int, the interval at which layers should use NoPE.
@@ -526,7 +525,7 @@ class Llama4ScannableBlock(nn.Module):
   """
   '''
 
-  config: models.Config
+  config: Config
   mesh: Mesh
   quant: Optional[Quant] = None
   nope_layer_interval: int = 1
