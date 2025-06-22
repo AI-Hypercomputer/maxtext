@@ -91,6 +91,7 @@ def run_generate_param_only_checkpoint(hardware, attention_type, quantization):
   )
 
 
+@pytest.mark.skip(reason="Test is flaky since Jax 0.6.2, see b/427048251")
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
 @pytest.mark.parametrize("quantization", [(""), ("int8")])

@@ -479,6 +479,7 @@ class AttentionTest(unittest.TestCase):
   def test_tpu_kernel_attention_mha(self):
     self.tpu_kernel_attention_helper(self.num_kv_heads)
 
+  @pytest.mark.skip(reason="Test is flaky since Jax 0.6.2, see b/427048251")
   @pytest.mark.tpu_only
   def test_tpu_kernel_attention_gqa(self):
     self.tpu_kernel_attention_helper(self.num_kv_heads // 2)

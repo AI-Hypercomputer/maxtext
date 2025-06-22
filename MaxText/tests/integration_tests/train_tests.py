@@ -204,6 +204,7 @@ class TrainTests(unittest.TestCase):
   def test_gpu_dropout(self):
     train_main(TrainTests.CONFIGS["dropout"] + ["attention=dot_product"])
 
+  @pytest.mark.skip(reason="Test is flaky since Jax 0.6.2, see b/427048251")
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test_tpu_hf_input_pipeline(self):
