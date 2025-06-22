@@ -1,5 +1,4 @@
 # Copyright 2023 Google LLC
-#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -61,7 +60,7 @@ class DataLoader:
     with maybe_record_goodput(self.recorder, "data_loading"):
       if self.reuse_example_batch and self.last_batch:
         return self.last_batch
-      
+
       try:
         self.last_batch = next(self.data_iterator)
       except Exception as e:  # pylint: disable=broad-except
@@ -114,7 +113,7 @@ class EvalMetrics:
 class TrainingContext:
   writer: Any
   checkpoint_manager: Any
-  mesh: Any    
+  mesh: Any
   model: Any
   learning_rate_schedule: Any
   tx: Any
@@ -125,7 +124,7 @@ class TrainingContext:
 class LoopContext:
   # truly immutable objects
   train_rng: jax.random.PRNGKey
-  p_train_step: Callable 
+  p_train_step: Callable
   p_eval_step: Callable
   start_step: int
   # NOTE: when used, these objects are side-effecting
@@ -146,13 +145,13 @@ def set_up_environment(config):
 
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = (
-      os.environ.get("LIBTPU_INIT_ARGS", "") + 
+      os.environ.get("LIBTPU_INIT_ARGS", "") +
       " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
     )
 
 
 def get_step_rng(rng, step, eval_step = None):
-  # we need to generate a unique key per train step in the case of training 
+  # we need to generate a unique key per train step in the case of training
   # and per eval step, per train step, in the case of eval
   if eval_step is None:
     return jax.random.fold_in(rng, 2 * step + 1)
@@ -204,7 +203,7 @@ def get_and_compile_step_functions(config, train_ctx, state_mesh_shardings, do_e
     static_argnums_train,
     donate_argnums_train,
   ) = get_partial_train(inner_train_step, train_ctx.mesh, state_mesh_shardings, train_ctx.model, config)
-  
+
   p_train_step = jax.jit(
     functional_train,
     in_shardings=in_shard_train,
@@ -214,7 +213,7 @@ def get_and_compile_step_functions(config, train_ctx, state_mesh_shardings, do_e
   )
 
   # TODO: is this used when it's already JITted/compiled?
-  with train_ctx.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):  
+  with train_ctx.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
     compiled_train = p_train_step.lower(state, create_dummy_batch_for_train(config), rng).compile()
     print_compiled_train_step_stats(compiled_train)
 
@@ -224,7 +223,7 @@ def get_and_compile_step_functions(config, train_ctx, state_mesh_shardings, do_e
   return p_train_step, p_eval_step
 
 
-# TODO: move to max_utils if not already there 
+# TODO: move to max_utils if not already there
 def create_dummy_batch_for_train(config):
   dummy_shape = (config.global_batch_size_to_train_on, config.max_target_length)
   dummy_dtype = jax.numpy.int32
@@ -262,7 +261,7 @@ def maybe_write_checkpoint(checkpoint_manager, step, state, config):
 def train_step(step, config, train_ctx, loop_ctx):
   with jax.profiler.StepTraceAnnotation("train", step_num=step):
     example_batch = loop_ctx.data_loader.try_load_next_batch()
-    
+
     check_example_batch(config, example_batch=example_batch)
     # pylint: disable=not-callable
     step_rng = get_step_rng(loop_ctx.train_rng, step)
@@ -278,12 +277,12 @@ def maybe_eval_step(config, train_ctx, loop_ctx, step):
   eval_metrics = EvalMetrics()
   if config.eval_interval > 0 and step >= loop_ctx.start_step and (step + 1) % config.eval_interval == 0:
     assert loop_ctx.eval_data_iterator
-    
+
     # pylint: disable=not-callable
     for eval_step, eval_batch in enumerate(loop_ctx.eval_data_iterator):
       if config.eval_steps > 0 and eval_step >= config.eval_steps:
         break
-      
+
       step_rng = get_step_rng(loop_ctx.train_rng, step, eval_step)
       with train_ctx.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
         step_metrics = loop_ctx.p_eval_step(loop_ctx.state, eval_batch, step_rng)
@@ -293,7 +292,7 @@ def maybe_eval_step(config, train_ctx, loop_ctx, step):
 
     # FIXME: verify our iterators support this
     loop_ctx.eval_data_iterator.reset()
-    
+
   return eval_metrics
 
 
@@ -301,7 +300,7 @@ def train_and_maybe_eval_step(config, train_ctx, loop_ctx, step, hooks):
   with hooks.training_step(step):
     metrics = train_step(step, config, train_ctx, loop_ctx, step)
     hooks.training_step_metrics = metrics
-  
+
   maybe_write_checkpoint(train_ctx.checkpoint_manager, step, loop_ctx.state, config)
 
   with hooks.eval_step():
@@ -332,14 +331,14 @@ def train(config, recorder, hooks):
   with maybe_record_goodput(recorder, "tpu_init"):
     init_rng, *train_ctx_args= setup_mesh_and_model(config)
     train_ctx = TrainingContext(*train_ctx_args, recorder)
-  
+
   with maybe_record_goodput(recorder, "training_preparation"):
     data_it, eval_data_it = create_data_iterator(config, train_ctx.mesh)
 
     state, _, shd, data_it = maxtext_utils.setup_training_state(
       train_ctx.model, data_it, train_ctx.tx, config, init_rng, train_ctx.mesh, train_ctx.checkpoint_manager
     )
-    
+
     compile_rng, train_rng = jax.random.split(init_rng, 2)
     p_train_step, p_eval_step = get_and_compile_step_functions(config, train_ctx, shd, eval_data_it is not None,
                                                               compile_rng, state)
@@ -356,17 +355,19 @@ def train(config, recorder, hooks):
 def main(argv: Sequence[str]) -> None:
   config = pyconfig.initialize(argv)
   validate_train_config(config)
-  
+
   set_up_environment(config)
-  
   max_utils.print_system_information()
+
+  hooks = TrainingHooks(config)
 
   # create a goodput recorder (which will only log if enabled) and start monitoring if configured
   recorder = create_goodput_recorder(config)
   maybe_start_goodput_monitoring(config)
 
-  with maybe_record_goodput(recorder, "job"):  
-    train(config, recorder)
+
+  with maybe_record_goodput(recorder, "job"):
+    train(config, recorder, hooks)
 
 
 if __name__ == "__main__":

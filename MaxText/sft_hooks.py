@@ -156,7 +156,7 @@ class TrainingHooks:
   def prepare_inputs(self, input_data: Any) -> Any:
     return input_data
 
-  @contextlib.context_manager
+  @contextlib.contextmanager
   def training_step(self, step):
     with self.profiler.train_step(step):
       try:
@@ -164,7 +164,7 @@ class TrainingHooks:
       finally:
         self.metrics_recorder.record_train_metrics(self.training_step_metrics, step)
 
-  @contextlib.context_manager
+  @contextlib.contextmanager
   def eval_step(self, step):
     # TODO: add this to profiler
     # with self.profiler.eval_step():

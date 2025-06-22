@@ -48,6 +48,7 @@ def basic_training(mt_config):
   # TODO: should this really return the mesh, or should that be a separate call that happens first
   linen_model, mesh, init_rng, *_ = mt.from_pretrained(mt_config)
   hooks = mt.sft_hooks.TrainingHooks(mt_config)
+  # FIXME: Anisha's notebook calls setup_decode_state. Can we just not do that and assume that NNX handles it
 
   rngs = nnx.Rngs(0)
   # FIXME: what should be the shape of this
