@@ -552,8 +552,13 @@ class Decoder(nn.Module):
       if cfg.scan_layers:
         if cfg.decoder_block == DecoderBlockType.DEEPSEEK:
           assert len(RemattedBlockLayers) == 2, "Scanned layers must have a length of 2 using deepseek."
+          layer_call_kwargs = {
+              "page_state": page_state,
+              "previous_chunk": previous_chunk,
+              "slot": slot,
+          }
           dense_layer = RemattedBlockLayers[0]
-          moe_layer = RemattedBlockLayers[1]
+          dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
           y, _ = self.scan_decoder_layers(cfg, dense_layer, cfg.first_num_dense_layers, "dense_layers", mesh)(
               y,
               decoder_segment_ids,
@@ -561,6 +566,8 @@ class Decoder(nn.Module):
               deterministic,
               model_mode,
           )
+          moe_layer = RemattedBlockLayers[1]
+          moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
           num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
           y, _ = self.scan_decoder_layers(cfg, moe_layer, num_moe_layers, "moe_layers", mesh)(
               y,
