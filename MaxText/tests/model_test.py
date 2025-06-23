@@ -112,6 +112,7 @@ class TestModel(unittest.TestCase):
     """Test logits datatype without casting."""
     self._test_logits_cast_driver(cast_logits_to_fp32=False, expected_dtype=jnp.bfloat16)
 
+  @pytest.mark.skip(reason="Test is flaky since Jax 0.6.2, see b/427048251")
   @pytest.mark.tpu_only
   def test_train_vs_prefill_and_autoregress(self):
     """Test train versus prefill and autoregress."""

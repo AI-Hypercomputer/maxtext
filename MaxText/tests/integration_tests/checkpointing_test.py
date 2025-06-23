@@ -115,7 +115,7 @@ def run_checkpointing(hardware, attention_type):
 
   check_loss("metrics.txt", "learning/loss")
 
-
+@pytest.mark.skip(reason="Test is flaky since Jax 0.6.2, see b/427048251")
 @pytest.mark.integration_test
 @pytest.mark.tpu_only
 def test_autoselected_attention():
