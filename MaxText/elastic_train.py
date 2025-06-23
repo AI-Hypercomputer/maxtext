@@ -406,13 +406,7 @@ def elastic_initialize(devices: Sequence[jax.Device]) -> manager.Manager:
   Returns:
     The initialized elastic manager
   """
-  elastic_manager = manager.Manager(
-      devices,
-      reshard_check_period=1,
-      snapshot_period=5,
-      max_elastic_down_event_count=100,
-      max_reshard_retry_count=3,
-  )
+  elastic_manager = manager.Manager(devices)
 
   # Do not start training until all slices are available
   # TODO: b/408455557 - Migrate to pathwaysutils and make configurable
@@ -431,6 +425,14 @@ def elastic_initialize(devices: Sequence[jax.Device]) -> manager.Manager:
 
   return elastic_manager
 
+def elastic_configure(
+    config: pyconfig.HyperParameters,
+    elastic_manager: manager.Manager,
+):
+  elastic_manager.reshard_check_period = config.elastic_reshard_check_period
+  elastic_manager.snapshot_period = config.elastic_snapshot_period
+  elastic_manager.max_elastic_down_event_count = config.elastic_max_elastic_down_event_count
+  elastic_manager.max_reshard_retry_count = config.elastic_max_reshard_retry_count
 
 def main(argv: Sequence[str]) -> None:
   pathwaysutils.initialize()
@@ -445,6 +447,7 @@ def main(argv: Sequence[str]) -> None:
   elastic_manager = elastic_initialize(jax.devices())
 
   config = pyconfig.initialize(argv)
+  elastic_configure(config, elastic_manager)
   max_utils.print_system_information()
   validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
