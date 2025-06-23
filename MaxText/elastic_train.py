@@ -217,30 +217,6 @@ def train_loop(config, elastic_manager, recorder, state=None):
   # the step is restored back to the latest snapshot when a slice is lost
   while step < config.steps:
     try:
-      step_start_time = datetime.datetime.now()
-      prof.maybe_activate_profiler(step, state)
-
-      max_logging.log(f"{step=} {elastic_manager.elastic_down_event_count=} {elastic_manager.good_slice_count=}")
-      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules), jax.default_device(elastic_manager.default_device):
-        with jax.profiler.StepTraceAnnotation("train", step_num=step):
-          example_batch = data_loader.load_next_batch()
-          # pylint: disable=not-callable
-          nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
-          with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
-            state, metrics = p_train_step(state, example_batch, nextrng)
-
-        if checkpoint_manager is not None:
-          state_to_save = state
-          if save_checkpoint(checkpoint_manager, int(step), state_to_save, config.dataset_type, data_iterator, config):
-            checkpointing.print_save_message(step, config.async_checkpointing)
-
-          # Upon preemption, exit when and only when all ongoing saves are complete.
-          if checkpoint_manager.reached_preemption(step):
-            checkpoint_manager.wait_until_finished()
-            sys.exit()
-
-        prof.maybe_deactivate_profiler(step, state)
-
       elastic_manager.maybe_snapshot(
           step=step,
           snapshot_jax_arrays={
@@ -275,6 +251,32 @@ def train_loop(config, elastic_manager, recorder, state=None):
             learning_rate_schedule,
             metric_logger,
         ) = ret
+        step += 1
+
+      step_start_time = datetime.datetime.now()
+      prof.maybe_activate_profiler(step, state)
+
+      max_logging.log(f"{step=} {elastic_manager.elastic_down_event_count=} {elastic_manager.good_slice_count=}")
+      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules), jax.default_device(elastic_manager.default_device):
+        with jax.profiler.StepTraceAnnotation("train", step_num=step):
+          example_batch = data_loader.load_next_batch()
+          # pylint: disable=not-callable
+          nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
+          with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
+            state, metrics = p_train_step(state, example_batch, nextrng)
+
+        if checkpoint_manager is not None:
+          state_to_save = state
+          if save_checkpoint(checkpoint_manager, int(step), state_to_save, config.dataset_type, data_iterator, config):
+            checkpointing.print_save_message(step, config.async_checkpointing)
+
+          # Upon preemption, exit when and only when all ongoing saves are complete.
+          if checkpoint_manager.reached_preemption(step):
+            checkpoint_manager.wait_until_finished()
+            sys.exit()
+
+        prof.maybe_deactivate_profiler(step, state)
+
 
       if step == start_step:
         max_utils.print_mem_stats("After params initialized")
@@ -287,7 +289,17 @@ def train_loop(config, elastic_manager, recorder, state=None):
       step += 1
 
     except jax.errors.JaxRuntimeError as error:
-      ret = elastic_manager.maybe_reshard_down(
+      (
+          config,
+          step,
+          state,
+          mesh,
+          checkpoint_manager,
+          data_iterator,
+          p_train_step,
+          learning_rate_schedule,
+          metric_logger,
+      ) = elastic_manager.maybe_reshard_down(
           error=error,
           elastic_handler=elastic_handler,
           handler_kwargs={
@@ -296,18 +308,6 @@ def train_loop(config, elastic_manager, recorder, state=None):
               "checkpoint_manager": checkpoint_manager,
           },
       )
-      if ret is not None:
-        (
-            config,
-            step,
-            state,
-            mesh,
-            checkpoint_manager,
-            data_iterator,
-            p_train_step,
-            learning_rate_schedule,
-            metric_logger,
-        ) = ret
     except exceptions.StopTraining as error:
       max_logging.log(f"Training stopped: {str(error)}")
 
