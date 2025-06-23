@@ -154,7 +154,6 @@ def elastic_handler(
       state = state.replace(step=state.step.at[None].set(step))
 
       p_train_step, _ = train_utils.jit_train_and_eval_step(config, model, mesh, state, state_mesh_shardings, train_step)
-      example_batch = None
       metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
       jax.block_until_ready(state)
@@ -167,7 +166,6 @@ def elastic_handler(
       checkpoint_manager,
       data_iterator,
       p_train_step,
-      example_batch,
       learning_rate_schedule,
       metric_logger,
   )
@@ -197,7 +195,6 @@ def train_loop(config, elastic_manager, recorder, state=None):
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
 
-  example_batch = None
   step = start_step
 
   elastic_manager.maybe_snapshot(
@@ -275,7 +272,6 @@ def train_loop(config, elastic_manager, recorder, state=None):
             checkpoint_manager,
             data_iterator,
             p_train_step,
-            example_batch,
             learning_rate_schedule,
             metric_logger,
         ) = ret
@@ -309,7 +305,6 @@ def train_loop(config, elastic_manager, recorder, state=None):
             checkpoint_manager,
             data_iterator,
             p_train_step,
-            example_batch,
             learning_rate_schedule,
             metric_logger,
         ) = ret
