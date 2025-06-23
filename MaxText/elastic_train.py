@@ -122,6 +122,7 @@ def elastic_handler(
     )
     with mesh:
       data_iterator, _ = create_data_iterator(config, mesh)
+      input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
 
       step, snapshot_jax_arrays, _ = elastic_manager.get_resharded_snapshot(mesh)
 
@@ -183,6 +184,7 @@ def elastic_handler(
       example_batch,
       learning_rate_schedule,
       metric_logger,
+      input_data_shardings,
   )
 
 
@@ -310,6 +312,7 @@ def train_loop(config, elastic_manager, recorder, state=None):
             example_batch,
             learning_rate_schedule,
             metric_logger,
+            input_data_shardings,
         ) = ret
 
       if step == start_step:
@@ -344,6 +347,7 @@ def train_loop(config, elastic_manager, recorder, state=None):
             example_batch,
             learning_rate_schedule,
             metric_logger,
+            input_data_shardings,
         ) = ret
 
   if checkpoint_manager is not None:
