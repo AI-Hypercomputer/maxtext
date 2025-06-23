@@ -12,7 +12,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Converts a HuggingFace checkpoint to a MaxText compatible Orbax checkpoint."""
+"""
+This script converts a HuggingFace model checkpoint to a MaxText-compatible
+Orbax checkpoint.
+
+Key Parameters (to be set in the config file or as command-line overrides):
+  model_name: (Required) The name of the model to convert (e.g., "gemma2-2b").
+              Must be a key in `MaxText.utils.ckpt_conversion.utils.utils.HF_IDS`.
+  base_output_directory: (Optional) The directory where the converted HuggingFace
+                         checkpoint will be saved. Can be a local path, a GCS
+                         path (gs://...), or a HuggingFace Hub repo ID (hf://...).
+                         Defaults to "./mt_output/".
+  scan_layers: (bool) Whether the MaxText model was trained with scanned layers.
+               This must match the training configuration of the checkpoint.
+
+Environment Variables:
+  HF_AUTH_TOKEN: (Required) Hugging Face authentication token, needed to
+                 download models from Hugging Face Hub.
+
+Example Usage:
+  To convert a gemma2-2b model and save it to a specific directory:
+
+  HF_AUTH_TOKEN="hf_YOUR_TOKEN" python MaxText/utils/ckpt_conversion/to_maxtext.py \
+    --model_name="gemma2-2b" \
+    --base_output_directory="/path/to/your/output/directory" \
+    --scan_layers=False
+
+  For models with scanned layers (e.g., some custom architectures), you might
+  need to set scan_layers=True and param_scan_axis accordingly.
+"""
 
 import os
 import sys
@@ -51,7 +79,7 @@ def main(argv: Sequence[str]) -> None:
   model_id = HF_IDS[config.model_name]
   max_utils.print_system_information()
   if not config.base_output_directory:
-    output_directory = os.path.expanduser("~/.mt_output/")
+    output_directory = os.path.join(os.getcwd(), "mt_output")
   else:
     output_directory = config.base_output_directory
 
@@ -96,8 +124,15 @@ def main(argv: Sequence[str]) -> None:
   max_logging.log("MaxText abstract model and state initialized.")
 
   # Get parameter mappings and hooks
+  # example of param mapping (gemma2, maxtext:huggingface):
+  # "params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_global-scale":
+  #                                                                    f"model.layers.{global_layer_idx}.input_layernorm.weight",
+
   model_key = config.model_name
   param_map_mt_to_hf = PARAM_MAPPING[model_key](hf_config_obj.to_dict(), config.scan_layers)
+
+  # Example of Hook FN mapping, to perform reshape:
+  # f"params-decoder-layers_{maxtext_layer_idx}-self_attention_global-key-kernel": reshape_kernel,
   hook_fn_map_mt = HOOK_FNS[model_key](hf_config_obj.to_dict(), config.scan_layers, saving_to_hf=False)
   max_logging.log("Parameter mappings and hooks obtained.")
 

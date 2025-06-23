@@ -14,6 +14,43 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+"""
+This script is to compare the logits of a MaxText checkpoint and a HuggingFace checkpoint.
+It is used to verify the checkpoint conversion scripts (to_huggingface.py and to_maxtext.py).
+
+The script loads a HuggingFace model and a MaxText model from their respective checkpoints.
+For a given set of prompts, it performs the following checks:
+    1. Runs a forward pass.
+    2. Compares the output logits of the last token prediction.
+    3. Compares the top-k predicted tokens and their scores.
+    4. Calculates the KL-divergence between the full logit distributions to ensure they are similar.
+
+This helps to ensure that the conversion process preserves the model's predictive behavior.
+
+Key Parameters:
+  --hf_model_id (required): The HuggingFace model ID for HF checkpoint.
+  --maxtext_checkpoint_path: The path to the MaxText checkpoint directory.
+  --maxtext_model_name: The name of the model in MaxText configuration (e.g., "gemma2-2b").
+  --maxtext_base_config_path: The path to the base MaxText configuration file (e.g., 'MaxText/configs/base.yml').
+  --scan_layers: (bool) Whether the MaxText model was trained with scanned layers.
+  --max_kl_div: The maximum allowed KL divergence between the logits of the two models.
+
+Environment Variables:
+  HF_AUTH_TOKEN: (Required) Hugging Face authentication token, needed to
+                 download models from Hugging Face Hub.
+  
+Example Usage:
+  To compare a converted MaxText gemma2-2b checkpoint against the original HuggingFace model:
+
+  HF_AUTH_TOKEN="hf_YOUR_TOKEN" python3 -m MaxText.tests.mt_hf_mutual_conversion_check \\
+    --hf_model_id="google/gemma-2-2b" \\
+    --maxtext_model_name="gemma2-2b" \\
+    --maxtext_checkpoint_path="/path/to/your/maxtext/checkpoint/0/items" \\
+    --maxtext_base_config_path="MaxText/configs/base.yml" \\
+    --scan_layers=False \\
+    --max_kl_div=0.02
+"""
+
 import os
 import torch
 import torch.nn.functional as F
@@ -36,23 +73,6 @@ from MaxText.layers import models
 from MaxText.layers import quantizations
 
 hf_token = os.environ.get("HF_AUTH_TOKEN")
-
-"""
-This script is to compare the logits of maxtext checkpoint and Huggingface checkpoint.
-Used to verify the checkpoint conversion (to_huggingface.py and to_maxtext.py)
-
-It loads the HF checkpoint and a maxtext checkpoint, and:
-    1. runs a foward pass of a MaxText model and a HF model
-    2. compares their output logits for a given input
-    3. compares the predicted token sequences
-    
-Extra Requirements:
-    torch
-    huggingface_hub
-    transformers
-    accelerate
-    tabulate
-"""
 
 
 def get_top_k_tokens_scores(logits_tensor, tokenizer_instance, k=10, description=""):
