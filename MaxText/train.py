@@ -541,7 +541,7 @@ def eval_step(model, config, state, data, dropout_rng):
   return metrics
 
 
-def setup_train_loop(config, recorder):
+def setup_train_loop(config, recorder, devices=None):
   """Set up prerequisites for the training loop -
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
       Set up data iterator and tokenizer, initialize the model.
@@ -562,7 +562,7 @@ def setup_train_loop(config, recorder):
   """
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
-    model = mt.from_pretrained(config)
+    model = mt.from_pretrained(config, devices)
     mesh = model.mesh
     init_rng, checkpoint_manager, learning_rate_schedule, tx = train_utils.create_training_tools(config, model, mesh)
 
