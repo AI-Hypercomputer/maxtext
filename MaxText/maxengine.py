@@ -334,13 +334,7 @@ class MaxEngine(engine_api.Engine):
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           jnp.ones((1, self.config.max_prefill_predict_length), dtype=jnp.int32),
           encoder_images=jnp.ones(
-              (
-                  1,
-                  maxtext_utils.NUM_IMAGES_PER_SEQUENCE,
-                  self.config.image_size_for_vit,
-                  self.config.image_size_for_vit,
-                  maxtext_utils.NUM_IMAGE_CHANNELS,
-              ),
+              maxtext_utils.get_dummy_image_shape_for_init(self.config),
               dtype=jnp.float32,
           )
           if self.config.use_multimodal
@@ -455,10 +449,12 @@ class MaxEngine(engine_api.Engine):
     input_tokens = jnp.expand_dims(padded_tokens, 0)  # [BATCH, SEQUENCE]
     positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
 
-    if self.config.use_multimodal:
-      input_images = images[jnp.newaxis, jnp.newaxis, ...]  # Add batch and sequence dimension [B, N, H, W, C]
-    else:
-      input_images = None
+    input_images = None
+    if self.config.use_multimodal and images is not None:
+      if self.config.model_name.startswith("gemma3"):
+        input_images = images[jnp.newaxis, jnp.newaxis, ...]  # Add batch and sequence dimension [B, N, H, W, C]
+      elif self.config.model_name.startswith("llama4"):
+        input_images = images[jnp.newaxis, ...]  # Add batch dimension [B, T, C, H, W]
 
     # sequence_indicator will be concatenated to existing_prefix decoder_segment_ids
     start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
@@ -1374,15 +1370,7 @@ class MaxEngine(engine_api.Engine):
           (int(self.config.per_device_batch_size * jax.device_count()), 1),
           dtype=jnp.int32,
       )
-      dummy_image = jnp.ones(
-          (
-              int(self.config.per_device_batch_size * jax.device_count()),
-              maxtext_utils.NUM_IMAGES_PER_SEQUENCE,
-              self.config.image_size_for_vit,
-              self.config.image_size_for_vit,
-              maxtext_utils.NUM_IMAGE_CHANNELS,
-          ),
-      )
+      dummy_image = jnp.ones(maxtext_utils.get_dummy_image_shape_for_init(self.config), dtype=jnp.int32)
       _, cache = self.model.apply(
           abstract_params,
           x,
