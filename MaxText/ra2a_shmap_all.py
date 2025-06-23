@@ -187,12 +187,12 @@ def get_all_to_all_params(all_shards_group_sizes):
 
 
 ##### Non-vmap #####
-# jit_wrapper = jax.jit(main_wrapper)
-# print(f"{x.shape=}", flush=True)
-# x_a2a = jit_wrapper(x, routing_table)
-# print("Successfully ran wrapper (non - vmap)")
-# print(x_a2a)
-# breakpoint()
+jit_wrapper = jax.jit(main_wrapper)
+print(f"{x.shape=}", flush=True)
+x_a2a = jit_wrapper(x, routing_table)
+print("Successfully ran wrapper (non - vmap)")
+print(x_a2a)
+breakpoint()
 
 
 ##### Vmap #####

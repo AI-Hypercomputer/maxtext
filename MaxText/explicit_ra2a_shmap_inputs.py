@@ -130,7 +130,6 @@ print("Successfully ran vmap!!")
 # This will fail! The output shape is [PP, 2, 4, 3] but we expect [PP, 8, 3] - the same shape as both x_vmap and output_shape_vmap
 # vmap_output = vmap_output.reshape([4,8,3])
 # print(f"output of a2a WITH vmap:\n {vmap_output}")
-breakpoint()
 assert vmap_output.shape == (pipeline_parallelism, batch, model)
 print("Now running expected assert...")
 for i in range(pipeline_parallelism):
