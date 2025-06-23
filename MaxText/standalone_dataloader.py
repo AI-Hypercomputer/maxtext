@@ -28,20 +28,22 @@ import jax
 
 from MaxText import max_logging
 from MaxText import pyconfig
-from MaxText.train import validate_train_config, get_first_step, load_next_batch, setup_train_loop
+from MaxText.data_loader import DataLoader
+from MaxText.train import validate_train_config, get_first_step, setup_train_loop
 
 
 def data_load_loop(config, state=None):
   """Main data loader loop.
   Loads batches of data for each training step.
   """
-  _, _, _, _, _, _, data_iterator, _, state = setup_train_loop(config, recorder=None)
+  _, _, _, _, mesh, _, data_iterator, _, state = setup_train_loop(config, recorder=None)
+  data_loader = DataLoader(config, mesh, data_iterator, None)
 
   example_batch = None
 
   start = datetime.datetime.now()
   start_step = get_first_step(state)
-  example_batch = load_next_batch(data_iterator, example_batch, config)
+  example_batch = data_loader.load_next_batch()
   jax.block_until_ready(example_batch)
   first_end = datetime.datetime.now()
   time_to_load_first_batch = first_end - start
@@ -49,7 +51,7 @@ def data_load_loop(config, state=None):
     max_logging.log(f"STANDALONE DATALOADER : First step completed in {time_to_load_first_batch.seconds} seconds, on host 0")
 
   for _ in np.arange(start_step + 1, config.steps):
-    example_batch = load_next_batch(data_iterator, example_batch, config)
+    example_batch = data_loader.load_next_batch()
 
   jax.block_until_ready(example_batch)  # wait until the last batch is read
   end = datetime.datetime.now()
