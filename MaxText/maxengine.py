@@ -21,11 +21,15 @@ import os.path
 import uuid
 import warnings
 
-from jax.experimental.layout import DeviceLocalLayout as DLL
-from jax.experimental.layout import Layout
+from jax.experimental.layout import Format
 from jax.sharding import PartitionSpec as P
 import jax
 import jax.numpy as jnp
+
+if jax.__version_info__ >= (0, 6, 3):
+  from jax.experimental.layout import Layout as DLL  # type: ignore
+else:
+  from jax.experimental.layout import DeviceLocalLayout as DLL  # type: ignore
 
 from flax import linen as nn
 from flax import struct
@@ -147,21 +151,21 @@ class MaxEngine(engine_api.Engine):
   ) -> tuple[Any, Any, Any, Any]:
     """Optimal memory layout for params and decode_state."""
 
-    param_layout = Layout(DLL.AUTO)
-    decode_state_layout = Layout(DLL.AUTO)
+    param_layout = Format(DLL.AUTO)
+    decode_state_layout = Format(DLL.AUTO)
     # Keyword arguments are not yet supported in JAX for specifying shardings. Therefore, all AOT
     # compiled functions use arguments instead.
     compiled_generate = (
         jax.jit(
             self.generate_aot,
             in_shardings=(param_layout, decode_state_layout, None),
-            out_shardings=(Layout(DLL.AUTO), Layout(DLL.AUTO)),
+            out_shardings=(Format(DLL.AUTO), Format(DLL.AUTO)),
             donate_argnames=("decode_state",),
         ).lower(params, decode_state, rng_shape)
     ).compile(compiler_options=xla_flags)
 
-    arg_layouts, _ = compiled_generate.input_layouts
-    generate_out_layouts, _ = compiled_generate.output_layouts
+    arg_layouts, _ = compiled_generate.input_formats
+    generate_out_layouts, _ = compiled_generate.output_formats
 
     return compiled_generate, arg_layouts[0], arg_layouts[1], generate_out_layouts
 
@@ -174,11 +178,16 @@ class MaxEngine(engine_api.Engine):
     """Lays out an array tensor by tensor to prevent OOMs."""
 
     def _layout(x, s, l):
-      if x.layout == l:
+      if x.format == l:
         return x
       # Somehow this can be None sometimes.
-      dll = l.device_local_layout if isinstance(l, Layout) else l
-      f = jax.jit(self._identity, out_shardings=Layout(dll, s)).lower(x).compile(compiler_options=xla_flags)
+      dll = (l.layout if jax.__version_info__ >= (0, 6, 3) else
+             l.device_local_layout) if isinstance(l, Format) else l
+      f = (
+          jax.jit(self._identity, out_shardings=Format(dll, s))
+          .lower(x)
+          .compile(compiler_options=xla_flags)
+      )
       y = f(x)
       # Achieves donation of the input argument, but allows for different memory
       # layouts and shapes.

@@ -1389,7 +1389,7 @@ class Attention(nn.Module):
     )
     query_proj = dense_general(
         inputs_shape=inputs_q.shape,
-        features=(self.num_query_heads, self.head_dim),
+        out_features_shape=(self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=query_init,
         kernel_axes=kernel_axes,
@@ -1427,7 +1427,7 @@ class Attention(nn.Module):
 
     kv_proj = dense_general(
         inputs_shape=inputs_kv.shape,
-        features=(self.num_kv_heads, self.head_dim),
+        out_features_shape=(self.num_kv_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
         kernel_axes=kernel_axes,
@@ -1445,7 +1445,7 @@ class Attention(nn.Module):
 
     qkv_proj = dense_general(
         inputs_shape=inputs.shape,
-        features=(3, self.num_query_heads, self.head_dim),
+        out_features_shape=(3, self.num_query_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
         kernel_axes=("embed", "qkv", "heads", "kv"),
@@ -1467,7 +1467,7 @@ class Attention(nn.Module):
     )
     out_proj = dense_general(
         inputs_shape=out.shape,
-        features=output_dim,
+        out_features_shape=output_dim,
         axis=(-2, -1),
         kernel_init=self.kernel_init,
         kernel_axes=out_kernel_axis,  # trade speed with memory
@@ -1734,8 +1734,8 @@ class MLA(Attention):
     if self.q_lora_rank == 0:
       # Standard Q projection (without LoRA).
       self.query_proj = dense_general(
-          in_features=self.config.emb_dim,
-          features=(self.num_query_heads, self.qk_head_dim),
+          in_features_shape=self.config.emb_dim,
+          out_features_shape=(self.num_query_heads, self.qk_head_dim),
           axis=-1,
           kernel_init=self.kernel_init,
           kernel_axes=("embed", "q_heads", "kv"),
@@ -1748,8 +1748,8 @@ class MLA(Attention):
     else:
       # LoRA path for Q.
       self.wq_a = dense_general(
-          in_features=self.config.emb_dim,
-          features=self.q_lora_rank,
+          in_features_shape=self.config.emb_dim,
+          out_features_shape=self.q_lora_rank,
           axis=-1,
           kernel_init=self.kernel_init,
           kernel_axes=("embed", "q_lora"),
@@ -1767,8 +1767,8 @@ class MLA(Attention):
           kernel_axes=("norm",),
       )
       self.wq_b = dense_general(
-          in_features=self.q_lora_rank,
-          features=(self.num_query_heads, self.qk_head_dim),
+          in_features_shape=self.q_lora_rank,
+          out_features_shape=(self.num_query_heads, self.qk_head_dim),
           axis=-1,
           kernel_init=self.kernel_init,
           kernel_axes=("q_lora", "q_heads", "kv"),
@@ -1781,8 +1781,8 @@ class MLA(Attention):
 
     # KV LoRA path.
     self.wkv_a = dense_general(
-        in_features=self.config.emb_dim,
-        features=self.kv_lora_rank + self.qk_rope_head_dim,
+        in_features_shape=self.config.emb_dim,
+        out_features_shape=self.kv_lora_rank + self.qk_rope_head_dim,
         axis=-1,
         kernel_init=self.kernel_init,
         kernel_axes=("embed", "kv_lora"),
@@ -1800,8 +1800,8 @@ class MLA(Attention):
         kernel_axes=("norm",),
     )
     self.wkv_b = dense_general(
-        in_features=self.kv_lora_rank,
-        features=(
+        in_features_shape=self.kv_lora_rank,
+        out_features_shape=(
             self.num_query_heads,
             (self.qk_nope_head_dim + self.v_head_dim),
         ),
@@ -1820,6 +1820,30 @@ class MLA(Attention):
     if self.max_position_embeddings > self.original_max_position_embeddings:
       mscale = 0.1 * self.mscale * jnp.log(self.rope_factor) + 1.0
       self.softmax_scale = self.softmax_scale * mscale * mscale
+
+    # Setup paged attention op
+    if self.config.attention == "paged":
+      # Set head_dim to the max of qk_head_dim and v_head_dim. The current paged
+      # attention kernel requires the head_dim to be the same for q, k, v.
+      head_dim = max(self.qk_head_dim, self.v_head_dim)
+      # Align head_dim to the pagedattn_head_dim_alignment if specified.
+      if self.config.pagedattn_head_dim_alignment > 0:
+        alignment = self.config.pagedattn_head_dim_alignment
+        head_dim = (head_dim + alignment - 1) // alignment * alignment
+      self.ds_paged_attention_op = paged_attention.PagedAttentionOp(
+          mesh=self.mesh,
+          num_pages=self.config.pagedattn_num_pages,
+          tokens_per_page=self.config.pagedattn_tokens_per_page,
+          max_pages_per_slot=(self.config.max_target_length + self.config.pagedattn_tokens_per_page - 1)
+          // self.config.pagedattn_tokens_per_page,
+          max_pages_per_prefill=(self.config.max_prefill_predict_length + self.config.pagedattn_tokens_per_page - 1)
+          // self.config.pagedattn_tokens_per_page,
+          pages_per_compute_block=self.config.pagedattn_pages_per_compute_block,
+          num_kv_heads=self.num_kv_heads,
+          kv_head_dim_size=head_dim,
+          dtype=self.dtype,
+          attn_logits_soft_cap=self.attn_logits_soft_cap,
+      )
 
   def mla_query_projection(self, inputs_q: Array, inputs_positions: Array, model_mode) -> Array:
     """Query projection for MLA, e.g. includes LoRA if q_lora_rank > 0."""
@@ -1907,7 +1931,7 @@ class MLA(Attention):
 
     key, value = self.mla_get_key_value(low_rank_main, key_rope, model_mode)
     cached_values = [None, None]
-    if model_mode != MODEL_MODE_TRAIN:
+    if self.config.attention != "paged" and model_mode != MODEL_MODE_TRAIN:
       if self.config.mla_naive_kvcache:
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
       else:
@@ -1956,7 +1980,14 @@ class MLA(Attention):
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
 
-    out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values)
+    if self.config.attention == "paged" and model_mode != MODEL_MODE_TRAIN:
+      unnormalized_out, _, exp_sum = self.ds_paged_attention_op(
+          query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
+      )
+      unnormalized_out = unnormalized_out[..., :self.v_head_dim]
+      out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
+    else:
+      out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values)
     out = nn.with_logical_constraint(out, self.out_axis_names)
     out = self.out_projection(inputs_q.shape[-1], out)
     return out

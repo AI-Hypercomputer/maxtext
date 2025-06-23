@@ -439,6 +439,11 @@ hf_eval_split: ''
 hf_eval_files: ''
 hf_access_token: ''
 # for Grain input pipeline (dataset_type=grain)
+# Path to grain data files. Can be a single pattern or multiple patterns with weights.
+# For multiple patterns, use semicolon (;) to separate and colon (:) to specify weights.
+# Example: "path/to/data1.array_record*:0.3;path/to/data2.array_record*:0.7"
+# Note: When using multiple files (separated by ';'), only ArrayRecord format is supported.
+# For more details, see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#grain-input-pipeline
 grain_train_files: ''
 grain_eval_files: ''
 grain_file_type: 'arrayrecord' # arrayrecord or parquet
@@ -696,6 +701,9 @@ pagedattn_num_pages: 64  # total number of pages to allocate
 pagedattn_tokens_per_page: 32  # number of tokens each page can hold
 pagedattn_pages_per_compute_block: 4  # number of pages processed together in pallas kernels
 pagedattn_max_pages_per_group: -1  # defaults to number of pages needed to reach max_target_length
+# Alignment of head_dim to the nearest multiple of this value, set to 0 to disable alignment. On
+# TPUs, the head_dim is padded to the nearest multiple of 128.
+pagedattn_head_dim_alignment: 128
 
 
 # Chunked Prefill Parameters

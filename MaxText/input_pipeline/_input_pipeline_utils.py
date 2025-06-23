@@ -332,7 +332,7 @@ class NormalizeFeatures(grain.MapTransform):
 
 @dataclasses.dataclass
 class Rekey(grain.MapTransform):
-  """Rname keys according to a mappign dict"""
+  """Rename keys according to a mapping dict"""
 
   def __init__(self, mapping_dict, keep_old_keys=False):
     self.mapping_dict = mapping_dict
