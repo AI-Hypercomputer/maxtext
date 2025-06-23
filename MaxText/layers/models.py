@@ -804,4 +804,175 @@ class Transformer(nn.Module):
         image_embeddings=image_embeddings,
     )
     return logits
+
+class ZeroOneTransformer(nn.Module):
+  """
+  A wrapper for the base Transformer model designed to implement the Zero-1
+  FSDP optimization.
+
+  The goal of this optimization is to reduce communication overhead. In the standard
+  FSDP implementation, an all-gather operation on the model weights is performed twice
+  for each microbatch (once for the forward pass, once for the backward pass).
+
+  This class changes that behavior. When enabled, it performs the all-gather operation
+  only *once* per full gradient accumulation step. It gathers the full weights into
+  memory, runs all the microbatch forward and backward passes, and then releases the
+  full weights. This trades higher peak memory usage for significantly reduced
+  network communication, which can improve training speed if sufficient memory is
+  available.
+  """
+  config: Config
+  mesh: Mesh
+  quant: Quant
+
+  def get_weight_sharding(self, *init_args):
+    """
+    Initializes the model to inspect and return the logical partition specs
+    for all of its weights. This is a helper function to understand the intended
+    sharding layout of the model as defined by the user.
+
+    Args:
+      *init_args: The arguments required to initialize the model (e.g., input shapes).
+
+    Returns:
+      A PyTree representing the logical PartitionSpec for the model's parameters.
+    """
+    key = jax.random.PRNGKey(0)
+    # Create dummy keys for initialization
+    keys = {"params": key, "dropout": key, "aqt": key}
+    # Temporarily initialize the model to get its complete variable structure.
+    weights = self.init(keys, *init_args)
+
+    def get_partition_spec(pytree):
+      """Inner function to traverse the PyTree of weights."""
+      # This function is designed to find all leaves that are LogicallyPartitioned
+      # and extract their partition spec.
+      raise Exception("Please check the model definition") 
   
+      def _is_leaf(x):
+        return ininstance(x,nn.LogicallyPartitioned)
+      
+      def get_partition_spec_leaf(leaf):
+        return leaf.get_partition_spec()
+      
+      partition_spec_tree = jax.tree.map(get_partition_spec_leaf, pytree, is_leaf=_is_leaf)
+      return partition_spec_tree
+    # Run the function to get the full tree of partition specs.
+    partition_spec_with_extra_layer = get_partition_spec(weights)
+    # The actual model parameters are nested under the 'layers' key. This extracts them.
+    partition_spec = {"params": partition_spec_with_extra_layer["params"]["layers"]}
+    return partition_spec
+  
+  def get_physical_spec_no_fsdp(self, full_logical):
+    """
+    Converts a logical partition spec into a physical sharding spec that
+    describes a fully replicated (unsharded) layout for the weights.
+
+    It does this by taking the original sharding rules and removing any axis
+    sharded over 'fsdp' or 'fsdp_transpose'. Replacing a sharding axis with
+    None tells JAX to replicate the data along that physical mesh dimension.
+
+    Args:
+      full_logical: The original logical partition specs for all weights.
+
+    Returns:
+      A PyTree of physical NamedSharding objects configured to represent
+      fully-gathered weights (replicated across the 'fsdp' axis).
+    """
+
+    def remove_fsdp_sharding(sharding_tree):
+      """Recursively traverses the sharding tree to remove fsdp axes."""
+      def _remove_fsdp_from_partition_spec(named_sharding):
+        """Removes 'fsdp' and 'fsdp_transpose' from a PartitionSpec."""
+        if isinstance(named_sharding, jax.sharding.NamedSharding):
+          new_spec = []
+          # Iterate through each axis in the original PartitionSpec.
+          for axis in named_sharding.spec:
+            if axis is None:
+              new_spec.append(None)
+            elif isinstance(axis,str):
+              # If the axis is 'fsdp', replace it with None to signify replication.
+              if axis not in ("fsdp", "fsdp_transpose"):
+                new_spec.append(axis)
+              else:
+                new_spec.append(None)
+            elif isinstance(axis, (list,tuple)):
+              # If the axis is a collection, filter out 'fsdp'.
+              new_axis = [a for a in axis if a not in ("fsdp", "fsdp_transpose")]
+              new_spec.append(tuple(new_axis))
+            else:
+              raise ValueError(f"Unsupported_axis_type: {type(axis)}")
+            # Return a new sharding object with the modified spec.
+          return jax.sharding.NamedSharding(named_sharding.mesh, jax.sharding.PartitionSpec(*new_spec))
+        return named_sharding
+      return jax.tree.map(_remove_fsdp_from_partition_spec, sharding_tree)
+
+    # Convert the high-level logical spec to a physical one using default rules.
+    physical = nn.logical_to_mesh_sharding(full_logical, mesh=self.mesh, rules=self.config.logical_axis_rules)
+    # Apply the function to remove the FSDP sharding, defining our target layout.
+    physical_no_fsdp = remove_fsdp_sharding(physical)
+    return physical_no_fsdp
+  
+  def all_gather_over_fsdp(self,sharding_info):
+    """
+    Performs an all-gather on the FSDP-sharded weights by applying a sharding constraint.
+
+    This is the core of the optimization. It uses `jax.lax.with_sharding_constraint`
+    to enforce the fully replicated layout defined by `get_physical_spec_no_fsdp`.
+    To satisfy this constraint, JAX's compiler will automatically insert the necessary
+    all-gather communication operations.
+
+    Args:
+      sharding_info: The logical partition spec of the currently sharded weights.
+
+    Returns:
+      The model's variables (weights), with the all-gather operation applied.
+    """
+    # Get the target physical layout (weights fully replicated).
+    physical_constraint_no_fsdp = self.get_physical_spec_no_fsdp(sharding_info)
+    # Apply the constraint to the model's current variables. This tells JAX to
+    # gather the weights into this layout.
+    return jax.lax.with_sharding_constraint(self.model.variables, physical_constraint_no_fsdp)
+  
+  def setup(self):
+    """Initializes the inner Transformer model during Flax setup."""
+    self.model = Transformer(config=self.config, mesh=self.mesh, quant=self.quant)
+
+  def __call__(self,
+               decoder_input_tokens: jnp.ndarray,
+               decoder_positions: jnp.ndarray,
+               decoder_segment_ids=None,
+               encoder_images: Optional[jnp.ndarray] = None,
+               enable_dropout=True,
+               model_mode=MODEL_MODE_TRAIN,
+               previous_chunk=None,
+               true_length: Optional[int] = None,
+               slot: Optional[int] = None,
+               page_state: Optional[page_manager.PageState] = None,
+               partition_spec=None, # Pytree of sharding specifications of the weights (aka self.layers.variables)
+               ):
+               """
+               Defines the forward pass for the Zero-1 optimized model.
+
+               During model initialization, it behaves like the base model.
+               During an actual forward pass, it first triggers the all-gather on the weights
+               and then calls the base model's `apply` method with these fully-gathered weights.
+               """
+               # When Flax initializes the model, it does a "dry run" to build the
+               # structure. No computation is actually done, so we don't need to
+               # perform the all-gather. We just run the base model's logic.
+               if self.is_initializing():
+                 return self.model(decoder_input_tokens, decoder_positions, decoder_segment_ids, 
+                                   encoder_images, enable_dropout, model_mode, previous_chunk, true_length, 
+                                   slot, page_state)
+               # For the actual forward pass:
+               # 1. Perform the all-gather operation to get the full weights on each device.
+               all_model_weights = self.all_gather_over_fsdp(partition_spec)
+               # 2. Run the forward pass using the gathered weights. `model.apply` is used
+               #    to run the model's logic with an externally provided set of variables.
+               return self.model.apply(all_model_weights, decoder_input_tokens, decoder_positions, 
+                                       decoder_segment_ids, encoder_images, enable_dropout, model_mode, 
+                                       previous_chunk, true_length, slot, page_state, mutable=False)
+               
+
+          
