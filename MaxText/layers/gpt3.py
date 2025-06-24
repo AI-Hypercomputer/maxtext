@@ -34,7 +34,7 @@ from MaxText.layers import initializers
 from MaxText.layers import linears
 from MaxText.layers import models
 from MaxText.layers import quantizations
-from MaxText.layers.attentions import AttentionOp, KVQuant, dense_general
+from MaxText.layers.attentions import KVQuant, attention_op_as_linen, dense_general
 from MaxText.layers.initializers import Initializer, NdInitializer, nd_dense_init
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
@@ -223,7 +223,7 @@ class Gpt3MultiHeadAttention(nn.Module):
     value = nn.with_logical_constraint(value, self.value_axis_names)
     value = checkpoint_name(value, "value_proj")
 
-    attention_op = AttentionOp(
+    attention_op = attention_op_as_linen(
         config=self.config,
         mesh=self.mesh,
         attention_kernel=self.attention_kernel,
