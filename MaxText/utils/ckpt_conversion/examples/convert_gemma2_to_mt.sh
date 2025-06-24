@@ -25,7 +25,7 @@ python3 -m "MaxText.utils.ckpt_conversion.to_maxtext" \
   model_name="${MODEL_NAME}" \
   base_output_directory="${OUTPUT_BASE_DIR}" \
   per_device_batch_size="${PER_DEVICE_BATCH_SIZE}" \
-  run_name="mt_gemma2" \
+  run_name="run_to_mt" \
   async_checkpointing="${ASYNC_CHECKPOINTING}" \
   scan_layers="${SCAN_LAYERS}" 
 
@@ -40,7 +40,7 @@ python3 -m "MaxText.decode" \
   tokenizer_path="${TOKENIZER_PATH}" \
   load_parameters_path="${OUTPUT_BASE_DIR}/0/items" \
   per_device_batch_size="${PER_DEVICE_BATCH_SIZE}" \
-  run_name="mt_gemma2_check" \
+  run_name="run_decode" \
   max_prefill_predict_length=8 \
   max_target_length=16 \
   dataset_type=synthetic \
