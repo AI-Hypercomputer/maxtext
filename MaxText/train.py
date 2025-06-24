@@ -837,6 +837,11 @@ def train_loop(config, recorder, state=None):
 
   metric_logger = MetricLogger(writer, config)
   input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    shaped_batch = maxtext_utils.get_shaped_batch(config)
+    compiled = p_train_step.lower(state, shaped_batch, jax.random.PRNGKey(0) ).compile()
+    compiled_stats = compiled.memory_analysis()
+    max_utils.print_compiled_memory_stats(compiled_stats)
   for step in np.arange(start_step, config.steps):
     if step == first_profiling_step or prof.should_activate_periodic_profile(step):
       optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
@@ -957,18 +962,6 @@ def train_loop(config, recorder, state=None):
   metric_logger.write_metrics(running_gcs_metrics, metrics, config.steps - 1)  # final step metrics
   max_utils.close_summary_writer(writer)
 
-  if example_batch:
-    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      # pytype: disable=attribute-error
-      compiled = p_train_step.lower(state, example_batch, nextrng).compile()
-      compiled_stats = compiled.memory_analysis()
-      if compiled_stats is not None:
-        max_logging.log(
-            f"Output size: {compiled_stats.output_size_in_bytes}, "
-            f"temp size: {compiled_stats.temp_size_in_bytes}, "
-            f"argument size: {compiled_stats.argument_size_in_bytes}, "
-            f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
-        )
   return state
 
 
