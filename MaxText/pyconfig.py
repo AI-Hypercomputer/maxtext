@@ -204,6 +204,12 @@ def validate_tokenizer(keys):
   ], "Please provide tokenizer_path. Even if using pre-tokenized data, tokenizer is required to process special tokens."
 
 
+def validate_constant_bound(keys):
+  assert (
+      len(keys["constant_bound_config"]) == 0 or len(keys["constant_bound_config"]) == 6
+  ), "Please specify competete constant bound or none"
+
+
 def validate_data_input(keys):
   """validate provided parameters for data input"""
   if not keys["hf_access_token"]:
@@ -595,6 +601,7 @@ class _HyperParameters:
     validate_keys(raw_keys)
     validate_tokenizer(raw_keys)
     validate_data_input(raw_keys)
+    validate_constant_bound(raw_keys)
 
     raw_keys["decoder_block"] = DecoderBlockType(raw_keys["decoder_block"])
 

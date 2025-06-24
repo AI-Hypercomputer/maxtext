@@ -370,41 +370,6 @@ def _build_per_tensor_config(
 
 
 # fp8 training recipe with static scaling for weight/activation only
-def _get_aqt_fp8_static_w_a_config(config):
-  """Get aqt for 8-bit floating point quantization configuration."""
-  aqt_dg = aqt_config.config_v4(
-      fwd_bits="e4m3",
-      dlhs_bits="e5m2",
-      drhs_bits="e5m2",
-      use_dummy_static_bound=False,
-      fwd_accumulator_dtype=jnp.bfloat16,
-      dlhs_accumulator_dtype=jnp.bfloat16,
-      drhs_accumulator_dtype=jnp.bfloat16,
-      dlhs_use_fwd_quant=False,
-      drhs_use_fwd_quant=False,
-  )
-
-  constant_bound_config = ConstantBoundConfig(
-      fwd_lhs_bound=245.66246032714844,
-      fwd_rhs_bound=16.86667823791504,
-      dlhs_lhs_bound=60.014862060546875,
-      dlhs_rhs_bound=245.66246032714844,
-      drhs_lhs_bound=60.014862060546875,
-      drhs_rhs_bound=129.5323028564453,
-  )
-  # if constant_bound_config is not None:
-  aqt_dg = _build_const_scale_config(aqt_dg, constant_bound_config)
-
-  aqt_config.set_stochastic_rounding(
-      aqt_dg,
-      vjp_lhs_stochastic_rounding=False,
-      vjp_rhs_stochastic_rounding=False,
-      implementation="jax.uniform",
-  )
-  return _build_per_tensor_config(aqt_dg)
-
-
-# default fp8 training recipe with full dynamic scaling
 def _get_aqt_fp8_default_config(config):
   """Get aqt for 8-bit floating point quantization configuration."""
   aqt_dg = aqt_config.config_v4(
@@ -418,6 +383,23 @@ def _get_aqt_fp8_default_config(config):
       dlhs_use_fwd_quant=False,
       drhs_use_fwd_quant=False,
   )
+  constant_bound_config = None
+
+  if len(config.constant_bound_config) == 6:
+    fwd_lhs_bound, fwd_rhs_bound, dlhs_lhs_bound, dlhs_rhs_bound, drhs_lhs_bound, drhs_rhs_bound = (
+        config.constant_bound_config
+    )
+    constant_bound_config = ConstantBoundConfig(
+        fwd_lhs_bound=fwd_lhs_bound,
+        fwd_rhs_bound=fwd_rhs_bound,
+        dlhs_lhs_bound=dlhs_lhs_bound,
+        dlhs_rhs_bound=dlhs_rhs_bound,
+        drhs_lhs_bound=drhs_lhs_bound,
+        drhs_rhs_bound=drhs_rhs_bound,
+    )
+  if constant_bound_config is not None:
+    aqt_dg = _build_const_scale_config(aqt_dg, constant_bound_config)
+
   aqt_config.set_stochastic_rounding(
       aqt_dg,
       vjp_lhs_stochastic_rounding=False,
@@ -489,8 +471,6 @@ def _get_quant_config(config):
     return _get_aqt_fp8_quant_config(config)
   if config.quantization == "aqt_fp8_full":
     return _get_aqt_fp8_default_config(config)
-  if config.quantization == "aqt_fp8_static_wa":
-    return _get_aqt_fp8_static_w_a_config(config)
 
   raise ValueError(f"Invalid value configured for quantization {config.quantization}.")
 
