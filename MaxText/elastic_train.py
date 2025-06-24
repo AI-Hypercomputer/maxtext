@@ -236,10 +236,6 @@ def train_loop(config, elastic_manager, recorder, state=None):
 
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
-  first_profiling_step = prof.start_initial_profile_step
-  if config.profiler != "" and first_profiling_step >= config.steps:
-    raise ValueError("Profiling requested but initial profiling step set past training final step")
-  last_profiling_step = prof.finished_initial_profile_step
 
   example_batch = None
   last_step_completion = datetime.datetime.now()
@@ -271,9 +267,7 @@ def train_loop(config, elastic_manager, recorder, state=None):
   # the step is restored back to the latest snapshot when a slice is lost
   while step < config.steps:
     try:
-      if step == first_profiling_step or prof.should_activate_periodic_profile(step):
-        optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
-        prof.activate(blocking_object=state, optional_postfix=optional_postfix)
+      prof.maybe_activate_profiler(step, state)
 
       max_logging.log(f"{step=} {elastic_manager.elastic_down_event_count=} {elastic_manager.good_slice_count=}")
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules), jax.default_device(elastic_manager.default_device):
@@ -310,8 +304,7 @@ def train_loop(config, elastic_manager, recorder, state=None):
 
         metric_logger.write_metrics(running_gcs_metrics, metrics, step)
 
-        if step == last_profiling_step or prof.should_deactivate_periodic_profile(step):
-          prof.deactivate(blocking_object=state)
+        prof.maybe_deactivate_profiler(step, state)
 
       elastic_manager.maybe_snapshot(
           step=step,
