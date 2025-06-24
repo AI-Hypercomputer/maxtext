@@ -43,7 +43,6 @@ import logging
 import os
 import sys
 import time
-import queue
 
 from absl import app
 
@@ -68,13 +67,11 @@ from MaxText import maxtext_utils
 from MaxText import max_logging
 from MaxText import profiler
 from MaxText import pyconfig
-from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
 from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.metric_logger import MetricLogger
 from MaxText.train import check_example_batch
 from MaxText.train import get_first_step
 from MaxText.train import load_next_batch
-from MaxText.train import record_scalar_metrics
 from MaxText.train import save_checkpoint
 from MaxText.train import setup_mesh_and_model
 from MaxText.train import setup_train_loop
@@ -120,7 +117,7 @@ def elastic_handler(
     checkpoint_manager.close()
 
   with jax.default_device(elastic_manager.default_device):
-    init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(
+    init_rng, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(
         config, elastic_manager.good_devices
     )
     with mesh:
@@ -171,7 +168,7 @@ def elastic_handler(
       )
 
       example_batch = None
-      metric_logger = MetricLogger(writer, config)
+      metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
       jax.block_until_ready(state)
 
@@ -186,7 +183,6 @@ def elastic_handler(
       example_batch,
       learning_rate_schedule,
       metric_logger,
-      writer,
   )
 
 
@@ -194,7 +190,6 @@ def train_loop(config, elastic_manager, recorder, state=None):
   """Main Training loop."""
   (
       init_rng,
-      writer,
       checkpoint_manager,
       state_mesh_shardings,
       model,
@@ -214,16 +209,6 @@ def train_loop(config, elastic_manager, recorder, state=None):
       donate_argnums_train,
   ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config)
 
-  num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
-  max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
-  per_device_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(config)
-  per_device_tokens = maxtext_utils.calculate_tokens_training_per_device(config)
-
-  # Write train config params, num model params, and XLA flags to tensorboard
-  max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
-  max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], writer)
-  maxtext_utils.add_config_to_summary_writer(config, writer)
-
   p_train_step = jax.jit(
       functional_train,
       in_shardings=in_shard_train,
@@ -231,25 +216,11 @@ def train_loop(config, elastic_manager, recorder, state=None):
       static_argnums=static_argnums_train,
       donate_argnums=donate_argnums_train,
   )
-  running_gcs_metrics = [] if config.gcs_metrics else None
-  metrics = None
 
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
 
   example_batch = None
-  last_step_completion = datetime.datetime.now()
-
-  performance_metric_queue = None
-  if config.report_heartbeat_metric_for_gcp_monitoring or config.report_performance_metric_for_gcp_monitoring:
-    gcp_workload_monitor = GCPWorkloadMonitor(config.run_name)
-    if config.report_heartbeat_metric_for_gcp_monitoring:
-      gcp_workload_monitor.start_heartbeat_reporting_thread(config.heartbeat_reporting_interval_in_seconds)
-    if config.report_performance_metric_for_gcp_monitoring:
-      performance_metric_queue = queue.Queue()
-      gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
-
-  metric_logger = MetricLogger(writer, config)
   step = start_step
 
   elastic_manager.maybe_snapshot(
@@ -263,10 +234,17 @@ def train_loop(config, elastic_manager, recorder, state=None):
   )
 
   input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
+
+  metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
+
+  # Write train config params, num model params, and XLA flags to tensorboard
+  metric_logger.write_setup_info_to_tensorboard(state.params)
+
   # Using while loop instead of a for loop because with elasticity
   # the step is restored back to the latest snapshot when a slice is lost
   while step < config.steps:
     try:
+      step_start_time = datetime.datetime.now()
       prof.maybe_activate_profiler(step, state)
 
       max_logging.log(f"{step=} {elastic_manager.elastic_down_event_count=} {elastic_manager.good_slice_count=}")
@@ -286,12 +264,6 @@ def train_loop(config, elastic_manager, recorder, state=None):
           with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
             state, metrics = p_train_step(state, example_batch, nextrng)
 
-        step_time_delta = datetime.datetime.now() - last_step_completion
-        last_step_completion = datetime.datetime.now()
-        record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
-        if performance_metric_queue:
-          performance_metric_queue.put(step_time_delta.total_seconds())
-
         if checkpoint_manager is not None:
           state_to_save = state
           if save_checkpoint(checkpoint_manager, int(step), state_to_save, config.dataset_type, data_iterator, config):
@@ -301,8 +273,6 @@ def train_loop(config, elastic_manager, recorder, state=None):
           if checkpoint_manager.reached_preemption(step):
             checkpoint_manager.wait_until_finished()
             sys.exit()
-
-        metric_logger.write_metrics(running_gcs_metrics, metrics, step)
 
         prof.maybe_deactivate_profiler(step, state)
 
@@ -340,11 +310,15 @@ def train_loop(config, elastic_manager, recorder, state=None):
             example_batch,
             learning_rate_schedule,
             metric_logger,
-            writer,
         ) = ret
 
       if step == start_step:
         max_utils.print_mem_stats("After params initialized")
+
+      jax.block_until_ready(state)  # ensure training step is completed
+
+      step_time_delta = datetime.datetime.now() - step_start_time
+      metric_logger.record_train_metrics(metrics, step, step_time_delta)
 
       step += 1
 
@@ -370,7 +344,6 @@ def train_loop(config, elastic_manager, recorder, state=None):
             example_batch,
             learning_rate_schedule,
             metric_logger,
-            writer,
         ) = ret
 
   if checkpoint_manager is not None:
@@ -391,8 +364,7 @@ def train_loop(config, elastic_manager, recorder, state=None):
         max_logging.log(f"Checkpoint is already saved for step {int(state.step)-1}.")
 
     checkpoint_manager.wait_until_finished()
-  metric_logger.write_metrics(running_gcs_metrics, metrics, config.steps - 1)  # final step metrics
-  max_utils.close_summary_writer(writer)
+  metric_logger.cleanup()
 
   if example_batch:
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
