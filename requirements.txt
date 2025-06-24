@@ -1,3 +1,4 @@
+# We recommend using lower bounds for dependencies instead of exact == pins.
 jax>=0.4.30
 jaxlib>=0.4.30
 orbax-checkpoint>=0.5.12
@@ -8,7 +9,7 @@ cloud-accelerator-diagnostics
 cloud-tpu-diagnostics
 datasets
 gcsfs
-google-cloud-aiplatform==1.61.0
+google-cloud-aiplatform>=1.61.0
 google-cloud-storage
 google-cloud-monitoring
 google-api-core
@@ -18,26 +19,28 @@ huggingface_hub
 flax>=0.10.6
 jaxtyping
 ml-collections
-ml-goodput-measurement==0.0.10
+ml-goodput-measurement>=0.0.10
 numpy
 optax
-protobuf==3.20.3
+protobuf>=3.20.3
 pylint
 pytest
 pyink
 pre-commit
 pytype
 pillow>=11.1.0
-sentencepiece==0.2.0
+sentencepiece>=0.2.0
 tensorflow-text>=2.13.0
 tensorflow>=2.13.0
 tensorflow-datasets
+tensorflow-metadata>=1.14.0
 tensorboardx>=2.6.2.2
 tensorboard-plugin-profile
 tiktoken
 transformers
-mlperf-logging@git+https://github.com/mlperf/logging.git
-google-jetstream@git+https://github.com/AI-Hypercomputer/JetStream.git
+# All source links must be pinned to a hash to guarantee reproducibility
+mlperf-logging@git+https://github.com/mlperf/logging.git@44b4810e65e8c0a7d9e4e207c60e51d9458a3fb8
+google-jetstream@git+https://github.com/AI-Hypercomputer/JetStream.git@261f25007e4d12bb57cf8d5d61e291ba8f18430f
 jsonlines
-pathwaysutils==0.1.1
+pathwaysutils>=0.1.1
 omegaconf
