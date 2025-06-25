@@ -129,7 +129,7 @@ def save_checkpoint(
     config=None,
     force=False,
 ) -> bool:
-  """Wrapper for saving checkpoint."""
+  """Wrapper for saving checkpoint. RAWR."""
   if config and config.enable_checkpointing:
     if (
         force
