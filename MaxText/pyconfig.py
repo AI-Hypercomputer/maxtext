@@ -205,6 +205,11 @@ def validate_tokenizer(keys):
 
 
 def validate_constant_bound(keys):
+  if keys["constant_bound_config"] == "":
+    keys["constant_bound_config"]=[]
+  else:
+    value_list = keys["constant_bound_config"].split(',')
+    keys["constant_bound_config"] = list(map(float, value_list))
   assert (
       len(keys["constant_bound_config"]) == 0 or len(keys["constant_bound_config"]) == 6
   ), "Please specify competete constant bound or none"
