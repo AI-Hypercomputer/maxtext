@@ -66,7 +66,7 @@ from MaxText import pyconfig
 from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
 from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.layers import quantizations
-from MaxText.layers.models import Transformer,ZeroOneTransformer
+from MaxText.layers.models import Transformer, ZeroOneTransformer
 from MaxText.metric_logger import MetricLogger
 from MaxText.utils import gcs_utils
 from MaxText.utils.goodput_utils import (
@@ -607,7 +607,7 @@ def setup_mesh_and_model(config, devices=None):
     # Instantiate the Zero-1 wrapper model if the optimization is enabled.
     model = ZeroOneTransformer(config, mesh, quant=quant)
   else:
-     # Otherwise, use the standard memory-efficient Transformer model.
+    # Otherwise, use the standard memory-efficient Transformer model.
     model = Transformer(config, mesh, quant=quant)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule)

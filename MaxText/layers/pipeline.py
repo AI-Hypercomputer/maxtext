@@ -722,7 +722,9 @@ class Pipeline(nn.Module):
       )
 
     if self.config.pipeline_fsdp_ag_once:
-      all_pipeline_weights = all_gather_over_fsdp(self.layers.variables, partition_spec, mesh=self.mesh, logical_axis_rules=self.config.logical_axis_rules)
+      all_pipeline_weights = all_gather_over_fsdp(
+          self.layers.variables, partition_spec, mesh=self.mesh, logical_axis_rules=self.config.logical_axis_rules
+      )
     else:
       all_pipeline_weights = self.layers.variables
 

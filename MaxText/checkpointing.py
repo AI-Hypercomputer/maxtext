@@ -103,7 +103,7 @@ def create_orbax_emergency_checkpoint_manager(
 
   # Only create directories if running on GPUs as the previous
   # directory structure might be assumed by TPUs
-  if global_mesh.devices.flatten()[0].platform == 'gpu':
+  if global_mesh.devices.flatten()[0].platform == "gpu":
     # pylint: disable=protected-access
     local_checkpoint_dir = f"{local_checkpoint_dir}/{jax._src.distributed.global_state.process_id}"
     local_p = epath.Path(local_checkpoint_dir)
@@ -374,9 +374,7 @@ def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-
   max_logging.log("Setting up checkpoint logger...")
   if config.enable_checkpoint_cloud_logger:
     logger_name = f"goodput_{config.run_name}"
-    options = ocp.logging.CloudLoggerOptions(
-        job_name=config.run_name, logger_name=logger_name
-    )
+    options = ocp.logging.CloudLoggerOptions(job_name=config.run_name, logger_name=logger_name)
     orbax_cloud_logger = ocp.logging.CloudLogger(options=options)
     max_logging.log("Successfully set up checkpoint cloud logger.")
     return orbax_cloud_logger

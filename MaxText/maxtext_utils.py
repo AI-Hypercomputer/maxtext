@@ -1080,23 +1080,33 @@ def get_formatted_sharding_annotations(params, mesh=None):
   return "\n".join(annotation_lines)
 
 
-def get_physical_spec_no_fsdp(full_logical,mesh,logical_axis_rules):
+def get_physical_spec_no_fsdp(full_logical, mesh, logical_axis_rules):
   """
-  Converts a logical partition spec into a physical sharding spec that
-  describes a fully replicated (unsharded) layout for the weights.
+  Generates a physical sharding spec for fully replicated weights.
 
-  It does this by taking the original sharding rules and removing any axis
-  sharded over 'fsdp' or 'fsdp_transpose'. Replacing a sharding axis with
-  None tells JAX to replicate the data along that physical mesh dimension.
+  This function computes a target sharding layout where model parameters are fully
+  replicated across the 'fsdp' mesh axis. It starts with the original logical
+  sharding and removes any rules that shard along the 'fsdp' or
+  'fsdp_transpose' axes.
 
+  Replacing a sharding axis with `None` in a PartitionSpec instructs JAX to
+  replicate the array data along that physical mesh dimension. The resulting
+  specification is used as a target layout for an all-gather operation.
+
+  Args:
+    full_logical: A PyTree of logical PartitionSpecs for the model parameters.
+    mesh: The JAX device mesh.
+    logical_axis_rules: Rules for converting logical axes to physical mesh axes.
 
   Returns:
-    A PyTree of physical NamedSharding objects configured to represent
-    fully-gathered weights (replicated across the 'fsdp' axis).
+    A PyTree of physical `jax.sharding.NamedSharding` objects that describe a
+    layout where parameters are fully gathered (replicated) across the 'fsdp'
+    mesh axis.
   """
 
   def remove_fsdp_sharding(sharding_tree):
     """Recursively traverses the sharding tree to remove fsdp axes."""
+
     def _remove_fsdp_from_partition_spec(named_sharding):
       """Removes 'fsdp' and 'fsdp_transpose' from a PartitionSpec."""
       if isinstance(named_sharding, jax.sharding.NamedSharding):
@@ -1105,13 +1115,13 @@ def get_physical_spec_no_fsdp(full_logical,mesh,logical_axis_rules):
         for axis in named_sharding.spec:
           if axis is None:
             new_spec.append(None)
-          elif isinstance(axis,str):
+          elif isinstance(axis, str):
             # If the axis is 'fsdp', replace it with None to signify replication.
             if axis not in ("fsdp", "fsdp_transpose"):
               new_spec.append(axis)
             else:
               new_spec.append(None)
-          elif isinstance(axis, (list,tuple)):
+          elif isinstance(axis, (list, tuple)):
             # If the axis is a collection, filter out 'fsdp'.
             new_axis = [a for a in axis if a not in ("fsdp", "fsdp_transpose")]
             new_spec.append(tuple(new_axis))
@@ -1120,6 +1130,7 @@ def get_physical_spec_no_fsdp(full_logical,mesh,logical_axis_rules):
           # Return a new sharding object with the modified spec.
         return jax.sharding.NamedSharding(named_sharding.mesh, jax.sharding.PartitionSpec(*new_spec))
       return named_sharding
+
     return jax.tree.map(_remove_fsdp_from_partition_spec, sharding_tree)
 
   # Convert the high-level logical spec to a physical one using default rules.
@@ -1127,25 +1138,30 @@ def get_physical_spec_no_fsdp(full_logical,mesh,logical_axis_rules):
   # Apply the function to remove the FSDP sharding, defining our target layout.
   physical_no_fsdp = remove_fsdp_sharding(physical)
   return physical_no_fsdp
-  
-def all_gather_over_fsdp(variables,sharding_info,mesh,logical_axis_rules):
-  """
-  Performs an all-gather on the FSDP-sharded weights by applying a sharding constraint.
 
-  This is the core of the optimization. It uses `jax.lax.with_sharding_constraint`
-  to enforce the fully replicated layout defined by `get_physical_spec_no_fsdp`.
-  To satisfy this constraint, JAX's compiler will automatically insert the necessary
-  all-gather communication operations.
+
+def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules):
+  """Performs an all-gather on FSDP-sharded variables via a sharding constraint.
+  This function triggers an all-gather operation on the model's parameters.
+  It does so by applying a sharding constraint that specifies a fully
+  replicated layout.
+
+  The JAX compiler satisfies this constraint by automatically inserting the
+  necessary `all-gather` collective communication operations into the
+  computation graph, effectively gathering the sharded weights.
 
   Args:
-    sharding_info: The logical partition spec of the currently sharded weights.
+    variables: The PyTree of model parameters, currently sharded across devices.
+    sharding_info: The logical partition spec of the currently sharded `variables`.
+    mesh: The JAX device mesh.
+    logical_axis_rules: Rules for converting logical axes to physical mesh axes.
 
   Returns:
-    The model's variables (weights), with the all-gather operation applied.
+    The model's variables with the all-gather operation applied, resulting
+    in the weights being fully replicated on all devices in the 'fsdp' mesh.
   """
   # Get the target physical layout (weights fully replicated).
-  physical_constraint_no_fsdp = get_physical_spec_no_fsdp(sharding_info,mesh,logical_axis_rules)
+  physical_constraint_no_fsdp = get_physical_spec_no_fsdp(sharding_info, mesh, logical_axis_rules)
   # Apply the constraint to the model's current variables. This tells JAX to
   # gather the weights into this layout.
   return jax.lax.with_sharding_constraint(variables, physical_constraint_no_fsdp)
-  

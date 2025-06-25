@@ -23,7 +23,6 @@ import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
-from jax.sharding import PartitionSpec as P
 
 from flax import linen as nn
 from flax.linen.partitioning import ScanIn
@@ -41,7 +40,6 @@ from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.embeddings import PositionalEmbedding, Embed
 from MaxText.layers.quantizations import AqtQuantization as Quant
 from MaxText.maxtext_utils import all_gather_over_fsdp
-from flax.linen.spmd import LogicallyPartitioned
 
 
 # ------------------------------------------------------------------------------
@@ -669,9 +667,7 @@ class Decoder(nn.Module):
           inputs_shape=y.shape,
           out_features_shape=cfg.vocab_size,
           weight_dtype=cfg.weight_dtype,
-          dtype=jnp.float32
-          if cfg.logits_dot_in_fp32
-          else cfg.dtype,  # for logit training stability
+          dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
           kernel_axes=("embed", "vocab"),
           name="logits_dense",
           matmul_precision=self.config.matmul_precision,
@@ -808,7 +804,8 @@ class Transformer(nn.Module):
     )
     return logits
 
-class ZeroOneTransformer(nn.Module): # maybe change ZeroOneWrapper()
+
+class ZeroOneTransformer(nn.Module):  # maybe change ZeroOneWrapper()
   """
   A wrapper for the base Transformer model designed to implement the Zero-1
   FSDP optimization.
@@ -824,34 +821,56 @@ class ZeroOneTransformer(nn.Module): # maybe change ZeroOneWrapper()
   network communication, which can improve training speed if sufficient memory is
   available.
   """
+
   config: Config
   mesh: Mesh
   quant: Quant
 
   def setup(self):
-    self.model = Transformer(self.config,self.mesh,self.quant)
-
+    self.model = Transformer(self.config, self.mesh, self.quant)
 
   def __call__(
-              self,
-              decoder_input_tokens: jnp.ndarray,
-              decoder_positions: jnp.ndarray,
-              decoder_segment_ids=None,
-              encoder_images: Optional[jnp.ndarray] = None,
-              enable_dropout=True,
-              model_mode=MODEL_MODE_TRAIN,
-              previous_chunk=None,
-              true_length: Optional[int] = None,
-              slot:Optional[int] = None,
-              page_state: Optional[page_manager.PageState]=None,
-              partition_spec=None,
-              ):
+      self,
+      decoder_input_tokens: jnp.ndarray,
+      decoder_positions: jnp.ndarray,
+      decoder_segment_ids=None,
+      encoder_images: Optional[jnp.ndarray] = None,
+      enable_dropout=True,
+      model_mode=MODEL_MODE_TRAIN,
+      previous_chunk=None,
+      true_length: Optional[int] = None,
+      slot: Optional[int] = None,
+      page_state: Optional[page_manager.PageState] = None,
+      partition_spec=None,
+  ):
     if self.is_initializing():
-      return self.model(decoder_input_tokens, decoder_positions, decoder_segment_ids, encoder_images, 
-                        enable_dropout, model_mode, previous_chunk, true_length, slot, page_state)
-    all_model_weights=all_gather_over_fsdp(self.model.variables,partition_spec,mesh=self.mesh,
-                                           logical_axis_rules=self.config.logical_axis_rules)
-    
-    return self.model.apply(all_model_weights,decoder_input_tokens,decoder_positions,decoder_segment_ids,
-                            encoder_images,enable_dropout,model_mode,previous_chunk,true_length,slot,
-                            page_state,mutable=False)
+      return self.model(
+          decoder_input_tokens,
+          decoder_positions,
+          decoder_segment_ids,
+          encoder_images,
+          enable_dropout,
+          model_mode,
+          previous_chunk,
+          true_length,
+          slot,
+          page_state,
+      )
+    all_model_weights = all_gather_over_fsdp(
+        self.model.variables, partition_spec, mesh=self.mesh, logical_axis_rules=self.config.logical_axis_rules
+    )
+
+    return self.model.apply(
+        all_model_weights,
+        decoder_input_tokens,
+        decoder_positions,
+        decoder_segment_ids,
+        encoder_images,
+        enable_dropout,
+        model_mode,
+        previous_chunk,
+        true_length,
+        slot,
+        page_state,
+        mutable=False,
+    )
