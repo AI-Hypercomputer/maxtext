@@ -28,6 +28,7 @@ from flax.core import meta
 from flax import linen as nn
 
 from MaxText.common_types import Config, MODEL_MODE_TRAIN
+from MaxText.maxtext_utils import all_gather_over_fsdp
 
 
 class Pipeline(nn.Module):
@@ -721,7 +722,7 @@ class Pipeline(nn.Module):
       )
 
     if self.config.pipeline_fsdp_ag_once:
-      all_pipeline_weights = self.all_gather_over_fsdp(partition_spec)
+      all_pipeline_weights = all_gather_over_fsdp(self.layers.variables, partition_spec, mesh=self.mesh, logical_axis_rules=self.config.logical_axis_rules)
     else:
       all_pipeline_weights = self.layers.variables
 
