@@ -113,3 +113,6 @@ class Profiler:
 
   def should_deactivate_periodic_profile(self, step):
     return self.profile_period > 0 and (step - self.finished_initial_profile_step) % self.profile_period == 0
+
+  def post_process(self):
+    pass
