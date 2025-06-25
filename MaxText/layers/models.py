@@ -558,14 +558,15 @@ class Decoder(nn.Module):
               "slot": slot,
           }
           dense_layer = RemattedBlockLayers[0]
-          dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
-          y, _ = self.scan_decoder_layers(cfg, dense_layer, cfg.first_num_dense_layers, "dense_layers", mesh)(
-              y,
-              decoder_segment_ids,
-              decoder_positions,
-              deterministic,
-              model_mode,
-          )
+          if cfg.first_num_dense_layers > 0:
+            dense_layer.__call__ = functools.partial(dense_layer.__call__, **layer_call_kwargs)
+            y, _ = self.scan_decoder_layers(cfg, dense_layer, cfg.first_num_dense_layers, "dense_layers", mesh)(
+                y,
+                decoder_segment_ids,
+                decoder_positions,
+                deterministic,
+                model_mode,
+            )
           moe_layer = RemattedBlockLayers[1]
           moe_layer.__call__ = functools.partial(moe_layer.__call__, **layer_call_kwargs)
           num_moe_layers = cfg.num_decoder_layers - cfg.first_num_dense_layers
