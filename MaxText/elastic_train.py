@@ -385,18 +385,6 @@ def train_loop(config, elastic_manager, recorder, state=None):
   return state
 
 
-def wait_for_all_slices(elastic_manager: manager.Manager) -> None:
-  elastic_manager.good_slice_indices = elastic_manager.get_slice_availability()
-  while len(elastic_manager.good_slice_indices) < elastic_manager.total_slice_count:
-    max_logging.log(
-        f"Only {elastic_manager.good_slice_count} slices out of {elastic_manager.total_slice_count} available. "
-        "Sleeping for 5 seconds."
-    )
-    time.sleep(5)
-    elastic_manager.good_slice_indices = elastic_manager.get_slice_availability()
-  max_logging.log("All slices are available")
-
-
 def elastic_initialize(devices: Sequence[jax.Device]) -> manager.Manager:
   """Initializes the elastic manager and pyconfig to support elastic training
 
@@ -409,8 +397,7 @@ def elastic_initialize(devices: Sequence[jax.Device]) -> manager.Manager:
   elastic_manager = manager.Manager(devices)
 
   # Do not start training until all slices are available
-  # TODO: b/408455557 - Migrate to pathwaysutils and make configurable
-  wait_for_all_slices(elastic_manager)
+  elastic_manager.wait_for_slices()
 
   pyconfig.HyperParameters.global_batch_size_to_train_on = property(
       lambda self: elastic_manager.scale_by_good_slices(self.get_keys()["global_batch_size_to_train_on"])
