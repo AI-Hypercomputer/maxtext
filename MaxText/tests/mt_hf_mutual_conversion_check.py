@@ -190,8 +190,8 @@ def run_prompts(args: argparse.Namespace) -> None:
       - maxtext_checkpoint_path (str): Path to the MaxText checkpoint.
       - maxtext_base_config_path (str): Path to MaxText base configuration.
       - maxtext_model_name (str): Name of the MaxText model.
+      - scan_layers (bool): Whether the MaxText model was trained with scanned layers.
       - max_kl_div (float): Maximum allowed KL divergence.
-      - unknown_args (list): List of unknown arguments to be passed as MaxText overrides.
   """
   # 1. Load Golden HF Model and Tokenizer
   hf_model = AutoModelForCausalLM.from_pretrained(args.hf_model_id, torch_dtype=torch.bfloat16)
