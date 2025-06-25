@@ -153,10 +153,16 @@ def validate_elastic(
 ):
   modes = {
       "replica-resize",
+      "fast-resume",
   }
 
   if elastic_mode not in modes:
     raise ValueError(f"{elastic_mode=} must be in {modes}")
+
+  if elastic_mode == "fast-resume" and elastic_reshard_check_period not in {None, 1}:
+    raise ValueError(
+        "For {elastic_mode=}, {elastic_reshard_check_period=} must be None or 1"
+    )
 
 
 def get_elastic_defaults(keys) -> tuple[str, int | None]:

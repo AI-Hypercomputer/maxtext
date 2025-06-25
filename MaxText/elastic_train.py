@@ -255,6 +255,10 @@ def train_loop(config, elastic_manager, recorder, state=None):
           block=True,
       )
 
+      if (config.elastic_mode == "fast-resume" and
+          elastic_manager.good_slice_count < elastic_manager.total_slice_count):
+        elastic_manager.wait_for_slices(wait_period=config.elastic_wait_period)
+
       ret = elastic_manager.maybe_reshard_up(
           step=step,
           snapshot_jax_arrays={
