@@ -419,7 +419,6 @@ def _get_aqt_fp8_default_config(config):
         drhs_lhs_bound=drhs_lhs_bound,
         drhs_rhs_bound=drhs_rhs_bound,
     )
-  if constant_bound_config is not None:
     aqt_dg = _build_const_scale_config(aqt_dg, constant_bound_config)
 
   aqt_config.set_stochastic_rounding(
