@@ -355,17 +355,38 @@ def _build_const_scale_config(
 
   return aqt_dg
 
+class PerTensorScales:
+  fwd_lhs: bool = False
+  fwd_rhs: bool = False
+  dlhs_lhs: bool = False
+  dlhs_rhs: bool = False
+  drhs_lhs: bool = False
+  drhs_rhs: bool = False
 
 def _build_per_tensor_config(
-    aqt_dg: aqt_config.DotGeneral,
+    aqt_dg: aqt_config.DotGeneral, per_tensor_scales: PerTensorScales,
 ) -> aqt_config.DotGeneral:
+  """Build a per tensor config for AQT dot general.
 
-  aqt_dg.fwd.dg_quantizer.lhs.calib_shared_axes = "per_tensor"
-  aqt_dg.fwd.dg_quantizer.rhs.calib_shared_axes = "per_tensor"
-  aqt_dg.dlhs.dg_quantizer.lhs.calib_shared_axes = "per_tensor"
-  aqt_dg.dlhs.dg_quantizer.rhs.calib_shared_axes = "per_tensor"
-  aqt_dg.drhs.dg_quantizer.lhs.calib_shared_axes = "per_tensor"
-  aqt_dg.drhs.dg_quantizer.rhs.calib_shared_axes = "per_tensor"
+  Args:
+    aqt_dg: The AQT dot general config.
+    per_tensor_scales: The per tensor scales config.
+
+  Returns:
+    The AQT dot general config with per tensor config.
+  """
+  if per_tensor_scales.fwd_lhs:
+    aqt_dg.fwd.dg_quantizer.lhs.calib_shared_axes = "per_tensor"
+  if per_tensor_scales.fwd_rhs:
+    aqt_dg.fwd.dg_quantizer.rhs.calib_shared_axes = "per_tensor"
+  if per_tensor_scales.dlhs_lhs:
+    aqt_dg.dlhs.dg_quantizer.lhs.calib_shared_axes = "per_tensor"
+  if per_tensor_scales.dlhs_rhs:
+    aqt_dg.dlhs.dg_quantizer.rhs.calib_shared_axes = "per_tensor"
+  if per_tensor_scales.drhs_lhs:
+    aqt_dg.drhs.dg_quantizer.lhs.calib_shared_axes = "per_tensor"
+  if per_tensor_scales.drhs_rhs:
+    aqt_dg.drhs.dg_quantizer.rhs.calib_shared_axes = "per_tensor"
   return aqt_dg
 
 
@@ -406,7 +427,16 @@ def _get_aqt_fp8_default_config(config):
       vjp_rhs_stochastic_rounding=False,
       implementation="jax.uniform",
   )
-  return _build_per_tensor_config(aqt_dg)
+
+  per_tensor_scales = PerTensorScales(
+      fwd_lhs=True,
+      fwd_rhs=True,
+      dlhs_lhs=True,
+      dlhs_rhs=True,
+      drhs_lhs=True,
+      drhs_rhs=True,
+  )
+  return _build_per_tensor_config(aqt_dg, per_tensor_scales)
 
 
 def _get_aqt_fp8_quant_config(config):
