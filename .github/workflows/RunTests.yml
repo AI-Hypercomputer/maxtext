@@ -146,17 +146,17 @@ jobs:
     - name: Delete TPU image
       run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu --force-delete-tags --quiet
 
-  notify:
-    if: ${{ always() }}
-    name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
-    runs-on: ubuntu-latest
-    steps:
-    - name: Check whether one of the jobs failed
-      if: ${{ failure() && github.event.pull_request == null }}
-      uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
-      with:
-        github-token: ${{ secrets.GITHUB_TOKEN }}
-    - name: Log message if dependent job succeeded
-      if: ${{ ! (failure() && github.event.pull_request == null) }}
-      run: echo "Conditions for creating/updating issue not met. Skipping."
+  # notify:
+  #   if: ${{ always() }}
+  #   name: Notify failed build # creates an issue or modifies last open existing issue for failed build
+  #   # needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #   - name: Check whether one of the jobs failed
+  #     if: ${{ failure() && github.event.pull_request == null }}
+  #     uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
+  #     with:
+  #       github-token: ${{ secrets.GITHUB_TOKEN }}
+  #   - name: Log message if dependent job succeeded
+  #     if: ${{ ! (failure() && github.event.pull_request == null) }}
+  #     run: echo "Conditions for creating/updating issue not met. Skipping."
