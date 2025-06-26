@@ -186,7 +186,7 @@ pipeline_delay_activation_forwarding: False # This delays the activation forward
 # the communication and compute in each iteration are now independent. However this comes at the cost of doubling the pipeline bubble,
 # and you must set the number of microbatches to at least 2 * num_stages (the minimum 2 * num_stages is set by default with this delay).
 
-model_fsdp_ag_once: False # This is ZeRO-one sharding that controls whether the Zero-one optimization is active or not.
+model_fsdp_ag_once: False # This is ZeRO-one sharding that controls whether the Zero-one optimization is active.
 # This is a memory/time tradeoff - True: Use ZeroOneTransformer to gather weights once per gradient step. 
 # False: Use the standard Transformer, which gathers for each microbatch's fwd/bwd pass.
 pipeline_fsdp_ag_once: False # This is ZeRO-three sharding. If set to true then all gather all of the weights over FSDP before the first pipeline iteration.
