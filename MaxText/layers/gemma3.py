@@ -436,14 +436,15 @@ class Gemma3DecoderLayer(nn.Module):
     )(attention_lnx)
 
     # MLP block.
-    mlp_lnx = MlpBlock(
+    mlp_lnx = mlp_block(
+        config=cfg,
+        in_features=attn_output.shape[-1],
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="mlp",
-        config=cfg,
         quant=self.quant,
     )(attn_output, deterministic=deterministic)
 
