@@ -45,7 +45,6 @@ import psutil
 
 from MaxText import checkpointing
 from MaxText import max_logging
-from MaxText.train import save_checkpoint
 
 jax.config.update("jax_platform_name", "cpu")
 
@@ -302,7 +301,7 @@ def convert(base_model_path, maxtext_model_path, model_size):
   )
 
   if checkpoint_manager is not None:
-    if save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new):
+    if checkpointing.save_checkpoint(checkpoint_manager, step_number_to_save_new_ckpt, state_new):
       max_logging.log(f"saved a checkpoint at step {step_number_to_save_new_ckpt}")
     # Upon preemption, exit when and only when all ongoing saves are complete.
     if checkpoint_manager.reached_preemption(0):

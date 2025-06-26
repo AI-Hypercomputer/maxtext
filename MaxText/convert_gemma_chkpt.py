@@ -32,7 +32,6 @@ import orbax
 
 from MaxText import checkpointing
 from MaxText import max_logging
-from MaxText.train import save_checkpoint
 
 jax.config.update("jax_platform_name", "cpu")
 
@@ -172,7 +171,7 @@ def main(raw_args=None) -> None:
   )
 
   if checkpoint_manager is not None:
-    if save_checkpoint(checkpoint_manager, 0, state_new):
+    if checkpointing.save_checkpoint(checkpoint_manager, 0, state_new):
       max_logging.log("saved a checkpoint at step 0")
     # Upon preemption, exit when and only when all ongoing saves are complete.
     if checkpoint_manager.reached_preemption(0):

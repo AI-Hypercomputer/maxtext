@@ -57,7 +57,6 @@ from MaxText import pyconfig
 from MaxText.globals import PKG_DIR
 from MaxText.layers import quantizations
 from MaxText.layers.models import Transformer
-from MaxText.train import save_checkpoint
 
 
 def fmt_size(num_bytes: int) -> str:
@@ -264,7 +263,7 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   max_logging.log("converted state finished")
   max_utils.print_mem_stats("converted state finished")
 
-  if save_checkpoint(checkpoint_manager, converted_state.step, converted_state):
+  if checkpointing.save_checkpoint(checkpoint_manager, converted_state.step, converted_state):
     max_logging.log(f"saved a checkpoint at step {converted_state.step}")
   # Upon preemption, exit when and only when all ongoing saves are complete.
   if checkpoint_manager.reached_preemption(converted_state.step):
