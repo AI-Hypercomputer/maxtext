@@ -50,23 +50,6 @@ class ElasticTrainTest(parameterized.TestCase):
       pass
 
   @parameterized.named_parameters(
-      ("ready_after_0_try", [{0, 1}]),
-      ("nothing_available_at_first", [{}, {0, 1}]),
-      ("nothing_available_for_a_few_times", [{}, {}, {}, {0, 1}]),
-      ("back_and_forth", [{}, {1}, {}, {0}, {}, {1}, {0}, {}, {0}, {0, 1}]),
-  )
-  def test_wait_for_all_slices(self, slice_availability_side_effect):
-    mock_manager = mock.create_autospec(manager.Manager, instance=True)
-    mock_manager.total_slice_count = 2
-    mock_manager.get_slice_availability.side_effect = slice_availability_side_effect
-
-    mock_sleep = self.enter_context(mock.patch.object(time, "sleep", create_autospec=True))
-
-    elastic_train.wait_for_all_slices(mock_manager)
-
-    self.assertEqual(mock_sleep.call_count, len(slice_availability_side_effect) - 1)
-
-  @parameterized.named_parameters(
       ("4_out_of_4_100", {0, 1, 2, 3}, 4, 100, 100),
       ("3_out_of_4_100", {1, 2, 3}, 4, 100, 75),
       ("2_out_of_4_100", {0, 3}, 4, 100, 50),
