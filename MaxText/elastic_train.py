@@ -62,16 +62,16 @@ from pathwaysutils.debug import timing
 import tensorflow as tf
 
 from MaxText import checkpointing
+from MaxText import exceptions
 from MaxText import max_utils
 from MaxText import maxtext_utils
 from MaxText import max_logging
 from MaxText import profiler
 from MaxText import pyconfig
+from MaxText.data_loader import DataLoader
 from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.metric_logger import MetricLogger
-from MaxText.train import check_example_batch
 from MaxText.train import get_first_step
-from MaxText.train import load_next_batch
 from MaxText.train import save_checkpoint
 from MaxText.train import setup_mesh_and_model
 from MaxText.train import setup_train_loop
@@ -233,8 +233,7 @@ def train_loop(config, elastic_manager, recorder, state=None):
       block=True,
   )
 
-  input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
-
+  data_loader = DataLoader(config, mesh, data_iterator, recorder)
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
   # Write train config params, num model params, and XLA flags to tensorboard
@@ -250,15 +249,7 @@ def train_loop(config, elastic_manager, recorder, state=None):
       max_logging.log(f"{step=} {elastic_manager.elastic_down_event_count=} {elastic_manager.good_slice_count=}")
       with mesh, nn_partitioning.axis_rules(config.logical_axis_rules), jax.default_device(elastic_manager.default_device):
         with jax.profiler.StepTraceAnnotation("train", step_num=step):
-          with maybe_record_goodput(recorder, GoodputEvent.DATA_LOADING):
-            try:
-              example_batch = load_next_batch(data_iterator, example_batch, config)
-              example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
-            except Exception as e:  # pylint: disable=broad-except
-              max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
-              break
-
-          check_example_batch(config, example_batch=example_batch)
+          example_batch = data_loader.load_next_batch()
           # pylint: disable=not-callable
           nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
           with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
@@ -345,6 +336,8 @@ def train_loop(config, elastic_manager, recorder, state=None):
             learning_rate_schedule,
             metric_logger,
         ) = ret
+    except exceptions.StopTraining as error:
+      max_logging.log(f"Training stopped: {str(error)}")
 
   if checkpoint_manager is not None:
     if ((int(state.step) - 1) % config.checkpoint_period != 0) and (int(state.step) != 0):
