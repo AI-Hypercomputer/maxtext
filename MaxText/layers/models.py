@@ -30,7 +30,7 @@ from flax.linen.partitioning import ScanIn
 from MaxText.common_types import DecoderBlockType, Config, MODEL_MODE_TRAIN, MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, DECODING_ACTIVE_SEQUENCE_INDICATOR
 from MaxText import max_logging
 from MaxText.inference import page_manager
-from MaxText.layers import linears
+from MaxText.layers.linears import dense_general, mlp_block
 from MaxText.layers import quantizations
 from MaxText.layers import pipeline
 from MaxText import maxtext_utils
@@ -116,14 +116,15 @@ class DecoderLayer(nn.Module):
     attention_lnx = nn.with_logical_constraint(attention_lnx, ("activation_batch", "activation_length", "activation_embed"))
 
     # MLP block.
-    mlp_lnx = linears.MlpBlock(
+    mlp_lnx = mlp_block(
+        config=cfg,
+        in_features=lnx.shape[-1],
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="mlp",
-        config=cfg,
         quant=self.quant,
     )(lnx, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
@@ -679,7 +680,7 @@ class Decoder(nn.Module):
         logits = logits / cfg.final_logits_soft_cap
         logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
     else:
-      logits = linears.dense_general(
+      logits = dense_general(
           inputs_shape=y.shape,
           out_features_shape=cfg.vocab_size,
           weight_dtype=cfg.weight_dtype,

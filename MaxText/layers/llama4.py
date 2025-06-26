@@ -30,8 +30,9 @@ from flax import linen as nn
 from MaxText.common_types import Config, Array
 from MaxText.inference import page_manager
 from MaxText.layers import initializers
-from MaxText.layers import linears
+from MaxText.layers.linears import mlp_block
 from MaxText.layers import models
+from MaxText.layers import linears
 from MaxText.layers import moe
 from MaxText.layers import quantizations
 from MaxText.layers import attentions
@@ -480,14 +481,15 @@ class Llama4DecoderLayer(nn.Module):
           quant=self.quant,
       )(hidden_states)
     else:
-      mlp_lnx = linears.MlpBlock(
+      mlp_lnx = mlp_block(
+          config=cfg,
+          in_features=hidden_states.shape[-1],
           intermediate_dim=cfg.mlp_dim,
           activations=cfg.mlp_activations,
           intermediate_dropout_rate=cfg.dropout_rate,
           dtype=cfg.dtype,
           weight_dtype=cfg.weight_dtype,
           name="mlp",
-          config=cfg,
           quant=self.quant,
       )(hidden_states, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
