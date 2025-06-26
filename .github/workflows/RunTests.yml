@@ -43,15 +43,15 @@ jobs:
     - name: Cleanup old docker images
       run: docker system prune --all --force
 
-  # tpu_image:
-  #   needs: prelim
-  #   uses: ./.github/workflows/build_upload_internal.yml
-  #   with:
-  #     device_type: tpu
-  #     device_name: v4-8
-  #     cloud_runner: linux-x86-n2-16-buildkit
-  #     build_mode: jax_ai_image
-  #     base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
+  tpu_image:
+    needs: prelim
+    uses: ./.github/workflows/build_upload_internal.yml
+    with:
+      device_type: tpu
+      device_name: v4-8
+      cloud_runner: linux-x86-n2-16-buildkit
+      build_mode: jax_ai_image
+      base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
 
   # gpu_image:
   #   needs: prelim
