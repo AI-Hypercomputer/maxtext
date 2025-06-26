@@ -25,7 +25,7 @@ from flax import linen as nn
 from MaxText.common_types import Config
 from MaxText.layers import quantizations
 from MaxText.layers.attentions import Attention
-from MaxText.layers.linears import MlpBlock
+from MaxText.layers.linears import mlp_block
 from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
@@ -110,14 +110,15 @@ class GemmaDecoderLayer(nn.Module):
     )(attention_lnx)
 
     # MLP block.
-    mlp_lnx = MlpBlock(
+    mlp_lnx = mlp_block(
+        config=cfg,
+        in_features=attn_output.shape[-1],
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="mlp",
-        config=cfg,
         quant=self.quant,
     )(attn_output, deterministic=deterministic)
     mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
