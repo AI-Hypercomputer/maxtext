@@ -304,9 +304,103 @@ def _get_int8_quant_config(config):
   )
 
 
+@dataclass(frozen=True)
+class ConstantBoundConfig:
+  fwd_lhs_bound: float | None = None
+  fwd_rhs_bound: float | None = None
+  dlhs_lhs_bound: float | None = None
+  dlhs_rhs_bound: float | None = None
+  drhs_lhs_bound: float | None = None
+  drhs_rhs_bound: float | None = None
+
+
+def _build_const_scale_config(
+    aqt_dg: aqt_config.DotGeneral,
+    cst_bound_config: ConstantBoundConfig,
+) -> aqt_config.DotGeneral:
+  """Build a constant scale config for AQT dot general.
+
+  Args:
+    aqt_dg: The AQT dot general config.
+    cst_bound_config: The constant bound config.
+
+  Returns:
+    The AQT dot general config with constant scale config.
+  """
+  if cst_bound_config.fwd_lhs_bound is not None:
+    aqt_dg.fwd.dg_quantizer.lhs.calibration = functools.partial(
+        calibration.ConstantCalibration, bound=cst_bound_config.fwd_lhs_bound
+    )
+  if cst_bound_config.fwd_rhs_bound is not None:
+    aqt_dg.fwd.dg_quantizer.rhs.calibration = functools.partial(
+        calibration.ConstantCalibration, bound=cst_bound_config.fwd_rhs_bound
+    )
+  if cst_bound_config.dlhs_lhs_bound:
+    aqt_dg.dlhs.dg_quantizer.lhs.calibration = functools.partial(
+        calibration.ConstantCalibration, bound=cst_bound_config.dlhs_lhs_bound
+    )
+
+  if cst_bound_config.dlhs_rhs_bound is not None:
+    aqt_dg.dlhs.dg_quantizer.rhs.calibration = functools.partial(
+        calibration.ConstantCalibration, bound=cst_bound_config.dlhs_rhs_bound
+    )
+
+  if cst_bound_config.drhs_lhs_bound is not None:
+    aqt_dg.drhs.dg_quantizer.lhs.calibration = functools.partial(
+        calibration.ConstantCalibration, bound=cst_bound_config.drhs_lhs_bound
+    )
+
+  if cst_bound_config.drhs_rhs_bound is not None:
+    aqt_dg.drhs.dg_quantizer.rhs.calibration = functools.partial(
+        calibration.ConstantCalibration, bound=cst_bound_config.drhs_rhs_bound
+    )
+
+  return aqt_dg
+
+
+def _build_per_tensor_config(
+    aqt_dg: aqt_config.DotGeneral,
+) -> aqt_config.DotGeneral:
+
+  aqt_dg.fwd.dg_quantizer.lhs.calib_shared_axes = "per_tensor"
+  aqt_dg.fwd.dg_quantizer.rhs.calib_shared_axes = "per_tensor"
+  aqt_dg.dlhs.dg_quantizer.lhs.calib_shared_axes = "per_tensor"
+  aqt_dg.dlhs.dg_quantizer.rhs.calib_shared_axes = "per_tensor"
+  aqt_dg.drhs.dg_quantizer.lhs.calib_shared_axes = "per_tensor"
+  aqt_dg.drhs.dg_quantizer.rhs.calib_shared_axes = "per_tensor"
+  return aqt_dg
+
+
 def _get_aqt_fp8_quant_config(config):
-  cfg = aqt_config.config_v4(fwd_bits="e4m3", dlhs_bits=None, drhs_bits=None, fwd_accumulator_dtype=jnp.bfloat16)
-  return cfg
+  """Get aqt for 8-bit floating point quantization configuration."""
+  aqt_dg = aqt_config.config_v4(
+      fwd_bits="e4m3",
+      dlhs_bits="e5m2",
+      drhs_bits="e5m2",
+      use_dummy_static_bound=False,
+      fwd_accumulator_dtype=jnp.bfloat16,
+      dlhs_accumulator_dtype=jnp.bfloat16,
+      drhs_accumulator_dtype=jnp.bfloat16,
+      dlhs_use_fwd_quant=False,
+      drhs_use_fwd_quant=False,
+  )
+
+  constant_bound_config = ConstantBoundConfig(
+      fwd_lhs_bound=245.66246032714844,
+      fwd_rhs_bound=16.86667823791504,
+      dlhs_lhs_bound=60.014862060546875,
+      dlhs_rhs_bound=245.66246032714844,
+      drhs_lhs_bound=60.014862060546875,
+      drhs_rhs_bound=129.5323028564453,
+  )
+  # if constant_bound_config is not None:
+  aqt_dg = _build_const_scale_config(
+      aqt_dg, constant_bound_config
+  )
+  # return _build_per_tensor_config(aqt_dg)
+  return aqt_dg
+
+
 
 
 def _dot_general_make(quant_cfg):
@@ -335,7 +429,7 @@ def _get_mixed_precision_quant_config(mixed_precision_config):
   ret_config = {}
   default_mp_config = _get_default_mp_config(default=mixed_precision_config.get(DEFAULT, None))
   for layer_name_re, layer_quantization_config in mixed_precision_config.items():
-    # Make a copy of default_mp_config to avoid updaing original dict
+    # Make a copy of default_mp_config to avoid updating original dict
     quant_config = default_mp_config.copy()
     # print(f"Mixed precision config: processing
     # {layer_name_re} - {layer_quantization_config}, default config - {quant_config}")
@@ -407,7 +501,7 @@ def match_aqt_and_unquantized_param(aqt_params, params):
   )
   param_tree_flat, _ = jax.tree_util.tree_flatten_with_path(params)
   aqt_paths = []
-  # Orginal path of quantized AQT param path.
+  # Original path of quantized AQT param path.
   param_paths = []
 
   for aqt_k, _ in aqt_param_flat:

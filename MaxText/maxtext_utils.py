@@ -589,8 +589,8 @@ def setup_initial_state(
           in_shardings=None,
           out_shardings=state_mesh_shardings,
       )(rng)
-      raw_params = raw_params["params"]
       if raw_params:  # If we loaded a partial state, we need to merge it.
+        raw_params = raw_params["params"]
         state = state.replace(params=dict(state.params, params=raw_params))
       max_logging.log(f"after restore {state.params}")
 

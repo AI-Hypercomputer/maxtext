@@ -53,6 +53,8 @@ PATHWAYS_SHORT_RUN_CHECKPOINTING_TUNING_PARAMS = {
     "enable_checkpoint_cloud_logger": True,
 }
 
+BATCH_SIZE = 8
+QUANTIZATION = ""
 
 @dataclasses.dataclass
 class MaxTextModel:
@@ -817,6 +819,7 @@ llama3_1_405b_8192_pure_fsdp_ici = _add_to_model_dictionary(
         "sa_block_q": 1024,
         "sa_block_q_dkv": 2048,
         "sa_block_q_dq": 2048,
+        "quantization": "aqt_fp8"
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -832,7 +835,7 @@ llama3_1_8b_8192 = _add_to_model_dictionary(
         model_name="llama3_1-8b-8192",
         model_type="llama3.1-8b",
         tuning_params={
-            "per_device_batch_size": 4,
+            "per_device_batch_size": BATCH_SIZE,
             "ici_fsdp_parallelism": -1,
             "remat_policy": "custom",
             "decoder_layer_input": "offload",
@@ -858,6 +861,7 @@ llama3_1_8b_8192 = _add_to_model_dictionary(
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
+            "quantization": QUANTIZATION
         },
         xla_flags=(
             xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -937,7 +941,7 @@ llama3_1_70b_8192 = _add_to_model_dictionary(
         model_name="llama3_1-70b-8192",
         model_type="llama3.1-70b",
         tuning_params={
-            "per_device_batch_size": 5,
+            "per_device_batch_size": BATCH_SIZE,
             "ici_fsdp_parallelism": -1,
             "remat_policy": "custom",
             "decoder_layer_input": "offload",
@@ -962,6 +966,7 @@ llama3_1_70b_8192 = _add_to_model_dictionary(
             "profiler": "xplane",
             "skip_first_n_steps_for_profiler": 10,
             "profiler_steps": 5,
+            "quantization": QUANTIZATION
         },
         xla_flags=(
             xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -1000,6 +1005,7 @@ llama3_1_70b_8192_iter_synthetic = _add_to_model_dictionary(
         "sa_block_q_dq": 2048,
         "sa_block_kv_dq": 2048,
         "sa_use_fused_bwd_kernel": True,
+        "quantization": "aqt_fp8"
     },
     xla_flags=(
         xla_flags_library.DENSE_VMEM_LIMIT_FLAG
@@ -1441,7 +1447,7 @@ mixtral_8x7b_dropless = _add_to_model_dictionary(
         model_name="mixtral_8x7b_dropless",
         model_type="mixtral-8x7b",
         tuning_params={
-            "per_device_batch_size": 12,
+            "per_device_batch_size": BATCH_SIZE,
             "ici_fsdp_parallelism": -1,
             "max_target_length": 4096,
             "remat_policy": "full",
@@ -1458,6 +1464,7 @@ mixtral_8x7b_dropless = _add_to_model_dictionary(
             "sa_block_q_dq": 2048,
             "megablox": True,
             "sparse_matmul": True,
+            "quantization": QUANTIZATION
         },
         xla_flags=(
             xla_flags_library.MOE_VMEM_LIMIT_FLAG
