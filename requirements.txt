@@ -39,5 +39,5 @@ transformers
 mlperf-logging@git+https://github.com/mlperf/logging.git
 google-jetstream@git+https://github.com/AI-Hypercomputer/JetStream.git
 jsonlines
-pathwaysutils==0.1.1
+pathwaysutils@git+https://github.com/AI-Hypercomputer/pathways-utils.git
 omegaconf
