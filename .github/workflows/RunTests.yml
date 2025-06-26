@@ -53,7 +53,7 @@ jobs:
       build_mode: jax_ai_image
       base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
 
-  # gpu_image:
+  gpu_image:
   #   needs: prelim
   #   uses: ./.github/workflows/build_upload_internal.yml
   #   with:
@@ -100,7 +100,7 @@ jobs:
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
 
-  # gpu_unit_tests:
+  gpu_unit_tests:
   #   needs: gpu_image
   #   uses: ./.github/workflows/run_tests_internal.yml
   #   with:
@@ -112,7 +112,7 @@ jobs:
   #     tf_force_gpu_allow_growth: true
   #     container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
 
-  # gpu_integration_tests:
+  gpu_integration_tests:
   #   needs: gpu_image
   #   uses: ./.github/workflows/run_tests_internal.yml
   #   with:
