@@ -20,6 +20,7 @@ import jax
 
 from flax import linen as nn
 from flax import nnx
+from aqt.jax.v2 import aqt_tensor
 
 from MaxText.common_types import Array, DType, Shape, PRNGKey
 
@@ -43,6 +44,12 @@ def nd_dense_init(scale, mode, distribution):
 
 
 def variable_to_logically_partitioned(variable: nnx.VariableState):
+  if isinstance(variable.value, aqt_tensor.QTensor):
+    return variable.value
+
+  if variable.type.__name__ == "_overwrite_with_gradient":
+    return variable.value
+
   metadata = variable.get_metadata()
   return nn.LogicallyPartitioned(  # type: ignore[wrong-keyword-args]
       variable.value,

@@ -146,7 +146,8 @@ class DecoderLayer(nn.Module):
       attention_lnx = nn.with_logical_constraint(attention_lnx, logical_axis_names)
 
     # MLP block.
-    mlp_lnx = linears.MlpBlock(
+    mlp_lnx = linears.mlp_block(
+        in_features=lnx.shape[-1],
         intermediate_dim=cfg.mlp_dim,
         activations=cfg.mlp_activations,
         intermediate_dropout_rate=cfg.dropout_rate,

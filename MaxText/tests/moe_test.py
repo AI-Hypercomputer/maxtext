@@ -30,7 +30,7 @@ from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import Config, DType
 from MaxText.globals import PKG_DIR
-from MaxText.layers import linears
+from MaxText.layers.linears import mlp_block
 from MaxText.layers import moe
 from MaxText.layers.initializers import NdInitializer, nd_dense_init
 
@@ -258,14 +258,15 @@ class MoeLoopBlock(nn.Module):
 
     for k in range(self.num_experts):
       weights_exp = jnp.sum(jnp.multiply(selected_experts == k, weights), axis=-1)
-      mlp_lnx_exp = linears.MlpBlock(
+      mlp_lnx_exp = mlp_block(
+          config=self.config,
+          in_features=inputs.shape[-1],
           intermediate_dim=self.config.mlp_dim,
           activations=["silu", "linear"],
           intermediate_dropout_rate=self.config.dropout_rate,
           dtype=self.dtype,
           weight_dtype=self.weight_dtype,
           name=f"mlp_{k}",
-          config=self.config,
       )(inputs, deterministic=deterministic)
 
       mlp_lnx_exp = nn.with_logical_constraint(mlp_lnx_exp, ("activation_batch", "activation_length", "activation_embed"))

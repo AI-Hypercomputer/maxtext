@@ -46,6 +46,7 @@ from MaxText.inference import paged_attention
 from MaxText.inference.kvcache import KVQuant, KVTensor
 from MaxText.kernels.ragged_attention import ragged_gqa
 from MaxText.kernels.ragged_attention import ragged_mha
+from MaxText.layers import nnx_wrappers
 from MaxText.layers.embeddings import (
     llama_rotary_embedding_as_linen,
     llama_vision_rotary_embedding_as_linen,
@@ -292,7 +293,7 @@ def attention_op_as_linen(
   """
   Initializes the AttentionOp module and returns it as a Linen module.
   """
-  return nnx.bridge.to_linen(
+  return nnx_wrappers.to_linen(
       AttentionOp,
       config=config,
       mesh=mesh,
@@ -1326,7 +1327,7 @@ def l2_norm_as_linen(self, eps: float = 1e-6):
   Args:
     eps: float, epsilon used for numerical stability (default value should be ok for most cases).
   """
-  return nnx.bridge.to_linen(L2Norm, eps=eps, metadata_fn=variable_to_logically_partitioned)
+  return nnx_wrappers.to_linen(L2Norm, eps=eps, metadata_fn=variable_to_logically_partitioned)
 
 
 def variable_to_logically_partitioned(variable: nnx.VariableState):
