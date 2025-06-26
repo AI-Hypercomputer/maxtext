@@ -24,7 +24,6 @@ updating policy gradients based on reward functions
 
 import datetime
 import os
-import sys
 import functools
 from typing import Sequence
 from collections.abc import Callable
@@ -68,7 +67,6 @@ from MaxText.metric_logger import MetricLogger
 from MaxText.train import (
     validate_train_config,
     get_first_step,
-    save_checkpoint,
 )
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
@@ -750,15 +748,8 @@ def train_loop(config, config_inference, recorder, state=None):
           with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
             state, metrics = p_train_step(state, example_batch, rng)
 
-      if checkpoint_manager is not None:
-        state_to_save = state if not config.use_dpo else _split_grpo_state(state)[0]
-        if save_checkpoint(checkpoint_manager, int(step), state_to_save, config.dataset_type, data_iterator, config):
-          checkpointing.print_save_message(step, config.async_checkpointing)
-
-        # Upon preemption, exit when and only when all ongoing saves are complete.
-        if checkpoint_manager.reached_preemption(step):
-          checkpoint_manager.wait_until_finished()
-          sys.exit()
+      state_to_save = _split_grpo_state(state)[0]
+      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
 
       if config.dump_hlo and step == start_step:
         jax.block_until_ready(state)  # Ensure compilation has finished.
@@ -796,21 +787,13 @@ def train_loop(config, config_inference, recorder, state=None):
 
       step_time_delta = datetime.datetime.now() - step_start_time
       metric_logger.record_train_metrics(metrics, step, step_time_delta)
+
+    state_to_save = _split_grpo_state(state)[0]
+    checkpointing.maybe_save_final_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
-
-  if checkpoint_manager is not None:
-    if ((int(state.step) - 1) % config.checkpoint_period != 0) and (int(state.step) != 0):
-      try:
-        if save_checkpoint(
-            checkpoint_manager, int(state.step) - 1, state, config.dataset_type, data_iterator, config, force=True
-        ):
-          checkpointing.print_save_message(int(state.step) - 1, config.async_checkpointing)
-      except Exception:  # pylint: disable=broad-except
-        max_logging.log(f"Checkpoint already saved for step {int(state.step)-1}.")
-
-    checkpoint_manager.wait_until_finished()
-  metric_logger.cleanup()
+  finally:
+    metric_logger.cleanup()
 
   return state
 

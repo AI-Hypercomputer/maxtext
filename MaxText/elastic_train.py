@@ -41,7 +41,6 @@ from collections.abc import Sequence
 import datetime
 import logging
 import os
-import sys
 import time
 
 from absl import app
@@ -74,7 +73,6 @@ from MaxText.data_loader import DataLoader
 from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.metric_logger import MetricLogger
 from MaxText.train import get_first_step
-from MaxText.train import save_checkpoint
 from MaxText.train import setup_train_loop
 from MaxText.train import train_step
 from MaxText.train import validate_train_config
@@ -232,15 +230,7 @@ def train_loop(config, elastic_manager, recorder, state=None):
           with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
             state, metrics = p_train_step(state, example_batch, nextrng)
 
-        if checkpoint_manager is not None:
-          state_to_save = state
-          if save_checkpoint(checkpoint_manager, int(step), state_to_save, config.dataset_type, data_iterator, config):
-            checkpointing.print_save_message(step, config.async_checkpointing)
-
-          # Upon preemption, exit when and only when all ongoing saves are complete.
-          if checkpoint_manager.reached_preemption(step):
-            checkpoint_manager.wait_until_finished()
-            sys.exit()
+        checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step)
 
         prof.maybe_deactivate_profiler(step, state)
 
@@ -316,24 +306,7 @@ def train_loop(config, elastic_manager, recorder, state=None):
     except exceptions.StopTraining as error:
       max_logging.log(f"Training stopped: {str(error)}")
 
-  if checkpoint_manager is not None:
-    if ((int(state.step) - 1) % config.checkpoint_period != 0) and (int(state.step) != 0):
-      try:
-        state_to_save = state
-        if save_checkpoint(
-            checkpoint_manager,
-            int(state.step) - 1,
-            state_to_save,
-            config.dataset_type,
-            data_iterator,
-            config,
-            force=True,
-        ):
-          checkpointing.print_save_message(int(state.step) - 1, config.async_checkpointing)
-      except Exception:  # pylint: disable=broad-except
-        max_logging.log(f"Checkpoint is already saved for step {int(state.step)-1}.")
-
-    checkpoint_manager.wait_until_finished()
+  checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator)
   metric_logger.cleanup()
 
   return state
