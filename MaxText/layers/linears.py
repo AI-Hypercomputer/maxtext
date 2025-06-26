@@ -31,8 +31,8 @@ import flax.linen as nn
 from MaxText import max_logging
 from MaxText.common_types import DecoderBlockType, DType, Array, Config
 from MaxText.layers import quantizations
-from MaxText.layers.normalizations import RMSNorm
-from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init
+from MaxText.layers.normalizations import rms_norm
+from MaxText.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
@@ -200,16 +200,6 @@ class DenseGeneral(nnx.Module):
     return output
 
 
-def variable_to_logically_partitioned(variable: nnx.VariableState):
-  metadata = variable.get_metadata()
-  return nn.LogicallyPartitioned(  # type: ignore[wrong-keyword-args]
-      variable.value,
-      variable.sharding,
-      mesh=metadata.get("mesh"),
-      rules=metadata.get("rules"),
-  )
-
-
 def dense_general(
     *,
     inputs_shape: tuple[int, ...] | None = None,
@@ -305,7 +295,7 @@ class MlpBlock(nn.Module):
   use_pre_norm: bool = False
   quant: Optional[Quant] = None
 
-  def get_norm_layer(self):
+  def get_norm_layer(self, features: int):
     """get normalization layer."""
     if self.config.decoder_block in (
         DecoderBlockType.DEFAULT,
@@ -316,7 +306,7 @@ class MlpBlock(nn.Module):
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.LLAMA4,
     ):
-      return RMSNorm
+      return functools.partial(rms_norm, features=features)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
       from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
 
@@ -330,7 +320,7 @@ class MlpBlock(nn.Module):
     cfg = self.config
 
     if self.use_pre_norm:
-      inputs = self.get_norm_layer()(
+      inputs = self.get_norm_layer(features=inputs.shape[-1])(
           name="mlp_layer_norm",
           dtype=cfg.dtype,
           weight_dtype=cfg.weight_dtype,

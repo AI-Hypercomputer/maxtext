@@ -26,7 +26,7 @@ from flax import linen as nn
 from MaxText.common_types import Config, MODEL_MODE_TRAIN
 from MaxText.layers.attentions import dense_general
 from MaxText.layers.models import DecoderLayer
-from MaxText.layers.normalizations import RMSNorm
+from MaxText.layers.normalizations import rms_norm
 
 
 class MultiTokenPredictionLayer(nn.Module):
@@ -88,7 +88,8 @@ class MultiTokenPredictionLayer(nn.Module):
     k = self.layer_number
 
     # --- 1. Normalize Hidden State and Embedding ---
-    embedding_norm_layer = RMSNorm(
+    embedding_norm_layer = rms_norm(
+        features=target_token_embedding.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name=f"mtp_{k}_embedding_norm",
@@ -97,7 +98,8 @@ class MultiTokenPredictionLayer(nn.Module):
     )
     embedding_norm = embedding_norm_layer(target_token_embedding)
 
-    hidden_state_norm_layer = RMSNorm(
+    hidden_state_norm_layer = rms_norm(
+        features=prev_hidden_state.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name=f"mtp_{k}_hidden_state_norm",

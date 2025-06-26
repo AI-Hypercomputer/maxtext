@@ -33,7 +33,7 @@ from MaxText.layers import models
 from MaxText.layers import quantizations
 from MaxText.layers.attentions import Attention
 from MaxText.layers.quantizations import AqtQuantization as Quant
-from MaxText.layers.normalizations import RMSNorm
+from MaxText.layers.normalizations import rms_norm
 
 
 # -----------------------------------------
@@ -65,7 +65,8 @@ class LlamaDecoderLayer(nn.Module):
 
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
-    lnx_rms = RMSNorm(
+    lnx_rms = rms_norm(
+        features=inputs.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="pre_self_attention_layer_norm",
@@ -120,7 +121,8 @@ class LlamaDecoderLayer(nn.Module):
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
-    hidden_states = models.RMSNorm(
+    hidden_states = rms_norm(
+        features=intermediate_inputs.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="post_self_attention_layer_norm",
