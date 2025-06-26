@@ -391,7 +391,7 @@ def _build_per_tensor_config(
   return aqt_dg
 
 
-# fp8 training recipe with static scaling for weight/activation only
+# fp8 training recipe of dynmaic scaling with configurable constant_bound_config for static scaling option
 def _get_aqt_fp8_default_config(config):
   """Get aqt for 8-bit floating point quantization configuration."""
   aqt_dg = aqt_config.config_v4(
