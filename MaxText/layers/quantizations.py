@@ -355,6 +355,7 @@ def _build_const_scale_config(
 
   return aqt_dg
 
+@dataclass
 class PerTensorScales:
   fwd_lhs: bool = False
   fwd_rhs: bool = False
