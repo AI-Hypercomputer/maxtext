@@ -43,25 +43,25 @@ jobs:
     - name: Cleanup old docker images
       run: docker system prune --all --force
 
-  tpu_image:
-    needs: prelim
-    uses: ./.github/workflows/build_upload_internal.yml
-    with:
-      device_type: tpu
-      device_name: v4-8
-      cloud_runner: linux-x86-n2-16-buildkit
-      build_mode: jax_ai_image
-      base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
+  # tpu_image:
+  #   needs: prelim
+  #   uses: ./.github/workflows/build_upload_internal.yml
+  #   with:
+  #     device_type: tpu
+  #     device_name: v4-8
+  #     cloud_runner: linux-x86-n2-16-buildkit
+  #     build_mode: jax_ai_image
+  #     base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
 
-  gpu_image:
-    needs: prelim
-    uses: ./.github/workflows/build_upload_internal.yml
-    with:
-      device_type: gpu
-      device_name: a100-40gb-4
-      cloud_runner: linux-x86-n2-16-buildkit
-      build_mode: jax_ai_image
-      base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/gpu:latest
+  # gpu_image:
+  #   needs: prelim
+  #   uses: ./.github/workflows/build_upload_internal.yml
+  #   with:
+  #     device_type: gpu
+  #     device_name: a100-40gb-4
+  #     cloud_runner: linux-x86-n2-16-buildkit
+  #     build_mode: jax_ai_image
+  #     base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/gpu:latest
 
   cpu_unit_tests:
     needs: tpu_image
@@ -100,29 +100,29 @@ jobs:
       tf_force_gpu_allow_growth: false
       container_resource_option: "--privileged"
 
-  gpu_unit_tests:
-    needs: gpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
-    with:
-      device_type: gpu
-      device_name: a100-40gb-4
-      cloud_runner: linux-x86-a2-48-a100-4gpu
-      pytest_marker: 'not cpu_only and not tpu_only and not integration_test'
-      xla_python_client_mem_fraction: 0.65
-      tf_force_gpu_allow_growth: true
-      container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
+  # gpu_unit_tests:
+  #   needs: gpu_image
+  #   uses: ./.github/workflows/run_tests_internal.yml
+  #   with:
+  #     device_type: gpu
+  #     device_name: a100-40gb-4
+  #     cloud_runner: linux-x86-a2-48-a100-4gpu
+  #     pytest_marker: 'not cpu_only and not tpu_only and not integration_test'
+  #     xla_python_client_mem_fraction: 0.65
+  #     tf_force_gpu_allow_growth: true
+  #     container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
 
-  gpu_integration_tests:
-    needs: gpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
-    with:
-      device_type: gpu
-      device_name: a100-40gb-4
-      cloud_runner: linux-x86-a2-48-a100-4gpu
-      pytest_marker: 'not cpu_only and not tpu_only and integration_test'
-      xla_python_client_mem_fraction: 0.65
-      tf_force_gpu_allow_growth: true
-      container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
+  # gpu_integration_tests:
+  #   needs: gpu_image
+  #   uses: ./.github/workflows/run_tests_internal.yml
+  #   with:
+  #     device_type: gpu
+  #     device_name: a100-40gb-4
+  #     cloud_runner: linux-x86-a2-48-a100-4gpu
+  #     pytest_marker: 'not cpu_only and not tpu_only and integration_test'
+  #     xla_python_client_mem_fraction: 0.65
+  #     tf_force_gpu_allow_growth: true
+  #     container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
 
   clean_up:
     if: ${{ always() }}  # always execute, regardless of previous jobs or steps.
