@@ -91,6 +91,7 @@ class DecodeTests(unittest.TestCase):
   def test_gpu_int8(self):
     decode_main(DecodeTests.CONFIGS["int8"] + ["attention=dot_product"])
 
+  @pytest.mark.skip(reason="Test is flaky since Jax 0.6.2, see b/427048251")
   @pytest.mark.tpu_only
   def test_tpu_pdb_lt_1(self):
     decode_main(DecodeTests.CONFIGS["pdb_lt_1"])
