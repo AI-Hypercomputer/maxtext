@@ -698,15 +698,6 @@ def train_loop(config, config_inference, recorder, state=None):
     state = _merge_grpo_state(state, reference_params)
   state_mesh_shardings = _merge_grpo_state(state_mesh_shardings, state_mesh_shardings.params["params"])
 
-  # pylint: disable=line-too-long
-  (
-      functional_train,
-      in_shard_train,
-      out_shard_train,
-      static_argnums_train,
-      donate_argnums_train,
-  ) = maxtext_utils.get_functional_train_with_signature(train_step, mesh, state_mesh_shardings, model, config)
-
   # Initializing maxengine and everything related from decode.py
   # TODO: Creating an engine here but might have two model compilation, need to initialize engine while passing model object
   engine = maxengine.MaxEngine(config_inference)
@@ -714,45 +705,18 @@ def train_loop(config, config_inference, recorder, state=None):
   # TODO: loading parameters from GCS here, need to pass in the same params to engine which already loaded
   _ = engine.load_params(rng_load_params)
 
-  if eval_data_iterator:
-    # pylint: disable=line-too-long
-    (
-        functional_eval,
-        in_shard_eval,
-        out_shard_eval,
-        static_argnums_eval,
-        donate_argnums_eval,
-    ) = maxtext_utils.get_functional_eval_with_signature(eval_step, mesh, state_mesh_shardings, model, config)
+  p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
+      config, model, mesh, state, state_mesh_shardings, train_step, eval_step, eval_data_iterator
+  )
 
-  # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
-  if config.compiled_trainstep_file != "":
-    print("Loading the compiled function...", flush=True)
-    # Need to pass train signature and state to determine i/o shapes of train_state for now.
-    p_train_step = maxtext_utils.load_compiled(config, functional_train, state)
-    # TODO: p_eval_step is not yet supported in load_compiled
-    p_eval_step = None
-    print("Loaded compiled function!", flush=True)
-  else:
-    p_train_step = jax.jit(
-        functional_train,
-        in_shardings=in_shard_train,
-        out_shardings=out_shard_train,
-        static_argnums=static_argnums_train,
-        donate_argnums=donate_argnums_train,
-    )
+  with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+    shaped_batch = maxtext_utils.get_shaped_batch(config)
+    compiled = p_train_step.lower(state, shaped_batch, init_rng).compile()
+    compiled_stats = compiled.memory_analysis()
+    max_utils.print_compiled_memory_stats(compiled_stats)
 
-    if eval_data_iterator:
-      p_eval_step = jax.jit(
-          functional_eval,
-          in_shardings=in_shard_eval,
-          out_shardings=out_shard_eval,
-          static_argnums=static_argnums_eval,
-          donate_argnums=donate_argnums_eval,
-      )
-    else:
-      p_eval_step = None
+  data_sharding = maxtext_utils.get_input_data_sharding(config, mesh)
 
-  data_sharding = in_shard_train[1]
   param_sharding = state_mesh_shardings.params
   p_generate_completions: Callable[[dict, dict, Array], Array] = jax.jit(
       functools.partial(generate_completions, config, tokenizer_model, engine),
@@ -763,9 +727,6 @@ def train_loop(config, config_inference, recorder, state=None):
 
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
-
-  example_batch = None
-
   data_loader = DataLoader(config, mesh, data_iterator, recorder)
   metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
@@ -851,17 +812,6 @@ def train_loop(config, config_inference, recorder, state=None):
     checkpoint_manager.wait_until_finished()
   metric_logger.cleanup()
 
-  if example_batch:
-    with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-      compiled = p_train_step.lower(state, example_batch, rng).compile()
-      compiled_stats = compiled.memory_analysis()
-      if compiled_stats is not None:
-        max_logging.log(
-            f"Output size: {compiled_stats.output_size_in_bytes}, "
-            f"temp size: {compiled_stats.temp_size_in_bytes}, "
-            f"argument size: {compiled_stats.argument_size_in_bytes}, "
-            f"host temp size: {compiled_stats.host_temp_size_in_bytes}, in bytes."
-        )
   return state
 
 
