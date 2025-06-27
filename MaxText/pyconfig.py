@@ -194,6 +194,12 @@ def validate_keys(keys):
 
   if keys["use_multimodal"]:
     validate_multimodal_model_name(keys["model_name"])
+    if keys["use_sft"]:
+      assert keys[
+          "sft_train_on_completion_only"
+      ], "In multimodal SFT (use_multimodal=True, use_sft=True), sft_train_on_completion_only must be set to True"
+      # TODO(aireenmei, hengtaoguo): support packing
+      assert not keys["packing"], "In multimodal SFT (use_multimodal=True, use_sft=True), packing is not supported yet"
 
   if keys["decoder_block"] == "llama4":
     validate_llama4_config(keys)

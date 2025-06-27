@@ -93,6 +93,9 @@ def get_shaped_batch(config):
   shaped_batch["targets"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   shaped_batch["targets_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
   shaped_batch["targets_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32)
+  if config.use_multimodal:
+    image_shape = get_dummy_image_shape_for_init(config)
+    shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32)
   return shaped_batch
 
 
