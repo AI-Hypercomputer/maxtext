@@ -48,9 +48,10 @@ def get_datasets(
     shuffle_seed,
     dataloading_host_index,
     dataloading_host_count,
+    dataset_path=None,
 ):
   """Load a TFDS dataset."""
-  ds_builder = tfds.builder(dataset_name)
+  ds_builder = tfds.builder(dataset_name, data_dir=dataset_path)
 
   if shuffle_files:
     read_config = tfds.ReadConfig(shuffle_seed=shuffle_seed)
@@ -227,8 +228,8 @@ def make_tfds_train_iterator(
         use_dpo=config.use_dpo,
         hf_access_token=config.hf_access_token,
     )
-    return multihost_dataloading.RemoteIterator(get_ds_fn, preprocessing_fn, config, global_mesh)
-
+    global_shape = (config.global_batch_size_to_load, config.max_target_length)
+    return multihost_dataloading.RemoteIterator(get_ds_fn, preprocessing_fn, global_mesh, global_shape)
 
 def make_tfds_eval_iterator(
     config: ml_collections.ConfigDict,
