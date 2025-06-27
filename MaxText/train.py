@@ -79,7 +79,7 @@ import MaxText as mt
 
 
 def validate_train_config(config):
-  """Validates the configuration is set correctly for 'train.py'."""
+  """Validates the configuration is set correctly for 'train.py' Maybe this line is really long and breaks lint though this is a super super long line."""
 
   assert config.run_name, "Erroring out, need a real run_name"
   if config.dataset_path and not config.dataset_path.startswith("gs://"):
