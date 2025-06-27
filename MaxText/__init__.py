@@ -25,7 +25,7 @@ __description__ = (
 # maxtext/__init__.py
 
 from MaxText import maxtext_utils
-from maxtext import train_utils
+from MaxText import train_utils
 from MaxText import pyconfig
 from MaxText.layers import models
 from jax.sharding import Mesh

@@ -57,7 +57,7 @@ from MaxText import exceptions
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxtext_utils
-from maxtext import train_utils
+from MaxText import train_utils
 from MaxText import profiler
 from MaxText import pyconfig
 from MaxText.data_loader import DataLoader
@@ -74,7 +74,7 @@ from MaxText.utils.goodput_utils import (
 from MaxText.vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
-import maxtext as mt
+import MaxText as mt
 # pylint: disable=too-many-positional-arguments
 
 

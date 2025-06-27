@@ -49,19 +49,19 @@ from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 import transformers
 
-import maxtext as mt
+import MaxText as mt
 from MaxText import checkpointing
 from MaxText import exceptions
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxengine
 from MaxText import maxtext_utils
-from maxtext import train_utils
+from MaxText import train_utils
 from MaxText import profiler
 from MaxText import pyconfig
 from MaxText.common_types import Array
 from MaxText.data_loader import DataLoader
-from maxtext.experimental.rl import grpo_input_pipeline
+from MaxText.experimental.rl import grpo_input_pipeline
 from MaxText.globals import EPS
 from MaxText.layers import models
 from MaxText.metric_logger import MetricLogger
