@@ -344,5 +344,6 @@ class TrainTests(unittest.TestCase):
   def test_gpu_synthetic_model_ag_once(self):
     train_main(TrainTests.CONFIGS["synthetic"] + ["model_fsdp_ag_once=True"])
 
+
 if __name__ == "__main__":
   absltest.main()

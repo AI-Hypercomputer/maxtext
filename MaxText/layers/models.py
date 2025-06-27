@@ -805,7 +805,7 @@ class Transformer(nn.Module):
     return logits
 
 
-class ZeroOneTransformer(nn.Module):  
+class ZeroOneTransformer(nn.Module):
   """
   A wrapper for the base Transformer model designed to implement the Zero-1
   FSDP optimization.
