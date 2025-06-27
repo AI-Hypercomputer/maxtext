@@ -833,7 +833,7 @@ class ZeroOneTransformer(nn.Module):
       decoder_input_tokens: jnp.ndarray,
       decoder_positions: jnp.ndarray,
       decoder_segment_ids=None,
-      encoder_images: Optional[jnp.ndarray] = None,
+      encoder_images: Optional[jnp.ndarray]=None,
       enable_dropout=True,
       model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,
