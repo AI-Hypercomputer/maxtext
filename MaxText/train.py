@@ -63,9 +63,9 @@ from MaxText import maxtext_utils
 from MaxText import optimizers
 from MaxText import profiler
 from MaxText import pyconfig
-from MaxText.gcp_workload_monitor import GCPWorkloadMonitor
+from MaxText.data_loader import DataLoader
 from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
-from MaxText.layers import quantizations
+from MaxText.globals import DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE, EPS
 from MaxText.layers.models import Transformer, ZeroOneTransformer
 from MaxText.metric_logger import MetricLogger
 from MaxText.utils import gcs_utils
