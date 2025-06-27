@@ -811,4 +811,3 @@ class Transformer(nn.Module):
         image_embeddings=image_embeddings,
     )
     return logits
-  

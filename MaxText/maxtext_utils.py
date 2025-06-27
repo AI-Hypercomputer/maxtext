@@ -19,6 +19,7 @@ limitations under the License.
 
 from typing import Optional
 import functools
+import os
 import pickle
 
 from flax import linen as nn
@@ -40,6 +41,8 @@ import optax
 
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
+
+import qwix
 
 from MaxText import checkpointing
 from MaxText import max_logging
@@ -655,6 +658,43 @@ def init_initial_state(model, tx, config, is_training, key):
   return init_decode_state(model.apply, model_vars)
 
 
+def qwix_quant(model, params, config):
+  if quant_dtype := os.environ.get("QUANT_DTYPE", None):
+    # Only Qwix or AQT should be used, but not both
+    assert not config.quantization
+    print("Qwix quantization enabled with dtype", quant_dtype)
+    tile_size = 512
+    rules = [
+        # Disable quantization on `self_attn``.
+        qwix.QuantizationRule(
+            module_path='.*self_attention.*',
+            weight_qtype=quant_dtype,
+        ),
+        qwix.QuantizationRule(
+            module_path='.*mlp.*',
+            weight_qtype=quant_dtype,
+            act_qtype=quant_dtype,
+            tile_size=tile_size,
+        ),
+    ]
+    model = qwix.quantize_model(model, qwix.PtqProvider(rules))
+    max_utils.print_mem_stats("After model quantization")
+
+    model_input = {
+      "decoder_input_tokens": jnp.ones((72, 1), dtype=jnp.int32),
+      "decoder_positions": jnp.ones((72, 1), dtype=jnp.int32),
+    }
+    ptq_model_init_same = functools.partial(model.init, **model_input)
+    # ptq_model.init, **model_input
+    abs_ptq_params = jax.eval_shape(ptq_model_init_same,
+                                    jax.random.key(0))["params"]
+    params = qwix.quantize_params(params["params"], abs_ptq_params)
+    print(params)
+    max_utils.print_mem_stats("After param quantization")
+  else:
+    print("Qwix quantization not enabled")
+  return model, params
+
 def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
   """Setup decode state by loading params from a checkpoint.
   Args:
@@ -686,6 +726,8 @@ def setup_decode_state(model, config, rng, mesh, checkpoint_manager):
           config.checkpoint_storage_use_ocdbt,
           config.checkpoint_storage_use_zarr3,
       )
+
+    model, params = qwix_quant(model, params, config)
     state = init_decode_state(None, params)
 
   state = max_utils.unbox_logicallypartioned(state)
