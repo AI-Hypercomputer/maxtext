@@ -203,7 +203,7 @@ class Fp8Quantization(Quantization):
     return nn.Fp8DirectDotGeneralOp
 
   def einsum(self, dtype: DType = jnp.float32):
-    return Fp8Einsum(dtype=dtype)
+    return nn.Fp8Einsum(dtype=dtype)
 
 
 class Fp8Einsum(nn.Module):
