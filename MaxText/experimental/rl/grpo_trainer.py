@@ -634,20 +634,19 @@ def setup_train_loop(config, recorder):
 
   Returns:
     init_rng:
-    writer: Summary writer for tensorboard
     checkpoint_manager: Orbax checkpointer
     state_mesh_annotations: the mesh annotations for the train state
     model:
     mesh:
     learning_rate_schedule:
     data_iterator:
+    eval_data_iterator:
     state: the initialized train state
   """
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     model = mt.from_pretrained(config)
     mesh = model.mesh
     init_rng, checkpoint_manager, learning_rate_schedule, tx = train_utils.create_training_tools(config, model, mesh)
-
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     data_iterator, eval_data_iterator = grpo_input_pipeline.create_data_iterator(config, mesh)
@@ -661,7 +660,6 @@ def setup_train_loop(config, recorder):
 
   return (
       init_rng,
-      writer,
       checkpoint_manager,
       state_mesh_shardings,
       model,
