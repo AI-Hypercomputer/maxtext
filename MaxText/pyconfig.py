@@ -918,6 +918,31 @@ def validate_sparse_matmul_parallelism(raw_keys):
         f"The expert dimension {raw_keys['num_experts']} is not divisible by expert parallelism setting {expert_parallelism}."
     )
 
+def validate_sparse_matmul_parallelism(raw_keys):
+  if raw_keys["sparse_matmul"] and using_sequence_parallelism(raw_keys):
+    raise ValueError("Currently we only support Megablox and Ragged dot with data, tensor, and expert parallelism.")
+  tensor_parallelism = (
+      raw_keys["ici_tensor_parallelism"]
+      * raw_keys["dcn_tensor_parallelism"]
+      * raw_keys["ici_tensor_sequence_parallelism"]
+      * raw_keys["dcn_tensor_sequence_parallelism"]
+      * raw_keys["ici_tensor_transpose_parallelism"]
+      * raw_keys["dcn_tensor_transpose_parallelism"]
+  )
+  if raw_keys["sparse_matmul"] and using_tensor_parallelism(raw_keys) and (raw_keys["emb_dim"] % tensor_parallelism):
+    raise ValueError(
+        f"The embedding dimension {raw_keys['emb_dim']} is not divisible by tensor parallelism setting {tensor_parallelism}."
+    )
+  expert_parallelism = raw_keys["ici_expert_parallelism"] * raw_keys["dcn_expert_parallelism"]
+  if raw_keys["sparse_matmul"] and using_expert_parallelism(raw_keys) and (raw_keys["num_experts"] % expert_parallelism):
+    raise ValueError(
+        f"The expert dimension {raw_keys['num_experts']} is not divisible by expert parallelism setting {expert_parallelism}."
+    )
+  if using_pipeline_parallelism(raw_keys) and (raw_keys["pipeline_fsdp_ag_once"] is False or raw_keys["model_fsdp_ag_once"]==True):
+    raise ValueError(
+      f"You should use the pipeline_fsdp_ag_once=True and leave model_fsdp_ag_once=False"
+    )
+
 
 def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules):
   new_logical_axis = set()

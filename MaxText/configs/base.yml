@@ -186,10 +186,10 @@ pipeline_delay_activation_forwarding: False # This delays the activation forward
 # the communication and compute in each iteration are now independent. However this comes at the cost of doubling the pipeline bubble,
 # and you must set the number of microbatches to at least 2 * num_stages (the minimum 2 * num_stages is set by default with this delay).
 
-model_fsdp_ag_once: False # This is ZeRO-one sharding that controls whether the Zero-one optimization is active.
-# This is a memory/time tradeoff - True: Use ZeroOneTransformer to gather weights once per gradient step. 
-# False: Use the standard Transformer, which gathers for each microbatch's fwd/bwd pass.
-pipeline_fsdp_ag_once: False # This is ZeRO-three sharding. If set to true then all gather all of the weights over FSDP before the first pipeline iteration.
+model_fsdp_ag_once: False # Controls whether the Zero-one optimization is active.
+# This is a memory/time tradeoff - True: This is ZeRO-one sharding. Use ZeroOneTransformer to gather weights once per gradient step. 
+# False: This is ZeRO-three sharding. Use the standard Transformer, which gathers for each microbatch's fwd/bwd pass.
+pipeline_fsdp_ag_once: False # If set to true then all gather all of the weights over FSDP before the first pipeline iteration.
 # This is a memory/time tradeoff - we now have to store the FSDP gathered weights and gradients (typically in bf16), as opposed
 # to only one stage's worth, however we only execute one all-gather and reduce across per repeat, as opposed
 # to every microbatch. This is similar to zero-1 sharding, since we also don't need to all gather the FSDP weights in the backward pass.
