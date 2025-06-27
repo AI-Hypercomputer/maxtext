@@ -813,7 +813,6 @@ class ZeroOneTransformer(nn.Module):
   The goal of this optimization is to reduce communication overhead. In the standard
   FSDP implementation, an all-gather operation on the model weights is performed twice
   for each gradient accumulation microbatch (once for the forward pass, once for the backward pass).
-
   This class changes that behavior. When enabled, it performs the all-gather operation
   only *once* per full gradient accumulation step. It gathers the full weights into
   memory, runs all the microbatch forward and backward passes, and then releases the
