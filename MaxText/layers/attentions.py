@@ -320,6 +320,7 @@ def attention_op_as_linen(
     chunk_attn_window_size=chunk_attn_window_size,
     use_ragged_attention=use_ragged_attention,
     ragged_block_size=ragged_block_size,
+    metadata_fn=variable_to_logically_partitioned,
   )
 
 
@@ -1320,7 +1321,17 @@ def l2_norm_as_linen(self, eps: float = 1e-6):
   Args:
     eps: float, epsilon used for numerical stability (default value should be ok for most cases).
   """
-  return nnx.bridge.to_linen(L2Norm, eps)
+  return nnx.bridge.to_linen(L2Norm, eps=eps, metadata_fn=variable_to_logically_partitioned)
+
+
+def variable_to_logically_partitioned(variable: nnx.VariableState):
+  metadata = variable.get_metadata()
+  return nn.LogicallyPartitioned(  # type: ignore[wrong-keyword-args]
+      variable.value,
+      variable.sharding,
+      mesh=metadata.get("mesh"),
+      rules=metadata.get("rules"),
+  )
 
 
 class Attention(nn.Module):
