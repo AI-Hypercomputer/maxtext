@@ -1,11 +1,11 @@
 #!/bin/bash
-set -e
+# set -e
 
 export HF_AUTH_TOKEN=""
 
 DATE=$(date +%Y-%m-%d)
 # config.base_output_directory
-OUTPUT_BASE_DIR=""
+OUTPUT_BASE_DIR="/home/yixuannwang_google_com/mt_output/${DATE}"
 # Model name must be consistent in utils/utils.py
 MODEL_NAME="gemma2-2b"
 # HF model id as golden model for verification
@@ -28,6 +28,8 @@ python3 -m "MaxText.utils.ckpt_conversion.to_maxtext" \
   run_name="run_to_mt" \
   async_checkpointing="${ASYNC_CHECKPOINTING}" \
   scan_layers="${SCAN_LAYERS}" 
+
+sleep 15
 
 echo "--- Checkpoint Conversion Complete ---"
 
@@ -54,11 +56,20 @@ echo "--- Decoding Complete ---"
 # --- Step 3: Compare the HF and MT Checkpoint ---
 
 echo "--- Starting Comparing Logits and Predicted Tokens ---"
-python3 -m "MaxText.tests.mt_hf_mutual_conversion_check" \
-    --hf_model_id="${HF_MODEL_ID}" \
-    --maxtext_model_name="${MODEL_NAME}" \
-    --maxtext_checkpoint_path="${OUTPUT_BASE_DIR}/0/items" \
-    --maxtext_base_config_path="/MaxText/configs/base.yml" \
-    --max_kl_div="0.02"
+python3 -m "MaxText.tests.forward_pass_logit_checker" \
+    "MaxText/configs/base.yml" \
+    tokenizer_path=${TOKENIZER_PATH} \
+    load_parameters_path="${OUTPUT_BASE_DIR}/0/items"\
+    run_name=forward_pass_test_${MODEL_NAME}\
+    per_device_batch_size=${PER_DEVICE_BATCH_SIZE} \
+    model_name=${MODEL_NAME} \
+    max_prefill_predict_length=4 \
+    max_target_length=4 \
+    dataset_type=synthetic \
+    scan_layers=${scan_layers} \
+    attention=dot_product \
+    --max_kl_div=0.015 \
+    --run_hf_model=True \
+    --hf_model_path=${HF_MODEL_ID} \
 
 echo "--- Decoding Complete ---"

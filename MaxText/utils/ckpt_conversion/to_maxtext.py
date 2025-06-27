@@ -69,8 +69,6 @@ def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"  # Suppress TensorFlow logging
 
-  hf_token = os.getenv("HF_AUTH_TOKEN")
-
   config = pyconfig.initialize(argv)
   # check the supported model ids
   if config.model_name not in HF_IDS:
@@ -79,7 +77,7 @@ def main(argv: Sequence[str]) -> None:
   model_id = HF_IDS[config.model_name]
   max_utils.print_system_information()
   if not config.base_output_directory:
-    output_directory = os.path.join(os.getcwd(), "mt_output")
+    output_directory = f"{os.getcwd()}/mt_output"
   else:
     output_directory = config.base_output_directory
 
@@ -89,10 +87,9 @@ def main(argv: Sequence[str]) -> None:
 
   # Load Hugging Face model, config, and state_dict
   max_logging.log(f"Loading Hugging Face model: {model_id}...")
-  hf_config_obj = AutoConfig.from_pretrained(model_id, token=hf_token)
+  hf_config_obj = AutoConfig.from_pretrained(model_id)
   hf_model = AutoModelForCausalLM.from_pretrained(
       model_id,
-      token=hf_token,
   )
   hf_state_dict_numpy = hf_model.state_dict()
   for k, v in hf_state_dict_numpy.items():

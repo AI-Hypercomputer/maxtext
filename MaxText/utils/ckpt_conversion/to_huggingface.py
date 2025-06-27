@@ -88,10 +88,6 @@ def _get_model_mappings(model_name: str, scan_layers: bool, config_dict: dict): 
   }
 
 
-# Read Hugging Face token from environment variable
-hf_token = os.environ.get("HF_AUTH_TOKEN")
-
-
 def main(argv: Sequence[str]) -> None:
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
@@ -109,7 +105,7 @@ def main(argv: Sequence[str]) -> None:
   loaded_params_from_engine = engine.load_params(rng_load_params)
 
   if not config.base_output_directory:
-    output_directory = os.path.join(os.getcwd(), "hf_output")
+    output_directory = f"{os.getcwd()}/hf_output"
   else:
     output_directory = config.base_output_directory
 
@@ -123,7 +119,7 @@ def main(argv: Sequence[str]) -> None:
   if model_key not in HF_IDS:
     raise ValueError(f"HF Tokenizer ID not found for model key: {model_key}")
   hf_tokenizer_id = HF_IDS[model_key]
-  tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id, token=hf_token)
+  tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id)
 
   # 3. Get parameter mappings
   mappings = _get_model_mappings(model_key, config.scan_layers, hf_config_obj.to_dict())
