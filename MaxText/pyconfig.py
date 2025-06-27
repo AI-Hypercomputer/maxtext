@@ -18,6 +18,7 @@ limitations under the License.
 # pylint: disable=missing-module-docstring, bare-except, consider-using-generator, missing-function-docstring
 from collections import OrderedDict
 from typing import Any, Union
+from math import prod
 import math
 import os
 import sys
@@ -1014,6 +1015,9 @@ def get_num_target_devices(raw_keys):
     compile_topology = accelerator_to_spec_map.get_system_characteristics(raw_keys["compile_topology"])
     devices_per_slice = compile_topology.devices_per_slice
     return int(devices_per_slice * raw_keys["compile_topology_num_slices"])
+  elif raw_keys.get("subslice_shape") and raw_keys.get("enable_single_controller"):
+    subslice_shape = tuple(int(x) for x in raw_keys["subslice_shape"].split(","))
+    return prod(subslice_shape)
   else:
     return len(jax.devices())
 
