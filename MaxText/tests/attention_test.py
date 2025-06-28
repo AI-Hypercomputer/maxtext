@@ -35,6 +35,7 @@ from flax.core import freeze
 from MaxText import maxtext_utils
 from MaxText import pyconfig
 from MaxText.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
+from MaxText.configs import types_i
 from MaxText.globals import PKG_DIR
 from MaxText.layers import attentions
 from MaxText.layers.attentions import Attention, MLA, ChunkedCausalMask
@@ -281,13 +282,13 @@ class AttentionTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    config = pyconfig.initialize(
+    config = types_i.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         **self.config_arguments,
     )
     self.cfg = config
 
-    config_cp = pyconfig.initialize(
+    config_cp = types_i.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         **self.config_arguments,
         ici_context_parallelism=4,  # use context parallelism of 4
@@ -630,7 +631,7 @@ class AttentionTest(unittest.TestCase):
 
     rtol, atol = 1e-02, 1e-02
 
-    config = pyconfig.initialize(
+    config = types_i.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
@@ -730,7 +731,7 @@ class AttentionTest(unittest.TestCase):
 
     rtol, atol = 1e-02, 1e-02
 
-    config = pyconfig.initialize(
+    config = types_i.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
@@ -1019,7 +1020,7 @@ class MLATest(parameterized.TestCase):
 
   def init_mla(self, rope_type):
     """Helper function to initialize MLA with different model names."""
-    cfg = pyconfig.initialize(
+    cfg = types_i.initialize(
         [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
         per_device_batch_size=1.0,
         run_name="test",
@@ -1031,7 +1032,7 @@ class MLATest(parameterized.TestCase):
     )
     rng = jax.random.PRNGKey(0)
 
-    devices_array = maxtext_utils.create_device_mesh(cfg)
+    devices_array = maxtext_utils.create_device_mesh_with_maxtextconfig(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
 
     global_batch_size = cfg.global_batch_size_to_train_on
