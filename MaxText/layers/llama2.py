@@ -59,6 +59,7 @@ class LlamaDecoderLayer(nn.Module):
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
       previous_chunk=None,
+      lora_state: Optional[dict] = None,
   ):
     cfg = self.config
     mesh = self.mesh
@@ -102,6 +103,14 @@ class LlamaDecoderLayer(nn.Module):
         ragged_block_size=cfg.ragged_block_size,
     )
 
+    lora_state_per_layer = None
+    if lora_state and "lora_params" in lora_state and "scale_factor" in lora_state:
+      lora_state_per_layer = {}
+      lora_state_per_layer["scale_factor"] = lora_state["scale_factor"]
+
+      # Fetch the self-attention params of each self.name=`layers_{idx}`
+      lora_state_per_layer["lora_params"] = lora_state["lora_params"][self.name]
+
     attention_lnx = attention_layer(
         lnx,
         lnx,
@@ -112,6 +121,7 @@ class LlamaDecoderLayer(nn.Module):
         slot=slot,
         page_state=page_state,
         previous_chunk=previous_chunk,
+        lora_state=lora_state_per_layer,
     )
 
     attention_lnx = nn.with_logical_constraint(
