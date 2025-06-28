@@ -518,7 +518,7 @@ class RoutedMoE(nn.Module):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
     def gmm(inputs, kernel, group_sizes, expert_assignments):
-      tile_size = (self.config.tile_batch_seq, self.config.tile_activation_dim, self.config.tile_weight_dim)
+      tile_size = None
       PAD_LENGTH = self.config.tile_batch_seq
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
@@ -539,13 +539,14 @@ class RoutedMoE(nn.Module):
         rhs_quantize_dtype = quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
 
       if self.config.megablox:
-        m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
+        # m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
         output = mblx.gmm(
             lhs=inputs,
             rhs=kernel,
             group_sizes=group_sizes,
             preferred_element_type=jnp.bfloat16,
-            tiling=(min(tile_size[0], m), min(tile_size[1], k), min(tile_size[2], n)),
+            # tiling=(min(tile_size[0], m), min(tile_size[1], k), min(tile_size[2], n)),
+            tiling = tile_size,
             lhs_quantize_dtype=lhs_quantize_dtype,
             rhs_quantize_dtype=rhs_quantize_dtype,
         )

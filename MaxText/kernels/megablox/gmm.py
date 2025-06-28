@@ -33,6 +33,9 @@ from aqt.jax.v2.aqt_tensor import QTensor
 
 from MaxText.kernels.megablox import common
 
+# Test 1
+gmm_tile_size = (512, 2560, 1024)
+tgmm_tile_size = (256, 1792, 3584)
 
 def _validate_args(
     *,
@@ -307,7 +310,7 @@ def gmm(
     rhs: jnp.ndarray | QTensor,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
-    tiling: tuple[int, int, int] | LutFn | None = (128, 128, 128),
+    tiling: tuple[int, int, int] | LutFn | None = gmm_tile_size,
     group_offset: jnp.ndarray | None = None,
     existing_out: jnp.ndarray | None = None,
     transpose_rhs: bool = False,
@@ -372,6 +375,7 @@ def gmm(
   if callable(tiling):
     tiling = tiling(m, k, n)
 
+  tiling = gmm_tile_size
   if tiling is None:
     raise ValueError(f"No tuned tiling found for (m, k, n) = ({m}, {k}, {n})")
 
@@ -620,7 +624,7 @@ def tgmm(
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype = jnp.float32,
-    tiling: tuple[int, int, int] | LutFn | None = (128, 128, 128),
+    tiling: tuple[int, int, int] | LutFn | None = tgmm_tile_size,
     group_offset: jnp.ndarray | None = None,
     num_actual_groups: int | None = None,
     existing_out: jnp.ndarray | None = None,
@@ -661,6 +665,7 @@ def tgmm(
   if callable(tiling):
     tiling = tiling(m, k, n)
 
+  tiling = tgmm_tile_size
   if tiling is None:
     raise ValueError(f"No tuned tiling found for (m, k, n) = ({m}, {k}, {n})")
 
