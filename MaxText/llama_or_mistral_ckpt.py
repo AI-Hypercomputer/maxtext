@@ -141,6 +141,9 @@ MODEL_PARAMS_DICT = {
         "rope_type": "llama3.1",
         "scale_query": False,
         "interleave_moe_layer_step": 1,
+        "num_layers_vit": 34,
+        "num_att_head_vit": 16,
+        "hidden_size_vit": 1408,
     },
     "llama4-17b-128e": {
         "num_layers": 48,
