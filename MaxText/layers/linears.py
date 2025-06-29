@@ -240,12 +240,12 @@ def dense_general(
     parameter_memory_host_offload: Determines whether to offload params to host
     name: name passed to the ToLinen Module
   """
-  if not (inputs_shape is not None) ^ (in_features is not None):
+  if not (inputs_shape is not None) ^ (in_features_shape is not None):
     raise ValueError("Exactly one of inputs_shape or in_features must be specified.")
 
   if inputs_shape is not None:
     axis = _canonicalize_tuple(axis)
-    in_features = tuple(inputs_shape[ax] for ax in _normalize_axes(axis, len(inputs_shape)))
+    in_features_shape = tuple(inputs_shape[ax] for ax in _normalize_axes(axis, len(inputs_shape)))
   else:
     assert in_features_shape is not None
   module = nnx.bridge.to_linen(
