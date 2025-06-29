@@ -68,9 +68,15 @@ class DecoderLayer(nn.Module):
     cfg = self.config
     mesh = self.mesh
     if model_mode == MODEL_MODE_PREFILL:
-      inputs = nn.with_logical_constraint(inputs, ("activation_batch", "prefill_activation_length", "activation_embed"))
+      logical_axis_names = ("activation_batch", "prefill_activation_length", "activation_embed")
     else:
-      inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
+      logical_axis_names = ("activation_batch", "activation_length", "activation_embed")
+    
+    
+    if model_mode == MODEL_MODE_PREFILL:
+      inputs = nn.with_logical_constraint(inputs, logical_axis_names)
+    else:
+      inputs = nn.with_logical_constraint(inputs, logical_axis_names)
 
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
@@ -82,9 +88,9 @@ class DecoderLayer(nn.Module):
         kernel_axes=("norm",),
     )(inputs)
     if model_mode == MODEL_MODE_PREFILL:
-      lnx = nn.with_logical_constraint(lnx, ("activation_batch", "prefill_activation_length", "activation_embed"))
+      lnx = nn.with_logical_constraint(lnx, logical_axis_names)
     else:
-      lnx = nn.with_logical_constraint(lnx, ("activation_batch", "activation_length", "activation_embed"))
+      lnx = nn.with_logical_constraint(lnx, logical_axis_names)
 
     attention_layer = Attention(
         config=self.config,
@@ -120,11 +126,11 @@ class DecoderLayer(nn.Module):
 
     if model_mode == MODEL_MODE_PREFILL:
       attention_lnx = nn.with_logical_constraint(
-          attention_lnx, ("activation_batch", "prefill_activation_length", "activation_embed")
+          attention_lnx, logical_axis_names
       )
     else:
       attention_lnx = nn.with_logical_constraint(
-          attention_lnx, ("activation_batch", "activation_length", "activation_embed")
+          attention_lnx, logical_axis_names
       )
 
     # MLP block.
@@ -140,9 +146,9 @@ class DecoderLayer(nn.Module):
         quant=self.quant,
     )(lnx, deterministic=deterministic)
     if model_mode == MODEL_MODE_PREFILL:
-      mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "prefill_activation_length", "activation_embed"))
+      mlp_lnx = nn.with_logical_constraint(mlp_lnx, logical_axis_names)
     else:
-      mlp_lnx = nn.with_logical_constraint(mlp_lnx, ("activation_batch", "activation_length", "activation_embed"))
+      mlp_lnx = nn.with_logical_constraint(mlp_lnx, logical_axis_names)
 
     next_layer_addition = mlp_lnx + attention_lnx
 
@@ -154,12 +160,12 @@ class DecoderLayer(nn.Module):
     if model_mode == MODEL_MODE_PREFILL:
       layer_output = nn.with_logical_constraint(
           layer_output,
-          ("activation_batch", "prefill_activation_length", "activation_embed"),
+          logical_axis_names,
       )
     else:
       layer_output = nn.with_logical_constraint(
           layer_output,
-          ("activation_batch", "activation_length", "activation_embed"),
+          logical_axis_names,
       )
 
     if cfg.record_internal_nn_metrics:

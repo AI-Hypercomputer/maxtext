@@ -120,14 +120,14 @@ class PrefillProcessor:
     """Process a new input."""
 
     process_fn = self._process_compiled(model_params, len(input_tokens_padded), return_prompt_logp)
-    return process_fn(model_params, input_tokens_padded, decode_slot, input_true_length, decode_state)
+    return process_fn(model_params, input_tokens_padded, decode_slot, input_true_length, decode_state, rng, return_prompt_logp)
 
   def _process_compiled(self, params: Params, padded_length: int, return_prompt_logp: bool = False):
     """Ahead-of-time compilation wrapper of _process()."""
 
     if padded_length not in self.process_func:
       log.info("compile prefill process(%d)", padded_length)
-      self.process_func[padded_length] = (
+      self.process_func[(padded_length, return_prompt_logp)] = (
           jax.jit(
               self._process,
               in_shardings=(self.engine.param_layouts, None, None, None, self.engine.decode_state_layouts, None),
@@ -136,7 +136,6 @@ class PrefillProcessor:
                   self.engine.decode_state_layouts,
               ),
               donate_argnames=("decode_state"),
-              static_argnames=("return_prompt_logp"),
           )
           .lower(
               params,
@@ -149,7 +148,7 @@ class PrefillProcessor:
           )
           .compile(compiler_options=None)
       )
-    return self.process_func[padded_length]
+    return self.process_func[(padded_length, return_prompt_logp)]
 
   def _process(
       self,
@@ -187,10 +186,10 @@ class BatchedPrefillProcessor:
         donate_argnames=("decode_state"),
     )
 
-  def aot_compile(self, params: Params, input_padding: int, capacity: int, num_prompts: int):
+  def aot_compile(self, params: Params, input_padding: int, capacity: int, num_prompts: int, return_prompt_logp: bool = False):
     """Ahead-of-time compile prefill processing routines."""
 
-    return self._process_batch_compiled(params, input_padding, capacity, num_prompts)
+    return self._process_batch_compiled(params, input_padding, capacity, num_prompts, return_prompt_logp)
 
   def process(
       self,
@@ -307,7 +306,7 @@ class BatchedPrefillProcessor:
           return_prompt_logp,
       )
     else:
-      prefill_fn = self._process_batch_compiled(model_params, input_padding, bucket.capacity, bucket.count)
+      prefill_fn = self._process_batch_compiled(model_params, input_padding, bucket.capacity, bucket.count, return_prompt_logp)
       first_tokens, decode_state = prefill_fn(
           model_params,
           tok_ids,
@@ -317,6 +316,7 @@ class BatchedPrefillProcessor:
           offsets_jax,
           lengths_jax,
           decode_state,
+          return_prompt_logp
       )
 
     prefill_result = []
@@ -331,12 +331,12 @@ class BatchedPrefillProcessor:
         prefill_result.append(PrefillResult(first_tokens[i], bucket.slots[i], None))
     return prefill_result, decode_state
 
-  def _process_batch_compiled(self, params: Params, padded_length: int, capacity: int, num_prompts: int):
+  def _process_batch_compiled(self, params: Params, padded_length: int, capacity: int, num_prompts: int, return_prompt_logp:bool):
     """Ahead-of-time compilation wrapper of _process_batch()."""
 
     if (padded_length, num_prompts) not in self.process_batch_func:
       log.info("compile prefill process_batch{(%d, %d)} capacity=%d", padded_length, num_prompts, capacity)
-      self.process_batch_func[(padded_length, num_prompts)] = (
+      self.process_batch_func[(padded_length, num_prompts, return_prompt_logp)] = (
           jax.jit(
               self._process_batch,
               in_shardings=(self.engine.param_layouts, None, None, None, None, None, None, self.engine.decode_state_layouts),
@@ -355,10 +355,11 @@ class BatchedPrefillProcessor:
               padded_length,
               jnp.full(self.max_batch_size, padded_length, dtype=int),
               self.engine.decode_state_shapes,
+              return_prompt_logp,
           )
           .compile(compiler_options=None)
       )
-    return self.process_batch_func[(padded_length, num_prompts)]
+    return self.process_batch_func[(padded_length, num_prompts, return_prompt_logp)]
 
   def _process_batch(  # pylint: disable=too-many-positional-arguments
       self,
