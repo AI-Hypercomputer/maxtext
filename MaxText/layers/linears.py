@@ -125,7 +125,7 @@ class DenseGeneral(nnx.Module):
     # Parameter initialization
     kernel_shape = self.in_features_shape + self.out_features_shape
     kernel_in_axis = np.arange(len(self.axis))
-    kernel_out_axis = np.arange(len(self.axis), len(self.axis) + len(self.out_features))
+    kernel_out_axis = np.arange(len(self.axis), len(self.axis) + len(self.out_features_shape))
 
     if not quantizations.in_serve_mode(self.quant):
       self.kernel = nnx.Param(
