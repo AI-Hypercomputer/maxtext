@@ -51,9 +51,10 @@ def self_attention_with_norm(
     decoder_positions,
     deterministic,
     model_mode,
-    previous_chunk = None,
+    previous_chunk=None,
     page_state: Optional[page_manager.PageState] = None,
-    slot: Optional[int] = None):
+    slot: Optional[int] = None,
+):
   """self-attention with normalization"""
   # Normalization
   lnx_rms = models.RMSNorm(
@@ -156,7 +157,7 @@ class DeepSeekDenseLayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
-      previous_chunk = None,
+      previous_chunk=None,
       page_state: Optional[page_manager.PageState] = None,
       slot: Optional[int] = None,
   ):
@@ -220,7 +221,7 @@ class DeepSeekMoELayer(nn.Module):
       decoder_positions,
       deterministic,
       model_mode,
-      previous_chunk = None,
+      previous_chunk=None,
       page_state: Optional[page_manager.PageState] = None,
       slot: Optional[int] = None,
   ):
