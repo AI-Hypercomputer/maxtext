@@ -24,12 +24,17 @@ from MaxText import optimizers
 from MaxText import checkpointing
 from MaxText import maxtext_utils
 
+def get_transformer_model(config, mesh, quant):
+  if config.model_fsdp_ag_once:
+    return models.ZeroOneTransformer(config, mesh, quant=quant)
+  else:
+    return models.Transformer(config, mesh, quant=quant)
 
 def create_model(config, mesh):
   """Instantiates and returns the model object, sharded across the mesh."""
   # Model definition
   quant = quantizations.configure_quantization(config)
-  model = models.Transformer(config, mesh, quant=quant)
+  model = get_transformer_model(config, mesh, quant)
   return model
 
 
