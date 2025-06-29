@@ -71,8 +71,7 @@ class DecoderLayer(nn.Module):
       logical_axis_names = ("activation_batch", "prefill_activation_length", "activation_embed")
     else:
       logical_axis_names = ("activation_batch", "activation_length", "activation_embed")
-    
-    
+
     if model_mode == MODEL_MODE_PREFILL:
       inputs = nn.with_logical_constraint(inputs, logical_axis_names)
     else:
@@ -126,13 +125,9 @@ class DecoderLayer(nn.Module):
     )
 
     if model_mode == MODEL_MODE_PREFILL:
-      attention_lnx = nn.with_logical_constraint(
-          attention_lnx, logical_axis_names
-      )
+      attention_lnx = nn.with_logical_constraint(attention_lnx, logical_axis_names)
     else:
-      attention_lnx = nn.with_logical_constraint(
-          attention_lnx, logical_axis_names
-      )
+      attention_lnx = nn.with_logical_constraint(attention_lnx, logical_axis_names)
 
     # MLP block.
     mlp_lnx = linears.MlpBlock(

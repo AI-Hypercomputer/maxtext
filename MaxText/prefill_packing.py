@@ -120,7 +120,9 @@ class PrefillProcessor:
     """Process a new input."""
 
     process_fn = self._process_compiled(model_params, len(input_tokens_padded), return_prompt_logp)
-    return process_fn(model_params, input_tokens_padded, decode_slot, input_true_length, decode_state, rng, return_prompt_logp)
+    return process_fn(
+        model_params, input_tokens_padded, decode_slot, input_true_length, decode_state, rng, return_prompt_logp
+    )
 
   def _process_compiled(self, params: Params, padded_length: int, return_prompt_logp: bool = False):
     """Ahead-of-time compilation wrapper of _process()."""
@@ -186,7 +188,9 @@ class BatchedPrefillProcessor:
         donate_argnames=("decode_state"),
     )
 
-  def aot_compile(self, params: Params, input_padding: int, capacity: int, num_prompts: int, return_prompt_logp: bool = False):
+  def aot_compile(
+      self, params: Params, input_padding: int, capacity: int, num_prompts: int, return_prompt_logp: bool = False
+  ):
     """Ahead-of-time compile prefill processing routines."""
 
     return self._process_batch_compiled(params, input_padding, capacity, num_prompts, return_prompt_logp)
@@ -306,17 +310,11 @@ class BatchedPrefillProcessor:
           return_prompt_logp,
       )
     else:
-      prefill_fn = self._process_batch_compiled(model_params, input_padding, bucket.capacity, bucket.count, return_prompt_logp)
+      prefill_fn = self._process_batch_compiled(
+          model_params, input_padding, bucket.capacity, bucket.count, return_prompt_logp
+      )
       first_tokens, decode_state = prefill_fn(
-          model_params,
-          tok_ids,
-          slots,
-          pos_ids,
-          seg_ids,
-          offsets_jax,
-          lengths_jax,
-          decode_state,
-          return_prompt_logp
+          model_params, tok_ids, slots, pos_ids, seg_ids, offsets_jax, lengths_jax, decode_state, return_prompt_logp
       )
 
     prefill_result = []
@@ -331,7 +329,9 @@ class BatchedPrefillProcessor:
         prefill_result.append(PrefillResult(first_tokens[i], bucket.slots[i], None))
     return prefill_result, decode_state
 
-  def _process_batch_compiled(self, params: Params, padded_length: int, capacity: int, num_prompts: int, return_prompt_logp:bool):
+  def _process_batch_compiled(
+      self, params: Params, padded_length: int, capacity: int, num_prompts: int, return_prompt_logp: bool
+  ):
     """Ahead-of-time compilation wrapper of _process_batch()."""
 
     if (padded_length, num_prompts) not in self.process_batch_func:
