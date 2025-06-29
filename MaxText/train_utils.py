@@ -22,7 +22,7 @@ from MaxText.layers import quantizations
 from MaxText.layers import models
 from MaxText import optimizers
 from MaxText import checkpointing
-from MaxText import maxtext_utils
+from MaxText import maxtext_utils 
 
 def get_transformer_model(config, mesh, quant):
   if config.model_fsdp_ag_once:
