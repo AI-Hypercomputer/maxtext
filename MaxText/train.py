@@ -24,7 +24,6 @@ from typing import Sequence
 import datetime
 import functools
 import os
-import queue
 import sys
 import time
 
@@ -36,9 +35,6 @@ import pathwaysutils  # pylint: disable=unused-import
 
 import tensorflow as tf
 
-from jax import random
-from jax.experimental import checkify
-from jax.sharding import Mesh
 import jax
 import jax.numpy as jnp
 
@@ -57,16 +53,16 @@ from cloud_tpu_diagnostics.configuration import diagnostic_configuration
 from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 from MaxText import checkpointing
+from MaxText import exceptions
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxtext_utils
-from MaxText import optimizers
+from MaxText import train_utils
 from MaxText import profiler
 from MaxText import pyconfig
-from MaxText.layers import quantizations
+from MaxText.data_loader import DataLoader
 from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.globals import DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE, EPS
-from MaxText.layers.models import Transformer, ZeroOneTransformer
 from MaxText.metric_logger import MetricLogger
 from MaxText.utils import gcs_utils
 from MaxText.utils.goodput_utils import (
@@ -78,10 +74,8 @@ from MaxText.utils.goodput_utils import (
 from MaxText.vertex_tensorboard import VertexTensorboardManager
 # Placeholder: internal
 
+import MaxText as mt
 # pylint: disable=too-many-positional-arguments
-
-EPS = 1e-8
-_DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE = 2 * 1024**3
 
 
 def validate_train_config(config):
@@ -115,25 +109,6 @@ def get_first_step(state):
   return int(state.step)
 
 
-def load_next_batch(train_iter, example_batch, config):
-  """Loads the next batch. Can keep reusing the same batch for performance reasons"""
-
-  if config.reuse_example_batch and example_batch is not None:
-    return example_batch
-  else:
-    return next(train_iter)
-
-
-def record_scalar_metrics(metrics, step_time_delta, per_device_tflops, lr, per_device_tokens):
-  """Records scalar metrics to be written to tensorboard"""
-  metrics["scalar"].update({"perf/step_time_seconds": step_time_delta.total_seconds()})
-  metrics["scalar"].update({"perf/per_device_tflops": per_device_tflops})
-  metrics["scalar"].update({"perf/per_device_tflops_per_sec": per_device_tflops / step_time_delta.total_seconds()})
-  metrics["scalar"].update({"perf/per_device_tokens": per_device_tokens})
-  metrics["scalar"].update({"perf/per_device_tokens_per_sec": per_device_tokens / step_time_delta.total_seconds()})
-  metrics["scalar"].update({"learning/current_learning_rate": lr})
-
-
 def save_checkpoint(
     checkpoint_manager,
     step,
@@ -161,7 +136,7 @@ def save_checkpoint(
       )
 
   # specify chunk_byte_size to force orbax to control maximum file size in checkpoint
-  chunk_byte_size = _DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
+  chunk_byte_size = DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
   if config:
     chunk_byte_size = config.checkpoint_storage_target_data_file_size_bytes
   save_args = jax.tree.map(lambda _: orbax.checkpoint.SaveArgs(chunk_byte_size=chunk_byte_size), state)
@@ -566,90 +541,6 @@ def eval_step(model, config, state, data, dropout_rng):
   return metrics
 
 
-def check_example_batch(config, example_batch):
-  if config.max_checkify:
-    jittable_f = checkify.checkify(lambda x: checkify.check(jnp.any(x > -1), "Batch contains bad synthetic data!"))
-    # Check if inputs in batch contains bad synthetic data.
-    # pylint: disable=not-callable
-    err, _ = jax.jit(jittable_f)(example_batch["inputs"][: config.global_batch_size_to_train_on, :])
-    err.throw()
-
-
-def setup_mesh_and_model(config, devices=None):
-  """Set up the mesh and the model for training
-
-  Args:
-    config
-    devices
-
-  Returns:
-    init_rng: RNG key
-    writer: Summary writer for tensorboard
-    checkpoint_manager: Orbax checkpointer
-    state_mesh_annotations: the mesh annotations for the train state
-    model:
-    mesh:
-    learning_rate_schedule:
-    tx:
-  """
-
-  init_rng = random.PRNGKey(config.init_weights_seed)
-  writer = max_utils.initialize_summary_writer(config.tensorboard_dir, config.run_name)
-
-  # Mesh definition
-  devices_array = maxtext_utils.create_device_mesh(config, devices)
-  mesh = Mesh(devices_array, config.mesh_axes)
-
-  # Model and Optimizer definition
-  quant = quantizations.configure_quantization(config)
-  # Determine which model class to use based on the config flag.
-  if config.model_fsdp_ag_once:
-    # Instantiate the Zero-1 wrapper model if the optimization is enabled.
-    model = ZeroOneTransformer(config, mesh, quant=quant)
-  else:
-    # Otherwise, use the standard memory-efficient Transformer model.
-    model = Transformer(config, mesh, quant=quant)
-  learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
-  tx = optimizers.get_optimizer(config, learning_rate_schedule)
-  logger = checkpointing.setup_checkpoint_logger(config)
-  if config.enable_emergency_checkpoint:
-    if config.use_replicator_service:
-      checkpoint_manager = checkpointing.create_orbax_emergency_replicator_checkpoint_manager(
-          config.local_checkpoint_directory,
-          config.local_checkpoint_period,
-          mesh,
-      )
-    else:
-      abstract_state, _, _ = maxtext_utils.get_abstract_state(model, tx, config, init_rng, mesh, is_training=True)
-      checkpoint_manager = checkpointing.create_orbax_emergency_checkpoint_manager(
-          config.local_checkpoint_directory,
-          config.checkpoint_dir,
-          mesh,
-          abstract_state,
-          config.local_checkpoint_period,
-          config.checkpoint_period,
-          logger,
-      )
-  else:
-    # TODO(b/368121306): Remove this once zarr3 support is plumbed on the backend
-    use_ocdbt = config.checkpoint_storage_use_ocdbt
-    use_zarr3 = config.checkpoint_storage_use_zarr3
-    if config.enable_single_controller:
-      use_ocdbt, use_zarr3 = False, False
-    checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
-        config.checkpoint_dir,
-        config.enable_checkpointing,
-        config.async_checkpointing,
-        config.checkpoint_period,
-        config.dataset_type,
-        logger,
-        use_ocdbt,
-        use_zarr3,
-    )
-
-  return init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx
-
-
 def setup_train_loop(config, recorder):
   """Set up prerequisites for the training loop -
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
@@ -661,7 +552,6 @@ def setup_train_loop(config, recorder):
 
   Returns:
     init_rng:
-    writer: Summary writer for tensorboard
     checkpoint_manager: Orbax checkpointer
     state_mesh_annotations: the mesh annotations for the train state
     model:
@@ -672,7 +562,9 @@ def setup_train_loop(config, recorder):
   """
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
-    init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
+    model = mt.from_pretrained(config)
+    mesh = model.mesh
+    init_rng, checkpoint_manager, learning_rate_schedule, tx = train_utils.create_training_tools(config, model, mesh)
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
@@ -729,7 +621,6 @@ def setup_train_loop(config, recorder):
 
   return (
       init_rng,
-      writer,
       checkpoint_manager,
       state_mesh_shardings,
       model,
@@ -745,7 +636,6 @@ def train_loop(config, recorder, state=None):
   """Main Training loop."""
   (
       init_rng,
-      writer,
       checkpoint_manager,
       state_mesh_shardings,
       model,
@@ -781,16 +671,6 @@ def train_loop(config, recorder, state=None):
         donate_argnums_eval,
     ) = maxtext_utils.get_functional_eval_with_signature(eval_step, mesh, state_mesh_shardings, model, config)
 
-  num_model_parameters = max_utils.calculate_num_params_from_pytree(state.params)
-  max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
-  per_device_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(config)
-  per_device_tokens = maxtext_utils.calculate_tokens_training_per_device(config)
-
-  # Write train config params, num model params, and XLA flags to tensorboard
-  max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), writer)
-  max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], writer)
-  maxtext_utils.add_config_to_summary_writer(config, writer)
-
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
   if config.compiled_trainstep_file != "":
     print("Loading the compiled function...", flush=True)
@@ -819,128 +699,78 @@ def train_loop(config, recorder, state=None):
     else:
       p_eval_step = None
 
-  running_gcs_metrics = [] if config.gcs_metrics else None
-  metrics = None
-
   start_step = get_first_step(state)  # this is the start_step for training
   prof = profiler.Profiler(config, offset_step=start_step)
-  first_profiling_step = prof.start_initial_profile_step
-  if config.profiler != "" and first_profiling_step >= config.steps:
-    raise ValueError("Profiling requested but initial profiling step set past training final step")
-  last_profiling_step = prof.finished_initial_profile_step
 
   example_batch = None
-  last_step_completion = datetime.datetime.now()
 
-  performance_metric_queue = None
-  if config.report_heartbeat_metric_for_gcp_monitoring or config.report_performance_metric_for_gcp_monitoring:
-    gcp_workload_monitor = GCPWorkloadMonitor(config.run_name)
-    if config.report_heartbeat_metric_for_gcp_monitoring:
-      gcp_workload_monitor.start_heartbeat_reporting_thread(config.heartbeat_reporting_interval_in_seconds)
-    if config.report_performance_metric_for_gcp_monitoring:
-      performance_metric_queue = queue.Queue()
-      gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
+  data_loader = DataLoader(config, mesh, data_iterator, recorder)
+  metric_logger = MetricLogger(config=config, learning_rate_schedule=learning_rate_schedule)
 
-  metric_logger = MetricLogger(writer, config)
-  input_data_shardings = maxtext_utils.get_input_data_sharding(config, mesh)
-  for step in np.arange(start_step, config.steps):
-    if step == first_profiling_step or prof.should_activate_periodic_profile(step):
-      optional_postfix = f"step_{step}" if config.profile_periodically_period > 0 else ""
-      prof.activate(blocking_object=state, optional_postfix=optional_postfix)
+  # Write train config params, num model params, and XLA flags to tensorboard
+  metric_logger.write_setup_info_to_tensorboard(state.params)
 
-    with jax.profiler.StepTraceAnnotation("train", step_num=step):
-      with maybe_record_goodput(recorder, GoodputEvent.DATA_LOADING):
-        try:
-          example_batch = load_next_batch(data_iterator, example_batch, config)
-          # Reshard data from loaded sharding to performant activation sharding
-          example_batch = jax.lax.with_sharding_constraint(example_batch, input_data_shardings)
-        except Exception as e:  # pylint: disable=broad-except
-          max_logging.log(f"load_next_batch failed, you may have run out of data. Error message: {e}")
-          break
+  try:
+    for step in np.arange(start_step, config.steps):
+      step_start_time = datetime.datetime.now()
+      prof.maybe_activate_profiler(step, state)
 
-      check_example_batch(config, example_batch=example_batch)
-      # pylint: disable=not-callable
-      nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
-      with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
-        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-          state, metrics = p_train_step(state, example_batch, nextrng)
+      with jax.profiler.StepTraceAnnotation("train", step_num=step):
+        example_batch = data_loader.load_next_batch()
+        # pylint: disable=not-callable
+        nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
+        with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
+          with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+            state, metrics = p_train_step(state, example_batch, nextrng)
 
-    step_time_delta = datetime.datetime.now() - last_step_completion
-    last_step_completion = datetime.datetime.now()
-    record_scalar_metrics(metrics, step_time_delta, per_device_tflops, learning_rate_schedule(step), per_device_tokens)
-    if performance_metric_queue:
-      performance_metric_queue.put(step_time_delta.total_seconds())
+      if checkpoint_manager is not None:
+        state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
+        if save_checkpoint(checkpoint_manager, int(step), state_to_save, config.dataset_type, data_iterator, config):
+          checkpointing.print_save_message(step, config.async_checkpointing)
 
-    if checkpoint_manager is not None:
-      state_to_save = state if not config.use_dpo else _split_dpo_state(state)[0]
-      if save_checkpoint(checkpoint_manager, int(step), state_to_save, config.dataset_type, data_iterator, config):
-        checkpointing.print_save_message(step, config.async_checkpointing)
+        # Upon preemption, exit when and only when all ongoing saves are complete.
+        if checkpoint_manager.reached_preemption(step):
+          checkpoint_manager.wait_until_finished()
+          sys.exit()
 
-      # Upon preemption, exit when and only when all ongoing saves are complete.
-      if checkpoint_manager.reached_preemption(step):
-        checkpoint_manager.wait_until_finished()
-        sys.exit()
+      if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
+        jax.block_until_ready(state)  # Ensure compilation has finished.
+        gcs_utils.upload_dump(
+            config.dump_hlo_local_dir,
+            config.dump_hlo_gcs_dir,
+            module_name=config.dump_hlo_module_name,
+            delete_local_after=config.dump_hlo_delete_local_after,
+            all_host_upload=config.dump_hlo_upload_all,
+        )
 
-    metric_logger.write_metrics(running_gcs_metrics, metrics, step)
+      if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
+        assert eval_data_iterator
+        eval_step_count = 0
+        # pylint: disable=not-callable
+        for eval_batch in eval_data_iterator:
+          if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
+            break
+          with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+            eval_metrics = p_eval_step(state, eval_batch, nextrng)
+          metric_logger.record_eval_metrics(step, metrics=eval_metrics)
+          max_logging.log(f"Completed eval step {eval_step_count}")
+          eval_step_count += 1
+        metric_logger.record_eval_metrics(step, eval_step_count=eval_step_count)
+        if metric_logger.cumulative_eval_metrics["scalar"]["eval/avg_loss"] <= config.target_eval_loss:
+          prof.deactivate()
+          raise exceptions.StopTraining(f"Target loss {config.target_eval_loss=} is achieved.")
 
-    if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
-      jax.block_until_ready(state)  # Ensure compilation has finished.
-      gcs_utils.upload_dump(
-          config.dump_hlo_local_dir,
-          config.dump_hlo_gcs_dir,
-          module_name=config.dump_hlo_module_name,
-          delete_local_after=config.dump_hlo_delete_local_after,
-          all_host_upload=config.dump_hlo_upload_all,
-      )
+      prof.maybe_deactivate_profiler(step, state)
 
-    if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
-      assert eval_data_iterator
-      cumulative_eval_metrics = {
-          "scalar": {
-              "eval/total_loss": 0.0,
-              "eval/total_weights": 0.0,
-              "eval/avg_loss": 0.0,
-              "eval/moe_lb_loss": 0.0,
-          }
-      }
-      eval_dpo_reward_accuracy = 0.0
-      eval_step_count = 0
-      # pylint: disable=not-callable
-      for eval_batch in eval_data_iterator:
-        if config.eval_steps > 0 and eval_step_count >= config.eval_steps:
-          break
-        with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
-          eval_metrics = p_eval_step(state, eval_batch, nextrng)
-        cumulative_eval_metrics["scalar"]["eval/total_loss"] += float(eval_metrics["scalar"]["evaluation/total_loss"])
-        cumulative_eval_metrics["scalar"]["eval/total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
-        cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] += float(eval_metrics["scalar"]["evaluation/moe_lb_loss"])
-        eval_dpo_reward_accuracy += float(eval_metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0))  # for dpo only
-        max_logging.log(f"Completed eval step {eval_step_count}")
-        eval_step_count += 1
-      eval_loss = cumulative_eval_metrics["scalar"]["eval/total_loss"] / (
-          cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS
-      )
-      cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
-      cumulative_eval_metrics["scalar"]["eval/avg_moe_lb_loss"] = (
-          cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
-      )
-      if config.use_dpo:
-        cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = eval_dpo_reward_accuracy / eval_step_count
-      metric_logger.write_metrics(running_gcs_metrics, cumulative_eval_metrics, step, is_training=False)
-      max_logging.log(
-          f"average loss after {step=}: {eval_step_count=}, {eval_loss=},"
-          f" total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}"
-      )
-      if eval_loss <= config.target_eval_loss:
-        max_logging.log(f"Early stop and exit loop after reaching {config.target_eval_loss=}")
-        prof.deactivate()
-        break
+      if step == start_step:
+        max_utils.print_mem_stats("After params initialized")
 
-    if step == last_profiling_step or prof.should_deactivate_periodic_profile(step):
-      prof.deactivate(blocking_object=state)
+      jax.block_until_ready(state)  # ensure training step is completed
 
-    if step == start_step:
-      max_utils.print_mem_stats("After params initialized")
+      step_time_delta = datetime.datetime.now() - step_start_time
+      metric_logger.record_train_metrics(metrics, step, step_time_delta)
+  except exceptions.StopTraining as e:
+    max_logging.log(f"Training stopped: {str(e)}")
 
   if checkpoint_manager is not None:
     if ((int(state.step) - 1) % config.checkpoint_period != 0) and (int(state.step) != 0):
@@ -960,8 +790,7 @@ def train_loop(config, recorder, state=None):
         max_logging.log(f"Checkpoint is already saved for step {int(state.step)-1}.")
 
     checkpoint_manager.wait_until_finished()
-  metric_logger.write_metrics(running_gcs_metrics, metrics, config.steps - 1)  # final step metrics
-  max_utils.close_summary_writer(writer)
+  metric_logger.cleanup()
 
   if example_batch:
     with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
@@ -987,6 +816,8 @@ def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
     os.environ["LIBTPU_INIT_ARGS"] = os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
+  # TODO: mazumdera@ : ensure missing mandatory fields in base.yml are filled in in argv,
+  # or fill in here
   config = pyconfig.initialize(argv)
   max_utils.print_system_information()
   validate_train_config(config)
