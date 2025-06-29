@@ -137,7 +137,7 @@ class PrefillResult:
 
   result_tokens: engine_api.ResultTokens
   slot: int
-  prompt_logp: jax.Array
+  prompt_logp: Optional[jax.Array]
 
 
 class PrefillHelper:

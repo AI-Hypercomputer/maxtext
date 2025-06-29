@@ -402,7 +402,7 @@ class MaxEngine(engine_api.Engine):
         rng=rng,
     )
 
-  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=("request_id", "return_prompt_logp"))
+  @functools.partial(jax.jit, static_argnums=(0,), static_argnames=( "return_prompt_logp"))
   def _prefill_jit(
       self,
       *,
@@ -413,7 +413,6 @@ class MaxEngine(engine_api.Engine):
       true_length: int,
       sampler: Optional[Callable[[Any], Any]] = None,  # pylint: disable=unused-argument
       rng: Optional[PRNGKeyType] = None,
-      request_id: Optional[uuid.UUID] = None,  # pylint: disable=unused-argument
       slot: Optional[int] = None,
       page_state: Optional[PageState] = None,
       return_prompt_logp: bool = False,
@@ -576,7 +575,6 @@ class MaxEngine(engine_api.Engine):
         page_state=self.page_state,  # Pass current page state
         slot=slot,
         rng=rng,
-        request_id=request_id,
         return_prompt_logp=return_prompt_logp,
     )
 

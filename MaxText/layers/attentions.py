@@ -1415,7 +1415,7 @@ class Attention(nn.Module):
   prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM)
   query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   input_axis_names: AxisNames = (BATCH, LENGTH, EMBED)
-  prefill_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED)
+  prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED)
   decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED)
   key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
   value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM)
@@ -1703,8 +1703,8 @@ class Attention(nn.Module):
       output of shape `[batch, length, q_features]`.
     """
     if model_mode == MODEL_MODE_PREFILL:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_axis_names)
+      inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_input_axis_names)
     elif model_mode == MODEL_MODE_TRAIN:
       inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
@@ -2080,8 +2080,8 @@ class MLA(Attention):
       MLA-attended outputs.
     """
     if model_mode == MODEL_MODE_PREFILL:
-      inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_axis_names)
-      inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_axis_names)
+      inputs_q = nn.with_logical_constraint(inputs_q, self.prefill_input_axis_names)
+      inputs_kv = nn.with_logical_constraint(inputs_kv, self.prefill_input_axis_names)
     else:
       inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
       inputs_kv = nn.with_logical_constraint(inputs_kv, self.input_axis_names)
