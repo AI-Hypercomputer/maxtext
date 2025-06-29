@@ -904,7 +904,7 @@ def validate_deepseek_moe(raw_keys):
 
 
 def validate_sparse_matmul_parallelism(raw_keys):
-  if raw_keys["sparse_matmul"] and (using_sequence_parallelism(raw_keys) or using_pipeline_parallelism(raw_keys)):
+  if raw_keys["sparse_matmul"] and using_sequence_parallelism(raw_keys):
     raise ValueError("Currently we only support Megablox and Ragged dot with data, tensor, and expert parallelism.")
   tensor_parallelism = (
       raw_keys["ici_tensor_parallelism"]
@@ -923,6 +923,10 @@ def validate_sparse_matmul_parallelism(raw_keys):
     raise ValueError(
         f"The expert dimension {raw_keys['num_experts']} is not divisible by expert parallelism setting {expert_parallelism}."
     )
+  if using_pipeline_parallelism(raw_keys) and (
+      raw_keys["pipeline_fsdp_ag_once"] is False or raw_keys["model_fsdp_ag_once"] is True
+  ):
+    raise ValueError("You should use the pipeline_fsdp_ag_once=True and leave model_fsdp_ag_once=False")
 
 
 def create_new_logical_axis_rules(old_logical_axis_rules, new_logical_axis_rules):
