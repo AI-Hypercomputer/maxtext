@@ -632,7 +632,7 @@ def setup_train_loop(config, recorder):
   )
 
 
-def train_loop(config, recorder, state=None):
+def train_loop(config, recorder, state=None, heartbeat_fn=None, failure_fn=None):
   """Main Training loop."""
   (
       init_rng,
@@ -733,6 +733,9 @@ def train_loop(config, recorder, state=None):
           checkpoint_manager.wait_until_finished()
           sys.exit()
 
+      if heartbeat_fn is not None:
+        heartbeat_fn()
+        
       if config.dump_hlo and step == (config.dump_step if config.dump_step >= 0 else start_step):
         jax.block_until_ready(state)  # Ensure compilation has finished.
         gcs_utils.upload_dump(
@@ -769,6 +772,8 @@ def train_loop(config, recorder, state=None):
 
       step_time_delta = datetime.datetime.now() - step_start_time
       metric_logger.record_train_metrics(metrics, step, step_time_delta)
+      if failure_fn is not None:
+        failure_fn()
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
 

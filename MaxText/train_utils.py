@@ -68,6 +68,7 @@ def create_training_tools(config, model, mesh):
         config.enable_checkpointing,
         config.async_checkpointing,
         config.checkpoint_period,
+        config.num_checkpoints_to_keep,
         config.dataset_type,
         logger,
         use_ocdbt,
