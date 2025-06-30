@@ -242,14 +242,7 @@ def main(config, test_args):  # pylint: disable=W0621
 
       if test_args.hf_model_path != "":
         with torch.no_grad():
-          # For HF, attention_mask should be 1 for non-padding tokens.
-          attention_mask = torch.tensor(decoder_segment_ids, dtype=torch.int)
-          full_train_logits = (
-              model(input_ids=torch.tensor(ids.tolist()), attention_mask=attention_mask)
-              .logits.cpu()
-              .numpy()
-              .astype("float32")
-          )
+          full_train_logits = model(torch.tensor(ids.tolist())).logits.cpu().numpy().astype("float32")
       else:
         # TODO(hengtaoguo): Add support for multimodal full prompt decoding check
         full_train_logits = model.apply(
@@ -260,9 +253,8 @@ def main(config, test_args):  # pylint: disable=W0621
             enable_dropout=False,
             rngs={"aqt": init_rng},
         )
-      if isinstance(full_train_logits, jax.Array):
-        full_train_logits = jax.experimental.multihost_utils.process_allgather(full_train_logits)
 
+      full_train_logits = jax.experimental.multihost_utils.process_allgather(full_train_logits)
       # Slice to original sequence length
       full_train_logits = full_train_logits[:, :seq_len, :]
 
