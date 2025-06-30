@@ -28,6 +28,7 @@ Usage:
 from collections.abc import Callable
 import functools
 import os
+import sys
 import subprocess
 import unittest
 
@@ -53,7 +54,9 @@ from MaxText.experimental.rl.grpo_trainer import compute_log_probs, grpo_loss_fn
 from MaxText.globals import PKG_DIR
 from MaxText.layers import models
 from MaxText.layers import quantizations
+from MaxText import optimizers
 
+import pathwaysutils
 
 def get_golden_data(config):
   """Get the golden data for GrpoTrainer from maxtext/MaxText/scratch_code/generate_grpo_golden_logits.py."""
@@ -213,6 +216,153 @@ class GrpoTrainerTest(unittest.TestCase):
     engine_data = p_generate_completions(engine_data, {"params": state.params["params"]}, rng)
     # Assert that the generated completions match the golden reference.
     self.assertEqual(engine_data["prompt_completions"][0].tolist(), golden_data["generated_completions"])
+
+class ReshardTest(unittest.TestCase):
+  def setUp(self):
+    super().setUp()
+    pathwaysutils.initialize()
+    self.training_config, self.inference_config = self.init_pyconfig()
+    self.rng = jax.random.PRNGKey(self.training_config.init_weights_seed)
+  
+  def init_pyconfig(self, **kwargs):
+    """Initialize MaxText pyconfig."""
+    init_kwargs = {
+        "run_name": "test",
+        # Parallelism
+        "per_device_batch_size": 1,
+        "ici_data_parallelism": 1,
+        "ici_fsdp_parallelism": -1,
+        # Model
+        "model_name": "gemma2-2b",
+        "skip_jax_distributed_system": True,
+        "enable_checkpointing": False,
+    } | kwargs
+    training_config = pyconfig.initialize(
+        [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml")],
+        **init_kwargs,
+    )
+    inference_config = pyconfig.initialize(
+      [sys.argv[0], os.path.join(PKG_DIR, "configs", "base.yml"), "ici_fsdp_parallelism=1", "ici_tensor_parallelism=4",],
+        **init_kwargs,
+    )
+    return training_config, inference_config
+  
+  def init_named_sharded_params(self, rng_key, mesh):
+    """
+    Create a nested param tree matching your structure, with arrays initialized
+    randomly and sharded using NamedSharding and PartitionSpec.
+    """
+    key = rng_key
+
+    def make(name, shape, dtype, pspec):
+      nonlocal key
+      key, sub = jax.random.split(key)
+      arr = jax.random.normal(sub, shape, dtype=dtype)
+      sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(*pspec))
+      return jax.device_put(arr, sharding)
+
+    return {
+      'decoder': {
+          'decoder_norm': {
+              'scale': make(
+                  'decoder_norm/scale',
+                  (2304,),
+                  jnp.float32,
+                  pspec=(('tensor', 'tensor_transpose', 'tensor_sequence'),)
+              ),
+          },
+          'layers': {
+              'mlp_local': {
+                  'wi_0': {'kernel': make('mlp_local/wi_0/kernel',
+                                            (2304,13,9216), jnp.float32,
+                                            pspec=(('fsdp','sequence','tensor_transpose','context','expert'),
+                                                  'stage',
+                                                  ('fsdp_transpose','tensor','tensor_sequence','autoregressive')))},
+              },
+              # Norms
+              **{
+                  'post_ffw_norm_global': {
+                      'scale': make(f'post_ffw_norm_global/scale',
+                                    (2304,13), jnp.float32,
+                                    pspec=(('tensor','tensor_transpose','tensor_sequence'),('stage')))
+                  }
+              },
+              # Self-Attention
+              'self_attention_global': {
+                    'self_attention_global': {
+                        'kernel': make(f'self_attention_global/key/kernel',
+                                        (2304,13,8,256), jnp.float32,
+                                        pspec=(('fsdp','fsdp_transpose','sequence','context','expert'),
+                                              'stage',
+                                              ('tensor','tensor_transpose','tensor_sequence'),
+                                              'autoregressive'))
+                    },
+              },
+          },
+      },
+      'token_embedder': {
+        'embedding': make(
+          'token_embedder/embedding',
+          (256128,2304), jnp.float32,
+          pspec=(('tensor','tensor_transpose','tensor_sequence','autoregressive'),
+          ('fsdp','fsdp_transpose','sequence','context','expert'))
+        )
+      }
+    }
+  
+  def test_pathways_reshard(self):
+    # assume the test runs on 32 v5p devices
+    training_devices = jax.devices()[16:]
+    training_devices = maxtext_utils.create_device_mesh(self.training_config, devices=training_devices)
+    training_mesh = Mesh(training_devices, self.training_config.mesh_axes)
+    inference_devices = jax.devices()[:4]
+    inference_devices = maxtext_utils.create_device_mesh(config=self.inference_config, devices=inference_devices)
+    inference_mesh = jax.sharding.Mesh(inference_devices, self.inference_config.mesh_axes)
+    # model = models.Transformer(config=self.training_config, mesh=training_mesh, quant=None)
+    # inference_model = models.Transformer(self.inference_config, inference_mesh, quant=None)
+    # tx = optimizers.get_optimizer(self.training_config, 0.01)
+    # state, _, state_mesh_shardings, _ = maxtext_utils.setup_training_state(
+    #     model, None, tx, self.training_config, self.rng, training_mesh, None
+    # )
+    # inference_state_mesh_shardings = maxtext_utils.get_abstract_state(inference_model, tx, self.inference_config, self.rng, inference_mesh, is_training=False)[2]
+    
+    def list_params_with_paths(params):
+      """
+      Return a list of (string path, array) entries from a pytree of parameters.
+      """
+      path_vals, _ = jax.tree_util.tree_flatten_with_path(params)
+      result = []
+      for keypath, leaf in path_vals:
+          # Convert KeyPath to human-readable string
+          readable = jax.tree_util.keystr(keypath)
+          result.append((readable, leaf))
+      return result
+
+    # # Usage example
+    # pairs = list_params_with_paths(inference_state_mesh_shardings.params)
+    # for path, arr in pairs:
+    #   print(f"{path}: sharding={arr}")
+    params = self.init_named_sharded_params(self.rng, training_mesh)
+    def apply_resharding(params, mesh):
+      """
+      Shard each array in a pytree according to spec_map.
+
+      - params: nested pytree (e.g. state.params)
+      - mesh: JAX mesh with named axes
+      """
+      def fn(path, leaf):
+        spec = leaf.sharding.spec
+        if spec is None:
+          return leaf
+        sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(*spec))
+        with (
+          jax.transfer_guard_device_to_host("disallow_explicit"),
+          jax.transfer_guard_host_to_device("disallow_explicit"),
+        ):
+          return jax.device_put(leaf, sharding)
+
+      return jax.tree_util.tree_map_with_path(fn, params)
+    resharded_params = apply_resharding(params, inference_mesh)
 
 
 if __name__ == "__main__":
