@@ -147,6 +147,10 @@ def run_and_time_vmap_ep(batch_per_ep, model):
     x_vmap = jax.jit(expand_array_for_vmap)(x)
     x_vmap.block_until_ready()
 
+    # x_vmap = jnp.zeros((pipeline_parallelism, batch, model), dtype=jnp.bfloat16)
+    # x_vmap = jax.device_put(x_vmap, vmap_sharding)
+
+
     output_shape_vmap = expand_array_for_vmap(output_shape)
     input_offsets_vmap = expand_array_for_vmap(input_offsets)
     send_sizes_vmap = expand_array_for_vmap(send_sizes)
