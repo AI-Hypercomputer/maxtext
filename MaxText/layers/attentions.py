@@ -1609,6 +1609,7 @@ class Attention(nn.Module):
           max_timescale=self.config.rope_max_timescale,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
+          name=name,
           use_scale=rope_use_scale,
       )
     elif rope_type.startswith("yarn"):
@@ -1633,6 +1634,7 @@ class Attention(nn.Module):
           max_timescale=max_timescale,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
+          name=name,
       )
     inputs = rotary_embedding(inputs, inputs_positions)
     return inputs

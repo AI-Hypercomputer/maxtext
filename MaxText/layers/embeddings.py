@@ -129,7 +129,8 @@ def rotary_embedding_as_linen(
     max_timescale: int,
     embedding_dims: int = 0,
     cast_as_fprop_dtype: bool = True,
-    fprop_dtype: DType = jnp.bfloat16
+    fprop_dtype: DType = jnp.bfloat16,
+    name: str | None = None
 ):
   """Initializes the RotaryEmbedding module and returns it as a Linen module.
 
@@ -141,6 +142,7 @@ def rotary_embedding_as_linen(
     embedding_dims: Dimension of the embedding to be generated.
     cast_as_fprop_dtype: Whether to cast the output to the fprop dtype.
     fprop_dtype: The dtype of the output.
+    name: Name of the Linen module.
   """
   return nnx.bridge.to_linen(
     RotaryEmbedding,
@@ -149,7 +151,8 @@ def rotary_embedding_as_linen(
     embedding_dims=embedding_dims,
     cast_as_fprop_dtype=cast_as_fprop_dtype,
     fprop_dtype=fprop_dtype,
-    metadata_fn=variable_to_logically_partitioned
+    metadata_fn=variable_to_logically_partitioned,
+    name=name
   )
 
 
@@ -244,7 +247,8 @@ def llama_rotary_embedding_as_linen(
     embedding_dims: int = 0,
     cast_as_fprop_dtype: bool = True,
     fprop_dtype: DType = jnp.bfloat16,
-    use_scale: bool = True
+    use_scale: bool = True,
+    name: str | None = None
 ):
   """Initializes the LLaMARotaryEmbedding module and returns it as a Linen module.
 
@@ -257,6 +261,7 @@ def llama_rotary_embedding_as_linen(
     cast_as_fprop_dtype: Whether to cast the output to the fprop dtype.
     fprop_dtype: The dtype of the output.
     use_scale: Whether to apply LLaMA3.1 scaling factor.
+    name: Name of the Linen module.
   """
   return nnx.bridge.to_linen(
     LLaMARotaryEmbedding,
@@ -266,7 +271,8 @@ def llama_rotary_embedding_as_linen(
     cast_as_fprop_dtype=cast_as_fprop_dtype,
     fprop_dtype=fprop_dtype,
     use_scale=use_scale,
-    metadata_fn=variable_to_logically_partitioned
+    metadata_fn=variable_to_logically_partitioned,
+    name=name
   )
 
 
