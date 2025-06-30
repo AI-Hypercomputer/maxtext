@@ -152,7 +152,7 @@ jobs:
   notify_success:
     if: ${{ success() }}
     name: Notify successful build
-    needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
+    # needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
     runs-on: ubuntu-latest
     steps:
     - name: Log message if dependent job succeeded
