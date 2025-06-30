@@ -41,6 +41,7 @@ def nd_dense_init(scale, mode, distribution):
 
   return init_fn
 
+
 def variable_to_logically_partitioned(variable: nnx.VariableState):
   metadata = variable.get_metadata()
   return nn.LogicallyPartitioned(  # type: ignore[wrong-keyword-args]

@@ -217,12 +217,7 @@ class _Fp8EinsumWrapper(nn.Module):
     # We cast rhs to the desired computation dtype.
     # nn.Fp8Einsum will then cast lhs to the same dtype.
     rhs = rhs.astype(self.dtype)
-    return nn.Fp8Einsum(name='fp8_einsum') (
-        eqn,
-        lhs,
-        rhs,
-        **kwargs
-    )
+    return nn.Fp8Einsum(name="fp8_einsum")(eqn, lhs, rhs, **kwargs)
 
 
 class Fp8Einsum(nn.Module):
@@ -374,6 +369,7 @@ def _build_const_scale_config(
 
   return aqt_dg
 
+
 @dataclass
 class PerTensorScales:
   fwd_lhs: bool = False
@@ -383,8 +379,10 @@ class PerTensorScales:
   drhs_lhs: bool = False
   drhs_rhs: bool = False
 
+
 def _build_per_tensor_config(
-    aqt_dg: aqt_config.DotGeneral, per_tensor_scales: PerTensorScales,
+    aqt_dg: aqt_config.DotGeneral,
+    per_tensor_scales: PerTensorScales,
 ) -> aqt_config.DotGeneral:
   """Build a per tensor config for AQT dot general.
 

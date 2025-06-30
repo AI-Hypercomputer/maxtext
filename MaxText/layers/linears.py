@@ -84,9 +84,7 @@ class DenseGeneral(nnx.Module):
       axis: Union[Iterable[int], int] = -1,
       weight_dtype: DType = jnp.float32,
       dtype: DType = jnp.float32,
-      kernel_init: NdInitializer = nd_dense_init(
-          1.0, "fan_in", "truncated_normal"
-      ),
+      kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
       kernel_axes: Tuple[Optional[str], ...] = (),
       quant: Optional[Quant] = None,
       use_bias: bool = False,
@@ -127,9 +125,7 @@ class DenseGeneral(nnx.Module):
     # Parameter initialization
     kernel_shape = self.in_features_shape + self.out_features_shape
     kernel_in_axis = np.arange(len(self.axis))
-    kernel_out_axis = np.arange(
-        len(self.axis), len(self.axis) + len(self.out_features_shape)
-    )
+    kernel_out_axis = np.arange(len(self.axis), len(self.axis) + len(self.out_features_shape))
 
     if not quantizations.in_serve_mode(self.quant):
       self.kernel = nnx.Param(
@@ -208,9 +204,7 @@ def dense_general(
     axis: Union[Iterable[int], int] = -1,
     weight_dtype: DType = jnp.float32,
     dtype: DType = jnp.float32,
-    kernel_init: NdInitializer = nd_dense_init(
-        1.0, "fan_in", "truncated_normal"
-    ),
+    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
     kernel_axes: Tuple[Optional[str], ...] = (),
     quant: Optional[Quant] = None,
     use_bias: bool = False,
@@ -237,15 +231,11 @@ def dense_general(
     name: name passed to the ToLinen Module
   """
   if not (inputs_shape is not None) ^ (in_features_shape is not None):
-    raise ValueError(
-        "Exactly one of inputs_shape or in_features must be specified."
-    )
+    raise ValueError("Exactly one of inputs_shape or in_features must be specified.")
 
   if inputs_shape is not None:
     axis = _canonicalize_tuple(axis)
-    in_features_shape = tuple(
-        inputs_shape[ax] for ax in _normalize_axes(axis, len(inputs_shape))
-    )
+    in_features_shape = tuple(inputs_shape[ax] for ax in _normalize_axes(axis, len(inputs_shape)))
   else:
     assert in_features_shape is not None
   module = nnx.bridge.to_linen(
@@ -311,7 +301,7 @@ class MlpBlock(nn.Module):
       from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
 
       return functools.partial(
-        gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=self.use_bias
+          gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=self.use_bias
       )
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")

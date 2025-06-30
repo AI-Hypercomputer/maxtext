@@ -96,9 +96,7 @@ class GateLogit(nn.Module):
   axis: Union[Iterable[int], int] = -1
   weight_dtype: ctypes.DType = jnp.float32
   dtype: ctypes.DType = jnp.float32
-  kernel_init: attentions.NdInitializer = attentions.nd_dense_init(
-      1.0, "fan_in", "truncated_normal"
-  )
+  kernel_init: attentions.NdInitializer = attentions.nd_dense_init(1.0, "fan_in", "truncated_normal")
   kernel_axes: Tuple[Optional[str], ...] = ()
   use_bias: bool = False
   score_func: str = ""
@@ -106,9 +104,7 @@ class GateLogit(nn.Module):
   matmul_precision: str = "default"
 
   @nn.compact
-  def __call__(
-      self, inputs: ctypes.Array
-  ) -> Tuple[ctypes.Array, Optional[ctypes.Array]]:
+  def __call__(self, inputs: ctypes.Array) -> Tuple[ctypes.Array, Optional[ctypes.Array]]:
 
     features = linears._canonicalize_tuple(self.features)
     axis = linears._canonicalize_tuple(self.axis)
@@ -159,9 +155,7 @@ class GateLogit(nn.Module):
       )
       bias = self.param(
           "bias",
-          nn.with_logical_partitioning(
-              initializers.default_bias_init, bias_axes
-          ),
+          nn.with_logical_partitioning(initializers.default_bias_init, bias_axes),
           bias_shape,
           self.weight_dtype,
       )
@@ -289,9 +283,7 @@ class RoutedMoE(nn.Module):
     if self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK:
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
     elif self.config.decoder_block != ctypes.DecoderBlockType.LLAMA4:
-      top_k_weights = jax.nn.softmax(
-          top_k_weights.astype(jnp.float32), axis=-1
-      ).astype(self.dtype)
+      top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
     return top_k_weights, top_k_indices
 
   def deepseek_scale_weights(self, weights):
@@ -598,9 +590,7 @@ class RoutedMoE(nn.Module):
         elif strategy == TransformStrategy.OUTPUT_OFFSET:
           # The offset in each shard will just be the start of the group which
           # that shard is responsible for.
-          output_offset = jnp.concatenate(
-              (jnp.array([0]), jnp.cumsum(input_array[:-1]))
-          )[shard_id]
+          output_offset = jnp.concatenate((jnp.array([0]), jnp.cumsum(input_array[:-1])))[shard_id]
           return jnp.repeat(output_offset, num_expert_parallelism)
         # The amount that each shard receives from all other shards is
         # equivalent to the group sizes (aka input_array).
@@ -657,15 +647,10 @@ class RoutedMoE(nn.Module):
       hs_shape = inputs.shape
       # pad length is the 1st dimension of tiling size in gmm call
       if inputs.shape[0] != expert_assignments.shape[0]:
-        raise ValueError(
-            "The number of input tokens must match the number of expert"
-            " assignments!"
-        )
+        raise ValueError("The number of input tokens must match the number of expert" " assignments!")
       if hs_shape[0] % pad_length:
         pad_length = pad_length - hs_shape[0] % pad_length
-        inputs = jax.lax.pad(
-            inputs.astype(jnp.float32), 0.0, [(0, pad_length, 0), (0, 0, 0)]
-        )
+        inputs = jax.lax.pad(inputs.astype(jnp.float32), 0.0, [(0, pad_length, 0), (0, 0, 0)])
 
       inputs = inputs.astype(self.dtype)
       kernel = kernel.astype(self.dtype)
@@ -700,9 +685,7 @@ class RoutedMoE(nn.Module):
                 "Unsupported usecase for ragged_dot with quantized kernel."
             )
           rhs_inputs = kernel.qvalue
-        with set_xla_metadata(
-            ragged_dot_tiling=",".join([str(t) for t in tiling])
-        ):
+        with set_xla_metadata(ragged_dot_tiling=",".join([str(t) for t in tiling])):
           output = jax.lax.ragged_dot(
               lhs=inputs,
               rhs=rhs_inputs,
@@ -711,9 +694,7 @@ class RoutedMoE(nn.Module):
           )
         if isinstance(kernel, aqt.QTensor):
           # Multiply outputs by the kernely scale
-          scales = jnp.take(
-              kernel.scale[0].squeeze(), indices=expert_assignments, axis=0
-          )
+          scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0)
           if hs_shape[0] % pad_length:
             scales = jax.lax.pad(
                 scales,
@@ -740,7 +721,9 @@ class RoutedMoE(nn.Module):
                   lambda tup: tup[0] == "activation_batch",
                   self.config.logical_axis_rules,
               )
-          )[0][1]
+          )[
+              0
+          ][1]
       )
     except:  # pylint: disable=bare-except
       is_batch_sharded_by_expert = False
@@ -766,17 +749,11 @@ class RoutedMoE(nn.Module):
     w1_pspec = nn.logical_to_mesh_axes(("exp", None, "mlp"))
     wo_pspec = nn.logical_to_mesh_axes(("exp", "mlp", None))
     if isinstance(w0_kernel, aqt.QTensor):
-      w0_pspec = aqt.partition_spec(
-          w0_pspec, (1,), w0_kernel.dtype, use_bias=False
-      )
+      w0_pspec = aqt.partition_spec(w0_pspec, (1,), w0_kernel.dtype, use_bias=False)
     if isinstance(w1_kernel, aqt.QTensor):
-      w1_pspec = aqt.partition_spec(
-          w1_pspec, (1,), w1_kernel.dtype, use_bias=False
-      )
+      w1_pspec = aqt.partition_spec(w1_pspec, (1,), w1_kernel.dtype, use_bias=False)
     if isinstance(wo_kernel, aqt.QTensor):
-      wo_pspec = aqt.partition_spec(
-          wo_pspec, (1,), wo_kernel.dtype, use_bias=False
-      )
+      wo_pspec = aqt.partition_spec(wo_pspec, (1,), wo_kernel.dtype, use_bias=False)
 
     @functools.partial(
         shard_map.shard_map,
@@ -789,11 +766,7 @@ class RoutedMoE(nn.Module):
             w1_pspec,
             wo_pspec,
         ),
-        out_specs=(
-            nn.logical_to_mesh_axes(
-                (batch_logical_axis, "activation_length", "activation_embed")
-            )
-        ),
+        out_specs=(nn.logical_to_mesh_axes((batch_logical_axis, "activation_length", "activation_embed"))),
         check_rep=False,
     )
     def wrapper(x, logits, pre_bias_logits, w0, w1, wo):
@@ -813,15 +786,11 @@ class RoutedMoE(nn.Module):
         )
         global_group_sizes = group_sizes
         if is_batch_sharded_by_expert:
-          all_shards_group_sizes = jax.lax.all_gather(
-              reshaped_group_sizes, axis_name=batch_axis
-          )
-          input_offsets, send_sizes, output_offsets, recv_sizes = (
-              RoutedMoE.get_all_to_all_params(
-                  all_shards_group_sizes,
-                  expert_shard_id,
-                  num_expert_parallelism,
-              )
+          all_shards_group_sizes = jax.lax.all_gather(reshaped_group_sizes, axis_name=batch_axis)
+          input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
+              all_shards_group_sizes,
+              expert_shard_id,
+              num_expert_parallelism,
           )
           # TODO(ranran): For better performance, we could update output buffer
           # to a smaller size to replace self.get_expert_parallelism_size() for
@@ -847,16 +816,12 @@ class RoutedMoE(nn.Module):
               recv_sizes,
               axis_name=expert_axis_name,
           )
-          global_group_sizes = jax.lax.all_gather(
-              group_sizes, axis_name=expert_axis_name
-          )
-          x, local_sorted_indices, group_sizes, selected_experts = (
-              RoutedMoE.local_permute(
-                  x,
-                  global_group_sizes,
-                  local_expert_size,
-                  shard_index=expert_shard_id,
-              )
+          global_group_sizes = jax.lax.all_gather(group_sizes, axis_name=expert_axis_name)
+          x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
+              x,
+              global_group_sizes,
+              local_expert_size,
+              shard_index=expert_shard_id,
           )
         else:
           x, local_sorted_indices, group_sizes, selected_experts = (
@@ -879,9 +844,7 @@ class RoutedMoE(nn.Module):
           self.config.mlp_activations[0]
       )(layer_w0)
       intermediate_layer = jnp.multiply(layer_act, layer_w1)
-      intermediate_output = gmm(
-          intermediate_layer, wo, group_sizes, selected_experts
-      )
+      intermediate_output = gmm(intermediate_layer, wo, group_sizes, selected_experts)
       intermediate_output = adc.checkpoint_name(intermediate_output, "mlpwo")
 
       if self.get_tensor_parallelism_size() > 1:
@@ -894,10 +857,7 @@ class RoutedMoE(nn.Module):
             batch_size * sequence_length * self.config.num_experts_per_tok
         )
         if sorted_selected_experts.shape[0] != original_inputs_first_dim:
-          raise ValueError(
-              "original_inputs_first_dim does not match the original tensor"
-              " shape!"
-          )
+          raise ValueError("original_inputs_first_dim does not match the original tensor" " shape!")
         output_shape = jnp.zeros(
             (
                 original_inputs_first_dim,
@@ -912,12 +872,10 @@ class RoutedMoE(nn.Module):
               indices=jnp.argsort(local_sorted_indices),  # pylint: disable=undefined-variable
               axis=0,
           )
-          input_offsets, send_sizes, output_offsets, recv_sizes = (
-              RoutedMoE.get_all_to_all_params(
-                  jnp.transpose(all_shards_group_sizes),  # pylint: disable=undefined-variable
-                  expert_shard_id,
-                  num_expert_parallelism,
-              )
+          input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
+              jnp.transpose(all_shards_group_sizes),  # pylint: disable=undefined-variable
+              expert_shard_id,
+              num_expert_parallelism,
           )
           intermediate_output = jax.lax.ragged_all_to_all(
               local_output,
@@ -933,13 +891,11 @@ class RoutedMoE(nn.Module):
           # 0..local_shard_size data to the other shards and receive the
           # local_shard data from all of the other shards using
           # ragged_all_to_all.
-          input_offsets, send_sizes, output_offsets, recv_sizes = (
-              RoutedMoE.get_all_to_all_params(
-                  reshaped_group_sizes,  # pylint: disable=undefined-variable
-                  expert_shard_id,
-                  num_expert_parallelism,
-                  is_batch_sharded=False,
-              )
+          input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
+              reshaped_group_sizes,  # pylint: disable=undefined-variable
+              expert_shard_id,
+              num_expert_parallelism,
+              is_batch_sharded=False,
           )
           intermediate_output = jax.lax.ragged_all_to_all(
               intermediate_output,
@@ -969,9 +925,7 @@ class RoutedMoE(nn.Module):
     """reshape and update weights."""
     # input of weights and indices: (batch_size, seq_len, num_experts_per_tok)
     # output of updated weights: (batch_size, seq_len, num_experts)
-    update_weights = jnp.zeros(
-        (weights.shape[0], weights.shape[1], self.num_experts), dtype=self.dtype
-    )
+    update_weights = jnp.zeros((weights.shape[0], weights.shape[1], self.num_experts), dtype=self.dtype)
     index_update = (
         jnp.arange(weights.shape[0])[:, None, None],
         jnp.arange(weights.shape[1])[:, None],
@@ -996,9 +950,7 @@ class RoutedMoE(nn.Module):
 
     # Break sequence into subsequences (groups) of tokens, and route only within
     # each group.
-    top_k_indices = jnp.reshape(
-        top_k_indices, (batch_size, cp, sub_seq, top_k_indices.shape[2])
-    )
+    top_k_indices = jnp.reshape(top_k_indices, (batch_size, cp, sub_seq, top_k_indices.shape[2]))
 
     tokens_per_batch = sub_seq * self.num_experts_per_tok
     # this is to avoid expert_capacity_per_batch = 0
@@ -1009,10 +961,7 @@ class RoutedMoE(nn.Module):
             self.config.capacity_factor,
         )
     )
-    max_logging.log(
-        "Applying potential token dropping with a batch expert_capacity of"
-        f" {expert_capacity_per_batch}"
-    )
+    max_logging.log("Applying potential token dropping with a batch expert_capacity of" f" {expert_capacity_per_batch}")
 
     # calculate expert mask and drop tokens if needed
     # shape of output expert mask: (batch, sequence, num_experts_per_tok)
@@ -1029,16 +978,12 @@ class RoutedMoE(nn.Module):
     # [[[[1, 0, 0, 0],[0, 1, 0, 0]], [[0, 0, 0, 0],[0, 0, 0, 1]]]],
     # so the 2nd token for expert #1 ([0, 1] & [1, 3]) is dropped, output of
     # updated_expert_mask is [[[1, 1],[0, 1]]].
-    expert_mask = jax.nn.one_hot(
-        top_k_indices, num_classes=self.num_experts, dtype=jnp.int32
-    )
+    expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
     expert_mask_fused = jnp.reshape(
         expert_mask,
         (batch_size, cp, sub_seq * self.num_experts_per_tok, self.num_experts),
     )
-    expert_mask_fused = nn.with_logical_constraint(
-        expert_mask_fused, ("activation_batch", None, None, None)
-    )
+    expert_mask_fused = nn.with_logical_constraint(expert_mask_fused, ("activation_batch", None, None, None))
     expert_token_count_fused = jnp.cumsum(expert_mask_fused, axis=2)
     expert_token_count = jnp.reshape(
         expert_token_count_fused,
@@ -1047,9 +992,6 @@ class RoutedMoE(nn.Module):
     expert_token_count = nn.with_logical_constraint(
         expert_token_count,
         ("activation_batch", "activation_length", None, None, None),
-    )
-    trunc_expert_mask = expert_mask * jnp.less_equal(
-        expert_token_count, expert_capacity_per_batch
     )
     combined_expert_mask = jnp.sum(trunc_expert_mask, axis=3)
 
@@ -1109,10 +1051,7 @@ class RoutedMoE(nn.Module):
             self.config.capacity_factor,
         )
     )
-    max_logging.log(
-        "Applying potential token dropping with a batch expert_capacity of"
-        f" {expert_capacity_per_batch}"
-    )
+    max_logging.log("Applying potential token dropping with a batch expert_capacity of" f" {expert_capacity_per_batch}")
 
     # calculate expert mask and drop tokens if needed
     # shape of output expert mask: (batch, sequence, num_experts_per_tok)
@@ -1129,16 +1068,12 @@ class RoutedMoE(nn.Module):
     # [[[[1, 0, 0, 0],[0, 1, 0, 0]], [[0, 0, 0, 0],[0, 0, 0, 1]]]],
     # so the 2nd token for expert #1 ([0, 1] & [1, 3]) is dropped, output of
     # updated_expert_mask is [[[1, 1],[0, 1]]].
-    expert_mask = jax.nn.one_hot(
-        top_k_indices, num_classes=self.num_experts, dtype=jnp.int32
-    )
+    expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
     expert_mask_fused = jnp.reshape(
         expert_mask,
         (batch_size, seq_len * self.num_experts_per_tok, self.num_experts),
     )
-    expert_mask_fused = nn.with_logical_constraint(
-        expert_mask_fused, ("activation_batch", None, None)
-    )
+    expert_mask_fused = nn.with_logical_constraint(expert_mask_fused, ("activation_batch", None, None))
     expert_token_count_fused = jnp.cumsum(expert_mask_fused, axis=1)
     expert_token_count = jnp.reshape(
         expert_token_count_fused,
@@ -1147,9 +1082,6 @@ class RoutedMoE(nn.Module):
     expert_token_count = nn.with_logical_constraint(
         expert_token_count,
         ("activation_batch", "activation_length", None, None),
-    )
-    trunc_expert_mask = expert_mask * jnp.less_equal(
-        expert_token_count, expert_capacity_per_batch
     )
     combined_expert_mask = jnp.sum(trunc_expert_mask, axis=2)
 
@@ -1182,9 +1114,7 @@ class RoutedMoE(nn.Module):
   # See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details.
   def load_balance_loss(self, top_k_indices, logits):
     """Compute the load balance loss."""
-    expert_mask = jax.nn.one_hot(
-        top_k_indices, num_classes=self.num_experts, dtype=jnp.int32
-    )
+    expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
     summed_expert_mask = jnp.sum(expert_mask, axis=2)
     # Get fraction of tokens dispatched to each expert
     density = jnp.mean(summed_expert_mask, axis=1)
@@ -1197,9 +1127,7 @@ class RoutedMoE(nn.Module):
     )
     return loss
 
-  def get_einsum(
-      self, rhs_mesh_axes: Tuple[Optional[str], ...] = (), einsum_name=None
-  ):
+  def get_einsum(self, rhs_mesh_axes: Tuple[Optional[str], ...] = (), einsum_name=None):
     """Get the Einstein summation."""
 
     # the check is to prevent aqteinsum as einsum op for dispatch and combine
@@ -1225,9 +1153,7 @@ class RoutedMoE(nn.Module):
       einsum_op = jnp.einsum
     return einsum_op
 
-  def maybe_all_gather_kernel_weight_in_expert_parallelism(
-      self, kernel, kernel_axes
-  ):
+  def maybe_all_gather_kernel_weight_in_expert_parallelism(self, kernel, kernel_axes):
     """All-gather kernel weight in expert parallelism if needed."""
     if self.get_expert_parallelism_size() > 1:
       # This will trigger all-gather using weight_dtype
@@ -1258,9 +1184,7 @@ class RoutedMoE(nn.Module):
           pre_bias_logits, ("activation_batch", "activation_length", None)
       )
     top_k_weights, top_k_indices = self.get_topk(gate_logits, pre_bias_logits)
-    is_llama4_decoder_layer = (
-        self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4
-    )
+    is_llama4_decoder_layer = self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4
     if is_llama4_decoder_layer:
       router_scores = jax.nn.sigmoid(top_k_weights.astype(jnp.float32)).astype(
           jnp.bfloat16
@@ -1309,12 +1233,8 @@ class RoutedMoE(nn.Module):
       else:
         # TODO(b/425930507): Try replacing `softmax_probs` with padded weights
         # and verify with decode acc tests.
-        softmax_probs = jax.nn.softmax(
-            gate_logits.astype(jnp.float32), axis=-1
-        ).astype(self.dtype)
-        dispatch_mask, combine_mask = self.generate_masks_subgroup(
-            top_k_indices, softmax_probs
-        )
+        softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
+        dispatch_mask, combine_mask = self.generate_masks_subgroup(top_k_indices, softmax_probs)
         if self.get_context_autoregressive_parallelism_size() > 0 and cp == 1:
           mask_axes = (
               "activation_length",
@@ -1538,9 +1458,7 @@ class RoutedMoE(nn.Module):
     # This is called only during tracing. This is to invoke creation of
     # quantized tensor inside AqtEinsum.  After jit, this will become no-op and
     # will not affect performance.
-    _ = self.dense_matmul(
-        inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel
-    )
+    _ = self.dense_matmul(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)
 
     w0_kernel = self.variables["aqt"]["AqtEinsum_0"]["AqtDotGeneral_0"]["qrhs"][
         "frozen"

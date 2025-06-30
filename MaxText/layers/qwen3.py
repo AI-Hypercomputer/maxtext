@@ -90,7 +90,7 @@ class Qwen3DecoderLayer(nn.Module):
         quant=self.quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
         use_qk_norm=cfg.use_qk_norm,
-        query_pre_attn_scalar=(cfg.head_dim**-0.5), # Qwen3 specific scaling
+        query_pre_attn_scalar=(cfg.head_dim**-0.5),  # Qwen3 specific scaling
     )
 
     attention_output = attention_layer(
@@ -113,7 +113,7 @@ class Qwen3DecoderLayer(nn.Module):
         num_features=residual_after_attention.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
-        name="post_self_attention_layer_norm", # Standard MaxText naming
+        name="post_self_attention_layer_norm",  # Standard MaxText naming
         epsilon=cfg.normalization_layer_epsilon,
         kernel_axes=("norm",),
     )(residual_after_attention)

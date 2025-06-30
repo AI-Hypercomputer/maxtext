@@ -38,7 +38,7 @@ class RMSNorm(nnx.Module):
       scale_init: Initializer = nn.initializers.ones,
       parameter_memory_host_offload: bool = False,
       *,
-      rngs: nnx.Rngs
+      rngs: nnx.Rngs,
   ):
     self.num_features = num_features
     self.epsilon = epsilon

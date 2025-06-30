@@ -59,7 +59,7 @@ class Gpt3LayerNorm(nnx.Module):
       reductions_in_fp32: bool = False,
       parameter_memory_host_offload: bool = False,
       *,
-      rngs: nnx.Rngs
+      rngs: nnx.Rngs,
   ):
     self.epsilon = epsilon
     self.dtype = dtype
@@ -71,13 +71,12 @@ class Gpt3LayerNorm(nnx.Module):
     self.parameter_memory_host_offload = parameter_memory_host_offload
 
     self.scale = nnx.Param(
-      self.scale_init(rngs.params(), (num_features,), self.weight_dtype),
-      sharding=self.kernel_axes,
+        self.scale_init(rngs.params(), (num_features,), self.weight_dtype),
+        sharding=self.kernel_axes,
     )
     if self.use_bias:
       self.bias = nnx.Param(
-          initializers.default_bias_init(rngs.params(), (num_features,), self.weight_dtype),
-          sharding=self.kernel_axes
+          initializers.default_bias_init(rngs.params(), (num_features,), self.weight_dtype), sharding=self.kernel_axes
       )
     else:
       self.bias = None

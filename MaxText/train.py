@@ -685,6 +685,7 @@ def initialize(argv: Sequence[str]) -> Tuple[pyconfig.HyperParameters, Any, Any]
   diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
   return config, recorder, diagnostic_config
 
+
 def run(config, recorder, diagnostic_config):
   """Run the job given hyperparameters and utilities"""
   with diagnostic.diagnose(diagnostic_config):
@@ -694,6 +695,11 @@ def run(config, recorder, diagnostic_config):
 def main(argv: Sequence[str]) -> None:
   config, recorder, diagnostic_config = initialize(argv)
   run(config, recorder, diagnostic_config)
+
+def main(argv: Sequence[str]) -> None:
+  config, recorder, diagnostic_config = initialize(argv)
+  run(config, recorder, diagnostic_config)
+
 
 if __name__ == "__main__":
   app.run(main)
