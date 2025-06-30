@@ -15,7 +15,7 @@ WORKDIR /deps
 
 # Copy setup files and dependency files separately for better caching
 COPY setup.sh ./
-COPY requirements.txt requirements_with_jax_ai_image.txt ./
+COPY requirements.txt requirements_with_jax_ai_image.txt requirements_with_jax_stable_stack_0_6_1_pipreqs.txt ./
 
 
 # For JAX AI tpu training images 0.4.37 AND 0.4.35
@@ -35,7 +35,15 @@ RUN if [ "$DEVICE" = "tpu" ] && ([ "$JAX_AI_IMAGE_BASEIMAGE" = "us-docker.pkg.de
 RUN apt-get update && apt-get install --yes && apt-get install --yes dnsutils
 # TODO(bvandermoon, parambole): Remove this when it's added to JAX AI Image
 RUN pip install google-cloud-monitoring
-RUN python3 -m pip install -r /deps/requirements_with_jax_ai_image.txt
+
+# Install requirements file that was generated with pipreqs for JSS 0.6.1 using:
+# pipreqs --savepath requirements_with_jax_stable_stack_0_6_1_pipreqs.txt
+# Otherwise use general requirements_with_jax_ai_image.txt
+RUN if [ "$DEVICE" = "tpu" ] && [ "$JAX_STABLE_STACK_BASEIMAGE" = "us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:jax0.6.1-rev1" ]; then \
+        python3 -m pip install -r /deps/requirements_with_jax_stable_stack_0_6_1_pipreqs.txt; \
+  else \
+        python3 -m pip install -r /deps/requirements_with_jax_ai_image.txt; \
+  fi
 
 # Now copy the remaining code (source files that may change frequently)
 COPY . .
