@@ -164,13 +164,9 @@ def _colocated_cpu_devices(
   return colocated_python.colocated_cpu_devices(devices)
 
 
-def _get_cpu_mesh(mesh: Mesh):
-  flat_devices = tuple(mesh.devices.flat)
-  flat_cpu_devices = _colocated_cpu_devices(flat_devices)
-  cpu_mesh = jax.sharding.Mesh(
-      np.array(flat_cpu_devices).reshape(mesh.devices.shape), mesh.axis_names, axis_types=mesh.axis_types
-  )
-  return cpu_mesh
+def _colocated_cpu_mesh(mesh: Mesh) -> Mesh:
+  """Returns a CPU mesh that has colocated CPU devices."""
+  return colocated_python.colocated_cpu_devices(mesh)
 
 
 class RemoteIterator:
@@ -179,7 +175,7 @@ class RemoteIterator:
   def __init__(self, get_ds_fn, preprocessing_fn, global_mesh, global_shape):
     self.cpu_devices = _colocated_cpu_devices(jax.local_devices())
     self.tpu_devices = jax.local_devices()
-    self.cpu_mesh = _get_cpu_mesh(global_mesh)
+    self.cpu_mesh = _colocated_cpu_mesh(global_mesh)
     self.tpu_sharding = jax.sharding.NamedSharding(global_mesh, PartitionSpec(global_mesh.axis_names))
     self.cpu_sharding = jax.sharding.NamedSharding(self.cpu_mesh, PartitionSpec(self.cpu_mesh.axis_names))
     self.dummy_array = jnp.zeros((len(self.cpu_devices)))

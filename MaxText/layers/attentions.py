@@ -46,11 +46,15 @@ from MaxText.inference import paged_attention
 from MaxText.inference.kvcache import KVQuant, KVTensor
 from MaxText.kernels.ragged_attention import ragged_gqa
 from MaxText.kernels.ragged_attention import ragged_mha
-from MaxText.layers import embeddings
-from MaxText.layers.embeddings import YarnRotaryEmbedding, rotary_embedding_as_linen
+from MaxText.layers.embeddings import (
+    llama_rotary_embedding_as_linen,
+    llama_vision_rotary_embedding_as_linen,
+    rotary_embedding_as_linen,
+    yarn_rotary_embedding_as_linen,
+)
 from MaxText.layers.initializers import nd_dense_init, NdInitializer
 from MaxText.layers.linears import dense_general
-from MaxText.layers.normalizations import RMSNorm
+from MaxText.layers.normalizations import rms_norm
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
@@ -289,38 +293,38 @@ def attention_op_as_linen(
   Initializes the AttentionOp module and returns it as a Linen module.
   """
   return nnx.bridge.to_linen(
-    AttentionOp,
-    config=config,
-    mesh=mesh,
-    attention_kernel=attention_kernel,
-    max_target_length=max_target_length,
-    num_query_heads=num_query_heads,
-    num_kv_heads=num_kv_heads,
-    float32_qk_product=float32_qk_product,
-    max_prefill_predict_length=max_prefill_predict_length,
-    float32_logits=float32_logits,
-    flash_axis_names_kv=flash_axis_names_kv,
-    flash_axis_names_q=flash_axis_names_q,
-    flash_axis_names_splash_kernel=flash_axis_names_splash_kernel,
-    prefill_cache_logical_axis_names=prefill_cache_logical_axis_names,
-    cache_logical_axis_names=cache_logical_axis_names,
-    cache_scale_logical_axis_names=cache_scale_logical_axis_names,
-    ragged_qkv_axis_names=ragged_qkv_axis_names,
-    ragged_lengths_names=ragged_lengths_names,
-    compute_axis_order=compute_axis_order,
-    key_axis_order=key_axis_order,
-    reshape_q=reshape_q,
-    dropout_rate=dropout_rate,
-    dtype=dtype,
-    quant=quant,
-    kv_quant=kv_quant,
-    attention_type=attention_type,
-    attn_logits_soft_cap=attn_logits_soft_cap,
-    sliding_window_size=sliding_window_size,
-    chunk_attn_window_size=chunk_attn_window_size,
-    use_ragged_attention=use_ragged_attention,
-    ragged_block_size=ragged_block_size,
-    metadata_fn=variable_to_logically_partitioned,
+      AttentionOp,
+      config=config,
+      mesh=mesh,
+      attention_kernel=attention_kernel,
+      max_target_length=max_target_length,
+      num_query_heads=num_query_heads,
+      num_kv_heads=num_kv_heads,
+      float32_qk_product=float32_qk_product,
+      max_prefill_predict_length=max_prefill_predict_length,
+      float32_logits=float32_logits,
+      flash_axis_names_kv=flash_axis_names_kv,
+      flash_axis_names_q=flash_axis_names_q,
+      flash_axis_names_splash_kernel=flash_axis_names_splash_kernel,
+      prefill_cache_logical_axis_names=prefill_cache_logical_axis_names,
+      cache_logical_axis_names=cache_logical_axis_names,
+      cache_scale_logical_axis_names=cache_scale_logical_axis_names,
+      ragged_qkv_axis_names=ragged_qkv_axis_names,
+      ragged_lengths_names=ragged_lengths_names,
+      compute_axis_order=compute_axis_order,
+      key_axis_order=key_axis_order,
+      reshape_q=reshape_q,
+      dropout_rate=dropout_rate,
+      dtype=dtype,
+      quant=quant,
+      kv_quant=kv_quant,
+      attention_type=attention_type,
+      attn_logits_soft_cap=attn_logits_soft_cap,
+      sliding_window_size=sliding_window_size,
+      chunk_attn_window_size=chunk_attn_window_size,
+      use_ragged_attention=use_ragged_attention,
+      ragged_block_size=ragged_block_size,
+      metadata_fn=variable_to_logically_partitioned,
   )
 
 
@@ -360,7 +364,7 @@ class AttentionOp(nnx.Module):
   use_ragged_attention: bool = False
   ragged_block_size: int = 256
 
-  rngs: nnx.Rngs = None # Not used in AttentionOp but passed in by nnx.bridge.to_linen
+  rngs: nnx.Rngs = None  # Not used in AttentionOp but passed in by nnx.bridge.to_linen
 
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
     """Check attention inputs."""
@@ -1307,8 +1311,9 @@ class L2Norm(nnx.Module):
   Args:
     eps: float, epsilon used for numerical stability (default value should be ok for most cases).
   """
+
   eps: float = 1e-6
-  rngs: nnx.Rngs = None # Not used in L2Norm but passed in by nnx.bridge.to_linen
+  rngs: nnx.Rngs = None  # Not used in L2Norm but passed in by nnx.bridge.to_linen
 
   def __call__(self, x):
     return x * jax.lax.rsqrt(jnp.mean(x**2, axis=-1, keepdims=True) + self.eps)
@@ -1596,7 +1601,7 @@ class Attention(nn.Module):
     rope_type = self.config.rope_type.lower()
     rope_use_scale = self.config.rope_use_scale
     if self.is_vision:
-      rotary_embedding = embeddings.LlamaVisionRotaryEmbedding(
+      rotary_embedding = llama_vision_rotary_embedding_as_linen(
           image_size=self.config.image_size_for_vit,
           patch_size=self.config.patch_size_for_vit,
           hidden_size=self.config.hidden_size_for_vit,
@@ -1604,15 +1609,16 @@ class Attention(nn.Module):
           rope_theta=self.config.rope_theta_for_vit,
       )
     elif self.config.model_name.startswith("llama3.1") or rope_type.startswith("llama3.1"):
-      rotary_embedding = embeddings.llama_rotary_embedding_as_linen(
+      rotary_embedding = llama_rotary_embedding_as_linen(
           min_timescale=self.config.rope_min_timescale,
           max_timescale=self.config.rope_max_timescale,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
+          name=name,
           use_scale=rope_use_scale,
       )
     elif rope_type.startswith("yarn"):
-      rotary_embedding = YarnRotaryEmbedding(
+      rotary_embedding = yarn_rotary_embedding_as_linen(
           max_position_embeddings=self.config.max_position_embeddings,
           original_max_position_embeddings=self.config.original_max_position_embeddings,
           beta_fast=self.config.beta_fast,
@@ -1633,6 +1639,7 @@ class Attention(nn.Module):
           max_timescale=max_timescale,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
+          name=name,
       )
     inputs = rotary_embedding(inputs, inputs_positions)
     return inputs
@@ -1712,7 +1719,8 @@ class Attention(nn.Module):
     is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
     # NOTE: llama 4 does L2 normalization after RoPE
     if self.use_qk_norm and not is_llama4_decoder_block:
-      query = RMSNorm(
+      query = rms_norm(
+          num_features=query.shape[-1],
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           name="query_norm",
@@ -1720,7 +1728,8 @@ class Attention(nn.Module):
           kernel_axes=("norm",),
       )(query)
 
-      key = RMSNorm(
+      key = rms_norm(
+          num_features=key.shape[-1],
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           name="key_norm",
@@ -1853,7 +1862,8 @@ class MLA(Attention):
           quant=self.quant,
           matmul_precision=self.config.matmul_precision,
       )
-      self.q_norm = RMSNorm(
+      self.q_norm = rms_norm(
+          num_features=self.q_lora_rank,
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
           name="q_norm",
@@ -1886,7 +1896,8 @@ class MLA(Attention):
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
     )
-    self.kv_norm = RMSNorm(
+    self.kv_norm = rms_norm(
+        num_features=self.kv_lora_rank,
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
         name="kv_norm",
@@ -2078,7 +2089,7 @@ class MLA(Attention):
       unnormalized_out, _, exp_sum = self.ds_paged_attention_op(
           query, key, value, decoder_segment_ids, model_mode, previous_chunk, slot=slot, page_state=page_state
       )
-      unnormalized_out = unnormalized_out[..., :self.v_head_dim]
+      unnormalized_out = unnormalized_out[..., : self.v_head_dim]
       out = unnormalized_out / (exp_sum + 1e-9) if exp_sum is not None else unnormalized_out
     else:
       out = self.attention_op(query, key, value, decoder_segment_ids, model_mode, cached_values)

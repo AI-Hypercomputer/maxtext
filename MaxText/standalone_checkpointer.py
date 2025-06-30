@@ -39,7 +39,7 @@ from MaxText import maxtext_utils
 from MaxText import train_utils
 from MaxText import max_logging
 from MaxText import pyconfig
-from MaxText.train import get_first_step, validate_train_config, save_checkpoint
+from MaxText.train import get_first_step, validate_train_config
 from MaxText.layers import models
 
 Transformer = models.Transformer
@@ -91,7 +91,7 @@ def checkpoint_loop(config, state=None):
       start_time = datetime.datetime.now()
       # A barrier to sync all hosts before starting to save checkpoint
       jax.experimental.multihost_utils.sync_global_devices("Barrier before save")
-      if save_checkpoint(checkpoint_manager, int(step), state):
+      if checkpointing.save_checkpoint(checkpoint_manager, int(step), state):
         checkpoint_manager.wait_until_finished()
         end_time = datetime.datetime.now()
         if jax.process_index() == 0:

@@ -42,12 +42,11 @@ def get_process_loading_real_data(
       process_loading_real_data.add(p.process_index)
   return list(process_loading_real_data)
 
-def create_process_specific_iterator(
-    config: pyconfig.HyperParameters, mesh, process_indices, input_iterator
-):
+
+def create_process_specific_iterator(config: pyconfig.HyperParameters, mesh, process_indices, input_iterator):
   """
-    If the current process's index is among the `process_indices`, a real
-    data iterator is created. Otherwise, a placeholder iterator is returned.
+  If the current process's index is among the `process_indices`, a real
+  data iterator is created. Otherwise, a placeholder iterator is returned.
   """
   if jax.process_index() in process_indices:
     iterator_fn = functools.partial(input_iterator, config, mesh, process_indices)
@@ -56,6 +55,7 @@ def create_process_specific_iterator(
     output_iterator = PlaceHolderDataIterator(config, mesh)
   return output_iterator
 
+
 def create_data_iterator(config: pyconfig.HyperParameters, mesh):
   """Create train and eval data iterators given configs and mesh."""
 
@@ -63,10 +63,10 @@ def create_data_iterator(config: pyconfig.HyperParameters, mesh):
   if config.dataset_type == "synthetic":
     return SyntheticDataIterator(config, mesh), None
   dataset_type_to_train_eval_iterator = {
-    "tfds": (make_tfds_train_iterator, make_tfds_eval_iterator),
-    "grain": (make_grain_train_iterator, make_grain_eval_iterator),
-    "hf": (make_hf_train_iterator, make_hf_eval_iterator),
-    "c4_mlperf": (make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator)
+      "tfds": (make_tfds_train_iterator, make_tfds_eval_iterator),
+      "grain": (make_grain_train_iterator, make_grain_eval_iterator),
+      "hf": (make_hf_train_iterator, make_hf_eval_iterator),
+      "c4_mlperf": (make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator),
   }
 
   # Collect train and eval iterators
@@ -75,8 +75,10 @@ def create_data_iterator(config: pyconfig.HyperParameters, mesh):
       assert config.packing, "c4_mlperf dataloader only works with packing. For padded version, use tfds dataloader"
     train_iterator, eval_iterator = dataset_type_to_train_eval_iterator[config.dataset_type]
   else:
-    max_logging.log(f"WARNING: '{config.dataset_type}' is not a supported dataset type." \
-                    "Using synthetic data. Please choose from 'tfds', 'grain', 'hf', or 'c4_mlperf'.")
+    max_logging.log(
+        f"WARNING: '{config.dataset_type}' is not a supported dataset type."
+        "Using synthetic data. Please choose from 'tfds', 'grain', 'hf', or 'c4_mlperf'."
+    )
     output_train_iterator, output_eval_iterator = SyntheticDataIterator(config, mesh), None
     return output_train_iterator, output_eval_iterator
 

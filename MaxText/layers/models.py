@@ -36,10 +36,10 @@ from MaxText.layers import pipeline
 from MaxText import maxtext_utils
 from MaxText import multimodal_utils
 from MaxText.layers.attentions import Attention
-from MaxText.layers.normalizations import RMSNorm
-from MaxText.layers.embeddings import PositionalEmbedding, Embed
+from MaxText.layers.normalizations import rms_norm
+from MaxText.layers.embeddings import positional_embedding_as_linen, Embed
 from MaxText.layers.quantizations import AqtQuantization as Quant
-
+from MaxText.maxtext_utils import all_gather_over_fsdp
 
 # ------------------------------------------------------------------------------
 # The network: Decoder & Transformer Definitions
@@ -71,7 +71,8 @@ class DecoderLayer(nn.Module):
     inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     # inputs: embedded inputs to the decoder with shape [batch, length, emb_dim]
-    lnx = RMSNorm(
+    lnx = rms_norm(
+        num_features=inputs.shape[-1],
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="pre_self_attention_norm",
@@ -200,7 +201,7 @@ class Decoder(nn.Module):
   def setup(self):
     """Initialize decoder layer."""
     self.decoder_layer = self.get_decoder_layers()
-    self.norm_layer = self.get_norm_layer()
+    self.norm_layer = self.get_norm_layer(num_features=self.config.emb_dim)
     if self.config.using_pipeline_parallelism:
       pipeline_stage_module = self.get_pipeline_stage_module(self.decoder_layer)
       remat_policy = self.get_remat_policy()
@@ -347,6 +348,10 @@ class Decoder(nn.Module):
       from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
 
       return [gpt3.Gpt3DecoderLayer]
+    elif self.config.decoder_block == DecoderBlockType.QWEN3:
+      from MaxText.layers import qwen3  # pylint: disable=import-outside-toplevel
+
+      return [qwen3.Qwen3DecoderLayer]
     elif self.config.decoder_block == DecoderBlockType.SIMPLE:
       from MaxText.layers import simple_layer  # pylint: disable=import-outside-toplevel
 
@@ -365,7 +370,7 @@ class Decoder(nn.Module):
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
-  def get_norm_layer(self):
+  def get_norm_layer(self, num_features: int):
     """get normalization layer (return type inherits from nn.Module)"""
     if self.config.decoder_block in (
         DecoderBlockType.DEFAULT,
@@ -376,15 +381,16 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
+        DecoderBlockType.QWEN3,
         DecoderBlockType.SIMPLE,
         DecoderBlockType.SIMPLE_MLP,
         DecoderBlockType.LLAMA4,
     ):
-      return RMSNorm
+      return functools.partial(rms_norm, num_features=num_features)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
       from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
 
-      return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=True)
+      return functools.partial(gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=True)
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
@@ -484,7 +490,7 @@ class Decoder(nn.Module):
     y = y.astype(cfg.dtype)
 
     if cfg.use_untrainable_positional_embedding:
-      y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
+      y = positional_embedding_as_linen(embedding_dims=cfg.base_emb_dim)(y, decoder_positions)
 
     if cfg.trainable_position_size > 0:
       y += Embed(
@@ -648,7 +654,9 @@ class Decoder(nn.Module):
                 slot=slot,
                 **layer_call_kwargs,
             )
-    y = self.get_norm_layer()(
+
+    assert isinstance(y, jax.Array)
+    y = self.get_norm_layer(num_features=y.shape[-1])(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         name="decoder_norm",
@@ -673,9 +681,7 @@ class Decoder(nn.Module):
           inputs_shape=y.shape,
           out_features_shape=cfg.vocab_size,
           weight_dtype=cfg.weight_dtype,
-          dtype=jnp.float32
-          if cfg.logits_dot_in_fp32
-          else cfg.dtype,  # for logit training stability
+          dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
           kernel_axes=("embed", "vocab"),
           name="logits_dense",
           matmul_precision=self.config.matmul_precision,
@@ -811,4 +817,73 @@ class Transformer(nn.Module):
         image_embeddings=image_embeddings,
     )
     return logits
-  
+
+
+class ZeroOneTransformer(nn.Module):
+  """
+  A wrapper for the base Transformer model designed to implement the Zero-1
+  FSDP optimization.
+
+  The goal of this optimization is to reduce communication overhead. In the standard
+  FSDP implementation, an all-gather operation on the model weights is performed twice
+  for each gradient accumulation microbatch (once for the forward pass, once for the backward pass).
+  This class changes that behavior. When enabled, it performs the all-gather operation
+  only *once* per full gradient accumulation step. It gathers the full weights into
+  memory, runs all the microbatch forward and backward passes, and then releases the
+  full weights. This trades higher peak memory usage for significantly reduced
+  network communication, which can improve training speed if sufficient memory is
+  available.
+  """
+
+  config: Config
+  mesh: Mesh
+  quant: Quant
+
+  def setup(self):
+    self.model = Transformer(self.config, self.mesh, self.quant)
+
+  def __call__(
+      self,
+      decoder_input_tokens: jnp.ndarray,
+      decoder_positions: jnp.ndarray,
+      decoder_segment_ids=None,
+      encoder_images: Optional[jnp.ndarray] = None,
+      enable_dropout=True,
+      model_mode=MODEL_MODE_TRAIN,
+      previous_chunk=None,
+      true_length: Optional[int] = None,
+      slot: Optional[int] = None,
+      page_state: Optional[page_manager.PageState] = None,
+      partition_spec=None,
+  ):
+    if self.is_initializing():
+      return self.model(
+          decoder_input_tokens,
+          decoder_positions,
+          decoder_segment_ids,
+          encoder_images,
+          enable_dropout,
+          model_mode,
+          previous_chunk,
+          true_length,
+          slot,
+          page_state,
+      )
+    all_model_weights = all_gather_over_fsdp(
+        self.model.variables, partition_spec, mesh=self.mesh, logical_axis_rules=self.config.logical_axis_rules
+    )
+
+    return self.model.apply(
+        all_model_weights,
+        decoder_input_tokens,
+        decoder_positions,
+        decoder_segment_ids,
+        encoder_images,
+        enable_dropout,
+        model_mode,
+        previous_chunk,
+        true_length,
+        slot,
+        page_state,
+        mutable=False,
+    )

@@ -88,6 +88,7 @@ class PagedAttentionOp(nn.Module):
 
   def pad_qkv(self, *qkv):
     """Pad input to kv_head_dim_size"""
+
     def pad_to_kv_head_dim_size(x):
       if x.shape[-1] != self.kv_head_dim_size:
         return jnp.pad(
