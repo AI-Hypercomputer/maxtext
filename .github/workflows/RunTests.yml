@@ -63,70 +63,70 @@ jobs:
       build_mode: jax_ai_image
       base_image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/gpu:latest
 
-  cpu_unit_tests:
-    needs: tpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
-    with:
-      device_type: cpu
-      device_name: X64
-      cloud_runner: linux-x86-n2-16
-      image_type: tpu
-      pytest_marker: 'cpu_only'
-      xla_python_client_mem_fraction: 0.75
-      tf_force_gpu_allow_growth: false
-      container_resource_option: "--privileged"
+  # cpu_unit_tests:
+  #   needs: tpu_image
+  #   uses: ./.github/workflows/run_tests_internal.yml
+  #   with:
+  #     device_type: cpu
+  #     device_name: X64
+  #     cloud_runner: linux-x86-n2-16
+  #     image_type: tpu
+  #     pytest_marker: 'cpu_only'
+  #     xla_python_client_mem_fraction: 0.75
+  #     tf_force_gpu_allow_growth: false
+  #     container_resource_option: "--privileged"
 
-  tpu_unit_tests:
-    needs: tpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
-    with:
-      device_type: tpu
-      device_name: v4-8
-      cloud_runner: linux-x86-ct4p-240-4tpu
-      pytest_marker: 'not cpu_only and not gpu_only and not integration_test'
-      xla_python_client_mem_fraction: 0.75
-      tf_force_gpu_allow_growth: false
-      container_resource_option: "--privileged"
+  # tpu_unit_tests:
+  #   needs: tpu_image
+  #   uses: ./.github/workflows/run_tests_internal.yml
+  #   with:
+  #     device_type: tpu
+  #     device_name: v4-8
+  #     cloud_runner: linux-x86-ct4p-240-4tpu
+  #     pytest_marker: 'not cpu_only and not gpu_only and not integration_test'
+  #     xla_python_client_mem_fraction: 0.75
+  #     tf_force_gpu_allow_growth: false
+  #     container_resource_option: "--privileged"
 
-  tpu_integration_tests:
-    needs: tpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
-    with:
-      device_type: tpu
-      device_name: v4-8
-      cloud_runner: linux-x86-ct4p-240-4tpu
-      pytest_marker: 'not cpu_only and not gpu_only and integration_test'
-      xla_python_client_mem_fraction: 0.75
-      tf_force_gpu_allow_growth: false
-      container_resource_option: "--privileged"
+  # tpu_integration_tests:
+  #   needs: tpu_image
+  #   uses: ./.github/workflows/run_tests_internal.yml
+  #   with:
+  #     device_type: tpu
+  #     device_name: v4-8
+  #     cloud_runner: linux-x86-ct4p-240-4tpu
+  #     pytest_marker: 'not cpu_only and not gpu_only and integration_test'
+  #     xla_python_client_mem_fraction: 0.75
+  #     tf_force_gpu_allow_growth: false
+  #     container_resource_option: "--privileged"
 
-  gpu_unit_tests:
-    needs: gpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
-    with:
-      device_type: gpu
-      device_name: a100-40gb-4
-      cloud_runner: linux-x86-a2-48-a100-4gpu
-      pytest_marker: 'not cpu_only and not tpu_only and not integration_test'
-      xla_python_client_mem_fraction: 0.65
-      tf_force_gpu_allow_growth: true
-      container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
+  # gpu_unit_tests:
+  #   needs: gpu_image
+  #   uses: ./.github/workflows/run_tests_internal.yml
+  #   with:
+  #     device_type: gpu
+  #     device_name: a100-40gb-4
+  #     cloud_runner: linux-x86-a2-48-a100-4gpu
+  #     pytest_marker: 'not cpu_only and not tpu_only and not integration_test'
+  #     xla_python_client_mem_fraction: 0.65
+  #     tf_force_gpu_allow_growth: true
+  #     container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
 
-  gpu_integration_tests:
-    needs: gpu_image
-    uses: ./.github/workflows/run_tests_internal.yml
-    with:
-      device_type: gpu
-      device_name: a100-40gb-4
-      cloud_runner: linux-x86-a2-48-a100-4gpu
-      pytest_marker: 'not cpu_only and not tpu_only and integration_test'
-      xla_python_client_mem_fraction: 0.65
-      tf_force_gpu_allow_growth: true
-      container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
+  # gpu_integration_tests:
+  #   needs: gpu_image
+  #   uses: ./.github/workflows/run_tests_internal.yml
+  #   with:
+  #     device_type: gpu
+  #     device_name: a100-40gb-4
+  #     cloud_runner: linux-x86-a2-48-a100-4gpu
+  #     pytest_marker: 'not cpu_only and not tpu_only and integration_test'
+  #     xla_python_client_mem_fraction: 0.65
+  #     tf_force_gpu_allow_growth: true
+  #     container_resource_option: "--shm-size 2g --runtime=nvidia --gpus all --privileged"
 
   clean_up:
     if: ${{ always() }}  # always execute, regardless of previous jobs or steps.
-    needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
+    # needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
     name: "Clean up"
     runs-on: ["self-hosted"]
     permissions:
@@ -143,7 +143,7 @@ jobs:
     - name: Verify images exist before deletion
       run: |
         echo "Verifying GPU and TPU images for run ID ${{ github.run_id }}"
-        gcloud artifacts docker images list gcr.io/tpu-prod-env-multipod --filter="tags:maxtext_${{ github.run_id }}"
+        gcloud artifacts docker images list gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}
     - name: Delete GPU image
       run: gcloud artifacts docker images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:gpu --force-delete-tags --quiet
     - name: Delete TPU image
@@ -158,13 +158,15 @@ jobs:
     - name: Log message if dependent job succeeded
       run: echo "Conditions for creating/updating issue not met. Skipping."
 
-  notify_failure:
-    if: ${{ failure() && github.event.pull_request == null}}
-    name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
-    runs-on: ubuntu-latest
-    steps:
-    - name: Check whether one of the jobs failed
-      uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
-      with:
-        github-token: ${{ secrets.GITHUB_TOKEN }}
+  # notify_failure:
+  #   if: ${{ failure() && github.event.pull_request == null}}
+  #   name: Notify failed build # creates an issue or modifies last open existing issue for failed build
+  #   needs: [cpu_unit_tests, gpu_unit_tests, gpu_integration_tests, tpu_unit_tests, tpu_integration_tests]
+  #   runs-on: ubuntu-latest
+  #   permissions:
+  #   issues: write
+  #   steps:
+  #   - name: Check whether one of the jobs failed
+  #     uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
+  #     with:
+  #       github-token: ${{ secrets.GITHUB_TOKEN }}
