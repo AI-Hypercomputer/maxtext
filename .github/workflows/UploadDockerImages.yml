@@ -105,11 +105,13 @@ jobs:
             gcr.io/tpu-prod-env-multipod/${{ matrix.image_name }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          provenance: false
           build-args: |
             ${{ matrix.build_args }}
             JAX_AI_IMAGE_BASEIMAGE=${{ matrix.base_image }}
             COMMIT_HASH=${{ steps.vars.outputs.sha_short }}
             DEVICE=tpu
+            TEST_TYPE=xlml
 
   # Same as tpu-build step but mirrored for GPUs
   build-gpu:
@@ -165,8 +167,10 @@ jobs:
             gcr.io/tpu-prod-env-multipod/${{ matrix.image_name }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          provenance: false
           build-args: |
             ${{ matrix.build_args }}
             JAX_AI_IMAGE_BASEIMAGE=${{ matrix.base_image }}
             COMMIT_HASH=${{ steps.vars.outputs.sha_short }}
             DEVICE=gpu
+            TEST_TYPE=xlml
