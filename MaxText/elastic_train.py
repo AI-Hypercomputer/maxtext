@@ -61,10 +61,12 @@ from pathwaysutils.debug import timing
 
 import tensorflow as tf
 
+import MaxText as mt
 from MaxText import checkpointing
 from MaxText import exceptions
 from MaxText import max_utils
 from MaxText import maxtext_utils
+from MaxText import train_utils
 from MaxText import max_logging
 from MaxText import profiler
 from MaxText import pyconfig
@@ -73,7 +75,6 @@ from MaxText.input_pipeline.input_pipeline_interface import create_data_iterator
 from MaxText.metric_logger import MetricLogger
 from MaxText.train import get_first_step
 from MaxText.train import save_checkpoint
-from MaxText.train import setup_mesh_and_model
 from MaxText.train import setup_train_loop
 from MaxText.train import train_step
 from MaxText.train import validate_train_config
@@ -108,18 +109,19 @@ def elastic_handler(
   there is an elastic event, those functions will call this function
   and return its returns.
   """
-  # We reuse setup_mesh_and_model because it contains most of the
+  # We use train_utils.create_training_tools because it contains most of the
   # reconfiguration. Depending on the configuration, the checkpoint
   # manager depends on the mesh and must be recreated. Therefore, we
   # close the previous checkpoint manager and get a new checkpoint
-  # manager from setup_mesh_and_model.
+  # manager from create_training_tools.
   if checkpoint_manager is not None:
     checkpoint_manager.close()
 
   with jax.default_device(elastic_manager.default_device):
-    init_rng, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(
-        config, elastic_manager.good_devices
-    )
+    model = mt.from_pretrained(config)
+    mesh = model.mesh
+    init_rng, checkpoint_manager, learning_rate_schedule, tx = train_utils.create_training_tools(config, model, mesh)
+
     with mesh:
       data_iterator, _ = create_data_iterator(config, mesh)
 

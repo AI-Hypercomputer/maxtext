@@ -47,7 +47,7 @@ from MaxText.inference.kvcache import KVQuant, KVTensor
 from MaxText.kernels.ragged_attention import ragged_gqa
 from MaxText.kernels.ragged_attention import ragged_mha
 from MaxText.layers import embeddings
-from MaxText.layers.embeddings import YarnRotaryEmbedding, RotaryEmbedding
+from MaxText.layers.embeddings import YarnRotaryEmbedding, rotary_embedding_as_linen
 from MaxText.layers.initializers import nd_dense_init, NdInitializer
 from MaxText.layers.linears import dense_general
 from MaxText.layers.normalizations import RMSNorm
@@ -320,6 +320,7 @@ def attention_op_as_linen(
     chunk_attn_window_size=chunk_attn_window_size,
     use_ragged_attention=use_ragged_attention,
     ragged_block_size=ragged_block_size,
+    metadata_fn=variable_to_logically_partitioned,
   )
 
 
@@ -1320,7 +1321,17 @@ def l2_norm_as_linen(self, eps: float = 1e-6):
   Args:
     eps: float, epsilon used for numerical stability (default value should be ok for most cases).
   """
-  return nnx.bridge.to_linen(L2Norm, eps)
+  return nnx.bridge.to_linen(L2Norm, eps=eps, metadata_fn=variable_to_logically_partitioned)
+
+
+def variable_to_logically_partitioned(variable: nnx.VariableState):
+  metadata = variable.get_metadata()
+  return nn.LogicallyPartitioned(  # type: ignore[wrong-keyword-args]
+      variable.value,
+      variable.sharding,
+      mesh=metadata.get("mesh"),
+      rules=metadata.get("rules"),
+  )
 
 
 class Attention(nn.Module):
@@ -1593,12 +1604,11 @@ class Attention(nn.Module):
           rope_theta=self.config.rope_theta_for_vit,
       )
     elif self.config.model_name.startswith("llama3.1") or rope_type.startswith("llama3.1"):
-      rotary_embedding = embeddings.LLaMARotaryEmbedding(
+      rotary_embedding = embeddings.llama_rotary_embedding_as_linen(
           min_timescale=self.config.rope_min_timescale,
           max_timescale=self.config.rope_max_timescale,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
-          name=name,
           use_scale=rope_use_scale,
       )
     elif rope_type.startswith("yarn"):
@@ -1618,12 +1628,11 @@ class Attention(nn.Module):
       # For local attention use local_rope_max_timescale if it's is positive
       if self.attention_type == AttentionType.LOCAL_SLIDING and self.config.local_rope_max_timescale > 0:
         max_timescale = self.config.local_rope_max_timescale
-      rotary_embedding = RotaryEmbedding(
+      rotary_embedding = rotary_embedding_as_linen(
           min_timescale=self.config.rope_min_timescale,
           max_timescale=max_timescale,
           embedding_dims=rope_embedding_dims,
           fprop_dtype=self.dtype,
-          name=name,
       )
     inputs = rotary_embedding(inputs, inputs_positions)
     return inputs

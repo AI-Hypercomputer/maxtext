@@ -49,12 +49,14 @@ from cloud_tpu_diagnostics.configuration import stack_trace_configuration
 
 import transformers
 
+import MaxText as mt
 from MaxText import checkpointing
 from MaxText import exceptions
 from MaxText import max_logging
 from MaxText import max_utils
 from MaxText import maxengine
 from MaxText import maxtext_utils
+from MaxText import train_utils
 from MaxText import profiler
 from MaxText import pyconfig
 from MaxText.common_types import Array
@@ -67,7 +69,6 @@ from MaxText.train import (
     validate_train_config,
     get_first_step,
     save_checkpoint,
-    setup_mesh_and_model,
 )
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
@@ -633,17 +634,19 @@ def setup_train_loop(config, recorder):
 
   Returns:
     init_rng:
-    writer: Summary writer for tensorboard
     checkpoint_manager: Orbax checkpointer
     state_mesh_annotations: the mesh annotations for the train state
     model:
     mesh:
     learning_rate_schedule:
     data_iterator:
+    eval_data_iterator:
     state: the initialized train state
   """
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
-    init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
+    model = mt.from_pretrained(config)
+    mesh = model.mesh
+    init_rng, checkpoint_manager, learning_rate_schedule, tx = train_utils.create_training_tools(config, model, mesh)
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     data_iterator, eval_data_iterator = grpo_input_pipeline.create_data_iterator(config, mesh)
@@ -657,7 +660,6 @@ def setup_train_loop(config, recorder):
 
   return (
       init_rng,
-      writer,
       checkpoint_manager,
       state_mesh_shardings,
       model,

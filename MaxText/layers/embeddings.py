@@ -22,6 +22,7 @@ from jax import lax
 import jax.numpy as jnp
 
 from flax import linen as nn
+from flax import nnx
 
 from MaxText import max_logging
 from MaxText.common_types import Config, DType, Array
@@ -122,35 +123,78 @@ class Embed(nn.Module):
     return jnp.dot(query, jnp.asarray(self.embedding, jnp.bfloat16).T, preferred_element_type=dtype)
 
 
-class RotaryEmbedding(nn.Module):
-  """Rotary Position Embedding.
+def rotary_embedding_as_linen(
+    *,
+    min_timescale: int,
+    max_timescale: int,
+    embedding_dims: int = 0,
+    cast_as_fprop_dtype: bool = True,
+    fprop_dtype: DType = jnp.bfloat16
+):
+  """Initializes the RotaryEmbedding module and returns it as a Linen module.
 
-  Attributes:
+  Args:
     min_timescale: Start of the geometric index. Determines the periodicity of
       the added signal.
     max_timescale: End of the geometric index. Determines the frequency of the
       added signal.
     embedding_dims: Dimension of the embedding to be generated.
+    cast_as_fprop_dtype: Whether to cast the output to the fprop dtype.
+    fprop_dtype: The dtype of the output.
   """
+  return nnx.bridge.to_linen(
+    RotaryEmbedding,
+    min_timescale=min_timescale,
+    max_timescale=max_timescale,
+    embedding_dims=embedding_dims,
+    cast_as_fprop_dtype=cast_as_fprop_dtype,
+    fprop_dtype=fprop_dtype,
+    metadata_fn=variable_to_logically_partitioned
+  )
 
-  min_timescale: int
-  max_timescale: int
-  embedding_dims: int = 0
-  cast_as_fprop_dtype: bool = True
-  fprop_dtype: DType = jnp.bfloat16
 
-  def setup(self) -> None:
-    """init with timescale"""
+class RotaryEmbedding(nnx.Module):
+  """Rotary Position Embedding."""
+  def __init__(
+      self,
+      min_timescale: int,
+      max_timescale: int,
+      embedding_dims: int = 0,
+      cast_as_fprop_dtype: bool = True,
+      fprop_dtype: DType = jnp.bfloat16,
+      # Not used in RotaryEmbedding but passed in by nnx.bridge.to_linen.
+      # TODO: Remove when bridge no longer needed
+      rngs: nnx.Rngs = None
+  ):
+    """Initializes the RotaryEmbedding module.
+
+    Args:
+      min_timescale: Start of the geometric index. Determines the periodicity of
+        the added signal.
+      max_timescale: End of the geometric index. Determines the frequency of the
+        added signal.
+      embedding_dims: Dimension of the embedding to be generated.
+      cast_as_fprop_dtype: Whether to cast the output to the fprop dtype.
+      fprop_dtype: The dtype of the output.
+      rngs: rng keys passed in by nnx.bridge.to_linen.
+    """
+    self.min_timescale = min_timescale
+    self.max_timescale = max_timescale
+    self.embedding_dims = embedding_dims
+    self.cast_as_fprop_dtype = cast_as_fprop_dtype
+    self.fprop_dtype = fprop_dtype
+
     if self.embedding_dims % 2:
       raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
 
-    half_embedding_dim = self.embedding_dims // 2
-    fraction = 2 * jnp.arange(0, half_embedding_dim) / self.embedding_dims
-    self.timescale = self.min_timescale * (self.max_timescale / self.min_timescale) ** fraction
 
+  @property
+  def timescale(self):
+    """Returns the timescale for the rotary embedding."""
     half_embedding_dim = self.embedding_dims // 2
     fraction = 2 * jnp.arange(0, half_embedding_dim) / self.embedding_dims
-    self.timescale = self.min_timescale * (self.max_timescale / self.min_timescale) ** fraction
+    return self.min_timescale * (self.max_timescale / self.min_timescale) ** fraction
+
 
   def __call__(
       self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
@@ -193,12 +237,95 @@ class RotaryEmbedding(nn.Module):
     return x_out
 
 
+def llama_rotary_embedding_as_linen(
+    *,
+    min_timescale: int,
+    max_timescale: int,
+    embedding_dims: int = 0,
+    cast_as_fprop_dtype: bool = True,
+    fprop_dtype: DType = jnp.bfloat16,
+    use_scale: bool = True
+):
+  """Initializes the LLaMARotaryEmbedding module and returns it as a Linen module.
+
+  Args:
+    min_timescale: Start of the geometric index. Determines the periodicity of
+      the added signal.
+    max_timescale: End of the geometric index. Determines the frequency of the
+      added signal.
+    embedding_dims: Dimension of the embedding to be generated.
+    cast_as_fprop_dtype: Whether to cast the output to the fprop dtype.
+    fprop_dtype: The dtype of the output.
+    use_scale: Whether to apply LLaMA3.1 scaling factor.
+  """
+  return nnx.bridge.to_linen(
+    LLaMARotaryEmbedding,
+    min_timescale=min_timescale,
+    max_timescale=max_timescale,
+    embedding_dims=embedding_dims,
+    cast_as_fprop_dtype=cast_as_fprop_dtype,
+    fprop_dtype=fprop_dtype,
+    use_scale=use_scale,
+    metadata_fn=variable_to_logically_partitioned
+  )
+
+
 class LLaMARotaryEmbedding(RotaryEmbedding):
   """LLaMA variant of ROPE."""
 
-  # # LLaMA3.1 ROPE scaling, see the original pytorch implementation
-  # https://github.com/meta-llama/llama-models/blob/301ca3a2b3b10e94ddcd1fdd2c57e52f812e1cac/models/llama3/reference_impl/model.py#L45C5-L45C18
-  use_scale: bool = True
+  def __init__(
+      self,
+      min_timescale: int,
+      max_timescale: int,
+      embedding_dims: int = 0,
+      cast_as_fprop_dtype: bool = True,
+      fprop_dtype: DType = jnp.bfloat16,
+      use_scale: bool = True,
+      # Not used in LLaMARotaryEmbedding but passed in by nnx.bridge.to_linen.
+      # TODO: Remove when bridge no longer needed
+      rngs: nnx.Rngs = None
+  ):
+    """Initializes the LLaMARotaryEmbedding module.
+
+    Args:
+      min_timescale: Start of the geometric index. Determines the periodicity of
+        the added signal.
+      max_timescale: End of the geometric index. Determines the frequency of the
+        added signal.
+      embedding_dims: Dimension of the embedding to be generated.
+      cast_as_fprop_dtype: Whether to cast the output to the fprop dtype.
+      fprop_dtype: The dtype of the output.
+      use_scale: Whether to apply LLaMA3.1 scaling factor.
+      rngs: rng keys passed in by nnx.bridge.to_linen.
+    """
+    super().__init__(
+      min_timescale=min_timescale,
+      max_timescale=max_timescale,
+      embedding_dims=embedding_dims,
+      cast_as_fprop_dtype=cast_as_fprop_dtype,
+      fprop_dtype=fprop_dtype,
+      rngs=rngs
+    )
+
+    # LLaMA3.1 ROPE scaling, see the original pytorch implementation:
+    # https://github.com/meta-llama/llama-models/blob/301ca3a2b3b10e94ddcd1fdd2c57e52f812e1cac/models/llama3/reference_impl/model.py#L45C5-L45C18
+    self.use_scale = use_scale
+
+
+  @property
+  def timescale(self):
+    half_embedding_dim = self.embedding_dims // 2
+    fraction = 2 * jnp.arange(0, half_embedding_dim) / self.embedding_dims
+    fraction = jnp.repeat(fraction, 2)
+    timescale = self.min_timescale * (self.max_timescale / self.min_timescale) ** fraction
+
+    # Apply scaling factor if enabled
+    if self.use_scale:
+      timescale = 1.0 / jax.vmap(self._apply_scaling_factor)(1.0 / timescale)
+
+    # Expand timescale dimensions for broadcasting
+    return timescale[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
+
 
   def _apply_scaling_factor(self, freq):
     """apply scaling factor to rotary position embedding."""
@@ -228,21 +355,6 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
     lower_wavelen_cond = wavelen < high_freq_wavelen
     return jax.lax.cond(lower_wavelen_cond, lower_wavelen, bigger_or_equal_wavelen, freq)
 
-  def setup(self) -> None:
-    if self.embedding_dims % 2:
-      raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
-
-    half_embedding_dim = self.embedding_dims // 2
-    fraction = 2 * jnp.arange(0, half_embedding_dim) / self.embedding_dims
-    fraction = jnp.repeat(fraction, 2)
-    timescale = self.min_timescale * (self.max_timescale / self.min_timescale) ** fraction
-
-    # Apply scaling factor if enabled
-    if self.use_scale:
-      timescale = 1.0 / jax.vmap(self._apply_scaling_factor)(1.0 / timescale)
-
-    # Expand timescale dimensions for broadcasting
-    self.timescale = timescale[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
 
   def __call__(self, inputs: jax.Array, position: Optional[jax.Array] = None) -> jax.Array:
     """Applies LLaMA variant of rotary position embedding.
@@ -556,3 +668,13 @@ class LlamaVisionRotaryEmbedding(nn.Module):
       output = output.astype(self.fprop_dtype)
 
     return output
+
+
+def variable_to_logically_partitioned(variable: nnx.VariableState):
+  metadata = variable.get_metadata()
+  return nn.LogicallyPartitioned(  # type: ignore[wrong-keyword-args]
+      variable.value,
+      variable.sharding,
+      mesh=metadata.get("mesh"),
+      rules=metadata.get("rules"),
+  )
