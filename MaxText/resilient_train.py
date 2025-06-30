@@ -114,7 +114,7 @@ class MaxtextTrainer(ray_cluster.ResilientWorker):
 
   def _train_loop(self, recorder, state=None):
     failure_fn = functools.partial(self._fail, failure_timer_start=datetime.datetime.now())
-    train_loop(self.config, recorder, state=state, hearbeat_fn=self.heartbeat, failure_fn=failure_fn)
+    train_loop(self.config, recorder, state=state, heartbeat_fn=self.heartbeat, failure_fn=failure_fn)
 
   def run(self):
     with diagnostic.diagnose(self.diagnostic_config):
