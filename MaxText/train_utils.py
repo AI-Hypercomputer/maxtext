@@ -74,4 +74,4 @@ def create_training_tools(config, model, mesh):
         use_zarr3,
     )
 
-  return init_rng, checkpoint_manager, learning_rate_schedule, tx
+    return init_rng, checkpoint_manager, learning_rate_schedule, tx
