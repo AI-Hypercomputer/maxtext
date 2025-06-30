@@ -138,6 +138,7 @@ class PrefillProcessor:
                   self.engine.decode_state_layouts,
               ),
               donate_argnames=("decode_state"),
+              static_argnames=("return_prompt_logp",),
           )
           .lower(
               params,
@@ -341,7 +342,11 @@ class BatchedPrefillProcessor:
               self._process_batch,
               in_shardings=(self.engine.param_layouts, None, None, None, None, None, None, self.engine.decode_state_layouts),
               out_shardings=(None, self.engine.decode_state_layouts),
-              static_argnames=("num_prompts", "padded_length"),
+              static_argnames=(
+                  "num_prompts",
+                  "padded_length",
+                  "return_prompt_logp",
+              ),
               donate_argnames=("decode_state"),
           )
           .lower(
