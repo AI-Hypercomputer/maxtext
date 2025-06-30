@@ -134,17 +134,20 @@ jobs:
       issues: write  # for failed-build-issue
     steps:
     - name: Authenticate gcloud
-      continue-on-error: true
       run: |
           # configure registries as root and as runner
           sudo gcloud auth configure-docker --quiet
           gcloud auth configure-docker --quiet
           sudo gcloud auth configure-docker us-docker.pkg.dev --quiet
           gcloud auth configure-docker us-docker.pkg.dev --quiet
+    - name: Verify images exist before deletion
+      run: |
+        echo "Verifying GPU and TPU images for run ID ${{ github.run_id }}"
+        gcloud artifacts docker images list gcr.io/tpu-prod-env-multipod --filter="tags:maxtext_${{ github.run_id }}"
     - name: Delete GPU image
-      run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:gpu --force-delete-tags --quiet
+      run: gcloud artifacts docker images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:gpu --force-delete-tags --quiet
     - name: Delete TPU image
-      run: gcloud container images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu --force-delete-tags --quiet
+      run: gcloud artifacts docker images delete gcr.io/tpu-prod-env-multipod/maxtext_${{ github.run_id }}:tpu --force-delete-tags --quiet
 
   notify_success:
     if: ${{ success() }}
