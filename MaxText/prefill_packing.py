@@ -132,7 +132,7 @@ class PrefillProcessor:
       self.process_func[(padded_length, return_prompt_logp)] = (
           jax.jit(
               self._process,
-              in_shardings=(self.engine.param_layouts, None, None, None, self.engine.decode_state_layouts, None, None),
+              in_shardings=(self.engine.param_layouts, None, None, None, self.engine.decode_state_layouts, None),
               out_shardings=(
                   None,
                   self.engine.decode_state_layouts,
