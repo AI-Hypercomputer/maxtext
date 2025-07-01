@@ -46,3 +46,8 @@ RUN --mount=type=cache,target=/root/.cache/pip bash setup.sh MODE=${ENV_MODE} JA
 
 # Now copy the remaining code (source files that may change frequently)
 COPY . .
+#COPY use_custom_jax.sh ./ 
+# Copy entire contnets of jax folder 
+#COPY jax_folder ./jax_folder
+
+RUN bash use_custom_jax.sh

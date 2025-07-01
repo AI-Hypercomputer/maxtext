@@ -38,8 +38,7 @@ def simple_timeit(f, *args, tries=10, task=None, enable_profile=False):
 
 num_devices = len(jax.devices()) # we expect either 4 or 8 total devices
 expert_parallelism = 4
-#assert expert_parallelism==2, "This script only supports EP=2"
-pipeline_parallelism = num_devices // expert_parallelism # We expect this is either 2 or 4
+pipeline_parallelism = num_devices // expert_parallelism 
 
 
  # Define a mesh with PP + EP
