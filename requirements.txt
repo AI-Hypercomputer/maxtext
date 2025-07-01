@@ -21,7 +21,8 @@ ml-collections
 ml-goodput-measurement==0.0.10
 numpy
 optax
-protobuf==3.20.3
+# protobuf==3.20.3
+protobuf
 pylint
 pytest
 pyink
