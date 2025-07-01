@@ -347,6 +347,10 @@ class Decoder(nn.Module):
       from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
 
       return [gpt3.Gpt3DecoderLayer]
+    elif self.config.decoder_block == DecoderBlockType.QWEN3:
+      from MaxText.layers import qwen3  # pylint: disable=import-outside-toplevel
+
+      return [qwen3.Qwen3DecoderLayer]
     elif self.config.decoder_block == DecoderBlockType.SIMPLE:
       from MaxText.layers import simple_layer  # pylint: disable=import-outside-toplevel
 
@@ -376,6 +380,7 @@ class Decoder(nn.Module):
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
+        DecoderBlockType.QWEN3,
         DecoderBlockType.SIMPLE,
         DecoderBlockType.SIMPLE_MLP,
         DecoderBlockType.LLAMA4,
@@ -811,4 +816,4 @@ class Transformer(nn.Module):
         image_embeddings=image_embeddings,
     )
     return logits
-  
+
