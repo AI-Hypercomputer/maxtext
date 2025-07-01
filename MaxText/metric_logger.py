@@ -86,7 +86,8 @@ class MetricLogger:
         f"TFLOP/s/device: {metrics['scalar']['perf/per_device_tflops_per_sec']:.3f}, "
         f"Tokens/s/device: {metrics['scalar']['perf/per_device_tokens_per_sec']:.3f}, "
         f"total_weights: {metrics['scalar']['learning/total_weights']}, "
-        f"loss: {metrics['scalar']['learning/loss']:.3f}"
+        f"loss: {metrics['scalar']['learning/loss']:.3f}, "
+        f"mtp_loss: {metrics['scalar']['learning/mtp_loss']:.3f}"
     )
 
   def write_metrics_locally(self, metrics, step):

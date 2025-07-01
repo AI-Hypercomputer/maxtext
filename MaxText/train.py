@@ -27,6 +27,8 @@ import os
 import queue
 import sys
 import time
+from jax.debug import print as jax_print
+
 
 from absl import app
 
@@ -389,12 +391,19 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     # The single model.apply call now triggers the entire chain if MTP is enabled:
     # Decoder runs -> returns hidden_state -> MTPBlock uses it -> MTPBlock sows losses -> we reap them here.
     mutable_collections.append("mtp_losses")
+
+  # During evaluation, if the acceptance rate test is enabled, we must
+  # make its specific collection mutable so the MTPBlock can sow into it.
+  if config.mtp_eval_target_layer > 0 and not is_train:
+    print("I AM HEREEEEEEEEEEEEEEEEEEEEEE      ", is_train)
+    mutable_collections.append('mtp_acceptance')
+
   logits, intermediate_outputs = model.apply(
       params,
       data["inputs"],
       data["inputs_position"],
-      decoder_target_tokens=data["targets"] if is_train else None,
-      decoder_target_mask=data["targets_segmentation"] if is_train else None,
+      decoder_target_tokens=data["targets"],
+      decoder_target_mask=data["targets_segmentation"],
       decoder_segment_ids=data["inputs_segmentation"],
       encoder_images=data["images"] if config.use_multimodal else None,
       enable_dropout=config.enable_dropout if is_train else False,
@@ -426,6 +435,13 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
       avg_mtp_loss = sum_of_all_mtp_losses / (sum_of_all_mtp_weights + EPS)
       scaled_mtp_loss = avg_mtp_loss * config.mtp_loss_scaling_factor
 
+      jax.debug.print("TRAIN LOG: Avg MTP Loss (Unscaled): {x}", x=avg_mtp_loss)
+
+      # config.mtp_loss_scaling_factor is a Python float, so direct formatting is fine
+      jax.debug.print(f"TRAIN LOG: MTP Loss Scaling Factor: {config.mtp_loss_scaling_factor:.4f}")
+      jax.debug.print("TRAIN LOG: Scaled MTP Loss (Added to Main): {x:.4f}", x=scaled_mtp_loss)
+
+
       loss += scaled_mtp_loss
       mtp_loss = scaled_mtp_loss
 
@@ -436,6 +452,11 @@ def loss_fn(model, config, data, dropout_rng, params, is_train=True):
     total_moe_lb_loss = maxtext_utils.get_nested_value(intermediate_outputs, nested_key, 0.0)
     moe_lb_loss = jnp.mean(jnp.array(total_moe_lb_loss))
     loss += moe_lb_loss
+  
+  # Add the model's primary output to the intermediates dict so it can be used
+  # by the acceptance rate calculation in eval_step.
+  intermediate_outputs['logits'] = logits
+  
   aux = {
       "intermediate_outputs": intermediate_outputs,
       "total_loss": total_loss,
@@ -580,6 +601,48 @@ def eval_step(model, config, state, data, dropout_rng):
 
   eval_loss_fn = functools.partial(_loss_fn, model, config, data, dropout_rng, is_train=False)
   loss, aux = eval_loss_fn(state.params, *extra_dpo_args)
+
+  mtp_acceptance_rate = 0.0 # Default value
+  # This logic only runs if the feature was enabled in the config.
+  if config.mtp_eval_target_layer > 0:
+      sown_data = maxtext_utils.get_nested_value(aux['intermediate_outputs'], ('mtp_acceptance', 'mtp_block'), {})
+      
+      # get_nested_value returns a tuple of sown values; we take the first.
+      mtp_preds = maxtext_utils.get_nested_value(sown_data, ('mtp_preds',), [None])[0]
+      # This is the crucial mask that handles padding and roll-over correctly.
+      valid_mask = maxtext_utils.get_nested_value(sown_data, ('mtp_mask',), [None])[0]
+
+
+      # max_logging.log(f"########### 1 ######### {mtp_preds}")
+
+      # max_logging.log(f"########### 1 ######### {valid_mask}")
+
+      
+      if mtp_preds is not None and valid_mask is not None:
+          # Get the main model's greedy predictions from the logits.
+          main_model_preds = jnp.argmax(aux['intermediate_outputs']['logits'], axis=-1)
+          
+          # Roll the main model's predictions to align them in time with the MTP head's target.
+          # We need to roll it `k` times, where `k` is our target layer.
+          rolled_main_preds = main_model_preds
+          for _ in range(config.mtp_eval_target_layer):
+              rolled_main_preds = maxtext_utils.roll_and_mask(rolled_main_preds)
+          
+          # Compare the aligned predictions, applying the valid_mask to ignore junk values.
+          correct_predictions = jnp.sum((mtp_preds == rolled_main_preds) * valid_mask)
+
+          # jax_print("########### Correct Prediciton ######### {y}", y=correct_predictions)
+
+          total_valid_tokens = jnp.sum(valid_mask)
+          
+          mtp_acceptance_rate = (correct_predictions / (total_valid_tokens + EPS)) * 100
+
+
+
+          # jax_print("########### ACCEPTANCE_RATE ######### {x}", x=mtp_acceptance_rate)
+
+
+
   total_loss = aux["total_loss"]
   total_weights = aux["total_weights"]
   moe_lb_loss = aux["moe_lb_loss"]
@@ -591,6 +654,7 @@ def eval_step(model, config, state, data, dropout_rng):
           "evaluation/total_weights": total_weights,
           "evaluation/moe_lb_loss": moe_lb_loss,
           "evaluation/mtp_loss": mtp_loss,
+          "evaluation/mtp_acceptance_rate_percent": mtp_acceptance_rate,
       },
   }
   if config.use_dpo:
@@ -783,6 +847,82 @@ def train_loop(config, recorder, state=None):
       state,
   ) = setup_train_loop(config, recorder)
 
+  max_logging.log("!!! START OF PARAMETER NAMES !!!")
+  param_tree_paths = jax.tree_util.tree_leaves_with_path(state.params)
+  for path, _ in param_tree_paths:
+      # jax.tree_util.keystr(path) gives a clean string of the name
+      max_logging.log(jax.tree_util.keystr(path))
+  max_logging.log("!!! END OF PARAMETER NAMES !!!")
+
+#   # in train.py, inside the train_loop function, after `!!! END OF PARAMETER NAMES !!!`
+
+# # ====================================================================
+# # START: "EYEBALL" ALL LOADED WEIGHTS VALIDATION (Multi-Host & Slice-Correct)
+# # ====================================================================
+#   import jax.tree_util as tree_util
+#   from jax.experimental import multihost_utils
+
+#   max_logging.log("Eyeballing ALL loaded weights in MaxText state...")
+
+#   def print_slice(tensor, path):
+#       """Prints a small slice of a NumPy tensor."""
+#       print(f"\nProcessing MaxText weight: {path}")
+#       if tensor.ndim == 0:
+#           print(f"    - Value: {tensor.item()}")
+#       elif tensor.ndim == 1:
+#           # For 1D tensors (like biases/norms), print the first 4 elements
+#           slice_size = min(4, tensor.shape[0])
+#           print(f"    - Slice (first {slice_size}): {tensor[0:slice_size]}")
+#       else:
+#           # For 2D or higher, print the top-left 2x2 slice
+#           slice_rows = min(2, tensor.shape[0])
+#           slice_cols = min(2, tensor.shape[1])
+#           print(f"    - Slice ({slice_rows}x{slice_cols}):\n{tensor[0:slice_rows, 0:slice_cols]}")
+
+#   def inspect_pytree(pytree):
+#       """Walks a pytree and prints slices of its leaf nodes (tensors)."""
+      
+#       def leaf_handler(path, leaf):
+#           # We only need process 0 to do the work and printing.
+#               try:
+#                   # 1. Define the slice we want from the GLOBAL array.
+#                   if leaf.ndim == 0:
+#                       slice_obj = ()
+#                   elif leaf.ndim == 1:
+#                       slice_obj = slice(0, min(4, leaf.shape[0]))
+#                   else:
+#                       # The slice of the top-left 2x2 corner of the global array
+#                       slice_obj = (slice(0, min(2, leaf.shape[0])), slice(0, min(2, leaf.shape[1])))
+
+#                   # 2. Apply the slice to the global, sharded array.
+#                   # The result is a new, very small sharded array.
+#                   sliced_leaf = leaf[slice_obj]
+
+#                   # 3. Gather this small array from all hosts.
+#                   # Since the array is tiny (e.g., 2x2), this is memory-safe.
+#                   gathered_slice = multihost_utils.process_allgather(sliced_leaf)
+
+#                   # 4. Copy the now-local array to the CPU as a NumPy array.
+#                   numpy_array = jax.device_get(gathered_slice)
+
+#                   # 5. Print it.
+#                   path_str = "['" + "']['".join(map(str, tree_util.keystr(path).split('.'))) + "']"
+#                   print_slice(numpy_array, path_str)
+
+#               except Exception as e:
+#                   path_str = "['" + "']['".join(map(str, tree_util.keystr(path).split('.'))) + "']"
+#                   print(f"\nCould not inspect weight: {path_str} due to error: {e}")
+
+#       # We are interested in the 'params' dictionary within the state's 'params'
+#       tree_util.tree_map_with_path(leaf_handler, pytree)
+
+#   # Run the inspection on the loaded model parameters
+#   inspect_pytree(state.params['params'])
+
+#   max_logging.log("Finished eyeballing all loaded weights.")
+# # ====================================================================
+# # END: "EYEBALL" ALL LOADED WEIGHTS VALIDATION
+# # ====================================================================
   if config.use_dpo:
     if "reference_params" not in state.params:
       reference_params = jax.tree.map(jnp.copy, state.params["params"])
@@ -929,6 +1069,7 @@ def train_loop(config, recorder, state=None):
               "eval/avg_loss": 0.0,
               "eval/moe_lb_loss": 0.0,
               "eval/mtp_loss": 0.0,
+              "eval/mtp_acceptance_rate_percent": 0.0,
           }
       }
       eval_dpo_reward_accuracy = 0.0
@@ -943,6 +1084,8 @@ def train_loop(config, recorder, state=None):
         cumulative_eval_metrics["scalar"]["eval/total_weights"] += float(eval_metrics["scalar"]["evaluation/total_weights"])
         cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] += float(eval_metrics["scalar"]["evaluation/moe_lb_loss"])
         cumulative_eval_metrics["scalar"]["eval/mtp_loss"] += float(eval_metrics["scalar"]["evaluation/mtp_loss"])
+        cumulative_eval_metrics["scalar"]["eval/mtp_acceptance_rate_percent"] += float(eval_metrics["scalar"]["evaluation/mtp_acceptance_rate_percent"])
+
         eval_dpo_reward_accuracy += float(eval_metrics["scalar"].get("evaluation/dpo_reward_accuracy", 0.0))  # for dpo only
         max_logging.log(f"Completed eval step {eval_step_count}")
         eval_step_count += 1
@@ -950,14 +1093,20 @@ def train_loop(config, recorder, state=None):
           cumulative_eval_metrics["scalar"]["eval/total_weights"] + EPS
       )
       cumulative_eval_metrics["scalar"]["eval/avg_loss"] = eval_loss
+      eval_perplexity = jnp.exp(eval_loss)
+      cumulative_eval_metrics["scalar"]["eval/perplexity"] = eval_perplexity
       cumulative_eval_metrics["scalar"]["eval/avg_moe_lb_loss"] = (
           cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] / eval_step_count
       )
+      cumulative_eval_metrics["scalar"]["eval/mtp_acceptance_rate_percent"] = (
+          cumulative_eval_metrics["scalar"]["eval/mtp_acceptance_rate_percent"] / eval_step_count
+      )
+
       if config.use_dpo:
         cumulative_eval_metrics["scalar"]["eval/dpo_reward_accuracy"] = eval_dpo_reward_accuracy / eval_step_count
       metric_logger.write_metrics(running_gcs_metrics, cumulative_eval_metrics, step, is_training=False)
       max_logging.log(
-          f"average loss after {step=}: {eval_step_count=}, {eval_loss=},"
+          f"average loss after {step=}: {eval_step_count=}, {eval_loss=}, perplexity={eval_perplexity}"
           f" total_weights={cumulative_eval_metrics['scalar']['eval/total_weights']}"
       )
       if eval_loss <= config.target_eval_loss:

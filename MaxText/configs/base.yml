@@ -140,6 +140,7 @@ mtp_num_layers: 0
 # The scaling factor (lambda) for the MTP auxiliary loss. The final loss is:
 # main_loss + mtp_loss_scaling_factor * avg_mtp_loss
 mtp_loss_scaling_factor: 0.1
+mtp_eval_target_layer: 1
 
 # mixture of experts (moe)
 num_experts: 1
@@ -316,6 +317,7 @@ logical_axis_rules: [
                       ['activation_vocab', ['sequence','context']],
                       ['activation_stage', 'stage'],
                       ['activation_exp', ['expert']],
+                      ['concat_embed', ['fsdp', 'fsdp_transpose', 'sequence', 'tensor_transpose', 'context', 'expert']],
                       ['decode_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['decode_length', ['sequence']],
                       ['mlp', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
@@ -582,8 +584,8 @@ decode_sampling_nucleus_p: -1 # set if you're doing nucleus / top-p
 decode_sampling_top_k: 0 # set if you're doing top-k
 decode_sampling_temperature: 1.
 
-eval_interval: -1  # the specific number of train step between eval_step
-eval_steps: -1  # run this number of steps for eval, recommend setting this to prevent error due to running out of evel data
+eval_interval: 1  # the specific number of train step between eval_step
+eval_steps: 5  # run this number of steps for eval, recommend setting this to prevent error due to running out of evel data
 target_eval_loss: 0.  # early stop once reaching target eval_loss
 
 # Goodput parameters

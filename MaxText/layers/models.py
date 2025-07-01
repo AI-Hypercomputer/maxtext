@@ -70,7 +70,7 @@ class Transformer(nn.Module):
       layer_types = maxtext_utils.get_decoder_layers(self.config)
       # For MTP, we use the primary (usually dense) transformer block blueprint
       # to ensure architectural consistency. By convention, this is the first in the list.
-      mtp_layer = layer_types[0]
+      mtp_layer = layer_types[-1]
       self.mtp_block = MultiTokenPredictionBlock(
           config=self.config, mesh=self.mesh, name="mtp_block", transformer_layer_module=mtp_layer, decoder=self.decoder
       )
@@ -144,7 +144,7 @@ class Transformer(nn.Module):
     #   2. The `shared_embedding` for both embedding future tokens and for its final
     #      logit projection.
     # Its only effect is to "sow" these losses; it does not alter the primary logits output.
-    if self.config.mtp_num_layers > 0 and model_mode == MODEL_MODE_TRAIN:
+    if self.config.mtp_num_layers > 0:
       self.mtp_block(
           main_hidden_state=hidden_state,
           input_ids=decoder_input_tokens,

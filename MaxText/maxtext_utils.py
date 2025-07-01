@@ -1016,28 +1016,6 @@ def create_learning_rate_schedule(config):
 
   return optax.join_schedules(pieces, boundaries)
 
-
-def roll_and_mask(x: jnp.ndarray, shift: int = -1) -> jnp.ndarray:
-  """
-  Performs a leftward roll on the sequence axis (axis=1) and masks the
-  newly created invalid positions at the end of the sequence.
-  Assumes input `x` has a batch dimension at axis 0 and sequence at axis 1.
-
-  Args:
-    x: The input array of shape [batch, seq_len, ...].
-    shift: The number of positions to shift left.
-
-  Returns:
-    The rolled array of the same shape as x.
-  """
-  # If shift is 0, it's a no-op. Return the original array.
-  if shift == 0:
-    return x
-
-  # to set the last `abs(shift)` elements of the sequence to zero.
-  return jnp.roll(x, shift, axis=1).at[:, shift:, ...].set(0)
-
-
 def get_formatted_sharding_annotations(params, mesh=None):
   """
   Generates a readable string report of sharding annotations for all parameters.
@@ -1100,6 +1078,27 @@ def get_formatted_sharding_annotations(params, mesh=None):
     annotation_lines.append(f" - Param: {param_name_str}\n" f"   Shape: {shape_str}\n" f"   Sharding: {sharding_desc}")
   # Join all the collected lines into a single string, separated by newlines.
   return "\n".join(annotation_lines)
+
+
+def roll_and_mask(x: jnp.ndarray, shift: int = -1) -> jnp.ndarray:
+  """
+  Performs a leftward roll on the sequence axis (axis=1) and masks the
+  newly created invalid positions at the end of the sequence.
+  Assumes input `x` has a batch dimension at axis 0 and sequence at axis 1.
+
+  Args:
+    x: The input array of shape [batch, seq_len, ...].
+    shift: The number of positions to shift left.
+
+  Returns:
+    The rolled array of the same shape as x.
+  """
+  # If shift is 0, it's a no-op. Return the original array.
+  if shift == 0:
+    return x
+
+  # to set the last `abs(shift)` elements of the sequence to zero.
+  return jnp.roll(x, shift, axis=1).at[:, shift:, ...].set(0)
 
 
 def get_decoder_layers(config):

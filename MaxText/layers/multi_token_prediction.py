@@ -31,6 +31,33 @@ from MaxText.layers.normalizations import RMSNorm
 from MaxText import max_utils
 from MaxText import maxtext_utils
 
+import jax
+import jax.numpy as jnp
+
+def log_tensor_stats(tensor, name, k=None, full=False):
+    if tensor is None:
+        jax.debug.print(f"MTP LOG: {'k=' + str(k) if k is not None else ''} {name}: IS NONE")
+        return
+    try:
+        k_prefix = f"k={k} " if k is not None else ""
+        name_prefix = f"MTP LOG: {k_prefix}{name}: "
+        shape_dtype = f", shape={tensor.shape}, dtype={tensor.dtype}"
+
+        # REMOVED :.4f from the placeholders
+        jax.debug.print(name_prefix +
+                      "mean={mean}, std={std}, min={min}, max={max}" +
+                      shape_dtype,
+                      mean=jnp.mean(tensor),
+                      std=jnp.std(tensor),
+                      min=jnp.min(tensor),
+                      max=jnp.max(tensor))
+        if full:
+             jax.debug.print(name_prefix + "values={x}", x=tensor)
+    except Exception as e:
+        # This print is outside JAX, so direct f-string is fine for the exception message
+        print(f"MTP LOG ERROR in log_tensor_stats for {name}: {e}")
+        # Optional: jax.debug.print for the name, if you want it in the device logs
+        jax.debug.print("MTP LOG ERROR in log_tensor_stats for name={name}", name=name)
 
 class MultiTokenPredictionLayer(nn.Module):
   """
@@ -89,6 +116,9 @@ class MultiTokenPredictionLayer(nn.Module):
     cfg = self.config
     mesh = self.mesh
     k = self.layer_number
+    jax.debug.print(f"MTP LOG: --- Enter MultiTokenPredictionLayer k={k} ---")
+    log_tensor_stats(prev_hidden_state, "layer_input_prev_h", k)
+    log_tensor_stats(target_token_embedding, "layer_input_target_emb", k)
 
     # --- 1. Normalize Hidden State and Embedding ---
     embedding_norm_layer = RMSNorm(
@@ -100,6 +130,12 @@ class MultiTokenPredictionLayer(nn.Module):
     )
     embedding_norm = embedding_norm_layer(target_token_embedding)
 
+    embedding_norm = nn.with_logical_constraint(
+        embedding_norm, ('activation_batch', 'activation_length', 'activation_embed')
+    )
+
+    log_tensor_stats(embedding_norm, "embedding_norm", k)
+
     hidden_state_norm_layer = RMSNorm(
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
@@ -110,9 +146,22 @@ class MultiTokenPredictionLayer(nn.Module):
 
     hidden_state_norm = hidden_state_norm_layer(prev_hidden_state)
 
+    hidden_state_norm = nn.with_logical_constraint(
+        hidden_state_norm, ('activation_batch', 'activation_length', 'activation_embed')
+    )
+
+    log_tensor_stats(hidden_state_norm, "hidden_state_norm", k)
+
+
     # --- 2. Concatenate Normalized Representations ---
     # Shape: [B, S, 2*H]
     concatenated_features = jnp.concatenate([hidden_state_norm, embedding_norm], axis=-1)
+
+    concatenated_features = nn.with_logical_constraint(
+         concatenated_features, ('activation_batch', 'activation_length', None)
+    )
+
+    log_tensor_stats(concatenated_features, "concatenated_features", k)
 
     # --- 3. Project Concatenated Features ---
     # Projects from 2*H back down to H
@@ -127,6 +176,12 @@ class MultiTokenPredictionLayer(nn.Module):
     # Shape: [B, S, H]
     projected_features = projection_layer(concatenated_features)
 
+    projected_features = nn.with_logical_constraint(
+        projected_features, ('activation_batch', 'activation_length', 'activation_embed')
+    )
+
+    log_tensor_stats(projected_features, "projected_features", k)
+
     # --- 4. Pass through MTP Transformer Block ---
     next_hidden_state, _ = self.transformer_layer_module(config=cfg, mesh=mesh, name=f"mtp_{k}_transformer_layer")(
         inputs=projected_features,
@@ -135,7 +190,8 @@ class MultiTokenPredictionLayer(nn.Module):
         deterministic=deterministic,
         model_mode=model_mode,
     )
-
+    log_tensor_stats(next_hidden_state, "layer_output_next_h", k)
+    jax.debug.print(f"MTP LOG: --- Exit MultiTokenPredictionLayer k={k} ---")
     # Shape: [B, S, H]
     # --- Return Processed Hidden State ---
     return next_hidden_state
@@ -170,18 +226,26 @@ class MultiTokenPredictionBlock(nn.Module):
     rolled_input_ids = input_ids
     rolled_target_ids = target_ids
     rolled_target_mask = target_mask
-    rolled_position_id = position_ids
+
 
     # Range chosen to align with the naming convention of the paper
     for k in range(1, cfg.mtp_num_layers + 1):
+      jax.debug.print(f"MTP LOG: ===== START MTP Layer k={k} =====")
+
       # Sequentially roll all tensors to prepare data for predicting the k-th future token.
       rolled_input_ids = maxtext_utils.roll_and_mask(rolled_input_ids)
       rolled_target_ids = maxtext_utils.roll_and_mask(rolled_target_ids)
       rolled_target_mask = maxtext_utils.roll_and_mask(rolled_target_mask)
-      rolled_position_id = maxtext_utils.roll_and_mask(rolled_position_id)
 
+
+      # TODO(@parambole) Not sure if this is requried check 
+      rolled_position_ids = position_ids + k
+    #   rolled_position_ids = maxtext_utils.roll_and_mask(position_ids)
+      log_tensor_stats(rolled_input_ids, "rolled_input_ids", k)
+      log_tensor_stats(rolled_position_ids, "rolled_position_ids", k)
       # Embed the k-th future input tokens using the shared embedding module
-      target_token_embedding = self.decoder._apply_embedding(rolled_input_ids, rolled_position_id, deterministic)
+      target_token_embedding = self.decoder._apply_embedding(rolled_input_ids, rolled_position_ids, deterministic)
+      log_tensor_stats(target_token_embedding, "target_token_embedding", k)
 
       # Instantiate and apply the MTP layer for this step
       mtp_layer = MultiTokenPredictionLayer(
@@ -193,22 +257,51 @@ class MultiTokenPredictionBlock(nn.Module):
       )
 
       next_mtp_hidden_state = mtp_layer(
-          mtp_hidden_state, target_token_embedding, position_ids, decoder_segment_ids, deterministic, model_mode
+          mtp_hidden_state, target_token_embedding, rolled_position_ids, decoder_segment_ids, deterministic, model_mode
       )
+      log_tensor_stats(next_mtp_hidden_state, "next_mtp_hidden_state", k)
 
       # Project to logits using the shared embedding transpose
       mtp_logits = self.decoder._apply_output_head(next_mtp_hidden_state, deterministic, model_mode)
+      
+      log_tensor_stats(mtp_logits, "mtp_logits", k)
 
-      # Calculate cross-entropy loss for this specific layer's prediction
-      mtp_xent, _ = max_utils.cross_entropy_with_logits(mtp_logits, jax.nn.one_hot(rolled_target_ids, cfg.vocab_size), 0.0)
-      mtp_xent_masked = mtp_xent * rolled_target_mask
+      # This runs only if the feature is enabled (flag > 0), for the specific layer (k == flag),
+      # and when the 'mtp_acceptance' collection is mutable (i.e., during eval).
+      if not self.is_initializing() and cfg.mtp_eval_target_layer == k and self.is_mutable_collection('mtp_acceptance'):
+        mtp_top_1_pred = jnp.argmax(mtp_logits, axis=-1)
+        self.sow('mtp_acceptance', 'mtp_preds', mtp_top_1_pred)
+        self.sow('mtp_acceptance', 'mtp_mask', rolled_target_mask)
 
       # This condition ensures loss is only computed during training runs (`.apply`),
       # and not during model initialization (`.init()`).
-      if not self.is_initializing():
+      if not self.is_initializing() and model_mode == MODEL_MODE_TRAIN:
+        true_one_hot = jax.nn.one_hot(rolled_target_ids, cfg.vocab_size)
+
+        # Calculate cross-entropy loss for this specific layer's prediction
+        mtp_xent, _ = max_utils.cross_entropy_with_logits(mtp_logits, true_one_hot, 0.0)
+        mtp_xent_masked = mtp_xent * rolled_target_mask
+        num_valid_tokens = jnp.sum(rolled_target_mask)
+        
+        avg_mtp_xent = jnp.sum(mtp_xent_masked) / (num_valid_tokens + 1e-8)
+        jax.debug.print("MTP LOG: k={k} avg UN SCALED XENT: {x}", k=k, x=avg_mtp_xent)
+
+
+        # Log probability of the true tokens
+        log_probs = jax.nn.log_softmax(mtp_logits)
+        true_token_log_probs = jnp.take_along_axis(log_probs, rolled_target_ids[..., None], axis=-1)[..., 0]
+        masked_true_token_log_probs = true_token_log_probs * rolled_target_mask
+        avg_true_token_log_prob = jnp.sum(masked_true_token_log_probs) / (num_valid_tokens + 1e-8)
+        jax.debug.print("MTP LOG: k={k} avg true token log_prob: {x:.4f}", k=k, x=avg_true_token_log_prob)
+
+          # self.sow(...)
+
         # "Sow" the loss values into the 'mtp_losses' collection for the
         self.sow("mtp_losses", "losses", jnp.sum(mtp_xent_masked))
         self.sow("mtp_losses", "weights", jnp.sum(rolled_target_mask))
+
+      jax.debug.print(f"MTP LOG: ===== END MTP Layer k={k} =====")
+
 
       # The output of this layer is the input for the next, maintaining the causal chain.
       mtp_hidden_state = next_mtp_hidden_state
