@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# model config for qwen3-0.6b
+# model config for qwen3-8b
 
 base_emb_dim: 4096
 base_num_query_heads: 32
