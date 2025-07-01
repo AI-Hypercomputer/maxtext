@@ -922,7 +922,7 @@ def create_device_mesh(config, devices=None):
   if devices is None:
     devices = jax.devices()
   if (
-      config.subslice_shape is not None
+      config.subslice_shape
       and config.enable_single_controller
       and config.num_slices == 1
   ):
