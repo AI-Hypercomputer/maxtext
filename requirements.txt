@@ -36,8 +36,8 @@ tensorboardx>=2.6.2.2
 tensorboard-plugin-profile
 tiktoken
 transformers
-mlperf-logging@git+https://github.com/mlperf/logging.git
-google-jetstream@git+https://github.com/AI-Hypercomputer/JetStream.git
+# mlperf-logging@git+https://github.com/mlperf/logging.git
+# google-jetstream@git+https://github.com/AI-Hypercomputer/JetStream.git
 jsonlines
 pathwaysutils==0.1.1
 omegaconf
