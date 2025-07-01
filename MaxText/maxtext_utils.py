@@ -24,6 +24,7 @@ import pickle
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 from flax.training import train_state
+from flax import nnx
 
 import numpy as np
 
@@ -650,6 +651,8 @@ def init_initial_state(model, tx, config, is_training, key):
       np.ones(input_shape, dtype=jnp.int32),
       encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
   )
+  # mazumdera@: https://flax.readthedocs.io/en/latest/guides/bridge_guide.html#linen-nnx
+  nnx.bridge.lazy_init(model, model_vars)
   if is_training:
     return init_training_state(model.apply, model_vars, tx)
   return init_decode_state(model.apply, model_vars)
