@@ -37,7 +37,7 @@ from MaxText import maxtext_utils
 from MaxText import multimodal_utils
 from MaxText.layers.attentions import Attention
 from MaxText.layers.normalizations import rms_norm
-from MaxText.layers.embeddings import PositionalEmbedding, Embed
+from MaxText.layers.embeddings import positional_embedding_as_linen, Embed
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
 
@@ -490,7 +490,7 @@ class Decoder(nn.Module):
     y = y.astype(cfg.dtype)
 
     if cfg.use_untrainable_positional_embedding:
-      y = PositionalEmbedding(cfg.base_emb_dim)(y, decoder_positions)
+      y = positional_embedding_as_linen(embedding_dims=cfg.base_emb_dim)(y, decoder_positions)
 
     if cfg.trainable_position_size > 0:
       y += Embed(
