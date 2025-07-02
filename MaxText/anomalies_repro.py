@@ -15,7 +15,7 @@ import datetime
 
 
 num_devices = len(jax.devices()) # we expect either 4 or 8 total devices
-expert_parallelism = 4
+expert_parallelism = 8
 pipeline_parallelism = num_devices // expert_parallelism 
 
 
@@ -66,7 +66,7 @@ def run_ragged_a2a(batch_per_ep, model):
       x = jnp.arange(0.0, batch)
       x = jnp.expand_dims(x, axis=1)
       x = jnp.tile(x, (1, model))
-      x = jnp.astype(x, jnp.float32)
+      x = jnp.astype(x, jnp.bfloat16)
       x = jax.device_put(x, x_sharding)
       return x
     x = jax.jit(create_x)()
@@ -114,9 +114,9 @@ def run_ragged_a2a(batch_per_ep, model):
 
 batch_per_ep = 1024
 
-model = 4096 # Works with both bf16 and float32
+#model = 4096 # Works with both bf16 and float32
 model = 8192 # Works with bf16, crashes with float32
-model = 16384 # Crashes with both bf16 and float32
+#model = 16384 # Crashes with both bf16 and float32
 
 
 output_a2a = run_ragged_a2a(batch_per_ep, model)

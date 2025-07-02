@@ -171,7 +171,7 @@ def get_roofline_time(batch_per_ep, model, ici_speed_bytes):
 
 batch_per_ep = 1024
 
-model_vec = [512 * 2**n for n in range(1, 5)]
+model_vec = [512 * 2**n for n in range(0, 4)]
 
 output_time = [run_and_time_vmap_ep(batch_per_ep, model) for model in model_vec]
 
