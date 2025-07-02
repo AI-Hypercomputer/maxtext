@@ -194,6 +194,11 @@ def validate_keys(keys):
         "Not using emergency checkpoint, ignoring local_checkpoint_directory, local_checkpoint_period,"
         " use_replicator_service and replicator_backup_interval_minutes"
     )
+  if keys["use_ring_of_experts"]:
+    assert (
+        keys["sparse_matmul"] and keys["megablox"] and 
+        (keys["ici_expert_parallelism"] or keys["dcn_expert_parallelism"])
+    ), "use_ring_of_experts is only supported with num_experts > 1"
 
   validate_multiple_slices(keys)
   if keys["num_experts"] > 1:
