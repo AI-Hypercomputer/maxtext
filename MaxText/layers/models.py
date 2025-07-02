@@ -390,7 +390,9 @@ class Decoder(nn.Module):
     elif self.config.decoder_block == DecoderBlockType.GPT3:
       from MaxText.layers import gpt3  # pylint: disable=import-outside-toplevel
 
-      return functools.partial(gpt3.Gpt3LayerNorm, reductions_in_fp32=False, use_bias=True)
+      return functools.partial(
+        gpt3.gpt3_layer_norm, num_features=num_features, reductions_in_fp32=False, use_bias=True
+      )
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
