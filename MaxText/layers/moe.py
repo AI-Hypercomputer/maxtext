@@ -15,28 +15,24 @@
 
 """MoE related Layers."""
 
-import functools
-from typing import Iterable, Tuple, Union, Optional
 from enum import Enum, auto
+import functools
 import math
-
-import numpy as np
-
-from jax import lax
-from jax.ad_checkpoint import checkpoint_name
-from jax.experimental import shard_map
-from jax.sharding import Mesh
-import jax
-import jax.numpy as jnp
-
-import flax.linen as nn
+from typing import Iterable, Optional, Tuple, Union
 
 from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2.aqt_tensor import QTensor
-
+import flax.linen as nn
+import jax
+from jax import lax
+from jax.ad_checkpoint import checkpoint_name
+from jax.experimental import shard_map
+from jax.experimental import xla_metadata
+import jax.numpy as jnp
+from jax.sharding import Mesh
 from MaxText import max_logging
 from MaxText import max_utils
-from MaxText.common_types import DType, Array, Config, DecoderBlockType
+from MaxText.common_types import Array, Config, DType, DecoderBlockType
 from MaxText.kernels import megablox as mblx
 from MaxText.layers import initializers
 from MaxText.layers import linears
@@ -44,6 +40,10 @@ from MaxText.layers import quantizations
 from MaxText.layers.attentions import NdInitializer, nd_dense_init
 from MaxText.layers.initializers import default_bias_init
 from MaxText.layers.quantizations import AqtQuantization as Quant
+import numpy as np
+
+
+set_xla_metadata = xla_metadata.set_xla_metadata
 
 
 DISPATCH = "dispatch"
@@ -555,12 +555,15 @@ class RoutedMoE(nn.Module):
           if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
             raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
           rhs_inputs = kernel.qvalue
-        output = jax.lax.ragged_dot(
-            lhs=inputs,
-            rhs=rhs_inputs,
-            group_sizes=group_sizes,
-            preferred_element_type=jnp.bfloat16,
-        )
+        with set_xla_metadata(
+            ragged_dot_tiling=",".join([str(t) for t in tile_size])
+        ):
+          output = jax.lax.ragged_dot(
+              lhs=inputs,
+              rhs=rhs_inputs,
+              group_sizes=group_sizes,
+              preferred_element_type=jnp.bfloat16,
+          )
         if isinstance(kernel, QTensor):
           # Multiply outputs by the kernely scale
           scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0)
