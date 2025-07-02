@@ -2,7 +2,7 @@
 
 ## Checkpoint Formats
 
-Checkpoint formats in MaxText can be categorized along two axes: whether they include **training states** (e.g., optimizer properties) and whether the model's parameter weights are **stacked** or **unstacked**. This results in the four types summarized below:
+Checkpoint formats in MaxText can be categorized along two axes: whether they include **training states** (e.g., optimizer properties) and whether the model's parameter weights are **stacked** or **unstacked** (aka scanned/unscanned). This results in the four types summarized below:
 
 |                           | **Unstacked Weights**  | **Stacked Weights**  |
 | :------------------------ | :------------------------------------- | :-------------------------------------- |
@@ -28,6 +28,24 @@ To work with `jax.lax.scan`, the model's parameters must be "stacked". For a Tra
 
 ![Illustration of an unstacked checkpoint versus a stacked checkpoint.](checkpoints_explain.png)
 *Figure 1: A comparison of an unstacked checkpoint and a stacked checkpoint for a simple language model.*
+
+Their difference can also be represented in the following pytree structure:
+```
+# Stacked (aka scanned)
+"params" : {
+"mlp_0" : [num_layers, emb_d, ff_d]
+"mlp_1" : [num_layers, ff_d, emb_d]
+}
+
+# Unstacked
+"params" {
+{"layer_0":
+   "mlp_0" : [ emb_d, ff_d]
+    "mlp_1"" : [ff_d,emb_d]
+"layer_1"
+...
+}
+```
 
 The stacked format is highly efficient but has one key requirement: all layers within the `scan` operation must have identical configurations. For models with heterogeneous layers (where layer configurations differ), stacking is not possible, and only unstacked checkpoints can be used.
 
