@@ -464,6 +464,7 @@ class Decoder(nn.Module):
       previous_chunk=None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
+      lora_state: Optional[dict] = None,
       bidirectional_mask: Optional[Any] = None,
       image_embeddings: Optional[jnp.ndarray] = None,
   ):
@@ -628,6 +629,13 @@ class Decoder(nn.Module):
         else:
           for lyr in range(cfg.num_decoder_layers):
             RemattedBlockLayer = RemattedBlockLayers[0]
+
+            lora_state_with_decoder_params = None
+            if lora_state and "lora_params" in lora_state and "scale_factor" in lora_state:
+              lora_state_with_decoder_params = {}
+              lora_state_with_decoder_params["scale_factor"] = lora_state["scale_factor"]
+              lora_state_with_decoder_params["lora_params"] = lora_state["lora_params"]["params"]["decoder"]
+
             layer_kwargs = {}
             layer_call_kwargs = {}
             if cfg.decoder_block == DecoderBlockType.GEMMA3:
@@ -651,6 +659,7 @@ class Decoder(nn.Module):
                 model_mode,
                 previous_chunk=previous_chunk,
                 page_state=page_state,
+                lora_state=lora_state_with_decoder_params,
                 slot=slot,
                 **layer_call_kwargs,
             )
@@ -778,6 +787,7 @@ class Transformer(nn.Module):
       enable_dropout=True,
       model_mode=MODEL_MODE_TRAIN,
       previous_chunk=None,
+      lora_state: Optional[dict] = None,
       true_length: Optional[int] = None,
       slot: Optional[int] = None,
       page_state: Optional[page_manager.PageState] = None,
@@ -815,6 +825,7 @@ class Transformer(nn.Module):
         previous_chunk=previous_chunk,
         slot=slot,
         page_state=page_state,
+        lora_state=lora_state,
         bidirectional_mask=bidirectional_mask,
         image_embeddings=image_embeddings,
     )
