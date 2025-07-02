@@ -16,7 +16,6 @@
 
 import datetime
 import os
-import sys
 from typing import Sequence
 
 from absl import app
@@ -42,7 +41,6 @@ from MaxText.metric_logger import MetricLogger
 from MaxText.train import (
     eval_step,
     get_first_step,
-    save_checkpoint,
     setup_train_loop,
     train_step,
     validate_train_config,
@@ -103,14 +101,7 @@ def train_loop(config, recorder, state=None):
           with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
             state, metrics = p_train_step(state, example_batch, nextrng)
 
-      if checkpoint_manager is not None:
-        if save_checkpoint(checkpoint_manager, int(step), state, config.dataset_type, data_iterator, config):
-          checkpointing.print_save_message(step, config.async_checkpointing)
-
-        # Upon preemption, exit when and only when all ongoing saves are complete.
-        if checkpoint_manager.reached_preemption(step):
-          checkpoint_manager.wait_until_finished()
-          sys.exit()
+      checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step)
 
       if config.dump_hlo and step == start_step:
         jax.block_until_ready(state)  # Ensure compilation has finished.
@@ -148,21 +139,12 @@ def train_loop(config, recorder, state=None):
 
       step_time_delta = datetime.datetime.now() - step_start_time
       metric_logger.record_train_metrics(metrics, step, step_time_delta)
+
+    checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator)
   except exceptions.StopTraining as e:
     max_logging.log(f"Training stopped: {str(e)}")
-
-  if checkpoint_manager is not None:
-    if ((int(state.step) - 1) % config.checkpoint_period != 0) and (int(state.step) != 0):
-      try:
-        if save_checkpoint(
-            checkpoint_manager, int(state.step) - 1, state, config.dataset_type, data_iterator, config, force=True
-        ):
-          checkpointing.print_save_message(int(state.step) - 1, config.async_checkpointing)
-      except Exception:  # pylint: disable=broad-except
-        max_logging.log(f"Checkpoint already saved for step {int(state.step)-1}.")
-
-    checkpoint_manager.wait_until_finished()
-  metric_logger.cleanup()
+  finally:
+    metric_logger.cleanup()
 
   return state
 
